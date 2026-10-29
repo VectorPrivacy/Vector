@@ -2312,14 +2312,33 @@ pub fn edition_head_entity_ids(community_id: &str) -> Result<std::collections::H
 /// floor INCLUDING the deterministic tiebreak key, so a fold can resolve a same-version fork at the
 /// floor (converge to the fork winner) instead of wedging on it.
 /// `(epoch, version, self_hash, inner_id, author)`.
-type EditionHeadFull = (u64, u64, [u8; 32], Option<[u8; 32]>, Option<[u8; 32]>);
+type EditionHeadFull = (u64, u64, [u8; 32], Option<[u8; 32]>, Option<[u8; 32]>, Option<FloorFamily>);
+
+/// Which fold a head's floor belongs to, as its row records it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FloorFamily {
+    Authority,
+    Control,
+    /// A family this build doesn't know: no fold of its own takes it.
+    Other,
+}
+
+impl FloorFamily {
+    pub fn of(family: &str) -> Self {
+        match family {
+            FLOOR_AUTHORITY => FloorFamily::Authority,
+            FLOOR_CONTROL => FloorFamily::Control,
+            _ => FloorFamily::Other,
+        }
+    }
+}
 /// `(epoch, version, self_hash)`.
 type EditionHead = (u64, u64, [u8; 32]);
 
 pub fn get_all_edition_heads_full(community_id: &str) -> Result<std::collections::HashMap<String, EditionHeadFull>, String> {
     let conn = super::get_db_connection_guard_static()?;
     let mut stmt = conn
-        .prepare("SELECT entity_id, epoch, version, self_hash, inner_id, author FROM community_edition_heads WHERE community_id = ?1")
+        .prepare("SELECT entity_id, epoch, version, self_hash, inner_id, author, family FROM community_edition_heads WHERE community_id = ?1")
         .map_err(|e| e.to_string())?;
     let rows = stmt
         .query_map(params![community_id], |r| {
@@ -2330,6 +2349,7 @@ pub fn get_all_edition_heads_full(community_id: &str) -> Result<std::collections
                 r.get::<_, Vec<u8>>(3)?,
                 r.get::<_, Option<Vec<u8>>>(4)?,
                 r.get::<_, Option<Vec<u8>>>(5)?,
+                r.get::<_, Option<String>>(6)?,
             ))
         })
         .map_err(|e| e.to_string())?;
@@ -2344,11 +2364,11 @@ pub fn get_all_edition_heads_full(community_id: &str) -> Result<std::collections
     };
     let mut out = std::collections::HashMap::new();
     for row in rows {
-        let (entity, epoch, version, hash, inner, author) = row.map_err(|e| e.to_string())?;
+        let (entity, epoch, version, hash, inner, author, family) = row.map_err(|e| e.to_string())?;
         if hash.len() == 32 {
             let mut h = [0u8; 32];
             h.copy_from_slice(&hash);
-            out.insert(entity, (epoch as u64, version as u64, h, blob32(inner), blob32(author)));
+            out.insert(entity, (epoch as u64, version as u64, h, blob32(inner), blob32(author), family.as_deref().map(FloorFamily::of)));
         }
     }
     Ok(out)
@@ -3605,7 +3625,10 @@ mod tests {
         let cid = "c".repeat(64);
         let entity = "e".repeat(64);
         let author = |b: u8| [b; 32];
-        let held = |cid: &str| get_all_edition_heads_full(cid).unwrap()[&entity];
+        let held = |cid: &str| {
+            let f = get_all_edition_heads_full(cid).unwrap()[&entity];
+            (f.0, f.1, f.2, f.3, f.4)
+        };
         set_edition_head_at_epoch(&cid, &entity, 1, &[0x11; 32], &[0x01; 32], &author(0xA1), 0).unwrap();
         set_edition_head_at_epoch(&cid, &entity, 2, &[0x22; 32], &[0x02; 32], &author(0xB2), 0).unwrap();
         assert_eq!(held(&cid), (0, 2, [0x22; 32], Some([0x02; 32]), Some(author(0xB2))), "an advance records its own author");
@@ -3778,7 +3801,7 @@ mod tests {
     fn a_folds_floor_writes_skip_only_what_is_already_stored() {
         let (_tmp, _guard) = init_test_db();
         let cid = "c".repeat(64);
-        let row = |eid: &str| get_all_edition_heads_full(&cid).unwrap().get(eid).copied();
+        let row = |eid: &str| get_all_edition_heads_full(&cid).unwrap().get(eid).map(|f| (f.0, f.1, f.2, f.3, f.4));
         let (h4, h5, a) = ([4u8; 32], [5u8; 32], [9u8; 32]);
         set_family_head_at_epoch(&cid, "e1", 5, &h5, &[7; 32], &a, 2, FLOOR_CONTROL).unwrap();
         set_family_head_at_epoch(&cid, "e2", 3, &h5, &[8; 32], &a, 2, FLOOR_AUTHORITY).unwrap();

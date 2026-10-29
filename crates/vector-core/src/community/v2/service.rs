@@ -1419,7 +1419,7 @@ async fn refresh_invite_registry_cache<T: Transport + ?Sized>(transport: &T, com
             .unwrap_or_default()
             .into_iter()
             .filter(|(_, f)| f.0 == community.root_epoch.0)
-            .map(|(entity, f)| (entity, (f.1, f.2, f.3, f.4)))
+            .map(|(entity, f)| (entity, (f.1, f.2, f.3, f.4, f.5)))
             .collect();
         let authority = fold_authority(community, &editions, &floors);
         let sets = live_invite_link_sets(community.id(), &owner.to_hex(), &editions, &authority, &floors);
@@ -1517,7 +1517,7 @@ pub async fn revoke_public_link<T: Transport + ?Sized>(transport: &T, community:
                         .unwrap_or_default()
                         .into_iter()
                         .filter(|(_, f)| f.0 == community.root_epoch.0)
-                        .map(|(entity, f)| (entity, (f.1, f.2, f.3, f.4)))
+                        .map(|(entity, f)| (entity, (f.1, f.2, f.3, f.4, f.5)))
                         .collect();
                     let owner_hex = community.owner().map(|o| o.to_hex()).unwrap_or_default();
                     let authority = fold_authority(community, &editions, &floors);
@@ -1803,7 +1803,7 @@ pub async fn community_is_public<T: Transport + ?Sized>(transport: &T, community
         .unwrap_or_default()
         .into_iter()
         .filter(|(_, f)| f.0 == community.root_epoch.0)
-        .map(|(entity, f)| (entity, (f.1, f.2, f.3, f.4)))
+        .map(|(entity, f)| (entity, (f.1, f.2, f.3, f.4, f.5)))
         .collect();
     let authority = fold_authority(community, &editions, &floors);
     !live_invite_link_sets(cid, &owner.to_hex(), &editions, &authority, &floors).is_empty()
@@ -3066,13 +3066,13 @@ pub async fn fetch_authority<T: Transport + ?Sized>(transport: &T, community: &C
                 .unwrap_or_default()
                 .into_iter()
                 .filter(|(_, f)| f.0 == community.root_epoch.0)
-                .map(|(entity, f)| (entity, (f.1, f.2, f.3, f.4)))
+                .map(|(entity, f)| (entity, (f.1, f.2, f.3, f.4, f.5)))
                 .collect();
             let a = fold_authority(community, &[], &floors);
             (floors, a, true)
         }
     };
-    let floors = floors_of_family(&floors, &cid_hex, crate::db::community::FLOOR_AUTHORITY);
+    let floors = floors_of_family(&floors, crate::db::community::FLOOR_AUTHORITY);
     let head_entities = a.settled().into_iter().map(String::from).collect();
     // The first head held for each entity, as a scan of the list would find it.
     let mut first_head: std::collections::HashMap<&str, &FoldedHead> = std::collections::HashMap::with_capacity(a.heads.len());
@@ -4254,7 +4254,7 @@ async fn refound_community_with<T: Transport + ?Sized>(transport: &T, community:
         let floors: Floors = crate::db::community::get_all_edition_heads_full(&cid_hex)?
             .into_iter()
             .filter(|(_, f)| f.0 == community.root_epoch.0)
-            .map(|(entity, f)| (entity, (f.1, f.2, f.3, f.4)))
+            .map(|(entity, f)| (entity, (f.1, f.2, f.3, f.4, f.5)))
             .collect();
         let current_control = control::ControlPlane::of(community);
         // Page the ENTIRE control plane, not just the newest window: the compaction MUST
@@ -7940,7 +7940,7 @@ async fn seal_standing<T: Transport + ?Sized>(transport: &T, community: &Communi
         let floors: Floors = crate::db::community::get_all_edition_heads_full(&cid_hex)?
             .into_iter()
             .filter(|(_, f)| f.0 == community.root_epoch.0)
-            .map(|(entity, f)| (entity, (f.1, f.2, f.3, f.4)))
+            .map(|(entity, f)| (entity, (f.1, f.2, f.3, f.4, f.5)))
             .collect();
         let Some(editions) = fetch_control_plane_whole(transport, community).await else {
             // Nothing to seal before Roles v2, and a removal never waits on a read.
@@ -10438,7 +10438,7 @@ async fn read_control<T: Transport + ?Sized>(transport: &T, community: &Communit
     let floors: Floors = crate::db::community::get_all_edition_heads_full(&cid_hex)?
         .into_iter()
         .filter(|(_, f)| f.0 == community.root_epoch.0)
-        .map(|(entity, f)| (entity, (f.1, f.2, f.3, f.4)))
+        .map(|(entity, f)| (entity, (f.1, f.2, f.3, f.4, f.5)))
         .collect();
 
     // Newest window first; page OLDER only while a tracking entity is gapped (its
@@ -11028,9 +11028,10 @@ struct ControlFold {
     admitted: std::collections::HashSet<[u8; 32]>,
 }
 
-/// Per-entity floor: `(version, self_hash, inner_id, author)` of the committed head. The id and
-/// author are its fork tiebreak key; either is `None` on a row written before it was recorded.
-type Floor = (u64, [u8; 32], Option<[u8; 32]>, Option<[u8; 32]>);
+/// Per-entity floor: `(version, self_hash, inner_id, author, family)` of the committed head. The id
+/// and author are its fork tiebreak key; either is `None` on a row written before it was recorded,
+/// as the family is on a row that records none.
+type Floor = (u64, [u8; 32], Option<[u8; 32]>, Option<[u8; 32]>, Option<crate::db::community::FloorFamily>);
 
 /// An author's authority in an equal-version fork (CORD-04 §1), lower outranking: the owner, then
 /// the lowest role position, then the roleless.
@@ -11089,9 +11090,9 @@ fn floor_family(vsk_code: &str) -> &'static str {
 
 /// `floors` without the rows another fold recorded: a row's coordinate can be squatted by
 /// an edition of another kind, whose floor means nothing to this one.
-fn floors_of_family(floors: &Floors, cid_hex: &str, family: &str) -> Floors {
-    let families = crate::db::community::edition_head_families(cid_hex).unwrap_or_default();
-    floors.iter().filter(|(k, _)| families.get(*k).is_none_or(|f| f == family)).map(|(k, f)| (k.clone(), *f)).collect()
+fn floors_of_family(floors: &Floors, family: &str) -> Floors {
+    let family = crate::db::community::FloorFamily::of(family);
+    floors.iter().filter(|(_, f)| f.4.is_none_or(|f| f == family)).map(|(k, f)| (k.clone(), *f)).collect()
 }
 
 /// Fold owner-authored control editions into an updated community using the
@@ -11118,7 +11119,7 @@ fn floors_of_family(floors: &Floors, cid_hex: &str, family: &str) -> Floors {
 fn apply_control_fold(community: &CommunityV2, editions: &[ParsedEdition], floors: &Floors, authority: &AuthoritySet) -> ControlFold {
     use crate::community::roles::Permissions;
     use std::collections::BTreeMap;
-    let floors = &floors_of_family(floors, &crate::simd::hex::bytes_to_hex_32(&community.id().0), crate::db::community::FLOOR_CONTROL);
+    let floors = &floors_of_family(floors, crate::db::community::FLOOR_CONTROL);
 
     let owner_hex = community.owner().ok().map(|o| o.to_hex());
     let standing = crate::community::roles::RoleIndex::of(&authority.roles);
@@ -11712,7 +11713,7 @@ fn fold_authority(community: &CommunityV2, editions: &[ParsedEdition], floors: &
 
     let cid = community.id();
     let cid_hex = crate::simd::hex::bytes_to_hex_32(&cid.0);
-    let floors = &floors_of_family(floors, &cid_hex, crate::db::community::FLOOR_AUTHORITY);
+    let floors = &floors_of_family(floors, crate::db::community::FLOOR_AUTHORITY);
     let owner = community.owner().ok();
     let owner_hex = owner.map(|o| o.to_hex());
     let banlist_eid = super::derive::banlist_locator(cid);
@@ -15454,6 +15455,30 @@ mod tests {
     }
 
     #[test]
+    fn a_fold_takes_the_floors_of_its_family_as_their_rows_record_it() {
+        let (_tmp, _guard, _owner) = init_test_db();
+        let cid = "cd".repeat(32);
+        let (h, i, a) = ([1u8; 32], [2u8; 32], [3u8; 32]);
+        use crate::db::community::{set_edition_head_at_epoch, set_family_head_at_epoch, FLOOR_AUTHORITY, FLOOR_CONTROL};
+        set_family_head_at_epoch(&cid, "grant", 1, &h, &i, &a, 0, FLOOR_AUTHORITY).unwrap();
+        set_family_head_at_epoch(&cid, "meta", 1, &h, &i, &a, 0, FLOOR_CONTROL).unwrap();
+        set_family_head_at_epoch(&cid, "future", 1, &h, &i, &a, 0, "x").unwrap();
+        set_edition_head_at_epoch(&cid, "legacy", 1, &h, &i, &a, 0).unwrap();
+        let floors: Floors = crate::db::community::get_all_edition_heads_full(&cid).unwrap().into_iter().map(|(e, f)| (e, (f.1, f.2, f.3, f.4, f.5))).collect();
+        let families = crate::db::community::edition_head_families(&cid).unwrap();
+        for family in [FLOOR_AUTHORITY, FLOOR_CONTROL] {
+            let mut by_query: Vec<String> = floors.keys().filter(|k| families.get(*k).is_none_or(|f| f == family)).cloned().collect();
+            let mut taken: Vec<String> = floors_of_family(&floors, family).into_keys().collect();
+            by_query.sort();
+            taken.sort();
+            assert_eq!(taken, by_query, "{family}");
+        }
+        let mut authority: Vec<String> = floors_of_family(&floors, FLOOR_AUTHORITY).into_keys().collect();
+        authority.sort();
+        assert_eq!(authority, ["grant", "legacy"], "a family this build doesn't know goes to neither fold");
+    }
+
+    #[test]
     fn ledger_chains_are_judged_as_the_reference_judges_them() {
         use super::super::writers::{Ledger, Spell};
         let mut seed: u64 = 0x9e37_79b9_7f4a_7c15;
@@ -17879,7 +17904,7 @@ mod tests {
     #[test]
     fn a_held_key_ranks_rivals_by_what_the_row_recorded() {
         let (lo, hi) = ([1u8; 32], [9u8; 32]);
-        let floor = |inner, author| -> Floor { (2, [0u8; 32], inner, author) };
+        let floor = |inner, author| -> Floor { (2, [0u8; 32], inner, author, None) };
         let owner_ranked = |_: &[u8; 32]| 0u32;
         assert!(HeldKey::of(&floor(None, None), &owner_ranked).beaten_by(u32::MAX, &hi), "an unkeyed row yields to anyone");
         let legacy = HeldKey::of(&floor(Some(hi), None), &owner_ranked);
@@ -18178,7 +18203,7 @@ mod tests {
                 }
             }
             // A reader holding exactly the heads it decided folds them again.
-            let floors: Floors = base.heads.iter().map(|h| (h.entity_hex.clone(), (h.version, h.self_hash, Some(h.inner_id), Some(h.author)))).collect();
+            let floors: Floors = base.heads.iter().map(|h| (h.entity_hex.clone(), (h.version, h.self_hash, Some(h.inner_id), Some(h.author), None))).collect();
             let tracked = authority_fingerprint(&fold_authority(&community, &eds, &floors));
             if tracked != authority_fingerprint(&base) {
                 failures.push(format!("case {case} tracking:\n  fresh {}\n  held  {tracked}", authority_fingerprint(&base)));
@@ -18189,7 +18214,7 @@ mod tests {
                 let of: Vec<&ParsedEdition> = eds.iter().filter(|e| e.entity_id == *eid).collect();
                 if !of.is_empty() && next(4) != 0 {
                     let e = of[next(of.len() as u64) as usize];
-                    held.insert(crate::simd::hex::bytes_to_hex_32(eid), (e.version, e.self_hash, Some(e.inner_id), Some(e.author.to_bytes())));
+                    held.insert(crate::simd::hex::bytes_to_hex_32(eid), (e.version, e.self_hash, Some(e.inner_id), Some(e.author.to_bytes()), None));
                 }
             }
             // Every fold above again with fresh scratch per entity, as replay ran before reusing it.
@@ -22013,7 +22038,7 @@ mod tests {
         let at = |v: u64| {
             let e = editions.iter().find(|e| crate::simd::hex::bytes_to_hex_32(&e.entity_id) == rr && e.version == v).unwrap();
             let mut f = base.clone();
-            f.insert(rr.clone(), (v, e.self_hash, Some(e.inner_id), Some(e.author.to_bytes())));
+            f.insert(rr.clone(), (v, e.self_hash, Some(e.inner_id), Some(e.author.to_bytes()), None));
             f
         };
         for floors in [Floors::default(), at(1), at(2), at(3)] {
@@ -22127,7 +22152,7 @@ mod tests {
         publish_fork(&[&thin], &community, &stranger, vsk::CHANNEL_METADATA, &ch.0, 2, ch2.prev_hash, &ch2.content, None).await;
         let mut floors = load_floors(&community);
         for e in [&g2, &ch2] {
-            floors.insert(crate::simd::hex::bytes_to_hex_32(&e.entity_id), (2, e.self_hash, None, None));
+            floors.insert(crate::simd::hex::bytes_to_hex_32(&e.entity_id), (2, e.self_hash, None, None, None));
         }
         let thin_eds = fetch_control(&thin, &community).await;
         let a = fold_authority(&held, &thin_eds, &floors);
@@ -23855,7 +23880,7 @@ mod tests {
         let (wrap, _) = control::seal_control_edition(&rumor, &group, &c, Timestamp::from_secs(1_000)).unwrap();
         relay.publish(&wrap, &community.relays).await.unwrap();
         let served: Vec<ParsedEdition> = fetch_control(&relay, &community).await.into_iter().filter(|e| e.inner_id != held.inner_id).collect();
-        let floors: Floors = [(crate::simd::hex::bytes_to_hex_32(&held.entity_id), (1, held.self_hash, Some(held.inner_id), Some(b.public_key().to_bytes())))].into_iter().collect();
+        let floors: Floors = [(crate::simd::hex::bytes_to_hex_32(&held.entity_id), (1, held.self_hash, Some(held.inner_id), Some(b.public_key().to_bytes()), None))].into_iter().collect();
         assert_eq!(fold_authority(&community, &served, &Floors::default()).roles.role(&made).map(|r| r.name.as_str()), Some("by C"), "read floorless, C's stands");
         let f = fold_authority(&community, &served, &floors);
         assert!(f.roles.role(&made).is_none_or(|r| r.name != "by C"), "the sealed floor holds against a non-owner rival");
@@ -23906,7 +23931,7 @@ mod tests {
         set_member_roles(&bed.relay, &held(), &a.public_key(), vec![]).await.unwrap();
         follow_control(&bed.relay, &held()).await.unwrap();
         let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
-        let floors: Floors = crate::db::community::get_all_edition_heads_full(&cid_hex).unwrap().into_iter().filter(|(_, f)| f.0 == held().root_epoch.0).map(|(e, f)| (e, (f.1, f.2, f.3, f.4))).collect();
+        let floors: Floors = crate::db::community::get_all_edition_heads_full(&cid_hex).unwrap().into_iter().filter(|(_, f)| f.0 == held().root_epoch.0).map(|(e, f)| (e, (f.1, f.2, f.3, f.4, f.5))).collect();
         let served: Vec<ParsedEdition> = fetch_control(&bed.relay, &held()).await.into_iter().filter(|e| e.vsk != vsk::TENURE).collect();
         let f = fold_authority(&held(), &served, &floors);
         let entity = crate::simd::hex::bytes_to_hex_32(&eid_of(&made));
@@ -25585,7 +25610,7 @@ mod tests {
             .unwrap_or_default()
             .into_iter()
             .filter(|(_, f)| f.0 == community.root_epoch.0)
-            .map(|(e, f)| (e, (f.1, f.2, f.3, f.4)))
+            .map(|(e, f)| (e, (f.1, f.2, f.3, f.4, f.5)))
             .collect()
     }
 
@@ -26767,7 +26792,7 @@ mod tests {
         grant_channel_access(&bed.relay, &held(), &ch, &m).await.unwrap();
         follow_control(&bed.relay, &held()).await.unwrap();
         let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
-        let floors: Floors = crate::db::community::get_all_edition_heads_full(&cid_hex).unwrap().into_iter().filter(|(_, f)| f.0 == held().root_epoch.0).map(|(e, f)| (e, (f.1, f.2, f.3, f.4))).collect();
+        let floors: Floors = crate::db::community::get_all_edition_heads_full(&cid_hex).unwrap().into_iter().filter(|(_, f)| f.0 == held().root_epoch.0).map(|(e, f)| (e, (f.1, f.2, f.3, f.4, f.5))).collect();
         let served: Vec<ParsedEdition> = fetch_control(&bed.relay, &held()).await.into_iter().filter(|e| e.vsk != vsk::CHANNEL_ACL).collect();
         let f = fold_authority(&held(), &served, &floors);
         assert!(f.roles.is_entitled(Some(&owner.keys.public_key().to_hex()), &m.to_hex(), &crate::simd::hex::bytes_to_hex_32(&ch.0), &[], &[]), "withholding doesn't revoke");
@@ -26800,7 +26825,7 @@ mod tests {
             assert_ne!(now.root_epoch, epoch, "the ban re-founded");
             epoch = now.root_epoch;
             let eds = fetch_control(&bed.relay, &now).await;
-            let floors: Floors = crate::db::community::get_all_edition_heads_full(&cid_hex).unwrap().into_iter().filter(|(_, f)| f.0 == now.root_epoch.0).map(|(e, f)| (e, (f.1, f.2, f.3, f.4))).collect();
+            let floors: Floors = crate::db::community::get_all_edition_heads_full(&cid_hex).unwrap().into_iter().filter(|(_, f)| f.0 == now.root_epoch.0).map(|(e, f)| (e, (f.1, f.2, f.3, f.4, f.5))).collect();
             let probe = Keys::generate().public_key().to_hex();
             for (who, f) in [("cold", fold_authority(&now, &eds, &Floors::default())), ("floored", fold_authority(&now, &eds, &floors))] {
                 assert!(f.roles.is_entitled(Some(&owner_hex), &m.to_hex(), &chan, &[], &[]), "{round} {who}: the role's allow crossed");
@@ -26948,7 +26973,7 @@ mod tests {
         // Another device saw the squat but not this publish.
         crate::db::community::set_community_roles(&cid_hex, &before, 0).unwrap();
         crate::db::community::delete_edition_head(&cid_hex, &spot_hex).unwrap();
-        let (epoch, v, hash, inner, author) = squatted;
+        let (epoch, v, hash, inner, author, _) = squatted;
         crate::db::community::set_family_head_at_epoch(&cid_hex, &spot_hex, v, &hash, &inner.unwrap(), &author.unwrap(), epoch, crate::db::community::FLOOR_CONTROL).unwrap();
         follow_control(&bed.relay, &held()).await.unwrap();
         let roster = crate::db::community::get_community_roles(&crate::simd::hex::bytes_to_hex_32(&community.id().0)).unwrap();
@@ -31757,7 +31782,7 @@ mod tests {
         act_as(&owner.keys);
         follow_control(&bed.relay, &held()).await.unwrap();
         let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
-        let floors = || -> Floors { crate::db::community::get_all_edition_heads_full(&cid_hex).unwrap().into_iter().filter(|(_, f)| f.0 == held().root_epoch.0).map(|(e, f)| (e, (f.1, f.2, f.3, f.4))).collect() };
+        let floors = || -> Floors { crate::db::community::get_all_edition_heads_full(&cid_hex).unwrap().into_iter().filter(|(_, f)| f.0 == held().root_epoch.0).map(|(e, f)| (e, (f.1, f.2, f.3, f.4, f.5))).collect() };
         let held_floors = floors();
         // Readers lifted above X: X's edit no longer stands.
         move_role_v2(&bed.relay, &held(), &r, 0).await.unwrap();
