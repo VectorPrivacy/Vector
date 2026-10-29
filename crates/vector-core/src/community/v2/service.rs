@@ -3033,6 +3033,11 @@ pub async fn fetch_authority<T: Transport + ?Sized>(transport: &T, community: &C
     };
     let floors = floors_of_family(&floors, &cid_hex, crate::db::community::FLOOR_AUTHORITY);
     let head_entities = a.settled().into_iter().map(String::from).collect();
+    // The first head held for each entity, as a scan of the list would find it.
+    let mut first_head: std::collections::HashMap<&str, &FoldedHead> = std::collections::HashMap::with_capacity(a.heads.len());
+    for h in &a.heads {
+        first_head.entry(h.entity_hex.as_str()).or_insert(h);
+    }
     let grant_authors = a
         .roles
         .grants
@@ -3040,7 +3045,7 @@ pub async fn fetch_authority<T: Transport + ?Sized>(transport: &T, community: &C
         .filter_map(|g| {
             let member = crate::simd::hex::hex_to_bytes_32_checked(&g.member)?;
             let eid = crate::simd::hex::bytes_to_hex_32(&super::derive::grant_locator(community.id(), &member));
-            let head = a.heads.iter().find(|h| h.entity_hex == eid)?;
+            let head = first_head.get(eid.as_str())?;
             Some((g.member.clone(), crate::simd::hex::bytes_to_hex_32(&head.author)))
         })
         .collect();
@@ -10403,6 +10408,18 @@ async fn read_control<T: Transport + ?Sized>(transport: &T, community: &Communit
     // device's baseline is the one step that outlives the round.
     let mut truncated = true;
     let mut pages_read = 0usize;
+    // Every entity some edition in hand speaks for, and how many editions the folds above last
+    // saw: a page that can't account for everything tracked folds nothing, since a head needs an
+    // edition of its own entity.
+    let mut entities: std::collections::HashSet<[u8; 32]> = std::collections::HashSet::new();
+    let mut folded: Option<usize> = None;
+    let fold_now = |editions: &[ParsedEdition], folded: &mut Option<usize>, authority: &mut AuthoritySet, fold: &mut ControlFold| {
+        if *folded != Some(editions.len()) {
+            *authority = fold_authority(community, editions, &floors);
+            *fold = apply_control_fold(community, editions, &floors, authority);
+            *folded = Some(editions.len());
+        }
+    };
     // Quorum answers as soon as a majority does, so a fast subset that happens not
     // to hold an older edition is indistinguishable from that edition not existing —
     // and the same subset answers every boot, so the retain never lifts and the
@@ -10433,6 +10450,7 @@ async fn read_control<T: Transport + ?Sized>(transport: &T, community: &Communit
             // at a page boundary); the wrap-id dedup makes re-served boundary events
             // free, and a page with nothing new means the relay is exhausted.
             let mut fresh = 0usize;
+            let batch = control.check_page(&wraps.iter().filter(|w| !seen_wraps.contains(&w.id)).collect::<Vec<_>>());
             for w in &wraps {
                 if !seen_wraps.insert(w.id) {
                     continue;
@@ -10446,14 +10464,33 @@ async fn read_control<T: Transport + ?Sized>(transport: &T, community: &Communit
                 // fold (CORD-04 §5), not by a signer filter here — an admin's edits fold.
                 if let Ok((ed, _)) = control.open(w) {
                     if seen.insert(ed.inner_id) {
+                        entities.insert(ed.entity_id);
                         editions.push(ed);
                     }
                 }
             }
+            drop(batch);
+            let known = crate::db::community::get_community_roles(&cid_hex);
+            let reachable = known.as_ref().is_ok_and(|known| {
+                (!known.roles.is_empty() || !known.grants.is_empty())
+                    && (!floors.contains_key(&everyone_hex) || entities.contains(&super::derive::everyone_locator(community.id())))
+                    && known.roles.iter().all(|r| crate::simd::hex::hex_to_bytes_32_checked(&r.role_id).is_some_and(|id| entities.contains(&id)))
+                    && known.grants.iter().all(|g| crate::simd::hex::hex_to_bytes_32_checked(&g.member).is_none_or(|m| entities.contains(&super::derive::grant_locator(community.id(), &m))))
+            });
+            if !reachable {
+                if let Err(e) = &known {
+                    crate::log_warn!("[v2:control {}] roster read failed mid-page ({e}) — paging on rather than assuming nothing is tracked", &cid_hex[..8.min(cid_hex.len())]);
+                }
+                if fresh == 0 {
+                    truncated = wraps.len() >= FOLLOW_PAGE;
+                    break;
+                }
+                until = oldest;
+                continue;
+            }
             // Roster first (roles/grants/banlist → authorized set), then the authority-
             // gated metadata/channel fold over the same edition set.
-            authority = fold_authority(community, &editions, &floors);
-            fold = apply_control_fold(community, &editions, &floors, &authority);
+            fold_now(&editions, &mut folded, &mut authority, &mut fold);
             // "Nothing is gapped" is NOT "I have read enough".
             //
             // An entity we track whose editions are entirely absent from the window
@@ -10510,6 +10547,7 @@ async fn read_control<T: Transport + ?Sized>(transport: &T, community: &Communit
             until = oldest;
         }
 
+        fold_now(&editions, &mut folded, &mut authority, &mut fold);
         if tier == crate::community::transport::Evidence::Full {
             break;
         }
@@ -10560,20 +10598,23 @@ pub async fn follow_control<T: Transport + ?Sized>(
         // Roster heads from a fold that ran out its bound are one round's guess, not a result.
         let roster_heads: &[FoldedHead] = if authority.converged { &authority.heads } else { &[] };
         let families = fold.heads.iter().map(|h| (h, crate::db::community::FLOOR_CONTROL)).chain(roster_heads.iter().map(|h| (h, crate::db::community::FLOOR_AUTHORITY)));
-        for (h, family) in families {
-            if h.rebased {
-                crate::db::community::rebase_edition_head_at_epoch(&cid_hex, &h.entity_hex, h.version, &h.self_hash, &h.inner_id, &h.author, community.root_epoch.0, family)?;
-                continue;
+        crate::db::community::write_folded_heads(&cid_hex, |w| {
+            for (h, family) in families {
+                if h.rebased {
+                    w.rebase(&h.entity_hex, h.version, &h.self_hash, &h.inner_id, &h.author, community.root_epoch.0, family)?;
+                    continue;
+                }
+                w.set(&h.entity_hex, h.version, &h.self_hash, &h.inner_id, &h.author, community.root_epoch.0, family)?;
+                // The same edition content can arrive under another author's signature (the hash
+                // covers content, not signer): it must not re-key a floor that records its author,
+                // or a weaker copy lowers the bar a later rival has to beat.
+                let rekey = floors.get(&h.entity_hex).is_some_and(|f| f.0 == h.version && f.1 == h.self_hash && f.3.is_some());
+                if !rekey {
+                    w.converge(&h.entity_hex, h.version, &h.self_hash, &h.inner_id, &h.author, community.root_epoch.0, family)?;
+                }
             }
-            crate::db::community::set_family_head_at_epoch(&cid_hex, &h.entity_hex, h.version, &h.self_hash, &h.inner_id, &h.author, community.root_epoch.0, family)?;
-            // The same edition content can arrive under another author's signature (the hash
-            // covers content, not signer): it must not re-key a floor that records its author,
-            // or a weaker copy lowers the bar a later rival has to beat.
-            let rekey = floors.get(&h.entity_hex).is_some_and(|f| f.0 == h.version && f.1 == h.self_hash && f.3.is_some());
-            if !rekey {
-                crate::db::community::converge_family_head_at_epoch(&cid_hex, &h.entity_hex, h.version, &h.self_hash, &h.inner_id, &h.author, community.root_epoch.0, Some(family))?;
-            }
-        }
+            Ok(())
+        })?;
         // Adopt the staff write key a promotion delivered inside MY OWN Grant
         // (CORD-04 §3): decrypt the control_wrap under the granter↔me pairwise key
         // and record the secret. Verified fail-closed inside — the epoch must be
@@ -10633,23 +10674,11 @@ pub async fn follow_control<T: Transport + ?Sized>(
         // of such a seed, so the wedge lands on exactly the account whose rotations
         // everyone else is waiting to adopt.
         let seed_only = stored_at == 0;
-        // A floor that can NEVER be satisfied must not veto the roster forever.
-        //
-        // `stored_complete` retains the cache when a stored entity is floored but
-        // folded no head, because a withholding relay looks exactly like that. The
-        // trouble is that an entity can legitimately stop producing a head for good:
-        // its author was demoted, so `select_authorized` drops their editions; or the
-        // entity was compacted away. The veto then holds forever, the roster can never
-        // be replaced, and a client with a stale roster refuses every rotation from an
-        // admin promoted since — which is a fork, arrived at silently.
-        //
-        // So when the read was COHERENT — the whole plane paged, nothing gapped, and
-        // the fetch itself is quorum-backed — an entity that produced no head is
-        // genuinely not there as far as the reachable relay set can tell. Forget its
-        // floor and let the roster move. A read that was truncated or gapped proves
-        // nothing and still retains, which is the withholding case the guard exists
-        // for. My OWN grant is never pruned: losing my own standing on a bad read is
-        // the one mistake with no path back.
+        // `stored_complete` retains the cache when a stored entity is floored but folded no
+        // head, because a withholding relay looks exactly like that. An entity can also stop
+        // producing a head for good (its author demoted, or compacted away), and then the veto
+        // holds: a frozen roster refuses rotations from admins promoted since. That is a known
+        // fork risk, accepted over the alternative below.
         // NO FLOOR PRUNING. An attempt at it evicted thirteen real admins from a live
         // community: their grant editions were merely outside the fetched window, and
         // "the plane is serving newer editions than mine" is not evidence that a
@@ -10955,6 +10984,14 @@ fn fork_rank(roles: &crate::community::roles::CommunityRoles, owner_hex: Option<
     roles.highest_position(author_hex).unwrap_or(u32::MAX)
 }
 
+/// [`fork_rank`] over an index of the roster.
+fn fork_rank_in(roles: &crate::community::roles::RoleIndex<'_>, owner_hex: Option<&str>, author_hex: &str) -> u32 {
+    if owner_hex == Some(author_hex) {
+        return 0;
+    }
+    roles.highest_position(author_hex).unwrap_or(u32::MAX)
+}
+
 /// The held floor's fork key, ranked against the roster the caller folds with.
 enum HeldKey {
     /// No tiebreak was recorded for the held head: any same-version rival may replace it.
@@ -11027,6 +11064,8 @@ fn apply_control_fold(community: &CommunityV2, editions: &[ParsedEdition], floor
     let floors = &floors_of_family(floors, &crate::simd::hex::bytes_to_hex_32(&community.id().0), crate::db::community::FLOOR_CONTROL);
 
     let owner_hex = community.owner().ok().map(|o| o.to_hex());
+    let standing = crate::community::roles::RoleIndex::of(&authority.roles);
+    let head_index = HeadIndex::of(&authority.heads);
 
     let mut groups: BTreeMap<(String, [u8; 32]), Vec<&ParsedEdition>> = BTreeMap::new();
     for e in editions {
@@ -11068,7 +11107,7 @@ fn apply_control_fold(community: &CommunityV2, editions: &[ParsedEdition], floor
             vsk::PINS => Permissions::PIN_MESSAGES,
             _ => return false,
         };
-        authority.roles.is_authorized(&author.to_hex(), owner_hex.as_deref(), bit)
+        standing.is_authorized(&author.to_hex(), owner_hex.as_deref(), bit)
     };
     let taken_by = |kind: &str| -> std::collections::HashSet<[u8; 32]> {
         groups
@@ -11129,15 +11168,15 @@ fn apply_control_fold(community: &CommunityV2, editions: &[ParsedEdition], floor
                 // held a bit via a not-yet-stripped grant, unless a Tenure sealed them.
                 let sealed = seal_of(&authority.sealed, &author, &e.self_hash, u32::MAX) & required == required;
                 (sealed || !authority.banned.contains(&author))
-                    && (sealed || authority.roles.is_authorized(&author, owner_hex.as_deref(), required))
+                    && (sealed || standing.is_authorized(&author, owner_hex.as_deref(), required))
                     // …and the CORD-04 §5 sync floor. Resolved against the Grant heads
                     // this same fold settled, so it works on a bootstrap where no
                     // persisted head exists yet.
-                    && (sealed || citation_ok_in_fold(community.id(), &authority.heads, owner_hex.as_deref(), &e.author, e.authority.as_ref()))
+                    && (sealed || citation_ok_in_fold(community.id(), &head_index, owner_hex.as_deref(), &e.author, e.authority.as_ref()))
             })
             .collect();
         // A Writers ledger settles a tie on what never changes: a later change of rank can't move it.
-        let rank = |author_hex: &str| if writers_channel.is_some() { 0 } else { fork_rank(&authority.roles, owner_hex.as_deref(), author_hex) };
+        let rank = |author_hex: &str| if writers_channel.is_some() { 0 } else { fork_rank_in(&standing, owner_hex.as_deref(), author_hex) };
         let ledger_ok = writers_channel
             .map(|ch| {
                 // What this reader already holds anchors what builds on it.
@@ -11568,7 +11607,9 @@ fn fold_authority(community: &CommunityV2, editions: &[ParsedEdition], floors: &
 
             for p in group {
                 let head = FoldedHead { entity_hex: entity_hex.clone(), version: p.version, self_hash: p.self_hash, inner_id: p.inner_id, author: p.author.to_bytes(), rebased: false };
-                let cand = |role: Role, kind: RoleKind| AuthorityCand { role: Some(role), grant: None, tenure: None, kind, author: p.author, head: head.clone(), citation: p.authority.clone(), prev: p.prev_hash, floor, held_served };
+                let author_hex = p.author.to_hex();
+                let grant_hex = crate::simd::hex::bytes_to_hex_32(&super::derive::grant_locator(cid, &p.author.to_bytes()));
+                let cand = |role: Role, kind: RoleKind| AuthorityCand { role: Some(role), grant: None, tenure: None, kind, author: p.author, author_hex: author_hex.clone(), grant_hex: grant_hex.clone(), head: head.clone(), citation: p.authority.clone(), prev: p.prev_hash, floor, held_served };
                 match p.vsk.as_str() {
                     // The @everyone coordinate holds @everyone alone.
                     vsk::ROLE if *eid == everyone_eid => {}
@@ -11616,7 +11657,7 @@ fn fold_authority(community: &CommunityV2, editions: &[ParsedEdition], floors: &
                                         Some(Sealed { position, bits: e.permissions, heads })
                                     })
                                     .collect();
-                                tenure_cands.entry(entity_hex.clone()).or_default().push(AuthorityCand { role: None, grant: None, tenure: Some((t.member.clone(), entries)), kind: RoleKind::Live, author: p.author, head, citation: p.authority.clone(), prev: p.prev_hash, floor, held_served });
+                                tenure_cands.entry(entity_hex.clone()).or_default().push(AuthorityCand { role: None, grant: None, tenure: Some((t.member.clone(), entries)), kind: RoleKind::Live, author: p.author, author_hex: author_hex.clone(), grant_hex: grant_hex.clone(), head, citation: p.authority.clone(), prev: p.prev_hash, floor, held_served });
                             }
                         }
                     }
@@ -11625,7 +11666,7 @@ fn fold_authority(community: &CommunityV2, editions: &[ParsedEdition], floors: &
                             if let Some(member) = crate::simd::hex::hex_to_bytes_32_checked(&grant.member) {
                                 if super::derive::grant_locator(cid, &member) == *eid {
                                     grant.role_ids.truncate(super::roles::MAX_ROLES_PER_MEMBER);
-                                    grant_cands.entry(entity_hex.clone()).or_default().push(AuthorityCand { role: None, grant: Some(grant), tenure: None, kind: RoleKind::Live, author: p.author, head, citation: p.authority.clone(), prev: p.prev_hash, floor, held_served });
+                                    grant_cands.entry(entity_hex.clone()).or_default().push(AuthorityCand { role: None, grant: Some(grant), tenure: None, kind: RoleKind::Live, author: p.author, author_hex: author_hex.clone(), grant_hex: grant_hex.clone(), head, citation: p.authority.clone(), prev: p.prev_hash, floor, held_served });
                                 }
                             }
                         }
@@ -11648,13 +11689,21 @@ fn fold_authority(community: &CommunityV2, editions: &[ParsedEdition], floors: &
     // authors of floored heads, each against everyone who could have reduced them.
     let tenure_floors: Vec<String> = {
         let mut writers: std::collections::BTreeSet<[u8; 32]> = owner.iter().map(|o| o.to_bytes()).collect();
-        writers.extend(stored.grants.iter().filter(|g| stored.is_authorized(&g.member, owner_hex.as_deref(), Permissions::MANAGE_ROLES)).filter_map(|g| crate::simd::hex::hex_to_bytes_32_checked(&g.member)));
+        let managers = stored.authorized_grantees(owner_hex.as_deref(), Permissions::MANAGE_ROLES);
+        writers.extend(stored.grants.iter().filter(|g| managers.contains(g.member.as_str())).filter_map(|g| crate::simd::hex::hex_to_bytes_32_checked(&g.member)));
         let authors: std::collections::BTreeSet<[u8; 32]> = floors.values().filter_map(|f| f.3).collect();
         authors
             .iter()
             .flat_map(|a| writers.iter().map(move |w| crate::simd::hex::bytes_to_hex_32(&super::derive::tenure_locator(cid, a, w))))
             .filter(|eid| floors.contains_key(eid))
             .collect()
+    };
+    // What `held_is` matches on, for every edition in hand: by version and hash, and with the id.
+    let served: std::collections::HashSet<(u64, [u8; 32])> = editions.iter().map(|e| (e.version, e.self_hash)).collect();
+    let served_as: std::collections::HashSet<(u64, [u8; 32], [u8; 32])> = editions.iter().map(|e| (e.version, e.self_hash, e.inner_id)).collect();
+    let held_served = |f: &Floor| match f.2 {
+        None => served.contains(&(f.0, f.1)),
+        Some(id) => served_as.contains(&(f.0, f.1, id)),
     };
     let complete_of = |role_cands: &BTreeMap<String, Vec<AuthorityCand>>, grant_cands: &BTreeMap<String, Vec<AuthorityCand>>, tenure_cands: &BTreeMap<String, Vec<AuthorityCand>>| {
         let mut tracked: std::collections::BTreeSet<String> = role_cands.keys().chain(grant_cands.keys()).chain(tenure_cands.keys()).cloned().collect();
@@ -11664,7 +11713,7 @@ fn fold_authority(community: &CommunityV2, editions: &[ParsedEdition], floors: &
             crate::simd::hex::hex_to_bytes_32_checked(&g.member)
                 .map(|m| crate::simd::hex::bytes_to_hex_32(&super::derive::grant_locator(cid, &m)))
         }));
-        tracked.iter().all(|eid| floors.get(eid).is_none_or(|f| editions.iter().any(|e| held_is(f, e))))
+        tracked.iter().all(|eid| floors.get(eid).is_none_or(&held_served))
     };
     let some_v2 = groups.get(&everyone_eid).is_some_and(|g| g.iter().any(|e| e.vsk == vsk::ROLE_V2 && e.binding.is_some()));
     let activated = floors.contains_key(&everyone_hex)
@@ -11702,6 +11751,7 @@ fn fold_authority(community: &CommunityV2, editions: &[ParsedEdition], floors: &
     // OWN ban to un-ban themselves (removals aren't outrank-checked). Exclude them from
     // head eligibility, not just from the roster.
     let banned_authors: std::collections::HashSet<&str> = persisted_banned.iter().map(String::as_str).collect();
+    let prelim_index = HeadIndex::of(&prelim_heads);
     let banlist_authored: Vec<&ParsedEdition> = groups
         .get(&banlist_eid)
         .map(|g| {
@@ -11713,7 +11763,7 @@ fn fold_authority(community: &CommunityV2, editions: &[ParsedEdition], floors: &
                     (!banned_authors.contains(ah.as_str()) || sealed_ban)
                         // From the author's Roles: @everyone's bits author no banlist.
                         && (owner_hex.as_deref() == Some(ah.as_str()) || sealed_ban || prelim.permissions_above(&ah, u32::MAX).contains(Permissions::BAN))
-                        && (sealed_ban || citation_ok_in_fold(cid, &prelim_heads, owner_hex.as_deref(), &e.author, e.authority.as_ref()))
+                        && (sealed_ban || citation_ok_in_fold(cid, &prelim_index, owner_hex.as_deref(), &e.author, e.authority.as_ref()))
                         // A malformed list is no Banlist edition: read as empty it would unban everyone.
                         && super::roles::parse_banlist_content(&e.content).is_some()
                 })
@@ -12039,6 +12089,9 @@ struct AuthorityCand {
     /// What a role candidate stands for (grants are always `Live`).
     kind: RoleKind,
     author: PublicKey,
+    /// `author` as hex, and the coordinate of their own Grant, which their citation names.
+    author_hex: String,
+    grant_hex: String,
     head: FoldedHead,
     /// The `vac` this edition carried (CORD-04 §5). `None` for an owner edition
     /// (supreme, cites nothing) or an uncited one — the latter is refused.
@@ -12096,18 +12149,18 @@ impl AuthorityCand {
     /// A same-version rival of a withheld held edition that does not beat the key its
     /// floor recorded (CORD-04 §1). Taking it would let a relay withholding the better
     /// held edition swap in a worse one; a served held edition competes on the tiebreak.
-    fn loses_to_floor(&self, roles: &crate::community::roles::CommunityRoles, owner_hex: Option<&str>) -> bool {
+    fn loses_to_floor(&self, roles: &crate::community::roles::RoleIndex<'_>, owner_hex: Option<&str>) -> bool {
         let Some(floor) = self.floor.as_ref().filter(|_| !self.held_served) else { return false };
         if self.head.version != floor.0 || self.head.self_hash == floor.1 {
             return false;
         }
         // Without the held edition its claims are unknown, so no rival can be judged against
         // them: only the owner, who acts whatever the rank, stands in for it.
-        if owner_hex != Some(self.author.to_hex().as_str()) {
+        if owner_hex != Some(self.author_hex.as_str()) {
             return true;
         }
-        let rank_of = |a: &[u8; 32]| fork_rank(roles, owner_hex, &crate::simd::hex::bytes_to_hex_32(a));
-        let mine = fork_rank(roles, owner_hex, &self.author.to_hex());
+        let rank_of = |a: &[u8; 32]| fork_rank_in(roles, owner_hex, &crate::simd::hex::bytes_to_hex_32(a));
+        let mine = fork_rank_in(roles, owner_hex, &self.author_hex);
         !HeldKey::of(floor, &rank_of).beaten_by(mine, &self.head.inner_id)
     }
 }
@@ -12122,35 +12175,40 @@ impl AuthorityCand {
 /// entity — applied to the citation instead of the chain link.
 fn citation_ok_in_fold(
     cid: &crate::community::CommunityId,
-    heads: &[FoldedHead],
+    heads: &HeadIndex<'_>,
     owner_hex: Option<&str>,
     author: &PublicKey,
     citation: Option<&crate::community::edition::AuthorityCitation>,
 ) -> bool {
-    let actor_hex = author.to_hex();
-    if owner_hex == Some(actor_hex.as_str()) {
+    citation_ok_against(cid, heads, owner_hex, author, citation)
+}
+
+/// A fold's heads by entity, for the citation checks it makes per candidate: the first head held
+/// for each entity, as a scan of the list would find it.
+struct HeadIndex<'a>(std::collections::HashMap<&'a str, (u64, [u8; 32])>);
+
+impl<'a> HeadIndex<'a> {
+    fn of(heads: &'a [FoldedHead]) -> Self {
+        let mut index = std::collections::HashMap::with_capacity(heads.len());
+        for h in heads {
+            index.entry(h.entity_hex.as_str()).or_insert((h.version, h.self_hash));
+        }
+        HeadIndex(index)
+    }
+}
+
+/// [`citation_ok_against`] for a candidate, whose author's hex and Grant coordinate it carries.
+fn citation_ok_of(heads: &HeadIndex<'_>, owner_hex: Option<&str>, c: &AuthorityCand) -> bool {
+    if owner_hex == Some(c.author_hex.as_str()) {
         return true;
     }
-    citation_ok_against(cid, &entity_heads(heads), owner_hex, author, citation)
+    crate::community::edition::authority_citation_satisfied_by(|e| heads.0.get(e).copied(), owner_hex, &c.author_hex, &c.grant_hex, c.citation.as_ref())
 }
 
-fn entity_heads(heads: &[FoldedHead]) -> Vec<crate::community::edition::EntityHead> {
-    heads
-        .iter()
-        .map(|h| crate::community::edition::EntityHead {
-            entity_hex: h.entity_hex.clone(),
-            version: h.version,
-            self_hash: h.self_hash,
-            inner_id: h.inner_id,
-            citation: None,
-        })
-        .collect()
-}
-
-/// [`citation_ok_in_fold`] against heads already in [`entity_heads`] form.
+/// Whether `citation` holds against a fold's heads (the CORD-04 §5 sync floor).
 fn citation_ok_against(
     cid: &crate::community::CommunityId,
-    heads: &[crate::community::edition::EntityHead],
+    heads: &HeadIndex<'_>,
     owner_hex: Option<&str>,
     author: &PublicKey,
     citation: Option<&crate::community::edition::AuthorityCitation>,
@@ -12160,7 +12218,7 @@ fn citation_ok_against(
         return true;
     }
     let grant_hex = crate::simd::hex::bytes_to_hex_32(&super::derive::grant_locator(cid, &author.to_bytes()));
-    crate::community::edition::authority_citation_satisfied(heads, owner_hex, &actor_hex, &grant_hex, citation)
+    crate::community::edition::authority_citation_satisfied_by(|e| heads.0.get(e).copied(), owner_hex, &actor_hex, &grant_hex, citation)
 }
 
 thread_local! {
@@ -12238,7 +12296,8 @@ fn select_authorized(
         let mut next_gapped = false;
         let mut next_admitted: std::collections::HashSet<[u8; 32]> = Default::default();
         let mut next_sealed: SealedBy = Default::default();
-        let cite_heads = entity_heads(&heads);
+        let cite_heads = HeadIndex::of(&heads);
+        let standing = crate::community::roles::RoleIndex::of(&accepted);
         // A ban takes what its target wrote, but not what a Tenure sealed (CORD-04 §9).
         let voided = |cands: &[AuthorityCand]| {
             held_banned(cands, excluded) && !cands.first().and_then(|c| c.floor).is_some_and(|f| f.3.is_some_and(|a| is_listed(&sealed, &crate::simd::hex::bytes_to_hex_32(&a), &f.1)))
@@ -12246,28 +12305,28 @@ fn select_authorized(
         // What an author holds above `reach` for this edition: their Roles, and the standing a
         // Tenure sealed it at.
         let support_for = |ah: &str, c: &AuthorityCand, reach: u32| -> Permissions {
-            Permissions(accepted.permissions_above(ah, reach).0 | seal_of(&sealed, ah, &c.head.self_hash, reach))
+            Permissions(standing.permissions_above(ah, reach).0 | seal_of(&sealed, ah, &c.head.self_hash, reach))
         };
 
         for (entity, cands) in tenure_cands {
-            let claims = |c: &AuthorityCand| c.tenure.iter().flat_map(|(_, es)| es.iter().map(|e| e.position)).collect::<Vec<u32>>();
+            let claims = |c: &AuthorityCand| c.tenure.iter().flat_map(|(_, es)| es.iter().map(|e| e.position)).min();
             let mut judge = |c: &AuthorityCand, _reach: u32| -> Option<Option<u32>> {
                 let (member, entries) = c.tenure.as_ref()?;
-                let ah = c.author.to_hex();
-                let is_sealed = is_listed(&sealed, &ah, &c.head.self_hash);
-                if excluded.contains(&ah) && !is_sealed {
+                let ah = c.author_hex.as_str();
+                let is_sealed = is_listed(&sealed, ah, &c.head.self_hash);
+                if excluded.contains(ah) && !is_sealed {
                     return refuse(&mut why, c, "tenure: author banned");
                 }
                 // Written by whoever reduces the member: never by the member, and the owner
                 // needs none.
-                if *member == ah || owner_hex == Some(member.as_str()) {
+                if member == ah || owner_hex == Some(member.as_str()) {
                     return refuse(&mut why, c, "tenure: written by its own member, or for the owner");
                 }
-                if owner_hex != Some(ah.as_str()) {
+                if owner_hex != Some(ah) {
                     // Each standing is one the writer could grant: beneath them, with bits
                     // they hold above it.
                     let can = entries.iter().all(|e| {
-                        let support = support_for(&ah, c, e.position);
+                        let support = support_for(ah, c, e.position);
                         support.contains(Permissions::MANAGE_ROLES) && e.bits & !support.0 == 0
                     });
                     if !can {
@@ -12275,12 +12334,12 @@ fn select_authorized(
                     }
                 }
                 // A sealed edition stands on its Tenure, not on the Grant it cited.
-                if !is_sealed && !citation_ok_against(cid, &cite_heads, owner_hex, &c.author, c.citation.as_ref()) && c.citation.is_some() {
+                if !is_sealed && !citation_ok_of(&cite_heads, owner_hex, c) && c.citation.is_some() {
                     return refuse(&mut why, c, "tenure: cited a grant we cannot resolve");
                 }
                 Some(None)
             };
-            let (picked, gap) = replay(cands, &accepted, owner_hex, complete, voided(cands), &claims, &mut judge, &mut next_admitted);
+            let (picked, gap) = replay(cands, &standing, owner_hex, complete, voided(cands), &claims, &mut judge, &mut next_admitted);
             next_gapped |= gap;
             let j = match picked {
                 Picked::Head(j, rebased) => {
@@ -12306,23 +12365,23 @@ fn select_authorized(
         for (entity, cands) in role_cands {
             // A deletion and a legacy edition claim no rank: they act at the one the Role stood at.
             let claims = |c: &AuthorityCand| match c.kind {
-                RoleKind::Deleted | RoleKind::History => Vec::new(),
-                _ => c.role.iter().map(|r| r.position).collect::<Vec<u32>>(),
+                RoleKind::Deleted | RoleKind::History => None,
+                _ => c.role.iter().map(|r| r.position).min(),
             };
             let mut judge = |c: &AuthorityCand, reach: u32| -> Option<Option<u32>> {
                 let role = c.role.as_ref()?;
-                let ah = c.author.to_hex();
+                let ah = c.author_hex.as_str();
                 if c.kind == RoleKind::History {
                     return refuse(&mut why, c, "role: a vsk-1 edition after Roles v2 activated");
                 }
-                let is_sealed = is_listed(&sealed, &ah, &c.head.self_hash);
-                if (excluded.contains(&ah) && !is_sealed) || role.position == 0 {
+                let is_sealed = is_listed(&sealed, ah, &c.head.self_hash);
+                if (excluded.contains(ah) && !is_sealed) || role.position == 0 {
                     return refuse(&mut why, c, "role: author banned or position 0");
                 }
-                if owner_hex != Some(ah.as_str()) {
+                if owner_hex != Some(ah) {
                     // MANAGE_ROLES and every carried bit from roles above the reach: both
                     // rank gates at once (the rank claimed and the rank replaced).
-                    let support = support_for(&ah, c, reach);
+                    let support = support_for(ah, c, reach);
                     if !support.contains(Permissions::MANAGE_ROLES) {
                         return refuse(&mut why, c, "role: author holds no MANAGE_ROLES above what it touches");
                     }
@@ -12335,12 +12394,12 @@ fn select_authorized(
                 // A `vac` is a sync floor, not the verdict (CORD-04 §5): a citation we
                 // can't resolve parks, while an uncited edition declared no floor to wait
                 // for. The rank gates above already passed either way.
-                if !is_sealed && !citation_ok_against(cid, &cite_heads, owner_hex, &c.author, c.citation.as_ref()) && c.citation.is_some() {
+                if !is_sealed && !citation_ok_of(&cite_heads, owner_hex, c) && c.citation.is_some() {
                     return refuse(&mut why, c, "role: cited a grant we cannot resolve");
                 }
                 Some((c.kind != RoleKind::Deleted).then_some(role.position))
             };
-            let (picked, gap) = replay(cands, &accepted, owner_hex, complete, voided(cands), &claims, &mut judge, &mut next_admitted);
+            let (picked, gap) = replay(cands, &standing, owner_hex, complete, voided(cands), &claims, &mut judge, &mut next_admitted);
             next_gapped |= gap;
             // Deletion is terminal over the authorized chain, not the head alone (CORD-04 §2):
             // once one stands, the Role is gone whatever was written after it.
@@ -12405,17 +12464,19 @@ fn select_authorized(
                     .filter_map(|rid| accepted.role(rid).map(|r| (rid.clone(), r.position)))
                     .collect()
             };
-            let claims = |c: &AuthorityCand| resolved_of(c).into_iter().map(|(_, p)| p).collect::<Vec<u32>>();
+            let claims = |c: &AuthorityCand| {
+                c.grant.iter().flat_map(|g| g.role_ids.iter()).filter(|rid| **rid != everyone_hex).filter_map(|rid| accepted.role(rid).map(|r| r.position)).min()
+            };
             let mut judge = |c: &AuthorityCand, reach: u32| -> Option<Option<u32>> {
                 let grant = c.grant.as_ref()?;
-                let ah = c.author.to_hex();
-                let is_sealed = is_listed(&sealed, &ah, &c.head.self_hash);
-                if (excluded.contains(&ah) && !is_sealed) || excluded.contains(&grant.member) {
+                let ah = c.author_hex.as_str();
+                let is_sealed = is_listed(&sealed, ah, &c.head.self_hash);
+                if (excluded.contains(ah) && !is_sealed) || excluded.contains(&grant.member) {
                     return refuse(&mut why, c, "grant: author or member banned");
                 }
                 // An uncited edition may add authority, fully rank-checked, but one that
                 // names no Role anyone has published is a strip, and a strip must cite.
-                if !is_sealed && !citation_ok_against(cid, &cite_heads, owner_hex, &c.author, c.citation.as_ref()) {
+                if !is_sealed && !citation_ok_of(&cite_heads, owner_hex, c) {
                     if c.citation.is_some() {
                         return refuse(&mut why, c, "grant: cited a grant we cannot resolve");
                     }
@@ -12426,8 +12487,8 @@ fn select_authorized(
                 // MANAGE_ROLES from roles above the reach. That also rules out a
                 // self-grant: nothing of yours sits above your own standing. The owner
                 // is never a target.
-                let ok = owner_hex == Some(ah.as_str())
-                    || (owner_hex != Some(grant.member.as_str()) && support_for(&ah, c, reach).contains(Permissions::MANAGE_ROLES));
+                let ok = owner_hex == Some(ah)
+                    || (owner_hex != Some(grant.member.as_str()) && support_for(ah, c, reach).contains(Permissions::MANAGE_ROLES));
                 if !ok {
                     return refuse(&mut why, c, "grant: author holds no MANAGE_ROLES above the roles or the member");
                 }
@@ -12438,7 +12499,7 @@ fn select_authorized(
                 next_refused.insert(entity.clone());
                 continue;
             }
-            let (picked, gap) = replay(cands, &accepted, owner_hex, complete, voided(cands), &claims, &mut judge, &mut next_admitted);
+            let (picked, gap) = replay(cands, &standing, owner_hex, complete, voided(cands), &claims, &mut judge, &mut next_admitted);
             next_gapped |= gap;
             let (j, rebased) = match picked {
                 Picked::Head(j, rebased) => (j, rebased),
@@ -12490,11 +12551,11 @@ fn held_banned(cands: &[AuthorityCand], excluded: &std::collections::BTreeSet<St
 /// An author's authority for ordering a version's siblings, read only from roles ranked
 /// above `reach`: the same standing the sibling is judged on, so the order can't lean on
 /// authority the decision itself creates.
-fn fork_rank_above(roles: &crate::community::roles::CommunityRoles, owner_hex: Option<&str>, author_hex: &str, reach: u32) -> u32 {
+fn fork_rank_above(roles: &crate::community::roles::RoleIndex<'_>, owner_hex: Option<&str>, author_hex: &str, reach: u32) -> u32 {
     if owner_hex == Some(author_hex) {
         return 0;
     }
-    roles.roles_of(author_hex).map(|r| r.position).filter(|p| *p < reach).min().unwrap_or(u32::MAX)
+    roles.highest_position_above(author_hex, reach).unwrap_or(u32::MAX)
 }
 
 enum Picked {
@@ -12527,12 +12588,13 @@ struct Stand {
 #[allow(clippy::too_many_arguments)]
 fn replay(
     cands: &[AuthorityCand],
-    accepted: &crate::community::roles::CommunityRoles,
+    accepted: &crate::community::roles::RoleIndex<'_>,
     owner_hex: Option<&str>,
     complete: bool,
     // The held edition's signer is banned: everything they wrote is gone, the floor with it.
     voided: bool,
-    claims: &dyn Fn(&AuthorityCand) -> Vec<u32>,
+    // The strictest rank an edition claims.
+    claims: &dyn Fn(&AuthorityCand) -> Option<u32>,
     judge: &mut dyn FnMut(&AuthorityCand, u32) -> Option<Option<u32>>,
     // Every edition this replay admits, collected for the caller.
     admitted_out: &mut std::collections::HashSet<[u8; 32]>,
@@ -12540,7 +12602,7 @@ fn replay(
     let n = cands.len();
     let Some(first) = cands.first() else { return (Picked::Nothing, false) };
     let floor = first.floor;
-    let is_owner = |c: &AuthorityCand| owner_hex == Some(c.author.to_hex().as_str());
+    let is_owner = |c: &AuthorityCand| owner_hex == Some(c.author_hex.as_str());
     let mut by_hash: std::collections::HashMap<[u8; 32], Vec<usize>> = Default::default();
     for (j, c) in cands.iter().enumerate() {
         by_hash.entry(c.head.self_hash).or_default().push(j);
@@ -12582,7 +12644,7 @@ fn replay(
         let reach = (i..hi).filter(|&j| viable[j]).map(own).min().unwrap_or(u32::MAX);
         for j in i..hi {
             let c = &cands[j];
-            key[j] = (fork_rank_above(accepted, owner_hex, &c.author.to_hex(), reach), c.head.inner_id);
+            key[j] = (fork_rank_above(accepted, owner_hex, &c.author_hex, reach), c.head.inner_id);
             conf[j] = if viable[j] { judge(c, reach) } else { None };
             admitted[j] = conf[j].is_some();
             // Decided on evidence: judged with what stood beneath it in hand, signed by the owner,
@@ -12691,7 +12753,7 @@ fn link_run(
     by_hash: &std::collections::HashMap<[u8; 32], Vec<usize>>,
     sure: &[bool],
     conf: &[Option<Option<u32>>],
-    claims: &dyn Fn(&AuthorityCand) -> Vec<u32>,
+    claims: &dyn Fn(&AuthorityCand) -> Option<u32>,
 ) -> (Option<u32>, bool) {
     let (mut acc, mut through_held, mut at) = (None, false, ver);
     for _ in 0..LINK_RUN_CAP {
@@ -14396,6 +14458,22 @@ pub async fn upgrade_admin_role_pin_bit<T: Transport + ?Sized>(
     widened.permissions.0 |= Permissions::PIN_MESSAGES;
     set_role(transport, community, &widened).await?;
     Ok(true)
+}
+
+/// Timings of one control follow's stages over what `transport` serves, for `cargo bench`:
+/// (the read with its folds, one `fold_authority`, one `apply_control_fold`, editions read).
+#[cfg(feature = "bench")]
+pub(crate) async fn bench_control_stages<T: Transport + ?Sized>(transport: &T, community: &CommunityV2) -> (std::time::Duration, std::time::Duration, std::time::Duration, usize) {
+    use crate::rt::time_std::Instant;
+    let t = Instant::now();
+    let read = read_control(transport, community).await.unwrap();
+    let read_at = t.elapsed();
+    let t = Instant::now();
+    let authority = fold_authority(community, &read.editions, &read.floors);
+    let authority_at = t.elapsed();
+    let t = Instant::now();
+    std::hint::black_box(apply_control_fold(community, &read.editions, &read.floors, &authority));
+    (read_at, authority_at, t.elapsed(), read.editions.len())
 }
 
 #[cfg(test)]
@@ -17421,6 +17499,120 @@ mod tests {
         assert!(moderator.outranks(4) && !moderator.outranks(3) && !moderator.outranks(1), "strictly beneath only");
         let owner = RoleAuthor { is_owner: true, rank: 0, ..moderator };
         assert!(owner.supports(1, u64::MAX) && owner.outranks(1));
+    }
+
+    /// The roster, banlist and the heads a follow would floor, as one comparable string.
+    fn authority_and_heads(a: &AuthoritySet) -> String {
+        let mut heads: Vec<_> = a.heads.iter().map(|h| (h.entity_hex.clone(), h.version, crate::simd::hex::bytes_to_hex_32(&h.self_hash), crate::simd::hex::bytes_to_hex_32(&h.inner_id), h.rebased)).collect();
+        heads.sort();
+        format!("{} heads={heads:?} converged={}", authority_fingerprint(a), a.converged)
+    }
+
+    #[tokio::test]
+    async fn random_control_planes_fold_alike_in_any_order_and_for_a_reader_holding_its_heads() {
+        let (_tmp, _guard, owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "Random planes", vec!["wss://r".into()], None).await.unwrap();
+        let group = control::ControlPlane::of(&community).write_group().unwrap();
+        let cid = community.id();
+        let actors: Vec<Keys> = (0..4).map(|_| Keys::generate()).collect();
+        let mut signers = vec![owner.clone()];
+        signers.extend(actors.iter().cloned());
+        let roles: Vec<String> = (1..=3u8).map(|i| crate::simd::hex::bytes_to_hex_32(&[i; 32])).collect();
+        let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = move |n: u64| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed % n
+        };
+        let perms: [u64; 5] = [Permissions::MANAGE_ROLES | Permissions::BAN, Permissions::MANAGE_ROLES, Permissions::BAN, Permissions::KICK, 0];
+        let mut failures: Vec<String> = Vec::new();
+        for case in 0..100 {
+            // Entities: three Roles, a Grant per actor, the Banlist.
+            let mut entities: Vec<([u8; 32], &str)> = roles.iter().map(|r| (crate::simd::hex::hex_to_bytes_32(r), vsk::ROLE)).collect();
+            entities.extend(actors.iter().map(|a| (crate::community::v2::derive::grant_locator(cid, &a.public_key().to_bytes()), vsk::GRANT)));
+            entities.push((crate::community::v2::derive::banlist_locator(cid), vsk::BANLIST));
+            let mut eds: Vec<ParsedEdition> = Vec::new();
+            // Grants written so far by entity: what a citation can name.
+            let mut written: std::collections::HashMap<[u8; 32], Vec<(u64, [u8; 32])>> = Default::default();
+            // Interleave entities by version, so a citation can name what came before it.
+            let lens: Vec<u64> = entities.iter().map(|_| 1 + next(3)).collect();
+            let mut at_version: std::collections::HashMap<[u8; 32], Vec<[u8; 32]>> = Default::default();
+            for v in 1..=3u64 {
+                for (k, (eid, kind)) in entities.iter().enumerate() {
+                    if v > lens[k] {
+                        continue;
+                    }
+                    let below = at_version.get(eid).cloned().unwrap_or_default();
+                    let mut here = Vec::new();
+                    for _ in 0..(1 + u64::from(next(4) == 0)) {
+                        let signer = if next(2) == 0 { &signers[0] } else { &signers[1 + next(4) as usize] };
+                        let prev = match (v, next(6)) {
+                            (1, _) => None,
+                            (_, 0) => Some([0xee; 32]),
+                            _ if below.is_empty() => None,
+                            _ => Some(below[next(below.len() as u64) as usize]),
+                        };
+                        let content = match *kind {
+                            vsk::ROLE => {
+                                let rid = crate::simd::hex::bytes_to_hex_32(eid);
+                                let mut r = admin_role(&rid, perms[next(perms.len() as u64) as usize]);
+                                r.position = 1 + next(4) as u32;
+                                crate::community::v2::roles::role_content_json(&r).unwrap()
+                            }
+                            vsk::GRANT => {
+                                let member = actors.iter().find(|a| crate::community::v2::derive::grant_locator(cid, &a.public_key().to_bytes()) == *eid).unwrap();
+                                let role_ids = roles.iter().filter(|_| next(2) == 0).cloned().collect();
+                                crate::community::v2::roles::grant_content_json(&MemberGrant { member: member.public_key().to_hex(), role_ids }).unwrap()
+                            }
+                            _ => {
+                                let banned: Vec<String> = actors.iter().filter(|_| next(3) == 0).map(|a| a.public_key().to_hex()).collect();
+                                crate::community::v2::roles::banlist_content_json(&banned).unwrap()
+                            }
+                        };
+                        let own = crate::community::v2::derive::grant_locator(cid, &signer.public_key().to_bytes());
+                        let cite = match (signer.public_key() == owner.public_key(), next(3), written.get(&own)) {
+                            (true, ..) | (_, 0, _) => None,
+                            (_, 1, Some(held)) if !held.is_empty() => {
+                                let (version, edition_hash) = held[next(held.len() as u64) as usize];
+                                Some(crate::community::edition::AuthorityCitation { entity_id: own, version, edition_hash })
+                            }
+                            _ => Some(crate::community::edition::AuthorityCitation { entity_id: own, version: 1, edition_hash: [0xcc; 32] }),
+                        };
+                        let ts = 1_000 + next(3);
+                        let rumor = control::build_edition_rumor(signer.public_key(), kind, eid, v, prev.as_ref(), &content, ts, cite.as_ref());
+                        let (wrap, _) = control::seal_control_edition(&rumor, &group, signer, Timestamp::from_secs(ts)).unwrap();
+                        let (ed, _) = control::open_control_edition(&wrap, &group).unwrap();
+                        here.push(ed.self_hash);
+                        if *kind == vsk::GRANT {
+                            written.entry(*eid).or_default().push((v, ed.self_hash));
+                        }
+                        eds.push(ed);
+                    }
+                    at_version.insert(*eid, here);
+                }
+            }
+            let base = fold_authority(&community, &eds, &Floors::default());
+            let want = authority_and_heads(&base);
+            for order in 0..4 {
+                let mut shuffled = eds.clone();
+                for i in (1..shuffled.len()).rev() {
+                    shuffled.swap(i, next(i as u64 + 1) as usize);
+                }
+                let got = authority_and_heads(&fold_authority(&community, &shuffled, &Floors::default()));
+                if got != want {
+                    failures.push(format!("case {case} order {order}:\n  want {want}\n   got {got}"));
+                }
+            }
+            // A reader holding exactly the heads it decided folds them again.
+            let floors: Floors = base.heads.iter().map(|h| (h.entity_hex.clone(), (h.version, h.self_hash, Some(h.inner_id), Some(h.author)))).collect();
+            let tracked = authority_fingerprint(&fold_authority(&community, &eds, &floors));
+            if tracked != authority_fingerprint(&base) {
+                failures.push(format!("case {case} tracking:\n  fresh {}\n  held  {tracked}", authority_fingerprint(&base)));
+            }
+        }
+        assert!(failures.is_empty(), "{} of 100 cases folded differently:\n{}", failures.len(), failures.join("\n"));
     }
 
     #[tokio::test]

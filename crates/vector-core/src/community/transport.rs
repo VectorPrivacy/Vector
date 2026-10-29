@@ -1914,7 +1914,7 @@ impl Transport for LiveTransport {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "bench"))]
 pub(crate) mod memory {
     use super::*;
     use std::collections::{HashMap, HashSet};

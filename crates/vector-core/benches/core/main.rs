@@ -21,6 +21,10 @@ const ALL: &[(&str, fn())] = &[
     ("compact::profile_lookup", compact::profile_lookup),
     ("community::load_encrypted", community::load_encrypted),
     ("community::policy_window", community::policy_window),
+    ("concord::live_dispatch", concord_live_dispatch),
+    ("concord::history_catchup", concord_history_catchup),
+    ("concord::control_fold", concord_control_fold),
+    ("concord::guestbook_ingest", concord_guestbook_ingest),
     ("db::pool_uncontended", pool::uncontended),
     ("db::pool_contended", pool::contended),
     ("db::scoped_lookup", pool::scoped_lookup),
@@ -59,6 +63,26 @@ fn main() {
         println!("\n== {name}");
         run();
     }
+}
+
+fn concord_live_dispatch() {
+    fresh_account();
+    vector_core::community::v2::bench::live_dispatch();
+}
+
+fn concord_history_catchup() {
+    fresh_account();
+    vector_core::community::v2::bench::history_catchup();
+}
+
+fn concord_control_fold() {
+    fresh_account();
+    vector_core::community::v2::bench::control_fold();
+}
+
+fn concord_guestbook_ingest() {
+    fresh_account();
+    vector_core::community::v2::bench::guestbook_ingest();
 }
 
 /// Log in a new account under a temp root that lives until the process exits.

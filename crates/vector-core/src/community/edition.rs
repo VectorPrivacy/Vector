@@ -291,6 +291,19 @@ pub fn authority_citation_satisfied(
     actor_grant_hex: &str,
     citation: Option<&AuthorityCitation>,
 ) -> bool {
+    let head_of = |entity_hex: &str| heads.iter().find(|h| h.entity_hex == entity_hex).map(|h| (h.version, h.self_hash));
+    authority_citation_satisfied_by(head_of, owner_hex, actor_hex, actor_grant_hex, citation)
+}
+
+/// [`authority_citation_satisfied`] with the heads looked up by `head_of`: an entity's
+/// `(version, self_hash)` as the first head held for it would give them.
+pub fn authority_citation_satisfied_by(
+    head_of: impl Fn(&str) -> Option<(u64, [u8; 32])>,
+    owner_hex: Option<&str>,
+    actor_hex: &str,
+    actor_grant_hex: &str,
+    citation: Option<&AuthorityCitation>,
+) -> bool {
     if owner_hex == Some(actor_hex) {
         return true;
     }
@@ -302,13 +315,13 @@ pub fn authority_citation_satisfied(
     if entity_hex != actor_grant_hex {
         return false;
     }
-    match heads.iter().find(|h| h.entity_hex == entity_hex) {
+    match head_of(&entity_hex) {
         // We hold a LATER edition of the actor's grant than they cited — synced past it. Whether the
         // actor is STILL authorized is the caller's roster check (which reflects this later head).
-        Some(h) if h.version > c.version => true,
+        Some((version, _)) if version > c.version => true,
         // Synced to exactly the cited version: the cited hash must be the one that won our fold (else
         // the actor cited a non-canonical fork of their own grant).
-        Some(h) if h.version == c.version => h.self_hash == c.edition_hash,
+        Some((version, self_hash)) if version == c.version => self_hash == c.edition_hash,
         // Not surfaced, or our head is BEHIND the cited version → we cannot confirm the authority.
         _ => false,
     }

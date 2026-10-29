@@ -10,6 +10,8 @@
 //! [`derive`], and the kind registry below (CORD-02 Appendix B). A retired
 //! number is burned forever, never reused.
 
+#[cfg(feature = "bench")]
+pub mod bench;
 pub mod chat;
 pub mod community;
 pub mod control;

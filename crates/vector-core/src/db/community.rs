@@ -1169,6 +1169,7 @@ fn delete_community_inner(community_id: &str, retain_keys: bool) -> Result<(), S
             .map_err(|e| format!("delete community: {e}"))?;
     }
     tx.commit().map_err(|e| format!("delete community commit: {e}"))?;
+    roster_cache().lock().unwrap_or_else(|e| e.into_inner()).moved(community_id);
     departures_seen_cache().lock().unwrap_or_else(|e| e.into_inner()).moved(community_id);
     if let Some(cid) = crate::community::id32_from_hex(community_id) {
         banlist_cache().write().unwrap_or_else(|e| e.into_inner()).remove(&cid);
@@ -1887,17 +1888,43 @@ pub fn set_community_roles(
         params![json, at, community_id],
     )
     .map_err(|e| format!("set roles: {e}"))?;
+    roster_cache().lock().unwrap_or_else(|e| e.into_inner()).moved(community_id);
+    drop(conn);
     bump_membership_generation();
     Ok(())
 }
 
 /// A Community's cached role graph. Empty (default) for an unknown community or none stored.
+type RosterCache = Parsed<std::sync::Arc<crate::community::roles::CommunityRoles>, 16>;
+
+fn roster_cache() -> std::sync::Arc<std::sync::Mutex<RosterCache>> {
+    struct Key;
+    super::current_session().scoped::<Key, std::sync::Mutex<RosterCache>>()
+}
+
 pub fn get_community_roles(
     community_id: &str,
 ) -> Result<crate::community::roles::CommunityRoles, String> {
-    let conn = super::get_db_connection_guard_static()?;
-    let json = stored_roles(&conn, community_id).map_err(|e| format!("get roles: {e}"))?;
-    Ok(parse_roles(json, dec_txt))
+    get_community_roles_shared(community_id).map(std::sync::Arc::unwrap_or_clone)
+}
+
+/// [`get_community_roles`] without copying the roster out.
+pub fn get_community_roles_shared(community_id: &str) -> Result<std::sync::Arc<crate::community::roles::CommunityRoles>, String> {
+    let cache = roster_cache();
+    let generation = {
+        let mut held = cache.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(hit) = held.get(community_id) {
+            return Ok(hit);
+        }
+        held.generation(community_id)
+    };
+    let json = {
+        let conn = super::get_db_connection_guard_static()?;
+        stored_roles(&conn, community_id).map_err(|e| format!("get roles: {e}"))?
+    };
+    let roles = std::sync::Arc::new(parse_roles(json, dec_txt));
+    cache.lock().unwrap_or_else(|e| e.into_inner()).put(community_id, generation, roles.clone());
+    Ok(roles)
 }
 
 /// A community's roles JSON as stored (sealed when Local Encryption is on).
@@ -1971,7 +1998,11 @@ pub fn set_edition_head_at_epoch(community_id: &str, entity_id: &str, version: u
 /// head never takes one an authority row holds.
 #[allow(clippy::too_many_arguments)]
 pub fn set_family_head_at_epoch(community_id: &str, entity_id: &str, version: u64, self_hash: &[u8; 32], inner_id: &[u8; 32], author: &[u8; 32], epoch: u64, family: &str) -> Result<(), String> {
-    let conn = super::get_write_connection_guard_static()?;
+    set_family_head_on(&*super::get_write_connection_guard_static()?, community_id, entity_id, version, self_hash, inner_id, author, epoch, family)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn set_family_head_on(conn: &rusqlite::Connection, community_id: &str, entity_id: &str, version: u64, self_hash: &[u8; 32], inner_id: &[u8; 32], author: &[u8; 32], epoch: u64, family: &str) -> Result<(), String> {
     conn.execute(
         "INSERT INTO community_edition_heads (community_id, entity_id, version, self_hash, inner_id, epoch, author, family)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
@@ -1990,6 +2021,75 @@ pub fn set_family_head_at_epoch(community_id: &str, entity_id: &str, version: u6
     )
     .map_err(|e| format!("set edition head: {e}"))?;
     Ok(())
+}
+
+/// A floor row: `(epoch, version, self_hash, inner_id, author, family)`.
+type HeldFloorRow = (u64, u64, Vec<u8>, Option<Vec<u8>>, Option<Vec<u8>>, Option<String>);
+
+/// One fold's floor writes, made by [`write_folded_heads`] in a single transaction.
+pub struct FloorWrites<'c> {
+    conn: &'c rusqlite::Connection,
+    community_id: &'c str,
+    /// Each row as the transaction found it.
+    held: std::collections::HashMap<String, HeldFloorRow>,
+    /// Rows written in this transaction, which the snapshot above no longer describes.
+    touched: std::collections::HashSet<String>,
+}
+
+impl FloorWrites<'_> {
+    /// The row already records exactly this head at `epoch`, so every write would leave it as it is.
+    #[allow(clippy::too_many_arguments)]
+    fn already(&self, entity_id: &str, version: u64, self_hash: &[u8; 32], inner_id: &[u8; 32], author: &[u8; 32], epoch: u64, family: &str) -> bool {
+        !self.touched.contains(entity_id)
+            && self.held.get(entity_id).is_some_and(|(e, v, h, i, a, f)| {
+                *e == epoch && *v == version && h.as_slice() == self_hash && i.as_deref() == Some(inner_id.as_slice()) && a.as_deref() == Some(author.as_slice()) && f.as_deref() == Some(family)
+            })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn set(&mut self, entity_id: &str, version: u64, self_hash: &[u8; 32], inner_id: &[u8; 32], author: &[u8; 32], epoch: u64, family: &str) -> Result<(), String> {
+        if self.already(entity_id, version, self_hash, inner_id, author, epoch, family) {
+            return Ok(());
+        }
+        self.touched.insert(entity_id.to_string());
+        set_family_head_on(self.conn, self.community_id, entity_id, version, self_hash, inner_id, author, epoch, family)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn converge(&mut self, entity_id: &str, version: u64, self_hash: &[u8; 32], inner_id: &[u8; 32], author: &[u8; 32], epoch: u64, family: &str) -> Result<(), String> {
+        if self.already(entity_id, version, self_hash, inner_id, author, epoch, family) {
+            return Ok(());
+        }
+        self.touched.insert(entity_id.to_string());
+        converge_family_head_on(self.conn, self.community_id, entity_id, version, self_hash, inner_id, author, epoch, Some(family))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn rebase(&mut self, entity_id: &str, version: u64, self_hash: &[u8; 32], inner_id: &[u8; 32], author: &[u8; 32], epoch: u64, family: &str) -> Result<(), String> {
+        if self.already(entity_id, version, self_hash, inner_id, author, epoch, family) {
+            return Ok(());
+        }
+        self.touched.insert(entity_id.to_string());
+        rebase_edition_head_on(self.conn, self.community_id, entity_id, version, self_hash, inner_id, author, epoch, family)
+    }
+}
+
+/// Run one fold's floor writes in a single transaction: all of them land, or none.
+pub fn write_folded_heads(community_id: &str, write: impl FnOnce(&mut FloorWrites<'_>) -> Result<(), String>) -> Result<(), String> {
+    let conn = super::get_write_connection_guard_static()?;
+    let tx = conn.unchecked_transaction().map_err(|e| format!("floor writes tx: {e}"))?;
+    let held = {
+        let mut stmt = tx
+            .prepare_cached("SELECT entity_id, epoch, version, self_hash, inner_id, author, family FROM community_edition_heads WHERE community_id = ?1")
+            .map_err(|e| format!("floor writes: {e}"))?;
+        let rows = stmt
+            .query_map(params![community_id], |r| Ok((r.get::<_, String>(0)?, (r.get::<_, i64>(1)? as u64, r.get::<_, i64>(2)? as u64, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?))))
+            .map_err(|e| format!("floor writes: {e}"))?;
+        rows.collect::<Result<_, _>>().map_err(|e| format!("floor writes: {e}"))?
+    };
+    let mut writes = FloorWrites { conn: &tx, community_id, held, touched: Default::default() };
+    write(&mut writes)?;
+    tx.commit().map_err(|e| format!("floor writes commit: {e}"))
 }
 
 /// A floor of the authority fold: Roles, Grants, the Banlist, Tenures, overwrites, syncs.
@@ -2046,7 +2146,11 @@ pub fn converge_edition_head_at_epoch(community_id: &str, entity_id: &str, versi
 /// [`converge_edition_head_at_epoch`], touching only a row of `family` (or one that records none).
 #[allow(clippy::too_many_arguments)]
 pub fn converge_family_head_at_epoch(community_id: &str, entity_id: &str, version: u64, self_hash: &[u8; 32], inner_id: &[u8; 32], author: &[u8; 32], epoch: u64, family: Option<&str>) -> Result<(), String> {
-    let conn = super::get_write_connection_guard_static()?;
+    converge_family_head_on(&*super::get_write_connection_guard_static()?, community_id, entity_id, version, self_hash, inner_id, author, epoch, family)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn converge_family_head_on(conn: &rusqlite::Connection, community_id: &str, entity_id: &str, version: u64, self_hash: &[u8; 32], inner_id: &[u8; 32], author: &[u8; 32], epoch: u64, family: Option<&str>) -> Result<(), String> {
     conn.execute(
         "UPDATE community_edition_heads
             SET self_hash = ?4, inner_id = ?5, author = ?7
@@ -2068,7 +2172,11 @@ pub fn converge_family_head_at_epoch(community_id: &str, entity_id: &str, versio
 /// Only a row of the head's own `family`, or one that records none, moves.
 #[allow(clippy::too_many_arguments)]
 pub fn rebase_edition_head_at_epoch(community_id: &str, entity_id: &str, version: u64, self_hash: &[u8; 32], inner_id: &[u8; 32], author: &[u8; 32], epoch: u64, family: &str) -> Result<(), String> {
-    let conn = super::get_write_connection_guard_static()?;
+    rebase_edition_head_on(&*super::get_write_connection_guard_static()?, community_id, entity_id, version, self_hash, inner_id, author, epoch, family)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn rebase_edition_head_on(conn: &rusqlite::Connection, community_id: &str, entity_id: &str, version: u64, self_hash: &[u8; 32], inner_id: &[u8; 32], author: &[u8; 32], epoch: u64, family: &str) -> Result<(), String> {
     conn.execute(
         "UPDATE community_edition_heads
             SET version = ?3, self_hash = ?4, inner_id = ?5, author = ?7, family = COALESCE(family, ?8)
@@ -3610,6 +3718,33 @@ mod tests {
         departures_seen_cache().lock().unwrap().moved(&cid);
         assert_eq!(*departures_seen(&cid).unwrap().spans, want, "read back from the sealed rows");
         crate::state::set_encryption_enabled(false);
+    }
+
+    #[test]
+    fn a_folds_floor_writes_skip_only_what_is_already_stored() {
+        let (_tmp, _guard) = init_test_db();
+        let cid = "c".repeat(64);
+        let row = |eid: &str| get_all_edition_heads_full(&cid).unwrap().get(eid).copied();
+        let (h4, h5, a) = ([4u8; 32], [5u8; 32], [9u8; 32]);
+        set_family_head_at_epoch(&cid, "e1", 5, &h5, &[7; 32], &a, 2, FLOOR_CONTROL).unwrap();
+        set_family_head_at_epoch(&cid, "e2", 3, &h5, &[8; 32], &a, 2, FLOOR_AUTHORITY).unwrap();
+        write_folded_heads(&cid, |w| {
+            // Stepped down, then the very head the transaction found: it is written again.
+            w.rebase("e1", 4, &h4, &[6; 32], &a, 2, FLOOR_CONTROL)?;
+            w.set("e1", 5, &h5, &[7; 32], &a, 2, FLOOR_CONTROL)?;
+            // A same-version rival with a lower id is no copy of what is held.
+            w.converge("e2", 3, &h5, &[1; 32], &a, 2, FLOOR_AUTHORITY)
+        })
+        .unwrap();
+        assert_eq!(row("e1"), Some((2, 5, h5, Some([7; 32]), Some(a))));
+        assert_eq!(row("e2"), Some((2, 3, h5, Some([1; 32]), Some(a))));
+        // Nothing lands from a fold whose writes fail part way.
+        let failed = write_folded_heads(&cid, |w| {
+            w.set("e3", 1, &h4, &[2; 32], &a, 2, FLOOR_CONTROL)?;
+            Err("cut short".into())
+        });
+        assert!(failed.is_err());
+        assert_eq!(row("e3"), None);
     }
 
     #[test]

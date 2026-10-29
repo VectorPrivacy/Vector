@@ -411,6 +411,26 @@ impl CommunityRoles {
         self.has_permission(actor_hex, permission)
     }
 
+    /// Every grantee [`is_authorized`](Self::is_authorized) for `permission`, found in one pass
+    /// over the grants rather than one scan of them per member.
+    pub fn authorized_grantees(&self, owner_hex: Option<&str>, permission: u64) -> std::collections::HashSet<&str> {
+        let mut bits: std::collections::HashMap<&str, Permissions> = std::collections::HashMap::new();
+        for r in &self.roles {
+            // `role` finds the first of a repeated id.
+            bits.entry(r.role_id.as_str()).or_insert(r.permissions);
+        }
+        let mut held: std::collections::HashMap<&str, Permissions> = std::collections::HashMap::new();
+        for g in &self.grants {
+            let member = held.entry(g.member.as_str()).or_insert(self.everyone.unwrap_or_default());
+            for rid in &g.role_ids {
+                if let Some(b) = bits.get(rid.as_str()) {
+                    *member = member.union(*b);
+                }
+            }
+        }
+        held.into_iter().filter(|(m, p)| owner_hex == Some(*m) || p.contains(permission)).map(|(m, _)| m).collect()
+    }
+
     /// escalation defense — may `actor_hex` manage something sitting at `target_position`
     /// (grant/revoke/edit/reorder a role)? The actor must **strictly outrank** it (their highest
     /// authority is a *lower* position number) AND hold `MANAGE_ROLES`. The owner is supreme
@@ -580,9 +600,94 @@ impl CommunityRoles {
     }
 }
 
+/// One roster's per-member questions answered from each member's Roles gathered once: what
+/// [`CommunityRoles`] answers by scanning every grant per question. A fold asks for each
+/// candidate it judges, so over a large roster the scans dominate.
+pub struct RoleIndex<'a> {
+    everyone: Permissions,
+    held: std::collections::HashMap<&'a str, Vec<&'a Role>>,
+}
+
+impl<'a> RoleIndex<'a> {
+    pub fn of(roster: &'a CommunityRoles) -> Self {
+        let mut by_id: std::collections::HashMap<&str, &Role> = std::collections::HashMap::new();
+        for r in &roster.roles {
+            // `role` finds the first of a repeated id.
+            by_id.entry(r.role_id.as_str()).or_insert(r);
+        }
+        let mut held: std::collections::HashMap<&str, Vec<&Role>> = std::collections::HashMap::new();
+        for g in &roster.grants {
+            let roles = held.entry(g.member.as_str()).or_default();
+            roles.extend(g.role_ids.iter().filter_map(|rid| by_id.get(rid.as_str()).copied()));
+        }
+        RoleIndex { everyone: roster.everyone.unwrap_or_default(), held }
+    }
+
+    fn roles_of(&self, member_hex: &str) -> &[&'a Role] {
+        self.held.get(member_hex).map_or(&[], Vec::as_slice)
+    }
+
+    /// [`CommunityRoles::permissions_above`].
+    pub fn permissions_above(&self, member_hex: &str, bound: u32) -> Permissions {
+        self.roles_of(member_hex).iter().filter(|r| r.position < bound).fold(Permissions::empty(), |acc, r| acc.union(r.permissions))
+    }
+
+    /// [`CommunityRoles::is_authorized`].
+    pub fn is_authorized(&self, actor_hex: &str, owner_hex: Option<&str>, permission: u64) -> bool {
+        owner_hex == Some(actor_hex) || self.roles_of(actor_hex).iter().fold(self.everyone, |acc, r| acc.union(r.permissions)).contains(permission)
+    }
+
+    /// [`CommunityRoles::highest_position`].
+    pub fn highest_position(&self, member_hex: &str) -> Option<u32> {
+        self.roles_of(member_hex).iter().map(|r| r.position).min()
+    }
+
+    /// The highest of the member's Role positions strictly above `bound`.
+    pub fn highest_position_above(&self, member_hex: &str, bound: u32) -> Option<u32> {
+        self.roles_of(member_hex).iter().map(|r| r.position).filter(|p| *p < bound).min()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn authorized_grantees_agrees_with_asking_each_member() {
+        let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = move |n: u64| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed % n
+        };
+        for round in 0..200 {
+            let ids: Vec<String> = (0..6).map(|i| format!("{i:064x}")).collect();
+            let members: Vec<String> = (0..8).map(|i| format!("{:064x}", 100 + i)).collect();
+            // Repeated role ids and members, roles granted that don't exist, @everyone or not.
+            let roles = (0..next(7)).map(|_| Role { role_id: ids[next(6) as usize].clone(), position: 1 + next(5) as u32, permissions: Permissions(next(16)), ..Role::admin(String::new()) }).collect();
+            let grants = (0..next(12)).map(|_| MemberGrant { member: members[next(8) as usize].clone(), role_ids: (0..next(4)).map(|_| ids[next(6) as usize].clone()).collect() }).collect();
+            let r = CommunityRoles { roles, grants, everyone: (next(2) == 0).then(|| Permissions(next(16))), ..Default::default() };
+            let owner = (round % 3 == 0).then(|| members[0].as_str());
+            let index = RoleIndex::of(&r);
+            for bits in 1..16u64 {
+                let fast = r.authorized_grantees(owner, bits);
+                for g in &r.grants {
+                    assert_eq!(fast.contains(g.member.as_str()), r.is_authorized(&g.member, owner, bits), "round {round} bits {bits}");
+                }
+                for m in members.iter().map(String::as_str).chain(["nobody"]) {
+                    assert_eq!(index.is_authorized(m, owner, bits), r.is_authorized(m, owner, bits), "round {round}");
+                }
+            }
+            for m in members.iter().map(String::as_str).chain(["nobody"]) {
+                assert_eq!(index.highest_position(m), r.highest_position(m), "round {round}");
+                for bound in 0..8 {
+                    assert_eq!(index.permissions_above(m, bound), r.permissions_above(m, bound), "round {round} bound {bound}");
+                    assert_eq!(index.highest_position_above(m, bound), r.roles_of(m).map(|r| r.position).filter(|p| *p < bound).min(), "round {round} bound {bound}");
+                }
+            }
+        }
+    }
 
     #[test]
     fn a_channel_resolves_everyone_then_roles_then_the_member() {

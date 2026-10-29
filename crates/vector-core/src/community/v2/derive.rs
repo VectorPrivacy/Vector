@@ -319,7 +319,30 @@ pub fn voice_sender_key(media_key: &[u8; 32], identity: &str) -> [u8; 32] {
 
 /// A member's Grant entity coordinate (the edition `eid`).
 pub fn grant_locator(community_id: &CommunityId, member_xonly: &[u8; 32]) -> [u8; 32] {
-    hkdf32(&community_id.0, &build_info(LABEL_GRANT, member_xonly, None))
+    // Memoized: every roster fold asks again for each grant, several times over.
+    #[derive(Default)]
+    struct Locators {
+        cur: std::collections::HashMap<[u8; 64], [u8; 32]>,
+        prev: std::collections::HashMap<[u8; 64], [u8; 32]>,
+    }
+    const GEN: usize = 8192;
+    let mut key = [0u8; 64];
+    key[..32].copy_from_slice(&community_id.0);
+    key[32..].copy_from_slice(member_xonly);
+    let memo = crate::db::current_session().scoped::<Locators, std::sync::Mutex<Locators>>();
+    let mut held = memo.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(hit) = held.cur.get(&key) {
+        return *hit;
+    }
+    let locator = match held.prev.remove(&key) {
+        Some(hit) => hit,
+        None => hkdf32(&community_id.0, &build_info(LABEL_GRANT, member_xonly, None)),
+    };
+    if held.cur.len() >= GEN {
+        held.prev = std::mem::take(&mut held.cur);
+    }
+    held.cur.insert(key, locator);
+    locator
 }
 
 /// The community-wide Banlist coordinate.

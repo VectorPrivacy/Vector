@@ -13,7 +13,7 @@
 //!     the head at the highest *contiguous* version and is reported, so the caller can fail closed for
 //!     that entity and refetch the missing prereqs from the quorum (H1/M8) rather than fail open.
 
-use sha2::{Digest, Sha256};
+use crate::crypto::sha256::Sha256;
 
 /// Frozen domain-separation label for the edition canonicalization (never change).
 const EDITION_LABEL: &[u8] = b"vector-community/v1/edition";
@@ -60,11 +60,10 @@ pub fn edition_hash_signed(
     content: &[u8],
     signer: &[u8; 32],
 ) -> [u8; 32] {
-    let mut h = Sha256::new();
-    h.update(edition_signing_bytes(entity_id, version, prev_hash, content));
+    let mut h = signing_hasher(entity_id, version, prev_hash, content);
     h.update(b"concord/edition-signer");
     h.update(signer);
-    h.finalize().into()
+    h.finalize()
 }
 
 /// SHA-256 of [`edition_signing_bytes`] — the edition's identity in the chain. The next edition's
@@ -75,9 +74,29 @@ pub fn edition_hash(
     prev_hash: Option<&[u8; 32]>,
     content: &[u8],
 ) -> [u8; 32] {
+    signing_hasher(entity_id, version, prev_hash, content).finalize()
+}
+
+/// A hasher fed [`edition_signing_bytes`], without building them.
+fn signing_hasher(entity_id: &[u8; 32], version: u64, prev_hash: Option<&[u8; 32]>, content: &[u8]) -> Sha256 {
     let mut h = Sha256::new();
-    h.update(edition_signing_bytes(entity_id, version, prev_hash, content));
-    h.finalize().into()
+    h.update((EDITION_LABEL.len() as u64).to_be_bytes());
+    h.update(EDITION_LABEL);
+    h.update(entity_id);
+    h.update(version.to_be_bytes());
+    match prev_hash {
+        Some(prev) => {
+            h.update([1]);
+            h.update(prev);
+        }
+        None => {
+            h.update([0]);
+            h.update([0u8; 32]);
+        }
+    }
+    h.update((content.len() as u64).to_be_bytes());
+    h.update(content);
+    h
 }
 
 /// One fetched edition of an entity, reduced to what the fold needs. (Signature/authority validation
@@ -269,6 +288,21 @@ mod tests {
 
     /// Golden vector — the frozen edition canonicalization must never drift (a change reshuffles
     /// every chain link and forces a migration).
+    #[test]
+    fn the_streamed_hash_is_the_hash_of_the_signing_bytes() {
+        use sha2::Digest;
+        for prev in [None, Some([9u8; 32])] {
+            for len in [0usize, 1, 55, 64, 1000] {
+                let content: Vec<u8> = (0..len).map(|i| i as u8).collect();
+                let bytes = edition_signing_bytes(&[3; 32], 7, prev.as_ref(), &content);
+                let want: [u8; 32] = sha2::Sha256::digest(&bytes).into();
+                assert_eq!(edition_hash(&[3; 32], 7, prev.as_ref(), &content), want);
+                let signed: [u8; 32] = sha2::Sha256::new().chain_update(&bytes).chain_update(b"concord/edition-signer").chain_update([5u8; 32]).finalize().into();
+                assert_eq!(edition_hash_signed(&[3; 32], 7, prev.as_ref(), &content, &[5; 32]), signed);
+            }
+        }
+    }
+
     #[test]
     fn edition_hash_golden_vector() {
         let h = edition_hash(&id(0x11), 1, None, b"hello");
