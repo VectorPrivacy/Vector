@@ -457,9 +457,12 @@ async function startPrecompression(filepath) {
                     if (sendWhenCompressed) sendPreviewedFile();
                 }
             } catch (e) {
-                // File might have been cancelled
+                // A cancel removes the slot; a failed run reports its error.
                 stopCompressionPolling();
-                if (sendWhenCompressed && pendingFile === filepath) sendPreviewedFile();
+                if (pendingFile !== filepath) return;
+                compressionInProgress = false;
+                VectorSvelte.fpPatch({ compressInfo: "Couldn't compress this file" });
+                if (sendWhenCompressed) sendPreviewedFile();
             }
         }, 200);
     } catch (e) {

@@ -27,7 +27,7 @@ impl CachedCompressedImage {
 
 /// A preview's pre-compression: running while `result` is None.
 pub struct CompressionSlot {
-    pub result: Option<CachedCompressedImage>,
+    pub result: Option<Result<CachedCompressedImage, String>>,
     pub started: std::time::Instant,
     pub cancel: Arc<std::sync::atomic::AtomicBool>,
 }

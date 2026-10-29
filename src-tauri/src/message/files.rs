@@ -813,7 +813,7 @@ pub async fn start_image_precompression(file_path: String) -> Result<(), String>
 
         // Only into the slot this run was started for: a cancel removed it, a reopen replaced it.
         if let Some(slot) = cache.get_mut(&path_clone).filter(|s| Arc::ptr_eq(&s.cancel, &cancel)) {
-            slot.result = result.ok();
+            slot.result = Some(result);
         }
         drop(cache);
 
@@ -834,7 +834,7 @@ pub async fn get_compression_status(file_path: String) -> Result<Option<Compress
     let cache = COMPRESSION_CACHE.lock().await;
     
     match cache.get(&file_path).map(|slot| &slot.result) {
-        Some(Some(cached)) => {
+        Some(Some(Ok(cached))) => {
             // Compression complete
             let savings_percent = if cached.original_size > 0 && cached.compressed_size < cached.original_size {
                 ((cached.original_size - cached.compressed_size) * 100 / cached.original_size) as u32
@@ -848,6 +848,7 @@ pub async fn get_compression_status(file_path: String) -> Result<Option<Compress
                 savings_percent,
             }))
         }
+        Some(Some(Err(e))) => Err(e.clone()),
         Some(None) => {
             // Still compressing
             Ok(None)
@@ -1443,7 +1444,7 @@ pub(crate) async fn take_precompressed(file_path: &str, wait: bool) -> Option<Ca
     if slot.result.is_none() {
         slot.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
     }
-    slot.result
+    slot.result?.ok()
 }
 
 /// Backstop for previews that never closed through the frontend (a reload, a crash):
@@ -1656,6 +1657,30 @@ mod filled_tests {
         assert!(filled.older_than(&b, std::time::Duration::ZERO), "and age from then on");
         filled.mark(&a);
         assert!(!filled.older_than(&a, std::time::Duration::from_secs(60)), "a refill starts over");
+    }
+}
+
+#[cfg(test)]
+mod precompression_tests {
+    use super::*;
+
+    #[test]
+    fn a_precompression_that_fails_says_so_instead_of_running_forever() {
+        tauri::async_runtime::block_on(async {
+            let path = std::env::temp_dir().join("vector-precompression-unreadable.png").to_string_lossy().into_owned();
+            let _ = std::fs::remove_file(&path);
+            start_image_precompression(path.clone()).await.unwrap();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            let status = loop {
+                match get_compression_status(path.clone()).await {
+                    Ok(None) if std::time::Instant::now() < deadline => tokio::time::sleep(std::time::Duration::from_millis(10)).await,
+                    other => break other,
+                }
+            };
+            assert!(status.as_ref().is_err_and(|e| e.contains("Failed to read file")), "{:?}", status.map(|s| s.is_some()));
+            assert!(take_precompressed(&path, true).await.is_none(), "a send takes no result from a failed run");
+            assert!(get_compression_status(path).await.is_err(), "and the slot is gone");
+        });
     }
 }
 

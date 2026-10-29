@@ -2,7 +2,7 @@
     // The send-file preview overlay: what is about to be sent, its name (click to
     // rename), size, the image options and the buttons. The vanilla module owns the
     // file itself and the send; this derives the overlay from lib/filepreview.svelte.js.
-    import { filePreview, filePreviewContent } from '../lib/filepreview.svelte.js';
+    import { filePreview, filePreviewContent, setFilePreviewContent } from '../lib/filepreview.svelte.js';
 
     let { h } = $props();   // h: FilePreviewHelpers (js/file-preview.js)
 
@@ -86,7 +86,10 @@
         const path = content?.path;
         if (!path) return;
         img.onerror = null;
-        h.readImagePreview(path).then((src) => { img.src = src; }).catch(() => {});
+        const was = content;
+        h.readImagePreview(path).then((src) => { img.src = src; }).catch(() => {
+            if (content === was) setFilePreviewContent({ kind: 'icon', icon: 'icon-image' });
+        });
     }
 
     // Spoiler: swap the image for its thumbhash at the same rendered size, with a
