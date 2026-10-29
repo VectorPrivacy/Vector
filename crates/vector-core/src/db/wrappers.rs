@@ -11,10 +11,9 @@ pub const TRANSPORT_CONCORD: i64 = 1;
 /// so the ledger is shared across transports while negentropy stays NIP-17-scoped.
 pub fn save_processed_wrapper(wrapper_id_bytes: &[u8; 32], wrapper_created_at: u64, transport: i64) -> Result<(), String> {
     let conn = super::get_write_connection_guard_static()?;
-    conn.execute(
-        "INSERT OR IGNORE INTO processed_wrappers (wrapper_id, wrapper_created_at, transport) VALUES (?1, ?2, ?3)",
-        rusqlite::params![&wrapper_id_bytes[..], wrapper_created_at as i64, transport],
-    ).map_err(|e| format!("Failed to save processed wrapper: {}", e))?;
+    conn.prepare_cached("INSERT OR IGNORE INTO processed_wrappers (wrapper_id, wrapper_created_at, transport) VALUES (?1, ?2, ?3)")
+        .and_then(|mut stmt| stmt.execute(rusqlite::params![&wrapper_id_bytes[..], wrapper_created_at as i64, transport]))
+        .map_err(|e| format!("Failed to save processed wrapper: {}", e))?;
     Ok(())
 }
 

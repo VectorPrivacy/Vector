@@ -27939,6 +27939,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_reaction_paged_before_its_target_lands_once_the_target_does() {
+        let (bed, owner, _member) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Windows", bed.relays.clone(), None).await.unwrap();
+        let general = community.channels[0].id;
+        let chan_hex = crate::simd::hex::bytes_to_hex_32(&general.0);
+        let group = channel_group_key(&community.community_root, &general, community.root_epoch);
+        let peer = Keys::generate();
+        let at = now_ms() - 60_000;
+        let open = |rumor: nostr_sdk::prelude::UnsignedEvent, at: u64| {
+            let (wrap, _) = chat::seal_chat_rumor(&rumor, &group, &peer, Timestamp::from_secs(at / 1000), false).unwrap();
+            FetchedEvent { event: chat::open_chat_event(&wrap, &group, &general, community.root_epoch).unwrap(), epoch: community.root_epoch, wrap: Some(wrap) }
+        };
+        let message = open(chat::build_message_rumor(peer.public_key(), &general, community.root_epoch, "first", None, &[], vec![], at), at);
+        let target = message.event.opened().rumor_id.to_hex();
+        let reaction = open(chat::build_reaction_rumor(peer.public_key(), &general, community.root_epoch, &target, &peer.public_key().to_hex(), super::super::kind::MESSAGE, "+", None, at + 1_000), at + 1_000);
+        let me = owner.keys.public_key();
+        let session = crate::db::current_session;
+        // The newer window first: its reaction has nothing to land on yet.
+        let (_, waiting) = crate::VectorCore::v2_ingest_chat_page_keeping(&chan_hex, me, session(), vec![reaction]).await;
+        assert_eq!(waiting.len(), 1, "kept back for its target");
+        crate::VectorCore::v2_ingest_chat_page(&chan_hex, me, session(), vec![message]).await;
+        crate::VectorCore::v2_ingest_chat_page_waiting(&chan_hex, me, session(), waiting).await;
+        let (_, landed) = crate::state::STATE.lock().await.find_message(&target).unwrap();
+        assert_eq!(landed.reactions.len(), 1, "the reaction lands on its target");
+        let (_, none_left) = crate::VectorCore::v2_ingest_chat_page_keeping(&chan_hex, me, session(), Vec::new()).await;
+        assert!(none_left.is_empty());
+    }
+
+    #[tokio::test]
     async fn a_page_judged_before_a_stop_landed_is_judged_again_as_it_lands() {
         use crate::community::roles::OverwriteTarget;
         let (bed, owner, member, community, general) = restricted_bed(false).await;

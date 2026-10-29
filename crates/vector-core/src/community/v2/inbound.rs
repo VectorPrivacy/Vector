@@ -158,7 +158,22 @@ pub enum ChatPersist {
 /// non-persisted kind (typing/webxdc), or an aggregate whose target isn't resident in
 /// this channel.
 pub fn apply_chat_to_state(state: &mut ChatState, event: &ChatEvent, channel_id: &str, my_pubkey: &PublicKey) -> Option<ChatPersist> {
-    apply_chat_to_state_in(state, event, channel_id, None, my_pubkey)
+    apply_chat_to_state_in(state, event, channel_id, None, my_pubkey, None)
+}
+
+/// [`apply_chat_to_state`] for one event of a page whose stored ids `stored` were read in one go
+/// ([`crate::db::events::existing_event_ids`]) rather than one query each.
+pub(crate) fn apply_page_event_to_state(state: &mut ChatState, event: &ChatEvent, channel_id: &str, my_pubkey: &PublicKey, stored: &std::collections::HashSet<String>) -> Option<ChatPersist> {
+    apply_chat_to_state_in(state, event, channel_id, None, my_pubkey, Some(stored))
+}
+
+/// The ids of a page's events that [`apply_chat_to_state`] asks the store about.
+pub(crate) fn page_event_ids<'a>(events: impl IntoIterator<Item = &'a ChatEvent>) -> Vec<String> {
+    events
+        .into_iter()
+        .filter(|e| matches!(e, ChatEvent::Message { .. } | ChatEvent::Edit { .. }))
+        .map(|e| e.opened().rumor_id.to_hex())
+        .collect()
 }
 
 /// [`apply_chat_to_state`], given the owning community when the caller already knows it.
@@ -168,7 +183,12 @@ fn apply_chat_to_state_in(
     channel_id: &str,
     community: Option<&[u8; 32]>,
     my_pubkey: &PublicKey,
+    stored: Option<&std::collections::HashSet<String>>,
 ) -> Option<ChatPersist> {
+    let is_stored = |id: &str| match stored {
+        Some(ids) => ids.contains(id),
+        None => crate::db::events::event_exists(id).unwrap_or(false),
+    };
     // CORD-04 §4: a banned npub VANISHES — every chat event they author (message,
     // reaction, edit, delete) is dropped at fold time. Severance (the rekey) only
     // cuts their READ of new epochs; they still hold old epoch keys and can post
@@ -195,14 +215,18 @@ fn apply_chat_to_state_in(
             // DB dedup: a known inner id is already stored — don't re-ingest/re-emit (a
             // catch-up sweep re-fetches the whole page; in-memory STATE holds only a window).
             // A deleted one has no row left to find, so its tombstone answers instead.
-            if crate::db::events::event_exists(&msg.id).unwrap_or(false) || crate::state::was_message_deleted(&msg.id) {
+            if is_stored(&msg.id) || crate::state::was_message_deleted(&msg.id) {
                 return None;
             }
             state.ensure_community_chat(channel_id);
             // Persist regardless of the STATE-add result: `event_exists` already proved
             // it's not in the DB, so a `false` here means only that another writer put it
             // in STATE first — the row must still be saved, or it's lost until re-fetch.
-            state.add_message_to_chat(channel_id, &msg);
+            // A page's stored ids were read before the page began, so that writer may have
+            // saved it since: ask the store again.
+            if !state.add_message_to_chat(channel_id, &msg) && stored.is_some() && crate::db::events::event_exists(&msg.id).unwrap_or(false) {
+                return None;
+            }
             Some(ChatPersist::New(msg))
         }
         ChatEvent::Reaction { opened, target, emoji, emoji_url, .. } => {
@@ -231,7 +255,7 @@ fn apply_chat_to_state_in(
             // in-message `apply_edit` dedups silently, so without this a re-wrapped
             // duplicate would still return Updated and re-fire the handler — the
             // replay hole the persist-gated callbacks exist to close.
-            if crate::db::events::event_exists(&opened.rumor_id.to_hex()).unwrap_or(false) {
+            if is_stored(&opened.rumor_id.to_hex()) {
                 return None;
             }
             let target_id = crate::simd::hex::bytes_to_hex_32(target);
@@ -390,7 +414,7 @@ async fn persist_chat_event_in(
     hydrate_target(event, channel_id).await;
     let outcome = {
         let mut st = crate::state::STATE.lock().await;
-        apply_chat_to_state_in(&mut st, event, channel_id, community, my_pubkey)
+        apply_chat_to_state_in(&mut st, event, channel_id, community, my_pubkey, None)
     }?;
     // Resolve a reply's preview (content/npub) from the DB before persist + emit:
     // the parent is often persisted but outside the in-memory window,

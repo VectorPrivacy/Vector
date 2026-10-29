@@ -114,6 +114,21 @@ pub fn event_exists(event_id: &str) -> Result<bool, String> {
     event_exists_on(&conn, event_id)
 }
 
+/// Which of `event_ids` are stored: [`event_exists`] for a whole page in one read.
+pub fn existing_event_ids(event_ids: &[String]) -> Result<std::collections::HashSet<String>, String> {
+    if event_ids.is_empty() {
+        return Ok(Default::default());
+    }
+    let conn = super::get_db_connection_guard_static()?;
+    let mut stmt = conn
+        .prepare_cached("SELECT id FROM events WHERE id IN (SELECT value FROM json_each(?1))")
+        .map_err(|e| format!("prepare event existence: {e}"))?;
+    let rows = stmt
+        .query_map([id_list_param(event_ids)], |row| row.get::<_, String>(0))
+        .map_err(|e| format!("Failed to check event existence: {e}"))?;
+    rows.collect::<Result<_, _>>().map_err(|e| format!("Failed to check event existence: {e}"))
+}
+
 /// `event_exists` against a caller-held connection or transaction — an in-transaction check
 /// sees the batch's own uncommitted rows, which the pooled read connection cannot.
 fn event_exists_on(conn: &rusqlite::Connection, event_id: &str) -> Result<bool, String> {

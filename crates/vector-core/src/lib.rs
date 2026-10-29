@@ -3582,12 +3582,21 @@ impl VectorCore {
         // A caller that takes only a count can't page on from where the relay walk stopped: go on
         // from there a few times, or what a quieter address held below it would wait for a scroll.
         let (mut new, mut until) = (0, until);
+        let mut waiting = Vec::new();
         for _ in 0..BACKFILL_CONTINUATIONS {
-            let count = Self::v2_backfill_channel_counted(id, channel_id, limit, max_pages, since, until, evidence, transport_secs).await;
+            let (count, still) = Self::v2_backfill_window(id, channel_id, limit, max_pages, since, until, evidence, transport_secs).await;
             new += count.new_messages;
+            waiting.extend(still);
             match count.next_before {
                 Some(next) if until.is_none_or(|u| next < u) => until = Some(next),
                 _ => break,
+            }
+        }
+        // Newest first, so a reaction, edit or delete can arrive a window before its target: once
+        // every window has landed, it lands too.
+        if !waiting.is_empty() {
+            if let Some(me) = state::my_public_key() {
+                Self::v2_ingest_chat_page_waiting(channel_id, me, crate::db::current_session(), waiting).await;
             }
         }
         new
@@ -3608,17 +3617,33 @@ impl VectorCore {
         evidence: crate::community::transport::Evidence,
         transport_secs: u64,
     ) -> BackfillCount {
+        Self::v2_backfill_window(id, channel_id, limit, max_pages, since, until, evidence, transport_secs).await.0
+    }
+
+    /// [`v2_backfill_channel_counted`](Self::v2_backfill_channel_counted), with the reactions,
+    /// edits and deletes whose target the window didn't hold.
+    #[allow(clippy::too_many_arguments)]
+    async fn v2_backfill_window(
+        id: &crate::community::CommunityId,
+        channel_id: &str,
+        limit: usize,
+        max_pages: usize,
+        since: Option<u64>,
+        until: Option<u64>,
+        evidence: crate::community::transport::Evidence,
+        transport_secs: u64,
+    ) -> (BackfillCount, Vec<crate::community::v2::service::FetchedEvent>) {
         // Guard straddles the fetch: a swap mid-fetch must not persist account A's chat
         // into account B's STATE/DB (the message ids are global).
         let session = crate::db::current_session();
-        let Some(my_pk) = state::my_public_key() else { return BackfillCount::default() };
+        let Some(my_pk) = state::my_public_key() else { return (BackfillCount::default(), Vec::new()) };
         // CORD-02 §9: a dissolved community honors no NEW events — old history reads
         // through the explicit paths, but a catch-up sweep must not ingest anything
         // authored into the grave.
         if crate::db::community::get_community_dissolved(&crate::simd::hex::bytes_to_hex_32(&id.0)).unwrap_or(false) {
-            return BackfillCount::default();
+            return (BackfillCount::default(), Vec::new());
         }
-        let Ok(Some(community)) = crate::db::community::load_community_v2(id) else { return BackfillCount::default() };
+        let Ok(Some(community)) = crate::db::community::load_community_v2(id) else { return (BackfillCount::default(), Vec::new()) };
         let ch = crate::community::ChannelId(crate::simd::hex::hex_to_bytes_32(channel_id));
         let transport = crate::community::transport::LiveTransport::with_timeout(std::time::Duration::from_secs(transport_secs));
         let held = std::sync::atomic::AtomicUsize::new(0);
@@ -3662,11 +3687,11 @@ impl VectorCore {
         )
         .await
         else {
-            return BackfillCount::default();
+            return (BackfillCount::default(), Vec::new());
         };
         let fetched = page.len() + held.into_inner();
-        let new_messages = Self::v2_ingest_chat_page(channel_id, my_pk, session, page).await;
-        BackfillCount { fetched, new_messages, next_before }
+        let (new_messages, waiting) = Self::v2_ingest_chat_page_keeping(channel_id, my_pk, session, page).await;
+        (BackfillCount { fetched, new_messages, next_before }, waiting)
     }
 
     /// Ingest a fetched chat page: STATE apply, batched persist with delete
@@ -3678,16 +3703,39 @@ impl VectorCore {
         session: std::sync::Arc<crate::db::Session>,
         page: Vec<crate::community::v2::service::FetchedEvent>,
     ) -> usize {
+        Self::v2_ingest_chat_page_keeping(channel_id, my_pk, session, page).await.0
+    }
+
+    /// Ingest reactions, edits and deletes kept back by [`v2_ingest_chat_page_keeping`] once more.
+    async fn v2_ingest_chat_page_waiting(
+        channel_id: &str,
+        my_pk: nostr_sdk::prelude::PublicKey,
+        session: std::sync::Arc<crate::db::Session>,
+        page: Vec<crate::community::v2::service::FetchedEvent>,
+    ) {
+        Self::v2_ingest_chat_page_keeping(channel_id, my_pk, session, page).await;
+    }
+
+    /// [`v2_ingest_chat_page`](Self::v2_ingest_chat_page), returning as well the reactions, edits
+    /// and deletes that wait on a target nothing holds yet.
+    async fn v2_ingest_chat_page_keeping(
+        channel_id: &str,
+        my_pk: nostr_sdk::prelude::PublicKey,
+        session: std::sync::Arc<crate::db::Session>,
+        page: Vec<crate::community::v2::service::FetchedEvent>,
+    ) -> (usize, Vec<crate::community::v2::service::FetchedEvent>) {
         crate::db::scoped(async move {
-            use crate::community::v2::inbound::{apply_chat_to_state, ChatPersist};
+            use crate::community::v2::inbound::ChatPersist;
             let judged_on = crate::community::v2::service::writers_head(channel_id);
             let page = crate::community::v2::service::rejudge_page(channel_id, page);
             let since = page.iter().map(|f| f.event.opened().at_ms).min();
             let posted: Vec<(nostr_sdk::prelude::PublicKey, u64)> = page.iter().filter(|f| matches!(f.event, crate::community::v2::chat::ChatEvent::Message { .. } | crate::community::v2::chat::ChatEvent::Edit { .. })).map(|f| (f.event.opened().author, f.event.opened().at_ms)).collect();
             let mut new = 0usize;
+            let mut unapplied: Vec<usize> = Vec::new();
             // Pass 1 — apply to STATE (per-item lock) and COLLECT outcomes in wire order.
             let mut outcomes: Vec<ChatPersist> = Vec::with_capacity(page.len());
-            for f in &page {
+            let stored = crate::db::events::existing_event_ids(&crate::community::v2::inbound::page_event_ids(page.iter().map(|f| &f.event))).unwrap_or_default();
+            for (i, f) in page.iter().enumerate() {
                 // A backfilled WebXDC peer ad persists through the shared 30078 row
                 // (recency-gated at read) so a reopening lobby lists peers who
                 // advertised while this device was closed. Own
@@ -3712,13 +3760,17 @@ impl VectorCore {
                 crate::community::v2::inbound::hydrate_target(&f.event, channel_id).await;
                 let outcome = {
                     let mut st = state::STATE.lock().await;
-                    apply_chat_to_state(&mut st, &f.event, channel_id, &my_pk)
+                    crate::community::v2::inbound::apply_page_event_to_state(&mut st, &f.event, channel_id, &my_pk, &stored)
                 };
-                if let Some(outcome) = outcome {
-                    if matches!(outcome, ChatPersist::New(_)) {
-                        new += 1;
+                match outcome {
+                    Some(outcome) => {
+                        if matches!(outcome, ChatPersist::New(_)) {
+                            new += 1;
+                        }
+                        outcomes.push(outcome);
                     }
-                    outcomes.push(outcome);
+                    None if matches!(f.event, crate::community::v2::chat::ChatEvent::Reaction { .. } | crate::community::v2::chat::ChatEvent::Edit { .. } | crate::community::v2::chat::ChatEvent::Delete { .. }) => unapplied.push(i),
+                    None => {}
                 }
             }
             // Pass 2 — persist: message saves COLLECT into batched transactions; deletes are
@@ -3772,7 +3824,14 @@ impl VectorCore {
                     ),
                 }
             }
-            new
+            let mut waiting = Vec::new();
+            for i in unapplied {
+                let f = &page[i];
+                if crate::community::v2::inbound::awaits_target(&f.event).await {
+                    waiting.push(crate::community::v2::service::FetchedEvent { event: f.event.clone(), epoch: f.epoch, wrap: f.wrap.clone() });
+                }
+            }
+            (new, waiting)
         })
         .await
     }
