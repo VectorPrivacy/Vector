@@ -2,7 +2,7 @@
 name = "concord-cli"
 version = "0.1.0"
 edition = "2021"
-description = "Read a Concord Community from its invite link: no account, nothing stored, nothing published."
+description = "Read a Concord Community from its invite link or bundle: no account, nothing stored, nothing published."
 
 [[bin]]
 name = "concord"

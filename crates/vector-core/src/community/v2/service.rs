@@ -26,7 +26,7 @@ use crate::community::edition::ParsedEdition;
 mod audit;
 pub use audit::{audit_log, AuditEntry, AuditLog};
 mod inspect;
-pub use inspect::{inspect_public_link, InspectedChannel, InspectedPlane, Inspection};
+pub use inspect::{inspect_bundle, inspect_public_link, InspectedChannel, InspectedMessage, InspectedPlane, Inspection, MessageRead};
 mod relocate;
 pub use relocate::{check_relays, move_relays, RelayCheck, RelayMove, RETIRED_RELAY_GRACE_MS};
 pub(crate) use relocate::{relays_moved, resume_relay_copy, retired_relays};
@@ -15282,7 +15282,7 @@ mod tests {
 
         bed.swap_to(&member);
         let before = bed.relay.stored_count();
-        let seen = inspect_public_link(&bed.relay, &link.url, None).await.unwrap();
+        let seen = inspect_public_link(&bed.relay, &link.url, None, None).await.unwrap();
         assert_eq!(bed.relay.stored_count(), before, "inspecting publishes nothing");
         assert!(crate::db::community::load_community_v2(community.id()).unwrap().is_none(), "nor joins");
         assert!(seen.verified);
@@ -15301,6 +15301,83 @@ mod tests {
         let unnamed: Vec<String> = wraps.iter().map(|w| w.pubkey.to_hex()).filter(|pk| !named.contains(pk.as_str())).collect();
         assert_eq!(unnamed, vec![staff_posts], "planes: {:#?}", seen.planes);
         assert!(named.contains(link_signer_of(&link.url).as_str()));
+    }
+
+    #[tokio::test]
+    async fn an_invite_bundle_inspects_as_its_link_does_less_the_link() {
+        let (bed, owner, member) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Guild", bed.relays.clone(), None).await.unwrap();
+        send_message(&bed.relay, &community, &community.channels[0].id, "hello").await.unwrap();
+        let link = mint_public_link(&bed.relay, &community, "https://vectorapp.io", None, None).await.unwrap();
+        let json = serde_json::to_string(&bundle_of(&community, BundleAudience::Link, Some(owner.keys.public_key()), None, None)).unwrap();
+
+        bed.swap_to(&member);
+        let by_link = inspect_public_link(&bed.relay, &link.url, None, None).await.unwrap();
+        let before = bed.relay.stored_count();
+        let bundle = CommunityInvite::from_bundle_json(&json).unwrap();
+        let by_bundle = inspect_bundle(&bed.relay, &bundle, None, None).await.unwrap();
+        assert_eq!(bed.relay.stored_count(), before, "inspecting publishes nothing");
+        assert!(by_bundle.verified);
+        assert_eq!(by_bundle.link_signer, None);
+        assert!(!serde_json::to_value(&by_bundle).unwrap().as_object().unwrap().contains_key("link_signer"));
+        assert_eq!((by_bundle.name.as_str(), by_bundle.community_id.as_str()), ("Guild", by_link.community_id.as_str()));
+        let signer = link_signer_of(&link.url);
+        let from_link: Vec<&InspectedPlane> = by_link.planes.iter().filter(|p| p.pk != signer).collect();
+        assert_eq!(by_bundle.planes.iter().collect::<Vec<_>>(), from_link);
+    }
+
+    #[tokio::test]
+    async fn an_inspection_reads_the_newest_posts_as_their_authors_left_them() {
+        let (bed, owner, member) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Guild", bed.relays.clone(), None).await.unwrap();
+        let general = community.channels[0].id;
+        let random = create_public_channel(&bed.relay, &community, "random").await.unwrap();
+        let community = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        create_private_channel(&bed.relay, &community, "staff").await.unwrap();
+        let community = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        let tick = || crate::rt::time::sleep(std::time::Duration::from_millis(3));
+        let one = send_message(&bed.relay, &community, &general, "one").await.unwrap();
+        tick().await;
+        let two = send_message(&bed.relay, &community, &general, "two").await.unwrap();
+        tick().await;
+        let three = send_message(&bed.relay, &community, &general, "three").await.unwrap();
+        tick().await;
+        send_message(&bed.relay, &community, &random, "r1").await.unwrap();
+        tick().await;
+        send_edit(&bed.relay, &community, &general, &two, "two, edited", &[]).await.unwrap();
+        send_delete(&bed.relay, &community, &general, &three, 9, None).await.unwrap();
+        let link = mint_public_link(&bed.relay, &community, "https://vectorapp.io", None, None).await.unwrap();
+
+        bed.swap_to(&member);
+        // Anyone holding the link's keys can wrap an edit or a delete; only an author's own count.
+        let held = CommunityV2::from_bundle(&fetch_public_bundle(&bed.relay, &link.url).await.unwrap(), 0).unwrap();
+        tick().await;
+        send_edit(&bed.relay, &held, &general, &two, "hijacked", &[]).await.unwrap();
+        send_delete(&bed.relay, &held, &general, &one, 9, None).await.unwrap();
+        let read = |count: usize, channels: &[&str]| MessageRead { count, channels: channels.iter().map(|c| c.to_string()).collect() };
+        let texts = |seen: &Inspection| seen.messages.iter().map(|m| (m.channel.clone(), m.content.clone(), m.edited)).collect::<Vec<_>>();
+
+        let before = bed.relay.stored_count();
+        let all = inspect_public_link(&bed.relay, &link.url, None, Some(&read(2, &[]))).await.unwrap();
+        assert_eq!(bed.relay.stored_count(), before, "reading publishes nothing");
+        assert_eq!(texts(&all), [("general".into(), "two, edited".into(), true), ("random".into(), "r1".into(), false)]);
+        let npub = nostr_sdk::prelude::ToBech32::to_bech32(&owner.keys.public_key()).unwrap();
+        assert!(all.messages.iter().all(|m| m.author == npub));
+
+        let general_only = inspect_public_link(&bed.relay, &link.url, None, Some(&read(10, &["#General"]))).await.unwrap();
+        assert_eq!(texts(&general_only), [("general".into(), "one".into(), false), ("general".into(), "two, edited".into(), true)], "a self-deleted post is gone");
+
+        let missing = inspect_public_link(&bed.relay, &link.url, None, Some(&read(5, &["nope"]))).await.unwrap_err();
+        assert!(missing.contains("#general") && missing.contains("#random"), "{missing}");
+        assert!(inspect_public_link(&bed.relay, &link.url, None, Some(&read(5, &["staff"]))).await.unwrap_err().contains("private"));
+        assert!(inspect_public_link(&bed.relay, &link.url, None, None).await.unwrap().messages.is_empty());
+
+        // As Concord CLI reads: no account and no database.
+        crate::db::close_database();
+        let stateless = inspect_public_link(&bed.relay, &link.url, None, Some(&read(2, &[]))).await.unwrap();
+        assert_eq!(texts(&stateless), texts(&all));
     }
 
     fn link_signer_of(url: &str) -> String {
