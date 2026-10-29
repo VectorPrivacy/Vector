@@ -4,12 +4,20 @@
     // network in use can't reach says so in place of its socket state.
     import { networkState } from '../../lib/settings.svelte.js';
     import { transportState, routeOf, shortI2pHost } from '../../lib/transport.svelte.js';
+    import { relayInfoState } from '../../lib/relay-info.svelte.js';
     // part: 'relays' | 'servers' renders one half under a heading its host draws, with the
     // add action as a row of its own; both halves by default, each titled.
-    let { h, part = null } = $props();   // h: explain(kind), addRelay, addServer, openRelay(relay), openServer(server), toggleRelay(relay, enabled) → Promise<boolean>, routes(urls), routeTag(route), routeBadge(route)
+    let { h, part = null } = $props();   // h: explain(kind), addRelay, addServer, openRelay(relay), openServer(server), toggleRelay(relay, enabled) → Promise<boolean>, relayInfo(url), routes(urls), routeTag(route), routeBadge(route)
 
     const n = networkState();
     const t = transportState();
+    // A relay's own name and icon (NIP-11); its address stays on hover and in its dialog.
+    const relayInfo = relayInfoState();
+    let iconFailed = $state({});
+    $effect(() => {
+        if (part === 'servers') return;
+        for (const r of n.relays) if (!(r.url in relayInfo)) h.relayInfo(r.url);
+    });
     const host = (url) => shortI2pHost(url.replace(/^(wss?|https?):\/\//, ''));
 
     // The listed rows' routes, read when the rows change (not on every socket state);
@@ -55,6 +63,7 @@
 {/if}
 {#each n.relays as relay (relay.url)}
     {@const g = tag(relay)}
+    {@const ri = relayInfo[relay.url]}
     <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
     <div class="relay-item" class:disabled={!relay.enabled} data-relay-url={relay.url} data-relay-is-default={relay.is_default} data-relay-is-custom={relay.is_custom} onclick={() => h.openRelay(relay)}>
         <div class="relay-item-content">
@@ -63,7 +72,14 @@
             {/if}
             {#if relay.is_default}<span class="relay-default-badge">default</span>
             {:else if part}<span class="relay-default-badge relay-custom-badge">custom</span>{/if}
-            <span class="relay-url" title={relay.url}>{host(relay.url)}</span>
+            <span class="relay-item-icon">
+                {#if ri?.iconSrc && !iconFailed[relay.url]}
+                    <img src={ri.iconSrc} alt="" onerror={() => { iconFailed[relay.url] = true; }} />
+                {:else}
+                    <span class="icon icon-globe"></span>
+                {/if}
+            </span>
+            <span class="relay-url" title={relay.url}>{ri?.name || host(relay.url)}</span>
         </div>
         <div class="relay-item-actions">
             {#if !g}{@const b = badge(relay)}{#if b}<span class="relay-route-badge {b.cls}" title={b.title}>{b.text}</span>{/if}{/if}

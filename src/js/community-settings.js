@@ -31,6 +31,8 @@ VectorSvelte.setScreen('communitySettings', {
         profile: (npub) => getProfile(npub) || null,
         loadAudit: (communityId) => csLoadAudit(communityId),
         openLink: (key) => openUrl(CS_LINKS[key]),
+        relayInfo: (url) => loadRelayInfo(url),
+        explainAuth: () => csExplainAuth(),
         ui: { twemojify, showTooltip: showGlobalTooltip, hideTooltip: hideGlobalTooltip },
     },
 });
@@ -89,6 +91,10 @@ async function openCommunitySettings(communityId) {
         showToast('Could not load this community\'s settings');
         closeCommunitySettings(true);
     }
+}
+
+function csExplainAuth() {
+    popupConfirm('This relay uses AUTH', "AUTH relays ask every app to sign in with its Nostr key. Vector signs in as you, so the relay can link your npub to this community every time you connect. Without AUTH, the relay sees this community only through Concord's anonymous keys.<br><br>For faster connections and more privacy, use relays without AUTH.", true, '', 'vector_warning.svg');
 }
 
 /**

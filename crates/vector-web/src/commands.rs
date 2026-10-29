@@ -423,6 +423,7 @@ pub async fn dispatch(cmd: &str, a: Args) -> Result<Value, String> {
         "get_community_invite_summary" => cm::get_community_invite_summary(&a.str("communityId")?),
         "get_community_capabilities" => core(VectorCore.community_capabilities(&a.str("communityId")?)),
         "get_community_audit_log" => core(VectorCore.community_audit_log(&a.str("communityId")?).await),
+        "get_relay_info" => Ok(json!(vector_core::relay_info::relay_info(&a.str("url")?).await?)),
         "check_community_relays" => core(VectorCore.check_community_relays(&a.str("communityId")?, &a.de::<Vec<String>>("relays")?).await),
         "set_community_relays" => core(VectorCore.move_community_relays(&a.str("communityId")?, &a.de::<Vec<String>>("relays")?).await),
         "get_community_roles_view" => core(VectorCore.community_roles_view(&a.str("communityId")?)),

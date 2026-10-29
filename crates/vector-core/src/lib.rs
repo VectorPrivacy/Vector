@@ -96,6 +96,7 @@ pub mod blossom_error;
 pub mod blossom_info;
 pub mod blossom_stats;
 pub mod inbox_relays;
+pub mod relay_info;
 pub mod emoji_packs;
 pub mod text_color;
 pub mod text_time;

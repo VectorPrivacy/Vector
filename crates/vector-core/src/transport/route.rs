@@ -200,6 +200,21 @@ pub fn route_i2p(dest: &Dest, port: u16, ctx: &RouteCtx) -> Route {
 
 const RELAY_SCHEME: &str = "Use wss://, or ws:// for an .i2p or .onion address.";
 
+/// Where a relay serves its NIP-11 document: its own URL over HTTP, path included. A relay at
+/// `wss://jskitty.com/nostr` answers there, while `https://jskitty.com/` is a website.
+pub fn nip11_url(relay_url: &str) -> Result<String, String> {
+    let bad = || "That isn't a valid server address.".to_string();
+    let mut u = url::Url::parse(relay_url.trim()).map_err(|_| bad())?;
+    let scheme = match u.scheme() {
+        "wss" | "https" => "https",
+        "ws" | "http" => "http",
+        _ => return Err(bad()),
+    };
+    u.set_scheme(scheme).map_err(|_| bad())?;
+    u.set_fragment(None);
+    Ok(u.to_string())
+}
+
 /// A relay URL the app can keep: `wss://` for any host, plain `ws://` only for an `.i2p` or
 /// `.onion` host, where the network itself encrypts end to end. Returns the URL without a
 /// trailing slash.

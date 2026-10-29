@@ -3,6 +3,23 @@
 
 let fNetworkHandlersSet = false;
 
+/** A relay's name, icon and AUTH flag, into the shared map. The icon comes through the backend cache. */
+async function loadRelayInfo(url) {
+    VectorSvelte.setRelayInfo(url, null);
+    let info;
+    try {
+        info = await invoke('get_relay_info', { url });
+    } catch {
+        return;
+    }
+    let iconSrc = null;
+    if (info.icon) {
+        const path = await invoke('cache_url_image', { url: info.icon }).catch(() => null);
+        if (path) iconSrc = convertFileSrc(path);
+    }
+    VectorSvelte.setRelayInfo(url, { name: info.name || '', iconSrc, auth: !!info.auth });
+}
+
 /** Fetch the relay and media server lists into the Network section's state. */
 async function renderRelayList() {
     if (!fNetworkHandlersSet) {
@@ -30,6 +47,7 @@ async function renderRelayList() {
                     }
                 },
                 openRelay: (relay) => openRelayInfoDialog(relay),
+                relayInfo: (url) => loadRelayInfo(url),
                 openServer: (server) => openBlossomServerInfoDialog(server),
                 routes: (urls) => refreshTransportRoutes(urls),
                 routeTag: (route) => transportRouteTag(route),

@@ -15165,6 +15165,16 @@ button.popout-thumb {
   min-width: 0;
   overflow: hidden;
 }
+.relay-item-icon {
+  position: relative;
+  flex-shrink: 0;
+  width: 22px;
+  height: 22px;
+  user-select: none;
+  -webkit-user-select: none;
+}
+.relay-item-icon img { display: block; width: 100%; height: 100%; border-radius: 5px; object-fit: cover; -webkit-user-drag: none; }
+.relay-item-icon .icon { width: 16px; height: 16px; background-color: #7a7a7a; }
 
 .relay-mode-badge {
   font-size: 10px;
@@ -15305,6 +15315,16 @@ button.popout-thumb {
 /* The host gives way to the status pill, never the other way round. */
 .relay-info-header-row .pop-dialog-host { flex-shrink: 1; }
 .relay-info-header-row .relay-status { flex-shrink: 0; }
+.relay-info-title { display: flex; flex-direction: column; flex-shrink: 1; min-width: 0; }
+.relay-info-name {
+  margin: 0;
+  overflow: hidden;
+  color: #fff;
+  font-size: 16px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 
 #relay-info-done {
   border: 2px solid #474747;
@@ -24413,6 +24433,8 @@ body.profile-switcher-editing .profile-switcher-add {
   width: 16px;
   height: 16px;
   flex-shrink: 0;
+  user-select: none;
+  -webkit-user-select: none;
 }
 .cs-relay-icon .icon { width: 100%; height: 100%; background-color: #7a7a7a; }
 .cs-relay-url {
@@ -24423,6 +24445,30 @@ body.profile-switcher-editing .profile-switcher-add {
   user-select: text;
 }
 .cs-relay-scheme { color: #6a6a6a; }
+.cs-relay-icon:has(> .cs-relay-img) { width: 22px; height: 22px; margin: 0 -3px; }
+.cs-relay-img { display: block; width: 100%; height: 100%; border-radius: 5px; object-fit: cover; -webkit-user-drag: none; }
+.cs-relay-text { display: flex; flex-direction: column; flex: 1 1 auto; min-width: 0; }
+.cs-relay-name { min-width: 0; color: #e8e8e8; font-size: 14px; font-weight: 600; line-height: 18px; }
+.cs-relay-url.cs-relay-sub { color: #9a9a9a; font-size: 12px; line-height: 16px; }
+.cs-relay-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+  height: 22px;
+  padding: 0 8px;
+  border: 1px solid rgba(242, 184, 75, 0.35);
+  border-radius: 11px;
+  background-color: rgba(242, 184, 75, 0.1);
+  color: #f2b84b;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  cursor: pointer;
+}
+.cs-relay-tag .icon { position: static; flex-shrink: 0; width: 11px; height: 11px; margin: 0; background-color: #f2b84b; }
+.cs-relay-tag:hover { background-color: rgba(242, 184, 75, 0.18); }
 .cs-relay-remove {
   position: relative;
   box-sizing: border-box;

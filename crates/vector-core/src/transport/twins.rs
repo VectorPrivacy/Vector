@@ -137,20 +137,7 @@ pub async fn find_privacy_address(relay_url: &str, kind: Kind) -> Result<Option<
     Ok(first_privacy_address(&doc, kind))
 }
 
-/// Where a relay serves its NIP-11 document: its own URL over HTTP, path included. A relay at
-/// `wss://jskitty.com/nostr` answers there, while `https://jskitty.com/` is a website.
-pub fn nip11_url(relay_url: &str) -> Result<String, String> {
-    let bad = || "That isn't a valid server address.".to_string();
-    let mut u = url::Url::parse(relay_url.trim()).map_err(|_| bad())?;
-    let scheme = match u.scheme() {
-        "wss" | "https" => "https",
-        "ws" | "http" => "http",
-        _ => return Err(bad()),
-    };
-    u.set_scheme(scheme).map_err(|_| bad())?;
-    u.set_fragment(None);
-    Ok(u.to_string())
-}
+pub use super::route::nip11_url;
 
 /// The first `privacy_addresses` entry whose host is `kind`'s own address (a `.b32.i2p`, a v3
 /// `.onion`), as that host. Names need the router's address book, so they never count.

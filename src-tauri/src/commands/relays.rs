@@ -381,6 +381,12 @@ pub async fn get_relay_logs(url: String) -> Result<Vec<RelayLog>, String> {
     Ok(logs)
 }
 
+/// A relay's NIP-11 name and icon, and whether it uses AUTH.
+#[tauri::command]
+pub async fn get_relay_info(url: String) -> Result<vector_core::relay_info::RelayInfo, String> {
+    vector_core::relay_info::relay_info(&url).await
+}
+
 /// Get all relays with their current status
 #[tauri::command]
 pub async fn get_relays<R: Runtime>(handle: AppHandle<R>) -> Result<Vec<RelayInfo>, String> {

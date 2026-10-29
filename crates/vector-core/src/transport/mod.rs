@@ -38,7 +38,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::OnceLock;
 
 pub use budget::{budget, Budgets, Op};
-pub use route::{validate_relay_url, Dest, Refusal, Route};
+pub use route::{nip11_url, validate_relay_url, Dest, Refusal, Route};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]

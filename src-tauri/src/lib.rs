@@ -1065,6 +1065,7 @@ pub fn run() {
             commands::transfer::transfer_finish,
             // Relay commands (commands/relays.rs)
             commands::relays::get_relays,
+            commands::relays::get_relay_info,
             commands::relays::get_media_servers,
             commands::relays::get_blossom_servers_config,
             commands::relays::warm_inbox_relays,

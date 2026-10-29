@@ -9,6 +9,7 @@
     import Avatar from '../ui/Avatar.svelte';
     import BannerArt from './BannerArt.svelte';
     import { bannerState } from '../lib/banners.svelte.js';
+    import { relayInfoState } from '../lib/relay-info.svelte.js';
     import MemberRow from '../people/MemberRow.svelte';
     import RolesSection from './RolesSection.svelte';
     import AuditLogSection from './AuditLogSection.svelte';
@@ -20,6 +21,7 @@
     //    avatarSrc(npub), copyIdItems(what, id), copyBannedId(npub), showContextMenu(menu), loadAudit(communityId), openLink(key),
     //    ui (MemberRow's { twemojify, showTooltip, hideTooltip })
     let { h } = $props();
+    const relayInfo = relayInfoState();
 
     const ov = csOverlay.state();
     const st = csState();
@@ -191,6 +193,15 @@
     let relayError = $state('');
     // The relay being edited in place: its index in the draft, and the text in its field.
     let relayEdit = $state(null);
+    // Relays whose icon would not load: they keep the globe.
+    let relayIconFailed = $state({});
+
+    $effect(() => {
+        if (st.section !== 'relays') return;
+        for (const url of st.draft.relays) {
+            if (!(url in relayInfo)) h.relayInfo(url);
+        }
+    });
 
     /** `raw` as a relay address the list can hold, or an error message. */
     function relayAddress(raw, except = -1) {
@@ -399,8 +410,15 @@
                             <p class="cs-lede">Every message, channel and member list in this community lives on these relays, end-to-end encrypted.</p>
                             <div class="cs-relays">
                                 {#each st.draft.relays as url, i (url)}
+                                    {@const info = relayInfo[url]}
                                     <div class="cs-relay">
-                                        <span class="cs-relay-icon"><span class="icon icon-globe"></span></span>
+                                        <span class="cs-relay-icon">
+                                            {#if info?.iconSrc && !relayIconFailed[url]}
+                                                <img class="cs-relay-img" src={info.iconSrc} alt="" onerror={() => { relayIconFailed[url] = true; }} />
+                                            {:else}
+                                                <span class="icon icon-globe"></span>
+                                            {/if}
+                                        </span>
                                         {#if relayEdit?.index === i}
                                             <!-- svelte-ignore a11y_autofocus -->
                                             <input class="cs-relay-field" type="text" autofocus autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"
@@ -408,7 +426,13 @@
                                                    onkeydown={(e) => { if (e.key === 'Enter') { e.preventDefault(); commitRelayEdit(); } else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); relayEdit = null; } }}
                                                    onblur={commitRelayEdit} />
                                         {:else}
-                                            <span class="cs-relay-url cutoff"><span class="cs-relay-scheme">{schemeOf(url)}</span>{addressOf(url)}</span>
+                                            <span class="cs-relay-text">
+                                                {#if info?.name}<span class="cs-relay-name cutoff">{info.name}</span>{/if}
+                                                <span class="cs-relay-url cutoff" class:cs-relay-sub={info?.name}><span class="cs-relay-scheme">{schemeOf(url)}</span>{addressOf(url)}</span>
+                                            </span>
+                                            {#if info?.auth}
+                                                <button type="button" class="cs-relay-tag" title="What AUTH means" onclick={() => h.explainAuth()}><span class="icon icon-locked"></span>AUTH</button>
+                                            {/if}
                                         {/if}
                                         {#if st.canEdit && relayEdit?.index !== i}
                                             <button class="cs-relay-remove cs-relay-edit" title="Edit" onclick={() => { relayEdit = { index: i, text: url }; relayError = ''; }}><span class="icon icon-edit"></span></button>

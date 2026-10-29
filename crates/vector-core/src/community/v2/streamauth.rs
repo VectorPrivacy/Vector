@@ -130,6 +130,17 @@ fn remember_challenge(relay: &RelayUrl, challenge: &str) -> bool {
         != Some(challenge)
 }
 
+/// Whether the relay has sent this process an AUTH challenge, which Vector answers as the user.
+pub fn challenged(relay_url: &str) -> bool {
+    let want = crate::inbox_relays::normalize_relay_url(relay_url);
+    CHALLENGES.lock().unwrap_or_else(|e| e.into_inner()).keys().any(|r| crate::inbox_relays::normalize_relay_url(r.as_str()) == want)
+}
+
+#[cfg(test)]
+pub(crate) fn note_challenge(relay_url: &str) {
+    remember_challenge(&RelayUrl::parse(relay_url).unwrap(), "test");
+}
+
 /// The challenge this relay's connection last issued, if seen.
 fn remembered_challenge(relay: &RelayUrl) -> Option<String> {
     CHALLENGES.lock().unwrap_or_else(|e| e.into_inner()).get(relay).cloned()

@@ -8,9 +8,11 @@
     import ConnectionBlock from './ConnectionBlock.svelte';
     import AliasField from './AliasField.svelte';
     import { shortI2pHost, transportState, routeOf, aliasKinds } from '../../lib/transport.svelte.js';
+    import { relayInfoState } from '../../lib/relay-info.svelte.js';
     let { h } = $props();   // h: close(), disable(), setMode(mode), copy(), alias: { help, save, find, check }, routeTag(route)
     const st = relayInfoDialog.state();
     const t = transportState();
+    const relayInfo = relayInfoState();
     // The header says what the list says: the network's word for a relay it holds back.
     const tag = $derived(st.enabled && t.view ? h.routeTag(routeOf(st.href)) : null);
     // A custom relay's button removes it but has always read "Disable".
@@ -28,7 +30,10 @@
         <div class="relay-dialog relay-info-dialog pop-dialog" use:popIn={st.tick}>
             <div class="relay-dialog-content">
                 <div class="relay-info-header-row">
-                    <p id="relay-info-url" class="pop-dialog-host" title={st.href || st.url}>{shortI2pHost(st.url)}</p>
+                    <div class="relay-info-title">
+                        {#if relayInfo[st.href]?.name}<p class="relay-info-name">{relayInfo[st.href].name}</p>{/if}
+                        <p id="relay-info-url" class="pop-dialog-host" title={st.href || st.url}>{shortI2pHost(st.url)}</p>
+                    </div>
                     {#if tag}
                         <span class="relay-status relay-status-small {tag.cls}" title={tag.title}>{tag.text}</span>
                     {:else}
