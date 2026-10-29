@@ -12468,7 +12468,7 @@ fn select_authorized(
         let mut next_refused: std::collections::BTreeSet<String> = Default::default();
         let mut next_carried: std::collections::BTreeSet<String> = Default::default();
         let mut next_gapped = false;
-        let mut next_admitted: std::collections::HashSet<[u8; 32]> = Default::default();
+        let mut next_admitted: std::collections::HashSet<[u8; 32]> = std::collections::HashSet::with_capacity(admitted.len());
         let mut next_sealed: SealedBy = Default::default();
         let cite_heads = HeadIndex::of(&heads);
         let standing = crate::community::roles::RoleIndex::of(&accepted);
@@ -12635,11 +12635,11 @@ fn select_authorized(
                     .iter()
                     .flat_map(|g| g.role_ids.iter())
                     .filter(|rid| **rid != everyone_hex)
-                    .filter_map(|rid| accepted.role(rid).map(|r| (rid.clone(), r.position)))
+                    .filter_map(|rid| standing.role(rid).map(|r| (rid.clone(), r.position)))
                     .collect()
             };
             let claims = |c: &AuthorityCand| {
-                c.grant.iter().flat_map(|g| g.role_ids.iter()).filter(|rid| **rid != everyone_hex).filter_map(|rid| accepted.role(rid).map(|r| r.position)).min()
+                c.grant.iter().flat_map(|g| g.role_ids.iter()).filter(|rid| **rid != everyone_hex).filter_map(|rid| standing.role(rid).map(|r| r.position)).min()
             };
             let mut judge = |c: &AuthorityCand, reach: u32| -> Option<Option<u32>> {
                 let grant = c.grant.as_ref()?;
@@ -12666,7 +12666,7 @@ fn select_authorized(
                 if !ok {
                     return refuse(&mut why, c, "grant: author holds no MANAGE_ROLES above the roles or the member");
                 }
-                Some(resolved_of(c).into_iter().map(|(_, p)| p).min())
+                Some(claims(c))
             };
             // A banned member holds nothing, whatever their grant's history (CORD-04 §4).
             if cands.first().and_then(|c| c.grant.as_ref()).is_some_and(|g| excluded.contains(&g.member)) {
@@ -17647,6 +17647,35 @@ mod tests {
         let held = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
         follow_control(&thin, &held).await.unwrap();
         assert_eq!(floor_of(&community, &ch.0), (2, Some(owner_id), Some(owner.public_key().to_bytes())), "the floor keeps the owner's key");
+    }
+
+    #[tokio::test]
+    async fn a_role_above_its_granter_stays_out_of_reach_when_bundled_with_one_below() {
+        let (_tmp, _guard, owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "Bundled", vec!["wss://r".into()], None).await.unwrap();
+        let (moderator, member) = (Keys::generate(), Keys::generate().public_key());
+        let (rhigh, rmod, rlow) = ("a1".repeat(32), "a2".repeat(32), "a3".repeat(32));
+        for (rid, perms, position) in [(&rhigh, Permissions::ADMIN_ALL, 1), (&rmod, Permissions::MANAGE_ROLES, 2), (&rlow, Permissions::KICK, 3)] {
+            let mut role = admin_role(rid, perms);
+            role.position = position;
+            publish_role(&relay, &community, &owner, &role, 1).await;
+        }
+        publish_grant(&relay, &community, &owner, &moderator.public_key(), vec![rmod], 1).await;
+        let held_by = |community: &CommunityV2| {
+            let roles = crate::db::community::get_community_roles(&community.id().to_hex()).unwrap();
+            let mut ids: Vec<String> = roles.roles_of(&member.to_hex()).map(|r| r.role_id.clone()).collect();
+            ids.sort();
+            ids
+        };
+
+        publish_grant(&relay, &community, &moderator, &member, vec![rlow.clone()], 1).await;
+        follow_control(&relay, &community).await.unwrap();
+        assert_eq!(held_by(&community), [rlow.clone()], "a role beneath the granter stands");
+
+        publish_grant(&relay, &community, &moderator, &member, vec![rhigh.clone(), rlow.clone()], 2).await;
+        follow_control(&relay, &community).await.unwrap();
+        assert_eq!(held_by(&community), [rlow], "the highest role a grant names sets its reach, so the bundle is refused");
     }
 
     #[tokio::test]
