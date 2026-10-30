@@ -421,7 +421,6 @@ function _showPackTabMenu(pack, x, y) {
 }
 
 function renderEmojiPackSidebar() {
-    _ensureEmojiPickerIslands();
     VectorSvelte.setPickerPacks(arrEmojiPacks);
 }
 
@@ -432,6 +431,10 @@ function _ensureEmojiPickerIslands() {
     if (_emojiPickerIslandsMounted) return;
     _emojiPickerIslandsMounted = true;
     VectorSvelte.setPickerReady();
+    if (emojiPacksLoaded) {
+        VectorSvelte.flushSync();
+        _afterPackSectionsRender();
+    }
 }
 
 // Apply the drop: reorder `arrEmojiPacks` optimistically + repaint, then
@@ -648,9 +651,10 @@ function _packSectionHeightPx(pack) {
     return _packSectionChromePx + PACK_CANVAS_CELL_PX * rows;
 }
 
-/** The sections are an island over the packs order; this arms what is on screen. */
+/** The sections are an island over the packs order; this arms what is on screen. Packs that
+ *  load before the first open wait for it: the islands mount with them then. */
 function renderEmojiPackSections() {
-    _ensureEmojiPickerIslands();
+    if (!_emojiPickerIslandsMounted) return;
     VectorSvelte.flushSync();
     _afterPackSectionsRender();
 }
