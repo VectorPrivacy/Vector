@@ -494,9 +494,11 @@ function attachImagePreview(imgElement) {
     imgElement.addEventListener('click', (e) => {
         e.preventDefault();
         e.stopPropagation();
-        // A chat photo shows a display-sized copy; the viewer opens its original.
-        const src = imgElement.dataset.full || imgElement.src;
-        if (src && !src.startsWith('data:')) {
+        // A chat photo shows a display-sized copy; the viewer opens its original. That may be
+        // Vector Web's placeholder for a file, which the viewer's own <img> resolves.
+        const full = imgElement.dataset.full;
+        const src = full || imgElement.src;
+        if (full || (src && !src.startsWith('data:'))) {
             openImageViewer(src, imgElement.dataset.svgPath || null);
         }
     });
