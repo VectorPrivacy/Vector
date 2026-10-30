@@ -281,6 +281,11 @@ mod tests {
         ram.remove(&H1);
         assert!(!ram.contains(&H1) && !ram.contains(&H2), "the copy goes with the file");
         assert!(ram.contains(&H3), "nothing else does");
+
+        // A copy of a picture kept on disk, not here: its removal still takes the copy.
+        ram.insert_derived(H4, H2, bytes(10), "image/jpeg").unwrap();
+        ram.remove(&H4);
+        assert!(!ram.contains(&H2));
     }
 
     #[test]

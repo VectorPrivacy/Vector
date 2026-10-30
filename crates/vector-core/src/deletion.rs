@@ -508,12 +508,13 @@ fn delete_cached_attachment_files(attachments: &[crate::types::Attachment]) {
     }
     let ram = crate::media::ram::cache();
     for hash in attachments.iter().filter_map(|a| crate::simd::hex::hex_to_bytes_32_checked(&a.id)) {
-        ram.remove(&hash);
         crate::media::pending::forget(&hash);
         #[cfg(not(target_arch = "wasm32"))]
         crate::media::store::forget(&hash);
         #[cfg(target_arch = "wasm32")]
         crate::db::spawn_bound(async move { crate::media::store::forget(&hash).await });
+        // Last, so a copy finishing meanwhile finds its picture gone and goes too.
+        ram.remove(&hash);
     }
     #[cfg(target_arch = "wasm32")]
     {

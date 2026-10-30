@@ -126,11 +126,15 @@ pub async fn image_still(src: String) -> Result<Option<String>, String> {
 #[tauri::command]
 pub async fn image_display(src: String, dim: u32) -> Result<Option<String>, String> {
     let dim = dim.clamp(256, 4096);
+    let account = vector_core::db::current_session_id();
     let probe = src.clone();
     if let Some(kept) = vector_core::db::blocking_bound(move || crate::image_cache::display_kept(&probe, dim)).await? {
         return Ok(Some(kept));
     }
     let _turn = crate::image_cache::DISPLAY_COPIES.acquire().await.map_err(|e| e.to_string())?;
+    if vector_core::db::current_session_id() != account {
+        return Err("account changed while the copy waited".into());
+    }
     vector_core::db::blocking_bound(move || crate::image_cache::display_for(&src, dim)).await?
 }
 

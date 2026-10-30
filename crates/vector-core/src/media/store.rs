@@ -413,15 +413,16 @@ pub(crate) fn read_exact_at(file: &std::fs::File, mut buf: &mut [u8], mut offset
 /// goes, since some rows hold the only key there is. Returns the hashes no longer kept.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn check() -> Vec<[u8; 32]> {
-    let (Ok(dir), Ok(rows)) = (dir(), media_store::all()) else { return Vec::new() };
+    let (Ok(dir), Ok(rows), Ok(named)) = (dir(), media_store::all(), media_store::files()) else { return Vec::new() };
+    if rows.len() < named.len() {
+        crate::log_warn!("[Media] {} kept rows don't read; their files are left alone", named.len() - rows.len());
+    }
     let (mut lost, mut found, mut gone) = (Vec::new(), Vec::new(), Vec::new());
-    let mut named = HashSet::with_capacity(rows.len());
     for (hash, file, missing) in rows {
         if dir.join(&file).is_file() {
             if missing {
                 found.push(hash);
             }
-            named.insert(file);
         } else if missing {
             forget(&hash);
             gone.push(hash);
@@ -583,7 +584,7 @@ mod tests {
     }
 
     #[test]
-    fn a_row_that_doesnt_read_stops_the_sweep() {
+    fn a_file_only_an_unreadable_row_names_is_never_swept() {
         let (_tmp, _guard) = init_test_db();
         let (plain, blob, params) = sealed(64);
         keep_bytes(&blob, keep_of(&plain, &blob, &params)).unwrap();

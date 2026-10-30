@@ -157,7 +157,7 @@ pub fn remove(hash: &[u8; 32]) -> Result<Option<String>, String> {
 }
 
 /// Every kept hash with its file name, and whether its file was missing at the last check. A row
-/// that doesn't read fails the whole list: the launch check sweeps files no row names.
+/// whose hash doesn't read is left out; [`files`] still names its file.
 pub fn all() -> Result<Vec<([u8; 32], String, bool)>, String> {
     let conn = super::get_db_connection_guard_static()?;
     let mut stmt = conn
@@ -165,13 +165,23 @@ pub fn all() -> Result<Vec<([u8; 32], String, bool)>, String> {
         .map_err(|e| format!("list media: {e}"))?;
     let rows = stmt
         .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, bool>(2)?)))
+        .map_err(|e| format!("list media: {e}"))?
+        .flatten()
+        .filter_map(|(hash, file, missing)| hex_to_bytes_32_checked(&hash).map(|h| (h, file, missing)))
+        .collect();
+    Ok(rows)
+}
+
+/// Every file a row names, whether or not the rest of the row reads.
+pub fn files() -> Result<std::collections::HashSet<String>, String> {
+    let conn = super::get_db_connection_guard_static()?;
+    let mut stmt = conn.prepare("SELECT file FROM media_store").map_err(|e| format!("list media: {e}"))?;
+    let files = stmt
+        .query_map([], |r| r.get::<_, String>(0))
+        .map_err(|e| format!("list media: {e}"))?
+        .collect::<Result<_, _>>()
         .map_err(|e| format!("list media: {e}"))?;
-    rows.map(|row| {
-        let (hash, file, missing) = row.map_err(|e| format!("list media: {e}"))?;
-        let hash = hex_to_bytes_32_checked(&hash).ok_or("list media: a row's hash doesn't read")?;
-        Ok((hash, file, missing))
-    })
-    .collect()
+    Ok(files)
 }
 
 /// Every kept hash with its type.
@@ -279,6 +289,7 @@ mod tests {
         assert!(!insert(&StoredMedia { file: "other".into(), ..entry.clone() }).unwrap(), "the first copy stands");
         assert_eq!(get(&[7; 32]).unwrap(), Some(entry.clone()));
         assert_eq!(all().unwrap(), vec![([7; 32], "f00d".to_string(), false)]);
+        assert_eq!(files().unwrap(), std::collections::HashSet::from(["f00d".to_string()]));
         assert_eq!(totals().unwrap(), vec![("image/png".to_string(), 1, 1234)]);
         assert_eq!(remove(&[7; 32]).unwrap().as_deref(), Some("f00d"));
         assert_eq!(get(&[7; 32]).unwrap(), None);

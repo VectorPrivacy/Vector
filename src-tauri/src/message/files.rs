@@ -1047,7 +1047,12 @@ fn render_held_svg(hash: &[u8; 32], max_dim: u32) -> Option<String> {
         return None;
     }
     let png = vector_core::svg::rasterize_png(&bytes, dim).ok()?;
-    vector_core::media::ram::insert(render, png, "image/png").ok()?;
+    vector_core::media::ram::insert_derived(*hash, render, png, "image/png").ok()?;
+    // Deleted while it rendered: the render goes with it.
+    if !vector_core::media::resident(hash) {
+        vector_core::media::ram::cache().remove(hash);
+        return None;
+    }
     Some(vector_core::media::MediaRef::held(&render))
 }
 

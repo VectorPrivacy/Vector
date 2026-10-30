@@ -709,6 +709,15 @@ fn read_head(source: &dyn vector_core::media::MediaSource, max: usize) -> Result
     Ok(head)
 }
 
+/// All of `source`, or None past [`STILL_SOURCE_MAX`]: too large to draw from is an answer, a read
+/// that failed is an error the page can ask again after.
+fn whole(source: &dyn vector_core::media::MediaSource) -> Result<Option<zeroize::Zeroizing<Vec<u8>>>, String> {
+    if source.len() > STILL_SOURCE_MAX {
+        return Ok(None);
+    }
+    read_whole(source).map(Some)
+}
+
 /// All of `source`, refused past [`STILL_SOURCE_MAX`].
 fn read_whole(source: &dyn vector_core::media::MediaSource) -> Result<zeroize::Zeroizing<Vec<u8>>, String> {
     if source.len() > STILL_SOURCE_MAX {
@@ -740,7 +749,7 @@ pub fn still_for(src: &str) -> Result<Option<String>, String> {
     }
     let Some(path) = path else {
         return held_derived("still", &key, 0, || {
-            let Ok(bytes) = read_whole(&*source) else { return Ok(None) };
+            let Some(bytes) = whole(&*source)? else { return Ok(None) };
             Ok(Some((vector_core::crypto::still_png(&bytes)?, "image/png")))
         });
     };
@@ -751,7 +760,7 @@ pub fn still_for(src: &str) -> Result<Option<String>, String> {
     }
     let still = vector_core::db::get_app_data_dir()?.join("cache").join("stills").join(format!("{key}.png"));
     if !vector_core::vcache::readable(&still) {
-        let Ok(bytes) = read_whole(&*source) else { return Ok(None) };
+        let Some(bytes) = whole(&*source)? else { return Ok(None) };
         let png = vector_core::crypto::still_png(&bytes)?;
         std::fs::create_dir_all(still.parent().ok_or("no stills folder")?).map_err(|e| e.to_string())?;
         vector_core::vcache::write(&still, &png)?;
@@ -776,6 +785,11 @@ fn held_derived(
     }
     let Some((bytes, mime)) = make()? else { return Ok(None) };
     vector_core::media::ram::insert_derived(parent, key, bytes, mime).map_err(|_| "no room in memory for the copy")?;
+    // Deleted while the copy was made: the copy goes with it.
+    if !vector_core::media::resident(&parent) {
+        vector_core::media::ram::cache().remove(&parent);
+        return Err("the picture is gone".into());
+    }
     Ok(Some(held))
 }
 
@@ -829,7 +843,7 @@ pub fn display_for(src: &str, dim: u32) -> Result<Option<String>, String> {
         return Ok(None);
     }
     let shrink = || -> Result<Option<crate::shared::image::EncodedImage>, String> {
-        let Ok(bytes) = read_whole(&*source) else { return Ok(None) };
+        let Some(bytes) = whole(&*source)? else { return Ok(None) };
         let img = crate::shared::image::decode_image(&bytes, dim)?;
         crate::shared::image::compress_image(&img, dim, 85).map(Some)
     };
@@ -1844,7 +1858,7 @@ mod avatar_thumb_tests {
             vector_core::media::ram::insert(hash, bytes, mime).unwrap();
             (hash, bytes_to_hex_string(&hash))
         };
-        let ((photo_hash, photo), (_, anim)) = (hold(jpeg(3000, 2000), "image/jpeg"), hold(gif(64, 48, 2), "image/gif"));
+        let ((photo_hash, photo), (anim_hash, anim)) = (hold(jpeg(3000, 2000), "image/jpeg"), hold(gif(64, 48, 2), "image/gif"));
         let stills = root.join("cache").join("stills");
         let on_disk = |hex: &str| std::fs::read_dir(&stills).is_ok_and(|d| d.flatten().any(|e| e.file_name().to_string_lossy().starts_with(hex)));
 
@@ -1862,6 +1876,8 @@ mod avatar_thumb_tests {
 
         vector_core::media::ram::cache().remove(&photo_hash);
         assert_eq!(display_kept(&format!("vmedia:{photo}"), 1024), None, "the copy goes with its photo");
+        vector_core::media::ram::cache().remove(&anim_hash);
+        assert_eq!(held_kept(&format!("vmedia:{anim}"), "still", 0), None, "the still goes with its animation");
     }
 
     #[test]
