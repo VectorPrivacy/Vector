@@ -156,7 +156,8 @@ pub fn remove(hash: &[u8; 32]) -> Result<Option<String>, String> {
     Ok(file)
 }
 
-/// Every kept hash with its file name, and whether its file was missing at the last check.
+/// Every kept hash with its file name, and whether its file was missing at the last check. A row
+/// that doesn't read fails the whole list: the launch check sweeps files no row names.
 pub fn all() -> Result<Vec<([u8; 32], String, bool)>, String> {
     let conn = super::get_db_connection_guard_static()?;
     let mut stmt = conn
@@ -164,11 +165,13 @@ pub fn all() -> Result<Vec<([u8; 32], String, bool)>, String> {
         .map_err(|e| format!("list media: {e}"))?;
     let rows = stmt
         .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, bool>(2)?)))
-        .map_err(|e| format!("list media: {e}"))?
-        .flatten()
-        .filter_map(|(hash, file, missing)| hex_to_bytes_32_checked(&hash).map(|h| (h, file, missing)))
-        .collect();
-    Ok(rows)
+        .map_err(|e| format!("list media: {e}"))?;
+    rows.map(|row| {
+        let (hash, file, missing) = row.map_err(|e| format!("list media: {e}"))?;
+        let hash = hex_to_bytes_32_checked(&hash).ok_or("list media: a row's hash doesn't read")?;
+        Ok((hash, file, missing))
+    })
+    .collect()
 }
 
 /// Every kept hash with its type.

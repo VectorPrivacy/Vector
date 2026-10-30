@@ -583,6 +583,27 @@ mod tests {
     }
 
     #[test]
+    fn a_row_that_doesnt_read_stops_the_sweep() {
+        let (_tmp, _guard) = init_test_db();
+        let (plain, blob, params) = sealed(64);
+        keep_bytes(&blob, keep_of(&plain, &blob, &params)).unwrap();
+        crate::db::get_write_connection_guard_static()
+            .unwrap()
+            .execute(
+                "INSERT INTO media_store (hash, file, format, key, nonce, blob_sha256, pt_len, mime, origin, created_at, used_at)
+                 SELECT 'nothex', 'unnamed', format, key, nonce, blob_sha256, pt_len, mime, origin, created_at, used_at FROM media_store LIMIT 1",
+                [],
+            )
+            .unwrap();
+        let file = dir().unwrap().join("unnamed");
+        std::fs::write(&file, b"x").unwrap();
+        let f = std::fs::OpenOptions::new().write(true).open(&file).unwrap();
+        f.set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(7200)).unwrap();
+        check();
+        assert!(file.exists(), "a file only an unreadable row names is not an orphan");
+    }
+
+    #[test]
     fn every_kept_file_counts_and_goes_whatever_its_type() {
         let (_dir, _guard) = init_test_db();
         let (picture, archive) = (b"a kept picture".to_vec(), b"a kept archive".to_vec());
