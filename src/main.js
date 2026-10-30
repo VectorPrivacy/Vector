@@ -75,9 +75,12 @@ async function imageStill(src) {
     const still = await invoke('image_still', { src: original });
     if (!still) return null;
     const url = (path) => (path.startsWith('vmedia:') ? refSrc(path) : window.__vectorWeb?.fileUrl(path) ?? convertFileSrc(path));
-    return original === ref
+    const frames = original === ref
         ? { still: await url(still), moving: src, face }
         : { still: src, moving: await url(original), face };
+    // A still memory has let go of fails here, so the gate forgets it and asks again.
+    await Object.assign(new Image(), { src: frames.still }).decode();
+    return frames;
 }
 
 // System event types (matches Rust SystemEventType enum)

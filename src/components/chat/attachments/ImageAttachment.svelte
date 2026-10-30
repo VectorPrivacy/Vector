@@ -36,7 +36,9 @@
     // WebKit decodes a picture whole however small it draws. The viewer opens the original.
     const DISPLAY_DIM = 1024;
     const original = $derived(isSvg ? null : h.assetUrl(mediaPath(att)));
-    const sized = $derived(!isSvg && !uploading && Math.max(att.img_meta?.width || 0, att.img_meta?.height || 0) > DISPLAY_DIM);
+    let revealed = $state(false);
+    // A spoiler's copy waits for its reveal: a veiled picture may never be opened.
+    const sized = $derived(!isSvg && !uploading && (!spoiler || revealed) && Math.max(att.img_meta?.width || 0, att.img_meta?.height || 0) > DISPLAY_DIM);
     let display = $state(undefined);
     // Until the picture loads its box holds the size it will draw, so the row doesn't grow under the reader.
     let loaded = $state(false);
@@ -53,7 +55,6 @@
     // Spoiler: the blur arrives async; a failed blur shows the real image instead.
     let blur = $state(null);
     let blurFailed = $state(false);
-    let revealed = $state(false);
     if (spoiler) {
         // svelte-ignore state_referenced_locally
     h.thumbhash(chatId, msg.id).then((b64) => { blur = b64; }).catch(() => { blurFailed = true; });
@@ -91,7 +92,7 @@
 {:else if spoiler && !blurFailed}
     <div style="position: relative; display: inline-block;" bind:this={container} data-spoiler-upload={uploading ? '1' : undefined} use:badgeOnly>
         {#if blur}
-            <img class={revealed ? 'dmsg-image-attachment' : 'spoiler-img'} src={revealed ? real ?? blur : blur} data-full={revealed ? original : undefined} onerror={() => { if (revealed) h.lost(att, msg); }} alt=""
+            <img class={revealed ? 'dmsg-image-attachment' : 'spoiler-img'} src={revealed ? real ?? blur : blur} data-full={revealed ? original : undefined} onerror={() => { if (!revealed) return; if (display) { display = null; return; } h.lost(att, msg); }} alt=""
                  width={!revealed && fit ? fit.w : undefined} height={!revealed && fit ? fit.h : undefined}
                  style="max-width: 100%; height: auto; border-radius: 8px;"
                  style:aspect-ratio={!revealed && fit ? fit.ratio : null}

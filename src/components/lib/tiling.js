@@ -9,9 +9,12 @@ const SLACK = 16;
 const UA = navigator.userAgent;
 const LEAKS = /iPhone|iPad|iPod/.test(UA) || (/Macintosh/.test(UA) && !/Chrome|Firefox|Edg/.test(UA));
 
-// Dropping the scrolling layers stops a scroll in flight (a macOS momentum scroll keeps sending
-// wheel events), so a crossing mid-gesture is left to leak instead.
+// Dropping the scrolling layers stops a scroll in flight, so a crossing mid-gesture is left to
+// leak instead. A macOS momentum scroll keeps sending wheel events; a touch's runs on after the
+// finger lifts with none, and a scrollbar drag sends none while it lasts.
 const GESTURE_MS = 250;
+const COAST_MS = 1500;
+const PRESS_MS = 10_000;
 
 const crosses = (a, b) => a !== b && Math.min(a, b) <= EDGE + SLACK && Math.max(a, b) >= EDGE - SLACK;
 
@@ -28,12 +31,14 @@ export function guardTiling(el, changed) {
     let raf = 0;
     let held = 0;
     let gesture = -Infinity;
+    let pressed = -Infinity;
     const check = () => {
         raf = 0;
         const nw = el.scrollWidth;
         const nh = el.scrollHeight;
         if (nw === w && nh === h) return;
-        if (LEAKS && !held && performance.now() - gesture > GESTURE_MS && (crosses(w, nw) || crosses(h, nh))) {
+        const now = performance.now();
+        if (LEAKS && !held && now - gesture > GESTURE_MS && now > pressed && (crosses(w, nw) || crosses(h, nh))) {
             held = hold(el, () => { held = 0; });
         }
         // A held frame's scrollWidth includes the scrollbar moved into its padding.
@@ -41,9 +46,20 @@ export function guardTiling(el, changed) {
         h = nh;
         changed?.();
     };
-    const scrolling = () => { gesture = performance.now(); };
+    const scrolling = () => { gesture = Math.max(gesture, performance.now()); };
+    const coasting = () => { gesture = Math.max(gesture, performance.now() + COAST_MS); };
+    // A press holds until it lifts, or for PRESS_MS if the lift lands outside the window.
+    const press = () => { pressed = performance.now() + PRESS_MS; };
+    const release = () => {
+        if (pressed > performance.now()) scrolling();
+        pressed = -Infinity;
+    };
     el.addEventListener('wheel', scrolling, { passive: true });
     el.addEventListener('touchmove', scrolling, { passive: true });
+    el.addEventListener('touchend', coasting, { passive: true });
+    el.addEventListener('pointerdown', press, { passive: true });
+    window.addEventListener('pointerup', release, { passive: true });
+    window.addEventListener('pointercancel', release, { passive: true });
     const sizes = new ResizeObserver(check);
     const rows = new MutationObserver((records) => {
         for (const r of records) {
@@ -62,6 +78,10 @@ export function guardTiling(el, changed) {
         cancelAnimationFrame(raf);
         el.removeEventListener('wheel', scrolling);
         el.removeEventListener('touchmove', scrolling);
+        el.removeEventListener('touchend', coasting);
+        el.removeEventListener('pointerdown', press);
+        window.removeEventListener('pointerup', release);
+        window.removeEventListener('pointercancel', release);
     };
 }
 
