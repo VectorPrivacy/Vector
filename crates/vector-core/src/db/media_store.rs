@@ -156,15 +156,17 @@ pub fn remove(hash: &[u8; 32]) -> Result<Option<String>, String> {
     Ok(file)
 }
 
-/// Every kept hash with its file name.
-pub fn all() -> Result<Vec<([u8; 32], String)>, String> {
+/// Every kept hash with its file name, and whether its file was missing at the last check.
+pub fn all() -> Result<Vec<([u8; 32], String, bool)>, String> {
     let conn = super::get_db_connection_guard_static()?;
-    let mut stmt = conn.prepare("SELECT hash, file FROM media_store").map_err(|e| format!("list media: {e}"))?;
+    let mut stmt = conn
+        .prepare("SELECT hash, file, missing_at IS NOT NULL FROM media_store")
+        .map_err(|e| format!("list media: {e}"))?;
     let rows = stmt
-        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, bool>(2)?)))
         .map_err(|e| format!("list media: {e}"))?
         .flatten()
-        .filter_map(|(hash, file)| hex_to_bytes_32_checked(&hash).map(|h| (h, file)))
+        .filter_map(|(hash, file, missing)| hex_to_bytes_32_checked(&hash).map(|h| (h, file, missing)))
         .collect();
     Ok(rows)
 }
@@ -196,23 +198,30 @@ pub fn totals() -> Result<Vec<(String, u64, u64)>, String> {
     Ok(rows)
 }
 
-/// Mark a row whose file was not found. Returns whether it was marked already: a second miss
-/// in a row is when the row goes, since some rows hold the only key there is.
-pub fn mark_missing(hash: &[u8; 32]) -> Result<bool, String> {
-    let conn = super::get_write_connection_guard_static()?;
-    let already: bool = conn
-        .query_row("SELECT missing_at IS NOT NULL FROM media_store WHERE hash = ?1", [bytes_to_hex_32(hash)], |r| r.get(0))
-        .unwrap_or(false);
-    conn.execute("UPDATE media_store SET missing_at = COALESCE(missing_at, ?2) WHERE hash = ?1", rusqlite::params![bytes_to_hex_32(hash), now()])
-        .map_err(|e| format!("mark media: {e}"))?;
-    Ok(already)
-}
-
-pub fn clear_missing(hash: &[u8; 32]) -> Result<(), String> {
-    let conn = super::get_write_connection_guard_static()?;
-    conn.execute("UPDATE media_store SET missing_at = NULL WHERE hash = ?1 AND missing_at IS NOT NULL", [bytes_to_hex_32(hash)])
-        .map(|_| ())
-        .map_err(|e| format!("mark media: {e}"))
+/// Mark the rows whose file was not found and clear the ones found again, in one write.
+/// A second miss in a row is when a row goes, since some rows hold the only key there is.
+pub fn set_missing(lost: &[[u8; 32]], found: &[[u8; 32]]) -> Result<(), String> {
+    if lost.is_empty() && found.is_empty() {
+        return Ok(());
+    }
+    let mut conn = super::get_write_connection_guard_static()?;
+    let tx = conn.transaction().map_err(|e| format!("mark media: {e}"))?;
+    {
+        let mut mark = tx
+            .prepare("UPDATE media_store SET missing_at = COALESCE(missing_at, ?2) WHERE hash = ?1")
+            .map_err(|e| format!("mark media: {e}"))?;
+        let at = now();
+        for hash in lost {
+            mark.execute(rusqlite::params![bytes_to_hex_32(hash), at]).map_err(|e| format!("mark media: {e}"))?;
+        }
+        let mut clear = tx
+            .prepare("UPDATE media_store SET missing_at = NULL WHERE hash = ?1")
+            .map_err(|e| format!("mark media: {e}"))?;
+        for hash in found {
+            clear.execute([bytes_to_hex_32(hash)]).map_err(|e| format!("mark media: {e}"))?;
+        }
+    }
+    tx.commit().map_err(|e| format!("mark media: {e}"))
 }
 
 pub fn touch(hash: &[u8; 32]) {
@@ -266,7 +275,7 @@ mod tests {
         assert!(insert(&entry).unwrap());
         assert!(!insert(&StoredMedia { file: "other".into(), ..entry.clone() }).unwrap(), "the first copy stands");
         assert_eq!(get(&[7; 32]).unwrap(), Some(entry.clone()));
-        assert_eq!(all().unwrap(), vec![([7; 32], "f00d".to_string())]);
+        assert_eq!(all().unwrap(), vec![([7; 32], "f00d".to_string(), false)]);
         assert_eq!(totals().unwrap(), vec![("image/png".to_string(), 1, 1234)]);
         assert_eq!(remove(&[7; 32]).unwrap().as_deref(), Some("f00d"));
         assert_eq!(get(&[7; 32]).unwrap(), None);
@@ -277,10 +286,15 @@ mod tests {
     fn a_missing_file_is_forgiven_once() {
         let (_tmp, _guard) = init_test_db();
         insert(&sample([8; 32])).unwrap();
-        assert!(!mark_missing(&[8; 32]).unwrap(), "the first miss only marks it");
-        clear_missing(&[8; 32]).unwrap();
-        assert!(!mark_missing(&[8; 32]).unwrap(), "found again, so the count starts over");
-        assert!(mark_missing(&[8; 32]).unwrap(), "two misses in a row");
+        insert(&sample([9; 32])).unwrap();
+        let missing = |h: [u8; 32]| all().unwrap().into_iter().find(|r| r.0 == h).unwrap().2;
+        assert!(!missing([8; 32]));
+        set_missing(&[[8; 32]], &[]).unwrap();
+        assert!(missing([8; 32]) && !missing([9; 32]), "a miss marks only its own row");
+        set_missing(&[[8; 32]], &[]).unwrap();
+        assert!(missing([8; 32]), "a second miss keeps the mark");
+        set_missing(&[], &[[8; 32]]).unwrap();
+        assert!(!missing([8; 32]), "found again, so the count starts over");
     }
 
     #[test]

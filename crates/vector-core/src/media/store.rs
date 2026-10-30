@@ -414,18 +414,23 @@ pub(crate) fn read_exact_at(file: &std::fs::File, mut buf: &mut [u8], mut offset
 #[cfg(not(target_arch = "wasm32"))]
 pub fn check() -> Vec<[u8; 32]> {
     let (Ok(dir), Ok(rows)) = (dir(), media_store::all()) else { return Vec::new() };
-    let mut gone = Vec::new();
-    for (hash, file) in rows {
+    let (mut lost, mut found, mut gone) = (Vec::new(), Vec::new(), Vec::new());
+    let mut named = HashSet::with_capacity(rows.len());
+    for (hash, file, missing) in rows {
         if dir.join(&file).is_file() {
-            let _ = media_store::clear_missing(&hash);
-        } else if media_store::mark_missing(&hash).unwrap_or(false) {
+            if missing {
+                found.push(hash);
+            }
+            named.insert(file);
+        } else if missing {
             forget(&hash);
             gone.push(hash);
+        } else {
+            lost.push(hash);
         }
     }
+    let _ = media_store::set_missing(&lost, &found);
     // Files no row names, from a crash between a file and its row, once they're an hour old.
-    let Ok(rows) = media_store::all() else { return gone };
-    let named: HashSet<String> = rows.into_iter().map(|(_, f)| f).collect();
     if let Ok(entries) = std::fs::read_dir(&dir) {
         let hour = std::time::Duration::from_secs(3600);
         for entry in entries.flatten() {
