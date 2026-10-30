@@ -9,6 +9,10 @@ const SLACK = 16;
 const UA = navigator.userAgent;
 const LEAKS = /iPhone|iPad|iPod/.test(UA) || (/Macintosh/.test(UA) && !/Chrome|Firefox|Edg/.test(UA));
 
+// Dropping the scrolling layers stops a scroll in flight (a macOS momentum scroll keeps sending
+// wheel events), so a crossing mid-gesture is left to leak instead.
+const GESTURE_MS = 250;
+
 const crosses = (a, b) => a !== b && Math.min(a, b) <= EDGE + SLACK && Math.max(a, b) >= EDGE - SLACK;
 
 /**
@@ -23,16 +27,23 @@ export function guardTiling(el, changed) {
     let h = el.scrollHeight;
     let raf = 0;
     let held = 0;
+    let gesture = -Infinity;
     const check = () => {
         raf = 0;
         const nw = el.scrollWidth;
         const nh = el.scrollHeight;
         if (nw === w && nh === h) return;
-        if (LEAKS && !held && (crosses(w, nw) || crosses(h, nh))) held = hold(el, () => { held = 0; });
-        w = nw;
+        if (LEAKS && !held && performance.now() - gesture > GESTURE_MS && (crosses(w, nw) || crosses(h, nh))) {
+            held = hold(el, () => { held = 0; });
+        }
+        // A held frame's scrollWidth includes the scrollbar moved into its padding.
+        if (!held) w = nw;
         h = nh;
         changed?.();
     };
+    const scrolling = () => { gesture = performance.now(); };
+    el.addEventListener('wheel', scrolling, { passive: true });
+    el.addEventListener('touchmove', scrolling, { passive: true });
     const sizes = new ResizeObserver(check);
     const rows = new MutationObserver((records) => {
         for (const r of records) {
@@ -49,6 +60,8 @@ export function guardTiling(el, changed) {
         sizes.disconnect();
         rows.disconnect();
         cancelAnimationFrame(raf);
+        el.removeEventListener('wheel', scrolling);
+        el.removeEventListener('touchmove', scrolling);
     };
 }
 
