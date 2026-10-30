@@ -254,17 +254,34 @@ pub async fn forget(hash: &[u8; 32]) {
     indexed(*hash, false);
 }
 
-/// Stop keeping `hash`: the row goes first, then its file, and the attachments that had no
-/// other copy are no longer downloaded.
+/// Stop keeping `hash`: the row goes first, then its file and what was drawn from it, and the
+/// attachments that had no other copy are no longer downloaded.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn forget(hash: &[u8; 32]) {
     if let Ok(Some(file)) = media_store::remove(hash) {
         if let Ok(dir) = dir() {
             let _ = std::fs::remove_file(dir.join(file));
         }
-        let _ = crate::db::attachments::clear_kept(&crate::simd::hex::bytes_to_hex_32(hash));
+        let hex = crate::simd::hex::bytes_to_hex_32(hash);
+        forget_drawn(&hex);
+        let _ = crate::db::attachments::clear_kept(&hex);
     }
     indexed(*hash, false);
+}
+
+/// The pictures the cache drew from a kept file: its first-frame still (`<hash>.png`) and its
+/// display-sized copies (`<hash>-<dim>.<ext>`).
+#[cfg(not(target_arch = "wasm32"))]
+fn forget_drawn(hex: &str) {
+    let Ok(root) = crate::db::get_app_data_dir() else { return };
+    let Ok(entries) = std::fs::read_dir(root.join("cache").join("stills")) else { return };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.strip_prefix(hex).is_some_and(|rest| rest.starts_with('.') || rest.starts_with('-')) {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
 }
 
 /// The files kept here, and their size in bytes.
@@ -550,6 +567,58 @@ mod tests {
         f.set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(7200)).unwrap();
         check();
         assert!(!orphan.exists());
+    }
+
+    #[test]
+    fn a_kept_file_hours_old_is_never_taken_for_an_orphan() {
+        let (_tmp, _guard) = init_test_db();
+        let (plain, blob, params) = sealed(48);
+        let keep = keep_of(&plain, &blob, &params);
+        keep_bytes(&blob, keep.clone()).unwrap();
+        let path = dir().unwrap().join(media_store::get(&keep.hash).unwrap().unwrap().file);
+        let f = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        f.set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(7200)).unwrap();
+        assert!(check().is_empty());
+        assert!(path.exists() && holds(&keep.hash), "a row names it, however old");
+    }
+
+    #[test]
+    fn a_file_found_again_starts_its_misses_over() {
+        let (_tmp, _guard) = init_test_db();
+        let (plain, blob, params) = sealed(56);
+        let keep = keep_of(&plain, &blob, &params);
+        keep_bytes(&blob, keep.clone()).unwrap();
+        let path = dir().unwrap().join(media_store::get(&keep.hash).unwrap().unwrap().file);
+        let bytes = std::fs::read(&path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        assert!(check().is_empty(), "one miss only marks it");
+        std::fs::write(&path, &bytes).unwrap();
+        assert!(check().is_empty(), "found again");
+        std::fs::remove_file(&path).unwrap();
+        assert!(check().is_empty(), "a miss after it was found is a first miss");
+        assert!(holds(&keep.hash));
+    }
+
+    #[test]
+    fn forgetting_a_file_takes_the_pictures_drawn_from_it() {
+        let (_tmp, _guard) = init_test_db();
+        let (plain, blob, params) = sealed(77);
+        let keep = keep_of(&plain, &blob, &params);
+        keep_bytes(&blob, keep.clone()).unwrap();
+        let hex = crate::simd::hex::bytes_to_hex_32(&keep.hash);
+        let stills = crate::db::get_app_data_dir().unwrap().join("cache").join("stills");
+        std::fs::create_dir_all(&stills).unwrap();
+        let drawn = [format!("{hex}.png"), format!("{hex}-1024.jpg")];
+        let other = [format!("{hex}x.png"), format!("{}.png", "ab".repeat(32))];
+        for name in drawn.iter().chain(&other) {
+            std::fs::write(stills.join(name), b"x").unwrap();
+        }
+        forget(&keep.hash);
+        assert!(drawn.iter().all(|n| !stills.join(n).exists()));
+        assert!(other.iter().all(|n| stills.join(n).exists()), "only its own pictures go");
+        for name in &other {
+            std::fs::remove_file(stills.join(name)).unwrap();
+        }
     }
 
     #[test]
