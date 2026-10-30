@@ -27945,10 +27945,12 @@ body.profile-switcher-editing .profile-switcher-add {
   max-width: 1040px;
   margin: 0 auto;
   padding: 24px 32px 72px;
-  animation: nx-rise 0.32s var(--nx-ease);
+  /* Filled, so the page stays composited: when an ancestor stops compositing at an animation's
+     end, WebKit orphans the layers of the scrollers inside it (the shelves). */
+  animation: nx-rise 0.32s var(--nx-ease) both;
 }
-.nx-page.push { animation: nx-push 0.34s var(--nx-ease); }
-.nx-page.pop { animation: nx-pop 0.3s var(--nx-ease); }
+.nx-page.push { animation: nx-push 0.34s var(--nx-ease) both; }
+.nx-page.pop { animation: nx-pop 0.3s var(--nx-ease) both; }
 
 .nx-heading {
   display: flex;
