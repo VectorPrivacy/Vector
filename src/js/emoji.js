@@ -2206,6 +2206,32 @@ function stockEmojiCodeFor(char) {
     return _emojiCodeMap.get(char) || _emojiCodeMap.get(char.replace(/\uFE0F/g, '')) || null;
 }
 
+/**
+ * Draw a picker cell's stock emoji as its slice of a sprite sheet (src/twemoji/sheets): the
+ * grid decodes a few sheets, where an <img> per emoji kept a WebKit document per SVG.
+ * False for an emoji on no sheet, which the caller twemojifies.
+ * @param {HTMLElement} cell
+ * @param {string} emoji
+ * @returns {boolean}
+ */
+function spriteEmoji(cell, emoji) {
+    const slot = twemojiSheets.slots[emoji];
+    if (slot === undefined) return false;
+    const { per, cols } = twemojiSheets;
+    const sheet = Math.floor(slot / per);
+    const at = slot % per;
+    const rows = Math.ceil(Math.min(per, twemojiSheets.count - sheet * per) / cols);
+    const glyph = document.createElement('i');
+    glyph.className = 'tw-sprite';
+    glyph.style.backgroundImage = `url(/twemoji/sheets/${sheet}.webp)`;
+    glyph.style.backgroundSize = `${cols * 100}% ${rows * 100}%`;
+    glyph.style.backgroundPosition = `${(at % cols) / (cols - 1) * 100}% ${rows > 1 ? Math.floor(at / cols) / (rows - 1) * 100 : 0}%`;
+    cell.setAttribute('role', 'img');
+    cell.setAttribute('aria-label', emoji);
+    cell.replaceChildren(glyph);
+    return true;
+}
+
 function twemojify(domElement, opts) {
     // Strip skin tone modifiers from text nodes — our Twemoji set only has neutral/yellow variants.
     // Also normalize ZWJ sequences whose Twemoji regex entry omits FE0F variation selectors

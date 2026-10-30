@@ -96,6 +96,7 @@ const _pickerPanelHelpers = {
      * @property {(pack: object) => string} packInitial
      * @property {(id?: string) => void} openCreator
      * @property {(el: Element) => void} twemojify
+     * @property {(cell: HTMLElement, emoji: string) => boolean} sprite   draw a stock emoji from its sheet; false if on none
      * @property {(e: object) => string} stockTitle
      * @property {() => HTMLElement|null} scrollRoot        the panel's scroller, for the grids' observers
      * @property {() => object[]} recents
@@ -119,6 +120,7 @@ const _pickerPanelHelpers = {
         packInitial: (pack) => _packTitleInitial(pack),
         openCreator: (id) => openEmojiPackCreator(id),
         twemojify: (el) => twemojify(el),
+        sprite: (cell, emoji) => spriteEmoji(cell, emoji),
         stockTitle: (e) => stockEmojiTitle(e),
         scrollRoot: () => _pickerEls.main,
         // Custom emoji already known to be unavailable never take a cell, as in the sections.

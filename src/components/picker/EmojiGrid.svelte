@@ -1,11 +1,12 @@
 <script>
     // One grid of emoji cells, rendered straight into the host grid element: stock emoji
-    // (twemojified) and custom pack emoji (cached image); the big All grid is AllGrid.
+    // (a sprite sheet slice) and custom pack emoji (cached image); the big All grid is AllGrid.
     // The picker's delegated click handlers read the cells' data attributes and expect
     // them as the grid's direct children, so there is no wrapper here.
-    let { items, h } = $props();   // h: twemojify(el), bindCachedImg(img, url, kind, onUnavailable), stockTitle(e), scrollRoot()
+    let { items, h } = $props();   // h: sprite(cell, emoji), twemojify(el), bindCachedImg(img, url, kind, onUnavailable), stockTitle(e), scrollRoot()
 
     function stock(span, e) {
+        if (h.sprite(span, e.emoji)) return;
         span.textContent = e.emoji;
         h.twemojify(span);
     }

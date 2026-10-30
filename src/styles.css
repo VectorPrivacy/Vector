@@ -6388,6 +6388,15 @@ textarea#chat-input::placeholder {
   pointer-events: none;
 }
 
+/* A stock emoji drawn from its sprite sheet (spriteEmoji): fills the cell as the <img> did. */
+.tw-sprite {
+  display: block;
+  width: 100%;
+  height: 100%;
+  background-repeat: no-repeat;
+  pointer-events: none;
+}
+
 /* ============================================================================
    Custom emoji packs (NIP-30 / NIP-51)
    ============================================================================ */
