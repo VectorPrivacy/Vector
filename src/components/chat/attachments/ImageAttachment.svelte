@@ -6,7 +6,7 @@
     import { messageVersion } from '../../lib/chatview.svelte.js';
     import { mediaPath } from '../../lib/media.js';
     let { att, msg, ctx, sender, h } = $props();
-    // h: assetUrl(path), svgRender(path, dim), lost(att, msg), isSpoiler(att), thumbhash(chatId, msgId), onImageLoad(), onThumbLoad(), attachImagePreview(img),
+    // h: assetUrl(path), displaySrc(path, dim), svgRender(path, dim), lost(att, msg), isSpoiler(att), thumbhash(chatId, msgId), onImageLoad(), onThumbLoad(), attachImagePreview(img),
     //    attachFileExtBadge(img, container, ext), cancelUpload
 
     const uploading = $derived.by(() => { messageVersion(msg.id); return !!(msg.mine && msg.pending); });
@@ -32,7 +32,20 @@
         });
         return () => { live = false; };
     });
-    const real = $derived(isSvg ? svgSrc : h.assetUrl(mediaPath(att)));
+    // A photo larger than a bubble ever draws (450 x 350 at up to 2x) shows a copy at that size:
+    // WebKit decodes a picture whole however small it draws. The viewer opens the original.
+    const DISPLAY_DIM = 1024;
+    const original = $derived(isSvg ? null : h.assetUrl(mediaPath(att)));
+    const sized = $derived(!isSvg && !uploading && Math.max(att.img_meta?.width || 0, att.img_meta?.height || 0) > DISPLAY_DIM);
+    let display = $state(undefined);
+    $effect(() => {
+        if (!sized) return;
+        display = undefined;
+        let live = true;
+        h.displaySrc(mediaPath(att), DISPLAY_DIM).then((src) => { if (live) display = src; }, () => { if (live) display = null; });
+        return () => { live = false; };
+    });
+    const real = $derived(isSvg ? svgSrc : !sized ? original : display === undefined ? null : display ?? original);
 
     // Spoiler: the blur arrives async; a failed blur shows the real image instead.
     let blur = $state(null);
@@ -75,7 +88,7 @@
 {:else if spoiler && !blurFailed}
     <div style="position: relative; display: inline-block;" bind:this={container} data-spoiler-upload={uploading ? '1' : undefined} use:badgeOnly>
         {#if blur}
-            <img class={revealed ? 'dmsg-image-attachment' : 'spoiler-img'} src={revealed ? real : blur} onerror={() => { if (revealed) h.lost(att, msg); }} alt=""
+            <img class={revealed ? 'dmsg-image-attachment' : 'spoiler-img'} src={revealed ? real : blur} data-full={revealed ? original : undefined} onerror={() => { if (revealed) h.lost(att, msg); }} alt=""
                  width={!revealed && fit ? fit.w : undefined} height={!revealed && fit ? fit.h : undefined}
                  style="max-width: 100%; height: auto; border-radius: 8px;"
                  style:aspect-ratio={!revealed && fit ? fit.ratio : null}
@@ -95,7 +108,7 @@
         {#if isSvg}
             {#if real}<img data-attachment-type="svg" data-svg-path={mediaPath(att)} src={real} onerror={() => h.lost(att, msg)} alt="" style="width: 25vw; height: auto; border-radius: 8px;" style:opacity={uploading ? '0.25' : null} onload={() => h.onImageLoad()} use:preview use:badge use:pin>{/if}
         {:else}
-            <img class="dmsg-image-attachment" src={real} onerror={() => h.lost(att, msg)} alt="" style="max-width: 100%; height: auto; border-radius: 8px;" style:opacity={uploading ? '0.25' : null} onload={() => h.onImageLoad()} use:preview use:badge use:pin>
+            <img class="dmsg-image-attachment" src={real} data-full={original} onerror={() => h.lost(att, msg)} alt="" style="max-width: 100%; height: auto; border-radius: 8px;" style:opacity={uploading ? '0.25' : null} onload={() => h.onImageLoad()} use:preview use:badge use:pin>
         {/if}
         {#if uploading}
             <UploadOverlay pendingId={msg.id} {h} />

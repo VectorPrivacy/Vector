@@ -494,8 +494,10 @@ function attachImagePreview(imgElement) {
     imgElement.addEventListener('click', (e) => {
         e.preventDefault();
         e.stopPropagation();
-        if (imgElement.src && !imgElement.src.startsWith('data:')) {
-            openImageViewer(imgElement.src, imgElement.dataset.svgPath || null);
+        // A chat photo shows a display-sized copy; the viewer opens its original.
+        const src = imgElement.dataset.full || imgElement.src;
+        if (src && !src.startsWith('data:')) {
+            openImageViewer(src, imgElement.dataset.svgPath || null);
         }
     });
 
