@@ -9,6 +9,8 @@
 //! MUST accept either form (a number from an older edition, a string henceforth) and
 //! always write the string.
 
+use std::borrow::Cow;
+
 use serde::{Deserialize, Serialize};
 
 use crate::community::roles::{MemberGrant, Overwrite, OverwriteTarget, Permissions, Role, RoleScope};
@@ -124,9 +126,78 @@ pub fn grant_content_json_with_wrap(g: &MemberGrant, control_wrap: Option<String
     serde_json::to_string(&content).map_err(|e| e.to_string())
 }
 
-/// Parse a vsk-3 edition's content into a shared `MemberGrant`.
+/// Parse a vsk-3 edition's content into a shared `MemberGrant`: what [`GrantContent`] accepts,
+/// borrowed from the JSON rather than copied, as every fold reads every grant.
 pub fn parse_grant_content(content: &str) -> Option<MemberGrant> {
-    serde_json::from_str::<GrantContent>(content).ok().map(GrantContent::into_grant)
+    let read: GrantRead = serde_json::from_str(content).ok()?;
+    let lower = |h: Cow<str>| if h.bytes().any(|b| b.is_ascii_uppercase()) { h.to_ascii_lowercase() } else { h.into_owned() };
+    Some(MemberGrant { member: lower(read.member), role_ids: read.role_ids.into_iter().map(lower).collect() })
+}
+
+/// A Grant's member and Roles. Only an object reads, every other field is parsed and dropped,
+/// and a repeated field is refused, as `GrantContent`'s flattened map does.
+struct GrantRead<'a> {
+    member: Cow<'a, str>,
+    role_ids: Vec<Cow<'a, str>>,
+}
+
+/// A string kept borrowed unless the JSON escaped it.
+struct Text<'a>(Cow<'a, str>);
+
+impl<'de> Deserialize<'de> for Text<'de> {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct V;
+        impl<'de> serde::de::Visitor<'de> for V {
+            type Value = Text<'de>;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a string")
+            }
+            fn visit_borrowed_str<E>(self, v: &'de str) -> Result<Text<'de>, E> {
+                Ok(Text(Cow::Borrowed(v)))
+            }
+            fn visit_str<E>(self, v: &str) -> Result<Text<'de>, E> {
+                Ok(Text(Cow::Owned(v.to_owned())))
+            }
+            fn visit_string<E>(self, v: String) -> Result<Text<'de>, E> {
+                Ok(Text(Cow::Owned(v)))
+            }
+        }
+        d.deserialize_str(V)
+    }
+}
+
+impl<'de> Deserialize<'de> for GrantRead<'de> {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        use serde::de::Error;
+        struct V;
+        impl<'de> serde::de::Visitor<'de> for V {
+            type Value = GrantRead<'de>;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a Grant")
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<GrantRead<'de>, A::Error> {
+                let (mut member, mut role_ids, mut wrapped) = (None, None, false);
+                while let Some(Text(key)) = map.next_key()? {
+                    match key.as_ref() {
+                        "member" if member.is_some() => return Err(A::Error::duplicate_field("member")),
+                        "member" => member = Some(map.next_value::<Text>()?.0),
+                        "role_ids" if role_ids.is_some() => return Err(A::Error::duplicate_field("role_ids")),
+                        "role_ids" => role_ids = Some(map.next_value::<Vec<Text>>()?.into_iter().map(|t| t.0).collect()),
+                        "control_wrap" if wrapped => return Err(A::Error::duplicate_field("control_wrap")),
+                        "control_wrap" => {
+                            map.next_value::<Option<Text>>()?;
+                            wrapped = true;
+                        }
+                        _ => {
+                            map.next_value::<serde_json::Value>()?;
+                        }
+                    }
+                }
+                Ok(GrantRead { member: member.ok_or_else(|| A::Error::missing_field("member"))?, role_ids: role_ids.unwrap_or_default() })
+            }
+        }
+        d.deserialize_map(V)
+    }
 }
 
 /// Parse a vsk-3 edition's `control_wrap`, if one rides within bounds
@@ -585,6 +656,67 @@ mod tests {
     }
 
     use super::*;
+
+    /// The parse every fold ran before the borrowing read: the judge of what a Grant is.
+    fn full_grant(content: &str) -> Option<MemberGrant> {
+        serde_json::from_str::<GrantContent>(content).ok().map(GrantContent::into_grant)
+    }
+
+    #[test]
+    fn the_borrowing_grant_read_takes_exactly_what_the_full_content_takes() {
+        let (m, r) = ("ab".repeat(32), "cd".repeat(32));
+        let fixed = [
+            format!(r#"{{"member":"{m}","role_ids":["{r}"]}}"#),
+            format!(r#"{{"member":"{}","role_ids":["{}"]}}"#, m.to_uppercase(), r.to_uppercase()),
+            format!(r#"{{"member":"{m}"}}"#),
+            format!(r#"{{"member":"{m}","role_ids":null}}"#),
+            format!(r#"{{"member":"{m}","role_ids":[1]}}"#),
+            format!(r#"{{"member":"{m}","control_wrap":"AbC="}}"#),
+            format!(r#"{{"member":"{m}","control_wrap":7}}"#),
+            format!(r#"{{"member":"{m}","control_wrap":null}}"#),
+            format!(r#"{{"member":"{m}","x":{{"y":[1,2,{{"z":null}}]}}}}"#),
+            format!(r#"{{"member":"{m}","v":1e400}}"#),
+            format!(r#"{{"member":"{m}","v":-0.0,"w":18446744073709551616}}"#),
+            format!(r#"{{"member":"{m}","member":"{r}"}}"#),
+            format!(r#"{{"member":"{m}","role_ids":[],"role_ids":["{r}"]}}"#),
+            format!(r#"{{"member":"{m}","control_wrap":"a","control_wrap":"b"}}"#),
+            format!(r#"{{"member":"{m}","x":1,"x":2}}"#),
+            format!(r#"{{"\u006dember":"\u0041{m}","role_ids":["\u0042{r}"]}}"#),
+            format!(r#"{{"member":"ÄB{m}"}}"#),
+            format!(r#"["{m}",["{r}"]]"#),
+            format!(r#"{{"member":"{m}"}} trailing"#),
+            format!(r#" {{"member":"{m}"}}  "#),
+            r#"{"role_ids":[]}"#.into(),
+            r#"{"member":null}"#.into(),
+            r#"{"member":5}"#.into(),
+            r#"{"member":"a","role_ids":"b"}"#.into(),
+            "[]".into(),
+            r#""s""#.into(),
+            String::new(),
+            "{".into(),
+            format!("{}{{\"member\":\"a\"}}{}", "[".repeat(200), "]".repeat(200)),
+            format!(r#"{{"member":"a","x":{}1{}}}"#, "[".repeat(200), "]".repeat(200)),
+        ];
+        for c in &fixed {
+            assert_eq!(parse_grant_content(c), full_grant(c), "{c}");
+        }
+
+        // Random objects over the fields a Grant names, values of every JSON shape.
+        let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = move |n: u64| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed % n
+        };
+        let keys = ["member", "role_ids", "control_wrap", "extra", "MEMBER", "\\u006dember"];
+        let values = [r#""AbC""#, r#""ab""#, r#""\u0041""#, "null", "1", "1e400", "true", "[]", r#"["Ab","cd"]"#, r#"["a",1]"#, "{}", r#"{"k":[1]}"#];
+        for _ in 0..50_000 {
+            let fields: Vec<String> = (0..next(5)).map(|_| format!("{}:{}", format!("\"{}\"", keys[next(keys.len() as u64) as usize]), values[next(values.len() as u64) as usize])).collect();
+            let c = format!("{{{}}}", fields.join(","));
+            assert_eq!(parse_grant_content(&c), full_grant(&c), "{c}");
+        }
+    }
 
     fn role(perms: u64, pos: u32) -> Role {
         Role {

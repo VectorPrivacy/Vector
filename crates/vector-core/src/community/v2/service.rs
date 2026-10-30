@@ -12631,14 +12631,6 @@ fn select_authorized(
         for (entity, cands) in grant_cands {
             // A grant confers the roles it names that resolve. It is judged on what it
             // names, never on whether those resolve, so no role can hinge on its absence.
-            let resolved_of = |c: &AuthorityCand| -> Vec<(String, u32)> {
-                c.grant
-                    .iter()
-                    .flat_map(|g| g.role_ids.iter())
-                    .filter(|rid| **rid != everyone_hex)
-                    .filter_map(|rid| standing.role(rid).map(|r| (rid.clone(), r.position)))
-                    .collect()
-            };
             let claims = |c: &AuthorityCand| {
                 c.grant.iter().flat_map(|g| g.role_ids.iter()).filter(|rid| **rid != everyone_hex).filter_map(|rid| standing.role(rid).map(|r| r.position)).min()
             };
@@ -12690,11 +12682,11 @@ fn select_authorized(
             };
             // A revoke still records its head: it is a real chain advance.
             next_heads.push(FoldedHead { rebased, ..cands[j].head.clone() });
-            let ids: Vec<String> = resolved_of(&cands[j]).into_iter().map(|(rid, _)| rid).collect();
-            if !ids.is_empty() {
-                let mut g = cands[j].grant.clone().expect("a grant candidate");
-                g.role_ids = ids;
-                next.grants.push(g);
+            if let Some(grant) = &cands[j].grant {
+                let ids: Vec<String> = grant.role_ids.iter().filter(|rid| **rid != everyone_hex && standing.role(rid).is_some()).cloned().collect();
+                if !ids.is_empty() {
+                    next.grants.push(crate::community::roles::MemberGrant { member: grant.member.clone(), role_ids: ids });
+                }
             }
         }
 
@@ -18390,6 +18382,24 @@ mod tests {
             crate::db::community::get_community_roles(&cid_hex).unwrap().is_admin(&admin.public_key().to_hex()),
             "and the admin survives",
         );
+    }
+
+    #[tokio::test]
+    async fn a_grant_whose_roles_resolve_to_none_leaves_no_entry() {
+        let (bed, owner, _m) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Unresolved", bed.relays.clone(), None).await.unwrap();
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        let (kept, lost) = (Keys::generate(), Keys::generate());
+        let role = "aa".repeat(32);
+        publish_role(&bed.relay, &community, &owner.keys, &admin_role(&role, Permissions::BAN), 1).await;
+        publish_grant(&bed.relay, &community, &owner.keys, &kept.public_key(), vec!["cc".repeat(32), role.clone()], 1).await;
+        publish_grant(&bed.relay, &community, &owner.keys, &lost.public_key(), vec!["dd".repeat(32)], 1).await;
+        follow_control(&bed.relay, &community).await.unwrap();
+        let roster = crate::db::community::get_community_roles(&cid_hex).unwrap();
+        let of = |k: &Keys| roster.grants.iter().find(|g| g.member == k.public_key().to_hex()).map(|g| g.role_ids.clone());
+        assert_eq!(of(&kept), Some(vec![role]), "a grant keeps only the roles that resolve");
+        assert_eq!(of(&lost), None, "and one that resolves none stands for nothing");
     }
 
     #[tokio::test]
