@@ -303,7 +303,7 @@ pub fn precache_image_bytes<R: Runtime>(
     } else {
         (bytes, extension)
     };
-    let still = emoji_still(image_type, bytes);
+    let still = display_still(image_type, bytes);
     let (bytes, extension) = match &still {
         Some(s) => (&s.bytes[..], s.extension),
         None => (bytes, extension),
@@ -556,18 +556,18 @@ async fn cache_image_uncached<R: Runtime>(
         }
     }
 
-    // A still emoji or pack icon is kept at its display size. Blocking pool: a decode.
-    if matches!(image_type, ImageType::Emoji | ImageType::EmojiPackIcon) {
+    // A picture that only shows small is kept at its display size. Blocking pool: a decode.
+    if display_dim(image_type).is_some() {
         let owned = bytes;
         // spawn-detached: CPU work on bytes in hand, awaited
         let (returned, still) = match tokio::task::spawn_blocking(move || {
-            let still = emoji_still(image_type, &owned);
+            let still = display_still(image_type, &owned);
             (owned, still)
         })
         .await
         {
             Ok(pair) => pair,
-            Err(e) => return CacheResult::Failed(format!("emoji resize task: {e}")),
+            Err(e) => return CacheResult::Failed(format!("resize task: {e}")),
         };
         bytes = returned;
         if let Some(s) = still {
@@ -738,13 +738,23 @@ pub fn still_for(src: &str) -> Result<Option<PathBuf>, String> {
 /// megabyte of pixels per icon.
 const EMOJI_STILL_DIM: u32 = 128;
 
-/// A still emoji or pack icon past its display size, re-encoded down to it (PNG keeps alpha).
-/// None leaves the bytes as they are: an animation, another kind, or one already small.
-fn emoji_still(image_type: ImageType, bytes: &[u8]) -> Option<crate::shared::image::EncodedImage> {
-    if !matches!(image_type, ImageType::Emoji | ImageType::EmojiPackIcon) {
-        return None;
+/// Longest side a Mini App icon is kept at: Nexus shows one at up to 132 CSS px, where a
+/// published 512 px icon decoded to a megabyte for an 84 px tile.
+const MINIAPP_ICON_DIM: u32 = 256;
+
+/// The longest side a kind of picture is kept at, for the kinds that show only small.
+fn display_dim(image_type: ImageType) -> Option<u32> {
+    match image_type {
+        ImageType::Emoji | ImageType::EmojiPackIcon => Some(EMOJI_STILL_DIM),
+        ImageType::MiniAppIcon => Some(MINIAPP_ICON_DIM),
+        _ => None,
     }
-    still_within(bytes, EMOJI_STILL_DIM)
+}
+
+/// A still emoji, pack icon or Mini App icon past its display size, re-encoded down to it (PNG
+/// keeps alpha). None leaves the bytes as they are: an animation, another kind, or one already small.
+fn display_still(image_type: ImageType, bytes: &[u8]) -> Option<crate::shared::image::EncodedImage> {
+    still_within(bytes, display_dim(image_type)?)
 }
 
 /// A still picture longer than `dim` on a side, re-encoded down to it. None for an animation,
@@ -761,22 +771,25 @@ fn still_within(bytes: &[u8], dim: u32) -> Option<crate::shared::image::EncodedI
     crate::shared::image::compress_image(&img, dim, 90).ok()
 }
 
-/// Bring still emojis and pack icons cached at full size down to [`EMOJI_STILL_DIM`], once per
-/// cache directory (a marker remembers it): new ones are sized as they are written.
+/// Bring still emojis, pack icons and Mini App icons cached at full size down to their display
+/// size, once per cache directory (a marker remembers it): new ones are sized as they are written.
 /// Returns how many were rewritten.
 pub fn backfill_emoji_stills<R: Runtime>(handle: &AppHandle<R>) -> usize {
-    const SWEPT: &str = ".stills-128";
     let mut written = 0usize;
-    for image_type in [ImageType::Emoji, ImageType::EmojiPackIcon] {
-        let Ok(dir) = get_cache_dir(handle, image_type) else { continue };
-        let marker = dir.join(SWEPT);
+    for image_type in [ImageType::Emoji, ImageType::EmojiPackIcon, ImageType::MiniAppIcon] {
+        let (Ok(dir), Some(dim)) = (get_cache_dir(handle, image_type), display_dim(image_type)) else { continue };
+        let marker = dir.join(format!(".stills-{dim}"));
         if marker.exists() {
             continue;
         }
         let Ok(entries) = std::fs::read_dir(&dir) else { continue };
         for path in entries.flatten().map(|e| e.path()).filter(|p| p.is_file()) {
             let Ok(bytes) = vector_core::vcache::read(&path) else { continue };
-            let Some(still) = emoji_still(image_type, &bytes) else { continue };
+            let Some(still) = display_still(image_type, &bytes) else { continue };
+            // A Mini App's catalogue stores its icon's path whole: a new extension would lose it.
+            if image_type == ImageType::MiniAppIcon && path.extension().and_then(|e| e.to_str()) != Some(still.extension) {
+                continue;
+            }
             let dest = path.with_extension(still.extension);
             if vector_core::vcache::write(&dest, &still.bytes).is_err() {
                 continue;
@@ -789,7 +802,7 @@ pub fn backfill_emoji_stills<R: Runtime>(handle: &AppHandle<R>) -> usize {
         let _ = std::fs::write(&marker, b"");
     }
     if written > 0 {
-        log_info!("[ImageCache] backfill: {} emoji stills brought to display size", written);
+        log_info!("[ImageCache] backfill: {} emoji and icon stills brought to display size", written);
     }
     written
 }
@@ -867,6 +880,7 @@ fn animated_display_target(image_type: ImageType) -> Option<(u32, usize, &'stati
         ImageType::Avatar => Some((160, 512 * 1024, "avatar")),
         ImageType::Banner => Some((640, 1536 * 1024, "banner")),
         ImageType::Emoji | ImageType::EmojiPackIcon => Some((EMOJI_STILL_DIM, 256 * 1024, "emoji")),
+        ImageType::MiniAppIcon => Some((MINIAPP_ICON_DIM, 512 * 1024, "Mini App icon")),
         _ => None,
     }
 }
@@ -1660,6 +1674,17 @@ mod avatar_thumb_tests {
         std::fs::write(outside.path(), gif(8, 8, 2)).unwrap();
         assert!(still_for(&outside.path().to_string_lossy()).is_err(), "only Vector's own files");
         assert!(still_for("vmedia:nothex").is_err());
+    }
+
+    #[test]
+    fn a_mini_app_icon_is_kept_at_the_size_nexus_shows() {
+        let png = |d: u32| crate::shared::image::encode_png(&vec![200u8; (d * d * 4) as usize], d, d).unwrap();
+        let big = display_still(ImageType::MiniAppIcon, &png(629)).expect("a 629 px icon comes down");
+        let img = image::load_from_memory(&big.bytes).unwrap();
+        assert_eq!(img.width().max(img.height()), MINIAPP_ICON_DIM);
+        assert!(display_still(ImageType::MiniAppIcon, &png(200)).is_none(), "one within it stays as it is");
+        assert!(display_still(ImageType::Banner, &png(629)).is_none(), "a banner shows large");
+        assert!(display_still(ImageType::MiniAppIcon, &gif(400, 400, 2)).is_none(), "an animation is the transcode's");
     }
 
     #[test]

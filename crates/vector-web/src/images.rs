@@ -50,6 +50,15 @@ impl Kind {
         }
     }
 
+    /// The longest side a kind that only shows small is kept at, as the desktop keeps it.
+    fn display_dim(self) -> Option<u32> {
+        match self {
+            Kind::Emoji | Kind::EmojiPackIcon => Some(128),
+            Kind::MiniAppIcon => Some(256),
+            _ => None,
+        }
+    }
+
     fn dir(self) -> &'static str {
         match self {
             Kind::Avatar => "avatars",
@@ -157,6 +166,23 @@ fn thumb(bytes: &[u8]) -> Option<Vec<u8>> {
     } else {
         img
     };
+    png(small)
+}
+
+/// A still picture longer than `dim` on a side, as a PNG of it brought down to `dim`. None for an
+/// animation or one already within it.
+fn fitted(bytes: &[u8], dim: u32) -> Option<Vec<u8>> {
+    if vector_core::crypto::animated_format(bytes).is_some() {
+        return None;
+    }
+    let img = ImageReader::new(std::io::Cursor::new(bytes)).with_guessed_format().ok()?.decode().ok()?;
+    if img.width().max(img.height()) <= dim {
+        return None;
+    }
+    png(img.thumbnail(dim, dim))
+}
+
+fn png(small: DynamicImage) -> Option<Vec<u8>> {
     let mut out = Vec::new();
     DynamicImage::ImageRgba8(small.to_rgba8())
         .write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)
@@ -266,6 +292,14 @@ async fn store(url: &str, kind: Kind, bytes: &[u8]) -> Result<String, String> {
         &rendered[..]
     } else {
         bytes
+    };
+    let small;
+    let bytes = match kind.display_dim().and_then(|dim| fitted(bytes, dim)) {
+        Some(b) => {
+            small = b;
+            &small[..]
+        }
+        None => bytes,
     };
     let ext = extension_for(vector_core::crypto::mime_from_magic_bytes(bytes)).ok_or("Not an image")?;
     let key = &vector_core::crypto::sha256_hex(url.as_bytes())[..16];
