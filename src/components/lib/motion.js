@@ -49,7 +49,7 @@ export function setMotionActive(on) {
 
 const held = new WeakSet();
 
-/** CSS loops (pulses, spinners) hold their frame while the window is inactive. */
+/** CSS loops (pulses, spinners) and muted video loops (GIFs) hold their frame while the window is inactive. */
 function loops(on) {
     for (const a of document.getAnimations()) {
         if (on && held.has(a)) {
@@ -58,6 +58,15 @@ function loops(on) {
         } else if (!on && a.playState === 'running' && a.effect?.getTiming().iterations === Infinity) {
             held.add(a);
             a.pause();
+        }
+    }
+    for (const v of document.querySelectorAll('video[loop]')) {
+        if (on && held.has(v)) {
+            held.delete(v);
+            if (v.paused && v.checkVisibility({ opacityProperty: true, visibilityProperty: true })) v.play().catch(() => {});
+        } else if (!on && v.muted && !v.paused) {
+            held.add(v);
+            v.pause();
         }
     }
 }
