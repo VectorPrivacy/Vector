@@ -47,8 +47,9 @@
         frameKey = '';
     });
 
+    // A card draws its picture at most 480 wide: a site's full-size image comes at 1024.
     function cached(img, url) {
-        h.backendCachedImg(img, url);
+        h.backendCachedImg(img, url, 1024);
     }
     function cachedIcon(img, url) {
         h.backendCachedImg(img, url, 64);

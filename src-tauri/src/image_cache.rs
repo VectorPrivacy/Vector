@@ -1405,6 +1405,31 @@ pub async fn cache_url_image<R: Runtime>(
     if let Some(path) = get_cached_path(&handle, &key, ImageType::InlineImage) {
         return Ok(Some(path));
     }
+    // Kept whole from before: the fitted copy comes from it, not from the site again.
+    if let (Some(dim), true) = (fit, vector_core::media::keep_media()) {
+        if let Some(whole) = get_cached_path(&handle, &url, ImageType::InlineImage) {
+            let dest_dir = get_cache_dir(&handle, ImageType::InlineImage)?;
+            let stem = url_to_cache_key(&key);
+            // spawn-detached: CPU work on a file in hand, awaited
+            let fitted = tokio::task::spawn_blocking(move || -> Option<String> {
+                let bytes = vector_core::vcache::read(std::path::Path::new(&whole)).ok()?;
+                let ext = std::path::Path::new(&whole).extension()?.to_str()?.to_string();
+                let (bytes, ext) = match still_within(&bytes, dim) {
+                    Some(re) => (re.bytes, re.extension.to_string()),
+                    None => (bytes.to_vec(), ext),
+                };
+                let dest = dest_dir.join(format!("{stem}.{ext}"));
+                vector_core::vcache::write(&dest, &bytes).ok()?;
+                Some(dest.to_string_lossy().into_owned())
+            })
+            .await
+            .ok()
+            .flatten();
+            if fitted.is_some() {
+                return Ok(fitted);
+            }
+        }
+    }
 
     // Check if this URL is already being downloaded (e.g., message re-rendered from Pending to Sent)
     // If so, return None - the frontend will receive the cached path via the inline_image_cached event
