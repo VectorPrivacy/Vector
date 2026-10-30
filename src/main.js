@@ -79,7 +79,7 @@ async function imageStill(src) {
         ? { still: await url(still), moving: src, face }
         : { still: src, moving: await url(original), face };
     // A still memory has let go of fails here, so the gate forgets it and asks again.
-    await Object.assign(new Image(), { src: frames.still }).decode();
+    await new Promise((loaded, failed) => Object.assign(new Image(), { onload: loaded, onerror: failed, src: frames.still }));
     return frames;
 }
 

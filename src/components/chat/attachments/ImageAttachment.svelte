@@ -37,8 +37,10 @@
     const DISPLAY_DIM = 1024;
     const original = $derived(isSvg ? null : h.assetUrl(mediaPath(att)));
     let revealed = $state(false);
-    // A spoiler's copy waits for its reveal: a veiled picture may never be opened.
-    const sized = $derived(!isSvg && !uploading && (!spoiler || revealed) && Math.max(att.img_meta?.width || 0, att.img_meta?.height || 0) > DISPLAY_DIM);
+    let blurFailed = $state(false);
+    // A spoiler's copy waits for its reveal (a veiled picture may never be opened), unless its blur
+    // failed and it shows plain.
+    const sized = $derived(!isSvg && !uploading && (!spoiler || revealed || blurFailed) && Math.max(att.img_meta?.width || 0, att.img_meta?.height || 0) > DISPLAY_DIM);
     let display = $state(undefined);
     // Until the picture loads its box holds the size it will draw, so the row doesn't grow under the reader.
     let loaded = $state(false);
@@ -46,7 +48,7 @@
         if (!sized) return;
         display = undefined;
         let live = true;
-        h.displaySrc(mediaPath(att), DISPLAY_DIM).then((src) => { if (live) display = src; }, () => { if (live) display = null; });
+        h.displaySrc(mediaPath(att), DISPLAY_DIM, () => live).then((src) => { if (live) display = src; }, () => { if (live) display = null; });
         return () => { live = false; };
     });
     // A picture already showing (an own upload just sent) stays until its copy is ready.
@@ -54,7 +56,6 @@
 
     // Spoiler: the blur arrives async; a failed blur shows the real image instead.
     let blur = $state(null);
-    let blurFailed = $state(false);
     if (spoiler) {
         // svelte-ignore state_referenced_locally
     h.thumbhash(chatId, msg.id).then((b64) => { blur = b64; }).catch(() => { blurFailed = true; });

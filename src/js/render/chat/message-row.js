@@ -268,6 +268,27 @@ const _dmsgContentHelpers = {
     armExpiry: (at) => armExpiry(at),
 };
 
+// Display copies are asked for newest first, a few at a time: switching chats puts the new rows
+// ahead of the old, and a row that left before its turn asks nothing.
+const _displayJobs = [];
+let _displayAsking = 0;
+function _displayNext() {
+    while (_displayAsking < 4 && _displayJobs.length) {
+        const job = _displayJobs.pop();
+        if (!job.alive()) {
+            job.done(null);
+            continue;
+        }
+        _displayAsking++;
+        invoke('image_display', { src: job.path, dim: job.dim })
+            .then((p) => job.done(p ? refSrc(p) : null), job.fail)
+            .finally(() => {
+                _displayAsking--;
+                _displayNext();
+            });
+    }
+}
+
 /**
  * MediaHelpers: Attachments and its leaves (Image, Video, Thumbhash, FileBox, UploadOverlay);
  * `audio` is AudioPlayer's own bag.
@@ -287,7 +308,7 @@ const _dmsgContentHelpers = {
  *   openFile: (att: object, msg: object) => void,
  *   openModel: (att: object) => void,
  *   assetUrl: (path: string) => string, mediaUrl: (path: string) => string,
- *   displaySrc: (path: string, dim: number) => Promise<string|null>,
+ *   displaySrc: (path: string, dim: number, alive?: () => boolean) => Promise<string|null>,
  *   hold: (att: object) => void, release: (att: object) => void,
  *   lost: (att: object, msg: object) => void,
  *   svgRender: (path: string, dim: number) => Promise<string|null>,
@@ -330,7 +351,10 @@ const _dmsgMediaHelpers = {
     openFile: (att, msg) => _dmsgOpenFile(att, msg),
     openModel: (att) => openModelViewer(att),
     assetUrl: (path) => refSrc(path),
-    displaySrc: (path, dim) => invoke('image_display', { src: path, dim }).then((p) => p ? refSrc(p) : null),
+    displaySrc: (path, dim, alive = () => true) => new Promise((done, fail) => {
+        _displayJobs.push({ path, dim, alive, done, fail });
+        _displayNext();
+    }),
     svgRender: (path, dim) => svgRenderSrc(path, dim),
     mediaUrl: (path) => refSrc(path, mediaUrl),
     hold: (att) => { invoke('media_hold', { hash: att.id }).catch(() => {}); },
