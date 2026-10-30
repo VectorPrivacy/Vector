@@ -271,12 +271,14 @@ const _dmsgContentHelpers = {
 // Display copies are asked for newest first, a few at a time: switching chats puts the new rows
 // ahead of the old, and a row that left before its turn asks nothing.
 const _displayJobs = [];
+// What each picture's ask answered, so a chat opened again shows its copies without queueing.
+const _displayMade = new Map();
 let _displayAsking = 0;
 function _displayNext() {
     while (_displayAsking < 4 && _displayJobs.length) {
         const job = _displayJobs.pop();
         if (!job.alive()) {
-            job.done(null);
+            job.done(undefined);
             continue;
         }
         _displayAsking++;
@@ -309,6 +311,7 @@ function _displayNext() {
  *   openModel: (att: object) => void,
  *   assetUrl: (path: string) => string, mediaUrl: (path: string) => string,
  *   displaySrc: (path: string, dim: number, alive?: () => boolean) => Promise<string|null>,
+ *   displayLost: (path: string, dim: number) => void,
  *   hold: (att: object) => void, release: (att: object) => void,
  *   lost: (att: object, msg: object) => void,
  *   svgRender: (path: string, dim: number) => Promise<string|null>,
@@ -351,10 +354,19 @@ const _dmsgMediaHelpers = {
     openFile: (att, msg) => _dmsgOpenFile(att, msg),
     openModel: (att) => openModelViewer(att),
     assetUrl: (path) => refSrc(path),
-    displaySrc: (path, dim, alive = () => true) => new Promise((done, fail) => {
-        _displayJobs.push({ path, dim, alive, done, fail });
-        _displayNext();
-    }),
+    displaySrc: (path, dim, alive = () => true) => {
+        const key = `${path}|${dim}`;
+        if (_displayMade.has(key)) return Promise.resolve(_displayMade.get(key));
+        return new Promise((done, fail) => {
+            _displayJobs.push({ path, dim, alive, done, fail });
+            _displayNext();
+        }).then((src) => {
+            // A row that left before its turn asked nothing: nothing to remember.
+            if (src !== undefined) _displayMade.set(key, src);
+            return src;
+        });
+    },
+    displayLost: (path, dim) => _displayMade.delete(`${path}|${dim}`),
     svgRender: (path, dim) => svgRenderSrc(path, dim),
     mediaUrl: (path) => refSrc(path, mediaUrl),
     hold: (att) => { invoke('media_hold', { hash: att.id }).catch(() => {}); },

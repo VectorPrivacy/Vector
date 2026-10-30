@@ -6,7 +6,7 @@
     import { messageVersion } from '../../lib/chatview.svelte.js';
     import { mediaPath } from '../../lib/media.js';
     let { att, msg, ctx, sender, h } = $props();
-    // h: assetUrl(path), displaySrc(path, dim), svgRender(path, dim), lost(att, msg), isSpoiler(att), thumbhash(chatId, msgId), onImageLoad(), onThumbLoad(), attachImagePreview(img),
+    // h: assetUrl(path), displaySrc(path, dim, alive), displayLost(path, dim), svgRender(path, dim), lost(att, msg), isSpoiler(att), thumbhash(chatId, msgId), onImageLoad(), onThumbLoad(), attachImagePreview(img),
     //    attachFileExtBadge(img, container, ext), cancelUpload
 
     const uploading = $derived.by(() => { messageVersion(msg.id); return !!(msg.mine && msg.pending); });
@@ -93,7 +93,7 @@
 {:else if spoiler && !blurFailed}
     <div style="position: relative; display: inline-block;" bind:this={container} data-spoiler-upload={uploading ? '1' : undefined} use:badgeOnly>
         {#if blur}
-            <img class={revealed ? 'dmsg-image-attachment' : 'spoiler-img'} src={revealed ? real ?? blur : blur} data-full={revealed ? original : undefined} onerror={() => { if (!revealed) return; if (display) { display = null; return; } h.lost(att, msg); }} alt=""
+            <img class={revealed ? 'dmsg-image-attachment' : 'spoiler-img'} src={revealed ? real ?? blur : blur} data-full={revealed ? original : undefined} onerror={() => { if (!revealed) return; if (display) { h.displayLost(mediaPath(att), DISPLAY_DIM); display = null; return; } h.lost(att, msg); }} alt=""
                  width={!revealed && fit ? fit.w : undefined} height={!revealed && fit ? fit.h : undefined}
                  style="max-width: 100%; height: auto; border-radius: 8px;"
                  style:aspect-ratio={!revealed && fit ? fit.ratio : null}
@@ -114,7 +114,7 @@
         {#if isSvg}
             {#if real}<img data-attachment-type="svg" data-svg-path={mediaPath(att)} src={real} onerror={() => h.lost(att, msg)} alt="" style="width: 25vw; height: auto; border-radius: 8px;" style:opacity={uploading ? '0.25' : null} onload={() => h.onImageLoad()} use:preview use:badge use:pin>{/if}
         {:else}
-            <img class="dmsg-image-attachment" src={real} data-full={original} onerror={() => { if (display) { display = null; return; } loaded = true; h.lost(att, msg); }} alt="" style="max-width: 100%; height: auto; border-radius: 8px;" style:opacity={uploading ? '0.25' : null} onload={() => { loaded = true; h.onImageLoad(); }} use:preview use:badge use:pin>
+            <img class="dmsg-image-attachment" src={real} data-full={original} onerror={() => { if (display) { h.displayLost(mediaPath(att), DISPLAY_DIM); display = null; return; } loaded = true; h.lost(att, msg); }} alt="" style="max-width: 100%; height: auto; border-radius: 8px;" style:opacity={uploading ? '0.25' : null} onload={() => { loaded = true; h.onImageLoad(); }} use:preview use:badge use:pin>
         {/if}
         {#if uploading}
             <UploadOverlay pendingId={msg.id} {h} />
