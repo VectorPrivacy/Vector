@@ -751,6 +751,33 @@ pub fn still_for(src: &str) -> Result<Option<PathBuf>, String> {
     Ok(Some(still))
 }
 
+/// A display copy decodes the whole picture, and a chat opening asks for every row's at once;
+/// two at a time keeps that from holding a window's worth of full-size pixels.
+static DISPLAY_GATE: (std::sync::Mutex<u8>, std::sync::Condvar) = (std::sync::Mutex::new(0), std::sync::Condvar::new());
+const DISPLAY_SLOTS: u8 = 2;
+
+struct DisplaySlot;
+
+impl DisplaySlot {
+    fn take() -> Self {
+        let (count, freed) = &DISPLAY_GATE;
+        let mut taken = count.lock().unwrap_or_else(|e| e.into_inner());
+        while *taken >= DISPLAY_SLOTS {
+            taken = freed.wait(taken).unwrap_or_else(|e| e.into_inner());
+        }
+        *taken += 1;
+        DisplaySlot
+    }
+}
+
+impl Drop for DisplaySlot {
+    fn drop(&mut self) {
+        let (count, freed) = &DISPLAY_GATE;
+        *count.lock().unwrap_or_else(|e| e.into_inner()) -= 1;
+        freed.notify_one();
+    }
+}
+
 /// A copy of the still picture at `src` at most `dim` on its longest side, for showing it where
 /// it never fills more: WebKit decodes a picture whole however small it draws it, and keeps one
 /// copy in the page and one in the GPU process. None when it is already within `dim`, animates,
@@ -766,11 +793,14 @@ pub fn display_for(src: &str, dim: u32) -> Result<Option<PathBuf>, String> {
         return Ok(None);
     }
     let stills = vector_core::db::get_app_data_dir()?.join("cache").join("stills");
-    for ext in ["jpg", "png"] {
-        let kept = stills.join(format!("{key}-{dim}.{ext}"));
-        if vector_core::vcache::readable(&kept) {
-            return Ok(Some(kept));
-        }
+    let kept = || ["jpg", "png"].into_iter().map(|ext| stills.join(format!("{key}-{dim}.{ext}"))).find(|p| vector_core::vcache::readable(p));
+    if let Some(kept) = kept() {
+        return Ok(Some(kept));
+    }
+    let _slot = DisplaySlot::take();
+    // The same picture in two rows: whoever waited finds the other's copy.
+    if let Some(kept) = kept() {
+        return Ok(Some(kept));
     }
     let Ok(bytes) = read_whole(&*source) else { return Ok(None) };
     let img = crate::shared::image::decode_image(&bytes, dim)?;
