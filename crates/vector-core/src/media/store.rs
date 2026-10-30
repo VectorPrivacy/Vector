@@ -620,6 +620,30 @@ mod tests {
     }
 
     #[test]
+    fn a_plain_copy_in_a_download_folder_opens_though_it_isnt_held() {
+        let (_tmp, _guard) = init_test_db();
+        let downloads = tempfile::tempdir().unwrap();
+        crate::db::set_download_dir(downloads.path().to_path_buf());
+        let bytes = b"a picture kept unencrypted".to_vec();
+        let hash = crate::simd::hex::hex_to_bytes_32(&crate::crypto::sha256_hex(&bytes));
+        let path = downloads.path().join("plain.png");
+        std::fs::write(&path, &bytes).unwrap();
+        let conn = crate::db::get_write_connection_guard_static().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys = OFF").unwrap();
+        conn.execute(
+            "INSERT INTO attachments (event_id, att_index, hash, path, downloaded) VALUES ('plain', 0, ?1, ?2, 1)",
+            rusqlite::params![crate::simd::hex::bytes_to_hex_32(&hash), path.to_string_lossy()],
+        )
+        .unwrap();
+        conn.execute_batch("PRAGMA foreign_keys = ON").unwrap();
+        drop(conn);
+
+        assert!(!crate::media::resident(&hash) && crate::media::openable(&hash), "opens from the plain copy");
+        std::fs::remove_file(&path).unwrap();
+        assert!(!crate::media::openable(&hash), "and not once that is gone");
+    }
+
+    #[test]
     fn every_kept_file_counts_and_goes_whatever_its_type() {
         let (_dir, _guard) = init_test_db();
         let (picture, archive) = (b"a kept picture".to_vec(), b"a kept archive".to_vec());
