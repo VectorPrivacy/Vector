@@ -271,7 +271,7 @@ const _dmsgContentHelpers = {
 // Display copies are asked for newest first, a few at a time: switching chats puts the new rows
 // ahead of the old, and a row that left before its turn asks nothing.
 const _displayJobs = [];
-// What each picture's ask answered, so a chat opened again shows its copies without queueing.
+// What each held picture's ask answered, so a chat opened again shows its copies without queueing.
 const _displayMade = new Map();
 let _displayAsking = 0;
 function _displayNext() {
@@ -361,8 +361,9 @@ const _dmsgMediaHelpers = {
             _displayJobs.push({ path, dim, alive, done, fail });
             _displayNext();
         }).then((src) => {
-            // A row that left before its turn asked nothing: nothing to remember.
-            if (src !== undefined) _displayMade.set(key, src);
+            // A row that left before its turn asked nothing. Only a held picture's answer is kept:
+            // its hash names its content, where a file's path can come back holding another.
+            if (src !== undefined && path.startsWith('vmedia:')) _displayMade.set(key, src);
             return src;
         });
     },

@@ -506,18 +506,17 @@ fn delete_cached_attachment_files(attachments: &[crate::types::Attachment]) {
     if attachments.is_empty() {
         return;
     }
-    let ram = crate::media::ram::cache();
-    for hash in attachments.iter().filter_map(|a| crate::simd::hex::hex_to_bytes_32_checked(&a.id)) {
-        crate::media::pending::forget(&hash);
+    let hashes: Vec<[u8; 32]> = attachments.iter().filter_map(|a| crate::simd::hex::hex_to_bytes_32_checked(&a.id)).collect();
+    for hash in &hashes {
+        crate::media::pending::forget(hash);
         #[cfg(not(target_arch = "wasm32"))]
-        crate::media::store::forget(&hash);
+        crate::media::store::forget(hash);
         #[cfg(target_arch = "wasm32")]
         {
+            let hash = *hash;
             crate::media::store::stop_holding(&hash);
             crate::db::spawn_bound(async move { crate::media::store::forget(&hash).await });
         }
-        // Last, so a copy or a read finishing meanwhile finds its picture gone and leaves it so.
-        ram.remove(&hash);
     }
     #[cfg(target_arch = "wasm32")]
     {
@@ -535,6 +534,12 @@ fn delete_cached_attachment_files(attachments: &[crate::types::Attachment]) {
     }
     #[cfg(not(target_arch = "wasm32"))]
     delete_cached_attachment_files_native(attachments);
+    // Last, after every other place it could be read from: a copy or a read finishing meanwhile
+    // finds its picture gone and leaves it so.
+    let ram = crate::media::ram::cache();
+    for hash in &hashes {
+        ram.remove(hash);
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]

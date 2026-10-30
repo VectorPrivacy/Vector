@@ -44,8 +44,12 @@
     let display = $state(undefined);
     // Until the picture loads its box holds the size it will draw, so the row doesn't grow under the reader.
     let loaded = $state(false);
+    // A remembered copy memory has since let go of is asked for once more, before the original shows.
+    let ask = $state(0);
+    let retried = false;
     $effect(() => {
         if (!sized) return;
+        void ask;
         display = undefined;
         let live = true;
         h.displaySrc(mediaPath(att), DISPLAY_DIM, () => live).then((src) => { if (live) display = src; }, () => { if (live) display = null; });
@@ -93,7 +97,7 @@
 {:else if spoiler && !blurFailed}
     <div style="position: relative; display: inline-block;" bind:this={container} data-spoiler-upload={uploading ? '1' : undefined} use:badgeOnly>
         {#if blur}
-            <img class={revealed ? 'dmsg-image-attachment' : 'spoiler-img'} src={revealed ? real ?? blur : blur} data-full={revealed ? original : undefined} onerror={() => { if (!revealed) return; if (display) { h.displayLost(mediaPath(att), DISPLAY_DIM); display = null; return; } h.lost(att, msg); }} alt=""
+            <img class={revealed ? 'dmsg-image-attachment' : 'spoiler-img'} src={revealed ? real ?? blur : blur} data-full={revealed ? original : undefined} onerror={() => { if (!revealed) return; if (display) { h.displayLost(mediaPath(att), DISPLAY_DIM); if (retried) display = null; else { retried = true; ask++; } return; } h.lost(att, msg); }} alt=""
                  width={!revealed && fit ? fit.w : undefined} height={!revealed && fit ? fit.h : undefined}
                  style="max-width: 100%; height: auto; border-radius: 8px;"
                  style:aspect-ratio={!revealed && fit ? fit.ratio : null}
@@ -114,7 +118,7 @@
         {#if isSvg}
             {#if real}<img data-attachment-type="svg" data-svg-path={mediaPath(att)} src={real} onerror={() => h.lost(att, msg)} alt="" style="width: 25vw; height: auto; border-radius: 8px;" style:opacity={uploading ? '0.25' : null} onload={() => h.onImageLoad()} use:preview use:badge use:pin>{/if}
         {:else}
-            <img class="dmsg-image-attachment" src={real} data-full={original} onerror={() => { if (display) { h.displayLost(mediaPath(att), DISPLAY_DIM); display = null; return; } loaded = true; h.lost(att, msg); }} alt="" style="max-width: 100%; height: auto; border-radius: 8px;" style:opacity={uploading ? '0.25' : null} onload={() => { loaded = true; h.onImageLoad(); }} use:preview use:badge use:pin>
+            <img class="dmsg-image-attachment" src={real} data-full={original} onerror={() => { if (display) { h.displayLost(mediaPath(att), DISPLAY_DIM); if (retried) display = null; else { retried = true; ask++; } return; } loaded = true; h.lost(att, msg); }} alt="" style="max-width: 100%; height: auto; border-radius: 8px;" style:opacity={uploading ? '0.25' : null} onload={() => { loaded = true; h.onImageLoad(); }} use:preview use:badge use:pin>
         {/if}
         {#if uploading}
             <UploadOverlay pendingId={msg.id} {h} />
