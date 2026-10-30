@@ -8986,9 +8986,8 @@ body:has(.nostr-embed-overlay:not([hidden])) .mini-profile-popup { z-index: 5002
   z-index: 2000;
   width: calc(100% - 55px);
   box-shadow: 0 -8px 32px rgba(0, 0, 0, 0.5);
-  backdrop-filter: blur(10px);
-  -webkit-backdrop-filter: blur(10px);
-  transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.3s ease;
+  /* Blur only while shown: a hidden backdrop-filter still holds its GPU surfaces. */
+  transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.3s ease, backdrop-filter 0.3s ease, -webkit-backdrop-filter 0.3s ease;
   pointer-events: none;
   opacity: 0;
   display: flex;
@@ -8999,6 +8998,8 @@ body:has(.nostr-embed-overlay:not([hidden])) .mini-profile-popup { z-index: 5002
   transform: translateX(-50%) translateY(0);
   pointer-events: auto;
   opacity: 1;
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
 }
 
 .attachment-panel-content {
@@ -19200,20 +19201,20 @@ hr {
   overflow-x: hidden;
   overflow-y: auto;
   box-shadow: 0 -8px 32px rgba(0, 0, 0, 0.5);
-  backdrop-filter: blur(10px);
-  -webkit-backdrop-filter: blur(10px);
   padding: 6px 0;
   transform: translateY(8px);
   opacity: 0;
   pointer-events: none;
   transition: transform 0.25s cubic-bezier(0.4, 0, 0.2, 1),
-              opacity 0.2s ease;
+              opacity 0.2s ease, backdrop-filter 0.2s ease, -webkit-backdrop-filter 0.2s ease;
 }
 
 .mention-selector.visible {
   transform: translateY(0);
   opacity: 1;
   pointer-events: auto;
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
 }
 
 .mention-selector-header {
@@ -19453,8 +19454,6 @@ hr {
   max-height: min(320px, 45vh, var(--room, 100vh));
   overflow-y: auto;
   box-shadow: 0 -8px 32px rgba(0, 0, 0, 0.5);
-  backdrop-filter: blur(10px);
-  -webkit-backdrop-filter: blur(10px);
   /* No top padding: section headers stick flush to the scrollport edge, so a
      padding gap would let rows peek above the stuck header. */
   padding: 0 0 6px;
@@ -19462,13 +19461,15 @@ hr {
   opacity: 0;
   pointer-events: none;
   transition: transform 0.25s cubic-bezier(0.4, 0, 0.2, 1),
-              opacity 0.2s ease;
+              opacity 0.2s ease, backdrop-filter 0.2s ease, -webkit-backdrop-filter 0.2s ease;
 }
 
 .command-selector.visible {
   transform: translateY(0);
   opacity: 1;
   pointer-events: auto;
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
 }
 
 .command-section-header {
@@ -20221,20 +20222,20 @@ textarea.command-part-input {
   overflow-x: hidden;
   overflow-y: auto;
   box-shadow: 0 -8px 32px rgba(0, 0, 0, 0.5);
-  backdrop-filter: blur(10px);
-  -webkit-backdrop-filter: blur(10px);
   padding: 6px 0;
   transform: translateY(8px);
   opacity: 0;
   pointer-events: none;
   transition: transform 0.25s cubic-bezier(0.4, 0, 0.2, 1),
-              opacity 0.2s ease;
+              opacity 0.2s ease, backdrop-filter 0.2s ease, -webkit-backdrop-filter 0.2s ease;
 }
 
 .emoji-shortcode-selector.visible {
   transform: translateY(0);
   opacity: 1;
   pointer-events: auto;
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
 }
 
 .emoji-shortcode-header {
@@ -21467,16 +21468,16 @@ textarea.command-part-input {
   right: 0;
   bottom: 0;
   background: rgba(0, 0, 0, 0.45);
-  backdrop-filter: blur(6px);
-  -webkit-backdrop-filter: blur(6px);
   opacity: 0;
   pointer-events: none;
-  transition: opacity 160ms ease;
+  transition: opacity 160ms ease, backdrop-filter 160ms ease, -webkit-backdrop-filter 160ms ease;
   z-index: 998;
 }
 .profile-switcher-backdrop.visible {
   opacity: 1;
   pointer-events: auto;
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
 }
 
 /* The dropdown panel — flush extension of the Profile tab header. Caps at
