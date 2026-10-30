@@ -136,7 +136,6 @@
     "allow-cache-community-image",
     "allow-cache-invite-logo",
     "allow-image-still",
-    "allow-image-display",
     "allow-grant-community-admin",
     "allow-revoke-community-admin",
     "allow-get-community-admins",

@@ -751,35 +751,6 @@ pub fn still_for(src: &str) -> Result<Option<PathBuf>, String> {
     Ok(Some(still))
 }
 
-/// A copy of the still picture at `src` at most `dim` on its longest side, for showing it where
-/// it never fills more: WebKit decodes a picture whole however small it draws it, and keeps one
-/// copy in the page and one in the GPU process. None when it is already within `dim`, animates,
-/// or isn't a picture; the page then shows the original.
-pub fn display_for(src: &str, dim: u32) -> Result<Option<PathBuf>, String> {
-    let (source, key, _) = open_ours(src)?;
-    let head = read_head(&*source, ANIMATION_HEAD)?;
-    if crate::shared::image::animated_format(&head).is_some() || vector_core::svg::looks_like_svg(&head) {
-        return Ok(None);
-    }
-    let Some((w, h)) = crate::shared::image::header_dimensions_oriented(&head) else { return Ok(None) };
-    if w.max(h) <= dim {
-        return Ok(None);
-    }
-    let stills = vector_core::db::get_app_data_dir()?.join("cache").join("stills");
-    for ext in ["jpg", "png"] {
-        let kept = stills.join(format!("{key}-{dim}.{ext}"));
-        if vector_core::vcache::readable(&kept) {
-            return Ok(Some(kept));
-        }
-    }
-    let Ok(bytes) = read_whole(&*source) else { return Ok(None) };
-    let img = crate::shared::image::decode_image(&bytes, dim)?;
-    let small = crate::shared::image::compress_image(&img, dim, 85)?;
-    let kept = stills.join(format!("{key}-{dim}.{}", small.extension));
-    std::fs::create_dir_all(&stills).map_err(|e| e.to_string())?;
-    vector_core::vcache::write(&kept, &small.bytes)?;
-    Ok(Some(kept))
-}
 
 /// Longest side an emoji or pack icon is kept at: it shows at most 64 CSS px, and a picker
 /// sheet frame is 56. A 512 px original decoded in full for an 18 px slot was a
@@ -1747,24 +1718,6 @@ mod avatar_thumb_tests {
         std::fs::write(outside.path(), gif(8, 8, 2)).unwrap();
         assert!(still_for(&outside.path().to_string_lossy()).is_err(), "only Vector's own files");
         assert!(still_for("vmedia:nothex").is_err());
-    }
-
-    #[test]
-    fn a_photo_larger_than_a_bubble_gets_a_display_copy_and_a_small_one_none() {
-        let root = crate::util::test_app_data();
-        let dir = root.join("cache").join("inline_images");
-        std::fs::create_dir_all(&dir).unwrap();
-        let (big, small, anim) = (dir.join("display-big.jpg"), dir.join("display-small.jpg"), dir.join("display-anim.gif"));
-        vector_core::vcache::write(&big, &jpeg(3000, 2000)).unwrap();
-        vector_core::vcache::write(&small, &jpeg(900, 600)).unwrap();
-        vector_core::vcache::write(&anim, &gif(1600, 1200, 2)).unwrap();
-
-        let copy = display_for(&big.to_string_lossy(), 1024).unwrap().expect("a 3000 px photo comes down");
-        let img = image::load_from_memory(&vector_core::vcache::read(&copy).unwrap()).unwrap();
-        assert_eq!((img.width(), img.height()), (1024, 683), "the bubble's size, the photo's shape");
-        assert_eq!(display_for(&big.to_string_lossy(), 1024).unwrap(), Some(copy), "made once, then found");
-        assert_eq!(display_for(&small.to_string_lossy(), 1024).unwrap(), None);
-        assert_eq!(display_for(&anim.to_string_lossy(), 1024).unwrap(), None, "an animation shows as it is");
     }
 
     #[test]

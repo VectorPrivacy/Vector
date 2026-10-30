@@ -121,15 +121,6 @@ pub async fn image_still(src: String) -> Result<Option<String>, String> {
     Ok(still.map(|p| p.to_string_lossy().into_owned()))
 }
 
-/// A copy of the picture `src` (a `vmedia:` ref or a cached file) at most `dim` on its longest
-/// side, or None to show the original: a chat bubble never draws a photo larger.
-#[tauri::command]
-pub async fn image_display(src: String, dim: u32) -> Result<Option<String>, String> {
-    let dim = dim.clamp(256, 4096);
-    let display = tokio::task::spawn_blocking(move || crate::image_cache::display_for(&src, dim)).await.map_err(|e| e.to_string())??;
-    Ok(display.map(|p| p.to_string_lossy().into_owned()))
-}
-
 // Handler list for this module (for reference):
 // - start_recording
 // - stop_recording
@@ -137,4 +128,3 @@ pub async fn image_display(src: String, dim: u32) -> Result<Option<String>, Stri
 // - transcribe_recording (platform-specific)
 // - download_whisper_model (platform-specific)
 // - image_still
-// - image_display

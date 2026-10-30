@@ -828,7 +828,6 @@ pub fn run() {
             commands::media::transcribe_recording,
             commands::media::download_whisper_model,
             commands::media::image_still,
-            commands::media::image_display,
             commands::messaging::update_unread_counter,
             commands::messaging::get_unread_counts,
             commands::messaging::set_active_chat,
