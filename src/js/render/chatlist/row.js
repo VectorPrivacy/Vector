@@ -16,6 +16,8 @@ async function _showChatRowContextMenu(chat, isGroup, nUnread, x, y) {
     // A mobile long-press synthesises a trailing tap; stamp the time so the
     // chatlist open handler can swallow it instead of opening the chat.
     window._chatRowMenuAt = Date.now();
+    // A community's row stands for the whole community: its own menu, as on the rail.
+    if (isGroup && chat.metadata?.custom_fields?.community_id) return openCommunityMenu(chat, null, { x, y });
 
     const items = [];
     if (nUnread > 0) {

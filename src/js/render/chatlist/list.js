@@ -256,12 +256,14 @@ function chatlistHelpers() {
         chatById: (id) => arrChats.find(c => c.id === id) || null,
         countPingMessages,
         isPrimaryChannelId: (id) => arrChats.some(c => c.id === id && c.metadata?.custom_fields?.primary_channel === id),
-        // A voice channel's row joins its call and opens its chat.
+        // A voice channel's row joins its call and opens its chat. Picked from a channel's
+        // drawer, the drawer goes away to show it.
         openChannel: (communityId, channel) => {
             if (channel.view === 'voice') joinVoiceChannel(communityId, channel);
             openCommunityChannel(communityId, channel);
+            ccSetDrawer(false);
         },
-        openChannelChat: (communityId, channel) => openCommunityChannel(communityId, channel),
+        openChannelChat: (communityId, channel) => { openCommunityChannel(communityId, channel); ccSetDrawer(false); },
         openChannelMenu,
         // A tap that dismissed an open context menu must only close it, not also open the
         // chat behind it; the trailing tap a long-press synthesises is swallowed the same way.
@@ -270,6 +272,8 @@ function chatlistHelpers() {
             if (wasContextMenuJustDismissed()) return;
             if (Date.now() - (window._chatRowMenuAt || 0) < 500) { window._chatRowMenuAt = 0; return; }
             if (vm.joining) return;
+            if (vm.isGroup && vm.communityId && ccActive()) return ccOpenCommunity(vm.communityId, vm.chat.id);
+            if (!vm.isGroup && ccActive() && !chatOnScreen(vm.chat.id)) return ccSlideInto(vm.chat.id);
             // A community opens on the channel you were last in.
             const target = (vm.isGroup && wsChannelForCommunity(vm.communityId)) || vm.chat.id;
             if (chatOnScreen(target)) return;

@@ -33,7 +33,10 @@ body.mobile .navbar {
 }
 body.mobile .profile-content { bottom: max(calc(65px + var(--floor, 0px) / 2), var(--kb, 0px)); }
 body.mobile:not(.cc) #chat-list { bottom: calc(70px + var(--floor, 0px) / 2); }
+body.mobile.cc { --cc-nav-h: calc(65px + var(--floor, 0px) / 2); }
 body.mobile.cc #chats { bottom: max(calc(65px + var(--floor, 0px) / 2), var(--kb, 0px)); }
+/* A channel's drawer has no tab bar under it, and puts the keyboard away as it comes out. */
+body.mobile.cc.cc-layer:not(.cc-homing) #chats { bottom: 0; }
 /* Panes and dialogs pinned to the screen's bottom end at the keyboard (`--kb`, web/chrome.js). */
 body.mobile #settings { bottom: max(calc(70px + var(--floor, 0px) / 2), var(--kb, 0px)); }
 body.mobile .relay-dialog-overlay { bottom: var(--kb, 0px); }

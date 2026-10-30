@@ -1,7 +1,7 @@
 <script>
     // The conversation pane: header, a DM request's bar, pins drawer, message list host,
     // wallpaper controls and the composer, each rendering from its store.
-    import { shellPanes, shellReveals, reveal, bindShellEl } from '../lib/shell.svelte.js';
+    import { shellPanes, shellReveals, shellHandlers, reveal, bindShellEl } from '../lib/shell.svelte.js';
     import { chatPaneHandlers } from '../lib/chatpane.svelte.js';
     import { pinsState } from '../lib/pins.svelte.js';
     import { wallpaperState, wallpaperShown } from '../lib/wallpaper.svelte.js';
@@ -13,7 +13,25 @@
     import ComposerBox from '../composer/ComposerBox.svelte';
     import RequestBar from '../chat/RequestBar.svelte';
     import { requestState } from '../lib/request.svelte.js';
+    import { consoleState } from '../lib/console.svelte.js';
+    import { railPull } from '../lib/railmotion.js';
+    import { drawerPull } from '../lib/drawer.js';
     const req = requestState();
+    const cc = consoleState();
+
+    // The drawer comes out under a sideways pull from the conversation or its header. What
+    // scrolls sideways itself, or turns under a drag, keeps the gesture.
+    function sideways(el) {
+        for (; el && !el.classList.contains('chat-messages'); el = el.parentElement) {
+            if (el.scrollWidth > el.clientWidth && /auto|scroll/.test(getComputedStyle(el).overflowX)) return true;
+        }
+        return false;
+    }
+    const drawerGrip = drawerPull({
+        live: () => cc.layer,
+        grabs: (t) => !!t.closest('.chat-messages, .chat-header') && !t.closest('.model3d, .audio-waveform') && !sideways(t),
+        end: (open) => shellHandlers().consoleDrawer?.(open),
+    });
     const panes = shellPanes();
     const reveals = shellReveals();
     const bindChat = bindShellEl('chat');
@@ -46,7 +64,7 @@
 </script>
 
 <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-<div id="chat" class="chat" style:display={panes.chat ? null : 'none'} class:pins-focus={pins.open} class:has-request={!!req.chatId} use:bindChat use:reveal={['chat', reveals.chat]} onclick={(e) => chatPaneHandlers().click?.(e)}
+<div id="chat" class="chat" style:display={panes.chat ? null : 'none'} class:pins-focus={pins.open} class:has-request={!!req.chatId} use:bindChat use:reveal={['chat', reveals.chat]} use:railPull={drawerGrip} onclick={(e) => chatPaneHandlers().click?.(e)}
      data-wallpaper={wallpaperShown() ? 'true' : undefined} data-wallpaper-previewing={wp.previewing ? 'true' : undefined}>
     <WallpaperLayer />
     <ChatHeader />

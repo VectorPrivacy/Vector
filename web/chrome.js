@@ -136,7 +136,8 @@
         // Just below the reserved strip: what the cap continues.
         const below = (parseFloat(getComputedStyle(document.body).getPropertyValue('--chrome-h')) || 0) + 4;
         for (const hit of document.elementsFromPoint(innerWidth / 2, below)) {
-            if (hit === cap || hit === root) continue;
+            // A dimmer over the page (`data-edge-skip`) leaves the status bar its colour.
+            if (hit === cap || hit === root || hit.hasAttribute('data-edge-skip')) continue;
             const cs = getComputedStyle(hit);
             const a = alphaOf(cs.backgroundColor);
             if (a <= 0) continue;

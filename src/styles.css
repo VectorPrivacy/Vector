@@ -4627,6 +4627,12 @@ body:not(.ws) .voice-tile {
   overflow: hidden;
 }
 
+/* The overview's header has only Back beside it: the name keeps that much clear on each
+   side, so it stays centred, and takes the rest. */
+body:not(.ws) #group-overview > .chat-header > .profile-header-info {
+  max-width: calc(100% - 120px);
+}
+
 /* Centred while the name fits; past that each side shrinks to its own buttons and
    the name takes everything between them. */
 #chat > .chat-header {

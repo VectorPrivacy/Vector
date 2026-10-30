@@ -16,6 +16,7 @@
     import NetworkNotice from './NetworkNotice.svelte';
     import { loginState } from '../lib/login.svelte.js';
     import { settler, railPull, edgeClaim } from '../lib/railmotion.js';
+    import { drawerPull } from '../lib/drawer.js';
     import { untrack } from 'svelte';
     const panes = shellPanes();
     const login = loginState();
@@ -69,6 +70,7 @@
         const live = cc.active;
         untrack(() => (live ? settle.to(railP, target) : (railP = target)));
     });
+    // In a channel's drawer a sideways pull moves the drawer, so the rail stays as it is.
     const pull = {
         width: () => RAIL_W,
         begin: () => { settle.stop(); return railP; },
@@ -77,12 +79,15 @@
             if (open !== cc.railOpen) shellHandlers().consoleSetRail?.(open);
             else settle.to(railP, open ? 1 : 0);
         },
+        grabs: () => !cc.layer,
     };
     // The rail moves by its bare strip and the Messages door: a tile's drag is its own.
-    const railGrip = { ...pull, grabs: (t) => !t.closest('.ws-rail-item, .ws-rail-folder, .cc-rail-add, .cc-rail-fold') };
+    const railGrip = { ...pull, grabs: (t) => !cc.layer && !t.closest('.ws-rail-item, .ws-rail-folder, .cc-rail-add, .cc-rail-fold') };
+    const drawerGrip = drawerPull({ live: () => cc.layer, end: (open) => shellHandlers().consoleDrawer?.(open) });
 </script>
 
-<div id="chats" class="chats" style:display={panes.chats ? null : 'none'} use:bindChats use:reveal={['chats', reveals.chats]}>
+<!-- A community channel on screen keeps the pane up as its drawer, away until pulled. -->
+<div id="chats" class="chats" style:display={panes.chats || cc.layer ? null : 'none'} use:bindChats use:reveal={['chats', reveals.chats]} use:railPull={drawerGrip}>
     {#if slim}<ConsoleHeader />{/if}
     <!-- A sync that starts under the login form waits for the list to be on screen. -->
     <div id="sync-line" class="sync-line" class:active={sync.active && !login.shown} class:fade-out={sync.fadeOut} class:progress={sync.progress !== null}
@@ -140,3 +145,8 @@
         </div>
     </div>
 </div>
+{#if cc.layer}
+    <!-- The channel under the drawer, shaded: a tap or a pull back puts the drawer away. -->
+    <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+    <div class="cc-drawer-shade" data-edge-skip use:railPull={drawerGrip} onclick={() => shellHandlers().consoleDrawer?.(false)}></div>
+{/if}

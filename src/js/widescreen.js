@@ -297,6 +297,8 @@ function wsSyncMembersPane() {
 
 function openCommunityDetails(chat) {
     if (!wsActive()) {
+        // A community channel stays open beneath its details, which slide over it and away.
+        if (ccLayerChat()) return ccOpenDetails(chat);
         // Narrow: the member list IS the screen, and Back returns to the channel.
         closeChat();
         openGroupOverview(chat);
@@ -391,20 +393,30 @@ function ccSyncBody() {
     document.body.classList.toggle('cc', on);
     VectorSvelte.setConsoleActive(on);
     document.body.classList.toggle('cc-community', on && !!ccSpace());
+    ccSyncLayer();
 }
 
 function ccScrollTop() {
     VectorSvelte.shellElements().chatList?.scrollTo({ top: 0 });
 }
 
+// Where the chats list was scrolled, kept while a community's channels have its scroller.
+let ccListTop = 0;
+function ccKeepListTop() {
+    if (!ccSpace()) ccListTop = VectorSvelte.shellElements().chatList?.scrollTop || 0;
+}
+
 /** A community was picked (or the Messages door, null): the pane follows it. Folded,
- *  its channels stand in for the list, and Back returns to it. */
+ *  its channels stand in for the list, and Back returns to it, where it was left. */
 function ccShowSpace(communityId) {
+    const back = !communityId && !!ccSpace();
+    if (communityId) ccKeepListTop();
     VectorSvelte.setConsoleSpace(communityId);
     VectorSvelte.setConsoleQuery('');
     paneChanged();
     ccSyncBack();
-    ccScrollTop();
+    VectorSvelte.flushSync();
+    VectorSvelte.shellElements().chatList?.scrollTo({ top: back ? ccListTop : 0 });
 }
 
 function ccSyncBack() {
@@ -423,13 +435,198 @@ function ccSetRail(open) {
 /** Whatever opened a chat, Back lands on the pane that holds it: its community's
  *  channels, or the DMs. A search has done its job once something opens from it. */
 function ccFollowOpenChat() {
+    ccSyncLayer();
     if (!ccActive()) return;
     // Back to the channels a chat was opened from, and from them to the list.
     if (!strOpenChat) return ccSyncBack();
     const chat = arrChats.find(c => c.id === strOpenChat);
     if (!chat || chat.id === strPubkey) return;
-    VectorSvelte.setConsoleSpace(communityIdOfChat(chat) || null);
+    // A flat chat's drawer is the whole list.
+    const space = ccFlatChat(chat) ? null : communityIdOfChat(chat);
+    const moved = space !== ccSpace();
+    VectorSvelte.setConsoleSpace(space);
     VectorSvelte.setConsoleQuery('');
+    // A community's channels start at the top; the list comes back where it was left.
+    if (moved) {
+        VectorSvelte.flushSync();
+        VectorSvelte.shellElements().chatList?.scrollTo({ top: space ? 0 : ccListTop });
+    }
+}
+
+/* The drawer (lib/drawer.js): with a chat on screen the list pane is its drawer, away until
+   pulled out. A community of many channels rests it beside the channel, out when the community
+   was just picked: Back from the channel brings it out, and Back from it leaves the community.
+   A flat chat (a DM, or a community of one channel) has no list of its own, so its drawer is the
+   whole list, and comes out only to leave for it. */
+let ccDrawerOpen = false;
+let ccLayerChatId = null;
+
+/** The chat on screen in the console, or null. */
+function ccLayerChat() {
+    if (!ccActive() || !strOpenChat || !VectorSvelte.paneShown('chat')) return null;
+    // A DM with nothing in it yet isn't in the list.
+    return arrChats.find(c => c.id === strOpenChat) || { id: strOpenChat };
+}
+
+/** A chat with no drawer of its own: a DM, or a community of one channel. */
+function ccFlatChat(chat) {
+    const communityId = communityIdOfChat(chat);
+    return !communityId || communityIsSingleChannel(communityId);
+}
+
+function ccSyncFlat() {
+    const chat = ccLayerChat();
+    document.body.classList.toggle('cc-flat', !!chat && ccFlatChat(chat));
+}
+
+function ccSyncLayer() {
+    const chat = ccLayerChat();
+    document.body.classList.toggle('cc-layer', !!chat);
+    VectorSvelte.setConsoleLayer(!!chat);
+    if (!chat) {
+        ccLayerChatId = null;
+        ccDrawerOpen = false;
+        popBack('cc-drawer');
+        VectorSvelte.drawerTo(false, true);
+        ccSyncFlat();
+        return;
+    }
+    // Only on arrival: a re-sync must not lift Back past whatever opened over the channel.
+    if (ccLayerChatId === chat.id) return;
+    ccLayerChatId = chat.id;
+    // A drawer left out goes away before a flat chat takes its peek.
+    if (ccDrawerOpen && ccFlatChat(chat)) {
+        ccDrawerOpen = false;
+        VectorSvelte.drawerTo(false, false, ccSyncFlat);
+    } else {
+        ccSyncFlat();
+    }
+    ccSyncDrawerBack(chat);
+}
+
+function ccSyncDrawerBack(chat) {
+    pushBack('cc-drawer', ccDrawerOpen || ccFlatChat(chat) ? ccLeaveChat : () => ccSetDrawer(true));
+}
+
+/** Bring the drawer out or put it away; `instant` for a screen that opens with it out. */
+function ccSetDrawer(open, instant = false) {
+    const chat = ccLayerChat();
+    if (!chat) return;
+    if (open && ccFlatChat(chat)) return ccLeaveChat();
+    ccDrawerOpen = !!open;
+    // The keyboard belongs to the conversation going under.
+    if (open) document.activeElement?.blur?.();
+    VectorSvelte.drawerTo(open, instant);
+    ccSyncDrawerBack(chat);
+}
+
+/** The Messages door, or the folded list's Back: from a channel's drawer that's out of the
+ *  community, which is the only way back to the tab bar where nothing has a Back button. */
+function ccHome() {
+    if (ccLayerChat()) ccLeaveChat();
+    else ccShowSpace(null);
+}
+
+/** Search spans every chat, so it starts from the list: out of a community, or off its channels. */
+function ccSearch() {
+    if (ccLayerChat()) ccLeaveChat();
+    else if (ccSpace()) ccShowSpace(null);
+}
+
+// Bumped by each widening of the drawer into the list or back, so only the latest one lands.
+let ccHomeSeq = 0;
+
+/** Out of the chat on screen, to the list it was picked from. */
+function ccLeaveChat() {
+    // Cleared first, so the list never shows the community's channels on the way.
+    if (ccSpace()) ccShowSpace(null);
+    const chat = ccLayerChat();
+    if (!chat || !(ccDrawerOpen || ccFlatChat(chat))) return closeChat();
+    // The list comes the rest of the way over the chat and widens into the screen, the tab bar rising with it.
+    const id = strOpenChat;
+    const seq = ++ccHomeSeq;
+    if (!document.activeElement?.closest?.('.cc-search')) document.activeElement?.blur?.();
+    VectorSvelte.showPane('chats', true);
+    VectorSvelte.showPane('navbar', true);
+    VectorSvelte.setShellFlag('settingsTab', true);
+    VectorSvelte.drawerTo(true);
+    VectorSvelte.drawerHome(1, {
+        done: () => {
+            if (seq === ccHomeSeq && strOpenChat === id) closeChat();
+            VectorSvelte.drawerHome(0, { instant: true });
+        },
+    });
+}
+
+/** Arrived from the list: it narrows into the drawer, or slides off a flat chat, as the tab bar sinks. */
+function ccCameFromList() {
+    const seq = ++ccHomeSeq;
+    VectorSvelte.showPane('navbar', true);
+    VectorSvelte.setShellFlag('settingsTab', true);
+    VectorSvelte.drawerHome(0, {
+        from: 1,
+        done: () => {
+            if (seq !== ccHomeSeq || !ccLayerChat()) return;
+            VectorSvelte.showPane('navbar', false);
+            VectorSvelte.setShellFlag('settingsTab', false);
+        },
+    });
+}
+
+/** Into a flat chat from the list, which slides away to the left: leaving it, backwards. */
+function ccSlideInto(id) {
+    // Opening the chat takes the list out of the layout for a moment, which forgets its scroll.
+    const list = VectorSvelte.shellElements().chatList;
+    const top = list?.scrollTop || 0;
+    openChat(id, { fade: false });
+    if (!ccLayerChat()) return VectorSvelte.revealPane('chat', 'fadein-anim');
+    if (list) list.scrollTop = top;
+    VectorSvelte.drawerTo(true, true);
+    VectorSvelte.drawerTo(false);
+    ccCameFromList();
+}
+
+/** A community channel's details (lib/sheet.js), slid in over the channel, which stays open. */
+function ccOpenDetails(chat) {
+    document.activeElement?.blur?.();
+    VectorSvelte.sheetTo(true, { instant: true });
+    openGroupOverview(chat, true);
+    VectorSvelte.sheetTo(false);
+}
+
+/** Slide the details away to the channel beneath. */
+function ccCloseDetails() {
+    popBack('group-overview');
+    VectorSvelte.sheetTo(true, {
+        done: () => {
+            VectorSvelte.showPane('groupOverview', false);
+            VectorSvelte.setOverviewGroup(null);
+        },
+    });
+}
+
+/** The chat header's Back: a channel's drawer, or out of a flat chat. False off the console. */
+function ccChatBack() {
+    const chat = ccLayerChat();
+    if (!chat) return false;
+    if (!ccDrawerOpen && !ccFlatChat(chat)) ccSetDrawer(true);
+    else ccLeaveChat();
+    return true;
+}
+
+/** A community picked from the rail or the list: its last channel opens under its drawer,
+ *  or on its own when it has just the one. Channels not loaded yet: just its channels. */
+function ccOpenCommunity(communityId, fallbackChatId) {
+    ccKeepListTop();
+    const target = wsChannelForCommunity(communityId) || fallbackChatId;
+    if (!target) return ccShowSpace(communityId);
+    // Picked from inside the drawer it eases; from the list the screen opens with it out.
+    const instant = !ccLayerChat();
+    const drawer = !communityIsSingleChannel(communityId);
+    if (instant && !drawer) return ccSlideInto(target);
+    if (!chatOnScreen(target)) openChat(target);
+    ccSetDrawer(drawer, instant);
+    if (instant && drawer && ccLayerChat()) ccCameFromList();
 }
 
 /** The header's New menu, hung from the + under its right edge. */
@@ -451,12 +648,17 @@ function ccInit() {
     let open = true;
     try { open = localStorage.getItem(CC_KEY_RAIL) !== 'false'; } catch (_) { /* default stands */ }
     VectorSvelte.setConsoleRail(open);
+    // The drawer lives exactly as long as a chat is on screen.
+    VectorSvelte.onPaneChange((name) => { if (name === 'chat' || name === null) ccSyncLayer(); });
     VectorSvelte.mergeShellHandlers({
         consoleSwitchAccount: (el) => profileSwitcher.toggle('header', el),
         consoleScan: () => openQrScanner(),
         consoleNewMenu: ccOpenNewMenu,
         consoleSetRail: ccSetRail,
-        consoleBack: () => ccShowSpace(null),
+        consoleBack: ccHome,
+        consoleDrawer: (open) => ccSetDrawer(open),
+        consoleDetails: (gone) => (gone ? ccCloseDetails() : VectorSvelte.sheetTo(false)),
+        consoleSearch: ccSearch,
         // The rail's own surface (its background, the Messages door, its buttons) folds it;
         // a community or folder keeps its own menu.
         consoleRailMenu: (node) => attachLongPressContextMenu(

@@ -711,3 +711,87 @@ body.cc .chatlist-community-head-avatar {
   width: 40px !important;
   height: 40px !important;
 }
+
+/* ============================ The channel drawer ========================== */
+
+/* With a community channel on screen the pane is its drawer, pulled over the channel by
+   `--cc-drawer-p` (lib/drawer.js), the channel showing beside it under a shade. Only the
+   drawer moves: the conversation's long scroller stays where it is. */
+body.cc.cc-layer #chats {
+  right: calc(var(--cc-peek) * (1 - var(--cc-home, 0)));
+  bottom: 0;
+  z-index: 110;
+  /* Toward the list's own ground as it widens into it. */
+  background-color: color-mix(in srgb, #0b0b0b calc((1 - var(--cc-home, 0)) * 100%), rgb(5, 5, 5));
+  transform: translateX(calc((var(--cc-drawer-p, 0) - 1) * 100%));
+  touch-action: pan-y;
+  box-shadow: 4px 0 24px rgba(0, 0, 0, 0.5);
+  /* The shadow falls on the channel only, never up under the status bar. */
+  clip-path: inset(0 -32px 0 0);
+}
+
+/* The tab bar rises under it as it widens into the list, and sinks as it narrows back. */
+body.cc.cc-layer.cc-homing #chats {
+  bottom: calc(max(var(--cc-nav-h), var(--kb, 0px)) * var(--cc-home, 0));
+}
+
+body.cc.cc-homing .navbar {
+  z-index: 111;
+  transform: translateY(calc((1 - var(--cc-home, 0)) * 100%));
+}
+
+/* A flat chat's drawer is the whole list, with nothing of the chat beside it. */
+body.cc.cc-layer.cc-flat {
+  --cc-peek: 0px;
+}
+
+/* Away, it neither paints nor takes a press. */
+body.cc.cc-layer:not(.cc-drawer-on) #chats {
+  visibility: hidden;
+}
+
+.cc-drawer-shade {
+  display: none;
+}
+
+/* Present only while the drawer shows: a blur held at nothing still costs its layer. */
+body.cc.cc-layer.cc-drawer-on .cc-drawer-shade {
+  display: block;
+  position: fixed;
+  top: var(--chrome-h);
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 109;
+  background-color: rgba(0, 0, 0, 0.45);
+  opacity: var(--cc-drawer-p);
+  -webkit-backdrop-filter: blur(3px);
+  backdrop-filter: blur(3px);
+  touch-action: none;
+}
+
+/* Sideways over the conversation is the drawer's, or a reply's; up and down still scroll. */
+body.cc.cc-layer #chat-messages {
+  touch-action: pan-y;
+}
+
+/* A channel's details slide over it from the right, `--cc-sheet-away` (lib/sheet.js) off,
+   the channel kept open beneath: under the drawer and its shade, over the channel's header. */
+body.cc.cc-layer #group-overview {
+  position: fixed;
+  top: var(--chrome-h, 0px);
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: auto;
+  z-index: 108;
+  background-color: rgb(3, 3, 3);
+  transform: translateX(calc(var(--cc-sheet-away, 0) * 100%));
+  box-shadow: -4px 0 24px rgba(0, 0, 0, 0.5);
+  clip-path: inset(0 0 0 -32px);
+}
+
+body.cc.cc-layer #group-overview,
+body.cc.cc-layer #group-overview > div {
+  touch-action: pan-y;
+}

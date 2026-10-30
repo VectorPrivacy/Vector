@@ -43,8 +43,9 @@
         }
         let subtext = '', tags = [], topic = false;
         if (notes) subtext = 'Encrypted Notes to Self';
-        // A channel's topic says more than the member count, so it takes the line when set.
-        else if (group) { const t = H.channelTopic(chat); topic = !!t; subtext = t || H.memberSubtext(communityId); }
+        // A channel's topic says more than the member count, so it takes the line when set; a
+        // header naming the channel shows its topic or nothing.
+        else if (group) { const t = H.channelTopic(chat); topic = !!t; subtext = t || (H.namesChannel(chat) ? '' : H.memberSubtext(communityId)); }
         else if (!H.streamHidden(profile || id)) { subtext = profile?.status?.title || ''; tags = profile?.status?.emoji_tags || []; }
         return { id, notes, group, name, twemoji, avatarSrc, click, subtext, tags, topic, menu: !!chat && H.menuCount(chat) > 0 };
     });

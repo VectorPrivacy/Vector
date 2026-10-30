@@ -10,10 +10,12 @@
     // roster island mounts into #group-overview-members from the app.
     import { overviewState } from '../lib/overview.svelte.js';
 
-    let { h } = $props();   // h: memberSubtext, openNotifyMenu, pickIcon, rename, setDescription, invite, moderate, leaveOrDelete
+    let { h } = $props();   // h: memberSubtext, openNotifyMenu, pickIcon, rename, setDescription, setTopic, invite, moderate, channelOf, editChannel, leaveOrDelete
 
     const ov = overviewState();
     const manage = $derived(!!ov.caps.manage_metadata);
+    // In a community of many channels this is the channel's view: its name and topic.
+    const manageTopic = $derived(!!ov.caps.manage_channels);
 
     let iconBroken = $state(false);
     $effect(() => { ov.avatarSrc; iconBroken = false; });
@@ -23,8 +25,8 @@
     let draft = $state('');
     let leaving = $state(false);
     function startEdit(kind) {
-        if (!manage) return;
-        draft = kind === 'name' ? ov.name : ov.description;
+        if (!(kind === 'topic' ? manageTopic : manage)) return;
+        draft = kind === 'name' ? ov.name : kind === 'topic' ? ov.channel?.topic || '' : ov.description;
         editing = kind;
     }
     function commit() {
@@ -33,6 +35,7 @@
         editing = null;
         const value = draft.trim();
         if (kind === 'name') { if (value && value !== ov.name) h.rename(value); }
+        else if (kind === 'topic') { if (value !== (ov.channel?.topic || '')) h.setTopic(value); }
         else if (value !== ov.description) h.setDescription(value);
     }
     function cancel() { editing = null; }
@@ -68,7 +71,20 @@
     {/if}
 </div>
 <div class="group-overview-body">
-    {#if editing === 'name'}
+    {#if ov.channel}
+        <!-- Renamed in its editor, with the rest of the channel. -->
+        <h3 id="group-overview-secondary-name" class="chat-contact-with-status cutoff"
+            style="max-width: 90%; margin-left: auto; margin-right: auto;">{ov.channel.voice ? '' : '#'}{ov.channel.name}</h3>
+        {#if editing === 'topic'}
+            <textarea class="group-name-input" rows="2" bind:value={draft} use:focus
+                      onblur={commit} onkeydown={(e) => { if (e.key === 'Escape') cancel(); }}></textarea>
+        {:else if ov.channel.topic || manageTopic}
+            <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+            <span id="group-overview-description" class="chat-contact-status" class:group-editable={manageTopic} class:group-placeholder={!ov.channel.topic && manageTopic}
+                  style="width: 90%; white-space: pre-line; overflow-y: auto; max-height: 225px; font-style: normal; margin-top: 10px;"
+                  onclick={() => startEdit('topic')}>{ov.channel.topic || 'Add a topic...'}</span>
+        {/if}
+    {:else if editing === 'name'}
         <input type="text" class="group-name-input" maxlength="32" bind:value={draft} use:focus
                onblur={commit} onkeydown={(e) => { if (e.key === 'Enter') { e.preventDefault(); e.target.blur(); } if (e.key === 'Escape') cancel(); }}>
     {:else}
@@ -76,7 +92,9 @@
         <h3 id="group-overview-secondary-name" class="chat-contact-with-status btn cutoff" class:group-editable={manage}
             style="max-width: 90%; margin-left: auto; margin-right: auto;" onclick={() => startEdit('name')}>{ov.name}</h3>
     {/if}
-    {#if editing === 'description'}
+    {#if ov.channel}
+        <!-- The channel's topic stands in for the community's description. -->
+    {:else if editing === 'description'}
         <textarea class="group-name-input" maxlength="500" rows="2" bind:value={draft} use:focus
                   onblur={commit} onkeydown={(e) => { if (e.key === 'Escape') cancel(); }}></textarea>
     {:else if ov.description || manage}
@@ -93,21 +111,29 @@
                     <span style="color: white;">Invite</span>
                 </button>
             {/if}
-            <!-- Batch containment needs BAN, and the rotation it drives is a v2 verb. -->
-            {#if ov.caps.ban}
-                <button id="group-moderate-btn" class="btn accept-btn btn-bounce" class:raid-alert={!!ov.raid} title={ov.raid ? `${ov.raid.suspects} accounts flagged as a raid` : null}
+            <!-- Moderation lives in the community's menu; a flagged raid brings it here, where it
+                 can't be missed. Batch containment needs BAN. -->
+            {#if ov.caps.ban && ov.raid}
+                <button id="group-moderate-btn" class="btn accept-btn btn-bounce raid-alert" title={`${ov.raid.suspects} accounts flagged as a raid`}
                         style="background-color: transparent; display: flex; align-items: center; gap: 6px;" onclick={h.moderate}>
                     <span class="icon icon-warning" style="width: 16px; height: 16px; flex-shrink: 0; position: relative; background-color: var(--danger-color);"></span>
                     <span style="color: white;">Moderate</span>
                 </button>
+            {:else if ov.caps.manage_channels && h.channelOf()}
+                <button id="group-edit-channel-btn" class="btn accept-btn btn-bounce" style="background-color: transparent; display: flex; align-items: center; gap: 6px;" onclick={h.editChannel}>
+                    <span class="icon icon-edit" style="width: 16px; height: 16px; flex-shrink: 0; position: relative; background-color: var(--icon-color-primary);"></span>
+                    <span style="color: white;">Edit Channel</span>
+                </button>
             {/if}
-            <!-- The owner cannot leave their own root: their button dissolves it for everyone. -->
-            <button id="group-leave-btn" class="btn cancel-btn btn-bounce" style="display: flex; align-items: center; gap: 6px;"
-                    style:opacity={leaving ? '0.5' : null} style:pointer-events={leaving ? 'none' : null}
-                    onclick={async () => { leaving = true; try { await h.leaveOrDelete(); } finally { leaving = false; } }}>
-                <span class="icon icon-x-user" style="width: 16px; height: 16px; flex-shrink: 0; position: relative; background-color: var(--danger-color);"></span>
-                <span style="color: white;">{ov.isOwner ? 'Delete Community' : 'Leave'}</span>
-            </button>
+            <!-- The owner dissolves the community from its menu, behind its confirmation. -->
+            {#if !ov.isOwner}
+                <button id="group-leave-btn" class="btn cancel-btn btn-bounce" style="display: flex; align-items: center; gap: 6px;"
+                        style:opacity={leaving ? '0.5' : null} style:pointer-events={leaving ? 'none' : null}
+                        onclick={async () => { leaving = true; try { await h.leaveOrDelete(); } finally { leaving = false; } }}>
+                    <span class="icon icon-x-user" style="width: 16px; height: 16px; flex-shrink: 0; position: relative; background-color: var(--danger-color);"></span>
+                    <span style="color: white;">Leave</span>
+                </button>
+            {/if}
         </div>
         {#if !shell.ws}<MemberSearch />{/if}
         <div id="group-overview-members" style="padding: 6px; border-radius: 8px; border: 1px solid rgba(57, 57, 57, 0.5);">

@@ -73,7 +73,8 @@ function swipeEnd() {
 /**
  * Pull the rail by this element, sideways only: a press that heads up or down is left to
  * scroll. `o`: { width() px of a full pull, begin() → the amount it starts from,
- * move(amount), end(open), grabs?(target) → false where a press is never a pull }.
+ * move(amount), end(open), grabs?(target) → false where a press is never a pull,
+ * declines?(dx) → true for a sideways start (px, + rightward) left to someone else }.
  * A release decides by its speed, else by how far it got. A
  * pull whose release never arrives (let go outside the window) ends at the next press,
  * a lost capture or the window losing focus, so it can't hold the rail mid-way. A
@@ -122,7 +123,7 @@ export function railPull(node, o) {
             const dx = e.clientX - x0, dy = e.clientY - y0;
             if (Math.hypot(dx, dy) < SLOP) return;
             axis = Math.abs(dx) > Math.abs(dy) ? 'x' : 'y';
-            if (axis === 'y') { id = null; return; }
+            if (axis === 'y' || (!refused && opts.declines?.(dx))) { id = null; return; }
             if (refused) { stray = true; return; }
             p0 = last = opts.begin();
             pulling = true;
@@ -170,6 +171,8 @@ export function railPull(node, o) {
             return;
         }
         if (performance.now() < swipeQuietUntil || (opts.grabs && !opts.grabs(e.target))) return;
+        // Content moves against the fingers, so the swipe travels -deltaX.
+        if (opts.declines?.(-e.deltaX)) return;
         e.preventDefault();
         swipe = { owner: node, opts, p0: opts.begin(), last: 0, dx: 0, samples: [], timer: 0 };
         swipe.last = swipe.p0;

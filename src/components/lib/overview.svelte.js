@@ -9,6 +9,7 @@ const ov = $state({
     chatId: '', communityId: '',
     name: '', description: '', avatarSrc: null,
     muted: false, isOwner: false,
+    channel: null,            // { name, topic, voice }: the channel's view, in a community of many
     caps: {},                 // role-engine capabilities; empty = nothing manageable
     raid: null,               // { suspects } while a raid is flagged
     upload: null,             // { progress } while the icon uploads

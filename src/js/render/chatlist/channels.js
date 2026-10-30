@@ -915,6 +915,19 @@ function communityOfChannel(channelId) {
     return null;
 }
 
+/** One channel and no Categories: a community that reads as a group chat. Unknown until its channels load. */
+function communityIsSingleChannel(communityId) {
+    const channels = getCommunityChannels(communityId);
+    return !!channels && channels.length <= 1 && !getCommunityCategories(communityId).length;
+}
+
+/** The slim header names the channel, with its topic under it, in a community of many:
+ *  the drawer beside it names the community. */
+function headerNamesChannel(chat) {
+    const communityId = communityIdOfChat(chat);
+    return !wsActive() && !!communityId && !!chat?.metadata?.custom_fields?.channel_name && !communityIsSingleChannel(communityId);
+}
+
 /**
  * The title for a Community chat's header: the community's name, plus the channel when
  * you're in one of its secondary channels (the primary channel IS the community row, so
@@ -929,7 +942,8 @@ function communityChatTitle(chat) {
     if (wsActive() && communityIdOfChat(chat)) {
         return cf.channel_name || name;
     }
-    if (isPrimaryChannelChat(chat) || !cf.channel_name) return name;
+    if (!headerNamesChannel(chat) && (isPrimaryChannelChat(chat) || !cf.channel_name)) return name;
     const voice = (getCommunityChannels(communityIdOfChat(chat)) || []).some((c) => c.id === chat.id && c.view === 'voice');
-    return `${name} › ${voice ? '' : '#'}${cf.channel_name}`;
+    const channel = `${voice ? '' : '#'}${cf.channel_name}`;
+    return headerNamesChannel(chat) ? channel : `${name} › ${channel}`;
 }

@@ -7,8 +7,9 @@ import { shellState } from './shell.svelte.js';
 const FILTERS_OPEN = ['messages', 'requests'];
 const FILTERS_FOLDED = ['all', 'messages', 'communities', 'requests'];
 
-// `active`: signed in and slim, so the console is the list pane's layout.
-const cc = $state({ active: false, railOpen: true, filter: 'messages', space: null, query: '' });
+// `active`: signed in and slim, so the console is the list pane's layout. `layer`: a
+// community channel is on screen, so the pane is its drawer (lib/drawer.js).
+const cc = $state({ active: false, railOpen: true, filter: 'messages', space: null, query: '', layer: false });
 
 export function consoleState() { return cc; }
 
@@ -25,3 +26,4 @@ export function setConsoleRail(open) { cc.railOpen = !!open; flushSync(); }
 export function setConsoleFilter(filter) { cc.filter = filter; }
 export function setConsoleSpace(communityId) { cc.space = communityId || null; }
 export function setConsoleQuery(text) { cc.query = text || ''; }
+export function setConsoleLayer(on) { if (cc.layer !== !!on) { cc.layer = !!on; flushSync(); } }

@@ -774,11 +774,13 @@ function _dmsgInitGestures() {
             if (_gAxis === 'v') { _gTouchRow = null; return; }  // vertical = scroll
             // A 3D model turns under the drag, and a code block or table with room to scroll owns it; at its edge, the swipe applies.
             if (e.target.closest('.model3d canvas') || _dmsgCanScrollX(e.target, _gTouchRow, dx)) { _gTouchRow = null; _gAxis = null; return; }
+            // A reply is a leftward swipe; one heading right is the channel drawer's.
+            if (dx > 0) { _gTouchRow = null; _gAxis = null; return; }
             _dmsgBeginSwipeVisual(_gTouchRow);
         }
         if (_gAxis !== 'h') return;
         // Claim the gesture from the scroller and render leftward travel only,
-        // rubber-banding both an accidental rightward pull and past the cap.
+        // rubber-banding a drift back past the start and past the cap.
         e.preventDefault();
         let off = Math.min(0, dx);
         if (off < -_G_SWIPE_MAX) off = -_G_SWIPE_MAX + (off + _G_SWIPE_MAX) * 0.2;

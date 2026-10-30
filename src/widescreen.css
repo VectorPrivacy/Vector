@@ -1108,6 +1108,7 @@ body.ws #group-mute-btn,
 body.ws #group-invite-member-btn,
 body.ws #group-leave-btn,
 body.ws #group-moderate-btn,
+body.ws #group-edit-channel-btn,
 body.ws #group-migrate-row {
   display: none !important;
 }

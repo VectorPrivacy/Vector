@@ -631,11 +631,13 @@ async function leaveCommunityFromList(chat) {
 /**
  * Open the Group Overview view for a specific group chat
  * @param {Chat} chat - The group chat object
+ * @param {boolean} [overChat] - slim: slid over the open channel by widescreen.js, which keeps it
  */
-async function openGroupOverview(chat) {
+async function openGroupOverview(chat, overChat = false) {
     if (!chat || !chatIsGroup(chat)) return;
 
     pushBack('group-overview', () => {
+        if (overChat) return ccCloseDetails();
         VectorSvelte.showPane('groupOverview', false);
         VectorSvelte.setOverviewGroup(null);
         // Widescreen docks the roster beside a conversation that never closed, so
@@ -658,7 +660,7 @@ async function openGroupOverview(chat) {
     // hiding them there only LOOKS right because `body.ws` forces them visible with
     // !important. The inline none survives underneath, so narrowing the window past
     // the threshold hands it the win and the whole app paints black.
-    if (!wsActive()) {
+    if (!wsActive() && !overChat) {
         VectorSvelte.showPane('navbar', false);
         VectorSvelte.showPane('chats', false);
         VectorSvelte.showPane('chat', false);
@@ -673,7 +675,7 @@ async function openGroupOverview(chat) {
     // first would leave the app fully black for the whole fetch — and a render
     // throw would strand it there.
     if (!VectorSvelte.paneShown('groupOverview')) {
-        VectorSvelte.revealPane('groupOverview', 'fadein-subtle-anim');
+        if (!overChat) VectorSvelte.revealPane('groupOverview', 'fadein-subtle-anim');
         VectorSvelte.showPane('groupOverview', true);
     }
 
@@ -767,6 +769,32 @@ function registerCommunityOverview() {
             },
             invite: () => { const chat = cur(); if (chat) openCommunityInvitePanel(chat); },
             moderate: () => openModerationPanel(VectorSvelte.overviewState().communityId),
+            // The channel the overview was opened from, which Edit Channel edits.
+            channelOf: () => {
+                const { communityId, chatId } = VectorSvelte.overviewState();
+                return (getCommunityChannels(communityId) || []).find(c => c.id === chatId) || null;
+            },
+            editChannel: () => {
+                const { communityId, chatId } = VectorSvelte.overviewState();
+                const channel = (getCommunityChannels(communityId) || []).find(c => c.id === chatId);
+                if (channel) openChannelEditorFor(communityId, channel);
+            },
+            setTopic: async (topic) => {
+                const ov = VectorSvelte.overviewState();
+                const { communityId, chatId } = ov;
+                const channel = (getCommunityChannels(communityId) || []).find(c => c.id === chatId);
+                if (!channel || !ov.channel) return;
+                const prev = ov.channel.topic;
+                VectorSvelte.setOverview({ channel: { ...ov.channel, topic } });
+                try {
+                    await invoke('edit_community_channel', { communityId, channelId: channel.id, name: channel.name, topic: topic || null, view: channel.view });
+                    refreshCommunityChannels();
+                } catch (e) {
+                    console.error('Failed to update the channel topic:', e);
+                    VectorSvelte.setOverview({ channel: { ...VectorSvelte.overviewState().channel, topic: prev } });
+                    showToast('Failed to update the topic');
+                }
+            },
             // The flows live in `communityLeaveOrDelete`: the widescreen header menu offers the same action.
             leaveOrDelete: async () => { const chat = cur(); if (chat) await communityLeaveOrDelete(chat); },
         },
@@ -783,6 +811,7 @@ function closeGroupOverviewFromHeader() {
         wsSetMembersOpen(false);
         return;
     }
+    if (VectorSvelte.paneShown('chat')) return ccCloseDetails();
     const { chatId } = VectorSvelte.overviewState();
     popBack('group-overview');
     VectorSvelte.showPane('groupOverview', false);
@@ -851,12 +880,17 @@ async function renderCommunityOverview(chat, preserveSearch = false) {
     // Tag the overview with its community so the realtime `community_refreshed` listener knows to re-render
     // it when a control change (ban/role/metadata/mode) lands live.
     VectorSvelte.setOverviewGroup(communityId);
+    // A community of many channels shows the channel it was opened from; one of a single
+    // channel reads as a group chat and shows the community.
+    const channel = communityIsSingleChannel(communityId) ? null
+        : (getCommunityChannels(communityId) || []).find(c => c.id === chat.id) || null;
     // The head paints from memory before anything is awaited; the gates it needs land below.
     VectorSvelte.setOverview({
         chatId: chat.id,
         communityId,
         name: cf.name || `Community ${chat.id.substring(0, 10)}...`,
         description: cf.description || '',
+        channel: channel && { name: channel.name, topic: channel.topic || '', voice: channel.view === 'voice' },
         avatarSrc: chat.metadata?.avatar_cached ? convertFileSrc(chat.metadata.avatar_cached) : null,
         muted: !!chat.community_muted,
         isOwner: cf.is_owner === 'true',

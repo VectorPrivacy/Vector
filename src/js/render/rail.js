@@ -93,19 +93,21 @@ function renderRailShortcuts() {
             computeListRowUnreadCount,
             computeCommunityPingCount,
             openChat: (id) => { if (!chatOnScreen(id)) openChat(id); },
-            // Widescreen returns you to the channel you left the community in, not its primary.
+            // Both return you to the channel you left the community in, not its primary.
             openCommunity: (communityId, fallbackChatId) => {
-                if (!wsActive()) return ccShowSpace(communityId);
+                // The tap a long-press ends on opened the menu, not the community.
+                if (Date.now() - (window._chatRowMenuAt || 0) < 500) { window._chatRowMenuAt = 0; return; }
+                if (!wsActive()) return ccOpenCommunity(communityId, fallbackChatId);
                 const id = wsChannelForCommunity(communityId) || fallbackChatId;
                 if (!chatOnScreen(id)) openChat(id);
             },
-            openDmHome: () => (wsActive() ? wsOpenDmHome() : ccShowSpace(null)),
+            openDmHome: () => (wsActive() ? wsOpenDmHome() : ccHome()),
             wsChannelForCommunity,
             voiceChannelIds: (communityId) => (getCommunityChannels(communityId) || []).filter((c) => c.view === 'voice').map((c) => c.id),
             attachLongPressContextMenu,
             // A shortcut stands for the whole community, so it opens the community's menu
             // rather than its anchoring channel's row menu.
-            openCommunityMenu: (chat, x, y) => openCommunityMenu(chat, null, { x, y }),
+            openCommunityMenu: (chat, x, y) => { window._chatRowMenuAt = Date.now(); openCommunityMenu(chat, null, { x, y }); },
             showChatRowContextMenu: _showChatRowContextMenu,
             syncRailFade,
             onUnreadDms: syncChatTabBadge,

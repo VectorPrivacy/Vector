@@ -1,6 +1,6 @@
 <script>
     // The slim layout's header: your avatar (the account switcher), search, the QR
-    // scanner and the New menu. Search filters the list beneath it as you type.
+    // scanner and the New menu. Search filters every chat as you type, from the list itself.
     import Avatar from '../ui/Avatar.svelte';
     import { accountState } from '../lib/account.svelte.js';
     import { shellHandlers } from '../lib/shell.svelte.js';
@@ -25,7 +25,7 @@
     <label class="cc-search" class:has-text={!!cc.query}>
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.6-3.6"/></svg>
         <input bind:this={inputEl} type="text" enterkeyhint="search" autocomplete="off" spellcheck="false" placeholder="Search..."
-               value={cc.query} oninput={(e) => setConsoleQuery(e.currentTarget.value)}
+               value={cc.query} onfocus={() => h().consoleSearch?.()} oninput={(e) => setConsoleQuery(e.currentTarget.value)}
                onkeydown={(e) => { if (e.key === 'Escape') clear(); }}>
         {#if cc.query}
             <button class="cc-search-clear" aria-label="Clear search" onclick={(e) => { e.preventDefault(); clear(); }}>

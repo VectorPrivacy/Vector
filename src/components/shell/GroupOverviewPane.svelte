@@ -8,8 +8,15 @@
     import Avatar from '../ui/Avatar.svelte';
     import CommunityOverview from '../community/CommunityOverview.svelte';
     import MemberSearch from '../community/MemberSearch.svelte';
-    import { shellState, shellScreens } from '../lib/shell.svelte.js';
+    import { shellState, shellScreens, shellHandlers } from '../lib/shell.svelte.js';
+    import { consoleState } from '../lib/console.svelte.js';
+    import { railPull } from '../lib/railmotion.js';
+    import { sheetPull } from '../lib/sheet.js';
     const panes = shellPanes();
+    const cc = consoleState();
+    // Over a community channel, a pull to the right slides the details away to it.
+    const sheetGrip = { ...sheetPull({ live: () => cc.layer, end: (gone) => shellHandlers().consoleDetails?.(gone) }),
+        grabs: (t) => !t.closest('input, textarea') };
     const ov = overviewState();
     const h = () => overviewHeadHandlers();
     const subtext = $derived.by(() => {
@@ -22,7 +29,7 @@
     const screens = shellScreens();
 </script>
 
-<div id="group-overview" class="chats" style:display={panes.groupOverview ? null : 'none'} use:reveal={['groupOverview', reveals.groupOverview]} data-group-id={ov.groupId || undefined}>
+<div id="group-overview" class="chats" style:display={panes.groupOverview ? null : 'none'} use:reveal={['groupOverview', reveals.groupOverview]} use:railPull={sheetGrip} data-group-id={ov.groupId || undefined}>
     <div class="chat-header" style="top: 0px;">
         <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
         <div id="group-overview-back-btn" class="btn nav-back-btn" onclick={() => h().back?.()}>
