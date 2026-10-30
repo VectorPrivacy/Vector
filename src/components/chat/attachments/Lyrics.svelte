@@ -3,6 +3,7 @@
     // the view with the rest dimmed, softening with distance while the music plays; words
     // fill in as they are sung when the file times them, and a tap on a line plays from
     // there. Plain lyrics are a calm scrolling text.
+    import { tiling } from '../../lib/tiling.js';
     let { lyrics, positionMs, playing, onSeek } = $props();
     // lyrics: { synced, lines: [{ at_ms, text, words: [{ at_ms, text }] }] } (src-tauri lyrics.rs)
 
@@ -131,7 +132,7 @@
 </script>
 
 <!-- svelte-ignore a11y_no_static_element_interactions -->
-<div class="lyrics" class:is-synced={lyrics.synced} class:is-playing={playing} class:more-above={moreAbove} class:more-below={moreBelow}
+<div class="lyrics" use:tiling class:is-synced={lyrics.synced} class:is-playing={playing} class:more-above={moreAbove} class:more-below={moreBelow}
      bind:this={scroller} onwheel={hold} ontouchmove={hold} onscroll={onScroll}>
     {#each lines as line, i (i)}
         {#if lyrics.synced}
