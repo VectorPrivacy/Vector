@@ -2206,17 +2206,24 @@ function stockEmojiCodeFor(char) {
     return _emojiCodeMap.get(char) || _emojiCodeMap.get(char.replace(/\uFE0F/g, '')) || null;
 }
 
+// The sheets are WebP, which a Mac's WebKit decodes only from macOS 11: before the probe says
+// yes, cells take the SVG path.
+let twemojiSheetsDecode = false;
+const _webpProbe = new Image();
+_webpProbe.onload = () => { twemojiSheetsDecode = _webpProbe.width === 1; };
+_webpProbe.src = 'data:image/webp;base64,UklGRhoAAABXRUJQVlA4TA0AAAAvAAAAEAcQERGIiP4HAA==';
+
 /**
  * Draw a picker cell's stock emoji as its slice of a sprite sheet (src/twemoji/sheets): the
  * grid decodes a few sheets, where an <img> per emoji kept a WebKit document per SVG.
- * False for an emoji on no sheet, which the caller twemojifies.
+ * False for an emoji on no sheet, or where WebP doesn't decode; the caller twemojifies.
  * @param {HTMLElement} cell
  * @param {string} emoji
  * @returns {boolean}
  */
 function spriteEmoji(cell, emoji) {
     const slot = twemojiSheets.slots[emoji];
-    if (slot === undefined) return false;
+    if (slot === undefined || !twemojiSheetsDecode) return false;
     const { per, cols } = twemojiSheets;
     const sheet = Math.floor(slot / per);
     const at = slot % per;
