@@ -152,15 +152,18 @@
 
 {#snippet enterIcon()}<img src="./icons/login/enter.svg" alt="" width="22" height="22">{/snippet}
 
-<div class="lg-art" class:hidden={l.bgHidden} aria-hidden="true">
-    <img src="./icons/login/cctv.png" alt="">
-</div>
-<div class="lg-aggro-bg" class:shown={l.screen === 'encrypt' && !!e.wrong} aria-hidden="true">
-    <img class="lg-aggro-bg-1" src="./icons/login/aggro-bg-1.svg" alt="" width="226" height="224">
-    <img class="lg-aggro-bg-2" src="./icons/login/aggro-bg-2.svg" alt="" width="128" height="127">
-    <img class="lg-aggro-bg-3" src="./icons/login/aggro-bg-3.svg" alt="" width="98" height="97">
-    <img class="lg-aggro-bg-4" src="./icons/login/aggro-bg-4.svg" alt="" width="60" height="59">
-</div>
+<!-- The art goes with the form: a signed-in session keeps no full-window picture decoded. -->
+{#if l.shown}
+    <div class="lg-art" class:hidden={l.bgHidden} aria-hidden="true">
+        <img src="./icons/login/cctv.png" alt="">
+    </div>
+    <div class="lg-aggro-bg" class:shown={l.screen === 'encrypt' && !!e.wrong} aria-hidden="true">
+        <img class="lg-aggro-bg-1" src="./icons/login/aggro-bg-1.svg" alt="" width="226" height="224">
+        <img class="lg-aggro-bg-2" src="./icons/login/aggro-bg-2.svg" alt="" width="128" height="127">
+        <img class="lg-aggro-bg-3" src="./icons/login/aggro-bg-3.svg" alt="" width="98" height="97">
+        <img class="lg-aggro-bg-4" src="./icons/login/aggro-bg-4.svg" alt="" width="60" height="59">
+    </div>
+{/if}
 
 <div class="lg">
     <header class="lg-head">
@@ -306,7 +309,7 @@
                 {/if}
                 {#if !e.typeSelectShown && (e.pinShown || e.passwordShown)}{@render goBack()}{/if}
             </div>
-        {:else if l.screen === 'none' && !l.bunker}
+        {:else if l.screen === 'none' && !l.bunker && l.shown}
             <div class="lg-booting" role="status" aria-label="Loading"><span></span><span></span><span></span></div>
         {/if}
 
