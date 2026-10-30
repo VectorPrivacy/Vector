@@ -310,6 +310,12 @@ let _packCanvasRafHandle = null;
 let _packCanvasLastTick = 0;
 
 function _packCanvasTick(now) {
+    // An inactive window shows its last frame; syncMotion restarts the loop on return.
+    if (!isWindowActive()) {
+        _packCanvasRafHandle = null;
+        _packCanvasLastTick = 0;
+        return;
+    }
     const dt = _packCanvasLastTick ? Math.min(now - _packCanvasLastTick, 100) : 0;
     _packCanvasLastTick = now;
     let anyActive = false;

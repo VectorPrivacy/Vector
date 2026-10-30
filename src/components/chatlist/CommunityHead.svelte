@@ -56,6 +56,7 @@
     <div
         class="chatlist-community-head btn"
         id="chatlist-community-head"
+        data-motion="live"
         onclick={(e) => h.openCommunityMenu(vm.primary, e)}
         oncontextmenu={(e) => { e.preventDefault(); e.stopPropagation(); h.openCommunityMenu(vm.primary, e); }}
     >

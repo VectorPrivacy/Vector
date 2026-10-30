@@ -33,6 +33,53 @@ function vcacheSrc(path) {
     return `${platformFeatures.vcache}/${rel.split('/').map(encodeURIComponent).join('/')}`;
 }
 
+/**
+ * The backend ref behind a src this page built: `vmedia:<hash>` or a file path; null for any other.
+ * @param {string} src
+ * @returns {string|null}
+ */
+function srcRef(src) {
+    const web = window.__vectorWeb?.pathOf(src);
+    if (web) return web;
+    const pf = platformFeatures;
+    src = src.split(/[?#]/)[0];
+    const after = (base) => base && src.startsWith(base + '/') ? src.slice(base.length + 1) : null;
+    const cached = after(pf?.vcache);
+    if (cached != null) return pf.app_data + cached.split('/').map(decodeURIComponent).join('/');
+    const held = after(pf?.vmedia);
+    if (held != null) return 'vmedia:' + held;
+    const served = after(pf?.media_url);
+    if (served != null) return decodeURIComponent(served);
+    const asset = src.match(/^(?:asset:\/\/localhost|https?:\/\/asset\.localhost)\/(.+)$/);
+    return asset ? decodeURIComponent(asset[1]) : null;
+}
+
+/** Everything that animates follows the window: still while it is inactive. */
+function syncMotion() {
+    const on = isWindowActive();
+    VectorSvelte.setMotionActive(on);
+    if (on) _startPackCanvasLoop();
+}
+
+/**
+ * What the picture at `src` shows while it may not move, and while it may; null when it doesn't
+ * animate. A face is shown by its thumb, a still, and moves by its original.
+ * @param {string} src
+ * @returns {Promise<{ still: string, moving: string, face: boolean }|null>}
+ */
+async function imageStill(src) {
+    const ref = srcRef(src);
+    if (!ref) return null;
+    const face = /[\\/]avatars[\\/]/.test(ref);
+    const original = ref.replace(/([\\/])avatars([\\/])thumbs[\\/]/, '$1avatars$2');
+    const still = await invoke('image_still', { src: original });
+    if (!still) return null;
+    const url = (path) => window.__vectorWeb?.fileUrl(path) ?? convertFileSrc(path);
+    return original === ref
+        ? { still: await url(still), moving: src, face }
+        : { still: src, moving: await url(original), face };
+}
+
 // System event types (matches Rust SystemEventType enum)
 const SystemEventType = {
     MemberLeft: 0,
@@ -1977,6 +2024,8 @@ let strPubkey;
 window.addEventListener("DOMContentLoaded", async () => {
     // Fetch platform features to determine OS-specific behavior
     await fetchPlatformFeatures();
+    VectorSvelte.startMotion({ stillOf: imageStill });
+    VectorSvelte.setMotionActive(document.hasFocus() && !document.hidden);
 
     // Downgrade gate, before any other boot step: this build must not touch a
     // database a newer Vector wrote. Terminal by design — nothing below runs.
@@ -2622,6 +2671,7 @@ window.addEventListener("DOMContentLoaded", async () => {
             const wasActive = isWindowActive();
             windowFocused = !!event.payload;
             if (!wasActive && isWindowActive()) { onWindowResumed(); if (!fInit) consumePendingShare(); }
+            syncMotion();
             syncBackendActiveChat();
         });
 
@@ -2631,6 +2681,7 @@ window.addEventListener("DOMContentLoaded", async () => {
             // A share that foregrounded the app (onNewIntent stored it) may have been emitted before
             // the WebView resumed; poll for it on every resume so it isn't stranded until a later tap.
             if (!wasActive && isWindowActive()) { onWindowResumed(); if (!fInit) consumePendingShare(); }
+            syncMotion();
             syncBackendActiveChat();
         });
     }

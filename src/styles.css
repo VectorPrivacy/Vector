@@ -1372,7 +1372,6 @@ html, body {
 }
 
 .aggro-glitch-img {
-  content: url('./icons/aggro-glitch-red.gif');
   width: 64px;
   height: 64px;
 }

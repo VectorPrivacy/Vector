@@ -618,9 +618,9 @@ pub fn avatar_thumb_path(avatar_path: &std::path::Path) -> Option<PathBuf> {
     Some(avatar_path.parent()?.join("thumbs").join(name))
 }
 
-/// Write the display-sized still for a cached avatar. An animation is already
-/// normalized to the display ceiling, and an undecodable file costs nothing to
-/// draw small, so those are copied as they are; an SVG never is.
+/// Write the display-sized still for a cached avatar or community icon: an animation's first
+/// frame, so lists show it still and only an open view plays it. An undecodable file costs
+/// nothing to draw small, so it is copied as it is; an SVG never is.
 pub fn write_avatar_thumb(avatar_path: &std::path::Path, bytes: &[u8]) -> Result<(), String> {
     let dest = avatar_thumb_path(avatar_path).ok_or("avatar path has no file name")?;
     if let Some(dir) = dest.parent() {
@@ -633,7 +633,7 @@ pub fn write_avatar_thumb(avatar_path: &std::path::Path, bytes: &[u8]) -> Result
     // Size from the header: a JPEG decodes DCT-scaled to just above the thumb, so the
     // decoded size no longer says whether the original needed shrinking.
     let big = crate::shared::image::animated_dims(bytes).is_some_and(|(w, h)| w.max(h) > AVATAR_THUMB_DIM);
-    if out.is_none() && big && crate::shared::image::animated_format(bytes).is_none() {
+    if out.is_none() && (big || crate::shared::image::animated_format(bytes).is_some()) {
         if let Ok(img) = crate::shared::image::decode_image(bytes, AVATAR_THUMB_DIM) {
             out = Some(crate::shared::image::compress_image(&img, AVATAR_THUMB_DIM, 85)?.bytes);
         }
@@ -641,8 +641,100 @@ pub fn write_avatar_thumb(avatar_path: &std::path::Path, bytes: &[u8]) -> Result
     vector_core::vcache::write(&dest, out.as_deref().unwrap_or(bytes)).map_err(|e| format!("thumb write: {e}"))
 }
 
-/// Longest side a still emoji or pack icon is kept at: it shows at most 64 CSS px, and a
-/// picker sheet frame is 56. A 512 px original decoded in full for an 18 px slot was a
+/// Thumbs written before an animation's thumb was its first frame, made stills once: a marker
+/// in the thumbs directory remembers it. Returns how many were rewritten.
+pub fn backfill_animated_avatar_stills<R: Runtime>(handle: &AppHandle<R>) -> usize {
+    const SWEPT: &str = ".animated-stills";
+    let Ok(dir) = get_cache_dir(handle, ImageType::Avatar) else { return 0 };
+    let marker = dir.join("thumbs").join(SWEPT);
+    if marker.exists() {
+        return 0;
+    }
+    let Ok(entries) = std::fs::read_dir(&dir) else { return 0 };
+    let mut written = 0usize;
+    for path in entries.flatten().map(|e| e.path()).filter(|p| p.is_file()) {
+        let Ok(bytes) = vector_core::vcache::read(&path) else { continue };
+        if crate::shared::image::animated_format(&bytes).is_none() {
+            continue;
+        }
+        match write_avatar_thumb(&path, &bytes) {
+            Ok(()) => written += 1,
+            Err(e) => log_debug!("[ImageCache] still skipped {:?}: {}", path.file_name(), e),
+        }
+    }
+    if std::fs::create_dir_all(dir.join("thumbs")).is_ok() {
+        let _ = std::fs::write(&marker, b"");
+    }
+    if written > 0 {
+        log_info!("[ImageCache] backfill: {} animated avatar thumbs made stills", written);
+    }
+    written
+}
+
+/// The largest animation a still is made from: past it, a page shows the animation as it is.
+const STILL_SOURCE_MAX: u64 = 64 * 1024 * 1024;
+/// Enough of a file to tell whether it animates: every marker sits in its first chunks.
+const ANIMATION_HEAD: usize = 64 * 1024;
+
+/// What the page shows while the animated image at `src` may not move: an avatar's thumb, or its
+/// first frame kept in `cache/stills/`. `src` is a `vmedia:` ref or a file under Vector's own
+/// folders; None when it does not animate.
+pub fn still_for(src: &str) -> Result<Option<PathBuf>, String> {
+    let app_data = vector_core::db::get_app_data_dir()?;
+    let (source, key, path) = match src.strip_prefix("vmedia:") {
+        Some(hash) => {
+            let raw = vector_core::simd::hex::hex_to_bytes_32_checked(hash).ok_or("not a media hash")?;
+            (vector_core::media::open(&raw).ok_or("not held")?, hash.to_ascii_lowercase(), None)
+        }
+        None => {
+            let real = std::fs::canonicalize(src).map_err(|e| e.to_string())?;
+            let ours = std::iter::once(app_data.clone())
+                .chain(vector_core::db::download_roots())
+                .filter_map(|root| std::fs::canonicalize(root).ok())
+                .any(|root| real.starts_with(root));
+            if !ours {
+                return Err("not one of Vector's files".into());
+            }
+            let meta = std::fs::metadata(&real).map_err(|e| e.to_string())?;
+            let stamp = meta.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_nanos());
+            let key = url_to_cache_key(&format!("{}\0{}\0{stamp}", real.to_string_lossy(), meta.len()));
+            (vector_core::vcache::open(&real, "").ok_or("not readable")?, key, Some(real))
+        }
+    };
+    let mut head = vec![0u8; ANIMATION_HEAD.min(source.len() as usize)];
+    let n = source.read_at(0, &mut head).map_err(|e| e.to_string())?;
+    if crate::shared::image::animated_format(&head[..n]).is_none() {
+        return Ok(None);
+    }
+    let in_avatars = |p: &&PathBuf| p.parent().and_then(|d| d.file_name()) == Some("avatars".as_ref());
+    if let Some(thumb) = path.as_ref().filter(in_avatars).and_then(|p| avatar_thumb_path(p)) {
+        if vector_core::vcache::readable(&thumb) {
+            return Ok(Some(thumb));
+        }
+    }
+    let still = app_data.join("cache").join("stills").join(format!("{key}.png"));
+    if vector_core::vcache::readable(&still) {
+        return Ok(Some(still));
+    }
+    if source.len() > STILL_SOURCE_MAX {
+        return Ok(None);
+    }
+    let mut bytes = zeroize::Zeroizing::new(vec![0u8; source.len() as usize]);
+    let mut filled = 0;
+    while filled < bytes.len() {
+        match source.read_at(filled as u64, &mut bytes[filled..]).map_err(|e| e.to_string())? {
+            0 => break,
+            n => filled += n,
+        }
+    }
+    let png = vector_core::crypto::still_png(&bytes[..filled])?;
+    std::fs::create_dir_all(still.parent().ok_or("no stills folder")?).map_err(|e| e.to_string())?;
+    vector_core::vcache::write(&still, &png)?;
+    Ok(Some(still))
+}
+
+/// Longest side an emoji or pack icon is kept at: it shows at most 64 CSS px, and a picker
+/// sheet frame is 56. A 512 px original decoded in full for an 18 px slot was a
 /// megabyte of pixels per icon.
 const EMOJI_STILL_DIM: u32 = 128;
 
@@ -1475,5 +1567,81 @@ mod avatar_thumb_tests {
         let thumb = avatar_thumb_path(&path).unwrap();
         assert_eq!(&*vector_core::vcache::read(&thumb).unwrap(), &bytes);
         assert_ne!(std::fs::read(&thumb).unwrap(), bytes, "sealed on disk");
+    }
+
+    fn gif(w: u16, h: u16, frames: u8) -> Vec<u8> {
+        let mut out = Vec::new();
+        {
+            let mut enc = gif::Encoder::new(&mut out, w, h, &[]).unwrap();
+            enc.set_repeat(gif::Repeat::Infinite).unwrap();
+            for i in 0..frames {
+                let mut px: Vec<u8> = (0..u32::from(w) * u32::from(h)).flat_map(|_| [i.wrapping_mul(60), 90, 200, 255]).collect();
+                enc.write_frame(&gif::Frame::from_rgba_speed(w, h, &mut px, 30)).unwrap();
+            }
+        }
+        out
+    }
+
+    fn animated_webp(w: u32, h: u32, frames: u32) -> Vec<u8> {
+        let mut enc = crate::shared::animated_webp::Encoder::lossy(w, h, 80.0).unwrap();
+        for i in 0..frames {
+            let px: Vec<u8> = (0..w * h).flat_map(|_| [(i * 60) as u8, 90, 200, 255]).collect();
+            enc.add(&px, 100).unwrap();
+        }
+        enc.finish().unwrap()
+    }
+
+    #[test]
+    fn an_animated_avatar_and_icon_get_a_still_first_frame_for_a_thumb() {
+        crate::util::test_app_data();
+        let dir = tempfile::tempdir().unwrap();
+        for (name, bytes) in [("a.gif", gif(120, 120, 3)), ("b.webp", animated_webp(120, 120, 3)), ("big.gif", gif(400, 300, 2))] {
+            assert!(crate::shared::image::animated_format(&bytes).is_some(), "{name}");
+            let path = dir.path().join(name);
+            write_avatar_thumb(&path, &bytes).unwrap();
+            let thumb = vector_core::vcache::read(&avatar_thumb_path(&path).unwrap()).unwrap();
+            assert!(crate::shared::image::animated_format(&thumb).is_none(), "{name}: the thumb is a still");
+            let img = image::load_from_memory(&thumb).unwrap();
+            assert!(img.width().max(img.height()) <= AVATAR_THUMB_DIM, "{name}");
+            let first = img.to_rgba8().get_pixel(img.width() / 2, img.height() / 2).0;
+            assert!(first[0] < 30 && first[2] > 150, "{name}: the first frame, not a later one: {first:?}");
+        }
+    }
+
+    #[test]
+    fn an_animation_gets_a_first_frame_still_and_a_still_picture_gets_none() {
+        let root = crate::util::test_app_data();
+        let emojis = root.join("cache").join("emojis");
+        std::fs::create_dir_all(&emojis).unwrap();
+        let (gif_path, png_path) = (emojis.join("still-test.gif"), emojis.join("still-test.png"));
+        vector_core::vcache::write(&gif_path, &gif(90, 60, 3)).unwrap();
+        vector_core::vcache::write(&png_path, &crate::shared::image::encode_png(&[9u8; 4 * 4 * 4], 4, 4).unwrap()).unwrap();
+
+        let still = still_for(&gif_path.to_string_lossy()).unwrap().expect("a GIF animates");
+        assert!(still.starts_with(root.join("cache").join("stills")));
+        assert!(vector_core::vcache::is_sealed(&still));
+        let img = image::load_from_memory(&vector_core::vcache::read(&still).unwrap()).unwrap();
+        assert_eq!((img.width(), img.height()), (90, 60), "the still keeps the animation's size");
+        assert!(img.to_rgba8().get_pixel(45, 30).0[0] < 30, "the first frame");
+        assert_eq!(still_for(&gif_path.to_string_lossy()).unwrap(), Some(still), "made once, then found");
+
+        assert_eq!(still_for(&png_path.to_string_lossy()).unwrap(), None);
+        let outside = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(outside.path(), gif(8, 8, 2)).unwrap();
+        assert!(still_for(&outside.path().to_string_lossy()).is_err(), "only Vector's own files");
+        assert!(still_for("vmedia:nothex").is_err());
+    }
+
+    #[test]
+    fn an_animated_avatar_stills_to_its_thumb() {
+        let root = crate::util::test_app_data();
+        let avatars = root.join("cache").join("avatars");
+        std::fs::create_dir_all(&avatars).unwrap();
+        let path = avatars.join("still-face.gif");
+        let bytes = gif(64, 64, 2);
+        vector_core::vcache::write(&path, &bytes).unwrap();
+        write_avatar_thumb(&path, &bytes).unwrap();
+        let thumb = still_for(&path.to_string_lossy()).unwrap().unwrap();
+        assert_eq!(std::fs::canonicalize(thumb).unwrap(), std::fs::canonicalize(avatar_thumb_path(&path).unwrap()).unwrap());
     }
 }

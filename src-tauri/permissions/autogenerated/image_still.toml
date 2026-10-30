@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-image-still"
+description = "Enables the image_still command without any pre-configured scope."
+commands.allow = ["image_still"]
+
+[[permission]]
+identifier = "deny-image-still"
+description = "Denies the image_still command without any pre-configured scope."
+commands.deny = ["image_still"]

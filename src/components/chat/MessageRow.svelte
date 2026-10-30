@@ -163,6 +163,7 @@
 
 <div
     class="dmsg"
+    data-motion-host
     class:dmsg--has-reply={!!quote && !isPivx && !isBlocked && !isTimedOut}
     class:dmsg--merged={merged}
     id={current.id}

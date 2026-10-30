@@ -39,6 +39,7 @@
 <!-- svelte-ignore a11y_no_noninteractive_tabindex (role is 'button' whenever tabindex is set) -->
 <div
     class="member-pick-row"
+    data-motion="hover"
     class:is-acting={acting}
     data-npub={npub}
     use:watchProfile={npub}

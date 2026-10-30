@@ -258,7 +258,7 @@ function tick(t) {
     const dt = Math.min(timer.getDelta(), 0.1);
     let any = false;
     for (const v of ticking) {
-        if (!v.onScreen || document.hidden || (front && v !== front)) continue;
+        if (!v.onScreen || document.hidden || !document.hasFocus() || (front && v !== front)) continue;
         any = true;
         if (v.animating) v.mixer.update(dt);
         if (v.spinning) v.spun += dt;
@@ -281,6 +281,7 @@ function schedule(v) {
     wake();
 }
 document.addEventListener('visibilitychange', wake);
+window.addEventListener('focus', wake);
 
 /**
  * Show the model at `url` (extension `ext`) on `canvas`. `onState` hears

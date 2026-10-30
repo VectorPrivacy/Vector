@@ -113,7 +113,7 @@
         <span class="icon icon-chevron-double-left nav-icon"></span>
         <span class="update-notification-dot" style:display={backDot ? null : 'none'}></span>
     </div>
-    <div class="profile-header-info">
+    <div class="profile-header-info" data-motion="hover">
         <div class="profile-header-name-row">
             <div id="chat-header-avatar-container">
                 {#if vm && !vm.notes}

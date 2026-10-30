@@ -84,6 +84,7 @@
 <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
 <div
     class="ws-rail-item btn"
+    data-motion="touch"
     class:is-community={isCommunity}
     class:is-quiet={isCommunity && !vm.unread}
     class:is-muted={vm.muted}

@@ -585,8 +585,16 @@
         return token;
     }
 
-    /** The stored path behind a URL `convertFileSrc` handed out, if it is one. */
-    const pathOf = (url) => tokens.get(tokenIn(url)) ?? null;
+    /** The stored path behind a URL `convertFileSrc` or `fileUrl` handed out, if it is one. */
+    function pathOf(url) {
+        const token = tokens.get(tokenIn(url));
+        if (token) return token;
+        if (typeof url !== 'string') return null;
+        const vfs = url.startsWith(location.origin + '/vfs/') ? url.slice(location.origin.length) : url.startsWith('/vfs/') ? url : null;
+        if (vfs) return vfs.slice(4).split(/[?#]/)[0].split('/').map(decodeURIComponent).join('/');
+        if (url.startsWith('blob:')) for (const [path, b] of blobs) if (b.url === url) return path;
+        return null;
+    }
 
     // What each element was last given and hasn't got yet: a file arriving late must
     // not overwrite a newer value, or a cleared one.

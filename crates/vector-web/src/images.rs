@@ -164,6 +164,50 @@ fn thumb(bytes: &[u8]) -> Option<Vec<u8>> {
     Some(out)
 }
 
+/// What the page shows while the animated picture at `path` may not move: an avatar's thumb, or
+/// its first frame kept in `/cache/stills/`. None when it doesn't animate.
+pub async fn still(path: &str) -> Result<Option<String>, String> {
+    if !path.starts_with("/cache/") || path.split('/').any(|p| p == "..") {
+        return Ok(None);
+    }
+    let bytes = vector_core::webfiles::read(Path::new(path)).await?;
+    if vector_core::crypto::animated_format(&bytes).is_none() {
+        return Ok(None);
+    }
+    if let Some(name) = path.strip_prefix("/cache/avatars/").filter(|n| !n.contains('/')) {
+        let thumb = format!("/cache/avatars/thumbs/{name}");
+        if vector_core::webfiles::exists(Path::new(&thumb)).await {
+            return Ok(Some(thumb));
+        }
+    }
+    let still = format!("/cache/stills/{}.png", &vector_core::crypto::sha256_hex(&bytes)[..32]);
+    if !vector_core::webfiles::exists(Path::new(&still)).await {
+        vector_core::webfiles::write(Path::new(&still), &vector_core::crypto::still_png(&bytes)?).await?;
+    }
+    Ok(Some(still))
+}
+
+/// Avatar thumbs kept as animations before a thumb was a still, made stills once: a marker in
+/// the thumbs directory remembers it.
+pub async fn still_avatar_thumbs() {
+    let marker = Path::new("/cache/avatars/thumbs/.animated-stills");
+    if vector_core::webfiles::exists(marker).await {
+        return;
+    }
+    for name in vector_core::webfiles::list(Path::new("/cache/avatars")).await {
+        let thumb_path = format!("/cache/avatars/thumbs/{name}");
+        let Ok(kept) = vector_core::webfiles::read(Path::new(&thumb_path)).await else { continue };
+        if vector_core::crypto::animated_format(&kept).is_none() {
+            continue;
+        }
+        let Ok(bytes) = vector_core::webfiles::read(Path::new(&format!("/cache/avatars/{name}"))).await else { continue };
+        if let Some(small) = thumb(&bytes) {
+            let _ = vector_core::webfiles::write(Path::new(&thumb_path), &small).await;
+        }
+    }
+    let _ = vector_core::webfiles::write(marker, b"").await;
+}
+
 /// A displayable src for `url`: the local copy's path, or a picture in a chat held in memory
 /// while the account doesn't keep media.
 pub async fn cache(url: &str, kind: Kind) -> Result<String, String> {
@@ -228,7 +272,7 @@ async fn store(url: &str, kind: Kind, bytes: &[u8]) -> Result<String, String> {
     let path = format!("/cache/{}/{key}.{ext}", kind.dir());
     vector_core::webfiles::write(Path::new(&path), bytes).await?;
     if kind == Kind::Avatar {
-        let small = if ext == "gif" { None } else { thumb(bytes) };
+        let small = thumb(bytes);
         let thumb_path = format!("/cache/avatars/thumbs/{key}.{ext}");
         vector_core::webfiles::write(Path::new(&thumb_path), small.as_deref().unwrap_or(bytes)).await?;
     }

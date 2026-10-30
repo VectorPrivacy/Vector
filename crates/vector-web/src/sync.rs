@@ -81,6 +81,7 @@ async fn hydrate_and_announce() {
     drop(state);
     emitter::emit("init_finished", &vector_core::boot_payload::boot_payload(&profiles, &chats, None));
     db::spawn_bound(crate::images::cache_all_profile_images());
+    db::spawn_bound(crate::images::still_avatar_thumbs());
 }
 
 pub async fn fetch_messages(init: bool) -> Result<(), String> {

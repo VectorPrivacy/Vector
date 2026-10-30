@@ -668,6 +668,59 @@ pub const RECOGNISED_MIMES: &[&str] = &[
     "video/mp4",
 ];
 
+/// If `bytes` is an animated image we must not re-encode, return its extension
+/// (`"gif"`/`"webp"`/`"png"`); otherwise `None`. Biased toward detecting
+/// animation: a false positive only skips stripping/compression, whereas a false
+/// negative would flatten the animation to a still.
+pub fn animated_format(bytes: &[u8]) -> Option<&'static str> {
+    // GIF: any GIF may hold multiple frames.
+    if bytes.len() >= 6 && (&bytes[..6] == b"GIF87a" || &bytes[..6] == b"GIF89a") {
+        return Some("gif");
+    }
+    // Animated WebP: RIFF....WEBP with a VP8X chunk whose animation flag (0x02)
+    // is set, or an explicit ANIM chunk near the header.
+    if bytes.len() >= 16 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        let vp8x_anim = bytes.len() >= 21 && &bytes[12..16] == b"VP8X" && bytes[20] & 0x02 != 0;
+        let anim_chunk = bytes[..bytes.len().min(64)].windows(4).any(|w| w == b"ANIM");
+        if vp8x_anim || anim_chunk {
+            return Some("webp");
+        }
+    }
+    // APNG: a PNG with an acTL chunk before the first IDAT.
+    if bytes.len() >= 8 && &bytes[..8] == b"\x89PNG\r\n\x1a\n" && png_has_actl(bytes) {
+        return Some("png");
+    }
+    None
+}
+
+/// Walk PNG chunks looking for `acTL` (animation control) before the first
+/// `IDAT` — the marker that distinguishes an APNG from a plain PNG.
+fn png_has_actl(bytes: &[u8]) -> bool {
+    let mut off = 8; // past the 8-byte PNG signature
+    while off + 8 <= bytes.len() {
+        let len = u32::from_be_bytes([bytes[off], bytes[off + 1], bytes[off + 2], bytes[off + 3]]) as usize;
+        match &bytes[off + 4..off + 8] {
+            b"acTL" => return true,
+            b"IDAT" => return false,
+            _ => {}
+        }
+        off = off.saturating_add(12).saturating_add(len); // len(4) + type(4) + data + crc(4)
+    }
+    false
+}
+
+/// An animation's first frame as a PNG at its own size, so a page can swap one for the other
+/// without its layout moving.
+pub fn still_png(bytes: &[u8]) -> Result<Vec<u8>, String> {
+    use image::ImageEncoder;
+    let rgba = decode_image_bounded(bytes)?.into_rgba8();
+    let mut out = Vec::new();
+    image::codecs::png::PngEncoder::new_with_quality(&mut out, image::codecs::png::CompressionType::Fast, image::codecs::png::FilterType::Adaptive)
+        .write_image(&rgba, rgba.width(), rgba.height(), image::ExtendedColorType::Rgba8)
+        .map_err(|e| format!("still encode: {e}"))?;
+    Ok(out)
+}
+
 pub fn mime_from_magic_bytes(bytes: &[u8]) -> &'static str {
     if bytes.len() < 4 {
         return "application/octet-stream";

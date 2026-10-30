@@ -14,9 +14,9 @@ use zeroize::Zeroizing;
 
 /// Vector's caches under `<app_data>/cache/`. Nothing else there is Vector Cache: on Android the
 /// folder is the system's own cache directory, which also holds the webview's files.
-pub const KINDS: [&str; 11] = [
+pub const KINDS: [&str; 12] = [
     "avatars", "banners", "emojis", "emoji_pack_icons", "emoji_spritesheets", "miniapp_icons",
-    "inline_images", "embed_videos", "gif_previews", "svg_renders", "previews",
+    "inline_images", "embed_videos", "gif_previews", "svg_renders", "previews", "stills",
 ];
 
 const MAGIC: &[u8; 4] = b"VCC1";

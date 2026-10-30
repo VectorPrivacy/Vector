@@ -38,7 +38,7 @@
 </script>
 
 <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-<div id="account" class="account" bind:this={row} style:display={st.visible ? null : 'none'} use:fadeIn={st.revealTick}>
+<div id="account" class="account" data-motion="hover" bind:this={row} style:display={st.visible ? null : 'none'} use:fadeIn={st.revealTick}>
     <div class="profile-header-info">
         <div class="profile-header-name-row">
             <!-- Collapsed, the caret is gone and the avatar is the only way to the switcher. -->

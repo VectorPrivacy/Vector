@@ -495,6 +495,7 @@ pub async fn dispatch(cmd: &str, a: Args) -> Result<Value, String> {
         "get_chat_commands" => to_value(VectorCore.get_chat_commands(&a.str("chatId")?).await),
         "cache_community_image" => crate::community_ops::cache_community_image(&a).await,
         "cache_invite_logo" => crate::community_ops::cache_invite_logo(&a).await,
+        "image_still" => to_value(crate::images::still(&a.str("src")?).await?),
 
         "start_typing" => {
             let receiver = a.str("receiver")?;

@@ -35,6 +35,8 @@
     //    security: {...}, setAdvancedMode(on), setPlayers(on), copyLogs(), logout()
 
     const sc = settingsScreen();
+    // Themes whose Dangerzone face glitches green rather than red.
+    const GREEN_GLITCH = new Set(['vector', 'cyberpunk']);
     const hs = settingsHandlers();
     const net = transportState();
     // The panel under the network card: the viewed network's own settings, when this build has it.
@@ -445,7 +447,7 @@
                 <div class="st-page sm-page">
                     {#if sec.danger}
                         <div class="sm-danger-head">
-                            <img class="aggro-glitch-img" alt="">
+                            <img class="aggro-glitch-img" src={GREEN_GLITCH.has(sc.theme) ? './icons/aggro-glitch.gif' : './icons/aggro-glitch-red.gif'} alt="">
                             <p class="danger-subtitle">Irreversible Actions</p>
                         </div>
                     {/if}

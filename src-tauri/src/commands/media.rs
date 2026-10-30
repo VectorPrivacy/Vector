@@ -113,9 +113,18 @@ pub async fn download_whisper_model<R: Runtime>(
     Err("Whisper model download is not supported on this platform".to_string())
 }
 
+/// A still for the animated image `src` (a `vmedia:` ref or a cached file), or None when it
+/// doesn't animate: the page shows it whenever the image may not move.
+#[tauri::command]
+pub async fn image_still(src: String) -> Result<Option<String>, String> {
+    let still = tokio::task::spawn_blocking(move || crate::image_cache::still_for(&src)).await.map_err(|e| e.to_string())??;
+    Ok(still.map(|p| p.to_string_lossy().into_owned()))
+}
+
 // Handler list for this module (for reference):
 // - start_recording
 // - stop_recording
 // - transcribe (platform-specific)
 // - transcribe_recording (platform-specific)
 // - download_whisper_model (platform-specific)
+// - image_still
