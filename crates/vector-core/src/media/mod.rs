@@ -33,9 +33,12 @@ pub fn keep_unencrypted() -> bool {
 }
 
 /// The memory key of media fetched by URL rather than by content hash: `kind` keeps one kind's
-/// keys apart from another's, and from every content hash.
+/// keys apart from another's. The digest is masked so that no file's content hash can be it: a
+/// file of exactly the derivation's bytes would otherwise claim the link's slot.
 pub fn url_key(kind: &str, url: &str) -> [u8; 32] {
-    crate::crypto::sha256::digest(format!("vector-url-media\n{kind}\n{url}").as_bytes())
+    let mut key = crate::crypto::sha256::digest(format!("vector-url-media\n{kind}\n{url}").as_bytes());
+    key[0] ^= 0x80;
+    key
 }
 
 /// Kinds a chat bubble draws itself: these load for viewing without being kept.
@@ -184,6 +187,14 @@ impl Seek for Reader {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn no_file_can_claim_a_links_memory_slot() {
+        let url = "https://example.com/a.png";
+        let derivation = format!("vector-url-media\ninline-image\n{url}");
+        assert_ne!(url_key("inline-image", url), crate::crypto::sha256::digest(derivation.as_bytes()), "a file of the derivation's bytes hashes elsewhere");
+        assert_ne!(url_key("inline-image", url), url_key("embed-poster", url));
+    }
 
     #[test]
     fn a_ref_is_a_held_hash_or_a_file() {

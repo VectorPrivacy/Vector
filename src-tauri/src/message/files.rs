@@ -1032,7 +1032,9 @@ pub async fn render_svg(app: tauri::AppHandle, path: String, max_dim: u32) -> Re
 fn render_held_svg(hash: &[u8; 32], max_dim: u32) -> Option<String> {
     use sha2::{Digest, Sha256};
     let dim = max_dim.clamp(256, vector_core::svg::MAX_RENDER_DIM).div_ceil(256) * 256;
-    let render: [u8; 32] = Sha256::new().chain_update(b"svg-render").chain_update(hash).chain_update(dim.to_le_bytes()).finalize().into();
+    let mut render: [u8; 32] = Sha256::new().chain_update(b"svg-render").chain_update(hash).chain_update(dim.to_le_bytes()).finalize().into();
+    // Masked so no file's content hash can be it: those 46 bytes, sent as a file, would claim the slot.
+    render[0] ^= 0x80;
     if vector_core::media::resident(&render) {
         return Some(vector_core::media::MediaRef::held(&render));
     }
