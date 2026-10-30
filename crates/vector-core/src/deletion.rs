@@ -513,7 +513,8 @@ fn delete_cached_attachment_files(attachments: &[crate::types::Attachment]) {
         crate::media::store::forget(&hash);
         #[cfg(target_arch = "wasm32")]
         crate::db::spawn_bound(async move { crate::media::store::forget(&hash).await });
-        // Last, so a copy finishing meanwhile finds its picture gone and goes too.
+        // Last, so a copy finishing meanwhile finds its picture gone and goes too (natively: on
+        // wasm the store's forget runs later, and nothing there makes copies).
         ram.remove(&hash);
     }
     #[cfg(target_arch = "wasm32")]

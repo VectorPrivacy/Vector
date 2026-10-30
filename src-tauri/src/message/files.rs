@@ -998,7 +998,7 @@ fn write_preview_as_is(dir: &std::path::Path, bytes: &[u8], ext: &str) -> Result
 #[tauri::command]
 pub async fn render_svg(app: tauri::AppHandle, path: String, max_dim: u32) -> Result<Option<String>, String> {
     if let Some(vector_core::media::MediaRef::Held(hash)) = vector_core::media::MediaRef::parse(&path) {
-        return tokio::task::spawn_blocking(move || Ok(render_held_svg(&hash, max_dim))).await.map_err(|e| e.to_string())?;
+        return vector_core::db::blocking_bound(move || render_held_svg(&hash, max_dim)).await;
     }
     let meta = std::fs::metadata(&path).map_err(|e| e.to_string())?;
     if !meta.is_file() || meta.len() > vector_core::svg::MAX_SVG_BYTES as u64 {
@@ -1048,9 +1048,9 @@ fn render_held_svg(hash: &[u8; 32], max_dim: u32) -> Option<String> {
     }
     let png = vector_core::svg::rasterize_png(&bytes, dim).ok()?;
     vector_core::media::ram::insert_derived(*hash, render, png, "image/png").ok()?;
-    // Deleted while it rendered: the render goes with it.
-    if !vector_core::media::resident(hash) {
-        vector_core::media::ram::cache().remove(hash);
+    // Deleted while it rendered: the render goes too.
+    if !vector_core::media::openable(hash) {
+        vector_core::media::ram::cache().remove(&render);
         return None;
     }
     Some(vector_core::media::MediaRef::held(&render))

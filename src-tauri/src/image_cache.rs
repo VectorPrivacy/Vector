@@ -785,9 +785,9 @@ fn held_derived(
     }
     let Some((bytes, mime)) = make()? else { return Ok(None) };
     vector_core::media::ram::insert_derived(parent, key, bytes, mime).map_err(|_| "no room in memory for the copy")?;
-    // Deleted while the copy was made: the copy goes with it.
-    if !vector_core::media::resident(&parent) {
-        vector_core::media::ram::cache().remove(&parent);
+    // Deleted while the copy was made: the copy goes too.
+    if !vector_core::media::openable(&parent) {
+        vector_core::media::ram::cache().remove(&key);
         return Err("the picture is gone".into());
     }
     Ok(Some(held))
@@ -1878,6 +1878,14 @@ mod avatar_thumb_tests {
         assert_eq!(display_kept(&format!("vmedia:{photo}"), 1024), None, "the copy goes with its photo");
         vector_core::media::ram::cache().remove(&anim_hash);
         assert_eq!(held_kept(&format!("vmedia:{anim}"), "still", 0), None, "the still goes with its animation");
+
+        let (gone_hash, gone) = hold(jpeg(1600, 1200), "image/jpeg");
+        let made = held_derived("display", &gone, 1024, || {
+            vector_core::media::ram::cache().remove(&gone_hash);
+            Ok(Some((jpeg(64, 48), "image/jpeg")))
+        });
+        assert!(made.is_err(), "deleted while its copy was made");
+        assert!(!vector_core::media::ram::cache().contains(&derived_key("display", &gone, 1024)), "and the copy doesn't stay");
     }
 
     #[test]

@@ -413,7 +413,10 @@ pub(crate) fn read_exact_at(file: &std::fs::File, mut buf: &mut [u8], mut offset
 /// goes, since some rows hold the only key there is. Returns the hashes no longer kept.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn check() -> Vec<[u8; 32]> {
-    let (Ok(dir), Ok(rows), Ok(named)) = (dir(), media_store::all(), media_store::files()) else { return Vec::new() };
+    let (Ok(dir), Ok(rows), Ok(named)) = (dir(), media_store::all(), media_store::files()) else {
+        crate::log_warn!("[Media] the kept files couldn't be listed; the launch check is skipped");
+        return Vec::new();
+    };
     if rows.len() < named.len() {
         crate::log_warn!("[Media] {} kept rows don't read; their files are left alone", named.len() - rows.len());
     }
@@ -600,8 +603,13 @@ mod tests {
         std::fs::write(&file, b"x").unwrap();
         let f = std::fs::OpenOptions::new().write(true).open(&file).unwrap();
         f.set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(7200)).unwrap();
+        let stray = dir().unwrap().join("stray");
+        std::fs::write(&stray, b"x").unwrap();
+        let f = std::fs::OpenOptions::new().write(true).open(&stray).unwrap();
+        f.set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(7200)).unwrap();
         check();
         assert!(file.exists(), "a file only an unreadable row names is not an orphan");
+        assert!(!stray.exists(), "the check still runs: a file no row names is swept");
     }
 
     #[test]

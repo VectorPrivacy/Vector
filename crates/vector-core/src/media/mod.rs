@@ -118,6 +118,11 @@ pub fn resident(hash: &[u8; 32]) -> bool {
     ram::cache().contains(hash) || store::holds(hash) || pending::holds(hash)
 }
 
+/// Whether [`open`] would find `hash`: held, or a plain copy in a download folder.
+pub fn openable(hash: &[u8; 32]) -> bool {
+    resident(hash) || open(hash).is_some()
+}
+
 /// How a command names an attachment's bytes: a hash this account holds, or a file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MediaRef {
