@@ -187,6 +187,7 @@ function showMessageToolbar(rowEl) {
     const view = _dmsgToolbarView(rowEl);
     if (!view) {
         VectorSvelte.setToolbarHost({ open: false });
+        _dmsgUnfollow();
         return;
     }
     VectorSvelte.setMessageToolbar(view);
@@ -194,7 +195,7 @@ function showMessageToolbar(rowEl) {
     VectorSvelte.flushSync();
     _dmsgPlaced = null;
     _dmsgPositionToolbar(rowEl);
-    if (_dmsgToolbarFollowRaf === null) _dmsgToolbarFollowRaf = requestAnimationFrame(_dmsgFollowToolbar);
+    _dmsgFollowRow(rowEl);
 }
 
 /**
@@ -202,15 +203,43 @@ function showMessageToolbar(rowEl) {
  * not move with the row: a trim above, a cleared divider, a streak merging or media
  * settling all shift rows out from under it. Stranded past the last row it stretches
  * the scroll height, and the bottom hold rides the view down into blank space until a
- * scroll hides it. Cheap while nothing moves: the read hits clean layout.
+ * scroll hides it. It is placed again the frame after the chat changes, loads or
+ * resizes, never polled: a toolbar left up over an idle chat draws nothing.
  */
 let _dmsgToolbarFollowRaf = null;
+let _dmsgFollowWatch = null;
+function _dmsgFollowRow(rowEl) {
+    if (!_dmsgFollowWatch) {
+        const soon = () => { if (_dmsgToolbarFollowRaf === null) _dmsgToolbarFollowRaf = requestAnimationFrame(_dmsgFollowToolbar); };
+        _dmsgFollowWatch = { soon, changes: new MutationObserver(soon), sizes: new ResizeObserver(soon), row: null };
+    }
+    const w = _dmsgFollowWatch;
+    if (!w.row) {
+        w.changes.observe(domChatMessages, { subtree: true, childList: true, characterData: true, attributes: true });
+        w.sizes.observe(domChatMessages);
+        domChatMessages.addEventListener('load', w.soon, true);
+    }
+    if (w.row !== rowEl) {
+        if (w.row) w.sizes.unobserve(w.row);
+        w.sizes.observe(rowEl);
+        w.row = rowEl;
+    }
+}
+
+function _dmsgUnfollow() {
+    const w = _dmsgFollowWatch;
+    if (!w?.row) return;
+    w.changes.disconnect();
+    w.sizes.disconnect();
+    domChatMessages.removeEventListener('load', w.soon, true);
+    w.row = null;
+}
+
 function _dmsgFollowToolbar() {
     _dmsgToolbarFollowRaf = null;
-    if (!_dmsgToolbarTarget || !VectorSvelte.toolbarHost().open) return;
+    if (!_dmsgToolbarTarget || !VectorSvelte.toolbarHost().open) { _dmsgUnfollow(); return; }
     if (!_dmsgToolbarTarget.isConnected) { hideMessageToolbar(); return; }
     _dmsgPositionToolbar(_dmsgToolbarTarget);
-    _dmsgToolbarFollowRaf = requestAnimationFrame(_dmsgFollowToolbar);
 }
 
 /** Which actions the toolbar offers for `rowEl`, or null to offer none. */
@@ -285,6 +314,7 @@ function _dmsgToolbarView(rowEl) {
 function hideMessageToolbar() {
     VectorSvelte.setToolbarHost({ open: false, target: '' });
     _dmsgToolbarTarget = null;
+    _dmsgUnfollow();
 }
 
 function _dmsgScheduleToolbarHide() {
