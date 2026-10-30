@@ -49,6 +49,9 @@ export function setMotionActive(on) {
 
 const held = new WeakSet();
 
+// checkVisibility arrived in Safari 17.4; an older WebKit only knows whether it's laid out.
+const shown = (el) => (el.checkVisibility ? el.checkVisibility({ opacityProperty: true, visibilityProperty: true }) : el.offsetParent !== null);
+
 /** CSS loops (pulses, spinners) and muted video loops (GIFs) hold their frame while the window is inactive. */
 function loops(on) {
     for (const a of document.getAnimations()) {
@@ -63,7 +66,7 @@ function loops(on) {
     for (const v of document.querySelectorAll('video[loop]')) {
         if (on && held.has(v)) {
             held.delete(v);
-            if (v.paused && v.checkVisibility({ opacityProperty: true, visibilityProperty: true })) v.play().catch(() => {});
+            if (v.paused && shown(v)) v.play().catch(() => {});
         } else if (!on && v.muted && !v.paused) {
             held.add(v);
             v.pause();
