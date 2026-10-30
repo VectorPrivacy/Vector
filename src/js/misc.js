@@ -744,36 +744,60 @@ const TRACKING_PARAMS_GLOBAL = [
   'msclkid',
 
   // Yandex
-  'yclid', 'ysclid', 'clckid', '_openstat',
+  'yclid', 'ysclid', 'clckid', '_openstat', 'yadclid', 'yadordid', 'ymclid',
+  'ym_tracking_id',
 
-  // Twitter/X — bare 's'/'t' stay in the Twitter branch: globally they eat
+  // Twitter/X — bare 'a'/'s'/'t' stay in the Twitter branch: globally they eat
   // WordPress search (?s=) and everyone else's timestamps (?t=).
-  'twclid', '__twitter_impression',
+  'twclid', '__twitter_impression', 'tw_adid', 'tw_kwdid', 'tw_profile_id',
 
   // TikTok / Twitch
   'ttclid', 'tt_medium', 'tt_content',
 
-  // Reddit / Pinterest / LinkedIn ad click IDs
-  'rdt_cid', 'epik', 'li_fat_id',
+  // Ad click IDs: Reddit, Pinterest, LinkedIn, Telegram, LINE, Yahoo Japan, Prisjakt
+  'rdt_cid', 'epik', 'li_fat_id', 'tgclid', 'line_uid', 'yj_r', 'pjclid',
 
   // Per-click IDs minted by affiliate networks (Impact, CJ, Awin, ShareASale,
-  // TradeDoubler, Rakuten). The affiliate's own ID is a referral, not these.
-  'irclickid', 'irgwc', 'ir_campaignid', 'ir_adid', 'ir_partnerid',
-  'cjevent', 'cjdata', 'awc', 'sscid', 'tduid', 'ranMID', 'ranEAID',
-  'ranSiteID', 'clickid', 'iclid', 'external_click_id', 'rb_clickid',
-  'wickedid', 'sms_click', 'sms_source', 'sms_uph',
+  // TradeDoubler, Rakuten, Admitad, A8, ValueCommerce, RedTrack). The
+  // affiliate's own ID is a referral, not these.
+  'irclickid', 'irgwc', 'ir_campaignid', 'ir_adid', 'ir_partnerid', 'ircid',
+  'impradid', 'impradname', 'cjevent', 'cjdata', 'awc', 'sscid', 'tduid',
+  'ranMID', 'ranEAID', 'ranSiteID', 'clickid', 'iclid', 'external_click_id',
+  'rb_clickid', 'wickedid', 'sms_click', 'sms_source', 'sms_uph',
+  'admitad_uid', 'a8', 'vc_lpp', 'rtkcid', 'x-clickref', 'aiad_clid',
+  'unicorn_click_id', 'adsterra_clid', 'adsterra_placement_id', 'loclid',
+  'ldtag_cl', 'cstrackid', 'oprtrack', 'jmtyClId', '_zucks_suid',
+  'famad_xuid', 'bance_xuid', 'asgtbndr', 'winflncrtag', 'vs_campaign_id',
+  'erid', 'mindbox-click-id',
 
-  // Email + marketing automation
+  // Email + marketing automation (Mailchimp, Kit, MailerLite, Vero, Marketo,
+  // Eloqua, Klaviyo, beehiiv, Hootsuite, Emarsys, Squarespace, Salesforce)
   'mc_cid', 'mc_eid', 'mc_tc', 'ck_subscriber_id', 'ml_subscriber',
-  'ml_subscriber_hash', 'vero_conv', 'vero_id', 'mkt_tok', '__s',
-  'elq', 'elqTrackId', 'elqaid', 'elqat', 'elqak',
+  'ml_subscriber_hash', 'ml_sub', 'ml_sub_hash', 'vero_conv', 'vero_id',
+  'mkt_tok', '__s', 'elq', 'elqTrackId', 'elqaid', 'elqat', 'elqak',
+  'elqCampaignId', '_kx', '_bhlid', 'hootPostID', 'eblastId', 'ex_cid',
+  'et_cid', 'et_lid', 'et_rid', 'ss_campaign_id', 'ss_campaign_name',
+  'ss_campaign_sent_date', 'sc_customer', 'sc_eh', 'sc_lid', 'sc_llid',
+  'sc_src', 'sc_uid', 'h_sid', 'h_slt', 'eml-name', 'eml-mediaplan',
+  'eml-publisher', 'ems_dl', 'emcs_t', 'x-source', 'x-a-medium',
+  'mindbox-message-key', 'user_email_address',
 
   // HubSpot
   '_hsenc', '_hsmi', '__hssc', '__hstc', '__hsfp', 'hsCtaTracking',
 
-  // Adobe / AT Internet / Webtrekk
+  // Adobe / AT Internet / Webtrekk / Coremetrics / Piano / Matomo's old names
   's_cid', 'sc_cid', 'adobe_mc_ref', 'adobe_mc_sdid', 'xtor',
-  'wt_mc', 'wt_zmc', 'wtrid',
+  'wt_mc', 'wt_zmc', 'wtrid', 'cm_me', 'cm_cr', 'cm_re', 'cm_sp',
+  'cx_click', 'cx_recsOrder', 'cx_recsWidget', 'piwik_campaign', 'piwik_kwd',
+
+  // App-install and analytics session IDs
+  'gps_adid', 'is_retargeting', 'analytics_context', 'analytics_trace_id',
+  '__io_lv', '_io_session_id', '_ly_c', '_ly_r', '_clde', '_cldee',
+  '_bdadid', 'adc_publisher', 'adc_token', 'bemobdata', 'uzcid',
+  'beyond_uzcvid', 'beyond_uzmcvid', 'vsm_type', 'vsm_cid', 'vsm_pid',
+  'Tcsack', 'srclt', 'lt_r', 'spot_im_redirect_source',
+  'personaclick_search_query', 'personaclick_input_query',
+  'brave-campaign-id', 'brave-creative-id', 'brave-creative-set-id',
 
   // Publisher CMS campaign tags
   'cmpid', 'ncid', 'ftag', 'os_ehash', 'guccounter', 'guce_referrer',
@@ -793,8 +817,8 @@ const TRACKING_UTM_CLONE_RE = /^(?:utm_.|[a-z][a-z0-9]{0,3}_(?:source|medium|cam
 
 // Namespaces a single analytics vendor owns outright, so nothing functional can
 // live under them: Matomo, HubSpot Ads, AppsFlyer, Adjust, Branch, Blueshift,
-// Sailthru, Vox, Vero, AT Internet's mail tags, Temu.
-const TRACKING_NAMESPACE_RE = /^(?:mtm_|pk_|hsa_|af_|adj_|adjust_|_branch_|bsft_|_sgm_|oly_|vero_|_x_(?:ads|ns|bg|sessn)_|at_(?:campaign|creation|custom|emailtype|link|medium|ptr_|recipient|send_))/i;
+// Sailthru, Vox, Vero, AT Internet, Temu, Coremetrics, MyTracker, EBiS, NewsBreak.
+const TRACKING_NAMESPACE_RE = /^(?:mtm_|pk_|hsa_|af_|adj_|adjust_|_branch_|bsft_|_sgm_|oly_|vero_|_x_(?:ads|ns|bg|sessn)_|cm_mmc|at_(?:campaign|channel|creation|custom|detail_placement|emailtype|format|general_placement|identifier|link|medium|network|platform|ptr_|recipient|send_|type$|variant)|mt_(?:click_id|network|adset|creative|sub\d|link_id)$|ebis(?:AdID|Other\d)$|nb_(?:adid|aname|asize|atype|cid|mtype|partner_name|partner_shared_id|pid|platform|product_sku|placement|expid_meta)$)/i;
 
 /**
  * Removes tracking and marketing parameters from URLs for privacy.
@@ -842,7 +866,7 @@ function cleanTrackingFromUrl(urlString) {
         'feature', 'si', 'is', 'app', 'kw', 'annotation_id', 'src_vid',
         'ab_channel', 'start_radio', 'rv', 'pp', 'themeRefresh',
         'source_ve_path', 'embeds_referring_origin', 'embeds_referring_euri',
-        'embeds_euri', 'embeds_origin'
+        'embeds_euri', 'embeds_origin', 'embeds_loader_url_for_pings'
       ]);
     }
 
@@ -853,7 +877,7 @@ function cleanTrackingFromUrl(urlString) {
         'ved', 'ei', 'sei', 'oq', 'aqs', 'sourceid', 'sxsrf', 'rlz', 'uact',
         'usg', 'sa', 'esrc', 'cd', 'cad', 'atyp', 'vet', 'je', 'dcr', 'dpr',
         'iflsig', 'fbs', 'ictx', 'cshid', 'sclient', '_u', 'site', 'ie',
-        'pcampaignid', 'icid', 'original_referer'
+        'pcampaignid', 'icid', 'original_referer', 'sstk', 'spell'
       ]);
       dropMatching(/^(?:gs_|gws_|gfe_|bi[hw]$|btn|sca_(?:esv|upv)$)/);
     }
@@ -869,7 +893,10 @@ function cleanTrackingFromUrl(urlString) {
     // DuckDuckGo. `t` is the client tag, but only junk on a shared search URL —
     // elsewhere on the site it can be load-bearing, so require `q` alongside it.
     else if (hostIs('duckduckgo.com')) {
-      dropParams(['atb', 'origin', 'from', 'vis', 'perf_id', 'vqd', 'ia_source']);
+      dropParams([
+        'atb', 'origin', 'from', 'vis', 'perf_id', 'vqd', 'ia_source',
+        'ad_provider', 'ad_domain', 'ad_type', 'click_metadata', 'parent_perf_id'
+      ]);
       if (url.searchParams.has('q')) url.searchParams.delete('t');
     }
 
@@ -905,7 +932,7 @@ function cleanTrackingFromUrl(urlString) {
         'social_share', 'th', 'smid', 'refRID', 'rnid', 'camp', 'spIA',
         'qualifier', '_encoding', 'dchild', 'starsLeft', 'skipTwisterOG',
         'aaxitk', 'ms3_c', 'colid', 'coliid', 'twchReferral', 'ingress',
-        'yTwchPos'
+        'yTwchPos', 'linkId', 'geniuslink', 'ufe'
       ]);
       dropMatching(/^(?:p[fd]_rd_|__mk_|cv_ct_|sb-ci-|field-lbr_)/);
     }
@@ -932,7 +959,7 @@ function cleanTrackingFromUrl(urlString) {
         dropParams([
           '_trkparms', '_trksid', 'itmprp', 'itmmeta', 'hash', 'amdata',
           'epid', '_from', 'mkcid', 'mkrid', 'toolid', 'customid',
-          'mkevt', 'nordt', 'rt', 'ssspo', 'sssrc', 'ssuid', 'widget_ver'
+          'mkevt', 'nordt', 'rt', 'ssspo', 'sssrc', 'ssuid', 'widget_ver', 'ssrc'
         ]);
       }
     }
@@ -969,18 +996,22 @@ function cleanTrackingFromUrl(urlString) {
       ]);
     }
     else if (hostIs('bestbuy.com')) {
-      dropParams(['acampID', 'mpid', 'intl', 'loc']);
+      dropParams(['acampID', 'acampid', 'mpid', 'intl', 'loc']);
     }
     else if (hostIs('newegg.com')) {
       dropParams(['ACRID', 'ASUBID', 'ASID', 'nm_mc', 'cm_mmc']);
     }
     else if (hostIs('temu.com')) {
-      dropParams(['top_gallery_url', 'refer_page_name', 'refer_page_id', 'refer_page_sn']);
+      dropParams([
+        'top_gallery_url', 'adg_ctx', 'mrk_rec', 'freesia_scene', 'share_img',
+        'from_share', 'spec_gallery_id'
+      ]);
+      dropMatching(/^(?:_x_|_oak_|_p_|_bg_|refer_)/);
     }
 
-    // Twitter/X
+    // Twitter/X. `a` is the per-share ID on copied links.
     else if (hostIs('twitter.com', 'x.com', 't.co')) {
-      dropParams(['s', 't', 'cn', 'ref_src', 'refsrc', 'ref_url', 'src']);
+      dropParams(['a', 's', 't', 'cn', 'cxt', 'ref_src', 'refsrc', 'ref_url', 'src']);
     }
 
     // Facebook / Messenger
@@ -989,14 +1020,18 @@ function cleanTrackingFromUrl(urlString) {
         'sfnsn', 'rdid', 'paipv', '_rdr', 'rdc', 'rdr', '__tn__', '_nc_x',
         'comment_tracking', 'dti', 'eav', 'idorvanity', 'wtsid', 'ls_ref',
         'action_history', 'tracking', 'referral_story_type', 'video_source',
-        'ftentidentifier', 'pageid', 'eid'
+        'ftentidentifier', 'pageid', 'eid', 'acontext', 'external_ref',
+        'gd_impression_id', 'sale_post_id', 'store_visit_source', 'with_pv'
       ]);
       dropMatching(/^(?:hc_|__cft__|__xts__)/);
     }
 
     // Instagram
     else if (hostIs('instagram.com')) {
-      dropParams(['igshid', 'igsh', 'ig_rid']);
+      dropParams(['igshid', 'igsh', 'ig_rid', 'stkn', 'click_source']);
+    }
+    else if (hostIs('threads.net', 'threads.com')) {
+      dropParams(['xmt']);
     }
 
     // TikTok
@@ -1007,7 +1042,8 @@ function cleanTrackingFromUrl(urlString) {
         'share_link_id', 'share_item_id', 'share_iid', 'share_region',
         'social_share_type', 'embed_source', 'referer_url', 'referer_video_id',
         'trackParams', 'ug_btm', 'enter_from', 'preview_pb', 'sec_user_id',
-        'user_id', '_r', '_t', '_d'
+        'user_id', '_r', '_t', '_d', 'sec_uid', 'share_author_id', 'tt_from',
+        'enter_method'
       ]);
     }
 
@@ -1015,7 +1051,7 @@ function cleanTrackingFromUrl(urlString) {
     // searchParams decodes names, so the `$` spelling is the one that matches.
     else if (hostIs('reddit.com', 'redd.it')) {
       dropParams([
-        'share_id', 'correlation_id', 'rdt', 'ref_source', 'ref_campaign',
+        'share_id', 'correlation_id', 'rdt', 'ref', 'ref_source', 'ref_campaign',
         'entry_point', 'target_user', 'post_index', 'post_fullname',
         '$deep_link', '$3p', '$original_url', '$android_deeplink_path'
       ]);
@@ -1024,8 +1060,10 @@ function cleanTrackingFromUrl(urlString) {
     // LinkedIn
     else if (hostIs('linkedin.com')) {
       dropParams([
-        'trk', 'trkInfo', 'trackingId', 'refId', 'originalSubdomain',
-        'midToken', 'midSig', 'eid', 'courseClaim'
+        'trk', 'trkInfo', 'trackingId', 'trackingCode', 'refId', 'referenceId',
+        'originalSubdomain', 'original_referer', 'originalReferer', 'midToken',
+        'midSig', 'eid', 'courseClaim', 'alternateChannel', 'eBP', 'mcid', 'rcm',
+        'isSS', 'src'
       ]);
       dropMatching(/^li[a-z]{2}$/);
     }
@@ -1082,12 +1120,27 @@ function cleanTrackingFromUrl(urlString) {
 
     // GitHub email-notification links
     else if (hostIs('github.com')) {
-      dropParams(['email_token', 'email_source', 'notification_referrer_id']);
+      dropParams(['email_token', 'email_source', 'notification_referrer_id', 'reference_location']);
     }
 
     // Vimeo
     else if (hostIs('vimeo.com')) {
       dropParams(['share', 'fl', 'fe']);
+    }
+
+    // News share and newsletter tags. A NYT gift link's `unlocked_article_code`
+    // is the gift itself; Substack's `r` is a referral.
+    else if (hostIs('nytimes.com')) {
+      dropParams(['smid', 'sgrp', 'ugrp', 'referringSource', 'impression_id']);
+    }
+    else if (hostIs('theguardian.com')) {
+      dropParams(['CMP']);
+    }
+    else if (hostIs('bloomberg.com')) {
+      dropParams(['leadSource', 'srnd', 'sref']);
+    }
+    else if (hostIs('substack.com')) {
+      dropParams(['triedRedirect', 'isFreemail', 'publication_id', 'post_id']);
     }
 
     // Every host: the exact-name list, then the pattern families. Referral params
