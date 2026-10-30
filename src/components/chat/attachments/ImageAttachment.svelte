@@ -38,6 +38,8 @@
     const original = $derived(isSvg ? null : h.assetUrl(mediaPath(att)));
     const sized = $derived(!isSvg && !uploading && Math.max(att.img_meta?.width || 0, att.img_meta?.height || 0) > DISPLAY_DIM);
     let display = $state(undefined);
+    // Until the picture loads its box holds the size it will draw, so the row doesn't grow under the reader.
+    let loaded = $state(false);
     $effect(() => {
         if (!sized) return;
         display = undefined;
@@ -45,7 +47,8 @@
         h.displaySrc(mediaPath(att), DISPLAY_DIM).then((src) => { if (live) display = src; }, () => { if (live) display = null; });
         return () => { live = false; };
     });
-    const real = $derived(isSvg ? svgSrc : !sized ? original : display === undefined ? null : display ?? original);
+    // A picture already showing (an own upload just sent) stays until its copy is ready.
+    const real = $derived(isSvg ? svgSrc : !sized ? original : display === undefined ? (loaded ? original : null) : display ?? original);
 
     // Spoiler: the blur arrives async; a failed blur shows the real image instead.
     let blur = $state(null);
@@ -61,9 +64,6 @@
         const scale = Math.min(450 / m.width, 350 / m.height, 1);
         return { w: Math.round(m.width * scale), h: Math.round(m.height * scale), ratio: `${m.width} / ${m.height}` };
     });
-
-    // Until the picture loads its box holds the size it will draw, so the row doesn't grow under the reader.
-    let loaded = $state(false);
 
     let container = $state(null);
     // The fullscreen previewer attaches once the picture is revealed; before that a click reveals.
@@ -91,7 +91,7 @@
 {:else if spoiler && !blurFailed}
     <div style="position: relative; display: inline-block;" bind:this={container} data-spoiler-upload={uploading ? '1' : undefined} use:badgeOnly>
         {#if blur}
-            <img class={revealed ? 'dmsg-image-attachment' : 'spoiler-img'} src={revealed ? real : blur} data-full={revealed ? original : undefined} onerror={() => { if (revealed) h.lost(att, msg); }} alt=""
+            <img class={revealed ? 'dmsg-image-attachment' : 'spoiler-img'} src={revealed ? real ?? blur : blur} data-full={revealed ? original : undefined} onerror={() => { if (revealed) h.lost(att, msg); }} alt=""
                  width={!revealed && fit ? fit.w : undefined} height={!revealed && fit ? fit.h : undefined}
                  style="max-width: 100%; height: auto; border-radius: 8px;"
                  style:aspect-ratio={!revealed && fit ? fit.ratio : null}
