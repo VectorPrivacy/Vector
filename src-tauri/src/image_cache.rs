@@ -676,48 +676,43 @@ const STILL_SOURCE_MAX: u64 = 64 * 1024 * 1024;
 /// Enough of a file to tell whether it animates: every marker sits in its first chunks.
 const ANIMATION_HEAD: usize = 64 * 1024;
 
-/// What the page shows while the animated image at `src` may not move: an avatar's thumb, or its
-/// first frame kept in `cache/stills/`. `src` is a `vmedia:` ref or a file under Vector's own
-/// folders; None when it does not animate.
-pub fn still_for(src: &str) -> Result<Option<PathBuf>, String> {
+/// A picture the page names, its key, and the file it lies in, if any.
+type Ours = (std::sync::Arc<dyn vector_core::media::MediaSource>, String, Option<PathBuf>);
+
+/// A picture the page names by its src: a `vmedia:` ref or a file under Vector's own folders, with
+/// a key naming its content and the file it lies in, if any.
+fn open_ours(src: &str) -> Result<Ours, String> {
+    if let Some(hash) = src.strip_prefix("vmedia:") {
+        let raw = vector_core::simd::hex::hex_to_bytes_32_checked(hash).ok_or("not a media hash")?;
+        return Ok((vector_core::media::open(&raw).ok_or("not held")?, hash.to_ascii_lowercase(), None));
+    }
     let app_data = vector_core::db::get_app_data_dir()?;
-    let (source, key, path) = match src.strip_prefix("vmedia:") {
-        Some(hash) => {
-            let raw = vector_core::simd::hex::hex_to_bytes_32_checked(hash).ok_or("not a media hash")?;
-            (vector_core::media::open(&raw).ok_or("not held")?, hash.to_ascii_lowercase(), None)
-        }
-        None => {
-            let real = std::fs::canonicalize(src).map_err(|e| e.to_string())?;
-            let ours = std::iter::once(app_data.clone())
-                .chain(vector_core::db::download_roots())
-                .filter_map(|root| std::fs::canonicalize(root).ok())
-                .any(|root| real.starts_with(root));
-            if !ours {
-                return Err("not one of Vector's files".into());
-            }
-            let meta = std::fs::metadata(&real).map_err(|e| e.to_string())?;
-            let stamp = meta.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_nanos());
-            let key = url_to_cache_key(&format!("{}\0{}\0{stamp}", real.to_string_lossy(), meta.len()));
-            (vector_core::vcache::open(&real, "").ok_or("not readable")?, key, Some(real))
-        }
-    };
-    let mut head = vec![0u8; ANIMATION_HEAD.min(source.len() as usize)];
+    let real = std::fs::canonicalize(src).map_err(|e| e.to_string())?;
+    let ours = std::iter::once(app_data.clone())
+        .chain(vector_core::db::download_roots())
+        .filter_map(|root| std::fs::canonicalize(root).ok())
+        .any(|root| real.starts_with(root));
+    if !ours {
+        return Err("not one of Vector's files".into());
+    }
+    let meta = std::fs::metadata(&real).map_err(|e| e.to_string())?;
+    let stamp = meta.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_nanos());
+    let key = url_to_cache_key(&format!("{}\0{}\0{stamp}", real.to_string_lossy(), meta.len()));
+    Ok((vector_core::vcache::open(&real, "").ok_or("not readable")?, key, Some(real)))
+}
+
+/// Up to `max` bytes from the start of `source`.
+fn read_head(source: &dyn vector_core::media::MediaSource, max: usize) -> Result<Vec<u8>, String> {
+    let mut head = vec![0u8; max.min(source.len() as usize)];
     let n = source.read_at(0, &mut head).map_err(|e| e.to_string())?;
-    if crate::shared::image::animated_format(&head[..n]).is_none() {
-        return Ok(None);
-    }
-    let in_avatars = |p: &&PathBuf| p.parent().and_then(|d| d.file_name()) == Some("avatars".as_ref());
-    if let Some(thumb) = path.as_ref().filter(in_avatars).and_then(|p| avatar_thumb_path(p)) {
-        if vector_core::vcache::readable(&thumb) {
-            return Ok(Some(thumb));
-        }
-    }
-    let still = app_data.join("cache").join("stills").join(format!("{key}.png"));
-    if vector_core::vcache::readable(&still) {
-        return Ok(Some(still));
-    }
+    head.truncate(n);
+    Ok(head)
+}
+
+/// All of `source`, refused past [`STILL_SOURCE_MAX`].
+fn read_whole(source: &dyn vector_core::media::MediaSource) -> Result<zeroize::Zeroizing<Vec<u8>>, String> {
     if source.len() > STILL_SOURCE_MAX {
-        return Ok(None);
+        return Err("too large".into());
     }
     let mut bytes = zeroize::Zeroizing::new(vec![0u8; source.len() as usize]);
     let mut filled = 0;
@@ -727,10 +722,63 @@ pub fn still_for(src: &str) -> Result<Option<PathBuf>, String> {
             n => filled += n,
         }
     }
-    let png = vector_core::crypto::still_png(&bytes[..filled])?;
+    bytes.truncate(filled);
+    Ok(bytes)
+}
+
+/// What the page shows while the animated image at `src` may not move: an avatar's thumb, or its
+/// first frame kept in `cache/stills/`. `src` is a `vmedia:` ref or a file under Vector's own
+/// folders; None when it does not animate.
+pub fn still_for(src: &str) -> Result<Option<PathBuf>, String> {
+    let (source, key, path) = open_ours(src)?;
+    if crate::shared::image::animated_format(&read_head(&*source, ANIMATION_HEAD)?).is_none() {
+        return Ok(None);
+    }
+    let in_avatars = |p: &&PathBuf| p.parent().and_then(|d| d.file_name()) == Some("avatars".as_ref());
+    if let Some(thumb) = path.as_ref().filter(in_avatars).and_then(|p| avatar_thumb_path(p)) {
+        if vector_core::vcache::readable(&thumb) {
+            return Ok(Some(thumb));
+        }
+    }
+    let still = vector_core::db::get_app_data_dir()?.join("cache").join("stills").join(format!("{key}.png"));
+    if vector_core::vcache::readable(&still) {
+        return Ok(Some(still));
+    }
+    let Ok(bytes) = read_whole(&*source) else { return Ok(None) };
+    let png = vector_core::crypto::still_png(&bytes)?;
     std::fs::create_dir_all(still.parent().ok_or("no stills folder")?).map_err(|e| e.to_string())?;
     vector_core::vcache::write(&still, &png)?;
     Ok(Some(still))
+}
+
+/// A copy of the still picture at `src` at most `dim` on its longest side, for showing it where
+/// it never fills more: WebKit decodes a picture whole however small it draws it, and keeps one
+/// copy in the page and one in the GPU process. None when it is already within `dim`, animates,
+/// or isn't a picture; the page then shows the original.
+pub fn display_for(src: &str, dim: u32) -> Result<Option<PathBuf>, String> {
+    let (source, key, _) = open_ours(src)?;
+    let head = read_head(&*source, ANIMATION_HEAD)?;
+    if crate::shared::image::animated_format(&head).is_some() || vector_core::svg::looks_like_svg(&head) {
+        return Ok(None);
+    }
+    let Some((w, h)) = crate::shared::image::header_dimensions_oriented(&head) else { return Ok(None) };
+    if w.max(h) <= dim {
+        return Ok(None);
+    }
+    let stills = vector_core::db::get_app_data_dir()?.join("cache").join("stills");
+    for ext in ["jpg", "png"] {
+        let kept = stills.join(format!("{key}-{dim}.{ext}"));
+        if vector_core::vcache::readable(&kept) {
+            return Ok(Some(kept));
+        }
+    }
+    let Ok(bytes) = read_whole(&*source) else { return Ok(None) };
+    let img = crate::shared::image::decode_image(&bytes, dim)?;
+    let small = crate::shared::image::compress_image(&img, dim, 85)?;
+    let kept = stills.join(format!("{key}-{dim}.{}", small.extension));
+    std::fs::create_dir_all(&stills).map_err(|e| e.to_string())?;
+    vector_core::vcache::write(&kept, &small.bytes)?;
+    Ok(Some(kept))
 }
 
 /// Longest side an emoji or pack icon is kept at: it shows at most 64 CSS px, and a picker
@@ -1674,6 +1722,24 @@ mod avatar_thumb_tests {
         std::fs::write(outside.path(), gif(8, 8, 2)).unwrap();
         assert!(still_for(&outside.path().to_string_lossy()).is_err(), "only Vector's own files");
         assert!(still_for("vmedia:nothex").is_err());
+    }
+
+    #[test]
+    fn a_photo_larger_than_a_bubble_gets_a_display_copy_and_a_small_one_none() {
+        let root = crate::util::test_app_data();
+        let dir = root.join("cache").join("inline_images");
+        std::fs::create_dir_all(&dir).unwrap();
+        let (big, small, anim) = (dir.join("display-big.jpg"), dir.join("display-small.jpg"), dir.join("display-anim.gif"));
+        vector_core::vcache::write(&big, &jpeg(3000, 2000)).unwrap();
+        vector_core::vcache::write(&small, &jpeg(900, 600)).unwrap();
+        vector_core::vcache::write(&anim, &gif(1600, 1200, 2)).unwrap();
+
+        let copy = display_for(&big.to_string_lossy(), 1024).unwrap().expect("a 3000 px photo comes down");
+        let img = image::load_from_memory(&vector_core::vcache::read(&copy).unwrap()).unwrap();
+        assert_eq!((img.width(), img.height()), (1024, 683), "the bubble's size, the photo's shape");
+        assert_eq!(display_for(&big.to_string_lossy(), 1024).unwrap(), Some(copy), "made once, then found");
+        assert_eq!(display_for(&small.to_string_lossy(), 1024).unwrap(), None);
+        assert_eq!(display_for(&anim.to_string_lossy(), 1024).unwrap(), None, "an animation shows as it is");
     }
 
     #[test]
