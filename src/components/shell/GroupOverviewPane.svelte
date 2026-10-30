@@ -2,6 +2,7 @@
     // The community overview's frame: its header from overview state, the body below it.
     // Ids stay where the stylesheets select them.
     import { shellPanes, shellReveals, reveal } from '../lib/shell.svelte.js';
+    import { tiling } from '../lib/tiling.js';
     import { overviewState, overviewHeadHandlers } from '../lib/overview.svelte.js';
     import { communityVersion } from '../lib/signals.svelte.js';
     import Avatar from '../ui/Avatar.svelte';
@@ -38,7 +39,7 @@
         </div>
         {#if shell.ws && screens.overview}<MemberSearch docked />{/if}
     </div>
-    <div style="overflow-y: auto; height: 100%; position: relative;">
+    <div style="overflow-y: auto; height: 100%; position: relative;" use:tiling>
         {#if screens.overview}<CommunityOverview h={screens.overview.h} />{/if}
     </div>
 </div>

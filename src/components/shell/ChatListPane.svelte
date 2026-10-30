@@ -4,6 +4,7 @@
     // over the community rail and the pane beside it, which is the filtered list or the
     // community the rail picked.
     import { shellPanes, shellState, shellHandlers, shellScreens, shellReveals, reveal, bindShellEl, syncLineState } from '../lib/shell.svelte.js';
+    import { tiling } from '../lib/tiling.js';
     import { consoleState } from '../lib/console.svelte.js';
     import { paneState } from '../lib/signals.svelte.js';
     import ConsoleHeader from './ConsoleHeader.svelte';
@@ -133,7 +134,7 @@
                     {#if screens.communityBanner}<CommunityBanner h={screens.communityBanner.h} />{/if}
                 {/if}
             </div>
-            <div id="chat-list" bind:this={listEl} use:bindList use:listFade use:reveal={['chatList', reveals.chatList]}>
+            <div id="chat-list" bind:this={listEl} use:tiling use:bindList use:listFade use:reveal={['chatList', reveals.chatList]}>
                 {#if screens.chatlist}<Chatlist h={screens.chatlist.h} snapshot={screens.chatlist.snapshot} />{/if}
             </div>
         </div>

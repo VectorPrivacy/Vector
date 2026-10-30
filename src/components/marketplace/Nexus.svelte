@@ -4,6 +4,7 @@
     // The page (a view, a search, or one app) rises in when it changes; an app opened on a
     // phone slides in over the list, and going back lands where the list was left.
     import { mktState, mktApps, mktSetQuery, mktClosingEnded, mktPicker, mktFits, mktDevice } from '../lib/marketplace.svelte.js';
+    import { tiling } from '../lib/tiling.js';
     import { shellState } from '../lib/shell.svelte.js';
     import { popupState } from '../lib/popup.svelte.js';
     import { permissionState } from '../lib/overlays.svelte.js';
@@ -144,7 +145,7 @@
             </div>
         {/if}
 
-        <div class="nx-scroll" bind:this={scroller}>
+        <div class="nx-scroll" use:tiling bind:this={scroller}>
             {#key st.tick}
                 <div class="nx-page" class:push={!ws && !!app} class:pop={!ws && !app && returning}>
                     {#if st.loading && !mktApps().length}

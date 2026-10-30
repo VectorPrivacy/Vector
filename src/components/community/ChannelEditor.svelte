@@ -5,6 +5,7 @@
     // overwrite per role or member, each bit allowed, denied, or left to what they hold
     // server-wide. A Category has Permissions alone.
     import { tick } from 'svelte';
+    import { tiling } from '../lib/tiling.js';
     import {
         ceOverlay, channelEditorState, setChannelEditorSection, setChannelEditorQuery, selectOverwrite, setOverwriteBit,
         overwriteKey, storedOverwrite, channelEditorDirty,
@@ -224,7 +225,7 @@
                 </button>
             </header>
 
-            <div class="cs-scroll" bind:this={anchors.el} onscroll={() => anchors.spy()}>
+            <div class="cs-scroll" use:tiling bind:this={anchors.el} onscroll={() => anchors.spy()}>
                 {#key section.id}
                 <div class="cs-content cs-content-enter" class:loading={st.busy}>
                     {#if section.id === 'overview'}

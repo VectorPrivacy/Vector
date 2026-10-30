@@ -5,6 +5,7 @@
     // first open (`ready`); scroll spy, rail follow and jump-scroll stay the app's, working
     // on the hosts handed over at mount.
     import { onMount } from 'svelte';
+    import { tiling } from '../lib/tiling.js';
     import { pickerState, panelState } from '../lib/picker.svelte.js';
     import PackSidebar from './PackSidebar.svelte';
     import RecentsGrid from './RecentsGrid.svelte';
@@ -55,7 +56,7 @@
         {#if p.ready}<PackSidebar h={h.islands} />{/if}
     </div>
     <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-    <div class="emoji-main" bind:this={main} onclick={(e) => h.mainClick(e)} onscroll={() => h.mainScroll()}>
+    <div class="emoji-main" use:tiling bind:this={main} onclick={(e) => h.mainClick(e)} onscroll={() => h.mainScroll()}>
         <div class="emoji-section" id="emoji-search-results-container" hidden={!st.query}>
             <div class="emoji-section-header">
                 <span class="header-text">Search Results</span>
@@ -94,7 +95,7 @@
 </div>
 <div class="gif-picker-content" style:display={p.mode === 'gif' ? 'flex' : 'none'}>
     <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-    <div class="gif-grid" id="gif-grid" bind:this={gif} onclick={(e) => h.gifClick(e)} onscroll={() => h.gifScroll()}>
+    <div class="gif-grid" id="gif-grid" use:tiling bind:this={gif} onclick={(e) => h.gifClick(e)} onscroll={() => h.gifScroll()}>
         {#if gif}<GifGrid grid={gif} h={h.islands} />{/if}
     </div>
 </div>

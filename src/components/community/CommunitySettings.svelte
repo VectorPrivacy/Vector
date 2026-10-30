@@ -4,6 +4,7 @@
     // the content itself as headed blocks in one scroll. Edits collect in a draft behind a
     // save bar; closing with unsaved changes is refused, and the bar says why.
     import { tick } from 'svelte';
+    import { tiling } from '../lib/tiling.js';
     import { csOverlay, csState, csDirty, csSetDraft, csSetSection, csSetQuery, csSelectBans, csClearBanSel } from '../lib/community-settings.svelte.js';
     import { popIn } from '../lib/popin.js';
     import Avatar from '../ui/Avatar.svelte';
@@ -288,7 +289,7 @@
                 </button>
             </header>
 
-            <div class="cs-scroll" bind:this={anchors.el} onscroll={() => anchors.spy()}>
+            <div class="cs-scroll" use:tiling bind:this={anchors.el} onscroll={() => anchors.spy()}>
                 {#key section.id}
                 <div class="cs-content cs-content-enter" class:loading={st.loading}>
                     {#if section.id === 'overview'}

@@ -863,9 +863,7 @@ function holdChatBottom(ms = BOTTOM_HOLD_MS) {
  * rows are watched for size, the list for rows coming and going.
  */
 let _pinGuardHeight = 0;
-let _pinGuardRaf = null;
 function _pinGuardCheck() {
-    _pinGuardRaf = null;
     const el = domChatMessages;
     const height = el.scrollHeight;
     if (height === _pinGuardHeight) return;
@@ -874,17 +872,7 @@ function _pinGuardCheck() {
     beginProgrammaticScroll();
     scrollToEnd(el);
 }
-// Resize callbacks run after layout and before paint, so the correction lands in the same frame.
-const _pinGuardSizes = new ResizeObserver(() => _pinGuardCheck());
-new MutationObserver((records) => {
-    for (const r of records) {
-        for (const n of r.addedNodes) if (n.nodeType === 1) _pinGuardSizes.observe(n, { box: 'border-box' });
-        for (const n of r.removedNodes) if (n.nodeType === 1) _pinGuardSizes.unobserve(n);
-    }
-    // A removed row resizes nothing that is still watched; check on the next frame.
-    if (_pinGuardRaf === null) _pinGuardRaf = requestAnimationFrame(_pinGuardCheck);
-}).observe(domChatMessages, { childList: true });
-for (const n of domChatMessages.children) _pinGuardSizes.observe(n, { box: 'border-box' });
+VectorSvelte.guardTiling(domChatMessages, _pinGuardCheck);
 
 /**
  * Handle procedural scroll loading of older messages

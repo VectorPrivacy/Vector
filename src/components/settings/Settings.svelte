@@ -5,6 +5,7 @@
     // render the same section bodies. Toggle values live in the screen store; the sections
     // whose owners register later (updates, network, voice) render once their handler bag exists.
     import { tick, untrack } from 'svelte';
+    import { tiling } from '../lib/tiling.js';
     import { settingsScreen, settingsHandlers, updatesState } from '../lib/settings.svelte.js';
     import { transportState, viewedKind, routingOffered } from '../lib/transport.svelte.js';
     import { advancedState } from '../lib/advanced.svelte.js';
@@ -506,7 +507,7 @@
         <header class="cs-top">
             <h2 class="cs-top-title">{category.label}</h2>
         </header>
-        <div class="cs-scroll" bind:this={anchors.el} onscroll={() => anchors.spy()}>
+        <div class="cs-scroll" use:tiling bind:this={anchors.el} onscroll={() => anchors.spy()}>
             {#key category.id}
                 <div class="cs-content cs-content-enter st-page" class:st-danger={category.danger}>
                     {#each category.anchors as a (a.id)}

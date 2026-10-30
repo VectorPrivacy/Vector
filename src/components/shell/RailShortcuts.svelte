@@ -1,5 +1,6 @@
 <script>
     import { bindRailEl, railEls, railLayout, railFolderOpen } from '../lib/rail.svelte.js';
+    import { tiling } from '../lib/tiling.js';
     import { dragGhost, nearestByCentre } from '../lib/reorder.js';
     import RailFolder from './RailFolder.svelte';
     const bindSpacesRows = bindRailEl('spacesRows');
@@ -308,7 +309,7 @@
 </div>
 <div id="ws-rail-spaces" class="ws-rail-group" hidden={groups.spaces.length === 0 && !tail}>
     <div class="ws-rail-group-label">Communities</div>
-    <div class="ws-rail-rows" use:bindSpacesRows use:fade use:fitHost>
+    <div class="ws-rail-rows" use:bindSpacesRows use:fade use:fitHost use:tiling>
         {#each rows as row (row.type === 'folder' ? `f:${row.id}` : `i:${row.key}`)}
             {#if row.type === 'folder'}
                 <RailFolder {h} folder={row} {activeId} {drag} />
