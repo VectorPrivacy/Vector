@@ -1270,6 +1270,7 @@ pub async fn send_file_dm_from(
         url: String::new(), path: local_path_str.clone(), size: plain_len + 16,
         // No copy of its own: the bubble reads the sender's bytes until the send ends.
         img_meta: img_meta.clone(), downloading: false, downloaded: false, verified: true,
+        resident: crate::media::resident(&crate::simd::hex::hex_to_bytes_32(&file_hash)),
         webxdc_topic: webxdc_topic.clone(),
         ..Default::default()
     };
@@ -1860,6 +1861,38 @@ mod seal_tests {
             }
         }
         let _ = std::fs::remove_file(&src);
+    }
+
+    #[tokio::test]
+    async fn an_upload_shows_the_bytes_in_hand_while_it_goes() {
+        struct Shown(Mutex<Option<Message>>);
+        impl SendCallback for Shown {
+            fn on_pending(&self, _: &str, msg: &Message) {
+                *self.0.lock().unwrap() = Some(msg.clone());
+            }
+        }
+        let session = crate::db::Session::empty();
+        let me = Keys::generate();
+        let file = std::env::temp_dir().join(format!("vector-shown-{}.bin", std::process::id()));
+        std::fs::write(&file, vec![7u8; 4096]).unwrap();
+        let shown = Arc::new(Shown(Mutex::new(None)));
+        crate::db::with_session(session, async {
+            crate::state::set_nostr_client(crate::nostr_client_builder().build());
+            crate::state::set_my_public_key(me.public_key());
+            crate::signer::set_test_signer(Some(crate::signer::ActiveSigner::Keys(me.clone())));
+            // Called off before its seal: nothing reaches a server.
+            let config = SendConfig { cancel_token: Some(Arc::new(AtomicBool::new(true))), ..SendConfig::default() };
+            let to = Keys::generate().public_key().to_bech32().unwrap();
+            let sent = send_file_dm_from(&to, FileSource::Path(file.clone()), "a.bin", "bin", None, None, None, &config, shown.clone()).await;
+            crate::signer::set_test_signer(None);
+            assert!(sent.is_err(), "the cancelled send ends failed");
+        })
+        .await;
+        let _ = std::fs::remove_file(&file);
+        let msg = shown.0.lock().unwrap().clone().expect("the bubble went up");
+        let att = &msg.attachments[0];
+        assert!(!att.downloaded && att.path.is_empty(), "the sender keeps no copy of its own");
+        assert!(att.resident, "the bubble draws the bytes it's sending, rather than offering to download them");
     }
 
     #[tokio::test]
