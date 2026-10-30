@@ -63,6 +63,8 @@ struct Slot {
     entry: Arc<Entry>,
     touched: Instant,
     holds: u32,
+    /// The file this one was drawn from (a still, a display copy): it goes when that one does.
+    parent: Option<[u8; 32]>,
 }
 
 pub struct MediaRam {
@@ -87,10 +89,15 @@ impl MediaRam {
     }
 
     pub fn insert(&self, hash: [u8; 32], bytes: Vec<u8>, mime: &str) -> Result<Arc<Entry>, Refused> {
-        self.insert_at(hash, bytes, mime, Instant::now())
+        self.insert_at(hash, bytes, mime, Instant::now(), None)
     }
 
-    fn insert_at(&self, hash: [u8; 32], bytes: Vec<u8>, mime: &str, now: Instant) -> Result<Arc<Entry>, Refused> {
+    /// Keep a picture drawn from `parent` under its own `key`; removing `parent` removes it.
+    pub fn insert_derived(&self, parent: [u8; 32], key: [u8; 32], bytes: Vec<u8>, mime: &str) -> Result<Arc<Entry>, Refused> {
+        self.insert_at(key, bytes, mime, Instant::now(), Some(parent))
+    }
+
+    fn insert_at(&self, hash: [u8; 32], bytes: Vec<u8>, mime: &str, now: Instant, parent: Option<[u8; 32]>) -> Result<Arc<Entry>, Refused> {
         let bytes = Zeroizing::new(bytes);
         let len = bytes.len() as u64;
         if !self.admits(len) {
@@ -117,7 +124,7 @@ impl MediaRam {
 
         self.live.fetch_add(len, Ordering::Relaxed);
         let entry = Arc::new(Entry { bytes, mime: mime.into(), live: self.live.clone() });
-        slots.insert(hash, Slot { entry: entry.clone(), touched: now, holds: 0 });
+        slots.insert(hash, Slot { entry: entry.clone(), touched: now, holds: 0, parent });
         Ok(entry)
     }
 
@@ -158,7 +165,7 @@ impl MediaRam {
     }
 
     pub fn remove(&self, hash: &[u8; 32]) {
-        self.lock().remove(hash);
+        self.lock().retain(|key, slot| key != hash && slot.parent.as_ref() != Some(hash));
     }
 
     pub fn clear(&self) {
@@ -225,6 +232,12 @@ pub fn insert(hash: [u8; 32], bytes: Vec<u8>, mime: &str) -> Result<Arc<Entry>, 
     cache().insert(hash, bytes, mime)
 }
 
+/// [`insert`] for a picture drawn from `parent`, which takes it along when it goes.
+pub fn insert_derived(parent: [u8; 32], key: [u8; 32], bytes: Vec<u8>, mime: &str) -> Result<Arc<Entry>, Refused> {
+    start_trimming();
+    cache().insert_derived(parent, key, bytes, mime)
+}
+
 /// A per-session loop would outlive its session across a rebind, so one loop trims
 /// whichever account is live.
 fn start_trimming() {
@@ -260,14 +273,25 @@ mod tests {
     }
 
     #[test]
+    fn a_picture_drawn_from_a_file_goes_with_it() {
+        let ram = MediaRam::with_budget(10_000);
+        ram.insert(H1, bytes(100), "image/png").unwrap();
+        ram.insert_derived(H1, H2, bytes(10), "image/jpeg").unwrap();
+        ram.insert(H3, bytes(10), "image/png").unwrap();
+        ram.remove(&H1);
+        assert!(!ram.contains(&H1) && !ram.contains(&H2), "the copy goes with the file");
+        assert!(ram.contains(&H3), "nothing else does");
+    }
+
+    #[test]
     fn the_least_recently_used_goes_first_and_a_held_entry_never_does() {
         let ram = MediaRam::with_budget(300);
         let t0 = Instant::now();
-        ram.insert_at(H1, bytes(100), "image/png", t0).unwrap();
-        ram.insert_at(H2, bytes(100), "image/png", t0 + Duration::from_secs(1)).unwrap();
+        ram.insert_at(H1, bytes(100), "image/png", t0, None).unwrap();
+        ram.insert_at(H2, bytes(100), "image/png", t0 + Duration::from_secs(1), None).unwrap();
         assert!(ram.hold(&H1));
-        ram.insert_at(H3, bytes(100), "image/png", t0 + Duration::from_secs(2)).unwrap();
-        ram.insert_at(H4, bytes(100), "image/png", t0 + Duration::from_secs(3)).unwrap();
+        ram.insert_at(H3, bytes(100), "image/png", t0 + Duration::from_secs(2), None).unwrap();
+        ram.insert_at(H4, bytes(100), "image/png", t0 + Duration::from_secs(3), None).unwrap();
         assert!(ram.contains(&H1), "held, though oldest");
         assert!(!ram.contains(&H2), "the oldest unheld went");
         assert!(ram.contains(&H3) && ram.contains(&H4));
@@ -308,11 +332,11 @@ mod tests {
     fn a_reader_mid_request_keeps_its_entry_out_of_eviction() {
         let ram = MediaRam::with_budget(300);
         let t0 = Instant::now();
-        ram.insert_at(H1, bytes(100), "video/mp4", t0).unwrap();
+        ram.insert_at(H1, bytes(100), "video/mp4", t0, None).unwrap();
         let reading = ram.get(&H1).unwrap();
-        ram.insert_at(H2, bytes(100), "image/png", t0 + Duration::from_secs(1)).unwrap();
-        ram.insert_at(H3, bytes(100), "image/png", t0 + Duration::from_secs(2)).unwrap();
-        ram.insert_at(H4, bytes(100), "image/png", t0 + Duration::from_secs(3)).unwrap();
+        ram.insert_at(H2, bytes(100), "image/png", t0 + Duration::from_secs(1), None).unwrap();
+        ram.insert_at(H3, bytes(100), "image/png", t0 + Duration::from_secs(2), None).unwrap();
+        ram.insert_at(H4, bytes(100), "image/png", t0 + Duration::from_secs(3), None).unwrap();
         assert!(ram.contains(&H1), "the oldest, but being read");
         assert!(!ram.contains(&H2), "so the next oldest went");
         drop(reading);
@@ -322,10 +346,10 @@ mod tests {
     fn an_idle_entry_goes_after_half_an_hour_unless_held() {
         let ram = MediaRam::with_budget(1000);
         let t0 = Instant::now();
-        ram.insert_at(H1, bytes(10), "image/png", t0).unwrap();
-        ram.insert_at(H2, bytes(10), "video/mp4", t0).unwrap();
+        ram.insert_at(H1, bytes(10), "image/png", t0, None).unwrap();
+        ram.insert_at(H2, bytes(10), "video/mp4", t0, None).unwrap();
         assert!(ram.hold(&H2));
-        ram.insert_at(H3, bytes(10), "image/png", t0 + IDLE + Duration::from_secs(1)).unwrap();
+        ram.insert_at(H3, bytes(10), "image/png", t0 + IDLE + Duration::from_secs(1), None).unwrap();
         assert!(!ram.contains(&H1), "idle");
         assert!(ram.contains(&H2), "held");
         assert!(ram.contains(&H3));

@@ -117,7 +117,7 @@ pub async fn download_whisper_model<R: Runtime>(
 /// a path, or None when it doesn't animate: the page shows it whenever the image may not move.
 #[tauri::command]
 pub async fn image_still(src: String) -> Result<Option<String>, String> {
-    tokio::task::spawn_blocking(move || crate::image_cache::still_for(&src)).await.map_err(|e| e.to_string())?
+    vector_core::db::blocking_bound(move || crate::image_cache::still_for(&src)).await?
 }
 
 /// A copy of the picture `src` (a `vmedia:` ref or a cached file) at most `dim` on its longest
@@ -126,7 +126,12 @@ pub async fn image_still(src: String) -> Result<Option<String>, String> {
 #[tauri::command]
 pub async fn image_display(src: String, dim: u32) -> Result<Option<String>, String> {
     let dim = dim.clamp(256, 4096);
-    tokio::task::spawn_blocking(move || crate::image_cache::display_for(&src, dim)).await.map_err(|e| e.to_string())?
+    let probe = src.clone();
+    if let Some(kept) = vector_core::db::blocking_bound(move || crate::image_cache::display_kept(&probe, dim)).await? {
+        return Ok(Some(kept));
+    }
+    let _turn = crate::image_cache::DISPLAY_COPIES.acquire().await.map_err(|e| e.to_string())?;
+    vector_core::db::blocking_bound(move || crate::image_cache::display_for(&src, dim)).await?
 }
 
 // Handler list for this module (for reference):

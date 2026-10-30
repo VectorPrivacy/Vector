@@ -731,12 +731,15 @@ fn read_whole(source: &dyn vector_core::media::MediaSource) -> Result<zeroize::Z
 /// a `vmedia:` ref for a held picture (see [`held_derived`]) or a path in `cache/stills/`. None
 /// when it does not animate.
 pub fn still_for(src: &str) -> Result<Option<String>, String> {
+    if let Some(kept) = held_kept(src, "still", 0) {
+        return Ok(Some(kept));
+    }
     let (source, key, path) = open_ours(src)?;
     if crate::shared::image::animated_format(&read_head(&*source, ANIMATION_HEAD)?).is_none() {
         return Ok(None);
     }
     let Some(path) = path else {
-        return held_derived("still", &key, 0, false, || {
+        return held_derived("still", &key, 0, || {
             let Ok(bytes) = read_whole(&*source) else { return Ok(None) };
             Ok(Some((vector_core::crypto::still_png(&bytes)?, "image/png")))
         });
@@ -758,52 +761,56 @@ pub fn still_for(src: &str) -> Result<Option<String>, String> {
 
 /// A held picture's still or display copy lives in this account's media memory under a key of its
 /// own, never on disk: memory-only viewing writes nothing, and a kept file persists only under its
-/// own encryption. Answers the copy as a `vmedia:` ref; None when memory has no room for it.
+/// own encryption. Answers the copy as a `vmedia:` ref, and it goes when its picture does.
 fn held_derived(
     kind: &str,
     hash: &str,
     dim: u32,
-    gated: bool,
     make: impl FnOnce() -> Result<Option<(Vec<u8>, &'static str)>, String>,
 ) -> Result<Option<String>, String> {
-    let key: [u8; 32] = Sha256::digest(format!("vector-derived:{kind}:{hash}:{dim}").as_bytes()).into();
+    let parent = vector_core::simd::hex::hex_to_bytes_32_checked(hash).ok_or("not a media hash")?;
+    let key = derived_key(kind, hash, dim);
     let held = format!("vmedia:{}", bytes_to_hex_string(&key));
-    if vector_core::media::ram::cache().contains(&key) {
-        return Ok(Some(held));
-    }
-    let _slot = gated.then(DisplaySlot::take);
-    if gated && vector_core::media::ram::cache().contains(&key) {
+    if vector_core::media::ram::cache().get(&key).is_some() {
         return Ok(Some(held));
     }
     let Some((bytes, mime)) = make()? else { return Ok(None) };
-    Ok(vector_core::media::ram::insert(key, bytes, mime).ok().map(|_| held))
+    vector_core::media::ram::insert_derived(parent, key, bytes, mime).map_err(|_| "no room in memory for the copy")?;
+    Ok(Some(held))
+}
+
+/// Where a held picture's `kind` copy lives. The digest is masked so that no file's content hash
+/// can be it: the derivation string is public, and a file of exactly those bytes would otherwise
+/// claim the slot.
+fn derived_key(kind: &str, hash: &str, dim: u32) -> [u8; 32] {
+    let mut key: [u8; 32] = Sha256::digest(format!("vector-derived:{kind}:{hash}:{dim}").as_bytes()).into();
+    key[0] ^= 0x80;
+    key
+}
+
+/// A held picture's `kind` copy already in memory, as its `vmedia:` ref, without opening the picture.
+fn held_kept(src: &str, kind: &str, dim: u32) -> Option<String> {
+    let hash = src.strip_prefix("vmedia:")?.to_ascii_lowercase();
+    let key = derived_key(kind, &hash, dim);
+    vector_core::media::ram::cache().get(&key).map(|_| format!("vmedia:{}", bytes_to_hex_string(&key)))
 }
 
 /// A display copy decodes the whole picture, and a chat opening asks for every row's at once;
-/// two at a time keeps that from holding a window's worth of full-size pixels.
-static DISPLAY_GATE: (std::sync::Mutex<u8>, std::sync::Condvar) = (std::sync::Mutex::new(0), std::sync::Condvar::new());
-const DISPLAY_SLOTS: u8 = 2;
+/// two at a time, in the order asked, keeps that from holding a window's worth of full-size pixels.
+pub static DISPLAY_COPIES: LazyLock<Semaphore> = LazyLock::new(|| Semaphore::new(2));
 
-struct DisplaySlot;
-
-impl DisplaySlot {
-    fn take() -> Self {
-        let (count, freed) = &DISPLAY_GATE;
-        let mut taken = count.lock().unwrap_or_else(|e| e.into_inner());
-        while *taken >= DISPLAY_SLOTS {
-            taken = freed.wait(taken).unwrap_or_else(|e| e.into_inner());
-        }
-        *taken += 1;
-        DisplaySlot
+/// The display copy of `src` already made, held or on disk, without decoding anything.
+pub fn display_kept(src: &str, dim: u32) -> Option<String> {
+    if src.starts_with("vmedia:") {
+        return held_kept(src, "display", dim);
     }
-}
-
-impl Drop for DisplaySlot {
-    fn drop(&mut self) {
-        let (count, freed) = &DISPLAY_GATE;
-        *count.lock().unwrap_or_else(|e| e.into_inner()) -= 1;
-        freed.notify_one();
-    }
+    let (_, key, _) = open_ours(src).ok()?;
+    let stills = vector_core::db::get_app_data_dir().ok()?.join("cache").join("stills");
+    ["jpg", "png"]
+        .into_iter()
+        .map(|ext| stills.join(format!("{key}-{dim}.{ext}")))
+        .find(|p| vector_core::vcache::readable(p))
+        .map(|p| p.to_string_lossy().into_owned())
 }
 
 /// A copy of the still picture at `src` at most `dim` on its longest side, for showing it where
@@ -827,20 +834,14 @@ pub fn display_for(src: &str, dim: u32) -> Result<Option<String>, String> {
         crate::shared::image::compress_image(&img, dim, 85).map(Some)
     };
     if path.is_none() {
-        return held_derived("display", &key, dim, true, || {
+        return held_derived("display", &key, dim, || {
             Ok(shrink()?.map(|small| (small.bytes, if small.extension == "png" { "image/png" } else { "image/jpeg" })))
         });
     }
+    if let Some(kept) = display_kept(src, dim) {
+        return Ok(Some(kept));
+    }
     let stills = vector_core::db::get_app_data_dir()?.join("cache").join("stills");
-    let kept = || ["jpg", "png"].into_iter().map(|ext| stills.join(format!("{key}-{dim}.{ext}"))).find(|p| vector_core::vcache::readable(p));
-    if let Some(kept) = kept() {
-        return Ok(Some(kept.to_string_lossy().into_owned()));
-    }
-    let _slot = DisplaySlot::take();
-    // The same picture in two rows: whoever waited finds the other's copy.
-    if let Some(kept) = kept() {
-        return Ok(Some(kept.to_string_lossy().into_owned()));
-    }
     let Some(small) = shrink()? else { return Ok(None) };
     let kept = stills.join(format!("{key}-{dim}.{}", small.extension));
     std::fs::create_dir_all(&stills).map_err(|e| e.to_string())?;
@@ -1836,15 +1837,16 @@ mod avatar_thumb_tests {
 
     #[test]
     fn a_held_pictures_copy_and_still_stay_in_memory() {
+        let _serial = crate::commands::transport::tests::TEST_LOCK.blocking_lock();
         let root = crate::util::test_app_data();
         let hold = |bytes: Vec<u8>, mime: &str| {
             let hash: [u8; 32] = Sha256::digest(&bytes).into();
             vector_core::media::ram::insert(hash, bytes, mime).unwrap();
-            bytes_to_hex_string(&hash)
+            (hash, bytes_to_hex_string(&hash))
         };
-        let (photo, anim) = (hold(jpeg(3000, 2000), "image/jpeg"), hold(gif(64, 48, 2), "image/gif"));
+        let ((photo_hash, photo), (_, anim)) = (hold(jpeg(3000, 2000), "image/jpeg"), hold(gif(64, 48, 2), "image/gif"));
         let stills = root.join("cache").join("stills");
-        let on_disk = |hex: &str| std::fs::read_dir(&stills).map_or(false, |d| d.flatten().any(|e| e.file_name().to_string_lossy().starts_with(hex)));
+        let on_disk = |hex: &str| std::fs::read_dir(&stills).is_ok_and(|d| d.flatten().any(|e| e.file_name().to_string_lossy().starts_with(hex)));
 
         for (made, hex) in [(display_for(&format!("vmedia:{photo}"), 1024), &photo), (still_for(&format!("vmedia:{anim}")), &anim)] {
             let made = made.unwrap().expect("a copy");
@@ -1853,7 +1855,13 @@ mod avatar_thumb_tests {
             assert!(image::load_from_memory(entry.bytes()).is_ok());
             assert!(!on_disk(hex), "nothing drawn from a held picture is written");
         }
-        assert_eq!(display_for(&format!("vmedia:{photo}"), 1024).unwrap(), display_for(&format!("vmedia:{photo}"), 1024).unwrap(), "made once, then found");
+        assert_eq!(display_kept(&format!("vmedia:{photo}"), 1024), display_for(&format!("vmedia:{photo}"), 1024).unwrap(), "found without opening the photo");
+
+        let public: [u8; 32] = Sha256::digest(format!("vector-derived:display:{photo}:1024").as_bytes()).into();
+        assert_ne!(derived_key("display", &photo, 1024), public, "no file of the derivation's bytes can claim the slot");
+
+        vector_core::media::ram::cache().remove(&photo_hash);
+        assert_eq!(display_kept(&format!("vmedia:{photo}"), 1024), None, "the copy goes with its photo");
     }
 
     #[test]
