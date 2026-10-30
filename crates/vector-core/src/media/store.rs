@@ -43,6 +43,13 @@ pub fn holds(hash: &[u8; 32]) -> bool {
     index().0.read().unwrap_or_else(|e| e.into_inner()).as_ref().is_some_and(|set| set.contains(hash))
 }
 
+/// Stop answering for `hash` at once, before its row and file go: a read already under way then
+/// finds it gone instead of putting it back in memory.
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn stop_holding(hash: &[u8; 32]) {
+    indexed(*hash, false);
+}
+
 fn indexed(hash: [u8; 32], present: bool) {
     if let Some(set) = index().0.write().unwrap_or_else(|e| e.into_inner()).as_mut() {
         if present {

@@ -85,6 +85,10 @@ pub async fn held_bytes(hash: &[u8; 32]) -> Option<(Vec<u8>, String)> {
     }
     #[cfg(target_arch = "wasm32")]
     if let Some((plain, mime)) = store::read_plain(hash).await {
+        // Deleted while it was read: it doesn't come back into memory.
+        if !store::holds(hash) {
+            return None;
+        }
         let _ = ram::cache().insert(*hash, plain.clone(), &mime);
         return Some((plain, mime));
     }
