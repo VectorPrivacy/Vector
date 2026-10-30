@@ -1385,14 +1385,15 @@ function setupInlineImageListeners() {
  * fallbacks (hide favicon, remove preview) behave as before.
  * @param {HTMLImageElement} img
  * @param {string} url - remote https URL (attacker-controlled is fine)
+ * @param {number} [fit] - the longest side it shows at, for a picture shown small (a favicon)
  */
-function bindBackendCachedImg(img, url) {
+function bindBackendCachedImg(img, url, fit) {
     if (!url || typeof url !== 'string') {
         queueMicrotask(() => img.dispatchEvent(new Event('error')));
         return;
     }
-    img.dataset.pendingCacheUrl = url;
-    invoke('cache_url_image', { url }).then(path => {
+    img.dataset.pendingCacheUrl = fit ? `${url}#fit${fit}` : url;
+    invoke('cache_url_image', { url, fit: fit || null }).then(path => {
         if (path) {
             delete img.dataset.pendingCacheUrl;
             img.src = convertFileSrc(path);

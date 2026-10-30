@@ -744,15 +744,21 @@ fn emoji_still(image_type: ImageType, bytes: &[u8]) -> Option<crate::shared::ima
     if !matches!(image_type, ImageType::Emoji | ImageType::EmojiPackIcon) {
         return None;
     }
+    still_within(bytes, EMOJI_STILL_DIM)
+}
+
+/// A still picture longer than `dim` on a side, re-encoded down to it. None for an animation,
+/// an SVG, or one already within it.
+fn still_within(bytes: &[u8], dim: u32) -> Option<crate::shared::image::EncodedImage> {
     if crate::shared::image::animated_format(bytes).is_some() || vector_core::svg::looks_like_svg(bytes) {
         return None;
     }
     let (w, h) = crate::shared::image::animated_dims(bytes)?;
-    if w.max(h) <= EMOJI_STILL_DIM {
+    if w.max(h) <= dim {
         return None;
     }
-    let img = crate::shared::image::decode_image(bytes, EMOJI_STILL_DIM).ok()?;
-    crate::shared::image::compress_image(&img, EMOJI_STILL_DIM, 90).ok()
+    let img = crate::shared::image::decode_image(bytes, dim).ok()?;
+    crate::shared::image::compress_image(&img, dim, 90).ok()
 }
 
 /// Bring still emojis and pack icons cached at full size down to [`EMOJI_STILL_DIM`], once per
@@ -860,6 +866,7 @@ fn animated_display_target(image_type: ImageType) -> Option<(u32, usize, &'stati
         // (display-dim ceiling, byte budget the quality ladder aims for)
         ImageType::Avatar => Some((160, 512 * 1024, "avatar")),
         ImageType::Banner => Some((640, 1536 * 1024, "banner")),
+        ImageType::Emoji | ImageType::EmojiPackIcon => Some((EMOJI_STILL_DIM, 256 * 1024, "emoji")),
         _ => None,
     }
 }
@@ -907,7 +914,7 @@ fn keep_transcode(src: &[u8], out: &[u8], target: u32, budget: usize) -> bool {
 /// check by construction, so later boots read a few file headers and stop.
 pub fn backfill_animated_cache<R: Runtime>(handle: &AppHandle<R>) {
     let mut rewritten = 0usize;
-    for image_type in [ImageType::Avatar, ImageType::Banner] {
+    for image_type in [ImageType::Avatar, ImageType::Banner, ImageType::Emoji, ImageType::EmojiPackIcon] {
         let Some((target, budget, label)) = animated_display_target(image_type) else { continue };
         let Ok(dir) = get_cache_dir(handle, image_type) else { continue };
         let Ok(entries) = std::fs::read_dir(&dir) else { continue };
@@ -1304,6 +1311,7 @@ pub async fn cleanup_stale_downloads() {
 pub async fn cache_url_image<R: Runtime>(
     handle: AppHandle<R>,
     url: String,
+    fit: Option<u32>,
 ) -> Result<Option<String>, String> {
     // Security: Only allow HTTPS URLs
     if !is_https_url(&url) {
@@ -1319,12 +1327,20 @@ pub async fn cache_url_image<R: Runtime>(
         }
     }
 
+    // A picture shown small (a favicon) is kept at that size: decoded whole, a site's 1024 px
+    // icon is 4 MB of pixels for a 15 px slot. It is its own entry, and its events name it.
+    let fit = fit.filter(|n| (16..=1024).contains(n));
+    let key = match fit {
+        Some(n) => format!("{url}#fit{n}"),
+        None => url.clone(),
+    };
+
     // Held in memory already, or kept on disk.
-    let held_key = vector_core::media::url_key("inline-image", &url);
+    let held_key = vector_core::media::url_key("inline-image", &key);
     if vector_core::media::resident(&held_key) {
         return Ok(Some(vector_core::media::MediaRef::held(&held_key)));
     }
-    if let Some(path) = get_cached_path(&handle, &url, ImageType::InlineImage) {
+    if let Some(path) = get_cached_path(&handle, &key, ImageType::InlineImage) {
         return Ok(Some(path));
     }
 
@@ -1332,16 +1348,16 @@ pub async fn cache_url_image<R: Runtime>(
     // If so, return None - the frontend will receive the cached path via the inline_image_cached event
     {
         let mut in_progress = DOWNLOADS_IN_PROGRESS.lock().await;
-        if in_progress.contains(&url) {
-            log_debug!("[ImageCache] Download already in progress, frontend will get path via event: {}", url);
+        if in_progress.contains(&key) {
+            log_debug!("[ImageCache] Download already in progress, frontend will get path via event: {}", key);
             return Ok(None);
         }
         // Mark as in-progress (clone here is necessary for the set)
-        in_progress.insert(url.clone());
+        in_progress.insert(key.clone());
     }
 
     // Use a scope guard pattern - url is moved into cleanup, avoiding extra clone
-    let cleanup_url = url.clone(); // One clone for cleanup
+    let cleanup_url = key.clone(); // One clone for cleanup
     let cleanup = || async move {
         DOWNLOADS_IN_PROGRESS.lock().await.remove(&cleanup_url);
     };
@@ -1356,7 +1372,7 @@ pub async fn cache_url_image<R: Runtime>(
     };
 
     // Create progress reporter for this download
-    let reporter = InlineImageProgressReporter::new(&handle, &url);
+    let reporter = InlineImageProgressReporter::new(&handle, &key);
 
     // Helper to emit failure event so frontend can remove spinner
     let emit_failure = |handle: &AppHandle<R>, url: &str| {
@@ -1378,7 +1394,7 @@ pub async fn cache_url_image<R: Runtime>(
             // Expected for sites without full preview metadata (missing favicon,
             // og:image, etc.) — debug, not a warning.
             log_debug!("[ImageCache] Failed to download inline image {}: {}", url, e);
-            emit_failure(&handle, &url);
+            emit_failure(&handle, &key);
             return Ok(None);
         }
     };
@@ -1391,7 +1407,7 @@ pub async fn cache_url_image<R: Runtime>(
             // Unsupported format (e.g. AVIF, absent from our image build) or a
             // non-image response — an expected outcome, not a warning.
             log_debug!("[ImageCache] Invalid image data from {}", url);
-            emit_failure(&handle, &url);
+            emit_failure(&handle, &key);
             return Ok(None);
         }
     };
@@ -1406,12 +1422,26 @@ pub async fn cache_url_image<R: Runtime>(
             _ => {
                 cleanup().await;
                 log_debug!("[ImageCache] SVG refused from {}", url);
-                emit_failure(&handle, &url);
+                emit_failure(&handle, &key);
                 return Ok(None);
             }
         }
     } else {
         bytes
+    };
+    let bytes = match fit {
+        Some(dim) => match tokio::task::spawn_blocking(move || still_within(&bytes, dim).map_or((bytes, None), |re| (re.bytes, Some(re.extension)))).await {
+            Ok((fitted, ext)) => {
+                extension = ext.unwrap_or(extension);
+                fitted
+            }
+            Err(e) => {
+                cleanup().await;
+                emit_failure(&handle, &key);
+                return Err(format!("fit task: {e}"));
+            }
+        },
+        None => bytes,
     };
 
     // A picture in a chat follows the attachment rules: held in memory unless the account
@@ -1424,11 +1454,11 @@ pub async fn cache_url_image<R: Runtime>(
                 return Err(e);
             }
         };
-        let file_path = cache_dir.join(format!("{}.{}", url_to_cache_key(&url), extension));
+        let file_path = cache_dir.join(format!("{}.{}", url_to_cache_key(&key), extension));
         if let Err(e) = vector_core::vcache::write(&file_path, &bytes) {
             cleanup().await;
             log_warn!("[ImageCache] Failed to write cache file: {}", e);
-            emit_failure(&handle, &url);
+            emit_failure(&handle, &key);
             return Ok(None);
         }
         file_path.to_string_lossy().into_owned()
@@ -1436,7 +1466,7 @@ pub async fn cache_url_image<R: Runtime>(
         let mime = vector_core::crypto::mime_from_extension(extension);
         if vector_core::media::ram::insert(held_key, bytes, mime).is_err() {
             cleanup().await;
-            emit_failure(&handle, &url);
+            emit_failure(&handle, &key);
             return Ok(None);
         }
         vector_core::media::MediaRef::held(&held_key)
@@ -1449,7 +1479,7 @@ pub async fn cache_url_image<R: Runtime>(
     // Emit completion event so ALL loading indicators for this URL get updated
     // (handles cases like message re-rendering or multiple instances of same image)
     handle.emit("inline_image_cached", json!({
-        "url": url,
+        "url": key,
         "path": path_str.clone()
     })).ok();
 

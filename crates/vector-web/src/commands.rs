@@ -398,7 +398,12 @@ pub async fn dispatch(cmd: &str, a: Args) -> Result<Value, String> {
         "cache_url_image" => {
             let url = a.str("url")?;
             let path = crate::images::cache(&url, crate::images::Kind::InlineImage).await?;
-            vector_core::emit_event("inline_image_cached", &json!({ "url": url, "path": path }));
+            // The event names what the page asked for: a fitted request waits under its own key.
+            let key = match a.get("fit").and_then(Value::as_u64) {
+                Some(n) => format!("{url}#fit{n}"),
+                None => url,
+            };
+            vector_core::emit_event("inline_image_cached", &json!({ "url": key, "path": path }));
             Ok(json!(path))
         }
 

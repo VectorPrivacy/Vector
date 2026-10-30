@@ -185,7 +185,7 @@ function updateMessageRow(msg, oldId = '') {
 // @property {(n: number, dec?: number, short?: boolean) => string} formatBytes
 // @property {() => string} openChat            the open chat's id
 // @property {(url: string) => void} openUrl     with the link-spoof guard
-// @property {(img: HTMLImageElement, url: string) => void} backendCachedImg
+// @property {(img: HTMLImageElement, url: string, fit?: number) => void} backendCachedImg
 // @property {() => void} onThumbLoad           a thumbnail landed: keep the scroll anchored
 /** The subset of `obj` under `keys`, by reference. */
 function _dmsgPick(obj, keys) { return Object.fromEntries(keys.map((k) => [k, obj[k]])); }
@@ -202,7 +202,7 @@ const _dmsgLookups = {
     formatBytes: (n, dec, short) => formatBytes(n, dec, short),
     openChat: () => strOpenChat,
     openUrl: (url) => _dmsgOpenPreviewUrl(url),
-    backendCachedImg: (img, url) => bindBackendCachedImg(img, url),
+    backendCachedImg: (img, url, fit) => bindBackendCachedImg(img, url, fit),
     onThumbLoad: () => { if (proceduralScrollState.isLoadingOlderMessages) correctScrollForMediaLoad(); else softChatScroll(); },
 };
 

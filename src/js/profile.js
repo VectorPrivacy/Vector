@@ -11,7 +11,7 @@ function renderCurrentProfile(cProfile) {
         hasName: !!(cProfile?.nickname || cProfile?.name),
         statusText: cProfile?.status?.title || 'Set a Status',
         emojiTags: cProfile?.status?.emoji_tags || [],
-        avatarSrc: getProfileAvatarSrc(cProfile, true) || null,
+        avatarSrc: getProfileAvatarSrc(cProfile) || null,
     });
 }
 
