@@ -282,10 +282,13 @@
     if (location.hash) followRoute(location.hash, true);
 
     let steppingBack = null;   // the report that asked for it, applied once the Back lands
+    // An iOS Home Screen app turns an edge swipe into Back or Forward wherever history has an
+    // entry, which the app's own swipes trip; there the place is kept in the URL alone.
+    const swipesWalkHistory = navigator.standalone === true;
     function applyPlace(detail) {
         const key = placeKey(detail);
         const url = location.pathname + location.search + placeHash(detail);
-        const replace = settling || key === entry.place || (entry.account && entry.account !== detail.account);
+        const replace = swipesWalkHistory || settling || key === entry.place || (entry.account && entry.account !== detail.account);
         settling = false;
         if (!replace && entry.index > 0 && trail[entry.index - 1] === key
             && !(key.startsWith('chat:') && entry.place.startsWith('chat:'))) {
@@ -345,15 +348,28 @@
 
     const storeFiles = (files) => post({ t: 'store', files: [...files] });
 
+    // The picker's input stays in the document until it answers: WebKit can collect a detached
+    // one while its sheet is open, and the pick never arrives.
+    let picking = null;
     function pickFiles({ multiple = false, filters } = {}) {
+        picking?.([]);
         return new Promise((resolve) => {
             const input = document.createElement('input');
             input.type = 'file';
             input.multiple = multiple;
+            input.style.cssText = 'position:fixed;top:0;left:0;width:1px;height:1px;opacity:0;pointer-events:none';
             const exts = (filters || []).flatMap((f) => f.extensions || []).filter((e) => e && e !== '*');
             if (exts.length) input.accept = exts.map((e) => '.' + e).join(',');
-            input.addEventListener('change', () => resolve([...input.files]));
-            input.addEventListener('cancel', () => resolve([]));
+            const done = (files) => {
+                if (picking !== done) return;
+                picking = null;
+                input.remove();
+                resolve(files);
+            };
+            input.addEventListener('change', () => done([...input.files]));
+            input.addEventListener('cancel', () => done([]));
+            picking = done;
+            document.body.appendChild(input);
             input.click();
         });
     }
