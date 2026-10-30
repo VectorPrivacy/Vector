@@ -727,28 +727,56 @@ fn read_whole(source: &dyn vector_core::media::MediaSource) -> Result<zeroize::Z
 }
 
 /// What the page shows while the animated image at `src` may not move: an avatar's thumb, or its
-/// first frame kept in `cache/stills/`. `src` is a `vmedia:` ref or a file under Vector's own
-/// folders; None when it does not animate.
-pub fn still_for(src: &str) -> Result<Option<PathBuf>, String> {
+/// first frame. `src` is a `vmedia:` ref or a file under Vector's own folders, and the answer is
+/// a `vmedia:` ref for a held picture (see [`held_derived`]) or a path in `cache/stills/`. None
+/// when it does not animate.
+pub fn still_for(src: &str) -> Result<Option<String>, String> {
     let (source, key, path) = open_ours(src)?;
     if crate::shared::image::animated_format(&read_head(&*source, ANIMATION_HEAD)?).is_none() {
         return Ok(None);
     }
-    let in_avatars = |p: &&PathBuf| p.parent().and_then(|d| d.file_name()) == Some("avatars".as_ref());
-    if let Some(thumb) = path.as_ref().filter(in_avatars).and_then(|p| avatar_thumb_path(p)) {
-        if vector_core::vcache::readable(&thumb) {
-            return Ok(Some(thumb));
+    let Some(path) = path else {
+        return held_derived("still", &key, 0, false, || {
+            let Ok(bytes) = read_whole(&*source) else { return Ok(None) };
+            Ok(Some((vector_core::crypto::still_png(&bytes)?, "image/png")))
+        });
+    };
+    if path.parent().and_then(|d| d.file_name()) == Some("avatars".as_ref()) {
+        if let Some(thumb) = avatar_thumb_path(&path).filter(|t| vector_core::vcache::readable(t)) {
+            return Ok(Some(thumb.to_string_lossy().into_owned()));
         }
     }
     let still = vector_core::db::get_app_data_dir()?.join("cache").join("stills").join(format!("{key}.png"));
-    if vector_core::vcache::readable(&still) {
-        return Ok(Some(still));
+    if !vector_core::vcache::readable(&still) {
+        let Ok(bytes) = read_whole(&*source) else { return Ok(None) };
+        let png = vector_core::crypto::still_png(&bytes)?;
+        std::fs::create_dir_all(still.parent().ok_or("no stills folder")?).map_err(|e| e.to_string())?;
+        vector_core::vcache::write(&still, &png)?;
     }
-    let Ok(bytes) = read_whole(&*source) else { return Ok(None) };
-    let png = vector_core::crypto::still_png(&bytes)?;
-    std::fs::create_dir_all(still.parent().ok_or("no stills folder")?).map_err(|e| e.to_string())?;
-    vector_core::vcache::write(&still, &png)?;
-    Ok(Some(still))
+    Ok(Some(still.to_string_lossy().into_owned()))
+}
+
+/// A held picture's still or display copy lives in this account's media memory under a key of its
+/// own, never on disk: memory-only viewing writes nothing, and a kept file persists only under its
+/// own encryption. Answers the copy as a `vmedia:` ref; None when memory has no room for it.
+fn held_derived(
+    kind: &str,
+    hash: &str,
+    dim: u32,
+    gated: bool,
+    make: impl FnOnce() -> Result<Option<(Vec<u8>, &'static str)>, String>,
+) -> Result<Option<String>, String> {
+    let key: [u8; 32] = Sha256::digest(format!("vector-derived:{kind}:{hash}:{dim}").as_bytes()).into();
+    let held = format!("vmedia:{}", bytes_to_hex_string(&key));
+    if vector_core::media::ram::cache().contains(&key) {
+        return Ok(Some(held));
+    }
+    let _slot = gated.then(DisplaySlot::take);
+    if gated && vector_core::media::ram::cache().contains(&key) {
+        return Ok(Some(held));
+    }
+    let Some((bytes, mime)) = make()? else { return Ok(None) };
+    Ok(vector_core::media::ram::insert(key, bytes, mime).ok().map(|_| held))
 }
 
 /// A display copy decodes the whole picture, and a chat opening asks for every row's at once;
@@ -780,10 +808,11 @@ impl Drop for DisplaySlot {
 
 /// A copy of the still picture at `src` at most `dim` on its longest side, for showing it where
 /// it never fills more: WebKit decodes a picture whole however small it draws it, and keeps one
-/// copy in the page and one in the GPU process. None when it is already within `dim`, animates,
-/// or isn't a picture; the page then shows the original.
-pub fn display_for(src: &str, dim: u32) -> Result<Option<PathBuf>, String> {
-    let (source, key, _) = open_ours(src)?;
+/// copy in the page and one in the GPU process. A held picture's copy is a `vmedia:` ref (see
+/// [`held_derived`]), a file's a path in `cache/stills/`. None when it is already within `dim`,
+/// animates, or isn't a picture; the page then shows the original.
+pub fn display_for(src: &str, dim: u32) -> Result<Option<String>, String> {
+    let (source, key, path) = open_ours(src)?;
     let head = read_head(&*source, ANIMATION_HEAD)?;
     if crate::shared::image::animated_format(&head).is_some() || vector_core::svg::looks_like_svg(&head) {
         return Ok(None);
@@ -792,23 +821,31 @@ pub fn display_for(src: &str, dim: u32) -> Result<Option<PathBuf>, String> {
     if w.max(h) <= dim {
         return Ok(None);
     }
+    let shrink = || -> Result<Option<crate::shared::image::EncodedImage>, String> {
+        let Ok(bytes) = read_whole(&*source) else { return Ok(None) };
+        let img = crate::shared::image::decode_image(&bytes, dim)?;
+        crate::shared::image::compress_image(&img, dim, 85).map(Some)
+    };
+    if path.is_none() {
+        return held_derived("display", &key, dim, true, || {
+            Ok(shrink()?.map(|small| (small.bytes, if small.extension == "png" { "image/png" } else { "image/jpeg" })))
+        });
+    }
     let stills = vector_core::db::get_app_data_dir()?.join("cache").join("stills");
     let kept = || ["jpg", "png"].into_iter().map(|ext| stills.join(format!("{key}-{dim}.{ext}"))).find(|p| vector_core::vcache::readable(p));
     if let Some(kept) = kept() {
-        return Ok(Some(kept));
+        return Ok(Some(kept.to_string_lossy().into_owned()));
     }
     let _slot = DisplaySlot::take();
     // The same picture in two rows: whoever waited finds the other's copy.
     if let Some(kept) = kept() {
-        return Ok(Some(kept));
+        return Ok(Some(kept.to_string_lossy().into_owned()));
     }
-    let Ok(bytes) = read_whole(&*source) else { return Ok(None) };
-    let img = crate::shared::image::decode_image(&bytes, dim)?;
-    let small = crate::shared::image::compress_image(&img, dim, 85)?;
+    let Some(small) = shrink()? else { return Ok(None) };
     let kept = stills.join(format!("{key}-{dim}.{}", small.extension));
     std::fs::create_dir_all(&stills).map_err(|e| e.to_string())?;
     vector_core::vcache::write(&kept, &small.bytes)?;
-    Ok(Some(kept))
+    Ok(Some(kept.to_string_lossy().into_owned()))
 }
 
 /// Longest side an emoji or pack icon is kept at: it shows at most 64 CSS px, and a picker
@@ -1764,13 +1801,13 @@ mod avatar_thumb_tests {
         vector_core::vcache::write(&gif_path, &gif(90, 60, 3)).unwrap();
         vector_core::vcache::write(&png_path, &crate::shared::image::encode_png(&[9u8; 4 * 4 * 4], 4, 4).unwrap()).unwrap();
 
-        let still = still_for(&gif_path.to_string_lossy()).unwrap().expect("a GIF animates");
+        let still = PathBuf::from(still_for(&gif_path.to_string_lossy()).unwrap().expect("a GIF animates"));
         assert!(still.starts_with(root.join("cache").join("stills")));
         assert!(vector_core::vcache::is_sealed(&still));
         let img = image::load_from_memory(&vector_core::vcache::read(&still).unwrap()).unwrap();
         assert_eq!((img.width(), img.height()), (90, 60), "the still keeps the animation's size");
         assert!(img.to_rgba8().get_pixel(45, 30).0[0] < 30, "the first frame");
-        assert_eq!(still_for(&gif_path.to_string_lossy()).unwrap(), Some(still), "made once, then found");
+        assert_eq!(still_for(&gif_path.to_string_lossy()).unwrap().map(PathBuf::from), Some(still), "made once, then found");
 
         assert_eq!(still_for(&png_path.to_string_lossy()).unwrap(), None);
         let outside = tempfile::NamedTempFile::new().unwrap();
@@ -1789,12 +1826,34 @@ mod avatar_thumb_tests {
         vector_core::vcache::write(&small, &jpeg(900, 600)).unwrap();
         vector_core::vcache::write(&anim, &gif(1600, 1200, 2)).unwrap();
 
-        let copy = display_for(&big.to_string_lossy(), 1024).unwrap().expect("a 3000 px photo comes down");
+        let copy = PathBuf::from(display_for(&big.to_string_lossy(), 1024).unwrap().expect("a 3000 px photo comes down"));
         let img = image::load_from_memory(&vector_core::vcache::read(&copy).unwrap()).unwrap();
         assert_eq!((img.width(), img.height()), (1024, 683), "the bubble's size, the photo's shape");
-        assert_eq!(display_for(&big.to_string_lossy(), 1024).unwrap(), Some(copy), "made once, then found");
+        assert_eq!(display_for(&big.to_string_lossy(), 1024).unwrap().map(PathBuf::from), Some(copy), "made once, then found");
         assert_eq!(display_for(&small.to_string_lossy(), 1024).unwrap(), None);
         assert_eq!(display_for(&anim.to_string_lossy(), 1024).unwrap(), None, "an animation shows as it is");
+    }
+
+    #[test]
+    fn a_held_pictures_copy_and_still_stay_in_memory() {
+        let root = crate::util::test_app_data();
+        let hold = |bytes: Vec<u8>, mime: &str| {
+            let hash: [u8; 32] = Sha256::digest(&bytes).into();
+            vector_core::media::ram::insert(hash, bytes, mime).unwrap();
+            bytes_to_hex_string(&hash)
+        };
+        let (photo, anim) = (hold(jpeg(3000, 2000), "image/jpeg"), hold(gif(64, 48, 2), "image/gif"));
+        let stills = root.join("cache").join("stills");
+        let on_disk = |hex: &str| std::fs::read_dir(&stills).map_or(false, |d| d.flatten().any(|e| e.file_name().to_string_lossy().starts_with(hex)));
+
+        for (made, hex) in [(display_for(&format!("vmedia:{photo}"), 1024), &photo), (still_for(&format!("vmedia:{anim}")), &anim)] {
+            let made = made.unwrap().expect("a copy");
+            let key = made.strip_prefix("vmedia:").expect("a held ref, not a path");
+            let entry = vector_core::media::ram::cache().get(&vector_core::simd::hex::hex_to_bytes_32(key)).expect("in memory");
+            assert!(image::load_from_memory(entry.bytes()).is_ok());
+            assert!(!on_disk(hex), "nothing drawn from a held picture is written");
+        }
+        assert_eq!(display_for(&format!("vmedia:{photo}"), 1024).unwrap(), display_for(&format!("vmedia:{photo}"), 1024).unwrap(), "made once, then found");
     }
 
     #[test]

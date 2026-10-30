@@ -113,21 +113,20 @@ pub async fn download_whisper_model<R: Runtime>(
     Err("Whisper model download is not supported on this platform".to_string())
 }
 
-/// A still for the animated image `src` (a `vmedia:` ref or a cached file), or None when it
-/// doesn't animate: the page shows it whenever the image may not move.
+/// A still for the animated image `src` (a `vmedia:` ref or a cached file), as a `vmedia:` ref or
+/// a path, or None when it doesn't animate: the page shows it whenever the image may not move.
 #[tauri::command]
 pub async fn image_still(src: String) -> Result<Option<String>, String> {
-    let still = tokio::task::spawn_blocking(move || crate::image_cache::still_for(&src)).await.map_err(|e| e.to_string())??;
-    Ok(still.map(|p| p.to_string_lossy().into_owned()))
+    tokio::task::spawn_blocking(move || crate::image_cache::still_for(&src)).await.map_err(|e| e.to_string())?
 }
 
 /// A copy of the picture `src` (a `vmedia:` ref or a cached file) at most `dim` on its longest
-/// side, or None to show the original: a chat bubble never draws a photo larger.
+/// side, as a `vmedia:` ref or a path, or None to show the original: a chat bubble never draws a
+/// photo larger.
 #[tauri::command]
 pub async fn image_display(src: String, dim: u32) -> Result<Option<String>, String> {
     let dim = dim.clamp(256, 4096);
-    let display = tokio::task::spawn_blocking(move || crate::image_cache::display_for(&src, dim)).await.map_err(|e| e.to_string())??;
-    Ok(display.map(|p| p.to_string_lossy().into_owned()))
+    tokio::task::spawn_blocking(move || crate::image_cache::display_for(&src, dim)).await.map_err(|e| e.to_string())?
 }
 
 // Handler list for this module (for reference):

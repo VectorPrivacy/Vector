@@ -112,7 +112,7 @@
         {#if isSvg}
             {#if real}<img data-attachment-type="svg" data-svg-path={mediaPath(att)} src={real} onerror={() => h.lost(att, msg)} alt="" style="width: 25vw; height: auto; border-radius: 8px;" style:opacity={uploading ? '0.25' : null} onload={() => h.onImageLoad()} use:preview use:badge use:pin>{/if}
         {:else}
-            <img class="dmsg-image-attachment" src={real} data-full={original} onerror={() => { loaded = true; h.lost(att, msg); }} alt="" style="max-width: 100%; height: auto; border-radius: 8px;" style:opacity={uploading ? '0.25' : null} onload={() => { loaded = true; h.onImageLoad(); }} use:preview use:badge use:pin>
+            <img class="dmsg-image-attachment" src={real} data-full={original} onerror={() => { if (display) { display = null; return; } loaded = true; h.lost(att, msg); }} alt="" style="max-width: 100%; height: auto; border-radius: 8px;" style:opacity={uploading ? '0.25' : null} onload={() => { loaded = true; h.onImageLoad(); }} use:preview use:badge use:pin>
         {/if}
         {#if uploading}
             <UploadOverlay pendingId={msg.id} {h} />

@@ -330,7 +330,7 @@ const _dmsgMediaHelpers = {
     openFile: (att, msg) => _dmsgOpenFile(att, msg),
     openModel: (att) => openModelViewer(att),
     assetUrl: (path) => refSrc(path),
-    displaySrc: (path, dim) => invoke('image_display', { src: path, dim }).then((p) => p ? convertFileSrc(p) : null),
+    displaySrc: (path, dim) => invoke('image_display', { src: path, dim }).then((p) => p ? refSrc(p) : null),
     svgRender: (path, dim) => svgRenderSrc(path, dim),
     mediaUrl: (path) => refSrc(path, mediaUrl),
     hold: (att) => { invoke('media_hold', { hash: att.id }).catch(() => {}); },

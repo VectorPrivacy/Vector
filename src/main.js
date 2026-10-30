@@ -74,7 +74,7 @@ async function imageStill(src) {
     const original = ref.replace(/([\\/])avatars([\\/])thumbs[\\/]/, '$1avatars$2');
     const still = await invoke('image_still', { src: original });
     if (!still) return null;
-    const url = (path) => window.__vectorWeb?.fileUrl(path) ?? convertFileSrc(path);
+    const url = (path) => (path.startsWith('vmedia:') ? refSrc(path) : window.__vectorWeb?.fileUrl(path) ?? convertFileSrc(path));
     return original === ref
         ? { still: await url(still), moving: src, face }
         : { still: src, moving: await url(original), face };
