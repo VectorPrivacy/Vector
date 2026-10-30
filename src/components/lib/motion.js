@@ -31,6 +31,7 @@ const tracked = new Set();
 export function startMotion(opts) {
     stillOf = opts.stillOf;
     sheet = document.head.appendChild(document.createElement('style')).sheet;
+    sheet.insertRule('[data-motion-held],[data-motion-held]::before,[data-motion-held]::after{animation-play-state:paused!important}', 0);
     io = new IntersectionObserver(onSeen, { threshold: [0, 0.0001] });
     new MutationObserver(onMutations).observe(document.documentElement, { subtree: true, childList: true, attributes: true, attributeFilter: ['src'] });
     document.querySelectorAll('img').forEach(track);
@@ -48,25 +49,50 @@ export function setMotionActive(on) {
 }
 
 const held = new WeakSet();
+const heldEls = new Set();
 
 // checkVisibility arrived in Safari 17.4; an older WebKit only knows whether it's laid out.
 const shown = (el) => (el.checkVisibility ? el.checkVisibility({ opacityProperty: true, visibilityProperty: true }) : el.offsetParent !== null);
 
+/** On screen and inside every clipping ancestor, so a GIF its grid scrolled away stays put. */
+function inView(el) {
+    const r = el.getBoundingClientRect();
+    if (!r.width || r.bottom <= 0 || r.top >= innerHeight) return false;
+    for (let p = el.parentElement; p; p = p.parentElement) {
+        if (getComputedStyle(p).overflowY === 'visible') continue;
+        const c = p.getBoundingClientRect();
+        if (r.bottom <= c.top || r.top >= c.bottom) return false;
+    }
+    return true;
+}
+
 /** CSS loops (pulses, spinners) and muted video loops (GIFs) hold their frame while the window is inactive. */
 function loops(on) {
-    for (const a of document.getAnimations()) {
+    if (on) {
+        for (const el of heldEls) delete el.dataset.motionHeld;
+        heldEls.clear();
+    }
+    for (const a of document.getAnimations?.() ?? []) {
         if (on && held.has(a)) {
             held.delete(a);
             if (a.playState === 'paused') a.play();
         } else if (!on && a.playState === 'running' && a.effect?.getTiming().iterations === Infinity) {
-            held.add(a);
-            a.pause();
+            // A CSS animation holds through the stylesheet: pause() would override its own
+            // animation-play-state rules for good.
+            const el = 'animationName' in a ? a.effect.target : null;
+            if (el) {
+                el.dataset.motionHeld = '';
+                heldEls.add(el);
+            } else {
+                held.add(a);
+                a.pause();
+            }
         }
     }
     for (const v of document.querySelectorAll('video[loop]')) {
         if (on && held.has(v)) {
             held.delete(v);
-            if (v.paused && shown(v)) v.play().catch(() => {});
+            if (v.paused && shown(v) && inView(v)) v.play().catch(() => {});
         } else if (!on && v.muted && !v.paused) {
             held.add(v);
             v.pause();
