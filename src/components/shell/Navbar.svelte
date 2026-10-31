@@ -17,6 +17,12 @@
     const screens = shellScreens();
     // Bookmarks is your own chat: lit while it is open, and Chat stands down meanwhile.
     const bookmarksOpen = $derived(!!openChatId() && openChatId() === h().myNpub?.());
+    // A tab that is a place in the app offers its link.
+    function placeMenu(e, what, path) {
+        e.preventDefault();
+        e.stopPropagation();
+        h().placeMenu?.(e, what, path);
+    }
 </script>
 
 <div id="navbar" class="row navbar" style:display={panes.navbar ? null : 'none'} use:bindNavbar use:reveal={['navbar', reveals.navbar]} use:drawerPane>
@@ -41,12 +47,12 @@
         <p class="navbar-text">Bookmarks</p>
     </div>
     <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-    <div id="miniapps-btn" class="btn navbar-btn" class:navbar-btn-inactive={st.tab !== 'miniapps-btn'} style:display={st.ws ? null : 'none'} onclick={() => h().openMiniApps?.()}>
+    <div id="miniapps-btn" class="btn navbar-btn" class:navbar-btn-inactive={st.tab !== 'miniapps-btn'} style:display={st.ws ? null : 'none'} onclick={() => h().openMiniApps?.()} oncontextmenu={(e) => placeMenu(e, 'Nexus', 'nexus')}>
         <span class="icon icon-grid-fill navbar-icon"></span>
         <p class="navbar-text">Mini Apps</p>
     </div>
     <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-    <div id="settings-btn" class="btn navbar-btn" class:navbar-btn-inactive={st.tab !== 'settings-btn'} style:display={st.settingsTab ? null : 'none'} onclick={() => h().openSettings?.()}>
+    <div id="settings-btn" class="btn navbar-btn" class:navbar-btn-inactive={st.tab !== 'settings-btn'} style:display={st.settingsTab ? null : 'none'} onclick={() => h().openSettings?.()} oncontextmenu={(e) => placeMenu(e, 'Settings', 'settings')}>
         <span class="icon icon-settings navbar-icon"></span>
         <p class="navbar-text">Settings</p>
         <span class="update-notification-dot" style:display={st.updateDot ? null : 'none'}></span>

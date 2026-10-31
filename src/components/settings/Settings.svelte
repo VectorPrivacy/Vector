@@ -33,7 +33,8 @@
     // h: setTheme(theme), setPrivacy(key, on), help(key), openLink(key), streamer: {...}, transport: {...}, tor: {...}, blocked: {...},
     //    display: {...}, notif: {...}, storageDonut: {...}, setGalleryHidden(on), setAutoDownload(on),
     //    setAutoDownloadLimit(bytes), setVideoQuality(quality), clearStorage(), setBackgroundService(on), batteryWarningTap(),
-    //    security: {...}, setAdvancedMode(on), setPlayers(on), copyLogs(), logout()
+    //    security: {...}, setAdvancedMode(on), setPlayers(on), copyLogs(), logout(),
+    //    copyLink(path), placeMenu(node, path)
 
     const sc = settingsScreen();
     // Themes whose Dangerzone face glitches green rather than red.
@@ -299,7 +300,24 @@
     $effect(() => {
         sc.at = { category: shell.ws ? catId : (openCat || ''), section };
     });
+
+    // What a link to each place here is called, for the pills a chat draws.
+    $effect(() => {
+        sc.places = Object.fromEntries(CATEGORIES.map((c) => [c.id, {
+            label: c.label, sections: Object.fromEntries(c.anchors.map((a) => [a.id, a.label])),
+        }]));
+    });
+
+    function placeMenu(node, path) {
+        h.placeMenu(node, () => path);
+    }
 </script>
+
+{#snippet copyLink(path)}
+    <button type="button" class="place-link" title="Copy Link" aria-label="Copy a link to this section" onclick={() => h.copyLink(path)}>
+        <span class="icon icon-share"></span>
+    </button>
+{/snippet}
 
 <!-- ── Section bodies, shared by both layouts ── -->
 
@@ -497,7 +515,7 @@
                     {/if}
                     {#each sec.anchors as a (a.id)}
                         <section class="sm-block" class:off={!a.shown} data-anchor={a.id}>
-                            {#if sec.anchors.length > 1}<h3 class="sm-heading">{a.label}</h3>{/if}
+                            {#if sec.anchors.length > 1}<h3 class="sm-heading">{a.label}{@render copyLink(`${sec.id}/${a.id}`)}</h3>{/if}
                             {@render block(a.id)}
                         </section>
                     {/each}
@@ -555,7 +573,7 @@
                 <div class="cs-content cs-content-enter st-page" class:st-danger={category.danger}>
                     {#each category.anchors as a (a.id)}
                         <section class="cs-block" data-anchor={a.id}>
-                            <h3 class="cs-heading">{a.label}</h3>
+                            <h3 class="cs-heading">{a.label}{@render copyLink(`${category.id}/${a.id}`)}</h3>
                             {@render block(a.id)}
                         </section>
                     {/each}
@@ -599,7 +617,7 @@
                 <div class="sm-cat" class:open={sec.open} class:shut={!sec.shown} class:danger={sec.danger}
                      class:clip={!(sec.open && settled[sec.id])} class:first={sec.id === firstListed} class:instant={instant === sec.id}>
                     <div class="sm-cat-inner">
-                        <button class="sm-row" aria-expanded={sec.open} bind:this={rows[sec.id]} onclick={() => toggle(sec.id)}>
+                        <button class="sm-row" aria-expanded={sec.open} bind:this={rows[sec.id]} use:placeMenu={sec.id} onclick={() => toggle(sec.id)}>
                             <span class="sm-row-icon"><span class="icon icon-{sec.icon}"></span></span>
                             <span class="sm-row-label cutoff">{sec.label}</span>
                             <span class="sm-chevron"><span class="icon icon-chevron-right"></span></span>

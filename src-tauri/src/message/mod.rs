@@ -129,8 +129,8 @@ pub async fn fetch_msg_metadata(chat_id: String, msg_id: String) -> bool {
         if vector_core::nostr_embed::EmbedRef::from_url(&url).is_some() {
             continue;
         }
-        // Community invite links render as a dedicated in-chat card — an OG preview
-        // would stack a duplicate website-style card under it.
+        // Community invite links render as a dedicated in-chat card and Vector links as
+        // pills — an OG preview would stack a duplicate website-style card under them.
         if url.starts_with("https://vectorapp.io/invite")
             || url.starts_with("https://www.vectorapp.io/invite")
             || vector_core::golink::is_go_url(&url)

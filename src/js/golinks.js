@@ -295,16 +295,95 @@ function _goReplaceText(element, re, build) {
 /**
  * Turn Vector links in rendered text into pills: bare ones in the text, and anchors the
  * linkifier or markdown already made, whatever their label claimed. One that doesn't parse
- * becomes a Broken link pill rather than a trip to the website.
+ * becomes a Broken link pill rather than a trip to the website. Links to a place in the
+ * app (Settings, the Nexus, Requests) become pills too.
  */
 function renderGoLinks(element) {
     const hereCommunity = communityIdOfChat(arrChats.find(c => c.id === strOpenChat));
     for (const a of element.querySelectorAll('a')) {
         const href = a.getAttribute('href') || '';
+        const place = parsePlaceLink(href);
+        if (place) {
+            a.replaceWith(_buildPlacePill(place));
+            continue;
+        }
         GO_LINK_ANY_RE.lastIndex = 0;
-        if (!GO_LINK_ANY_RE.test(href)) continue;
-        a.replaceWith(_buildGoPill(parseGoLink(href), hereCommunity));
+        if (GO_LINK_ANY_RE.test(href)) a.replaceWith(_buildGoPill(parseGoLink(href), hereCommunity));
     }
     _goReplaceText(element, GO_LINK_RE, (m) => _buildGoPill(parseGoPayload(m[1]), hereCommunity));
+    _goReplaceText(element, PLACE_LINK_RE, (m) => _buildPlacePill(m[1]));
     _goReplaceText(element, GO_LINK_ANY_RE, () => _buildGoPill(null, hereCommunity));
+}
+
+/* ---- Places: Settings, the Nexus and Requests (core deep_link.rs is the grammar) ----------
+ * They open in the app and nowhere else, so a chat names them in the app's own words. */
+
+/** A place's shareable link is a Vector link: the website keeps every other path. */
+const PLACE_BASE = 'https://vectorapp.io/go#';
+const PLACE_APP_ID = '[A-Za-z0-9_-](?:[A-Za-z0-9_.-]{0,126}[A-Za-z0-9_-])?';
+/** The places a pill names, in each address they ride. A sentence's last full stop stays out. */
+const PLACE_LINK_RE = new RegExp(
+    '(?:https?://(?:www\\.)?vectorapp\\.io/go/?#|vector://(?:go/?#)?|https://web\\.vectorapp\\.io/#(?:go/)?)'
+    + `(settings(?:/[a-z0-9-]{1,32}){0,2}|nexus(?:/${PLACE_APP_ID})?|requests)/?(?![\\w/-])`,
+    'g',
+);
+
+/** A whole URL naming a place, as its path (`settings/privacy`); null otherwise. */
+function parsePlaceLink(url) {
+    const s = String(url || '').trim();
+    PLACE_LINK_RE.lastIndex = 0;
+    const m = PLACE_LINK_RE.exec(s);
+    return m && m.index === 0 && m[0].length === s.length ? m[1] : null;
+}
+
+/** What a place is called here: an icon and its names, outermost first. */
+function _placeNames(path) {
+    const [kind, first, second] = path.split('/');
+    if (kind === 'nexus') {
+        const app = first && marketplaceApps.find(a => a.id === first);
+        return { icon: 'nexus', names: first ? ['Nexus', app?.name || first] : ['Nexus'] };
+    }
+    if (kind === 'requests') return { icon: 'mail', names: ['Requests'] };
+    // A section id may stand alone, as Settings itself accepts.
+    const places = VectorSvelte.settingsScreen().places;
+    const cat = places[first] || (!second && Object.values(places).find(c => c.sections[first]));
+    if (!cat) return { icon: 'settings', names: ['Settings'] };
+    const section = cat.sections[second || (places[first] ? '' : first)];
+    return { icon: 'settings', names: section ? [cat.label, section] : [cat.label] };
+}
+
+function _buildPlacePill(path) {
+    const pill = document.createElement('span');
+    pill.className = 'mention go-link';
+    pill.setAttribute('role', 'link');
+    pill.tabIndex = 0;
+    const { icon, names } = _placeNames(path);
+    pill.append(_goIcon(icon));
+    names.forEach((name, i) => {
+        if (i) pill.append(_goText('›', 'go-link-sep'));
+        pill.append(_goText(name, 'go-link-name'));
+    });
+    pill.title = names.join(' › ');
+    const open = async (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const place = await invoke('parse_deep_link', { url: PLACE_BASE + path }).catch(() => null);
+        if (place) executeDeepLinkAction(place);
+        else showToast('This link is broken or incomplete');
+    };
+    pill.addEventListener('click', open);
+    pill.addEventListener('keydown', (e) => { if (e.key === 'Enter') open(e); });
+    return pill;
+}
+
+/** A menu's Copy Link entry for a place in the app. */
+function placeLinkItems(what, path) {
+    return [{ label: 'Copy Link', icon: 'share', onClick: () => copyPlaceLink(what, path) }];
+}
+
+/** Copy the link to a place in the app, `what` naming it in the toast. */
+function copyPlaceLink(what, path) {
+    navigator.clipboard.writeText(PLACE_BASE + path)
+        .then(() => showToast(`Copied ${what} Link`))
+        .catch(() => showToast('Failed to Copy'));
 }

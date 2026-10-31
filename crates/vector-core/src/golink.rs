@@ -41,14 +41,7 @@ impl GoLink {
 
     /// Any of the three forms: the shareable link, the app scheme, or Vector Web's own address.
     pub fn parse_url(url: &str) -> Option<Self> {
-        let (locator, payload) = url.trim().split_once('#')?;
-        let locator = locator.trim_end_matches('/');
-        let payload = match locator {
-            "https://vectorapp.io/go" | "http://vectorapp.io/go" | "https://www.vectorapp.io/go" | "vector://go" => payload,
-            "https://web.vectorapp.io" => payload.strip_prefix("go/")?,
-            _ => return None,
-        };
-        Self::parse_payload(payload)
+        Self::parse_payload(go_payload(url)?)
     }
 
     pub fn payload(&self) -> String {
@@ -62,6 +55,17 @@ impl GoLink {
 
     pub fn url(&self) -> String {
         format!("{LINK_BASE}{}", self.payload())
+    }
+}
+
+/// What follows a Vector link's `#`, in any of its three forms. A place in the app rides
+/// here too (`go#settings/privacy`), so the website keeps every path but `/go`.
+pub fn go_payload(url: &str) -> Option<&str> {
+    let (locator, payload) = url.trim().split_once('#')?;
+    match locator.trim_end_matches('/') {
+        "https://vectorapp.io/go" | "http://vectorapp.io/go" | "https://www.vectorapp.io/go" | "vector://go" => Some(payload),
+        "https://web.vectorapp.io" => payload.strip_prefix("go/"),
+        _ => None,
     }
 }
 

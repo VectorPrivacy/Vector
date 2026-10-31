@@ -39,7 +39,7 @@
     <header class="nx-d-head">
         <AppIcon {app} {h} size={112} />
         <div class="nx-d-id">
-            <h1 class="nx-d-name">{app.name}</h1>
+            <h1 class="nx-d-name">{app.name}<button type="button" class="place-link" title="Copy Link" aria-label="Copy a link to this app" onclick={() => h.copyLink(app)}><span class="icon icon-share"></span></button></h1>
             <div class="nx-d-maker">{app.developer || publisher?.name || 'Unknown maker'}</div>
         </div>
         <div class="nx-d-actions">

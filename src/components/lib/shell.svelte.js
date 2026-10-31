@@ -13,7 +13,7 @@ const shell = $state({ tab: 'chat-btn', invitesTab: false, settingsTab: true, up
 // Registered by two owners: main.js (the nav actions) and widescreen.js (the list
 // resizer), so writes must merge. { openProfile, openChatlist, openSettings, openInvites,
 // openNewChat, openCreateGroup, openRouting, openMiniApps, openBookmarks, myNpub,
-// listResizeStart, listResizeReset }
+// placeMenu(event, what, path), listResizeStart, listResizeReset }
 let handlers = $state.raw({});
 
 export function shellPanes() { return panes; }

@@ -2134,6 +2134,11 @@ async function reauthorizeSigner() {
 // the relay list, voice) register their own bags on the store.
 const SETTINGS_HELPERS = {
     help: showSettingsHelp,
+    // `path`: `category[/section]`.
+    copyLink: (path) => copyPlaceLink('Settings', `settings/${path}`),
+    placeMenu: (node, path) => attachLongPressContextMenu(node, (x, y) => showContextMenu({
+        x, y, items: placeLinkItems('Settings', `settings/${path()}`),
+    })),
     openLink: (key) => openUrl(SETTINGS_LINKS[key]),
     setTheme: async (theme) => {
         await setTheme(theme);

@@ -24966,6 +24966,32 @@ body.mobile .cs-close-key { display: none; }
   font-weight: 700;
   color: #fff;
 }
+/* Copy Link beside a place's heading (a Settings section, a Nexus app): quiet, and out
+   until hovered with a mouse. */
+.place-link {
+  all: unset;
+  display: inline-flex;
+  vertical-align: middle;
+  margin: -4px 0 -4px 6px;
+  padding: 5px;
+  border-radius: 6px;
+  cursor: pointer;
+  opacity: 0.4;
+  transition: opacity 0.15s ease;
+}
+.place-link .icon {
+  position: static;
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  background-color: #fff;
+}
+@media (hover: hover) {
+  .place-link { opacity: 0; }
+  :hover > .place-link,
+  .place-link:focus-visible { opacity: 0.55; }
+  .place-link:hover { opacity: 1; }
+}
 /* The page's 230px controls fit a widescreen column; here they share a phone's width. */
 .sm-page .theme-picker,
 .sm-page select {

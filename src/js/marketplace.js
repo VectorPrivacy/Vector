@@ -365,6 +365,7 @@ window.__TAURI__.event.listen('inline_image_cached', (event) => {
  * @property {(on: boolean) => void} setFitOnly   only what fits this device, remembered on it
  * @property {(app: object) => void} editListing
  * @property {(url: string) => void} openUrl
+ * @property {(app: object) => void} copyLink   its page in the Nexus
  * @property {() => void} back
  */
 function registerMarketplaceHandlers() {
@@ -395,6 +396,7 @@ function registerMarketplaceHandlers() {
         setFitOnly: setNexusFitOnly,
         editListing: (app) => showEditListingDialog(current(app)),
         openUrl: (url) => confirmAndOpenUrl(url),   // a listing's source URL is relay data
+        copyLink: (app) => copyPlaceLink('App', `nexus/${app.id}`),
         back: () => { hideMarketplacePanel(); },
     };
     VectorSvelte.setMarketplaceHandlers(h);

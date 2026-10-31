@@ -145,6 +145,7 @@ const screen = $state({
     },
     scroll: { target: '', seq: 0 },               // `category[/section]` or a section id to bring into view
     at: { category: '', section: '' },            // where the screen is: what a link to here names
+    places: {},                                   // category id → { label, sections: { id: label } }: what a link here is called
 });
 export function settingsScreen() { return screen; }
 export function setSettingsScreen(patch) {

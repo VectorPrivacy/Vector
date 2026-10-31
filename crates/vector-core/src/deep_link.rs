@@ -2,7 +2,9 @@
 //!
 //! A place is a path: `profile/<npub>`, `emojis/pack/<naddr>`, `dm/<npub>`,
 //! `settings[/<category>[/<section>]]`, `nexus[/<app>]` or `requests`. It rides `vector://<path>`,
-//! `https://vectorapp.io/<path>` and Vector Web's own address, `https://web.vectorapp.io/#<path>`.
+//! Vector Web's own address `https://web.vectorapp.io/#<path>`, and a Vector link's fragment
+//! (`https://vectorapp.io/go#<path>`). The website's own paths carry only the places it has a
+//! page for (profiles, emoji packs, DMs), so the rest of its namespace stays the website's.
 //! Vector links (golink.rs) and community invites keep their own shapes. A link only opens a
 //! place: joining, launching or changing anything there still takes the user's tap.
 
@@ -43,6 +45,9 @@ pub fn parse_deep_link(url: &str) -> Option<DeepLinkAction> {
     if let Some(link) = GoLink::parse_url(url) {
         return Some(action("go", link.payload()));
     }
+    if let Some(payload) = crate::golink::go_payload(url) {
+        return parse_path(payload).filter(|a| in_app_only(&a.action_type));
+    }
 
     // Invites carry their secret in the fragment, which the path parser strips: the join flow
     // re-parses the whole URL.
@@ -52,12 +57,16 @@ pub fn parse_deep_link(url: &str) -> Option<DeepLinkAction> {
         }
     }
 
-    let path = url
-        .strip_prefix(WEB_BASE)
-        .or_else(|| url.strip_prefix("vector://"))
-        .or_else(|| url.strip_prefix("https://vectorapp.io/"))
-        .or_else(|| url.strip_prefix("http://vectorapp.io/"))?;
-    parse_path(path)
+    if let Some(path) = url.strip_prefix(WEB_BASE).or_else(|| url.strip_prefix("vector://")) {
+        return parse_path(path);
+    }
+    let path = url.strip_prefix("https://vectorapp.io/").or_else(|| url.strip_prefix("http://vectorapp.io/"))?;
+    parse_path(path).filter(|a| !in_app_only(&a.action_type))
+}
+
+/// A place with no page on the website, so its web link is a Vector link (`go#…`).
+fn in_app_only(action_type: &str) -> bool {
+    matches!(action_type, "settings" | "nexus" | "requests")
 }
 
 fn parse_path(path: &str) -> Option<DeepLinkAction> {
@@ -140,10 +149,22 @@ mod tests {
             ("requests".to_string(), "requests", String::new()),
         ];
         for (path, kind, target) in places {
-            for url in [format!("vector://{path}"), format!("https://vectorapp.io/{path}"), format!("{WEB_BASE}{path}")] {
+            let web_link = if in_app_only(kind) { format!("https://vectorapp.io/go#{path}") } else { format!("https://vectorapp.io/{path}") };
+            for url in [format!("vector://{path}"), web_link, format!("{WEB_BASE}{path}")] {
                 assert_eq!(opens(&url), Some((kind.to_string(), target.clone())), "{url}");
             }
         }
+    }
+
+    #[test]
+    fn the_website_keeps_its_paths_for_places_it_has_no_page_for() {
+        for path in ["settings/privacy", "nexus/chess", "requests"] {
+            assert_eq!(parse_deep_link(&format!("https://vectorapp.io/{path}")), None, "{path}");
+            assert!(parse_deep_link(&format!("vector://go#{path}")).is_some(), "{path}");
+            assert!(parse_deep_link(&format!("{WEB_BASE}go/{path}")).is_some(), "{path}");
+        }
+        assert_eq!(parse_deep_link(&format!("https://vectorapp.io/go#profile/{}", npub())), None, "a go link carries only in-app places");
+        assert!(crate::golink::is_go_url("https://vectorapp.io/go#settings/privacy"), "and is never fetched for a preview");
     }
 
     #[test]
