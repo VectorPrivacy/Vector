@@ -134,9 +134,13 @@ async function setupRustListeners() {
         // not only after a hard reload.
         try {
             const cachedPath = await invoke('cache_community_image', { communityId, isBanner: false });
-            if (cachedPath) {
-                for (const c of arrChats) {
-                    if (c.metadata?.custom_fields?.community_id === communityId) c.metadata.avatar_cached = cachedPath;
+            for (const c of arrChats) {
+                if (c.metadata?.custom_fields?.community_id !== communityId) continue;
+                if (cachedPath) c.metadata.avatar_cached = cachedPath;
+                else {
+                    // The icon was taken away: the copy cached before goes with it.
+                    delete c.metadata.avatar_cached;
+                    delete c.metadata.custom_fields.icon;
                 }
             }
         } catch (_) {}

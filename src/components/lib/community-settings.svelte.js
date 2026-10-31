@@ -8,14 +8,16 @@ export const csOverlay = popOverlay({});
 const blank = () => ({ name: '', description: '', iconSrc: null, voiceRelays: [] });
 // bannerPath: a picked file awaiting upload, with its displayable copy, the crop to make of it
 // on save (source pixels, null when it already fits) and its size for previewing that crop.
-const noBanner = () => ({ bannerPath: null, bannerPreview: null, bannerCrop: null, bannerNatural: null });
+// bannerRemoved: the saved banner goes on save.
+const noBanner = () => ({ bannerPath: null, bannerPreview: null, bannerCrop: null, bannerNatural: null, bannerRemoved: false });
 
 const s = $state({
     communityId: null,
     loading: false,
     saved: blank(),
-    // iconPath: a picked file awaiting upload; iconPreview: its displayable copy; iconCrop: the part to upload.
-    draft: { name: '', description: '', iconPath: null, iconPreview: null, iconCrop: null, voiceRelays: [], relays: [], ...noBanner() },
+    // iconPath: a picked file awaiting upload; iconPreview: its displayable copy; iconCrop: the part to upload;
+    // iconRemoved: the saved icon goes on save.
+    draft: { name: '', description: '', iconPath: null, iconPreview: null, iconCrop: null, iconRemoved: false, voiceRelays: [], relays: [], ...noBanner() },
     relays: [],
     canEdit: false,
     // Bans act at once, not through the save bar: the list IS the published state.
@@ -44,7 +46,9 @@ export function csOverviewDirty() {
     return s.draft.name !== s.saved.name
         || s.draft.description !== s.saved.description
         || !!s.draft.iconPath
-        || !!s.draft.bannerPath;
+        || s.draft.iconRemoved
+        || !!s.draft.bannerPath
+        || s.draft.bannerRemoved;
 }
 
 /** Whether the Voice Relays draft differs from the published list. */
@@ -102,7 +106,7 @@ export function csOpen(communityId) {
     s.communityId = communityId;
     s.loading = !!communityId;
     s.saved = blank();
-    s.draft = { name: '', description: '', iconPath: null, iconPreview: null, iconCrop: null, voiceRelays: [], relays: [], ...noBanner() };
+    s.draft = { name: '', description: '', iconPath: null, iconPreview: null, iconCrop: null, iconRemoved: false, voiceRelays: [], relays: [], ...noBanner() };
     s.relays = [];
     s.canEdit = false;
     s.canBan = false;
@@ -120,7 +124,7 @@ export function csOpen(communityId) {
 
 export function csLoaded({ name, description, iconSrc, relays, voiceRelays, canEdit, canBan, canRoles, canAudit }) {
     s.saved = { name, description, iconSrc, voiceRelays: voiceRelays || [] };
-    s.draft = { name, description, iconPath: null, iconPreview: null, iconCrop: null, voiceRelays: [...s.saved.voiceRelays], relays: [...(relays || [])], ...noBanner() };
+    s.draft = { name, description, iconPath: null, iconPreview: null, iconCrop: null, iconRemoved: false, voiceRelays: [...s.saved.voiceRelays], relays: [...(relays || [])], ...noBanner() };
     s.relays = relays || [];
     s.canEdit = !!canEdit;
     s.canBan = !!canBan;
@@ -156,7 +160,7 @@ export function csRemoveBans(npubs) {
 export function csSetDraft(patch) { Object.assign(s.draft, patch); }
 
 export function csReset() {
-    s.draft = { name: s.saved.name, description: s.saved.description, iconPath: null, iconPreview: null, iconCrop: null, voiceRelays: [...s.saved.voiceRelays], relays: [...s.relays], ...noBanner() };
+    s.draft = { name: s.saved.name, description: s.saved.description, iconPath: null, iconPreview: null, iconCrop: null, iconRemoved: false, voiceRelays: [...s.saved.voiceRelays], relays: [...s.relays], ...noBanner() };
     s.roles.order = null;
     const e = s.roles.edit;
     // A role never created has nothing to fall back to: resetting discards it.
@@ -173,6 +177,7 @@ export function csCommitted(patch) {
         s.draft.iconPath = null;
         s.draft.iconPreview = null;
         s.draft.iconCrop = null;
+        s.draft.iconRemoved = false;
     }
     // The saved banner itself lives in the banner store, which the channel pane shares.
     if ('banner' in patch) Object.assign(s.draft, noBanner());

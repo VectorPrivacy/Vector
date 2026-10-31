@@ -24413,6 +24413,19 @@ body.mobile .cs-close-key { display: none; }
   line-height: 16px;
 }
 
+/* Remove, under the image it takes away; it goes on Save like any edit. */
+.cs-icon-col { display: flex; flex-direction: column; align-items: center; gap: 6px; flex-shrink: 0; }
+.cs-remove {
+  all: unset;
+  align-self: center;
+  padding: 2px 6px;
+  color: #8a8a8a;
+  font-size: 12.5px;
+  cursor: pointer;
+}
+.cs-remove:hover { color: var(--danger-color); }
+.cs-banner .cs-remove { align-self: flex-start; }
+
 /* The banner, previewed at the width it gets in the channel list. */
 .cs-banner { display: flex; flex-direction: column; gap: 10px; }
 .cs-banner-frame {

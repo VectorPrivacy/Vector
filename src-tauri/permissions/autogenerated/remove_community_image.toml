@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-remove-community-image"
+description = "Enables the remove_community_image command without any pre-configured scope."
+commands.allow = ["remove_community_image"]
+
+[[permission]]
+identifier = "deny-remove-community-image"
+description = "Denies the remove_community_image command without any pre-configured scope."
+commands.deny = ["remove_community_image"]

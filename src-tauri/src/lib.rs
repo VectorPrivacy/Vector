@@ -1219,6 +1219,7 @@ pub fn run() {
             commands::community::create_community_channel,
             commands::community::delete_community_channel,
             commands::community::set_community_image,
+            commands::community::remove_community_image,
             commands::community::cache_community_image,
             commands::community::cache_invite_logo,
             commands::community::grant_community_admin,

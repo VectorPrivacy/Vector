@@ -18,7 +18,7 @@
     import { anchorScroll } from '../lib/anchorscroll.svelte.js';
     import SectionNav from '../settings/SectionNav.svelte';
 
-    // h: close(), pickIcon(), pickBanner(), save(), reset(), unban() (the selection), name(npub), veiled(npub), searchName(npub), profile(npub),
+    // h: close(), pickIcon(), pickBanner(), removeIcon(), removeBanner(), save(), reset(), unban() (the selection), name(npub), veiled(npub), searchName(npub), profile(npub),
     //    avatarSrc(npub), copyIdItems(what, id), copyBannedId(npub), showContextMenu(menu), loadAudit(communityId), openLink(key),
     //    ui (MemberRow's { twemojify, showTooltip, hideTooltip })
     let { h } = $props();
@@ -174,10 +174,10 @@
     // edits. A refused close always takes it: the bar is the only place that says why.
     const bar = $derived(warn && dirty ? 'save' : section.id === 'bans' && st.banSel.size ? 'unban' : dirty ? 'save' : null);
 
-    const iconSrc = $derived(st.draft.iconPreview || st.saved.iconSrc);
+    const iconSrc = $derived(st.draft.iconRemoved ? null : st.draft.iconPreview || st.saved.iconSrc);
     const banners = bannerState();
     // A staged banner previews its crop on the original; the saved one is already cut.
-    const bannerSrc = $derived(st.draft.bannerPreview || banners.src[st.communityId] || null);
+    const bannerSrc = $derived(st.draft.bannerRemoved ? null : st.draft.bannerPreview || banners.src[st.communityId] || null);
     const nameEmpty = $derived(!st.draft.name.trim());
 
     // The scheme recedes; the rest, path included, IS the relay's address.
@@ -296,14 +296,19 @@
                         <section class="cs-block" data-anchor="identity">
                             <h3 class="cs-heading">Icon & Name</h3>
                             <div class="cs-identity">
-                                <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-                                <div class="cs-icon" class:editable={st.canEdit} onclick={st.canEdit ? h.pickIcon : null}
-                                     title={st.canEdit ? 'Change icon' : null}>
-                                    <Avatar src={iconSrc} size={null} group={true} class="cs-icon-img" />
-                                    {#if st.canEdit}
-                                        <span class="cs-icon-edit"><span class="icon icon-edit"></span></span>
+                                <div class="cs-icon-col">
+                                    <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+                                    <div class="cs-icon" class:editable={st.canEdit} onclick={st.canEdit ? h.pickIcon : null}
+                                         title={st.canEdit ? 'Change icon' : null}>
+                                        <Avatar src={iconSrc} size={null} group={true} class="cs-icon-img" />
+                                        {#if st.canEdit}
+                                            <span class="cs-icon-edit"><span class="icon icon-edit"></span></span>
+                                        {/if}
+                                        {#if st.draft.iconPath}<span class="cs-icon-new">New</span>{/if}
+                                    </div>
+                                    {#if st.canEdit && iconSrc}
+                                        <button type="button" class="cs-remove" onclick={h.removeIcon}>Remove</button>
                                     {/if}
-                                    {#if st.draft.iconPath}<span class="cs-icon-new">New</span>{/if}
                                 </div>
                                 <div class="cs-field cs-field-grow">
                                     <div class="cs-field-head">
@@ -340,6 +345,9 @@
                                     {/if}
                                     {#if st.draft.bannerPath}<span class="cs-icon-new">New</span>{/if}
                                 </div>
+                                {#if st.canEdit && bannerSrc}
+                                    <button type="button" class="cs-remove" onclick={h.removeBanner}>Remove Banner</button>
+                                {/if}
                             </div>
                         </section>
 

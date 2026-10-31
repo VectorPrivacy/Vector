@@ -70,6 +70,7 @@ pub fn dispatch<'a>(cmd: &'a str, a: &'a Args) -> Pin<Box<dyn Future<Output = Op
 
             // --- Images & pins ---
             "set_community_image" => set_community_image(a).await,
+            "remove_community_image" => remove_community_image(a).await,
             "fetch_pinned_attachment" => fetch_pinned_attachment(a).await,
             _ => return None,
         })
@@ -453,12 +454,18 @@ async fn set_community_image(a: &Args) -> Result<Value, String> {
         }
         let transport = LiveTransport::with_timeout(Duration::from_secs(12));
         vector_core::community::v2::service::edit_community_metadata(&transport, &community, &meta).await?;
-        if let Some(updated) = vector_core::community::v2::service::persist_community_image(community.id(), img_ref, is_banner).await {
+        if let Some(updated) = vector_core::community::v2::service::persist_community_image(community.id(), Some(img_ref), is_banner).await {
             VectorCore.register_v2_chats(&updated, &session).await;
         }
         Ok(Value::Null)
     })
     .await
+}
+
+async fn remove_community_image(a: &Args) -> Result<Value, String> {
+    let (id, is_banner) = (a.str("communityId")?, a.bool("isBanner").unwrap_or(false));
+    db::scoped(async move { VectorCore.remove_community_image(&id, is_banner).await.map_err(|e| e.to_string()) }).await?;
+    Ok(Value::Null)
 }
 
 /// A joined community's logo or banner as a local path, `null` when it has none.

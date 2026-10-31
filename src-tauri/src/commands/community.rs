@@ -2833,7 +2833,7 @@ pub async fn set_community_image(
         vector_core::community::v2::service::edit_community_metadata(&transport, &v2, &meta).await?;
         if let Some(updated) = vector_core::community::v2::service::persist_community_image(
             v2.id(),
-            img_ref,
+            Some(img_ref),
             is_banner,
         )
         .await
@@ -2841,6 +2841,15 @@ pub async fn set_community_image(
             vector_core::VectorCore.register_v2_chats(&updated, &session).await;
         }
         Ok(())
+    })
+    .await
+}
+
+/// Take a Community's logo or banner away, for every member.
+#[tauri::command]
+pub async fn remove_community_image(community_id: String, is_banner: bool) -> Result<(), String> {
+    vector_core::db::scoped(async move {
+        vector_core::VectorCore.remove_community_image(&community_id, is_banner).await.map_err(|e| e.to_string())
     })
     .await
 }

@@ -7,6 +7,17 @@ VectorSvelte.setScreen('communitySettings', {
         close: () => closeCommunitySettings(),
         pickIcon: () => csPickIcon(),
         pickBanner: () => csPickBanner(),
+        // What shows goes: a staged pick, and the saved image behind it on save.
+        removeIcon: () => VectorSvelte.csSetDraft({
+            iconPath: null, iconPreview: null, iconCrop: null, iconRemoved: !!VectorSvelte.csState().saved.iconSrc,
+        }),
+        removeBanner: () => {
+            const st = VectorSvelte.csState();
+            VectorSvelte.csSetDraft({
+                bannerPath: null, bannerPreview: null, bannerCrop: null, bannerNatural: null,
+                bannerRemoved: !!VectorSvelte.bannerState().src[st.communityId],
+            });
+        },
         save: () => csSave(),
         reset: () => VectorSvelte.csReset(),
         unban: () => csUnbanSelected(),
@@ -133,7 +144,7 @@ async function csPickIcon() {
     }
     const cropped = await cropAvatarPick(filePath, preview, 'Crop Icon', 'community');
     if (!cropped) return;
-    VectorSvelte.csSetDraft({ iconPath: filePath, iconPreview: cropped.preview, iconCrop: cropped.crop });
+    VectorSvelte.csSetDraft({ iconPath: filePath, iconPreview: cropped.preview, iconCrop: cropped.crop, iconRemoved: false });
 }
 
 /** The banner template: 238 x 70, under the community's header. */
@@ -168,7 +179,7 @@ async function csPickBanner() {
         });
         if (!crop) return;
     }
-    VectorSvelte.csSetDraft({ bannerPath: filePath, bannerPreview: preview, bannerCrop: crop, bannerNatural: natural });
+    VectorSvelte.csSetDraft({ bannerPath: filePath, bannerPreview: preview, bannerCrop: crop, bannerNatural: natural, bannerRemoved: false });
 }
 
 /** The real pane around the banner preview: this community's header and channels, at the
@@ -318,7 +329,21 @@ async function csSaveOverview(communityId) {
         // A trimmed value committed while the field still shows its spaces would read as unsaved.
         VectorSvelte.csSetDraft({ name, description });
     }
-    const { bannerPath, bannerCrop } = st.draft;
+    const { bannerPath, bannerCrop, iconRemoved, bannerRemoved } = st.draft;
+    if (iconRemoved) {
+        await invoke('remove_community_image', { communityId, isBanner: false });
+        for (const chat of csCommunityChats(communityId)) {
+            delete chat.metadata.custom_fields.icon;
+            delete chat.metadata.avatar_cached;
+        }
+        VectorSvelte.csCommitted({ iconSrc: null });
+        communityChanged(communityId);
+    }
+    if (bannerRemoved) {
+        await invoke('remove_community_image', { communityId, isBanner: true });
+        await resolveCommunityBanner(communityId, true);
+        VectorSvelte.csCommitted({ banner: true });
+    }
     if (!iconPath && !bannerPath) return null;
     let uploadingBanner = false;
     const unlisten = await window.__TAURI__.event.listen('community_image_upload_progress', (e) => {

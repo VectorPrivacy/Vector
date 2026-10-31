@@ -8999,16 +8999,16 @@ pub async fn edit_community_metadata<T: Transport + ?Sized>(transport: &T, commu
 /// a stale pre-upload copy would drop rows a concurrent fold just landed.
 pub async fn persist_community_image(
     id: &crate::community::CommunityId,
-    img: control::ImageRef,
+    img: Option<control::ImageRef>,
     is_banner: bool,
 ) -> Option<CommunityV2> {
     let lock = super::realtime::follow_lock(id);
     let _guard = lock.lock().await;
     let mut fresh = crate::db::community::load_community_v2(id).ok()??;
     if is_banner {
-        fresh.banner = Some(img);
+        fresh.banner = img;
     } else {
-        fresh.icon = Some(img);
+        fresh.icon = img;
     }
     crate::db::community::save_community_v2(&fresh).ok()?;
     Some(fresh)
@@ -16221,6 +16221,47 @@ mod tests {
             crate::db::community::load_community_v2(preview.id()).unwrap().is_none(),
             "previewing must not persist a membership"
         );
+    }
+
+    #[tokio::test]
+    async fn a_removed_icon_and_banner_leave_every_member() {
+        let (bed, owner, member) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Bare", bed.relays.clone(), None).await.unwrap();
+        let image = |name: &str| control::ImageRef {
+            url: format!("https://blossom.example/{name}"),
+            key: "k".into(),
+            nonce: "n".into(),
+            hash: "h".into(),
+            extra: Default::default(),
+        };
+        let mut meta = community.metadata();
+        meta.icon = Some(image("icon"));
+        meta.banner = Some(image("banner"));
+        edit_community_metadata(&bed.relay, &community, &meta).await.unwrap();
+        let link = mint_public_link(&bed.relay, &community, "https://vectorapp.io", None, None).await.unwrap();
+
+        bed.swap_to(&member);
+        let joined = accept_public_link(&bed.relay, &link.url).await.unwrap();
+        assert!(joined.icon.is_some() && joined.banner.is_some());
+
+        bed.swap_to(&owner);
+        let held = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        let mut meta = held.metadata();
+        meta.icon = None;
+        meta.banner = None;
+        edit_community_metadata(&bed.relay, &held, &meta).await.unwrap();
+        persist_community_image(community.id(), None, false).await.unwrap();
+        let mine = persist_community_image(community.id(), None, true).await.unwrap();
+        assert!(mine.icon.is_none() && mine.banner.is_none(), "the remover's own copy drops them at once");
+
+        bed.swap_to(&member);
+        let theirs = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        follow_control(&bed.relay, &theirs).await.unwrap();
+        let theirs = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        assert!(theirs.icon.is_none(), "an edition without the icon removes it");
+        assert!(theirs.banner.is_none(), "and the banner");
+        assert_eq!(theirs.metadata().name, "Bare", "nothing else moves");
     }
 
     #[tokio::test]

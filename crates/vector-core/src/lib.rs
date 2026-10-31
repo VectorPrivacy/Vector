@@ -5090,6 +5090,35 @@ impl VectorCore {
             .map_err(VectorError::Other)
     }
 
+    /// Take a Community's logo or banner away (MANAGE_METADATA). An edition is the whole
+    /// document, so one without the image removes it for every member.
+    pub async fn remove_community_image(&self, community_id: &str, is_banner: bool) -> Result<()> {
+        use crate::community::{transport::LiveTransport, CommunityId};
+        let session = crate::db::current_session();
+        let cid = CommunityId(Self::id32(community_id, "community_id")?);
+        let community = crate::db::community::load_community_v2(&cid)
+            .map_err(VectorError::Other)?
+            .ok_or_else(|| VectorError::Other("v2 community not found".into()))?;
+        let mut meta = community.metadata();
+        if is_banner {
+            meta.banner = None;
+        } else {
+            meta.icon = None;
+        }
+        let transport = LiveTransport::with_timeout(std::time::Duration::from_secs(12));
+        crate::community::v2::service::edit_community_metadata(&transport, &community, &meta)
+            .await
+            .map_err(VectorError::Other)?;
+        // Unbound caller: the edition is out, but the account on screen may no longer be its own.
+        if !session.is_live() {
+            return Err(VectorError::Other("account changed while removing the image".into()));
+        }
+        if let Some(updated) = crate::community::v2::service::persist_community_image(&cid, None, is_banner).await {
+            self.register_v2_chats(&updated, &session).await;
+        }
+        Ok(())
+    }
+
     /// Set the iroh relays a Community's voice channels use (CORD-07 §8): at most eight, https
     /// only; none means iroh's defaults. Overlaid onto the held document like any metadata edit.
     pub async fn set_voice_relays(&self, community_id: &str, relays: &[String]) -> Result<Vec<String>> {
