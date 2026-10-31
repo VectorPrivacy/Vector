@@ -1932,9 +1932,27 @@ async function setBackgroundService(on) {
 }
 
 /**
- * Show a one-time prompt asking the user to enable the background service
- * and battery optimization. Called once after first login.
+ * Once per account after sign-in: offer push. A phone push can't reach is offered the
+ * background service instead, and a browser without push its own notifications.
  */
+async function offerNotifications() {
+    const push = await invoke('push_status').catch(() => 'unsupported');
+    if (push === 'off') {
+        if (await invoke('get_sql_setting', { key: 'push_prompted' }).catch(() => null)) return;
+        await invoke('set_sql_setting', { key: 'push_prompted', value: 'true' });
+        const allow = await popupConfirm('Notifications', 'Get notified of new messages, even while Vector is closed.', false, '', 'vector_bell.svg', '', 'Allow', false, null, 'Not Now');
+        // Still inside the tap: iOS only lets a web app subscribe to push while handling one.
+        if (allow) await NOTIF_HANDLERS.setPush(true);
+        return;
+    }
+    if (platformFeatures.os === 'web') return invoke('offer_web_notifications');
+    if (push === 'unsupported' && !(await invoke('get_background_service_prompted'))) {
+        await invoke('set_background_service_prompted');
+        await showBackgroundServicePrompt();
+    }
+}
+
+/** Ask to turn on the background service, for a phone push can't reach. */
 async function showBackgroundServicePrompt() {
     const confirmed = await popupConfirm(
         'Background Notifications',

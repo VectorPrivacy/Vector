@@ -887,7 +887,6 @@ pub async fn set_background_service_prompted() {
 
 #[cfg(target_os = "android")]
 fn call_battery_helper_bool(method: &str) -> bool {
-    let default = method == "getBackgroundServiceEnabled";
     crate::android::utils::with_android_context(|env, activity| {
         let class_loader = env.call_method(activity, "getClassLoader", "()Ljava/lang/ClassLoader;", &[])
             .map_err(|e| format!("{:?}", e))?.l().map_err(|e| format!("{:?}", e))?;
@@ -903,7 +902,7 @@ fn call_battery_helper_bool(method: &str) -> bool {
             &[activity.into()])
             .map_err(|e| format!("{:?}", e))?.z().map_err(|e| format!("{:?}", e))?;
         Ok(val)
-    }).unwrap_or(default)
+    }).unwrap_or(false)
 }
 
 #[cfg(target_os = "android")]

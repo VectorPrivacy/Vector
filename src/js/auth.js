@@ -344,23 +344,9 @@ async function login(skipAnimations = false) {
                 // Adjust the Chat List sizes (deferred — layout reflows don't block first paint)
                 requestAnimationFrame(() => adjustSize());
 
-                // Prompt for background service / battery optimization (mobile only, once)
-                // Deferred so login animations finish first
-                if (platformFeatures.os === 'web') {
-                    setTimeout(() => invoke('offer_web_notifications').catch((e) => console.warn('[Notify] offer failed:', e)), 1500);
-                } else if (platformFeatures.is_mobile) {
-                    setTimeout(async () => {
-                        try {
-                            const prompted = await invoke('get_background_service_prompted');
-                            console.log('[Battery] prompted =', prompted);
-                            if (!prompted) {
-                                await invoke('set_background_service_prompted');
-                                await showBackgroundServicePrompt();
-                            }
-                        } catch (e) {
-                            console.error('[Battery] prompt error:', e);
-                        }
-                    }, 1500);
+                // Deferred so login animations finish first.
+                if (platformFeatures.os === 'web' || platformFeatures.os === 'android') {
+                    setTimeout(() => offerNotifications().catch((e) => console.warn('[Notify] offer failed:', e)), 1500);
                 }
             };
 
