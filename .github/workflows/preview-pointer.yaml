@@ -19,8 +19,9 @@ on:
 jobs:
   repoint:
     # Uploading to the pointer publishes nothing, but guard anyway so a manual
-    # edit of the pointer release can never re-trigger this.
-    if: github.event.release.tag_name != 'preview'
+    # edit of the pointer release can never re-trigger this. A rehearsal draft
+    # published by mistake must never reach the preview channel.
+    if: github.event.release.tag_name != 'preview' && !startsWith(github.event.release.tag_name, 'rehearsal-')
     runs-on: ubuntu-latest
     permissions:
       contents: write

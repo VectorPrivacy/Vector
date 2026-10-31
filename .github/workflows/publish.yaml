@@ -4,8 +4,14 @@ on:
   push:
     branches:
       - release
+      # A dry run of the whole release: every build, signed, into a draft tagged
+      # rehearsal-v<version>. No publish-triggered workflow acts on that tag.
+      - rehearsal
 
 # This workflow will trigger on each push to the `release` branch to create or update a GitHub release, build your app, and upload the artifacts to the release.
+
+env:
+  TAG_PREFIX: ${{ github.ref_name == 'rehearsal' && 'rehearsal-' || '' }}
 
 jobs:
   publish-tauri:
@@ -144,9 +150,9 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
-          tagName: v__VERSION__ # the action automatically replaces \_\_VERSION\_\_ with the app version.
-          releaseName: 'Vector v__VERSION__'
-          releaseBody: 'A new Vector release arrives! If you can see this, the changelog has not been written yet, wait around to see whats new!'
+          tagName: ${{ env.TAG_PREFIX }}v__VERSION__ # the action automatically replaces \_\_VERSION\_\_ with the app version.
+          releaseName: ${{ github.ref_name == 'rehearsal' && 'Rehearsal of Vector v__VERSION__' || 'Vector v__VERSION__' }}
+          releaseBody: ${{ github.ref_name == 'rehearsal' && 'Release rehearsal. Never publish this draft; delete it once checked.' || 'A new Vector release arrives! If you can see this, the changelog has not been written yet, wait around to see whats new!' }}
           releaseDraft: true
           prerelease: ${{ steps.channel.outputs.prerelease }}
           tauriScript: npm run tauri
@@ -246,7 +252,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          TAG="v${{ steps.get_version.outputs.VERSION }}"
+          TAG="${TAG_PREFIX}v${{ steps.get_version.outputs.VERSION }}"
           if ! gh release list --repo "$GITHUB_REPOSITORY" --limit 30 --json tagName --jq '.[].tagName' | grep -qx "$TAG"; then
             gh release create "$TAG" --draft ${{ steps.get_version.outputs.PRERELEASE }} --title "Vector $TAG" --repo "$GITHUB_REPOSITORY"
           fi
@@ -264,7 +270,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - id: v
-        run: echo "tag=v$(grep -m1 '^version' src-tauri/Cargo.toml | sed 's/version = "\(.*\)"/\1/')" >> $GITHUB_OUTPUT
+        run: echo "tag=${TAG_PREFIX}v$(grep -m1 '^version' src-tauri/Cargo.toml | sed 's/version = "\(.*\)"/\1/')" >> $GITHUB_OUTPUT
 
   # The F-Droid flavour, built by `fdroid build` inside F-Droid's own image and
   # signed with the release key: the asset their verifier compares against
@@ -276,3 +282,48 @@ jobs:
       ref: ${{ github.sha }}
       release_tag: ${{ needs.release-version.outputs.tag }}
     secrets: inherit
+
+  # One file that vouches for every download: SHA256SUMS.txt over the release's assets, signed
+  # with the updater key the app already trusts (minisign), and a build-provenance attestation per
+  # asset so `gh attestation verify` ties each file to this workflow and commit.
+  checksums:
+    needs: [release-version, publish-tauri, publish-android, publish-android-fdroid]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    env:
+      TAG: ${{ needs.release-version.outputs.tag }}
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Download the release's assets
+        run: |
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir assets
+          rm -f assets/SHA256SUMS.txt assets/SHA256SUMS.txt.minisig
+          ls -l assets
+
+      - name: SHA256SUMS.txt
+        working-directory: assets
+        run: |
+          sha256sum -- * > ../SHA256SUMS.txt
+          cat ../SHA256SUMS.txt
+
+      - name: Sign with the updater key
+        env:
+          TAURI_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          npx --yes @tauri-apps/cli@2.9.6 signer sign SHA256SUMS.txt
+          # Tauri writes the minisign signature base64-wrapped; minisign reads it raw.
+          base64 -d SHA256SUMS.txt.sig > SHA256SUMS.txt.minisig
+          rm SHA256SUMS.txt.sig
+
+      - uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            assets/*
+            SHA256SUMS.txt
+
+      - name: Upload to the release
+        run: gh release upload "$TAG" SHA256SUMS.txt SHA256SUMS.txt.minisig --clobber --repo "$GITHUB_REPOSITORY"

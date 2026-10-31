@@ -40,6 +40,28 @@ Builds:
       - scripts/fdroid-build.sh build
     ndk: 29.0.14206865
 
+  - versionName: 0.5.0
+    versionCode: 50099
+    commit: 921f7c9dcb2b8f50ecd7dc4973aa168066966543
+    subdir: src-tauri/gen/android/app
+    sudo:
+      - apt-get update
+      - apt-get install -y --no-install-recommends rustup cmake make clang libclang-dev
+        pkg-config nodejs npm
+    output: build/outputs/apk/universal/release/app-universal-universal-release-unsigned.apk
+    scandelete:
+      - web/whisper
+    prebuild:
+      - cd ../../../..
+      - scripts/fdroid-build.sh prepare
+    build:
+      - cd ../../../..
+      - export PATH="$HOME/.cargo/bin:$PATH"
+      - export ANDROID_HOME=$$SDK$$
+      - export NDK_HOME=$$NDK$$
+      - scripts/fdroid-build.sh build
+    ndk: 29.0.14206865
+
 AllowedAPKSigningKeys: 89bc6c8f6188d26e8a650acbcebd30be72705a05c384651ddb05f9affc06461d
 
 AutoUpdateMode: Version

@@ -64,6 +64,23 @@ jobs:
           sed -e 's|^    commit: .*|    commit: ${{ inputs.ref }}|' \
               -e '/^Binaries:/d' \
               docs/fdroid/io.vectorapp.yml > /home/vagrant/fdroiddata/metadata/io.vectorapp.yml
+          # The newest entry builds whatever version that commit carries, preview or stable,
+          # so the version check inside `fdroid build` holds without an entry per release.
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git fetch --quiet --depth 1 origin "${{ inputs.ref }}"
+          props=$(git show FETCH_HEAD:src-tauri/gen/android/app/version.properties)
+          python3 - "$(sed -n 's/^versionName=//p' <<< "$props")" "$(sed -n 's/^versionCode=//p' <<< "$props")" <<'EOF'
+          import re, sys
+          path = '/home/vagrant/fdroiddata/metadata/io.vectorapp.yml'
+          name, code = sys.argv[1], sys.argv[2]
+          assert name and code.isdigit(), (name, code)
+          text = open(path).read()
+          last_name = list(re.finditer(r'^  - versionName: .*$', text, re.M))[-1]
+          last_code = list(re.finditer(r'^    versionCode: .*$', text, re.M))[-1]
+          text = (text[:last_name.start()] + f'  - versionName: {name}' + text[last_name.end():last_code.start()]
+                  + f'    versionCode: {code}' + text[last_code.end():])
+          open(path, 'w').write(text)
+          EOF
           grep -n "commit:\|Binaries" /home/vagrant/fdroiddata/metadata/io.vectorapp.yml || true
           chown -R vagrant:vagrant /builds/JSKitty /home/vagrant/fdroiddata "$fdroidserver"
           echo "vercode=$(sed -n 's/^    versionCode: //p' /home/vagrant/fdroiddata/metadata/io.vectorapp.yml | tail -1)" >> "$GITHUB_ENV"

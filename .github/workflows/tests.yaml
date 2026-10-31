@@ -6,7 +6,7 @@ name: Tests
 # forgot to run them locally.
 on:
   push:
-    branches: [master]
+    branches: [master, rehearsal]
   pull_request:
   workflow_dispatch:
 
