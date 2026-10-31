@@ -15,7 +15,7 @@
 <div class="vcard-overlay" id="miniapp-launch-overlay" class:active={st.open} class:closing={shown && !st.active}
      onclick={(e) => { if (e.target === e.currentTarget) h.cancel(); }}>
 {#if st.open}
-    <div class="vcard ma-card ma-launch" role="dialog" aria-modal="true" aria-labelledby="ma-launch-title" use:popIn={shown}>
+    <div class="vcard ma-card ma-launch" role="dialog" aria-modal="true" aria-labelledby="ma-launch-title" use:popIn={st.open}>
         <div class="vcard-head">
             <span class="ma-launch-icon">
                 {#if st.icon}<img src={st.icon} alt="" draggable="false">{:else}<span class="ma-launch-initial">{(st.name.match(/[\p{L}\p{N}]/u)?.[0] || '?').toUpperCase()}</span>{/if}

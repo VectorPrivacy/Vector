@@ -16,7 +16,7 @@
     <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
     <div class="vcard-overlay" class:active={st.open} class:closing={shown && !st.active}
          onclick={(e) => { if (e.target === e.currentTarget) answer()?.deny(); }}>
-        <div class="vcard ma-card" role="dialog" aria-modal="true" aria-labelledby="ma-perm-title" use:popIn={shown}>
+        <div class="vcard ma-card" role="dialog" aria-modal="true" aria-labelledby="ma-perm-title" use:popIn={st.open}>
             <div class="vcard-head">
                 <span class="vcard-badge ma-perm-badge" aria-hidden="true"></span>
                 <h3 id="ma-perm-title" class="vcard-title">{st.appName} asks for access</h3>
