@@ -1,5 +1,7 @@
 [workspace]
 members = ["vector-calls", "vector-core", "vector-cli", "concord-cli", "vector-agent", "vector-sdk", "vector-web", "vector-push", "vector-pusher"]
+# Vendored crates (patched in from src-tauri) are packages of their own, not members.
+exclude = ["vendor"]
 resolver = "2"
 
 # Dependencies compile OPTIMIZED even in dev/test; our own crates stay unoptimized

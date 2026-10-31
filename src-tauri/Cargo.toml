@@ -379,6 +379,6 @@ nostr-database = { git = "https://github.com/VectorPrivacy/nostr.git", branch = 
 # bootstrap. Vendored with the probe and eagerness fixed; drop when an upstream
 # release ships the fix.
 saturating-time = { path = "../crates/vendor/saturating-time" }
-# ndk 0.9.0 plus a switch that opens every AAudio stream as a phone call's (the only change, in
-# src/audio.rs), its API 28 setters found at run time so minSdk 26 still loads.
+# ndk 0.9.0 plus a switch that opens every AAudio stream as a phone call's (src/audio.rs), its
+# API 28 setters found at run time so minSdk 26 still loads, and one lint fix for current Rust.
 ndk = { path = "../crates/vendor/ndk" }

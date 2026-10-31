@@ -2054,6 +2054,7 @@ pub(crate) mod memory {
 
         /// Have `relays` follow CORD-01 §Deletions: a wrap goes only by its `p`-tagged owner's
         /// deletion, never its author's.
+        #[cfg(test)]
         pub fn follow_cord01(&self, relays: &[String]) {
             self.owner_rule.lock().unwrap().extend(relays.iter().cloned());
         }
@@ -2061,12 +2062,14 @@ pub(crate) mod memory {
         /// Total stored events across every relay url — lets a test assert that a
         /// code path published NOTHING, which an absence-of-effect check can't
         /// express by fetching (an empty result also means "never published").
+        #[cfg(test)]
         pub fn stored_count(&self) -> usize {
             self.per_relay.lock().unwrap().values().map(|v| v.len()).sum()
         }
 
         /// Open a live subscription: every subsequent publish/inject matching `query` is
         /// delivered — ephemerals included, which stream but are never stored.
+        #[cfg(test)]
         pub fn subscribe(&self, query: Query) -> tokio::sync::mpsc::UnboundedReceiver<Event> {
             let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
             self.subscribers.lock().unwrap().push((query, tx));
@@ -2114,6 +2117,7 @@ pub(crate) mod memory {
         }
 
         /// How many events a given relay holds (test introspection).
+        #[cfg(test)]
         pub fn count_on(&self, relay: &str) -> usize {
             self.per_relay.lock().unwrap().get(relay).map_or(0, |v| v.len())
         }

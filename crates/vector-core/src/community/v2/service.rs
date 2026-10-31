@@ -25654,7 +25654,6 @@ mod tests {
     #[tokio::test]
     #[ignore]
     async fn live_e2e_two_accounts() {
-        use crate::community::transport::LiveTransport;
         use nostr_sdk::prelude::ToBech32;
 
         let relay = std::env::var("VECTOR_E2E_RELAY").unwrap_or_else(|_| "wss://jskitty.com/nostr".to_string());
@@ -34760,7 +34759,6 @@ mod tests {
     #[tokio::test]
     #[ignore = "hits a real relay over the network"]
     async fn live_smoke_create_send_fetch_on_a_real_relay() {
-        use crate::community::transport::LiveTransport;
         use nostr_sdk::prelude::ToBech32;
 
         let relay = std::env::var("VECTOR_SMOKE_RELAY").unwrap_or_else(|_| "wss://jskitty.com/nostr".to_string());

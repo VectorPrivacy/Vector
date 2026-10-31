@@ -53,7 +53,7 @@ fn encrypt_with(
     record.push(0x02);
     record.resize(body_len - HEADER_LEN - TAG_LEN, 0);
     let tag = Aes128Gcm::new(&cek.into())
-        .encrypt_in_place_detached(Nonce::from_slice(&nonce), &[], &mut record)
+        .encrypt_in_place_detached(&Nonce::from(nonce), &[], &mut record)
         .map_err(|_| Error::Crypto("encryption failed"))?;
 
     let mut body = Vec::with_capacity(body_len);
@@ -82,7 +82,7 @@ pub fn decrypt(ua_secret: &SecretKey, auth: &[u8], body: &[u8]) -> Result<Vec<u8
     let (ciphertext, tag) = body[HEADER_LEN..].split_at(body.len() - HEADER_LEN - TAG_LEN);
     let mut record = ciphertext.to_vec();
     Aes128Gcm::new(&cek.into())
-        .decrypt_in_place_detached(Nonce::from_slice(&nonce), &[], &mut record, tag.into())
+        .decrypt_in_place_detached(&Nonce::from(nonce), &[], &mut record, tag.into())
         .map_err(|_| Error::Crypto("decryption failed"))?;
     let end = record.iter().rposition(|&b| b != 0).ok_or(Error::Format("no padding delimiter".into()))?;
     if record[end] != 0x02 {

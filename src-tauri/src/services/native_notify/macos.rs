@@ -319,7 +319,7 @@ mod tests {
     #[test]
     fn the_category_carries_reply_read_and_every_mute() {
         let category = category();
-        let ids: Vec<String> = unsafe { category.actions() }.iter().map(|a| unsafe { a.identifier() }.to_string()).collect();
+        let ids: Vec<String> = category.actions().iter().map(|a| a.identifier().to_string()).collect();
         assert_eq!(ids[0], REPLY);
         assert_eq!(ids[1], READ);
         assert_eq!(ids.len(), 2 + super::super::MUTE_CHOICES.len());

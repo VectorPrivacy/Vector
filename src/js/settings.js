@@ -1339,8 +1339,8 @@ async function initSettings() {
     // Logs are fetched when Settings opens, so Copy writes them inside the click.
     window._cachedLogs = '';
 
-    // Initialize battery / background service settings (mobile only)
-    if (platformFeatures.is_mobile) {
+    // Battery and the background service: Android's alone, not a phone's on the web.
+    if (platformFeatures.os === 'android') {
         try {
             await initBatterySettings();
         } catch (e) {

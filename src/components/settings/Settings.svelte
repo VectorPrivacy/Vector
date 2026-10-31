@@ -167,7 +167,7 @@
     let kept = $state({});
     let phoneEl = $state(null);
     let searchEl = $state(null);
-    const rows = {};
+    const rows = $state({});
     const q = $derived(query.trim().toLowerCase());
     const phoneNav = $derived(CATEGORIES.map((sec) => {
         const hits = sec.anchors.map((a) => !q || `${sec.label} ${a.label} ${a.keys || ''}`.toLowerCase().includes(q));

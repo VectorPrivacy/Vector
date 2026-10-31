@@ -36,7 +36,8 @@ trait Lanes: Copy {
     unsafe fn rotl7(a: Self) -> Self;
     /// Write the N blocks contiguously to `out[..64 * N]`.
     unsafe fn store(x: &[Self; 16], out: &mut [u8]);
-    /// XOR the N blocks into `data[..64 * N]`.
+    /// XOR the N blocks into `data[..64 * N]`. Only aarch64's long-message path does.
+    #[cfg(target_arch = "aarch64")]
     #[inline(always)]
     unsafe fn store_xor(x: &[Self; 16], data: &mut [u8]) {
         let mut ks = [0u8; BUF];
@@ -66,6 +67,7 @@ unsafe fn blocks<V: Lanes>(st: &State, counter: u32, out: &mut [u8]) {
 }
 
 /// [`blocks`], XORed into `data` as they leave the registers.
+#[cfg(target_arch = "aarch64")]
 #[inline(always)]
 unsafe fn blocks_xor<V: Lanes>(st: &State, counter: u32, data: &mut [u8]) {
     V::store_xor(&words::<V>(st, counter), data);

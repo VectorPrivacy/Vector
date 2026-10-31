@@ -21,7 +21,7 @@ use num_enum::{FromPrimitive, IntoPrimitive};
 
 use crate::utils::abort_on_panic;
 
-// Vector: the one change from ndk 0.9.0.
+// Vector's change to ndk 0.9.0 (src-tauri/Cargo.toml's [patch.crates-io] says why).
 static VOICE_COMMUNICATION: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// While on, every stream a builder opens is a call's: voice-communication usage and speech
