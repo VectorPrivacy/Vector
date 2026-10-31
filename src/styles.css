@@ -24668,6 +24668,20 @@ body.mobile .cs-close-key { display: none; }
   height: 16px !important;
   margin: 0 !important;
 }
+/* The padding is a finger-sized tap area: the glyph draws in the content box, and the
+   negative margin keeps the layout to the glyph. A mask clips hit-testing to its box. */
+.st-page .icon-info.btn {
+  box-sizing: content-box;
+  padding: 10px;
+  margin: -10px !important;
+  mask-origin: content-box;
+}
+.st-page .st-line > .icon-info.btn { margin-left: -16px !important; }
+.st-page .tor-card-title .icon-info.btn { margin-left: -2px !important; }
+/* Only the switch flips a setting, not its name or the space beside it. */
+.st-page .toggle-container { pointer-events: none; }
+.st-page .toggle-container:not(.disabled) .neon-toggle,
+.st-page .toggle-container .icon-info { pointer-events: auto; }
 /* A card title's info icon trails it, so it needs the gap the rule above zeroes. */
 .st-page .tor-card-title .icon-info {
   margin-left: 8px !important;
@@ -24736,6 +24750,8 @@ body.mobile .cs-close-key { display: none; }
   text-align: left;
   -webkit-user-select: none;
   user-select: none;
+  /* The accordion holds the tapped row in place itself. */
+  overflow-anchor: none;
 }
 .sm-title {
   margin: 14px 0 20px;
@@ -24914,6 +24930,9 @@ body.mobile .cs-close-key { display: none; }
   user-select: text;
 }
 .sm-cat.open .sm-page { opacity: 1; transform: none; }
+.sm-cat.instant .sm-body,
+.sm-cat.instant .sm-page,
+.sm-cat.instant .sm-chevron { transition: none; }
 .sm-block { padding: 12px 0 4px; }
 .sm-block:not(.off) ~ .sm-block:not(.off) { border-top: 1px solid #222; }
 .sm-block.off { display: none; }

@@ -167,7 +167,9 @@
     let kept = $state({});
     let phoneEl = $state(null);
     let searchEl = $state(null);
+    let instant = $state(null);
     const rows = $state({});
+    const bodies = $state({});
     const q = $derived(query.trim().toLowerCase());
     const phoneNav = $derived(CATEGORIES.map((sec) => {
         const hits = sec.anchors.map((a) => !q || `${sec.label} ${a.label} ${a.keys || ''}`.toLowerCase().includes(q));
@@ -215,8 +217,49 @@
             return;
         }
         section = '';
+        const prev = openCat;
         openCat = openCat === id ? null : id;
-        if (openCat) reveal(id);
+        if (openCat) hold(id, prev);
+    }
+
+    // The tapped row stays under the finger: a category folding above it shuts at once and
+    // the scroll takes up its height. A row low on the screen then rises just enough to show
+    // its settings, starting with the tap and yielding to the next touch.
+    async function hold(id, prev) {
+        const row = rows[id];
+        const scroller = phoneEl?.parentElement;
+        if (!row || !scroller) return;
+        const before = row.getBoundingClientRect().top;
+        if (prev && rows[prev]?.getBoundingClientRect().top < before) instant = prev;
+        kept[id] = true;
+        await tick();
+        scroller.scrollTop += row.getBoundingClientRect().top - before;
+        requestAnimationFrame(() => {
+            instant = null;
+            const view = scroller.getBoundingClientRect();
+            const top = row.getBoundingClientRect().top;
+            const below = view.bottom - top - row.offsetHeight;
+            const want = Math.min(bodies[id]?.scrollHeight || 0, view.height / 2);
+            const by = Math.min(want - below, top - view.top - 10);
+            if (by > 0) follow(scroller, by);
+        });
+    }
+
+    // Eased by hand rather than smooth-scrolled: the list may only grow long enough as the
+    // body opens, and a smooth scroll stops at the end the list had when it began.
+    function follow(scroller, by) {
+        const from = scroller.scrollTop;
+        const start = performance.now();
+        const ac = new AbortController();
+        for (const type of ['touchstart', 'wheel']) scroller.addEventListener(type, () => ac.abort(), { signal: ac.signal, passive: true });
+        const step = (now) => {
+            if (ac.signal.aborted) return;
+            const t = Math.min(1, (now - start) / 320);
+            scroller.scrollTop = from + by * (1 - (1 - t) ** 3);
+            if (t < 1) requestAnimationFrame(step);
+            else ac.abort();
+        };
+        requestAnimationFrame(step);
     }
 
     // Once the category that was open has folded, so the row is aimed at where it settles.
@@ -443,7 +486,7 @@
 <!-- A phone category's body: its blocks, headed when there are several, folding open under its row. -->
 {#snippet catBody(sec)}
     <div class="sm-body" ontransitionend={(e) => foldEnd(e, sec)}>
-        <div class="sm-body-inner">
+        <div class="sm-body-inner" bind:this={bodies[sec.id]}>
             {#if kept[sec.id]}
                 <div class="st-page sm-page">
                     {#if sec.danger}
@@ -537,7 +580,8 @@
         </div>
 
         {#if pending}
-            <div class="sm-cat sm-update" class:open={pending.open} class:shut={!pending.shown} class:clip={!(pending.open && settled.updates)}>
+            <div class="sm-cat sm-update" class:open={pending.open} class:shut={!pending.shown} class:clip={!(pending.open && settled.updates)}
+                 class:instant={instant === 'updates'}>
                 <div class="sm-cat-inner">
                     <button class="sm-row" aria-expanded={pending.open} bind:this={rows.updates} onclick={() => toggle('updates')}>
                         <span class="sm-row-icon"><span class="icon icon-refresh"></span></span>
@@ -553,7 +597,7 @@
         <div class="sm-list">
             {#each listed as sec (sec.id)}
                 <div class="sm-cat" class:open={sec.open} class:shut={!sec.shown} class:danger={sec.danger}
-                     class:clip={!(sec.open && settled[sec.id])} class:first={sec.id === firstListed}>
+                     class:clip={!(sec.open && settled[sec.id])} class:first={sec.id === firstListed} class:instant={instant === sec.id}>
                     <div class="sm-cat-inner">
                         <button class="sm-row" aria-expanded={sec.open} bind:this={rows[sec.id]} onclick={() => toggle(sec.id)}>
                             <span class="sm-row-icon"><span class="icon icon-{sec.icon}"></span></span>

@@ -1073,7 +1073,10 @@ function createRichComposer(host, opts = {}) {
     // for. Splicing the string keeps both problems out.
     el.addEventListener('paste', (e) => {
         e.preventDefault();
-        const raw = (e.clipboardData || window.clipboardData).getData('text/plain');
+        const dt = e.clipboardData || window.clipboardData;
+        // A link copied from a share sheet carries only its URL, no plain text.
+        const raw = dt.getData('text/plain') || dt.getData('text/uri-list').split(/\r?\n/)
+            .filter((line) => line && !line.startsWith('#') && !line.startsWith('file:')).join('\n');
         if (!raw) return;
         const text = raw.replace(/\r\n?/g, '\n');   // Windows clipboards carry CRLF
         const sel = selectionRange() || { start: src.length, end: src.length };
