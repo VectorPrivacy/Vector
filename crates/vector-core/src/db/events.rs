@@ -2429,6 +2429,18 @@ mod tests {
         assert_eq!(locate_message("locate_me").unwrap(), MessageLocation { chat: None, deleted: true });
     }
 
+    /// A row a page served from the store, never loaded into memory, still finds its chat,
+    /// so it can be deleted like any other.
+    #[tokio::test]
+    async fn a_message_outside_memory_still_finds_its_chat() {
+        let (_tmp, _guard) = init_test_db();
+        save_message("channel_paged", &Message { id: "paged_in".into(), content: "hi".into(), at: 1_000_000, ..Default::default() })
+            .await.unwrap();
+        assert!(crate::state::STATE.lock().await.find_message("paged_in").is_none());
+        assert_eq!(crate::VectorCore.message_chat("paged_in").await.unwrap(), "channel_paged");
+        assert!(crate::VectorCore.message_chat("never_stored").await.is_err());
+    }
+
     #[tokio::test]
     async fn a_missing_message_resolves_to_none_rather_than_erroring() {
         let (_tmp, _guard) = init_test_db();

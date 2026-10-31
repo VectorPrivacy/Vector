@@ -2353,17 +2353,23 @@ impl VectorCore {
     }
 
     /// Delete one of your own Community messages, resolving its channel from local
-    /// state (the GUI path). A headless v2 consumer holds no local history — use
+    /// history (the GUI path). A headless v2 consumer holds no local history — use
     /// [`Self::delete_community_message_in`] with the channel id instead.
     pub async fn delete_community_message(&self, message_id: &str) -> Result<()> {
-        let channel_id = {
-            let st = state::STATE.lock().await;
-            match st.find_message(message_id) {
-                Some((chat, _)) => chat.id.clone(),
-                None => return Err(VectorError::Other("message not found (already deleted?)".into())),
-            }
-        };
+        let channel_id = self.message_chat(message_id).await?;
         self.delete_community_message_in(&channel_id, message_id).await
+    }
+
+    /// The chat a message on this device was said in: memory first, then the store, which
+    /// holds the rows a page served without loading them into memory.
+    pub async fn message_chat(&self, message_id: &str) -> Result<String> {
+        if let Some((_, chat)) = state::STATE.lock().await.find_chat_for_message(message_id) {
+            return Ok(chat);
+        }
+        crate::db::events::locate_message(message_id)
+            .map_err(VectorError::Other)?
+            .chat
+            .ok_or_else(|| VectorError::Other("message not found (already deleted?)".into()))
     }
 
     /// Delete one of your own Community messages (or reactions) in `channel_id`: its wraps off
@@ -2373,14 +2379,13 @@ impl VectorCore {
         use crate::community::transport::LiveTransport;
         let transport = LiveTransport::with_timeout(std::time::Duration::from_secs(12));
 
-        // Attachment URLs come from local state when held (a headless v2 consumer
+        // Attachment URLs come from local history when held (a headless v2 consumer
         // has none — blob cleanup is then the receiving peers' concern, not ours).
-        let attachment_urls: Vec<String> = {
-            let st = state::STATE.lock().await;
-            st.find_message(message_id)
-                .map(|(_, msg)| msg.attachments.iter().flat_map(|a| a.all_urls().map(str::to_string)).collect())
-                .unwrap_or_default()
-        };
+        let attachment_urls: Vec<String> = self
+            .get_message(message_id)
+            .await
+            .map(|(_, msg)| msg.attachments.iter().flat_map(|a| a.all_urls().map(str::to_string)).collect())
+            .unwrap_or_default();
         // Smart-forward gate: scrub only urls no OTHER message still references.
         let attachment_urls =
             crate::db::attachments::urls_unreferenced_elsewhere(&attachment_urls, message_id).unwrap_or_default();

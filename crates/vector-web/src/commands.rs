@@ -469,7 +469,7 @@ pub async fn dispatch(cmd: &str, a: Args) -> Result<Value, String> {
         }
         "delete_community_message" => {
             let message_id = a.str("messageId")?;
-            let channel = STATE.lock().await.find_message(&message_id).map(|(c, _)| c.id.clone()).ok_or("message not found (already deleted?)")?;
+            let channel = VectorCore.message_chat(&message_id).await.map_err(|e| e.to_string())?;
             cm::community_control(&channel, &message_id, ControlOp::Delete).await.map(|_| Value::Null)
         }
         "create_community" => cm::create_community(a.str("name")?, a.opt_str("channelName"), a.de("relays")?).await,
