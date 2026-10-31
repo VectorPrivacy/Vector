@@ -183,8 +183,12 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
+      # Its default package list still names the legacy `tools`, which current
+      # command-line tools no longer carry.
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
 
       - name: Install Android NDK
         run: |
