@@ -285,22 +285,12 @@ pub extern "C" fn Java_io_vectorapp_VectorNotificationService_nativeStartBackgro
         STOP_STANDALONE_SYNC.store(false, Ordering::SeqCst);
 
         // Store the JavaVM and application context for cross-thread JNI calls.
-        if BG_JAVA_VM.get().is_none() {
-            match env.get_java_vm() {
-                Ok(vm) => { let _ = BG_JAVA_VM.set(vm); }
-                Err(e) => logcat(&format!("Failed to get JavaVM: {:?}", e)),
-            }
-        }
-        if BG_APP_CONTEXT.get().is_none() {
-            match env.new_global_ref(&context) {
-                Ok(global_ref) => { let _ = BG_APP_CONTEXT.set(global_ref); }
-                Err(e) => logcat(&format!("Failed to create context GlobalRef: {:?}", e)),
-            }
-        }
+        hold_context(&mut env, &context);
 
         // Register the NIP-55 signer backend for service-only mode (no Activity, so
         // lib.rs's setup hook never ran). Idempotent — a no-op in full-app mode.
         crate::android::external_signer::register();
+        crate::android::incoming_call::install();
 
         let data_dir_str: String = match env.get_string(&data_dir) {
             Ok(s) => s.into(),
@@ -1004,11 +994,28 @@ async fn bootstrap_client(data_dir: &str) -> Result<(Client, PublicKey, bool, Op
     }
 }
 
+/// Keep the VM and an application context for JNI calls from any thread, in a process that
+/// may have no Activity at all.
+pub(crate) fn hold_context(env: &mut JNIEnv, context: &JObject) {
+    if BG_JAVA_VM.get().is_none() {
+        match env.get_java_vm() {
+            Ok(vm) => { let _ = BG_JAVA_VM.set(vm); }
+            Err(e) => logcat(&format!("Failed to get JavaVM: {:?}", e)),
+        }
+    }
+    if BG_APP_CONTEXT.get().is_none() {
+        match env.new_global_ref(context) {
+            Ok(global_ref) => { let _ = BG_APP_CONTEXT.set(global_ref); }
+            Err(e) => logcat(&format!("Failed to create context GlobalRef: {:?}", e)),
+        }
+    }
+}
+
 /// Bootstrap the shared processing pipeline for headless (service-only) mode.
 /// Sets up APP_DATA_DIR, CURRENT_ACCOUNT, and the DB connection pool so that
 /// `handle_event_with_context()` can persist decrypted messages to the database.
 /// Call this once before processing events in the background service.
-fn bootstrap_pipeline(data_dir: &str) -> Result<String, String> {
+pub(crate) fn bootstrap_pipeline(data_dir: &str) -> Result<String, String> {
     let data_path = std::path::PathBuf::from(data_dir);
 
     // Set APP_DATA_DIR so static path helpers work
@@ -1068,7 +1075,7 @@ fn bootstrap_pipeline(data_dir: &str) -> Result<String, String> {
 
 /// Load saved profiles from the database into STATE so that notifications
 /// can show real display names instead of "New Message".
-async fn preload_profiles_into_state() {
+pub(crate) async fn preload_profiles_into_state() {
     match crate::db::get_all_profiles().await {
         Ok(profiles) => {
             let count = profiles.len();
@@ -1089,7 +1096,7 @@ async fn preload_profiles_into_state() {
 /// A picture the notification service can decode. A sealed cache file is written out plain,
 /// once per version of it, in the app's private folder: the service decodes it by path, and the
 /// folder is cleared at the next launch.
-fn notification_image(path: Option<String>) -> Option<String> {
+pub(crate) fn notification_image(path: Option<String>) -> Option<String> {
     let path = path?;
     let source = std::path::Path::new(&path);
     if !vector_core::vcache::is_sealed(source) {

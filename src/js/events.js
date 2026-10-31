@@ -1267,12 +1267,15 @@ async function setupRustListeners() {
     // before setupRustListeners has run.
 
     // Native calls: the backend owns the state machine; the overlay mirrors it.
-    _on('call_state', (evt) => { VectorSvelte.setCallState(evt.payload); callVideoOnState(evt.payload); callMicOnState(evt.payload); });
+    // Android's endpoint arrives after the switch was flipped.
+    _on('push_state', () => initNotificationSettings());
+    _on('call_state', (evt) => { VectorSvelte.setCallState(evt.payload); callVideoOnState(evt.payload); callMicOnState(evt.payload); answerIfPending(evt.payload); });
     _on('call_stats', (evt) => VectorSvelte.setCallStats(evt.payload));
     _on('call_video_refused', () => { stopAllVideo(false); VectorSvelte.showToast('They cannot receive video from this device'); });
     _on('call_level', (evt) => VectorSvelte.setCallLevels(evt.payload));
     // Voice channels: the call this device is in, and who is in each channel's call.
     _on('voice_state', (evt) => voiceOnState(evt.payload));
+    _on('call_route', (evt) => VectorSvelte.setCallRoute(evt.payload));
     _on('voice_levels', (evt) => VectorSvelte.setVoiceSession(evt.payload));
     _on('voice_presence', (evt) => refreshVoicePresent(evt.payload?.channel_id));
     _on('mic_level', (evt) => VectorSvelte.setMicTest(null, evt.payload?.mic || 0));

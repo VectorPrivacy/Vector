@@ -11,6 +11,8 @@
     import { profileVersion } from '../lib/signals.svelte.js';
     import Avatar from '../ui/Avatar.svelte';
     import VoiceMeter from './VoiceMeter.svelte';
+    import RouteButton from './RouteButton.svelte';
+    import StayOnScreen from './StayOnScreen.svelte';
     import { loadPillPos, savePillPos, clampPill, pillDrag } from '../lib/call-pill.js';
 
     /**
@@ -19,6 +21,7 @@
      * @property {() => void} reject
      * @property {() => void} hangup
      * @property {(on: boolean) => void} setMuted
+     * @property {(route: string) => void} setRoute   a phone's earpiece, speaker, headset or bluetooth
      * @property {() => void} micAccess   the call has no microphone: explain, and offer the system settings
      * @property {(volume: number) => void} setVolume
      * @property {(kind: 'camera'|'screen', on: boolean) => void} setVideo
@@ -55,6 +58,7 @@
         else h.setMuted(!c.muted);
     }
 
+
     const peer = $derived.by(() => {
         c.tick;
         if (!c.peer) return null;
@@ -83,7 +87,10 @@
         switch (c.phase) {
             case 'ringing': return c.outgoing ? 'Calling…' : 'Incoming call';
             case 'connecting': return 'Connecting…';
-            case 'active': return clock(c.activeMs + (now - c.receivedAt));
+            case 'active':
+                if (c.peerAway) return 'Waiting for them to come back…';
+                if (c.stalled) return 'Reconnecting…';
+                return clock(c.activeMs + (now - c.receivedAt));
             case 'ended': return REASONS[c.reason] || 'Call ended';
             default: return '';
         }
@@ -385,6 +392,7 @@
                         <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><rect x="3" y="4" width="18" height="12" rx="2" stroke="currentColor" stroke-width="2"/><path d="M8 20h8M12 16v4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
                     </button>
                 {/if}
+                <RouteButton set={h.setRoute} />
                 <button class="call-btn" class:call-btn-on={c.muted || c.micOff} title={micTitle} onclick={toggleMic}>
                     <span class="icon" class:icon-mic-off={c.muted || c.micOff} class:icon-mic-on={!c.muted && !c.micOff}></span>
                 </button>
@@ -395,6 +403,7 @@
                 </button>
             {/if}
         </div>
+        {#if live}<StayOnScreen />{/if}
         {#if pictures && !max}
             <div class="call-pictures" style="aspect-ratio: {aspectOf(lead)}" transition:curtain>
                 {#if lead}

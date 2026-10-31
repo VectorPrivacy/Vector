@@ -32,6 +32,10 @@ class NotificationActionReceiver : BroadcastReceiver() {
         val notificationId = intent.getIntExtra("notification_id", -1)
 
         when (intent.action) {
+            IncomingCall.ACTION_DECLINE -> {
+                val callId = intent.getStringExtra(IncomingCall.EXTRA_CALL_ID) ?: return
+                IncomingCall.decline(context, callId, chatId)
+            }
             ACTION_MARK_READ -> {
                 nativeMarkAsRead(chatId)
                 // Dismiss the notification immediately

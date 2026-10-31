@@ -5198,11 +5198,10 @@ dependencies = [
 [[package]]
 name = "ndk"
 version = "0.9.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c3f42e7bbe13d351b6bead8286a43aac9534b82bd3cc43e47037f012ebfd62d4"
 dependencies = [
  "bitflags 2.13.2",
  "jni-sys 0.3.0",
+ "libc",
  "log",
  "ndk-sys",
  "num_enum",
@@ -11704,6 +11703,7 @@ dependencies = [
  "libwebp-sys",
  "lofty",
  "memchr",
+ "ndk",
  "ndk-context",
  "noq-proto",
  "nostr-sdk",
@@ -11749,6 +11749,7 @@ dependencies = [
  "toml 0.8.23",
  "url",
  "vector-core",
+ "vector-push",
  "webkit2gtk",
  "webview2-com 0.39.1",
  "whisper-rs",

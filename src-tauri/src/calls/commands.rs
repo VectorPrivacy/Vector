@@ -77,6 +77,26 @@ pub async fn call_set_muted(muted: bool) -> Result<(), String> {
     session::set_muted(muted).await
 }
 
+/// Where a phone plays the call (earpiece, speaker, a headset), or null where that isn't chosen.
+#[tauri::command]
+pub async fn call_route_get() -> Option<serde_json::Value> {
+    #[cfg(target_os = "android")]
+    return crate::android::call_audio::route().and_then(|r| serde_json::to_value(r).ok());
+    #[cfg(not(target_os = "android"))]
+    None
+}
+
+#[tauri::command]
+pub async fn call_route_set(route: String) -> Result<(), String> {
+    #[cfg(target_os = "android")]
+    return crate::android::call_audio::set_route(&route);
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = route;
+        Err("Not available on this platform".into())
+    }
+}
+
 #[tauri::command]
 pub async fn call_set_volume(volume: f32) -> Result<(), String> {
     session::set_volume(volume).await

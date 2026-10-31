@@ -14,6 +14,7 @@ import android.os.Build
 import android.os.IBinder
 import android.view.WindowManager
 import androidx.core.app.NotificationCompat
+import androidx.core.app.Person
 import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
 
@@ -27,6 +28,16 @@ class CallService : Service() {
         private const val CHANNEL_ID = "vector_calls"
         private const val NOTIFICATION_ID = 2
         private const val ACTION_LEAVE = "io.vectorapp.ACTION_LEAVE_CALL"
+        private const val ACTION_MUTE = "io.vectorapp.ACTION_MUTE_CALL"
+
+        /** The call the notification shows; null shows the plain one. */
+        private data class Shown(val name: String, val avatar: String, val muted: Boolean, val video: Boolean, val since: Long, val detail: String)
+
+        @Volatile
+        private var shown: Shown? = null
+
+        @Volatile
+        private var running: CallService? = null
 
         init {
             System.loadLibrary("vector_lib")
@@ -34,6 +45,29 @@ class CallService : Service() {
 
         @JvmStatic
         external fun nativeLeaveCall()
+
+        @JvmStatic
+        external fun nativeSetMuted(on: Boolean)
+
+        /** The call as the notification should show it, whether or not the service runs yet. */
+        @JvmStatic
+        fun show(name: String, avatarPath: String, muted: Boolean, video: Boolean, activeMs: Long) {
+            shown = Shown(name, avatarPath, muted, video, System.currentTimeMillis() - activeMs, if (video) "Video call" else "Call")
+            running?.post()
+        }
+
+        /** A voice Channel's call: the channel by name, its community below. */
+        @JvmStatic
+        fun showVoice(channel: String, community: String, muted: Boolean, sinceMs: Long) {
+            shown = Shown(channel, "", muted, false, sinceMs, community)
+            running?.post()
+        }
+
+        /** The call ended; its service stops with it, so nothing is reposted. */
+        @JvmStatic
+        fun clear() {
+            shown = null
+        }
 
         @JvmStatic
         fun start(context: Context) {
@@ -66,9 +100,15 @@ class CallService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (intent?.action == ACTION_LEAVE) {
-            nativeLeaveCall()
-            return START_NOT_STICKY
+        when (intent?.action) {
+            ACTION_LEAVE -> {
+                nativeLeaveCall()
+                return START_NOT_STICKY
+            }
+            ACTION_MUTE -> {
+                shown?.let { nativeSetMuted(!it.muted) }
+                return START_NOT_STICKY
+            }
         }
         val manager = getSystemService(NotificationManager::class.java)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -78,26 +118,7 @@ class CallService : Service() {
             }
             manager.createNotificationChannel(channel)
         }
-        val open = PendingIntent.getActivity(
-            this, 0,
-            Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP),
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        )
-        val leave = PendingIntent.getService(
-            this, 1,
-            Intent(this, CallService::class.java).setAction(ACTION_LEAVE),
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        )
-        val notification = NotificationCompat.Builder(this, CHANNEL_ID)
-            .setSmallIcon(R.drawable.ic_notification)
-            .setContentTitle("In a call")
-            .setContentText("Tap to return to Vector")
-            .setContentIntent(open)
-            .addAction(0, "Leave", leave)
-            .setOngoing(true)
-            .setSilent(true)
-            .setCategory(NotificationCompat.CATEGORY_CALL)
-            .build()
+        val notification = build()
         // Listen-only (no microphone permission) can't claim the microphone type.
         val mic = checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
         val type = when {
@@ -108,11 +129,67 @@ class CallService : Service() {
         }
         try {
             ServiceCompat.startForeground(this, NOTIFICATION_ID, notification, type)
+            running = this
         } catch (e: Exception) {
             android.util.Log.w("CallService", "startForeground refused: ${e.message}")
             stopSelf()
         }
         return START_NOT_STICKY
+    }
+
+    override fun onDestroy() {
+        if (running === this) running = null
+        super.onDestroy()
+    }
+
+    private fun post() {
+        try {
+            getSystemService(NotificationManager::class.java)?.notify(NOTIFICATION_ID, build())
+        } catch (e: Exception) {
+            android.util.Log.w("CallService", "update refused: ${e.message}")
+        }
+    }
+
+    /** The phone's own call notification: who or which channel, the timer, Mute and Hang up. */
+    private fun build(): android.app.Notification {
+        val open = PendingIntent.getActivity(
+            this, 0,
+            Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        val leave = PendingIntent.getService(
+            this, 1,
+            Intent(this, CallService::class.java).setAction(ACTION_LEAVE),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        val builder = NotificationCompat.Builder(this, CHANNEL_ID)
+            .setSmallIcon(R.drawable.ic_notification)
+            .setContentIntent(open)
+            .setOngoing(true)
+            .setSilent(true)
+            .setCategory(NotificationCompat.CATEGORY_CALL)
+        val call = shown ?: return builder
+            .setContentTitle("In a call")
+            .setContentText("Tap to return to Vector")
+            .addAction(0, "Leave", leave)
+            .build()
+        val mute = PendingIntent.getService(
+            this, 2,
+            Intent(this, CallService::class.java).setAction(ACTION_MUTE),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        val person = Person.Builder().setName(call.name).setImportant(true).apply {
+            IncomingCall.avatar(call.avatar)?.let { setIcon(it) }
+        }.build()
+        return builder
+            .setContentTitle(call.name)
+            .setContentText(if (call.muted) "Muted" else call.detail)
+            .setWhen(call.since)
+            .setUsesChronometer(true)
+            .setShowWhen(true)
+            .setStyle(NotificationCompat.CallStyle.forOngoingCall(person, leave).setIsVideo(call.video))
+            .addAction(0, if (call.muted) "Unmute" else "Mute", mute)
+            .build()
     }
 
     /** Swiped away from recents: the call ends with the app, as quitting does on desktop. */

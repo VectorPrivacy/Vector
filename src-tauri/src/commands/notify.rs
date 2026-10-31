@@ -252,3 +252,42 @@ pub fn arm_expiry_timer() {
 }
 
 // Handlers: get_notify_prefs, set_notify_level, set_notify_mute, set_suppress_everyone
+
+/// Notify When Closed on this device: `on`, `off`, `busy` or `unsupported`. Only Android
+/// receives pushes natively; a desktop is reached while it runs.
+#[tauri::command]
+pub async fn push_status() -> String {
+    #[cfg(target_os = "android")]
+    {
+        crate::android::push::status()
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        "unsupported".into()
+    }
+}
+
+/// Ask for an endpoint; it arrives later and `push_state` says so.
+#[tauri::command]
+pub async fn push_enable() -> Result<(), String> {
+    #[cfg(target_os = "android")]
+    {
+        crate::android::push::enable()
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        Err("Not available on this device".into())
+    }
+}
+
+#[tauri::command]
+pub async fn push_disable() -> Result<(), String> {
+    #[cfg(target_os = "android")]
+    {
+        crate::android::push::disable().await
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        Ok(())
+    }
+}

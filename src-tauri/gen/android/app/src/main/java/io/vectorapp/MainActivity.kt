@@ -37,6 +37,8 @@ class MainActivity : TauriActivity() {
         @JvmStatic
         external fun nativeOnNotificationTap(chatId: String)
         @JvmStatic
+        external fun nativeOnCallTap(callId: String, npub: String, answer: Boolean)
+        @JvmStatic
         external fun nativeOnShareReceived(uris: Array<String>, text: String)
     }
 
@@ -184,6 +186,10 @@ class MainActivity : TauriActivity() {
 
     override fun onStop() {
         super.onStop()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+            setShowWhenLocked(false)
+            setTurnScreenOn(false)
+        }
         // Whatever an embedded player's pages left in the webview's cache goes with the app.
         managedWebView?.clearCache(true)
     }
@@ -207,6 +213,19 @@ class MainActivity : TauriActivity() {
     }
 
     private fun handleNotificationIntent(intent: Intent?) {
+        val callNpub = intent?.getStringExtra(IncomingCall.EXTRA_CALL_NPUB)
+        if (!callNpub.isNullOrEmpty()) {
+            val callId = intent.getStringExtra(IncomingCall.EXTRA_CALL_ID) ?: ""
+            val answer = intent.getBooleanExtra(IncomingCall.EXTRA_CALL_ANSWER, false)
+            intent.removeExtra(IncomingCall.EXTRA_CALL_NPUB)
+            // A ringing call shows over the lock screen; leaving the app takes that back.
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+                setShowWhenLocked(true)
+                setTurnScreenOn(true)
+            }
+            try { nativeOnCallTap(callId, callNpub, answer) } catch (_: Exception) {}
+            return
+        }
         val chatId = intent?.getStringExtra("chat_id")
         if (!chatId.isNullOrEmpty()) {
             intent.removeExtra("chat_id") // Consume to prevent re-processing

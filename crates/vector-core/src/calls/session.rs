@@ -22,11 +22,15 @@ use std::time::Duration;
 use web_time::Instant;
 
 /// An offer older than this never rings: it was a call that already ended.
-const OFFER_TTL_SECS: u64 = 60;
-const RING_TIMEOUT: Duration = Duration::from_secs(45);
+const OFFER_TTL_SECS: u64 = 75;
+/// Long enough to answer from a notification on a phone the call woke.
+const RING_TIMEOUT: Duration = Duration::from_secs(60);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
-/// Seconds without a single frame from the peer before the call is declared dead.
-const PEER_SILENCE_SECS: u32 = 8;
+/// A peer silent this long is gone; one that said it went away gets [`AWAY_SILENCE_SECS`],
+/// under the transport's own idle timeout. Past [`STALL_SECS`] the call shows as reconnecting.
+const PEER_SILENCE_SECS: u32 = 30;
+const AWAY_SILENCE_SECS: u32 = 90;
+const STALL_SECS: u32 = 3;
 
 #[derive(Serialize, Clone, Copy, PartialEq, Debug)]
 #[serde(rename_all = "snake_case")]
@@ -61,6 +65,10 @@ pub struct CallState {
     pub video_offered: bool,
     /// The peer has hidden our picture; the camera can rest.
     pub paused_by_peer: bool,
+    /// The peer's app is paused by their system; the call waits for it.
+    pub peer_away: bool,
+    /// Nothing has arrived from the peer for a few seconds.
+    pub stalled: bool,
     /// The shared screen's sound travels with it, each way.
     pub share_audio_mine: bool,
     pub share_audio_peer: bool,
@@ -70,6 +78,11 @@ pub struct CallState {
     pub share_audio_native: bool,
     /// The system has refused screen recording and will not ask again.
     pub share_audio_denied: bool,
+    /// The peer as this account shows them, for a phone's own call notification.
+    #[serde(skip)]
+    pub name: String,
+    #[serde(skip)]
+    pub avatar: Option<String>,
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -123,8 +136,14 @@ struct Call {
     peer_decodes: Vec<String>,
     video_offered: bool,
     paused_by_peer: bool,
+    peer_away: bool,
+    stalled: bool,
     /// The machine stays awake for the call, and the display too once there is video.
     awake: Option<Box<dyn std::any::Any + Send>>,
+    /// The sound routed as a phone call's, and whether out loud.
+    call_audio: Option<(bool, Box<dyn std::any::Any + Send>)>,
+    /// The peer's name and cached avatar, as this account knows them.
+    shown: (String, Option<String>),
     /// The shared screen's sound from the webview, for the engine's share thread.
     share: Arc<ShareInput>,
     share_audio_mine: bool,
@@ -133,19 +152,35 @@ struct Call {
     share_audio_denied: bool,
 }
 
+/// Whether a call's sound is held as a phone call's, and out loud: from our own ring on (theirs
+/// rings out loud by itself), to the ear until there is video, which keeps it out loud.
+fn call_audio_wanted(phase: Phase, outgoing: bool, video: bool, held: Option<bool>) -> Option<bool> {
+    match phase {
+        Phase::Ringing if !outgoing => None,
+        Phase::Ended => None,
+        _ => Some(video || held == Some(true)),
+    }
+}
+
 impl Call {
-    /// The hold the call needs right now; dropping the old one after taking the new
+    /// The holds the call needs right now; dropping the old one after taking the new
     /// keeps the machine covered in between.
-    fn refresh_awake(&mut self) {
+    fn refresh_holds(&mut self) {
+        let video = self.video_mine.any() || self.video_peer.any();
         let level = if self.phase != Phase::Active {
             None
-        } else if self.video_mine.any() || self.video_peer.any() {
+        } else if video {
             Some(AwakeLevel::Display)
         } else {
             Some(AwakeLevel::System)
         };
         let next = level.and_then(|l| platform::get().ok()?.hold_awake(l));
         self.awake = next;
+        let held = self.call_audio.as_ref().map(|(loud, _)| *loud);
+        let audio = call_audio_wanted(self.phase, self.outgoing, self.video_offered || video, held);
+        if held != audio {
+            self.call_audio = audio.and_then(|loud| Some((loud, platform::get().ok()?.hold_call_audio(loud)?)));
+        }
     }
 
     fn state(&self, reason: Option<String>) -> CallState {
@@ -165,11 +200,15 @@ impl Call {
             peer_decodes: self.peer_decodes.clone(),
             video_offered: self.video_offered,
             paused_by_peer: self.paused_by_peer,
+            peer_away: self.peer_away,
+            stalled: self.stalled,
             share_audio_mine: self.share_audio_mine,
             share_audio_peer: self.share_audio_peer,
             share_volume: self.share_volume,
             share_audio_native: platform::get().is_ok_and(|p| p.share_audio_native()),
             share_audio_denied: self.share_audio_denied,
+            name: self.shown.0.clone(),
+            avatar: self.shown.1.clone(),
         }
     }
 }
@@ -237,6 +276,9 @@ fn with_call_id<R>(id: &str, f: impl FnOnce(&mut Call) -> R) -> Option<R> {
 
 fn emit_state(state: &CallState) {
     crate::traits::emit_event("call_state", state);
+    if let Some(ringer) = RINGER.get() {
+        ringer.ongoing(state);
+    }
 }
 
 pub fn snapshot() -> Option<CallState> {
@@ -270,9 +312,19 @@ async fn send_signal(peer: &str, call_id: &str, signal: &str, addr: Option<&str>
     }
     let rumor = builder.finalize_unsigned_with_id(me);
     let relays = active_trusted_relays().await;
-    match crate::send_gift_wrap(&client, relays, &pubkey, rumor, []).await {
-        Ok(_) => true,
-        Err(e) => {
+    // An offer and its withdrawal also go to their inbox relays: a phone the ring's push just
+    // woke reads those first, and may not share ours.
+    let (ours, inbox) = if signal == "offer" || signal == "hangup" {
+        futures_util::join!(
+            crate::send_gift_wrap(&client, relays, &pubkey, rumor.clone(), []),
+            async { crate::inbox_relays::send_gift_wrap(&client, &pubkey, rumor, []).await.map(|_| ()) },
+        )
+    } else {
+        (crate::send_gift_wrap(&client, relays, &pubkey, rumor, []).await, Err(String::new()))
+    };
+    match (ours, inbox) {
+        (Ok(_), _) | (_, Ok(())) => true,
+        (Err(e), _) => {
             log_warn!("[CALLS] Failed to send {signal} to {peer}: {e}");
             false
         }
@@ -295,6 +347,66 @@ pub fn end_all(reason: &str) {
     }
 }
 
+/// A phone's own call surfaces: the ring where the app's window can't show one (the lock
+/// screen), and the notification of a call under way. Installed once per process, so it rings
+/// even in one that runs no call engine (a phone's background service).
+pub trait Ringer: Send + Sync {
+    /// `name` and `avatar` are the caller's, as this account knows them.
+    fn ring(&self, call_id: &str, peer: &str, name: &str, avatar: Option<&str>, video: bool);
+    /// The ring stopped: taken up here, or `missed`.
+    fn over(&self, call_id: &str, missed: bool);
+    /// Every change to the call, for the phone's ongoing-call notification.
+    fn ongoing(&self, _state: &CallState) {}
+    /// The voice Channel's call, for the same notification; None once left.
+    fn voice(&self, _call: Option<&VoiceShown>) {}
+}
+
+/// A voice Channel's call as a phone's notification shows it.
+pub struct VoiceShown<'a> {
+    pub channel_id: &'a str,
+    pub channel: &'a str,
+    pub community: &'a str,
+    pub muted: bool,
+    pub since_ms: u64,
+}
+
+static RINGER: std::sync::OnceLock<Box<dyn Ringer>> = std::sync::OnceLock::new();
+
+pub(super) fn ringer() -> Option<&'static dyn Ringer> {
+    RINGER.get().map(|r| &**r)
+}
+
+pub fn set_ringer(ringer: Box<dyn Ringer>) {
+    let _ = RINGER.set(ringer);
+}
+
+async fn ring(call_id: &str, peer: &str, video: bool) {
+    let Some(ringer) = RINGER.get() else { return };
+    let (name, avatar) = shown_as(peer).await;
+    ringer.ring(call_id, peer, &name, avatar.as_deref(), video);
+}
+
+/// A peer's name and cached avatar, as this account knows them.
+async fn shown_as(peer: &str) -> (String, Option<String>) {
+    let (name, avatar) = {
+        let state = crate::STATE.lock().await;
+        match state.get_profile(peer) {
+            Some(p) => {
+                let name = [p.nickname(), p.display_name(), p.name()].into_iter().find(|n| !n.is_empty()).map(str::to_string);
+                (name, p.has_avatar_cached().then(|| p.avatar_cached().into_owned()))
+            }
+            None => (None, None),
+        }
+    };
+    (name.unwrap_or_else(|| format!("{}…", &peer[..peer.len().min(14)])), avatar)
+}
+
+fn ring_over(call_id: &str, missed: bool) {
+    if let Some(ringer) = RINGER.get() {
+        ringer.over(call_id, missed);
+    }
+}
+
 fn take_down(id: &str, reason: &str) -> bool {
     let call = {
         let mut guard = slot().lock().unwrap_or_else(|e| e.into_inner());
@@ -305,6 +417,8 @@ fn take_down(id: &str, reason: &str) -> bool {
     };
     let Some(mut call) = call else { return false };
     log_info!("[CALLS] Call {} ended: {reason}", call.id);
+    // An incoming ring that timed out, or that the caller withdrew, was missed.
+    ring_over(&call.id, !call.outgoing && call.phase == Phase::Ringing && matches!(reason, "missed" | "hangup"));
     for t in call.tasks.drain(..) {
         t.abort();
     }
@@ -332,6 +446,7 @@ pub async fn start(peer: String, video: bool) -> Result<CallState, String> {
     let platform = platform::get()?;
     let id = format!("{:032x}", rand::random::<u128>());
 
+    let shown = shown_as(&peer).await;
     // In the slot before the node is read: a client that closes an idle node
     // must see this call, or the offer could name a node already gone.
     let state = {
@@ -339,7 +454,7 @@ pub async fn start(peer: String, video: bool) -> Result<CallState, String> {
         if guard.is_some() {
             return Err("Already in a call".into());
         }
-        let call = Call {
+        let mut call = Call {
             id: id.clone(),
             peer: peer.clone(),
             outgoing: true,
@@ -359,13 +474,18 @@ pub async fn start(peer: String, video: bool) -> Result<CallState, String> {
             peer_decodes: Vec::new(),
             video_offered: video,
             paused_by_peer: false,
+            peer_away: false,
+            stalled: false,
             awake: None,
+            call_audio: None,
+            shown,
             share: Arc::new(ShareInput::new()),
             share_audio_mine: false,
             share_audio_peer: false,
             share_volume: 1.0,
             share_audio_denied: false,
         };
+        call.refresh_holds();
         let state = call.state(None);
         *guard = Some(call);
         state
@@ -386,6 +506,7 @@ pub async fn start(peer: String, video: bool) -> Result<CallState, String> {
         end(&id, "send_failed");
         return Err("Could not reach the relays".into());
     }
+    crate::push::call_ringing(&peer, &id, video);
     spawn_ring_timeout(id.clone(), peer, true);
     Ok(state)
 }
@@ -399,6 +520,7 @@ fn spawn_ring_timeout(id: String, peer: String, outgoing: bool) {
         }
         if outgoing {
             send_signal(&peer, &id, "hangup", None, false).await;
+            crate::push::call_missed(&peer, &id);
             end(&id, "no_answer");
         } else {
             end(&id, "missed");
@@ -420,9 +542,11 @@ pub async fn accept() -> Result<(), String> {
             return Err("No incoming call to accept".to_string());
         }
         c.phase = Phase::Connecting;
+        c.refresh_holds();
         Ok((c.id.clone(), c.peer.clone()))
     })
     .unwrap_or(Err("No call".into()))?;
+    ring_over(&id, false);
     if let Some(s) = snapshot() {
         emit_state(&s);
     }
@@ -460,8 +584,20 @@ pub async fn reject() -> Result<(), String> {
     Ok(())
 }
 
+/// Decline a ringing call from a notification, whether or not this process holds it: a
+/// background service only rang it.
+pub async fn decline(call_id: &str, peer: &str) {
+    ring_over(call_id, false);
+    if with_call(|c| c.id == call_id).unwrap_or(false) {
+        let _ = reject().await;
+    } else {
+        send_signal(peer, call_id, "reject", None, false).await;
+    }
+}
+
 pub async fn hangup() -> Result<(), String> {
-    let (id, peer, control) = with_call(|c| (c.id.clone(), c.peer.clone(), c.control.clone())).ok_or("No call")?;
+    let (id, peer, control, unanswered) =
+        with_call(|c| (c.id.clone(), c.peer.clone(), c.control.clone(), c.outgoing && c.phase == Phase::Ringing)).ok_or("No call")?;
     if let Some(control) = control {
         let mut send = control.lock().await;
         let _ = timeout(Duration::from_secs(1), write_control(&mut *send, &Control::Bye)).await;
@@ -470,6 +606,9 @@ pub async fn hangup() -> Result<(), String> {
     end(&id, "hangup");
     // The signal reaches a peer whose connection never came up, or one still ringing.
     send_signal(&peer, &id, "hangup", None, false).await;
+    if unanswered {
+        crate::push::call_missed(&peer, &id);
+    }
     Ok(())
 }
 
@@ -488,6 +627,16 @@ pub async fn set_muted(on: bool) -> Result<(), String> {
     if let Some(control) = control {
         let mut send = control.lock().await;
         let _ = timeout(Duration::from_secs(1), write_control(&mut *send, &Control::Mute { on })).await;
+    }
+    Ok(())
+}
+
+/// Tell the peer this app is going where the system pauses it, or is back.
+pub async fn set_away(on: bool) -> Result<(), String> {
+    let control = with_call(|c| c.control.clone()).ok_or("No call")?;
+    if let Some(control) = control {
+        let mut send = control.lock().await;
+        let _ = timeout(Duration::from_secs(1), write_control(&mut *send, &Control::Away { on })).await;
     }
     Ok(())
 }
@@ -528,7 +677,7 @@ pub async fn set_video(kind: VideoKind, on: bool) -> Result<(), String> {
             c.share.active.store(false, Ordering::Relaxed);
             stop_share_audio();
         }
-        c.refresh_awake();
+        c.refresh_holds();
         Ok((tracks, c.control.clone()))
     })
     .unwrap_or(Err("No call".into()))?;
@@ -631,7 +780,7 @@ async fn on_link_closed(id: &str) {
         if let Some(v) = c.video.as_ref() {
             v.set_sending(Tracks::default());
         }
-        c.refresh_awake();
+        c.refresh_holds();
         Some((Tracks::default(), c.control.clone()))
     })
     .flatten();
@@ -713,7 +862,16 @@ fn stop_share_audio() {
 /// A signal from the peer, already validated as coming from `sender`.
 pub async fn on_signal(sender: &str, call_id: &str, signal: &str, node_addr: Option<&str>, created_at: u64, video: Option<&str>, media: Option<&str>) {
     log_info!("[CALLS] {signal} from {sender} for call {call_id}");
-    let Ok(platform) = platform::get() else { return };
+    let Ok(platform) = platform::get() else {
+        // No call engine in this process: the ring is all it can do, and the app takes the call.
+        match signal {
+            "offer" if created_at + OFFER_TTL_SECS >= Timestamp::now().as_secs() => ring(call_id, sender, media == Some("video")).await,
+            "hangup" => ring_over(call_id, true),
+            "taken" => ring_over(call_id, false),
+            _ => {}
+        }
+        return;
+    };
     match signal {
         "offer" => {
             let now = Timestamp::now().as_secs();
@@ -728,6 +886,7 @@ pub async fn on_signal(sender: &str, call_id: &str, signal: &str, node_addr: Opt
             if !first_offer(call_id, now) {
                 return;
             }
+            let shown = shown_as(sender).await;
             let state = {
                 let mut guard = slot().lock().unwrap_or_else(|e| e.into_inner());
                 match guard.as_ref() {
@@ -756,7 +915,11 @@ pub async fn on_signal(sender: &str, call_id: &str, signal: &str, node_addr: Opt
                             peer_decodes: parse_decodes(video),
                             video_offered: media == Some("video"),
                             paused_by_peer: false,
+                            peer_away: false,
+                            stalled: false,
                             awake: None,
+                            call_audio: None,
+                            shown,
                             share: Arc::new(ShareInput::new()),
                             share_audio_mine: false,
                             share_audio_peer: false,
@@ -773,6 +936,7 @@ pub async fn on_signal(sender: &str, call_id: &str, signal: &str, node_addr: Opt
                 Some(state) => {
                     emit_state(&state);
                     spawn_ring_timeout(call_id.to_string(), sender.to_string(), false);
+                    ring(call_id, sender, media == Some("video")).await;
                 }
                 None => {
                     send_signal(sender, call_id, "busy", None, false).await;
@@ -788,6 +952,7 @@ pub async fn on_signal(sender: &str, call_id: &str, signal: &str, node_addr: Opt
                 if c.outgoing && c.peer == sender && c.phase == Phase::Ringing {
                     c.phase = Phase::Connecting;
                     c.peer_decodes = parse_decodes(video);
+                    c.refresh_holds();
                     true
                 } else {
                     false
@@ -933,7 +1098,7 @@ async fn attach(id: &str, conn: Connection, send: SendStream, mut recv: RecvStre
         c.video = Some(video);
         c.phase = Phase::Active;
         c.active_since = Some(Instant::now());
-        c.refresh_awake();
+        c.refresh_holds();
     })
     .is_some();
     if !installed {
@@ -967,7 +1132,7 @@ async fn attach(id: &str, conn: Connection, send: SendStream, mut recv: RecvStre
                         if let Some(v) = c.video.as_ref() {
                             v.set_peer(tracks);
                         }
-                        c.refresh_awake();
+                        c.refresh_holds();
                     });
                     if let Some(s) = snapshot() {
                         emit_state(&s);
@@ -979,6 +1144,12 @@ async fn attach(id: &str, conn: Connection, send: SendStream, mut recv: RecvStre
                             v.force_keyframe(kind);
                         }
                     });
+                }
+                Ok(Control::Away { on }) => {
+                    with_call_id(&ctl_id, |c| c.peer_away = on);
+                    if let Some(s) = snapshot() {
+                        emit_state(&s);
+                    }
                 }
                 Ok(Control::VideoPause { on }) => {
                     with_call_id(&ctl_id, |c| {
@@ -1032,8 +1203,7 @@ async fn attach(id: &str, conn: Connection, send: SendStream, mut recv: RecvStre
         end(&closed_id, reason);
     });
     // A stats line every second, and the liveness check: the peer sends fifty frames
-    // a second even muted, so a silent stretch means they are gone long before the
-    // transport's idle timeout would say so.
+    // a second even muted, so a silent stretch means they are stalled, and a long one gone.
     let stats_id = id.to_string();
     let stats_conn = conn.clone();
     let stats_task = crate::db::spawn_bound(async move {
@@ -1055,9 +1225,16 @@ async fn attach(id: &str, conn: Connection, send: SendStream, mut recv: RecvStre
             let received = stats.received.load(Ordering::Relaxed);
             silent_secs = if received == last_received { silent_secs + 1 } else { 0 };
             last_received = received;
-            if silent_secs >= PEER_SILENCE_SECS {
+            let away = with_call_id(&stats_id, |c| c.peer_away).unwrap_or(false);
+            if silent_secs >= if away { AWAY_SILENCE_SECS } else { PEER_SILENCE_SECS } {
                 end(&stats_id, "disconnected");
                 return;
+            }
+            let stalled = silent_secs >= STALL_SECS;
+            if with_call_id(&stats_id, |c| std::mem::replace(&mut c.stalled, stalled) != stalled).unwrap_or(false) {
+                if let Some(s) = snapshot() {
+                    emit_state(&s);
+                }
             }
             let (rtt_ms, path) = {
                 let paths = stats_conn.paths();
@@ -1103,6 +1280,19 @@ async fn attach(id: &str, conn: Connection, send: SendStream, mut recv: RecvStre
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_call_plays_to_the_ear_from_our_ring_and_out_loud_once_there_is_video() {
+        assert_eq!(call_audio_wanted(Phase::Ringing, false, false, None), None);
+        assert_eq!(call_audio_wanted(Phase::Ringing, true, false, None), Some(false));
+        assert_eq!(call_audio_wanted(Phase::Connecting, false, false, None), Some(false));
+        assert_eq!(call_audio_wanted(Phase::Ringing, true, true, None), Some(true));
+        assert_eq!(call_audio_wanted(Phase::Active, false, true, Some(false)), Some(true));
+        // The camera going off leaves a video call out loud.
+        assert_eq!(call_audio_wanted(Phase::Active, false, false, Some(true)), Some(true));
+        assert_eq!(call_audio_wanted(Phase::Active, false, false, Some(false)), Some(false));
+        assert_eq!(call_audio_wanted(Phase::Ended, true, true, Some(true)), None);
+    }
 
     #[test]
     fn an_offer_rings_once_until_its_ttl_passes() {

@@ -30,6 +30,61 @@ pub struct Device {
     pub origin: String,
 }
 
+/// Make `dev` this account's push subscription. A new one goes to recent contacts, spaced out:
+/// a burst of wraps at once ties every recipient to the sender.
+pub async fn adopt(dev: Device) -> Result<(), String> {
+    let fresh = device().as_ref() != Some(&dev);
+    set_device(dev).await?;
+    if fresh {
+        let recent = recent_contacts().await;
+        prepare(&recent).await?;
+        crate::db::spawn_bound(async move {
+            for npub in recent {
+                match share_with(&npub).await {
+                    Ok(true) => crate::rt::time::sleep(std::time::Duration::from_millis(1500)).await,
+                    Ok(false) => {}
+                    Err(e) => crate::log_warn!("[Push] ticket to {}: {}", npub, e),
+                }
+            }
+        });
+    }
+    // Mutes and blocks made on another device, or before this one turned push on.
+    controls_changed();
+    Ok(())
+}
+
+async fn recent_contacts() -> Vec<String> {
+    let state = STATE.lock().await;
+    let mut chats: Vec<(u64, String)> = state
+        .chats
+        .iter()
+        .filter(|c| matches!(c.chat_type(), crate::ChatType::DirectMessage))
+        .filter(|c| !state.get_profile(c.id()).is_some_and(|p| p.flags.is_blocked()))
+        .map(|c| (c.last_message_time().unwrap_or(0), c.id().clone()))
+        .collect();
+    chats.sort_by(|a, b| b.0.cmp(&a.0));
+    chats.into_iter().take(RECENT_CONTACTS).map(|(_, id)| id).collect()
+}
+
+/// A push this device received, checked against what it issued: the contact it came from and
+/// what it says, or None when no contact of this account holds that handle or the MAC is wrong.
+pub fn receive(message: &[u8]) -> Option<(String, Notice)> {
+    let v: serde_json::Value = serde_json::from_slice(message).ok()?;
+    let d = &v["notification"]["data"];
+    let notice = Notice {
+        h: d["h"].as_str()?.to_string(),
+        kind: d["k"].as_str()?.to_string(),
+        msg: d["m"].as_str()?.to_string(),
+        ts: d["t"].as_u64()?,
+        text: d["x"].as_str().unwrap_or_default().to_string(),
+    };
+    let mac = d["a"].as_str()?;
+    let issued: HashMap<String, Issued> = load(ISSUED_KEY);
+    let (npub, i) = issued.iter().find(|(_, i)| i.h == notice.h)?;
+    let mk = crate::simd::hex::hex_to_bytes_32_checked(&i.mk)?;
+    (notice.mac(&mk).ok()? == mac).then(|| (npub.clone(), notice))
+}
+
 /// What this device minted for one contact.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Issued {
@@ -53,6 +108,13 @@ const MAX_TICKETS_PER_CONTACT: usize = 8;
 const SEND_JITTER_MS: u64 = 4000;
 /// How long a push service holds a notification for a device that is offline.
 const TTL: u32 = 2 * 24 * 3600;
+/// A ring is worth nothing once the call stops ringing.
+#[cfg(feature = "calls")]
+const CALL_TTL: u32 = 60;
+
+/// Contacts handed a ticket the moment notifications are turned on. Everyone else gets one
+/// with our next message to them.
+const RECENT_CONTACTS: usize = 30;
 
 /// Serialises the read-modify-write of the three JSON settings.
 struct PushLock;
@@ -366,12 +428,34 @@ pub(crate) fn after_delivery(receiver_npub: &str, rumor: &UnsignedEvent) {
             // paired by arrival time alone.
             let jitter = rand::Rng::gen_range(&mut rand::thread_rng(), 0..SEND_JITTER_MS);
             crate::rt::time::sleep(std::time::Duration::from_millis(jitter)).await;
-            notify(&receiver, &notice).await;
+            notify(&receiver, &notice, TTL).await;
         }
         if let Err(e) = share_with(&receiver).await {
             crate::log_warn!("[Push] sharing ticket with {}: {}", receiver, e);
         }
     });
+}
+
+/// Our call is ringing `receiver`: their devices ring at once, unjittered, since a ring that
+/// waits is a missed call.
+#[cfg(feature = "calls")]
+pub(crate) fn call_ringing(receiver_npub: &str, call_id: &str, video: bool) {
+    let notice = call_notice(if video { "video_call" } else { "call" }, call_id);
+    let receiver = receiver_npub.to_string();
+    crate::db::spawn_bound(async move { notify(&receiver, &notice, CALL_TTL).await });
+}
+
+/// Our call stopped ringing unanswered.
+#[cfg(feature = "calls")]
+pub(crate) fn call_missed(receiver_npub: &str, call_id: &str) {
+    let notice = call_notice("missed_call", call_id);
+    let receiver = receiver_npub.to_string();
+    crate::db::spawn_bound(async move { notify(&receiver, &notice, TTL).await });
+}
+
+#[cfg(feature = "calls")]
+fn call_notice(kind: &str, call_id: &str) -> Notice {
+    Notice { h: String::new(), kind: kind.into(), msg: call_id.into(), ts: now_secs() * 1000, text: String::new() }
 }
 
 fn notice_for(rumor: &UnsignedEvent) -> Option<Notice> {
@@ -410,7 +494,7 @@ fn file_label(mime: &str) -> &'static str {
     }
 }
 
-async fn notify(receiver: &str, notice: &Notice) {
+async fn notify(receiver: &str, notice: &Notice, ttl: u32) {
     let tickets: Vec<Ticket> = {
         let _g = lock().lock_owned().await;
         let held: HashMap<String, Vec<Ticket>> = load(HELD_KEY);
@@ -421,7 +505,7 @@ async fn notify(receiver: &str, notice: &Notice) {
     }
     let Some(client) = nostr_client() else { return };
     for t in tickets {
-        let event = match t.request(notice, TTL) {
+        let event = match t.request(notice, ttl) {
             Ok(e) => e,
             Err(e) => {
                 crate::log_warn!("[Push] building request: {}", e);
@@ -478,6 +562,37 @@ async fn publish(client: &Client, relays: &[String], event: &Event) -> Result<()
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn init_test_db() -> (tempfile::TempDir, std::sync::MutexGuard<'static, ()>) {
+        let guard = crate::db::DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        crate::db::close_database();
+        crate::db::clear_id_caches();
+        let tmp = tempfile::tempdir().unwrap();
+        let account = Keys::generate().public_key().to_bech32().unwrap();
+        std::fs::create_dir_all(tmp.path().join(&account)).unwrap();
+        crate::db::set_app_data_dir(crate::db::shared_test_data_dir().to_path_buf());
+        crate::db::set_current_account(account.clone()).unwrap();
+        crate::db::init_database(&account).unwrap();
+        (tmp, guard)
+    }
+
+    #[tokio::test]
+    async fn a_push_reads_only_against_the_ticket_this_device_issued() {
+        let (_tmp, _guard) = init_test_db();
+        let alice = Keys::generate().public_key().to_bech32().unwrap();
+        prepare(std::slice::from_ref(&alice)).await.unwrap();
+        let issued: HashMap<String, Issued> = load(ISSUED_KEY);
+        let i = &issued[&alice];
+        let notice = Notice { h: i.h.clone(), kind: "call".into(), msg: "c1".into(), ts: 5, text: String::new() };
+        let message = notice.message("https://vectorapp.io", &i.mk).unwrap();
+
+        let (from, got) = receive(&message).expect("a push sealed by our own ticket");
+        assert_eq!((from.as_str(), got.kind.as_str(), got.msg.as_str()), (alice.as_str(), "call", "c1"));
+        let forged = String::from_utf8(message.clone()).unwrap().replace("\"c1\"", "\"c2\"");
+        assert!(receive(forged.as_bytes()).is_none(), "an altered field fails the MAC");
+        let stranger = Notice { h: "00".repeat(8), ..notice }.message("https://vectorapp.io", &i.mk).unwrap();
+        assert!(receive(&stranger).is_none(), "a handle no contact here holds");
+    }
 
     #[test]
     fn previews_flatten_and_files_get_a_label() {

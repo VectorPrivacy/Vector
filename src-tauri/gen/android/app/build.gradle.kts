@@ -154,6 +154,10 @@ dependencies {
     implementation("androidx.appcompat:appcompat:1.6.1")
     implementation("com.google.android.material:material:1.8.0")
     implementation("androidx.core:core-ktx:1.12.0")
+    // Push. Connector 3.0 is the last built with a stdlib this Kotlin 1.9 can read; the
+    // embedded FCM distributor is vendored (VENDORED.md), and needs coroutines.
+    implementation("org.unifiedpush.android:connector:3.0.10")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
     testImplementation("junit:junit:4.13.2")
     androidTestImplementation("androidx.test.ext:junit:1.1.4")
     androidTestImplementation("androidx.test.espresso:espresso-core:3.5.0")

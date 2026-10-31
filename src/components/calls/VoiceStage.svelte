@@ -5,6 +5,8 @@
     import { openChatId, profileVersion } from '../lib/signals.svelte.js';
     import { rttQuality } from '../lib/calls.svelte.js';
     import Avatar from '../ui/Avatar.svelte';
+    import RouteButton from './RouteButton.svelte';
+    import StayOnScreen from './StayOnScreen.svelte';
 
     const stage = $derived(voiceStage());
     const shown = $derived(!!stage && openChatId() === stage.channelId);
@@ -162,6 +164,7 @@
                         <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><rect x="3" y="4" width="18" height="12" rx="2" stroke="currentColor" stroke-width="2"/><path d="M8 20h8M12 16v4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
                     </button>
                 {/if}
+                <RouteButton set={(route) => h.setRoute?.(route)} />
                 <button class="call-btn" class:call-btn-on={micOff} class:call-btn-locked={v.serverMuted}
                         title={v.serverMuted ? 'Muted by a moderator' : `${micOff ? 'Unmute' : 'Mute'} (${h.keyHint?.('M')})`} onclick={toggleMic}>
                     <span class="icon" class:icon-mic-off={micOff} class:icon-mic-on={!micOff}></span>
@@ -179,5 +182,6 @@
                 <button class="voice-stage-join" disabled={joining} onclick={join}>{joining ? 'Joining…' : 'Join Voice'}</button>
             {/if}
         </div>
+        {#if inCall}<StayOnScreen />{/if}
     </div>
 {/if}

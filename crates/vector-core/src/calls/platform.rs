@@ -73,6 +73,11 @@ pub trait CallPlatform: Send + Sync + 'static {
     fn hold_awake(&self, _level: AwakeLevel) -> Option<Box<dyn Any + Send>> {
         None
     }
+    /// The call's sound routed as a phone call's for as long as the returned value lives: to
+    /// the ear, or `out_loud` (a video call, a voice Channel). Taken before the audio opens.
+    fn hold_call_audio(&self, _out_loud: bool) -> Option<Box<dyn Any + Send>> {
+        None
+    }
     /// A call this side took down after it rang or ran.
     fn ended(&self) {}
     /// Captures a shared screen's sound itself, for a picker that gave none.

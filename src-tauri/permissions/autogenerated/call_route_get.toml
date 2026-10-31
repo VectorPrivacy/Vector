@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-call-route-get"
+description = "Enables the call_route_get command without any pre-configured scope."
+commands.allow = ["call_route_get"]
+
+[[permission]]
+identifier = "deny-call-route-get"
+description = "Denies the call_route_get command without any pre-configured scope."
+commands.deny = ["call_route_get"]

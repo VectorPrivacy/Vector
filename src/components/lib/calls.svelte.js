@@ -10,6 +10,8 @@ const c = $state({ id: null, peer: null, outgoing: false, phase: null, reason: n
     // offer was for a video call, and whether the peer has hidden our pictures.
     videoMine: { camera: false, screen: false }, videoPeer: { camera: false, screen: false },
     peerDecodes: [], videoOffered: false, pausedByPeer: false,
+    // Their app is paused by their system (a locked phone), or nothing has arrived for a moment.
+    peerAway: false, stalled: false,
     // The shared screen's sound, each way, how loud theirs plays here, and whether
     // this platform can capture ours itself when the picker gives no audio.
     shareAudioMine: false, shareAudioPeer: false, shareVolume: 1, shareAudioNative: false, shareAudioDenied: false });
@@ -32,7 +34,9 @@ const audio = $state({ autoGain: true, echoCancel: true, noiseSuppress: true, mi
     direct: false,
     micTest: false, micLevel: 0,
     // Every microphone and speaker on the machine, the defaults, and the preference (null = default).
-    devices: { inputs: [], outputs: [], defaultInput: '', defaultOutput: '', input: null, output: null } });
+    devices: { inputs: [], outputs: [], defaultInput: '', defaultOutput: '', input: null, output: null },
+    // A phone's call: where it plays (earpiece, headset, speaker, bluetooth) and where else it could.
+    route: null });
 let endedTimer = null;
 
 export function callState() { return c; }
@@ -75,6 +79,9 @@ export function setCallAudio(s) {
 
 export function setCallDirect(on) { audio.direct = !!on; }
 
+/** `r` is the backend's route, or null outside a phone's call. */
+export function setCallRoute(r) { audio.route = r?.current ? { current: r.current, available: r.available || [] } : null; }
+
 /** The backend's device list and preference. */
 export function setAudioDevices(l) {
     if (!l) return;
@@ -107,6 +114,7 @@ export function setCallState(s) {
     c.videoMine = { camera: !!s.video_mine?.camera, screen: !!s.video_mine?.screen };
     c.videoPeer = { camera: !!s.video_peer?.camera, screen: !!s.video_peer?.screen };
     c.peerDecodes = s.peer_decodes || []; c.videoOffered = !!s.video_offered; c.pausedByPeer = !!s.paused_by_peer;
+    c.peerAway = !!s.peer_away; c.stalled = !!s.stalled;
     c.shareAudioMine = !!s.share_audio_mine; c.shareAudioPeer = !!s.share_audio_peer;
     c.shareVolume = typeof s.share_volume === 'number' ? s.share_volume : 1;
     c.shareAudioNative = !!s.share_audio_native; c.shareAudioDenied = !!s.share_audio_denied;

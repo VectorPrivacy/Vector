@@ -72,6 +72,10 @@
 # Keep VectorNotificationService native JNI methods and static helpers
 -keep class io.vectorapp.VectorNotificationService { *; }
 -keep class io.vectorapp.CallService { *; }
+-keep class io.vectorapp.IncomingCall { *; }
+-keep class io.vectorapp.CallAudioRouter { *; }
+-keep class io.vectorapp.VectorPush { *; }
+-keep class io.vectorapp.VectorPushService { *; }
 
 # Keep BootReceiver (referenced in AndroidManifest)
 -keep class io.vectorapp.BootReceiver { *; }

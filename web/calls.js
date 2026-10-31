@@ -19,6 +19,19 @@
     let chimeBuf = null;
     /** WebKit's call output: a media element playing the speaker's stream. */
     let out = null;
+    /** The 1:1 call's phase, from its state events. */
+    let phase = null;
+    /** In a voice Channel's call. */
+    let inVoice = false;
+    let wakeLock = null;
+    let wakeWanted = false;
+    let wakeAsking = false;
+    // An iPhone or iPad pauses a web app's microphone whenever it leaves the screen. Only their
+    // WebKit has touch callouts, whatever a Mac's screen can do.
+    const pausesHidden = CSS.supports('-webkit-touch-callout', 'none');
+    // Taken now: a page on its way off screen may not get to wait for it.
+    let registration = null;
+    navigator.serviceWorker?.ready.then((r) => { registration = r; }, () => {});
 
     function constraints(s) {
         return {
@@ -85,6 +98,80 @@
         graph = null;
     }
 
+    /** The screen stays on through a call: a phone that locks pauses the app, microphone and all.
+     *  A hidden page loses its lock, so it is taken again on return. */
+    async function holdScreen() {
+        if (!wakeWanted || wakeLock || wakeAsking || document.visibilityState !== 'visible' || !navigator.wakeLock) return;
+        wakeAsking = true;
+        try {
+            const lock = await navigator.wakeLock.request('screen');
+            if (!wakeWanted) {
+                lock.release().catch(() => {});
+                return;
+            }
+            wakeLock = lock;
+            lock.addEventListener('release', () => { if (wakeLock === lock) wakeLock = null; });
+        } catch (_) {
+        } finally {
+            wakeAsking = false;
+        }
+    }
+
+    function keepAwake() {
+        wakeWanted = !!graph || (!!phase && phase !== 'ended');
+        if (wakeWanted) return holdScreen();
+        wakeLock?.release().catch(() => {});
+        wakeLock = null;
+    }
+
+    /** Back in front: the system may have stopped the microphone and paused the audio meanwhile. */
+    async function revive() {
+        if (!graph) return;
+        ctx?.resume().catch(() => {});
+        if (out && out.player.paused) out.player.play().catch(() => {});
+        if (!graph.src || mic?.getAudioTracks()[0]?.readyState !== 'ended') return;
+        try {
+            const settings = await backend('call_audio_settings_get').catch(() => null);
+            const fresh = await navigator.mediaDevices.getUserMedia(constraints(settings));
+            if (!graph?.src) {
+                fresh.getTracks().forEach((t) => t.stop());
+                return;
+            }
+            graph.src.disconnect();
+            mic = fresh;
+            graph.src = ctx.createMediaStreamSource(mic);
+            graph.src.connect(graph.mic);
+        } catch (_) {}
+    }
+
+    /** Off screen in a call: the lock screen says why the other side can't hear you. */
+    function notePaused() {
+        if (!pausesHidden || !registration || globalThis.Notification?.permission !== 'granted') return;
+        registration.showNotification('Call paused', { body: 'Open Vector to keep talking', tag: 'vector-call-paused', icon: '/icon-192.png' }).catch(() => {});
+    }
+
+    // iOS refuses to close one in its first 30 seconds, so once more after that.
+    async function clearPaused(retry = true) {
+        const shown = await registration?.getNotifications({ tag: 'vector-call-paused' }).catch(() => []) || [];
+        for (const n of shown) {
+            try { n.close(); } catch {}
+        }
+        if (shown.length && retry) setTimeout(() => clearPaused(false), 31000);
+    }
+
+    // Locking the phone or switching apps pauses this page: the peer is told to wait, not hang up.
+    document.addEventListener('visibilitychange', () => {
+        const hidden = document.visibilityState === 'hidden';
+        if (phase === 'active') backend('call_set_away', { on: hidden }).catch(() => {});
+        if (inVoice) backend('voice_set_away', { on: hidden }).catch(() => {});
+        if (hidden && (phase === 'active' || graph)) notePaused();
+        if (!hidden) {
+            holdScreen();
+            revive();
+            clearPaused();
+        }
+    });
+
     /** Everything off: the microphone light goes out with the call. */
     function release() {
         stopGraph();
@@ -97,6 +184,8 @@
         mic = null;
         preparing = null;
         if (!test) ctx?.suspend().catch(() => {});
+        keepAwake();
+        clearPaused();
     }
 
     async function startGraph(voice) {
@@ -130,6 +219,7 @@
             micNode?.port.postMessage({ port: toMic.port1, rate: ctx.sampleRate }, [toMic.port1]);
             spk.port.postMessage({ port: toSpk.port1, rate: ctx.sampleRate }, [toSpk.port1]);
             graph = { src, mic: micNode, sink, spk };
+            keepAwake();
             if (micNode) web.callPost({ t: 'call-ports', mic: toMic.port2, spk: toSpk.port2 }, [toMic.port2, toSpk.port2]);
             else web.callPost({ t: 'call-ports', mic: null, spk: toSpk.port2 }, [toSpk.port2]);
         } catch (e) {
@@ -221,8 +311,11 @@
     });
 
     // A call that never connected still took the microphone.
+    window.__TAURI__.event.listen('voice_state', ({ payload }) => { inVoice = !!payload; });
     window.__TAURI__.event.listen('call_state', ({ payload }) => {
-        if (payload?.phase === 'ended') release();
+        phase = payload?.phase ?? null;
+        if (phase === 'ended') release();
+        else keepAwake();
     });
 
     function level(buf) {

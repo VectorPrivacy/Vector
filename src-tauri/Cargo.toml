@@ -275,6 +275,10 @@ bitcoin_hashes = { version = "1.2", default-features = false, features = ["std"]
 [target.'cfg(target_os = "android")'.dependencies]
 jni = "0.21.1"
 ndk-context = "0.1.1"
+# Push: the phone makes its own VAPID key for its UnifiedPush endpoint.
+vector-push = { path = "../crates/vector-push", features = ["vapid"] }
+# Calls: AAudio streams opened as a phone call's (the patched crate below).
+ndk = { version = "0.9", default-features = false, features = ["audio"] }
 whisper-rs = { version = "0.15.1", optional = true }
 
 # Whisper (with platform-specific GPU acceleration)
@@ -375,3 +379,6 @@ nostr-database = { git = "https://github.com/VectorPrivacy/nostr.git", branch = 
 # bootstrap. Vendored with the probe and eagerness fixed; drop when an upstream
 # release ships the fix.
 saturating-time = { path = "../crates/vendor/saturating-time" }
+# ndk 0.9.0 plus a switch that opens every AAudio stream as a phone call's (the only change, in
+# src/audio.rs), its API 28 setters found at run time so minSdk 26 still loads.
+ndk = { path = "../crates/vendor/ndk" }

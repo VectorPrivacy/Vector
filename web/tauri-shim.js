@@ -244,6 +244,8 @@
     }
     async function routeAction(hash) {
         if (!hash || hash === '#') return { action_type: 'home', target: '' };
+        // Notifications shown before their links used the router's own place.
+        hash = hash.replace(/^#chat=(npub1)/, '#dm/$1');
         return backend('parse_deep_link', { url: WEB_BASE + hash.slice(1) }).catch(() => null);
     }
 

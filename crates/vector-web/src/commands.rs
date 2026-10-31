@@ -119,6 +119,15 @@ pub async fn dispatch(cmd: &str, a: Args) -> Result<Value, String> {
         })),
         "tor_get_bridges" => Ok(json!([])),
         // The browser has no sockets of its own: Vector Web connects directly, always.
+        "set_log_level" => {
+            if vector_core::logging::set_log_level_str(&a.str("level")?) {
+                Ok(Value::Null)
+            } else {
+                Err("Unknown log level".into())
+            }
+        }
+        // Where a phone plays a call: native Android only.
+        "call_route_get" => Ok(Value::Null),
         "transport_get_state" => to_value(vector_core::transport::status::view()),
         "transport_allow_realtime" => to_value(vector_core::transport::status::view()),
         "transport_set" | "transport_set_prelogin" => match a.str("kind")?.as_str() {
@@ -428,6 +437,12 @@ pub async fn dispatch(cmd: &str, a: Args) -> Result<Value, String> {
         "get_community_invite_summary" => cm::get_community_invite_summary(&a.str("communityId")?),
         "get_community_capabilities" => core(VectorCore.community_capabilities(&a.str("communityId")?)),
         "get_community_audit_log" => core(VectorCore.community_audit_log(&a.str("communityId")?).await),
+        // Structure only, so a private community's frozen view can be reported from a console.
+        "debug_v2_control_report" => {
+            let c = cm::load_v2(&a.str("communityId")?)?;
+            vector_core::community::v2::service::debug_control_report(&c).await
+        }
+        "debug_v2_explain_base_rekey" => core(VectorCore.explain_epoch_state(&a.str("communityId")?).await),
         "get_relay_info" => Ok(json!(vector_core::relay_info::relay_info(&a.str("url")?).await?)),
         "check_community_relays" => core(VectorCore.check_community_relays(&a.str("communityId")?, &a.de::<Vec<String>>("relays")?).await),
         "set_community_relays" => core(VectorCore.move_community_relays(&a.str("communityId")?, &a.de::<Vec<String>>("relays")?).await),

@@ -132,10 +132,18 @@ async function verified(data, contact) {
     return mac === data.a;
 }
 
+/** What a call notice says, chosen here: a call's notice carries no text of the sender's. */
+const CALLS = { call: 'Incoming call', video_call: 'Incoming video call', missed_call: 'Missed call' };
+
 async function describe(data) {
     const state = await pushState();
     const contact = state?.contacts?.[data?.h];
     if (!contact || !(await verified(data, contact))) return null;
+    const call = CALLS[data.k];
+    if (call) {
+        const named = state.privacy === 'hide_sender' || state.privacy === 'hide_all' ? 'Vector' : (contact.name || 'Vector');
+        return { title: named, body: call, chat: contact.npub, call: String(data.m || ''), kind: data.k };
+    }
     let text = String(data.x || '').slice(0, 1000);
     // Streaming: nobody here can be checked for consent, so every mention is hidden.
     if (state.streamer) text = text.replace(/(?:@|nostr:)?(?:npub1|nprofile1)[02-9ac-hj-np-z]+/gi, '@•••••');
@@ -179,15 +187,28 @@ async function onPush(event) {
     }
     const origin = self.location.origin;
     const title = shown?.title || 'Vector';
+    const ringing = shown?.kind === 'call' || shown?.kind === 'video_call';
     const options = {
         body: shown?.body || 'New message',
-        tag: shown?.chat ? `chat:${shown.chat}` : 'vector',
+        // A call's notices share a tag, so where tags replace, the missed call takes the ring's place.
+        tag: shown?.call ? `call:${shown.call}` : shown?.chat ? `chat:${shown.chat}` : 'vector',
         icon: '/icon-192.png',
-        data: { chat: shown?.chat || null },
-        navigate: shown?.chat ? `${origin}/#chat=${shown.chat}` : `${origin}/`,
+        data: { chat: shown?.chat || null, call: ringing ? shown.call : null },
+        navigate: shown?.chat ? `${origin}/#dm/${shown.chat}` : `${origin}/`,
     };
+    if (ringing) {
+        // A ring stays until it is answered, and buzzes like one where the system allows.
+        options.requireInteraction = true;
+        options.renotify = true;
+        options.vibrate = [700, 400, 700, 400, 700, 400, 700];
+    }
+    if (shown?.kind === 'missed_call') {
+        // iOS never replaces by tag: the ring is closed by hand.
+        const rings = await self.registration.getNotifications().catch(() => []);
+        for (const n of rings) if (n.data?.call && n.data.call === shown.call) n.close();
+    }
     // Both inside the push event, which a closed app's worker doesn't outlive.
-    await Promise.all([self.registration.showNotification(title, options), bumpBadge()]);
+    await Promise.all([self.registration.showNotification(title, options), ringing ? null : bumpBadge()]);
 }
 
 self.addEventListener('push', (event) => event.waitUntil(onPush(event)));
@@ -203,6 +224,6 @@ self.addEventListener('notificationclick', (event) => {
             if (chat) win.postMessage({ type: 'vector-open-chat', chat });
             return;
         }
-        await self.clients.openWindow(chat ? `/#chat=${chat}` : '/');
+        await self.clients.openWindow(chat ? `/#dm/${chat}` : '/');
     })());
 });

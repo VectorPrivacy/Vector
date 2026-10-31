@@ -724,6 +724,10 @@ pub fn dispatch<'a>(cmd: &'a str, a: &'a Args) -> Pin<Box<dyn Future<Output = Op
                 Some(on) => session::set_muted(on).await.and_then(to_value),
                 None => Err("Missing muted".into()),
             },
+            "call_set_away" => match a.bool("on") {
+                Some(on) => session::set_away(on).await.and_then(to_value),
+                None => Err("Missing on".into()),
+            },
             "call_set_volume" => match a.de::<f32>("volume") {
                 Ok(v) => session::set_volume(v).await.and_then(to_value),
                 Err(e) => Err(e),
@@ -780,6 +784,13 @@ pub fn dispatch<'a>(cmd: &'a str, a: &'a Args) -> Pin<Box<dyn Future<Output = Op
             "voice_state" => to_value(vector_core::db::scoped(async { voice::snapshot() }).await),
             "voice_set_muted" => match a.bool("on") {
                 Some(on) => vector_core::db::scoped_result(async move { voice::set_muted(on) }).await.map(|_| Value::Null),
+                None => Err("Missing on".into()),
+            },
+            "voice_set_away" => match a.bool("on") {
+                Some(on) => {
+                    vector_core::db::scoped(async move { voice::set_away(on) }).await;
+                    Ok(Value::Null)
+                }
                 None => Err("Missing on".into()),
             },
             "voice_set_deafened" => match a.bool("on") {

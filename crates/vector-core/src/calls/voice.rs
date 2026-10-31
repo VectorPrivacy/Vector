@@ -136,6 +136,8 @@ struct Voice {
     media: Mutex<Option<Arc<dyn VoiceMedia>>>,
     muted: AtomicBool,
     deafened: AtomicBool,
+    /// Our app is paused by its system (a locked phone): shown muted until it's back.
+    away: AtomicBool,
     nudge: tokio::sync::Notify,
     /// An answer to a newcomer is pending; more arrivals ride it.
     greeting: AtomicBool,
@@ -144,6 +146,10 @@ struct Voice {
     video: video::Video,
     /// The machine stays awake for the call, and the display too while video shows.
     awake: Mutex<Option<(AwakeLevel, Box<dyn std::any::Any + Send>)>>,
+    /// The sound routed as a phone call's, out loud.
+    call_audio: Mutex<Option<Box<dyn std::any::Any + Send>>>,
+    /// The channel's and community's names, and when we joined, for a phone's call notification.
+    shown: (String, String, u64),
     tasks: Mutex<Vec<crate::rt::JoinHandle<()>>>,
 }
 
@@ -248,7 +254,13 @@ async fn bind(community: &CommunityV2) -> Result<Endpoint, String> {
         }
     }
     let relays = voice_relays(community);
+    #[cfg(not(target_arch = "wasm32"))]
     let mode = if relays.is_empty() { RelayMode::Default } else { RelayMode::Custom(relays.into_iter().collect()) };
+    #[cfg(target_arch = "wasm32")]
+    let mode = {
+        let urls = if relays.is_empty() { iroh::defaults::prod::default_relay_map().urls::<Vec<RelayUrl>>() } else { relays };
+        RelayMode::Custom(urls.iter().map(browser_relay).collect())
+    };
     let transport = iroh::endpoint::QuicTransportConfig::builder()
         .keep_alive_interval(Duration::from_secs(5))
         .max_idle_timeout(Some(Duration::from_secs(30).try_into().map_err(|e| format!("{e}"))?))
@@ -264,6 +276,17 @@ async fn bind(community: &CommunityV2) -> Result<Endpoint, String> {
     let endpoint = builder.bind().await.map_err(|e| format!("Voice unavailable: {e}"))?;
     let _ = crate::rt::time::timeout(Duration::from_secs(8), endpoint.online()).await;
     Ok(endpoint)
+}
+
+/// A relay as a browser can dial it: WebKit refuses a WebSocket to a fully qualified host, and
+/// iroh spells its relays with the trailing dot. `xdc::wire::browser_relay` is the mesh's twin.
+#[cfg(target_arch = "wasm32")]
+fn browser_relay(url: &RelayUrl) -> RelayUrl {
+    let mut u = (**url).clone();
+    if let Some(host) = u.host_str().and_then(|h| h.strip_suffix('.')).map(str::to_string) {
+        let _ = u.set_host(Some(&host));
+    }
+    RelayUrl::from(u)
 }
 
 fn relay_of(endpoint: &Endpoint) -> Option<String> {
@@ -288,7 +311,7 @@ async fn announce(v: &Voice, joined: bool) -> Result<(), String> {
 fn showing(v: &Voice) -> presence::Showing {
     let sending = v.video.sending();
     presence::Showing {
-        muted: v.muted.load(Ordering::SeqCst) || v.engine().is_none_or(|m| !m.has_mic()),
+        muted: v.muted.load(Ordering::SeqCst) || v.away.load(Ordering::SeqCst) || v.engine().is_none_or(|m| !m.has_mic()),
         deafened: v.deafened.load(Ordering::SeqCst),
         screen: sending.screen,
         camera: sending.camera,
@@ -318,6 +341,7 @@ pub async fn join(community_id: &str, channel_id: &str) -> Result<VoiceState, St
     }
     let endpoint = bind(&community).await?;
     crate::log_info!("[voice] joined via {}", relay_of(&endpoint).as_deref().unwrap_or("no relay yet"));
+    let call_audio = super::platform::get().ok().and_then(|p| p.hold_call_audio(true));
     let media = match super::platform::get() {
         Ok(p) => match p.start_voice().await {
             Ok(m) => Some(m),
@@ -340,11 +364,14 @@ pub async fn join(community_id: &str, channel_id: &str) -> Result<VoiceState, St
         media: Mutex::new(media.map(Arc::from)),
         muted: AtomicBool::new(false),
         deafened: AtomicBool::new(false),
+        away: AtomicBool::new(false),
         nudge: tokio::sync::Notify::new(),
         greeting: AtomicBool::new(false),
         can_video: AtomicBool::new(may_video(&community, &channel, &me)),
         video: video::Video::default(),
         awake: Mutex::new(None),
+        call_audio: Mutex::new(call_audio),
+        shown: (ch.name.clone(), community.name.clone(), now_ms()),
         tasks: Mutex::new(Vec::new()),
     });
     // Just after launch the relays may still be connecting: a refused first presence is retried.
@@ -381,6 +408,9 @@ pub async fn join(community_id: &str, channel_id: &str) -> Result<VoiceState, St
 /// Leave the call, if in one: a `left` is best-effort, staleness heals a missed one.
 pub async fn leave() {
     let Some(v) = VOICE.lock().unwrap_or_else(|e| e.into_inner()).take() else { return };
+    if let Some(ringer) = super::session::ringer() {
+        ringer.voice(None);
+    }
     shutdown(v).await;
     crate::emit_event("voice_state", &serde_json::Value::Null);
 }
@@ -405,6 +435,7 @@ async fn shutdown(v: Arc<Voice>) {
     if let Some(engine) = engine {
         engine.stop();
     }
+    v.call_audio.lock().unwrap_or_else(|e| e.into_inner()).take();
     let _ = announce(&v, false).await;
     v.endpoint.close().await;
     v.awake.lock().unwrap_or_else(|e| e.into_inner()).take();
@@ -604,6 +635,20 @@ pub fn set_deafened(on: bool) -> Result<(), String> {
     Ok(())
 }
 
+/// Our app is paused by its system or back: shown muted meanwhile, since nothing we say is
+/// sent; back, we announce at once and dial, as a long pause aged our presence out.
+pub fn set_away(on: bool) {
+    let Some(v) = live() else { return };
+    if v.away.swap(on, Ordering::SeqCst) == on && on {
+        return;
+    }
+    reannounce(&v);
+    if !on {
+        v.nudge.notify_one();
+    }
+    changed(&v);
+}
+
 const VOLUMES_KEY: &str = "voice_volumes";
 
 struct Volumes;
@@ -740,6 +785,10 @@ fn changed(v: &Voice) {
     if live().is_some_and(|now| std::ptr::eq(Arc::as_ptr(&now), v)) {
         refresh_awake(v);
         crate::emit_event("voice_state", &state);
+        if let Some(ringer) = super::session::ringer() {
+            let (channel, community, since_ms) = &v.shown;
+            ringer.voice(Some(&super::session::VoiceShown { channel_id: &v.channel_hex, channel, community, muted: effective(v).0, since_ms: *since_ms }));
+        }
     }
 }
 
@@ -884,6 +933,8 @@ async fn dialer(v: Arc<Voice>) {
             let Ok(id) = iroh::EndpointId::from_bytes(&ep) else { continue };
             v.dialing.lock().unwrap_or_else(|e| e.into_inner()).insert(ep);
             let (v2, author) = (v.clone(), p.author);
+            #[cfg(target_arch = "wasm32")]
+            let relay = browser_relay(&relay);
             crate::db::spawn_bound(async move {
                 let addr = EndpointAddr { id, addrs: [TransportAddr::Relay(relay)].into_iter().collect() };
                 match crate::rt::time::timeout(CONNECT_TIMEOUT, v2.endpoint.connect(addr, VOICE_ALPN)).await {
@@ -1018,11 +1069,14 @@ mod tests {
             media: Mutex::new(None),
             muted: AtomicBool::new(false),
             deafened: AtomicBool::new(false),
+            away: AtomicBool::new(false),
             nudge: tokio::sync::Notify::new(),
             greeting: AtomicBool::new(false),
             can_video: AtomicBool::new(false),
             video: video::Video::default(),
             awake: Mutex::new(None),
+            call_audio: Mutex::new(None),
+            shown: Default::default(),
             tasks: Mutex::new(Vec::new()),
         });
         let id = *b.id().as_bytes();
@@ -1064,11 +1118,14 @@ mod tests {
             media: Mutex::new(None),
             muted: AtomicBool::new(false),
             deafened: AtomicBool::new(false),
+            away: AtomicBool::new(false),
             nudge: tokio::sync::Notify::new(),
             greeting: AtomicBool::new(false),
             can_video: AtomicBool::new(false),
             video: video::Video::default(),
             awake: Mutex::new(None),
+            call_audio: Mutex::new(None),
+            shown: Default::default(),
             tasks: Mutex::new(Vec::new()),
         });
         let id = *b.id().as_bytes();

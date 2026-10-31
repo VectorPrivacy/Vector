@@ -137,7 +137,6 @@
         signedIn = true;
         backend('get_synced_settings').then((v) => { live = !!v?.streamer?.on; if (live) closeAll(); }, () => {});
         sync().catch((e) => console.warn('[Push] sync failed:', e));
-        openFromHash();
         setTimeout(clearRead, 3000);
     });
     window.__TAURI__.event.listen('push_contacts_changed', () => refresh());
@@ -208,20 +207,27 @@
         if (shown.length && retry) setTimeout(() => closeAll(false), 31000);
     }
 
-    // A tapped notification names the chat: in the hash when it opened the app, in a
-    // message from the worker when the app was already open.
+    // A ring the app has taken over (ringing here, answered, declined, over) needs no notification.
+    async function closeRing(id, retry = true) {
+        const reg = await navigator.serviceWorker?.ready.catch(() => null);
+        const shown = await reg?.getNotifications().catch(() => []) || [];
+        const rings = shown.filter((n) => n.data?.call === id);
+        for (const n of rings) {
+            try { n.close(); } catch {}
+        }
+        if (rings.length && retry) setTimeout(() => closeRing(id, false), 31000);
+    }
+    window.__TAURI__.event.listen('call_state', ({ payload }) => {
+        if (payload?.id && !payload.outgoing) closeRing(payload.id);
+    });
+
+    // A tapped notification that opened the app names its chat in the URL, which the router
+    // follows; one tapped while the app was open names it in a message from the worker.
     function openChatSoon(npub) {
         if (!/^npub1[0-9a-z]{58}$/.test(npub)) return;
         const go = () => openChat(npub);
         if (signedIn) go(); else window.__TAURI__.event.listen('init_finished', () => setTimeout(go, 0));
     }
-    function openFromHash() {
-        const m = /^#chat=(npub1[0-9a-z]{58})$/.exec(location.hash);
-        if (!m) return;
-        history.replaceState(null, '', location.pathname + location.search);
-        openChatSoon(m[1]);
-    }
-    addEventListener('hashchange', openFromHash);
     navigator.serviceWorker?.addEventListener('message', (e) => {
         if (e.data?.type === 'vector-open-chat') openChatSoon(e.data.chat);
     });

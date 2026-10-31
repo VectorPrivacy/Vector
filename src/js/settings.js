@@ -1123,7 +1123,9 @@ async function initNotificationSettings() {
     } catch (_) { /* default full */ }
     // A browser build asks the browser itself, which answers once per site.
     const ask = platformFeatures.os === 'web' && (await invoke('web_notifications').catch(() => null)) === 'default';
-    const push = platformFeatures.os === 'web' ? await invoke('push_status').catch(() => 'unsupported') : 'unsupported';
+    // A browser subscribes through its push service; Android through UnifiedPush.
+    const pushable = platformFeatures.os === 'web' || platformFeatures.os === 'android';
+    const push = pushable ? await invoke('push_status').catch(() => 'unsupported') : 'unsupported';
     VectorSvelte.setNotifSettings({
         sounds,
         ask,

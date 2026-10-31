@@ -60,6 +60,9 @@ pub enum Control {
     VideoPause { on: bool },
     /// My decoder cannot take this codec after all; send with another.
     VideoUnsupported { codec: VideoCodec },
+    /// My app went where the system pauses it (a locked phone, another app in front), or came
+    /// back: my silence meanwhile is a wait, not a hangup.
+    Away { on: bool },
     /// A message from a newer peer: skipped, never fatal.
     #[serde(other)]
     Unknown,
@@ -240,6 +243,7 @@ mod tests {
         let v: Control = serde_json::from_str(r#"{"t":"video","camera":false,"screen":true}"#).unwrap();
         assert_eq!(v, Control::Video { camera: false, screen: true, audio: false });
         assert_eq!(serde_json::to_string(&Control::KeyframeRequest { kind: VideoKind::Camera }).unwrap(), r#"{"t":"keyframe_request","kind":"camera"}"#);
+        assert_eq!(serde_json::to_string(&Control::Away { on: true }).unwrap(), r#"{"t":"away","on":true}"#);
         assert_eq!(VideoKind::from_flags(VIDEO_KEY | VIDEO_SCREEN), VideoKind::Screen);
         assert!(Tracks::default().with(VideoKind::Screen, true).has(VideoKind::Screen));
     }

@@ -56,6 +56,11 @@ impl CallPlatform for Desktop {
         Some(Box::new(crate::awake::hold(level)))
     }
 
+    #[cfg(target_os = "android")]
+    fn hold_call_audio(&self, out_loud: bool) -> Option<Box<dyn std::any::Any + Send>> {
+        Some(Box::new(crate::android::call_audio::hold(out_loud)))
+    }
+
     fn ended(&self) {
         play_ended_chime();
         // spawn-detached: closes the live node only when nothing uses it; reads no account state.
@@ -87,6 +92,8 @@ impl CallPlatform for Desktop {
 /// when the default microphone or speaker changes an active call reopens its audio.
 pub fn install() {
     vector_core::calls::platform::install(Arc::new(Desktop));
+    #[cfg(target_os = "android")]
+    crate::android::incoming_call::install();
     if let Ok(mixer) = crate::audio_engine::AudioEngine::get() {
         mixer.on_device_change(Box::new(|| {
             if mic_test_running() {

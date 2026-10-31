@@ -24,6 +24,9 @@ pub struct DeepLinkAction {
     /// For "chat": the message to land on.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+    /// For "chat": a call answered from a notification, taken up once it rings here.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub call: Option<String>,
     /// The npub the action belongs to; dropped if a different account is live when it's taken.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub account: Option<String>,

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-call-route-set"
+description = "Enables the call_route_set command without any pre-configured scope."
+commands.allow = ["call_route_set"]
+
+[[permission]]
+identifier = "deny-call-route-set"
+description = "Denies the call_route_set command without any pre-configured scope."
+commands.deny = ["call_route_set"]

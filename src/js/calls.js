@@ -101,6 +101,11 @@ SETTINGS_HELPERS.calls = {
     setDirect: (on) => invoke('realtime_direct_set', { on }).then(() => VectorSvelte.setCallDirect(on)).catch((e) => VectorSvelte.showToast(String(e))),
 };
 
+/** A phone's call: the earpiece, speaker, headset or bluetooth. */
+function pickCallRoute(route) {
+    invoke('call_route_set', { route }).catch((e) => VectorSvelte.showToast(String(e)));
+}
+
 function registerCallScreen() {
     VectorSvelte.setScreen('call', {
         // Lazy: the helpers live in scripts that load after this one evaluates.
@@ -109,6 +114,7 @@ function registerCallScreen() {
             reject: () => invoke('call_reject').catch(() => {}),
             hangup: () => invoke('call_hangup').catch(() => {}),
             setMuted: (on) => invoke('call_set_muted', { muted: on }).catch(() => {}),
+            setRoute: (route) => pickCallRoute(route),
             micAccess: () => promptMicAccess(),
             setVolume: (volume) => invoke('call_set_volume', { volume }).catch(() => {}),
             setVideo: (kind, on) => startVideo(kind, on),
@@ -129,6 +135,7 @@ function registerCallScreen() {
     invoke('call_status').then((s) => { if (s) { VectorSvelte.setCallState(s); callVideoOnState(s); } }).catch(() => {});
     invoke('call_audio_settings_get').then((s) => VectorSvelte.setCallAudio(s)).catch(() => {});
     invoke('realtime_direct_get').then((on) => VectorSvelte.setCallDirect(on)).catch(() => {});
+    invoke('call_route_get').then((r) => VectorSvelte.setCallRoute(r)).catch(() => {});
 }
 
 /** A held quality rung or frame rate for one of our pictures; null lets the ladder decide. */
@@ -148,6 +155,25 @@ async function startCall(npub, video = false, asked = false) {
         }
         VectorSvelte.showToast(String(e));
     }
+}
+
+/** A call answered from a notification, taken up once it rings here: the app may first have to
+ *  start and read it. Good for as long as an offer could still ring. */
+let answerPending = null;
+
+function answerWhenRinging(id) {
+    answerPending = { id, until: Date.now() + 75000 };
+    invoke('call_status').then((s) => answerIfPending(s)).catch(() => {});
+}
+
+function answerIfPending(s) {
+    if (!answerPending || !s || s.id !== answerPending.id) return;
+    if (s.phase !== 'ringing' || s.outgoing || Date.now() > answerPending.until) {
+        if (s.phase !== 'ringing') answerPending = null;
+        return;
+    }
+    answerPending = null;
+    acceptCall();
 }
 
 /** Answer the ringing call; off Clearnet the account agrees first. */
@@ -242,6 +268,7 @@ function registerVoiceScreen() {
         leave: () => invoke('voice_leave').catch(() => {}),
         setMuted: (on) => invoke('voice_set_muted', { on }).catch((e) => VectorSvelte.showToast(String(e))),
         setDeafened: (on) => invoke('voice_set_deafened', { on }).catch((e) => VectorSvelte.showToast(String(e))),
+        setRoute: (route) => pickCallRoute(route),
         micAccess: () => promptMicAccess(),
         getName: (npub, communityId) => getName(npub, communityId),
         avatarSrc: (npub) => getProfileAvatarSrc(getProfile(npub)),
@@ -261,6 +288,7 @@ function registerVoiceScreen() {
             setMuted: (on) => invoke('voice_set_muted', { on }).catch((e) => VectorSvelte.showToast(String(e))),
             setDeafened: (on) => invoke('voice_set_deafened', { on }).catch((e) => VectorSvelte.showToast(String(e))),
             leave: () => invoke('voice_leave').catch(() => {}),
+            setRoute: (route) => pickCallRoute(route),
             keyHint: (key) => voiceKeyHint(key),
             share: (on) => startVideo('screen', on),
             camera: (on) => startVideo('camera', on),

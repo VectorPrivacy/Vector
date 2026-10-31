@@ -66,6 +66,14 @@ pub fn handle_current_deep_link<R: Runtime>(handle: &AppHandle<R>, urls: Vec<Str
     handle_deep_link(handle, urls);
 }
 
+/// Hold an action for a frontend that may not be up yet (Android's call notification).
+#[allow(dead_code)]
+pub fn set_pending_action(action: DeepLinkAction) {
+    if let Ok(mut pending) = PENDING_DEEP_LINK.lock() {
+        *pending = Some(action);
+    }
+}
+
 /// Store a pending notification tap action (called from Android JNI when user taps a notification)
 #[allow(dead_code)]
 pub fn set_pending_notification_action(chat_id: &str) {
@@ -120,6 +128,7 @@ pub fn open_chat_from_notification<R: Runtime>(
         target: chat_id.to_string(),
         message: message.map(str::to_string),
         account: account.filter(|a| !a.is_empty()).map(str::to_string),
+        call: None,
     };
     if let Ok(mut pending) = PENDING_DEEP_LINK.lock() {
         *pending = Some(action.clone());

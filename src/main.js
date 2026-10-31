@@ -1983,6 +1983,7 @@ async function openDeepLink(payload) {
         // A chat (a notification tap, a DM link), at its message when named
         if (!chatOnScreen(target)) await openChat(target);
         if (payload.message) jumpToMessage(payload.message);
+        if (payload.call) answerWhenRinging(payload.call);
     } else if (action_type === 'emoji_pack') {
         // Open the Pack Details modal for the given naddr. The modal
         // owns the fetch, render, and subscribe/unsubscribe flow; we

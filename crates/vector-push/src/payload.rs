@@ -15,9 +15,9 @@ use crate::{Error, Result};
 pub struct Notice {
     /// The sender's handle on the device, from the ticket.
     pub h: String,
-    /// `dm` or `file`.
+    /// `dm`, `file`, `call`, `video_call` or `missed_call`.
     pub kind: String,
-    /// The message (rumor) id, hex.
+    /// The message (rumor) id, or the call's id.
     pub msg: String,
     /// Send time, unix milliseconds.
     pub ts: u64,
@@ -58,13 +58,19 @@ impl Notice {
     }
 
     fn render(&self, origin: &str, mk: &[u8]) -> Result<Vec<u8>> {
+        // Shown only when the receiving worker can't run: fixed per kind, never the sender's.
+        let body = match self.kind.as_str() {
+            "call" | "video_call" => "Incoming call",
+            "missed_call" => "Missed call",
+            _ => "New message",
+        };
         // `mutable` sits both at the top and inside `notification`: WebKit moved it.
         let msg = json!({
             "web_push": 8030,
             "mutable": true,
             "notification": {
                 "title": "Vector",
-                "body": "New message",
+                "body": body,
                 "navigate": format!("{}/", origin.trim_end_matches('/')),
                 "mutable": true,
                 "data": {
@@ -98,6 +104,19 @@ mod tests {
         assert_ne!(Notice { ts: 1, ..notice("hi") }.mac(&mk).unwrap(), base);
         assert_ne!(Notice { kind: "file".into(), ..notice("hi") }.mac(&mk).unwrap(), base);
         assert_ne!(notice("hi").mac(&[8u8; 32]).unwrap(), base);
+    }
+
+    #[test]
+    fn the_fallback_names_a_call_and_nothing_the_sender_wrote() {
+        let mk = crate::hex(&[3u8; 32]);
+        let body = |kind: &str| {
+            let out = Notice { kind: kind.into(), ..notice("ignore this") }.message("https://web.vectorapp.io", &mk).unwrap();
+            serde_json::from_slice::<serde_json::Value>(&out).unwrap()["notification"]["body"].as_str().unwrap().to_string()
+        };
+        assert_eq!(body("call"), "Incoming call");
+        assert_eq!(body("video_call"), "Incoming call");
+        assert_eq!(body("missed_call"), "Missed call");
+        assert_eq!(body("dm"), "New message");
     }
 
     #[test]
