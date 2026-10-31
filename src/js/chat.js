@@ -1043,8 +1043,10 @@ let _openChatSeq = 0;
 
 /** A click on the conversation already on screen: reopening it only repaints it. */
 function chatOnScreen(id) {
-    // Widescreen Settings covers the chat pane without hiding it.
-    return !!id && strOpenChat === id && VectorSvelte.paneShown('chat') && !VectorSvelte.paneShown('settings');
+    // Widescreen Settings and the Nexus cover the chat pane without hiding it.
+    const nexus = VectorSvelte.mktState();
+    return !!id && strOpenChat === id && VectorSvelte.paneShown('chat') && !VectorSvelte.paneShown('settings')
+        && !(nexus.panelOpen && !nexus.panelClosing);
 }
 
 async function openChat(contact, { reread = true, fade = true } = {}) {
