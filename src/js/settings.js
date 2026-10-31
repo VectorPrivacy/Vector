@@ -2026,7 +2026,7 @@ function updateMigrationProgress(total, completed, phase) {
 // Help prompts: one explainer per info icon. A function body resolves at click
 // time (the change-PIN wording follows the security type).
 const SETTINGS_HELP = {
-    keepMedia: ['Keep Files on This Device', 'Every file you receive is kept on this device, encrypted, so it opens instantly and never downloads twice.<br><br>Off: files stay in memory while Vector is open, and load again after it closes. One too large to hold waits for a tap, then is kept. Turning it off deletes what it kept.'],
+    keepMedia: ['Keep Files on This Device', '<b>When enabled:</b> every file you receive is kept on this device, encrypted, so it opens instantly and never downloads twice.<br><br><b>When disabled:</b> files stay in memory while Vector is open, and load again after it closes. One too large to hold waits for a tap, then is kept. Turning it off deletes what it kept.'],
     keepUnencrypted: () => ['Keep Unencrypted', `What Vector keeps is saved as normal files in ${publicFolderName()}, so other apps and backups can open them.<br><br>Anyone with access to this device's files can open them too.`],
     stripTracking: ['Strip Tracking Markers', 'When enabled, Vector will <b>automatically remove tracking markers</b> from URLs before displaying or sending them.<br><br>This helps reduce your footprint and enhances your privacy with no loss in functionality, only disable if you know what you\'re doing.'],
     sendTyping: ['Send Typing Indicators', 'When enabled, Vector will <b>notify your contacts when you are typing</b> a message to them.<br><br>Disable this if you prefer to type without others knowing you are composing a message.'],
