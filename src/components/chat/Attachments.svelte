@@ -23,7 +23,8 @@
         return (msg.attachments || []).map((att) => ({
             att,
             phase: attachmentReady(att) ? 'downloaded' : h.isDownloading(att) ? 'downloading' : 'idle',
-            auto: !attachmentReady(att) && h.willAutoDownload(att, ctx),
+            // Your own file before it's uploaded has nowhere to come from.
+            auto: !attachmentReady(att) && !unsent(att) && h.willAutoDownload(att, ctx),
             uploading: !!(msg.mine && msg.pending),
         }));
     });
@@ -32,7 +33,8 @@
     // and only once the message comes near the screen: a long chat loads what you scroll to.
     // A file that came without a size asks for it then too: auto-download needs it.
     let near = $state(false);
-    const unsized = (r) => r.phase === 'idle' && !(r.att.size > 0) && !ctx.held && !ctx.revealedBlocked;
+    function unsent(att) { return !!msg.mine && !att.url; }
+    const unsized = (r) => r.phase === 'idle' && !(r.att.size > 0) && !unsent(r.att) && !ctx.held && !ctx.revealedBlocked;
     const waiting = $derived(rows.some((r) => (r.phase === 'idle' && r.auto) || unsized(r)));
     $effect(() => {
         if (!near) return;
@@ -68,7 +70,11 @@
         {#if IMAGE_BLUR.includes(att.extension)}
             <ThumbhashAttachment {att} {msg} {ctx} {sender} {auto} {h} />
         {:else}
-            <FileBox {att} {msg} {sender} phase={auto ? 'downloading' : 'download'} held={!!ctx.held} {h} />
+            {#if unsent(att)}
+                <FileBox {att} {msg} {sender} phase="download" label={msg.failed ? 'Not sent' : 'Sending…'} onActivate={() => {}} {h} />
+            {:else}
+                <FileBox {att} {msg} {sender} phase={auto ? 'downloading' : 'download'} held={!!ctx.held} {h} />
+            {/if}
         {/if}
     {/if}
 {/each}

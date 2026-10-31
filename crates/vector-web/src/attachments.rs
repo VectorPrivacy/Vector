@@ -66,6 +66,17 @@ pub async fn download_attachment(chat: String, msg_id: String, attachment_id: St
         return fail(&chat, &msg_id, &attachment_id, "Attachment not found");
     };
     let attachment = message.attachments[idx].clone();
+    // Already held (an upload's own bytes, or an earlier look): there's nothing to fetch.
+    if let Some(held) = vector_core::simd::hex::hex_to_bytes_32_checked(&attachment.id).filter(vector_core::media::resident) {
+        emitter::emit(
+            "attachment_download_result",
+            &json!({
+                "profile_id": chat, "msg_id": msg_id, "id": attachment_id,
+                "success": true, "resident": true, "result": vector_core::media::MediaRef::held(&held),
+            }),
+        );
+        return true;
+    }
     let author = if message.mine { None } else { message.npub.clone().or_else(|| Some(chat_id.clone())) };
     // Too large to hold: kept, so only once asked for, unless the account keeps files.
     if auto && !vector_core::media::ram::cache().admits(attachment.size) && !vector_core::media::keep_media() {
