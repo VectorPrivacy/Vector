@@ -7820,6 +7820,21 @@ img.emoji-img-loading {
   text-transform: uppercase;
   color: rgba(255, 255, 255, 0.45);
 }
+.ne-reply {
+  margin: 2px 0 6px;
+  font-size: 0.85em;
+  color: rgba(255, 255, 255, 0.55);
+}
+
+.ne-reply .ne-chip {
+  margin-left: 2px;
+}
+
+.ne-reply-scope {
+  color: rgba(255, 255, 255, 0.75);
+  overflow-wrap: anywhere;
+}
+
 
 .ne-author,
 .ne-author-who {

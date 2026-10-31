@@ -21,6 +21,8 @@ pub const KIND_VIDEO_ADDRESSABLE: u16 = 34235;
 pub const KIND_SHORT_ADDRESSABLE: u16 = 34236;
 pub const KIND_REPOST: u16 = 6;
 pub const KIND_GENERIC_REPOST: u16 = 16;
+/// NIP-22: a plaintext reply scoped to what it answers, outside kind 1's own threads.
+pub const KIND_COMMENT: u16 = 1111;
 
 /// Asked when neither our relays, the reference's hints nor the author's outbox
 /// have it: the large general-purpose relays most public content reaches.
@@ -50,7 +52,7 @@ fn supported(kind: u16) -> bool {
 
 /// What a card shows itself; a repost shows the event it carries.
 fn shown(kind: u16) -> bool {
-    matches!(kind, KIND_POST | KIND_ARTICLE | KIND_VIDEO | KIND_SHORT | KIND_VIDEO_ADDRESSABLE | KIND_SHORT_ADDRESSABLE)
+    matches!(kind, KIND_POST | KIND_COMMENT | KIND_ARTICLE | KIND_VIDEO | KIND_SHORT | KIND_VIDEO_ADDRESSABLE | KIND_SHORT_ADDRESSABLE)
 }
 
 fn is_repost_kind(kind: u16) -> bool {
@@ -200,6 +202,46 @@ pub struct Embed {
     pub bech32: String,
     /// Who reposted it, when the reference named a repost (NIP-18).
     pub reposted_by: Option<String>,
+    /// What a comment answers (NIP-22).
+    pub reply_to: Option<ReplyTo>,
+}
+
+/// A comment's parent: a Nostr event, or a scope outside Nostr (NIP-73).
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct ReplyTo {
+    /// The parent's kind, as its `k` tag says; None outside Nostr.
+    pub kind: Option<u16>,
+    /// The parent as a nevent or naddr, when it's an event a card can show.
+    pub entity: Option<String>,
+    /// A scope outside Nostr, by its NIP-73 value: a URL, a `#hashtag`, and the like.
+    pub external: Option<String>,
+}
+
+/// The parent a NIP-22 comment names in its lowercase tags; the uppercase ones are its thread's root.
+fn comment_parent(ev: &Event) -> Option<ReplyTo> {
+    let tag = |name: &str| ev.tags.iter().map(|t| t.as_slice()).find(|s| s.first().map(String::as_str) == Some(name) && s.len() > 1);
+    let hint = |s: &[String]| s.get(2).and_then(|r| RelayUrl::parse(r).ok()).into_iter().collect::<Vec<_>>();
+    let kind = tag_value(ev, "k").and_then(|k| k.trim().parse::<u16>().ok());
+    if let Some(a) = tag("a") {
+        if let Ok(coordinate) = Coordinate::parse(&a[1]) {
+            let parent = coordinate.kind.as_u16();
+            let entity = supported(parent).then(|| Nip19Coordinate::new(coordinate, hint(a)).to_bech32().ok()).flatten();
+            return Some(ReplyTo { kind: kind.or(Some(parent)), entity, external: None });
+        }
+    }
+    if let Some(e) = tag("e") {
+        let id = EventId::from_hex(&e[1]).ok()?;
+        let mut nevent = Nip19Event::new(id).relays(hint(e));
+        if let Some(author) = e.get(3).and_then(|p| PublicKey::from_hex(p).ok()) {
+            nevent = nevent.author(author);
+        }
+        if let Some(k) = kind {
+            nevent = nevent.kind(Kind::from(k));
+        }
+        let entity = kind.is_none_or(supported).then(|| nevent.to_bech32().ok()).flatten();
+        return Some(ReplyTo { kind, entity, external: None });
+    }
+    tag("i").map(|i| ReplyTo { kind: None, entity: None, external: Some(i[1].chars().take(300).collect()) })
 }
 
 /// Fetch and shape the event `reference` (a bare entity, a `nostr:` URI, or a web
@@ -517,7 +559,7 @@ fn cap_text(mut s: String) -> String {
 pub(crate) fn to_embed(ev: &Event, hints: &[RelayUrl]) -> Result<Embed, String> {
     let kind = ev.kind.as_u16();
     let class = match kind {
-        KIND_POST => "post",
+        KIND_POST | KIND_COMMENT => "post",
         KIND_ARTICLE => "article",
         KIND_VIDEO | KIND_VIDEO_ADDRESSABLE => "video",
         KIND_SHORT | KIND_SHORT_ADDRESSABLE => "short",
@@ -558,6 +600,7 @@ pub(crate) fn to_embed(ev: &Event, hints: &[RelayUrl]) -> Result<Embed, String> 
         emoji: crate::types::EmojiTag::extract_from_tags(ev.tags.iter()),
         bech32,
         reposted_by: None,
+        reply_to: (kind == KIND_COMMENT).then(|| comment_parent(ev)).flatten(),
     };
     match class {
         "post" => {
@@ -794,6 +837,42 @@ mod tests {
 
     fn raw(parts: &[&str]) -> Tag {
         Tag::parse(parts.iter().map(|s| s.to_string()).collect::<Vec<_>>()).unwrap()
+    }
+
+    #[test]
+    fn a_comment_shows_as_a_post_that_names_its_parent() {
+        let author = Keys::generate().public_key().to_hex();
+        let article = format!("30023:{author}:essay");
+        let (_, top) = signed(KIND_COMMENT, "Great essay", vec![
+            raw(&["A", &article]), raw(&["K", "30023"]), raw(&["P", &author]),
+            raw(&["a", &article, "wss://relay.example"]), raw(&["k", "30023"]), raw(&["p", &author]),
+        ]);
+        let e = to_embed(&top, &[]).unwrap();
+        assert_eq!((e.class, e.kind, e.text.as_str()), ("post", KIND_COMMENT, "Great essay"));
+        let parent = e.reply_to.expect("a comment names its parent");
+        assert_eq!(parent.kind, Some(KIND_ARTICLE));
+        assert!(parent.entity.as_deref().is_some_and(|n| n.starts_with("naddr1")));
+
+        let (_, reply) = signed(KIND_COMMENT, "Agreed", vec![
+            raw(&["A", &article]), raw(&["K", "30023"]),
+            raw(&["e", &top.id.to_hex(), "", &top.pubkey.to_hex()]), raw(&["k", "1111"]), raw(&["p", &top.pubkey.to_hex()]),
+        ]);
+        let parent = to_embed(&reply, &[]).unwrap().reply_to.unwrap();
+        assert_eq!(parent.kind, Some(KIND_COMMENT), "a reply in a thread names the comment, not the article");
+        let nevent = Nip19Event::from_bech32(parent.entity.as_deref().unwrap()).unwrap();
+        assert_eq!((nevent.event_id, nevent.author), (top.id, Some(top.pubkey)));
+
+        let file = "11".repeat(32);
+        let (_, on_file) = signed(KIND_COMMENT, "Nice file", vec![raw(&["e", &file]), raw(&["k", "1063"])]);
+        let parent = to_embed(&on_file, &[]).unwrap().reply_to.unwrap();
+        assert_eq!((parent.kind, parent.entity), (Some(1063), None), "a kind no card shows is named, never opened");
+
+        let (_, on_web) = signed(KIND_COMMENT, "Nice article", vec![raw(&["I", "https://abc.com/a"]), raw(&["K", "web"]), raw(&["i", "https://abc.com/a"]), raw(&["k", "web"])]);
+        let parent = to_embed(&on_web, &[]).unwrap().reply_to.unwrap();
+        assert_eq!((parent.kind, parent.external.as_deref()), (None, Some("https://abc.com/a")));
+
+        let (_, post) = signed(KIND_POST, "hi", vec![raw(&["e", &file])]);
+        assert!(to_embed(&post, &[]).unwrap().reply_to.is_none(), "kind 1 threads are NIP-10's");
     }
 
     #[test]

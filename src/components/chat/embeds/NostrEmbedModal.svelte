@@ -8,6 +8,7 @@
     import EmbedImage from './EmbedImage.svelte';
     import { imageViewerState } from '../../lib/imageviewer.svelte.js';
     import EmbedAuthor from './EmbedAuthor.svelte';
+    import EmbedReplyTo from './EmbedReplyTo.svelte';
     import EmbedMedia from './EmbedMedia.svelte';
     import EmbedVideo from './EmbedVideo.svelte';
     let { h } = $props();   // h: NostrEmbedHelpers (js/nostr-embeds.js)
@@ -64,6 +65,7 @@
                 {:else}
                     {#if e.class === 'article' && e.image}<EmbedImage url={e.image} cls="nem-cover" preview {h} />{/if}
                     <EmbedAuthor npub={e.author} at={e.published_at || e.created_at} {h} />
+                    {#if e.reply_to}<EmbedReplyTo reply={e.reply_to} {h} />{/if}
                     {#if e.title}<h2 class="nem-title">{e.title}</h2>{/if}
                     {#if e.class === 'article' && e.summary}<div class="nem-summary">{e.summary}</div>{/if}
                     {#if e.video}<EmbedVideo media={e.video} poster={e.image} short={e.class === 'short'} title={e.title} origin={v.origin} {h} />{/if}

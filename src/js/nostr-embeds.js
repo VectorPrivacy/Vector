@@ -2,7 +2,7 @@
 // are on. Only the backend fetches: the event from relays, its pictures and video into local
 // caches. One global scope: loads after message-row.js and pack-previews.js.
 
-const NOSTR_EMBED_KINDS = new Set([1, 30023, 21, 22, 34235, 34236, 6, 16]);
+const NOSTR_EMBED_KINDS = new Set([1, 1111, 30023, 21, 22, 34235, 34236, 6, 16]);
 const NOSTR_EMBEDS_PER_MSG = 3;
 const NOSTR_EMBED_ERR_TTL_MS = 30000;
 const NOSTR_ARTICLE_MAX_IMAGES = 50;
@@ -173,6 +173,7 @@ function _nostrRefNoun(entity) {
         case 21: case 34235: return 'Video';
         case 22: case 34236: return 'Short';
         case 6: case 16: return 'Repost';
+        case 1111: return 'Comment';
         default: return 'Post';
     }
 }
@@ -353,6 +354,7 @@ function _fmtMediaDuration(secs) {
  *   duration: (secs: number) => string,
  *   openUrl: (url: string) => void,
  *   copy: (text: string, label: string) => void,
+ *   openRef: (entity: string) => void,
  *   open: (view: { embed: object, url: string|null, entity: string, origin?: object|null }) => void,
  *   push: (view: { embed: object, url: string|null, entity: string, origin?: object|null }) => void,
  *   back: () => void,
@@ -376,6 +378,8 @@ const NOSTR_EMBED_HELPERS = {
     twemojify: (el) => twemojify(el),
     when: (secs) => timeAgo(secs * 1000),
     buildText: (text, emoji) => _nostrEmbedText(text, emoji),
+    // A comment's parent, as a quote chip opens it.
+    openRef: (entity) => _nostrOpenRef(entity),
     buildArticle: (markdown, emoji) => _nostrEmbedArticle(markdown, emoji),
     backendCachedImg: (img, url) => bindBackendCachedImg(img, url),
     attachImagePreview: (img) => attachImagePreview(img),

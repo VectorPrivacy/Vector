@@ -10,7 +10,7 @@
     h.resolve(ref.entity).then((r) => { res = r; });
     const e = $derived(res?.state === 'ok' ? res.embed : null);
     const veiled = $derived(e?.content_warning != null);
-    const label = $derived({ post: 'Quoted Post', article: 'Quoted Article', video: 'Quoted Video', short: 'Quoted Short' }[e?.class] || 'Quote');
+    const label = $derived(e?.kind === 1111 ? 'Quoted Comment' : { post: 'Quoted Post', article: 'Quoted Article', video: 'Quoted Video', short: 'Quoted Short' }[e?.class] || 'Quote');
     const thumb = $derived(!e || veiled ? null
         : e.image || e.media.find((m) => !m.is_video)?.url || e.media.find((m) => m.poster)?.poster || null);
 

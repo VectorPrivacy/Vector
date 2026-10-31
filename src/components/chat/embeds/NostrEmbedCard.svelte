@@ -5,6 +5,7 @@
     import EmbedMedia from './EmbedMedia.svelte';
     import EmbedVideo from './EmbedVideo.svelte';
     import EmbedImage from './EmbedImage.svelte';
+    import EmbedReplyTo from './EmbedReplyTo.svelte';
     import { profileVersion } from '../../lib/signals.svelte.js';
     let { ref, origin = null, h } = $props();   // ref: { key, entity, url }; origin: { chatId, msgId }; h: NostrEmbedHelpers
 
@@ -18,7 +19,7 @@
     h.resolve(ref.entity).then((r) => { res = r; requestAnimationFrame(() => h.onResized()); });
 
     const e = $derived(res?.state === 'ok' ? res.embed : null);
-    const label = $derived({ post: 'Nostr Post', article: 'Nostr Article', video: 'Nostr Video', short: 'Nostr Short' }[e?.class] || 'Nostr');
+    const label = $derived(e?.kind === 1111 ? 'Nostr Comment' : { post: 'Nostr Post', article: 'Nostr Article', video: 'Nostr Video', short: 'Nostr Short' }[e?.class] || 'Nostr');
     // NIP-36 makes the reason optional: an empty one still veils.
     const reposter = $derived.by(() => {
         if (!e?.reposted_by) return null;
@@ -64,6 +65,7 @@
         </div>
     {:else}
         <EmbedAuthor npub={e.author} at={e.published_at || e.created_at} {h} />
+        {#if e.reply_to}<EmbedReplyTo reply={e.reply_to} {h} />{/if}
         {#if veiled}
             <button type="button" class="ne-veil" onclick={(ev) => { ev.stopPropagation(); revealed = true; h.onResized(); }}>
                 <span class="ne-veil-title">Content warning{e.content_warning ? `: ${e.content_warning}` : ''}</span>
