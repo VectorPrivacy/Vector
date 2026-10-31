@@ -2,11 +2,15 @@
     // The Display section: toggle rows derived from display state. Each change
     // hands the new value to the app, which persists and applies it.
     import { displayState } from '../lib/settings.svelte.js';
+    import { shellState } from '../lib/shell.svelte.js';
     // grouped: a faint label above each run of rows that share a group.
     let { h, grouped = false } = $props();   // h: DisplayHelpers (js/settings.js)
 
     const d = displayState();
-    const rows = [
+    const shell = shellState();
+    // `slim`: only the slim layout has the row's subject.
+    const ROWS = [
+        { key: 'hideRail', id: 'hide-rail-toggle', label: 'Hide Community Rail', group: 'Chat List', slim: true },
         { key: 'imageTypes', id: 'display-image-types-toggle', label: 'Display Image Types', group: 'Chat' },
         { key: 'chatBg', id: 'chat-bg-toggle', label: 'Background Wallpaper', group: 'Chat' },
         { key: 'emoticons', id: 'emoticon-suggestions-toggle', label: 'Emoticon Suggestions', group: 'Composer' },
@@ -15,6 +19,7 @@
         { key: 'sendOnEnter', id: 'send-on-enter-toggle', label: 'Send on Enter', group: 'Composer' },
         { key: 'floatingPlayer', id: 'floating-player-toggle', label: 'Floating Player', group: 'Media' },
     ];
+    const rows = $derived(shell.ws ? ROWS.filter((r) => !r.slim) : ROWS);
     function info(key) {
         return (e) => { e.preventDefault(); e.stopPropagation(); h.explain(key); };
     }

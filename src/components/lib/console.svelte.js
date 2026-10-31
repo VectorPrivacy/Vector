@@ -1,6 +1,7 @@
 // The list pane's filters and the slim layout's Centre Console: the community rail open
-// (Discord) or folded away (Telegram), the filter tab, the community the pane shows beside
-// the rail, and the search text. widescreen.js owns the writes that reach past the pane.
+// (Discord), folded away (Telegram) or hidden by a setting, the filter tab, the community
+// the pane shows beside the rail, and the search text. widescreen.js owns the writes that
+// reach past the pane.
 import { flushSync } from 'svelte';
 import { shellState } from './shell.svelte.js';
 
@@ -9,7 +10,7 @@ const FILTERS_FOLDED = ['all', 'messages', 'communities', 'requests'];
 
 // `active`: signed in and slim, so the console is the list pane's layout. `layer`: a
 // community channel is on screen, so the pane is its drawer (lib/drawer.js).
-const cc = $state({ active: false, railOpen: true, filter: 'messages', space: null, query: '', layer: false });
+const cc = $state({ active: false, railOpen: true, railHidden: false, filter: 'messages', space: null, query: '', layer: false });
 
 export function consoleState() { return cc; }
 
@@ -23,6 +24,7 @@ export function consoleFilter() {
 
 export function setConsoleActive(on) { if (cc.active !== !!on) { cc.active = !!on; flushSync(); } }
 export function setConsoleRail(open) { cc.railOpen = !!open; flushSync(); }
+export function setConsoleRailHidden(on) { cc.railHidden = !!on; }
 export function setConsoleFilter(filter) { cc.filter = filter; }
 export function setConsoleSpace(communityId) { cc.space = communityId || null; }
 export function setConsoleQuery(text) { cc.query = text || ''; }

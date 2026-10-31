@@ -983,6 +983,7 @@ const NOTIF_EXPLAINERS = {
 };
 
 const DISPLAY_EXPLAINERS = {
+    hideRail: ['Hide Community Rail', 'When enabled, the <b>community rail and its pull tab are hidden</b>, and your communities sit in the chat list behind the <b>All</b>, <b>Messages</b>, <b>Communities</b> and <b>Requests</b> filters.<br><br>This applies to this device only.'],
     imageTypes: ['Display Image Types', 'When enabled, images in chat will display a <b>small badge showing the file type</b> (e.g., PNG, GIF, WEBP) in the corner.<br><br>This helps identify image formats at a glance.'],
     chatBg: ['Background Wallpaper', 'This feature enables and disables background images inside of Chats (Private & Group Chats).<br><br>Only applies to certain themes.'],
     timeSuggestions: ['Time Suggestions', 'When you type a time to come, like <b>in 6 hours</b> or <b>dec 25 at 8pm</b>, the composer offers to send it as a time everyone sees in their own zone: a live countdown, or the date and time where they are.<br><br>Press <b>Tab</b> or tap the suggestion to use it; keep typing to leave it as written.'],
@@ -1002,6 +1003,9 @@ const DISPLAY_EXPLAINERS = {
 const DISPLAY_HANDLERS = {
     change: async (key, on) => {
         switch (key) {
+            case 'hideRail':
+                ccSetRailHidden(on);
+                break;
             case 'imageTypes':
                 fDisplayImageTypes = on;
                 await saveDisplayImageTypes(on);
@@ -1050,6 +1054,7 @@ async function initDisplaySettings() {
     const floatingPlayer = await loadFloatingPlayer();
     VectorSvelte.setPopoutEnabled(floatingPlayer);
     VectorSvelte.setDisplaySettings({
+        hideRail: VectorSvelte.consoleState().railHidden,
         imageTypes: fDisplayImageTypes,
         chatBg,
         emoticons: emoticonSuggestionsEnabled,

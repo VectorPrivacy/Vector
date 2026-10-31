@@ -109,7 +109,7 @@
     {/if}
     <!-- Widescreen lays these wrappers out of the way (display: contents). -->
     <div class="cc-body" style:--cc-rail-p={slim ? railP : null}>
-        {#if slim}
+        {#if slim && !cc.railHidden}
             <!-- Folded, it's still here at no width, so a pull can bring it out. -->
             <div class="cc-rail-slot" inert={railP === 0} use:railPull={railGrip}><ConsoleRail /></div>
             <!-- Folded, a swipe in from the screen's edge pulls it out as the tab does. -->
@@ -118,7 +118,7 @@
         <div class="cc-pane">
             {#if (slim || shell.ws) && !pane.communityId && !searching && screens.chatlist}
                 <div class="cc-tabs-row">
-                    {#if slim}
+                    {#if slim && !cc.railHidden}
                         <!-- The button is the grab area, wider and taller than the tab it draws,
                              which tucks into the rail's edge as it comes out. -->
                         <button class="cc-rail-pull" title="Show communities" aria-label="Show communities" inert={railP === 1}

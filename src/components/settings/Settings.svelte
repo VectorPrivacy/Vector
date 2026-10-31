@@ -72,7 +72,7 @@
             id: 'appearance', label: 'Appearance', icon: 'palette',
             anchors: [
                 { id: 'theme', label: 'Theme', icon: 'palette', keys: 'theme colour color vector satoshi chatstr cosmic purple neon xmr' },
-                { id: 'display', label: 'Display', icon: 'image', keys: 'display image types background wallpaper rich composer emoticon suggestions time suggestions countdown autocorrect send on enter return key floating player' },
+                { id: 'display', label: 'Display', icon: 'image', keys: `display image types background wallpaper rich composer emoticon suggestions time suggestions countdown autocorrect send on enter return key floating player${shell.ws ? '' : ' hide community rail sidebar pull tab chat list filters'}` },
             ],
         },
         {

@@ -240,7 +240,7 @@ flushSync();
 export { reactionEls } from './lib/reactionpopups.svelte.js';
 export { miniProfileEls, setMiniProfileRoles, setMiniProfileRoleBusy } from './lib/miniprofile.svelte.js';
 export { railEls, setRailLayout } from './lib/rail.svelte.js';
-export { consoleState, setConsoleActive, setConsoleRail, setConsoleSpace, setConsoleQuery, setConsoleFilter, setConsoleLayer } from './lib/console.svelte.js';
+export { consoleState, setConsoleActive, setConsoleRail, setConsoleRailHidden, setConsoleSpace, setConsoleQuery, setConsoleFilter, setConsoleLayer } from './lib/console.svelte.js';
 export { drawerTo, drawerHome } from './lib/drawer.js';
 export { sheetTo } from './lib/sheet.js';
 export { watchPlace, repeatPlace, setPlaceMessage } from './lib/place.svelte.js';

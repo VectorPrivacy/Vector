@@ -369,6 +369,11 @@ function wsInitRail() {
  */
 
 const CC_KEY_RAIL = 'cc_rail_open';
+const CC_KEY_RAIL_HIDDEN = 'cc_rail_hidden';
+
+function ccStoredRail() {
+    try { return localStorage.getItem(CC_KEY_RAIL) !== 'false'; } catch (_) { return true; }
+}
 
 function ccActive() {
     return !wsActive() && !fInit;
@@ -425,11 +430,24 @@ function ccSyncBack() {
 }
 
 function ccSetRail(open) {
+    if (VectorSvelte.consoleState().railHidden) return;
     try { localStorage.setItem(CC_KEY_RAIL, String(open)); } catch (_) { /* per-device nicety only */ }
+    ccApplyRail(open);
+}
+
+function ccApplyRail(open) {
     VectorSvelte.setConsoleRail(open);
     paneChanged();
     ccSyncBack();
     ccScrollTop();
+}
+
+/** Display's Hide Community Rail: folded with nothing to pull it out. Shown again, the
+ *  rail comes back as it was left. */
+function ccSetRailHidden(hidden) {
+    try { localStorage.setItem(CC_KEY_RAIL_HIDDEN, String(hidden)); } catch (_) { /* per-device nicety only */ }
+    VectorSvelte.setConsoleRailHidden(hidden);
+    ccApplyRail(!hidden && ccStoredRail());
 }
 
 /** Whatever opened a chat, Back lands on the pane that holds it: its community's
@@ -645,9 +663,10 @@ function ccOpenNewMenu(anchor) {
 }
 
 function ccInit() {
-    let open = true;
-    try { open = localStorage.getItem(CC_KEY_RAIL) !== 'false'; } catch (_) { /* default stands */ }
-    VectorSvelte.setConsoleRail(open);
+    let hidden = false;
+    try { hidden = localStorage.getItem(CC_KEY_RAIL_HIDDEN) === 'true'; } catch (_) { /* default stands */ }
+    VectorSvelte.setConsoleRailHidden(hidden);
+    VectorSvelte.setConsoleRail(!hidden && ccStoredRail());
     // The drawer lives exactly as long as a chat is on screen.
     VectorSvelte.onPaneChange((name) => { if (name === 'chat' || name === null) ccSyncLayer(); });
     VectorSvelte.mergeShellHandlers({
