@@ -1606,6 +1606,7 @@ const RAID_REPORT_TTL_SECS: u64 = 90;
 struct RaidReportCache;
 
 struct PolicyReportCache;
+struct PolicyReportGate;
 
 type ReportCache<T> = std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, (u64, std::sync::Arc<T>)>>>;
 
@@ -1614,6 +1615,10 @@ type ReportCache<T> = std::sync::Arc<std::sync::Mutex<std::collections::HashMap<
 /// header badge asking on every render would be a real cost.
 fn policy_report_cache() -> ReportCache<serde_json::Value> {
     crate::db::current_session().scoped::<PolicyReportCache, _>()
+}
+
+fn policy_report_gate() -> std::sync::Arc<std::sync::Mutex<()>> {
+    crate::db::current_session().scoped::<PolicyReportGate, _>()
 }
 
 fn raid_report_cache() -> ReportCache<crate::community::raid::RaidReport> {
@@ -1634,6 +1639,27 @@ fn report_put<T>(cache: &ReportCache<T>, cid_hex: &str, now_secs: u64, report: s
     map.insert(cid_hex.to_string(), (now_secs, report));
 }
 
+/// A memoised report, evaluated at most once per expiry: callers that miss together (a
+/// badge, a menu and a panel asking on one render) wait for the first and take its report.
+fn report_once<T>(
+    cache: &ReportCache<T>,
+    gate: &std::sync::Mutex<()>,
+    cid_hex: &str,
+    now_secs: u64,
+    compute: impl FnOnce() -> Result<std::sync::Arc<T>>,
+) -> Result<std::sync::Arc<T>> {
+    if let Some(hit) = report_get(cache, cid_hex, now_secs) {
+        return Ok(hit);
+    }
+    let _turn = gate.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(hit) = report_get(cache, cid_hex, now_secs) {
+        return Ok(hit);
+    }
+    let report = compute()?;
+    report_put(cache, cid_hex, now_secs, report.clone());
+    Ok(report)
+}
+
 #[cfg(test)]
 mod report_cache_tests {
     use super::*;
@@ -1649,6 +1675,28 @@ mod report_cache_tests {
         report_put(&cache, "c", 1_050 + RAID_REPORT_TTL_SECS, std::sync::Arc::new(3));
         let map = cache.lock().unwrap();
         assert!(!map.contains_key("b") && map.contains_key("c"), "and so does an insert");
+    }
+
+    #[test]
+    fn callers_that_miss_together_share_one_evaluation() {
+        let cache: ReportCache<u32> = Default::default();
+        let gate = std::sync::Mutex::new(());
+        let runs = std::sync::atomic::AtomicU32::new(0);
+        std::thread::scope(|s| {
+            for _ in 0..4 {
+                s.spawn(|| {
+                    let got = report_once(&cache, &gate, "a", 1_000, || {
+                        runs.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        std::thread::sleep(std::time::Duration::from_millis(50));
+                        Ok(std::sync::Arc::new(7))
+                    });
+                    assert_eq!(got.unwrap().as_ref(), &7);
+                });
+            }
+        });
+        assert_eq!(runs.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let again = report_once(&cache, &gate, "a", 1_000 + RAID_REPORT_TTL_SECS, || Ok(std::sync::Arc::new(8)));
+        assert_eq!(again.unwrap().as_ref(), &8, "an expired report is evaluated afresh");
     }
 }
 
@@ -3140,15 +3188,21 @@ impl VectorCore {
     /// real raid out of local storage and stayed silent on a healthy community
     /// across six runs.
     fn policy_console_report(cid_hex: &str, community: &crate::community::v2::community::CommunityV2) -> Result<std::sync::Arc<serde_json::Value>> {
-        use crate::community::v2::guestbook::GuestbookEntry;
         let now_secs = web_time::SystemTime::now()
             .duration_since(web_time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        if let Some(cached) = report_get(&policy_report_cache(), cid_hex, now_secs) {
-            return Ok(cached);
-        }
+        report_once(&policy_report_cache(), &policy_report_gate(), cid_hex, now_secs, || {
+            Self::evaluate_policy_console(cid_hex, community, now_secs)
+        })
+    }
 
+    fn evaluate_policy_console(
+        cid_hex: &str,
+        community: &crate::community::v2::community::CommunityV2,
+        now_secs: u64,
+    ) -> Result<std::sync::Arc<serde_json::Value>> {
+        use crate::community::v2::guestbook::GuestbookEntry;
         let owner = community.owner().map_err(VectorError::Other)?;
         let me = state::my_public_key();
 
@@ -3210,12 +3264,10 @@ impl VectorCore {
         let assembled =
             crate::community::policy::harness::assemble(cid_hex, &owner, me.as_ref(), &members, now_ms)
                 .map_err(VectorError::Other)?;
-        let report = std::sync::Arc::new(
+        Ok(std::sync::Arc::new(
             crate::community::policy::harness::evaluate_for_console(cid_hex, &assembled, now_ms)
                 .map_err(VectorError::Other)?,
-        );
-        report_put(&policy_report_cache(), cid_hex, now_secs, report.clone());
-        Ok(report)
+        ))
     }
 
     /// Run the policy engine beside the shipped assessor and report where they
