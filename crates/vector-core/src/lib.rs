@@ -2646,8 +2646,10 @@ impl VectorCore {
     }
 
     /// Members of a Community: the Complete Memberlist, each entry `{npub}` (it carries no
-    /// activity time). Best-effort throughout: a transport failure yields an empty list, never
-    /// an error.
+    /// activity time). One only seen posting, outside the Guestbook's members, also carries
+    /// `unlisted` (`"no_join"` or `"departed"`): listed, but never counted, since what this
+    /// client has seen depends on how much history it holds. Best-effort throughout: a
+    /// transport failure yields an empty list, never an error.
     pub async fn get_community_members(&self, community_id: &str) -> Vec<serde_json::Value> {
         use nostr_sdk::prelude::ToBech32;
         // The Complete Memberlist from LOCAL state (persisted guestbook +
@@ -2671,12 +2673,13 @@ impl VectorCore {
                 });
             }
         }
-        crate::community::v2::service::stored_memberlist_from(&community, &events)
-            .unwrap_or_default()
+        let parts = crate::community::v2::service::stored_member_parts(&community, &events).unwrap_or_default();
+        let counted = parts.counted.into_iter().filter_map(|pk| pk.to_bech32().ok()).map(|npub| serde_json::json!({ "npub": npub }));
+        let unlisted = parts
+            .unlisted
             .into_iter()
-            .filter_map(|pk| pk.to_bech32().ok())
-            .map(|npub| serde_json::json!({ "npub": npub }))
-            .collect()
+            .filter_map(|(pk, why)| pk.to_bech32().ok().map(|npub| serde_json::json!({ "npub": npub, "unlisted": why })));
+        counted.chain(unlisted).collect()
     }
 
     /// A Community's banlist, as npubs.
@@ -2719,6 +2722,12 @@ impl VectorCore {
         let banlist = crate::db::community::get_community_banlist(&cid_hex).unwrap_or_default();
         let caps = self.community_capabilities(community_id).unwrap_or_else(|_| serde_json::json!({}));
         let owner_b32 = community.owner().map_err(VectorError::Other)?.to_bech32().unwrap_or_default();
+        // Who the member list marks as only seen posting: assessed like everyone, never counted.
+        let unlisted: Vec<String> = crate::db::community::get_guestbook_shared(&cid_hex)
+            .ok()
+            .and_then(|(events, _)| crate::community::v2::service::stored_member_parts(&community, &events).ok())
+            .map(|p| p.unlisted.into_keys().filter_map(|pk| pk.to_bech32().ok()).collect())
+            .unwrap_or_default();
 
         Ok(serde_json::json!({
             "community_id": cid_hex,
@@ -2726,6 +2735,7 @@ impl VectorCore {
             "owner_npub": owner_b32,
             "epoch": community.root_epoch.0,
             "report": &*report,
+            "unlisted": unlisted,
             "invites": invites.iter().map(|i| serde_json::json!({
                 "token": i.token,
                 "label": i.label,

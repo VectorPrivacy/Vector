@@ -6,8 +6,10 @@
         if (!intel) return [];
         const r = intel.report;
         const flagged = r.members.filter(x => x.verdict === 'suspect').length;
+        // Someone only seen posting is assessed but never counted, as in every member count.
+        const unlisted = new Set(intel.unlisted);
         return [
-            { n: r.members.length, label: 'members', tone: 'quiet' },
+            { n: r.members.filter(x => !unlisted.has(x.npub)).length, label: 'members', tone: 'quiet' },
             { n: r.trusted || 0, label: 'trusted', tone: 'good' },
             { n: r.protected || 0, label: 'staff', tone: 'staff' },
             { n: flagged, label: 'flagged', tone: flagged ? 'bad' : 'quiet' },

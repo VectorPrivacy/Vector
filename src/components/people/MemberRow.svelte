@@ -21,6 +21,8 @@
         veiled = false,           // Streamer Mode hides this person: no status either
         keyHint = '',             // see MemberName
         timeoutUntil = 0,         // see MemberName
+        unlisted = null,          // see MemberName
+        onunlisted = null,        // see MemberName
         onactivate = null,        // (event) => void — row click / Enter / Space
         oncontextmenu = null,     // (event) => void — right-click
         gutter = null,            // snippet: the left control slot
@@ -61,6 +63,8 @@
         bot={!!profile?.bot}
         {keyHint}
         {timeoutUntil}
+        {unlisted}
+        {onunlisted}
         status={withStatus && !veiled && profile?.status?.title ? { title: profile.status.title, emojiTags: profile.status.emoji_tags || [] } : null}
         style={dim ? 'opacity:0.6;' : ''}
         {ui}

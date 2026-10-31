@@ -2187,7 +2187,7 @@ async fn accept_bundle<T: Transport + ?Sized>(
             let gb_group = super::derive::guestbook_group_key(&community.community_root, community.id(), community.root_epoch);
             let join_rumor = guestbook::build_join_rumor(my_pk, attr_ref, at_ms);
             if let Ok((join_wrap, _)) = guestbook::seal_guestbook_rumor_signed(&signer, my_pk, &join_rumor, &gb_group, Timestamp::from_secs(at_ms / 1000)).await {
-                let _ = transport.publish(&join_wrap, &community.relays).await;
+                publish_my_join(transport, &community, join_wrap).await;
             }
         }
 
@@ -2799,6 +2799,150 @@ pub async fn kick_member<T: Transport + ?Sized>(transport: &T, community: &Commu
     .await
 }
 
+/// Write each ban's departure to the Guestbook (CORD-04 §6): a Kick dated at the ban, which the
+/// banlist alone never records, so lifting it doesn't count a pre-ban Join again. Only for a
+/// member whose standing Join predates their ban; a Join after it is a return and outranks the
+/// Kick anyway. Dated by the ban, one signer's departure for a member is the same rumor from any
+/// of their devices. Best-effort: returns how many landed.
+async fn publish_ban_departures<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, targets: &[PublicKey]) -> usize {
+    let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+    let marks = crate::db::community::get_community_ban_marks(&cid_hex).unwrap_or_default();
+    let (Ok((events, _)), Ok(owner), Ok(my_pk), Ok(signer)) =
+        (crate::db::community::get_guestbook_shared(&cid_hex), community.owner(), me_pk(), crate::signer::active_signer())
+    else {
+        return 0;
+    };
+    let Ok(citation) = required_authority_citation(community, &my_pk) else { return 0 };
+    let owner_hex = owner.to_hex();
+    let roles = crate::db::community::get_community_roles(&cid_hex).unwrap_or_default();
+    let coalesced = guestbook::coalesce(&events, now_ms(), snapshot_authority_for(&cid_hex, community, &owner).as_ref(), &kick_judge(&cid_hex, &owner_hex, &roles));
+    drop(events);
+    let gb_group = super::derive::guestbook_group_key(&community.community_root, community.id(), community.root_epoch);
+    let mut landed = 0;
+    for target in targets {
+        let Some(&banned_secs) = marks.get(&target.to_hex()) else { continue };
+        let at_ms = banned_secs.saturating_mul(1000);
+        if !coalesced.get(target).is_some_and(|st| st.verdict == guestbook::Verdict::Joined && st.at_ms <= at_ms) {
+            continue;
+        }
+        let rumor = guestbook::build_kick_rumor(my_pk, *target, citation.as_ref(), at_ms);
+        let Some(rumor_id) = rumor.id.map(|id| id.to_bytes()) else { continue };
+        let Ok((wrap, _)) = guestbook::seal_guestbook_rumor_signed(&signer, my_pk, &rumor, &gb_group, Timestamp::from_secs(banned_secs)).await else { continue };
+        if let Err(e) = transport.publish(&wrap, &community.relays).await {
+            crate::log_warn!("[Ban] departure for an un-banned member not published: {e}");
+            continue;
+        }
+        landed += 1;
+        let kick = guestbook::GuestbookEvent {
+            rumor_id,
+            entry: guestbook::GuestbookEntry::Kick { actor: my_pk, target: *target, citation: citation.clone(), at_ms },
+            epoch: Some(community.root_epoch.0),
+            observed_at: Some(now_ms() / 1000),
+        };
+        let _ = ingest_guestbook_event(community, kick, 0);
+    }
+    landed
+}
+
+/// Once a session, the owner writes the departure of every ban lifted before un-bans wrote
+/// their own: a member whose ban this device remembers, still standing on a pre-ban Join and
+/// silent since. Owner-only, so one signer writes it and each member gets one rumor.
+pub async fn heal_ban_departures<T: Transport + ?Sized>(transport: &T, community: &CommunityV2) -> Result<usize, String> {
+    if !guestbook_walked_this_session(community) || community.owner()? != me_pk()? {
+        return Ok(0);
+    }
+    if !session_plane_once::<BanDeparturesHealed>(community) {
+        return Ok(0);
+    }
+    let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+    let banned = crate::db::community::get_community_banlist(&cid_hex)?;
+    let active: std::collections::HashMap<PublicKey, u64> = crate::db::community::community_member_activity_capped(&cid_hex, false)?
+        .into_iter()
+        .filter_map(|(npub, secs)| PublicKey::parse(&npub).ok().map(|pk| (pk, secs)))
+        .collect();
+    let lifted: Vec<PublicKey> = crate::db::community::get_community_ban_marks(&cid_hex)?
+        .into_iter()
+        .filter(|(hex, _)| !banned.contains(hex))
+        .filter_map(|(hex, at)| PublicKey::from_hex(&hex).ok().map(|pk| (pk, at)))
+        .filter(|(pk, at)| active.get(pk).is_none_or(|seen| seen <= at))
+        .map(|(pk, _)| pk)
+        .collect();
+    if lifted.is_empty() {
+        return Ok(0);
+    }
+    Ok(publish_ban_departures(transport, community, &lifted).await)
+}
+
+struct BanDeparturesHealed;
+struct JoinAnnounced;
+
+/// True the first time this session asks for `community`'s current Guestbook plane under `K`.
+fn session_plane_once<K: 'static>(community: &CommunityV2) -> bool {
+    let set = crate::db::current_session().scoped::<K, std::sync::Mutex<std::collections::HashSet<[u8; 32]>>>();
+    let mut held = set.lock().unwrap_or_else(|e| e.into_inner());
+    held.insert(guestbook_plane(community))
+}
+
+/// Publish my Join, keeping the same signed wrap going until a relay holds it, so a retry can
+/// only ever land the one event. Marks the plane as announced this session.
+async fn publish_my_join<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, wrap: Event) {
+    session_plane_once::<JoinAnnounced>(community);
+    if transport.publish(&wrap, &community.relays).await.is_ok() || crate::state::nostr_client().is_none() {
+        return;
+    }
+    let relays = community.relays.clone();
+    crate::db::spawn_bound(async move {
+        let transport = crate::community::transport::LiveTransport::with_timeout(std::time::Duration::from_secs(12));
+        if let Err(e) = transport.publish_durable(&wrap, &relays).await {
+            crate::log_warn!("[Guestbook] Join still unpublished; the next session's walk will restore it: {e}");
+        }
+    });
+}
+
+/// CORD-02 §5: a member finding no state of their own on the Guestbook publishes a fresh Join.
+/// Only after a whole walk of the plane, once a session, and dated by the plane itself (the
+/// Refounding's cut, else its oldest entry), so my devices healing at once write one rumor.
+pub async fn heal_my_join<T: Transport + ?Sized>(transport: &T, community: &CommunityV2) -> Result<bool, String> {
+    if !guestbook_walked_this_session(community) {
+        return Ok(false);
+    }
+    let my_pk = me_pk()?;
+    let owner = community.owner()?;
+    let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+    if my_pk == owner || crate::db::community::is_author_banned(&cid_hex, &my_pk) {
+        return Ok(false);
+    }
+    let at_ms = {
+        let (events, _) = crate::db::community::get_guestbook_shared(&cid_hex)?;
+        let roles = crate::db::community::get_community_roles(&cid_hex).unwrap_or_default();
+        let authority = snapshot_authority_for(&cid_hex, community, &owner);
+        let state = guestbook::coalesce(&events, now_ms(), authority.as_ref(), &kick_judge(&cid_hex, &owner.to_hex(), &roles)).remove(&my_pk);
+        if state.is_some_and(|st| st.verdict != guestbook::Verdict::Refounded) {
+            return Ok(false);
+        }
+        let live = Some(community.root_epoch.0);
+        let Some(at_ms) = guestbook::live_refound(&events, authority.as_ref(), now_ms().saturating_add(guestbook::MAX_FUTURE_MS))
+            .map(|r| r.cut)
+            .or_else(|| events.iter().filter(|e| e.epoch == live).map(|e| e.entry.at_ms()).min())
+        else {
+            return Ok(false);
+        };
+        at_ms
+    };
+    if !session_plane_once::<JoinAnnounced>(community) {
+        return Ok(false);
+    }
+    let signer = crate::signer::active_signer()?;
+    let rumor = guestbook::build_join_rumor(my_pk, None, at_ms);
+    let gb_group = super::derive::guestbook_group_key(&community.community_root, community.id(), community.root_epoch);
+    let (wrap, _) = guestbook::seal_guestbook_rumor_signed(&signer, my_pk, &rumor, &gb_group, Timestamp::from_secs(at_ms / 1000))
+        .await
+        .map_err(|e| e.to_string())?;
+    crate::log_info!("[Guestbook] no Join of ours stands on this plane; restoring it");
+    publish_my_join(transport, community, wrap).await;
+    Ok(true)
+}
+
 /// The Timeouts running now (CORD-04 §8), by target: judged against the Roster as it
 /// stands, like every authority action. Returns target → (from, until), unix seconds.
 pub fn community_timeouts(community: &CommunityV2) -> Result<std::collections::BTreeMap<PublicKey, (u64, u64)>, String> {
@@ -3316,11 +3460,26 @@ fn snapshot_authority_for(cid_hex: &str, community: &CommunityV2, owner: &Public
 fn fold_members(
     community: &CommunityV2,
     events: &[guestbook::GuestbookEvent],
-    mut observed: std::collections::BTreeMap<PublicKey, u64>,
+    observed: std::collections::BTreeMap<PublicKey, u64>,
     roles: &crate::community::roles::CommunityRoles,
     banlist: &std::collections::BTreeSet<PublicKey>,
     banned_at: &std::collections::BTreeMap<PublicKey, u64>,
 ) -> Result<Vec<PublicKey>, String> {
+    let parts = fold_member_parts(community, events, observed, roles, banlist, banned_at)?;
+    let mut all = parts.counted;
+    all.extend(parts.unlisted.into_keys());
+    Ok(all.into_iter().collect())
+}
+
+/// [`fold_members`], split into who counts and who is only seen posting.
+fn fold_member_parts(
+    community: &CommunityV2,
+    events: &[guestbook::GuestbookEvent],
+    mut observed: std::collections::BTreeMap<PublicKey, u64>,
+    roles: &crate::community::roles::CommunityRoles,
+    banlist: &std::collections::BTreeSet<PublicKey>,
+    banned_at: &std::collections::BTreeMap<PublicKey, u64>,
+) -> Result<guestbook::MemberParts, String> {
     let owner = community.owner()?;
     let owner_hex = owner.to_hex();
     let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
@@ -3342,28 +3501,27 @@ fn fold_members(
     // without re-posting. Genesis has no refounder, hence no snapshot power.
     let snapshot_authority_pk = snapshot_authority_for(&cid_hex, community, &owner);
     let snapshot_authority = snapshot_authority_pk.as_ref();
-    // Kick authority (CORD-04 §5/§6): the signer must cite a Grant we've synced AND
-    // hold KICK AND strictly outrank the target (the owner is supreme; equal cannot
-    // kick equal).
-    let can_kick = |actor: &PublicKey, target: &PublicKey, citation: Option<&crate::community::edition::AuthorityCitation>| {
-        let actor_hex = actor.to_hex();
-        // A banned member's Guestbook events count for nothing (CORD-04 §4).
-        !crate::db::community::is_author_banned(&cid_hex, actor)
-            && citation_is_synced(&cid_hex, &owner_hex, &actor_hex, citation)
-            && roles.can_act_on_member(&actor_hex, Some(&owner_hex), &target.to_hex(), crate::community::roles::Permissions::KICK)
-    };
+    let can_kick = kick_judge(&cid_hex, &owner_hex, roles);
     let now = now_ms();
     let coalesced = guestbook::coalesce(events, now, snapshot_authority, &can_kick);
     // The live refound's guest list also gates the observed-forward path in
     // complete_memberlist, so a raid spammer whose Kick was buried by the rotation
     // isn't silently re-admitted by their old spam.
     let refound = guestbook::live_refound(events, snapshot_authority, now);
-    let mut members = guestbook::complete_memberlist(&coalesced, &observed, banlist, banned_at, refound.as_ref());
+    let mut parts = guestbook::memberlist_parts(&coalesced, &observed, banlist, banned_at, refound.as_ref());
+    // A role-holder the fold lists counts, however their activity is stamped: a Grant is
+    // consensus, the same on every client.
+    for g in roles.grants.iter().filter(|g| !g.role_ids.is_empty()) {
+        if let Some(pk) = PublicKey::from_hex(&g.member).ok().filter(|pk| parts.unlisted.remove(pk).is_some()) {
+            parts.counted.insert(pk);
+        }
+    }
     // The owner is a member by definition, independent of any fetched Join.
     if !banlist.contains(&owner) {
-        members.insert(owner);
+        parts.unlisted.remove(&owner);
+        parts.counted.insert(owner);
     }
-    Ok(members.into_iter().collect())
+    Ok(parts)
 }
 
 
@@ -3554,13 +3712,7 @@ pub async fn wire_guestbook_members<T: Transport + ?Sized>(
     let roles = crate::db::community::get_community_roles(&cid_hex).unwrap_or_default();
     let snapshot_authority_pk = snapshot_authority_for(&cid_hex, community, &owner);
     let snapshot_authority = snapshot_authority_pk.as_ref();
-    let can_kick = |actor: &PublicKey, target: &PublicKey, citation: Option<&crate::community::edition::AuthorityCitation>| {
-        let actor_hex = actor.to_hex();
-        // A banned member's Guestbook events count for nothing (CORD-04 §4).
-        !crate::db::community::is_author_banned(&cid_hex, actor)
-            && citation_is_synced(&cid_hex, &owner_hex, &actor_hex, citation)
-            && roles.can_act_on_member(&actor_hex, Some(&owner_hex), &target.to_hex(), crate::community::roles::Permissions::KICK)
-    };
+    let can_kick = kick_judge(&cid_hex, &owner_hex, &roles);
     let coalesced = guestbook::coalesce(&events, now_ms(), snapshot_authority, &can_kick);
     let banlist: std::collections::BTreeSet<PublicKey> = crate::db::community::get_community_banlist(&cid_hex)
         .unwrap_or_default()
@@ -3587,13 +3739,7 @@ pub(crate) fn stored_departure_times(community: &CommunityV2) -> std::collection
     let owner_hex = owner.to_hex();
     let roles = crate::db::community::get_community_roles(&cid_hex).unwrap_or_default();
     let snapshot_authority_pk = snapshot_authority_for(&cid_hex, community, &owner);
-    let can_kick = |actor: &PublicKey, target: &PublicKey, citation: Option<&crate::community::edition::AuthorityCitation>| {
-        let actor_hex = actor.to_hex();
-        // A banned member's Guestbook events count for nothing (CORD-04 §4).
-        !crate::db::community::is_author_banned(&cid_hex, actor)
-            && citation_is_synced(&cid_hex, &owner_hex, &actor_hex, citation)
-            && roles.can_act_on_member(&actor_hex, Some(&owner_hex), &target.to_hex(), crate::community::roles::Permissions::KICK)
-    };
+    let can_kick = kick_judge(&cid_hex, &owner_hex, &roles);
     guestbook::coalesce(&events, now_ms(), snapshot_authority_pk.as_ref(), &can_kick).into_iter().filter(|(_, st)| st.verdict != guestbook::Verdict::Joined).map(|(pk, st)| (pk, st.at_ms)).collect()
 }
 
@@ -3743,13 +3889,7 @@ fn with_departure_fold<R>(
     let owner_hex = owner.to_hex();
     let roles = crate::db::community::get_community_roles(cid_hex).unwrap_or_default();
     let snapshot_authority_pk = snapshot_authority_for(cid_hex, community, &owner);
-    let can_kick = |actor: &PublicKey, target: &PublicKey, citation: Option<&crate::community::edition::AuthorityCitation>| {
-        let actor_hex = actor.to_hex();
-        // A banned member's Guestbook events count for nothing (CORD-04 §4).
-        !crate::db::community::is_author_banned(cid_hex, actor)
-            && citation_is_synced(cid_hex, &owner_hex, &actor_hex, citation)
-            && roles.can_act_on_member(&actor_hex, Some(&owner_hex), &target.to_hex(), crate::community::roles::Permissions::KICK)
-    };
+    let can_kick = kick_judge(cid_hex, &owner_hex, &roles);
     Some(f(&events, now_ms(), snapshot_authority_pk.as_ref(), &can_kick))
 }
 
@@ -3841,13 +3981,7 @@ pub fn stored_kick_at(community: &CommunityV2, member: &PublicKey) -> Option<u64
     let roles = crate::db::community::get_community_roles(&cid_hex).unwrap_or_default();
     let snapshot_authority_pk = snapshot_authority_for(&cid_hex, community, &owner);
     let snapshot_authority = snapshot_authority_pk.as_ref();
-    let can_kick = |actor: &PublicKey, target: &PublicKey, citation: Option<&crate::community::edition::AuthorityCitation>| {
-        let actor_hex = actor.to_hex();
-        // A banned member's Guestbook events count for nothing (CORD-04 §4).
-        !crate::db::community::is_author_banned(&cid_hex, actor)
-            && citation_is_synced(&cid_hex, &owner_hex, &actor_hex, citation)
-            && roles.can_act_on_member(&actor_hex, Some(&owner_hex), &target.to_hex(), crate::community::roles::Permissions::KICK)
-    };
+    let can_kick = kick_judge(&cid_hex, &owner_hex, &roles);
     guestbook::coalesce(&events, now_ms(), snapshot_authority, &can_kick)
         .get(member)
         .filter(|st| st.verdict == guestbook::Verdict::Kicked)
@@ -4102,7 +4236,27 @@ pub fn stored_memberlist_strict(community: &CommunityV2) -> Result<Vec<PublicKey
     memberlist_folded(community, &events, true)
 }
 
+/// The stored memberlist split into who counts and who is only seen posting: what a member
+/// list and its counters show.
+pub fn stored_member_parts(community: &CommunityV2, events: &[guestbook::GuestbookEvent]) -> Result<guestbook::MemberParts, String> {
+    let (observed, roles, banlist, banned_at) = memberlist_inputs(community, false)?;
+    fold_member_parts(community, events, observed, &roles, &banlist, &banned_at)
+}
+
 fn memberlist_folded(community: &CommunityV2, events: &[guestbook::GuestbookEvent], strict: bool) -> Result<Vec<PublicKey>, String> {
+    let (observed, roles, banlist, banned_at) = memberlist_inputs(community, strict)?;
+    fold_members(community, events, observed, &roles, &banlist, &banned_at)
+}
+
+type MemberlistInputs = (
+    std::collections::BTreeMap<PublicKey, u64>,
+    crate::community::roles::CommunityRoles,
+    std::collections::BTreeSet<PublicKey>,
+    std::collections::BTreeMap<PublicKey, u64>,
+);
+
+/// What the stored fold reads besides the Guestbook: activity, the roster, the banlist and ban history.
+fn memberlist_inputs(community: &CommunityV2, strict: bool) -> Result<MemberlistInputs, String> {
     let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
     let mut observed: std::collections::BTreeMap<PublicKey, u64> = std::collections::BTreeMap::new();
     let activity = if strict { crate::db::community::community_member_activity_strict(&cid_hex) } else { crate::db::community::community_member_activity(&cid_hex) };
@@ -4122,14 +4276,14 @@ fn memberlist_folded(community: &CommunityV2, events: &[guestbook::GuestbookEven
         .iter()
         .filter_map(|h| PublicKey::from_hex(h).ok())
         .collect();
-    // Ban history outlives the banlist itself — see [`fold_members`]. Read from the store,
-    // since this path never folds editions.
+    // Ban history gates observation (CORD-02 §5). Read from the store, since this path never
+    // folds editions.
     let banned_at: std::collections::BTreeMap<PublicKey, u64> = crate::db::community::get_community_ban_marks(&cid_hex)
         .unwrap_or_default()
         .into_iter()
         .filter_map(|(h, at)| PublicKey::from_hex(&h).ok().map(|pk| (pk, at)))
         .collect();
-    fold_members(community, events, observed, &roles, &banlist, &banned_at)
+    Ok((observed, roles, banlist, banned_at))
 }
 
 /// Fold the Complete Memberlist from the Guestbook plane. The proven owner is
@@ -6171,6 +6325,24 @@ pub async fn sync_community_list<T: Transport + ?Sized>(transport: &T, bootstrap
 /// since-demoted actor is refused there (refuse-superseded). An action citing a
 /// version we haven't synced parks and is re-judged on the next roster sync — the
 /// sync path can't escalate to a blocking fetch.
+/// Whom a Kick is honored from (CORD-04 §6): a signer holding KICK, or BAN for the departure an
+/// un-ban writes, who strictly outranks the target, is not banned, and cites a Grant we hold.
+pub(super) fn kick_judge<'a>(
+    cid_hex: &'a str,
+    owner_hex: &'a str,
+    roles: &'a crate::community::roles::CommunityRoles,
+) -> impl Fn(&PublicKey, &PublicKey, Option<&crate::community::edition::AuthorityCitation>) -> bool + 'a {
+    use crate::community::roles::Permissions;
+    move |actor, target, citation| {
+        let (actor_hex, target_hex) = (actor.to_hex(), target.to_hex());
+        // The roster check first: it is in memory, the other two read the database.
+        [Permissions::KICK, Permissions::BAN].into_iter().any(|bit| roles.can_act_on_member(&actor_hex, Some(owner_hex), &target_hex, bit))
+            // A banned member's Guestbook events count for nothing (CORD-04 §4).
+            && !crate::db::community::is_author_banned(cid_hex, actor)
+            && citation_is_synced(cid_hex, owner_hex, &actor_hex, citation)
+    }
+}
+
 pub(super) fn citation_is_synced(
     cid_hex: &str,
     owner_hex: &str,
@@ -8542,6 +8714,11 @@ async fn run_moderation_batch<T: Transport + ?Sized>(
                 .ok_or_else(|| "v2 community not found".to_string())?;
             // A ban drops what its target says, never what they decided (CORD-04 §9).
             seal_standing(transport, &community, &newly_banned, Seal::BestEffort).await?;
+            // The departure goes first: between the two, the banlist still holds them out.
+            let unbanned: Vec<PublicKey> = original.iter().filter(|h| !list.contains(*h)).filter_map(|h| pk_of.get(h).copied()).collect();
+            if !unbanned.is_empty() {
+                publish_ban_departures(transport, &community, &unbanned).await;
+            }
             set_banlist(transport, &community, &list).await?;
             let mut stripped: Vec<(PublicKey, Vec<String>)> = Vec::new();
             // Pre-strip role capture: the read-severance below judges which
@@ -35373,6 +35550,92 @@ mod tests {
             stored_memberlist(&community).unwrap().contains(&member_pk),
             "after the unban the raced Join makes them a member again"
         );
+    }
+
+    #[tokio::test]
+    async fn lifting_a_ban_writes_its_departure_dated_at_the_ban() {
+        let (bed, owner, member) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Lift", bed.relays.clone(), None).await.unwrap();
+        let member_pk = member.keys.public_key();
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        let join = guestbook::GuestbookEvent { epoch: None, observed_at: None, rumor_id: [7u8; 32],
+            entry: guestbook::GuestbookEntry::Join { member: member_pk, invited_by: None, at_ms: 1_000_000 },
+        };
+        assert!(ingest_guestbook_event(&community, join, 0).unwrap());
+
+        set_banlist(&bed.relay, &community, &[member_pk.to_hex()]).await.unwrap();
+        set_members_banned(&bed.relay, community.id(), &[member_pk], false).await.unwrap();
+
+        let fresh = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        let mark = crate::db::community::get_community_ban_marks(&cid_hex).unwrap()[&member_pk.to_hex()];
+        assert_eq!(stored_kick_at(&fresh, &member_pk), Some(mark * 1000), "the departure is dated at the ban");
+        assert!(!stored_memberlist(&fresh).unwrap().contains(&member_pk), "the pre-ban Join no longer counts here");
+        assert!(!wire_guestbook_members(&bed.relay, &fresh).await.unwrap().contains(&member_pk), "nor for a reader who never saw the ban");
+
+        let back = guestbook::GuestbookEvent { epoch: None, observed_at: None, rumor_id: [8u8; 32],
+            entry: guestbook::GuestbookEntry::Join { member: member_pk, invited_by: None, at_ms: mark * 1000 + 1 },
+        };
+        assert!(ingest_guestbook_event(&fresh, back, 0).unwrap());
+        assert!(stored_memberlist(&fresh).unwrap().contains(&member_pk), "a Join after the ban is a return");
+    }
+
+    /// [`MemoryRelay`] that refuses one plane's publishes, as a relay that never took them.
+    struct Refuses<'a>(&'a MemoryRelay, PublicKey);
+    #[async_trait::async_trait]
+    impl Transport for Refuses<'_> {
+        async fn publish(&self, event: &Event, relays: &[String]) -> Result<(), String> {
+            if event.pubkey == self.1 {
+                return Err("refused".into());
+            }
+            self.0.publish(event, relays).await
+        }
+        async fn fetch(&self, query: &Query, relays: &[String]) -> Result<Vec<Event>, String> {
+            self.0.fetch(query, relays).await
+        }
+        async fn fetch_plane(&self, plane: &Keys, query: &Query, relays: &[String]) -> Result<crate::community::transport::PlaneFetch, String> {
+            self.0.fetch_plane(plane, query, relays).await
+        }
+        async fn publish_durable(&self, event: &Event, relays: &[String]) -> Result<(), String> {
+            self.publish(event, relays).await
+        }
+    }
+
+    #[tokio::test]
+    async fn a_lost_join_is_restored_once_dated_by_the_plane() {
+        let (bed, owner, member) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Lost", bed.relays.clone(), None).await.unwrap();
+        send_direct_invite(&bed.relay, &community, &member.keys.public_key(), None, None).await.unwrap();
+        let plane = super::super::derive::guestbook_group_key(&community.community_root, community.id(), community.root_epoch).pk();
+
+        bed.swap_to(&member);
+        let me = member.keys.public_key();
+        let invite_wrap = fetch_direct_invite(&bed.relay, &bed.relays, &me).await;
+        let joined = accept_direct_invite(&Refuses(&bed.relay, plane), &invite_wrap).await.unwrap();
+        assert!(!wire_guestbook_members(&bed.relay, &joined).await.unwrap().contains(&me), "the Join never landed");
+        sync_guestbook(&bed.relay, &joined).await.unwrap();
+        assert!(!heal_my_join(&bed.relay, &joined).await.unwrap(), "the session that sent it waits for the next");
+
+        // A later session reads the whole plane and finds no Join of theirs.
+        bed.swap_to(&owner);
+        bed.swap_to(&member);
+        sync_guestbook(&bed.relay, &joined).await.unwrap();
+        assert!(heal_my_join(&bed.relay, &joined).await.unwrap());
+        assert!(!heal_my_join(&bed.relay, &joined).await.unwrap(), "once a session");
+
+        let (events, _, _) = fetch_guestbook_events(&bed.relay, &joined, 0).await.unwrap();
+        let mine: Vec<u64> = events
+            .iter()
+            .filter_map(|e| match &e.entry {
+                guestbook::GuestbookEntry::Join { member, at_ms, .. } if *member == me => Some(*at_ms),
+                _ => None,
+            })
+            .collect();
+        let oldest = events.iter().filter(|e| !matches!(&e.entry, guestbook::GuestbookEntry::Join { member, .. } if *member == me)).map(|e| e.entry.at_ms()).min();
+        assert_eq!(mine.len(), 1, "one Join on the wire");
+        assert_eq!(Some(mine[0]), oldest, "dated by the plane's oldest entry, the same from any of their devices");
+        assert!(wire_guestbook_members(&bed.relay, &joined).await.unwrap().contains(&me));
     }
 
     #[tokio::test]

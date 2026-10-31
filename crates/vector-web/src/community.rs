@@ -89,8 +89,13 @@ pub async fn get_community_members(community_id: &str) -> Value {
     Value::Array(
         members
             .iter()
-            .filter_map(|m| m.get("npub").and_then(Value::as_str))
-            .map(|npub| json!({ "npub": npub, "last_active": 0 }))
+            .filter_map(|m| {
+                let mut out = json!({ "npub": m.get("npub")?.as_str()?, "last_active": 0 });
+                if let Some(why) = m.get("unlisted") {
+                    out["unlisted"] = why.clone();
+                }
+                Some(out)
+            })
             .collect(),
     )
 }

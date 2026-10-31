@@ -533,6 +533,9 @@ fn guestbook_entries(community: &CommunityV2, cid_hex: &str) -> Vec<AuditEntry> 
     let Ok(owner) = community.owner().map(|o| o.to_hex()) else { return Vec::new() };
     let roster = crate::db::community::get_community_roles(cid_hex).unwrap_or_default();
     let banned = crate::db::community::get_community_banlist(cid_hex).unwrap_or_default();
+    // An un-ban's Kick is the ban's own departure, dated at it: the ban already has its entry.
+    let ban_marks = crate::db::community::get_community_ban_marks(cid_hex).unwrap_or_default();
+    let departs_a_ban = |target: &PublicKey, at_ms: u64| at_ms.is_multiple_of(1000) && ban_marks.get(&target.to_hex()) == Some(&(at_ms / 1000));
     let may = |actor: &PublicKey, target: &PublicKey, bit: u64, vac: Option<&crate::community::edition::AuthorityCitation>| {
         let (a, t) = (actor.to_hex(), target.to_hex());
         t != owner && !banned.contains(&a) && roster.can_act_on_member(&a, Some(&owner), &t, bit) && citation_is_synced(cid_hex, &owner, &a, vac)
@@ -546,7 +549,10 @@ fn guestbook_entries(community: &CommunityV2, cid_hex: &str) -> Vec<AuditEntry> 
     for ev in &events {
         let id = hex(&ev.rumor_id);
         match &ev.entry {
-            guestbook::GuestbookEntry::Kick { actor, target, citation, at_ms } if may(actor, target, Permissions::KICK, citation.as_ref()) => {
+            guestbook::GuestbookEntry::Kick { target, at_ms, .. } if departs_a_ban(target, *at_ms) => {}
+            guestbook::GuestbookEntry::Kick { actor, target, citation, at_ms }
+                if may(actor, target, Permissions::KICK, citation.as_ref()) || may(actor, target, Permissions::BAN, citation.as_ref()) =>
+            {
                 out.push(AuditEntry { id, at: *at_ms, actor: Some(npub(actor)), action: "member_kick", target: Some(member(&target.to_hex())), changes: Vec::new(), partial: false });
             }
             guestbook::GuestbookEntry::Timeout { actor, target, until_secs, citation, at_ms } if may(actor, target, Permissions::MODERATE_MEMBERS, citation.as_ref()) => {

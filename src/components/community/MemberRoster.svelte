@@ -20,7 +20,7 @@
         ownerNpub = null,          // PROVEN owner (verified attestation), or null
         caps = {},                 // community capabilities: manage_roles, kick, ban
         profiles = [],             // initial snapshot; later loads ride setProfiles()
-        members = [],              // [{ npub }]
+        members = [],              // [{ npub, unlisted? }]: an `unlisted` member is shown, never counted
         admins = [],
         banned = [],
         roleGraph = null,          // { roles: [{ role_id, name, position, channel_id }], grants: [{ npub, role_ids }] }
@@ -210,6 +210,7 @@
                 rank: isOwner ? 'owner' : isAdmin ? 'admin' : null,
                 rankLabel: heldBy.get(m.npub)?.name || null,
                 timeoutUntil: timedOutUntil(communityId, m.npub),
+                unlisted: m.unlisted || null,
                 canModerate: iOutrank(m.npub) && !!(caps.kick || caps.ban || caps.moderate_members),
                 canRole: mayRole(m.npub),
                 canNick: mayNick(m.npub),
@@ -224,7 +225,9 @@
             const id = heldBy.get(vm.npub)?.role_id || (vm.isOwner || vm.isAdmin ? 'admin' : 'members');
             (buckets.get(id) || buckets.get('members')).push(vm);
         }
-        return sectionOrder.map((s) => ({ ...s, rows: buckets.get(s.id) })).filter((s) => s.rows.length);
+        return sectionOrder
+            .map((s) => ({ ...s, rows: buckets.get(s.id), counted: buckets.get(s.id).filter((vm) => !vm.unlisted).length }))
+            .filter((s) => s.rows.length);
     });
 
     const shown = $derived(sections.reduce((n, s) => n + s.rows.length, 0));
@@ -374,7 +377,7 @@
                      oncontextmenu={(e) => headMenu(it.section, e)}
                      onkeydown={(e) => (e.key === 'Enter' || e.key === ' ') && (e.preventDefault(), toggleSection(it.section.id))}>
                     <span class="member-section-label">{it.section.label}</span>
-                    <span class="member-section-count">{it.section.rows.length}</span>
+                    <span class="member-section-count">{it.section.counted}</span>
                     <span class="member-section-caret"><span class="icon icon-chevron-down"></span></span>
                 </div>
             {:else}
@@ -391,6 +394,8 @@
                         rank={vm.rank}
                         rankLabel={vm.rankLabel}
                         timeoutUntil={vm.timeoutUntil}
+                        unlisted={vm.unlisted}
+                        onunlisted={() => h.explainUnlisted(vm.unlisted)}
                         {hoverBg}
                         acting={acting.has(vm.npub)}
                         onactivate={(e) => openProfile(vm.npub, e)}

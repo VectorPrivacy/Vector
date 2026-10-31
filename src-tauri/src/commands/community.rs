@@ -136,6 +136,9 @@ pub async fn list_communities() -> Result<Vec<CommunitySummary>, String> {
 pub struct CommunityMember {
     pub npub: String,
     pub last_active: u64,
+    /// Seen posting but not a member by the Guestbook (`"no_join"`, `"departed"`): listed, never counted.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unlisted: Option<String>,
 }
 
 /// Observed participants of a Community: distinct authors seen across its channels, newest
@@ -149,8 +152,11 @@ pub async fn get_community_members(community_id: String) -> Result<Vec<Community
         .get_community_members(&community_id)
         .await
         .into_iter()
-        .filter_map(|m| m.get("npub").and_then(|n| n.as_str()).map(String::from))
-        .map(|npub| CommunityMember { npub, last_active: 0 })
+        .filter_map(|m| {
+            let npub = m.get("npub")?.as_str()?.to_string();
+            let unlisted = m.get("unlisted").and_then(|u| u.as_str()).map(String::from);
+            Some(CommunityMember { npub, last_active: 0, unlisted })
+        })
         .collect())
 }
 

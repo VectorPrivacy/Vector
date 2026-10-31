@@ -20603,6 +20603,21 @@ textarea.command-part-input {
   background-color: var(--danger-color);
 }
 
+/* Seen posting outside the Guestbook's members. The padding is a finger-sized tap area: the
+   glyph draws in the content box, and the negative margin keeps the layout to the glyph. */
+.member-unlisted {
+  position: relative;
+  box-sizing: content-box;
+  width: 14px;
+  height: 14px;
+  padding: 8px;
+  margin: -8px;
+  mask-origin: content-box;
+  flex-shrink: 0;
+  display: inline-block;
+  background-color: #fbbf24;
+}
+
 .dmsg-author-badge {
   display: inline-block;
   font-size: 9px;

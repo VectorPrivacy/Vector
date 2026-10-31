@@ -1538,6 +1538,19 @@ async fn follow_community(session: &std::sync::Arc<crate::db::Session>, id: &Com
                 surface_presence(&current, &fresh, handler);
                 handler.on_community_refreshed(&community_id);
             }
+            match super::service::heal_my_join(&transport, &current).await {
+                Ok(true) => handler.on_community_refreshed(&community_id),
+                Ok(false) => {}
+                Err(e) => crate::log_debug!("[v2:join {}] restore deferred: {e}", &community_id[..8.min(community_id.len())]),
+            }
+            match super::service::heal_ban_departures(&transport, &current).await {
+                Ok(0) => {}
+                Ok(n) => {
+                    crate::log_info!("[v2:ban {}] wrote {n} lifted ban(s) to the Guestbook", &community_id[..8.min(community_id.len())]);
+                    handler.on_community_refreshed(&community_id);
+                }
+                Err(e) => crate::log_debug!("[v2:ban {}] departures deferred: {e}", &community_id[..8.min(community_id.len())]),
+            }
             if let Err(e) = super::service::carry_my_nickname(&transport, &current).await {
                 crate::log_debug!("[v2:nickname {}] carry deferred: {e}", &community_id[..8.min(community_id.len())]);
             }

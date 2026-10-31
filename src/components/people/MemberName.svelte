@@ -1,7 +1,7 @@
 <script>
     // The identity cell of a member-style row: display name plus its marks (rank, bot, a
-    // running Timeout) on one line. Same DOM as the vanilla buildMemberNameCell so the global
-    // styles cascade.
+    // running Timeout, posting outside the Guestbook) on one line. Same DOM as the vanilla
+    // buildMemberNameCell so the global styles cascade.
     import { countdownTip, fmtCountdown } from '../lib/countdown.js';
 
     let {
@@ -13,6 +13,8 @@
         status = null,            // { title, emojiTags } — the person's NIP-38 status line
         keyHint = '',             // a shortened npub beside the name, so a copied name can't pass as its owner
         timeoutUntil = 0,         // unix seconds a running Timeout ends, 0 for none
+        unlisted = null,          // 'no_join' | 'departed': seen posting outside the Guestbook's members
+        onunlisted = null,        // () => void — the warning mark was tapped
         style = '',
         ui,                       // { twemojify, renderCustomEmojiShortcodes, showTooltip, hideTooltip }
     } = $props();
@@ -50,6 +52,13 @@
 
     const rankWord = $derived(rank === 'owner' ? 'Owner' : (rankLabel || 'Admin'));
     const timeoutLabel = (left) => (left > 0 ? 'Timeout ends in ' + fmtCountdown(left) : 'Timeout ending');
+    const unlistedLabel = $derived(unlisted === 'departed' ? 'Posting after leaving' : 'Never announced joining');
+
+    function explain(e) {
+        e.stopPropagation();
+        ui.hideTooltip();
+        onunlisted?.();
+    }
 </script>
 
 <div class="member-pick-identity" {style}>
@@ -77,6 +86,18 @@
         {#if timeoutUntil}
             <span class="icon icon-clock-snooze member-timeout" role="img" aria-label="Timed out"
                   use:countdownTip={{ until: timeoutUntil, label: timeoutLabel, ui }}></span>
+        {/if}
+        {#if unlisted}
+            <span
+                class="icon icon-warning member-unlisted btn"
+                role="button"
+                tabindex="0"
+                aria-label={unlistedLabel}
+                onclick={explain}
+                onkeydown={(e) => (e.key === 'Enter' || e.key === ' ') && (e.preventDefault(), explain(e))}
+                onmouseenter={(e) => ui.showTooltip(unlistedLabel, e.currentTarget)}
+                onmouseleave={() => ui.hideTooltip()}
+            ></span>
         {/if}
     </div>
     {#if status?.title}

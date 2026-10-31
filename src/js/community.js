@@ -554,6 +554,23 @@ const _communityCapsCache = new Map();
 /** Bumped per overview render: a render that awaited past a newer one paints nothing. */
 let _overviewRenderSeq = 0;
 
+/** A roster's count: someone only seen posting is listed, never counted, so every client agrees. */
+function countedMembers(members) {
+    return members.reduce((n, m) => n + (m.unlisted ? 0 : 1), 0);
+}
+
+/** What a member list's warning mark means, for someone seen posting outside the Guestbook. */
+function explainUnlisted(why) {
+    const departed = why === 'departed';
+    popupConfirm(
+        departed ? 'Departed Member' : 'Unannounced Member',
+        departed
+            ? 'They left or were removed, yet are still posting. This may be suspicious, keep an eye on them.'
+            : 'They joined and are posting without ever publishing a join event. This may be suspicious, keep an eye on them.',
+        true, '', 'vector_warning.svg',
+    );
+}
+
 /** Render text for a community's member count, or '' if not yet known. */
 function communityMemberSubtext(communityId) {
     const n = communityMemberCounts.get(communityId);
@@ -577,10 +594,12 @@ async function refreshCommunityMemberCount(communityId, force = false) {
     }
     _communityCountInFlight.delete(communityId);
     _communityCountLastFetch.set(communityId, Date.now());
+    const listed = communityMembersCache.get(communityId)?.length;
     communityMembersCache.set(communityId, members);
     if (force) syncRequestMutuals(true);
-    if (communityMemberCounts.get(communityId) === members.length) return; // unchanged, no re-render
-    communityMemberCounts.set(communityId, members.length);
+    const counted = countedMembers(members);
+    if (communityMemberCounts.get(communityId) === counted && listed === members.length) return; // unchanged, no re-render
+    communityMemberCounts.set(communityId, counted);
     // Live-update the open channel's header (its chat carries this community_id) + the overview status.
     const openChat = strOpenChat ? arrChats.find(c => c.id === strOpenChat) : null;
     if (openChat && openChat.metadata?.custom_fields?.community_id === communityId) {
@@ -957,11 +976,11 @@ async function renderCommunityOverview(chat, preserveSearch = false) {
                 h: {
                     showContextMenu, attachLongPressContextMenu, showMiniProfile, getProfileAvatarSrc, getProfile,
                     getName, streamHidden, twemojify, renderCustomEmojiShortcodes, showGlobalTooltip, hideGlobalTooltip,
-                    memberSectionClosed, setMemberSectionClosed, copyIdItems, memberMenuItems,
+                    memberSectionClosed, setMemberSectionClosed, copyIdItems, memberMenuItems, explainUnlisted,
                 },
                 onChange: ({ members }) => {
                     communityMembersCache.set(communityId, members);
-                    communityMemberCounts.set(communityId, members.length);
+                    communityMemberCounts.set(communityId, countedMembers(members));
                     VectorSvelte.touchCommunity(communityId);
                 },
             } });
@@ -982,7 +1001,7 @@ async function renderCommunityOverview(chat, preserveSearch = false) {
         try { memberList = await fetchCommunityMembers(communityId); } catch (_) {}
         // Cache the count for the header/overview subtext (the overview's own authoritative fetch).
         communityMembersCache.set(communityId, memberList);
-        communityMemberCounts.set(communityId, memberList.length);
+        communityMemberCounts.set(communityId, countedMembers(memberList));
         _communityCountLastFetch.set(communityId, Date.now());
         try { adminNpubs = await invoke('get_community_admins', { communityId }); } catch (_) {}
         try {
