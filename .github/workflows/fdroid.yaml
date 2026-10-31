@@ -46,7 +46,11 @@ jobs:
           distribution: temurin
           java-version: '17'
 
+      # Its default package list still names the legacy `tools`, which current
+      # command-line tools no longer carry.
       - uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
 
       - name: Android NDK
         run: |
