@@ -48,6 +48,12 @@ object VectorBatteryHelper {
     @JvmStatic
     fun getBackgroundServiceEnabled(context: Context): Boolean {
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        if (!prefs.contains(KEY_BG_SERVICE_ENABLED)) {
+            // Off for a new install; one that already holds an account ran in the background by default.
+            val existing = context.dataDir.listFiles()?.any { it.isDirectory && it.name.startsWith("npub1") } == true
+            setBackgroundServiceEnabled(context, existing)
+            return existing
+        }
         return prefs.getBoolean(KEY_BG_SERVICE_ENABLED, false)
     }
 
