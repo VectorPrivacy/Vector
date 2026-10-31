@@ -114,6 +114,11 @@
   </head>
 
   <!-- The shell (src/components/shell/App.svelte) mounts here as the bundle loads. -->
-  <body></body>
+  <body>
+    <!-- Holds the parse until every stylesheet has loaded: WebKit runs deferred scripts
+         without waiting, so the shell would mount unstyled and each panel animate into its
+         hidden state. -->
+    <script src="/js/styles-gate.js"></script>
+  </body>
 
 </html>

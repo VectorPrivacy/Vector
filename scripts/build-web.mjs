@@ -205,7 +205,8 @@ async function bundleScripts() {
     const strict = (src) => /^\s*(\/\*[\s\S]*?\*\/\s*|\/\/[^\n]*\n\s*)*['"]use strict['"]/.test(readFileSync(join(OUT, src), 'utf8'));
     const groups = [];
     const runs = { true: null, false: null };
-    for (const [tag, src, defer] of page.matchAll(/ *<script src="([^"]+)"( defer)?><\/script>\n?/g)) {
+    // The head's only: a script in the body runs where it stands.
+    for (const [tag, src, defer] of page.slice(0, page.indexOf('<body')).matchAll(/ *<script src="([^"]+)"( defer)?><\/script>\n?/g)) {
         const kind = !!defer;
         if (strict(src)) { runs[kind] = null; continue; }
         if (!runs[kind]) groups.push(runs[kind] = { defer: kind, srcs: [], tags: [] });
