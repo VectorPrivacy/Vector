@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-calls-mic-get"
+description = "Enables the calls_mic_get command without any pre-configured scope."
+commands.allow = ["calls_mic_get"]
+
+[[permission]]
+identifier = "deny-calls-mic-get"
+description = "Denies the calls_mic_get command without any pre-configured scope."
+commands.deny = ["calls_mic_get"]

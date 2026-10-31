@@ -68,6 +68,7 @@ import VoiceBar from '../calls/VoiceBar.svelte';
     import AttachmentPanelRoot from '../miniapps/AttachmentPanelRoot.svelte';
     import MarketplaceRoot from '../marketplace/MarketplaceRoot.svelte';
     import LaunchDialogRoot from '../miniapps/LaunchDialogRoot.svelte';
+    import StartMenu from './StartMenu.svelte';
     const panes = shellPanes();
     const screens = shellScreens();
     const reveals = shellReveals();
@@ -85,6 +86,7 @@ import VoiceBar from '../calls/VoiceBar.svelte';
 {#if screens.packDetails}<PackDetailsOverlay h={screens.packDetails.h} />{/if}
 <!-- A Nostr post, article or video from a chat card, in full. -->
 {#if screens.nostrEmbed}<NostrEmbedModal h={screens.nostrEmbed.h} />{/if}
+{#if screens.startMenu}<StartMenu h={screens.startMenu.h} />{/if}
 
 <WindowChrome />
 <main class="container">

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-start-rename-folder"
+description = "Enables the start_rename_folder command without any pre-configured scope."
+commands.allow = ["start_rename_folder"]
+
+[[permission]]
+identifier = "deny-start-rename-folder"
+description = "Denies the start_rename_folder command without any pre-configured scope."
+commands.deny = ["start_rename_folder"]

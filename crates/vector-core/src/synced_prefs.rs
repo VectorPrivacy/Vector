@@ -31,6 +31,7 @@ pub const RAIL_D_TAG: &str = "vector/rail";
 pub const BANNERS_D_TAG: &str = "vector/banners";
 pub const SETTINGS_D_TAG: &str = "vector/settings";
 pub const ARCHIVE_D_TAG: &str = "vector/archive";
+pub const START_D_TAG: &str = "vector/start";
 
 const BLOCKS_LOCAL_KEY: &str = "synced_blocks_local";
 const MUTES_LOCAL_KEY: &str = "synced_mutes_local";
@@ -40,6 +41,7 @@ const RAIL_LOCAL_KEY: &str = "synced_rail_local";
 const BANNERS_LOCAL_KEY: &str = "synced_banners_local";
 const SETTINGS_LOCAL_KEY: &str = "synced_settings_local";
 const ARCHIVE_LOCAL_KEY: &str = "synced_archive_local";
+const START_LOCAL_KEY: &str = "synced_start_local";
 /// The newest `created_at` of an archive copy this device holds, adopted or published.
 const ARCHIVE_SEEN_KEY: &str = "synced_archive_seen";
 /// Persisted, so a change survives a quit until the relays have it.
@@ -50,6 +52,10 @@ const SETTINGS_SEEN_KEY: &str = "synced_settings_seen";
 /// have. Persisted, so a quit during the rail's publish debounce is recoverable
 /// at the next boot instead of being silently lost.
 const RAIL_DIRTY_KEY: &str = "synced_rail_dirty";
+const START_DIRTY_KEY: &str = "synced_start_dirty";
+/// The newest `created_at` of a layout copy this device holds, adopted or published.
+const RAIL_SEEN_KEY: &str = "synced_rail_seen";
+const START_SEEN_KEY: &str = "synced_start_seen";
 
 /// One NIP-44 event holds the whole list, and blocks and nicknames scale with contacts
 /// rather than being capped like pins: the write path measures the list as it will be
@@ -422,20 +428,32 @@ pub enum Pref {
     Settings,
     /// Chats tidied out of the list until someone speaks in them again.
     Archive,
+    /// The widescreen Start Menu's pins and folders.
+    Start,
 }
 
 /// Every list, in the order hydration walks them. `Notify` comes after `Mutes`
 /// so a device holding both applies the richer one last and wins the overlap.
-pub const ALL_PREFS: [Pref; 8] = [
+pub const ALL_PREFS: [Pref; 9] = [
     Pref::Blocks,
     Pref::Mutes,
     Pref::Nicknames,
     Pref::Notify,
     Pref::Rail,
+    Pref::Start,
     Pref::Banners,
     Pref::Settings,
     Pref::Archive,
 ];
+
+/// Every self-synced list's d tag, for the live subscriptions: built from [`ALL_PREFS`],
+/// so a new list can't be read at boot and then never heard from again.
+pub fn live_d_tags() -> Vec<String> {
+    std::iter::once(crate::pinned_chats::PINNED_D_TAG)
+        .chain(ALL_PREFS.iter().map(|p| p.d_tag()))
+        .map(str::to_string)
+        .collect()
+}
 
 impl Pref {
     pub fn d_tag(self) -> &'static str {
@@ -448,6 +466,7 @@ impl Pref {
             Pref::Banners => BANNERS_D_TAG,
             Pref::Settings => SETTINGS_D_TAG,
             Pref::Archive => ARCHIVE_D_TAG,
+            Pref::Start => START_D_TAG,
         }
     }
     fn local_key(self) -> &'static str {
@@ -460,6 +479,7 @@ impl Pref {
             Pref::Banners => BANNERS_LOCAL_KEY,
             Pref::Settings => SETTINGS_LOCAL_KEY,
             Pref::Archive => ARCHIVE_LOCAL_KEY,
+            Pref::Start => START_LOCAL_KEY,
         }
     }
     /// The d-tag → list routing used by the self-sync handler.
@@ -473,6 +493,7 @@ impl Pref {
             BANNERS_D_TAG => Some(Pref::Banners),
             SETTINGS_D_TAG => Some(Pref::Settings),
             ARCHIVE_D_TAG => Some(Pref::Archive),
+            START_D_TAG => Some(Pref::Start),
             _ => None,
         }
     }
@@ -518,12 +539,12 @@ pub async fn hydrate_all(client: &Client) -> Vec<(Pref, String)> {
     let Some(my_pk) = crate::state::my_public_key() else { return Vec::new() };
     let mut applied = Vec::new();
     for pref in ALL_PREFS {
-        // The rail is the one list that can hold edits the relays have never
-        // seen: its publish is debounced, so a quit mid-drag leaves the newer
+        // The layouts are the lists that can hold edits the relays have never
+        // seen: their publish is debounced, so a quit mid-drag leaves the newer
         // copy here. Applying the relay's older one would undo it.
-        if pref == Pref::Rail && rail_is_dirty() {
+        if pref.is_layout() && layout_is_dirty(pref) {
             mark_hydrated(pref);
-            schedule_rail_publish();
+            schedule_layout_publish(pref);
             continue;
         }
         let fetched = match fetch_raw(client, my_pk, pref).await {
@@ -559,8 +580,13 @@ pub async fn hydrate_all(client: &Client) -> Vec<(Pref, String)> {
             continue;
         }
         match fetched {
+            // A relay that missed our last publish still serves the one before it.
+            Some(copy) if pref.is_layout() && !adopts_layout_copy(pref, copy.created_at) => mark_hydrated(pref),
             Some(copy) => {
                 if save_local_raw(pref, &copy.json).is_ok() {
+                    if pref.is_layout() {
+                        set_layout_seen(pref, copy.created_at);
+                    }
                     mark_hydrated(pref);
                     applied.push((pref, copy.json));
                 }
@@ -940,9 +966,47 @@ fn settings_published(json: &str, at: u64) {
 }
 
 pub fn load_rail() -> crate::rail_layout::RailLayout {
-    load_local_raw(Pref::Rail)
+    load_layout(Pref::Rail)
+}
+
+/// The Start Menu's pins, in the rail's shape: keys are pin keys (`crate::start_menu`).
+pub fn load_start() -> crate::rail_layout::RailLayout {
+    load_layout(Pref::Start)
+}
+
+fn load_layout(pref: Pref) -> crate::rail_layout::RailLayout {
+    let mut layout = load_local_raw(pref)
         .map(|s| crate::rail_layout::RailLayout::from_json(&s))
-        .unwrap_or_default()
+        .unwrap_or_default();
+    // A copy from a buggy or hostile writer can repeat a key; the menu keys its tiles by them.
+    if layout.is_editable() {
+        layout.normalize();
+    }
+    layout
+}
+
+struct LayoutEditLock;
+
+/// Load, change and commit one layout, one edit at a time: commands run on several
+/// threads, and two read-modify-writes interleaved would drop one of them. Returns the
+/// layout and whether anything moved (nothing is written when nothing did).
+pub fn edit_layout(
+    pref: Pref,
+    f: impl FnOnce(&mut crate::rail_layout::RailLayout) -> Result<(), String>,
+) -> Result<(crate::rail_layout::RailLayout, bool), String> {
+    if !pref.is_layout() {
+        return Err(format!("{} is not a layout", pref.d_tag()));
+    }
+    let lock: std::sync::Arc<std::sync::Mutex<()>> = crate::db::current_session().scoped::<LayoutEditLock, _>();
+    let _turn = lock.lock().unwrap_or_else(|e| e.into_inner());
+    let before = load_layout(pref);
+    let mut layout = before.clone();
+    f(&mut layout)?;
+    let changed = layout != before;
+    if changed {
+        save_layout_debounced(pref, &layout)?;
+    }
+    Ok((layout, changed))
 }
 
 async fn decrypt_event(my_pk: &PublicKey, event: &Event) -> Option<String> {
@@ -1047,14 +1111,19 @@ pub async fn ingest_remote(my_pk: &PublicKey, event: &Event) -> Option<(Pref, St
             }
         };
     }
+    let created_at = event.created_at.as_secs();
+    if pref.is_layout() && !adopts_layout_copy(pref, created_at) {
+        mark_hydrated(pref);
+        return None;
+    }
     if let Err(e) = save_local_raw(pref, &json) {
         crate::log_warn!("[SyncedPrefs] persisting {} failed: {e}", pref.d_tag());
         return None;
     }
-    mark_hydrated(pref);
-    if pref == Pref::Rail {
-        set_rail_dirty(false);
+    if pref.is_layout() {
+        set_layout_seen(pref, created_at);
     }
+    mark_hydrated(pref);
     Some((pref, json))
 }
 
@@ -1070,50 +1139,94 @@ pub async fn ingest_remote(my_pk: &PublicKey, event: &Event) -> Option<(Pref, St
 /// while the timer runs.
 const RAIL_PUBLISH_IDLE: std::time::Duration = std::time::Duration::from_millis(2500);
 
-/// Bumped by every rail edit. A sleeping publish that wakes to find a newer
+/// Bumped by every edit of a layout. A sleeping publish that wakes to find a newer
 /// generation was superseded mid-drag and simply stops, which is what collapses
 /// a burst into one write.
 struct RailPublishGen;
+struct StartPublishGen;
 
-fn rail_gen() -> std::sync::Arc<std::sync::atomic::AtomicU64> {
-    crate::db::current_session().scoped::<RailPublishGen, _>()
+fn layout_gen(pref: Pref) -> std::sync::Arc<std::sync::atomic::AtomicU64> {
+    if pref == Pref::Start {
+        crate::db::current_session().scoped::<StartPublishGen, _>()
+    } else {
+        crate::db::current_session().scoped::<RailPublishGen, _>()
+    }
 }
 
-/// Whether the rail holds edits the relays have not seen.
-pub fn rail_is_dirty() -> bool {
-    crate::db::settings::get_sql_setting(RAIL_DIRTY_KEY.to_string())
+impl Pref {
+    /// An arrangement the user drags about: saved at once, published once the dragging stops.
+    fn is_layout(self) -> bool {
+        matches!(self, Pref::Rail | Pref::Start)
+    }
+    fn dirty_key(self) -> &'static str {
+        if self == Pref::Start { START_DIRTY_KEY } else { RAIL_DIRTY_KEY }
+    }
+    fn seen_key(self) -> &'static str {
+        if self == Pref::Start { START_SEEN_KEY } else { RAIL_SEEN_KEY }
+    }
+}
+
+/// Whether a relay's copy of a layout replaces ours. Never over unsent edits, which are
+/// newer than any copy out there and publish regardless; nor when it is no newer than one
+/// we hold, since relays replay what they kept, in no order, and our own echo among it.
+fn adopts_layout_copy(pref: Pref, created_at: u64) -> bool {
+    !layout_is_dirty(pref) && created_at > layout_seen(pref)
+}
+
+/// The newest copy of a layout this device has adopted or published.
+fn layout_seen(pref: Pref) -> u64 {
+    crate::db::settings::get_sql_setting(pref.seen_key().to_string())
+        .ok()
+        .flatten()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0)
+}
+
+fn set_layout_seen(pref: Pref, at: u64) {
+    if at > layout_seen(pref) {
+        let _ = crate::db::settings::set_sql_setting(pref.seen_key().to_string(), at.to_string());
+    }
+}
+
+/// Whether a layout holds edits the relays have not seen.
+pub fn layout_is_dirty(pref: Pref) -> bool {
+    pref.is_layout()
+        && crate::db::settings::get_sql_setting(pref.dirty_key().to_string())
         .ok()
         .flatten()
         .as_deref()
         == Some("1")
 }
 
-fn set_rail_dirty(dirty: bool) {
+fn set_layout_dirty(pref: Pref, dirty: bool) {
     let _ = crate::db::settings::set_sql_setting(
-        RAIL_DIRTY_KEY.to_string(),
+        pref.dirty_key().to_string(),
         if dirty { "1" } else { "0" }.to_string(),
     );
 }
 
 /// Commit an arrangement: on disk now, on the relays once the dragging stops.
 ///
-/// The local mirror is the truth the rail paints from, so the UI never waits on
-/// a relay to show a drag landing.
-pub fn save_rail_debounced(layout: &crate::rail_layout::RailLayout) -> Result<(), String> {
-    save_local_raw(Pref::Rail, &layout.to_json())?;
-    set_rail_dirty(true);
-    schedule_rail_publish();
+/// The local mirror is the truth the rail and the Start Menu paint from, so the UI
+/// never waits on a relay to show a drag landing.
+pub fn save_layout_debounced(pref: Pref, layout: &crate::rail_layout::RailLayout) -> Result<(), String> {
+    if !pref.is_layout() {
+        return Err(format!("{} is not a layout", pref.d_tag()));
+    }
+    save_local_raw(pref, &layout.to_json())?;
+    set_layout_dirty(pref, true);
+    schedule_layout_publish(pref);
     Ok(())
 }
 
-fn schedule_rail_publish() {
-    let generation = rail_gen().fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+fn schedule_layout_publish(pref: Pref) {
+    let generation = layout_gen(pref).fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
     crate::db::spawn_bound(async move {
         crate::rt::time::sleep(RAIL_PUBLISH_IDLE).await;
-        if rail_gen().load(std::sync::atomic::Ordering::Relaxed) != generation {
+        if layout_gen(pref).load(std::sync::atomic::Ordering::Relaxed) != generation {
             return;
         }
-        flush_rail().await;
+        flush_layout(pref).await;
     });
 }
 
@@ -1124,14 +1237,27 @@ fn schedule_rail_publish() {
 /// persisted. That is also what covers a quit inside the debounce window — the
 /// publish never ran, and the arrangement is not lost.
 pub async fn flush_rail() {
-    if !rail_is_dirty() || !is_hydrated(Pref::Rail) {
+    flush_layout(Pref::Rail).await
+}
+
+pub async fn flush_layout(pref: Pref) {
+    if !layout_is_dirty(pref) || !is_hydrated(pref) {
         return;
     }
-    let Some(client) = crate::state::nostr_client() else { return };
-    let Some(json) = load_local_raw(Pref::Rail) else { return };
-    match publish_raw(&client, Pref::Rail, &json).await {
-        Ok(()) => set_rail_dirty(false),
-        Err(e) => crate::log_warn!("[SyncedPrefs] rail publish deferred: {e}"),
+    let (Some(client), Some(my_pk)) = (crate::state::nostr_client(), crate::state::my_public_key()) else { return };
+    let generation = layout_gen(pref).load(std::sync::atomic::Ordering::Relaxed);
+    let Some(json) = load_local_raw(pref) else { return };
+    // Dated after every copy we hold, so ours is the newest wherever it lands.
+    let at = Timestamp::now().as_secs().max(layout_seen(pref) + 1);
+    match send_list(&client, my_pk, pref, &json, Some(at)).await {
+        // An edit made while this copy was out is still unsent; its own timer sends it.
+        Ok(()) => {
+            set_layout_seen(pref, at);
+            if layout_gen(pref).load(std::sync::atomic::Ordering::Relaxed) == generation {
+                set_layout_dirty(pref, false);
+            }
+        }
+        Err(e) => crate::log_warn!("[SyncedPrefs] {} publish deferred: {e}", pref.d_tag()),
     }
 }
 
@@ -1384,6 +1510,52 @@ mod tests {
         }
         assert!(s.set_notif("hide_everything").is_err());
         assert_eq!(s.notif, "hide_all", "a refused level changes nothing");
+    }
+
+    #[test]
+    fn every_synced_list_is_on_the_live_subscription() {
+        let tags = live_d_tags();
+        for p in ALL_PREFS {
+            assert!(tags.contains(&p.d_tag().to_string()), "{} read at boot but never heard live", p.d_tag());
+        }
+        assert!(tags.contains(&crate::pinned_chats::PINNED_D_TAG.to_string()));
+    }
+
+    #[tokio::test]
+    async fn the_two_layouts_keep_their_own_edits_and_nothing_else_is_one() {
+        let (_tmp, _guard) = init_test_db();
+        let (start, changed) = edit_layout(Pref::Start, |l| crate::start_menu::pin(l, "nexus").map(|_| ())).unwrap();
+        assert!(changed && start.contains("nexus"));
+        assert!(layout_is_dirty(Pref::Start), "unsent until the dragging stops");
+        assert!(!layout_is_dirty(Pref::Rail), "the rail's state is its own");
+        assert!(load_rail().nodes.is_empty());
+        let (_, changed) = edit_layout(Pref::Start, |l| crate::start_menu::pin(l, "nexus").map(|_| ())).unwrap();
+        assert!(!changed, "an edit that moves nothing writes nothing");
+        assert!(edit_layout(Pref::Blocks, |_| Ok(())).is_err());
+        assert!(save_layout_debounced(Pref::Blocks, &start).is_err(), "a layout never lands in another list");
+        assert!(!layout_is_dirty(Pref::Blocks));
+    }
+
+    #[test]
+    fn a_layout_takes_only_a_newer_copy_and_never_over_unsent_edits() {
+        let (_tmp, _guard) = init_test_db();
+        assert!(adopts_layout_copy(Pref::Start, 100), "a first copy is taken");
+        set_layout_seen(Pref::Start, 100);
+        assert!(!adopts_layout_copy(Pref::Start, 100), "our own echo changes nothing");
+        assert!(!adopts_layout_copy(Pref::Start, 90), "a relay replaying the copy before");
+        assert!(adopts_layout_copy(Pref::Start, 101));
+        set_layout_seen(Pref::Start, 50);
+        assert!(!adopts_layout_copy(Pref::Start, 99), "what we have seen only moves forward");
+        assert!(adopts_layout_copy(Pref::Rail, 60), "each layout keeps its own");
+        set_layout_dirty(Pref::Start, true);
+        assert!(!adopts_layout_copy(Pref::Start, 999), "unsent edits outrank any copy");
+    }
+
+    #[test]
+    fn a_layout_repeating_a_key_loads_once_each() {
+        let (_tmp, _guard) = init_test_db();
+        save_local_raw(Pref::Start, r#"{"v":1,"nodes":[{"type":"item","key":"nexus"},{"type":"item","key":"nexus"},{"type":"folder","id":"f","keys":["requests","nexus","settings"]}]}"#).unwrap();
+        assert_eq!(load_start().flatten(), vec!["nexus".to_string(), "requests".to_string(), "settings".to_string()]);
     }
 
     fn init_test_db() -> (tempfile::TempDir, std::sync::MutexGuard<'static, ()>) {

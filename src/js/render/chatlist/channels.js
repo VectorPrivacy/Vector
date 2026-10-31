@@ -754,7 +754,7 @@ async function openCommunityMenu(chat, ev, at) {
             });
         }
     }
-    if (cf.community_id) items.push(...copyLinkItems('Community', { community: cf.community_id }));
+    if (cf.community_id) items.push(...startPinItems(`c/${cf.community_id}`), ...copyLinkItems('Community', { community: cf.community_id }));
     items.push(...copyIdItems('Community', cf.community_id));
     items.push({ divider: true });
     // Owner or member, the same entry point decides which flow it is — and both
@@ -790,7 +790,7 @@ async function openChannelMenu(communityId, channel, x, y) {
         items.push({ divider: true });
         items.push({ label: 'Edit Channel', icon: 'edit', onClick: () => openChannelEditorFor(communityId, channel) });
     }
-    items.push(...copyLinkItems('Channel', { community: communityId, channel: channel.id }));
+    items.push(...startPinItems(`c/${communityId}/${channel.id}`), ...copyLinkItems('Channel', { community: communityId, channel: channel.id }));
     items.push(...copyIdItems('Channel', channel.id));
     // The primary channel anchors the community's row and history; the backend refuses to tombstone it.
     const fPrimary = arrChats.some(c => c.id === channel.id && c.metadata?.custom_fields?.primary_channel === channel.id);

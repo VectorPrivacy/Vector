@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-start-unpin"
+description = "Enables the start_unpin command without any pre-configured scope."
+commands.allow = ["start_unpin"]
+
+[[permission]]
+identifier = "deny-start-unpin"
+description = "Denies the start_unpin command without any pre-configured scope."
+commands.deny = ["start_unpin"]

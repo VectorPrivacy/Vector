@@ -70,7 +70,7 @@ export { communityTimeouts, setCommunityTimeouts } from './lib/timeouts.svelte.j
 export { fmtCountdown } from './lib/countdown.js';
 export { setChrome } from './lib/chrome.svelte.js';
 export { ilSet, ilSetBusy, ilSetCreating, ilSetRevoking, ilReset } from './lib/invitelinks.svelte.js';
-export { mktState, mktActions, mktIcons, mktPerms, mktSetApps, mktPatchApp, mktSetLoading, mktSetError, mktSetAction, mktSetProgress, mktSetIcon, mktOpenDetails, mktCloseDetails, mktSetPerms, mktSetPlayed, mktShow, mktReset, mktOpenPicker, mktClosePicker, setMarketplaceHandlers, mktOpenPanel, mktClosePanel, mktSetDevice, mktSetFitOnly } from './lib/marketplace.svelte.js';
+export { mktState, mktActions, mktIcons, mktPerms, mktSetApps, mktPatchApp, mktSetLoading, mktSetError, mktSetAction, mktSetProgress, mktSetIcon, mktOpenDetails, mktCloseDetails, mktSetPerms, mktSetPlayed, mktShow, mktReset, mktOpenPicker, mktClosePicker, setMarketplaceHandlers, mktOpenPanel, mktClosePanel, mktSetDevice, mktSetFitOnly, mktHandlers, mktSetQuery } from './lib/marketplace.svelte.js';
 export { gridState, gridSetApps, gridSetQuery, gridSetEditMode, gridPatch } from './lib/miniappsgrid.svelte.js';
 export { splitControlTags, controlTags } from './lib/nexus.js';
 export { polState, polPresets, polRuleKinds, polStored, polDraft, polSetCatalogue, polSetStored, polSetChannels, polResetChannels, polShowGallery, polOpenEditor, polSetBusy, polSetPreview, polSetPreviewError } from './lib/policy.svelte.js';
@@ -122,7 +122,7 @@ export { openNostrEmbedModal, pushNostrEmbedModal, popNostrEmbedModal, closeNost
 export { gifLoading, gifResults, gifEmpty, gifLoadingMore };
 export { setPins, setPinsOpen, setPinsButtonVisible, setPinsHandlers, pinsEls };
 export { setChatPaneHandlers, setChatHeaderHandlers } from './lib/chatpane.svelte.js';
-export { callAudio, setCallState, setCallStats, setCallLevels, setCallAudio, setCallDirect, setCallRoute, setMicTest, setAudioDevices, setVideoCaps, setVideoLink, setVideoPeerSize, setVideoStats, setVideoPrefs, setShareAudio, shareAudioNative, shareAudioOn } from './lib/calls.svelte.js';
+export { micState, setMicState, callAudio, setCallState, setCallStats, setCallLevels, setCallAudio, setCallDirect, setCallRoute, setMicTest, setAudioDevices, setVideoCaps, setVideoLink, setVideoPeerSize, setVideoStats, setVideoPrefs, setShareAudio, shareAudioNative, shareAudioOn } from './lib/calls.svelte.js';
 export { startMotion, setMotionActive } from './lib/motion.js';
 export { guardTiling } from './lib/tiling.js';
 export { wallpaperState, setWallpaperLayer, setWallpaperSliders, setWallpaperBusy, setWallpaperLabel, setWallpaperPreviewing } from './lib/wallpaper.svelte.js';
@@ -247,3 +247,5 @@ export { watchPlace, repeatPlace, setPlaceMessage } from './lib/place.svelte.js'
 export { requestState, setChatRequest, setRequestHandlers } from './lib/request.svelte.js';
 export { canvasReadsTrue } from './lib/artcolor.js';
 export { voiceSession, setVoiceSession, setVoicePresent, setVoiceStage, setVoiceCallHandlers, toggleVoiceMic, voiceJoining, setVoiceJoining } from './lib/voice.svelte.js';
+
+export { startMenuState, setStartMode, setStartLayout, setStartOpen } from './lib/startmenu.svelte.js';

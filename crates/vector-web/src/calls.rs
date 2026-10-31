@@ -797,6 +797,13 @@ pub fn dispatch<'a>(cmd: &'a str, a: &'a Args) -> Pin<Box<dyn Future<Output = Op
                 Some(on) => vector_core::db::scoped_result(async move { voice::set_deafened(on) }).await.map(|_| Value::Null),
                 None => Err("Missing on".into()),
             },
+            "calls_mic_get" => to_value(vector_core::db::scoped(async { vector_core::calls::settings::mic_state() }).await),
+            "calls_mic_set" => match (a.bool("muted"), a.bool("deafened")) {
+                (Some(muted), Some(deafened)) => vector_core::db::scoped_result(vector_core::calls::set_mic(vector_core::calls::settings::MicState { muted, deafened }))
+                    .await
+                    .map(|_| Value::Null),
+                _ => Err("Missing muted or deafened".into()),
+            },
             "voice_video" => match (a.de::<VideoKind>("kind"), a.bool("on")) {
                 (Ok(kind), Some(on)) => vector_core::db::scoped_result(async move { voice::set_video(kind, on) }).await.map(|_| Value::Null),
                 (Err(e), _) => Err(e),

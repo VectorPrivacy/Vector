@@ -61,6 +61,10 @@ pub fn publish_projection(pref: Pref) {
                 synced_prefs::flush_rail().await;
                 return;
             }
+            Pref::Start => {
+                synced_prefs::flush_layout(Pref::Start).await;
+                return;
+            }
             Pref::Banners => synced_prefs::load_hidden_banners().to_json(),
             Pref::Archive => synced_prefs::load_archive().to_json(),
             Pref::Settings => return,
@@ -95,6 +99,7 @@ pub async fn hydrate_prefs() {
             Pref::Nicknames => apply_nicknames(NicknameMap::from_json(&json)).await,
             Pref::Notify => apply_notify(NotifyMap::from_json(&json)).await,
             Pref::Rail => crate::commands::rail::emit(&vector_core::rail_layout::RailLayout::from_json(&json)),
+            Pref::Start => crate::commands::start::emit(&vector_core::rail_layout::RailLayout::from_json(&json)),
             Pref::Banners => emit_hidden_banners(&IdList::from_json(&json)),
             Pref::Archive => emit_archive(&ArchiveMap::from_json(&json)),
             Pref::Settings => settings_changed(was_live, &SyncedSettings::from_json(&json)),
@@ -113,6 +118,7 @@ pub async fn ingest_prefs_update(event: Event) {
         Pref::Nicknames => apply_nicknames(NicknameMap::from_json(&json)).await,
         Pref::Notify => apply_notify(NotifyMap::from_json(&json)).await,
         Pref::Rail => crate::commands::rail::emit(&vector_core::rail_layout::RailLayout::from_json(&json)),
+        Pref::Start => crate::commands::start::emit(&vector_core::rail_layout::RailLayout::from_json(&json)),
         Pref::Banners => emit_hidden_banners(&IdList::from_json(&json)),
         Pref::Archive => emit_archive(&ArchiveMap::from_json(&json)),
         Pref::Settings => settings_changed(was_live, &SyncedSettings::from_json(&json)),

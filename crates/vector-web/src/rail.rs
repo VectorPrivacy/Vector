@@ -63,11 +63,8 @@ async fn edit(f: impl FnOnce(&mut RailLayout) -> Result<(), String>) -> Result<R
         if !synced_prefs::is_hydrated(Pref::Rail) {
             return Err("Still syncing your communities, try again in a moment".to_string());
         }
-        let before = synced_prefs::load_rail();
-        let mut layout = before.clone();
-        f(&mut layout)?;
-        if layout != before {
-            synced_prefs::save_rail_debounced(&layout)?;
+        let (layout, changed) = synced_prefs::edit_layout(Pref::Rail, f)?;
+        if changed {
             vector_core::traits::emit_event_json(
                 "rail_layout_updated",
                 serde_json::to_value(&layout).unwrap_or_default(),

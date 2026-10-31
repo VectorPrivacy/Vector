@@ -170,3 +170,13 @@ function grade(lost, rtt) {
 export function rttQuality(rtt) {
     return rtt > 0 ? grade(0, rtt) : null;
 }
+
+// Muted and deafened as you left them (core calls::settings::MicState): every call starts this
+// way, and the Start Menu, the call overlay and the voice bar all change the one setting.
+const mic = $state({ muted: false, deafened: false });
+export function micState() { return mic; }
+export function setMicState(s) {
+    if (!s) return;
+    mic.muted = !!s.muted;
+    mic.deafened = !!s.deafened;
+}

@@ -9,6 +9,7 @@
     import RailShortcuts from './RailShortcuts.svelte';
     import { shellScreens } from '../lib/shell.svelte.js';
     import { openChatId } from '../lib/signals.svelte.js';
+    import { startMenuState, setStartOpen } from '../lib/startmenu.svelte.js';
     const panes = shellPanes();
     const st = shellState();
     const h = () => shellHandlers();
@@ -17,6 +18,18 @@
     const screens = shellScreens();
     // Bookmarks is your own chat: lit while it is open, and Chat stands down meanwhile.
     const bookmarksOpen = $derived(!!openChatId() && openChatId() === h().myNpub?.());
+    const start = startMenuState();
+    // With the Start Menu, your row opens it: the switcher and profile live inside.
+    function startTrigger(e) {
+        if (!st.ws || start.mode !== 'start') return;
+        e.stopPropagation();
+        e.preventDefault();
+        // Measured for the menu to grow from: the row and its avatar.
+        const box = (el) => { const r = el.getBoundingClientRect(); return { left: r.left, top: r.top, width: r.width, height: r.height }; };
+        const row = e.currentTarget.querySelector('.account') || e.currentTarget;
+        const avatar = row.querySelector('#account-avatar-container') || row;
+        setStartOpen(!start.open, { row: box(row), avatar: box(avatar) });
+    }
     // A tab that is a place in the app offers its link.
     function placeMenu(e, what, path) {
         e.preventDefault();
@@ -70,7 +83,9 @@
         <p class="navbar-text">Collapse</p>
     </div>
     <!-- The rail's footer: your row, rendered here instead of in the list while widescreen. -->
-    <div id="ws-rail-account">
+    <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+    <div id="ws-rail-account" class:start-open={start.visible} onclickcapture={startTrigger}>
+        {#if st.ws && start.mode === 'start' && (st.updateDot || st.invitesTab)}<span class="ws-start-dot" aria-hidden="true"></span>{/if}
         {#if st.ws}
             <AccountRow />
         {/if}

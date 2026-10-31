@@ -343,6 +343,40 @@ body.ws #settings-btn {
   display: flex !important;
 }
 
+/* The Start Menu holds the tabs: the rail keeps your communities and the row that opens it. */
+body.ws.ws-start #profile-btn,
+body.ws.ws-start #chat-btn,
+body.ws.ws-start #bookmarks-btn,
+body.ws.ws-start #miniapps-btn,
+body.ws.ws-start #settings-btn,
+body.ws.ws-start #invites-btn {
+  display: none !important;
+}
+body.ws.ws-start #ws-rail-account #account { cursor: pointer; }
+/* While the menu is out, its footer is the row: the row itself steps aside. */
+body.ws.ws-start #ws-rail-account.start-open #account,
+body.ws.ws-start #ws-rail-account.start-open .ws-start-dot { visibility: hidden; }
+/* An update or an invite waits inside the menu. */
+body.ws.ws-start #ws-rail-account { position: relative; }
+.ws-start-dot {
+  position: absolute;
+  top: 4px;
+  left: 6px;
+  z-index: 1;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background-color: var(--icon-color-primary);
+  box-shadow: 0 0 0 2px var(--ws-rail-bg, #0b0b0b);
+  pointer-events: none;
+}
+/* The menu opens upward from the row, so its caret points there, and back down while it's open. */
+body.ws.ws-start:not(.ws-rail-collapsed) #ws-rail-account .ws-account-caret {
+  transform: rotate(180deg);
+  transition: transform 0.15s ease, border-top-color 0.12s ease;
+}
+
+
 /* The rail's nav glyphs are solid; the mobile tab bar keeps its outlines. */
 body.ws #settings-btn .icon-settings {
   mask-image: url("./icons/settings-fill.svg");

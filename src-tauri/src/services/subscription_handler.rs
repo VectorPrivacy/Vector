@@ -54,17 +54,7 @@ pub(crate) async fn subscribe_self_sync() {
     let self_lists_filter = Filter::new()
         .author(my_pk)
         .kind(Kind::Custom(vector_core::stored_event::event_kind::APPLICATION_SPECIFIC))
-        .identifiers([
-            vector_core::pinned_chats::PINNED_D_TAG.to_string(),
-            vector_core::synced_prefs::BLOCKS_D_TAG.to_string(),
-            vector_core::synced_prefs::MUTES_D_TAG.to_string(),
-            vector_core::synced_prefs::NICKNAMES_D_TAG.to_string(),
-            vector_core::synced_prefs::NOTIFY_D_TAG.to_string(),
-            vector_core::synced_prefs::RAIL_D_TAG.to_string(),
-            vector_core::synced_prefs::BANNERS_D_TAG.to_string(),
-            vector_core::synced_prefs::SETTINGS_D_TAG.to_string(),
-            vector_core::synced_prefs::ARCHIVE_D_TAG.to_string(),
-        ]);
+        .identifiers(vector_core::synced_prefs::live_d_tags());
     match client.subscribe(self_lists_filter).await {
         Ok(out) => new_ids.push(out.value),
         Err(e) => eprintln!("[self-sync] self-lists subscribe failed: {:?}", e),

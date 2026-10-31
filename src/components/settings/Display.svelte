@@ -8,8 +8,9 @@
 
     const d = displayState();
     const shell = shellState();
-    // `slim`: only the slim layout has the row's subject.
+    // `slim` / `wide`: only that layout has the row's subject.
     const ROWS = [
+        { key: 'startMenu', id: 'start-menu-toggle', label: 'Start Menu', group: 'Navigation', wide: true },
         { key: 'hideRail', id: 'hide-rail-toggle', label: 'Hide Community Rail', group: 'Chat List', slim: true },
         { key: 'imageTypes', id: 'display-image-types-toggle', label: 'Display Image Types', group: 'Chat' },
         { key: 'chatBg', id: 'chat-bg-toggle', label: 'Background Wallpaper', group: 'Chat' },
@@ -19,7 +20,7 @@
         { key: 'sendOnEnter', id: 'send-on-enter-toggle', label: 'Send on Enter', group: 'Composer' },
         { key: 'floatingPlayer', id: 'floating-player-toggle', label: 'Floating Player', group: 'Media' },
     ];
-    const rows = $derived(shell.ws ? ROWS.filter((r) => !r.slim) : ROWS);
+    const rows = $derived(ROWS.filter((r) => (shell.ws ? !r.slim : !r.wide)));
     function info(key) {
         return (e) => { e.preventDefault(); e.stopPropagation(); h.explain(key); };
     }

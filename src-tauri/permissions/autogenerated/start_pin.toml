@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-start-pin"
+description = "Enables the start_pin command without any pre-configured scope."
+commands.allow = ["start_pin"]
+
+[[permission]]
+identifier = "deny-start-pin"
+description = "Denies the start_pin command without any pre-configured scope."
+commands.deny = ["start_pin"]

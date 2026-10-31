@@ -432,6 +432,7 @@ pub mod sending;
 // === Per-DM Wallpapers ===
 pub mod pinned_chats;
 pub mod rail_layout;
+pub mod start_menu;
 pub mod synced_prefs;
 pub mod notify;
 pub mod push;

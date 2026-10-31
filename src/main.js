@@ -194,6 +194,13 @@ function nprofileNpub(nprofile) {
     return '';
 }
 
+/** Whether `s` is a whole npub: 32 bytes under a checksum that holds. */
+function isNpub(s) {
+    if (!/^npub1[qpzry9x8gf2tvdw0s3jn54khce6mua7l]{58}$/.test(s || '')) return false;
+    const words = [...s.slice(5)].map(c => BECH32_CHARS.indexOf(c));
+    return bech32Polymod([...bech32HrpExpand('npub'), ...words]) === 1 && !!bech32Regroup(words.slice(0, -6), 5, 8, false);
+}
+
 /** The npub for a 32-byte hex public key, or '' when it isn't one. */
 function hexNpub(hex) {
     if (!/^[0-9a-f]{64}$/i.test(hex || '')) return '';

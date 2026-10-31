@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-calls-mic-set"
+description = "Enables the calls_mic_set command without any pre-configured scope."
+commands.allow = ["calls_mic_set"]
+
+[[permission]]
+identifier = "deny-calls-mic-set"
+description = "Denies the calls_mic_set command without any pre-configured scope."
+commands.deny = ["calls_mic_set"]

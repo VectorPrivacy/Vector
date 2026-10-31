@@ -166,6 +166,22 @@
   mask-image: url("./icons/mic-on.svg");
 }
 
+.icon-headphones {
+  mask-image: url("./icons/headphones.svg");
+}
+
+.icon-start-profile {
+  mask-image: url("./icons/start-profile.svg");
+}
+
+.icon-start-settings {
+  mask-image: url("./icons/start-settings.svg");
+}
+
+.icon-headphones-off {
+  mask-image: url("./icons/headphones-off.svg");
+}
+
 .icon-mic-off {
   mask-image: url("./icons/mic-off.svg");
 }

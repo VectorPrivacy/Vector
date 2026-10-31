@@ -53,6 +53,8 @@ async function setupRustListeners() {
     // lookup simply finds it when it arrives.
     // The rail's arrangement changed: an edit here, or one from another device.
     _on('rail_layout_updated', (evt) => VectorSvelte.setRailLayout(evt.payload));
+    _on('start_layout_updated', (evt) => VectorSvelte.setStartLayout(evt.payload));
+    _on('call_mic_state', (evt) => VectorSvelte.setMicState(evt.payload));
     _on('hidden_banners_updated', (evt) => VectorSvelte.setHiddenBanners(evt.payload?.ids));
     _on('synced_settings_updated', (evt) => applySyncedSettings(evt.payload));
 

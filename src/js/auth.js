@@ -257,6 +257,8 @@ async function login(skipAnimations = false) {
             _archiveLoaded = false;
             await ensureArchiveLoaded();
             loadRailLayout();
+            loadStartLayout();
+            invoke('calls_mic_get').then((m) => VectorSvelte.setMicState(m)).catch(() => {});
             loadHiddenBanners();
             // Awaited: Streamer Mode decides which names the first paint may show.
             await loadSyncedSettings();

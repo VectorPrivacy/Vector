@@ -352,6 +352,7 @@ pub async fn join(community_id: &str, channel_id: &str) -> Result<VoiceState, St
         },
         Err(_) => None,
     };
+    let mic = super::settings::mic_state();
     let v = Arc::new(Voice {
         owner: crate::db::current_session().id(),
         community: cid,
@@ -362,8 +363,9 @@ pub async fn join(community_id: &str, channel_id: &str) -> Result<VoiceState, St
         links: Mutex::new(HashMap::new()),
         dialing: Mutex::new(HashSet::new()),
         media: Mutex::new(media.map(Arc::from)),
-        muted: AtomicBool::new(false),
-        deafened: AtomicBool::new(false),
+        // As you left them, so a muted member never sends a moment on arrival.
+        muted: AtomicBool::new(mic.muted),
+        deafened: AtomicBool::new(mic.deafened),
         away: AtomicBool::new(false),
         nudge: tokio::sync::Notify::new(),
         greeting: AtomicBool::new(false),
@@ -617,6 +619,7 @@ pub fn set_muted(on: bool) -> Result<(), String> {
     }
     reannounce(&v);
     changed(&v);
+    super::settings::remember_mic(super::settings::MicState { muted: on, deafened: v.deafened.load(Ordering::SeqCst) });
     Ok(())
 }
 
@@ -632,6 +635,7 @@ pub fn set_deafened(on: bool) -> Result<(), String> {
     }
     reannounce(&v);
     changed(&v);
+    super::settings::remember_mic(super::settings::MicState { muted: v.muted.load(Ordering::SeqCst), deafened: on });
     Ok(())
 }
 

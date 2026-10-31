@@ -1,0 +1,6 @@
+<svg width="100%" height="100%" viewBox="0 0 18 18" fill="none" xmlns="http://www.w3.org/2000/svg">
+<defs><clipPath id="inside"><circle cx="8.709" cy="8.709" r="7.6"/></clipPath></defs>
+<circle cx="8.709" cy="8.709" r="8.009" stroke="currentColor" stroke-width="1.4"/>
+<circle cx="8.709" cy="6.67" r="3.9" fill="currentColor"/>
+<rect x="2.95" y="12.05" width="11.52" height="8" rx="2.4" fill="currentColor" clip-path="url(#inside)"/>
+</svg>

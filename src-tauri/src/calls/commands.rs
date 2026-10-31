@@ -176,6 +176,18 @@ pub async fn voice_set_deafened(on: bool) -> Result<(), String> {
     vector_core::db::scoped(async move { vector_core::calls::voice::set_deafened(on) }).await
 }
 
+/// Muted and deafened as you left them: every call starts this way.
+#[tauri::command]
+pub async fn calls_mic_get() -> vector_core::calls::settings::MicState {
+    vector_core::db::scoped(async { vector_core::calls::settings::mic_state() }).await
+}
+
+/// Set both switches, for the call under way and every one after it.
+#[tauri::command]
+pub async fn calls_mic_set(muted: bool, deafened: bool) -> Result<(), String> {
+    vector_core::db::scoped(vector_core::calls::set_mic(vector_core::calls::settings::MicState { muted, deafened })).await
+}
+
 /// Send our camera or screen to the voice call, or stop.
 #[tauri::command]
 pub async fn voice_video(kind: VideoKind, on: bool) -> Result<(), String> {

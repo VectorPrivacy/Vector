@@ -464,7 +464,7 @@ pub async fn start(peer: String, video: bool) -> Result<CallState, String> {
             control: None,
             tasks: Vec::new(),
             active_since: None,
-            muted: false,
+            muted: { let mic = super::settings::mic_state(); mic.muted || mic.deafened },
             peer_muted: false,
             mic_off: false,
             volume: 1.0,
@@ -612,7 +612,35 @@ pub async fn hangup() -> Result<(), String> {
     Ok(())
 }
 
+/// Mute or unmute, and remember it for the next call. Unmuting while deafened hears again too.
 pub async fn set_muted(on: bool) -> Result<(), String> {
+    let mic = super::settings::mic_state();
+    if !on && mic.deafened {
+        hear(true)?;
+    }
+    super::settings::remember_mic(super::settings::MicState { muted: on, deafened: mic.deafened && on });
+    send_muted(on).await
+}
+
+/// Deafen: nothing the call plays is heard, and the microphone goes off with it.
+pub async fn set_deafened(on: bool) -> Result<(), String> {
+    let mic = super::settings::mic_state();
+    super::settings::remember_mic(super::settings::MicState { muted: mic.muted, deafened: on });
+    hear(!on)?;
+    send_muted(on || mic.muted).await
+}
+
+/// Play the call at its volume, or at nothing.
+fn hear(on: bool) -> Result<(), String> {
+    with_call(|c| {
+        if let Some(m) = c.media.as_ref() {
+            m.set_volume(if on { c.volume } else { 0.0 });
+        }
+    })
+    .ok_or_else(|| "No call".to_string())
+}
+
+async fn send_muted(on: bool) -> Result<(), String> {
     let control = with_call(|c| {
         c.muted = on;
         if let Some(m) = c.media.as_ref() {
@@ -647,7 +675,7 @@ pub async fn set_volume(volume: f32) -> Result<(), String> {
     with_call(|c| {
         c.volume = volume;
         if let Some(m) = c.media.as_ref() {
-            m.set_volume(volume);
+            m.set_volume(super::settings::heard(volume));
         }
     })
     .ok_or("No call")?;
@@ -831,6 +859,7 @@ async fn reopen_audio(stats: &mut Option<Arc<super::stats::MediaStats>>) -> Reop
         *stats = Some(m.stats());
     }
     drop(old);
+    let volume = super::settings::heard(volume);
     match platform.start_audio(conn, AudioStart { volume, share_volume, stats: stats.clone(), share }).await {
         Ok(m) => {
             m.set_muted(muted);
@@ -905,7 +934,7 @@ pub async fn on_signal(sender: &str, call_id: &str, signal: &str, node_addr: Opt
                             control: None,
                             tasks: Vec::new(),
                             active_since: None,
-                            muted: false,
+                            muted: { let mic = super::settings::mic_state(); mic.muted || mic.deafened },
                             peer_muted: false,
                             mic_off: false,
                             volume: 1.0,
@@ -1053,7 +1082,7 @@ async fn attach(id: &str, conn: Connection, send: SendStream, mut recv: RecvStre
         }
     };
     let (volume, share, share_volume) = with_call_id(id, |c| (c.volume, Arc::clone(&c.share), c.share_volume)).unwrap_or((1.0, Arc::new(ShareInput::new()), 1.0));
-    let start = AudioStart { volume, share_volume, stats: None, share: Arc::clone(&share) };
+    let start = AudioStart { volume: super::settings::heard(volume), share_volume, stats: None, share: Arc::clone(&share) };
     let media = match platform.start_audio(conn.clone(), start).await {
         Ok(m) => m,
         Err(e) => {

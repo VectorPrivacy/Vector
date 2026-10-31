@@ -69,6 +69,7 @@ async function _showChatRowContextMenu(chat, isGroup, nUnread, x, y) {
         });
     }
     const rowCommunity = isGroup ? chat.metadata?.custom_fields?.community_id : null;
+    items.push(...startPinItems(rowCommunity ? `c/${rowCommunity}` : !isGroup && chat.id !== strPubkey ? `dm/${chat.id}` : null));
     if (rowCommunity) items.push(...copyLinkItems('Community', { community: rowCommunity }));
     items.push(...(isGroup ? copyIdItems('Community', rowCommunity) : copyIdItems('User', chat.id)));
     if (!isGroup) {

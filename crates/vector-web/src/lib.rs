@@ -30,6 +30,7 @@ mod emoji_ops;
 mod encryption;
 mod messaging;
 mod rail;
+mod start;
 mod miniapps;
 mod sync;
 mod transfer;
@@ -41,7 +42,7 @@ use std::pin::Pin;
 type Module = for<'a> fn(&'a str, &'a commands::Args) -> Pin<Box<dyn std::future::Future<Output = Option<Result<serde_json::Value, String>>> + 'a>>;
 
 /// Consulted in order for commands the core dispatcher doesn't answer.
-const MODULES: &[Module] = &[signers::dispatch, miniapps::dispatch, emoji_ops::dispatch, chat_ops::dispatch, profile_ops::dispatch, network_ops::dispatch, community_ops::dispatch, rail::dispatch, calls::dispatch, push_ops::dispatch, transfer::dispatch];
+const MODULES: &[Module] = &[signers::dispatch, miniapps::dispatch, emoji_ops::dispatch, chat_ops::dispatch, profile_ops::dispatch, network_ops::dispatch, community_ops::dispatch, rail::dispatch, start::dispatch, calls::dispatch, push_ops::dispatch, transfer::dispatch];
 
 use wasm_bindgen::prelude::*;
 

@@ -46,6 +46,10 @@ async fn apply(pref: Pref, json: &str, before: &StreamerSettings) {
             "rail_layout_updated",
             serde_json::to_value(vector_core::rail_layout::RailLayout::from_json(json)).unwrap_or_default(),
         ),
+        Pref::Start => vector_core::traits::emit_event_json(
+            "start_layout_updated",
+            serde_json::to_value(vector_core::rail_layout::RailLayout::from_json(json)).unwrap_or_default(),
+        ),
         Pref::Banners => vector_core::traits::emit_event_json(
             "hidden_banners_updated",
             json!({ "ids": IdList::from_json(json).ids }),
@@ -139,17 +143,7 @@ async fn apply_nicknames(map: NicknameMap) {
 
 async fn subscribe() {
     let (Some(client), Some(me)) = (vector_core::state::nostr_client(), vector_core::my_public_key()) else { return };
-    let lists = Filter::new().author(me).kind(Kind::Custom(APPLICATION_SPECIFIC)).identifiers([
-        vector_core::pinned_chats::PINNED_D_TAG.to_string(),
-        synced_prefs::BLOCKS_D_TAG.to_string(),
-        synced_prefs::MUTES_D_TAG.to_string(),
-        synced_prefs::NICKNAMES_D_TAG.to_string(),
-        synced_prefs::NOTIFY_D_TAG.to_string(),
-        synced_prefs::RAIL_D_TAG.to_string(),
-        synced_prefs::BANNERS_D_TAG.to_string(),
-        synced_prefs::SETTINGS_D_TAG.to_string(),
-        synced_prefs::ARCHIVE_D_TAG.to_string(),
-    ]);
+    let lists = Filter::new().author(me).kind(Kind::Custom(APPLICATION_SPECIFIC)).identifiers(synced_prefs::live_d_tags());
     let v2_list = Filter::new().author(me).kind(Kind::Custom(vector_core::community::v2::kind::COMMUNITY_LIST_FRAG));
     let emoji = Filter::new().author(me).kind(Kind::Custom(10030));
     let mut subs = Vec::new();

@@ -34,6 +34,7 @@ pub mod i2p;
 pub mod emoji_packs;
 pub mod pinned;
 pub mod rail;
+pub mod start;
 pub mod prefs;
 pub mod notify;
 pub mod wallpaper;

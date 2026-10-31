@@ -69,7 +69,7 @@ export function setSigner(signer) { security.signer = signer || null; }
 export function setSignerDot(dot) { security.dot = dot || ''; }
 
 // Display: the toggles. The rows render from here; the app applies each one.
-const display = $state({ loaded: false, hideRail: false, imageTypes: false, chatBg: true, emoticons: true, timeSuggestions: true, autocorrect: true, sendOnEnter: false, floatingPlayer: true });
+const display = $state({ loaded: false, startMenu: true, hideRail: false, imageTypes: false, chatBg: true, emoticons: true, timeSuggestions: true, autocorrect: true, sendOnEnter: false, floatingPlayer: true });
 export function displayState() { return display; }
 export function setDisplaySettings(values) {
     Object.assign(display, values);
@@ -145,7 +145,7 @@ const screen = $state({
     },
     scroll: { target: '', seq: 0 },               // `category[/section]` or a section id to bring into view
     at: { category: '', section: '' },            // where the screen is: what a link to here names
-    places: {},                                   // category id → { label, sections: { id: label } }: what a link here is called
+    places: {},                                   // category id → { label, icon, sections: { id: label }, sectionIcons }: what a link here is called
 });
 export function settingsScreen() { return screen; }
 export function setSettingsScreen(patch) {
