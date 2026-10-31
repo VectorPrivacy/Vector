@@ -218,6 +218,8 @@ function wsUpdate() {
             if (strOpenChat) openChat(strOpenChat);
             else openChatlist();
         }
+        // The rail kept Settings whatever a chat hid; narrow, it shows unless a chat owns the screen.
+        VectorSvelte.setShellFlag('settingsTab', !VectorSvelte.paneShown('chat'));
         wsMarkActiveRow();
         adjustSize();
     }
