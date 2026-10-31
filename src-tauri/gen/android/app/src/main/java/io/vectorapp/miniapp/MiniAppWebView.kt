@@ -226,7 +226,9 @@ class MiniAppWebView(
 
             // Cache for performance
             cacheMode = WebSettings.LOAD_DEFAULT
-            databaseEnabled = true
+            // Mini Apps are other people's code, and some still open Web SQL.
+            @Suppress("DEPRECATION")
+            setDatabaseEnabled(true)
 
             // Viewport settings
             useWideViewPort = true

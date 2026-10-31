@@ -9,6 +9,7 @@ import android.os.CancellationSignal
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.util.Base64
+import androidx.annotation.RequiresApi
 import org.json.JSONObject
 import java.security.InvalidKeyException
 import java.security.KeyStore
@@ -205,6 +206,7 @@ object BiometricUnlock {
 
     // ------------------------------------------------------------------------
 
+    @RequiresApi(Build.VERSION_CODES.R)
     private fun generateKey(alias: String): SecretKey {
         val builder = KeyGenParameterSpec.Builder(
             alias,
@@ -238,6 +240,7 @@ object BiometricUnlock {
         return kg.generateKey()
     }
 
+    @RequiresApi(Build.VERSION_CODES.R)
     private fun prompt(
         activity: Activity,
         requestId: Int,

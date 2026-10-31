@@ -27,6 +27,7 @@ object VectorFiles {
      * the absolute path, or null if external media storage is unavailable.
      */
     @JvmStatic
+    @Suppress("DEPRECATION") // No replacement keeps this path, browsable and permission-free.
     fun externalMediaDir(context: Context): String? {
         val base = context.externalMediaDirs.firstOrNull { it != null } ?: return null
         val dir = File(base, "Vector")
@@ -154,9 +155,7 @@ object VectorFiles {
      * that toggle rather than leave another dead tap.
      */
     private fun installApk(context: Context, uri: Uri): Boolean {
-        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O &&
-            !context.packageManager.canRequestPackageInstalls()
-        ) {
+        if (!context.packageManager.canRequestPackageInstalls()) {
             val settings = Intent(
                 android.provider.Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
                 Uri.parse("package:" + context.packageName)
@@ -179,11 +178,7 @@ object VectorFiles {
      */
     @JvmStatic
     fun canInstallApks(context: Context): Boolean {
-        return if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
-            context.packageManager.canRequestPackageInstalls()
-        } else {
-            true
-        }
+        return context.packageManager.canRequestPackageInstalls()
     }
 
     /**

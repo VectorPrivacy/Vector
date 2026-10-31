@@ -111,13 +111,11 @@ class CallService : Service() {
             }
         }
         val manager = getSystemService(NotificationManager::class.java)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val channel = NotificationChannel(CHANNEL_ID, "Calls", NotificationManager.IMPORTANCE_LOW).apply {
-                description = "Shown while you're in a call"
-                setShowBadge(false)
-            }
-            manager.createNotificationChannel(channel)
+        val channel = NotificationChannel(CHANNEL_ID, "Calls", NotificationManager.IMPORTANCE_LOW).apply {
+            description = "Shown while you're in a call"
+            setShowBadge(false)
         }
+        manager.createNotificationChannel(channel)
         val notification = build()
         // Listen-only (no microphone permission) can't claim the microphone type.
         val mic = checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED

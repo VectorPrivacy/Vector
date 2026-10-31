@@ -93,9 +93,7 @@ object VectorUpdates {
         val incoming = apkSignatureSha256(context, path) ?: return "unverifiable"
         if (installed != incoming) return "signature-mismatch"
 
-        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O &&
-            !context.packageManager.canRequestPackageInstalls()
-        ) {
+        if (!context.packageManager.canRequestPackageInstalls()) {
             val settings = Intent(
                 android.provider.Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
                 Uri.parse("package:" + context.packageName)

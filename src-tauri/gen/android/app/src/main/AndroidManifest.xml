@@ -40,7 +40,6 @@
     <uses-feature android:name="android.software.leanback" android:required="false" />
 
     <queries>
-        <package android:name="com.google.android.gms" />
         <intent>
             <action android:name="org.unifiedpush.android.distributor.REGISTER" />
         </intent>
@@ -141,8 +140,8 @@
             android:foregroundServiceType="microphone|mediaPlayback"
             android:exported="false" />
 
-        <!-- Push: UnifiedPush's events for this app, and the embedded FCM distributor
-             (vendored under org.unifiedpush) for phones with no distributor app. -->
+        <!-- Push: UnifiedPush's events for this app. The embedded FCM distributor's receivers
+             come with its library, in every build but F-Droid's. -->
         <service
             android:name=".VectorPushService"
             android:exported="false">
@@ -150,25 +149,6 @@
                 <action android:name="org.unifiedpush.android.connector.PUSH_EVENT" />
             </intent-filter>
         </service>
-        <receiver
-            android:name="org.unifiedpush.android.embedded_fcm_distributor.impl.FirebaseReceiver"
-            android:exported="true"
-            android:permission="com.google.android.c2dm.permission.SEND">
-            <intent-filter>
-                <action android:name="com.google.android.c2dm.intent.RECEIVE" />
-                <action android:name="com.google.android.c2dm.intent.REGISTRATION" />
-            </intent-filter>
-        </receiver>
-        <receiver
-            android:name="org.unifiedpush.android.embedded_fcm_distributor.impl.UnifiedPushReceiver"
-            android:enabled="true"
-            android:exported="false">
-            <intent-filter android:priority="-500">
-                <action android:name="org.unifiedpush.android.distributor.feature.BYTES_MESSAGE" />
-                <action android:name="org.unifiedpush.android.distributor.REGISTER" />
-                <action android:name="org.unifiedpush.android.distributor.UNREGISTER" />
-            </intent-filter>
-        </receiver>
 
         <receiver
             android:name=".BootReceiver"

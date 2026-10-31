@@ -38,18 +38,21 @@ fn helper<'a>(env: &mut JNIEnv<'a>, ctx: &JObject<'a>) -> Result<JClass<'a>, Str
 
 /// `on`, `off`, `busy` (asked, no endpoint yet) or `unsupported` (no distributor, no Play Services).
 pub fn status() -> String {
-    if vector_core::push::device().is_some() {
-        return "on".into();
-    }
+    let registered = vector_core::push::device().is_some();
     super::utils::with_android_context(|env, ctx| {
         let class = helper(env, ctx)?;
         let out = env
-            .call_static_method(&class, "status", "(Landroid/content/Context;)Ljava/lang/String;", &[JValue::Object(ctx)])
+            .call_static_method(
+                &class,
+                "status",
+                "(Landroid/content/Context;Z)Ljava/lang/String;",
+                &[JValue::Object(ctx), JValue::Bool(registered as u8)],
+            )
             .and_then(|v| v.l())
             .map_err(|e| format!("{e:?}"))?;
         env.get_string(&JString::from(out)).map(Into::into).map_err(|e| format!("{e:?}"))
     })
-    .unwrap_or_else(|_| "unsupported".into())
+    .unwrap_or_else(|_| if registered { "on" } else { "unsupported" }.into())
 }
 
 /// Ask for an endpoint: a distributor the user has, else FCM's own through Play Services.

@@ -3,7 +3,6 @@ package io.vectorapp
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
-import android.os.Build
 import android.os.PowerManager
 import android.provider.Settings
 
@@ -73,11 +72,7 @@ object VectorBatteryHelper {
     @JvmStatic
     fun startBackgroundService(context: Context) {
         val intent = Intent(context, VectorNotificationService::class.java)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            context.startForegroundService(intent)
-        } else {
-            context.startService(intent)
-        }
+        context.startForegroundService(intent)
     }
 
     @JvmStatic

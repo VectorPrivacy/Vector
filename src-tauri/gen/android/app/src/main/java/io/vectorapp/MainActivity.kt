@@ -18,6 +18,10 @@ import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import io.vectorapp.miniapp.MiniAppManager
 
+
+/** Chromium the shared frontend needs (Vector Web's preflight floor). */
+private const val MIN_WEBVIEW = 98
+
 class MainActivity : TauriActivity() {
 
     companion object {
@@ -131,9 +135,30 @@ class MainActivity : TauriActivity() {
         gyroActive = false
     }
 
+    /**
+     * The frontend needs Chromium 98, as Vector Web does. A phone whose WebView never updated
+     * (no app store, or updates off) would show a blank app, so it says what to update instead.
+     */
+    private fun warnIfWebViewTooOld() {
+        val webView = WebView.getCurrentWebViewPackage() ?: return
+        val major = webView.versionName?.substringBefore('.')?.toIntOrNull() ?: return
+        if (major >= MIN_WEBVIEW) return
+        android.app.AlertDialog.Builder(this)
+            .setTitle("Update Android System WebView")
+            .setMessage("Vector needs version $MIN_WEBVIEW or newer, and this phone has $major. Update it, then reopen Vector.")
+            .setPositiveButton("Update") { _, _ ->
+                val store = Intent(Intent.ACTION_VIEW, Uri.parse("market://details?id=${webView.packageName}"))
+                val web = Intent(Intent.ACTION_VIEW, Uri.parse("https://play.google.com/store/apps/details?id=${webView.packageName}"))
+                try { startActivity(store) } catch (_: Exception) { try { startActivity(web) } catch (_: Exception) {} }
+            }
+            .setNegativeButton("Close", null)
+            .show()
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         blockWebViewDiskCache()
         super.onCreate(savedInstanceState)
+        warnIfWebViewTooOld()
 
         // Hand Rust the activity for ndk_context (tao 0.35 stopped registering it).
         try { nativeRegisterNdkContext(this) } catch (e: Throwable) {
@@ -149,11 +174,7 @@ class MainActivity : TauriActivity() {
         // Start the foreground notification service (only if user hasn't disabled it)
         if (VectorBatteryHelper.getBackgroundServiceEnabled(this)) {
             val serviceIntent = Intent(this, VectorNotificationService::class.java)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                startForegroundService(serviceIntent)
-            } else {
-                startService(serviceIntent)
-            }
+            startForegroundService(serviceIntent)
         }
 
         // Handle notification tap that launched the app
@@ -401,9 +422,6 @@ class MainActivity : TauriActivity() {
             // Viewport settings
             useWideViewPort = true
             loadWithOverviewMode = true
-            
-            // Database settings
-            databaseEnabled = true
         }
     }
     

@@ -26,6 +26,10 @@ release asset, so the two cannot drift. It is source-only:
 - every native npm package is deleted after `npm ci`, and the script refuses to continue if a
   `.node` or `.wasm` file remains
 
+It carries nothing of Google's: with `VECTOR_FDROID` set, Gradle leaves out the embedded FCM
+distributor (Play Services' push endpoint), so push on this flavour is UnifiedPush through a
+distributor app such as ntfy, which every Android build supports.
+
 Output is one unsigned universal APK for arm64. F-Droid keys builds on versionCode, and the
 per-ABI splits share one, so a single artifact is the only shape it accepts.
 
@@ -105,6 +109,11 @@ measured yet: whisper.cpp's cmake build, R8 output across JDK builds, and Gradle
 The first F-Droid build of a tag will say which, in their `verification` log.
 
 ## Release checklist additions
+
+- From v0.5.0 the build entry needs `scandelete: [web/whisper]`: Vector Web's prebuilt whisper.cpp
+  WebAssembly, which the Android build never uses and F-Droid's scanner refuses. Older tags lack
+  the folder, and a `scandelete` path that doesn't exist is itself an error, so it can't go on the
+  v0.4.4 entry.
 
 - Bump `src-tauri/gen/android/app/version.properties` with `Cargo.toml` and `package.json`.
 - `distribute.yaml` publishes to Zapstore on `release: published` for stable tags, when the

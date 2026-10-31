@@ -3,7 +3,6 @@ package io.vectorapp.miniapp
 import android.content.Context
 import android.graphics.Bitmap
 import android.net.http.SslError
-import android.os.Build
 import android.webkit.RenderProcessGoneDetail
 import android.webkit.SslErrorHandler
 import android.webkit.WebResourceError
@@ -154,11 +153,7 @@ class MiniAppWebViewClient(
         view: WebView?,
         detail: RenderProcessGoneDetail?
     ): Boolean {
-        val crashed = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            detail?.didCrash() ?: true
-        } else {
-            true
-        }
+        val crashed = detail?.didCrash() ?: true
 
         Logger.error(TAG, "[$miniappId] Renderer process gone (crashed=$crashed)", null)
 

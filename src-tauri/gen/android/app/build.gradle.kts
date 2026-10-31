@@ -1,5 +1,7 @@
 import java.util.Properties
 import java.io.FileInputStream
+import com.android.build.api.dsl.ApplicationExtension
+import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
 plugins {
     id("com.android.application")
@@ -7,78 +9,20 @@ plugins {
     id("rust")
 }
 
-val tauriProperties = Properties().apply {
-    val propFile = file("tauri.properties")
-    if (propFile.exists()) {
-        propFile.inputStream().use { load(it) }
-    }
-}
+// A stale version.properties (F-Droid's update checker reads it) fails the build.
+AppVersion.checkMirror(file("../../../Cargo.toml"), file("version.properties"))
 
-// Read version from Cargo.toml
-val cargoTomlFile = file("../../../Cargo.toml")
-val cargoVersion = if (cargoTomlFile.exists()) {
-    cargoTomlFile.readLines()
-        .find { it.trim().startsWith("version") }
-        ?.substringAfter("=")
-        ?.trim()
-        ?.trim('"')
-        ?: "0.0.1"
-} else {
-    "0.0.1"
-}
-
-// Convert semantic version to version code (e.g. 0.4.2-1 -> 40201, 0.4.2 -> 40299).
-//
-// The low two digits rank a version's previews below the release they lead to,
-// which is what lets Android accept preview -> official as an upgrade. Without
-// that slot a `0.4.2-1` APK scores below 0.4.1 and the install is refused as a
-// downgrade. Codes only ever grow, so the x100 widening is safe against every
-// build already in the wild.
-fun versionToCode(version: String): Int {
-    val core = version.substringBefore('-').substringBefore('+')
-    val parts = core.split(".").map { it.toIntOrNull() ?: 0 }
-    val major = parts.getOrElse(0) { 0 }
-    val minor = parts.getOrElse(1) { 0 }
-    val patch = parts.getOrElse(2) { 0 }
-
-    // Stable sorts above every preview of the same version.
-    val preview = version.substringAfter('-', "").substringBefore('+')
-    val slot = if (preview.isEmpty()) 99 else preview.toIntOrNull()
-        ?.takeIf { it in 1..98 }
-        // The MSI bundler already requires a numeric pre-release identifier;
-        // failing here keeps Android from silently minting an unorderable code,
-        // which is unfixable once users have installed it.
-        ?: throw GradleException(
-            "Version '$version': preview identifier must be a number from 1 to 98 (e.g. 0.4.2-1)"
-        )
-
-    return (major * 10000 + minor * 100 + patch) * 100 + slot
-}
-
-// version.properties mirrors the Cargo-derived pair for tools that can only
-// read a flat file (F-Droid's update checker). A stale mirror fails the build.
-val versionProperties = Properties().apply {
-    file("version.properties").inputStream().use { load(it) }
-}
-if (versionProperties.getProperty("versionName") != cargoVersion ||
-    versionProperties.getProperty("versionCode")?.toIntOrNull() != versionToCode(cargoVersion)
-) {
-    throw GradleException(
-        "app/version.properties is out of step with Cargo.toml: expected " +
-        "versionName=$cargoVersion versionCode=${versionToCode(cargoVersion)}"
-    )
-}
-
-android {
-    compileSdk = 34
+configure<ApplicationExtension> {
+    compileSdk = 36
     namespace = "io.vectorapp"
     defaultConfig {
         manifestPlaceholders["usesCleartextTraffic"] = "false"
         applicationId = "io.vectorapp"
         minSdk = 26
         targetSdk = 34
-        versionCode = versionToCode(cargoVersion)
-        versionName = cargoVersion
+        versionCode = AppVersion.code(file("../../../Cargo.toml"))
+        versionName = AppVersion.name(file("../../../Cargo.toml"))
+        buildConfigField("boolean", "EMBEDDED_FCM", (!isFdroidBuild()).toString())
     }
     // Signing is optional: F-Droid builds unsigned and signs on its own
     // servers, so a missing keystore still yields a release APK.
@@ -133,11 +77,18 @@ android {
             isUniversalApk = true
         }
     }
-    kotlinOptions {
-        jvmTarget = "1.8"
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_1_8
+        targetCompatibility = JavaVersion.VERSION_1_8
     }
     buildFeatures {
         buildConfig = true
+    }
+}
+
+kotlin {
+    compilerOptions {
+        jvmTarget = JvmTarget.JVM_1_8
     }
 }
 
@@ -147,20 +98,17 @@ rust {
 
 dependencies {
     // 1.18: Profile.setCrossOriginIsolatedAllowlist, threaded Mini Apps (MiniAppIsolation.kt).
-    // Pure Java; its kotlin-stdlib 2.1 has metadata this Kotlin 1.9 compiler can't read.
-    implementation("androidx.webkit:webkit:1.18.0-alpha01") {
-        exclude(group = "org.jetbrains.kotlin", module = "kotlin-stdlib")
-    }
+    implementation("androidx.webkit:webkit:1.18.0-alpha01")
     implementation("androidx.appcompat:appcompat:1.6.1")
     implementation("com.google.android.material:material:1.8.0")
     implementation("androidx.core:core-ktx:1.12.0")
-    // Push. Connector 3.0 is the last built with a stdlib this Kotlin 1.9 can read; the
-    // embedded FCM distributor is vendored (VENDORED.md), and needs coroutines.
+    // Push: UnifiedPush in every build; FCM's endpoint, through Play Services, for phones with
+    // no distributor app, everywhere but F-Droid.
     implementation("org.unifiedpush.android:connector:3.0.10")
-    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
+    if (!isFdroidBuild()) {
+        implementation("org.unifiedpush.android:embedded-fcm-distributor:3.1.0")
+    }
     testImplementation("junit:junit:4.13.2")
     androidTestImplementation("androidx.test.ext:junit:1.1.4")
     androidTestImplementation("androidx.test.espresso:espresso-core:3.5.0")
 }
-
-apply(from = "tauri.build.gradle.kts")

@@ -11,7 +11,7 @@ import java.util.List;
 /**
  * Turning push on and off. A UnifiedPush app the user has (ntfy, Sunup, ...) is used first;
  * without one, FCM's own Web Push endpoint through Play Services, by the distributor this app
- * embeds. Neither involves a Firebase project.
+ * embeds, except in F-Droid's build, which embeds none. Neither involves a Firebase project.
  */
 public final class VectorPush {
     private static final String INSTANCE = "default";
@@ -55,8 +55,14 @@ public final class VectorPush {
         UnifiedPush.removeDistributor(context);
     }
 
-    /** `busy` while an endpoint is on its way, `off` when one can be asked for, else `unsupported`. */
-    public static String status(Context context) {
+    /**
+     * `on` while the distributor that gave the endpoint is still here, `busy` while one is on its
+     * way, `off` when one can be asked for, else `unsupported`.
+     */
+    public static String status(Context context, boolean registered) {
+        // A distributor that is gone (uninstalled, or one this build doesn't embed) is unregistered
+        // by the connector here, which withdraws the endpoint through VectorPushService.
+        if (registered && UnifiedPush.getAckDistributor(context) != null) return "on";
         if (asking) return "busy";
         for (String d : UnifiedPush.getDistributors(context)) {
             if (!d.equals(context.getPackageName())) return "off";
@@ -70,6 +76,7 @@ public final class VectorPush {
     }
 
     private static boolean playServices(Context context) {
+        if (!BuildConfig.EMBEDDED_FCM) return false;
         try {
             context.getPackageManager().getPackageInfo(GSF_PACKAGE, 0);
             return true;

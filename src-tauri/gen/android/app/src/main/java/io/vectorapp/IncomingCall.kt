@@ -159,7 +159,6 @@ object IncomingCall {
     }
 
     private fun channels(manager: NotificationManager) {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
         if (manager.getNotificationChannel(RING_CHANNEL) == null) {
             val ring = NotificationChannel(RING_CHANNEL, "Incoming calls", NotificationManager.IMPORTANCE_HIGH).apply {
                 description = "Rings when someone calls you"

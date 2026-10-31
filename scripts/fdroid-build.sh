@@ -29,6 +29,8 @@ prepare() {
            node_modules/esbuild node_modules/@esbuild \
            node_modules/lightningcss node_modules/lightningcss-* \
            node_modules/fsevents
+    # three's Draco and Basis decoders: prebuilt WebAssembly the 3D viewer never loads.
+    find node_modules/three -name '*.wasm' -delete
     if find node_modules -name '*.node' -o -name '*.wasm' | grep -q .; then
         echo "prebuilt binaries remain in node_modules:" >&2
         find node_modules -name '*.node' -o -name '*.wasm' >&2
@@ -54,6 +56,8 @@ build() {
     export ANDROID_NDK_HOME="$NDK_HOME"
     export ANDROID_NDK="$NDK_HOME"   # cmake's Android toolchain (whisper.cpp)
     export TAURI_CLI="cargo tauri"
+    # Gradle leaves the embedded FCM distributor out: push is UnifiedPush through a distributor app.
+    export VECTOR_FDROID=1
     # The NDK ships only the llvm-* binutils. Vendored OpenSSL asks `cc` for an
     # archiver and ranlib; without these it guesses the GNU-prefixed names.
     local ndk_bin

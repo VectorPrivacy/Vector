@@ -17,6 +17,10 @@ open class RustPlugin : Plugin<Project> {
     override fun apply(project: Project) = with(project) {
         config = extensions.create("rust", Config::class.java)
 
+        // Tauri's generated plugin dependencies. Applied here, not from the build script:
+        // Lint 9.3 crashes analysing a build script that applies another.
+        project.apply(mapOf("from" to file("tauri.build.gradle.kts")))
+
         val defaultAbiList = listOf("arm64-v8a", "armeabi-v7a", "x86", "x86_64");
         val abiList = (findProperty("abiList") as? String)?.split(',') ?: defaultAbiList
 
@@ -63,13 +67,14 @@ open class RustPlugin : Plugin<Project> {
                     val targetName = targetPair.value
                     val targetArch = archList[targetPair.index]
                     val targetArchCapitalized = targetArch.replaceFirstChar { it.uppercase() }
-                    val targetBuildTask = project.tasks.maybeCreate(
+                    val targetBuildTask = project.tasks.register(
                         "rustBuild$targetArchCapitalized$profileCapitalized",
                         BuildTask::class.java
-                    ).apply {
+                    ) {
                         group = TASK_GROUP
                         description = "Build dynamic library in $profile mode for $targetArch"
                         rootDirRel = config.rootDirRel
+                        projectDir = project.projectDir.path
                         target = targetName
                         release = profile == "release"
                     }
