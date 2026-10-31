@@ -1499,6 +1499,12 @@ fn extract_tag_from_json(tags_json: &str, key: &str) -> Option<String> {
         .and_then(|tag| tag.into_iter().nth(1))
 }
 
+/// A stored message's time in ms from raw tags JSON, as [`StoredEvent::timestamp_ms`] reads it.
+fn stored_at_ms(created_at: u64, tags_json: &str) -> u64 {
+    let ms = extract_tag_from_json(tags_json, "ms").and_then(|s| s.parse::<u64>().ok()).filter(|ms| *ms <= 999);
+    created_at * 1000 + ms.unwrap_or(0)
+}
+
 
 /// A stored reaction author written as 64-char hex (an early v2 ingest) reads
 /// back as the npub the frontend contract expects — self-heals old rows with no
@@ -1890,18 +1896,20 @@ pub async fn get_messages_around(
 pub async fn get_all_chats_last_messages() -> Result<std::collections::HashMap<String, Vec<Message>>, String> {
     use std::collections::HashMap;
 
-    // Step 1: Query last message per chat via correlated subquery
+    // Step 1: each chat's newest message. The query returns every message of the chat's newest
+    // second and the ms tag picks among them, as the chat view orders them: a preview that differs
+    // from the view's newest leaves a read marker it can't find, and the chat badges unread.
     let message_events: Vec<(String, StoredEvent, String)> = {
         let conn = super::get_db_connection_guard_static()?;
         let mut stmt = conn.prepare(
             "SELECT c.chat_identifier, \
              e.id, e.kind, e.chat_id, e.user_id, e.content, e.tags, e.reference_id, \
-             e.created_at, e.received_at, e.mine, e.pending, e.failed, e.wrapper_event_id, e.npub, e.preview_metadata \
-             FROM chats c JOIN events e ON e.rowid = ( \
-                 SELECT e2.rowid FROM events e2 WHERE e2.chat_id = c.id \
+             e.created_at, e.received_at, e.mine, e.pending, e.failed, e.wrapper_event_id, e.npub, e.preview_metadata, e.rowid \
+             FROM chats c JOIN events e ON e.chat_id = c.id AND e.created_at = ( \
+                 SELECT e2.created_at FROM events e2 WHERE e2.chat_id = c.id \
                  AND e2.kind IN (?1, ?2, ?3) AND instr(e2.tags, '[\"unauthorized\"]') = 0 \
-                 ORDER BY e2.created_at DESC, e2.received_at DESC LIMIT 1) \
-             WHERE c.chat_type != 1"
+                 ORDER BY e2.created_at DESC LIMIT 1) \
+             WHERE c.chat_type != 1 AND e.kind IN (?1, ?2, ?3) AND instr(e.tags, '[\"unauthorized\"]') = 0"
         ).map_err(|e| format!("Failed to prepare: {}", e))?;
 
         let rows = stmt.query_map(
@@ -1923,10 +1931,18 @@ pub async fn get_all_chats_last_messages() -> Result<std::collections::HashMap<S
                     failed: row.get::<_, i32>(12)? != 0, wrapper_event_id: row.get(13)?,
                     npub: row.get(14)?, preview_metadata: row.get(15)?,
                 };
-                Ok((chat_id, event, tags_json))
+                Ok((chat_id, event, tags_json, row.get::<_, i64>(16)?))
             }
         ).map_err(|e| format!("Failed to query: {}", e))?;
-        rows.filter_map(|r| r.ok()).collect()
+        let mut newest: HashMap<String, ((u64, u64, i64), StoredEvent, String)> = HashMap::new();
+        for (chat_id, event, tags_json, rowid) in rows.filter_map(|r| r.ok()) {
+            let key = (stored_at_ms(event.created_at, &tags_json), event.received_at, rowid);
+            match newest.get(&chat_id) {
+                Some((held, _, _)) if *held >= key => {}
+                _ => { newest.insert(chat_id, (key, event, tags_json)); }
+            }
+        }
+        newest.into_iter().map(|(chat_id, (_, event, tags_json))| (chat_id, event, tags_json)).collect()
     };
 
     if message_events.is_empty() {
@@ -2044,7 +2060,7 @@ pub async fn get_all_chats_last_messages() -> Result<std::collections::HashMap<S
                 id: event.id, content, replied_to,
                 replied_to_content: None, replied_to_npub: None, replied_to_has_attachment: None,
                 replied_to_attachment_extension: None, replied_to_emoji_tags: None,
-                preview_metadata, attachments, reactions, at: event.created_at * 1000,
+                preview_metadata, attachments, reactions, at: stored_at_ms(event.created_at, &tags_json),
                 pending: event.pending, failed: event.failed, mine: event.mine,
                 npub: event.npub, wrapper_event_id: event.wrapper_event_id,
                 edited, edit_history,
@@ -3811,6 +3827,24 @@ mod tests {
         let last = get_all_chats_last_messages().await.unwrap();
         let row = last.values().flatten().find(|m| m.id == "pings-a-role").unwrap();
         assert_eq!(row.role_mentions, ids, "and the chat list's last messages");
+    }
+
+    #[tokio::test]
+    async fn the_chat_lists_last_message_is_the_newest_to_the_millisecond() {
+        let (_tmp, _guard) = init_test_db();
+        let chat = "npub1samesecond";
+        let later = Message { id: "sent-later".into(), content: "b".into(), at: 1_793_470_953_878, ..Default::default() };
+        let earlier = Message { id: "sent-earlier".into(), content: "a".into(), at: 1_793_470_953_000, ..Default::default() };
+        save_message(chat, &later).await.unwrap();
+        save_message(chat, &earlier).await.unwrap();
+        // The earlier one arrived last, as a catch-up batch can deliver them.
+        crate::db::get_write_connection_guard_static().unwrap()
+            .execute("UPDATE events SET received_at = received_at + 1000 WHERE id = 'sent-earlier'", [])
+            .unwrap();
+        let last = get_all_chats_last_messages().await.unwrap();
+        let row = last.get(chat).and_then(|m| m.last()).unwrap();
+        assert_eq!(row.id, "sent-later", "the newest by its ms, not by arrival");
+        assert_eq!(row.at, 1_793_470_953_878, "and dated to the ms the chat view shows");
     }
 
     #[tokio::test]
