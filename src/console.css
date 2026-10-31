@@ -714,6 +714,26 @@ body.cc .chatlist-community-head-avatar {
 
 /* ============================ The channel drawer ========================== */
 
+/* Moved every frame of a drag, set on the panes that read them (lib/drawer.js, lib/sheet.js):
+   not inherited, so a frame restyles those panes and nothing else on the page. */
+@property --cc-drawer-p {
+  syntax: '<number>';
+  inherits: false;
+  initial-value: 0;
+}
+
+@property --cc-home {
+  syntax: '<number>';
+  inherits: false;
+  initial-value: 0;
+}
+
+@property --cc-sheet-away {
+  syntax: '<number>';
+  inherits: false;
+  initial-value: 0;
+}
+
 /* With a community channel on screen the pane is its drawer, pulled over the channel by
    `--cc-drawer-p` (lib/drawer.js), the channel showing beside it under a shade. Only the
    drawer moves: the conversation's long scroller stays where it is. */
@@ -740,6 +760,12 @@ body.cc.cc-homing .navbar {
   transform: translateY(calc((1 - var(--cc-home, 0)) * 100%));
 }
 
+/* Each on its own layer for good: a drag moves the layer instead of repainting the list. */
+body.cc #chats,
+body.cc.cc-layer #group-overview {
+  will-change: transform;
+}
+
 /* A flat chat's drawer is the whole list, with nothing of the chat beside it. */
 body.cc.cc-layer.cc-flat {
   --cc-peek: 0px;
@@ -754,7 +780,8 @@ body.cc.cc-layer:not(.cc-drawer-on) #chats {
   display: none;
 }
 
-/* Present only while the drawer shows: a blur held at nothing still costs its layer. */
+/* Present only while the drawer shows. Darkened, not blurred: a blur redraws what is under it
+   every frame of a drag. */
 body.cc.cc-layer.cc-drawer-on .cc-drawer-shade {
   display: block;
   position: fixed;
@@ -763,10 +790,8 @@ body.cc.cc-layer.cc-drawer-on .cc-drawer-shade {
   right: 0;
   bottom: 0;
   z-index: 109;
-  background-color: rgba(0, 0, 0, 0.45);
+  background-color: rgba(0, 0, 0, 0.55);
   opacity: var(--cc-drawer-p);
-  -webkit-backdrop-filter: blur(3px);
-  backdrop-filter: blur(3px);
   touch-action: none;
 }
 

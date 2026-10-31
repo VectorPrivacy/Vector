@@ -4599,6 +4599,13 @@ body:not(.ws) .voice-tile {
   z-index: 10;
 }
 
+/* Press-and-hold on the name opens a channel's menu, not the text callout. */
+.chat-header .profile-header-info {
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
 .chat-header {
   position: fixed;
   height: 60px;
@@ -7813,13 +7820,6 @@ img.emoji-img-loading {
   animation: cic-pop-in 0.28s cubic-bezier(0.34, 1.56, 0.64, 1);
 }
 
-.ne-eyebrow {
-  font-size: 10px;
-  font-weight: 700;
-  letter-spacing: 0.09em;
-  text-transform: uppercase;
-  color: rgba(255, 255, 255, 0.45);
-}
 .ne-reply {
   margin: 2px 0 6px;
   font-size: 0.85em;
@@ -7835,6 +7835,13 @@ img.emoji-img-loading {
   overflow-wrap: anywhere;
 }
 
+.ne-eyebrow {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: rgba(255, 255, 255, 0.45);
+}
 
 .ne-author,
 .ne-author-who {
@@ -24288,6 +24295,8 @@ body.profile-switcher-editing .profile-switcher-add {
   font-weight: 600;
   letter-spacing: 0.06em;
 }
+/* No keyboard to press it on. */
+body.mobile .cs-close-key { display: none; }
 .cs-close:hover { color: #fff; }
 .cs-close:hover .cs-close-x { border-color: #9a9a9a; }
 

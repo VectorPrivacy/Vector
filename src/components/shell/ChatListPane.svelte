@@ -16,7 +16,7 @@
     import NetworkNotice from './NetworkNotice.svelte';
     import { loginState } from '../lib/login.svelte.js';
     import { settler, railPull, edgeClaim } from '../lib/railmotion.js';
-    import { drawerPull } from '../lib/drawer.js';
+    import { drawerPull, drawerPane } from '../lib/drawer.js';
     import { untrack } from 'svelte';
     const panes = shellPanes();
     const login = loginState();
@@ -87,7 +87,7 @@
 </script>
 
 <!-- A community channel on screen keeps the pane up as its drawer, away until pulled. -->
-<div id="chats" class="chats" style:display={panes.chats || cc.layer ? null : 'none'} use:bindChats use:reveal={['chats', reveals.chats]} use:railPull={drawerGrip}>
+<div id="chats" class="chats" style:display={panes.chats || cc.layer ? null : 'none'} use:bindChats use:reveal={['chats', reveals.chats]} use:railPull={drawerGrip} use:drawerPane>
     {#if slim}<ConsoleHeader />{/if}
     <!-- A sync that starts under the login form waits for the list to be on screen. -->
     <div id="sync-line" class="sync-line" class:active={sync.active && !login.shown} class:fade-out={sync.fadeOut} class:progress={sync.progress !== null}
@@ -148,5 +148,5 @@
 {#if cc.layer}
     <!-- The channel under the drawer, shaded: a tap or a pull back puts the drawer away. -->
     <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-    <div class="cc-drawer-shade" data-edge-skip use:railPull={drawerGrip} onclick={() => shellHandlers().consoleDrawer?.(false)}></div>
+    <div class="cc-drawer-shade" data-edge-skip use:railPull={drawerGrip} use:drawerPane onclick={() => shellHandlers().consoleDrawer?.(false)}></div>
 {/if}

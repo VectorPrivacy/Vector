@@ -106,6 +106,22 @@
         e.stopPropagation();
         h()?.openMenu(e.currentTarget.getBoundingClientRect());
     }
+
+    // Right-click or press-and-hold on a channel's name opens its menu. The tap a long-press
+    // ends with, or one that only dismissed a menu, must not also open the details.
+    let menuAt = 0;
+    let info = $state(null);
+    let gesture = false;
+    // Attached once a chat opens: the handlers land after the header mounts.
+    $effect(() => {
+        if (gesture || !vm || !info) return;
+        gesture = true;
+        h().attachLongPressContextMenu(info, (x, y) => { if (h().channelMenu(x, y)) menuAt = Date.now(); }, () => !!vm?.group);
+    });
+    function tap() {
+        if (Date.now() - menuAt < 600 || h()?.menuJustDismissed()) return;
+        vm?.click?.();
+    }
 </script>
 
 <div class="chat-header">
@@ -114,13 +130,13 @@
         <span class="icon icon-chevron-double-left nav-icon"></span>
         <span class="update-notification-dot" style:display={backDot ? null : 'none'}></span>
     </div>
-    <div class="profile-header-info" data-motion="hover">
+    <div class="profile-header-info" data-motion="hover" bind:this={info}>
         <div class="profile-header-name-row">
             <div id="chat-header-avatar-container">
                 {#if vm && !vm.notes}
                     {#key `${vm.id}|${vm.group}`}
                         <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-                        <span style="display:contents" onclick={() => vm?.click?.()}>
+                        <span style="display:contents" onclick={tap}>
                             <Avatar src={vm.avatarSrc} size={22} group={vm.group} class="btn" />
                         </span>
                     {/key}
@@ -128,7 +144,7 @@
             </div>
             <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_noninteractive_element_interactions, a11y_missing_content -->
             <h3 id="chat-contact" class="cutoff" class:btn={!!vm?.click} class:chat-contact={status.hidden} class:chat-contact-with-status={!status.hidden}
-                use:nameInto={[vm ? vm.name : '', !!vm?.twemoji]} onclick={() => vm?.click?.()}></h3>
+                use:nameInto={[vm ? vm.name : '', !!vm?.twemoji]} onclick={tap}></h3>
         </div>
         <span id="chat-contact-status" class="cutoff chat-contact-status btn" class:status-hidden={status.hidden} class:is-topic={!!vm?.topic}
               use:statusInto={[status.text, status.tags]}></span>

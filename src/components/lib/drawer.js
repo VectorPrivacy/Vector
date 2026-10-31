@@ -1,6 +1,6 @@
 // The slim layout's drawer: the list pane pulled over the open chat, as far out as
-// `--cc-drawer-p` on the root (0 away, 1 open), with `body.cc-drawer-on` while any of it
-// shows. Eased between the two, or held to a finger. widescreen.js decides where it rests.
+// `--cc-drawer-p` (0 away, 1 open), with `body.cc-drawer-on` while any of it shows. Eased
+// between the two, or held to a finger. widescreen.js decides where it rests.
 import { settler } from './railmotion.js';
 
 // The channel left showing beside the open drawer (`--cc-peek`, which a chat with no
@@ -8,12 +8,27 @@ import { settler } from './railmotion.js';
 const PEEK = 64;
 document.documentElement.style.setProperty('--cc-peek', PEEK + 'px');
 
+// Set on the panes that read them, not the root: registered as not inherited
+// (console.css), a frame restyles those panes alone, however much else is on the page.
+const panes = new Set();
+function put(name, v) {
+    for (const el of panes) el.style.setProperty(name, String(v));
+}
+
+/** use:drawerPane on whatever reads `--cc-drawer-p` or `--cc-home`. */
+export function drawerPane(node) {
+    panes.add(node);
+    node.style.setProperty('--cc-drawer-p', String(p));
+    node.style.setProperty('--cc-home', String(home));
+    return { destroy: () => panes.delete(node) };
+}
+
 let p = 0;
 let pTo = 0;
 let pDone = null;
 function paint(v) {
     p = v;
-    document.documentElement.style.setProperty('--cc-drawer-p', String(v));
+    put('--cc-drawer-p', v);
     document.body.classList.toggle('cc-drawer-on', v > 0);
     if (v === pTo && pDone) {
         const done = pDone;
@@ -42,7 +57,7 @@ let homeTo = 0;
 let homed = null;
 function paintHome(v) {
     home = v;
-    document.documentElement.style.setProperty('--cc-home', String(v));
+    put('--cc-home', v);
     if (v !== homeTo) return;
     document.body.classList.remove('cc-homing');
     if (homed) {

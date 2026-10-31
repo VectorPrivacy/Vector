@@ -1,13 +1,23 @@
 // The slim layout's details sheet: a community channel's details slid over the channel, which
-// stays open beneath, as far away as `--cc-sheet-away` on the root (0 covering it, 1 slid off
-// to the right). Eased between the two, or held to a finger. widescreen.js decides where it rests.
+// stays open beneath, as far away as `--cc-sheet-away` (0 covering it, 1 slid off to the right),
+// set on the sheet itself (not inherited, as drawer.js's). Eased between the two, or held to a
+// finger. widescreen.js decides where it rests.
 import { settler } from './railmotion.js';
 
 let away = 1;
 let settled = null;
+let sheet = null;
+
+/** use:sheetPane on the sheet. */
+export function sheetPane(node) {
+    sheet = node;
+    node.style.setProperty('--cc-sheet-away', String(away));
+    return { destroy: () => { if (sheet === node) sheet = null; } };
+}
+
 function paint(v) {
     away = v;
-    document.documentElement.style.setProperty('--cc-sheet-away', String(v));
+    sheet?.style.setProperty('--cc-sheet-away', String(v));
     if (v === 1 && settled) {
         const done = settled;
         settled = null;

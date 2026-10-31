@@ -3,6 +3,7 @@
     // island, mounted by rail.js), the tabs, the collapse toggle and the account slot
     // widescreen.js docks #account into. The rail-only children are display:none
     // outside `body.ws`.
+    import { drawerPane } from '../lib/drawer.js';
     import { shellPanes, shellState, shellHandlers, shellReveals, reveal, bindShellEl } from '../lib/shell.svelte.js';
     import AccountRow from './AccountRow.svelte';
     import RailShortcuts from './RailShortcuts.svelte';
@@ -18,7 +19,7 @@
     const bookmarksOpen = $derived(!!openChatId() && openChatId() === h().myNpub?.());
 </script>
 
-<div id="navbar" class="row navbar" style:display={panes.navbar ? null : 'none'} use:bindNavbar use:reveal={['navbar', reveals.navbar]}>
+<div id="navbar" class="row navbar" style:display={panes.navbar ? null : 'none'} use:bindNavbar use:reveal={['navbar', reveals.navbar]} use:drawerPane>
     <!-- Unread DMs over communities; the strip renders once rail.js registers its bag. -->
     <div id="ws-rail-shortcuts">
         {#if st.ws && screens.rail}<RailShortcuts h={screens.rail.h} snapshot={screens.rail.snapshot} />{/if}

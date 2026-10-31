@@ -3,8 +3,9 @@
     const t = toastState();
 </script>
 
-<div class="toast-backdrop" class:visible={t.visible}></div>
-<div class="app-toast" class:visible={t.visible}>{t.text}</div>
+<!-- Opacity inline: the scoped styles land after mount, and would fade an empty toast out on every load. -->
+<div class="toast-backdrop" style:opacity={t.visible ? 1 : 0}></div>
+<div class="app-toast" style:opacity={t.visible ? 1 : 0}>{t.text}</div>
 
 <style>
     .app-toast {
@@ -24,7 +25,6 @@
         z-index: 10100;
         font-size: 14px;
         overflow-wrap: anywhere;
-        opacity: 0;
         transition: opacity 0.3s ease;
         pointer-events: none;
     }
@@ -32,10 +32,8 @@
         position: fixed;
         top: 0; left: 0; width: 100%; height: 100%;
         background: linear-gradient(to bottom, rgba(0,0,0,0) 0%, rgba(0,0,0,0) 50%, rgba(0,0,0,0.8) 100%);
-        opacity: 0;
         z-index: 10099;
         pointer-events: none;
         transition: opacity 0.3s ease;
     }
-    .app-toast.visible, .toast-backdrop.visible { opacity: 1; }
 </style>

@@ -1048,6 +1048,8 @@ function chatOnScreen(id) {
 }
 
 async function openChat(contact, { reread = true, fade = true } = {}) {
+    // One chat replacing another is a switch, not a new screen: it never fades.
+    const swap = VectorSvelte.paneShown('chat');
     // Safety net: a navigate-away mid-resolve clears this in jumpToUnread's finally,
     // but unfreeze the window on any chat open in case a path slipped through.
     _unreadJumpResolving = false;
@@ -1094,7 +1096,7 @@ async function openChat(contact, { reread = true, fade = true } = {}) {
     popBack('new-chat');
     VectorSvelte.showPane('chat', true);
     // Match the fade transition the navbar/account tabs use for visual cohesion.
-    if (fade) VectorSvelte.revealPane('chat', 'fadein-anim');
+    if (fade && !swap) VectorSvelte.revealPane('chat', 'fadein-anim');
     VectorSvelte.setShellFlag('settingsTab', false);
 
     // Hide the Navbar
@@ -1642,6 +1644,17 @@ VectorSvelte.setChatHeaderHandlers({
         menuCount: (chat) => buildChatMenuItems(chat).length,
         openProfile: (profile) => { previousChatBeforeProfile = strOpenChat; openProfile(profile); },
         openCommunity: (chat) => openCommunityDetails(chat),
+        // A channel's header opens the menu its row does; false for anything else.
+        channelMenu: (x, y) => {
+            const chat = getChat(strOpenChat);
+            const communityId = communityIdOfChat(chat);
+            const channel = communityId ? communityChannelsCache.get(communityId)?.find(c => c.id === chat.id) : null;
+            if (!channel) return false;
+            openChannelMenu(communityId, channel, x, y);
+            return true;
+        },
+        attachLongPressContextMenu: (el, fire, accepts) => attachLongPressContextMenu(el, fire, accepts),
+        menuJustDismissed: () => wasContextMenuJustDismissed(),
         chats: () => arrChats,
         backDotWanted: () => chatBackDotWanted(),
         // A community channel's Back is its drawer's (widescreen.js).
