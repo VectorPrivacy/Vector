@@ -223,6 +223,7 @@ pub async fn resubscribe_relay_after_reconnect(
     relay: &nostr_sdk::prelude::RelayUrl,
 ) {
     use std::borrow::Cow;
+    crate::community::v2::realtime::note_resubscribe();
     let Ok(Some(handle)) = client.relay(relay).await else { return };
     let (mut sent, mut failed) = (0usize, 0usize);
     for (id, per_relay) in client.subscriptions().await {

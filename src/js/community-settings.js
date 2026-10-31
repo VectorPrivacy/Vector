@@ -30,6 +30,8 @@ VectorSvelte.setScreen('communitySettings', {
         avatarSrc: (npub) => { const p = getProfile(npub); return p ? getProfileAvatarSrc(p) || null : null; },
         profile: (npub) => getProfile(npub) || null,
         loadAudit: (communityId) => csLoadAudit(communityId),
+        syncReport: (communityId) => csSyncReport(communityId),
+        copyText: (text, what) => navigator.clipboard.writeText(text).then(() => showToast(`Copied ${what}`)).catch(() => showToast('Failed to Copy')),
         openLink: (key) => openUrl(CS_LINKS[key]),
         relayInfo: (url) => loadRelayInfo(url),
         explainAuth: () => csExplainAuth(),
@@ -481,6 +483,31 @@ async function csSetRoleHolders(roleId, add, remove) {
 
 /** The banlist, and the profiles behind it so rows read as people rather than keys. */
 /** Read the community's Audit Log, and the profiles it names that this device hasn't met. */
+/** Advanced Mode's sync report: this device's control fold and epoch state for one
+ *  community, structure only, to set beside another device's that disagrees. */
+async function csSyncReport(communityId) {
+    if (!communityId) return;
+    VectorSvelte.auditReportOpen();
+    const [control, epoch] = await Promise.allSettled([
+        invoke('debug_v2_control_report', { communityId }),
+        invoke('debug_v2_explain_base_rekey', { communityId }),
+    ]);
+    let version = '';
+    try { version = await window.__TAURI__.app.getVersion(); } catch (_) { /* reported blank */ }
+    if (control.status === 'rejected' && epoch.status === 'rejected') {
+        VectorSvelte.auditReportFailed(String(control.reason));
+        return;
+    }
+    VectorSvelte.auditReportLoaded({
+        client: document.documentElement.classList.contains('vector-web') ? 'web' : platformFeatures?.os || 'desktop',
+        version,
+        at: new Date().toISOString(),
+        community: communityId.slice(0, 12),
+        control: control.status === 'fulfilled' ? control.value : { error: String(control.reason) },
+        epoch: epoch.status === 'fulfilled' ? epoch.value : { error: String(epoch.reason) },
+    });
+}
+
 async function csLoadAudit(communityId) {
     if (!communityId) return;
     VectorSvelte.auditLoading(communityId);

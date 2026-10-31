@@ -129,6 +129,23 @@ type FollowLocks = std::collections::HashMap<[u8; 32], Arc<Mutex<()>>>;
 static V2_FOLLOW_LOCKS: LazyLock<StdMutex<FollowLocks>> =
     LazyLock::new(|| StdMutex::new(std::collections::HashMap::new()));
 
+/// Whether a follow of this community is queued.
+pub(crate) fn follow_pending(id: &CommunityId) -> bool {
+    V2_FOLLOW_PENDING.lock().unwrap_or_else(|e| e.into_inner()).contains(&id.0)
+}
+
+/// Bumped each time a relay's live subscriptions are sent again: what it carried in between never
+/// arrived, so a control window read before then may lack it.
+struct LinkGeneration;
+
+pub(crate) fn note_resubscribe() {
+    crate::db::current_session().scoped::<LinkGeneration, std::sync::atomic::AtomicU64>().fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+}
+
+pub(crate) fn link_generation() -> u64 {
+    crate::db::current_session().scoped::<LinkGeneration, std::sync::atomic::AtomicU64>().load(std::sync::atomic::Ordering::SeqCst)
+}
+
 /// The follow lock for one community (created on first use).
 pub(crate) fn follow_lock(id: &CommunityId) -> Arc<Mutex<()>> {
     let mut locks = V2_FOLLOW_LOCKS.lock().unwrap();
@@ -846,6 +863,7 @@ fn prime_auth_in_background(client: &Client, relays: Vec<String>) {
 /// The targeted id carries this relay's share only; one no held community lists
 /// gets none.
 pub(crate) async fn resubscribe_relay(client: &Client, relay: &RelayUrl) {
+    note_resubscribe();
     let targeted = V2_SUB_ID.lock().await.clone();
     let poolwide = V2_POOLWIDE_SUB_ID.lock().await.clone();
     if targeted.is_none() && poolwide.is_none() {
@@ -867,6 +885,51 @@ pub(crate) async fn resubscribe_relay(client: &Client, relay: &RelayUrl) {
             .with_id(id)
             .await;
     }
+}
+
+/// Fold a live control edition without re-reading the plane. `false` when it can't (a follow
+/// holds the community, or the held window can't decide it), so the caller queues the follow.
+/// A change that moves planes, keys, writers or authority still queues a full pass, for the rekey
+/// walk, key vends, writer keys and self-removal; the change itself is already on screen.
+async fn apply_live_control(c: &CommunityV2, wrap: &Event, handler: &dyn InboundEventHandler) -> bool {
+    // A queued follow means this device knows it is behind.
+    if follow_pending(c.id()) {
+        return false;
+    }
+    let lock = follow_lock(c.id());
+    let Ok(_guard) = lock.try_lock() else {
+        return false;
+    };
+    let Ok(Some(current)) = crate::db::community::load_community_v2(c.id()) else {
+        return false;
+    };
+    let Some(follow) = super::service::follow_control_live(&current, wrap).await else {
+        return false;
+    };
+    let community_id = crate::simd::hex::bytes_to_hex_32(&c.id().0);
+    let planes = |c: &CommunityV2| {
+        let mut chans: Vec<_> = c
+            .channels
+            .iter()
+            .map(|ch| (ch.id.0, ch.private, ch.key, ch.epoch.0, ch.writers.clone(), ch.sealed.clone()))
+            .collect();
+        chans.sort_unstable_by_key(|ch| ch.0);
+        (chans, c.relays.clone(), c.control_pk, c.control_root)
+    };
+    let moved_planes = follow.updated.as_ref().is_some_and(|u| planes(u) != planes(&current));
+    let banned = crate::my_public_key().is_some_and(|me| crate::db::community::is_author_banned(&community_id, &me));
+    if moved_planes {
+        if let Some(client) = crate::state::nostr_client() {
+            refresh_subscription(&client).await;
+        }
+    }
+    if follow.updated.is_some() {
+        handler.on_community_refreshed(&community_id);
+    }
+    if moved_planes || follow.authority_changed || banned {
+        enqueue_follow_urgent(c.id());
+    }
+    true
 }
 
 /// Route an arriving v2 wrap: find the held community whose plane it opens under
@@ -906,11 +969,16 @@ pub async fn dispatch_event(event: Event, handler: Arc<dyn InboundEventHandler>)
             let wrap = &event;
             match inbound::dispatch_wrap(&event, c, &my_pk, &*handler) {
                 inbound::DispatchedV2::NotOurs => return,
-                // A control OR a rekey wrap: just enqueue a follow for this community.
-                // Non-blocking + coalesced — the single follow worker serializes control
-                // and rekey per community (no concurrent whole-row clobber) off this hot
-                // path, so a junk-wrap flood can't head-of-line-block the notification loop.
-                inbound::DispatchedV2::Control { .. } | inbound::DispatchedV2::Rekey { .. } => {
+                // A control edition folds in place when the window it extends is in hand;
+                // anything else, and every rekey wrap, goes to the follow worker, which
+                // serializes control and rekey per community off this hot path.
+                inbound::DispatchedV2::Control { .. } => {
+                    if !apply_live_control(c, wrap, &*handler).await {
+                        enqueue_follow_urgent(c.id());
+                    }
+                    return;
+                }
+                inbound::DispatchedV2::Rekey { .. } => {
                     enqueue_follow_urgent(c.id());
                     return;
                 }

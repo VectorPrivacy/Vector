@@ -153,12 +153,6 @@ async function setupRustListeners() {
         // network has already removed — an operator would tick one and act on a roster
         // that no longer exists.
         modNoteControlChange(communityId);
-        // A ban hides what they already posted, but only in the QUERIES — the painted
-        // timeline and its cache still hold the rows. Drop the cache for this
-        // community's channels and re-open the visible one so it re-reads the filtered
-        // source. Deliberately NOT a JS-side banlist filter: the rule lives in one
-        // place, in SQL, and a second copy here would be the one that goes stale.
-        purgeCommunityMessageCache(communityId);
         communityChanged(communityId);
         // Re-render the open overview (re-fetches caps/members/banlist fresh) if it's this community.
         if (VectorSvelte.paneShown('groupOverview') && VectorSvelte.overviewState().groupId === communityId) {
@@ -179,10 +173,19 @@ async function setupRustListeners() {
         }
     });
 
+    // A ban hides what they already posted, but only in the QUERIES: the painted timeline and its
+    // cache still hold the rows, so they are re-read. Only when the banlist moved; any other control
+    // change re-reading here re-opened the channel under whoever was using it. Deliberately NOT a
+    // JS-side banlist filter: the rule lives in one place, in SQL.
+    _on('community_banlist_changed', (evt) => {
+        const communityId = evt.payload?.community_id;
+        if (communityId) purgeCommunityMessageCache(communityId);
+    });
+
     /// Drop cached/painted messages for a community so the next read comes from the
     /// filtered queries.
     ///
-    /// Called when control state moves (ban, kick, rotation). The ban rule is enforced
+    /// Called when the banlist moves, or a channel is deleted. The ban rule is enforced
     /// in SQL and nowhere else — re-reading is what makes this correct rather than a
     /// second implementation that can disagree with the first.
     async function purgeCommunityMessageCache(communityId) {

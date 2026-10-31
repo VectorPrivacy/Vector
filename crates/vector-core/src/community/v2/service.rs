@@ -1809,6 +1809,89 @@ pub async fn community_is_public<T: Transport + ?Sized>(transport: &T, community
     !live_invite_link_sets(cid, &owner.to_hex(), &editions, &authority, &floors).is_empty()
 }
 
+/// What this client's control fold makes of the plane now, saving none of it: whether
+/// authority settles, and per entity the held floor against the newest edition served.
+/// For a device whose view froze. Structure only (entity prefixes, versions, verdicts, signers
+/// by role, ages in days): no content, keys or exact times, so a private community's can be shared.
+pub async fn debug_control_report(community: &CommunityV2) -> Result<serde_json::Value, String> {
+    let transport = crate::community::transport::LiveTransport::with_timeout(std::time::Duration::from_secs(15));
+    let ControlRead { floors, editions, authority, fold, truncated, pages_read, healed, refusals } = read_control(&transport, community).await?;
+    let hex = crate::simd::hex::bytes_to_hex_32;
+    let short = |h: &str| h[..12.min(h.len())].to_string();
+    // Signers by role, never by key: a key prefix would name a private community's staff.
+    let owner = community.owner().ok().map(|o| o.to_hex());
+    let me = crate::state::my_public_key().map(|m| m.to_hex());
+    let mut signers: Vec<String> = Vec::new();
+    let mut signer = |pk: &str| -> String {
+        if owner.as_deref() == Some(pk) {
+            return "owner".into();
+        }
+        if me.as_deref() == Some(pk) {
+            return "me".into();
+        }
+        let n = signers.iter().position(|s| s == pk).unwrap_or_else(|| {
+            signers.push(pk.to_string());
+            signers.len() - 1
+        });
+        format!("signer {}", n + 1)
+    };
+    let now = now_ms() / 1000;
+    let mine = crate::state::my_public_key().map(|me| hex(&super::derive::grant_locator(community.id(), &me.to_bytes())));
+    let folded: std::collections::HashMap<&str, &FoldedHead> =
+        fold.heads.iter().chain(authority.heads.iter()).map(|h| (h.entity_hex.as_str(), h)).collect();
+    let mut by_entity: std::collections::BTreeMap<String, Vec<&ParsedEdition>> = Default::default();
+    for e in &editions {
+        by_entity.entry(hex(&e.entity_id)).or_default().push(e);
+    }
+    // A held entity the relays serve nothing for is part of the picture too.
+    for held in floors.keys() {
+        by_entity.entry(held.clone()).or_default();
+    }
+    let rows: Vec<serde_json::Value> = by_entity
+        .iter()
+        .map(|(eid, eds)| {
+            let newest = eds.iter().max_by_key(|e| (e.version, e.created_at));
+            let floor = floors.get(eid);
+            let mut served: Vec<u64> = eds.iter().map(|e| e.version).collect();
+            served.sort_unstable();
+            served.dedup();
+            serde_json::json!({
+                "entity": short(eid),
+                "kind": newest.map(|e| e.vsk.clone()),
+                "mine": mine.as_deref() == Some(eid.as_str()),
+                "served": served,
+                "newest": newest.map(|e| serde_json::json!({
+                    "version": e.version,
+                    "age_days": now.saturating_sub(e.created_at) / 86_400,
+                    "author": signer(&e.author.to_hex()),
+                    "admitted": fold.admitted.contains(&e.inner_id) || authority.admitted.contains(&e.inner_id),
+                    "is_floor": floor.is_some_and(|f| f.1 == e.self_hash),
+                    "extends_floor": floor.filter(|f| f.1 != e.self_hash).map(|f| e.prev_hash == Some(f.1)),
+                })),
+                "floor": floor.map(|f| serde_json::json!({ "version": f.0, "served": eds.iter().any(|e| e.self_hash == f.1) })),
+                "folds_to": folded.get(eid.as_str()).map(|h| serde_json::json!({ "version": h.version, "rebased": h.rebased })),
+                "refused": refusals.get(eid).copied().or_else(|| authority.refused.contains(eid).then_some("refused")),
+                "carried": authority.carried.contains(eid),
+                "kept": fold.kept.contains(eid),
+            })
+        })
+        .collect();
+    Ok(serde_json::json!({
+        "root_epoch": community.root_epoch.0,
+        "converged": authority.converged,
+        "complete": authority.complete,
+        "activated": authority.activated,
+        "authority_gapped": authority.gapped,
+        "fold_gapped": fold.gapped,
+        "truncated": truncated,
+        "pages_read": pages_read,
+        "editions": editions.len(),
+        "would_update": fold.updated.is_some(),
+        "healed": healed.iter().map(|h| short(&h.entity_hex)).collect::<Vec<_>>(),
+        "entities": rows,
+    }))
+}
+
 /// Page the WHOLE control plane, not the newest window: a registry pushed out of a
 /// single page reads as retired, and any member can push it out since the plane key
 /// comes from the community root they hold. `None` = it could NOT be read whole
@@ -2064,7 +2147,7 @@ async fn accept_bundle<T: Transport + ?Sized>(
         // queue). The system "modified the Pins" line still arrives via that first
         // follow — a join backfills state, it doesn't announce edits.
         if let Some((banned_list, version)) = &join_banlist_content {
-            let _ = crate::db::community::set_community_banlist(&cid_hex, banned_list, *version as i64);
+            store_banlist(&cid_hex, banned_list, *version as i64);
         }
         // The ROSTER, same rule as the banlist and pins above: the walk already
         // paid for it. Persisted BEFORE the channels register, because the first
@@ -6259,6 +6342,7 @@ async fn publish_control_edition_wrap_at<T: Transport + ?Sized>(
         // edit rebuilds the same head from the relay's copy).
         if let Ok((ed, _)) = control::open_control_edition(&wrap, &control) {
             crate::db::community::set_family_head_at_epoch(&cid_hex, &entity_hex, ed.version, &ed.self_hash, &ed.inner_id, &ed.author.to_bytes(), community.root_epoch.0, floor_family(&ed.vsk))?;
+            hold_own(community, ed);
         }
         Ok(wrap)
     })
@@ -8225,10 +8309,23 @@ pub async fn set_banlist<T: Transport + ?Sized>(transport: &T, community: &Commu
         // list if any later step trips before the fold, so each new banlist
         // edition it builds ERASES every ban since the last fold. Nineteen bans in
         // production each overwrote their predecessor exactly this way.
-        let _ = crate::db::community::set_community_banlist(&cid_hex, banned, version as i64);
+        store_banlist(&cid_hex, banned, version as i64);
         Ok(())
     })
     .await
+}
+
+/// Store a banlist, telling the UI when the set moved.
+fn store_banlist(cid_hex: &str, banned: &[String], version: i64) {
+    if crate::db::community::set_community_banlist(cid_hex, banned, version).unwrap_or(false) {
+        announce_banlist(cid_hex);
+    }
+}
+
+/// A ban hides what its target already posted (in SQL), and an un-ban shows it again: a painted
+/// timeline is stale only when the set moves, so this, not every control change, re-reads it.
+fn announce_banlist(cid_hex: &str) {
+    crate::emit_event("community_banlist_changed", &serde_json::json!({ "community_id": cid_hex }));
 }
 
 /// Per-community moderation-unit locks. Session-scoped: an account swap drops the
@@ -10422,6 +10519,233 @@ struct ControlRead {
     /// The read stopped with editions this device tracks still unread.
     truncated: bool,
     pages_read: usize,
+    /// Floors a build before marked editions wrote, now on the edition's real hash.
+    healed: Vec<HealedFloor>,
+    /// Why the last fold refused each role and grant it refused.
+    refusals: std::collections::BTreeMap<String, &'static str>,
+}
+
+/// A floor that held a marked edition under its unsigned hash, and the edition it names.
+struct HealedFloor {
+    entity_hex: String,
+    version: u64,
+    unsigned: [u8; 32],
+    self_hash: [u8; 32],
+    inner_id: [u8; 32],
+    author: [u8; 32],
+}
+
+/// A floor written before marked editions (CORD-04 §1) holds the edition's unsigned hash, which
+/// no served edition carries any more: its chain reads as a rival at the same version, and every
+/// edition resting on its authority stops folding. Only the same edition takes the floor over: its
+/// inner id, or its unsigned hash under the signer the floor recorded. A copy re-signed under
+/// another key shares that hash, so a floor that recorded no signer heals only to the owner's.
+fn heal_unsigned_floors(floors: &mut Floors, owner: Option<[u8; 32]>, editions: &[ParsedEdition], healed: &mut Vec<HealedFloor>) {
+    let mut at: crate::fasthash::FastMap<([u8; 32], u64), Vec<&ParsedEdition>> = Default::default();
+    for e in editions {
+        at.entry((e.entity_id, e.version)).or_default().push(e);
+    }
+    for (eid, f) in floors.iter_mut() {
+        let Some(entity) = crate::simd::hex::hex_to_bytes_32_checked(eid) else { continue };
+        let Some(served) = at.get(&(entity, f.0)) else { continue };
+        if served.iter().any(|e| held_is(f, e)) {
+            continue;
+        }
+        let same: Vec<&ParsedEdition> = match served.iter().find(|e| f.2 == Some(e.inner_id)) {
+            Some(e) => vec![*e],
+            None => {
+                let Some(signer) = f.3.or(owner) else { continue };
+                served
+                    .iter()
+                    .copied()
+                    .filter(|e| e.binding.is_some() && e.author.to_bytes() == signer)
+                    .filter(|e| f.4.is_none_or(|fam| fam == crate::db::community::FloorFamily::of(floor_family(&e.vsk))))
+                    .filter(|e| crate::community::version::edition_hash(&e.entity_id, e.version, e.prev_hash.as_ref(), e.content.as_bytes()) == f.1)
+                    .collect()
+            }
+        };
+        let Some(e) = same.iter().min_by_key(|e| e.inner_id) else { continue };
+        if same.iter().any(|o| o.self_hash != e.self_hash) {
+            continue;
+        }
+        let unsigned = f.1;
+        f.1 = e.self_hash;
+        f.2 = Some(e.inner_id);
+        f.3 = Some(e.author.to_bytes());
+        if !healed.iter().any(|h| h.entity_hex == *eid) {
+            healed.push(HealedFloor { entity_hex: eid.clone(), version: f.0, unsigned, self_hash: e.self_hash, inner_id: e.inner_id, author: e.author.to_bytes() });
+        }
+    }
+}
+
+/// Per-entity refuse-downgrade floors for the CURRENT epoch only. A head recorded under a prior
+/// epoch is excluded, so that entity auto-bootstraps after a Refounding (Armada accepts a compacted
+/// head across a dangling prev — matched). A read error FAILS CLOSED: an empty map would silently
+/// re-open the rollback window the floor exists to shut.
+fn held_floors(community: &CommunityV2) -> Result<Floors, String> {
+    let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+    Ok(crate::db::community::get_all_edition_heads_full(&cid_hex)?
+        .into_iter()
+        .filter(|(_, f)| f.0 == community.root_epoch.0)
+        .map(|(entity, f)| (entity, (f.1, f.2, f.3, f.4, f.5)))
+        .collect())
+}
+
+impl ControlRead {
+    /// A fold with one answer over a whole window: what a live edition may later fold against.
+    fn settled(&self) -> bool {
+        self.authority.converged && !self.truncated && !self.fold.gapped && !self.authority.gapped
+    }
+}
+
+/// The fold a follow runs, over editions already in hand. No network, and not truncated: the
+/// window it extends was read whole.
+fn fold_control_held(community: &CommunityV2, editions: Vec<ParsedEdition>) -> Result<ControlRead, String> {
+    let mut floors = held_floors(community)?;
+    let mut healed = Vec::new();
+    heal_unsigned_floors(&mut floors, community.owner().ok().map(|o| o.to_bytes()), &editions, &mut healed);
+    let authority = fold_authority(community, &editions, &floors);
+    let refusals = AUTHORITY_REFUSALS.with(|c| c.borrow().clone());
+    let fold = apply_control_fold(community, &editions, &floors, &authority);
+    Ok(ControlRead { floors, editions, authority, fold, truncated: false, pages_read: 0, healed, refusals })
+}
+
+/// A Control Plane window a settled follow read this session, which a live edition folds
+/// against instead of re-reading the plane.
+#[derive(Clone)]
+struct Held {
+    epoch: u64,
+    /// [`super::realtime::link_generation`] when the read began.
+    link: u64,
+    editions: Vec<ParsedEdition>,
+    /// The owner and everyone the window's Roster grants a Role: nobody else's edition can fold
+    /// here, since it would need a grant this window doesn't hold.
+    staff: crate::fasthash::FastSet<[u8; 32]>,
+    /// Channels the window already deletes.
+    deleted: Vec<ChannelId>,
+}
+
+struct HeldControl;
+type HeldControlMap = std::sync::Mutex<std::collections::HashMap<[u8; 32], Held>>;
+
+fn held_control() -> std::sync::Arc<HeldControlMap> {
+    crate::db::current_session().scoped::<HeldControl, HeldControlMap>()
+}
+
+/// The most editions a held window keeps: past it, live editions wait for a follow's re-read.
+const LIVE_WINDOW_MAX: usize = FOLLOW_PAGE * 2;
+
+/// What a window needs beside its editions to be held: one answer over all of it, with every
+/// floored role and grant served.
+fn holdable(community: &CommunityV2, read: &ControlRead) -> Option<(crate::fasthash::FastSet<[u8; 32]>, Vec<ChannelId>)> {
+    if !read.settled() || !read.authority.complete {
+        return None;
+    }
+    let mut staff: crate::fasthash::FastSet<[u8; 32]> =
+        read.authority.roles.grants.iter().filter_map(|g| crate::simd::hex::hex_to_bytes_32_checked(&g.member)).collect();
+    staff.extend(community.owner().ok().map(|o| o.to_bytes()));
+    Some((staff, read.fold.deleted_channels.clone()))
+}
+
+/// Keep a window, or forget one a follow could not settle.
+fn hold_control(community: &CommunityV2, window: Option<Held>) {
+    let held = held_control();
+    let mut held = held.lock().unwrap_or_else(|e| e.into_inner());
+    match window.filter(|w| w.editions.len() <= LIVE_WINDOW_MAX) {
+        Some(w) => held.insert(community.id().0, w),
+        None => held.remove(&community.id().0),
+    };
+}
+
+/// Our own published edition joins the held window, which its floor has already passed.
+fn hold_own(community: &CommunityV2, edition: ParsedEdition) {
+    let held = held_control();
+    let mut held = held.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(w) = held.get_mut(&community.id().0).filter(|w| w.epoch == community.root_epoch.0) else {
+        return;
+    };
+    if edition.vsk == vsk::GRANT {
+        let member = super::roles::parse_grant_content(&edition.content).and_then(|g| crate::simd::hex::hex_to_bytes_32_checked(&g.member));
+        w.staff.extend(member);
+    }
+    if !w.editions.iter().any(|e| e.inner_id == edition.inner_id) {
+        w.editions.push(edition);
+    }
+    if w.editions.len() > LIVE_WINDOW_MAX {
+        held.remove(&community.id().0);
+    }
+}
+
+/// Follows reading a community's plane right now, whoever called them: a live fold waits them
+/// out, since one that persists after it would write a row from before it.
+struct ControlReads;
+type ControlReadCounts = std::sync::Mutex<std::collections::HashMap<[u8; 32], usize>>;
+
+struct Reading(std::sync::Arc<ControlReadCounts>, [u8; 32]);
+
+impl Drop for Reading {
+    fn drop(&mut self) {
+        let mut counts = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(n) = counts.get_mut(&self.1) {
+            *n -= 1;
+            if *n == 0 {
+                counts.remove(&self.1);
+            }
+        }
+    }
+}
+
+fn reading(id: &crate::community::CommunityId) -> Reading {
+    let counts = crate::db::current_session().scoped::<ControlReads, ControlReadCounts>();
+    *counts.lock().unwrap_or_else(|e| e.into_inner()).entry(id.0).or_default() += 1;
+    Reading(counts, id.0)
+}
+
+fn being_read(id: &crate::community::CommunityId) -> bool {
+    crate::db::current_session().scoped::<ControlReads, ControlReadCounts>().lock().unwrap_or_else(|e| e.into_inner()).contains_key(&id.0)
+}
+
+/// A live control wrap, folded in place: the window the last settled follow read plus this
+/// edition, through the fold and persist a follow runs. `None` whenever the window may not
+/// decide it as a full read would (none held, a read since that may have missed something, an
+/// author or a refusal only a read can settle, a new deletion): a full follow then reads the plane.
+pub(crate) async fn follow_control_live(community: &CommunityV2, wrap: &Event) -> Option<ControlFollow> {
+    crate::db::scoped(async move {
+        if being_read(community.id()) {
+            return None;
+        }
+        let held = held_control().lock().unwrap_or_else(|e| e.into_inner()).get(&community.id().0).cloned()?;
+        if held.epoch != community.root_epoch.0 || held.link != super::realtime::link_generation() {
+            return None;
+        }
+        let edition = control::ControlPlane::of(community).open_edition(wrap).ok()?;
+        if held.editions.iter().any(|e| e.inner_id == edition.inner_id) {
+            return Some(ControlFollow::default());
+        }
+        // A Grant of mine may carry the staff key, which a remote signer opens: not on this path.
+        let mine = me_pk().is_ok_and(|me| edition.entity_id == super::derive::grant_locator(community.id(), &me.to_bytes()));
+        if mine || !held.staff.contains(&edition.author.to_bytes()) {
+            return None;
+        }
+        let id = edition.inner_id;
+        let Held { epoch, link, mut editions, deleted, .. } = held;
+        editions.push(edition);
+        let read = fold_control_held(community, editions).ok()?;
+        let admitted = read.fold.admitted.contains(&id) || read.authority.admitted.contains(&id) || read.authority.heads.iter().any(|h| h.inner_id == id);
+        // A deletion purges history for good: only a full read may decide one.
+        if !admitted || read.fold.deleted_channels.iter().any(|c| !deleted.contains(c)) {
+            return None;
+        }
+        let (staff, deleted) = holdable(community, &read)?;
+        let transport = crate::community::transport::LiveTransport::with_timeout(std::time::Duration::from_secs(12));
+        let Ok((follow, Some(editions))) = persist_control(&transport, community, read).await else {
+            hold_control(community, None);
+            return None;
+        };
+        hold_control(community, Some(Held { epoch, link, editions, staff, deleted }));
+        Some(follow)
+    })
+    .await
 }
 
 /// Read the Control Plane as deep as a follow does, escalating to Full while anything this
@@ -10430,16 +10754,10 @@ async fn read_control<T: Transport + ?Sized>(transport: &T, community: &Communit
     let control = control::ControlPlane::of(community);
     let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
     let everyone_hex = crate::simd::hex::bytes_to_hex_32(&super::derive::everyone_locator(community.id()));
-    // Per-entity refuse-downgrade floors for the CURRENT epoch only. A head recorded
-    // under a prior epoch is excluded, so that entity auto-bootstraps after a
-    // Refounding (Armada accepts a compacted head across a dangling prev — matched).
-    // A read error FAILS CLOSED: an empty map would silently re-open the rollback
-    // window the floor exists to shut.
-    let floors: Floors = crate::db::community::get_all_edition_heads_full(&cid_hex)?
-        .into_iter()
-        .filter(|(_, f)| f.0 == community.root_epoch.0)
-        .map(|(entity, f)| (entity, (f.1, f.2, f.3, f.4, f.5)))
-        .collect();
+    let mut floors = held_floors(community)?;
+    let mut healed: Vec<HealedFloor> = Vec::new();
+    let mut refusals: std::collections::BTreeMap<String, &'static str> = Default::default();
+    let owner = community.owner().ok().map(|o| o.to_bytes());
 
     // Newest window first; page OLDER only while a tracking entity is gapped (its
     // floor link evicted from the window — H1/M8 refetch), bounded like the join
@@ -10461,10 +10779,12 @@ async fn read_control<T: Transport + ?Sized>(transport: &T, community: &Communit
     // edition of its own entity.
     let mut entities: crate::fasthash::FastSet<[u8; 32]> = Default::default();
     let mut folded: Option<usize> = None;
-    let fold_now = |editions: &[ParsedEdition], folded: &mut Option<usize>, authority: &mut AuthoritySet, fold: &mut ControlFold| {
+    let fold_now = |floors: &Floors, editions: &[ParsedEdition], folded: &mut Option<usize>, authority: &mut AuthoritySet, fold: &mut ControlFold, refusals: &mut std::collections::BTreeMap<String, &'static str>| {
         if *folded != Some(editions.len()) {
-            *authority = fold_authority(community, editions, &floors);
-            *fold = apply_control_fold(community, editions, &floors, authority);
+            *authority = fold_authority(community, editions, floors);
+            // Taken before any await: the thread-local is this thread's, and the task can move.
+            *refusals = AUTHORITY_REFUSALS.with(|c| c.borrow().clone());
+            *fold = apply_control_fold(community, editions, floors, authority);
             *folded = Some(editions.len());
         }
     };
@@ -10538,7 +10858,8 @@ async fn read_control<T: Transport + ?Sized>(transport: &T, community: &Communit
             }
             // Roster first (roles/grants/banlist → authorized set), then the authority-
             // gated metadata/channel fold over the same edition set.
-            fold_now(&editions, &mut folded, &mut authority, &mut fold);
+            heal_unsigned_floors(&mut floors, owner, &editions, &mut healed);
+            fold_now(&floors, &editions, &mut folded, &mut authority, &mut fold, &mut refusals);
             // "Nothing is gapped" is NOT "I have read enough".
             //
             // An entity we track whose editions are entirely absent from the window
@@ -10595,7 +10916,8 @@ async fn read_control<T: Transport + ?Sized>(transport: &T, community: &Communit
             until = oldest;
         }
 
-        fold_now(&editions, &mut folded, &mut authority, &mut fold);
+        heal_unsigned_floors(&mut floors, owner, &editions, &mut healed);
+        fold_now(&floors, &editions, &mut folded, &mut authority, &mut fold, &mut refusals);
         if tier == crate::community::transport::Evidence::Full {
             break;
         }
@@ -10618,7 +10940,7 @@ async fn read_control<T: Transport + ?Sized>(transport: &T, community: &Communit
         );
     }
 
-    Ok(ControlRead { floors, editions, authority, fold, truncated, pages_read })
+    Ok(ControlRead { floors, editions, authority, fold, truncated, pages_read, healed, refusals })
 }
 
 pub async fn follow_control<T: Transport + ?Sized>(
@@ -10627,21 +10949,65 @@ pub async fn follow_control<T: Transport + ?Sized>(
 ) -> Result<ControlFollow, String> {
     crate::db::scoped(async move {
         community.owner()?; // fail fast if the community is somehow unproven.
-        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        let _reading = reading(community.id());
+        let link = super::realtime::link_generation();
+        let read = match read_control(transport, community).await {
+            Ok(read) => read,
+            Err(e) => {
+                hold_control(community, None);
+                return Err(e);
+            }
+        };
+        let keep = holdable(community, &read);
+        match persist_control(transport, community, read).await {
+            Ok((follow, editions)) => {
+                let window = keep.zip(editions).map(|((staff, deleted), editions)| Held { epoch: community.root_epoch.0, link, editions, staff, deleted });
+                hold_control(community, window);
+                Ok(follow)
+            }
+            Err(e) => {
+                hold_control(community, None);
+                Err(e)
+            }
+        }
+    })
+    .await
+}
 
-        let ControlRead { floors, editions, authority, fold, truncated, pages_read } = read_control(transport, community).await?;
+/// Persist what a control fold decided: floors, Roster, banlist, registry, pins, writers and
+/// the community row. Shared by the follow and the live fold, so both decide alike. Hands the
+/// window back when it persisted.
+async fn persist_control<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, read: ControlRead) -> Result<(ControlFollow, Option<Vec<ParsedEdition>>), String> {
+    {
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        let ControlRead { floors, editions, authority, fold, truncated, pages_read, healed, .. } = read;
 
         // The fetches straddled awaits; a swap since the guard was captured must not
         // write account A's control state into B.
         // A leave/delete raced this follow: writing now would resurrect the community
         // row and orphan floor rows past delete_community's wipe.
         if !crate::db::community::community_held(community.id())? {
-            return Ok(ControlFollow::default());
+            return Ok((ControlFollow::default(), None));
+        }
+        // A floor moved since this read loaded them: its fold is behind the row, so fold again.
+        let now = held_floors(community)?;
+        if now.iter().any(|(entity, f)| floors.get(entity).is_none_or(|r| f.0 > r.0)) {
+            crate::log_info!("[v2:control {}] floors moved during the read; following again", &cid_hex[..8.min(cid_hex.len())]);
+            super::realtime::enqueue_follow(community.id());
+            return Ok((ControlFollow::default(), None));
+        }
+        // A healed floor is the same edition under its real hash, whatever this fold makes of it:
+        // everything reading the row (sends, citations, the Audit Log) needs that hash too.
+        for h in &healed {
+            crate::db::community::heal_edition_head(&cid_hex, &h.entity_hex, community.root_epoch.0, h.version, &h.unsigned, &h.self_hash, &h.inner_id, &h.author)?;
+        }
+        if !healed.is_empty() {
+            crate::log_info!("[v2:control {}] {} floor(s) written before marked editions moved to their real hash", &cid_hex[..8.min(cid_hex.len())], healed.len());
         }
         // A Roster fold that ran out its bound has no single answer (CORD-04 §1): every verdict
         // below rests on its last round's guess, so none of it is kept, and the next follow folds again.
         if !authority.converged {
-            return Ok(ControlFollow::default());
+            return Ok((ControlFollow::default(), None));
         }
         // Persist advanced floors BEFORE the state save (a failed floor write must not
         // let saved state outrun its floor), stamping the epoch this fold ran under —
@@ -10684,7 +11050,9 @@ pub async fn follow_control<T: Transport + ?Sized>(
         let _ = crate::db::community::merge_community_ban_marks(&cid_hex, &authority.banned_at);
         if let Some((banned, version)) = &authority.banlist_persist {
             let mut before = crate::db::community::get_community_banlist(&cid_hex).unwrap_or_default();
-            crate::db::community::set_community_banlist(&cid_hex, banned, *version as i64)?;
+            if crate::db::community::set_community_banlist(&cid_hex, banned, *version as i64)? {
+                announce_banlist(&cid_hex);
+            }
             let mut after = banned.clone();
             before.sort();
             after.sort();
@@ -10923,9 +11291,8 @@ pub async fn follow_control<T: Transport + ?Sized>(
         for channel_id in &fold.deleted_channels {
             purge::purge_deleted_channel(community, channel_id).await;
         }
-        Ok(follow)
-    })
-    .await
+        Ok((follow, Some(editions)))
+    }
 }
 
 /// Adopt the `control_root` a staff-making Grant delivered to ME (CORD-04 §3).
@@ -17612,6 +17979,273 @@ mod tests {
         let a = fold_authority(&community, &editions, &load_floors(&community));
         assert_eq!(a.roles.role(&rlow).unwrap().name, "owner-pick", "a served held edition competes on the tiebreak");
         assert_eq!(a.heads.iter().find(|h| h.entity_hex == rlow).map(|h| h.inner_id), Some(owner_id));
+    }
+
+    #[tokio::test]
+    async fn a_floor_holding_a_marked_editions_unsigned_hash_heals_and_its_authority_returns() {
+        // The admin's grant moved to a marked v2, and a build before marked editions floored it
+        // under its unsigned hash, which nothing served carries: the grant folded no head, and
+        // every edition the admin signed after it fell unauthorized.
+        let (_tmp, _guard, owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let (community, admin) = with_admin(&relay, "UnsignedFloor", &owner, Permissions::MANAGE_CHANNELS).await;
+        let eid = crate::community::v2::derive::grant_locator(community.id(), &admin.public_key().to_bytes());
+        let group = control::ControlPlane::of(&community).write_group().unwrap();
+        let prev = head_hash_on_relay(&relay, &community, &eid).await;
+        let grant = MemberGrant { member: admin.public_key().to_hex(), role_ids: vec!["d1".repeat(32)] };
+        let content = crate::community::v2::roles::grant_content_json_with_wrap(&grant, None).unwrap();
+        let cite = cite_on_relay(&relay, &community, &owner).await;
+        let binding = Some(crate::community::v2::derive::edition_binding(community.id()));
+        let rumor = control::build_edition_rumor_bound(owner.public_key(), vsk::GRANT, &eid, 2, prev.as_ref(), &content, 1_001, cite.as_ref(), binding);
+        let (wrap, _) = control::seal_control_edition(&rumor, &group, &owner, Timestamp::from_secs(1_001)).unwrap();
+        relay.publish(&wrap, &community.relays).await.unwrap();
+        follow_control(&relay, &community).await.unwrap();
+
+        let v2 = fetch_control(&relay, &community).await.into_iter().find(|e| e.entity_id == eid && e.version == 2).unwrap();
+        let unsigned = crate::community::version::edition_hash(&eid, 2, v2.prev_hash.as_ref(), v2.content.as_bytes());
+        assert!(v2.binding.is_some() && unsigned != v2.self_hash, "a marked edition's hash covers its signer");
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        let eid_hex = crate::simd::hex::bytes_to_hex_32(&eid);
+        crate::db::community::delete_edition_head(&cid_hex, &eid_hex).unwrap();
+        crate::db::community::set_edition_head_at_epoch(&cid_hex, &eid_hex, 2, &unsigned, &v2.inner_id, &owner.public_key().to_bytes(), community.root_epoch.0).unwrap();
+
+        let ch = community.channels[0].id;
+        let v1 = head_hash_on_relay(&relay, &community, &ch.0).await;
+        publish_fork(&[&relay], &community, &admin, vsk::CHANNEL_METADATA, &ch.0, 2, v1, &channel_meta_json("renamed-by-admin"), None).await;
+        let updated = follow_control(&relay, &community).await.unwrap().updated.expect("the admin's rename folds");
+        assert_eq!(updated.channel(&ch).unwrap().name, "renamed-by-admin", "the admin's authority is back");
+        let held = crate::db::community::get_all_edition_heads_full(&cid_hex).unwrap()[&eid_hex];
+        assert_eq!((held.1, held.2), (2, v2.self_hash), "the floor names the served edition");
+    }
+
+    #[tokio::test]
+    async fn only_the_same_edition_heals_an_unsigned_floor() {
+        let (_tmp, _guard, owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "HealScope", vec!["wss://r".into()], None).await.unwrap();
+        let group = control::ControlPlane::of(&community).write_group().unwrap();
+        let binding = Some(crate::community::v2::derive::edition_binding(community.id()));
+        let eid = [7u8; 32];
+        let key = crate::simd::hex::bytes_to_hex_32(&eid);
+        let publish = |rumor: nostr_sdk::prelude::UnsignedEvent, signer: Keys, ts: u64| {
+            let (wrap, _) = control::seal_control_edition(&rumor, &group, &signer, Timestamp::from_secs(ts)).unwrap();
+            (wrap, signer)
+        };
+        let (wrap, _) = publish(control::build_edition_rumor_bound(owner.public_key(), vsk::CHANNEL_METADATA, &eid, 3, Some(&[1u8; 32]), &channel_meta_json("x"), 1_000, None, binding), owner.clone(), 1_000);
+        relay.publish(&wrap, &community.relays).await.unwrap();
+        let mine = fetch_control(&relay, &community).await;
+        let e = mine.iter().find(|x| x.entity_id == eid).unwrap().clone();
+        let unsigned = crate::community::version::edition_hash(&eid, 3, e.prev_hash.as_ref(), e.content.as_bytes());
+        let owner_pk = Some(owner.public_key().to_bytes());
+        let heal = |floor: Floor, served: &[ParsedEdition]| {
+            let mut floors: Floors = Default::default();
+            floors.insert(key.clone(), floor);
+            let mut healed = Vec::new();
+            heal_unsigned_floors(&mut floors, owner_pk, served, &mut healed);
+            (floors[&key].1, healed.len())
+        };
+        let only_e = std::slice::from_ref(&e);
+        assert_eq!(heal((3, unsigned, None, None, None), only_e), (e.self_hash, 1), "its unsigned hash, by the owner, heals");
+        assert_eq!(heal((3, [9u8; 32], Some(e.inner_id), None, None), only_e), (e.self_hash, 1), "its inner id heals");
+        assert_eq!(heal((3, [9u8; 32], Some([8u8; 32]), None, None), only_e), ([9u8; 32], 0), "another edition stays");
+        assert_eq!(heal((2, unsigned, None, None, None), only_e), (unsigned, 0), "another version stays");
+        assert_eq!(heal((3, unsigned, None, Some([5u8; 32]), None), only_e), (unsigned, 0), "another signer's floor stays");
+
+        // The same content re-signed by another key carries the same unsigned hash.
+        let other = Keys::generate();
+        let (wrap, _) = publish(control::build_edition_rumor_bound(other.public_key(), vsk::CHANNEL_METADATA, &eid, 3, Some(&[1u8; 32]), &channel_meta_json("x"), 1_001, None, binding), other.clone(), 1_001);
+        relay.publish(&wrap, &community.relays).await.unwrap();
+        let both: Vec<ParsedEdition> = fetch_control(&relay, &community).await.into_iter().filter(|x| x.entity_id == eid).collect();
+        assert_eq!(both.len(), 2);
+        let theirs: Vec<ParsedEdition> = both.iter().filter(|x| x.author == other.public_key()).cloned().collect();
+        assert_eq!(heal((3, unsigned, None, None, None), &theirs), (unsigned, 0), "with no signer recorded, nobody's copy but the owner's");
+        assert_eq!(heal((3, unsigned, None, None, None), &both), (e.self_hash, 1), "the owner's copy when none was recorded");
+        assert_eq!(heal((3, unsigned, None, Some(other.public_key().to_bytes()), None), &both).0, theirs[0].self_hash, "the recorded signer's copy");
+
+        // An unmarked copy carries the unsigned hash itself, but not the floor's inner id: it
+        // must not pass for the held edition and keep the real one from healing.
+        let (wrap, _) = publish(control::build_edition_rumor(other.public_key(), vsk::CHANNEL_METADATA, &eid, 3, Some(&[1u8; 32]), &channel_meta_json("x"), 1_002, None), other.clone(), 1_002);
+        relay.publish(&wrap, &community.relays).await.unwrap();
+        let all: Vec<ParsedEdition> = fetch_control(&relay, &community).await.into_iter().filter(|x| x.entity_id == eid).collect();
+        assert!(all.iter().any(|x| x.self_hash == unsigned), "the unmarked copy's hash is the unsigned one");
+        assert_eq!(heal((3, unsigned, Some(e.inner_id), None, None), &all), (e.self_hash, 1), "the floor's own edition still heals");
+    }
+
+    /// A channel edition sealed for the plane and published nowhere: only a live fold sees it.
+    fn live_edition(community: &CommunityV2, signer: &Keys, eid: &[u8; 32], version: u64, prev: Option<[u8; 32]>, name: &str, ts: u64) -> Event {
+        let group = control::ControlPlane::of(community).write_group().unwrap();
+        let rumor = control::build_edition_rumor(signer.public_key(), vsk::CHANNEL_METADATA, eid, version, prev.as_ref(), &channel_meta_json(name), ts, None);
+        control::seal_control_edition(&rumor, &group, signer, Timestamp::from_secs(ts)).unwrap().0
+    }
+
+    #[tokio::test]
+    async fn a_settled_community_folds_live_editions_without_reading_the_plane() {
+        let (_tmp, _guard, owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "LiveFold", vec!["wss://r".into()], None).await.unwrap();
+        let ch = community.channels[0].id;
+        follow_control(&relay, &community).await.unwrap();
+        let held = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+
+        let v1 = head_hash_on_relay(&relay, &community, &ch.0).await;
+        let rename = live_edition(&held, &owner, &ch.0, 2, v1, "live-name", 5_000);
+        let follow = follow_control_live(&held, &rename).await.expect("the held window decides it");
+        assert_eq!(follow.updated.expect("the rename folds").channel(&ch).unwrap().name, "live-name");
+        assert_eq!(floor_of(&community, &ch.0).0, 2);
+        let after = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        assert_eq!(after.channel(&ch).unwrap().name, "live-name", "persisted");
+        assert!(!follow_control_live(&after, &rename).await.expect("already held").moved(), "a repeat folds nothing");
+
+        let v2 = control::ControlPlane::of(&after).open_edition(&rename).unwrap().self_hash;
+        let again = live_edition(&after, &owner, &ch.0, 3, Some(v2), "again", 5_001);
+        let follow = follow_control_live(&after, &again).await.expect("extends the edition folded live");
+        assert_eq!(follow.updated.unwrap().channel(&ch).unwrap().name, "again");
+
+        // A relay that never saw them can't roll the live editions back.
+        let latest = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        follow_control(&relay, &latest).await.unwrap();
+        let reread = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        assert_eq!(reread.channel(&ch).unwrap().name, "again");
+        assert_eq!(floor_of(&community, &ch.0).0, 3);
+    }
+
+    #[tokio::test]
+    async fn a_live_edition_only_a_read_can_settle_waits_for_one() {
+        let (_tmp, _guard, owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "LiveRead", vec!["wss://r".into()], None).await.unwrap();
+        let ch = community.channels[0].id;
+        follow_control(&relay, &community).await.unwrap();
+        let held = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        let v1 = head_hash_on_relay(&relay, &community, &ch.0).await;
+
+        let stranger = Keys::generate();
+        assert!(follow_control_live(&held, &live_edition(&held, &stranger, &ch.0, 2, v1, "theirs", 5_000)).await.is_none(), "an author the window grants nothing");
+
+        let gone = serde_json::to_string(&control::ChannelMetadata { name: "x".into(), deleted: Some(true), ..Default::default() }).unwrap();
+        let group = control::ControlPlane::of(&held).write_group().unwrap();
+        let rumor = control::build_edition_rumor(owner.public_key(), vsk::CHANNEL_METADATA, &ch.0, 2, v1.as_ref(), &gone, 5_001, None);
+        let delete = control::seal_control_edition(&rumor, &group, &owner, Timestamp::from_secs(5_001)).unwrap().0;
+        assert!(follow_control_live(&held, &delete).await.is_none(), "a deletion");
+
+        let fine = live_edition(&held, &owner, &ch.0, 2, v1, "fine", 5_002);
+        let read = reading(community.id());
+        assert!(follow_control_live(&held, &fine).await.is_none(), "a read in flight");
+        drop(read);
+        super::super::realtime::note_resubscribe();
+        assert!(follow_control_live(&held, &fine).await.is_none(), "a resubscribe since the read");
+
+        assert_eq!(floor_of(&community, &ch.0).0, 1);
+        follow_control(&relay, &held).await.unwrap();
+        assert!(follow_control_live(&held, &fine).await.expect("a fresh read holds again").updated.is_some());
+    }
+
+    #[tokio::test]
+    async fn a_live_edition_the_roster_refuses_waits_for_a_read() {
+        let (_tmp, _guard, owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let (community, admin) = with_admin(&relay, "LiveRefused", &owner, Permissions::KICK).await;
+        let ch = community.channels[0].id;
+        follow_control(&relay, &community).await.unwrap();
+        let held = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        let v1 = head_hash_on_relay(&relay, &community, &ch.0).await;
+        let group = control::ControlPlane::of(&held).write_group().unwrap();
+        let cite = cite_on_relay(&relay, &held, &admin).await;
+        let rumor = control::build_edition_rumor(admin.public_key(), vsk::CHANNEL_METADATA, &ch.0, 2, v1.as_ref(), &channel_meta_json("not-theirs"), 5_000, cite.as_ref());
+        let rename = control::seal_control_edition(&rumor, &group, &admin, Timestamp::from_secs(5_000)).unwrap().0;
+        assert!(follow_control_live(&held, &rename).await.is_none(), "staff, but without the permission");
+        assert_eq!(floor_of(&community, &ch.0).0, 1);
+    }
+
+    #[tokio::test]
+    async fn a_window_missing_a_floored_grant_waits_for_a_read() {
+        let (_tmp, _guard, owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let (community, admin) = with_admin(&relay, "LiveDemoted", &owner, Permissions::MANAGE_CHANNELS).await;
+        let ch = community.channels[0].id;
+        follow_control(&relay, &community).await.unwrap();
+        let held = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        // The admin's demotion floored by another path, and so not in the window.
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        let geid = crate::community::v2::derive::grant_locator(community.id(), &admin.public_key().to_bytes());
+        crate::db::community::set_edition_head_with_id(&cid_hex, &crate::simd::hex::bytes_to_hex_32(&geid), 2, &[2u8; 32], &[2u8; 32]).unwrap();
+        let v1 = head_hash_on_relay(&relay, &community, &ch.0).await;
+        let group = control::ControlPlane::of(&held).write_group().unwrap();
+        let cite = cite_on_relay(&relay, &held, &admin).await;
+        let rumor = control::build_edition_rumor(admin.public_key(), vsk::CHANNEL_METADATA, &ch.0, 2, v1.as_ref(), &channel_meta_json("demoted-rename"), 5_000, cite.as_ref());
+        let rename = control::seal_control_edition(&rumor, &group, &admin, Timestamp::from_secs(5_000)).unwrap().0;
+        assert!(follow_control_live(&held, &rename).await.is_none(), "the window can't see the newer grant");
+        let owners = live_edition(&held, &owner, &ch.0, 2, v1, "owner-rename", 5_001);
+        assert!(follow_control_live(&held, &owners).await.is_none(), "nor fold anything over it");
+        assert_eq!(floor_of(&community, &ch.0).0, 1);
+    }
+
+    #[tokio::test]
+    async fn our_own_grant_joins_the_held_window_and_its_member_folds_live() {
+        let (_tmp, _guard, owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let (community, _admin) = with_admin(&relay, "LiveOwn", &owner, Permissions::MANAGE_CHANNELS).await;
+        let ch = community.channels[0].id;
+        follow_control(&relay, &community).await.unwrap();
+        let held = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        let fresh = Keys::generate();
+        grant_roles(&relay, &held, &fresh.public_key(), vec!["d1".repeat(32)]).await.unwrap();
+        let geid = crate::community::v2::derive::grant_locator(community.id(), &fresh.public_key().to_bytes());
+        let window = held_control().lock().unwrap().get(&community.id().0).cloned().expect("still held");
+        assert!(window.editions.iter().any(|e| e.entity_id == geid), "our grant is in the window");
+
+        let v1 = head_hash_on_relay(&relay, &community, &ch.0).await;
+        let now = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        let group = control::ControlPlane::of(&now).write_group().unwrap();
+        let cite = cite_on_relay(&relay, &now, &fresh).await;
+        let rumor = control::build_edition_rumor(fresh.public_key(), vsk::CHANNEL_METADATA, &ch.0, 2, v1.as_ref(), &channel_meta_json("by-the-new-admin"), 5_000, cite.as_ref());
+        let rename = control::seal_control_edition(&rumor, &group, &fresh, Timestamp::from_secs(5_000)).unwrap().0;
+        let follow = follow_control_live(&now, &rename).await.expect("the window holds their grant");
+        assert_eq!(follow.updated.unwrap().channel(&ch).unwrap().name, "by-the-new-admin");
+    }
+
+    #[tokio::test]
+    async fn a_read_a_newer_floor_overtook_persists_nothing() {
+        let (_tmp, _guard, owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "Overtaken", vec!["wss://r".into()], None).await.unwrap();
+        let ch = community.channels[0].id;
+        let name = community.channels[0].name.clone();
+        let v1 = head_hash_on_relay(&relay, &community, &ch.0).await;
+        publish_fork(&[&relay], &community, &owner, vsk::CHANNEL_METADATA, &ch.0, 2, v1, &channel_meta_json("on-the-relay"), None).await;
+        let read = read_control(&relay, &community).await.unwrap();
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        crate::db::community::set_edition_head_with_id(&cid_hex, &crate::simd::hex::bytes_to_hex_32(&ch.0), 3, &[3u8; 32], &[3u8; 32]).unwrap();
+        let (follow, window) = persist_control(&relay, &community, read).await.unwrap();
+        assert!(follow.updated.is_none() && window.is_none(), "folded against floors that have moved on");
+        let after = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        assert_eq!(after.channel(&ch).unwrap().name, name);
+    }
+
+    #[tokio::test]
+    async fn a_live_edition_the_held_window_cannot_decide_waits_for_a_follow() {
+        let (_tmp, _guard, owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "LiveGap", vec!["wss://r".into()], None).await.unwrap();
+        let ch = community.channels[0].id;
+        let name = community.channels[0].name.clone();
+        follow_control(&relay, &community).await.unwrap();
+        let held = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        let v1 = head_hash_on_relay(&relay, &community, &ch.0).await;
+
+        let gap = live_edition(&held, &owner, &ch.0, 3, Some([9u8; 32]), "gap", 5_000);
+        assert!(follow_control_live(&held, &gap).await.is_none(), "a link the window doesn't hold");
+
+        let fine = live_edition(&held, &owner, &ch.0, 2, v1, "fine", 5_001);
+        let mut rotated = held.clone();
+        rotated.root_epoch = crate::community::Epoch(held.root_epoch.0 + 1);
+        assert!(follow_control_live(&rotated, &fine).await.is_none(), "another epoch's window");
+        hold_control(&held, None);
+        assert!(follow_control_live(&held, &fine).await.is_none(), "no settled window");
+
+        let after = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        assert_eq!(after.channel(&ch).unwrap().name, name);
+        assert_eq!(floor_of(&community, &ch.0).0, 1);
     }
 
     #[tokio::test]

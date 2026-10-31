@@ -44,7 +44,7 @@ export { modOverlay } from './lib/moderation.svelte.js';
 export { setRelayInfo } from './lib/relay-info.svelte.js';
 export { inviteDetails } from './lib/invite-details.svelte.js';
 export { csOverlay, csState, csDirty, csOpen, csLoaded, csSetDraft, csReset, csCommitted, csSetSaving, csNudge, csSetBans, csSetUnbanning, csRemoveBans, csOverviewDirty, csVoiceRelaysDirty, csRoleOrderDirty, csRoleEditDirty, csSetRolesView, csSetRoleMembers, csSetRolesBusy, csSetRoleOrder, csEditRole, csRelaysDirty } from './lib/community-settings.svelte.js';
-export { auditReset, auditLoading, auditLoaded, auditFailed } from './lib/audit-log.svelte.js';
+export { auditReset, auditLoading, auditLoaded, auditFailed, auditReportOpen, auditReportLoaded, auditReportFailed } from './lib/audit-log.svelte.js';
 export { showDowngradeBlock } from './lib/overlays.svelte.js';
 export { setInvites } from './lib/invitescreen.svelte.js';
 import App from './shell/App.svelte';

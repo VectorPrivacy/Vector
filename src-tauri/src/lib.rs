@@ -1178,6 +1178,7 @@ pub fn run() {
             commands::community::delete_community_message,
             commands::community::revoke_reaction,
             commands::community::react_to_community_message,
+            commands::community::debug_v2_control_report,
             commands::community::edit_community_message,
             commands::community::invite_to_community,
             commands::community::list_community_invites,

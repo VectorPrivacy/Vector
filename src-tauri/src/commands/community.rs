@@ -1699,6 +1699,16 @@ pub async fn debug_v2_explain_base_rekey(community_id: String) -> Result<serde_j
     vector_core::community::v2::service::explain_epoch_state(&transport, &c).await
 }
 
+/// What this client's control fold makes of the plane, saving nothing: whether authority
+/// settles, and each entity's held floor against the newest edition served. Structure only,
+/// and in release, so a device whose view froze can report it from the Audit Log.
+#[tauri::command]
+pub async fn debug_v2_control_report(community_id: String) -> Result<serde_json::Value, String> {
+    let id = CommunityId(hex_to_id32(&community_id)?);
+    let c = vector_core::db::community::load_community_v2(&id)?.ok_or("not a held v2 community")?;
+    vector_core::community::v2::service::debug_control_report(&c).await
+}
+
 /// Wire-level probe for a v2 community's rotation planes. For each candidate
 /// derivation (the spec next-epoch base plane, archived-root variants, and the
 /// guestbook/control planes as positive controls), open a FRESH connection to

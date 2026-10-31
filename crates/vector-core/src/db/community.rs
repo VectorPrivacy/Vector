@@ -1793,7 +1793,10 @@ fn forget_console_verdict(community_id: &str) {
     crate::VectorCore::invalidate_raid_report(community_id);
 }
 
-pub fn set_community_banlist(community_id: &str, banned_hex: &[String], at: i64) -> Result<(), String> {
+/// Whether the stored set changed: a ban hides what its target already posted, so a painted
+/// timeline is stale only then.
+pub fn set_community_banlist(community_id: &str, banned_hex: &[String], at: i64) -> Result<bool, String> {
+    let before: std::collections::BTreeSet<String> = get_community_banlist(community_id).unwrap_or_default().into_iter().collect();
     let _seal = crate::crypto::gate::sealing();
     let conn = super::get_write_connection_guard_static()?;
     // MONOTONIC in the edition version. Un-banning is the fail-OPEN direction — the
@@ -1812,7 +1815,7 @@ pub fn set_community_banlist(community_id: &str, banned_hex: &[String], at: i64)
             "[Banlist] refused a stale edition (v{at} behind held v{}) — un-banning is the fail-open direction",
             current_at.unwrap_or(0)
         );
-        return Ok(());
+        return Ok(false);
     }
     // The banlist lives in `community_bans`, not as a blob: SQL has to compare it
     // against `events.npub` to drop a banned author's rows BEFORE `LIMIT`, and a
@@ -1858,7 +1861,7 @@ pub fn set_community_banlist(community_id: &str, banned_hex: &[String], at: i64)
     if let Some(cid) = crate::community::id32_from_hex(community_id) {
         banlist_cache().write().unwrap_or_else(|e| e.into_inner()).insert(cid, ban_set_from_hexes(banned_hex));
     }
-    Ok(())
+    Ok(before != banned_hex.iter().cloned().collect())
 }
 
 /// Per-npub ban marks: lowercase-hex npub → `created_at` (secs) of the newest AUTHORIZED
@@ -2067,7 +2070,7 @@ fn set_family_head_on(conn: &rusqlite::Connection, community_id: &str, entity_id
             epoch = excluded.epoch,
             author = excluded.author,
             family = excluded.family
-         WHERE NOT (community_edition_heads.family = 'a' AND excluded.family IS NOT 'a')
+         WHERE NOT (community_edition_heads.family IS 'a' AND excluded.family IS NOT 'a')
            AND (excluded.epoch > community_edition_heads.epoch
             OR (excluded.epoch = community_edition_heads.epoch AND excluded.version > community_edition_heads.version)
             OR (excluded.family = 'a' AND community_edition_heads.family IS NOT NULL AND community_edition_heads.family IS NOT 'a'))",
@@ -2238,6 +2241,21 @@ fn rebase_edition_head_on(conn: &rusqlite::Connection, community_id: &str, entit
         params![community_id, entity_id, version as i64, self_hash.as_slice(), inner_id.as_slice(), epoch as i64, author.as_slice(), family],
     )
     .map_err(|e| format!("rebase edition head: {e}"))?;
+    Ok(())
+}
+
+/// Move a floor a build before marked editions wrote onto the same edition's real hash. Only while
+/// the row still holds that unsigned hash at that version and epoch, so it never lands over a head
+/// that moved on in the meantime.
+#[allow(clippy::too_many_arguments)]
+pub fn heal_edition_head(community_id: &str, entity_id: &str, epoch: u64, version: u64, unsigned: &[u8; 32], self_hash: &[u8; 32], inner_id: &[u8; 32], author: &[u8; 32]) -> Result<(), String> {
+    let conn = super::get_write_connection_guard_static()?;
+    conn.execute(
+        "UPDATE community_edition_heads SET self_hash = ?6, inner_id = ?7, author = ?8
+          WHERE community_id = ?1 AND entity_id = ?2 AND epoch = ?3 AND version = ?4 AND self_hash = ?5",
+        params![community_id, entity_id, epoch as i64, version as i64, unsigned.as_slice(), self_hash.as_slice(), inner_id.as_slice(), author.as_slice()],
+    )
+    .map_err(|e| format!("heal edition head: {e}"))?;
     Ok(())
 }
 
@@ -3617,6 +3635,23 @@ mod tests {
         // A different entity is tracked independently.
         let other = "b".repeat(64);
         assert_eq!(get_edition_head(&cid, &other).unwrap(), None);
+    }
+
+    #[test]
+    fn a_floor_written_before_families_still_advances() {
+        // A row from before floors recorded their family holds NULL there, and `= 'a'` on NULL
+        // made the whole guard NULL: the row never moved, so every edit was re-minted at v2.
+        let (_tmp, _guard) = init_test_db();
+        let (cid, entity) = ("c".repeat(64), "e".repeat(64));
+        set_edition_head(&cid, &entity, 1, &[0x11; 32]).unwrap();
+        assert_eq!(get_all_edition_heads_full(&cid).unwrap()[&entity].5, None, "a familyless row");
+        set_family_head_at_epoch(&cid, &entity, 2, &[0x22; 32], &[0x02; 32], &[0xA1; 32], 0, FLOOR_CONTROL).unwrap();
+        let f = get_all_edition_heads_full(&cid).unwrap()[&entity];
+        assert_eq!((f.1, f.2, f.5), (2, [0x22; 32], Some(FloorFamily::of(FLOOR_CONTROL))), "it advances, and takes the family");
+        // An authority row still refuses a control write over it.
+        set_family_head_at_epoch(&cid, "a".repeat(64).as_str(), 1, &[0x33; 32], &[0x03; 32], &[0xA1; 32], 0, FLOOR_AUTHORITY).unwrap();
+        set_family_head_at_epoch(&cid, "a".repeat(64).as_str(), 2, &[0x44; 32], &[0x04; 32], &[0xA1; 32], 0, FLOOR_CONTROL).unwrap();
+        assert_eq!(get_all_edition_heads_full(&cid).unwrap()[&"a".repeat(64)].1, 1);
     }
 
     #[test]

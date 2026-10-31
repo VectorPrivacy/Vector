@@ -64,3 +64,13 @@ export function auditToggle(id) {
     if (open.has(id)) open.delete(id); else open.add(id);
     s.open = open;
 }
+
+// Advanced Mode's sync report: this device's view of the community's control state,
+// structure only, for comparing two devices that disagree. `null` while closed.
+const r = $state({ report: null });
+
+export function auditReportState() { return r; }
+export function auditReportOpen() { r.report = { loading: true, data: null, error: '' }; }
+export function auditReportLoaded(data) { if (r.report) r.report = { loading: false, data, error: '' }; }
+export function auditReportFailed(error) { if (r.report) r.report = { loading: false, data: null, error: error || 'The report could not be made.' }; }
+export function auditReportClose() { r.report = null; }
