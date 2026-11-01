@@ -254,7 +254,7 @@ jobs:
           EOF
 
       - name: Build Android APK
-        run: npx tauri android build --apk true --target aarch64 --target armv7
+        run: npx tauri android build --apk --target aarch64 --target armv7
         env:
           NDK_HOME: ${{ env.NDK_HOME }}
 
@@ -358,7 +358,7 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
-          npx --yes @tauri-apps/cli@2.12.4 signer sign SHA256SUMS.txt
+          npx --yes @tauri-apps/cli@2.12.2 signer sign SHA256SUMS.txt
           # Tauri writes the minisign signature base64-wrapped; minisign reads it raw.
           base64 -d SHA256SUMS.txt.sig > SHA256SUMS.txt.minisig
           rm SHA256SUMS.txt.sig

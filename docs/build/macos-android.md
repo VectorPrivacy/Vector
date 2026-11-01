@@ -152,10 +152,10 @@ Follow the [Tauri v2 Android Signing documentation](https://tauri.app/distribute
 
 ```bash
 # Recommended: Build for aarch64 (>95% of devices)
-npm run tauri android build -- --apk true --target aarch64
+npm run tauri android build -- --apk --target aarch64
 
 # Build for all architectures (larger binary, not recommended)
-npm run tauri android build -- --apk true
+npm run tauri android build -- --apk
 ```
 
 ### 5. Locate the Built APK
@@ -174,8 +174,8 @@ ls -la src-tauri/gen/android/app/build/outputs/apk/
 |---------|-------------|
 | `npm run tauri android dev` | Development build on emulator |
 | `npm run tauri android dev --open` | Dev build, opens Android Studio |
-| `npm run tauri android build -- --apk true` | Release APK (all architectures) |
-| `npm run tauri android build -- --apk true --target aarch64` | Release APK (ARM64 only, recommended) |
+| `npm run tauri android build -- --apk` | Release APK (all architectures) |
+| `npm run tauri android build -- --apk --target aarch64` | Release APK (ARM64 only, recommended) |
 
 ---
 
