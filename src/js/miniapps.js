@@ -5,7 +5,7 @@
  * which are isolated web applications that can be shared in chats.
  *
  * Includes support for realtime peer channels using Iroh P2P,
- * compatible with DeltaChat's WebXDC implementation.
+ * compatible with the WebXDC spec.
  */
 
 /**

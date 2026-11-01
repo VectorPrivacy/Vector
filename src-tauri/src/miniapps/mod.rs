@@ -1,7 +1,6 @@
 //! Mini Apps (WebXDC) implementation for Vector
 //!
-//! This module provides support for running isolated web applications
-//! within Vector, similar to DeltaChat's WebXDC implementation.
+//! Runs WebXDC apps (`.xdc` packages) inside Vector, each in an isolated webview.
 //!
 //! ## Marketplace
 //!
@@ -12,6 +11,7 @@ pub(crate) mod error;
 pub(crate) mod scheme;
 pub(crate) mod state;
 pub(crate) mod commands;
+#[cfg(all(not(target_os = "macos"), not(target_os = "windows"), not(target_os = "android")))]
 pub(crate) mod network_isolation;
 #[cfg(not(target_os = "android"))]
 pub(crate) mod isolated;

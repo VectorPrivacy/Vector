@@ -1,12 +1,7 @@
 fn main() {
-    // By default, Tauri enables all commands in all windows.
-    // Adding `.commands()` explicitly here makes it generate
-    // permissions for the commands, and makes it require to specify
-    // the permissions for our commands in capabilities explicitly
-    // for each window / webview.
-    // 
-    // This is critical for security: Mini Apps should only be able to
-    // call miniapp_* commands, not arbitrary app commands.
+    // Listing the commands turns each into a permission that a capability must grant
+    // per window; unlisted, every window could call every command. That keeps Mini Apps
+    // to their own `miniapp_*` commands.
     //
     // See: https://v2.tauri.app/security/permissions/
     // See: https://docs.rs/tauri-build/latest/tauri_build/struct.AppManifest.html

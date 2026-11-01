@@ -1,14 +1,8 @@
-//! Custom URI scheme handler for Mini Apps
-//!
-//! This provides the `webxdc://` protocol that serves content from .xdc packages
-//! in an isolated context with strict CSP.
+//! The `webxdc://` scheme: serves a Mini App's files out of its `.xdc` package, each
+//! response under a locked-down Content Security Policy.
 
 use std::borrow::Cow;
-use std::collections::HashMap;
-use tauri::{
-    utils::config::{Csp, CspDirectiveSources},
-    Manager, UriSchemeContext, UriSchemeResponder,
-};
+use tauri::{Manager, UriSchemeContext, UriSchemeResponder};
 
 use nostr_sdk::prelude::ToBech32;
 use std::sync::OnceLock;
@@ -16,8 +10,6 @@ use std::sync::OnceLock;
 use super::state::MiniAppsState;
 use crate::STATE;
 
-/// Content Security Policy for Mini Apps - very restrictive for security
-/// Based on DeltaChat's implementation
 fn csp() -> Cow<'static, str> {
     static CACHED: OnceLock<String> = OnceLock::new();
     cached_csp(&CACHED, false)
@@ -54,145 +46,52 @@ fn cached_csp(cache: &'static OnceLock<String>, isolated: bool) -> Cow<'static, 
     Cow::Borrowed(cache.get_or_init(|| build_csp(isolated)))
 }
 
+/// Everything loads from the app's own origin, and 'self' alone: each app is served from
+/// its own per-partition origin, and naming a fixed host would let it frame another
+/// origin's storage. Inline code, eval and WebAssembly stay open because games and their
+/// engines depend on them; 'wasm-unsafe-eval' is named apart, as Chromium stopped letting
+/// 'unsafe-eval' cover WebAssembly compilation and interpreted WASM runs many times slower.
 fn build_csp(isolated: bool) -> String {
-    let mut m: HashMap<String, CspDirectiveSources> = HashMap::new();
-    
-    // Only allow resources from self (the webxdc:// origin)
-    m.insert(
-        "default-src".to_owned(),
-        CspDirectiveSources::List(vec!["'self'".to_owned()]),
-    );
-    
-    // Allow inline styles and blob URLs for styles
-    m.insert(
-        "style-src".to_string(),
-        CspDirectiveSources::List(vec![
-            "'self'".to_owned(),
-            "'unsafe-inline'".to_owned(),
-            "blob:".to_owned(),
-        ]),
-    );
-    
-    // Allow data URLs and blob URLs for fonts
-    m.insert(
-        "font-src".to_string(),
-        CspDirectiveSources::List(vec![
-            "'self'".to_owned(),
-            "data:".to_owned(),
-            "blob:".to_owned(),
-        ]),
-    );
-    
-    // Allow inline scripts, eval, and WASM compilation (needed for many web apps).
-    // 'wasm-unsafe-eval' is required: Chromium 145+ no longer grants WASM JIT
-    // compilation permission from 'unsafe-eval' alone, causing V8 to interpret
-    // WASM bytecode (~50-100x slower) instead of compiling it to native code.
-    m.insert(
-        "script-src".to_string(),
-        CspDirectiveSources::List(vec![
-            "'self'".to_owned(),
-            "'unsafe-inline'".to_owned(),
-            "'unsafe-eval'".to_owned(),
-            "'wasm-unsafe-eval'".to_owned(),
-            "blob:".to_owned(),
-        ]),
-    );
-    
-    // Restrict connections to self, IPC, data/blob URLs, and the realtime WebSocket
-    let mut connect = vec![
-        "'self'".to_owned(),
-        "ipc:".to_owned(),
-        "data:".to_owned(),
-        "blob:".to_owned(),
-    ];
+    const LOCAL: &str = "'self' data: blob:";
+    let mut connect = String::from("'self' ipc: data: blob:");
     if let Some(port) = RT_WS_PORT.get() {
-        connect.push(format!("ws://127.0.0.1:{port}"));
+        connect += &format!(" ws://127.0.0.1:{port}");
     }
+    // WebView2's IPC endpoint; without it Tauri falls back to postMessage.
+    if isolated && cfg!(windows) {
+        connect += " http://ipc.localhost";
+    }
+    let mut policy = format!(
+        "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' blob:; \
+         style-src 'self' 'unsafe-inline' blob:; img-src {LOCAL}; media-src {LOCAL}; font-src {LOCAL}; \
+         connect-src {connect}; webrtc 'block'"
+    );
     if isolated {
-        // WebView2's IPC endpoint; without it Tauri falls back to postMessage.
-        if cfg!(windows) {
-            connect.push("http://ipc.localhost".to_owned());
-        }
-        m.insert(
-            "frame-ancestors".to_string(),
-            CspDirectiveSources::List(vec!["'self'".to_owned()]),
-        );
+        policy += "; frame-ancestors 'self'";
     }
-    m.insert("connect-src".to_string(), CspDirectiveSources::List(connect));
-    
-    // Allow data URLs and blob URLs for images
-    m.insert(
-        "img-src".to_string(),
-        CspDirectiveSources::List(vec![
-            "'self'".to_owned(),
-            "data:".to_owned(),
-            "blob:".to_owned(),
-        ]),
-    );
-    
-    // Allow data URLs and blob URLs for media
-    m.insert(
-        "media-src".to_string(),
-        CspDirectiveSources::List(vec![
-            "'self'".to_owned(),
-            "data:".to_owned(),
-            "blob:".to_owned(),
-        ]),
-    );
-    
-    // CSP "WEBRTC: block" directive is specified, but not yet implemented by browsers
-    // - see https://delta.chat/en/2023-05-22-webxdc-security#browsers-please-implement-the-w3c-webrtc-block-directive
-    m.insert(
-        "webrtc".to_string(),
-        CspDirectiveSources::List(vec!["'block'".to_owned()]),
-    );
-    
-    let csp = Csp::DirectiveMap(m);
-
-    // 'self' only: each app's window is served from its own per-partition
-    // origin, and naming a fixed host here would let an app iframe another
-    // origin's storage (including the legacy shared one).
-    csp.to_string()
+    policy
 }
 
 use vector_core::webxdc_permissions::build_permissions_policy;
 
-/// Handle requests to the webxdc:// protocol (async version for Tauri 2)
-/// Uses UriSchemeResponder to avoid blocking the WebView thread on Windows
+/// Serves `webxdc://<partition>.host/<path>` to Mini App windows only. Windows delivers it
+/// as `http://webxdc.<partition>.host/<path>`, which wry maps back. The work runs off the
+/// webview's thread: answering inline can deadlock WebView2.
 pub fn miniapp_protocol<R: tauri::Runtime>(
     ctx: UriSchemeContext<'_, R>,
     request: http::Request<Vec<u8>>,
     responder: UriSchemeResponder,
 ) {
-    log_trace!(
-        "webxdc_protocol: {} {}",
-        request.uri(),
-        request.uri().path()
-    );
-
-    // URI format (host = per-app storage partition):
-    // macOS/Linux: webxdc://<partition>.host/<path>
-    // Windows: arrives as http://webxdc.<partition>.host/<path>, reverted by
-    //          wry's prefix workaround to webxdc://<partition>.host/<path>
-
-    let webview_label = ctx.webview_label().to_owned();
-
-    // Security: Only allow Mini App windows to access this scheme
-    if !webview_label.starts_with("miniapp:") {
-        log_error!(
-            "Prevented non-miniapp window from accessing webxdc:// scheme (webview label: {webview_label})"
-        );
-        responder.respond(make_error_response(http::StatusCode::FORBIDDEN, "Access denied", ""));
+    let label = ctx.webview_label().to_owned();
+    log_trace!("miniapp scheme <- {label}: {}", request.uri());
+    if !label.starts_with("miniapp:") {
+        log_error!("webxdc:// request from a window that isn't a Mini App: {label}");
+        responder.respond(respond(http::StatusCode::FORBIDDEN, "text/plain", b"Access denied".to_vec(), ""));
         return;
     }
-
-    let app_handle = ctx.app_handle().clone();
-
-    // Spawn an async task to handle the request without blocking
-    // This is the pattern used by DeltaChat to avoid deadlocks on Windows
+    let app = ctx.app_handle().clone();
     tauri::async_runtime::spawn(async move {
-        let response = handle_miniapp_request(&app_handle, &webview_label, &request).await;
-        responder.respond(response);
+        responder.respond(handle_miniapp_request(&app, &label, &request).await);
     });
 }
 
@@ -207,7 +106,7 @@ async fn handle_miniapp_request<R: tauri::Runtime>(
         Some(inst) => inst,
         None => {
             log_error!("Mini App instance not found for window: {window_label}");
-            return make_error_response(http::StatusCode::NOT_FOUND, "Mini App not found", "");
+            return respond(http::StatusCode::NOT_FOUND, "text/plain", b"Mini App not found".to_vec(), "");
         }
     };
 
@@ -237,7 +136,7 @@ async fn handle_miniapp_request<R: tauri::Runtime>(
     .ok()
     .flatten();
     let Some((served, data)) = loaded else {
-        return make_error_response(http::StatusCode::NOT_FOUND, "File not found", "");
+        return respond(http::StatusCode::NOT_FOUND, "text/plain", b"File not found".to_vec(), "");
     };
 
     let mime_type = get_mime_type(&served);
@@ -246,9 +145,9 @@ async fn handle_miniapp_request<R: tauri::Runtime>(
         let granted = crate::db::get_miniapp_granted_permissions(&instance.package.hash_hex()).unwrap_or_default();
         let (user_npub, user_display_name) = get_user_info().await;
         let injected = inject_webxdc_script(&data, &user_npub, &user_display_name);
-        return make_success_response(injected, &mime_type, &granted);
+        return respond(http::StatusCode::OK, &mime_type, injected, &granted);
     }
-    make_success_response(data, &mime_type, "")
+    respond(http::StatusCode::OK, &mime_type, data, "")
 }
 
 /// Get the current user's npub and display name
@@ -295,7 +194,7 @@ pub(super) async fn get_user_info() -> (String, String) {
 /// Delegates to the canonical `generate_webxdc_bridge_js` to avoid maintaining two copies.
 fn serve_webxdc_js(user_npub: &str, user_display_name: &str) -> http::Response<Cow<'static, [u8]>> {
     let js = generate_webxdc_bridge_js(user_npub, user_display_name);
-    make_success_response(js.into_bytes(), "text/javascript", "")
+    respond(http::StatusCode::OK, "text/javascript", js.into_bytes(), "")
 }
 
 /// Inject the webxdc.js script inline into HTML content
@@ -519,16 +418,15 @@ pub(super) fn generate_webxdc_bridge_js(user_npub: &str, user_display_name: &str
     )
 }
 
-fn make_success_response(body: Vec<u8>, content_type: &str, granted_permissions: &str) -> http::Response<Cow<'static, [u8]>> {
-    let permissions_policy = build_permissions_policy(granted_permissions);
+/// Every response carries the full policy, errors included: a page served without one
+/// (a missing file opened in an iframe, say) would run unconfined beside its parent.
+fn respond(status: http::StatusCode, content_type: &str, body: Vec<u8>, granted_permissions: &str) -> http::Response<Cow<'static, [u8]>> {
     http::Response::builder()
-        .status(http::StatusCode::OK)
+        .status(status)
         .header(http::header::CONTENT_TYPE, content_type)
         .header(http::header::CONTENT_SECURITY_POLICY, csp().into_owned())
-        // Ensure that the browser doesn't try to interpret the file incorrectly
         .header(http::header::X_CONTENT_TYPE_OPTIONS, "nosniff")
-        // Dynamic permissions policy based on user grants
-        .header("Permissions-Policy", permissions_policy)
+        .header("Permissions-Policy", build_permissions_policy(granted_permissions))
         // No custom-scheme page is ever cross-origin isolated (WebKit enforces COOP
         // only on network loads; WebView2 maps the scheme to a non-secure host), so
         // these do not grant SharedArrayBuffer here. Apps that need it opt in to the
@@ -536,28 +434,7 @@ fn make_success_response(body: Vec<u8>, content_type: &str, granted_permissions:
         .header("Cross-Origin-Opener-Policy", "same-origin")
         .header("Cross-Origin-Embedder-Policy", "require-corp")
         .body(Cow::Owned(body))
-        .unwrap_or_else(|_| make_error_response(http::StatusCode::INTERNAL_SERVER_ERROR, "Failed to build response", ""))
-}
-
-fn make_error_response(status: http::StatusCode, message: &str, granted_permissions: &str) -> http::Response<Cow<'static, [u8]>> {
-    // IMPORTANT: Set CSP on ALL responses including errors
-    // Failing to set CSP might result in the app being able to create
-    // an <iframe> with no CSP, e.g. `<iframe src="/no_such_file.lol">`
-    // within which they can then do whatever through the parent frame
-    // See: "XDC-01-002 WP1: Full CSP bypass via desktop app webxdc.js"
-    // https://public.opentech.fund/documents/XDC-01-report_2_1.pdf
-    let permissions_policy = build_permissions_policy(granted_permissions);
-    http::Response::builder()
-        .status(status)
-        .header(http::header::CONTENT_TYPE, "text/plain")
-        .header(http::header::CONTENT_SECURITY_POLICY, csp().into_owned())
-        .header(http::header::X_CONTENT_TYPE_OPTIONS, "nosniff")
-        .header("Permissions-Policy", permissions_policy)
-        // Cross-origin isolation headers for SharedArrayBuffer (WASM threads)
-        .header("Cross-Origin-Opener-Policy", "same-origin")
-        .header("Cross-Origin-Embedder-Policy", "require-corp")
-        .body(Cow::Owned(message.as_bytes().to_vec()))
-        .unwrap()
+        .expect("Mini App response headers are built from fixed values")
 }
 
 pub(super) fn get_mime_type(path: &str) -> String {
@@ -586,10 +463,7 @@ pub(super) fn get_mime_type(path: &str) -> String {
         "xml" => "application/xml",
         "txt" => "text/plain",
         "md" => "text/markdown",
-        // Block PDF to prevent CSP bypass
-        // The PDF viewer allows the app to bypass CSP, at least on Chromium.
-        // See https://delta.chat/en/2023-05-22-webxdc-security,
-        // "XDC-01-005 WP1: Full CSP bypass via desktop app PDF embed".
+        // Never a PDF: an engine's built-in viewer runs outside the page's CSP.
         "pdf" => "application/octet-stream",
         _ => "application/octet-stream",
     }.to_string()
