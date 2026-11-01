@@ -70,9 +70,10 @@ fn next_send_ms() -> u64 {
     use std::sync::atomic::{AtomicU64, Ordering};
     static LAST: AtomicU64 = AtomicU64::new(0);
     let now = now_ms();
-    LAST.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |last| Some(now.max(last + 1)))
-        .map(|last| now.max(last + 1))
-        .unwrap_or(now)
+    // fetch_update: its rename, try_update, is newer than the toolchains Vector builds with.
+    #[allow(deprecated)]
+    let prev = LAST.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |last| Some(now.max(last + 1)));
+    prev.map(|last| now.max(last + 1)).unwrap_or(now)
 }
 
 /// Create a fresh v2 community owned by the local identity: mint the genesis
@@ -31366,6 +31367,7 @@ mod tests {
         async fn fetch_plane(&self, plane: &Keys, query: &Query, relays: &[String]) -> Result<crate::community::transport::PlaneFetch, String> {
             self.inner.fetch_plane(plane, query, relays).await
         }
+        #[allow(deprecated)] // fetch_update, see next_send_ms
         async fn publish(&self, e: &Event, r: &[String]) -> Result<(), String> {
             if e.pubkey.to_hex() == self.control {
                 self.tried.fetch_add(1, std::sync::atomic::Ordering::SeqCst);

@@ -588,6 +588,8 @@ async fn pump(
                 deliver(MeshEvent::NeighborUp(*peer.as_bytes()));
             }
             Ok(Event::NeighborDown(peer)) => {
+                // fetch_update: its rename, try_update, is newer than the toolchains Vector builds with.
+                #[allow(deprecated)]
                 let _ = neighbors.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |c| c.checked_sub(1));
                 deliver(MeshEvent::NeighborDown(*peer.as_bytes()));
             }

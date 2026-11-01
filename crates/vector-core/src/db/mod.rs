@@ -1304,6 +1304,8 @@ impl Drop for ConnectionGuard {
         }
         trim_for_idle(&conn);
         let mut pool = self.session.read_pool.lock().unwrap_or_else(|e| e.into_inner());
+        // fetch_update: its rename, try_update, is newer than the toolchains Vector builds with.
+        #[allow(deprecated)]
         let _ = self.session.readers_out.fetch_update(
             std::sync::atomic::Ordering::Relaxed,
             std::sync::atomic::Ordering::Relaxed,
@@ -1364,6 +1366,7 @@ impl Drop for WriteConnectionGuard {
             let mut spare = None;
             {
                 let mut slot = self.session.write_conn.lock().unwrap_or_else(|e| e.into_inner());
+                #[allow(deprecated)]
                 let _ = self.session.writers_out.fetch_update(
                     std::sync::atomic::Ordering::Relaxed,
                     std::sync::atomic::Ordering::Relaxed,

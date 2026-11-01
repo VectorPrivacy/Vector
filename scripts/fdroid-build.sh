@@ -17,7 +17,7 @@ export PATH="$HOME/.cargo/bin:$PATH"
 # The one place the toolchain is pinned: F-Droid's rebuild has to compile
 # with the same rustc and Tauri CLI as the released flavour it is compared to.
 RUST_TOOLCHAIN=1.98.0
-TAURI_CLI_VERSION=2.9.6
+TAURI_CLI_VERSION=2.12.4
 export RUSTUP_TOOLCHAIN="$RUST_TOOLCHAIN"
 
 prepare() {
