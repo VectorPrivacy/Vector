@@ -32,7 +32,8 @@ FFMPEG_TAR="$BUILD_DIR/ffmpeg-$FFMPEG_VERSION.tar.xz"
 mkdir -p "$BUILD_DIR"
 if [ ! -f "$FFMPEG_TAR" ]; then
     echo "Downloading FFmpeg $FFMPEG_VERSION..."
-    curl -fL -o "$FFMPEG_TAR.part" "https://ffmpeg.org/releases/ffmpeg-$FFMPEG_VERSION.tar.xz"
+    curl -fL --retry 5 --retry-all-errors --retry-delay 10 -o "$FFMPEG_TAR.part" \
+        "https://ffmpeg.org/releases/ffmpeg-$FFMPEG_VERSION.tar.xz"
     mv "$FFMPEG_TAR.part" "$FFMPEG_TAR"
 fi
 if command -v sha256sum >/dev/null; then
