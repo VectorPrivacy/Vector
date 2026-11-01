@@ -32,7 +32,7 @@
   },
   "devDependencies": {
     "@rollup/plugin-node-resolve": "^16.0.3",
-    "@tauri-apps/cli": "^2.12.4",
+    "@tauri-apps/cli": "2.12.2",
     "emojibase-data": "^17.0.0",
     "esbuild": "^0.28.1",
     "esbuild-svelte": "^0.9.5",

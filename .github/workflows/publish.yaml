@@ -17,7 +17,47 @@ env:
   RUST_TOOLCHAIN: 1.98.0
 
 jobs:
+  # The release this push builds into, made once before any build starts: jobs that each made it
+  # on demand could race into two drafts. A semver pre-release identifier (`0.4.2-1`) is what makes
+  # a build a preview; the GitHub flag and the updater endpoint both come from it, so they can't
+  # disagree, and flagging the release keeps `/releases/latest` (the stable channel) off previews.
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      tag: ${{ steps.r.outputs.tag }}
+      id: ${{ steps.r.outputs.id }}
+      prerelease: ${{ steps.r.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@v5
+      - id: r
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION=$(grep -m1 '^version' src-tauri/Cargo.toml | sed 's/version = "\(.*\)"/\1/')
+          TAG="${TAG_PREFIX}v$VERSION"
+          PRE=false
+          [[ "$VERSION" == *-* ]] && PRE=true
+          if [ "$GITHUB_REF_NAME" = rehearsal ]; then
+            NAME="Rehearsal of Vector v$VERSION"
+            BODY="Release rehearsal. Never publish this draft; delete it once checked."
+          else
+            NAME="Vector v$VERSION"
+            BODY="A new Vector release arrives! If you can see this, the changelog has not been written yet, wait around to see whats new!"
+          fi
+          ID=$(gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" --jq ".[] | select(.tag_name == \"$TAG\") | .id" | head -1)
+          if [ -z "$ID" ]; then
+            ID=$(gh api -X POST "repos/$GITHUB_REPOSITORY/releases" -f tag_name="$TAG" -f target_commitish="$GITHUB_SHA" \
+              -f name="$NAME" -f body="$BODY" -F draft=true -F prerelease=$PRE --jq .id)
+          fi
+          echo "Release $TAG (id $ID, prerelease $PRE)"
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+          echo "id=$ID" >> $GITHUB_OUTPUT
+          echo "prerelease=$PRE" >> $GITHUB_OUTPUT
+
   publish-tauri:
+    needs: release
     permissions:
       contents: write
     strategy:
@@ -35,6 +75,11 @@ jobs:
           - platform: 'windows-2022'
             args: ''
             ffmpeg: 'x86_64-pc-windows-msvc'
+          # ARM: native runners, Whisper on the CPU, and (for now) no video compression.
+          - platform: 'ubuntu-22.04-arm'
+            args: ''
+          - platform: 'windows-11-arm'
+            args: ''
 
     runs-on: ${{ matrix.platform }}
     steps:
@@ -53,24 +98,42 @@ jobs:
           targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
 
       # A throwaway runner: scanning every compiler write costs minutes and protects nothing.
-      # D: is the runner's fast disk and keeps paths short for whisper's CMake build. /Brepro
-      # leaves the link time out of the executable, so a rebuild of one commit is identical.
+      # The target dir sits at the root of the workspace's drive (D:, the fast disk, on x64),
+      # keeping paths short for whisper's CMake build. /Brepro leaves the link time out of the
+      # executable, so a rebuild of one commit is identical.
       - name: Prepare the runner (Windows)
-        if: matrix.platform == 'windows-2022'
+        if: startsWith(matrix.platform, 'windows')
         id: win
         shell: pwsh
         run: |
           Set-MpPreference -DisableRealtimeMonitoring $true
-          echo "CARGO_TARGET_DIR=D:\t" >> $env:GITHUB_ENV
+          $drive = Split-Path -Qualifier $env:GITHUB_WORKSPACE
+          echo "CARGO_TARGET_DIR=$drive\t" >> $env:GITHUB_ENV
           echo "CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS=-C link-arg=/Brepro" >> $env:GITHUB_ENV
+          echo "CARGO_TARGET_AARCH64_PC_WINDOWS_MSVC_RUSTFLAGS=-C link-arg=/Brepro" >> $env:GITHUB_ENV
           echo "image=$env:ImageVersion" >> $env:GITHUB_OUTPUT
 
-      - name: install dependencies (ubuntu only)
-        if: matrix.platform == 'ubuntu-22.04'
+      # ring assembles its ARM64 Windows code with clang; MSVC's assembler can't.
+      - name: LLVM (Windows ARM)
+        if: matrix.platform == 'windows-11-arm'
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "C:\Program Files\LLVM\bin\clang.exe")) {
+            if (Get-Command choco -ErrorAction SilentlyContinue) { choco install llvm -y --no-progress }
+            else { winget install --id LLVM.LLVM -e --silent --accept-package-agreements --accept-source-agreements }
+          }
+          echo "C:\Program Files\LLVM\bin" >> $env:GITHUB_PATH
+          & "C:\Program Files\LLVM\bin\clang.exe" --version
+
+      - name: install dependencies (Linux)
+        if: startsWith(matrix.platform, 'ubuntu')
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libasound2-dev
-          # Install Vulkan SDK with glslc compiler
+
+      - name: Vulkan SDK (Linux x64)
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
           wget -qO - https://packages.lunarg.com/lunarg-signing-key-pub.asc | sudo tee /etc/apt/trusted.gpg.d/lunarg.asc > /dev/null
           sudo wget -qO /etc/apt/sources.list.d/lunarg-vulkan-jammy.list https://packages.lunarg.com/vulkan/lunarg-vulkan-jammy.list
           sudo apt-get update
@@ -145,27 +208,9 @@ jobs:
       # branch reads only its own caches and master's, never a pull request's.
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: src-tauri -> ${{ matrix.platform == 'windows-2022' && '../../../../t' || 'target' }}
+          workspaces: src-tauri -> ${{ startsWith(matrix.platform, 'windows') && '../../../../t' || 'target' }}
           key: ${{ matrix.ffmpeg || matrix.platform }}
           save-if: ${{ github.ref_name == 'release' || github.ref_name == 'rehearsal' }}
-
-      # A semver pre-release identifier (`0.4.2-1`) is what makes a build a
-      # preview. Both the GitHub pre-release flag and the updater endpoint are
-      # derived from it here so they can never disagree: flagging the release
-      # is what keeps `/releases/latest` (the stable channel) off previews.
-      - name: Resolve release channel
-        id: channel
-        shell: bash
-        run: |
-          VERSION=$(grep -m1 '^version' src-tauri/Cargo.toml | sed 's/version = "\(.*\)"/\1/')
-          echo "Building $VERSION"
-          if [[ "$VERSION" == *-* ]]; then
-            echo "prerelease=true" >> $GITHUB_OUTPUT
-            echo "config=--config src-tauri/tauri.preview.conf.json" >> $GITHUB_OUTPUT
-          else
-            echo "prerelease=false" >> $GITHUB_OUTPUT
-            echo "config=" >> $GITHUB_OUTPUT
-          fi
 
       - uses: tauri-apps/tauri-action@v0
         env:
@@ -173,28 +218,35 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
-          tagName: ${{ env.TAG_PREFIX }}v__VERSION__ # the action automatically replaces \_\_VERSION\_\_ with the app version.
-          releaseName: ${{ github.ref_name == 'rehearsal' && 'Rehearsal of Vector v__VERSION__' || 'Vector v__VERSION__' }}
-          releaseBody: ${{ github.ref_name == 'rehearsal' && 'Release rehearsal. Never publish this draft; delete it once checked.' || 'A new Vector release arrives! If you can see this, the changelog has not been written yet, wait around to see whats new!' }}
-          releaseDraft: true
-          prerelease: ${{ steps.channel.outputs.prerelease }}
+          releaseId: ${{ needs.release.outputs.id }}
           tauriScript: npm run tauri
-          args: ${{ matrix.args }} ${{ steps.channel.outputs.config }}
+          args: ${{ matrix.args }} ${{ needs.release.outputs.prerelease == 'true' && '--config src-tauri/tauri.preview.conf.json' || '' }}
 
       # The executable before bundling: two builds of one commit should print the same hash.
       - name: Fingerprint the binary
         shell: bash
         run: |
           dir="${CARGO_TARGET_DIR:-src-tauri/target}"
+          command -v cygpath > /dev/null && dir=$(cygpath -u "$dir")
           for f in "$dir"/release/Vector "$dir"/release/Vector.exe "$dir"/*/release/Vector; do
             [ -f "$f" ] && sha256sum "$f"
           done
           true
 
-  # Android APK Build
+  # Android APKs: the ARM pair (and the universal fallback) alongside x86_64 for Chromebooks and
+  # emulators, which ships as its own APK so the universal one doesn't grow.
   publish-android:
+    needs: release
     permissions:
       contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - abis: arm
+            targets: --target aarch64 --target armv7
+          - abis: x86_64
+            targets: --target x86_64
     runs-on: ubuntu-22.04
 
     steps:
@@ -209,7 +261,7 @@ jobs:
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
-          targets: aarch64-linux-android,armv7-linux-androideabi
+          targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android
 
       - name: Setup Java 17
         uses: actions/setup-java@v5
@@ -238,7 +290,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri -> target
-          key: android
+          key: android-${{ matrix.abis }}
           save-if: ${{ github.ref_name == 'release' || github.ref_name == 'rehearsal' }}
 
       - name: Setup Android signing
@@ -254,35 +306,25 @@ jobs:
           EOF
 
       - name: Build Android APK
-        run: npx tauri android build --apk true --target aarch64 --target armv7
+        run: npx tauri android build --apk ${{ matrix.targets }}
         env:
           NDK_HOME: ${{ env.NDK_HOME }}
 
       - name: Fingerprint the native libraries
         run: sha256sum src-tauri/target/*/release/libvector_lib.so
 
-      - name: Get version from Cargo.toml
-        id: get_version
-        run: |
-          VERSION=$(grep -m1 '^version' src-tauri/Cargo.toml | sed 's/version = "\(.*\)"/\1/')
-          echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
-          # Only used if this job wins the race to create the release; the flag
-          # must match the desktop jobs or a preview would land on the stable
-          # channel. Android itself picks its channel at runtime from the
-          # version's pre-release identifier, so it needs no build-time config.
-          if [[ "$VERSION" == *-* ]]; then
-            echo "PRERELEASE=--prerelease" >> $GITHUB_OUTPUT
-          else
-            echo "PRERELEASE=" >> $GITHUB_OUTPUT
-          fi
-
+      # The abi-splits config emits one APK per ARM ABI plus a universal fallback. Built alone,
+      # x86_64 is the only ABI in its universal APK, which ships under its own name.
       - name: Collect split APKs
         run: |
           OUT=src-tauri/gen/android/app/build/outputs/apk/universal/release
-          # The abi-splits config emits one APK per ABI plus a universal fallback.
-          mv "$OUT/app-universal-arm64-v8a-release.apk"   "$OUT/Vector-arm64-v8a.apk"
-          mv "$OUT/app-universal-armeabi-v7a-release.apk" "$OUT/Vector-armeabi-v7a.apk"
-          mv "$OUT/app-universal-universal-release.apk"   "$OUT/Vector.apk"
+          if [ "${{ matrix.abis }}" = x86_64 ]; then
+            mv "$OUT/app-universal-universal-release.apk" "$OUT/Vector-x86_64.apk"
+          else
+            mv "$OUT/app-universal-arm64-v8a-release.apk"   "$OUT/Vector-arm64-v8a.apk"
+            mv "$OUT/app-universal-armeabi-v7a-release.apk" "$OUT/Vector-armeabi-v7a.apk"
+            mv "$OUT/app-universal-universal-release.apk"   "$OUT/Vector.apk"
+          fi
           ls -lh "$OUT"/Vector*.apk
 
       # Upload-only via the gh CLI: it must never PATCH release fields. The old
@@ -290,55 +332,38 @@ jobs:
       # the (floating) @v2 action started trying to flip it BACK to draft — an
       # operation the Actions token is refused ("Resource not accessible by
       # integration"), failing the whole job. Uploading assets works on drafts
-      # and published releases alike; the create branch only covers the race
-      # where this job outruns every desktop job on a brand-new version.
+      # and published releases alike.
       - name: Upload APKs to Release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          TAG="${TAG_PREFIX}v${{ steps.get_version.outputs.VERSION }}"
-          if ! gh release list --repo "$GITHUB_REPOSITORY" --limit 30 --json tagName --jq '.[].tagName' | grep -qx "$TAG"; then
-            gh release create "$TAG" --draft ${{ steps.get_version.outputs.PRERELEASE }} --title "Vector $TAG" --repo "$GITHUB_REPOSITORY"
-          fi
-          gh release upload "$TAG" \
-            src-tauri/gen/android/app/build/outputs/apk/universal/release/Vector.apk \
-            src-tauri/gen/android/app/build/outputs/apk/universal/release/Vector-arm64-v8a.apk \
-            src-tauri/gen/android/app/build/outputs/apk/universal/release/Vector-armeabi-v7a.apk \
+          gh release upload "${{ needs.release.outputs.tag }}" \
+            src-tauri/gen/android/app/build/outputs/apk/universal/release/Vector*.apk \
             --clobber --repo "$GITHUB_REPOSITORY"
-
-  # The version this push releases, for the F-Droid reference build below.
-  release-version:
-    runs-on: ubuntu-latest
-    outputs:
-      tag: ${{ steps.v.outputs.tag }}
-    steps:
-      - uses: actions/checkout@v5
-      - id: v
-        run: echo "tag=${TAG_PREFIX}v$(grep -m1 '^version' src-tauri/Cargo.toml | sed 's/version = "\(.*\)"/\1/')" >> $GITHUB_OUTPUT
 
   # The F-Droid flavour, built by `fdroid build` inside F-Droid's own image and
   # signed with the release key: the asset their verifier compares against
   # for the reproducible tier (docs/fdroid/README.md).
   publish-android-fdroid:
-    needs: release-version
+    needs: release
     uses: ./.github/workflows/fdroid-build.yaml
     with:
       ref: ${{ github.sha }}
-      release_tag: ${{ needs.release-version.outputs.tag }}
+      release_tag: ${{ needs.release.outputs.tag }}
     secrets: inherit
 
   # One file that vouches for every download: SHA256SUMS.txt over the release's assets, signed
   # with the updater key the app already trusts (minisign), and a build-provenance attestation per
   # asset so `gh attestation verify` ties each file to this workflow and commit.
   checksums:
-    needs: [release-version, publish-tauri, publish-android, publish-android-fdroid]
+    needs: [release, publish-tauri, publish-android, publish-android-fdroid]
     runs-on: ubuntu-latest
     permissions:
       contents: write
       id-token: write
       attestations: write
     env:
-      TAG: ${{ needs.release-version.outputs.tag }}
+      TAG: ${{ needs.release.outputs.tag }}
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - name: Download the release's assets
@@ -358,7 +383,7 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
-          npx --yes @tauri-apps/cli@2.12.4 signer sign SHA256SUMS.txt
+          npx --yes @tauri-apps/cli@2.12.2 signer sign SHA256SUMS.txt
           # Tauri writes the minisign signature base64-wrapped; minisign reads it raw.
           base64 -d SHA256SUMS.txt.sig > SHA256SUMS.txt.minisig
           rm SHA256SUMS.txt.sig

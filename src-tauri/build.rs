@@ -15,7 +15,10 @@ fn main() {
     let dev_plugins = std::env::var("PROFILE").as_deref() != Ok("release")
         && std::env::var_os("CARGO_FEATURE_MCP_BRIDGE").is_some();
     let capabilities = if dev_plugins { "./capabilities/**/*.json" } else { "./capabilities/*.json" };
-    tauri_build::try_build(tauri_build::Attributes::default().capabilities_path_pattern(capabilities).app_manifest(
+    // The Windows manifest is linked below rather than as a resource, which reaches binaries only.
+    let attributes = tauri_build::Attributes::default()
+        .windows_attributes(tauri_build::WindowsAttributes::new_without_app_manifest());
+    tauri_build::try_build(attributes.capabilities_path_pattern(capabilities).app_manifest(
         tauri_build::AppManifest::default().commands(&[
             // Database commands
             "get_theme",
@@ -234,6 +237,17 @@ fn main() {
         ]),
     ))
     .expect("failed to run tauri-build");
+
+    // Common Controls v6 for every linked target, test executables included: without it Windows
+    // loads comctl32 v5, which lacks TaskDialogIndirect, and the test exits before it starts.
+    let windows_msvc = std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows")
+        && std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc");
+    if windows_msvc {
+        let manifest = std::path::Path::new(&std::env::var("CARGO_MANIFEST_DIR").unwrap()).join("windows-app-manifest.xml");
+        println!("cargo:rerun-if-changed=windows-app-manifest.xml");
+        println!("cargo:rustc-link-arg=/MANIFEST:EMBED");
+        println!("cargo:rustc-link-arg=/MANIFESTINPUT:{}", manifest.display());
+    }
 
     // SpeexDSP's echo canceller and preprocessor for calls, compiled from the vendored
     // sources: a plain C build every target's compiler handles, no cmake or bindgen.

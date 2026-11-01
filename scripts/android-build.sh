@@ -34,9 +34,9 @@ cd "$PROJECT_ROOT"
 if [ "$1" = "--armv7-only" ]; then
     shift
     echo "Building armv7-only APK (Android Go / 32-bit)"
-    npx tauri android build --apk true --target armv7 "$@"
+    npx tauri android build --apk --target armv7 "$@"
 else
-    npx tauri android build --apk true --target aarch64 --target armv7 "$@"
+    npx tauri android build --apk --target aarch64 --target armv7 "$@"
 fi
 
 # Collect the per-ABI + universal split APKs under clean, store-friendly names.

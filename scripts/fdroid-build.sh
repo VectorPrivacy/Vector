@@ -17,7 +17,7 @@ export PATH="$HOME/.cargo/bin:$PATH"
 # The one place the toolchain is pinned: F-Droid's rebuild has to compile
 # with the same rustc and Tauri CLI as the released flavour it is compared to.
 RUST_TOOLCHAIN=1.98.0
-TAURI_CLI_VERSION=2.12.4
+TAURI_CLI_VERSION=2.12.2
 export RUSTUP_TOOLCHAIN="$RUST_TOOLCHAIN"
 
 prepare() {
@@ -99,7 +99,7 @@ build() {
     # whisper.cpp is C/C++ built by cmake; its asserts embed __FILE__.
     export CFLAGS="-ffile-prefix-map=$repo_physical=/vector -ffile-prefix-map=$repo_logical=/vector"
     export CXXFLAGS="$CFLAGS"
-    cargo tauri android build --apk true --target aarch64 \
+    cargo tauri android build --apk --target aarch64 \
         --config src-tauri/tauri.fdroid.conf.json
     local out=src-tauri/gen/android/app/build/outputs/apk/universal/release
     ls -l "$out/"

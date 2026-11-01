@@ -54,7 +54,7 @@ esac
 echo "Device ABI $DEVICE_ABI -> tauri target $TARGET (${PROFILE_DIR})"
 
 node scripts/build-frontend.mjs
-npx tauri android build --apk true --target "$TARGET" $PROFILE_FLAG
+npx tauri android build --apk --target "$TARGET" $PROFILE_FLAG
 
 OUT="src-tauri/gen/android/app/build/outputs/apk"
 # Prefer the split matching this ABI; the universal is the fallback.
