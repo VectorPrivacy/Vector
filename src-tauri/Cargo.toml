@@ -303,7 +303,6 @@ dispatch2 = "0.3"
 objc2-user-notifications = { version = "0.3.1", features = ["block2", "UNUserNotificationCenter", "UNNotification", "UNNotificationAction", "UNNotificationAttachment", "UNNotificationCategory", "UNNotificationContent", "UNNotificationRequest", "UNNotificationResponse", "UNNotificationTrigger"] }
 
 [target.'cfg(windows)'.dependencies]
-whisper-rs = { version = "0.15.1", features = ["vulkan"], optional = true }
 # Native toasts (services/native_notify/windows.rs). Same version tauri, tao and wry use.
 windows = { version = "0.61", features = ["Data_Xml_Dom", "Foundation", "UI_Notifications", "Win32_Foundation", "Win32_Security", "Win32_System_Com", "Win32_System_Registry", "Win32_UI_Notifications"] }
 # `#[implement]` expands to paths in windows-core.
@@ -318,7 +317,6 @@ webview2-com = "0.39"
 webview2-windows-core = { package = "windows-core", version = "0.62" }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-whisper-rs = { version = "0.15.1", features = ["vulkan"], optional = true }
 # GTK clipboard (file paste-in via text/uri-list). Pinned to the wry/tao GTK
 # generation (0.18) so no duplicate gtk crate is pulled.
 gtk = "0.18"
@@ -326,6 +324,14 @@ gdk = "0.18"
 glib = "0.18"
 # Same generation as wry: per-window proxy exemption for loopback-hosted Mini Apps.
 webkit2gtk = { version = "2.0", features = ["v2_40"] }
+
+# Vulkan on x86-64 Windows and Linux. ARM builds transcribe on the CPU (NEON): the Vulkan SDK
+# their runners would need has no ARM build for Linux, and these devices' CPUs carry it well.
+[target.'cfg(all(any(windows, target_os = "linux"), target_arch = "x86_64"))'.dependencies]
+whisper-rs = { version = "0.15.1", features = ["vulkan"], optional = true }
+
+[target.'cfg(all(any(windows, target_os = "linux"), not(target_arch = "x86_64")))'.dependencies]
+whisper-rs = { version = "0.15.1", optional = true }
 
 # For other platforms (not Android, macOS, Windows, or Linux)
 [target.'cfg(all(not(target_os = "android"), not(target_os = "macos"), not(windows), not(target_os = "linux")))'.dependencies]

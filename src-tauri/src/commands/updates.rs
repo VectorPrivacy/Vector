@@ -254,7 +254,11 @@ const APK_ASSET: &str = {
     {
         "Vector-armeabi-v7a.apk"
     }
-    #[cfg(not(any(target_arch = "aarch64", target_arch = "arm")))]
+    #[cfg(target_arch = "x86_64")]
+    {
+        "Vector-x86_64.apk"
+    }
+    #[cfg(not(any(target_arch = "aarch64", target_arch = "arm", target_arch = "x86_64")))]
     {
         "Vector.apk"
     }
