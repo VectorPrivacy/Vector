@@ -2005,7 +2005,8 @@ async function openDeepLink(payload) {
         const link = parseGoPayload(target);
         if (link) await openGoLink(link);
     } else if (action_type === 'settings') {
-        // `category[/section]`, brought into view
+        // `category[/section]`, brought into view. A narrow layout's chat covers every tab.
+        if (strOpenChat && !wsActive()) await closeChat();
         openSettings();
         if (target) VectorSvelte.requestSettingsScroll(target);
     } else if (action_type === 'nexus') {
