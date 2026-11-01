@@ -692,15 +692,24 @@ body.cc .chatlist-community-head-name {
   font-weight: 700;
 }
 
+/* Thumb-sized: the head's full height, from the pane's edge to the avatar. */
 body.cc .chatlist-community-head .chatlist-community-head-back {
   all: unset;
   position: relative;
   flex-shrink: 0;
-  width: 28px;
-  height: 36px;
-  margin-left: -4px;
+  align-self: stretch;
+  width: 52px;
+  margin: -10px -10px -11px calc(-1 * var(--ws-pane-gutter));
   cursor: pointer;
+  touch-action: pan-y;
   -webkit-tap-highlight-color: transparent;
+  /* Over the screen-edge strip, so a tap at the edge is the button's. */
+  z-index: 3;
+}
+
+body.cc .chatlist-community-head-back .icon {
+  width: 22px;
+  height: 22px;
 }
 
 .chatlist-community-head-back .icon {

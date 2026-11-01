@@ -6,9 +6,11 @@
     import { avatarThumb } from '../lib/avatar.js';
     import { paneState, communityVersion } from '../lib/signals.svelte.js';
     import Avatar from '../ui/Avatar.svelte';
+    import { railPull } from '../lib/railmotion.js';
 
     // onBack: the slim layout's way back to the list while the rail is folded away.
-    let { h, onBack = null } = $props();   // h: CommunityHeadHelpers (js/render/chatlist/list.js)
+    // backPull: the rail's pull, kept on the screen edge the button covers.
+    let { h, onBack = null, backPull = null } = $props();   // h: CommunityHeadHelpers (js/render/chatlist/list.js)
 
     const vm = $derived.by(() => {
         const id = paneState().communityId;
@@ -61,7 +63,7 @@
         oncontextmenu={(e) => { e.preventDefault(); e.stopPropagation(); h.openCommunityMenu(vm.primary, e); }}
     >
         {#if onBack}
-            <button class="chatlist-community-head-back" aria-label="Back to chats" onclick={(e) => { e.stopPropagation(); onBack(); }}>
+            <button class="chatlist-community-head-back" aria-label="Back to chats" use:railPull={backPull} onclick={(e) => { e.stopPropagation(); onBack(); }}>
                 <span class="icon icon-chevron-left"></span>
             </button>
         {/if}
