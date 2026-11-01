@@ -1164,6 +1164,7 @@ pub fn run() {
             commands::pinned::get_pinned_chats,
             commands::pinned::pin_chat,
             commands::pinned::unpin_chat,
+            commands::pinned::move_pinned_chat,
             commands::rail::get_rail_layout,
             commands::rail::rail_apply_drop,
             commands::rail::rail_rename_folder,

@@ -2,6 +2,7 @@
     import { markedChatId } from '../lib/signals.svelte.js';
     import { avatarThumb } from '../lib/avatar.js';
     import { shellState } from '../lib/shell.svelte.js';
+    import { reorderable } from '../lib/reorder.js';
     // One chat row.
     //
     // Chat objects are RAW (shared by reference with eventCache and mutated in
@@ -9,7 +10,9 @@
     // its own signals (chat, DM profile, community) and the clock `tick` are read
     // inside the vm derivation, while the keyed parent each keeps the DOM node
     // itself alive across updates.
-    let { h, chat, pinned, tick } = $props();   // h: ChatlistHelpers (js/render/chatlist/list.js)
+    // reorder: the list's drag handlers while the row is a pin, else null; mark: its part
+    // in a drag under way ('dragging', 'above' or 'below').
+    let { h, chat, pinned, tick, reorder = null, mark = null } = $props();   // h: ChatlistHelpers (js/render/chatlist/list.js)
 
     import Avatar from '../ui/Avatar.svelte';
     import { watchProfile } from '../lib/profilewatch.js';
@@ -101,11 +104,20 @@
         return { update: render };
     }
 
-    // Context menu: attach listeners once, always fire with the fresh view-model.
-    function rowMenu(node, v) {
-        let cur = v;
-        h.attachLongPressContextMenu(node, (x, y) => h.showChatRowContextMenu(cur.chat, cur.isGroup, cur.nMark, x, y));
-        return { update: (v) => { cur = v; } };
+    // Context menu, always fired with the fresh view-model. A pinned row also drags to
+    // reorder, so its press goes through the reorder arbiter, menu included.
+    function rowMenu(node, a) {
+        let cur = a;
+        const menu = (x, y) => h.showChatRowContextMenu(cur.vm.chat, cur.vm.isGroup, cur.vm.nMark, x, y);
+        h.attachLongPressContextMenu(node, menu, () => !cur.reorder);
+        let drag = null;
+        const sync = () => {
+            if (!cur.reorder === !drag) return;
+            drag?.destroy();
+            drag = cur.reorder ? reorderable(node, cur.reorder(node, menu)) : null;
+        };
+        sync();
+        return { update: (next) => { cur = next; sync(); }, destroy: () => drag?.destroy() };
     }
 
 </script>
@@ -118,8 +130,11 @@
     class:has-unread={vm.nMark}
     class:chatlist-joining={vm.joining}
     class:ws-active={shellState().ws && markedChatId() === vm.chat.id}
+    class:is-dragging={mark === 'dragging'}
+    class:drop-above={mark === 'above'}
+    class:drop-below={mark === 'below'}
     id="chatlist-{vm.chat.id}"
-    use:rowMenu={vm}
+    use:rowMenu={{ vm, reorder }}
     use:watchProfile={vm.isGroup ? null : vm.chat.id}
     onclick={() => h.rowClick(vm)}
 >

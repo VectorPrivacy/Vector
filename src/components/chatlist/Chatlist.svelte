@@ -11,6 +11,7 @@
     import { listVersion, invitesVersion, paneState, openChatId, clockTick } from '../lib/signals.svelte.js';
     import ChatlistRow from './ChatlistRow.svelte';
     import ArchiveRow from './ArchiveRow.svelte';
+    import { dragGhost, nearestByCentre } from '../lib/reorder.js';
     import { shellState } from '../lib/shell.svelte.js';
     import { consoleState, consoleFilter } from '../lib/console.svelte.js';
     const shell = shellState();
@@ -81,6 +82,48 @@
         for (const c of chats) if (h.chatIsGroup(c)) h.ensureCommunityPreviewActivity(c);
     });
 
+    // ── drag a pinned row among the pins ──
+    let dragging = $state(null);   // the dragged row's pin key
+    let drop = $state(null);       // { key, before }
+    let ghost = null;
+    const pinEls = new Map();
+    const pinKeys = $derived(chats.map((c) => h.chatPinKey(c)).filter((k) => snap.pinned.includes(k)));
+
+    const resolve = (y) => nearestByCentre(
+        pinKeys.filter((k) => k !== dragging).map((key) => ({ key, el: pinEls.get(key) })).filter((t) => t.el), 0, y, 'y');
+
+    // Lands before the next pin shown, or at the end: pins this tab hides keep their places.
+    function land(t) {
+        const rest = pinKeys.filter((k) => k !== dragging);
+        const at = rest.indexOf(t.key) + (t.before ? 0 : 1);
+        if (pinKeys.indexOf(dragging) === at) return;
+        h.movePin(dragging, rest[at] ?? null);
+    }
+
+    function pinDrag(key) {
+        return (node, menu) => {
+            pinEls.set(key, node);
+            return {
+                onMenu: menu,
+                closeMenu: h.hideContextMenu,
+                onDragStart: (ev, el) => { dragging = key; ghost = dragGhost(el, 'chatlist-drag-ghost'); },
+                onDragMove: (mv) => { ghost?.move(mv.clientX, mv.clientY); drop = resolve(mv.clientY); },
+                onDragEnd: (up) => {
+                    const t = resolve(up.clientY);
+                    ghost?.remove(); ghost = null;
+                    if (t) land(t);
+                    dragging = null; drop = null;
+                },
+            };
+        };
+    }
+
+    function dragMark(key) {
+        if (!dragging) return null;
+        if (key === dragging) return 'dragging';
+        return drop?.key === key ? (drop.before ? 'above' : 'below') : null;
+    }
+
     // Widescreen selection stamp — the vanilla render re-stamped after every
     // rebuild; rows persist here, so re-stamp on list shape / selection changes.
     $effect(() => {
@@ -110,12 +153,9 @@
         <InviteRow {invite} {h} />
     {/each}
     {#each chats as chat (chat.id)}
-        <ChatlistRow
-            {h}
-            {chat}
-            pinned={snap.pinned.includes(h.chatPinKey(chat))}
-            {tick}
-        />
+        {@const key = h.chatPinKey(chat)}
+        {@const pinned = snap.pinned.includes(key)}
+        <ChatlistRow {h} {chat} {pinned} {tick} reorder={pinned && !query ? pinDrag(key) : null} mark={pinned ? dragMark(key) : null} />
     {/each}
     {#if empty}
         {#if query}

@@ -34,6 +34,15 @@ pub async fn unpin_chat(chat_id: String) -> Result<Vec<String>, String> {
     Ok(list.chats)
 }
 
+/// Move a pin to just before `before` (the end when `None`), and sync it.
+#[tauri::command]
+pub async fn move_pinned_chat(chat_id: String, before: Option<String>) -> Result<Vec<String>, String> {
+    let client = vector_core::state::nostr_client().ok_or("Nostr client not initialized")?;
+    let list = pinned_chats::move_pinned_chat(&client, &chat_id, before.as_deref()).await?;
+    emit_pinned(&list);
+    Ok(list.chats)
+}
+
 /// A sibling device changed the list: fold it in and tell the UI to re-sort.
 /// Never republishes — the relay echoes our own publishes back on the same
 /// subscription, and answering an echo with a publish loops forever.

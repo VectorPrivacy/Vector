@@ -100,6 +100,17 @@ function chatPinMenuItem(chat) {
     };
 }
 
+/** Move a pin to just before `before`, or to the end when null. */
+async function moveChatPin(key, before) {
+    if (blockedBySync()) return;
+    try {
+        arrPinnedChats = await invoke('move_pinned_chat', { chatId: key, before });
+        listChanged();
+    } catch (e) {
+        showToast(e);
+    }
+}
+
 /** Block someone once they confirm; whether they were. */
 async function confirmBlockUser(npub) {
     if (blockedBySync()) return false;
