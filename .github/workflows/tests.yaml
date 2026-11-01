@@ -28,9 +28,11 @@ jobs:
       - name: install Rust stable
         uses: dtolnay/rust-toolchain@stable
 
+      # Saved from master only: release builds need the room in the repo's 10 GB of cache.
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: crates
+          save-if: ${{ github.ref == 'refs/heads/master' }}
 
       - uses: taiki-e/install-action@v2
         with:
@@ -64,6 +66,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
+          save-if: ${{ github.ref == 'refs/heads/master' }}
 
       # Tauri needs WebKitGTK to build at all on Linux. Vulkan is deliberately
       # absent: `--no-default-features` drops `whisper`, whose build wants
