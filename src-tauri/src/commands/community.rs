@@ -871,13 +871,12 @@ async fn process_outbound_community_attachment(
         // Neither the preview's byte copy nor its pre-compression is used from here.
         crate::message::types::ANDROID_FILE_CACHE.lock().unwrap().remove(file_path);
         crate::message::files::take_precompressed(file_path, false).await;
-        // A pick copied to disk at selection streams from that copy, which goes once sealed.
+        // A pick copied to disk at selection streams from that copy, which `send_community_files`
+        // drops once the send is done: staging only names it, the seal reads it.
         let picked = crate::message::types::ANDROID_PICKED_FILES.lock().unwrap().get(file_path).cloned();
         if let Some((copy, _, cached_name, _)) = picked {
             let name = if !name_override.is_empty() { name_override.to_string() } else { cached_name };
-            let prepared = process_outbound_community_attachment_path(copy, name).await;
-            crate::message::types::discard_picked_file(file_path);
-            return prepared;
+            return process_outbound_community_attachment_path(copy, name).await;
         }
         let af = crate::android::filesystem::read_android_uri(file_path.to_string())
             .map_err(|e| format!("read attachment: {e}"))?;
@@ -1100,13 +1099,21 @@ pub async fn send_community_files(
     if file_paths.is_empty() {
         return Err("No files to send".to_string());
     }
-    // Capture session BEFORE the uploads so a mid-upload account swap is caught.
-    let mut prepared = Vec::with_capacity(file_paths.len());
-    for (i, fp) in file_paths.iter().enumerate() {
-        let name_override = name_overrides.get(i).map(String::as_str).unwrap_or("");
-        prepared.push(process_outbound_community_attachment(fp, name_override, use_compression, keep_metadata).await?);
+    let sent = async {
+        let mut prepared = Vec::with_capacity(file_paths.len());
+        for (i, fp) in file_paths.iter().enumerate() {
+            let name_override = name_overrides.get(i).map(String::as_str).unwrap_or("");
+            prepared.push(process_outbound_community_attachment(fp, name_override, use_compression, keep_metadata).await?);
+        }
+        dispatch_community_attachment_message(channel_id, content, replied_to, prepared).await
     }
-    dispatch_community_attachment_message(channel_id, content, replied_to, prepared).await
+    .await;
+    // A failed upload kept its sealed copy for the retry, so the pick's copy is done with either way.
+    #[cfg(target_os = "android")]
+    for fp in &file_paths {
+        crate::message::types::discard_picked_file(fp);
+    }
+    sent
 }
 
 /// Send a voice note to a Community channel. Same upload path as a file, but the attachment's
