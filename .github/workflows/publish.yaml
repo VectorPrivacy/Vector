@@ -227,6 +227,7 @@ jobs:
         shell: bash
         run: |
           dir="${CARGO_TARGET_DIR:-src-tauri/target}"
+          command -v cygpath > /dev/null && dir=$(cygpath -u "$dir")
           for f in "$dir"/release/Vector "$dir"/release/Vector.exe "$dir"/*/release/Vector; do
             [ -f "$f" ] && sha256sum "$f"
           done
