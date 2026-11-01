@@ -665,8 +665,9 @@ async function setCommunityBannerHidden(communityId, hidden) {
  * The community's own menu, hung off its header — Discord's server dropdown.
  * Reuses the context-menu component, so it inherits its viewport clamping,
  * outside-click dismissal and styling rather than growing a second one.
+ * `inList`: opened from its chat-list row, which can be pinned there.
  */
-async function openCommunityMenu(chat, ev, at) {
+async function openCommunityMenu(chat, ev, at, { inList = false } = {}) {
     if (!chat) return;
     const cf = chat.metadata?.custom_fields || {};
     // Hung off a header button, or opened where a right-click landed on a rail shortcut.
@@ -724,6 +725,7 @@ async function openCommunityMenu(chat, ev, at) {
     if (cf.community_id) {
         items.push({ divider: true });
         items.push(...await notifyMenuItems(cf.community_id, cf.community_id));
+        if (inList) items.push(chatPinMenuItem(chat));
         const banners = VectorSvelte.bannerState();
         if (banners.src[cf.community_id] && banners.hidden.includes(cf.community_id)) {
             items.push({

@@ -17,7 +17,7 @@ async function _showChatRowContextMenu(chat, isGroup, nUnread, x, y) {
     // chatlist open handler can swallow it instead of opening the chat.
     window._chatRowMenuAt = Date.now();
     // A community's row stands for the whole community: its own menu, as on the rail.
-    if (isGroup && chat.metadata?.custom_fields?.community_id) return openCommunityMenu(chat, null, { x, y });
+    if (isGroup && chat.metadata?.custom_fields?.community_id) return openCommunityMenu(chat, null, { x, y }, { inList: true });
 
     const items = [];
     if (nUnread > 0) {
@@ -47,20 +47,7 @@ async function _showChatRowContextMenu(chat, isGroup, nUnread, x, y) {
         items.push(...await notifyMenuItems(strNotifyScope, isGroup ? strNotifyScope : null));
     }
     if (!isGroup) {
-        const fPinned = arrPinnedChats.includes(chat.id);
-        items.push({
-            label: fPinned ? 'Unpin' : 'Pin',
-            icon: 'pin',
-            onClick: async () => {
-                if (blockedBySync()) return;
-                try {
-                    arrPinnedChats = await invoke(fPinned ? 'unpin_chat' : 'pin_chat', { chatId: chat.id });
-                    listChanged();
-                } catch (e) {
-                    showToast(e);
-                }
-            },
-        });
+        items.push(chatPinMenuItem(chat));
         const fArchived = chatIsArchived(chat);
         items.push({
             label: fArchived ? 'Unarchive' : 'Archive',
@@ -92,6 +79,25 @@ async function _showChatRowContextMenu(chat, isGroup, nUnread, x, y) {
         });
     }
     showContextMenu({ x, y, items });
+}
+
+/** Pin or Unpin for a chat-list row; the backend holds the tier's cap. */
+function chatPinMenuItem(chat) {
+    const key = chatPinKey(chat);
+    const fPinned = arrPinnedChats.includes(key);
+    return {
+        label: fPinned ? 'Unpin' : 'Pin',
+        icon: 'pin',
+        onClick: async () => {
+            if (blockedBySync()) return;
+            try {
+                arrPinnedChats = await invoke(fPinned ? 'unpin_chat' : 'pin_chat', { chatId: key });
+                listChanged();
+            } catch (e) {
+                showToast(e);
+            }
+        },
+    };
 }
 
 /** Block someone once they confirm; whether they were. */

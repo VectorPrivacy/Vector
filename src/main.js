@@ -999,12 +999,16 @@ function finalizePendingMessage(chatId, pendingId, eventId) {
 }
 
 /**
- * Pinned DM npubs, in pin order, synced across the account's own devices.
- * Communities are arranged on the rail instead, so a community id an older
- * build pinned is simply never matched here.
+ * Pinned chat-list rows, in pin order, synced across the account's own devices:
+ * a DM's npub or a community's id.
  * @type {string[]}
  */
 let arrPinnedChats = [];
+
+/** The id a row pins under: a community's row stands for the whole community. */
+function chatPinKey(chat) {
+    return chat.metadata?.custom_fields?.community_id || chat.id;
+}
 
 /**
  * Pin rank, or -1 when unpinned. Looked up per render rather than stamped onto
@@ -1014,8 +1018,7 @@ let arrPinnedChats = [];
  * @returns {number}
  */
 function chatPinRank(chat) {
-    if (chatIsGroup(chat)) return -1;
-    return arrPinnedChats.indexOf(chat.id);
+    return arrPinnedChats.indexOf(chatPinKey(chat));
 }
 
 let fSyncing = false;

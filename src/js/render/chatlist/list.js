@@ -167,6 +167,7 @@ function chatlistSnapshot() {
  * @typedef {Object} ChatlistHelpers
  * @property {(chat: object) => boolean} chatIsVisibleInList
  * @property {(chat: object) => boolean} chatIsGroup
+ * @property {(chat: object) => string} chatPinKey   the id its pin is stored under
  * @property {(chat: object) => boolean} chatIsArchived
  * @property {(chat: object) => boolean} chatIsRequest   a DM neither answered nor accepted
  * @property {(chat: object, query: string) => boolean} chatMatchesQuery   query lowercased
@@ -223,6 +224,7 @@ function chatlistHelpers() {
         // membership + row policy
         chatIsVisibleInList,
         chatIsGroup,
+        chatPinKey,
         chatIsArchived,
         chatIsRequest,
         chatMatchesQuery,

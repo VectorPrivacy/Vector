@@ -101,7 +101,7 @@
         <ArchiveRow {h} chats={archived} forced={chats.length + invites.length === 0}>
             {#snippet rows()}
                 {#each archived as chat (chat.id)}
-                    <ChatlistRow {h} {chat} pinned={snap.pinned.includes(chat.id)} {tick} />
+                    <ChatlistRow {h} {chat} pinned={snap.pinned.includes(h.chatPinKey(chat))} {tick} />
                 {/each}
             {/snippet}
         </ArchiveRow>
@@ -113,7 +113,7 @@
         <ChatlistRow
             {h}
             {chat}
-            pinned={!h.chatIsGroup(chat) && snap.pinned.includes(chat.id)}
+            pinned={snap.pinned.includes(h.chatPinKey(chat))}
             {tick}
         />
     {/each}
