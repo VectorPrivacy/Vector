@@ -29,9 +29,6 @@ pub use vector_core::simd::hex::{
 
 pub use crate::simd::has_alpha_transparency;
 
-#[cfg(target_os = "windows")]
-pub use crate::simd::has_all_alpha_near_zero;
-
 /// Extract all HTTPS URLs from a string
 pub fn extract_https_urls(text: &str) -> Vec<String> {
     let mut urls = Vec::new();

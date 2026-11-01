@@ -1,14 +1,16 @@
 //! Install-source detection + store hand-off for the in-app update flow.
 
-use jni::objects::{JClass, JObject, JValue};
-use jni::JNIEnv;
+use jni::objects::JValue;
+#[cfg(not(feature = "fdroid"))]
+use jni::{objects::JObject, JNIEnv};
 use super::with_android_context;
 
+#[cfg(not(feature = "fdroid"))]
 fn load_class<'a>(
     env: &mut JNIEnv<'a>,
     activity: &JObject<'a>,
     name: &str,
-) -> Result<JClass<'a>, String> {
+) -> Result<jni::objects::JClass<'a>, String> {
     let class_loader = env
         .call_method(activity, "getClassLoader", "()Ljava/lang/ClassLoader;", &[])
         .map_err(|e| format!("classloader: {:?}", e))?
@@ -27,7 +29,7 @@ fn load_class<'a>(
         .map_err(|e| format!("loadClass {}: {:?}", name, e))?
         .l()
         .map_err(|e| format!("loaded class obj: {:?}", e))?;
-    Ok(JClass::from(cls))
+    Ok(jni::objects::JClass::from(cls))
 }
 
 /// Hand a downloaded update APK to the system installer — but only after the
@@ -37,6 +39,7 @@ fn load_class<'a>(
 ///
 /// Returns the raw status: `ok`, `needs-permission` (the settings screen was
 /// opened), `signature-mismatch`, `unverifiable`, `missing`.
+#[cfg(not(feature = "fdroid"))]
 pub fn install_update(path: &str) -> Result<String, String> {
     let path = path.to_string();
     with_android_context(|env, activity| {

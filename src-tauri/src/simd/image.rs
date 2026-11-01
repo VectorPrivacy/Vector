@@ -310,31 +310,6 @@ pub fn has_alpha_transparency(rgba_pixels: &[u8]) -> bool {
 }
 
 // ============================================================================
-// Alpha Near-Zero Check (Windows clipboard bug)
-// ============================================================================
-
-/// Check if all alpha values are nearly zero (Windows clipboard bug detection)
-///
-/// Returns true if ALL pixels have alpha <= 2. This detects a Windows clipboard
-/// bug where RGBA images have their alpha channel corrupted to near-zero values.
-#[inline]
-#[cfg(target_os = "windows")]
-pub fn has_all_alpha_near_zero(rgba_pixels: &[u8]) -> bool {
-    let mut chunks = rgba_pixels.chunks_exact(8);
-    // Mask to check if alpha bytes are > 2: if (alpha & 0xFC) != 0, then alpha > 3
-    const ALPHA_HIGH_BITS: u64 = 0xFC000000_FC000000;
-
-    for chunk in chunks.by_ref() {
-        let val = u64::from_ne_bytes(chunk.try_into().unwrap());
-        if (val & ALPHA_HIGH_BITS) != 0 {
-            return false; // Found alpha > 2
-        }
-    }
-
-    chunks.remainder().chunks_exact(4).all(|px| px[3] <= 2)
-}
-
-// ============================================================================
 // Nearest Neighbor Downsampling - Optimized
 // ============================================================================
 

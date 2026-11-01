@@ -28,6 +28,7 @@ pub struct AppUpdateInfo {
 ///
 /// GitHub's `/releases/latest` skips pre-releases, so a stable build never
 /// sees a preview.
+#[cfg(any(desktop, not(feature = "fdroid")))]
 const UPDATE_MANIFEST_URL: &str =
     "https://github.com/VectorPrivacy/Vector/releases/latest/download/latest.json";
 
@@ -37,6 +38,7 @@ const UPDATE_MANIFEST_URL: &str =
 ///
 /// Desktop reaches this same URL through `tauri.preview.conf.json`, which the
 /// release workflow merges into preview builds only.
+#[cfg(any(desktop, not(feature = "fdroid")))]
 const PREVIEW_MANIFEST_URL: &str =
     "https://github.com/VectorPrivacy/Vector/releases/download/preview/latest.json";
 
@@ -53,6 +55,7 @@ const MANIFEST_MAX_BYTES: usize = 1024 * 1024;
 /// permits, so it must stay at its default of `true`. No numbering scheme can
 /// substitute; ordering on Windows comes from the semver in the manifest, which
 /// the updater compares before msiexec is ever invoked.
+#[cfg(any(test, desktop, not(feature = "fdroid")))]
 fn is_preview(version: &semver::Version) -> bool {
     !version.pre.is_empty()
 }
@@ -76,6 +79,7 @@ fn version_is_newer(latest: &str, current: &semver::Version) -> bool {
 /// run: `true` accepts anything newer (release candidates included), `false`
 /// accepts newer STABLE releases only — which is what lets a preview build
 /// opt back out and ride this RC until the official release lands.
+#[cfg(any(test, not(feature = "fdroid")))]
 fn version_is_newer_opts(latest: &str, current: &semver::Version, preview_channel: bool) -> bool {
     let Ok(latest) = semver::Version::parse(latest.trim().trim_start_matches('v')) else {
         return false;

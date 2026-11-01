@@ -31,9 +31,9 @@ jobs:
   build:
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: 20
 
@@ -41,16 +41,12 @@ jobs:
       # toolchain it pins.
       - uses: dtolnay/rust-toolchain@stable
 
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '17'
 
-      # Its default package list still names the legacy `tools`, which current
-      # command-line tools no longer carry.
-      - uses: android-actions/setup-android@v3
-        with:
-          packages: platform-tools
+      - uses: android-actions/setup-android@v4
 
       - name: Android NDK
         run: |
@@ -79,7 +75,7 @@ jobs:
       - name: Build (offline stage)
         run: scripts/fdroid-build.sh build
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: Vector-fdroid-unsigned
           path: src-tauri/gen/android/app/build/outputs/apk/universal/release/app-universal-universal-release-unsigned.apk

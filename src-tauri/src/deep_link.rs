@@ -59,6 +59,7 @@ pub fn handle_deep_link<R: Runtime>(handle: &AppHandle<R>, urls: Vec<String>) {
 ///
 /// The plugin keeps the last URL for the life of the process, so every reload (an account swap)
 /// would replay it; only a URL not already handled is new.
+#[cfg(any(target_os = "macos", target_os = "ios", target_os = "android"))]
 pub fn handle_current_deep_link<R: Runtime>(handle: &AppHandle<R>, urls: Vec<String>) {
     if LAST_URLS.lock().is_ok_and(|last| *last == urls) {
         return;

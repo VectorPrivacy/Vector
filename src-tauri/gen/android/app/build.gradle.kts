@@ -14,6 +14,8 @@ AppVersion.checkMirror(file("../../../Cargo.toml"), file("version.properties"))
 
 configure<ApplicationExtension> {
     compileSdk = 36
+    // The NDK CI, F-Droid and scripts/fdroid-build.sh build with; AGP's own default is older.
+    ndkVersion = "29.0.14206865"
     namespace = "io.vectorapp"
     defaultConfig {
         manifestPlaceholders["usesCleartextTraffic"] = "false"
@@ -78,8 +80,8 @@ configure<ApplicationExtension> {
         }
     }
     compileOptions {
-        sourceCompatibility = JavaVersion.VERSION_1_8
-        targetCompatibility = JavaVersion.VERSION_1_8
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
     }
     buildFeatures {
         buildConfig = true
@@ -88,7 +90,7 @@ configure<ApplicationExtension> {
 
 kotlin {
     compilerOptions {
-        jvmTarget = JvmTarget.JVM_1_8
+        jvmTarget = JvmTarget.JVM_17
     }
 }
 
