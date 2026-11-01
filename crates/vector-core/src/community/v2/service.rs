@@ -11791,15 +11791,12 @@ fn apply_control_fold(community: &CommunityV2, editions: &[ParsedEdition], floor
                 ledger_chain_ok(group, &authorized, ch, &|e| (rank(&e.author.to_hex()), e.inner_id), anchor.as_ref())
             })
             .unwrap_or_default();
+        // An unmarked Channel edition describes only a Channel that stood before the switch.
+        let unlisted = is_channel && authority.roles.legacy_channels.as_ref().is_some_and(|l| !l.contains(&crate::simd::hex::bytes_to_hex_32(eid)));
         let ok: Vec<bool> = group
             .iter()
             .zip(&authorized)
-            .map(|(e, &authorized)| {
-                authorized
-                    && writers_channel.is_none_or(|_| ledger_ok.get(&e.self_hash).copied().unwrap_or(false))
-                    // An unmarked Channel edition describes only a Channel that stood before the switch.
-                    && !(is_channel && e.binding.is_none() && authority.roles.legacy_channels.as_ref().is_some_and(|l| !l.contains(&crate::simd::hex::bytes_to_hex_32(eid))))
-            })
+            .map(|(e, &authorized)| authorized && writers_channel.is_none_or(|_| ledger_ok.get(&e.self_hash).copied().unwrap_or(false)) && !(unlisted && e.binding.is_none()))
             .collect();
         let entity_hex = crate::simd::hex::bytes_to_hex_32(eid);
         admitted.extend(group.iter().zip(&ok).filter(|(_, &a)| a).map(|(e, _)| e.inner_id));
@@ -11816,6 +11813,12 @@ fn apply_control_fold(community: &CommunityV2, editions: &[ParsedEdition], floor
             && held.is_some_and(|h| !group.iter().zip(&ok).any(|(e, &a)| a && e.self_hash == h.self_hash));
         if !ok.contains(&true) {
             if refused && writers_channel.is_none() {
+                // Only an older build lists a Channel made after the switch by unmarked editions alone.
+                if unlisted && group.iter().all(|e| e.binding.is_none()) {
+                    let before = out.channels.len();
+                    out.channels.retain(|c| c.id.0 != *eid);
+                    changed |= out.channels.len() != before;
+                }
                 kept.insert(entity_hex);
             }
             continue;
@@ -11839,7 +11842,11 @@ fn apply_control_fold(community: &CommunityV2, editions: &[ParsedEdition], floor
             // stepped back from, or the posts its entry admitted would vanish.
             None if refused && writers_channel.is_none() => {
                 let prev = held.and_then(|h| h.prev_hash);
-                let target = (0..group.len()).filter(|&i| ok[i] && Some(group[i].self_hash) == prev).min_by_key(|&i| (rank(&group[i].author.to_hex()), group[i].inner_id));
+                // A build before marked editions names its predecessor by the unsigned hash.
+                let names = |e: &ParsedEdition| {
+                    prev == Some(e.self_hash) || (e.binding.is_some() && prev == Some(crate::community::version::edition_hash(&e.entity_id, e.version, e.prev_hash.as_ref(), e.content.as_bytes())))
+                };
+                let target = (0..group.len()).filter(|&i| ok[i] && names(group[i])).min_by_key(|&i| (rank(&group[i].author.to_hex()), group[i].inner_id));
                 let Some(hi) = target else {
                     kept.insert(entity_hex);
                     continue;
@@ -30840,6 +30847,91 @@ mod tests {
         let floors: Floors = Default::default();
         let fresh = fold_authority(&held(), &fetch_control(&relay, &held()).await, &floors);
         assert_eq!(fresh.roles.legacy_channels, Some(listed), "the switch's own list");
+    }
+
+    #[tokio::test]
+    async fn a_device_that_folded_legacy_edits_made_after_the_switch_lands_where_a_fresh_reader_does() {
+        // An older client takes a legacy admin's unmarked edits made after the switch, and floors
+        // them without an author. Once upgraded it must read what every other reader reads.
+        let (_tmp, _guard, owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "Upgrade", vec!["wss://r".into()], None).await.unwrap();
+        let held = || crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        // What an older client publishes: unmarked, citing the Grant it holds.
+        let legacy_edit = |signer: Keys, channel: ChannelId, name: &'static str, version: u64, prev: Option<[u8; 32]>| {
+            let relay = &relay;
+            async move {
+                let community = held();
+                let cite = cite_on_relay(relay, &community, &signer).await;
+                let content = serde_json::to_string(&control::ChannelMetadata { name: name.into(), ..Default::default() }).unwrap();
+                let rumor = control::build_edition_rumor(signer.public_key(), vsk::CHANNEL_METADATA, &channel.0, version, prev.as_ref(), &content, 1_000, cite.as_ref());
+                let (wrap, _) = control::seal_control_edition(&rumor, &control::ControlPlane::of(&community).write_group().unwrap(), &signer, Timestamp::from_secs(1_000)).unwrap();
+                relay.publish(&wrap, &community.relays).await.unwrap();
+            }
+        };
+        let admin = Keys::generate();
+        let ra = "a7".repeat(32);
+        publish_role(&relay, &community, &owner, &role_at(&ra, "Admin", 1, Permissions::MANAGE_CHANNELS), 1).await;
+        publish_grant(&relay, &community, &owner, &admin.public_key(), vec![ra.clone()], 1).await;
+        // A Channel that stood before the switch, by an admin demoted since, stays where it's held.
+        let demoted = Keys::generate();
+        publish_grant(&relay, &community, &owner, &demoted.public_key(), vec![ra.clone()], 1).await;
+        follow_control(&relay, &held()).await.unwrap();
+        let early = ChannelId([0x5b; 32]);
+        legacy_edit(demoted.clone(), early, "early", 1, None).await;
+        follow_control(&relay, &held()).await.unwrap();
+        assert!(held().channel(&early).is_some());
+        publish_grant(&relay, &community, &owner, &demoted.public_key(), vec![], 2).await;
+        follow_control(&relay, &held()).await.unwrap();
+        assert!(held().channel(&early).is_some());
+        activate_roles_v2(&relay, &held(), crate::community::v2::roles::EVERYONE_DEFAULT).await.unwrap();
+        follow_control(&relay, &held()).await.unwrap();
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        let hex = |c: &ChannelId| crate::simd::hex::bytes_to_hex_32(&c.0);
+        // So does one made after the switch, marked, by an admin whose standing went since.
+        let later = Keys::generate();
+        let gl = crate::community::v2::derive::grant_locator(community.id(), &later.public_key().to_bytes());
+        let grant = |role_ids: Vec<String>| crate::community::v2::roles::grant_content_json(&MemberGrant { member: later.public_key().to_hex(), role_ids }).unwrap();
+        publish_marked(&relay, &held(), &owner, vsk::GRANT, &gl, 1, None, &grant(vec![ra.clone()])).await;
+        follow_control(&relay, &held()).await.unwrap();
+        let stood = ChannelId([0x5c; 32]);
+        let meta = serde_json::to_string(&control::ChannelMetadata { name: "stood".into(), ..Default::default() }).unwrap();
+        publish_marked(&relay, &held(), &later, vsk::CHANNEL_METADATA, &stood.0, 1, None, &meta).await;
+        follow_control(&relay, &held()).await.unwrap();
+        assert!(held().channel(&stood).is_some());
+        let (gv, gh) = crate::db::community::get_edition_head(&cid_hex, &crate::simd::hex::bytes_to_hex_32(&gl)).unwrap().unwrap();
+        publish_marked(&relay, &held(), &owner, vsk::GRANT, &gl, gv + 1, Some(gh), &grant(vec![])).await;
+        follow_control(&relay, &held()).await.unwrap();
+        let lounge = create_public_channel(&relay, &held(), "lounge").await.unwrap();
+        follow_control(&relay, &held()).await.unwrap();
+        let (v, _) = crate::db::community::get_edition_head(&cid_hex, &hex(&lounge)).unwrap().unwrap();
+        // That build chains to the owner's marked edition by its unsigned hash.
+        let marked = fetch_control(&relay, &held()).await.into_iter().find(|e| e.entity_id == lounge.0 && e.version == v).unwrap();
+        assert!(marked.binding.is_some());
+        let unsigned = crate::community::version::edition_hash(&marked.entity_id, marked.version, marked.prev_hash.as_ref(), marked.content.as_bytes());
+        let made = ChannelId([0x5a; 32]);
+        legacy_edit(admin.clone(), lounge, "renamed", v + 1, Some(unsigned)).await;
+        legacy_edit(admin.clone(), made, "made", 1, None).await;
+        let editions = fetch_control(&relay, &held()).await;
+        let edition = |c: &ChannelId, version: u64| editions.iter().find(|e| e.entity_id == c.0 && e.version == version).unwrap().clone();
+        let (renamed, own) = (edition(&lounge, v + 1), edition(&made, 1));
+        crate::db::community::set_edition_head_with_id(&cid_hex, &hex(&lounge), renamed.version, &renamed.self_hash, &renamed.inner_id).unwrap();
+        crate::db::community::set_edition_head_with_id(&cid_hex, &hex(&made), own.version, &own.self_hash, &own.inner_id).unwrap();
+        let mut old = held();
+        old.channels.iter_mut().find(|c| c.id == lounge).unwrap().name = "renamed".into();
+        let mut extra = old.channels[0].clone();
+        extra.id = made;
+        extra.name = "made".into();
+        old.channels.push(extra);
+        crate::db::community::save_community_v2(&old).unwrap();
+
+        let joiner = verify_owner_root_and_reconcile(&relay, community.clone()).await.unwrap().community;
+        assert_eq!(joiner.channel(&lounge).map(|c| c.name.as_str()), Some("lounge"), "a fresh reader refuses the rename");
+        assert!(joiner.channel(&made).is_none(), "and the Channel");
+        follow_control(&relay, &held()).await.unwrap();
+        assert_eq!(held().channel(&lounge).map(|c| c.name.as_str()), Some("lounge"));
+        assert!(held().channel(&made).is_none());
+        assert!(held().channel(&early).is_some() && held().channel(&stood).is_some());
     }
 
     #[tokio::test]
