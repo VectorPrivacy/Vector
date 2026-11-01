@@ -1,96 +1,163 @@
 # Attributions
 
-This document contains attributions for third-party assets used in Vector.
+Vector is built on the work of many open-source projects and artists. This document credits every third-party asset, library, data set and adapted piece of code that ships with Vector, along with the license it is used under.
+
+Vector's own code is MIT licensed (see [LICENSE](../LICENSE)). The items below keep their own licenses.
+
+---
+
+## Fonts
+
+### Rubik
+
+- **Source**: [googlefonts/rubik](https://github.com/googlefonts/rubik)
+- **Version**: 2.300
+- **License**: [SIL Open Font License 1.1](https://openfontlicense.org/open-font-license-official-text/)
+- **Copyright**: © 2015 The Rubik Project Authors (Hubert & Fischer)
+- **Files**: `src/fonts/Rubik.woff2`, `src/fonts/Rubik-Italic.woff2`
+- **Usage**: The app's typeface.
 
 ---
 
 ## Icons
 
-### Robot Icon (bot.svg)
+### Untitled UI Icons
 
-- **Source**: [SVG Repo](https://www.svgrepo.com/svg/521818/robot)
-- **License**: [CC Attribution License](https://creativecommons.org/licenses/by/4.0/)
-- **Author**: [Konstantin Filatov](https://www.svgrepo.com/author/Konstantin%20Filatov/)
-- **Usage**: Used as the bot indicator icon in the chat list to identify bot accounts
-- **Modifications**: The icon form is not modified; however, it may be displayed in different colors adherent to the app's theme settings
+- **Source**: [Untitled UI](https://www.untitledui.com/free-icons) ([untitleduico/icons](https://github.com/untitleduico/icons))
+- **License**: [Untitled UI License](https://www.untitledui.com/license)
+- **Copyright**: © Untitled UI
+- **Files**: most of `src/icons/*.svg`, and icon paths inlined in `src/components/`
+- **Usage**: The app's main icon set.
 
-The CC Attribution License requires attribution to the original author, which we provide here in compliance with the license terms.
+These icons are used under Untitled UI's license and are **not** covered by Vector's MIT License. They may not be redistributed apart from Vector.
+
+### Other icons
+
+| Icon | Source | License | Author | File |
+|------|--------|---------|--------|------|
+| Robot | [SVG Repo](https://www.svgrepo.com/svg/521818/robot) | [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/) | [Konstantin Filatov](https://www.svgrepo.com/author/Konstantin%20Filatov/) | `src/icons/bot.svg` |
+| Arrow Up | [Feather](https://github.com/feathericons/feather) | [MIT](https://github.com/feathericons/feather/blob/main/LICENSE) | © Cole Bemis | `src/icons/arrow-up.svg` |
+| Trash | [Lucide](https://lucide.dev) (`trash-2`) | [ISC](https://lucide.dev/license), Feather portions MIT | © Lucide Contributors, © Cole Bemis | `src/icons/trash.svg` |
+| Star | [Bootstrap Icons](https://github.com/twbs/icons) (`star-fill`) | [MIT](https://github.com/twbs/icons/blob/main/LICENSE) | © The Bootstrap Authors | `src/icons/star.svg` |
+| Tor logo | [Wikimedia Commons](https://commons.wikimedia.org/wiki/File:Tor-logo-2011-flat.svg) | [CC BY 3.0 US](https://creativecommons.org/licenses/by/3.0/us/) | The Tor Project, Inc. | `src/icons/tor-logo.svg` |
+
+The robot icon's form is not modified, but it may be shown in colours that follow the app's theme. The Tor logo is not modified.
 
 ---
 
-## Libraries
-
-### Marked.js
-
-- **Source**: [Marked.js GitHub](https://github.com/markedjs/marked)
-- **Version**: v16.4.1
-- **License**: [MIT License](https://github.com/markedjs/marked/blob/master/LICENSE.md)
-- **Author**: Christopher Jeffrey and contributors
-- **Usage**: Used as the markdown parser for rendering formatted text in chat messages
-- **File**: `src/js/marked.min.js`
-
-Marked.js is a fast, low-level markdown compiler that follows the CommonMark specification. It provides Discord-like markdown rendering with support for bold, italic, strikethrough, code blocks, links, images, lists, and more.
-
-### Highlight.js
-
-- **Source**: [Highlight.js GitHub](https://github.com/highlightjs/highlight.js)
-- **Version**: v11.9.0
-- **License**: [BSD 3-Clause License](https://github.com/highlightjs/highlight.js/blob/main/LICENSE)
-- **Copyright**: (c) 2006-2023 Highlight.js contributors
-- **Usage**: Used for syntax highlighting in code blocks within chat messages
-- **File**: `src/js/highlight.min.js`
-
-Highlight.js provides automatic language detection and syntax highlighting for over 190 programming languages. It integrates seamlessly with Marked.js to provide beautiful, readable code blocks in chat messages.
-
-### DOMPurify
-
-- **Source**: [DOMPurify GitHub](https://github.com/cure53/DOMPurify)
-- **Version**: v3.0.6
-- **License**: [Apache License 2.0](https://github.com/cure53/DOMPurify/blob/main/LICENSE)
-- **Author**: Cure53 and DOMPurify contributors
-- **Usage**: Sanitizes rendered Markdown HTML to prevent XSS in chat messages
-- **File**: `src/js/dompurify.min.js`
-
-DOMPurify provides robust, battle-tested HTML sanitization. It ensures that rendered Markdown content cannot execute malicious scripts or inject unsafe markup, giving the chat interface strong protection against XSS attacks.
+## Emoji
 
 ### Twemoji
 
-- **Source**: [Twemoji GitHub](https://github.com/twitter/twemoji)
-- **Version**: v14.0.2
-- **License**: [CC-BY 4.0](https://creativecommons.org/licenses/by/4.0/) (graphics), [MIT License](https://github.com/twitter/twemoji/blob/master/LICENSE-CODE) (code)
-- **Author**: Twitter, Inc. and contributors
-- **Usage**: Used for rendering emoji as SVG images in chat messages and throughout the app
-- **Files**: `src/js/twemoji.min.js`, `src/twemoji/svg/*.svg`
+- **Source**: [jdecked/twemoji](https://github.com/jdecked/twemoji), the maintained fork of Twitter's Twemoji
+- **Version**: v17.0.2
+- **License**: graphics [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/), code [MIT](https://github.com/jdecked/twemoji/blob/main/LICENSE)
+- **Copyright**: © Twitter, Inc. and other contributors; jdecked/twemoji contributors
+- **Files**: `src/js/twemoji.min.js`, `src/twemoji/svg/*.svg`, `src/twemoji/sheets/*.webp`
+- **Usage**: Emoji throughout the app.
+- **Modifications**: the graphics are rasterised into sprite sheets (`src/twemoji/sheets/`). The pistol emoji (`1f52b.svg`) is replaced with a different drawing that is not part of Twemoji.
 
-Twemoji provides a consistent, high-quality emoji experience across all platforms. The library converts Unicode emoji characters into Twitter's emoji graphics, ensuring that emoji look the same regardless of the user's operating system or device.
+### Emoji names and keywords
+
+`src/js/emoji.js` is generated by `scripts/build-emoji.mjs` from:
+
+- **Unicode CLDR annotations** (v48.1) and **emoji-test.txt**, © Unicode, Inc., used under the [Unicode License v3](https://www.unicode.org/license.txt). Unicode and the Unicode Logo are registered trademarks of Unicode, Inc. in the United States and other countries.
+- **Emojibase** ([milesj/emojibase](https://github.com/milesj/emojibase), `emojibase-data` v17.0.0), including shortcodes from [iamcal/emoji-data](https://github.com/iamcal/emoji-data), used under the [MIT License](https://github.com/milesj/emojibase/blob/master/LICENSE).
+
+---
+
+## JavaScript Libraries
+
+| Library | Version | License | Copyright | Files |
+|---------|---------|---------|-----------|-------|
+| [Marked](https://github.com/markedjs/marked) | 16.4.1 | [MIT](https://github.com/markedjs/marked/blob/master/LICENSE.md) | © 2018+ MarkedJS, © 2011-2018 Christopher Jeffrey; Markdown © 2004 John Gruber | `src/js/marked.min.js` |
+| [Highlight.js](https://github.com/highlightjs/highlight.js) | 11.9.0 | [BSD 3-Clause](https://github.com/highlightjs/highlight.js/blob/main/LICENSE) | © 2006-2023 Highlight.js contributors | `src/js/highlight.min.js`, `src/highlight-github-dark.min.css` |
+| [DOMPurify](https://github.com/cure53/DOMPurify) | 3.4.9 | [Apache 2.0](https://github.com/cure53/DOMPurify/blob/main/LICENSE) (dual licensed with MPL 2.0; used under Apache 2.0) | © Cure53 and other contributors | `src/js/dompurify.min.js` |
+| [jsQR](https://github.com/cozmo/jsQR) | 1.4.0 | [Apache 2.0](https://github.com/cozmo/jsQR/blob/master/LICENSE) | © Cosmo Wolfe and contributors | `src/js/jsqr.js` |
+| [QR Code Generator](https://github.com/kazuhikoarase/qrcode-generator) | 2.0.4 | [MIT](https://github.com/kazuhikoarase/qrcode-generator/blob/master/LICENSE) | © 2009 Kazuhiko Arase | `src/js/qrcode-generator.js` |
+| [Svelte](https://github.com/sveltejs/svelte) | 5.56.7 | [MIT](https://github.com/sveltejs/svelte/blob/main/LICENSE.md) | © 2016-2025 Svelte Contributors | bundled into `src/components.bundle.js` |
+| [three.js](https://github.com/mrdoob/three.js) | 0.186.1 | [MIT](https://github.com/mrdoob/three.js/blob/dev/LICENSE) | © 2010-2026 three.js authors | bundled into `src/model3d.bundle.js` |
+| [fflate](https://github.com/101arrowz/fflate) | 0.8.2 | [MIT](https://github.com/101arrowz/fflate/blob/master/LICENSE) | © Arjun Barrett | bundled into `src/model3d.bundle.js` (three.js FBX loader) |
+
+The word "QR Code" is a registered trademark of DENSO WAVE INCORPORATED.
+
+---
+
+## Native Libraries
+
+| Library | Version | License | Copyright | Where |
+|---------|---------|---------|-----------|-------|
+| [FFmpeg](https://ffmpeg.org) | 8.0.1 | [LGPL 2.1 or later](https://www.gnu.org/licenses/old-licenses/lgpl-2.1.html) | © the FFmpeg developers | macOS and Windows releases (video compression) |
+| [whisper.cpp](https://github.com/ggml-org/whisper.cpp) and ggml | 1.9.5, with Vector's patches | [MIT](https://github.com/ggml-org/whisper.cpp/blob/master/LICENSE) | © Georgi Gerganov and the ggml authors | voice transcription and dictation, desktop, Android and Vector Web |
+| [KleidiAI](https://github.com/ARM-software/kleidiai) | | [Apache 2.0](https://github.com/ARM-software/kleidiai/tree/main/LICENSES) | © Arm Limited | Android arm64 transcription |
+| [Opus](https://opus-codec.org) | 1.6.1 | [BSD 3-Clause](https://opus-codec.org/license/) | © Xiph.Org Foundation, Skype Limited, Octasic, Jean-Marc Valin, Timothy B. Terriberry, CSIRO, Gregory Maxwell, Mark Borgerding, Erik de Castro Lopo | calls and voice channels |
+| [SpeexDSP](https://github.com/xiph/speexdsp) | | [BSD 3-Clause](https://github.com/xiph/speexdsp/blob/master/COPYING) | © Xiph.Org Foundation, Jean-Marc Valin and others; kiss_fft © Mark Borgerding | echo cancellation and noise suppression in calls (`src-tauri/csrc/speexdsp`) |
+| [libwebp](https://chromium.googlesource.com/webm/libwebp) | 1.3.1 | [BSD 3-Clause](https://chromium.googlesource.com/webm/libwebp/+/refs/heads/main/COPYING), with Google's [patent grant](https://chromium.googlesource.com/webm/libwebp/+/refs/heads/main/PATENTS) | © Google Inc. | WebP encoding |
+| [Symphonia](https://github.com/pdeljanov/Symphonia) | 0.5.5 | [MPL 2.0](https://www.mozilla.org/en-US/MPL/2.0/) | © Philip Deljanov and contributors | audio decoding |
+| [SQLite](https://sqlite.org) | | [Public domain](https://sqlite.org/copyright.html) | | the database |
+
+### FFmpeg
+
+Vector's macOS and Windows releases statically link FFmpeg, built by [`scripts/build-ffmpeg.sh`](../scripts/build-ffmpeg.sh) with only LGPL components: no `--enable-gpl` and no `--enable-nonfree`. FFmpeg is free software licensed under the [GNU Lesser General Public License, version 2.1](https://www.gnu.org/licenses/old-licenses/lgpl-2.1.html) or later. Its source is at [ffmpeg.org/releases/ffmpeg-8.0.1.tar.xz](https://ffmpeg.org/releases/ffmpeg-8.0.1.tar.xz), and the build script above pins it by SHA-256 and records every configure flag, so you can rebuild FFmpeg with your own changes and relink Vector against it from this repository. Builds without the `video` feature (Linux, Android and bare builds) contain no FFmpeg.
+
+---
+
+## Vector Web
+
+| Item | Version | License | Copyright | Files |
+|------|---------|---------|-----------|-------|
+| [Emscripten](https://emscripten.org) runtime | emsdk 6.0.11 | [MIT](https://github.com/emscripten-core/emscripten/blob/main/LICENSE) / University of Illinois/NCSA | © Emscripten authors | `web/whisper/*.js`, `*.wasm` |
+| [Dawn](https://dawn.googlesource.com/dawn) (emdawnwebgpu) | v20260317.182325 | [BSD 3-Clause](https://dawn.googlesource.com/dawn/+/refs/heads/main/LICENSE) | © The Dawn & Tint Authors | `web/whisper/whisper-gpu.*` |
+| [FUTO ACFT Whisper models](https://huggingface.co/futo-org) | base, small (q8_0) | [Apache 2.0](https://www.apache.org/licenses/LICENSE-2.0) | © FUTO | served from `/models/whisper/` by Vector Web |
+
+Desktop and Android download Whisper models on request; they aren't part of the app.
+
+---
+
+## Android
+
+| Library | License | Notes |
+|---------|---------|-------|
+| [UnifiedPush Android connector](https://codeberg.org/UnifiedPush/android-connector) | [Apache 2.0](https://www.apache.org/licenses/LICENSE-2.0) | push notifications |
+| [Embedded FCM Distributor](https://codeberg.org/UnifiedPush/android-embedded_fcm_distributor) | [Apache 2.0](https://www.apache.org/licenses/LICENSE-2.0) | carries Google's Firebase Cloud Messaging, under [Google's terms](https://firebase.google.com/terms). Not in the F-Droid build. |
+| [AndroidX](https://developer.android.com/jetpack/androidx) (Core, AppCompat, WebKit) | [Apache 2.0](https://www.apache.org/licenses/LICENSE-2.0) | |
+| [Material Components for Android](https://github.com/material-components/material-components-android) | [Apache 2.0](https://www.apache.org/licenses/LICENSE-2.0) | |
+| [Kotlin standard library](https://github.com/JetBrains/kotlin) | [Apache 2.0](https://www.apache.org/licenses/LICENSE-2.0) | |
+
+---
+
+## Adapted Code
+
+| What | Origin | License | Where |
+|------|--------|---------|-------|
+| NeuQuant colour quantisation | Anthony Dekker's NeuQuant (1994), via [color_quant](https://github.com/image-rs/color_quant) © 2014 The Piston Developers | [MIT](https://github.com/image-rs/color_quant/blob/master/LICENSE) | `src-tauri/src/simd/neuquant.rs` |
+| SIMD hex encoding | [faster-hex](https://github.com/nervosnetwork/faster-hex) | [MIT](https://github.com/nervosnetwork/faster-hex/blob/master/LICENSE) | `crates/vector-core/src/simd/hex.rs` |
+| Android NDK bindings, modified | [rust-mobile/ndk](https://github.com/rust-mobile/ndk) 0.9.0 | [MIT or Apache 2.0](https://github.com/rust-mobile/ndk/blob/master/LICENSE-MIT) | `crates/vendor/ndk` |
+| `saturating-time`, patched | [crates.io](https://crates.io/crates/saturating-time) | MIT or Apache 2.0 | `crates/vendor/saturating-time` |
+
+The URL tracker-parameter list in `src/js/misc.js` was curated with reference to [AdGuard's TrackParamFilter](https://github.com/AdguardTeam/AdguardFilters), [ClearURLs](https://github.com/ClearURLs/Rules) and [Brave's clean-urls list](https://github.com/brave/adblock-lists).
 
 ---
 
 ## Sounds
 
-### Sonar Ping (notif-sonar.mp3)
+| Sound | Source | License | Author | File |
+|-------|--------|---------|--------|------|
+| Sonar | [Freesound](https://freesound.org/people/shinephoenixstormcrow/sounds/337050/) | [CC BY 3.0](https://creativecommons.org/licenses/by/3.0/) | [shinephoenixstormcrow](https://freesound.org/people/shinephoenixstormcrow/), from [unfa](https://freesound.org/people/unfa/)'s original | `notif-sonar.mp3` (Android) |
+| Techno | [Freesound](https://freesound.org/people/Alexhanj/sounds/528730/) | [CC0 1.0](https://creativecommons.org/publicdomain/zero/1.0/) | [Alexhanj](https://freesound.org/people/Alexhanj/) | `notif-techno.mp3` |
+| Synth | [Freesound](https://freesound.org/people/SUBQUiRE/sounds/833599/) | [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/) | [SUBQUiRE](https://freesound.org/people/SUBQUiRE/) | `notif-synth.mp3` (Android) |
 
-- **Source**: [Freesound](https://freesound.org/people/shinephoenixstormcrow/sounds/337050/)
-- **License**: [CC Attribution 3.0](https://creativecommons.org/licenses/by/3.0/)
-- **Author**: [shinephoenixstormcrow](https://freesound.org/people/shinephoenixstormcrow/) (modified from [unfa](https://freesound.org/people/unfa/)'s original)
-- **Usage**: Used as the "Sonar" notification sound option
-- **File**: `src-tauri/resources/sounds/notif-sonar.mp3`
+---
 
-### Techno Ping (notif-techno.mp3)
+## Open-Source Dependencies
 
-- **Source**: [Freesound](https://freesound.org/people/Alexhanj/sounds/528730/)
-- **License**: [CC0 1.0 (Public Domain)](https://creativecommons.org/publicdomain/zero/1.0/)
-- **Author**: [Alexhanj](https://freesound.org/people/Alexhanj/)
-- **Usage**: Used as the "Techno" notification sound option
-- **File**: `src-tauri/resources/sounds/notif-techno.mp3`
+Vector also builds on hundreds of Rust crates and npm packages, each under its own license, mostly MIT and Apache 2.0. Every one is listed with its version in `src-tauri/Cargo.lock`, `crates/Cargo.lock` and `package-lock.json`, and its license text ships with its source.
 
-### Synth Ping (notif-synth.mp3)
+---
 
-- **Source**: [Freesound](https://freesound.org/people/SUBQUiRE/sounds/833599/)
-- **License**: [CC Attribution 4.0](https://creativecommons.org/licenses/by/4.0/)
-- **Author**: [SUBQUiRE](https://freesound.org/people/SUBQUiRE/)
-- **Usage**: Used as the "Synth" notification sound option
-- **File**: `src-tauri/resources/sounds/notif-synth.mp3`
+## Trademarks
+
+Tor and the Tor logo are trademarks of The Tor Project, Inc. Vector is not endorsed by or affiliated with The Tor Project. Other product names and logos shown in Vector belong to their owners.
 
 ---
 
