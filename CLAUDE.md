@@ -343,6 +343,6 @@ Key crates: `nostr-sdk` 0.45, `tauri` 2.10, `tokio` 1.49, `rusqlite` 0.37, `iroh
 ## Platform Notes
 
 - **macOS**: WKWebView white flash prevented by the window's `backgroundColor` in `tauri.conf.json` plus `macOSPrivateApi`. Metal GPU for Whisper.
-- **Linux**: `WEBKIT_DISABLE_DMABUF_RENDERER=1` set for WebKitGTK compatibility.
+- **Linux**: DMA-BUF hand-off off by default: `WEBKIT_DMABUF_RENDERER_FORCE_SHM=1` on WebKitGTK 2.54+ (disabling the renderer there loses acceleration, and the WebCodecs decoder probe then crashes the web process), `WEBKIT_DISABLE_DMABUF_RENDERER=1` below. A value set in the environment wins.
 - **Android**: API 26+. Vulkan GPU disabled for Whisper (device freeze).
 - **Feature flag**: `whisper` (default) — enables OpenAI Whisper transcription. Use `--no-default-features` to skip.
