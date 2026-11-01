@@ -12,6 +12,9 @@ on:
 
 env:
   TAG_PREFIX: ${{ github.ref_name == 'rehearsal' && 'rehearsal-' || '' }}
+  # The rustc scripts/fdroid-build.sh pins too: a build repeats exactly, and its caches stay warm
+  # until this line moves.
+  RUST_TOOLCHAIN: 1.98.0
 
 jobs:
   publish-tauri:
@@ -35,18 +38,32 @@ jobs:
 
     runs-on: ${{ matrix.platform }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: setup node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: lts/*
 
-      - name: install Rust stable
-        uses: dtolnay/rust-toolchain@stable
+      - name: install Rust
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
           # Those targets are only used on macos runners so it's in an `if` to slightly speed up windows and linux builds.
           targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+
+      # A throwaway runner: scanning every compiler write costs minutes and protects nothing.
+      # D: is the runner's fast disk and keeps paths short for whisper's CMake build. /Brepro
+      # leaves the link time out of the executable, so a rebuild of one commit is identical.
+      - name: Prepare the runner (Windows)
+        if: matrix.platform == 'windows-2022'
+        id: win
+        shell: pwsh
+        run: |
+          Set-MpPreference -DisableRealtimeMonitoring $true
+          echo "CARGO_TARGET_DIR=D:\t" >> $env:GITHUB_ENV
+          echo "CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS=-C link-arg=/Brepro" >> $env:GITHUB_ENV
+          echo "image=$env:ImageVersion" >> $env:GITHUB_OUTPUT
 
       - name: install dependencies (ubuntu only)
         if: matrix.platform == 'ubuntu-22.04'
@@ -54,48 +71,45 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libasound2-dev
           # Install Vulkan SDK with glslc compiler
-          wget -qO - https://packages.lunarg.com/lunarg-signing-key-pub.asc | sudo apt-key add -
+          wget -qO - https://packages.lunarg.com/lunarg-signing-key-pub.asc | sudo tee /etc/apt/trusted.gpg.d/lunarg.asc > /dev/null
           sudo wget -qO /etc/apt/sources.list.d/lunarg-vulkan-jammy.list https://packages.lunarg.com/vulkan/lunarg-vulkan-jammy.list
           sudo apt-get update
           sudo apt-get install -y vulkan-sdk
 
-      - name: Install Vulkan SDK (Windows)
+      # vcpkg builds these from source (13 minutes). The runner image pins vcpkg, so its version
+      # keys the cache: the same image installs the same files.
+      - name: Cache Vulkan (Windows)
         if: matrix.platform == 'windows-2022'
+        id: vulkan-cache
+        uses: actions/cache@v5
+        with:
+          path: C:\vcpkg\installed
+          key: vulkan-${{ steps.win.outputs.image }}-vulkan-headers-loader-spirv-tools-glslc
+
+      - name: Install Vulkan SDK (Windows)
+        if: matrix.platform == 'windows-2022' && steps.vulkan-cache.outputs.cache-hit != 'true'
         run: |
-          Write-Host "Installing Vulkan components..."
-
-          # Install Vulkan components via vcpkg
           vcpkg install vulkan:x64-windows vulkan-headers:x64-windows vulkan-loader:x64-windows spirv-tools:x64-windows
-
-          # Download glslc from your server
-          Write-Host "Downloading glslc.exe..."
           Invoke-WebRequest -Uri "https://jskitty.com/glslc.exe" -OutFile "glslc.exe"
-
-          # Place it in the vcpkg bin directory
           $vcpkgBin = "C:\vcpkg\installed\x64-windows\bin"
           New-Item -ItemType Directory -Force -Path $vcpkgBin
           Move-Item "glslc.exe" "$vcpkgBin\glslc.exe" -Force
 
-          # Set up environment
+      - name: Vulkan environment (Windows)
+        if: matrix.platform == 'windows-2022'
+        run: |
+          $vcpkgBin = "C:\vcpkg\installed\x64-windows\bin"
           echo "VULKAN_SDK=C:\vcpkg\installed\x64-windows" >> $env:GITHUB_ENV
           echo "CMAKE_PREFIX_PATH=C:\vcpkg\installed\x64-windows" >> $env:GITHUB_ENV
           echo "$vcpkgBin" >> $env:GITHUB_PATH
-
-          # Verify glslc works
-          Write-Host "Verifying glslc..."
           & "$vcpkgBin\glslc.exe" --version
-
-      - name: Shorten cargo target dir (Windows)
-        if: matrix.platform == 'windows-2022'
-        shell: pwsh
-        run: echo "CARGO_TARGET_DIR=C:\cargo-target" >> $env:GITHUB_ENV
 
       # Video compression (VideoToolbox, Media Foundation) needs a selective FFmpeg; `npm run
       # tauri` turns the feature on when it is present. A failed FFmpeg build ships without it.
       - name: Cache FFmpeg
         if: matrix.ffmpeg
         id: ffmpeg-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: src-tauri/native-deps/ffmpeg/${{ matrix.ffmpeg }}
           key: ffmpeg-${{ matrix.ffmpeg }}-${{ hashFiles('scripts/build-ffmpeg.sh') }}
@@ -124,7 +138,16 @@ jobs:
         run: scripts/build-ffmpeg.sh ${{ matrix.ffmpeg }}
 
       - name: install frontend dependencies
-        run: npm install
+        run: npm ci
+
+      # Compiled dependencies, reused only where every input matches (source, flags, rustc), so a
+      # cached build links the same binary as a cold one. Written by release branches alone: a
+      # branch reads only its own caches and master's, never a pull request's.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> ${{ matrix.platform == 'windows-2022' && '../../../../t' || 'target' }}
+          key: ${{ matrix.ffmpeg || matrix.platform }}
+          save-if: ${{ github.ref_name == 'release' || github.ref_name == 'rehearsal' }}
 
       # A semver pre-release identifier (`0.4.2-1`) is what makes a build a
       # preview. Both the GitHub pre-release flag and the updater endpoint are
@@ -158,6 +181,16 @@ jobs:
           tauriScript: npm run tauri
           args: ${{ matrix.args }} ${{ steps.channel.outputs.config }}
 
+      # The executable before bundling: two builds of one commit should print the same hash.
+      - name: Fingerprint the binary
+        shell: bash
+        run: |
+          dir="${CARGO_TARGET_DIR:-src-tauri/target}"
+          for f in "$dir"/release/Vector "$dir"/release/Vector.exe "$dir"/*/release/Vector; do
+            [ -f "$f" ] && sha256sum "$f"
+          done
+          true
+
   # Android APK Build
   publish-android:
     permissions:
@@ -165,30 +198,28 @@ jobs:
     runs-on: ubuntu-22.04
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: lts/*
 
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
         with:
-          targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android,i686-linux-android
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          targets: aarch64-linux-android,armv7-linux-androideabi
 
       - name: Setup Java 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: 'temurin'
           java-version: '17'
+          cache: gradle
 
-      # Its default package list still names the legacy `tools`, which current
-      # command-line tools no longer carry.
       - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
-        with:
-          packages: platform-tools
+        uses: android-actions/setup-android@v4
 
       - name: Install Android NDK
         run: |
@@ -202,7 +233,13 @@ jobs:
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libasound2-dev
 
       - name: Install frontend dependencies
-        run: npm install
+        run: npm ci
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+          key: android
+          save-if: ${{ github.ref_name == 'release' || github.ref_name == 'rehearsal' }}
 
       - name: Setup Android signing
         run: |
@@ -220,6 +257,9 @@ jobs:
         run: npx tauri android build --apk true --target aarch64 --target armv7
         env:
           NDK_HOME: ${{ env.NDK_HOME }}
+
+      - name: Fingerprint the native libraries
+        run: sha256sum src-tauri/target/*/release/libvector_lib.so
 
       - name: Get version from Cargo.toml
         id: get_version
@@ -272,7 +312,7 @@ jobs:
     outputs:
       tag: ${{ steps.v.outputs.tag }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - id: v
         run: echo "tag=${TAG_PREFIX}v$(grep -m1 '^version' src-tauri/Cargo.toml | sed 's/version = "\(.*\)"/\1/')" >> $GITHUB_OUTPUT
 
@@ -315,10 +355,10 @@ jobs:
 
       - name: Sign with the updater key
         env:
-          TAURI_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
-          npx --yes @tauri-apps/cli@2.9.6 signer sign SHA256SUMS.txt
+          npx --yes @tauri-apps/cli@2.12.4 signer sign SHA256SUMS.txt
           # Tauri writes the minisign signature base64-wrapped; minisign reads it raw.
           base64 -d SHA256SUMS.txt.sig > SHA256SUMS.txt.minisig
           rm SHA256SUMS.txt.sig
