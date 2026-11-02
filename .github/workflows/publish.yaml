@@ -223,7 +223,7 @@ jobs:
         with:
           releaseId: ${{ needs.release.outputs.id }}
           # latest.json is built once by `checksums`: every matrix job editing the shared asset raced.
-          uploadUpdaterJson: false
+          includeUpdaterJson: false
           tauriScript: npm run tauri
           args: ${{ matrix.args }} ${{ needs.release.outputs.prerelease == 'true' && '--config src-tauri/tauri.preview.conf.json' || '' }}
 
