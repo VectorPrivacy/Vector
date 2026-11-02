@@ -4,6 +4,9 @@
     // bottom. You ARE the button: the menu grows out of your row in the rail and shrinks
     // back into it, its footer standing where the row stood.
     import { tick } from 'svelte';
+    import { flip } from 'svelte/animate';
+    import { cubicOut } from 'svelte/easing';
+    import { reorderable, nearestByCentre } from '../lib/reorder.js';
     import { startMenuState, setStartOpen, setStartVisible } from '../lib/startmenu.svelte.js';
     import { shellState } from '../lib/shell.svelte.js';
     import { accountState } from '../lib/account.svelte.js';
@@ -46,7 +49,7 @@
             }
             return;
         }
-        endDrag(false);
+        cancelDrag();
         query = '';
         adding = false;
         folderId = null;
@@ -145,7 +148,7 @@
 
     // A press outside the menu (and outside what opened it) puts it away.
     function onPointerDown(e) {
-        if (!shown || drag) return;
+        if (!shown || dragId !== null) return;
         if (menuEl?.contains(e.target) || e.target.closest?.('#ws-rail-account, .context-menu')) return;
         close();
     }
@@ -158,94 +161,152 @@
         return { left: row ? row.left : 12, bottom, height: Math.min(560, window.innerHeight - bottom - 12) };
     });
 
-    // ── Dragging pins about: onto a pin makes a folder, onto a folder files it,
-    //    beside a pin places it there. A press that never travels is a click.
-    let drag = $state(null);   // { source, ghost, target, startX, startY, moved, el }
-    let dropAt = $state(null); // { el, mode: 'into' | 'before' | 'end' }
-    let suppressClick = false;
+    // ── Dragging pins about: onto a pin makes a folder, onto a folder files it, beside a
+    //    pin places it there. The rails' press arbiter decides drag, click or menu.
+    let dragId = $state(null);   // the lifted node: 'i:<key>' or 'f:<folder id>'
+    let armedId = $state(null);
+    let dropAt = $state(null);   // { id, mode: 'into' | 'before' | 'after' | 'end' }
+    let ghost = null;            // the lifted icon riding the pointer: { el, offX, offY }
+    let pane = $state(null);
+    const SLIDE = { duration: 220, easing: cubicOut };
 
-    function tileDown(e, source) {
-        if (e.button !== 0) return;
-        // Captured, so a release outside the window still ends the drag.
-        try { e.currentTarget.setPointerCapture(e.pointerId); } catch (_) { /* a pointer already gone */ }
-        drag = { source, el: e.currentTarget, startX: e.clientX, startY: e.clientY, moved: false, ghost: null };
+    const sourceId = (s) => (s.kind === 'folder' ? `f:${s.id}` : `i:${s.key}`);
+    const nodeIdOf = (n) => (n.type === 'folder' ? `f:${n.id}` : `i:${n.key}`);
+
+    function gestures(source, node) {
+        const id = sourceId(source);
+        return {
+            onMenu: (x, y) => h.tileMenu(x, y, node, folder?.id || null, (fid) => { folderId = fid; }, (fid) => { folderId = fid; renaming = true; }),
+            closeMenu: () => h.closeMenu(),
+            onArm: (on) => { armedId = on ? id : (armedId === id ? null : armedId); },
+            onDragStart: (ev, el) => { dragId = id; ghost = lift(el, ev); },
+            onDragMove: (mv) => {
+                ghost?.el.style.setProperty('left', `${mv.clientX - ghost.offX}px`);
+                ghost?.el.style.setProperty('top', `${mv.clientY - ghost.offY}px`);
+                dropAt = resolveDrop(mv.clientX, mv.clientY, id);
+                autoScroll(mv.clientY);
+            },
+            onDragEnd: (up) => land(source, resolveDrop(up.clientX, up.clientY, id)),
+        };
     }
 
-    function onPointerMove(e) {
-        if (!drag) return;
-        if (!drag.moved) {
-            if (Math.hypot(e.clientX - drag.startX, e.clientY - drag.startY) < 6) return;
-            drag.moved = true;
-            const r = drag.el.getBoundingClientRect();
-            const ghost = drag.el.cloneNode(true);
-            ghost.classList.add('stm-ghost');
-            Object.assign(ghost.style, { width: `${r.width}px`, height: `${r.height}px` });
-            document.body.appendChild(ghost);
-            drag.ghost = ghost;
-            drag.dx = drag.startX - r.left;
-            drag.dy = drag.startY - r.top;
-            drag.el.classList.add('stm-dragging');
-        }
-        drag.ghost.style.transform = `translate(${e.clientX - drag.dx}px, ${e.clientY - drag.dy}px)`;
-        const under = document.elementFromPoint(e.clientX, e.clientY)?.closest?.('[data-pin-node]');
-        if (!under || under === drag.el) { dropAt = under ? null : grid?.contains(document.elementFromPoint(e.clientX, e.clientY)) ? { el: null, mode: 'end' } : null; return; }
-        const r = under.getBoundingClientRect();
-        const x = (e.clientX - r.left) / r.width;
-        const canInto = drag.source.kind === 'item' && under.dataset.pinNode !== 'add' && !folder;
-        dropAt = under.dataset.pinNode === 'add' ? { el: under, mode: 'end' }
-            : canInto && x > 0.25 && x < 0.75 ? { el: under, mode: 'into' }
-            : { el: under, mode: x <= 0.5 ? 'before' : 'after' };
+    // The icon alone lifts, held where it was grabbed.
+    function lift(el, ev) {
+        const box = el.querySelector('.stm-box');
+        const r = box.getBoundingClientRect();
+        const g = box.cloneNode(true);
+        g.classList.add('stm-ghost');
+        Object.assign(g.style, { position: 'fixed', width: `${r.width}px`, height: `${r.height}px`, left: `${r.left}px`, top: `${r.top}px` });
+        document.body.appendChild(g);
+        return { el: g, offX: ev.clientX - r.left, offY: ev.clientY - r.top };
     }
 
-    /** End a drag; `drop` false lets go without moving anything. */
-    function endDrag(drop) {
-        if (!drag) return;
-        const d = drag;
-        drag = null;
-        d.el.classList.remove('stm-dragging');
-        d.ghost?.remove();
-        const at = dropAt;
+    // The nearest tile always answers, so the marker never drops out over a gap. Its icon's
+    // middle files into it; either side places beside it.
+    function resolveDrop(x, y, id) {
+        if (!grid) return null;
+        const tiles = [...grid.querySelectorAll('[data-node-id]')].map((el) => ({ key: el.dataset.nodeId, el }));
+        const hit = nearestByCentre(tiles, x, y);
+        if (!hit || hit.key === id) return null;
+        if (hit.key === 'add') return { id: 'add', mode: 'end' };
+        const b = hit.el.querySelector('.stm-box').getBoundingClientRect();
+        const inBox = x > b.left + b.width * 0.22 && x < b.right - b.width * 0.22 && y > b.top && y < b.bottom;
+        if (inBox && id.startsWith('i:') && !folder) return { id: hit.key, mode: 'into' };
+        return { id: hit.key, mode: hit.before ? 'before' : 'after' };
+    }
+
+    // Auto-scroll while the drag sits at the pane's top or bottom edge, faster the further past.
+    let autoRaf = null;
+    let dragY = 0;
+    function autoTick() {
+        autoRaf = null;
+        if (!pane || dragId === null) return;
+        const r = pane.getBoundingClientRect();
+        const zone = 28;
+        const v = dragY < r.top + zone ? -Math.min(12, (r.top + zone - dragY) * 0.3)
+            : dragY > r.bottom - zone ? Math.min(12, (dragY - (r.bottom - zone)) * 0.3) : 0;
+        if (!v) return;
+        const was = pane.scrollTop;
+        pane.scrollTop = was + v;
+        if (pane.scrollTop !== was) autoRaf = requestAnimationFrame(autoTick);
+    }
+    function autoScroll(y) { dragY = y; if (!autoRaf) autoRaf = requestAnimationFrame(autoTick); }
+
+    // Release: the layout lands, then the icon glides into its new place, or into the
+    // folder it joined, while the other tiles slide to theirs.
+    async function land(source, at) {
+        if (dragId === null) return;
+        if (autoRaf) { cancelAnimationFrame(autoRaf); autoRaf = null; }
+        const g = ghost?.el;
+        ghost = null;
+        const id = dragId;
         dropAt = null;
-        if (!d.moved) return;
-        suppressClick = true;
-        setTimeout(() => { suppressClick = false; }, 0);
-        if (drop && at) h.drop(d.source, target(at, d.source), folder?.id || null);
+        // A pin joined with another becomes a folder in that pin's place.
+        const into = at?.mode === 'into' ? tileEl(at.id) : null;
+        const intoSlot = into ? into.querySelector('.stm-box').getBoundingClientRect() : null;
+        if (at) await h.drop(source, target(at, source), folder?.id || null).catch(() => {});
+        dragId = null;
+        await tick();
+        if (!g) return;
+        const home = into ? null : tileEl(id);
+        const to = intoSlot || (home ? slotOf(home) : null);
+        if (!to) { g.remove(); return; }
+        const from = g.getBoundingClientRect();
+        const box = home?.querySelector('.stm-box');
+        if (box) box.style.visibility = 'hidden';
+        const scale = into ? 0.4 : 1;
+        const dx = to.left + (to.width - from.width) / 2 - from.left;
+        const dy = to.top + (to.height - from.height) / 2 - from.top;
+        const a = g.animate([
+            { transform: getComputedStyle(g).transform, opacity: 1 },
+            { transform: `translate(${dx}px, ${dy}px) scale(${scale})`, opacity: into ? 0 : 1 },
+        ], { duration: 220, easing: 'cubic-bezier(0.2, 0.8, 0.2, 1)', fill: 'forwards' });
+        // A hidden window never finishes an animation, and the icon must not stay lifted.
+        const done = () => { g.remove(); if (box) box.style.visibility = ''; };
+        a.finished.then(done, done);
+        setTimeout(done, 400);
+    }
+
+    const tileEl = (id) => grid?.querySelector(`[data-node-id="${CSS.escape(id)}"]`);
+
+    // Where a tile's icon rests once its slide is done: layout offsets ignore the slide's transform.
+    function slotOf(tile) {
+        const g = grid.getBoundingClientRect();
+        const box = tile.querySelector('.stm-box');
+        return { left: g.left + tile.offsetLeft + box.offsetLeft, top: g.top + tile.offsetTop + box.offsetTop, width: box.offsetWidth, height: box.offsetHeight };
+    }
+
+    /** Drop a drag in flight without moving anything. */
+    function cancelDrag() {
+        if (autoRaf) { cancelAnimationFrame(autoRaf); autoRaf = null; }
+        ghost?.el.remove();
+        ghost = null;
+        dragId = null;
+        dropAt = null;
     }
 
     // Where a release lands, as the rail's drop grammar says it. "After" is "before the
     // next one", counted without the dragged pin, which leaves its place as it moves.
     function target(at, source) {
-        if (at.mode === 'end' || !at.el) return folder ? { at: 'into-folder', folder_id: folder.id } : { at: 'end' };
-        const el = at.el;
-        const node = el.dataset.pinNode;
-        const key = el.dataset.key;
+        if (at.mode === 'end') return folder ? { at: 'into-folder', folder_id: folder.id } : { at: 'end' };
+        const ref = at.id.slice(2);
         if (folder) {
             if (at.mode === 'after') {
                 const keys = folder.keys.filter((k) => k !== source.key);
-                const next = keys[keys.indexOf(key) + 1];
+                const next = keys[keys.indexOf(ref) + 1];
                 return { at: 'into-folder', folder_id: folder.id, ...(next ? { before_key: next } : {}) };
             }
-            return { at: 'into-folder', folder_id: folder.id, before_key: key };
+            return { at: 'into-folder', folder_id: folder.id, before_key: ref };
         }
-        if (at.mode === 'into') return node === 'folder' ? { at: 'into-folder', folder_id: el.dataset.id } : { at: 'combine', with_key: key };
-        const others = nodes.filter((n) => (n.type === 'folder' ? !(source.kind === 'folder' && n.id === source.id) : !(source.kind === 'item' && n.key === source.key)));
-        const index = others.findIndex((n) => (n.type === 'folder' ? n.id === el.dataset.id : n.key === key));
+        if (at.mode === 'into') return at.id.startsWith('f:') ? { at: 'into-folder', folder_id: ref } : { at: 'combine', with_key: ref };
+        const others = nodes.filter((n) => nodeIdOf(n) !== sourceId(source));
+        const index = others.findIndex((n) => nodeIdOf(n) === at.id);
         const anchorNode = at.mode === 'after' ? others[index + 1] : others[index];
         if (!anchorNode) return { at: 'end' };
         return { at: 'before', anchor: anchorNode.type === 'folder' ? { kind: 'folder', id: anchorNode.id } : { kind: 'item', key: anchorNode.key } };
     }
 
     let grid = $state(null);
-
-    function tileClick(e, fn) {
-        if (suppressClick) { e.preventDefault(); return; }
-        fn();
-    }
-
-    function tileMenu(e, node) {
-        e.preventDefault();
-        h.tileMenu(e.clientX, e.clientY, node, folder?.id || null, (id) => { folderId = id; }, (id) => { folderId = id; renaming = true; });
-    }
 
     // Folder names are edited where they show.
     let renaming = $state(false);
@@ -260,7 +321,7 @@
     }
 </script>
 
-<svelte:window onkeydown={onKey} onpointerdown={onPointerDown} onpointermove={onPointerMove} onpointerup={() => endDrag(true)} onpointercancel={() => endDrag(false)} />
+<svelte:window onkeydown={onKey} onpointerdown={onPointerDown} />
 
 {#snippet glyph(r, size)}
     {#if r.app}
@@ -277,13 +338,14 @@
 {#snippet tile(node)}
     {#if node.type === 'folder'}
         {@const members = (node.keys || []).slice(0, 4).map(resolve)}
-        <button type="button" class="stm-tile" data-pin-node="folder" data-id={node.id}
-                class:drop-into={dropAt?.el?.dataset.id === node.id && dropAt.mode === 'into'}
-                class:drop-before={dropAt?.el?.dataset.id === node.id && dropAt.mode === 'before'}
-                class:drop-after={dropAt?.el?.dataset.id === node.id && dropAt.mode === 'after'}
-                onpointerdown={(e) => tileDown(e, { kind: 'folder', id: node.id })}
-                onclick={(e) => tileClick(e, () => { folderId = node.id; })}
-                oncontextmenu={(e) => tileMenu(e, node)}>
+        {@const id = `f:${node.id}`}
+        <button type="button" class="stm-tile" data-node-id={id}
+                class:is-armed={armedId === id} class:is-dragging={dragId === id}
+                class:drop-into={dropAt?.id === id && dropAt.mode === 'into'}
+                class:drop-before={dropAt?.id === id && dropAt.mode === 'before'}
+                class:drop-after={dropAt?.id === id && dropAt.mode === 'after'}
+                use:reorderable={gestures({ kind: 'folder', id: node.id }, node)}
+                onclick={() => { folderId = node.id; }}>
             <span class="stm-box stm-folder">
                 {#each members as m, i (i)}<span class="stm-mini">{@render glyph(m, 22)}</span>{/each}
             </span>
@@ -291,14 +353,14 @@
         </button>
     {:else}
         {@const r = resolve(node.key)}
-        <button type="button" class="stm-tile" data-pin-node="item" data-key={node.key} title={r.label}
-                class:missing={r.missing}
-                class:drop-into={dropAt?.el?.dataset.key === node.key && dropAt.mode === 'into'}
-                class:drop-before={dropAt?.el?.dataset.key === node.key && dropAt.mode === 'before'}
-                class:drop-after={dropAt?.el?.dataset.key === node.key && dropAt.mode === 'after'}
-                onpointerdown={(e) => tileDown(e, { kind: 'item', key: node.key })}
-                onclick={(e) => tileClick(e, () => openKey(node.key))}
-                oncontextmenu={(e) => tileMenu(e, node)}>
+        {@const id = `i:${node.key}`}
+        <button type="button" class="stm-tile" data-node-id={id} title={r.label}
+                class:missing={r.missing} class:is-armed={armedId === id} class:is-dragging={dragId === id}
+                class:drop-into={dropAt?.id === id && dropAt.mode === 'into'}
+                class:drop-before={dropAt?.id === id && dropAt.mode === 'before'}
+                class:drop-after={dropAt?.id === id && dropAt.mode === 'after'}
+                use:reorderable={gestures({ kind: 'item', key: node.key }, node)}
+                onclick={() => openKey(node.key)}>
             <span class="stm-box">{@render glyph(r, 40)}</span>
             <span class="stm-label">{r.label}</span>
         </button>
@@ -328,7 +390,7 @@
                 {/each}
             </nav>
 
-            <section class="stm-pane">
+            <section class="stm-pane" bind:this={pane}>
                 {#if searching}
                     <div class="stm-head" class:hidden={!adding && !results.length}>
                         {#if adding}
@@ -389,13 +451,13 @@
                         {/if}
                     </div>
                     <div class="stm-grid" bind:this={grid}>
-                        {#each folder.keys as key (key)}{@render tile({ type: 'item', key })}{/each}
+                        {#each folder.keys as key (key)}<div class="stm-cell" animate:flip={SLIDE}>{@render tile({ type: 'item', key })}</div>{/each}
                     </div>
                 {:else}
                     <div class="stm-head"><span>Pinned</span></div>
                     <div class="stm-grid" bind:this={grid}>
-                        {#each nodes as node (node.type === 'folder' ? `f:${node.id}` : node.key)}{@render tile(node)}{/each}
-                        <button type="button" class="stm-tile" data-pin-node="add" class:drop-before={dropAt?.mode === 'end'}
+                        {#each nodes as node (nodeIdOf(node))}<div class="stm-cell" animate:flip={SLIDE}>{@render tile(node)}</div>{/each}
+                        <button type="button" class="stm-tile" data-node-id="add" class:drop-before={dropAt?.mode === 'end'}
                                 onclick={() => { adding = true; query = ''; tick().then(() => searchEl?.focus()); }}>
                             <span class="stm-box stm-add"><span class="icon icon-plus-circle"></span></span>
                             <span class="stm-label">Add Pin</span>
@@ -548,7 +610,8 @@
         user-select: text;
     }
 
-    .stm-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 16px 14px; }
+    .stm-grid { position: relative; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 16px 14px; }
+    .stm-cell { display: grid; min-width: 0; }
     .stm-tile {
         all: unset;
         position: relative;
@@ -572,7 +635,7 @@
         border: 1.5px solid #3a3a3a;
         border-radius: 18px;
         background-color: #222;
-        transition: border-color 0.12s ease, background-color 0.12s ease;
+        transition: border-color 0.12s ease, background-color 0.12s ease, transform 0.16s ease, opacity 0.16s ease, box-shadow 0.16s ease;
     }
     .stm-tile:hover .stm-box, .stm-tile:focus-visible .stm-box { border-color: var(--icon-color-primary); }
     .stm-tile:hover .stm-label { color: #fff; }
@@ -588,7 +651,10 @@
     .stm-folder { display: grid; grid-template-columns: repeat(2, 22px); grid-auto-rows: 22px; gap: 6px; align-content: center; justify-content: center; }
     .stm-mini { display: flex; }
     .stm-add .icon { position: static; width: 34px; height: 34px; margin: 0; background-color: #bbb; }
-    .stm-tile.drop-into .stm-box { border-color: var(--icon-color-primary); background-color: #263; }
+    .stm-tile.drop-into .stm-box { border-color: var(--icon-color-primary); background-color: #263; transform: scale(1.08); }
+    /* The tile beside a drop line leans away from it, opening the gap the pin will fill. */
+    .stm-tile.drop-before .stm-box { transform: translateX(6px); }
+    .stm-tile.drop-after .stm-box { transform: translateX(-6px); }
     .stm-tile.drop-before::before, .stm-tile.drop-after::after {
         content: '';
         position: absolute;
@@ -597,18 +663,26 @@
         width: 3px;
         border-radius: 2px;
         background-color: var(--icon-color-primary);
+        box-shadow: 0 0 8px var(--icon-color-primary);
+        animation: stm-mark-in 0.14s ease-out;
     }
     .stm-tile.drop-before::before { left: -9px; }
     .stm-tile.drop-after::after { right: -9px; }
-    :global(.stm-dragging) { opacity: 0.35; }
+    @keyframes stm-mark-in { from { opacity: 0; transform: scaleY(0.4); } }
+    /* A held touch says "drag me" before anything moves. */
+    .stm-tile.is-armed .stm-box { transform: scale(1.06); box-shadow: 0 6px 18px rgba(0, 0, 0, 0.5); }
+    .stm-tile.is-dragging .stm-box { opacity: 0.3; transform: scale(0.9); }
+    .stm-tile.is-dragging .stm-label { opacity: 0.3; }
     :global(.stm-ghost) {
-        position: fixed;
-        left: 0;
-        top: 0;
         z-index: 9500;
+        margin: 0;
         pointer-events: none;
-        opacity: 0.9;
+        border-color: var(--icon-color-primary) !important;
+        box-shadow: 0 14px 34px rgba(0, 0, 0, 0.55);
+        transition: none !important;
+        animation: stm-lift 0.14s ease-out forwards;
     }
+    @keyframes -global-stm-lift { to { transform: scale(1.08); } }
 
     .stm-img { border-radius: 10px; object-fit: cover; }
     .stm-img.round, .stm-initial.round { border-radius: 50%; }

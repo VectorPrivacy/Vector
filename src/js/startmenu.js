@@ -388,6 +388,7 @@ async function startDeviceMenu(kind, anchor) {
  * @property {(folderId: string, name: string) => Promise<void>} renameFolder
  * @property {(x: number, y: number, node: object, inFolder: string|null, openFolder: (id: string) => void, renameFolder: (id: string) => void) => void} tileMenu
  * @property {(x: number, y: number, item: object) => void} navMenu
+ * @property {() => void} closeMenu   a long-press menu giving way to a drag
  * @property {() => object} mkt   the Nexus's helpers, for app icons
  * @property {() => string} myNpubShort
  * @property {() => void} openProfile
@@ -417,6 +418,7 @@ const START_MENU_HELPERS = {
     drop: (source, target) => startLayoutEdit('start_apply_drop', { source, target }),
     renameFolder: (folderId, name) => startLayoutEdit('start_rename_folder', { folderId, name }),
     tileMenu: startTileMenu,
+    closeMenu: () => hideContextMenu(),
     navMenu: (x, y, item) => {
         if (!item.key) return;
         const link = startKeyLink(item.key);
