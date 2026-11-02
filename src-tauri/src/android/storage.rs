@@ -103,6 +103,17 @@ pub fn open_for_write(uri: &str) -> Result<std::fs::File, String> {
     Ok(unsafe { <std::fs::File as std::os::fd::FromRawFd>::from_raw_fd(fd) })
 }
 
+/// After the descriptor from [`open_for_write`] is closed: the document's provider records it.
+pub fn finish_write(uri: &str) {
+    let _ = with_android_context(|env, activity| {
+        let cls = load_class(env, activity, "io/vectorapp/VectorFiles")?;
+        let j_uri = env.new_string(uri).map_err(|e| format!("uri str: {:?}", e))?;
+        env.call_static_method(&cls, "finishWrite", "(Ljava/lang/String;)V", &[JValue::Object(&j_uri)])
+            .map_err(|e| format!("finishWrite: {:?}", e))?;
+        Ok(())
+    });
+}
+
 /// Remove a picked document a failed save left behind.
 pub fn delete_document(uri: &str) {
     let _ = with_android_context(|env, activity| {
