@@ -68,6 +68,12 @@ pub static ANDROID_PICKED_FILES: LazyLock<std::sync::Mutex<HashMap<String, Andro
 pub fn discard_picked_file(uri: &str) {
     let removed = ANDROID_PICKED_FILES.lock().ok().and_then(|mut m| m.remove(uri));
     if let Some((path, ..)) = removed {
-        let _ = std::fs::remove_file(path);
+        remove_picked_copy(&path);
     }
+}
+
+/// A sent file's bubble may still read its copy: it takes the bytes before they go.
+pub fn remove_picked_copy(path: &std::path::Path) {
+    vector_core::media::pending::release_path(path);
+    let _ = std::fs::remove_file(path);
 }

@@ -46,6 +46,34 @@ pub fn forget(hash: &[u8; 32]) {
     lock(&map()).remove(hash);
 }
 
+/// `path` is going away: each bubble still reading it moves to memory, where a received file
+/// this account doesn't keep lives, or lets go when it is too large to be held there.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn release_path(path: &std::path::Path) {
+    let pending = map();
+    let released: Vec<([u8; 32], String)> = {
+        let mut map = lock(&pending);
+        let hit: Vec<_> = map.iter()
+            .filter(|(_, (source, _))| matches!(source, Source::Plain(p) if p == path))
+            .map(|(hash, (_, mime))| (*hash, mime.clone()))
+            .collect();
+        for (hash, _) in &hit {
+            map.remove(hash);
+        }
+        hit
+    };
+    let ram = super::ram::cache();
+    let unheld: Vec<_> = released.into_iter().filter(|(hash, _)| !ram.contains(hash) && !super::store::holds(hash)).collect();
+    let fits = std::fs::metadata(path).is_ok_and(|m| ram.admits(m.len()));
+    if unheld.is_empty() || !fits {
+        return;
+    }
+    let Ok(bytes) = std::fs::read(path) else { return };
+    for (hash, mime) in unheld {
+        let _ = ram.insert(hash, bytes.clone(), &mime);
+    }
+}
+
 pub fn holds(hash: &[u8; 32]) -> bool {
     lock(&map()).contains_key(hash)
 }
@@ -132,5 +160,29 @@ mod tests {
         assert_eq!(crate::media::read_all(&*open(&hash).unwrap()).unwrap(), b"the sender's own bytes");
         forget(&hash);
         assert!(!holds(&hash) && open(&hash).is_none());
+    }
+
+    #[test]
+    fn a_file_going_away_hands_its_bubbles_to_memory() {
+        let _guard = crate::db::DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let (copy, other, enc) = (dir.path().join("copy.mp3"), dir.path().join("other.mp3"), dir.path().join("x.enc"));
+        std::fs::write(&copy, b"the sender's picked bytes").unwrap();
+        let (a, b, c, d) = ([0x81u8; 32], [0x82u8; 32], [0x83u8; 32], [0x84u8; 32]);
+        plain(a, copy.clone(), "audio/mpeg");
+        plain(b, copy.clone(), "audio/mpeg");
+        plain(c, other.clone(), "audio/mpeg");
+        sealed(d, enc, "k", "n", "audio/mpeg");
+        release_path(&copy);
+        std::fs::remove_file(&copy).unwrap();
+        assert!(!holds(&a) && !holds(&b), "both bubbles on the copy let go of it");
+        for hash in [a, b] {
+            assert!(crate::media::resident(&hash), "and still play, from memory");
+            assert_eq!(crate::media::read_all(&*crate::media::open(&hash).unwrap()).unwrap(), b"the sender's picked bytes");
+            crate::media::ram::cache().remove(&hash);
+        }
+        assert!(holds(&c) && holds(&d), "another file and a sealed copy stay");
+        forget(&c);
+        forget(&d);
     }
 }
