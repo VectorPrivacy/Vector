@@ -317,9 +317,19 @@ pub fn run() {
 
     #[cfg(target_os = "linux")]
     {
-        // WebKitGTK can be quite funky cross-platform: as a result, we'll fallback to a more compatible renderer
-        // In theory, this will make Vector run more consistently across a wider range of Linux Desktop distros.
-        std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
+        // DMA-BUF hand-off to the compositor garbles on some GPUs (Pi 5). On 2.54 disabling the renderer also
+        // disables acceleration, where a WebCodecs decoder probe crashes the web process; shared memory avoids both.
+        let user_chose = std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_some()
+            || std::env::var_os("WEBKIT_DMABUF_RENDERER_FORCE_SHM").is_some();
+        if !user_chose {
+            // SAFETY: plain getters of the linked WebKitGTK's version, valid before GTK starts.
+            let webkit = unsafe { (webkit2gtk::ffi::webkit_get_major_version(), webkit2gtk::ffi::webkit_get_minor_version()) };
+            if webkit >= (2, 54) {
+                std::env::set_var("WEBKIT_DMABUF_RENDERER_FORCE_SHM", "1");
+            } else {
+                std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
+            }
+        }
         // WebKitGTK through 2.54 keeps SharedArrayBuffer off even in a cross-origin
         // isolated page (miniapps/isolated.rs) unless JSC enables it before the first
         // web process. It applies to every page; the only untrusted ones are Mini Apps,
@@ -1154,6 +1164,7 @@ pub fn run() {
             commands::pinned::get_pinned_chats,
             commands::pinned::pin_chat,
             commands::pinned::unpin_chat,
+            commands::pinned::move_pinned_chat,
             commands::rail::get_rail_layout,
             commands::rail::rail_apply_drop,
             commands::rail::rail_rename_folder,

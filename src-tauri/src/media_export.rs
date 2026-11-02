@@ -205,6 +205,19 @@ pub fn save_to(path_or_ref: &str, dest: &Path) -> Result<(), String> {
     copy_out(&*src, dest)
 }
 
+/// The name Save offers for `path_or_ref`, from what it holds; `Err` when that's gone, before
+/// anything is created to hold it.
+pub fn save_name(path_or_ref: &str, name: &str) -> Result<String, String> {
+    let (src, hash) = source(path_or_ref)?;
+    Ok(match hash {
+        Some(hash) => file_name(name, &hash, src.mime()),
+        None => {
+            let own = Path::new(path_or_ref).file_name().and_then(|n| n.to_str()).unwrap_or("file");
+            vector_core::crypto::sanitize_filename(if name.trim().is_empty() { own } else { name })
+        }
+    })
+}
+
 /// The name a file is saved under: the sender's, else its hash and type.
 pub fn file_name(name: &str, hash: &[u8; 32], mime: &str) -> String {
     let name = vector_core::crypto::sanitize_filename(name);
@@ -245,5 +258,21 @@ mod tests {
         assert_eq!(std::fs::read(&dest).unwrap(), b"held bytes");
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
         assert!(save_to(&MediaRef::held(&[0x5du8; 32]), &dir.path().join("gone.png")).is_err());
+    }
+
+    #[test]
+    fn save_offers_a_typed_name_and_refuses_what_is_gone() {
+        let _session = crate::commands::transport::tests::TEST_LOCK.blocking_lock();
+        let hash = [0x6cu8; 32];
+        media::ram::cache().insert(hash, b"a photo".to_vec(), "image/jpeg").unwrap();
+        let held = MediaRef::held(&hash);
+        assert_eq!(save_name(&held, "").unwrap(), "6c6c6c6c6c6c.jpg", "no name: its hash and type");
+        assert_eq!(save_name(&held, "beach.jpeg").unwrap(), "beach.jpeg");
+        assert!(save_name(&MediaRef::held(&[0x6du8; 32]), "gone.xdc").is_err(), "nothing is offered for bytes no longer held");
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("track.mp3");
+        std::fs::write(&file, b"id3").unwrap();
+        assert_eq!(save_name(file.to_str().unwrap(), "").unwrap(), "track.mp3", "a file keeps its own name");
+        media::ram::cache().remove(&hash);
     }
 }

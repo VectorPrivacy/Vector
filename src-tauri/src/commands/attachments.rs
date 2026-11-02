@@ -257,8 +257,12 @@ pub async fn save_attachment(app: tauri::AppHandle, path: String, name: String) 
         return Ok(Some(dest));
     }
     use tauri_plugin_dialog::DialogExt;
+    let suggested = {
+        let path = path.clone();
+        vector_core::db::blocking_bound(move || crate::media_export::save_name(&path, &name)).await??
+    };
     #[cfg_attr(target_os = "android", allow(unused_mut))]
-    let mut dialog = app.dialog().file().set_file_name(crate::media_export::file_name(&name, &[0u8; 32], ""));
+    let mut dialog = app.dialog().file().set_file_name(suggested);
     #[cfg(not(target_os = "android"))]
     {
         use tauri::Manager;
@@ -272,6 +276,7 @@ pub async fn save_attachment(app: tauri::AppHandle, path: String, name: String) 
         if let tauri_plugin_dialog::FilePath::Url(url) = &picked {
             let uri = url.to_string();
             let written = crate::android::storage::open_for_write(&uri).and_then(|file| crate::media_export::save_into(&path, file));
+            crate::android::storage::finish_write(&uri);
             if written.is_err() {
                 crate::android::storage::delete_document(&uri);
             }

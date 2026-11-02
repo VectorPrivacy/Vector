@@ -779,7 +779,7 @@ async function _dmsgOpenFile(att, msg) {
 
 /** Save an attachment's bytes as a normal file where the user picks. */
 function saveAttachmentFile(att) {
-    invoke('save_attachment', { path: VectorSvelte.mediaPath(att), name: att.name || '' })
+    invoke('save_attachment', { path: VectorSvelte.mediaPath(att), name: att.name || '', extension: att.extension || '' })
         .then(toastSaved)
         .catch((err) => showToast(String(err)));
 }

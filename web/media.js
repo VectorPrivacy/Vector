@@ -215,10 +215,21 @@
     // Held media has no file name of its own: its message names it, or it saves as 'file'.
     const fileName = (path) => (path.startsWith('vmedia:') ? 'file' : path.split('/').pop() || 'file');
 
-    async function save(path) {
+    // iOS and file managers go by the extension: a name without one takes the file's type.
+    const hasExt = (name) => /\.[a-z0-9]+$/i.test(name);
+    // The extension asked for, else the stored file's own, else one for its type.
+    function typed(name, ext, path, type) {
+        if (hasExt(name)) return name;
+        const own = path && !path.startsWith('vmedia:') ? (/\.([a-z0-9]+)$/i.exec(path) || [])[1] : '';
+        const known = ext || own || Object.keys(SAVE_TYPES).find((e) => SAVE_TYPES[e] === type);
+        return known ? `${name}.${known}` : name;
+    }
+
+    async function save(path, name = fileName(path), ext = '') {
+        const url = await urlOf(path);
         const a = document.createElement('a');
-        a.href = await urlOf(path);
-        a.download = fileName(path);
+        a.href = url;
+        a.download = hasExt(typed(name, ext, path)) ? typed(name, ext, path) : typed(name, '', '', (await (await fetch(url)).blob()).type);
         document.body.appendChild(a);
         a.click();
         a.remove();
@@ -259,7 +270,7 @@
     async function saveFile(args) {
         const path = savePath(args);
         const blob = await (await fetch(path ? await urlOf(path) : args.url)).blob();
-        const name = saveName(args);
+        const name = typed(saveName(args), args.extension, path, blob.type);
         // iOS offers Save Image / Save Video only for a file it knows is one.
         const ext = (/\.([a-z0-9]+)$/i.exec(name) || [])[1];
         const type = SAVE_TYPES[ext?.toLowerCase()] || blob.type || 'application/octet-stream';
@@ -289,7 +300,7 @@
             }
         }
         const path = savePath(args);
-        if (path) return save(path);
+        if (path) return save(path, saveName(args), args.extension);
         const a = document.createElement('a');
         a.href = args.url;
         a.download = saveName(args);

@@ -222,6 +222,8 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           releaseId: ${{ needs.release.outputs.id }}
+          # latest.json is built once by `checksums`: every matrix job editing the shared asset raced.
+          uploadUpdaterJson: false
           tauriScript: npm run tauri
           args: ${{ matrix.args }} ${{ needs.release.outputs.prerelease == 'true' && '--config src-tauri/tauri.preview.conf.json' || '' }}
 
@@ -402,11 +404,22 @@ jobs:
       TAG: ${{ needs.release.outputs.tag }}
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
+      - uses: actions/checkout@v5
+        with:
+          sparse-checkout: scripts/updater-manifest.mjs
+          sparse-checkout-cone-mode: false
+
       - name: Download the release's assets
         run: |
           gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir assets
-          rm -f assets/SHA256SUMS.txt assets/SHA256SUMS.txt.minisig
+          rm -f assets/SHA256SUMS.txt assets/SHA256SUMS.txt.minisig assets/latest.json
           ls -l assets
+
+      # Fails when any desktop build is missing, so a release can't go out with one dropped.
+      - name: Updater manifest (latest.json)
+        run: |
+          node scripts/updater-manifest.mjs assets "$TAG" "$GITHUB_REPOSITORY" > assets/latest.json
+          cat assets/latest.json
 
       - name: SHA256SUMS.txt
         working-directory: assets
@@ -431,4 +444,4 @@ jobs:
             SHA256SUMS.txt
 
       - name: Upload to the release
-        run: gh release upload "$TAG" SHA256SUMS.txt SHA256SUMS.txt.minisig --clobber --repo "$GITHUB_REPOSITORY"
+        run: gh release upload "$TAG" assets/latest.json SHA256SUMS.txt SHA256SUMS.txt.minisig --clobber --repo "$GITHUB_REPOSITORY"

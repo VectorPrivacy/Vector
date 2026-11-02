@@ -279,154 +279,117 @@ pub fn get_all_permission_info() -> Vec<PermissionInfo> {
 
 // ─── Permissions-Policy header ──────────────────────────────────────────────
 
-/// Base Permissions Policy that denies all sensitive APIs by default
-/// This is a comprehensive list from DeltaChat based on W3C spec
-/// https://github.com/w3c/webappsec-permissions-policy/blob/main/features.md
-///
-/// NOTE: Some permissions can be dynamically enabled if the user grants them.
-/// See `build_permissions_policy()` for dynamic generation.
-const PERMISSIONS_POLICY_DENY_ALL: &str = concat!(
-    "accelerometer=(), ",
-    "ambient-light-sensor=(), ",
-    "attribution-reporting=(), ",
-    "autoplay=(self), ",
-    "battery=(), ",
-    "bluetooth=(), ",
-    "camera=(), ",
-    "ch-ua=(), ",
-    "ch-ua-arch=(), ",
-    "ch-ua-bitness=(), ",
-    "ch-ua-full-version=(), ",
-    "ch-ua-full-version-list=(), ",
-    "ch-ua-high-entropy-values=(), ",
-    "ch-ua-mobile=(), ",
-    "ch-ua-model=(), ",
-    "ch-ua-platform=(), ",
-    "ch-ua-platform-version=(), ",
-    "ch-ua-wow64=(), ",
-    "compute-pressure=(), ",
-    "cross-origin-isolated=(), ",
-    "direct-sockets=(), ",
-    "display-capture=(), ",
-    "encrypted-media=(), ",
-    "execution-while-not-rendered=(), ",
-    "execution-while-out-of-viewport=(), ",
-    "fullscreen=(), ",
-    "geolocation=(), ",
-    "gyroscope=(), ",
-    "hid=(), ",
-    "identity-credentials-get=(), ",
-    "idle-detection=(), ",
-    "keyboard-map=(), ",
-    "magnetometer=(), ",
-    "mediasession=(), ",
-    "microphone=(), ",
-    "midi=(), ",
-    "navigation-override=(), ",
-    "otp-credentials=(), ",
-    "payment=(), ",
-    "picture-in-picture=(), ",
-    "publickey-credentials-create=(), ",
-    "publickey-credentials-get=(), ",
-    "screen-wake-lock=(), ",
-    "serial=(), ",
-    "sync-xhr=(), ",
-    "storage-access=(), ",
-    "usb=(), ",
-    "web-share=(), ",
-    "window-management=(), ",
-    "xr-spatial-tracking=(), ",
-    "autofill=(), ",
-    "clipboard-read=(), ",
-    "clipboard-write=(), ",
-    "deferred-fetch=(), ",
-    "gamepad=(self), ",
-    "language-detector=(), ",
-    "language-model=(), ",
-    "manual-text=(), ",
-    "rewriter=(), ",
-    "speaker-selection=(), ",
-    "summarizer=(), ",
-    "translator=(), ",
-    "writer=(), ",
-    "all-screens-capture=(), ",
-    "browsing-topics=(), ",
-    "captured-surface-control=(), ",
-    "conversion-measurement=(), ",
-    "digital-credentials-get=(), ",
-    "digital-credentials-create=(), ",
-    "focus-without-user-activation=(), ",
-    "join-ad-interest-group=(), ",
-    "local-fonts=(), ",
-    "monetization=(), ",
-    "run-ad-auction=(), ",
-    "smart-card=(), ",
-    "sync-script=(), ",
-    "trust-token-redemption=(), ",
-    "unload=(), ",
-    "vertical-scroll=(), ",
-    "document-domain=(), ",
-    "window-placement=()",
-);
-
-/// Permission policies that can be dynamically enabled based on user grants
-/// Maps permission name -> (policy directive name, allow value when enabled)
-const GRANTABLE_PERMISSIONS: &[(&str, &str)] = &[
-    ("microphone", "microphone"),
-    ("camera", "camera"),
-    ("geolocation", "geolocation"),
-    ("clipboard-read", "clipboard-read"),
-    ("clipboard-write", "clipboard-write"),
-    ("fullscreen", "fullscreen"),
-    ("autoplay", "autoplay"),
-    ("display-capture", "display-capture"),
-    ("midi", "midi"),
-    ("picture-in-picture", "picture-in-picture"),
-    ("screen-wake-lock", "screen-wake-lock"),
-    ("speaker-selection", "speaker-selection"),
-    ("accelerometer", "accelerometer"),
-    ("gyroscope", "gyroscope"),
-    ("magnetometer", "magnetometer"),
-    ("ambient-light-sensor", "ambient-light-sensor"),
-    ("bluetooth", "bluetooth"),
+/// Every feature a Mini App page's Permissions-Policy names. A feature left out would
+/// fall back to the engine's default, so this covers what an engine might grant a page:
+/// the W3C registry (<https://github.com/w3c/webappsec-permissions-policy/blob/main/features.md>)
+/// and the engines' own additions, retired names included for older engines.
+const POLICY_FEATURES: &[&str] = &[
+    "accelerometer",
+    "all-screens-capture",
+    "ambient-light-sensor",
+    "attribution-reporting",
+    "autofill",
+    "autoplay",
+    "battery",
+    "bluetooth",
+    "browsing-topics",
+    "camera",
+    "captured-surface-control",
+    "ch-ua",
+    "ch-ua-arch",
+    "ch-ua-bitness",
+    "ch-ua-full-version",
+    "ch-ua-full-version-list",
+    "ch-ua-high-entropy-values",
+    "ch-ua-mobile",
+    "ch-ua-model",
+    "ch-ua-platform",
+    "ch-ua-platform-version",
+    "ch-ua-wow64",
+    "clipboard-read",
+    "clipboard-write",
+    "compute-pressure",
+    "conversion-measurement",
+    "cross-origin-isolated",
+    "deferred-fetch",
+    "digital-credentials-create",
+    "digital-credentials-get",
+    "direct-sockets",
+    "display-capture",
+    "document-domain",
+    "encrypted-media",
+    "execution-while-not-rendered",
+    "execution-while-out-of-viewport",
+    "focus-without-user-activation",
+    "fullscreen",
+    "gamepad",
+    "geolocation",
+    "gyroscope",
+    "hid",
+    "identity-credentials-get",
+    "idle-detection",
+    "join-ad-interest-group",
+    "keyboard-map",
+    "language-detector",
+    "language-model",
+    "local-fonts",
+    "magnetometer",
+    "manual-text",
+    "mediasession",
+    "microphone",
+    "midi",
+    "monetization",
+    "navigation-override",
+    "otp-credentials",
+    "payment",
+    "picture-in-picture",
+    "publickey-credentials-create",
+    "publickey-credentials-get",
+    "rewriter",
+    "run-ad-auction",
+    "screen-wake-lock",
+    "serial",
+    "smart-card",
+    "speaker-selection",
+    "storage-access",
+    "summarizer",
+    "sync-script",
+    "sync-xhr",
+    "translator",
+    "trust-token-redemption",
+    "unload",
+    "usb",
+    "vertical-scroll",
+    "web-share",
+    "window-management",
+    "window-placement",
+    "writer",
+    "xr-spatial-tracking",
 ];
 
-/// Build a dynamic Permissions-Policy header based on granted permissions
-///
-/// This takes the base deny-all policy and enables specific permissions
-/// that the user has granted for this app.
-///
-/// # Arguments
-/// * `granted_permissions` - Comma-separated string of granted permission names
-///
-/// # Returns
-/// The complete Permissions-Policy header value
+/// Open to the app's own origin whatever it was granted.
+const ALWAYS_SELF: &[&str] = &["autoplay", "gamepad"];
+
+/// The features a user's grant opens to the app's own origin; a grant's name is its feature's.
+const GRANTABLE: &[&str] = &["microphone", "camera", "geolocation", "clipboard-read", "clipboard-write", "fullscreen", "autoplay", "display-capture", "midi", "picture-in-picture", "screen-wake-lock", "speaker-selection", "accelerometer", "gyroscope", "magnetometer", "ambient-light-sensor", "bluetooth"];
+
+/// The Permissions-Policy header for a page: every feature denied, except those the user
+/// granted this app (`granted_permissions` is comma-separated) and [`ALWAYS_SELF`].
 pub fn build_permissions_policy(granted_permissions: &str) -> String {
-    // Parse granted permissions into a set for fast lookup
-    let granted: std::collections::HashSet<&str> = granted_permissions
+    let granted: Vec<&str> = granted_permissions
         .split(',')
-        .map(|s| s.trim())
-        .filter(|s| !s.is_empty())
+        .map(str::trim)
+        .filter(|g| GRANTABLE.contains(g))
         .collect();
-
-    // If no permissions granted, use the static deny-all policy
-    if granted.is_empty() {
-        return PERMISSIONS_POLICY_DENY_ALL.to_string();
-    }
-
-    // Build the policy by modifying the base policy
-    // For each grantable permission, if granted, change from () to (self)
-    let mut policy = PERMISSIONS_POLICY_DENY_ALL.to_string();
-
-    for (perm_name, directive) in GRANTABLE_PERMISSIONS {
-        if granted.contains(*perm_name) {
-            // Replace "directive=()" with "directive=(self)"
-            let deny_pattern = format!("{}=()", directive);
-            let allow_pattern = format!("{}=(self)", directive);
-            policy = policy.replace(&deny_pattern, &allow_pattern);
+    let mut policy = String::with_capacity(POLICY_FEATURES.len() * 24);
+    for feature in POLICY_FEATURES {
+        if !policy.is_empty() {
+            policy.push_str(", ");
         }
+        policy.push_str(feature);
+        let open = ALWAYS_SELF.contains(feature) || granted.contains(feature);
+        policy.push_str(if open { "=(self)" } else { "=()" });
     }
-
     policy
 }
 
@@ -453,6 +416,19 @@ mod tests {
         assert_eq!(base.replace("cross-origin-isolated=()", "cross-origin-isolated=(self)"), isolated);
         assert!(isolated.contains("camera=(self)") && isolated.contains("microphone=()"));
         assert!(build_isolated_permissions_policy("").contains("cross-origin-isolated=(self)"));
+    }
+
+    #[test]
+    fn policy_names_every_feature_once_and_opens_only_grants() {
+        let policy = build_permissions_policy(" camera, unknown,geolocation ,");
+        let entries: Vec<&str> = policy.split(", ").collect();
+        assert_eq!(entries.len(), POLICY_FEATURES.len());
+        for feature in POLICY_FEATURES {
+            let open = ["camera", "geolocation", "autoplay", "gamepad"].contains(feature);
+            let expected = format!("{feature}={}", if open { "(self)" } else { "()" });
+            assert!(entries.contains(&expected.as_str()), "{expected}");
+        }
+        assert_eq!(build_permissions_policy("").matches("=(self)").count(), ALWAYS_SELF.len());
     }
 
     #[test]

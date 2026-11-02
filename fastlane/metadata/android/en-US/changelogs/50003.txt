@@ -1,0 +1,7 @@
+Preview 3 of Vector 0.5.0 "Vigil".
+- Pin Communities in your chat list, and drag pins into any order
+- Files like MP3s and Mini Apps send to Community channels again
+- A file you just sent plays straight away
+- Saved files keep their real size and their file type
+- Settings links open properly on phones
+- Linux: fixed a black window on the newest WebKitGTK

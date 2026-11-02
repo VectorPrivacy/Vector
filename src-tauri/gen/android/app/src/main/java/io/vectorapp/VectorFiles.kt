@@ -6,6 +6,7 @@ import android.content.Context
 import android.content.Intent
 import android.media.MediaScannerConnection
 import android.net.Uri
+import android.os.ParcelFileDescriptor
 import androidx.core.content.FileProvider
 import java.io.File
 
@@ -57,16 +58,31 @@ object VectorFiles {
         }
     }
 
+    /** Documents being written, held open until the writer is done: closing one is what
+     *  tells its provider what was written, so a file manager shows its real size. */
+    private val writing = java.util.concurrent.ConcurrentHashMap<String, ParcelFileDescriptor>()
+
     /**
      * A writable file descriptor for a document the user picked (ACTION_CREATE_DOCUMENT),
-     * truncated, owned by the caller from here. -1 if it can't be opened.
+     * truncated, owned by the caller from here; [finishWrite] once it's closed. -1 if it can't be opened.
      */
     @JvmStatic
     fun openForWrite(context: Context, uri: String): Int {
         return try {
-            context.contentResolver.openFileDescriptor(Uri.parse(uri), "wt")?.detachFd() ?: -1
+            val pfd = context.contentResolver.openFileDescriptor(Uri.parse(uri), "wt") ?: return -1
+            writing.put(uri, pfd)?.close()
+            pfd.dup().detachFd()
         } catch (_: Throwable) {
             -1
+        }
+    }
+
+    /** The caller has closed its descriptor for `uri`: let the provider record the file. */
+    @JvmStatic
+    fun finishWrite(uri: String) {
+        try {
+            writing.remove(uri)?.close()
+        } catch (_: Throwable) {
         }
     }
 

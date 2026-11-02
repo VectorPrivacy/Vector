@@ -3694,6 +3694,26 @@ body.mobile [contenteditable] * {
     border-color: transparent;
 }
 
+/* Dragging a pinned row among the pins. The line sits inside the row: off-screen rows
+   are paint-contained, which would clip it outside. */
+.chatlist-contact.is-dragging { opacity: 0.3; }
+.chatlist-contact.drop-above,
+.chatlist-contact.drop-below { position: relative; }
+.chatlist-contact.drop-above::after,
+.chatlist-contact.drop-below::after {
+  content: '';
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  height: 2px;
+  border-radius: 2px;
+  background-color: var(--icon-color-primary);
+  box-shadow: 0 0 8px var(--icon-color-primary);
+  pointer-events: none;
+}
+.chatlist-contact.drop-above::after { top: 0; }
+.chatlist-contact.drop-below::after { bottom: 0; }
+
 /* A row within reach of the viewport renders before it arrives (js/chatlist-window.js). */
 .chatlist-contact.cv-near {
   content-visibility: visible;

@@ -134,7 +134,7 @@
             <div id="ws-community-head">
                 {#if !searching}
                     {#if screens.communityHead}
-                        <CommunityHead h={screens.communityHead.h} onBack={slim && !cc.railOpen ? () => shellHandlers().consoleBack?.() : null} />
+                        <CommunityHead h={screens.communityHead.h} onBack={slim && !cc.railOpen ? () => shellHandlers().consoleBack?.() : null} backPull={pull} />
                     {/if}
                     {#if screens.communityBanner}<CommunityBanner h={screens.communityBanner.h} />{/if}
                 {/if}

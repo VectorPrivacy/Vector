@@ -457,7 +457,7 @@ pub fn clear_all_android_file_cache() -> Result<(), String> {
     super::compression::forget_fitted();
     if let Ok(mut picked) = super::types::ANDROID_PICKED_FILES.lock() {
         for (_, (path, ..)) in picked.drain() {
-            let _ = std::fs::remove_file(path);
+            super::types::remove_picked_copy(&path);
         }
     }
     Ok(())

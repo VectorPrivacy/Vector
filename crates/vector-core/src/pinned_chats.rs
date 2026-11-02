@@ -106,24 +106,22 @@ impl PinnedChats {
         Ok(())
     }
 
-    /// Drop the Community pins older builds wrote. Communities are arranged on
-    /// the rail now, so a pin there means nothing; it is shed on the next write
-    /// rather than by a write of its own. Keyed on FORM (a community id is 64
-    /// hex, a DM is an npub), so a pin for a chat this device has never synced
-    /// still survives.
-    pub fn retire_community_pins(&mut self) {
-        self.chats.retain(|c| !is_community_id(c));
-    }
-
     /// Drop `id`. Absent is success: unpinning something already gone is the
     /// state the caller asked for.
     pub fn unpin(&mut self, id: &str) {
         self.chats.retain(|c| c != id);
     }
-}
 
-fn is_community_id(id: &str) -> bool {
-    id.len() == 64 && id.bytes().all(|b| b.is_ascii_hexdigit())
+    /// Move pinned `id` to just before `before`, or to the end when `before` is
+    /// `None` or not pinned. Moving by neighbour rather than index leaves the pins
+    /// this device cannot show where they were. `false` when `id` is not pinned.
+    pub fn move_before(&mut self, id: &str, before: Option<&str>) -> bool {
+        let Some(from) = self.chats.iter().position(|c| c == id) else { return false };
+        let moved = self.chats.remove(from);
+        let to = before.and_then(|b| self.chats.iter().position(|c| c == b)).unwrap_or(self.chats.len());
+        self.chats.insert(to, moved);
+        true
+    }
 }
 
 /// The local mirror. Every read path goes through here so the UI never waits on
@@ -250,7 +248,6 @@ async fn publish_only(client: &Client, list: &PinnedChats) -> Result<(), String>
 /// republishes if it failed.
 pub async fn pin_chat(client: &Client, id: &str) -> Result<PinnedChats, String> {
     let mut list = load_local();
-    list.retire_community_pins();
     list.pin(id, effective_max_pinned())?;
     save_local(&list)?;
     publish_in_background(client, &list);
@@ -260,8 +257,19 @@ pub async fn pin_chat(client: &Client, id: &str) -> Result<PinnedChats, String> 
 /// Unpin a chat. Same commit-then-sync shape as [`pin_chat`].
 pub async fn unpin_chat(client: &Client, id: &str) -> Result<PinnedChats, String> {
     let mut list = load_local();
-    list.retire_community_pins();
     list.unpin(id);
+    save_local(&list)?;
+    publish_in_background(client, &list);
+    Ok(list)
+}
+
+/// Move a pin to just before `before` (the end when `None`). Same commit-then-sync
+/// shape as [`pin_chat`]; moving an id that is not pinned is an error.
+pub async fn move_pinned_chat(client: &Client, id: &str, before: Option<&str>) -> Result<PinnedChats, String> {
+    let mut list = load_local();
+    if !list.move_before(id, before) {
+        return Err("that chat is not pinned".to_string());
+    }
     save_local(&list)?;
     publish_in_background(client, &list);
     Ok(list)
@@ -301,15 +309,31 @@ mod tests {
     use super::*;
 
     #[test]
-    fn community_pins_are_shed_and_dm_pins_kept() {
+    fn a_community_pin_survives_a_dm_pin_and_unpin() {
+        let community = "c".repeat(64);
         let mut l = PinnedChats::default();
-        l.chats = vec![
-            "npub1alice".to_string(),
-            "c".repeat(64),
-            "some-future-id".to_string(),
-        ];
-        l.retire_community_pins();
-        assert_eq!(l.chats, vec!["npub1alice".to_string(), "some-future-id".to_string()]);
+        l.pin(&community, MAX_PINNED).unwrap();
+        l.pin("npub1alice", MAX_PINNED).unwrap();
+        l.unpin("npub1alice");
+        assert_eq!(l.chats, vec![community]);
+    }
+
+    #[test]
+    fn a_move_lands_before_its_neighbour_and_leaves_the_rest_in_place() {
+        let ids = |l: &PinnedChats| l.chats.iter().map(String::as_str).collect::<Vec<_>>().join(",");
+        let mut l = PinnedChats::from_json("{\"v\":1,\"chats\":[\"a\",\"hidden\",\"b\",\"c\"]}");
+        assert!(l.move_before("c", Some("a")));
+        assert_eq!(ids(&l), "c,a,hidden,b");
+        assert!(l.move_before("c", Some("b")));
+        assert_eq!(ids(&l), "a,hidden,c,b", "a pin this device can't show keeps its slot");
+        assert!(l.move_before("a", None));
+        assert_eq!(ids(&l), "hidden,c,b,a");
+        assert!(l.move_before("b", Some("gone")), "an unknown neighbour sends it to the end");
+        assert_eq!(ids(&l), "hidden,c,a,b");
+        assert!(l.move_before("b", Some("b")), "before itself is a no-op");
+        assert_eq!(ids(&l), "hidden,c,a,b");
+        assert!(!l.move_before("never-pinned", Some("a")));
+        assert_eq!(ids(&l), "hidden,c,a,b");
     }
 
     #[test]

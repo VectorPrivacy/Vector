@@ -79,31 +79,45 @@ Powered by Passion, Built on [Nostr](https://nostr.com/).
 
 ### 🔐 Privacy & Security
 - **No Phone Number, No Email, No KYC:** Sign up with nothing but a keypair. No identity to leak, subpoena, or sell.
-- **Built-In Tor:** Route all traffic through an embedded Tor client in one click, bridges included for censorship circumvention.
+- **Tor, I2P or Clearnet:** Pick the network every connection uses. Tor is built in, bridges included, and I2P runs through your own router. If your network isn't ready, Vector waits instead of quietly going direct.
+- **Message Requests:** DMs from people you've never replied to wait in Requests, and nothing of theirs loads until you answer or accept.
 - **Remote Signers:** Keep your keys in a separate signer via NIP-46, or Amber on Android. Your nsec never touches the app.
 - **Metadata Stripped by Default:** EXIF and location data removed from every photo before it leaves your device.
+- **Private Media Storage:** Media you only look at stays in memory, and the files you keep are encrypted on disk.
 - **Self-Destructing Messages:** Set a per-chat timer and watch messages disappear on your own schedule.
 - **Local Encryption:** Protect your account with a PIN, password, or biometrics.
-- **In Your Browser:** Vector Web runs the full app in any modern browser, Tor Browser included, with nothing to install.
+- **Sealed Push Notifications:** Android and Vector Web can wake for a message while closed, and the pusher can't read it or tell who it's from.
+- **Streamer Mode:** Hide the names, pictures and keys of anyone who hasn't agreed to be on stream.
 
 ### 👥 Communities & Chat
-- **Encrypted Communities:** Discord-style spaces with channels, roles, and admins, fully end-to-end encrypted.
+- **Encrypted Communities:** Discord-style spaces with text and voice channels, categories, and private channels, fully end-to-end encrypted.
+- **Roles & Permissions:** Custom roles with per-channel overrides, timeouts, and an Audit Log of every change.
 - **Bans That Actually Work:** Removing a member re-keys the room, cryptographically locking them out of everything that follows.
+- **Moderation Console:** Raid detection, one-press removal of a whole wave, and rules a Community writes for itself.
+- **Voice & Video Calls:** Encrypted one-to-one calls with camera and screen sharing, relayed by default so neither side learns the other's IP.
+- **Voice Channels:** Drop-in voice rooms with screen and camera sharing, per-person volume, and moderator controls.
 - **Rich Message Composer:** Markdown, mentions, and custom emojis render live as you type.
-- **Voice Messages:** Record and send audio, with optional on-device AI transcription.
-- **Voice & Video Calls:** Encrypted one-to-one calls with camera and screen sharing, peer to peer.
-- **Multiple Accounts:** Run several identities on one install with an in-app switcher.
+- **Voice Messages & Dictation:** Record audio or dictate a message, with on-device AI transcription.
+- **Music & Media:** A Floating Player with synced lyrics, YouTube and SoundCloud in chat, Nostr post cards, and 3D models you can spin.
+- **Multiple Accounts:** Run several identities on one install with an in-app switcher, and sign in on another device by scanning a code.
+
+### 🖥️ Everywhere
+- **Widescreen & Slim Layouts:** On a desktop-sized window, Communities sit on a rail beside the channel list, conversation and member list; phones get a layout of their own.
+- **Start Menu:** Every place in the app, pinned favourites and folders, and one search over all of it.
+- **In Your Browser:** Vector Web runs the full app in any modern browser, Tor Browser included, with nothing to install.
+- **Native Notifications:** Desktop notifications with avatars, inline reply, and mark as read.
 
 ### 🎨 Style & Customization
 - **Custom Emoji Packs:** Create, crop, and share your own packs, compatible with other Nostr clients.
 - **Chat Wallpapers:** Set a custom background per conversation with live blur and brightness controls.
+- **Coloured Text:** Rainbow, gradient and colour tags, plus ANSI code blocks.
 - **Themes:** 7 built-in themes, including XMR and Satoshi.
 
 ### 🛠️ For Developers
 - **Vector SDK:** Build bots in about a dozen lines of Rust, no protocol knowledge required.
 - **Slash Commands:** Ship real commands with typed parameters through a Discord-style picker.
-- **Mini Apps:** Run interactive multiplayer apps and games directly inside encrypted chats.
-- **AI Agent Support:** An MCP server gives AI agents 21 tools to drive Vector programmatically.
+- **Mini Apps:** Run WebXDC apps and multiplayer games directly inside encrypted chats, found in the Nexus.
+- **AI Agent Support:** An MCP server gives AI agents 61 tools to drive Vector programmatically.
 
 ---
 
@@ -125,11 +139,13 @@ Download the latest release for your platform, or open Vector Web in your browse
 | Windows | [Latest Release](https://github.com/VectorPrivacy/Vector/releases/latest) |
 | macOS | [Latest Release](https://github.com/VectorPrivacy/Vector/releases/latest) |
 | Linux | [Latest Release](https://github.com/VectorPrivacy/Vector/releases/latest) |
-| Android | [Latest Release](https://github.com/VectorPrivacy/Vector/releases/latest) |
+| Android | [Latest Release](https://github.com/VectorPrivacy/Vector/releases/latest) or [Zapstore](https://zapstore.dev/apps/io.vectorapp) |
 | Web | [web.vectorapp.io](https://web.vectorapp.io) |
 
 > [!NOTE]
 > The Android build is a standard APK and runs on de-Googled and privacy-focused Android variants, including [GrapheneOS](https://grapheneos.org) and UP Phone.
+
+Check any download at [vectorapp.io/verify](https://vectorapp.io/verify) before you install it: it matches the file against the hash GitHub recorded for that release. From v0.5.0, releases also carry signed checksums and build attestations.
 
 Prefer to build from source? See [Compiling](#compiling) below.
 
@@ -182,15 +198,17 @@ npm run build:bare
 ### What's Excluded?
 
 Currently, bare builds exclude:
-- Vector Voice AI (Whisper and its GPU ML dependencies, like Vulkan).
-- Tor integration (the embedded `arti` onion-routing client).
+- Vector Voice AI: Whisper transcription and dictation, and its GPU ML dependencies, like Vulkan.
+- Tor routing (the embedded `arti` onion-routing client).
+- I2P routing (Vector's SAM client for your own I2P router).
+- Video compression (the statically linked FFmpeg that macOS and Windows releases carry).
 
 ### Standard vs Bare
 
 - **Standard Build**: Full suite of features, maximum utility and range of function.
 - **Bare Build**: Core functionality only, maximum efficiency and the smallest dependency tree.
 
-The bare build is perfect for users who prioritize a minimal footprint and performance over additional features like Local AI and in-app Tor routing — network privacy can still come from a system-level Tor or VPN setup.
+The bare build suits users who put a minimal footprint and performance ahead of features like Local AI and in-app Tor or I2P routing. A bare build connects over Clearnet only, so network privacy can still come from a system-level Tor or VPN setup.
 
 ---
 
@@ -245,4 +263,10 @@ Vector uses third-party assets and resources. For a complete list of attribution
 Vector is released under the [MIT License](LICENSE).
 
 You are free to use, copy, modify, merge, publish, distribute, sublicense, and build upon this project for any purpose, commercial or personal, as long as the original license notice is included. This project is provided as-is, without warranty of any kind.
+
+---
+
+**Trademark notice:** This license covers the source code only. The Vector
+name, logo, and branding are trademarks of Formless Labs and are not
+licensed under the MIT License above. See [TRADEMARK.md](TRADEMARK.md).
 

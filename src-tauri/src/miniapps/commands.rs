@@ -16,10 +16,6 @@ use super::state::{MiniAppInstance, MiniAppsState, MiniAppPackage, RealtimeChann
 use super::realtime::{RealtimeEvent, EventTarget, TopicId, encode_topic_id};
 use crate::util::bytes_to_hex_string;
 
-// Network isolation proxy - only used on Linux (not macOS due to version requirements, not Windows due to WebView2 freeze, not Android)
-#[cfg(all(not(target_os = "macos"), not(target_os = "windows"), not(target_os = "android")))]
-use super::network_isolation::DUMMY_LOCALHOST_PROXY_URL;
-
 /// Information about a Mini App for the frontend
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MiniAppInfo {
@@ -76,8 +72,8 @@ fn miniapp_icon_dir(app: &AppHandle) -> Option<std::path::PathBuf> {
     crate::image_cache::get_cache_dir(app, crate::image_cache::ImageType::MiniAppIcon).ok()
 }
 
-/// Initialization script - runs in all frames
-/// Based on DeltaChat's implementation
+/// Runs before any app code, in every frame: engine shims, API removals and the
+/// permission guards.
 #[allow(dead_code)] // Used on desktop only
 const INIT_SCRIPT: &str = r#"
 // Mini App initialization script
@@ -179,17 +175,11 @@ const INIT_SCRIPT: &str = r#"
     } catch (e) {}
 })();
 
-// Disable WebRTC to prevent IP leaks
-try {
-    window.RTCPeerConnection = () => {};
-    RTCPeerConnection = () => {};
-} catch (e) {
-    console.error("Failed to disable RTCPeerConnection:", e);
-}
-try {
-    window.webkitRTCPeerConnection = () => {};
-    webkitRTCPeerConnection = () => {};
-} catch (e) {}
+// No peer connections: one would reveal the device's IP, and the CSP's `webrtc 'block'`
+// isn't enforced by any engine yet.
+['RTCPeerConnection', 'webkitRTCPeerConnection'].forEach(function (name) {
+    try { window[name] = function () { throw new TypeError(name + ' is not available in Mini Apps'); }; } catch (e) {}
+});
 
 // Secure-context APIs a Mini App has no use for (a loopback-hosted app is a
 // secure context): local file pickers, WebAuthn and the engine's own
@@ -757,10 +747,6 @@ fn get_miniapp_base_url(partition: &str) -> Result<tauri::Url, Error> {
     }
 }
 
-// Note: Chromium hardening browser args were removed for Windows because they cause WebView2 to freeze.
-// The CSP (Content Security Policy) provides the primary security layer for mini apps.
-// See: https://delta.chat/en/2023-05-22-webxdc-security for background on webxdc security.
-
 /// Load Mini App info from a file path
 struct KeptInfo;
 
@@ -1150,15 +1136,10 @@ pub async fn miniapp_open(
             let first = WebviewUrl::CustomProtocol(url.clone());
             (url, first, None, None)
         };
-        let initial_url_clone = initial_url.clone();
     
-        // Get the dummy proxy URL for network isolation (Linux only)
-        // macOS: skipped due to version requirements
-        // Windows: skipped due to WebView2 freeze issues
+        // Linux only: a proxy needs macOS 14 in WKWebView, and freezes WebView2.
         #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
-        let dummy_proxy_url = DUMMY_LOCALHOST_PROXY_URL
-            .as_ref()
-            .map_err(|_| Error::BlackholeProxyUnavailable)?;
+        let null_proxy = super::network_isolation::proxy_url().ok_or(Error::NetworkIsolationUnavailable)?;
     
         let init_script = INIT_SCRIPT.replace(
             "__VECTOR_DEBUG_BRIDGE__",
@@ -1179,7 +1160,7 @@ pub async fn miniapp_open(
         .min_inner_size(320.0, 480.0)
         .resizable(true)
         .focused(true)
-        // Use initialization_script_for_all_frames like DeltaChat does
+        // Frames too: an app's iframe would otherwise get the raw APIs.
         .initialization_script_for_all_frames(&init_script)
         // Enable devtools in debug mode only
         .devtools(cfg!(debug_assertions))
@@ -1212,13 +1193,10 @@ pub async fn miniapp_open(
             window_builder = window_builder.allow_link_preview(false);
         }
     
-        // Non-macOS/non-Windows: Use dummy proxy for network isolation
-        // Note: On macOS, proxy_url increases minimum version to 14, so we skip it
-        // Note: On Windows, both proxy_url and additional_browser_args cause WebView2 to freeze
-        //       We rely on CSP for security on Windows instead
+        // macOS and Windows rely on the CSP alone.
         #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
         if !isolated {
-            window_builder = window_builder.proxy_url(dummy_proxy_url.clone());
+            window_builder = window_builder.proxy_url(null_proxy.clone());
         }
 
         // An isolated app gets a data store of its own: cookies, storage and cache
@@ -1247,7 +1225,7 @@ pub async fn miniapp_open(
 
         #[cfg(target_os = "linux")]
         if let Some((port, boot_url)) = isolated_boot.clone() {
-            let blackhole = dummy_proxy_url.to_string();
+            let null_proxy = null_proxy.to_string();
             let (tx, rx) = tokio::sync::oneshot::channel();
             let queued = window.with_webview(move |wv| {
                 use webkit2gtk::{NetworkProxyMode, NetworkProxySettings, WebContextExt, WebViewExt, WebsiteDataManagerExt};
@@ -1262,7 +1240,7 @@ pub async fn miniapp_open(
                             hosts.push(format!("127.0.0.1:{rt}"));
                         }
                         let hosts: Vec<&str> = hosts.iter().map(String::as_str).collect();
-                        let mut settings = NetworkProxySettings::new(Some(blackhole.as_str()), &hosts);
+                        let mut settings = NetworkProxySettings::new(Some(null_proxy.as_str()), &hosts);
                         manager.set_network_proxy_settings(NetworkProxyMode::Custom, Some(&mut settings));
                         true
                     }
@@ -1270,7 +1248,7 @@ pub async fn miniapp_open(
                 };
                 let _ = tx.send(applied);
             });
-            // Fail closed: without the blackhole the app would have the network.
+            // Fail closed: without the null proxy the app would have the network.
             let applied = queued.is_ok()
                 && matches!(tokio::time::timeout(std::time::Duration::from_secs(5), rx).await, Ok(Ok(true)));
             if !applied || window.navigate(boot_url).is_err() {
@@ -1304,18 +1282,17 @@ pub async fn miniapp_open(
         // The instance this window is for, fixed now: a reopen of the same label
         // registers a new one before this window's teardown runs.
         let instance_id_for_handler = instance.instance_id;
-        let window_clone = Arc::clone(&window);
-    
-        // Track if we're already closing
-        let is_closing = std::sync::atomic::AtomicBool::new(false);
-    
-        // URL for navigating before close (to trigger unload events)
-        let webxdc_js_url = {
-            let mut url = initial_url_clone.clone();
+        let win = Arc::clone(&window);
+        // A first close leaves the page instead, so unload and visibilitychange handlers can
+        // send a last update; the window goes 300 ms later. The bridge script is the one
+        // same-origin address every app has.
+        let farewell = {
+            let mut url = initial_url.clone();
             url.set_path("/webxdc.js");
             url
         };
-    
+        let leaving = std::sync::atomic::AtomicBool::new(false);
+
         window.on_window_event(move |event| {
             match event {
                 tauri::WindowEvent::Destroyed => {
@@ -1330,38 +1307,21 @@ pub async fn miniapp_open(
                     });
                 }
                 tauri::WindowEvent::CloseRequested { api, .. } => {
-                    // Handle close gracefully to allow sendUpdate() calls to complete
-                    // This is a workaround for https://github.com/deltachat/deltachat-desktop/issues/3321
-                    let is_closing_already = is_closing.swap(true, std::sync::atomic::Ordering::Relaxed);
-                    if is_closing_already {
-                        log_trace!("Second CloseRequested event, closing now");
+                    if leaving.swap(true, std::sync::atomic::Ordering::Relaxed) {
                         return;
                     }
-                
-                    log_trace!("CloseRequested on Mini App window, will delay close");
-                
-                    // Navigate to webxdc.js to trigger unload events
-                    // This allows sendUpdate() calls in visibilitychange/unload handlers to complete
-                    if let Err(err) = window_clone.navigate(webxdc_js_url.clone()) {
-                        log_error!("Failed to navigate before close: {err}");
+                    if let Err(e) = win.navigate(farewell.clone()) {
+                        log_error!("Mini App could not leave its page before closing: {e}");
                         return;
                     }
-                
-                    // Hide the window immediately for better UX
-                    window_clone.hide()
-                        .inspect_err(|err| log_warn!("Failed to hide window: {err}"))
-                        .ok();
-                
+                    let _ = win.hide();
                     api.prevent_close();
-                
-                    let window_clone2 = Arc::clone(&window_clone);
+                    let win = Arc::clone(&win);
                     tauri::async_runtime::spawn(async move {
-                        // Wait a bit for any pending sendUpdate() calls
-                        tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
-                        log_trace!("Delay elapsed, closing Mini App window");
-                        window_clone2.close()
-                            .inspect_err(|err| log_error!("Failed to close window: {err}"))
-                            .ok();
+                        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                        if let Err(e) = win.close() {
+                            log_error!("Mini App window did not close: {e}");
+                        }
                     });
                 }
                 _ => {}

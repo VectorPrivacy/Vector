@@ -236,6 +236,7 @@
     "allow-get-pinned-chats",
     "allow-pin-chat",
     "allow-unpin-chat",
+    "allow-move-pinned-chat",
     "allow-get-rail-layout",
     "allow-rail-apply-drop",
     "allow-rail-rename-folder",

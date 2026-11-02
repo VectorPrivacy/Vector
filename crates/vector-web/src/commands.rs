@@ -214,6 +214,12 @@ pub async fn dispatch(cmd: &str, a: Args) -> Result<Value, String> {
             vector_core::traits::emit_event_json("pinned_chats_updated", json!(list.chats));
             Ok(json!(list.chats))
         }
+        "move_pinned_chat" => {
+            let client = vector_core::state::nostr_client().ok_or("Nostr client not initialized")?;
+            let list = vector_core::pinned_chats::move_pinned_chat(&client, &a.str("chatId")?, a.opt_str("before").as_deref()).await?;
+            vector_core::traits::emit_event_json("pinned_chats_updated", json!(list.chats));
+            Ok(json!(list.chats))
+        }
         "get_pinned_chats" => to_value(vector_core::pinned_chats::load_local().chats),
         "get_rail_layout" => to_value(vector_core::synced_prefs::load_rail()),
         "get_hidden_banners" => to_value(vector_core::synced_prefs::load_hidden_banners().ids),
