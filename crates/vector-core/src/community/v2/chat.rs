@@ -727,8 +727,12 @@ fn parse_chat_rumor(opened: OpenedStream) -> Result<ChatEvent, ChatError> {
             let target = decode_id32(required_tag(&opened.rumor, TAG_TARGET)?, TAG_TARGET)?;
             let target_author = PublicKey::from_hex(required_tag(&opened.rumor, TAG_TARGET_AUTHOR)?)
                 .map_err(|_| ChatError::BadTag(TAG_TARGET_AUTHOR))?;
-            let emoji_url = collect_emoji(&opened.rumor).into_iter().next().map(|(_, url)| url);
             let emoji = opened.rumor.content.clone();
+            // NIP-30: only the tag naming this reaction's own `:shortcode:` is its image.
+            let code = emoji.strip_prefix(':').and_then(|s| s.strip_suffix(':'));
+            let emoji_url = code
+                .and_then(|code| collect_emoji(&opened.rumor).into_iter().find(|(c, _)| c == code))
+                .map(|(_, url)| url);
             Ok(ChatEvent::Reaction { opened, target, target_author, emoji, emoji_url })
         }
         kind::DELETE => {
@@ -1190,6 +1194,26 @@ mod tests {
         };
         assert_eq!(emoji, ":catJAM:");
         assert_eq!(emoji_url, Some("https://x/cat.gif".to_string()));
+    }
+
+    #[test]
+    fn a_reaction_takes_only_the_emoji_tag_naming_its_own_shortcode() {
+        let author = Keys::generate();
+        let rumor = build_reaction_rumor(
+            author.public_key(),
+            &chan(),
+            Epoch(0),
+            &"bc".repeat(32),
+            &Keys::generate().public_key().to_hex(),
+            kind::MESSAGE,
+            ":catJAM:",
+            Some(("dogJAM", "https://x/dog.gif")),
+            AT,
+        );
+        let ChatEvent::Reaction { emoji_url, .. } = open(&seal(&rumor, &author)).unwrap() else {
+            panic!("expected a Reaction");
+        };
+        assert_eq!(emoji_url, None);
     }
 
     #[test]

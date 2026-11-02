@@ -230,6 +230,9 @@ fn apply_chat_to_state_in(
             Some(ChatPersist::New(msg))
         }
         ChatEvent::Reaction { opened, target, emoji, emoji_url, .. } => {
+            if !crate::types::is_renderable_reaction(emoji) {
+                return None;
+            }
             let target_id = crate::simd::hex::bytes_to_hex_32(target);
             // Cross-channel guard: a reaction lands only on a target resident in the SAME
             // channel it was sealed under (its binding authenticates its own channel, never
@@ -2100,6 +2103,40 @@ mod tests {
             st.find_message(&msg_id).map(|(_, m)| !m.reactions.is_empty()).unwrap_or(false)
         };
         assert!(!reacted, "the channel-B message gained no reaction from the channel-A injection");
+    }
+
+    #[tokio::test]
+    async fn a_reaction_with_junk_content_is_dropped_and_a_clean_one_lands() {
+        use nostr_sdk::prelude::Timestamp;
+        let (_tmp, _guard, me) = init();
+        let relay = MemoryRelay::new();
+        let community = service::create_community(&relay, "Junk", vec!["wss://r".into()], None).await.unwrap();
+        let general = community.channels[0].id;
+        let cid = crate::simd::hex::bytes_to_hex_32(&general.0);
+        let group = super::super::derive::channel_group_key(&community.community_root, &general, community.root_epoch);
+
+        let author = Keys::generate();
+        let msg = chat::build_message_rumor(author.public_key(), &general, community.root_epoch, "hi", None, &[], vec![], 5_000);
+        let msg_id = msg.id.unwrap().to_hex();
+        let (mw, _) = chat::seal_chat_rumor(&msg, &group, &author, Timestamp::from_secs(5), false).unwrap();
+        let ev = chat::open_chat_event(&mw, &group, &general, community.root_epoch).unwrap();
+        persist_chat_event(&ev, &cid, &me.public_key()).await;
+
+        let react = |content: &str, at: u64| {
+            let r = chat::build_reaction_rumor(author.public_key(), &general, community.root_epoch, &msg_id, &author.public_key().to_hex(), super::super::kind::MESSAGE, content, None, at);
+            let (w, _) = chat::seal_chat_rumor(&r, &group, &author, Timestamp::from_secs(at / 1000), false).unwrap();
+            chat::open_chat_event(&w, &group, &general, community.root_epoch).unwrap()
+        };
+        let junk = react(":catclap:https://i.nostr.build/lLMrw.gif", 6_000);
+        assert!(persist_chat_event(&junk, &cid, &me.public_key()).await.is_none(), "a shortcode+URL reaction is dropped");
+        let clean = react(":catclap:", 7_000);
+        assert!(persist_chat_event(&clean, &cid, &me.public_key()).await.is_some(), "a clean shortcode reaction lands");
+
+        let emojis: Vec<String> = {
+            let st = crate::state::STATE.lock().await;
+            st.find_message(&msg_id).map(|(_, m)| m.reactions.iter().map(|r| r.emoji.clone()).collect()).unwrap_or_default()
+        };
+        assert_eq!(emojis, vec![":catclap:".to_string()]);
     }
 
     #[tokio::test]

@@ -1589,7 +1589,7 @@ async fn compose_message_views(message_events: Vec<StoredEvent>) -> Result<Vec<M
         for event in related_events {
             if let Some(ref_id) = &event.reference_id {
                 match event.kind {
-                    k if k == event_kind::REACTION => {
+                    k if k == event_kind::REACTION && crate::types::is_renderable_reaction(&event.content) => {
                         let emoji_url = extract_reaction_emoji_url(&event.tags, &event.content);
                         let reaction = Reaction {
                             id: event.id.clone(),
@@ -1960,7 +1960,7 @@ pub async fn get_all_chats_last_messages() -> Result<std::collections::HashMap<S
         for event in related_events {
             if let Some(ref_id) = &event.reference_id {
                 match event.kind {
-                    k if k == event_kind::REACTION => {
+                    k if k == event_kind::REACTION && crate::types::is_renderable_reaction(&event.content) => {
                         let emoji_url = extract_reaction_emoji_url(&event.tags, &event.content);
                         let reaction = Reaction {
                             id: event.id.clone(), reference_id: ref_id.clone(),

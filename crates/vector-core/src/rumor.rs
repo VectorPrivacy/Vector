@@ -27,7 +27,7 @@
 use crate::tags::TagsExt;
 use std::path::Path;
 use nostr_sdk::prelude::*;
-use crate::types::{Message, Attachment, ImageMetadata, Reaction};
+use crate::types::{Message, Attachment, ImageMetadata, Reaction, is_renderable_reaction};
 use crate::stored_event::{StoredEvent, StoredEventBuilder, event_kind};
 use crate::crypto::{extension_from_mime, sanitize_filename};
 
@@ -674,33 +674,6 @@ fn process_deletion(
     let target_event_id = unique_event_ref(&rumor)
         .ok_or("Deletion target tag missing or ambiguous")?;
     Ok(RumorProcessingResult::DeletionRequest { target_event_id })
-}
-
-/// Whether a reaction's content is something Vector can render as a clean chip.
-/// Everything else (a `:code:URL`, prose, a jammed-in URL, anything long or with
-/// whitespace) is dropped at ingest instead of shown as an overflowing/garbled
-/// reaction — the wrapper is still recorded, but no reaction is stored.
-fn is_renderable_reaction(content: &str) -> bool {
-    // NIP-25 like / dislike / implicit-like.
-    if content.is_empty() || content == "+" || content == "-" {
-        return true;
-    }
-    // A clean NIP-30 custom-emoji shortcode `:name:` (resolves to an image, or is
-    // shown verbatim). Bounded so a giant shortcode can't slip through either.
-    if let Some(inner) = content.strip_prefix(':').and_then(|s| s.strip_suffix(':')) {
-        if !inner.is_empty()
-            && inner.len() <= 48
-            && inner.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '~' | '-' | '+'))
-        {
-            return true;
-        }
-    }
-    // Otherwise keep only a short, single-token glyph. Reject anything that would
-    // stretch or break the row: long content, whitespace/newlines, or an embedded
-    // URL (the `:code:https://…` fuzz). Short odd content is harmless.
-    content.chars().count() <= 12
-        && !content.chars().any(char::is_whitespace)
-        && !content.contains("://")
 }
 
 /// Process a reaction rumor
