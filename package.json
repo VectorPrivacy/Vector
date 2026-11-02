@@ -1,7 +1,7 @@
 {
   "name": "vector",
   "private": true,
-  "version": "0.5.0-3",
+  "version": "0.5.0-4",
   "type": "module",
   "engines": {
     "npm": ">=11"
