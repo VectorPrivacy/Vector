@@ -6072,6 +6072,8 @@ textarea#chat-input::placeholder {
   white-space: nowrap;
   cursor: default;
 }
+/* A composer widget's label is drawn, not typed: see `atom` in composer.js. */
+.rich-composer [data-label]::after { content: attr(data-label); }
 
 /* A coloured run keeps the ordinary caret, as a mention does. */
 #chat-input.rich-composer .cmp-color { caret-color: var(--text-color); }

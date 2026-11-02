@@ -494,6 +494,20 @@ function createRichComposer(host, opts = {}) {
         return n;
     }
 
+    /**
+     * A widget whose label is not its source, between caret-stop sentinels. The label is
+     * CSS content, not text: a keyboard that reads it as a word resumes composing over it.
+     */
+    function atom(cls, label, raw) {
+        const w = document.createElement('span');
+        w.className = cls;
+        w.dataset.label = label;
+        w.contentEditable = 'false';
+        w.dataset.src = raw;
+        el.append(CMP_ZWSP, w, CMP_ZWSP);
+        return w;
+    }
+
     /** A decoration keeps its markers visible but dimmed, so source == display. */
     function decorated(cls, raw, markLen) {
         const wrap = document.createElement('span');
@@ -568,44 +582,24 @@ function createRichComposer(host, opts = {}) {
                     // trapping the caret. The source already carries the short name.
                     el.appendChild(span('cmp-mention', raw));
                     break;
-                case 'timestamp': {
-                    // Atomic like a pasted mention: the text shown isn't the source.
-                    const w = span('cmp-time', ttFormat(t.unix, t.style));
-                    w.contentEditable = 'false';
-                    w.dataset.src = raw;
-                    w.title = ttFull(t.unix);
-                    el.appendChild(document.createTextNode(CMP_ZWSP));
-                    el.appendChild(w);
-                    el.appendChild(document.createTextNode(CMP_ZWSP));
+                case 'timestamp':
+                    atom('cmp-time', ttFormat(t.unix, t.style), raw).title = ttFull(t.unix);
                     break;
-                }
                 case 'channelref': {
-                    // Atomic: the link is the source, the channel's name is what shows.
-                    const w = span('cmp-mention cmp-channel', t.voice ? '' : '#' + t.label);
+                    // The link is the source, the channel's name is what shows.
+                    const w = atom('cmp-mention cmp-channel', t.voice ? t.label : '#' + t.label, raw);
                     if (t.voice) {
                         const icon = document.createElement('span');
                         icon.className = 'icon icon-volume-max cmp-channel-icon';
-                        w.append(icon, document.createTextNode(t.label));
+                        w.append(icon);
                     }
-                    w.contentEditable = 'false';
-                    w.dataset.src = raw;
-                    el.appendChild(document.createTextNode(CMP_ZWSP));
-                    el.appendChild(w);
-                    el.appendChild(document.createTextNode(CMP_ZWSP));
                     break;
                 }
-                case 'npubmention': {
-                    // Atomic, unlike the name form: the text shown ("@Alice") is not
-                    // the source ("@npub1…"), so the caret must not enter it. `data-src`
-                    // carries the key, keeping `value` byte-identical to what is sent.
-                    const w = span('cmp-mention', '@' + t.label);
-                    w.contentEditable = 'false';
-                    w.dataset.src = raw;
-                    el.appendChild(document.createTextNode(CMP_ZWSP));
-                    el.appendChild(w);
-                    el.appendChild(document.createTextNode(CMP_ZWSP));
+                case 'npubmention':
+                    // Unlike the name form, the text shown ("@Alice") is not the source
+                    // ("@npub1…"), so the caret must not enter it.
+                    atom('cmp-mention', '@' + t.label, raw);
                     break;
-                }
                 // Emoji widgets are BARE <img> elements, deliberately: an image is
                 // inherently atomic (nothing to type inside) and reads to an IME as
                 // an ordinary object character. The previous shape — a
@@ -950,7 +944,8 @@ function createRichComposer(host, opts = {}) {
         const sel = selectionRange();
         if (!sel || sel.start !== sel.end) return false;
         const caret = sel.start;
-        const atomic = (t) => t.kind === 'emoji' || t.kind === 'twemoji' || t.kind === 'ansicode';
+        const atomic = (t) => t.kind === 'emoji' || t.kind === 'twemoji' || t.kind === 'ansicode'
+            || t.kind === 'timestamp' || t.kind === 'npubmention' || t.kind === 'channelref';
         const tokens = cmpTokenize(src, opts);
         const splice = (from, to) => {
             src = src.slice(0, from) + src.slice(to);
@@ -1116,6 +1111,15 @@ function createRichComposer(host, opts = {}) {
             rerender(focused ? src.length : null);
             caretOwed = !focused;
             if (caretOwed) lastSelection = { start: src.length, end: src.length };
+            // A write under an IME composition replaces it without a compositionend, and some
+            // keyboards (AOSP, Samsung) keep the old word to re-type on Backspace: refocusing
+            // restarts them.
+            if (composing) {
+                composing = false;
+                el.blur();
+                el.focus();
+                setCaret(src.length);
+            }
         },
         get selectionStart() { const r = selectionRange(); return r ? r.start : src.length; },
         set selectionStart(v) { setCaret(v); },
