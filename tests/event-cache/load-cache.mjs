@@ -58,6 +58,7 @@ export function loadCache() {
     //   - window  : line 791 does `window.eventCache = eventCache`.
     //   - console : the source has none, but keep a real one for safety.
     //   - Date/Set/Map/Math/Infinity : Node natives, exposed via globalThis.
+    //   - VectorSvelte : the bundle's clock, here the device's.
     const sandbox = {
         invoke: async (cmd, args) => {
             invokeCalls.push({ cmd, args });
@@ -66,6 +67,7 @@ export function loadCache() {
             return [];
         },
         window: {},
+        VectorSvelte: { now: () => Date.now(), nowDate: () => new Date() },
         console,
         Date,
         Set,

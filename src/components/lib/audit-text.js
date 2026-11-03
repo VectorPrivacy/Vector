@@ -1,6 +1,7 @@
 // The Audit Log in words: each entry as a sentence of plain and bold parts, the details it
 // expands to, and the family the filter groups it under.
 import { permissionName } from './permissions.js';
+import { now as clockNow } from './clock.svelte.js';
 
 export const FAMILIES = [
     { value: 'all', label: 'All Actions' },
@@ -191,7 +192,7 @@ export function plainText(entry, ctx) {
 }
 
 /** When an entry happened, as a person says it. */
-export function when(ms, now = Date.now()) {
+export function when(ms, now = clockNow()) {
     const d = new Date(ms);
     const diff = now - ms;
     if (diff < 60_000) return 'Just now';

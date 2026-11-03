@@ -17,7 +17,7 @@ function initTimeSuggest(textarea, { enabled = () => true, busy = () => false } 
     let shortDate = null;
     function whenAt(unix) {
         const at = new Date(unix * 1000);
-        if (at.toDateString() === new Date().toDateString()) return ttFormat(unix, 't');
+        if (at.toDateString() === VectorSvelte.nowDate().toDateString()) return ttFormat(unix, 't');
         shortDate ??= new Intl.DateTimeFormat(undefined, { weekday: 'short', day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' });
         return shortDate.format(at);
     }

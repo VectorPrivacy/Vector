@@ -301,7 +301,7 @@ function _packsSignature(packs) {
 }
 
 async function loadEmojiPacks({ refresh = false } = {}) {
-    if (refresh && Date.now() - _lastRefreshAt < PACK_REFRESH_TTL_MS) {
+    if (refresh && VectorSvelte.now() - _lastRefreshAt < PACK_REFRESH_TTL_MS) {
         // Skip the relay round-trip — local mirror is still fresh.
         // The first open of every panel session still calls the read-only
         // path (refresh:false), so initial render isn't gated.
@@ -309,7 +309,7 @@ async function loadEmojiPacks({ refresh = false } = {}) {
     }
     try {
         const packs = await invoke(refresh ? 'refresh_emoji_packs' : 'list_emoji_packs');
-        if (refresh) _lastRefreshAt = Date.now();
+        if (refresh) _lastRefreshAt = VectorSvelte.now();
         const arr = Array.isArray(packs) ? packs : [];
         // Truncate every pack's emoji list to the display cap. Shared
         // packs may exceed the limit (creator's choice), but we surface

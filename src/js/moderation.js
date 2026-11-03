@@ -123,11 +123,11 @@ function modStopRefresh() {
 function modNoteActivity(communityId) {
     if (!communityId || modCommunityId() !== communityId) return;
     if (modRefreshPending) return; // already coalescing this burst
-    const since = Date.now() - modRefreshedAt;
+    const since = VectorSvelte.now() - modRefreshedAt;
     const wait = Math.max(MOD_REFRESH_COALESCE_MS, MOD_REFRESH_FLOOR_MS - since);
     modRefreshPending = setTimeout(() => {
         modRefreshPending = null;
-        modRefreshedAt = Date.now();
+        modRefreshedAt = VectorSvelte.now();
         modRefresh(communityId);
     }, wait);
 }

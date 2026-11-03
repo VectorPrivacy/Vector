@@ -761,7 +761,7 @@ function correctScrollForMediaLoad() {
  */
 function compensateChatScrollForResize() {
     if (!domChatMessages) return;
-    if (chatOpenTimestamp && Date.now() - chatOpenTimestamp < 100) {
+    if (chatOpenTimestamp && VectorSvelte.now() - chatOpenTimestamp < 100) {
         scrollToBottom(domChatMessages, false);
         holdChatBottom();
     } else if (proceduralScrollState.isLoadingOlderMessages) {
@@ -796,14 +796,14 @@ let _bottomHoldRaf = null;
  *  like a scroll-up; only a real gesture tells the two apart. */
 let _lastScrollGesture = 0;
 for (const ev of ['wheel', 'touchmove', 'pointerdown', 'keydown'])
-    domChatMessages.addEventListener(ev, () => { _lastScrollGesture = Date.now(); }, { passive: true });
+    domChatMessages.addEventListener(ev, () => { _lastScrollGesture = VectorSvelte.now(); }, { passive: true });
 
 /** Is the app currently asserting "we belong at the bottom"? The pin recompute
  *  consults this so a settling layout can't be mistaken for the user leaving. */
-function chatBottomHoldPending() { return Date.now() < _bottomHoldUntil; }
+function chatBottomHoldPending() { return VectorSvelte.now() < _bottomHoldUntil; }
 function holdChatBottom(ms = BOTTOM_HOLD_MS) {
     if (!domChatMessages) return;
-    _bottomHoldUntil = Math.max(_bottomHoldUntil, Date.now() + ms);
+    _bottomHoldUntil = Math.max(_bottomHoldUntil, VectorSvelte.now() + ms);
     if (_bottomHoldRaf !== null) return; // already holding; the deadline just moved
     let lastHeight = domChatMessages.scrollHeight;
     let lastSet = null;   // where WE last put the view, to tell our own scroll from theirs
@@ -843,12 +843,12 @@ function holdChatBottom(ms = BOTTOM_HOLD_MS) {
                     beginProgrammaticScroll();
                     scrollToEnd(el);
                     lastSet = el.scrollTop;
-                    lastSetAt = Date.now();
+                    lastSetAt = VectorSvelte.now();
                 }
             }
             firstTick = false;
         }
-        if (Date.now() < _bottomHoldUntil) _bottomHoldRaf = requestAnimationFrame(tick);
+        if (VectorSvelte.now() < _bottomHoldUntil) _bottomHoldRaf = requestAnimationFrame(tick);
     };
     _bottomHoldRaf = requestAnimationFrame(tick);
 }
@@ -1406,7 +1406,7 @@ async function jumpToUnread(lastReadId) {
     // navigate-away (the `strOpenChat !== chatId` bails) can't leave it stuck.
     _unreadJumpResolving = true;
     try {
-    const stale = boundaryAt < (Date.now() - UNREAD_JUMP_STALE_MS);
+    const stale = boundaryAt < (VectorSvelte.now() - UNREAD_JUMP_STALE_MS);
 
     // Only REAL messages drive the resolve frontier. Presence/system events stream into chat.messages
     // during the walk (their own emit path) at timestamps spanning the whole gap — counting them would

@@ -1,5 +1,6 @@
 // Profiles on screen, or about to be, are reported in batches; the backend fetches only the ones
 // whose last check has gone stale. One observer serves every row that shows a person.
+import { now as clockNow } from './clock.svelte.js';
 
 const NEAR = '300px 0px';
 const FLUSH_MS = 1500;
@@ -20,7 +21,7 @@ function flush() {
 }
 
 function seen(npub) {
-    const now = Date.now();
+    const now = clockNow();
     if (now - (sent.get(npub) || 0) < RESEND_MS) return;
     sent.set(npub, now);
     pending.add(npub);

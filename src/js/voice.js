@@ -271,7 +271,7 @@ class VoiceRecorder {
             VectorSvelte.setVoiceStatusText('Recording...');
             await invoke('start_recording');
             this._setState(RecordingState.RECORDING);
-            this.recordingStartTime = Date.now();
+            this.recordingStartTime = VectorSvelte.now();
             this._startTimer();
         } catch (err) {
             this._setState(RecordingState.IDLE);
@@ -557,7 +557,7 @@ class VoiceRecorder {
      */
     _startTimer() {
         this.timerInterval = setInterval(() => {
-            const elapsed = Math.floor((Date.now() - this.recordingStartTime) / 1000);
+            const elapsed = Math.floor((VectorSvelte.now() - this.recordingStartTime) / 1000);
             const minutes = Math.floor(elapsed / 60);
             const seconds = elapsed % 60;
             VectorSvelte.setVoiceTimer(`${minutes}:${seconds.toString().padStart(2, '0')}`);
@@ -858,7 +858,7 @@ const AUDIO_PLAYER_HELPERS = {
     cancelModelDownload: () => invoke('cancel_whisper_download'),
     // A received message under a minute old, with the chosen model already on disk.
     autoTranscribe: (msg) => {
-        if (!window.voiceSettings?.autoTranscribe || msg.mine || msg.at <= Date.now() - 60_000) return false;
+        if (!window.voiceSettings?.autoTranscribe || msg.mine || msg.at <= VectorSvelte.now() - 60_000) return false;
         const selected = window.voiceSettings.selectedModel || 'small';
         return !!window.voiceSettings.models?.find(m => m.model.name === selected)?.downloaded;
     },

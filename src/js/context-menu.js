@@ -46,7 +46,7 @@ let _ctxMenuOpenedAt = 0;
  *  click handler (e.g. the chatlist open) swallow that same tap, so dismissing
  *  the menu doesn't also activate whatever sat behind it. */
 function wasContextMenuJustDismissed() {
-    return Date.now() - _ctxMenuDismissedAt < 400;
+    return VectorSvelte.now() - _ctxMenuDismissedAt < 400;
 }
 
 // The menu is a component; an item's activation closes it before its handler runs.
@@ -232,7 +232,7 @@ function attachLongPressContextMenu(el, fireMenu, accepts = null) {
     }, { capture: true, passive: false });
     document.addEventListener('mousedown', () => {
         if (_ctxMenuPress.at < _ctxMenuOpenedAt) return;
-        if (_ctxMenuVisible) _ctxMenuDismissedAt = Date.now();
+        if (_ctxMenuVisible) _ctxMenuDismissedAt = VectorSvelte.now();
         hideContextMenu();
     });
     document.addEventListener('scroll', () => hideContextMenu(), true);

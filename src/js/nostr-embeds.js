@@ -237,12 +237,12 @@ const _nostrEmbedCache = new Map();
 function _resolveNostrEmbed(entity) {
     const key = entity.toLowerCase();
     const c = _nostrEmbedCache.get(key);
-    if (c && (c.state !== 'err' || Date.now() - c.ts < NOSTR_EMBED_ERR_TTL_MS)) {
+    if (c && (c.state !== 'err' || VectorSvelte.now() - c.ts < NOSTR_EMBED_ERR_TTL_MS)) {
         return c.state === 'loading' ? c.promise : Promise.resolve(c);
     }
     const promise = invoke('fetch_nostr_embed', { reference: entity })
         .then((embed) => ({ state: 'ok', embed }))
-        .catch((err) => ({ state: 'err', error: String(err), ts: Date.now() }))
+        .catch((err) => ({ state: 'err', error: String(err), ts: VectorSvelte.now() }))
         .then((r) => {
             _nostrEmbedCache.set(key, r);
             return r;

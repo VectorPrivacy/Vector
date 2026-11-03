@@ -89,7 +89,7 @@ function closeInviteDetails() {
 /** An invite row's menu: Advanced Mode's copies, the bundle in the CORD-05 form Concord CLI reads. */
 function showInviteMenu(invite, x, y) {
     if (!VectorSvelte.advancedState().on) return;
-    window._chatRowMenuAt = Date.now();
+    window._chatRowMenuAt = VectorSvelte.now();
     const copy = (label, text) => ({
         label: `Copy ${label}`,
         icon: 'copy',
@@ -133,7 +133,7 @@ async function surfaceCommunitySummary(summary) {
         // Stamp the join moment so an empty community sorts to the top right away. Reloads
         // re-source this from the persisted DB created_at via upsert_community_chat.
         if (!chat.metadata.custom_fields.created_at) {
-            chat.metadata.custom_fields.created_at = String(Date.now());
+            chat.metadata.custom_fields.created_at = String(VectorSvelte.now());
         }
         // Proven owner (verified attestation) → drives the crown + hoist + in-chat Owner tag.
         if (summary.owner_npub) chat.metadata.custom_fields.owner_npub = summary.owner_npub;
@@ -239,7 +239,7 @@ async function acceptCommunityInvite(communityId) {
         chat.metadata.custom_fields = chat.metadata.custom_fields || {};
         chat.metadata.custom_fields.name = invite.name || 'Community';
         chat.metadata.custom_fields.community_id = communityId;
-        if (!chat.metadata.custom_fields.created_at) chat.metadata.custom_fields.created_at = String(Date.now());
+        if (!chat.metadata.custom_fields.created_at) chat.metadata.custom_fields.created_at = String(VectorSvelte.now());
         chat._joining = true; // renders locked
         // Re-sort so the fresh created_at floats the joining row to the TOP (the list itself
         // renders arrChats in order; the new chat was pushed to the end).
@@ -469,8 +469,8 @@ function _resolveCommunityInvitePreview(inviteKey) {
         if (cached.state === 'ok') {
             const joined = cached.info.community_id
                 && arrChats.some(c => c.metadata?.custom_fields?.community_id === cached.info.community_id);
-            if (joined || (Date.now() - cached.ts) < INVITE_PREVIEW_OK_TTL_MS) return Promise.resolve(cached);
-        } else if (Date.now() - cached.ts < INVITE_PREVIEW_ERR_TTL_MS) {
+            if (joined || (VectorSvelte.now() - cached.ts) < INVITE_PREVIEW_OK_TTL_MS) return Promise.resolve(cached);
+        } else if (VectorSvelte.now() - cached.ts < INVITE_PREVIEW_ERR_TTL_MS) {
             return Promise.resolve(cached);
         }
     }
@@ -488,10 +488,10 @@ function _resolveCommunityInvitePreview(inviteKey) {
                     if (path) iconSrc = convertFileSrc(path);
                 } catch (e) { console.debug('invite logo decrypt failed, using placeholder', e); }
             }
-            entry = { state: 'ok', info, iconSrc, ts: Date.now() };
+            entry = { state: 'ok', info, iconSrc, ts: VectorSvelte.now() };
         } catch (e) {
             // A failed refresh must not downgrade a previously-good preview.
-            entry = prior ? { ...prior, ts: Date.now() } : { state: 'err', error: String(e), ts: Date.now() };
+            entry = prior ? { ...prior, ts: VectorSvelte.now() } : { state: 'err', error: String(e), ts: VectorSvelte.now() };
         }
         if (_invitePreviewCache.size >= INVITE_PREVIEW_CACHE_MAX) {
             const oldest = _invitePreviewCache.keys().next().value;
@@ -583,7 +583,7 @@ function communityMemberSubtext(communityId) {
  */
 async function refreshCommunityMemberCount(communityId, force = false) {
     if (!communityId || _communityCountInFlight.has(communityId)) return;
-    if (!force && Date.now() - (_communityCountLastFetch.get(communityId) || 0) < 2000) return;
+    if (!force && VectorSvelte.now() - (_communityCountLastFetch.get(communityId) || 0) < 2000) return;
     _communityCountInFlight.add(communityId);
     let members;
     try {
@@ -593,7 +593,7 @@ async function refreshCommunityMemberCount(communityId, force = false) {
         return;
     }
     _communityCountInFlight.delete(communityId);
-    _communityCountLastFetch.set(communityId, Date.now());
+    _communityCountLastFetch.set(communityId, VectorSvelte.now());
     const listed = communityMembersCache.get(communityId)?.length;
     communityMembersCache.set(communityId, members);
     if (force) syncRequestMutuals(true);
@@ -1002,7 +1002,7 @@ async function renderCommunityOverview(chat, preserveSearch = false) {
         // Cache the count for the header/overview subtext (the overview's own authoritative fetch).
         communityMembersCache.set(communityId, memberList);
         communityMemberCounts.set(communityId, countedMembers(memberList));
-        _communityCountLastFetch.set(communityId, Date.now());
+        _communityCountLastFetch.set(communityId, VectorSvelte.now());
         try { adminNpubs = await invoke('get_community_admins', { communityId }); } catch (_) {}
         try {
             roleGraph = await invoke('get_community_role_graph', { communityId });

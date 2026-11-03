@@ -414,7 +414,7 @@ document.addEventListener('DOMContentLoaded', registerMarketplaceHandlers, { onc
 
 /** How long ago something was played, said briefly: "just now", "5m ago", "2d ago", "3 Oct". */
 function formatPlayedAgo(ms) {
-    const s = Math.max(0, (Date.now() - ms) / 1000);
+    const s = Math.max(0, (VectorSvelte.now() - ms) / 1000);
     if (s < 60) return 'just now';
     if (s < 3600) return `${Math.floor(s / 60)}m ago`;
     if (s < 86400) return `${Math.floor(s / 3600)}h ago`;

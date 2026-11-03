@@ -6,15 +6,16 @@
     import { credentialState } from '../lib/credential.svelte.js';
     import { popIn } from '../lib/popin.js';
     import Avatar from '../ui/Avatar.svelte';
+    import { now as clockNow } from '../lib/clock.svelte.js';
     let { h } = $props();   // h: TransferHelpers (js/transfer.js)
     const st = transferModal.state();
     const cred = credentialState();
 
-    let now = $state(Date.now());
+    let now = $state(clockNow());
     $effect(() => {
         if (!st.active || st.stage !== 'show') return;
-        now = Date.now();
-        const id = setInterval(() => { now = Date.now(); }, 1000);
+        now = clockNow();
+        const id = setInterval(() => { now = clockNow(); }, 1000);
         return () => clearInterval(id);
     });
     const left = $derived(Math.max(0, Math.ceil((st.expiresAt - now) / 1000)));

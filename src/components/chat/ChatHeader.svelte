@@ -8,6 +8,7 @@
     import { pinsState, pinsEls } from '../lib/pins.svelte.js';
     import { wallpaperState } from '../lib/wallpaper.svelte.js';
     import Avatar from '../ui/Avatar.svelte';
+    import { now as clockNow } from '../lib/clock.svelte.js';
 
     const h = () => chatHeaderHandlers();
     // The pins scrim's hit-test needs the button: a tap on it toggles, never dismisses.
@@ -116,10 +117,10 @@
     $effect(() => {
         if (gesture || !vm || !info) return;
         gesture = true;
-        h().attachLongPressContextMenu(info, (x, y) => { if (h().channelMenu(x, y)) menuAt = Date.now(); }, () => !!vm?.group);
+        h().attachLongPressContextMenu(info, (x, y) => { if (h().channelMenu(x, y)) menuAt = clockNow(); }, () => !!vm?.group);
     });
     function tap() {
-        if (Date.now() - menuAt < 600 || h()?.menuJustDismissed()) return;
+        if (clockNow() - menuAt < 600 || h()?.menuJustDismissed()) return;
         vm?.click?.();
     }
 </script>

@@ -18,6 +18,9 @@ async function setupRustListeners() {
     const _p = [];
     const _on = (event, handler) => _p.push(listen(event, handler));
 
+    _on('clock_changed', (evt) => VectorSvelte.setClock(evt.payload));
+    invoke('get_clock_status').then((s) => VectorSvelte.setClock(s)).catch(() => {});
+
     // A Community invite (npub gift-wrap) was parked → surface it as a pending slot.
     _on('community_invite_received', async (evt) => {
         await loadCommunityInvites();
@@ -242,7 +245,7 @@ async function setupRustListeners() {
 
             // Use the event's REAL time so it sorts chronologically. A join replayed during history paging /
             // rehydration would otherwise be stamped `now` and sink to the bottom of the chat.
-            const atMs = Number(evt.payload?.created_at_ms) || Date.now();
+            const atMs = Number(evt.payload?.created_at_ms) || VectorSvelte.now();
 
             // Create system event message using the event_id
             const systemMsg = {
@@ -703,7 +706,7 @@ async function setupRustListeners() {
 
         // Store the typers array and update timestamp
         chat.active_typers = typers || [];
-        chat.last_typing_update = Date.now() / 1000;
+        chat.last_typing_update = VectorSvelte.now() / 1000;
         if (chat.active_typers.length) armTypingExpiry(chat.last_typing_update);
 
         // If this chat is currently open, update the chat header subtext
@@ -946,7 +949,7 @@ async function setupRustListeners() {
         // message until their own echo arrives.
         const inflight = pendingReactions.get(evt.payload.old_id);
         if (inflight) {
-            const now = Date.now();
+            const now = VectorSvelte.now();
             const still = inflight.filter(p =>
                 now - p.at < PENDING_REACTION_TTL_MS &&
                 !evt.payload.message.reactions.some(r => r.author_id === p.author_id && r.emoji === p.emoji)

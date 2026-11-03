@@ -97,7 +97,7 @@ async function showTransferCode() {
         if (seq !== transferSeq) return;
         transferId = started.id;
         if (transferState().stage === 'connecting') {
-            transferPatch({ stage: 'show', code: started.code, qr: started.qr, expiresAt: Date.now() + 5 * 60 * 1000 });
+            transferPatch({ stage: 'show', code: started.code, qr: started.qr, expiresAt: VectorSvelte.now() + 5 * 60 * 1000 });
         }
     } catch (e) {
         if (seq === transferSeq) transferPatch({ stage: 'error', error: String(e) });

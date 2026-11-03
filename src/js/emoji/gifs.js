@@ -73,7 +73,7 @@ function showGifSkeletons(count) {
  */
 function prefetchTrendingGifs() {
     // Skip if cache is still fresh
-    if (cachedTrendingGifs && Date.now() - cachedTrendingTimestamp < GIF_CACHE_TTL) {
+    if (cachedTrendingGifs && VectorSvelte.now() - cachedTrendingTimestamp < GIF_CACHE_TTL) {
         return;
     }
 
@@ -82,7 +82,7 @@ function prefetchTrendingGifs() {
         .then(data => {
             if (data.results && data.results.length > 0) {
                 cachedTrendingGifs = data.results;
-                cachedTrendingTimestamp = Date.now();
+                cachedTrendingTimestamp = VectorSvelte.now();
             }
         })
         .catch(() => {}); // Silently fail - this is just an optimization
@@ -192,7 +192,7 @@ async function loadTrendingGifs() {
     gifCurrentQuery = '';
 
     // Use cached data if fresh (only for first page)
-    if (cachedTrendingGifs && Date.now() - cachedTrendingTimestamp < GIF_CACHE_TTL) {
+    if (cachedTrendingGifs && VectorSvelte.now() - cachedTrendingTimestamp < GIF_CACHE_TTL) {
         // Thumbhashes should already be cached, but ensure they are
         await predecodeThumbhashes(cachedTrendingGifs);
         if (signal.aborted) return;
@@ -213,7 +213,7 @@ async function loadTrendingGifs() {
         if (data.results && data.results.length > 0) {
             // Cache the results
             cachedTrendingGifs = data.results;
-            cachedTrendingTimestamp = Date.now();
+            cachedTrendingTimestamp = VectorSvelte.now();
             // Pre-decode thumbhashes before rendering
             await predecodeThumbhashes(data.results);
             if (signal.aborted) return;

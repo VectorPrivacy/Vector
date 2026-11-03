@@ -58,8 +58,8 @@ function stopBunkerSessionTimer() {
 
 /** One tick of the live countdown; at expiry the single-use link is spent, so its popup goes. */
 function tickBunkerSession() {
-    if (bunkerSessionDeadline - Date.now() > 0) {
-        VectorSvelte.bunkerTick(Date.now());
+    if (bunkerSessionDeadline - VectorSvelte.now() > 0) {
+        VectorSvelte.bunkerTick(VectorSvelte.now());
         return;
     }
     stopBunkerSessionTimer();
@@ -72,13 +72,13 @@ function tickBunkerSession() {
 /** The QR popup: a live link is shown again as it is; otherwise a fresh session starts. */
 function openBunkerQr() {
     VectorSvelte.bunkerQrOpen(true);
-    if (strBunkerNostrConnectUrl && bunkerSessionDeadline > Date.now()) return;
+    if (strBunkerNostrConnectUrl && bunkerSessionDeadline > VectorSvelte.now()) return;
     startBunkerSession();
 }
 
 function armBunkerSessionTimer() {
     stopBunkerSessionTimer();
-    bunkerSessionDeadline = Date.now() + BUNKER_SESSION_TIMEOUT_MS;
+    bunkerSessionDeadline = VectorSvelte.now() + BUNKER_SESSION_TIMEOUT_MS;
     VectorSvelte.bunkerDeadline(bunkerSessionDeadline);
     bunkerSessionTimerHandle = setInterval(tickBunkerSession, 1000);
 }

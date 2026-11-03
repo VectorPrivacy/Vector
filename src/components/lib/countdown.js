@@ -1,4 +1,5 @@
 // Countdowns for what ends on its own: a dissolving message, a Timeout.
+import { now as clockNow } from './clock.svelte.js';
 
 /** mm:ss under an hour, else Hh Mm, else Dd Hh. */
 export function fmtCountdown(secs) {
@@ -15,7 +16,7 @@ export function fmtCountdown(secs) {
 export function countdownTip(node, opts) {
     let cur = opts;
     let timer = 0;
-    const tick = () => cur.ui.showTooltip(cur.label(cur.until - Math.floor(Date.now() / 1000)), node);
+    const tick = () => cur.ui.showTooltip(cur.label(cur.until - Math.floor(clockNow() / 1000)), node);
     const enter = () => { tick(); clearInterval(timer); timer = setInterval(tick, 1000); };
     const leave = () => {
         if (!timer) return;

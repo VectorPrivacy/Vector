@@ -62,7 +62,7 @@ class ConversationCacheEntry {
         this.conversationId = conversationId;
         this.events = [];
         this.eventIds = new Set();  // O(1) duplicate lookup (~8 bytes per reference)
-        this.lastAccess = Date.now();
+        this.lastAccess = VectorSvelte.now();
         this.totalInDb = 0;  // Total displayable event count in database
         this.loadedOffset = 0;  // How many events from the end we've loaded
         this.isFullyLoaded = false;  // Whether all events are loaded
@@ -77,7 +77,7 @@ class ConversationCacheEntry {
      * Update the last access time (for LRU tracking)
      */
     touch() {
-        this.lastAccess = Date.now();
+        this.lastAccess = VectorSvelte.now();
     }
 
     /**

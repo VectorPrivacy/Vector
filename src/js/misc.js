@@ -102,7 +102,7 @@ async function popupConfirm(strTitle, strSubtext, fNotice = false, strInputPlace
 
 /** Helper function to determine if a date is today */
 function isToday(date) {
-    const today = new Date();
+    const today = VectorSvelte.nowDate();
     return date.getDate() === today.getDate() &&
            date.getMonth() === today.getMonth() &&
            date.getFullYear() === today.getFullYear();
@@ -110,7 +110,7 @@ function isToday(date) {
 
 /** Helper function to determine if a date is yesterday */
 function isYesterday(date) {
-    const yesterday = new Date();
+    const yesterday = VectorSvelte.nowDate();
     yesterday.setDate(yesterday.getDate() - 1);
     return date.getDate() === yesterday.getDate() &&
            date.getMonth() === yesterday.getMonth() &&
@@ -125,7 +125,7 @@ function isYesterday(date) {
 function timeAgo(timestamp) {
     // Convert timestamp to Date object if it's not already
     const pastDate = timestamp instanceof Date ? timestamp : new Date(timestamp);
-    const now = new Date();
+    const now = VectorSvelte.nowDate();
 
     // Calculate time difference in milliseconds
     const diffMs = now - pastDate;
@@ -1351,7 +1351,7 @@ function replaceInlineImageIndicator(indicator, cachedPath) {
     // Add load handler for scroll correction (same logic as attachment images)
     img.addEventListener('load', () => {
         // Auto-scroll to bottom if within 100ms of chat opening
-        if (chatOpenTimestamp && Date.now() - chatOpenTimestamp < 100) {
+        if (chatOpenTimestamp && VectorSvelte.now() - chatOpenTimestamp < 100) {
             scrollToBottom(domChatMessages, false);
         } else {
             softChatScroll();

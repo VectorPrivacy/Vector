@@ -3,6 +3,7 @@
 // focus: whose shared screen the stage shows; null picks the first sharer, '' shows none.
 // joining: the voice channel a join is under way for.
 // since: when we joined the call, for its timer.
+import { now as clockNow } from './clock.svelte.js';
 const live = $state({ session: null, stage: null, focus: null, joining: null, since: 0 });
 const rooms = $state({});
 let handlers = {};
@@ -12,7 +13,7 @@ export function voiceSession() { return live.session; }
 /** The backend's voice state; null once out of the call. */
 export function setVoiceSession(s) {
     if (!s) live.since = 0;
-    else if (!live.session || live.session.channelId !== s.channel_id) live.since = Date.now();
+    else if (!live.session || live.session.channelId !== s.channel_id) live.since = clockNow();
     live.session = s ? {
         communityId: s.community_id, channelId: s.channel_id, peers: s.peers || [],
         muted: !!s.muted, deafened: !!s.deafened, audio: !!s.audio, micLevel: s.mic_level || 0,

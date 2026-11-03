@@ -4,6 +4,7 @@
 // the encrypt screen (title, which input is up, the biometric offers). The flows only set
 // state; one component paints it.
 import { flushSync } from 'svelte';
+import { now as clockNow } from './clock.svelte.js';
 
 const BG_KEY = 'vector_login_hide_bg';
 function readBgHidden() {
@@ -98,7 +99,7 @@ export function bunkerStatus(text, kind = '') { b.status = text || ''; b.kind = 
 export function bunkerLink(url) { b.url = url || ''; if (!url) b.qrReady = false; }
 export function bunkerCopied(on) { b.copied = !!on; }
 export function bunkerBusy(on) { b.busy = !!on; }
-export function bunkerDeadline(at) { b.deadline = at || 0; b.now = Date.now(); }
+export function bunkerDeadline(at) { b.deadline = at || 0; b.now = clockNow(); }
 export function bunkerTick(now) { b.now = now; }
 
 /** Empty the PIN boxes; the first takes focus when asked. */

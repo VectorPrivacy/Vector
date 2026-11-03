@@ -20,7 +20,7 @@ const TIME_STYLE_NAMES = { f: 'Date and time', t: 'Time', D: 'Date' };
 /** What the relative style is to the reader: a countdown, or how long ago. */
 function timeStyleName(style, unix) {
     if (style !== 'R') return TIME_STYLE_NAMES[style];
-    return unix >= Date.now() / 1000 ? 'Countdown' : 'Time since';
+    return unix >= VectorSvelte.now() / 1000 ? 'Countdown' : 'Time since';
 }
 
 // eslint-disable-next-line no-unused-vars

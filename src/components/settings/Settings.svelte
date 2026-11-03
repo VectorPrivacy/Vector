@@ -19,6 +19,7 @@
     import I2pOptions from './I2pOptions.svelte';
     import BlockedUsers from './BlockedUsers.svelte';
     import Display from './Display.svelte';
+    import ClockCard from './ClockCard.svelte';
     import Notifications from './Notifications.svelte';
     import NetworkList from './network/NetworkList.svelte';
     import StorageDonut from './StorageDonut.svelte';
@@ -95,6 +96,7 @@
             anchors: [
                 { id: 'relays', label: 'Nostr Relays', icon: 'globe', keys: 'network nostr relays add custom' },
                 { id: 'servers', label: 'Media Servers', icon: 'folder', keys: 'network media servers blossom upload add custom' },
+                { id: 'clock', label: 'Clock', icon: 'clock', keys: 'clock time date decentralised decentralized device relays slow fast timestamp' },
             ],
         },
         {
@@ -541,6 +543,7 @@
     {:else if id === 'battery'}{@render batteryBody()}
     {:else if id === 'relays'}{#if hs.network}<NetworkList h={hs.network} part="relays" />{/if}
     {:else if id === 'servers'}{#if hs.network}<NetworkList h={hs.network} part="servers" />{/if}
+    {:else if id === 'clock'}<ClockCard h={h.clock} />
     {:else if id === 'storage'}{@render storageBody()}
     {:else if id === 'privacy'}{@render privacyBody()}
     {:else if id === 'streamer'}<StreamerCard h={h.streamer} />

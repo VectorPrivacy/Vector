@@ -162,13 +162,13 @@ async function startCall(npub, video = false, asked = false) {
 let answerPending = null;
 
 function answerWhenRinging(id) {
-    answerPending = { id, until: Date.now() + 75000 };
+    answerPending = { id, until: VectorSvelte.now() + 75000 };
     invoke('call_status').then((s) => answerIfPending(s)).catch(() => {});
 }
 
 function answerIfPending(s) {
     if (!answerPending || !s || s.id !== answerPending.id) return;
-    if (s.phase !== 'ringing' || s.outgoing || Date.now() > answerPending.until) {
+    if (s.phase !== 'ringing' || s.outgoing || VectorSvelte.now() > answerPending.until) {
         if (s.phase !== 'ringing') answerPending = null;
         return;
     }

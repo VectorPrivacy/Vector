@@ -231,7 +231,7 @@ async function _resolvePackPreview(naddr) {
         if (cached.state === 'loading') return cached.promise;
         if (cached.state === 'ok') return cached;
         if (cached.state === 'err') {
-            const age = Date.now() - (cached.at || 0);
+            const age = VectorSvelte.now() - (cached.at || 0);
             if (age < PACK_PREVIEW_ERR_TTL_MS) return cached;
             // Stale error — fall through and refetch.
         }
@@ -244,7 +244,7 @@ async function _resolvePackPreview(naddr) {
             _packPreviewCache.set(naddr, result);
             return result;
         } catch (e) {
-            const result = { state: 'err', error: String(e), at: Date.now() };
+            const result = { state: 'err', error: String(e), at: VectorSvelte.now() };
             _packPreviewCache.set(naddr, result);
             return result;
         }

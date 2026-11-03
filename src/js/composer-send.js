@@ -315,7 +315,7 @@ async function sendMessage(messageText) {
                     // Add new edit entry
                     msg.edit_history.push({
                         content: colored.plain,
-                        edited_at: Date.now()
+                        edited_at: VectorSvelte.now()
                     });
                     msg.content = colored.plain;
                     msg.text_spans = colored.spans;
@@ -691,8 +691,8 @@ async function handleComposerInput(e) {
         if (fSendTypingIndicators && !strCurrentEditMessageId && !isDeletion
             && !domChatMessageInput.value.startsWith('/')
             && !chatIsRequest(getChat(strOpenChat))
-            && nLastTypingIndicator + 30000 < Date.now()) {
-            nLastTypingIndicator = Date.now();
+            && nLastTypingIndicator + 30000 < VectorSvelte.now()) {
+            nLastTypingIndicator = VectorSvelte.now();
             await invoke("start_typing", { receiver: strOpenChat });
         }
 }

@@ -526,7 +526,7 @@ async function csSyncReport(communityId) {
     VectorSvelte.auditReportLoaded({
         client: document.documentElement.classList.contains('vector-web') ? 'web' : platformFeatures?.os || 'desktop',
         version,
-        at: new Date().toISOString(),
+        at: VectorSvelte.nowDate().toISOString(),
         community: communityId.slice(0, 12),
         control: control.status === 'fulfilled' ? control.value : { error: String(control.reason) },
         epoch: epoch.status === 'fulfilled' ? epoch.value : { error: String(epoch.reason) },

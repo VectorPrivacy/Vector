@@ -5,6 +5,7 @@
     import { transportState, startStuck } from '../lib/transport.svelte.js';
     import { shellHandlers } from '../lib/shell.svelte.js';
     import { loginUp } from '../lib/login.svelte.js';
+    import { now as clockNow } from '../lib/clock.svelte.js';
 
     // The pane is narrow: the reason's gist, by its code.
     const SHORT = {
@@ -23,11 +24,11 @@
 
     const t = transportState();
     // A start is timed from its phase's beginning: the clock ticks only while one runs.
-    let now = $state(Date.now());
+    let now = $state(clockNow());
     $effect(() => {
         if (t.view?.phase !== 'starting') return;
-        now = Date.now();
-        const timer = setInterval(() => { now = Date.now(); }, 5000);
+        now = clockNow();
+        const timer = setInterval(() => { now = clockNow(); }, 5000);
         return () => clearInterval(timer);
     });
     const notice = $derived.by(() => {
