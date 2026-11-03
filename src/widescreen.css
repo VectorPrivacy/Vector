@@ -1437,9 +1437,10 @@ body:is(.ws, .cc) #ws-rail-messages {
 body:is(.ws, .cc) .ws-rail-messages {
   display: flex;
   align-items: center;
+  justify-content: center;
   gap: 11px;
   margin: 0 8px;
-  padding: 0 10px 0 14px;
+  padding: 0 12px;
   height: 40px;
   border-radius: 6px;
   color: rgba(255, 255, 255, 0.7);
@@ -1469,6 +1470,21 @@ body:is(.ws, .cc) .ws-rail-messages svg {
   flex-shrink: 0;
 }
 
+/* A dot, not a count: the door only flags that something is new. It sits off the
+   label's top-right like the list tabs' .cc-tab-dot, and takes no width, so the
+   centred content never shifts. */
+.ws-rail-item-badge.ws-rail-messages-dot {
+  position: relative;
+  top: -9px;
+  min-width: 8px;
+  width: 8px;
+  height: 8px;
+  padding: 0;
+  /* Back over the 11px gap to 1px past the label, then give up its own width. */
+  margin: 0 -9px 0 -10px;
+  border-radius: 50%;
+}
+
 /* Collapsed, the tile is a band the conversation header's height, and its seam
    runs on from the header's across the rail. */
 body.ws.ws-rail-collapsed #ws-rail-shortcuts {
@@ -1486,6 +1502,7 @@ body:is(.ws.ws-rail-collapsed, .cc) #ws-rail-messages {
 }
 
 body:is(.ws.ws-rail-collapsed, .cc) .ws-rail-messages {
+  position: relative;
   justify-content: center;
   gap: 0;
   width: 45px;
@@ -1493,6 +1510,12 @@ body:is(.ws.ws-rail-collapsed, .cc) .ws-rail-messages {
   padding: 0;
   margin: 0 auto;
   border-radius: 8.5px;
+}
+
+/* Centred on the glyph's top-right corner: the 33x27 glyph sits centred in the 45px tile. */
+body:is(.ws.ws-rail-collapsed, .cc) .ws-rail-messages .ws-rail-messages-dot {
+  top: calc((45px - 27px) / 2 - 5px);
+  right: calc((45px - 33px) / 2 - 5px);
 }
 
 /* The design's 62x51 glyph at its frame's 1.876 units to the pixel. */

@@ -298,7 +298,7 @@
         <span class="ws-rail-messages-label">Messages</span>
         <!-- Widescreen's Chat tab carries the total, unless the Start Menu took the tabs. -->
         {#if (!shell.ws || start.mode === 'start') && groups.unreadDms}
-            <span class="ws-rail-item-badge">{groups.unreadDms > 99 ? '99+' : groups.unreadDms}</span>
+            <span class="ws-rail-item-badge ws-rail-messages-dot" title="{groups.unreadDms} unread"></span>
         {/if}
     </div>
 </div>
