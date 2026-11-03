@@ -2,9 +2,17 @@
 // and the pins it shows (the rail's shape: nodes of items and folders, keys are pin
 // keys). js/startmenu.js owns the commands and resolves what each key shows.
 
+const VIEW_KEY = 'ws_start_view';
+
+function loadView() {
+    try { return localStorage.getItem(VIEW_KEY) === 'list' ? 'list' : 'grid'; } catch { return 'grid'; }
+}
+
 const st = $state({
     // 'start' (the menu) or 'navbar' (the rail's own tabs); per device.
     mode: 'start',
+    // How the pins lay out: 'grid' or 'list'; per device.
+    view: loadView(),
     open: false,
     // Where the menu grows from: your row's box and its avatar's, when it opened.
     anchor: null,
@@ -26,3 +34,7 @@ export function setStartOpen(open, anchor = null) {
     }
 }
 export function setStartVisible(on) { st.visible = !!on; }
+export function setStartView(view) {
+    st.view = view === 'list' ? 'list' : 'grid';
+    try { localStorage.setItem(VIEW_KEY, st.view); } catch { /* per-device nicety only */ }
+}

@@ -409,6 +409,10 @@
   mask-image: url("./icons/grid-outline.svg");
 }
 
+.icon-list {
+  mask-image: url("./icons/list.svg");
+}
+
 .icon-help {
   mask-image: url("./icons/help.svg");
   -webkit-mask-image: url("./icons/help.svg");

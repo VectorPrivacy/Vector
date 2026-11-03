@@ -7,7 +7,7 @@
     import { flip } from 'svelte/animate';
     import { cubicOut } from 'svelte/easing';
     import { reorderable, nearestByCentre } from '../lib/reorder.js';
-    import { startMenuState, setStartOpen, setStartVisible } from '../lib/startmenu.svelte.js';
+    import { startMenuState, setStartOpen, setStartVisible, setStartView } from '../lib/startmenu.svelte.js';
     import { shellState } from '../lib/shell.svelte.js';
     import { accountState } from '../lib/account.svelte.js';
     import { micState } from '../lib/calls.svelte.js';
@@ -107,6 +107,15 @@
     const nodes = $derived.by(() => { st.seq; return st.layout.nodes || []; });
     const folder = $derived(folderId ? nodes.find((n) => n.type === 'folder' && n.id === folderId) || null : null);
     $effect(() => { if (folderId && !folder) folderId = null; });
+    const list = $derived(st.view === 'list');
+    // A view switch lands in its final look: the tiles' hover and drag transitions sit out the frame.
+    let switching = $state(false);
+    function pickView(view) {
+        if (view === st.view) return;
+        switching = true;
+        setStartView(view);
+        requestAnimationFrame(() => requestAnimationFrame(() => { switching = false; }));
+    }
 
     const searching = $derived(!!query.trim() || adding);
     const results = $derived.by(() => {
@@ -202,16 +211,23 @@
     }
 
     // The nearest tile always answers, so the marker never drops out over a gap. Its icon's
-    // middle files into it; either side places beside it.
+    // middle files into it; either side places beside it. A list row's middle band files
+    // into it, and above or below places beside it.
     function resolveDrop(x, y, id) {
         if (!grid) return null;
         const tiles = [...grid.querySelectorAll('[data-node-id]')].map((el) => ({ key: el.dataset.nodeId, el }));
-        const hit = nearestByCentre(tiles, x, y);
+        const hit = nearestByCentre(tiles, x, y, list ? 'y' : undefined);
         if (!hit || hit.key === id) return null;
         if (hit.key === 'add') return { id: 'add', mode: 'end' };
-        const b = hit.el.querySelector('.stm-box').getBoundingClientRect();
-        const inBox = x > b.left + b.width * 0.22 && x < b.right - b.width * 0.22 && y > b.top && y < b.bottom;
-        if (inBox && id.startsWith('i:') && !folder) return { id: hit.key, mode: 'into' };
+        let inside;
+        if (list) {
+            const r = hit.el.getBoundingClientRect();
+            inside = y > r.top + r.height * 0.3 && y < r.bottom - r.height * 0.3;
+        } else {
+            const b = hit.el.querySelector('.stm-box').getBoundingClientRect();
+            inside = x > b.left + b.width * 0.22 && x < b.right - b.width * 0.22 && y > b.top && y < b.bottom;
+        }
+        if (inside && id.startsWith('i:') && !folder) return { id: hit.key, mode: 'into' };
         return { id: hit.key, mode: hit.before ? 'before' : 'after' };
     }
 
@@ -339,32 +355,55 @@
     {#if node.type === 'folder'}
         {@const members = (node.keys || []).slice(0, 4).map(resolve)}
         {@const id = `f:${node.id}`}
-        <button type="button" class="stm-tile" data-node-id={id}
+        <button type="button" class="stm-tile" data-node-id={id} class:is-row={list}
                 class:is-armed={armedId === id} class:is-dragging={dragId === id}
                 class:drop-into={dropAt?.id === id && dropAt.mode === 'into'}
                 class:drop-before={dropAt?.id === id && dropAt.mode === 'before'}
                 class:drop-after={dropAt?.id === id && dropAt.mode === 'after'}
                 use:reorderable={gestures({ kind: 'folder', id: node.id }, node)}
                 onclick={() => { folderId = node.id; }}>
-            <span class="stm-box stm-folder">
-                {#each members as m, i (i)}<span class="stm-mini">{@render glyph(m, 22)}</span>{/each}
+            <span class="stm-box stm-folder" class:is-row={list}>
+                {#each members as m, i (i)}<span class="stm-mini">{@render glyph(m, list ? 12 : 22)}</span>{/each}
             </span>
-            <span class="stm-label">{node.name || 'Folder'}</span>
+            {@render caption(node.name || 'Folder', 'Folder')}
         </button>
     {:else}
         {@const r = resolve(node.key)}
         {@const id = `i:${node.key}`}
-        <button type="button" class="stm-tile" data-node-id={id} title={r.label}
+        <button type="button" class="stm-tile" data-node-id={id} title={r.label} class:is-row={list}
                 class:missing={r.missing} class:is-armed={armedId === id} class:is-dragging={dragId === id}
                 class:drop-into={dropAt?.id === id && dropAt.mode === 'into'}
                 class:drop-before={dropAt?.id === id && dropAt.mode === 'before'}
                 class:drop-after={dropAt?.id === id && dropAt.mode === 'after'}
                 use:reorderable={gestures({ kind: 'item', key: node.key }, node)}
                 onclick={() => openKey(node.key)}>
-            <span class="stm-box" class:is-app={!!r.app} class:is-bare={!!(r.src || r.initial)}>{@render glyph(r, r.src || r.initial ? 80 : 40)}</span>
-            <span class="stm-label">{r.label}</span>
+            <span class="stm-box" class:is-app={!!r.app} class:is-bare={!!(r.src || r.initial)} class:is-row={list}>{@render glyph(r, list ? 28 : r.src || r.initial ? 80 : 40)}</span>
+            {@render caption(r.label, r.sub)}
         </button>
     {/if}
+{/snippet}
+
+<!-- A grid tile is named beneath; a list row reads like a search result. -->
+{#snippet caption(label, sub)}
+    {#if list}
+        <span class="stm-result-text">
+            <span class="stm-label stm-result-label">{label}</span>
+            {#if sub}<span class="stm-result-sub">{sub}</span>{/if}
+        </span>
+    {:else}
+        <span class="stm-label">{label}</span>
+    {/if}
+{/snippet}
+
+{#snippet viewSwitch()}
+    <span class="stm-view" role="group" aria-label="Pin layout">
+        <button type="button" class="stm-view-btn" class:on={!list} title="Grid" aria-pressed={!list} onclick={() => pickView('grid')}>
+            <span class="icon icon-grid"></span>
+        </button>
+        <button type="button" class="stm-view-btn" class:on={list} title="List" aria-pressed={list} onclick={() => pickView('list')}>
+            <span class="icon icon-list"></span>
+        </button>
+    </span>
 {/snippet}
 
 {#if rendered}
@@ -449,18 +488,19 @@
                         {:else}
                             <button type="button" class="stm-folder-name" title="Rename" onclick={() => { renaming = true; }}>{folder.name || 'Folder'}</button>
                         {/if}
+                        {@render viewSwitch()}
                     </div>
-                    <div class="stm-grid" bind:this={grid}>
+                    <div class="stm-grid" class:is-list={list} class:is-switching={switching} bind:this={grid}>
                         {#each folder.keys as key (key)}<div class="stm-cell" animate:flip={SLIDE}>{@render tile({ type: 'item', key })}</div>{/each}
                     </div>
                 {:else}
-                    <div class="stm-head"><span>Pinned</span></div>
-                    <div class="stm-grid" bind:this={grid}>
+                    <div class="stm-head"><span>Pinned</span>{@render viewSwitch()}</div>
+                    <div class="stm-grid" class:is-list={list} class:is-switching={switching} bind:this={grid}>
                         {#each nodes as node (nodeIdOf(node))}<div class="stm-cell" animate:flip={SLIDE}>{@render tile(node)}</div>{/each}
-                        <button type="button" class="stm-tile" data-node-id="add" class:drop-before={dropAt?.mode === 'end'}
+                        <button type="button" class="stm-tile" data-node-id="add" class:is-row={list} class:drop-before={dropAt?.mode === 'end'}
                                 onclick={() => { adding = true; query = ''; tick().then(() => searchEl?.focus()); }}>
-                            <span class="stm-box stm-add"><span class="icon icon-plus-circle"></span></span>
-                            <span class="stm-label">Add Pin</span>
+                            <span class="stm-box stm-add" class:is-row={list}><span class="icon icon-plus-circle"></span></span>
+                            {@render caption('Add Pin', null)}
                         </button>
                     </div>
                 {/if}
@@ -708,6 +748,31 @@
     /* A pinned place's glyph matches Add Pin's. */
     .stm-box > .stm-glyph .icon { width: 34px; height: 34px; }
 
+    /* List: the pins as rows that read like search results. The box carries its own row
+       class so the icon lifted for a drag keeps its size off the list. */
+    .stm-grid.is-list { display: flex; flex-direction: column; gap: 2px; }
+    .stm-grid.is-switching .stm-box { transition: none; }
+    .stm-tile.is-row { flex-direction: row; gap: 12px; padding: 5px 10px; border-radius: 10px; }
+    .stm-tile.is-row:hover, .stm-tile.is-row:focus-visible { background-color: #2a2a2a; }
+    .stm-tile.is-row .stm-label { max-width: none; color: #fff; }
+    /* Hidden by width and a transparent colour: `border: 0` would take the text's white. */
+    .stm-box.is-row { flex: none; width: 28px; max-width: none; padding: 0; border-width: 0; border-color: transparent; border-radius: 8px; background-color: transparent; }
+    .stm-box.is-row > * { font-size: 12px; }
+    .stm-box.is-row > .stm-glyph .icon { width: 70%; height: 70%; }
+    .stm-folder.is-row { grid-template-columns: repeat(2, 12px); grid-auto-rows: 12px; gap: 4px; }
+    .stm-add.is-row .icon { width: 22px; height: 22px; }
+    .stm-tile.is-row.drop-into { background-color: #263; }
+    .stm-tile.is-row.drop-before .stm-box, .stm-tile.is-row.drop-after .stm-box { transform: none; }
+    .stm-tile.is-row.drop-before::before, .stm-tile.is-row.drop-after::after { left: 10px; right: 10px; width: auto; height: 3px; }
+    .stm-tile.is-row.drop-before::before { top: -2.5px; bottom: auto; }
+    .stm-tile.is-row.drop-after::after { top: auto; bottom: -2.5px; }
+
+    .stm-view { display: flex; gap: 2px; margin-left: auto; }
+    .stm-view-btn { all: unset; display: flex; padding: 4px; cursor: pointer; }
+    .stm-view-btn .icon { position: static; width: 16px; height: 16px; margin: 0; background-color: #777; }
+    .stm-view-btn:hover .icon { background-color: #bbb; }
+    .stm-view-btn.on .icon { background-color: #fff; }
+
     .stm-results { display: flex; flex-direction: column; gap: 2px; }
     .stm-result {
         display: flex;
@@ -719,7 +784,7 @@
     }
     .stm-result.selected { background-color: #2a2a2a; }
     .stm-result-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
-    .stm-result-label { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: 14px; line-height: 1.2; }
+    .stm-result-label { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: 14px; font-weight: 400; line-height: 1.2; }
     .stm-result-sub { font-size: 12px; line-height: 1.2; color: rgba(255, 255, 255, 0.45); }
     .stm-act { all: unset; display: flex; padding: 6px; border-radius: 8px; cursor: pointer; opacity: 0.35; }
     .stm-act .icon { position: static; width: 16px; height: 16px; margin: 0; background-color: #fff; }
