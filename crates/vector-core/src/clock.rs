@@ -27,11 +27,14 @@ static CHECKED_AT: AtomicU64 = AtomicU64::new(0);
 /// `Date` has one-second resolution: a smaller gap is no evidence of a wrong clock.
 const NOISE_MS: i64 = 2_000;
 
-/// How close two relays must be to count as agreeing.
+/// How close a relay must be to the median to count as agreeing with it.
 const AGREE_MS: i64 = 5_000;
 
+/// How many relays must agree before their time is used. Never two: when two disagree, there is
+/// no telling which is wrong.
+const QUORUM: usize = 3;
+
 /// A sample whose round trip took longer than this can't place the time closely enough.
-#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 const MAX_ROUND_TRIP_MS: u64 = 8_000;
 
 /// How often the relays are asked again.
@@ -161,19 +164,19 @@ fn announce() {
 }
 
 /// The offset `samples` (each a relay's clock minus this device's, in ms) agree on: their median,
-/// when at least two lie within [`AGREE_MS`] of it, with how many do.
+/// when at least [`QUORUM`] lie within [`AGREE_MS`] of it, with how many do.
 fn agreed(samples: &mut [i64]) -> Option<(i64, usize)> {
-    if samples.len() < 2 {
+    if samples.len() < QUORUM {
         return None;
     }
     samples.sort_unstable();
     let median = samples[samples.len() / 2];
     let near = samples.iter().filter(|s| (*s - median).abs() <= AGREE_MS).count();
-    (near >= 2).then_some((median, near))
+    (near >= QUORUM).then_some((median, near))
 }
 
 /// Ask `relays` for the time and correct the clock by what they agree on. Leaves it alone when
-/// fewer than two answer alike.
+/// fewer than [`QUORUM`] answer alike, the device's clock is used until they do.
 pub async fn sync_with(relays: &[String]) {
     let asked = relays.iter().take(8).map(|r| sample(r));
     let mut samples: Vec<i64> = futures_util::future::join_all(asked).await.into_iter().flatten().collect();
@@ -182,10 +185,15 @@ pub async fn sync_with(relays: &[String]) {
     ANSWERED.store(answered.min(u8::MAX as usize) as u8, Ordering::Relaxed);
     AGREEING.store(agreement.map_or(0, |(_, n)| n.min(u8::MAX as usize) as u8), Ordering::Relaxed);
     CHECKED_AT.store(device_ms() / 1000, Ordering::Relaxed);
-    if let Some((offset, _)) = agreement {
-        let offset = if offset.abs() < NOISE_MS { 0 } else { offset };
-        if MEASURED_MS.swap(offset, Ordering::Relaxed) != offset && offset != 0 {
-            crate::log_warn!("[clock] this device's clock is {} ms off the relays'", -offset);
+    let offset = match agreement {
+        Some((offset, _)) if offset.abs() >= NOISE_MS => offset,
+        _ => 0,
+    };
+    if MEASURED_MS.swap(offset, Ordering::Relaxed) != offset {
+        match agreement {
+            Some(_) if offset != 0 => crate::log_warn!("[clock] this device's clock is {} ms off the relays'", -offset),
+            Some(_) => {}
+            None => crate::log_warn!("[clock] fewer than {QUORUM} relays agree on the time; using this device's clock"),
         }
     }
     announce();
@@ -209,7 +217,7 @@ pub(crate) async fn until_next_check() {
 }
 
 /// One relay's clock minus this device's, in ms, from the `Date` (and any `Age`) on its answer.
-#[cfg(not(target_arch = "wasm32"))]
+/// In a browser, only a relay that sends `Access-Control-Expose-Headers: Date` can answer.
 async fn sample(relay: &str) -> Option<i64> {
     let url = http_url(relay)?;
     let client = crate::net::build_http_client(std::time::Duration::from_secs(10)).ok()?;
@@ -233,21 +241,13 @@ async fn sample(relay: &str) -> Option<i64> {
 }
 
 /// Where a relay answers over HTTP: its own address, path included.
-#[cfg(not(target_arch = "wasm32"))]
 fn http_url(relay: &str) -> Option<String> {
     let relay = relay.trim();
     relay.strip_prefix("wss://").map(|r| format!("https://{r}")).or_else(|| relay.strip_prefix("ws://").map(|r| format!("http://{r}")))
 }
 
-/// A browser hides `Date` from a cross-origin page, so Vector Web keeps the device's clock.
-#[cfg(target_arch = "wasm32")]
-async fn sample(_relay: &str) -> Option<i64> {
-    None
-}
-
 /// Unix seconds of an IMF-fixdate, `Sun, 06 Nov 1994 08:49:37 GMT`: the form RFC 9110 has every
 /// server send.
-#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 fn parse_http_date(s: &str) -> Option<u64> {
     let parts: Vec<&str> = s.split_whitespace().collect();
     let [_, day, month, year, time, "GMT"] = parts.as_slice() else { return None };
@@ -343,9 +343,10 @@ mod tests {
     fn the_clock_moves_only_on_relays_that_agree() {
         assert_eq!(agreed(&mut []), None);
         assert_eq!(agreed(&mut [90_000]), None, "one relay is no agreement");
-        assert_eq!(agreed(&mut [90_000, 91_000, -3_000_000]), Some((90_000, 2)), "a lone liar is outvoted");
-        assert_eq!(agreed(&mut [90_000, 400_000]), None, "two that disagree move nothing");
-        assert_eq!(agreed(&mut [-120_000, -119_000]), Some((-119_000, 2)));
+        assert_eq!(agreed(&mut [-120_000, -119_000]), None, "nor are two, even agreeing: never two compasses");
+        assert_eq!(agreed(&mut [90_000, 91_000, 89_500, -3_000_000]), Some((90_000, 3)), "a lone liar is outvoted");
+        assert_eq!(agreed(&mut [90_000, 91_000, -3_000_000]), None, "two against one is not three");
+        assert_eq!(agreed(&mut [-120_000, -119_000, -121_000]), Some((-120_000, 3)));
     }
 
     #[test]

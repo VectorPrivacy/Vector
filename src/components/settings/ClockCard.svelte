@@ -17,7 +17,7 @@
     const apart = $derived(clock.measuredOffsetMs > 0 ? `${span(clock.measuredOffsetMs)} slow` : `${span(clock.measuredOffsetMs)} fast`);
     const note = $derived.by(() => {
         if (!clock.checkedAt) return 'Checking the time with your relays…';
-        if (clock.agreeing < 2) return 'Your relays did not agree on the time, so this device’s clock is in use.';
+        if (clock.agreeing < 3) return 'Fewer than three of your relays agreed on the time, so this device’s clock is in use.';
         if (clock.measuredOffsetMs === 0) return 'This device’s clock matches your relays.';
         return clock.decentralised
             ? `This device’s clock is ${apart}. Vector is using your relays’ time.`
