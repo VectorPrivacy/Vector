@@ -361,7 +361,7 @@
                 class:drop-after={dropAt?.id === id && dropAt.mode === 'after'}
                 use:reorderable={gestures({ kind: 'item', key: node.key }, node)}
                 onclick={() => openKey(node.key)}>
-            <span class="stm-box">{@render glyph(r, 40)}</span>
+            <span class="stm-box" class:is-app={!!r.app} class:is-bare={!!(r.src || r.initial)}>{@render glyph(r, r.src || r.initial ? 80 : 40)}</span>
             <span class="stm-label">{r.label}</span>
         </button>
     {/if}
@@ -633,10 +633,18 @@
         aspect-ratio: 1;
         box-sizing: border-box;
         border: 1.5px solid #3a3a3a;
-        border-radius: 18px;
+        border-radius: 12px;
         background-color: #222;
         transition: border-color 0.12s ease, background-color 0.12s ease, transform 0.16s ease, opacity 0.16s ease, box-shadow 0.16s ease;
     }
+    /* A Mini App's icon is the whole tile, and a contact's or community's picture stands on no plate. */
+    .stm-box.is-app, .stm-box.is-bare { border: 0; background-color: transparent; }
+    .stm-box.is-app :global(.nx-icon) { width: 100%; height: 100%; border-radius: inherit; }
+    /* Inset, so a person or community stands a step smaller than an app; a narrower grid
+       shrinks the picture with the tile. */
+    .stm-box.is-bare { padding: 7.5px; }
+    .stm-box.is-bare > * { max-width: 100%; max-height: 100%; font-size: 27px; }
+    .stm-box.is-bare > :not(.round) { border-radius: inherit; }
     .stm-tile:hover .stm-box, .stm-tile:focus-visible .stm-box { border-color: var(--icon-color-primary); }
     .stm-tile:hover .stm-label { color: #fff; }
     .stm-tile.missing .stm-box { opacity: 0.5; }
@@ -697,6 +705,8 @@
     }
     .stm-glyph { display: flex; align-items: center; justify-content: center; }
     .stm-glyph .icon { position: static; width: 70%; height: 70%; margin: 0; background-color: #ddd; }
+    /* A pinned place's glyph matches Add Pin's. */
+    .stm-box > .stm-glyph .icon { width: 34px; height: 34px; }
 
     .stm-results { display: flex; flex-direction: column; gap: 2px; }
     .stm-result {
