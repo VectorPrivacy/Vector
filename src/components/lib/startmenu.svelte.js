@@ -1,4 +1,4 @@
-// The widescreen Start Menu: whether it is the navigation in use, whether it is open,
+// The widescreen Main Menu: whether it is the navigation in use, whether it is open,
 // and the pins it shows (the rail's shape: nodes of items and folders, keys are pin
 // keys). js/startmenu.js owns the commands and resolves what each key shows.
 

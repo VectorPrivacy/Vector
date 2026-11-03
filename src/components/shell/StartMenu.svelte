@@ -1,5 +1,5 @@
 <script>
-    // The widescreen Start Menu: search, the app's own places down the left, the pins
+    // The widescreen Main Menu: search, the app's own places down the left, the pins
     // and their folders on the right, and you (with your audio devices) along the
     // bottom. You ARE the button: the menu grows out of your row in the rail and shrinks
     // back into it, its footer standing where the row stood.
@@ -407,7 +407,7 @@
 {/snippet}
 
 {#if rendered}
-    <div class="stm" bind:this={menuEl} role="dialog" aria-label="Start"
+    <div class="stm" bind:this={menuEl} role="dialog" aria-label="Main Menu"
          style:left="{place.left}px" style:bottom="{place.bottom}px" style:height="{place.height}px">
         <div class="stm-search stm-fade">
             <svg width="18" height="18" viewBox="0 0 12 12" fill="none" aria-hidden="true">
@@ -454,7 +454,7 @@
                                     </button>
                                 {/if}
                                 {#if r.key}
-                                    <button type="button" class="stm-act stm-pin" class:on={r.pinned} title={r.pinned ? 'Unpin from Start' : 'Pin to Start'}
+                                    <button type="button" class="stm-act stm-pin" class:on={r.pinned} title={r.pinned ? 'Unpin' : 'Pin to Main Menu'}
                                             onclick={(e) => { e.stopPropagation(); h.togglePin(r.key); }}>
                                         <span class="icon icon-pin"></span>
                                     </button>

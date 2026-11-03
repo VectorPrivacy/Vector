@@ -19,7 +19,7 @@
     // Bookmarks is your own chat: lit while it is open, and Chat stands down meanwhile.
     const bookmarksOpen = $derived(!!openChatId() && openChatId() === h().myNpub?.());
     const start = startMenuState();
-    // With the Start Menu, your row opens it: the switcher and profile live inside.
+    // With the Main Menu, your row opens it: the switcher and profile live inside.
     function startTrigger(e) {
         if (!st.ws || start.mode !== 'start') return;
         e.stopPropagation();

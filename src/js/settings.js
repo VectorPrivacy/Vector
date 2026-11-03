@@ -983,7 +983,7 @@ const NOTIF_EXPLAINERS = {
 };
 
 const DISPLAY_EXPLAINERS = {
-    startMenu: ['Start Menu', '<b>When enabled:</b> your Profile, Chat, Bookmarks, Mini Apps and Settings live in a Start Menu that opens from your row at the bottom of the sidebar, beside pins for the apps, chats and places you use most.<br><br><b>When disabled:</b> they sit down the sidebar as tabs, as before.<br><br>This applies to this device only.'],
+    startMenu: ['Main Menu', '<b>When enabled:</b> your Profile, Chat, Bookmarks, Mini Apps and Settings live in a Main Menu that opens from your row at the bottom of the sidebar, beside pins for the apps, chats and places you use most.<br><br><b>When disabled:</b> they sit down the sidebar as tabs, as before.<br><br>This applies to this device only.'],
     hideRail: ['Hide Community Rail', 'When enabled, the <b>community rail and its pull tab are hidden</b>, and your communities sit in the chat list behind the <b>All</b>, <b>Messages</b>, <b>Communities</b> and <b>Requests</b> filters.<br><br>This applies to this device only.'],
     imageTypes: ['Display Image Types', 'When enabled, images in chat will display a <b>small badge showing the file type</b> (e.g., PNG, GIF, WEBP) in the corner.<br><br>This helps identify image formats at a glance.'],
     chatBg: ['Background Wallpaper', 'This feature enables and disables background images inside of Chats (Private & Group Chats).<br><br>Only applies to certain themes.'],

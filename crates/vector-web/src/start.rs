@@ -1,4 +1,4 @@
-//! The widescreen Start Menu's pins and folders, synced as their own settings
+//! The widescreen Main Menu's pins and folders, synced as their own settings
 //! document (`vector/start`), as on desktop (`src-tauri/src/commands/start.rs`).
 
 use std::future::Future;

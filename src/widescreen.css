@@ -343,7 +343,7 @@ body.ws #settings-btn {
   display: flex !important;
 }
 
-/* The Start Menu holds the tabs: the rail keeps your communities and the row that opens it. */
+/* The Main Menu holds the tabs: the rail keeps your communities and the row that opens it. */
 body.ws.ws-start #profile-btn,
 body.ws.ws-start #chat-btn,
 body.ws.ws-start #bookmarks-btn,

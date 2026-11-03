@@ -103,7 +103,7 @@ Powered by Passion, Built on [Nostr](https://nostr.com/).
 
 ### 🖥️ Everywhere
 - **Widescreen & Slim Layouts:** On a desktop-sized window, Communities sit on a rail beside the channel list, conversation and member list; phones get a layout of their own.
-- **Start Menu:** Every place in the app, pinned favourites and folders, and one search over all of it.
+- **Main Menu:** Every place in the app, pinned favourites and folders, and one search over all of it.
 - **In Your Browser:** Vector Web runs the full app in any modern browser, Tor Browser included, with nothing to install.
 - **Native Notifications:** Desktop notifications with avatars, inline reply, and mark as read.
 

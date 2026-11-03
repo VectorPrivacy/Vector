@@ -296,7 +296,7 @@
             <path d="M58.5502 43.125L39.2858 25.5M22.7145 25.5L3.45033 43.125M2.00024 10.8125L25.6785 27.6015C27.5959 28.9613 28.5547 29.641 29.5975 29.9042C30.5186 30.1368 31.4819 30.1368 32.403 29.9042C33.4458 29.641 34.4046 28.9613 36.322 27.6015L60.0002 10.8125M15.9202 49H46.0802C50.9528 49 53.3888 49 55.25 48.0394C56.8871 47.1946 58.2179 45.8466 59.0519 44.1884C60.0002 42.3031 60.0002 39.8356 60.0002 34.9V16.1C60.0002 11.1645 60.0002 8.6968 59.0519 6.81171C58.2179 5.15352 56.8871 3.80539 55.25 2.9605C53.3888 2 50.9528 2 46.0802 2H15.9202C11.0478 2 8.61155 2 6.75053 2.9605C5.11351 3.80539 3.78258 5.15352 2.94849 6.81171C2.00024 8.6968 2.00024 11.1645 2.00024 16.1V34.9C2.00024 39.8356 2.00024 42.3031 2.94849 44.1884C3.78258 45.8466 5.11351 47.1946 6.75053 48.0394C8.61155 49 11.0478 49 15.9202 49Z" stroke="currentColor" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
         </svg>
         <span class="ws-rail-messages-label">Messages</span>
-        <!-- Widescreen's Chat tab carries the total, unless the Start Menu took the tabs. -->
+        <!-- Widescreen's Chat tab carries the total, unless the Main Menu took the tabs. -->
         {#if (!shell.ws || start.mode === 'start') && groups.unreadDms}
             <span class="ws-rail-item-badge ws-rail-messages-dot" title="{groups.unreadDms} unread"></span>
         {/if}

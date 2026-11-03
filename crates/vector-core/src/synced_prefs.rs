@@ -428,7 +428,7 @@ pub enum Pref {
     Settings,
     /// Chats tidied out of the list until someone speaks in them again.
     Archive,
-    /// The widescreen Start Menu's pins and folders.
+    /// The widescreen Main Menu's pins and folders.
     Start,
 }
 
@@ -969,7 +969,7 @@ pub fn load_rail() -> crate::rail_layout::RailLayout {
     load_layout(Pref::Rail)
 }
 
-/// The Start Menu's pins, in the rail's shape: keys are pin keys (`crate::start_menu`).
+/// The Main Menu's pins, in the rail's shape: keys are pin keys (`crate::start_menu`).
 pub fn load_start() -> crate::rail_layout::RailLayout {
     load_layout(Pref::Start)
 }
@@ -1207,7 +1207,7 @@ fn set_layout_dirty(pref: Pref, dirty: bool) {
 
 /// Commit an arrangement: on disk now, on the relays once the dragging stops.
 ///
-/// The local mirror is the truth the rail and the Start Menu paint from, so the UI
+/// The local mirror is the truth the rail and the Main Menu paint from, so the UI
 /// never waits on a relay to show a drag landing.
 pub fn save_layout_debounced(pref: Pref, layout: &crate::rail_layout::RailLayout) -> Result<(), String> {
     if !pref.is_layout() {

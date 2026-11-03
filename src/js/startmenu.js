@@ -1,16 +1,16 @@
-// The widescreen Start Menu (components/shell/StartMenu.svelte): what each pin shows and
+// The widescreen Main Menu (components/shell/StartMenu.svelte): what each pin shows and
 // opens, the search over everything that can be opened or pinned, and the footer's
 // account and audio controls. Pins are vector-core's `start_menu` keys, synced as
 // `vector/start`; the menu is the navigation unless Appearance picks the Navbar.
 
 const START_NAV_KEY = 'ws_nav';
 
-/** Whether the Start Menu, rather than the rail's own tabs, is how this device navigates. */
+/** Whether the Main Menu, rather than the rail's own tabs, is how this device navigates. */
 function startMenuActive() {
     return VectorSvelte.startMenuState().mode === 'start';
 }
 
-/** Appearance's choice between the Start Menu and the Navbar. Per device. */
+/** Appearance's choice between the Main Menu and the Navbar. Per device. */
 function setStartNavMode(mode) {
     try { localStorage.setItem(START_NAV_KEY, mode); } catch (_) { /* per-device nicety only */ }
     VectorSvelte.setStartMode(mode);
@@ -50,11 +50,11 @@ function toggleStartPin(key) {
     return startLayoutEdit(startPinned(key) ? 'start_unpin' : 'start_pin', { key });
 }
 
-/** A menu's Pin to Start entry; nothing where the Start Menu isn't in use. */
+/** A menu's Pin to Main Menu entry; nothing where the Main Menu isn't in use. */
 function startPinItems(key) {
     if (!key || !wsActive() || !startMenuActive()) return [];
     const pinned = startPinned(key);
-    return [{ label: pinned ? 'Unpin from Start' : 'Pin to Start', icon: 'pin', onClick: () => toggleStartPin(key) }];
+    return [{ label: pinned ? 'Unpin' : 'Pin to Main Menu', icon: 'pin', danger: pinned, onClick: () => toggleStartPin(key) }];
 }
 
 /** The community whose channels include `channelId`, from the chats this device holds. */
@@ -343,7 +343,7 @@ function startTileMenu(x, y, node, inFolder, openFolder, renameFolder) {
                 onClick: () => navigator.clipboard.writeText(link).then(() => showToast('Copied Link')).catch(() => showToast('Failed to Copy')),
             });
         }
-        items.push({ label: 'Unpin from Start', icon: 'pin', onClick: () => startLayoutEdit('start_unpin', { key: node.key }) });
+        items.push({ label: 'Unpin', icon: 'pin', danger: true, onClick: () => startLayoutEdit('start_unpin', { key: node.key }) });
     }
     showContextMenu({ x, y, items });
 }
@@ -375,7 +375,7 @@ async function startDeviceMenu(kind, anchor) {
 }
 
 /**
- * StartMenuHelpers: what the Start Menu resolves, opens and edits.
+ * StartMenuHelpers: what the Main Menu resolves, opens and edits.
  * @typedef {Object} StartMenuHelpers
  * @property {() => void} prepare   on opening: what the pins name, ready to show
  * @property {(query: string) => void} searchNexus   the Nexus, searching for what Start found nothing for
