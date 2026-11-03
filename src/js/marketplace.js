@@ -654,7 +654,7 @@ async function initMarketplace() {
     } catch (error) {
         console.error('Failed to initialize marketplace:', error);
         VectorSvelte.mktSetError(error.toString());
-        if (marketplaceApps.length) showToast("Couldn't refresh the Nexus");
+        if (marketplaceApps.length) showToast("Couldn't refresh the App Store");
     } finally {
         _marketplaceInitInProgress = false;
     }
@@ -813,7 +813,7 @@ async function showPublishAppDialog(filePath, miniAppInfo) {
                     );
                     console.log('Published app with event ID:', eventId);
                     close();
-                    popupConfirm('Published!', `${name} has been published to the Nexus.`, true, '', 'vector-check.svg');
+                    popupConfirm('Published!', `${name} has been published to the App Store.`, true, '', 'vector-check.svg');
                     resolve(true);
                 } catch (error) {
                     console.error('Failed to publish:', error);

@@ -60,7 +60,7 @@
         <p class="navbar-text">Bookmarks</p>
     </div>
     <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-    <div id="miniapps-btn" class="btn navbar-btn" class:navbar-btn-inactive={st.tab !== 'miniapps-btn'} style:display={st.ws ? null : 'none'} onclick={() => h().openMiniApps?.()} oncontextmenu={(e) => placeMenu(e, 'Nexus', 'nexus')}>
+    <div id="miniapps-btn" class="btn navbar-btn" class:navbar-btn-inactive={st.tab !== 'miniapps-btn'} style:display={st.ws ? null : 'none'} onclick={() => h().openMiniApps?.()} oncontextmenu={(e) => placeMenu(e, 'App Store', 'nexus')}>
         <span class="icon icon-grid-fill navbar-icon"></span>
         <p class="navbar-text">Mini Apps</p>
     </div>

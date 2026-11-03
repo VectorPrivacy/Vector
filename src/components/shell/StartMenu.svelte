@@ -473,7 +473,7 @@
                                 <p class="stm-none-sub">{adding ? 'Pin a Mini App, a chat, a community or a place in Settings.' : 'Try a name, a community, a Mini App or a setting.'}</p>
                                 {#if !adding && query.trim()}
                                     <button type="button" class="stm-none-action" onclick={() => run(() => h.searchNexus(query.trim()))}>
-                                        <span class="icon icon-nexus"></span>Search the Nexus
+                                        <span class="icon icon-nexus"></span>Search the App Store
                                     </button>
                                 {/if}
                             </div>

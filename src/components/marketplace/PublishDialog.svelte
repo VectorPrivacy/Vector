@@ -24,7 +24,7 @@
                     {#if st.icon}<img src={st.icon} alt="" draggable="false">{:else}<span class="ma-launch-initial">{(f.name.match(/[\p{L}\p{N}]/u)?.[0] || '?').toUpperCase()}</span>{/if}
                 </span>
                 <div class="ma-launch-id">
-                    <h3 id="ma-publish-title" class="vcard-title">{editing ? 'Edit Listing' : 'Publish to Nexus'}</h3>
+                    <h3 id="ma-publish-title" class="vcard-title">{editing ? 'Edit Listing' : 'Publish to App Store'}</h3>
                     <span class="ma-launch-sub">{editing ? 'Changes go live without uploading the app again' : 'Everyone on Vector can find and install it'}</span>
                 </div>
                 <button type="button" class="vcard-x" aria-label="Close" disabled={st.busy} onclick={() => h()?.cancel()}>&#x2715;</button>

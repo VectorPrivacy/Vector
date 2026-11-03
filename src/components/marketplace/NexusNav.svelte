@@ -30,7 +30,7 @@
 <aside class="cs-nav nx-nav">
     <div class="cs-search" class:has-query={!!st.query}>
         <span class="nx-g g-search nx-search-g"></span>
-        <input type="text" placeholder="Search the Nexus" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"
+        <input type="text" placeholder="Search the App Store" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"
                value={st.query} oninput={(e) => { if (st.detailsId) h.closeDetails(); mktSetQuery(e.currentTarget.value); }} use:searchField
                onkeydown={(e) => { if (e.key === 'Escape' && st.query) { e.stopPropagation(); mktSetQuery(''); } }}>
         {#if st.query}
@@ -42,7 +42,7 @@
     <div class="cs-nav-scroll">
         <div class="cs-nav-head">
             <span class="nx-g g-nexus nx-nav-glyph"></span>
-            <span class="cs-nav-title">Nexus</span>
+            <span class="cs-nav-title">App Store</span>
         </div>
         {@render row('discover', '', 'g-globe', 'Discover', 0, false)}
         {@render row('library', '', 'g-grid', 'Library', installed, false)}

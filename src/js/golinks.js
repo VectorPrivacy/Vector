@@ -341,7 +341,7 @@ function _placeNames(path) {
     const [kind, first, second] = path.split('/');
     if (kind === 'nexus') {
         const app = first && marketplaceApps.find(a => a.id === first);
-        return { icon: 'nexus', names: first ? ['Nexus', app?.name || first] : ['Nexus'] };
+        return { icon: 'nexus', names: first ? ['App Store', app?.name || first] : ['App Store'] };
     }
     if (kind === 'requests') return { icon: 'mail', names: ['Requests'] };
     // A section id may stand alone, as Settings itself accepts.

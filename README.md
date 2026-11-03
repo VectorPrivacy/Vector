@@ -116,7 +116,7 @@ Powered by Passion, Built on [Nostr](https://nostr.com/).
 ### 🛠️ For Developers
 - **Vector SDK:** Build bots in about a dozen lines of Rust, no protocol knowledge required.
 - **Slash Commands:** Ship real commands with typed parameters through a Discord-style picker.
-- **Mini Apps:** Run WebXDC apps and multiplayer games directly inside encrypted chats, found in the Nexus.
+- **Mini Apps:** Run WebXDC apps and multiplayer games directly inside encrypted chats, found in the App Store.
 - **AI Agent Support:** An MCP server gives AI agents 61 tools to drive Vector programmatically.
 
 ---

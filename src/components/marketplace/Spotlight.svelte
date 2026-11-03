@@ -52,7 +52,7 @@
     {#key shown.id}
         <div class="nx-spot-body">
             <div class="nx-spot-text">
-                <span class="nx-eyebrow">{isMultiplayer(shown) ? 'Play Together' : 'New in the Nexus'}</span>
+                <span class="nx-eyebrow">{isMultiplayer(shown) ? 'Play Together' : 'New in the App Store'}</span>
                 <h2 class="nx-spot-name">{shown.name}</h2>
                 <p class="nx-spot-desc">{shown.description}</p>
                 <div class="nx-spot-tags">

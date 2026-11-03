@@ -120,7 +120,7 @@ function resolveStartKey(key) {
             return (rest && startSettingsPlace(rest)) || { label: 'Settings', sub: 'Settings', icon: 'settings' };
         }
         case 'nexus':
-            return { label: 'Nexus', sub: 'Mini Apps', icon: 'nexus' };
+            return { label: 'App Store', sub: 'Mini Apps', icon: 'nexus' };
         case 'requests':
             return { label: 'Requests', sub: 'Messages', icon: 'mail' };
         default:
@@ -207,7 +207,7 @@ function startNavItems() {
         { id: 'profile', label: 'Profile', icon: 'start-profile', active: shell.tab === 'profile-btn', run: () => openProfile() },
         { id: 'chat', label: 'Chat', icon: 'chats', active: shell.tab === 'chat-btn' && !bookmarks && !nexus, run: () => openChatlist(), dot: !!shell.chatBadge },
         { id: 'bookmarks', label: 'Bookmarks', icon: 'bookmark-fill', active: bookmarks, run: () => openChat(strPubkey) },
-        { id: 'miniapps', label: 'Mini Apps', icon: 'grid-fill', active: nexus, run: () => showMarketplacePanel(), key: 'nexus' },
+        { id: 'miniapps', label: 'Mini Apps', icon: 'grid-fill', active: nexus, run: () => showMiniApps(), key: 'nexus' },
         { id: 'settings', label: 'Settings', icon: 'start-settings', active: shell.tab === 'settings-btn', run: () => openSettings(), key: 'settings', dot: !!shell.updateDot },
     ];
     if (shell.invitesTab) items.push({ id: 'invites', label: 'Invites', icon: 'gift', active: shell.tab === 'invites-btn', run: () => openInvites() });

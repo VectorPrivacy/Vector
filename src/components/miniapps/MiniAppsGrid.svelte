@@ -21,7 +21,7 @@
     <div class="attachment-panel-btn attachment-panel-marketplace-btn">
         <span class="icon icon-nexus"></span>
     </div>
-    <span class="attachment-panel-label">Nexus</span>
+    <span class="attachment-panel-label">App Store</span>
 </button>
 {#each rows as { a, shown } (a.key)}
     <button class="attachment-panel-item" class:attachment-panel-miniapp={!a.pivx} class:miniapp-disabled={a.hidden}
@@ -64,6 +64,6 @@
 {#if searching && visible === 0}
     <div class="miniapps-no-results">
         <p>No Mini Apps found</p>
-        <p class="miniapps-no-results-hint">Try a different search, or check out the Nexus!</p>
+        <p class="miniapps-no-results-hint">Try a different search, or check out the App Store!</p>
     </div>
 {/if}

@@ -38,20 +38,27 @@ async function showAttachmentPanelMiniApps() {
 /** The tab lit before the marketplace took over, so closing hands it back. */
 let strMarketplacePrevTab = '';
 
-/** Open the Nexus on its front page; opened again, it goes back there. */
-function showMarketplacePanel() {
+/** Open the Nexus on a page (its front page unless told); opened again, it goes back there. */
+function showMarketplacePanel(view = 'discover') {
     const st = VectorSvelte.mktState();
     if (st.panelOpen && !st.panelClosing) {
         popBack('app-details');
-        VectorSvelte.mktShow('discover');
+        VectorSvelte.mktShow(view);
         return;
     }
     pushBack('marketplace', () => { hideMarketplacePanel(); });
     strMarketplacePrevTab = VectorSvelte.shellState().tab;
     navbarSelect('miniapps-btn');
     VectorSvelte.mktReset();
+    if (view !== 'discover') VectorSvelte.mktShow(view);
     VectorSvelte.mktOpenPanel();
     initMarketplace();
+}
+
+/** Mini Apps: your Library when anything is installed (as the Library counts it), else Discover. */
+async function showMiniApps() {
+    if (!marketplaceApps.length) await getCachedMarketplaceApps().catch(() => {});
+    showMarketplacePanel(marketplaceApps.some(a => a.installed || a.local_path) ? 'library' : 'discover');
 }
 
 /**
