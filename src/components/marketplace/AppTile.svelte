@@ -5,7 +5,8 @@
     let { app, h, sub = '' } = $props();
 </script>
 
-<button type="button" class="nx-tile" onclick={() => h.showDetails(app)}>
+<button type="button" class="nx-tile" onclick={() => h.showDetails(app)}
+        oncontextmenu={(e) => { e.preventDefault(); h.appMenu(app, e.clientX, e.clientY); }}>
     <AppIcon {app} {h} size={84} />
     <span class="nx-tile-name">{app.name}</span>
     <span class="nx-tile-sub">{sub || tagLabel(leadTag(app))}</span>

@@ -12,6 +12,7 @@
 
 <!-- A div, not a button: it holds the action's own button. -->
 <div class="nx-row" role="button" tabindex="0" style:--i={index} onclick={() => h.showDetails(app)}
+     oncontextmenu={(e) => { e.preventDefault(); h.appMenu(app, e.clientX, e.clientY); }}
      onkeydown={(e) => { if (e.target === e.currentTarget && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); h.showDetails(app); } }}>
     <AppIcon {app} {h} size={56} />
     <div class="nx-row-text">

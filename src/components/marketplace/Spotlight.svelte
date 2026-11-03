@@ -44,7 +44,8 @@
 <!-- The card's own Details button is the keyboard's way in. -->
 <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
 <section class="nx-spot" onpointerenter={(e) => { if (e.pointerType === 'mouse') held = true; }} onpointerleave={() => { held = false; }}
-         onpointerdown={down} onpointerup={up} onpointercancel={() => { x0 = null; }} onclick={open}>
+         onpointerdown={down} onpointerup={up} onpointercancel={() => { x0 = null; }} onclick={open}
+         oncontextmenu={(e) => { e.preventDefault(); h.appMenu(shown, e.clientX, e.clientY); }}>
     {#each apps as app, i (app.id)}
         <div class="nx-spot-wash" class:on={i === at} style:--wash={wash(app)}></div>
     {/each}

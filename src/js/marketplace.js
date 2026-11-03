@@ -366,6 +366,7 @@ window.__TAURI__.event.listen('inline_image_cached', (event) => {
  * @property {(app: object) => void} editListing
  * @property {(url: string) => void} openUrl
  * @property {(app: object) => void} copyLink   its page in the Nexus
+ * @property {(app: object, x: number, y: number) => void} appMenu   right-click: copy its link, pin it to the Main Menu
  * @property {() => void} back
  */
 function registerMarketplaceHandlers() {
@@ -397,6 +398,13 @@ function registerMarketplaceHandlers() {
         editListing: (app) => showEditListingDialog(current(app)),
         openUrl: (url) => confirmAndOpenUrl(url),   // a listing's source URL is relay data
         copyLink: (app) => copyPlaceLink('App', `nexus/${app.id}`),
+        appMenu: (app, x, y) => showContextMenu({
+            x, y,
+            items: [
+                { label: 'Copy Link', icon: 'share', onClick: () => copyPlaceLink('App', `nexus/${app.id}`) },
+                ...startPinItems(`app/${app.id}`),
+            ],
+        }),
         back: () => { hideMarketplacePanel(); },
     };
     VectorSvelte.setMarketplaceHandlers(h);
