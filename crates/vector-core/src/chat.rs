@@ -68,10 +68,7 @@ impl Chat {
             messages: CompactMessageVec::new(),
             last_read: [0u8; 32],
             unread_from: [0u8; 32],
-            created_at: web_time::SystemTime::now()
-                .duration_since(web_time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs(),
+            created_at: crate::clock::now_secs(),
             metadata: ChatMetadata::new(),
             muted: false,
             typing_participants: Vec::new(),
@@ -304,8 +301,7 @@ impl Chat {
     }
 
     pub fn get_active_typers(&self, interner: &NpubInterner) -> Vec<String> {
-        let now = web_time::SystemTime::now()
-            .duration_since(web_time::UNIX_EPOCH).unwrap().as_secs();
+        let now = crate::clock::now_secs();
         self.typing_participants.iter()
             .filter(|(_, exp)| *exp > now)
             .filter_map(|(h, _)| interner.resolve(*h).map(|s| s.to_string()))
@@ -318,8 +314,7 @@ impl Chat {
         } else {
             self.typing_participants.push((handle, expires_at));
         }
-        let now = web_time::SystemTime::now()
-            .duration_since(web_time::UNIX_EPOCH).unwrap().as_secs();
+        let now = crate::clock::now_secs();
         self.typing_participants.retain(|(_, exp)| *exp > now);
     }
 

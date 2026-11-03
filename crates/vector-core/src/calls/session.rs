@@ -301,7 +301,7 @@ async fn send_signal(peer: &str, call_id: &str, signal: &str, addr: Option<&str>
         builder = builder.tag(Tag::custom("call-node-addr", vec![addr]));
     }
     if signal == "offer" {
-        builder = builder.tag(Tag::expiration(Timestamp::now() + OFFER_TTL_SECS));
+        builder = builder.tag(Tag::expiration(crate::clock::timestamp() + OFFER_TTL_SECS));
         builder = builder.tag(Tag::custom("call-media", vec![if offer_video { "video" } else { "audio" }]));
     }
     if signal == "offer" || signal == "answer" {
@@ -894,7 +894,7 @@ pub async fn on_signal(sender: &str, call_id: &str, signal: &str, node_addr: Opt
     let Ok(platform) = platform::get() else {
         // No call engine in this process: the ring is all it can do, and the app takes the call.
         match signal {
-            "offer" if created_at + OFFER_TTL_SECS >= Timestamp::now().as_secs() => ring(call_id, sender, media == Some("video")).await,
+            "offer" if created_at + OFFER_TTL_SECS >= crate::clock::timestamp().as_secs() => ring(call_id, sender, media == Some("video")).await,
             "hangup" => ring_over(call_id, true),
             "taken" => ring_over(call_id, false),
             _ => {}
@@ -903,7 +903,7 @@ pub async fn on_signal(sender: &str, call_id: &str, signal: &str, node_addr: Opt
     };
     match signal {
         "offer" => {
-            let now = Timestamp::now().as_secs();
+            let now = crate::clock::timestamp().as_secs();
             if created_at + OFFER_TTL_SECS < now {
                 log_info!("[CALLS] Ignoring an offer {}s old", now.saturating_sub(created_at));
                 return;

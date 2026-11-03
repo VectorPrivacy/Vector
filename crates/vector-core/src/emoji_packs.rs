@@ -856,8 +856,7 @@ pub fn save_subscriptions(addrs: &[String]) -> Result<(), String> {
     tx.execute("DELETE FROM emoji_pack_subscriptions", [])
         .map_err(|e| format!("Failed to clear subscriptions: {}", e))?;
 
-    let now = web_time::SystemTime::now()
-        .duration_since(web_time::UNIX_EPOCH).unwrap().as_secs() as i64;
+    let now = crate::clock::now_secs() as i64;
     // `position` (the slice index) is the authoritative display order — the
     // DELETE-all-reinsert stamps every row with the same `now`, so ordering
     // by `subscribed_at` alone would be unstable.
@@ -1706,10 +1705,7 @@ pub async fn fetch_subscribed_packs(
         // deleting an own pack removes its rows locally, so there's nothing to
         // grieve, and a self-authored pack must never grey out over relay state.
         let me_hex = my_pubkey.to_hex();
-        let now = web_time::SystemTime::now()
-            .duration_since(web_time::UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
+        let now = crate::clock::now_secs() as i64;
         let mut health_changed = false;
         for addr in &addrs {
             if addr.pubkey.to_hex() == me_hex { continue; }
@@ -1948,7 +1944,7 @@ pub fn republish_emoji_list_debounced() {
     // wrongly suppress a legit cross-device update.
     let _ = crate::db::settings::set_sql_setting(
         EMOJI_LIST_PUBLISHED_AT_KEY.to_string(),
-        Timestamp::now().as_secs().to_string(),
+        crate::clock::timestamp().as_secs().to_string(),
     );
     let gen = REPUBLISH_GEN.fetch_add(1, Ordering::SeqCst) + 1;
     crate::db::spawn_bound(async move {
@@ -2078,8 +2074,7 @@ pub async fn publish_pack(pack: &EmojiPack) -> Result<EmojiPack, String> {
         to_save.is_own = true;
         let raw_addr = build_pack_addr(&to_save.pubkey, &to_save.identifier);
         to_save.id = naddr_from_addr(&raw_addr)?;
-        to_save.updated_at = web_time::SystemTime::now()
-            .duration_since(web_time::UNIX_EPOCH).unwrap().as_secs();
+        to_save.updated_at = crate::clock::now_secs();
 
         // Equipped-pack cap. Replacing an existing own pack is fine — only
         // a *new* identifier would push us over the limit.

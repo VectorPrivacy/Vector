@@ -117,7 +117,7 @@ pub async fn find_alias(url: &str) -> Result<FindAlias, String> {
 }
 
 fn now_secs() -> u64 {
-    web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+    crate::clock::now_secs()
 }
 
 /// GET the relay's NIP-11 document over the account's network and return the first

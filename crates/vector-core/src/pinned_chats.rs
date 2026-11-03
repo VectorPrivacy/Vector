@@ -159,10 +159,7 @@ fn our_last_publish() -> u64 {
 }
 
 fn mark_published() {
-    let now = web_time::SystemTime::now()
-        .duration_since(web_time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
+    let now = crate::clock::now_secs();
     let _ = crate::db::settings::set_sql_setting(PINNED_PUBLISHED_AT_KEY.to_string(), now.to_string());
 }
 

@@ -675,7 +675,7 @@ fn dispatch_judged(event: ChatEvent, community: &CommunityV2, ch: &super::commun
         if author_is_banned_here(&channel_id, Some(&community.id().0), &opened.author) {
             return DispatchedV2::Ignored;
         }
-        let now = web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
+        let now = crate::clock::now_ms();
         let noted = super::voice::note(&channel_id, opened.author, at_ms, heard, now);
         if noted.reached {
             super::service::reassert_voice_directives(community, &channel_id, &opened.author);
@@ -700,7 +700,7 @@ fn dispatch_judged(event: ChatEvent, community: &CommunityV2, ch: &super::commun
         if !authorized || author_is_banned_here(&channel_id, Some(&community.id().0), &opened.author) {
             return DispatchedV2::Ignored;
         }
-        let now = web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
+        let now = crate::clock::now_ms();
         // A member holding the key can re-wrap a signed directive it once saw (CORD-07 §7).
         if !super::voice::directive_in_window(&channel_id, &target, at_ms, now) {
             return DispatchedV2::Ignored;
@@ -853,10 +853,7 @@ pub async fn persist_webxdc_signal(
     }
     // Sender-claimed timestamp: clamp into the near future so a forged far-future ad
     // can't outrank every later genuine peer-left in the latest-per-npub read.
-    let now_secs = web_time::SystemTime::now()
-        .duration_since(web_time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
+    let now_secs = crate::clock::now_secs();
     let created_at = created_at.min(now_secs + 300);
     let Ok(chat_id) = crate::db::id_cache::get_or_create_chat_id(channel_hex) else { return };
     let mut tags = vec![
@@ -875,10 +872,7 @@ pub async fn persist_webxdc_signal(
         tags,
         reference_id: Some(topic_id.to_string()),
         created_at,
-        received_at: web_time::SystemTime::now()
-            .duration_since(web_time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u64,
+        received_at: crate::clock::now_ms(),
         mine: false,
         pending: false,
         failed: false,

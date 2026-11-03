@@ -4,6 +4,7 @@
 //! message history follows, and a copy cut short resumes on its own.
 
 use super::*;
+use crate::event_ext::FinalizeOnClock;
 use nostr_sdk::prelude::RelayUrl;
 use std::collections::{BTreeMap, HashSet};
 
@@ -454,12 +455,12 @@ async fn copy_events<T: Transport + ?Sized>(transport: &T, events: &[Event], rel
 /// (kind 33301) read back. Then a burst, to learn whether it throttles. Returns whether it pushed
 /// back anywhere. The probes look like a Community's own, and are deleted after.
 async fn preflight<T: Transport + ?Sized>(transport: &T, relay: &str) -> Result<bool, String> {
-    use nostr_sdk::prelude::{EventBuilder, EventDeletionRequest, FinalizeEvent, Kind, Tag};
+    use nostr_sdk::prelude::{EventBuilder, EventDeletionRequest, IntoEventBuilder, Kind, Tag};
     let probe = Keys::generate();
     let relays = [relay.to_string()];
     // A wrap names a throwaway recipient, never its own author.
     let to = || Tag::public_key(Keys::generate().public_key());
-    let sign = |kind: u16, tags: Vec<Tag>| EventBuilder::new(Kind::Custom(kind), "concord relay check").tags(tags).finalize(&probe).map_err(|e| e.to_string());
+    let sign = |kind: u16, tags: Vec<Tag>| EventBuilder::new(Kind::Custom(kind), "concord relay check").tags(tags).finalize_on_clock(&probe).map_err(|e| e.to_string());
     let wrap = sign(stream::KIND_WRAP, vec![to()])?;
     let ephemeral = sign(stream::KIND_WRAP_EPHEMERAL, vec![to()])?;
     let bundle = sign(super::super::kind::INVITE_BUNDLE, vec![Tag::identifier("")])?;
@@ -496,7 +497,7 @@ async fn preflight<T: Transport + ?Sized>(transport: &T, relay: &str) -> Result<
     }
     pushed_back |= futures_util::future::join_all(sends).await.iter().any(|sent| sent.as_ref().is_err_and(|e| !is_duplicate(e)));
     let probes = burst.iter().map(|e| e.id).chain([wrap.id, bundle.id]);
-    if let Ok(cleanup) = EventDeletionRequest::new().ids(probes).finalize(&probe) {
+    if let Ok(cleanup) = EventDeletionRequest::new().ids(probes).into_event_builder().finalize_on_clock(&probe) {
         let _ = transport.publish(&cleanup, &relays).await;
     }
     Ok(pushed_back)

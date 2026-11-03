@@ -21,7 +21,9 @@
 //!
 //! The kind number is provisional pending upstream registry coordination.
 
+#[cfg(test)]
 use nostr_sdk::prelude::FinalizeEvent;
+use crate::event_ext::FinalizeOnClock;
 use std::collections::HashMap;
 
 use nostr_sdk::prelude::{Event, EventBuilder, Keys, Kind, Tag};
@@ -238,7 +240,7 @@ impl BotManifest {
         self.validate()?;
         let content = serde_json::to_string(self).map_err(|e| e.to_string())?;
         let event = EventBuilder::new(Kind::Custom(KIND_BOT_MANIFEST), content)
-            .finalize(keys)
+            .finalize_on_clock(keys)
             .map_err(|e| e.to_string())?;
         crate::event_size::check(&event)?;
         Ok(event)

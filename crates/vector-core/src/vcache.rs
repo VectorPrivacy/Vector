@@ -75,7 +75,7 @@ fn load_or_create(path: &Path) -> Result<Zeroizing<[u8; 32]>, String> {
             // tried again later.
             Err(e) if e == WRONG_LENGTH => {
                 crate::log_warn!("[VCache] cache key unusable, starting a new one");
-                let stamp = web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+                let stamp = crate::clock::now_secs();
                 std::fs::rename(path, path.with_extension(format!("key.unusable-{stamp}"))).map_err(|e| e.to_string())?;
             }
             Err(e) => return Err(e),

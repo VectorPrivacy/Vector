@@ -17,13 +17,13 @@ use nostr_sdk::prelude::*;
 /// re-guessed per call site.
 pub const NIP59_RANDOM_TIMESTAMP_TWEAK: Range<u64> = 0..172_800;
 
-/// `Timestamp::now()` backdated by a random offset inside the NIP-59 window.
+/// `crate::clock::timestamp()` backdated by a random offset inside the NIP-59 window.
 ///
 /// 0.45.0 removed `Timestamp::tweaked`; this mirrors what nip59 does internally.
 pub fn tweaked_timestamp() -> Timestamp {
     use ::rand::Rng;
     let secs: u64 = ::rand::thread_rng().gen_range(NIP59_RANDOM_TIMESTAMP_TWEAK);
-    Timestamp::from_secs(Timestamp::now().as_secs().saturating_sub(secs))
+    Timestamp::from_secs(crate::clock::timestamp().as_secs().saturating_sub(secs))
 }
 
 use crate::state::{nostr_client, my_public_key, STATE};
@@ -730,6 +730,7 @@ pub async fn send_dm(
     let client = nostr_client().ok_or("Not logged in")?;
     let my_pk = my_public_key().ok_or("Public key not set")?;
 
+    // device-clock: a local id, never compared with a time.
     let pending_id = format!("pending-{}", web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).unwrap().as_nanos());
     // Stamped by the corrected clock, so a fast device never dates a message ahead of everyone.
     let now = std::time::Duration::from_millis(crate::clock::now_ms());
@@ -1192,6 +1193,7 @@ pub async fn send_file_dm_from(
     let signer = crate::signer::active_signer()
         .map_err(|e| format!("Signer unavailable: {}", e))?;
 
+    // device-clock: a local id, never compared with a time.
     let pending_id = format!("pending-{}", web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).unwrap().as_nanos());
     let now = std::time::Duration::from_millis(crate::clock::now_ms());
     let milliseconds = now.as_millis() % 1000;

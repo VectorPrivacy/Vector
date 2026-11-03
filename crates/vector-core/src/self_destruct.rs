@@ -48,11 +48,7 @@ pub fn resolve_send_expiry(chat_id: &str) -> Option<u64> {
 /// after its upload, so the clock starts at publish, not at the moment the send was asked
 /// for.
 pub fn expiry_after(duration_secs: u64) -> Option<u64> {
-    let now = web_time::SystemTime::now()
-        .duration_since(web_time::UNIX_EPOCH)
-        .ok()?
-        .as_secs();
-    Some(now + duration_secs)
+    Some(crate::clock::now_secs() + duration_secs)
 }
 
 /// The NIP-40 expiry an edit of `message_id` carries: the message's own, so the edit
@@ -66,10 +62,7 @@ pub async fn edit_expiry(message_id: &str) -> Result<Option<u64>, String> {
         Some(exp) => exp,
         None => crate::db::events::event_expiration(message_id)?,
     };
-    let now = web_time::SystemTime::now()
-        .duration_since(web_time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
+    let now = crate::clock::now_secs();
     if expiry.is_some_and(|exp| exp <= now) {
         return Err("That message has already expired".into());
     }
@@ -99,10 +92,7 @@ pub async fn sweep_expired() -> Option<u64> {
     }
     let _guard = SweepGuard;
 
-    let now = match web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH) {
-        Ok(d) => d.as_secs(),
-        Err(_) => return None,
-    };
+    let now = crate::clock::now_secs();
 
     // Pass 1 — scan under the lock: collect the expired, and track the soonest
     // still-pending expiry so the loop can time the next sweep to the second.
@@ -191,10 +181,7 @@ pub(crate) async fn purge_one(id: &str, db_fallback: Option<(Vec<crate::types::A
 /// closed (or while their chat was out of STATE) must NEVER render — not
 /// even for the frame between hydration and the next sweep tick.
 pub fn strip_expired(messages: &mut Vec<crate::types::Message>) {
-    let now = match web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH) {
-        Ok(d) => d.as_secs(),
-        Err(_) => return,
-    };
+    let now = crate::clock::now_secs();
     let mut expired: Vec<(String, Vec<crate::types::Attachment>, bool)> = Vec::new();
     messages.retain(|m| match m.expiration {
         Some(exp) if exp <= now => {
@@ -217,10 +204,7 @@ pub fn strip_expired(messages: &mut Vec<crate::types::Message>) {
 /// (down to a 1s floor) so the final stretch purges in real time, but never
 /// longer than SWEEP_MAX_SECS so a newly-arrived message is noticed promptly.
 fn next_sweep_delay(soonest: Option<u64>) -> std::time::Duration {
-    let now = web_time::SystemTime::now()
-        .duration_since(web_time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
+    let now = crate::clock::now_secs();
     let secs = match soonest {
         Some(exp) => exp.saturating_sub(now).clamp(1, SWEEP_MAX_SECS),
         None => SWEEP_MAX_SECS,

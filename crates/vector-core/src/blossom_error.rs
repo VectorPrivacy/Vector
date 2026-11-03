@@ -2,7 +2,7 @@
 //!
 //! Magnitude answers every refusal three ways at once: `X-Error-Code`, a
 //! stable identifier that is a header so a BUD-06 `HEAD` preflight carries it
-//! too; `X-Retry`, one of `never` / `later` / `elsewhere`; and a JSON body
+//! too; `X-Retry`, one of `never` / `later` / `elsewhere` / `sign_again` / `fix_clock`; and a JSON body
 //! `{error, message, retry, status, ...}` whose extra fields hold the numbers
 //! behind the sentence (`limit`, `used`, `retry_after`, `mime`). A server that
 //! speaks that vocabulary is routed on it. One that does not falls back to the
@@ -28,6 +28,10 @@ pub enum Retry {
     Later,
     /// This server will not accept it, but another might.
     Elsewhere,
+    /// The same request with a freshly signed authorization will do.
+    SignAgain,
+    /// This device's clock is off by `clock_offset_secs`; signing again on it changes nothing.
+    FixClock,
 }
 
 impl Retry {
@@ -36,6 +40,8 @@ impl Retry {
             "never" => Some(Retry::Never),
             "later" => Some(Retry::Later),
             "elsewhere" => Some(Retry::Elsewhere),
+            "sign_again" => Some(Retry::SignAgain),
+            "fix_clock" => Some(Retry::FixClock),
             _ => None,
         }
     }
@@ -111,7 +117,21 @@ impl Refusal {
             details.entry("retry_after").or_insert(json!(secs));
         }
 
-        Self { status, code, retry, message, details }
+        let refusal = Self { status, code, retry, message, details };
+        if refusal.blames_clock() {
+            crate::clock::resync_soon();
+        }
+        refusal
+    }
+
+    /// How far the server finds this device's clock from its own, in seconds (negative is behind).
+    pub fn clock_offset_secs(&self) -> Option<i64> {
+        self.details.get("clock_offset_secs").and_then(|v| v.as_i64())
+    }
+
+    /// The server says the clock that signed this is wrong.
+    pub fn blames_clock(&self) -> bool {
+        self.retry == Some(Retry::FixClock) || self.code() == Some("auth_from_the_future")
     }
 
     pub fn code(&self) -> Option<&str> {
@@ -160,6 +180,8 @@ impl Refusal {
                 .retry_after()
                 .is_none_or(|d| d <= MAX_RETRY_AFTER),
             Some("internal") | Some("mirror_source_unreachable") => true,
+            // Each attempt signs afresh.
+            Some(_) if self.retry == Some(Retry::SignAgain) => true,
             Some(_) => false,
             None => {
                 !self.is_mime()
@@ -205,10 +227,20 @@ impl Refusal {
             },
             Some("server_full") => format!("{} is out of space.", host),
             Some("blob_blocked") => format!("{} has blocked this file.", host),
-            Some("auth_expired") | Some("auth_from_the_future") => format!(
-                "{} rejected the upload signature's timestamp — this device's clock may be wrong.",
-                host,
-            ),
+            Some("auth_expired") | Some("auth_from_the_future") => match self.clock_offset_secs() {
+                Some(off) if self.blames_clock() => format!(
+                    "{} says this device's clock is about {} {}. {}",
+                    host,
+                    crate::clock::describe_span(off.unsigned_abs()),
+                    if off < 0 { "slow" } else { "fast" },
+                    if crate::clock::is_decentralised() {
+                        "Vector is checking the time with your relays; try again in a moment."
+                    } else {
+                        "Turn on Decentralised Clock in Settings, or set this device's clock to update automatically."
+                    },
+                ),
+                _ => format!("{} rejected the upload signature's timestamp — this device's clock may be wrong.", host),
+            },
             Some(c) if c.starts_with("auth_") => {
                 format!("{} rejected the upload authorization ({}).", host, self.message)
             }
@@ -532,5 +564,26 @@ mod tests {
         assert_eq!(host_of("https://magnitude.jskitty.com/"), "magnitude.jskitty.com");
         assert_eq!(host_of("http://localhost:8080"), "localhost");
         assert_eq!(host_of("not a url"), "not a url");
+    }
+
+    #[test]
+    fn a_clock_the_server_blames_is_named_and_not_retried_on_the_same_clock() {
+        let h = headers(&[("x-error-code", "auth_expired"), ("x-retry", "fix_clock")]);
+        let body = r#"{"error":"auth_expired","message":"m","retry":"fix_clock","status":401,"clock_offset_secs":-241}"#;
+        let r = Refusal::from_response(401, &h, body);
+        assert_eq!(r.retry, Some(Retry::FixClock));
+        assert_eq!(r.clock_offset_secs(), Some(-241));
+        assert!(r.blames_clock());
+        assert!(!r.worth_retrying_here(), "signing again on the same clock gets the same answer");
+        assert!(r.describe("m.example").contains("about 4 minutes slow"), "{}", r.describe("m.example"));
+    }
+
+    #[test]
+    fn an_expired_signature_is_signed_again() {
+        let h = headers(&[("x-error-code", "auth_expired"), ("x-retry", "sign_again")]);
+        let r = Refusal::from_response(401, &h, "");
+        assert_eq!(r.retry, Some(Retry::SignAgain));
+        assert!(!r.blames_clock());
+        assert!(r.worth_retrying_here());
     }
 }

@@ -62,10 +62,7 @@ pub struct EmojiUse {
 }
 
 fn now_secs() -> f64 {
-    web_time::SystemTime::now()
-        .duration_since(web_time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as f64)
-        .unwrap_or(0.0)
+    crate::clock::now_secs() as f64
 }
 
 fn kind_code(kind: &str) -> i64 {

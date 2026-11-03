@@ -82,10 +82,7 @@ pub struct ServerStatus {
 }
 
 fn now_secs() -> i64 {
-    web_time::SystemTime::now()
-        .duration_since(web_time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
+    crate::clock::now_secs() as i64
 }
 
 fn norm_url(url: &str) -> String {

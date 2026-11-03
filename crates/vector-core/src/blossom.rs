@@ -330,7 +330,9 @@ fn auth_event(verb: &str, scope: AuthScope<'_>, content: &str, expiration: Times
         AuthScope::Blob(hash) => Tag::custom("x", [hash.to_string()]),
         AuthScope::Server(url) => Tag::custom("server", [url.to_string()]),
     };
-    EventBuilder::new(Kind::BlossomAuth, content).tags([scope, Tag::expiration(expiration), Tag::hashtag(verb)])
+    EventBuilder::new(Kind::BlossomAuth, content)
+        .tags([scope, Tag::expiration(expiration), Tag::hashtag(verb)])
+        .custom_created_at(crate::clock::timestamp())
 }
 
 /// A signed BUD-01 `Authorization: Nostr <base64 kind 24242>` header for `verb`, valid for `ttl`.
@@ -344,7 +346,7 @@ pub(crate) async fn auth_header<T>(
 where
     T: VectorSigner,
 {
-    let event: Event = auth_event(verb, scope, content, Timestamp::now() + ttl)
+    let event: Event = auth_event(verb, scope, content, crate::clock::timestamp() + ttl)
         .finalize_async(signer)
         .await
         .map_err(|e| format!("Failed to sign auth event: {}", e))?;

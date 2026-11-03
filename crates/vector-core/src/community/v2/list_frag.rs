@@ -11,8 +11,9 @@
 //! `current`.
 
 use crate::event_ext::FinalizeUnsignedWithId;
+use crate::event_ext::FinalizeOnClock;
 use nostr_sdk::prelude::nip44::{self, Version};
-use nostr_sdk::prelude::{Event, EventBuilder, FinalizeEvent, Keys, Kind, PublicKey, Tag, Timestamp};
+use nostr_sdk::prelude::{Event, EventBuilder, Keys, Kind, PublicKey, Tag, Timestamp};
 use serde::{Deserialize, Serialize};
 
 use super::list::{ChannelKeyRef, CommunityList, JoinMaterial};
@@ -368,7 +369,7 @@ pub fn build_fragment_event_keys(
     EventBuilder::new(Kind::Custom(super::kind::COMMUNITY_LIST_FRAG), content)
         .tag(Tag::identifier(index.to_string()))
         .custom_created_at(Timestamp::from_secs(created_at))
-        .finalize(my_keys)
+        .finalize_on_clock(my_keys)
         .map_err(|e| format!("fragment sign: {e}"))
 }
 

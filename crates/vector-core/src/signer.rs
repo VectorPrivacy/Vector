@@ -168,6 +168,8 @@ impl AsyncSignEvent for ActiveSigner {
     type Error = SignerError;
 
     fn sign_event_async(&self, unsigned: UnsignedEvent) -> BoxedFuture<'_, Result<Event, Self::Error>> {
+        // Before any backend sees it: a remote signer signs exactly what it is sent.
+        let unsigned = crate::clock::restamp(unsigned);
         Box::pin(async move { dispatch!(self, sign_event_async, unsigned) })
     }
 }

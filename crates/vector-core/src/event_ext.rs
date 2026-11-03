@@ -18,9 +18,23 @@ pub trait FinalizeUnsignedWithId {
 impl FinalizeUnsignedWithId for EventBuilder {
     #[inline]
     fn finalize_unsigned_with_id(self, public_key: PublicKey) -> UnsignedEvent {
-        let mut unsigned = self.finalize_unsigned(public_key);
+        let mut unsigned = crate::clock::restamp(self.finalize_unsigned(public_key));
         unsigned.ensure_id();
         unsigned
+    }
+}
+
+/// Sign with keys held in hand, stamped on Vector's clock. nostr's own `finalize` stamps the
+/// device's; the session signer restamps by itself, bare `Keys` cannot.
+pub trait FinalizeOnClock {
+    fn finalize_on_clock(self, keys: &Keys) -> Result<Event, <UnsignedEvent as FinalizeEvent<Keys>>::Error>;
+}
+
+impl FinalizeOnClock for EventBuilder {
+    #[inline]
+    fn finalize_on_clock(self, keys: &Keys) -> Result<Event, <UnsignedEvent as FinalizeEvent<Keys>>::Error> {
+        // device-clock: restamped on this line.
+        crate::clock::restamp(self.finalize_unsigned(keys.public_key())).finalize(keys)
     }
 }
 

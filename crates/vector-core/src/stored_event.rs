@@ -243,10 +243,7 @@ impl StoredEvent {
 
 /// Get current timestamp in milliseconds
 fn current_timestamp_ms() -> u64 {
-    web_time::SystemTime::now()
-        .duration_since(web_time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
+    crate::clock::now_ms()
 }
 
 /// Builder for creating StoredEvent from rumor processing

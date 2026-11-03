@@ -424,7 +424,7 @@ fn live_filter(authors: impl IntoIterator<Item = PublicKey>, since: Timestamp) -
 }
 
 fn live_since() -> Timestamp {
-    Timestamp::from_secs(Timestamp::now().as_secs().saturating_sub(crate::community::REALTIME_FRESH_WINDOW_MS / 1000))
+    Timestamp::from_secs(crate::clock::timestamp().as_secs().saturating_sub(crate::community::REALTIME_FRESH_WINDOW_MS / 1000))
 }
 
 /// This community's Control Plane address at the current root epoch — the single

@@ -398,7 +398,7 @@ fn unavailable_reason<R: Runtime>(handle: &AppHandle<R>, url: &str, image_type: 
     let v: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).ok()?).ok()?;
     let at = v.get("at")?.as_u64()?;
     let for_secs = v.get("for")?.as_u64()?;
-    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let now = vector_core::clock::now_secs();
     if now.saturating_sub(at) >= for_secs {
         let _ = std::fs::remove_file(&path);
         return None;
@@ -409,7 +409,7 @@ fn unavailable_reason<R: Runtime>(handle: &AppHandle<R>, url: &str, image_type: 
 fn remember_unavailable<R: Runtime>(handle: &AppHandle<R>, url: &str, image_type: ImageType, reason: &str) {
     let Some(for_secs) = unavailable_for(reason) else { return };
     let Some(path) = unavailable_marker(handle, url, image_type) else { return };
-    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let now = vector_core::clock::now_secs();
     let _ = std::fs::write(path, json!({ "reason": reason, "at": now, "for": for_secs }).to_string());
 }
 

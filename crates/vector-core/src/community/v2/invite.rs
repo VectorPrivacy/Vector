@@ -20,6 +20,8 @@
 //! before it is trusted, whichever lane carried it.
 
 use crate::event_ext::FinalizeUnsignedWithId;
+use crate::event_ext::FinalizeOnClock;
+#[cfg(test)]
 use nostr_sdk::prelude::FinalizeEvent;
 use nostr_sdk::prelude::nip44::{
     self,
@@ -299,7 +301,7 @@ pub fn build_bundle_event(
     let content = seal_bundle(bundle_key, &json)?;
     EventBuilder::new(Kind::Custom(kind::INVITE_BUNDLE), content)
         .tags([d_empty(), vsk_tag(vsk::INVITE_LIVE)])
-        .finalize(link_signer)
+        .finalize_on_clock(link_signer)
         .map_err(|e| InviteError::Crypto(e.to_string()))
 }
 
@@ -309,7 +311,7 @@ pub fn build_bundle_event(
 pub fn build_revocation(link_signer: &Keys) -> Result<Event, InviteError> {
     EventBuilder::new(Kind::Custom(kind::INVITE_BUNDLE), "")
         .tags([d_empty(), vsk_tag(vsk::INVITE_REVOKED)])
-        .finalize(link_signer)
+        .finalize_on_clock(link_signer)
         .map_err(|e| InviteError::Crypto(e.to_string()))
 }
 
@@ -633,7 +635,7 @@ pub fn build_invite_list_event(my_keys: &Keys, list: &InviteList) -> Result<Even
     let json = serde_json::to_string(list).map_err(|e| InviteError::Json(e.to_string()))?;
     let content = encrypt(my_keys.secret_key(), &my_keys.public_key(), json.as_bytes(), Version::V2).map_err(|e| InviteError::Crypto(e.to_string()))?;
     EventBuilder::new(Kind::Custom(kind::INVITE_LIST), content)
-        .finalize(my_keys)
+        .finalize_on_clock(my_keys)
         .map_err(|e| InviteError::Crypto(e.to_string()))
 }
 
@@ -689,7 +691,7 @@ pub fn build_direct_invite(
 
     // The unsigned kind-3313 rumor, authored (claimed) by the inviter.
     let mut rumor = EventBuilder::new(Kind::Custom(kind::DIRECT_INVITE), json)
-        .custom_created_at(Timestamp::now())
+        .custom_created_at(crate::clock::timestamp())
         .finalize_unsigned_with_id(inviter_keys.public_key());
     rumor.ensure_id();
 
@@ -697,7 +699,7 @@ pub fn build_direct_invite(
         .map_err(|e| InviteError::Crypto(e.to_string()))?;
     let seal = EventBuilder::new(Kind::Seal, seal_content)
         .custom_created_at(crate::sending::tweaked_timestamp())
-        .finalize(inviter_keys)
+        .finalize_on_clock(inviter_keys)
         .map_err(|e| InviteError::Crypto(e.to_string()))?;
 
     let ephemeral = Keys::generate();
@@ -713,7 +715,7 @@ pub fn build_direct_invite(
     EventBuilder::new(Kind::GiftWrap, wrap_content)
         .tags(tags)
         .custom_created_at(crate::sending::tweaked_timestamp())
-        .finalize(&ephemeral)
+        .finalize_on_clock(&ephemeral)
         .map_err(|e| InviteError::Crypto(e.to_string()))
 }
 
@@ -757,7 +759,7 @@ pub async fn build_invite_list_event_signed<S: crate::signer::VectorSigner + ?Si
     my_pk: PublicKey,
     list: &InviteList,
 ) -> Result<Event, InviteError> {
-    build_invite_list_event_at(signer, my_pk, list, Timestamp::now().as_secs()).await
+    build_invite_list_event_at(signer, my_pk, list, crate::clock::timestamp().as_secs()).await
 }
 
 /// [`build_invite_list_event_signed`] dated `at_secs`: a replaceable list must outdate every copy
@@ -797,7 +799,7 @@ pub async fn build_direct_invite_signed<S: crate::signer::VectorSigner + ?Sized>
 ) -> Result<Event, InviteError> {
     let json = serde_json::to_string(bundle).map_err(|e| InviteError::Json(e.to_string()))?;
     let mut rumor = EventBuilder::new(Kind::Custom(kind::DIRECT_INVITE), json)
-        .custom_created_at(Timestamp::now())
+        .custom_created_at(crate::clock::timestamp())
         .finalize_unsigned_with_id(inviter_pk);
     rumor.ensure_id();
     let rumor_json = rumor.as_json();
@@ -819,7 +821,7 @@ pub async fn build_direct_invite_signed<S: crate::signer::VectorSigner + ?Sized>
     EventBuilder::new(Kind::GiftWrap, wrap_content)
         .tags(tags)
         .custom_created_at(crate::sending::tweaked_timestamp())
-        .finalize(&ephemeral)
+        .finalize_on_clock(&ephemeral)
         .map_err(|e| InviteError::Crypto(e.to_string()))
 }
 

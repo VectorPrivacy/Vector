@@ -479,10 +479,7 @@ pub async fn load_profile(npub: String, handler: &dyn ProfileSyncHandler) -> boo
 
                         // Update timestamp
                         profile.last_updated = secs_to_compact(
-                            web_time::SystemTime::now()
-                                .duration_since(web_time::UNIX_EPOCH)
-                                .unwrap()
-                                .as_secs()
+                            crate::clock::now_secs()
                         );
 
                         // A GUI's picture with no local copy goes to the cache too: one held
@@ -515,10 +512,7 @@ pub async fn load_profile(npub: String, handler: &dyn ProfileSyncHandler) -> boo
                 let mut state = STATE.lock().await;
                 if let Some(profile) = state.get_profile_mut(&npub) {
                     profile.last_updated = secs_to_compact(
-                        web_time::SystemTime::now()
-                            .duration_since(web_time::UNIX_EPOCH)
-                            .unwrap()
-                            .as_secs()
+                        crate::clock::now_secs()
                     );
                 }
                 true
@@ -1078,7 +1072,7 @@ pub fn queue_profile_sync(npub: String, priority: SyncPriority, force_refresh: b
 }
 
 fn now_secs() -> u64 {
-    web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).map_or(0, |d| d.as_secs())
+    crate::clock::now_secs()
 }
 
 /// How long a profile's last check stays good enough for one that is merely on screen.

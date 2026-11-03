@@ -20,7 +20,8 @@
 //! Signing is local (raw derived keys) — it never touches the account signer /
 //! bunker.
 
-use nostr_sdk::prelude::FinalizeEvent;
+use nostr_sdk::prelude::IntoEventBuilder;
+use crate::event_ext::FinalizeOnClock;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{LazyLock, Mutex};
@@ -185,7 +186,7 @@ pub fn is_empty() -> bool {
 fn sign_all(challenge: &str, relay: &RelayUrl) -> Vec<nostr_sdk::prelude::Event> {
     let reg = REGISTRY.lock().unwrap_or_else(|e| e.into_inner());
     reg.values()
-        .filter_map(|keys| ClientAuthentication::new(challenge, relay.clone()).finalize(keys).ok())
+        .filter_map(|keys| ClientAuthentication::new(challenge, relay.clone()).into_event_builder().finalize_on_clock(keys).ok())
         .collect()
 }
 

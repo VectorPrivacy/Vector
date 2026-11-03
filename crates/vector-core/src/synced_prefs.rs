@@ -723,7 +723,7 @@ fn claim_archive_publish(now: u64) -> Result<(String, u64), String> {
 
 async fn publish_archive(client: &Client) -> Result<(), String> {
     let my_pk = crate::state::my_public_key().ok_or_else(|| "Not logged in".to_string())?;
-    let (json, at) = claim_archive_publish(Timestamp::now().as_secs())?;
+    let (json, at) = claim_archive_publish(crate::clock::timestamp().as_secs())?;
     send_list(client, my_pk, Pref::Archive, &json, Some(at)).await
 }
 
@@ -932,7 +932,7 @@ pub async fn publish_settings(client: &Client, refresh: bool) -> Result<Option<S
             }
         }
     }
-    let (json, at) = claim_publish(Timestamp::now().as_secs());
+    let (json, at) = claim_publish(crate::clock::timestamp().as_secs());
     send_list(client, my_pk, Pref::Settings, &json, Some(at)).await?;
     settings_published(&json, at);
     Ok(shown)
@@ -1248,7 +1248,7 @@ pub async fn flush_layout(pref: Pref) {
     let generation = layout_gen(pref).load(std::sync::atomic::Ordering::Relaxed);
     let Some(json) = load_local_raw(pref) else { return };
     // Dated after every copy we hold, so ours is the newest wherever it lands.
-    let at = Timestamp::now().as_secs().max(layout_seen(pref) + 1);
+    let at = crate::clock::timestamp().as_secs().max(layout_seen(pref) + 1);
     match send_list(&client, my_pk, pref, &json, Some(at)).await {
         // An edit made while this copy was out is still unsent; its own timer sends it.
         Ok(()) => {

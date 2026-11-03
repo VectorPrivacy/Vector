@@ -711,7 +711,7 @@ fn park_catch_up_channel_keys(
 }
 
 fn expired_invite(expires_at: u64, rumor_created_at: u64) -> bool {
-    let now = nostr_sdk::prelude::Timestamp::now().as_secs();
+    let now = crate::clock::timestamp().as_secs();
     if expires_at != 0 && expires_at <= now {
         return true;
     }
@@ -909,7 +909,7 @@ mod invite_expiry_tests {
     use super::*;
 
     fn now() -> u64 {
-        nostr_sdk::prelude::Timestamp::now().as_secs()
+        crate::clock::timestamp().as_secs()
     }
 
     #[test]
@@ -1530,10 +1530,7 @@ async fn hold_deletion_until_met(target: &str, sender: &PublicKey) {
     if deletion_target_known(target).await {
         return;
     }
-    let expires = web_time::SystemTime::now()
-        .duration_since(web_time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
+    let expires = crate::clock::now_secs()
         .saturating_add(crate::deletion::COOPERATIVE_HIDE_EXPIRY_SECS);
     if let Err(e) = crate::db::events::park_pending_deletion(target, &sender.to_hex(), expires) {
         crate::log_warn!("[NIP-17 cooperative-delete] {}", e);
@@ -1777,7 +1774,7 @@ mod invite_wrap_tests {
     async fn every_wrap_that_delivers_an_invite_is_kept_and_a_decline_deletes_them_all() {
         let (_tmp, _guard) = init_test_db();
         let cid = "ab".repeat(32);
-        let now = Timestamp::now().as_secs();
+        let now = crate::clock::timestamp().as_secs();
         commit_prepared_event(invite(&cid, 0x11, now), true, &NoOpEventHandler).await;
         commit_prepared_event(invite(&cid, 0x22, now), true, &NoOpEventHandler).await;
         assert_eq!(crate::db::community::pending_invite_wraps(&cid).unwrap(), ["11".repeat(32), "22".repeat(32)]);
@@ -1793,7 +1790,7 @@ mod invite_wrap_tests {
     async fn an_invite_met_again_after_its_decline_is_deleted_not_parked() {
         let (_tmp, _guard) = init_test_db();
         let cid = "cd".repeat(32);
-        let now = Timestamp::now().as_secs();
+        let now = crate::clock::timestamp().as_secs();
         crate::community::v2::service::note_local_removal(&cid, now * 1000);
         commit_prepared_event(invite(&cid, 0x33, now - 60), true, &NoOpEventHandler).await;
         assert!(crate::db::community::get_pending_invite(&cid).unwrap().is_none());

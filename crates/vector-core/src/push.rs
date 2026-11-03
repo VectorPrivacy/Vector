@@ -308,7 +308,7 @@ fn viewing_slot() -> Arc<std::sync::Mutex<Option<(String, u64)>>> {
 }
 
 fn now_secs() -> u64 {
-    web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+    crate::clock::now_secs()
 }
 
 async fn is_blocked(npub: &str) -> bool {

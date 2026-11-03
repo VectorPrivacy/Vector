@@ -4,6 +4,7 @@
 //! are delivered to the recipient's preferred inbox relays.
 
 use std::collections::{HashMap, HashSet};
+use crate::event_ext::FinalizeOnClock;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use web_time::Instant;
@@ -253,7 +254,7 @@ impl CachedRelays {
 }
 
 fn now_secs() -> u64 {
-    web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).map_or(0, |d| d.as_secs())
+    crate::clock::now_secs()
 }
 
 /// Relay urls as a set, for telling whether two lists name the same relays.
@@ -826,7 +827,7 @@ pub fn wrap_with_retained_key(
     let event = EventBuilder::new(Kind::GiftWrap, content)
         .tags(tags)
         .custom_created_at(crate::sending::tweaked_timestamp())
-        .finalize(&keys)
+        .finalize_on_clock(&keys)
         .map_err(|e| format!("sign wrap: {}", e))?;
     crate::event_size::check(&event)?;
     Ok((event, secret))

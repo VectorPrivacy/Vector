@@ -16,6 +16,8 @@
     "process:default",
     "allow-get-theme",
     "allow-get-sql-setting",
+    "allow-get-clock-status",
+    "allow-set-decentralised-clock",
     "allow-set-sql-setting",
     "allow-remove-setting",
     "allow-get-self-destruct-timer",

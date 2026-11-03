@@ -88,10 +88,7 @@ pub fn is_muted_at(mute_until: i64, now_ms: i64) -> bool {
 }
 
 pub fn now_ms() -> i64 {
-    web_time::SystemTime::now()
-        .duration_since(web_time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0)
+    crate::clock::now_ms() as i64
 }
 
 /// One scope's stored settings. `None` means inherit; `suppress_everyone` is

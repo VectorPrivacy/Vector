@@ -27,10 +27,7 @@ pub async fn check_and_vacuum_if_needed() -> Result<(), String> {
             |row| row.get(0)
         ).ok().and_then(|s: String| s.parse().ok());
 
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs() as i64;
+        let now = vector_core::clock::now_secs() as i64;
 
         let seven_days_secs = 7 * 24 * 60 * 60;
 
@@ -44,10 +41,7 @@ pub async fn check_and_vacuum_if_needed() -> Result<(), String> {
         vacuum_database()?;
 
         // Update last vacuum timestamp
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs() as i64;
+        let now = vector_core::clock::now_secs() as i64;
 
         let conn = crate::account_manager::get_write_connection_guard_static()?;
         conn.execute(
@@ -72,10 +66,7 @@ pub async fn check_and_optimize_if_needed() -> Result<(), String> {
             |row| row.get(0),
         ).ok().and_then(|s: String| s.parse().ok());
 
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs() as i64;
+        let now = vector_core::clock::now_secs() as i64;
 
         let one_day_secs = 24 * 60 * 60;
         match last_optimize {
@@ -87,10 +78,7 @@ pub async fn check_and_optimize_if_needed() -> Result<(), String> {
     if should_optimize {
         vector_core::db::optimize_database();
 
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs() as i64;
+        let now = vector_core::clock::now_secs() as i64;
 
         let conn = crate::account_manager::get_write_connection_guard_static()?;
         conn.execute(

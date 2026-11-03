@@ -669,10 +669,7 @@ async fn save_promo<R: Runtime>(
     let _seal = vector_core::crypto::gate::sealing();
     let privkey_encrypted = vector_core::crypto::maybe_encrypt_text(&privkey_hex)?;
 
-    let created_at = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
+    let created_at = vector_core::clock::now_secs();
 
     let conn = crate::account_manager::get_db_connection_guard_static()?;
     conn.execute(
@@ -823,10 +820,7 @@ async fn get_or_create_deposit_promo<R: Runtime>(handle: &AppHandle<R>) -> Resul
 
     save_promo(handle, &gift_code, &address, &privkey).await?;
 
-    let created_at = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
+    let created_at = vector_core::clock::now_secs();
 
     Ok(PivxPromo {
         gift_code,
@@ -1326,10 +1320,7 @@ pub async fn pivx_send_payment<R: Runtime>(
             vec!["amount".to_string(), amount_sats.to_string()],
             vec!["address".to_string(), send_promo.1.clone()],
         ])
-        .created_at(std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0))
+        .created_at(vector_core::clock::now_secs())
         .mine(true)
         .npub(Some(my_public_key.to_bech32().unwrap_or_default()))
         .build();
@@ -1441,10 +1432,7 @@ pub async fn pivx_send_existing_promo<R: Runtime>(
             vec!["amount".to_string(), amount_sats.to_string()],
             vec!["address".to_string(), address.clone()],
         ])
-        .created_at(std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0))
+        .created_at(vector_core::clock::now_secs())
         .mine(true)
         .npub(Some(my_public_key.to_bech32().unwrap_or_default()))
         .build();

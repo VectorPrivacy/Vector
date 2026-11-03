@@ -659,10 +659,7 @@ fn extract_nip40_expiration(rumor: &RumorEvent) -> Option<u64> {
 /// NIP-40: true when the tag's expiry already lies in the past at receipt.
 pub(crate) fn already_expired(expiration: Option<u64>) -> bool {
     match expiration {
-        Some(exp) => web_time::SystemTime::now()
-            .duration_since(web_time::UNIX_EPOCH)
-            .map(|d| exp <= d.as_secs())
-            .unwrap_or(false),
+        Some(exp) => exp <= crate::clock::now_secs(),
         None => false,
     }
 }
@@ -781,10 +778,7 @@ fn process_app_specific(
             .parse()
             .map_err(|_| "Invalid expiration timestamp")?;
 
-        let current_timestamp = web_time::SystemTime::now()
-            .duration_since(web_time::UNIX_EPOCH)
-            .map_err(|e| format!("System time error: {}", e))?
-            .as_secs();
+        let current_timestamp = crate::clock::now_secs();
 
         if expiry_timestamp <= current_timestamp || expiry_timestamp > current_timestamp + 30 {
             return Ok(RumorProcessingResult::Ignored);

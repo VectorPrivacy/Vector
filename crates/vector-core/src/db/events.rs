@@ -168,12 +168,8 @@ fn reaction_to_stored_event(
         content: reaction.emoji.clone(),
         tags,
         reference_id: Some(reaction.reference_id.clone()),
-        created_at: web_time::SystemTime::now()
-            .duration_since(web_time::UNIX_EPOCH)
-            .map(|d| d.as_secs()).unwrap_or(0),
-        received_at: web_time::SystemTime::now()
-            .duration_since(web_time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64).unwrap_or(0),
+        created_at: crate::clock::now_secs(),
+        received_at: crate::clock::now_ms(),
         mine,
         pending: false,
         failed: false,
@@ -473,10 +469,7 @@ fn message_to_stored_event(message: &Message, chat_id: i64, user_id: Option<i64>
         tags,
         reference_id: None,
         created_at: message.at / 1000,
-        received_at: web_time::SystemTime::now()
-            .duration_since(web_time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0),
+        received_at: crate::clock::now_ms(),
         mine: message.mine,
         pending: message.pending,
         failed: message.failed,
@@ -504,9 +497,7 @@ pub async fn save_system_event_by_id(
     member_npub: &str,
     member_name: Option<&str>,
 ) -> Result<bool, String> {
-    let now_secs = web_time::SystemTime::now()
-        .duration_since(web_time::UNIX_EPOCH)
-        .map(|d| d.as_secs()).unwrap_or(0);
+    let now_secs = crate::clock::now_secs();
     save_system_event_at(event_id, conversation_id, event_type, member_npub, member_name, now_secs, None, None).await
 }
 
@@ -539,9 +530,7 @@ pub async fn save_system_event_at(
     }
     let chat_id = super::id_cache::get_or_create_chat_id(conversation_id)?;
 
-    let now_secs = web_time::SystemTime::now()
-        .duration_since(web_time::UNIX_EPOCH)
-        .map(|d| d.as_secs()).unwrap_or(0);
+    let now_secs = crate::clock::now_secs();
     // Author-set timestamp: clamp forward so a future-dated event can't jump ahead of real activity.
     let created_at = created_at_secs.min(now_secs);
 
@@ -595,8 +584,7 @@ pub async fn save_edit_event(
     user_id: Option<i64>,
     npub: &str,
 ) -> Result<(), String> {
-    let now = web_time::SystemTime::now()
-        .duration_since(web_time::UNIX_EPOCH).unwrap();
+    let now = std::time::Duration::from_millis(crate::clock::now_ms());
 
     // Carry NIP-30 emoji tags so a reload renders the edit's custom emoji image
     // (the reload fold reads the latest edit's tags, not the original message's).
@@ -680,10 +668,7 @@ pub async fn delete_event(event_id: &str) -> Result<(), String> {
 /// re-serves across restarts (NIP-09 is best-effort — relays ignore it freely).
 pub fn add_message_tombstone(event_id: &str) -> Result<(), String> {
     let conn = super::get_write_connection_guard_static()?;
-    let now = web_time::SystemTime::now()
-        .duration_since(web_time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
+    let now = crate::clock::now_secs() as i64;
     conn.execute(
         "INSERT OR IGNORE INTO deleted_messages (event_id, deleted_at) VALUES (?1, ?2)",
         rusqlite::params![event_id, now],
@@ -698,7 +683,7 @@ const MAX_PENDING_DELETIONS: i64 = 10_000;
 /// until `expires_at` (unix secs). Only the oldest beyond the cap are let go.
 pub fn park_pending_deletion(target: &str, requester: &str, expires_at: u64) -> Result<(), String> {
     let conn = super::get_write_connection_guard_static()?;
-    let now = web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
+    let now = crate::clock::now_secs() as i64;
     conn.execute(
         "INSERT OR REPLACE INTO pending_deletions (target, requester, expires_at) VALUES (?1, ?2, ?3)",
         rusqlite::params![target, requester, expires_at as i64],
@@ -727,7 +712,7 @@ pub fn take_pending_deletion(target: &str) -> Option<String> {
     if let Ok(conn) = super::get_write_connection_guard_static() {
         let _ = conn.execute("DELETE FROM pending_deletions WHERE target = ?1", rusqlite::params![target]);
     }
-    let now = web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
+    let now = crate::clock::now_secs() as i64;
     (expires_at > now).then_some(requester)
 }
 

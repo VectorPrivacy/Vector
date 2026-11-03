@@ -462,7 +462,7 @@ fn community_relays_of(community_id: &str) -> Vec<String> {
 /// A removal this device decided (leave, delete): torn down and recorded
 /// in the local tombstone mirror at now.
 pub(crate) async fn teardown_community_local(community_id: &str, channel_ids: &[String]) {
-    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
+    let now = vector_core::clock::now_ms();
     vector_core::community::v2::service::note_local_removal(community_id, now);
     teardown_community_records(community_id, channel_ids).await
 }
@@ -674,10 +674,7 @@ pub async fn send_community_message(
         let ch = vector_core::community::ChannelId(hex_to_id32(&channel_id)?);
         let channel = community.channel(&ch).ok_or("Channel not found in Community")?;
         let (_, epoch) = community.channel_secret(channel);
-        let ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u64;
+        let ms = vector_core::clock::now_ms();
         let callback = crate::message::sending::TauriSendCallback;
         // NIP-30 pairs + the NIP-C7 reply author (best-effort from the held parent).
         let emoji_tags = vector_core::emoji_packs::resolve_outbound_emoji_tags(&content);
@@ -1208,13 +1205,12 @@ async fn dispatch_community_attachment_message(
             return Err("Channel not found in Community".to_string());
         }
 
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default();
-        let ms = now.as_millis() as u64;
+        let ms = vector_core::clock::now_ms();
         // Temp id keyed during upload — the real inner id depends on the imeta (uploaded URLs),
         // so it isn't known until every attachment lands. Finalized → real id on publish ack.
-        let pending_id = format!("pending-{}", now.as_nanos());
+        // device-clock: a local id, never compared with a time.
+        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos();
+        let pending_id = format!("pending-{nanos}");
         let callback = crate::message::sending::TauriSendCallback;
         let emoji_tags = vector_core::emoji_packs::resolve_outbound_emoji_tags(&content);
 
@@ -2975,10 +2971,7 @@ pub async fn revoke_public_invite(community_id: String, token: String) -> Result
 
 /// Current Unix time in seconds.
 fn now_secs() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
+    vector_core::clock::now_secs()
 }
 
 /// Decode a deterministic 64-char hex id (DB-stored community/channel id, our own encrypted

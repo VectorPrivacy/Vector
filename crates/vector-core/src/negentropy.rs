@@ -28,10 +28,7 @@ fn cap_key(relay_url: &str) -> String {
 }
 
 fn now_secs() -> u64 {
-    web_time::SystemTime::now()
-        .duration_since(web_time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
+    crate::clock::now_secs()
 }
 
 /// Cached NIP-77 verdict for a relay. `None` = unknown or stale — attempt

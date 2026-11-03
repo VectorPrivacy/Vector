@@ -386,10 +386,7 @@ pub async fn publish_wallpaper(chat_npub: &str, blur: u8, dim: u8) -> Result<(),
     // This flow never mirrors, so only the descriptor matters.
     .url;
 
-    let created_at = web_time::SystemTime::now()
-        .duration_since(web_time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
+    let created_at = crate::clock::now_secs();
     let rumor = EventBuilder::new(Kind::Custom(event_kind::APPLICATION_SPECIFIC), "")
         .tag(Tag::identifier(WALLPAPER_DTAG_VALUE))
         // Recipient tag — identifies which chat this wallpaper is for. The
@@ -934,10 +931,7 @@ pub async fn remove_wallpaper(chat_npub: &str) -> Result<(), String> {
     let recipient_pk = PublicKey::from_bech32(chat_npub)
         .map_err(|e| format!("Invalid chat npub: {}", e))?;
 
-    let created_at = web_time::SystemTime::now()
-        .duration_since(web_time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
+    let created_at = crate::clock::now_secs();
     // Tombstone: same d-tag + recipient p-tag as a set, but no url/key/nonce.
     let rumor = EventBuilder::new(Kind::Custom(event_kind::APPLICATION_SPECIFIC), "")
         .tag(Tag::identifier(WALLPAPER_DTAG_VALUE))

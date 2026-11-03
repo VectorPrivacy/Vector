@@ -100,6 +100,7 @@ pub fn persist(line: &str) {
 /// in the tree). A bare clock time can't tell a support-log reader whether an
 /// error predates a fix — the date is the whole point of a persistent log.
 pub fn timestamp_utc() -> String {
+    // device-clock: log lines keep the time the device showed.
     let secs = web_time::SystemTime::now()
         .duration_since(web_time::UNIX_EPOCH)
         .map(|d| d.as_secs())

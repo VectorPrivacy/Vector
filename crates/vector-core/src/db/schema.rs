@@ -171,10 +171,7 @@ pub fn migration_applied(conn: &rusqlite::Connection, migration_id: u32) -> bool
 
 /// Mark a migration as applied (within a transaction)
 pub fn mark_migration_applied(tx: &rusqlite::Transaction, migration_id: u32) -> Result<(), String> {
-    let now = web_time::SystemTime::now()
-        .duration_since(web_time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs() as i64;
+    let now = crate::clock::now_secs() as i64;
 
     tx.execute(
         "INSERT INTO schema_migrations (id, applied_at) VALUES (?1, ?2)",

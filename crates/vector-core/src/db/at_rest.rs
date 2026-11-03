@@ -1623,7 +1623,7 @@ pub async fn upgrade_after_unlock(password: &str, legacy_key: &[u8; 32]) -> Resu
     if crate::db::get_sql_setting("security_type".to_string())?.as_deref() == Some("biometric") {
         return Ok(false);
     }
-    let now = web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let now = crate::clock::now_secs();
     let last_try: u64 = crate::db::get_sql_setting("kdf_upgrade_attempt".to_string())?.and_then(|v| v.parse().ok()).unwrap_or(0);
     if now.saturating_sub(last_try) < RETRY_AFTER_SECS {
         return Ok(false);
@@ -1680,7 +1680,7 @@ static PROVING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 /// this can't walk the PIN space.
 pub async fn prove_credential(credential: &str) -> Result<zeroize::Zeroizing<[u8; 32]>, String> {
     let _one_at_a_time = PROVING.lock().await;
-    let now = web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let now = crate::clock::now_secs();
     let read = |key: &str| crate::db::get_sql_setting(key.to_string()).ok().flatten().and_then(|v| v.parse::<u64>().ok());
     if let Some(retry_at) = read("credential_retry_at").filter(|&t| t > now) {
         // A wait longer than any miss earns means the clock went back; count it from now instead.

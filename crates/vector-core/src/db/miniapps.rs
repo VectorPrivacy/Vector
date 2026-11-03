@@ -52,10 +52,7 @@ pub fn record_miniapp_opened_with_metadata(
 ) -> Result<(), String> {
     let conn = super::get_write_connection_guard_static()?;
 
-    let now = web_time::SystemTime::now()
-        .duration_since(web_time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs() as i64;
+    let now = crate::clock::now_secs() as i64;
 
     // Use INSERT OR REPLACE with a subquery to preserve/increment open_count
     // Uses UNIQUE(name) constraint - same app name always updates the existing entry
@@ -405,10 +402,7 @@ pub fn set_miniapp_permission(
 ) -> Result<(), String> {
     let conn = super::get_write_connection_guard_static()?;
 
-    let now = web_time::SystemTime::now()
-        .duration_since(web_time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs() as i64;
+    let now = crate::clock::now_secs() as i64;
 
     conn.execute(
         r#"
@@ -433,10 +427,7 @@ pub fn set_miniapp_permissions(
 ) -> Result<(), String> {
     let mut conn = super::get_write_connection_guard_static()?;
 
-    let now = web_time::SystemTime::now()
-        .duration_since(web_time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs() as i64;
+    let now = crate::clock::now_secs() as i64;
 
     let tx = conn.transaction()
         .map_err(|e| format!("Failed to start transaction: {}", e))?;
@@ -501,10 +492,7 @@ pub fn revoke_all_miniapp_permissions(
 pub fn save_marketplace_cache(apps: &[crate::webxdc::MarketplaceApp]) -> Result<(), String> {
     let mut conn = super::get_write_connection_guard_static()?;
 
-    let now = web_time::SystemTime::now()
-        .duration_since(web_time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs() as i64;
+    let now = crate::clock::now_secs() as i64;
 
     let tx = conn.transaction()
         .map_err(|e| format!("Failed to start marketplace cache transaction: {}", e))?;
