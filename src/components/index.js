@@ -139,7 +139,7 @@ export { contextMenuEls, setContextMenuHandlers, setContextMenu } from './lib/co
 export { setRekey } from './lib/rekey.svelte.js';
 export { setInviteModalHandlers, setInviteModal, setInviteModalStatus, inviteModalPicker } from './lib/invitemodal.svelte.js';
 export { ceOverlay, openChannelEditor, closeChannelEditor, setChannelEditorBusy, setChannelPerms, channelEditorState, channelEditorDirty, channelEditorNudge, channelEditorSaved, setChannelEditorPrivate, resetChannelEditor, channelOverviewDirty, overwriteDirty } from './lib/channel-editor.svelte.js';
-export { badgeCardState, badgeCardEls, setBadgeCardHandlers, setBadgeCard, setBadgeTiltVars } from './lib/badgecard.svelte.js';
+export { badgeCardState, badgeCardEls, setBadgeCardHandlers, setBadgeCard, setBadgeTiltVars, setDropClaimed, celebrateDrop } from './lib/badgecard.svelte.js';
 export { imageViewerState, imageViewerEls, setImageViewerHandlers, setImageViewer, setImageViewerZoom, setImageViewerTip } from './lib/imageviewer.svelte.js';
 export { setModelViewer, setModelViewerHandlers } from './lib/modelviewer.svelte.js';
 export { setModelDownload, claimPlayback, releasePlayback, waveformBytes } from './lib/audio.svelte.js';

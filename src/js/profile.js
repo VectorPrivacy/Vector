@@ -66,6 +66,7 @@ function registerProfileScreen() {
             showInviteBadge: (count) => showBadgeCard({ title: 'Vector Beta Inviter', html: `Acquired by inviting <b>${count} ${count === 1 ? 'user' : 'users'}</b> to the Vector Beta!`, svg: 'vector_badge_placeholder.svg' }),
             showFawkesCard,
             showBugHunterCard,
+            showDropBadge: (id) => showDropBadgeCard(id),
             showNavbar: (on) => { VectorSvelte.showPane('navbar', on); },
             pickPicture: pickProfilePicture,
             // Own profile

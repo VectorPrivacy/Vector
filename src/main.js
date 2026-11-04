@@ -2440,6 +2440,9 @@ window.addEventListener("DOMContentLoaded", async () => {
                 // Monitor relay connections and render relay list
                 invoke("monitor_relay_connections");
                 renderRelayList();
+
+                // The login flow offers badge drops; hot reload skips it.
+                offerBadgeDrops().catch((e) => console.warn('[Badge drop] offer failed:', e));
                 
                 // Initialize the updater (version info, update button)
                 initializeUpdater();

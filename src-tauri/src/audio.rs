@@ -529,8 +529,7 @@ fn wav_fast_decode(bytes: &[u8], target_rate: u32) -> Option<(Vec<f32>, u32)> {
 }
 
 /// Symphonia slow path: decode compressed audio (MP3, OGG, FLAC, etc.) to mono f32.
-#[cfg_attr(not(feature = "whisper"), allow(dead_code))]
-fn symphonia_decode_mono(file_bytes: Vec<u8>, extension: Option<&str>) -> Result<(Vec<f32>, u32), String> {
+pub(crate) fn symphonia_decode_mono(file_bytes: Vec<u8>, extension: Option<&str>) -> Result<(Vec<f32>, u32), String> {
     let cursor = std::io::Cursor::new(file_bytes);
     let media_source = MediaSourceStream::new(Box::new(cursor), Default::default());
 

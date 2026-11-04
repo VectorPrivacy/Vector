@@ -46,6 +46,9 @@
                         <span class="badge-card-access-text">{badge.access}</span>
                     </div>
                 {/if}
+                {#if badge.action}
+                    <button type="button" class="badge-card-action" onclick={() => h().action?.()}>{badge.action}</button>
+                {/if}
             </div>
         </div>
     </div>

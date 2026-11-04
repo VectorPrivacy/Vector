@@ -9,6 +9,23 @@
 use crate::audio_engine::{self, AudioEngine, AudioLoadResult};
 use crate::audio_devices::{self, DeviceList, DevicePrefs};
 
+static CLAIM_BADGE_MP3: &[u8] = include_bytes!("../../resources/sounds/claim-badge.mp3");
+
+/// The chime for claiming a badge, decoded once and kept for the run.
+#[tauri::command]
+pub async fn play_claim_sound() -> Result<(), String> {
+    static DECODED: std::sync::OnceLock<Option<(Vec<f32>, u32)>> = std::sync::OnceLock::new();
+    let Some((samples, rate)) = DECODED
+        .get_or_init(|| crate::audio::symphonia_decode_mono(CLAIM_BADGE_MP3.to_vec(), Some("mp3")).ok())
+        .clone()
+    else {
+        return Err("claim sound could not be decoded".into());
+    };
+    let engine = AudioEngine::get()?;
+    let out = engine.output_rate()?;
+    engine.play_oneshot(crate::audio::resample_mono_f32(samples, rate, out)?, out)
+}
+
 /// Every microphone and speaker on the machine, the defaults, and what is preferred.
 #[tauri::command]
 pub async fn audio_devices_list() -> DeviceList {

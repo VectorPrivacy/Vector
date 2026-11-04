@@ -455,6 +455,7 @@
     "allow-zip-paths",
     "allow-cleanup-zip",
     "allow-audio-probe",
+    "allow-play-claim-sound",
     "allow-audio-load",
     "allow-audio-play",
     "allow-call-start",

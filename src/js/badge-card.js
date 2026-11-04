@@ -8,6 +8,8 @@ let _badgeRaf = 0;
 let _badgePtr = null;
 let _badgeKeyHandler = null;
 let _badgeGyroActive = false;        // true only when a real rotation sensor is driving the tilt
+let _badgeAction = null;             // what the card's button does, when it has one
+let _badgeLocked = false;            // only its action closes it: no backdrop, Escape or Back
 
 // Native gyro bridge (Android MainActivity) pushes pitch/roll degrees here while the card is open, so
 // the badge reacts to physically tilting the phone, sidestepping the WebView's deviceorientation prompt.
@@ -16,7 +18,8 @@ window.__vectorGyro = function (rx, ry) {
 };
 
 VectorSvelte.setBadgeCardHandlers({
-    close: () => hideBadgeCard(),
+    close: () => { if (!_badgeLocked) hideBadgeCard(); },
+    action: () => _badgeAction?.(),
     // Pointer drives the tilt unless a real gyro is (then the sensor wins); skipped under reduced motion.
     pointerMove: (e) => {
         if (_badgeReduceMotion || _badgeGyroActive) return;
@@ -60,13 +63,15 @@ function _resetBadgeTilt() {
     VectorSvelte.setBadgeTiltVars({ rx: '0deg', ry: '0deg', mx: '50%', my: '50%', holo: '0', idle: true });
 }
 
-/** @param {{title:string, html:string, svg:string, subtitle?:string, tierProgress?:{current:number,total:number,icons:string[]}, access?:string}} badge */
-function showBadgeCard({ title, html, svg, subtitle, tierProgress, access }) {
+/** @param {{title:string, html:string, svg:string, subtitle?:string, tierProgress?:{current:number,total:number,icons:string[]}, access?:string, action?:{label:string, run:() => void}, locked?:boolean}} badge */
+function showBadgeCard({ title, html, svg, subtitle, tierProgress, access, action, locked }) {
+    _badgeAction = action?.run || null;
+    _badgeLocked = !!locked;
     VectorSvelte.setBadgeCard({
         badge: {
             src: /:\/\/|^data:|^blob:/.test(svg) ? svg : './icons/' + svg,
             title: title || '', subtitle: subtitle || '', html: html || '',
-            tiers: tierProgress || null, access: access || '',
+            tiers: tierProgress || null, access: access || '', action: action?.label || '',
         },
         open: true, visible: false,
     });
@@ -76,14 +81,20 @@ function showBadgeCard({ title, html, svg, subtitle, tierProgress, access }) {
     requestAnimationFrame(() => requestAnimationFrame(() => {
         if (VectorSvelte.badgeCardState().open) VectorSvelte.setBadgeCard({ visible: true });
     }));
-    _badgeKeyHandler = (e) => { if (e.key === 'Escape') { e.preventDefault(); hideBadgeCard(); } };
+    _badgeKeyHandler = (e) => { if (e.key === 'Escape') { e.preventDefault(); if (!_badgeLocked) hideBadgeCard(); } };
     document.addEventListener('keydown', _badgeKeyHandler);
     // Gyro if the device has the sensor; otherwise the pointer tilt takes over.
     _badgeGyroActive = false;
     if (!_badgeReduceMotion && window.__vectorGyroBridge) {
         try { _badgeGyroActive = !!window.__vectorGyroBridge.start(); } catch (_) {}
     }
-    pushBack('badge-card', hideBadgeCard);
+    pushBack('badge-card', onBadgeCardBack);
+}
+
+/** Android back: closes the card, unless it's locked to its action, which keeps it up. */
+function onBadgeCardBack() {
+    if (_badgeLocked) { pushBack('badge-card', onBadgeCardBack); return; }
+    hideBadgeCard();
 }
 
 function hideBadgeCard() {

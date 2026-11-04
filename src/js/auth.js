@@ -347,6 +347,7 @@ async function login(skipAnimations = false) {
                 requestAnimationFrame(() => adjustSize());
 
                 // Deferred so login animations finish first.
+                setTimeout(() => offerBadgeDrops().catch((e) => console.warn('[Badge drop] offer failed:', e)), 1200);
                 if (platformFeatures.os === 'web' || platformFeatures.os === 'android') {
                     setTimeout(() => offerNotifications().catch((e) => console.warn('[Notify] offer failed:', e)), 1500);
                 }
