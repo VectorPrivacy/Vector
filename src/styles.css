@@ -2749,8 +2749,13 @@ html, body {
   align-items: center;
   gap: 6px;
 }
+.xfer-code-row { display: flex; align-items: stretch; gap: 8px; }
 .xfer-code-text {
   padding: 8px 14px;
+  margin: 0;
+  color: inherit;
+  cursor: pointer;
+  transition: border-color 0.12s ease, background-color 0.12s ease;
   border: 1px solid #232526;
   border-radius: 10px;
   background-color: #161718;
@@ -2761,6 +2766,23 @@ html, body {
   -webkit-user-select: all;
   user-select: all;
 }
+.xfer-code-text:hover { border-color: #3a3c3d; background-color: #1c1d1e; }
+.xfer-copy {
+  display: flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 38px;
+  margin: 0;
+  padding: 0;
+  border: 1px solid #232526;
+  border-radius: 10px;
+  background-color: #161718;
+  cursor: pointer;
+  transition: border-color 0.12s ease, background-color 0.12s ease;
+}
+.xfer-copy:hover { border-color: #3a3c3d; background-color: #1c1d1e; }
+.xfer-copy .icon { position: static; width: 18px; height: 18px; margin: 0; }
 .xfer-expiry {
   font-size: 12px;
   color: rgba(255, 255, 255, 0.45);

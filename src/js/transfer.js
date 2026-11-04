@@ -25,6 +25,7 @@ const transferPatch = (view) => VectorSvelte.transferModal.patch(view);
  * @property {() => void} deny
  * @property {() => void} retry
  * @property {(node: Element, text: string) => void} renderQr
+ * @property {(code: string) => Promise<boolean>} copyCode   true once it is on the clipboard
  */
 document.addEventListener('DOMContentLoaded', () => {
     /** @type {TransferHelpers} */
@@ -38,6 +39,9 @@ document.addEventListener('DOMContentLoaded', () => {
         deny: () => denyTransfer(),
         retry: () => retryTransfer(),
         renderQr: (node, text) => renderQrInto(node, text),
+        copyCode: (code) => navigator.clipboard.writeText(code)
+            .then(() => { showToast('Copied Code'); return true; })
+            .catch(() => { showToast('Failed to Copy'); return false; }),
     };
     VectorSvelte.setScreen('transferModal', { h });
     window.__TAURI__.event.listen('transfer_state', (e) => applyTransferState(e.payload));
