@@ -198,20 +198,46 @@ function startKeyLink(key) {
     return null;
 }
 
-/** The left column: the app's own places, with whichever is on screen lit. */
+/** The left column: the app's own places. */
 function startNavItems() {
     const shell = VectorSvelte.shellState();
-    const bookmarks = !!strOpenChat && strOpenChat === strPubkey && VectorSvelte.paneShown('chat');
-    const nexus = VectorSvelte.mktState().panelOpen;
+    const st = VectorSvelte.startMenuState();
+    // More than one account: pick among them in the pins' place. One: straight to adding another.
+    const account = st.accounts.length > 1
+        ? [{ id: 'accounts', label: 'Accounts', icon: 'users-multi', pane: 'accounts' }]
+        : st.canAddAccount ? [{ id: 'add-account', label: 'Accounts', icon: 'add-user', run: () => addAccountFlow.start() }] : [];
     const items = [
-        { id: 'profile', label: 'Profile', icon: 'start-profile', active: shell.tab === 'profile-btn', run: () => openProfile() },
-        { id: 'chat', label: 'Chat', icon: 'chats', active: shell.tab === 'chat-btn' && !bookmarks && !nexus, run: () => openChatlist(), dot: !!shell.chatBadge },
-        { id: 'bookmarks', label: 'Bookmarks', icon: 'bookmark-fill', active: bookmarks, run: () => openChat(strPubkey) },
-        { id: 'miniapps', label: 'Mini Apps', icon: 'grid-fill', active: nexus, run: () => showMiniApps(), key: 'nexus' },
-        { id: 'settings', label: 'Settings', icon: 'start-settings', active: shell.tab === 'settings-btn', run: () => openSettings(), key: 'settings', dot: !!shell.updateDot },
+        ...account,
+        { id: 'profile', label: 'Profile', icon: 'start-profile', run: () => openProfile() },
+        { id: 'chat', label: 'Chat', icon: 'chats', run: () => openChatlist(), dot: !!shell.chatBadge },
+        { id: 'bookmarks', label: 'Bookmarks', icon: 'bookmark-fill', run: () => openChat(strPubkey) },
+        { id: 'miniapps', label: 'Mini Apps', icon: 'grid-fill', run: () => showMiniApps(), key: 'nexus' },
+        { id: 'settings', label: 'Settings', icon: 'start-settings', run: () => openSettings(), key: 'settings', dot: !!shell.updateDot },
     ];
-    if (shell.invitesTab) items.push({ id: 'invites', label: 'Invites', icon: 'gift', active: shell.tab === 'invites-btn', run: () => openInvites() });
+    if (shell.invitesTab) items.push({ id: 'invites', label: 'Invites', icon: 'gift', run: () => openInvites() });
     return items;
+}
+
+/** This device's accounts, with the Add gate the My Profile switcher applies. */
+async function loadStartAccounts() {
+    try {
+        const [list, tier] = await Promise.all([multiAccount.list(), invoke('get_max_account_tier').catch(() => _maxAccountTier)]);
+        _maxAccountTier = tier | 0;
+        const canAdd = platformFeatures?.multi_account !== false && list.length < maxAccountsForTier();
+        VectorSvelte.setStartAccounts(list, canAdd);
+    } catch (e) {
+        console.warn('[Start] accounts load failed:', e);
+    }
+}
+
+/** Switch to another account on this device; the session reloads into it. */
+async function startSwitchAccount(npub) {
+    try {
+        await multiAccount.setActiveAndSwap(npub);
+    } catch (e) {
+        console.error('[Start] switch failed:', e);
+        popupConfirm('Switch failed', escapeHtml(String(e)), true);
+    }
 }
 
 /** Everything the search can open: the left column's places, pins and what can be pinned. */
@@ -285,7 +311,8 @@ function searchStart(query, { adding = false } = {}) {
         const places = all.filter(c => !c.app && !c.recent && !c.key.startsWith('dm/'));
         list = [...apps, ...recent, ...places];
     } else {
-        const nav = adding ? [] : startNavItems().map(n => ({ ...n, nav: true }));
+        // A place that opens a pane in the menu, not a page, has nothing for a result to run.
+        const nav = adding ? [] : startNavItems().filter(n => n.run).map(n => ({ ...n, nav: true }));
         const score = (label) => {
             const l = String(label || '').toLowerCase();
             return l.startsWith(q) ? 2 : l.includes(q) ? 1 : 0;
@@ -391,6 +418,10 @@ async function startDeviceMenu(kind, anchor) {
  * @property {() => void} closeMenu   a long-press menu giving way to a drag
  * @property {() => object} mkt   the Nexus's helpers, for app icons
  * @property {() => string} myNpubShort
+ * @property {() => string} myNpub   the account signed in
+ * @property {(meta: object) => string|null} accountSrc   an account's cached avatar, never its remote URL
+ * @property {(npub: string) => Promise<void>} switchAccount
+ * @property {() => void} addAccount   the Login / Create Account flow
  * @property {() => void} openProfile
  * @property {() => void} toggleMute
  * @property {() => void} toggleDeafen
@@ -401,6 +432,7 @@ const START_MENU_HELPERS = {
     // otherwise loads only with the Nexus, for pinned apps.
     prepare: () => {
         invoke('get_start_layout').then((l) => VectorSvelte.setStartLayout(l)).catch(() => {});
+        loadStartAccounts();
         if (marketplaceApps.length) return;
         getCachedMarketplaceApps()
             .then(() => VectorSvelte.setStartLayout(VectorSvelte.startMenuState().layout))
@@ -429,6 +461,10 @@ const START_MENU_HELPERS = {
     },
     mkt: () => VectorSvelte.mktHandlers(),
     myNpubShort: () => (strPubkey ? `${strPubkey.slice(0, 16)}…` : ''),
+    myNpub: () => strPubkey,
+    accountSrc: (meta) => (meta.avatar_cached ? convertFileSrc(meta.avatar_cached) : null),
+    switchAccount: startSwitchAccount,
+    addAccount: () => addAccountFlow.start(),
     openProfile: () => openProfile(),
     // Unmuting while deafened hears again too, as in a call.
     toggleMute: () => {

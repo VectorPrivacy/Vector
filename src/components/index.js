@@ -250,4 +250,4 @@ export { requestState, setChatRequest, setRequestHandlers } from './lib/request.
 export { canvasReadsTrue } from './lib/artcolor.js';
 export { voiceSession, setVoiceSession, setVoicePresent, setVoiceStage, setVoiceCallHandlers, toggleVoiceMic, voiceJoining, setVoiceJoining } from './lib/voice.svelte.js';
 
-export { startMenuState, setStartMode, setStartLayout, setStartOpen } from './lib/startmenu.svelte.js';
+export { startMenuState, setStartMode, setStartLayout, setStartOpen, setStartAccounts } from './lib/startmenu.svelte.js';

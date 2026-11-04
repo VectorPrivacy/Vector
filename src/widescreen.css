@@ -370,10 +370,9 @@ body.ws.ws-start #ws-rail-account { position: relative; }
   box-shadow: 0 0 0 2px var(--ws-rail-bg, #0b0b0b);
   pointer-events: none;
 }
-/* The menu opens upward from the row, so its caret points there, and back down while it's open. */
-body.ws.ws-start:not(.ws-rail-collapsed) #ws-rail-account .ws-account-caret {
-  transform: rotate(180deg);
-  transition: transform 0.15s ease, border-top-color 0.12s ease;
+/* With the Main Menu the whole row opens it, and the switcher lives inside: no caret. */
+body.ws.ws-start #ws-rail-account .ws-account-caret {
+  display: none;
 }
 
 

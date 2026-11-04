@@ -13,6 +13,7 @@
     import { micState } from '../lib/calls.svelte.js';
     import { mktIcons } from '../lib/marketplace.svelte.js';
     import { profileVersion } from '../lib/signals.svelte.js';
+    import { streamerState, streamTint, streamDots } from '../lib/streamer.svelte.js';
     import Avatar from '../ui/Avatar.svelte';
     import AppIcon from '../marketplace/AppIcon.svelte';
 
@@ -25,9 +26,12 @@
     let query = $state('');
     let adding = $state(false);
     let folderId = $state(null);
+    // Switch Account: this device's accounts take the pins' place.
+    let picking = $state(false);
     let selected = $state(0);
     let searchEl = $state(null);
     let menuEl = $state(null);
+    let dimEl = $state(null);
     let footerAccount = $state(null);
     let footerAvatar = $state(null);
 
@@ -45,6 +49,7 @@
             } else if (closing) {
                 closing = false;
                 for (const a of menuEl?.getAnimations({ subtree: true }) || []) a.cancel();
+                for (const a of dimEl?.getAnimations() || []) a.cancel();
                 grow();
             }
             return;
@@ -53,6 +58,7 @@
         query = '';
         adding = false;
         folderId = null;
+        picking = false;
         if (rendered && !closing) shrink();
     });
 
@@ -75,6 +81,7 @@
     const SHRINK = { duration: 200, easing: 'cubic-bezier(0.4, 0, 0.7, 0.2)', fill: 'forwards' };
 
     function grow() {
+        dimEl?.animate([{ opacity: 0 }, { opacity: 1 }], GROW);
         const f = menuEl && morph();
         if (!f) return;
         menuEl.animate([{ clipPath: f.clipFrom }, { clipPath: f.clipTo }], GROW);
@@ -93,6 +100,7 @@
             setStartVisible(false);
         };
         closing = true;
+        dimEl?.animate([{ opacity: 1 }, { opacity: 0 }], SHRINK);
         if (!f) return done();
         const a = menuEl.animate([{ clipPath: f.clipTo }, { clipPath: f.clipFrom }], SHRINK);
         footerAccount.animate([{ transform: 'none' }, { transform: f.me }], SHRINK);
@@ -134,12 +142,34 @@
 
     function openKey(key) { run(() => h.open(key)); }
 
+    function openAccounts() {
+        query = '';
+        adding = false;
+        folderId = null;
+        picking = true;
+    }
+    // An account as a pin draws: Streamer Mode veils every account but the one on screen.
+    const stream = streamerState();
+    function accountView(meta) {
+        const current = meta.npub === h.myNpub();
+        const veiled = stream.on && !current;
+        const name = veiled ? streamDots : meta.display_name || 'Unnamed';
+        const src = veiled ? streamTint(meta.npub) : h.accountSrc(meta);
+        return {
+            current,
+            label: name,
+            sub: veiled ? '' : current ? 'Signed in' : `${meta.npub.slice(0, 12)}…${meta.npub.slice(-4)}`,
+            glyph: src ? { src, round: true } : { initial: (name.match(/[\p{L}\p{N}]/u)?.[0] || '?').toUpperCase(), round: true },
+        };
+    }
+
     function onKey(e) {
         if (!shown) return;
         if (e.key === 'Escape') {
             e.preventDefault();
             if (query) query = '';
             else if (adding) adding = false;
+            else if (picking) picking = false;
             else if (folderId) folderId = null;
             else close();
             return;
@@ -407,6 +437,7 @@
 {/snippet}
 
 {#if rendered}
+    <div class="stm-dim" bind:this={dimEl} aria-hidden="true"></div>
     <div class="stm" bind:this={menuEl} role="dialog" aria-label="Main Menu"
          style:left="{place.left}px" style:bottom="{place.bottom}px" style:height="{place.height}px">
         <div class="stm-search stm-fade">
@@ -420,8 +451,8 @@
         <div class="stm-body stm-fade">
             <nav class="stm-nav">
                 {#each nav as item (item.id)}
-                    <button type="button" class="stm-nav-item" class:active={item.active}
-                            onclick={() => run(item.run)} oncontextmenu={(e) => { e.preventDefault(); h.navMenu(e.clientX, e.clientY, item); }}>
+                    <button type="button" class="stm-nav-item" class:active={item.pane === 'accounts' && picking}
+                            onclick={() => item.pane ? openAccounts() : run(item.run)} oncontextmenu={(e) => { e.preventDefault(); h.navMenu(e.clientX, e.clientY, item); }}>
                         <span class="icon icon-{item.icon}"></span>
                         <span class="stm-nav-label">{item.label}</span>
                         {#if item.dot}<span class="stm-dot"></span>{/if}
@@ -479,6 +510,28 @@
                             </div>
                         {/each}
                     </div>
+                {:else if picking}
+                    <div class="stm-head">
+                        <button type="button" class="stm-back" aria-label="Back" onclick={() => { picking = false; }}><span class="icon icon-chevron-left"></span></button>
+                        <span>Accounts</span>
+                        {@render viewSwitch()}
+                    </div>
+                    <div class="stm-grid" class:is-list={list} class:is-switching={switching}>
+                        {#each st.accounts as meta (meta.npub)}
+                            {@const a = accountView(meta)}
+                            <button type="button" class="stm-tile" class:is-row={list} class:is-current={a.current} title={a.label}
+                                    aria-current={a.current ? 'true' : undefined} onclick={() => { if (!a.current) run(() => h.switchAccount(meta.npub)); }}>
+                                <span class="stm-box is-bare" class:is-row={list}>{@render glyph(a.glyph, list ? 28 : 80)}</span>
+                                {@render caption(a.label, a.sub)}
+                            </button>
+                        {/each}
+                        {#if st.canAddAccount}
+                            <button type="button" class="stm-tile" class:is-row={list} onclick={() => run(() => h.addAccount())}>
+                                <span class="stm-box stm-add" class:is-row={list}><span class="icon icon-add-user"></span></span>
+                                {@render caption('Add Account', null)}
+                            </button>
+                        {/if}
+                    </div>
                 {:else if folder}
                     <div class="stm-head">
                         <button type="button" class="stm-back" aria-label="Back" onclick={() => { folderId = null; }}><span class="icon icon-chevron-left"></span></button>
@@ -516,7 +569,6 @@
                         <span class="stm-me-name cutoff">{account.name || 'You'}</span>
                         <span class="stm-me-npub cutoff">{h.myNpubShort()}</span>
                     </span>
-                    <span class="stm-caret" aria-hidden="true"></span>
                 </button>
             </div>
             <span class="stm-foot-gap"></span>
@@ -545,6 +597,15 @@
 {/if}
 
 <style>
+    /* Everything behind the open menu, darkened. Presses pass through, so one outside still
+       closes the menu as before. */
+    .stm-dim {
+        position: fixed;
+        inset: 0;
+        z-index: 8999;
+        background-color: rgba(0, 0, 0, 0.6);
+        pointer-events: none;
+    }
     .stm {
         position: fixed;
         z-index: 9000;
@@ -767,6 +828,11 @@
     .stm-tile.is-row.drop-before::before { top: -2.5px; bottom: auto; }
     .stm-tile.is-row.drop-after::after { top: auto; bottom: -2.5px; }
 
+    /* The account signed in wears the primary ring, and picking it again does nothing. */
+    .stm-tile.is-current { cursor: default; }
+    .stm-tile.is-current .stm-box > * { box-shadow: 0 0 0 2px var(--icon-color-primary); }
+    .stm-tile.is-current .stm-label { color: #fff; font-weight: 600; }
+
     .stm-view { display: flex; gap: 2px; margin-left: auto; }
     .stm-view-btn { all: unset; display: flex; padding: 4px; cursor: pointer; }
     .stm-view-btn .icon { position: static; width: 16px; height: 16px; margin: 0; background-color: #777; }
@@ -862,17 +928,6 @@
     .stm-me-text { display: flex; flex-direction: column; gap: 3px; min-width: 0; max-width: 220px; }
     .stm-me-name { font-size: 18px; font-weight: 600; }
     .stm-me-npub { font-size: 13px; color: rgba(255, 255, 255, 0.5); }
-    /* The rail row's caret, grown with it. */
-    .stm-caret {
-        flex: none;
-        width: 0;
-        height: 0;
-        margin-right: 10px;
-        border-left: 7px solid transparent;
-        border-right: 7px solid transparent;
-        border-top: 9px solid rgba(255, 255, 255, 0.85);
-    }
-    .stm-me-main:hover .stm-caret { border-top-color: #fff; }
     .stm-foot-gap { flex: 1; }
     .stm-audio { display: flex; align-items: center; border-radius: 10px; }
     .stm-audio:hover { background-color: #1c1c1c; }
