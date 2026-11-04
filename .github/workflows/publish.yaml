@@ -64,10 +64,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # `cold`: no Rust cache. These finish inside the Windows build anyway, and the repo's
-        # caches share 10 GB, which the rest fill. macOS: both on the Intel image, Arm
-        # cross-compiled; GitHub's Arm macOS pool can go hours without a free runner, and the
-        # Intel one carries the same Xcode.
+        # `cold`: no Rust cache. These finish well inside the Intel Mac build, and the repo's
+        # caches share 10 GB, so only the jobs that set the release's length keep one. macOS:
+        # both on the Intel image, Arm cross-compiled; GitHub's Arm macOS pools often go
+        # without a free runner, and the Intel one carries the same Xcode.
         include:
           - platform: 'macos-26-intel' # for Arm based macs (M1 and above).
             args: '--target aarch64-apple-darwin'
@@ -89,6 +89,7 @@ jobs:
             cold: true
           - platform: 'windows-11-arm'
             args: ''
+            cold: true
 
     runs-on: ${{ matrix.platform }}
     steps:
@@ -269,7 +270,6 @@ jobs:
     needs: release
     permissions:
       contents: write
-      actions: write
     strategy:
       fail-fast: false
       matrix:
@@ -278,7 +278,6 @@ jobs:
             targets: --target aarch64 --target armv7
           - abis: x86_64
             targets: --target x86_64
-            cold: true # no Rust cache, as publish-tauri's `cold`
     runs-on: ubuntu-22.04
 
     steps:
@@ -318,14 +317,6 @@ jobs:
 
       - name: Install frontend dependencies
         run: npm ci
-
-      - uses: Swatinem/rust-cache@v2
-        if: ${{ !matrix.cold }}
-        id: rust-cache
-        with:
-          workspaces: src-tauri -> target
-          key: android-${{ matrix.abis }}
-          save-if: ${{ github.ref_name == 'release' || github.ref_name == 'rehearsal' }}
 
       - name: Setup Android signing
         run: |
@@ -374,19 +365,6 @@ jobs:
           gh release upload "${{ needs.release.outputs.tag }}" \
             src-tauri/gen/android/app/build/outputs/apk/universal/release/Vector*.apk \
             --clobber --repo "$GITHUB_REPOSITORY"
-
-      - name: Drop the superseded Rust cache
-        if: steps.rust-cache.outputs.cache-hit == 'false' && (github.ref_name == 'release' || github.ref_name == 'rehearsal')
-        env:
-          GH_TOKEN: ${{ github.token }}
-          PREFIX: v0-rust-android-${{ matrix.abis }}-${{ github.job }}-
-        run: |
-          gh api -X GET "repos/$GITHUB_REPOSITORY/actions/caches" -f ref="$GITHUB_REF" -f key="$PREFIX" \
-            --jq '.actions_caches[] | "\(.id) \(.key)"' |
-            while read -r id key; do
-              echo "dropping $key"
-              gh api -X DELETE "repos/$GITHUB_REPOSITORY/actions/caches/$id"
-            done
 
   # The F-Droid flavour, built by `fdroid build` inside F-Droid's own image and
   # signed with the release key: the asset their verifier compares against
