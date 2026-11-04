@@ -10,6 +10,7 @@
     import AccountRows from '../people/AccountRows.svelte';
     import Avatar from '../ui/Avatar.svelte';
     import NetInfo from './NetInfo.svelte';
+    import Select from '../ui/Select.svelte';
 
     let { h } = $props();   // h: LoginHelpers (js/auth.js)
     const l = loginState();
@@ -26,6 +27,7 @@
     const pairing = $derived(b.busy || b.deadline > 0);
     // The explainer has a tab per network that has one.
     const tabs = $derived(n.kinds.filter((k) => k === 'tor' || k === 'i2p'));
+    const netOptions = $derived(n.kinds.map((k) => ({ value: k, label: LABELS[k] || k })));
     // SAM credentials, typed here and handed over only with Use: they live in memory until the
     // account that signs in saves them.
     let samOpen = $state(false);
@@ -140,12 +142,15 @@
         </p>
     {:else if n.failed}
         <p class="lg-net-status error" role="alert">
-            <span>{n.failed}</span>
-            {#if n.kind}<button type="button" onclick={() => h.net.retry()}>Retry</button>{/if}
-            <!-- Retrying the same port never helps a router that isn't there or turned Vector down. -->
-            {#if n.kind === 'i2p' && (n.failedCode === 'router_unreachable' || n.failedCode.startsWith('sam_'))}
-                <button type="button" onclick={() => h.net.changePort()}>{n.failedCode.startsWith('sam_auth') ? 'Add SAM Password' : 'Change Port'}</button>
-            {/if}
+            <span class="lg-net-err-icon" aria-hidden="true"></span>
+            <span class="lg-net-err-text">{n.failed}</span>
+            <span class="lg-net-err-actions">
+                {#if n.kind}<button type="button" onclick={() => h.net.retry()}>Retry</button>{/if}
+                <!-- Retrying the same port never helps a router that isn't there or turned Vector down. -->
+                {#if n.kind === 'i2p' && (n.failedCode === 'router_unreachable' || n.failedCode.startsWith('sam_'))}
+                    <button type="button" onclick={() => h.net.changePort()}>{n.failedCode.startsWith('sam_auth') ? 'Add SAM Password' : 'Change Port'}</button>
+                {/if}
+            </span>
         </p>
     {/if}
 {/snippet}
@@ -194,14 +199,7 @@
                                       onkeydown={(ev) => { if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); h.net.info(tabs.includes(n.kind) ? n.kind : tabs[0]); } }}></span>
                             {/if}
                         </span>
-                        <div class="lg-net-pick" role="radiogroup" tabindex="-1" aria-label="Network"
-                             onkeydown={(ev) => { if (!pairing) rovingKeys(ev, n.kinds, n.kind, (k) => h.net.pick(k)); }}>
-                            {#each n.kinds as k, i (k)}
-                                <button type="button" role="radio" aria-checked={n.kind === k} class:on={n.kind === k} disabled={pairing}
-                                        tabindex={n.kind === k || (!n.kinds.includes(n.kind) && i === 0) ? 0 : -1}
-                                        onclick={() => h.net.pick(k)}>{LABELS[k] || k}</button>
-                            {/each}
-                        </div>
+                        <Select class="lg-net-select" label="Network" options={netOptions} value={n.kind} disabled={pairing} onchange={(k) => h.net.pick(k)} />
                     </div>
                     {@render netLine()}
                 {/if}

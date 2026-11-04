@@ -11925,7 +11925,7 @@ select {
 
 /* Keyboard focus shows on the network controls; the global button rule removes it. */
 :is(.net-pill, .net-use, .net-link, .net-notice, .i2p-router .st-btn, .i2p-form .st-btn, .i2p-op-add,
-    .i2p-op-move, .i2p-op-remove, .lg-net-pick button, .lg-net-tabs button, .lg-net-sam button):focus-visible {
+    .i2p-op-move, .i2p-op-remove, .lg-net-tabs button, .lg-net-sam button):focus-visible {
   outline: 2px solid var(--icon-color-primary);
   outline-offset: 2px;
 }
@@ -22390,13 +22390,13 @@ body.profile-switcher-editing .profile-switcher-add {
    every connection is refused until it connects, so signing in would only fail later. */
 .lg-buttons,
 .lg-back,
-.lg-net-pick { transition: opacity 0.2s ease; }
+.lg-net-select { transition: opacity 0.2s ease; }
 .lg-buttons.lg-held,
 .lg-back.lg-held { pointer-events: none; }
 .lg-buttons.lg-held { opacity: 0.25; }
 .lg-back.lg-held { opacity: 0.4; }
 /* Dimmed, not locked: leaving a network mid-connect is always allowed. */
-.lg-net.lg-held .lg-net-pick { opacity: 0.6; }
+.lg-net.lg-held .lg-net-select { opacity: 0.6; }
 .lg-btn:disabled { cursor: default; }
 .lg-net {
   display: flex;
@@ -22407,42 +22407,7 @@ body.profile-switcher-editing .profile-switcher-add {
   max-width: calc(100vw - 48px);
   margin-top: 24px;
 }
-.lg-net-pick {
-  display: flex;
-  flex-shrink: 0;
-  gap: 2px;
-  padding: 2px;
-  border: 1px solid #262626;
-  border-radius: 8px;
-  background: #0a0a0a;
-}
-.lg-net-pick button,
-.lg-net-pick button:hover,
-.lg-net-pick button:focus {
-  height: 26px;
-  margin: 0;
-  padding: 0 9px;
-  border: none;
-  border-radius: 6px;
-  background: none;
-  backdrop-filter: none;
-  -webkit-backdrop-filter: none;
-  box-shadow: none;
-  color: #b2b2b2;
-  font-family: inherit;
-  font-size: 12px;
-  font-weight: 500;
-  white-space: nowrap;
-  cursor: pointer;
-  transition: color 0.15s ease, background-color 0.15s ease, box-shadow 0.15s ease;
-}
-.lg-net-pick button:hover:not(:disabled) { color: #fff; }
-.lg-net-pick button.on {
-  background: #171717;
-  box-shadow: inset 0 0 0 1px rgba(51, 219, 152, 0.45);
-  color: #59fcb3;
-}
-.lg-net-pick button:disabled { opacity: 0.5; cursor: default; }
+.lg-net-select { flex-shrink: 0; width: 130px; }
 .lg-net-label {
   display: inline-flex;
   align-items: center;
@@ -22471,7 +22436,10 @@ body.profile-switcher-editing .profile-switcher-add {
   font-size: 10px;
   line-height: 12px;
 }
-.lg-net-slot.reserve { min-height: 36px; }
+/* Start keeps Go Back close under Network: the reserve holds the status line exactly. */
+.lg-net-slot.reserve { min-height: 21px; }
+.lg-net-slot.reserve .lg-net-status { margin-top: 9px; }
+.lg-net-slot.reserve + .lg-back { margin-top: 10px; }
 .lg-net-accent { color: #59fcb3; }
 .lg-net-spin {
   width: 10px;
@@ -22486,11 +22454,45 @@ body.profile-switcher-editing .profile-switcher-add {
 @media (prefers-reduced-motion: reduce) {
   .lg-net-spin { animation: none; }
 }
+/* A network that failed: a quiet card the Network row's width, red only in its edge and
+   mark, with its way forward as buttons beside the message. */
 .lg-net-status.error {
-  max-width: 280px;
-  color: var(--danger-color, #ff2ea9);
-  text-align: center;
+  justify-content: flex-start;
+  gap: 10px;
+  box-sizing: border-box;
+  width: 250px;
+  max-width: calc(100vw - 48px);
+  padding: 9px 10px 9px 11px;
+  border: 1px solid color-mix(in srgb, var(--danger-color, #fc595c) 30%, transparent);
+  border-radius: 10px;
+  background-color: color-mix(in srgb, var(--danger-color, #fc595c) 8%, transparent);
+  color: rgba(255, 255, 255, 0.82);
+  font-size: 11px;
+  line-height: 14px;
+  text-align: left;
 }
+.lg-net-err-icon {
+  flex: none;
+  width: 15px;
+  height: 15px;
+  background-color: var(--danger-color, #fc595c);
+  -webkit-mask: url("./icons/info.svg") center / contain no-repeat;
+  mask: url("./icons/info.svg") center / contain no-repeat;
+}
+.lg-net-err-text { flex: 1; min-width: 0; }
+.lg-net-err-actions { display: flex; flex: none; flex-direction: column; gap: 4px; }
+.lg-net-err-actions:empty { display: none; }
+.lg-net-status.error .lg-net-err-actions button {
+  padding: 4px 10px;
+  border-radius: 999px;
+  background-color: rgba(255, 255, 255, 0.1);
+  color: #fff;
+  font-size: 10.5px;
+  font-weight: 600;
+  white-space: nowrap;
+  transition: background-color 0.12s ease;
+}
+.lg-net-status.error .lg-net-err-actions button:hover { background-color: rgba(255, 255, 255, 0.18); text-decoration: none; }
 .lg-net-status button {
   flex-shrink: 0;
   padding: 0;
@@ -22841,6 +22843,10 @@ body.profile-switcher-editing .profile-switcher-add {
   cursor: pointer;
 }
 .lg-links button:hover { color: #59fcb3; }
+/* Widescreen widths (WS_MIN_W in widescreen.js): no body.ws before login, so the width decides. */
+@media (min-width: 900px) {
+  .lg-links { font-size: 12px; }
+}
 
 /* A fixed width with its icon in a fixed box, so neither moves when the label changes. */
 .lg-bg-toggle {
