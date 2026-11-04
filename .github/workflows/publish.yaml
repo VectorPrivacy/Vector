@@ -65,12 +65,16 @@ jobs:
       fail-fast: false
       matrix:
         # `cold`: no Rust cache. These finish inside the Windows build anyway, and the repo's
-        # caches share 10 GB, which the rest fill.
+        # caches share 10 GB, which the rest fill. macOS: both on the Intel image, Arm
+        # cross-compiled; GitHub's Arm macOS pool can go hours without a free runner, and the
+        # Intel one carries the same Xcode.
         include:
-          - platform: 'macos-latest' # for Arm based macs (M1 and above).
+          - platform: 'macos-26-intel' # for Arm based macs (M1 and above).
             args: '--target aarch64-apple-darwin'
             ffmpeg: 'aarch64-apple-darwin'
-          - platform: 'macos-latest' # for Intel based macs.
+            # ggml's native CPU probe would read the Intel host.
+            ggml_native: 'OFF'
+          - platform: 'macos-26-intel' # for Intel based macs.
             args: '--target x86_64-apple-darwin'
             ffmpeg: 'x86_64-apple-darwin'
           - platform: 'ubuntu-22.04'
@@ -100,7 +104,7 @@ jobs:
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           # Those targets are only used on macos runners so it's in an `if` to slightly speed up windows and linux builds.
-          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+          targets: ${{ startsWith(matrix.platform, 'macos') && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
 
       # A throwaway runner: scanning every compiler write costs minutes and protects nothing.
       # The target dir sits at the root of the workspace's drive (D:, the fast disk, on x64),
@@ -181,7 +185,7 @@ jobs:
           key: ffmpeg-${{ matrix.ffmpeg }}-${{ hashFiles('scripts/build-ffmpeg.sh') }}
 
       - name: Build FFmpeg (macOS)
-        if: matrix.platform == 'macos-latest' && steps.ffmpeg-cache.outputs.cache-hit != 'true'
+        if: startsWith(matrix.platform, 'macos') && steps.ffmpeg-cache.outputs.cache-hit != 'true'
         run: |
           brew install nasm
           scripts/build-ffmpeg.sh ${{ matrix.ffmpeg }}
@@ -214,6 +218,11 @@ jobs:
           workspaces: src-tauri -> ${{ startsWith(matrix.platform, 'windows') && '../../../../t' || 'target' }}
           key: ${{ matrix.ffmpeg || matrix.platform }}
           save-if: ${{ github.ref_name == 'release' || github.ref_name == 'rehearsal' }}
+
+      # Set only where the matrix asks: any value at all, even empty, turns off whisper's x86-64-v3 pin.
+      - name: GGML_NATIVE
+        if: matrix.ggml_native
+        run: echo "GGML_NATIVE=${{ matrix.ggml_native }}" >> "$GITHUB_ENV"
 
       - uses: tauri-apps/tauri-action@v0
         env:
