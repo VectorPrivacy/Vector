@@ -255,6 +255,8 @@ class MainActivity : TauriActivity() {
 
     override fun onStop() {
         super.onStop()
+        // The window's focus loss can land after onPause, so a loss held then is released here.
+        focusGuard?.releaseHeldLoss()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
             setShowWhenLocked(false)
             setTurnScreenOn(false)
