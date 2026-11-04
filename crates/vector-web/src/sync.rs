@@ -96,7 +96,7 @@ pub async fn fetch_messages(init: bool) -> Result<(), String> {
         emitter::emit("sync_finished", &());
         if init {
             db::spawn_bound(merge_media_servers());
-            db::spawn_bound(refresh_badges());
+            db::spawn_bound(vector_core::badges::refresh_own());
         }
     });
     Ok(())
@@ -122,22 +122,6 @@ async fn merge_media_servers() {
         Ok(_) => vector_core::emit_event("blossom_capabilities_updated", &()),
         Err(e) => vector_core::log_warn!("[Blossom Probe] probe pass failed: {e}"),
     }
-}
-
-/// The account's badges, which gate its perks (emoji and pin limits). Once the
-/// sync has settled: the relay holding a claim is often the one it just saturated.
-async fn refresh_badges() {
-    vector_core::rt::time::sleep(std::time::Duration::from_secs(30)).await;
-    vector_core::badges::refresh_own_badges().await;
-    vector_core::badges::refresh_own_bug_hunter().await;
-    vector_core::emit_event(
-        "badges_updated",
-        &serde_json::json!({
-            "vector": vector_core::badges::has_vector_badge(),
-            "tier": vector_core::badges::effective_tier(),
-            "bug_hunter": vector_core::badges::bug_hunter_tier(),
-        }),
-    );
 }
 
 /// Start the live DM and community subscription. Runs for the session's life;

@@ -300,12 +300,17 @@ function showFawkesCard() {
 }
 
 /** Resolve a user's Bug Hunter tier (0-3). Own → the cached value (filled by the
- *  post-sync refresh); others → a live fetch, session-cached. 0 = no badge. */
+ *  post-sync refresh), with one live look per session while it reads 0; a hit
+ *  there persists and emits badges_updated, which lifts the perks. Others → a
+ *  live fetch, session-cached. 0 = no badge. */
 const _bugHunterTierCache = new Map();
+let _ownBugHunterLiveChecked = false;
 async function resolveBugHunterTier(npub, isMine) {
     if (isMine) {
         if (_myBadges === null) { try { _myBadges = await invoke('get_my_badges'); } catch {} }
-        return _myBadges?.bug_hunter | 0;
+        if ((_myBadges?.bug_hunter | 0) > 0 || _ownBugHunterLiveChecked) return _myBadges?.bug_hunter | 0;
+        _ownBugHunterLiveChecked = true;
+        try { return await invoke('get_bug_hunter_tier', { npub }); } catch { return 0; }
     }
     if (_bugHunterTierCache.has(npub)) return _bugHunterTierCache.get(npub);
     try {

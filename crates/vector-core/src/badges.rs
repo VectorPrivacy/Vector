@@ -64,18 +64,52 @@ pub async fn has_fawkes_badge(pubkey: &PublicKey) -> Result<bool, String> {
             return Ok(true);
         }
     }
+    if !any_relay_connected(&client).await {
+        return Err("no relay connected".into());
+    }
     Ok(false)
+}
+
+/// An empty answer means "none" only if some relay was there to give it.
+async fn any_relay_connected(client: &Client) -> bool {
+    client.relays().await.values().any(|r| r.status() == RelayStatus::Connected)
+}
+
+/// The last badge state this session read from or wrote to its database. A failed
+/// read answers from here, never as "no badge": a busy or unbound connection must
+/// not take an account's perks away.
+#[derive(Default)]
+struct LastRead {
+    vector: Option<bool>,
+    bug_hunter: Option<u8>,
+}
+struct LastReadKey;
+
+fn last_read() -> std::sync::Arc<std::sync::Mutex<LastRead>> {
+    crate::db::current_session().scoped::<LastReadKey, _>()
+}
+
+fn with_last<T>(f: impl FnOnce(&mut LastRead) -> T) -> T {
+    f(&mut last_read().lock().unwrap_or_else(|e| e.into_inner()))
 }
 
 /// Cached flag for whether we hold the Vector badge. Cheap + synchronous, so
 /// safe to call from limit checks. Defaults to false when unset — badge perks
 /// stay off until the cache is filled post-sync.
 pub fn has_vector_badge() -> bool {
-    crate::db::get_sql_setting(BADGE_VECTOR_KEY.to_string())
-        .ok()
-        .flatten()
-        .map(|v| v == "true")
-        .unwrap_or(false)
+    match crate::db::settings::get_sql_setting_strict(BADGE_VECTOR_KEY) {
+        Ok(v) => {
+            let held = v.as_deref() == Some("true");
+            with_last(|l| l.vector = Some(held));
+            held
+        }
+        Err(_) => with_last(|l| l.vector).unwrap_or(false),
+    }
+}
+
+fn store_vector_badge() {
+    with_last(|l| l.vector = Some(true));
+    let _ = crate::db::set_sql_setting(BADGE_VECTOR_KEY.to_string(), "true".to_string());
 }
 
 /// Per-account settings key: cached Bug Hunter NIP-58 tier (0-3). Filled by the
@@ -89,12 +123,27 @@ const BADGE_BUG_HUNTER_AWARD_IDS_KEY: &str = "badge_bug_hunter_award_ids";
 /// Cached Bug Hunter tier (0-3) for the current account. Cheap + synchronous;
 /// 0 until the award fetch fills it.
 pub fn bug_hunter_tier() -> u8 {
-    crate::db::get_sql_setting(BADGE_BUG_HUNTER_TIER_KEY.to_string())
-        .ok()
-        .flatten()
-        .and_then(|v| v.parse::<u8>().ok())
-        .map(|t| t.min(3))
-        .unwrap_or(0)
+    match crate::db::settings::get_sql_setting_strict(BADGE_BUG_HUNTER_TIER_KEY) {
+        Ok(v) => {
+            let tier = v.and_then(|v| v.parse::<u8>().ok()).map(|t| t.min(3)).unwrap_or(0);
+            with_last(|l| l.bug_hunter = Some(tier));
+            tier
+        }
+        Err(_) => with_last(|l| l.bug_hunter).unwrap_or(0),
+    }
+}
+
+fn store_bug_hunter_tier(tier: u8) {
+    with_last(|l| l.bug_hunter = Some(tier));
+    let _ = crate::db::set_sql_setting(BADGE_BUG_HUNTER_TIER_KEY.to_string(), tier.to_string());
+}
+
+/// Tell the UI what the account's perks are now.
+fn emit_badges() {
+    crate::traits::emit_event_json(
+        "badges_updated",
+        serde_json::json!({ "vector": has_vector_badge(), "tier": effective_tier(), "bug_hunter": bug_hunter_tier() }),
+    );
 }
 
 /// The account's effective premium tier (0-3): the higher of the Bug Hunter tier
@@ -204,18 +253,24 @@ pub fn note_own_badge_confirmed(pubkey: &PublicKey, has_badge: bool) {
     if crate::state::my_public_key().as_ref() != Some(pubkey) {
         return;
     }
-    let _ = crate::db::set_sql_setting(BADGE_VECTOR_KEY.to_string(), "true".to_string());
+    store_vector_badge();
     crate::log_info!("[Badges] vector badge confirmed via on-demand check");
-    crate::traits::emit_event_json(
-        "badges_updated",
-        serde_json::json!({ "vector": true, "tier": effective_tier(), "bug_hunter": bug_hunter_tier() }),
-    );
+    emit_badges();
+}
+
+/// Resolve the account's badges once its sync has settled, on every login and on
+/// every client, then tell the UI. The relay holding a claim is often the one the
+/// sync just saturated.
+pub async fn refresh_own() {
+    crate::rt::time::sleep(std::time::Duration::from_secs(30)).await;
+    futures_util::join!(refresh_own_badges(), refresh_own_bug_hunter());
+    emit_badges();
 }
 
 /// Fetch our own badges and persist to the per-account cache. Called once
 /// after initial sync. The std::sync::Arc<crate::db::Session> straddles the network fetch so a
 /// mid-fetch account swap can't write account A's badge into account B's DB.
-pub async fn refresh_own_badges() {
+async fn refresh_own_badges() {
     crate::db::scoped(async move {
         let Some(pk) = crate::state::my_public_key() else {
             crate::log_warn!("[Badges] refresh skipped — no public key");
@@ -254,14 +309,17 @@ pub async fn refresh_own_badges() {
         // time for the cooldown); the next boot past the cooldown tries again until
         // it lands once (then sticky-cached forever).
         const ATTEMPTS: u8 = 3;
+        let mut answered = false;
         for attempt in 1..=ATTEMPTS {
             match has_fawkes_badge(&pk).await {
                 Ok(true) => {
                     crate::log_info!("[Badges] vector badge confirmed (attempt {})", attempt);
-                    let _ = crate::db::set_sql_setting(BADGE_VECTOR_KEY.to_string(), "true".to_string());
+                    store_vector_badge();
+                    emit_badges();
                     return;
                 }
                 Ok(false) => {
+                    answered = true;
                     crate::log_info!("[Badges] vector badge not found (attempt {}/{})", attempt, ATTEMPTS);
                 }
                 Err(e) => {
@@ -272,9 +330,13 @@ pub async fn refresh_own_badges() {
                 crate::rt::time::sleep(std::time::Duration::from_secs(20)).await;
             }
         }
-        // Record the unsuccessful pass so the cooldown applies before re-sweeping.
-        let _ = crate::db::set_sql_setting(BADGE_CHECK_TS_KEY.to_string(), now.to_string());
-        crate::log_info!("[Badges] vector badge not resolved this boot — will retry after cooldown");
+        // The cooldown starts only once a relay answered: an offline boot checked nothing.
+        if answered {
+            let _ = crate::db::set_sql_setting(BADGE_CHECK_TS_KEY.to_string(), now.to_string());
+            crate::log_info!("[Badges] vector badge not resolved this boot — will retry after cooldown");
+        } else {
+            crate::log_info!("[Badges] no relay answered — will retry next login");
+        }
     })
     .await
 }
@@ -394,6 +456,9 @@ async fn fetch_bug_hunter_raw(pubkey: &PublicKey) -> Result<(Vec<(EventId, u8)>,
         }
     }
 
+    if awards.is_empty() && !any_relay_connected(&client).await {
+        return Err("no relay connected".into());
+    }
     Ok((awards, revoked))
 }
 
@@ -402,7 +467,22 @@ async fn fetch_bug_hunter_raw(pubkey: &PublicKey) -> Result<(Vec<(EventId, u8)>,
 /// which also catches revocation of a since-purged award.
 pub async fn fetch_bug_hunter_tier(pubkey: &PublicKey) -> Result<(u8, bool), String> {
     let (awards, revoked) = fetch_bug_hunter_raw(pubkey).await?;
-    Ok(fold_bug_hunter(&awards, &revoked))
+    let (tier, revoked_seen) = fold_bug_hunter(&awards, &revoked);
+    note_own_bug_hunter(pubkey, tier);
+    Ok((tier, revoked_seen))
+}
+
+/// A live look at our own Bug Hunter awards raises the cached tier at once, so a
+/// badge the profile shows always carries its perks. Only ever upward: a lower
+/// result is a relay that missed the award, and downgrades go through
+/// `refresh_own_bug_hunter`'s revocation check.
+fn note_own_bug_hunter(pubkey: &PublicKey, tier: u8) {
+    if crate::state::my_public_key().as_ref() != Some(pubkey) || tier <= bug_hunter_tier() {
+        return;
+    }
+    store_bug_hunter_tier(tier);
+    crate::log_info!("[Badges] bug hunter tier {} confirmed via on-demand check", tier);
+    emit_badges();
 }
 
 fn read_cached_award_ids() -> Vec<EventId> {
@@ -418,22 +498,40 @@ fn write_cached_award_ids(ids: &[EventId]) {
     let _ = crate::db::set_sql_setting(BADGE_BUG_HUNTER_AWARD_IDS_KEY.to_string(), csv);
 }
 
+/// The tier to hold after a fetch: a higher award applies at once, a lower view only
+/// when the issuer's revocation was seen, since a missing award is a relay that missed it.
+fn next_tier(cached: u8, seen: u8, saw_revocation: bool) -> u8 {
+    if seen > cached || (seen < cached && saw_revocation) { seen } else { cached }
+}
+
 /// Resolve + persist our own Bug Hunter tier (called post-sync). Sticky cache:
 /// upgrades apply immediately; a downgrade is honored ONLY on a seen revocation,
 /// never a mere absent award (flaky relay). The ids of the awards backing the
 /// current tier are cached so a revocation still resolves after the relays purge
 /// the award itself (NIP-09 deletion).
-pub async fn refresh_own_bug_hunter() {
+async fn refresh_own_bug_hunter() {
     let Some(pk) = crate::state::my_public_key() else {
         return;
     };
 
-    let (awards, revoked) = match fetch_bug_hunter_raw(&pk).await {
-        Ok(r) => r,
-        Err(e) => {
-            crate::log_warn!("[Badges] bug hunter fetch failed: {}", e);
-            return;
+    // A failed fetch, or an empty one for an account with nothing cached yet, is
+    // most often a relay still busy with the sync: ask again before settling.
+    const ATTEMPTS: u8 = 3;
+    let mut attempt = 0;
+    let (awards, revoked) = loop {
+        attempt += 1;
+        match fetch_bug_hunter_raw(&pk).await {
+            Ok((awards, revoked)) if !awards.is_empty() || bug_hunter_tier() > 0 || attempt >= ATTEMPTS => {
+                break (awards, revoked);
+            }
+            Ok(_) => crate::log_info!("[Badges] no bug hunter award found (attempt {attempt}/{ATTEMPTS})"),
+            Err(e) if attempt >= ATTEMPTS => {
+                crate::log_warn!("[Badges] bug hunter fetch failed: {}", e);
+                return;
+            }
+            Err(e) => crate::log_warn!("[Badges] bug hunter fetch attempt {attempt}/{ATTEMPTS} failed: {e}"),
         }
+        crate::rt::time::sleep(std::time::Duration::from_secs(20)).await;
     };
 
     // Highest non-revoked seen tier + the award ids backing it.
@@ -459,11 +557,7 @@ pub async fn refresh_own_bug_hunter() {
     }
 
     let cached = bug_hunter_tier();
-    let new_tier = if seen_tier > cached || (seen_tier < cached && saw_revocation) {
-        seen_tier
-    } else {
-        cached
-    };
+    let new_tier = next_tier(cached, seen_tier, saw_revocation);
 
     // Remember the awards behind the current tier — but only when we actually saw
     // awards, so a flaky empty fetch never wipes the memory we need for revocation.
@@ -473,15 +567,9 @@ pub async fn refresh_own_bug_hunter() {
     if new_tier == cached {
         return;
     }
-    let _ = crate::db::set_sql_setting(
-        BADGE_BUG_HUNTER_TIER_KEY.to_string(),
-        new_tier.to_string(),
-    );
+    store_bug_hunter_tier(new_tier);
     crate::log_info!("[Badges] bug hunter tier {} -> {}", cached, new_tier);
-    crate::traits::emit_event_json(
-        "badges_updated",
-        serde_json::json!({ "vector": has_vector_badge(), "tier": effective_tier(), "bug_hunter": bug_hunter_tier() }),
-    );
+    emit_badges();
 }
 
 #[cfg(test)]
@@ -533,5 +621,114 @@ mod tests {
         assert_eq!(fold_bug_hunter(&[(id(1), 1), (id(3), 3), (id(2), 2)], &revoked), (2, true));
         // No awards: tier 0, no revocation.
         assert_eq!(fold_bug_hunter(&[], &HashSet::new()), (0, false));
+    }
+
+    fn init_test_db() -> (tempfile::TempDir, std::sync::MutexGuard<'static, ()>, Keys) {
+        let guard = crate::db::DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        crate::db::close_database();
+        crate::db::clear_id_caches();
+        let tmp = tempfile::tempdir().unwrap();
+        let me = Keys::generate();
+        let account = me.public_key().to_bech32().unwrap();
+        crate::db::set_app_data_dir(crate::db::shared_test_data_dir().to_path_buf());
+        crate::db::set_current_account(account.clone()).unwrap();
+        crate::db::init_database(&account).unwrap();
+        crate::state::set_my_public_key(me.public_key());
+        (tmp, guard, me)
+    }
+
+    fn rename_settings(from: &str, to: &str) {
+        let conn = crate::db::get_write_connection_guard_static().unwrap();
+        conn.execute(&format!("ALTER TABLE {from} RENAME TO {to}"), []).unwrap();
+    }
+
+    #[test]
+    fn a_missing_award_never_lowers_the_tier_and_a_revocation_does() {
+        assert_eq!(next_tier(0, 2, false), 2, "a new award applies at once");
+        assert_eq!(next_tier(2, 3, false), 3, "an upgrade applies at once");
+        assert_eq!(next_tier(2, 0, false), 2, "a relay that missed the award changes nothing");
+        assert_eq!(next_tier(3, 1, false), 3, "nor does one that only holds an older award");
+        assert_eq!(next_tier(2, 0, true), 0, "a seen revocation takes it away");
+        assert_eq!(next_tier(3, 2, true), 2, "or down to what remains");
+    }
+
+    #[test]
+    fn a_failed_settings_read_keeps_the_perks_it_last_saw() {
+        let (_tmp, _guard, _me) = init_test_db();
+        store_bug_hunter_tier(2);
+        assert_eq!(effective_tier(), 2);
+
+        rename_settings("settings", "settings_away");
+        assert_eq!(bug_hunter_tier(), 2, "an unreadable cache is not an absent badge");
+        assert_eq!(effective_tier(), 2);
+        assert_eq!(crate::emoji_packs::effective_max_emojis_per_pack(), 60);
+        assert_eq!(crate::emoji_packs::effective_max_equipped_packs(), 9);
+        assert_eq!(crate::pinned_chats::effective_max_pinned(), 9);
+        rename_settings("settings_away", "settings");
+
+        store_vector_badge();
+        rename_settings("settings", "settings_away");
+        assert!(has_vector_badge());
+        assert_eq!(effective_tier(), 3);
+        rename_settings("settings_away", "settings");
+    }
+
+    #[test]
+    fn perks_hold_across_a_restart_with_no_network() {
+        let (_tmp, _guard, me) = init_test_db();
+        store_bug_hunter_tier(3);
+        let account = me.public_key().to_bech32().unwrap();
+
+        // A relaunch: a new session over the same database, nothing fetched.
+        crate::db::close_database();
+        crate::db::set_current_account(account.clone()).unwrap();
+        crate::db::init_database(&account).unwrap();
+        crate::state::set_my_public_key(me.public_key());
+        assert_eq!(bug_hunter_tier(), 3);
+        assert_eq!(effective_tier(), 3);
+        assert_eq!(crate::emoji_packs::effective_max_emojis_per_pack(), 90);
+        assert_eq!(crate::emoji_packs::effective_max_equipped_packs(), usize::MAX);
+    }
+
+    #[test]
+    fn a_live_look_at_our_own_awards_raises_the_cache_and_never_lowers_it() {
+        let (_tmp, _guard, me) = init_test_db();
+        assert_eq!(effective_tier(), 0);
+
+        note_own_bug_hunter(&me.public_key(), 2);
+        assert_eq!(bug_hunter_tier(), 2, "the badge the profile shows carries its perks");
+        assert_eq!(crate::emoji_packs::effective_max_emojis_per_pack(), 60);
+
+        note_own_bug_hunter(&me.public_key(), 1);
+        note_own_bug_hunter(&me.public_key(), 0);
+        assert_eq!(bug_hunter_tier(), 2, "a lower live view is a relay that missed the award");
+
+        note_own_bug_hunter(&Keys::generate().public_key(), 3);
+        assert_eq!(bug_hunter_tier(), 2, "someone else's awards are not ours");
+    }
+
+    #[test]
+    fn perks_stay_with_their_account_across_a_swap() {
+        let (_tmp, _guard, a) = init_test_db();
+        store_bug_hunter_tier(3);
+        store_vector_badge();
+        assert_eq!(effective_tier(), 3);
+
+        let b = Keys::generate();
+        let b_npub = b.public_key().to_bech32().unwrap();
+        crate::db::close_database();
+        crate::db::set_current_account(b_npub.clone()).unwrap();
+        crate::db::init_database(&b_npub).unwrap();
+        crate::state::set_my_public_key(b.public_key());
+        assert_eq!(effective_tier(), 0, "another account's badges never carry over");
+        assert!(!has_vector_badge());
+        assert_eq!(crate::emoji_packs::effective_max_emojis_per_pack(), 30);
+
+        let a_npub = a.public_key().to_bech32().unwrap();
+        crate::db::close_database();
+        crate::db::set_current_account(a_npub.clone()).unwrap();
+        crate::db::init_database(&a_npub).unwrap();
+        crate::state::set_my_public_key(a.public_key());
+        assert_eq!(effective_tier(), 3, "and swapping back finds them where they were");
     }
 }

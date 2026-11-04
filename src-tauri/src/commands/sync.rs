@@ -227,6 +227,8 @@ pub async fn fetch_messages<R: Runtime>(
         if init {
             crate::commands::transport::set_account_booted(true);
             vector_core::transport::prelogin::commit();
+            // Every login, whatever the sync finds to do: badges gate the account's perks.
+            vector_core::db::spawn_bound(vector_core::badges::refresh_own());
         }
 
         // One-time (per-account) migration of legacy app-private downloads into the
@@ -997,27 +999,6 @@ pub async fn fetch_messages<R: Runtime>(
                     }
                     vector_core::emit_event("sync_finished", &());
                 }
-
-                // Resolve + cache our own badges AFTER boot/init settles — not during.
-                // The claim's holding relay (often the user's own) is saturated through
-                // the DM archive + concurrent community sweep, so a fetch
-                // fired now routinely misses and trips the multi-hour re-check cooldown.
-                // A short settle delay lets the pool go quiet first, giving the 10s
-                // fetch a clean shot. (On-demand profile checks are the other,
-                // self-persisting path — see badges.rs.)
-                vector_core::db::spawn_bound(async move {
-                    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
-                    vector_core::badges::refresh_own_badges().await;
-                    vector_core::badges::refresh_own_bug_hunter().await;
-                    // Through emit_event, not the handle: the badges belong to the
-                    // account this task began under, and a swap during that half
-                    // minute means they are not the badges now on screen.
-                    vector_core::emit_event("badges_updated", &serde_json::json!({
-                        "vector": vector_core::badges::has_vector_badge(),
-                        "tier": vector_core::badges::effective_tier(),
-                        "bug_hunter": vector_core::badges::bug_hunter_tier(),
-                    }));
-                });
 
                 // Post-sync: weekly vacuum + daily planner-stats refresh.
                 tokio::time::sleep(std::time::Duration::from_secs(5)).await;
