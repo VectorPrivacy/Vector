@@ -234,6 +234,9 @@ jobs:
           releaseId: ${{ needs.release.outputs.id }}
           # latest.json is built once by `checksums`: every matrix job editing the shared asset raced.
           includeUpdaterJson: false
+          # One more `tauri build` (compiled crates kept) and upload on a failure: a flake this late
+          # would otherwise cost the whole job again.
+          retryAttempts: 1
           tauriScript: npm run tauri
           args: ${{ matrix.args }} ${{ needs.release.outputs.prerelease == 'true' && '--config src-tauri/tauri.preview.conf.json' || '' }}
 
@@ -330,8 +333,9 @@ jobs:
           password=${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
           EOF
 
+      # Once more on a failure, compiled crates kept: a flake this late would cost the whole job.
       - name: Build Android APK
-        run: npx tauri android build --apk ${{ matrix.targets }}
+        run: npx tauri android build --apk ${{ matrix.targets }} || npx tauri android build --apk ${{ matrix.targets }}
         env:
           NDK_HOME: ${{ env.NDK_HOME }}
 
@@ -362,9 +366,13 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release upload "${{ needs.release.outputs.tag }}" \
-            src-tauri/gen/android/app/build/outputs/apk/universal/release/Vector*.apk \
-            --clobber --repo "$GITHUB_REPOSITORY"
+          for attempt in 1 2 3; do
+            gh release upload "${{ needs.release.outputs.tag }}" \
+              src-tauri/gen/android/app/build/outputs/apk/universal/release/Vector*.apk \
+              --clobber --repo "$GITHUB_REPOSITORY" && exit 0
+            sleep $((attempt * 15))
+          done
+          exit 1
 
   # The F-Droid flavour, built by `fdroid build` inside F-Droid's own image and
   # signed with the release key: the asset their verifier compares against

@@ -357,7 +357,14 @@ async function _pcPickImage(multiple) {
             directory: false,
             filters: [{ name: 'Image', extensions: ['png', 'jpg', 'jpeg', 'gif', 'webp', 'tiff', 'tif', 'bmp', 'ico'] }],
         });
-    } catch (_e) { picked = null; }
+    } catch (e) {
+        // A cancelled pick resolves null; a throw is a pick that failed, and must say so.
+        console.warn('[emoji-creator] image picker failed:', e);
+        _pcShowError('Oops! Couldn’t Open That!',
+            'The image couldn’t be opened: ' + (e?.message || e || 'unknown error') + '.',
+            { title: 'Upload Failed.', buttonText: 'GOT IT' });
+        return multiple ? [] : null;
+    }
     if (!picked) return multiple ? [] : null;
     const sources = Array.isArray(picked) ? picked : [picked];
     const out = [];
