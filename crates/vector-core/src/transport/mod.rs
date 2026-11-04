@@ -65,7 +65,7 @@ impl Kind {
 
     pub fn label(self) -> &'static str {
         match self {
-            Kind::Clearnet => "Clearnet",
+            Kind::Clearnet => "Standard",
             Kind::Tor => "Tor",
             Kind::I2p => "I2P",
         }

@@ -279,7 +279,7 @@ async function csMoveRelays(communityId, relays) {
     if (throttled.length) {
         cautions.push(`${named(throttled)} slowed down a short burst of test events. A community on a rate-limited relay can drop posts and fall out of sync when it's busy.`);
     }
-    for (const [net, others, host] of [['Tor', 'clearnet or I2P', /\.onion$/i], ['I2P', 'clearnet or Tor', /\.i2p$/i]]) {
+    for (const [net, others, host] of [['Tor', 'Standard or I2P', /\.onion$/i], ['I2P', 'Standard or Tor', /\.i2p$/i]]) {
         const only = checks.filter((c) => c.only_on === net);
         if (!only.length) continue;
         const hostOf = (r) => { try { return new URL(r).hostname; } catch { return ''; } };

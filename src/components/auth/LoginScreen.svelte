@@ -20,7 +20,7 @@
     const n = loginNetState();
 
     // ── network ──
-    const LABELS = { clearnet: 'Clearnet', tor: 'Tor', i2p: 'I2P' };
+    const LABELS = { clearnet: 'Standard', tor: 'Tor', i2p: 'I2P' };
     // Each arrival at Start re-reads the choice and lines the transport up with it.
     $effect(() => { if (l.screen === 'start') untrack(() => h.net.refresh()); });
     // A signer pairing in progress holds the choice (the backend refuses a change meanwhile).

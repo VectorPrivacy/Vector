@@ -110,7 +110,7 @@
             anchors: [
                 { id: 'privacy', label: 'Privacy', icon: 'eye-off', keys: 'web previews video players youtube embeds url tracking typing indicators proxy media' },
                 { id: 'streamer', label: 'Streamer Mode', icon: 'video', keys: 'streamer stream streaming live obs twitch screen share hide names pictures notifications' },
-                ...(routingOffered() ? [{ id: 'routing', label: 'Routing', icon: 'shield-filled', keys: 'routing network tor i2p onion clearnet bridges obfs4 circuit outproxy sam router anonymity' }] : []),
+                ...(routingOffered() ? [{ id: 'routing', label: 'Routing', icon: 'shield-filled', keys: 'routing network tor i2p onion standard clearnet bridges obfs4 circuit outproxy sam router anonymity' }] : []),
                 { id: 'blocked', label: 'Blocked Users', icon: 'x-user', keys: 'blocked users block unblock' },
             ],
         },

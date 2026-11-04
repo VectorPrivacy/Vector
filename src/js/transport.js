@@ -3,7 +3,7 @@
 // holds the switch, I2P's settings, per-server I2P addresses and the routes the relay list
 // shows. Settings, the welcome screen, the network dialogs and the chat list render from it.
 
-const TRANSPORT_LABELS = { clearnet: 'Clearnet', tor: 'Tor', i2p: 'I2P' };
+const TRANSPORT_LABELS = { clearnet: 'Standard', tor: 'Tor', i2p: 'I2P' };
 
 /** The core's I2P-Only refusal, which the relay list words as a status of its own. */
 const I2P_ONLY_REFUSAL = 'I2P-Only is on, so this server is off.';
