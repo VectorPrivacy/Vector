@@ -1699,15 +1699,18 @@ body:is(.ws, .cc) .chatlist-community-head:hover {
   color: #fff;
 }
 
+/* As wide as its digits: one digit makes a circle, more stretch it into a pill. */
 .ws-rail-item-badge {
   flex-shrink: 0;
-  min-width: 20px;
+  box-sizing: border-box;
+  min-width: 19px;
+  margin-left: auto;
   padding: 0 6px;
   border-radius: 10px;
   background-color: var(--primary-color, #33db98);
   color: #000;
   font-size: 11px;
-  font-weight: 600;
+  font-weight: 700;
   line-height: 19px;
   text-align: center;
 }
@@ -1853,24 +1856,37 @@ body:is(.ws, .cc) #ws-rail-spaces .ws-rail-item::before {
   content: '';
   position: absolute;
   left: -8px;
-  top: 3px;
-  bottom: 3px;
+  top: 50%;
   width: 4px;
+  /* Sized by height, not scaled: a scale squashes the round end flat. */
+  height: 10px;
+  transform: translateY(-50%);
   border-radius: 0 4px 4px 0;
   background-color: var(--icon-color-primary, #59fcb3);
   opacity: 0;
-  transform: scaleY(0.35);
   pointer-events: none;
-  transition: opacity 130ms ease-out, transform 130ms ease-out;
+  transition: opacity 130ms ease-out, height 130ms ease-out, background-color 130ms ease-out;
 }
 
 body:is(.ws.ws-rail-collapsed, .cc) #ws-rail-spaces .ws-rail-item::before {
   left: calc((45px - var(--ws-rail-w)) / 2);
 }
 
+/* Shut with something new, a short bar: gray for unread, the accent for a ping. */
+body:is(.ws, .cc) #ws-rail-spaces .ws-rail-item.has-unread::before {
+  opacity: 1;
+  background-color: #b2b2b2;
+}
+
+body:is(.ws, .cc) #ws-rail-spaces .ws-rail-item.has-ping::before {
+  opacity: 1;
+  background-color: var(--icon-color-primary, #59fcb3);
+}
+
 body:is(.ws, .cc) #ws-rail-spaces .ws-rail-item.active::before {
   opacity: 1;
-  transform: scaleY(1);
+  height: calc(100% - 6px);
+  background-color: var(--icon-color-primary, #59fcb3);
 }
 
 body:is(.ws.ws-rail-collapsed, .cc) #ws-rail-spaces .ws-rail-item-avatar,
@@ -2520,7 +2536,7 @@ body.ws #chat-list .chatlist-contact::before {
   opacity: 0;
   transform: scaleY(0.35);
   pointer-events: none;
-  transition: opacity 130ms ease-out, transform 130ms ease-out;
+  transition: opacity 130ms ease-out, transform 130ms ease-out, background-color 130ms ease-out;
 }
 body.ws #chat-list .chatlist-contact.ws-active::before {
   opacity: 1;
