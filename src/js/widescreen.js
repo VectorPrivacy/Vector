@@ -213,13 +213,14 @@ function wsUpdate() {
         // A roster opened narrow hid every other pane as a whole screen, and widening
         // may have closed it (no chat beside it). Widescreen forced the panes visible
         // regardless; narrow honours their inline none, so land where the user was.
+        // Add Account hid every pane behind the login screen on purpose: it stays hidden.
         const anyShown = ['chat', 'chats', 'profile', 'settings', 'groupOverview'].some(p => VectorSvelte.paneShown(p));
-        if (!anyShown) {
+        if (!anyShown && !addAccountFlow.active) {
             if (strOpenChat) openChat(strOpenChat);
             else openChatlist();
         }
         // The rail kept Settings whatever a chat hid; narrow, it shows unless a chat owns the screen.
-        VectorSvelte.setShellFlag('settingsTab', !VectorSvelte.paneShown('chat'));
+        if (!addAccountFlow.active) VectorSvelte.setShellFlag('settingsTab', !VectorSvelte.paneShown('chat'));
         wsMarkActiveRow();
         adjustSize();
     }
