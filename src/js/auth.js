@@ -974,6 +974,8 @@ const loginNet = {
         let v;
         try { v = await invoke('transport_get_state'); } catch (_) { return; }
         applyTransportView(v);
+        // Gone while it asked, as when Add Profile backs out: there's no sign in to line up for.
+        if (!VectorSvelte.loginState().shown) return;
         const kinds = v.supported || [];
         // A remembered choice that is unreadable, or that this build lacks, picks nothing: never direct by default.
         const unusable = !addAccountFlow.active && (v.prelogin === 'unknown' || !kinds.includes(v.prelogin));
