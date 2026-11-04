@@ -209,7 +209,7 @@
         {:else if l.screen === 'import'}
             <div class="lg-block">
                 <div class="lg-title"><img src="./icons/login/lock.svg" alt="" width="22" height="29"><h3>Enter Your Private Key</h3></div>
-                <div class="lg-field-row lg-field-row-offset">
+                <div class="lg-field-row">
                     <div class="lg-field">
                         <input type="password" class="lg-input" id="login-input" placeholder="Enter nsec or Seed Phrase..."
                                autocomplete="off" spellcheck="false" bind:value={l.importKey} onkeydown={onEnter(() => h.importKey())}>

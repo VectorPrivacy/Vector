@@ -22252,8 +22252,6 @@ body.profile-switcher-editing .profile-switcher-add {
 .lg-aggro-bg-3 { left: 85.7%; top: 44.5%; }
 .lg-aggro-bg-4 { left: 5.1%; top: 82.3%; }
 
-/* Keeps the field itself centred, with its side button hanging off to the right. */
-.lg-field-row-offset { margin-left: 48px; }
 .lg-field {
   display: flex;
   align-items: center;
