@@ -28,6 +28,11 @@
     // The explainer has a tab per network that has one.
     const tabs = $derived(n.kinds.filter((k) => k === 'tor' || k === 'i2p'));
     const netOptions = $derived(n.kinds.map((k) => ({ value: k, label: LABELS[k] || k })));
+    // Sign in with: another device (the default), a private key, or a remote signer.
+    const METHODS = [{ value: 'qr', label: 'QR Code' }, { value: 'key', label: 'Private Key' }, { value: 'signer', label: 'Remote Signer' }];
+    const method = $derived(l.bunker ? 'signer' : l.method);
+    // Held while a signer is connecting.
+    const methodHeld = $derived(b.busy);
     // SAM credentials, typed here and handed over only with Use: they live in memory until the
     // account that signs in saves them.
     let samOpen = $state(false);
@@ -68,8 +73,7 @@
     });
 
     // ── the way back, wherever a step has one ──
-    const back = $derived(l.bunker && b.fromImport ? { prompt: 'Have a private key?', label: 'Use nsec instead' }
-        : b.mode === 'reauth' && l.bunker || l.screen === 'start' ? { prompt: 'Changed your mind?', label: 'Go Back' }
+    const back = $derived(b.mode === 'reauth' && l.bunker || l.screen === 'start' ? { prompt: 'Changed your mind?', label: 'Go Back' }
         : { prompt: 'Want to change accounts?', label: 'Back to Login' });
 
     // ── bunker ──
@@ -125,6 +129,26 @@
 {#snippet goBack()}
     {#if l.backBar}
         <p class="lg-back" class:lg-held={n.busy}>{back.prompt} <button type="button" onclick={() => h.back()}>{back.label}</button></p>
+    {/if}
+{/snippet}
+
+{#snippet signInWith()}
+    <div class="lg-net lg-method">
+        <span class="lg-net-label">Sign in with
+            <span class="lg-net-info" role="button" tabindex="0" aria-label="About these ways to sign in"
+                  onclick={(ev) => { ev.preventDefault(); ev.stopPropagation(); h.methodInfo(); }}
+                  onkeydown={(ev) => { if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); h.methodInfo(); } }}></span>
+        </span>
+        <Select class="lg-net-select" label="Sign in with" options={METHODS} value={method} disabled={methodHeld} onchange={(m) => h.method(m)} />
+    </div>
+{/snippet}
+
+{#snippet signerLinks()}
+    {#if l.nip55Shown}
+        <button type="button" class="lg-link" disabled={l.nip55Busy} onclick={() => h.nip55()}>Sign in with Amber (Offline)</button>
+    {/if}
+    {#if l.nip07Shown}
+        <button type="button" class="lg-link" disabled={l.nip07Busy} onclick={() => h.nip07()}>Sign in with Browser Extension</button>
     {/if}
 {/snippet}
 
@@ -208,29 +232,25 @@
             </div>
         {:else if l.screen === 'import'}
             <div class="lg-block">
-                <div class="lg-title"><img src="./icons/login/lock.svg" alt="" width="22" height="29"><h3>Enter Your Private Key</h3></div>
-                <div class="lg-field-row">
-                    <div class="lg-field">
-                        <input type="password" class="lg-input" id="login-input" placeholder="Enter nsec or Seed Phrase..."
-                               autocomplete="off" spellcheck="false" bind:value={l.importKey} onkeydown={onEnter(() => h.importKey())}>
-                        <button type="button" class="lg-field-go" aria-label="Login" onclick={() => h.importKey()}>{@render enterIcon()}</button>
+                {#if l.method === 'key'}
+                    <div class="lg-title"><img src="./icons/login/lock.svg" alt="" width="22" height="29"><h3>Enter Your Private Key</h3></div>
+                    <div class="lg-field-row">
+                        <div class="lg-field">
+                            <input type="password" class="lg-input" id="login-input" placeholder="Enter nsec or Seed Phrase..."
+                                   autocomplete="off" spellcheck="false" bind:value={l.importKey} onkeydown={onEnter(() => h.importKey())}>
+                            <button type="button" class="lg-field-go" aria-label="Login" onclick={() => h.importKey()}>{@render enterIcon()}</button>
+                        </div>
                     </div>
-                    <button type="button" class="lg-side-btn" title="Use a Remote Signer" aria-label="Use a Remote Signer"
-                            disabled={b.busy} onclick={() => h.bunker.open()}>
-                        <img src="./icons/login/swap.svg" alt="" width="18" height="20">
-                    </button>
-                </div>
-                <button type="button" class="lg-transfer" onclick={() => h.transfer()}>
-                    <span class="lg-transfer-glyph" aria-hidden="true"></span>Sign in with another device
-                </button>
+                {:else}
+                    <div class="lg-title"><img src="./icons/login/lock.svg" alt="" width="22" height="29"><h3>Login with QR Code</h3></div>
+                    <div class="lg-buttons">
+                        <button type="button" class="lg-btn primary lg-device-btn" onclick={() => h.transfer()}>Sign in with Another Device</button>
+                    </div>
+                {/if}
+                {@render signInWith()}
                 {#if n.shown}{@render netLine()}{/if}
                 {@render goBack()}
-                {#if l.nip55Shown}
-                    <button type="button" class="lg-link" disabled={l.nip55Busy} onclick={() => h.nip55()}>Sign in with Amber (Offline)</button>
-                {/if}
-                {#if l.nip07Shown}
-                    <button type="button" class="lg-link" disabled={l.nip07Busy} onclick={() => h.nip07()}>Sign in with Browser Extension</button>
-                {/if}
+                {#if l.method === 'key'}{@render signerLinks()}{/if}
             </div>
         {:else if l.screen === 'invite'}
             <div class="lg-block">
@@ -328,7 +348,9 @@
                     </button>
                 </div>
                 {#if !b.qrOpen && line.text}<p class="lg-status {line.kind}">{line.text}</p>{/if}
+                {#if b.mode !== 'reauth'}{@render signInWith()}{/if}
                 {@render goBack()}
+                {#if b.mode !== 'reauth'}{@render signerLinks()}{/if}
             </div>
         {/if}
     </main>

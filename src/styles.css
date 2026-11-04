@@ -22378,33 +22378,14 @@ body.profile-switcher-editing .profile-switcher-add {
   letter-spacing: 1.1px;
 }
 .lg-link:disabled { opacity: 0.5; cursor: default; }
-.lg-transfer,
-.lg-transfer:hover,
-.lg-transfer:focus {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  margin-top: 18px;
-  padding: 9px 16px;
-  border: 1px solid rgba(51, 219, 152, 0.45);
-  border-radius: 999px;
-  background: rgba(51, 219, 152, 0.06);
-  backdrop-filter: none;
-  -webkit-backdrop-filter: none;
-  color: #33db98;
-  font-family: inherit;
-  font-size: 13px;
-  font-weight: 600;
-  cursor: pointer;
-}
-.lg-transfer:hover { background: rgba(51, 219, 152, 0.14); }
-.lg-transfer-glyph {
-  width: 16px;
-  height: 16px;
-  background-color: currentColor;
-  -webkit-mask: url("./icons/devices.svg") center / contain no-repeat;
-  mask: url("./icons/devices.svg") center / contain no-repeat;
-}
+/* Sign in with: the row under the chosen way in, as Network's is under the start buttons.
+   Wider than Network's, for "Remote Signer". */
+.lg-net.lg-method { width: 300px; }
+.lg-method .lg-net-label { white-space: nowrap; }
+.lg-method .lg-net-select { width: 150px; }
+/* QR's way in: the button that opens the Sign in with Another Device card. */
+/* As wide as the Sign in with row under it, its label on one line. */
+.lg-btn.lg-device-btn { width: 300px; max-width: calc(100vw - 48px); font-size: 18px; white-space: nowrap; }
 
 /* The welcome screen's network choice. Held while the pick is connecting or not up:
    every connection is refused until it connects, so signing in would only fail later. */

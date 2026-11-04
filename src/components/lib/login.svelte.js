@@ -14,6 +14,8 @@ function readBgHidden() {
 // No step until boot has read what is on disk: Start would flash up before an unlock step.
 const l = $state({
     screen: 'none', backBar: false, shown: true, bunker: false,
+    // The sign in screen's way in: 'qr' (another device), 'key' or 'signer'.
+    method: 'qr',
     importKey: '', inviteCode: '',
     nip55Shown: false, nip55Busy: false,
     nip07Shown: false, nip07Busy: false,
