@@ -1,6 +1,7 @@
 // The one call: a mirror of the backend's `call_state` events, the latest stats line,
 // and a minute of history for the connection graph. `receivedAt` lets the timer run
 // between events.
+import { now as clockNow } from './clock.svelte.js';
 const HISTORY = 60;
 
 const c = $state({ id: null, peer: null, outgoing: false, phase: null, reason: null,
@@ -110,7 +111,7 @@ export function setCallState(s) {
     c.id = s.id; c.peer = s.peer; c.outgoing = s.outgoing; c.phase = s.phase;
     c.reason = s.reason || null; c.muted = s.muted; c.peerMuted = s.peer_muted; c.micOff = !!s.mic_off;
     c.volume = typeof s.volume === 'number' ? s.volume : 1;
-    c.activeMs = s.active_ms; c.receivedAt = Date.now();
+    c.activeMs = s.active_ms; c.receivedAt = clockNow();
     c.videoMine = { camera: !!s.video_mine?.camera, screen: !!s.video_mine?.screen };
     c.videoPeer = { camera: !!s.video_peer?.camera, screen: !!s.video_peer?.screen };
     c.peerDecodes = s.peer_decodes || []; c.videoOffered = !!s.video_offered; c.pausedByPeer = !!s.paused_by_peer;
@@ -172,7 +173,7 @@ export function rttQuality(rtt) {
 }
 
 // Muted and deafened as you left them (core calls::settings::MicState): every call starts this
-// way, and the Start Menu, the call overlay and the voice bar all change the one setting.
+// way, and the Main Menu, the call overlay and the voice bar all change the one setting.
 const mic = $state({ muted: false, deafened: false });
 export function micState() { return mic; }
 export function setMicState(s) {

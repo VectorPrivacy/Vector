@@ -14,6 +14,7 @@
     import RouteButton from './RouteButton.svelte';
     import StayOnScreen from './StayOnScreen.svelte';
     import { loadPillPos, savePillPos, clampPill, pillDrag } from '../lib/call-pill.js';
+    import { now as clockNow } from '../lib/clock.svelte.js';
 
     /**
      * @typedef {object} CallHelpers
@@ -68,11 +69,11 @@
     });
 
     // The timer runs on a local clock between state events.
-    let now = $state(Date.now());
+    let now = $state(clockNow());
     $effect(() => {
         if (c.phase !== 'active') return;
-        now = Date.now();
-        const t = setInterval(() => { now = Date.now(); }, 1000);
+        now = clockNow();
+        const t = setInterval(() => { now = clockNow(); }, 1000);
         return () => clearInterval(t);
     });
     function clock(ms) {

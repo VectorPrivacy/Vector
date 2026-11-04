@@ -1,6 +1,6 @@
 [package]
 name = "vector"
-version = "0.5.0-3"
+version = "0.5.0-5"
 description = "A humble attempt at a modern, private, complete Nostr chat client."
 authors = ["Formless Labs", "JSKitty", "YuurinBee"]
 edition = "2021"
@@ -370,7 +370,7 @@ tauri-plugin = { git = "https://github.com/VectorPrivacy/tauri.git", rev = "c231
 # whisper-rs-sys: whisper.cpp 1.9.5 applying ../scripts/whisper/patches (WHISPER_PATCHES in
 # the repo-root .cargo/config.toml), KleidiAI on Android arm64, x86-64-v3 releases. Pinned by rev.
 # Fork: https://github.com/VectorPrivacy/whisper-rs/tree/whisper-1.9.5
-whisper-rs-sys = { git = "https://github.com/VectorPrivacy/whisper-rs.git", rev = "2d0a0d6e865ef3a08310d3d6cf05abab93d35055" }
+whisper-rs-sys = { git = "https://github.com/VectorPrivacy/whisper-rs.git", rev = "97540c4ce03944e54aa2da3381a64947b4a824cb" }
 # nostr: SecretKey's Drop used non_secure_erase, which the compiler can optimise away; the fork
 # zeroizes with volatile writes. nostr-sdk: its verification cache re-hashes the event ID, and a
 # gift wrap's ID is checked but not its throwaway-key signature (NIP-59; readers verify the seal).

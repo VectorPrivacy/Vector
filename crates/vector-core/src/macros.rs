@@ -69,6 +69,7 @@ macro_rules! log_trace {
 macro_rules! log_warn {
     ($($arg:tt)*) => {{
         if $crate::logging::level_enabled($crate::logging::LEVEL_WARN) {
+            // device-clock: log lines keep the time the device showed.
             let _secs = $crate::rt::time_std::SystemTime::now()
                 .duration_since($crate::rt::time_std::UNIX_EPOCH)
                 .unwrap_or_default()

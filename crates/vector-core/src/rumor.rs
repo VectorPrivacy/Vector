@@ -27,7 +27,7 @@
 use crate::tags::TagsExt;
 use std::path::Path;
 use nostr_sdk::prelude::*;
-use crate::types::{Message, Attachment, ImageMetadata, Reaction};
+use crate::types::{Message, Attachment, ImageMetadata, Reaction, is_renderable_reaction};
 use crate::stored_event::{StoredEvent, StoredEventBuilder, event_kind};
 use crate::crypto::{extension_from_mime, sanitize_filename};
 
@@ -659,10 +659,7 @@ fn extract_nip40_expiration(rumor: &RumorEvent) -> Option<u64> {
 /// NIP-40: true when the tag's expiry already lies in the past at receipt.
 pub(crate) fn already_expired(expiration: Option<u64>) -> bool {
     match expiration {
-        Some(exp) => web_time::SystemTime::now()
-            .duration_since(web_time::UNIX_EPOCH)
-            .map(|d| exp <= d.as_secs())
-            .unwrap_or(false),
+        Some(exp) => exp <= crate::clock::now_secs(),
         None => false,
     }
 }
@@ -674,33 +671,6 @@ fn process_deletion(
     let target_event_id = unique_event_ref(&rumor)
         .ok_or("Deletion target tag missing or ambiguous")?;
     Ok(RumorProcessingResult::DeletionRequest { target_event_id })
-}
-
-/// Whether a reaction's content is something Vector can render as a clean chip.
-/// Everything else (a `:code:URL`, prose, a jammed-in URL, anything long or with
-/// whitespace) is dropped at ingest instead of shown as an overflowing/garbled
-/// reaction — the wrapper is still recorded, but no reaction is stored.
-fn is_renderable_reaction(content: &str) -> bool {
-    // NIP-25 like / dislike / implicit-like.
-    if content.is_empty() || content == "+" || content == "-" {
-        return true;
-    }
-    // A clean NIP-30 custom-emoji shortcode `:name:` (resolves to an image, or is
-    // shown verbatim). Bounded so a giant shortcode can't slip through either.
-    if let Some(inner) = content.strip_prefix(':').and_then(|s| s.strip_suffix(':')) {
-        if !inner.is_empty()
-            && inner.len() <= 48
-            && inner.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '~' | '-' | '+'))
-        {
-            return true;
-        }
-    }
-    // Otherwise keep only a short, single-token glyph. Reject anything that would
-    // stretch or break the row: long content, whitespace/newlines, or an embedded
-    // URL (the `:code:https://…` fuzz). Short odd content is harmless.
-    content.chars().count() <= 12
-        && !content.chars().any(char::is_whitespace)
-        && !content.contains("://")
 }
 
 /// Process a reaction rumor
@@ -808,10 +778,7 @@ fn process_app_specific(
             .parse()
             .map_err(|_| "Invalid expiration timestamp")?;
 
-        let current_timestamp = web_time::SystemTime::now()
-            .duration_since(web_time::UNIX_EPOCH)
-            .map_err(|e| format!("System time error: {}", e))?
-            .as_secs();
+        let current_timestamp = crate::clock::now_secs();
 
         if expiry_timestamp <= current_timestamp || expiry_timestamp > current_timestamp + 30 {
             return Ok(RumorProcessingResult::Ignored);

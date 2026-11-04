@@ -1105,7 +1105,7 @@ impl VectorCore {
             return Ok(());
         }
 
-        let expiry = Timestamp::from_secs(Timestamp::now().as_secs() + 30);
+        let expiry = Timestamp::from_secs(crate::clock::timestamp().as_secs() + 30);
         let rumor = EventBuilder::new(Kind::ApplicationSpecificData, "typing")
             .tag(Tag::public_key(pubkey))
             .tag(Tag::custom("d", vec!["vector"]))
@@ -2091,7 +2091,7 @@ impl VectorCore {
             };
             let bundle_json = serde_json::to_string(&bundle).map_err(|e| VectorError::Other(e.to_string()))?;
             // A 24h NIP-40 expiry (DIRECT_INVITE_EXPIRY_SECS): a bundle is live key material for a community that keeps rotating, so it must not linger.
-            let expires_at = nostr_sdk::prelude::Timestamp::now().as_secs()
+            let expires_at = crate::clock::timestamp().as_secs()
                 + crate::community::v2::invite::DIRECT_INVITE_EXPIRY_SECS;
             let expiry_tag = nostr_sdk::prelude::Tag::expiration(nostr_sdk::prelude::Timestamp::from_secs(expires_at));
             let rumor = nostr_sdk::prelude::EventBuilder::new(
@@ -2198,10 +2198,7 @@ impl VectorCore {
         let emoji_pairs: Vec<(&str, &str)> = emoji_owned.iter().map(|t| (t.shortcode.as_str(), t.url.as_str())).collect();
         let mut extra_tags: Vec<nostr_sdk::prelude::Tag> = crate::text_spans::to_nostr_tags(&text_spans).chain(crate::community::mentions::to_tags(&role_mentions)).collect();
         if let Some(secs) = expires_in_secs.filter(|s| *s > 0) {
-            let at = web_time::SystemTime::now()
-                .duration_since(web_time::UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0)
+            let at = crate::clock::now_secs()
                 .saturating_add(secs);
             extra_tags.push(nostr_sdk::prelude::Tag::expiration(nostr_sdk::prelude::Timestamp::from_secs(at)));
         }
@@ -2851,10 +2848,7 @@ impl VectorCore {
             .iter()
             .any(|rid| roster.roles.iter().any(|r| &r.role_id == rid && (r.permissions.0 & MOD_MASK) != 0));
 
-        let now_ms = web_time::SystemTime::now()
-            .duration_since(web_time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0);
+        let now_ms = crate::clock::now_ms();
         let findings = crate::community::policy::harness::screen_message(
             &cid_hex, &owner, &author, &roles, is_staff, channel_id, text, now_ms,
         );
@@ -2898,10 +2892,7 @@ impl VectorCore {
         use nostr_sdk::prelude::PublicKey;
         use std::collections::{HashMap, HashSet};
 
-        let now_secs = web_time::SystemTime::now()
-            .duration_since(web_time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
+        let now_secs = crate::clock::now_secs();
         if let Some(report) = report_get(&raid_report_cache(), cid_hex, now_secs) {
             return Ok(report);
         }
@@ -3087,10 +3078,7 @@ impl VectorCore {
                 })
                 .collect();
 
-        let now_ms = web_time::SystemTime::now()
-            .duration_since(web_time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0);
+        let now_ms = crate::clock::now_ms();
         let assembled =
             crate::community::policy::harness::assemble(&cid_hex, &owner, me.as_ref(), &members, now_ms)
                 .map_err(VectorError::Other)?;
@@ -3153,10 +3141,7 @@ impl VectorCore {
 
         let hash = crate::community::policy::harness::hash_policy_bytes(bytes.as_bytes());
         let hash_hex = crate::simd::hex::bytes_to_hex_32(&hash.0);
-        let now_secs = web_time::SystemTime::now()
-            .duration_since(web_time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
+        let now_secs = crate::clock::now_secs();
         crate::db::community::set_community_policy(&cid_hex, policy_id, bytes, &hash_hex, enabled, now_secs)
             .map_err(VectorError::Other)?;
         // The console must not keep serving verdicts from the rules that were
@@ -3189,10 +3174,7 @@ impl VectorCore {
     /// real raid out of local storage and stayed silent on a healthy community
     /// across six runs.
     fn policy_console_report(cid_hex: &str, community: &crate::community::v2::community::CommunityV2) -> Result<std::sync::Arc<serde_json::Value>> {
-        let now_secs = web_time::SystemTime::now()
-            .duration_since(web_time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
+        let now_secs = crate::clock::now_secs();
         report_once(&policy_report_cache(), &policy_report_gate(), cid_hex, now_secs, || {
             Self::evaluate_policy_console(cid_hex, community, now_secs)
         })
@@ -3334,10 +3316,7 @@ impl VectorCore {
             })
             .unwrap_or_default();
 
-        let now_ms = web_time::SystemTime::now()
-            .duration_since(web_time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0);
+        let now_ms = crate::clock::now_ms();
         let diff = crate::community::policy::harness::run_side_by_side(
             &cid_hex, &owner, &members, &assessments, now_ms,
         )
@@ -5227,7 +5206,7 @@ impl VectorCore {
             let wraps = db::pending_invite_wraps(community_id).unwrap_or_default();
             db::delete_pending_invite(community_id).map_err(VectorError::Other)?;
             if let Some(cid) = bundle.and_then(|_| crate::simd::hex::hex_to_bytes_32_checked(community_id)) {
-                let removed_at = web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
+                let removed_at = crate::clock::now_ms();
                 crate::community::v2::service::tombstone_community_list_durable(crate::community::CommunityId(cid), relays.clone(), removed_at);
             }
             for wrap in wraps.iter().filter_map(|w| nostr_sdk::prelude::EventId::from_hex(w).ok()) {
@@ -5276,7 +5255,7 @@ impl VectorCore {
             // history to keep a few days of it is most of this function's cost
             // on an established account.
             let (items, filter) = if let Some(days) = since_days {
-                let since_ts = Timestamp::now().as_secs().saturating_sub(days * 24 * 3600);
+                let since_ts = crate::clock::timestamp().as_secs().saturating_sub(days * 24 * 3600);
                 let items = db::wrappers::load_negentropy_items_since(since_ts)
                     .unwrap_or_default();
                 let filter = Filter::new()
@@ -5635,7 +5614,7 @@ impl VectorCore {
         // read from here on, catch-up included, keeping only live subscriptions'
         // events: the catch-up's own traffic shares the notification ring and
         // would otherwise push them out of it.
-        let listening_since = web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
+        let listening_since = crate::clock::now_ms();
         let notifications = client.notifications();
         let dm_sub_id = self.subscribe_dms().await?;
         let (live_tx, mut live_rx) = tokio::sync::mpsc::channel::<(LiveRoute, Box<nostr_sdk::prelude::Event>)>(4096);
@@ -5711,7 +5690,7 @@ impl VectorCore {
                             continue;
                         }
                         let _ = VectorCore.sync_communities().await;
-                        let resync_from = web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
+                        let resync_from = crate::clock::now_ms();
                         let _ = VectorCore.sync_dms(None, &event_handler::LiveOnly::from(&*handler, resync_from)).await;
                         if let Some(c) = state::nostr_client() {
                             community::v2::realtime::refresh_subscription(&c).await;

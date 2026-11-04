@@ -5,6 +5,7 @@
 //! The sender's page never sees the number: the user carries it from the new device's screen.
 
 use std::collections::HashSet;
+use crate::event_ext::FinalizeOnClock;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -301,7 +302,7 @@ struct Wire {
 impl Wire {
     /// Publish `msg`, signed fresh each time: relays refuse a repeat of an old event.
     async fn publish(&mut self, msg: &Msg) {
-        let Ok(event) = EventBuilder::new(Kind::Custom(KIND), msg.encode()).tag(Tag::public_key(self.room)).finalize(&self.keys) else {
+        let Ok(event) = EventBuilder::new(Kind::Custom(KIND), msg.encode()).tag(Tag::public_key(self.room)).finalize_on_clock(&self.keys) else {
             return;
         };
         match crate::transport_aware(self.client.send_event(&event)).await {
@@ -535,7 +536,7 @@ async fn run(
     session.set_face(face.0, face.1);
     drop(code);
     let room = session.room();
-    let began = Timestamp::now();
+    let began = crate::clock::timestamp();
     let mut notes = client.notifications();
     let sub = client
         .subscribe(Filter::new().kind(Kind::Custom(KIND)).pubkey(room).since(began - STALE_SECS))

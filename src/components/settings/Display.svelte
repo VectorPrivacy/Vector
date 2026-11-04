@@ -10,7 +10,7 @@
     const shell = shellState();
     // `slim` / `wide`: only that layout has the row's subject.
     const ROWS = [
-        { key: 'startMenu', id: 'start-menu-toggle', label: 'Start Menu', group: 'Navigation', wide: true },
+        { key: 'startMenu', id: 'start-menu-toggle', label: 'Main Menu', group: 'Navigation', wide: true },
         { key: 'hideRail', id: 'hide-rail-toggle', label: 'Hide Community Rail', group: 'Chat List', slim: true },
         { key: 'imageTypes', id: 'display-image-types-toggle', label: 'Display Image Types', group: 'Chat' },
         { key: 'chatBg', id: 'chat-bg-toggle', label: 'Background Wallpaper', group: 'Chat' },

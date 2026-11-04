@@ -78,6 +78,11 @@ pub async fn dispatch(cmd: &str, a: Args) -> Result<Value, String> {
             }
             to_value(db::get_sql_setting("theme".into())?)
         }
+        "get_clock_status" => to_value(vector_core::clock::status()),
+        "set_decentralised_clock" => {
+            vector_core::clock::set_decentralised(a.bool("on").ok_or("`on` is required")?)?;
+            to_value(vector_core::clock::status())
+        }
         "get_sql_setting" => {
             if db::get_current_account().is_err() {
                 return Ok(Value::Null);

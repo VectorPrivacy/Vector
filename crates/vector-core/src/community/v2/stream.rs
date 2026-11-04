@@ -23,6 +23,8 @@
 //! events a strict reader cannot decrypt.
 
 use crate::event_ext::FinalizeUnsignedWithId;
+use crate::event_ext::FinalizeOnClock;
+#[cfg(test)]
 use nostr_sdk::prelude::FinalizeEvent;
 use nostr_sdk::prelude::nip44::v2::ConversationKey;
 use nostr_sdk::prelude::{Event, EventBuilder, EventId, Keys, Kind, PublicKey, Tag, Timestamp, UnsignedEvent};
@@ -271,7 +273,7 @@ pub fn build_seal(rumor: &UnsignedEvent, form: SealForm, group: &GroupKey, autho
     let content = seal_content(rumor, form, group)?;
     EventBuilder::new(Kind::Custom(form.kind()), content)
         .custom_created_at(rumor.created_at)
-        .finalize(author_keys)
+        .finalize_on_clock(author_keys)
         .map_err(|e| StreamError::Sign(e.to_string()))
 }
 
@@ -324,7 +326,7 @@ pub fn wrap_seal_for(
     let wrap = EventBuilder::new(Kind::Custom(wrap_kind), crate::simd::base64::STANDARD.encode_to_string(&ct))
         .tags(tags)
         .custom_created_at(wrap_at)
-        .finalize(group.keys())
+        .finalize_on_clock(group.keys())
         .map_err(|e| StreamError::Sign(e.to_string()))?;
     let len = wrap.as_json().len();
     if len > crate::event_size::MAX_EVENT_BYTES {

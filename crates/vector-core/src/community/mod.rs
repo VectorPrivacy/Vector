@@ -186,8 +186,7 @@ mod freshness_tests {
     // (hours to months old) and far-future junk are not "new" surfaces.
     #[test]
     fn realtime_freshness_window() {
-        let now_ms = web_time::SystemTime::now()
-            .duration_since(web_time::UNIX_EPOCH).unwrap().as_millis() as u64;
+        let now_ms = crate::clock::now_ms();
         assert!(is_realtime_fresh(now_ms), "just-sent is fresh");
         assert!(is_realtime_fresh(now_ms - REALTIME_FRESH_WINDOW_MS / 2), "modest delay is fresh");
         assert!(!is_realtime_fresh(now_ms - 3_600_000), "an hour-old replay is not");

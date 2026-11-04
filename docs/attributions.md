@@ -146,6 +146,7 @@ The URL tracker-parameter list in `src/js/misc.js` was curated with reference to
 | Sonar | [Freesound](https://freesound.org/people/shinephoenixstormcrow/sounds/337050/) | [CC BY 3.0](https://creativecommons.org/licenses/by/3.0/) | [shinephoenixstormcrow](https://freesound.org/people/shinephoenixstormcrow/), from [unfa](https://freesound.org/people/unfa/)'s original | `notif-sonar.mp3` (Android) |
 | Techno | [Freesound](https://freesound.org/people/Alexhanj/sounds/528730/) | [CC0 1.0](https://creativecommons.org/publicdomain/zero/1.0/) | [Alexhanj](https://freesound.org/people/Alexhanj/) | `notif-techno.mp3` |
 | Synth | [Freesound](https://freesound.org/people/SUBQUiRE/sounds/833599/) | [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/) | [SUBQUiRE](https://freesound.org/people/SUBQUiRE/) | `notif-synth.mp3` (Android) |
+| Badge Claim | [Pixabay](https://pixabay.com/sound-effects/film-special-effects-diamond-found-190255/) | [Pixabay Content License](https://pixabay.com/service/license-summary/) | [Liecio](https://pixabay.com/users/liecio-3298866/) | `claim-badge.mp3` |
 
 ---
 

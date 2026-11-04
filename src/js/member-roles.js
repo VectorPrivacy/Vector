@@ -95,7 +95,7 @@ async function memberMenuItems(communityId, npub, { onBusy = () => {}, onRemoved
         memberRolesView(communityId),
         invoke('get_community_timeouts', { communityId }).catch(() => ({})),
     ]);
-    const timedOut = (timeouts?.[npub]?.until || 0) * 1000 > Date.now();
+    const timedOut = (timeouts?.[npub]?.until || 0) * 1000 > VectorSvelte.now();
     const mine = npub === strPubkey;
     const above = !mine && !!view && npub !== view.owner && (view.is_owner || (view.rank != null && view.rank < memberRank(view, npub)));
     const display = getName(getProfile(npub) || npub, communityId);

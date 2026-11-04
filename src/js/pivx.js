@@ -3,7 +3,7 @@
 /** The PIVX wallet card replaces the Mini Apps view; the card slides in on each open. */
 function showPivxWalletPanel() {
     // Track PIVX usage for history-based positioning
-    localStorage.setItem('pivx_last_used', Date.now().toString());
+    localStorage.setItem('pivx_last_used', VectorSvelte.now().toString());
     VectorSvelte.attachmentSetView('pivx');
     VectorSvelte.attachmentPulse('pivx');
     refreshPivxWallet();
@@ -574,7 +574,7 @@ function handlePivxPaymentReceived(evt) {
     // Create a synthetic message object for the PIVX payment
     const pivxMsg = {
         id: message_id,
-        at: evt.payload.at || Date.now(),
+        at: evt.payload.at || VectorSvelte.now(),
         content: '',
         mine: is_mine,
         attachments: [],

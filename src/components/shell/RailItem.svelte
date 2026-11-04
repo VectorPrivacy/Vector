@@ -88,6 +88,8 @@
     class:is-community={isCommunity}
     class:is-quiet={isCommunity && !vm.unread}
     class:is-muted={vm.muted}
+    class:has-unread={isCommunity && !!vm.unread && !vm.muted}
+    class:has-ping={isCommunity && !!vm.pings}
     class:active
     class:is-drag-armed={armed}
     class:is-dragging={dragging}
@@ -104,7 +106,8 @@
     {#if voice}
         <span class="ws-rail-item-voice" class:is-mine={voice === 'mine'} title={voice === 'mine' ? 'You are in a voice call here' : 'Someone is in a voice call'}><span class="icon icon-volume-max"></span></span>
     {/if}
-    {#if vm.pings || vm.unread}
+    <!-- A community marks unread with its edge bar instead. -->
+    {#if !isCommunity && (vm.pings || vm.unread)}
         <span class="ws-rail-item-badge" class:is-dot={isDot} class:muted={vm.muted && !isDot}>
             {isDot ? '' : (vm.pings > 99 ? '99+' : String(vm.pings))}
         </span>

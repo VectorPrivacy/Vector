@@ -155,7 +155,7 @@ where
     let (Some(client), Some(me)) = (crate::state::nostr_client(), crate::state::my_public_key()) else {
         return report;
     };
-    let now = Timestamp::now().as_secs();
+    let now = crate::clock::timestamp().as_secs();
     let wanted = |url: &RelayUrl| {
         opts.only.as_ref().is_none_or(|only| {
             only.iter().any(|u| u.trim_end_matches('/') == url.as_str().trim_end_matches('/'))

@@ -288,10 +288,7 @@ pub fn list_accounts_with_metadata<R: Runtime>(
 /// Persist a `last_active` epoch-second timestamp into the current account's settings.
 /// Called on every successful login so the account picker can sort correctly.
 pub fn touch_last_active() -> Result<(), String> {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
+    let now = vector_core::clock::now_secs() as i64;
     vector_core::db::set_sql_setting("last_active".to_string(), now.to_string())
 }
 

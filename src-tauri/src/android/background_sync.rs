@@ -496,7 +496,7 @@ fn run_standalone_sync_loop(data_dir: &str) {
         // and the locked-account arm below has no ledger to dedup against
         // across service restarts. The `since` bound caps any replay at the
         // NIP-59 backdating window instead of the whole mailbox.
-        let sub_since = nostr_sdk::prelude::Timestamp::now()
+        let sub_since = vector_core::clock::timestamp()
             .as_secs()
             .saturating_sub(2 * 24 * 3600);
         let giftwrap_filter = Filter::new()
@@ -654,7 +654,7 @@ fn run_standalone_sync_loop(data_dir: &str) {
                         const LOCKED_NOTIFY_GAP_SECS: u64 = 30;
                         static LAST_LOCKED_NOTIFY: std::sync::atomic::AtomicU64 =
                             std::sync::atomic::AtomicU64::new(0);
-                        let now = nostr_sdk::prelude::Timestamp::now().as_secs();
+                        let now = vector_core::clock::timestamp().as_secs();
                         let last = LAST_LOCKED_NOTIFY.load(Ordering::Relaxed);
                         if now.saturating_sub(last) >= LOCKED_NOTIFY_GAP_SECS
                             && LAST_LOCKED_NOTIFY

@@ -50,12 +50,14 @@ fn holding() -> Arc<Mutex<HashSet<EventId>>> {
 }
 
 /// Start this account's live session: held wraps are released through `handler`, and the clock
-/// is checked against the relays now and every [`crate::clock::RESYNC`].
+/// is checked against the relays now, every [`crate::clock::RESYNC`], and whenever a server says
+/// it is off.
 pub fn start(handler: Arc<dyn InboundEventHandler>) {
     let first = releaser().write().unwrap_or_else(|e| e.into_inner()).replace(handler).is_none();
     if !first {
         return;
     }
+    crate::clock::load_setting();
     crate::db::spawn_bound(async move {
         loop {
             let Some(client) = crate::state::nostr_client() else { return };
@@ -64,7 +66,7 @@ pub fn start(handler: Arc<dyn InboundEventHandler>) {
             }
             let relays: Vec<String> = client.relays().await.keys().map(|u| u.to_string()).collect();
             crate::clock::sync_with(&relays).await;
-            crate::rt::time::sleep(crate::clock::RESYNC).await;
+            crate::clock::until_next_check().await;
         }
     });
 }

@@ -814,7 +814,7 @@ function _tabForSection(section) {
 }
 
 function _syncActiveSectionTab() {
-    if (Date.now() < _emojiSpyMuteUntil) return;
+    if (VectorSvelte.now() < _emojiSpyMuteUntil) return;
     const main = _pickerEls.main;
     // Creator mode hides every section, so there's nothing to track.
     if (!main || _pc.open) return;
@@ -892,11 +892,11 @@ function _jumpToPickerSection(section) {
     const main = _pickerEls.main;
     // Hold the spy off while the scroll travels, so the highlight stays on the tab
     // that was clicked instead of chasing the animation.
-    _emojiSpyMuteUntil = Date.now() + 900;
+    _emojiSpyMuteUntil = VectorSvelte.now() + 900;
     section.scrollIntoView({ behavior: 'smooth', block: 'start' });
     // A compaction in the next couple of seconds (sections above still decoding)
     // re-squares the landing; the user taking the scroll ends that.
-    _jumpAlign = { section, until: Date.now() + 2500 };
+    _jumpAlign = { section, until: VectorSvelte.now() + 2500 };
     let settled = false;
     const settle = () => {
         if (settled) return;
@@ -913,7 +913,7 @@ function _realignJump() {
     const main = _pickerEls.main;
     const j = _jumpAlign;
     if (!j || !main) return;
-    if (Date.now() > j.until || !j.section.isConnected) { _jumpAlign = null; return; }
+    if (VectorSvelte.now() > j.until || !j.section.isConnected) { _jumpAlign = null; return; }
     requestAnimationFrame(() => {
         if (_jumpAlign !== j) return;
         const off = j.section.getBoundingClientRect().top - main.getBoundingClientRect().top;

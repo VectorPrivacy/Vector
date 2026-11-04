@@ -22,7 +22,7 @@
             </span>
             <div class="ma-launch-id">
                 <h3 id="ma-launch-title" class="vcard-title">{st.name}</h3>
-                <span class="ma-launch-sub">{st.updateMode ? 'A newer version is in the Nexus' : 'Play here, or bring this chat along'}</span>
+                <span class="ma-launch-sub">{st.updateMode ? 'A newer version is in the App Store' : 'Play here, or bring this chat along'}</span>
             </div>
             <button type="button" class="vcard-x" aria-label="Close" onclick={h.cancel}>&#x2715;</button>
         </div>

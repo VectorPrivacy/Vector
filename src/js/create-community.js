@@ -134,7 +134,7 @@ async function createCommunityFromPanel(inviteeNpubs) {
         // Stamp the proven owner npub so the crown/Owner tag shows now, not after reload.
         if (created.owner_npub) chat.metadata.custom_fields.owner_npub = created.owner_npub;
         // Creation time sorts the empty community to the top right away; reloads re-source it.
-        chat.metadata.custom_fields.created_at = String(Date.now());
+        chat.metadata.custom_fields.created_at = String(VectorSvelte.now());
         if (avatarPath) {
             chat.metadata.custom_fields.icon = '1';
             // avatar_cached is a RAW path. Desktop: the picked file previews at once. Android: a

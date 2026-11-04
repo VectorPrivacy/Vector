@@ -50,7 +50,7 @@ function muteHint(view) {
     const at = new Date(view.mute_until);
     const time = at.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
     // A 24 hour mute lands at the same clock time tomorrow, which reads as "until now".
-    const today = new Date();
+    const today = VectorSvelte.nowDate();
     const sameDay = at.getDate() === today.getDate()
         && at.getMonth() === today.getMonth()
         && at.getFullYear() === today.getFullYear();

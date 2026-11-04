@@ -4,6 +4,7 @@
 // the encrypt screen (title, which input is up, the biometric offers). The flows only set
 // state; one component paints it.
 import { flushSync } from 'svelte';
+import { now as clockNow } from './clock.svelte.js';
 
 const BG_KEY = 'vector_login_hide_bg';
 function readBgHidden() {
@@ -13,6 +14,8 @@ function readBgHidden() {
 // No step until boot has read what is on disk: Start would flash up before an unlock step.
 const l = $state({
     screen: 'none', backBar: false, shown: true, bunker: false,
+    // The sign in screen's way in: 'qr' (another device), 'key' or 'signer'.
+    method: 'qr',
     importKey: '', inviteCode: '',
     nip55Shown: false, nip55Busy: false,
     nip07Shown: false, nip07Busy: false,
@@ -98,7 +101,7 @@ export function bunkerStatus(text, kind = '') { b.status = text || ''; b.kind = 
 export function bunkerLink(url) { b.url = url || ''; if (!url) b.qrReady = false; }
 export function bunkerCopied(on) { b.copied = !!on; }
 export function bunkerBusy(on) { b.busy = !!on; }
-export function bunkerDeadline(at) { b.deadline = at || 0; b.now = Date.now(); }
+export function bunkerDeadline(at) { b.deadline = at || 0; b.now = clockNow(); }
 export function bunkerTick(now) { b.now = now; }
 
 /** Empty the PIN boxes; the first takes focus when asked. */

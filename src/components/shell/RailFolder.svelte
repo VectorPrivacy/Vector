@@ -56,6 +56,8 @@
         class="ws-rail-item ws-rail-folder-head btn"
         class:is-quiet={!vm.unread}
         class:is-muted={vm.allMuted}
+        class:has-unread={!open && !!vm.unread && !vm.allMuted}
+        class:has-ping={!open && !!vm.pings}
         class:active={!open && holdsActive}
         class:is-drag-armed={drag.armed(`f:${folder.id}`)}
         class:is-dragging={drag.dragging(`f:${folder.id}`)}
@@ -75,11 +77,6 @@
             </span>
         </span>
         <span class="ws-rail-item-name cutoff">{vm.label}</span>
-        {#if !open && (vm.pings || vm.unread)}
-            <span class="ws-rail-item-badge" class:is-dot={!vm.pings} class:muted={vm.allMuted && !!vm.pings}>
-                {vm.pings ? (vm.pings > 99 ? '99+' : String(vm.pings)) : ''}
-            </span>
-        {/if}
     </div>
     <div class="ws-rail-folder-body">
         <div class="ws-rail-folder-inner">

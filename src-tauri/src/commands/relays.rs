@@ -178,10 +178,7 @@ fn add_relay_log_once(url: &str, level: &'static str, message: String) {
 
 pub fn add_relay_log(url: &str, level: &'static str, message: impl Into<Cow<'static, str>>) {
     let normalized = url.trim().trim_end_matches('/').to_lowercase();
-    let timestamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
+    let timestamp = vector_core::clock::now_secs();
 
     let log = RelayLog {
         timestamp,
@@ -1312,10 +1309,7 @@ pub async fn monitor_relay_connections() -> Result<bool, String> {
                     let received = relay.stats().bytes_received();
                     let before = heard.lock().unwrap().insert(url.clone(), received);
                     if before.is_some_and(|b| received > b) {
-                        let now_secs = std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_secs();
+                        let now_secs = vector_core::clock::now_secs();
                         update_relay_metrics(&url.to_string(), |m| m.last_check = Some(now_secs));
                         return;
                     }
@@ -1336,10 +1330,7 @@ pub async fn monitor_relay_connections() -> Result<bool, String> {
                     let elapsed = start.elapsed();
                     let url_str = url.to_string();
                     let ping_ms = elapsed.as_millis() as u64;
-                    let now_secs = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_secs();
+                    let now_secs = vector_core::clock::now_secs();
 
                     match result {
                         Ok(Ok(_events)) => {

@@ -834,7 +834,7 @@ fn auth_gate_at(url: &str) -> Option<u64> {
 }
 
 fn now_secs() -> u64 {
-    web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).map_or(0, |d| d.as_secs())
+    crate::clock::now_secs()
 }
 
 /// Whether the relay has challenged this account within [`AUTH_GATE_TTL_SECS`].

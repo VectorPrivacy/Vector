@@ -162,7 +162,7 @@ pub fn validate_twin(kind: Kind, addr: &str) -> Result<String, String> {
 }
 
 fn now() -> u64 {
-    web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+    crate::clock::now_secs()
 }
 
 struct AliasWrites;

@@ -25,6 +25,7 @@ const transferPatch = (view) => VectorSvelte.transferModal.patch(view);
  * @property {() => void} deny
  * @property {() => void} retry
  * @property {(node: Element, text: string) => void} renderQr
+ * @property {(code: string) => Promise<boolean>} copyCode   true once it is on the clipboard
  */
 document.addEventListener('DOMContentLoaded', () => {
     /** @type {TransferHelpers} */
@@ -38,6 +39,9 @@ document.addEventListener('DOMContentLoaded', () => {
         deny: () => denyTransfer(),
         retry: () => retryTransfer(),
         renderQr: (node, text) => renderQrInto(node, text),
+        copyCode: (code) => navigator.clipboard.writeText(code)
+            .then(() => { showToast('Copied Code'); return true; })
+            .catch(() => { showToast('Failed to Copy'); return false; }),
     };
     VectorSvelte.setScreen('transferModal', { h });
     window.__TAURI__.event.listen('transfer_state', (e) => applyTransferState(e.payload));
@@ -97,7 +101,7 @@ async function showTransferCode() {
         if (seq !== transferSeq) return;
         transferId = started.id;
         if (transferState().stage === 'connecting') {
-            transferPatch({ stage: 'show', code: started.code, qr: started.qr, expiresAt: Date.now() + 5 * 60 * 1000 });
+            transferPatch({ stage: 'show', code: started.code, qr: started.qr, expiresAt: VectorSvelte.now() + 5 * 60 * 1000 });
         }
     } catch (e) {
         if (seq === transferSeq) transferPatch({ stage: 'error', error: String(e) });

@@ -5,6 +5,7 @@
 //
 // Each player has one owner, the host that last created or adopted it, as in videohost.js: a
 // host tearing down drops its player only while it still owns it.
+import { now as clockNow } from './clock.svelte.js';
 
 const frames = new Map();   // key -> { el, owner, place, shape, orphan }
 // A player handed on stays out of sight only until the next host places it. One nobody places
@@ -70,8 +71,8 @@ function captionsOff(f, e) {
     try { m = JSON.parse(e.data); } catch { return; }
     const off = () => e.source.postMessage(JSON.stringify({ event: 'command', func: 'unloadModule', args: ['captions'], id: 1, channel: 'widget' }), YOUTUBE);
     const playing = (m.event === 'onStateChange' && m.info === 1) || (m.event === 'infoDelivery' && m.info?.playerState === 1);
-    if (playing && !f.started) { f.started = Date.now(); off(); }
-    if (m.event === 'onApiChange' && (!f.started || Date.now() - f.started < 3000)) off();
+    if (playing && !f.started) { f.started = clockNow(); off(); }
+    if (m.event === 'onApiChange' && (!f.started || clockNow() - f.started < 3000)) off();
 }
 
 window.addEventListener('message', (e) => {

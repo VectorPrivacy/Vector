@@ -84,7 +84,7 @@ pub async fn ingest(
         Some(Err(_)) => return None,
         None => None,
     };
-    let now = web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let now = crate::clock::now_secs();
     // Sender-claimed: a forged far-future signal must not outrank every later genuine one.
     let created_at = created_at.min(now + 300);
     persist(chat_id, npub, topic, node_addr, event_id, created_at).await;
@@ -113,7 +113,7 @@ async fn persist(chat_id: &str, npub: &str, topic: &str, node_addr: Option<&str>
         tags,
         reference_id: Some(topic.to_string()),
         created_at,
-        received_at: web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0),
+        received_at: crate::clock::now_ms(),
         mine: false,
         pending: false,
         failed: false,

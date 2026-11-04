@@ -279,7 +279,7 @@ async function csMoveRelays(communityId, relays) {
     if (throttled.length) {
         cautions.push(`${named(throttled)} slowed down a short burst of test events. A community on a rate-limited relay can drop posts and fall out of sync when it's busy.`);
     }
-    for (const [net, others, host] of [['Tor', 'clearnet or I2P', /\.onion$/i], ['I2P', 'clearnet or Tor', /\.i2p$/i]]) {
+    for (const [net, others, host] of [['Tor', 'Standard or I2P', /\.onion$/i], ['I2P', 'Standard or Tor', /\.i2p$/i]]) {
         const only = checks.filter((c) => c.only_on === net);
         if (!only.length) continue;
         const hostOf = (r) => { try { return new URL(r).hostname; } catch { return ''; } };
@@ -526,7 +526,7 @@ async function csSyncReport(communityId) {
     VectorSvelte.auditReportLoaded({
         client: document.documentElement.classList.contains('vector-web') ? 'web' : platformFeatures?.os || 'desktop',
         version,
-        at: new Date().toISOString(),
+        at: VectorSvelte.nowDate().toISOString(),
         community: communityId.slice(0, 12),
         control: control.status === 'fulfilled' ? control.value : { error: String(control.reason) },
         epoch: epoch.status === 'fulfilled' ? epoch.value : { error: String(epoch.reason) },

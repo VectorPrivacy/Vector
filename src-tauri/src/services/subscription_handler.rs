@@ -535,7 +535,7 @@ pub(crate) async fn start_subscriptions() -> Result<bool, String> {
                 if let ClientNotification::Event { event, subscription_id, .. } = n {
                     let k = event.kind.as_u16();
                     if k == 1059 || k == 21059 {
-                        let age = nostr_sdk::prelude::Timestamp::now()
+                        let age = vector_core::clock::timestamp()
                             .as_secs()
                             .saturating_sub(event.created_at.as_secs());
                         if age <= 120 {

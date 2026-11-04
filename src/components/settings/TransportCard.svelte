@@ -7,6 +7,7 @@
     import { transportState, viewedKind, startStuck } from '../lib/transport.svelte.js';
     import InfoIcon from './InfoIcon.svelte';
     import NetGlyph from '../ui/NetGlyph.svelte';
+    import { now as clockNow } from '../lib/clock.svelte.js';
 
     let { h } = $props();   // h: TransportHandlers (js/transport.js)
 
@@ -37,11 +38,11 @@
     const inCall = $derived(!!view?.call_active);
 
     // `retry_in` counts from when the view arrived; a start is timed from when its phase began.
-    let now = $state(Date.now());
+    let now = $state(clockNow());
     $effect(() => {
         if (!using || (view.retry_in == null && view.phase !== 'starting')) return;
-        now = Date.now();
-        const timer = setInterval(() => { now = Date.now(); }, 1000);
+        now = clockNow();
+        const timer = setInterval(() => { now = clockNow(); }, 1000);
         return () => clearInterval(timer);
     });
     const retryIn = $derived(view?.retry_in == null ? null : Math.max(1, Math.ceil(view.retry_in - Math.max(0, now - t.at) / 1000)));

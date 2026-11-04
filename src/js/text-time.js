@@ -62,7 +62,7 @@ const TT_OPTIONS = {
 let ttRelative = null;
 /** "in 2 hours", "3 days ago": the unit grows with the distance, as Discord's does. Always
  *  a count, never "tomorrow", so it reads as a countdown beside the date styles. */
-function ttRelativeText(unix, now = Date.now() / 1000) {
+function ttRelativeText(unix, now = VectorSvelte.now() / 1000) {
     ttRelative ??= new Intl.RelativeTimeFormat(undefined, { numeric: 'always' });
     const diff = unix - now;
     const abs = Math.abs(diff);
@@ -109,7 +109,7 @@ function ttStartTicking() {
     const tick = () => {
         const chips = document.querySelectorAll('.vt-time[data-style="R"]');
         if (!chips.length) { ttTicker = 0; return; }
-        const now = Date.now() / 1000;
+        const now = VectorSvelte.now() / 1000;
         let near = false;
         for (const chip of chips) {
             const unix = Number(chip.dataset.unix);
@@ -117,9 +117,9 @@ function ttStartTicking() {
             if (chip.textContent !== text) chip.textContent = text;
             if (Math.abs(unix - now) < 90) near = true;
         }
-        ttTicker = setTimeout(tick, near ? 1000 - (Date.now() % 1000) + 5 : 30000);
+        ttTicker = setTimeout(tick, near ? 1000 - (VectorSvelte.now() % 1000) + 5 : 30000);
     };
-    ttTicker = setTimeout(tick, 1000 - (Date.now() % 1000) + 5);
+    ttTicker = setTimeout(tick, 1000 - (VectorSvelte.now() % 1000) + 5);
 }
 
 const TT_SKIP = 'code, pre, a, .vt-time';
@@ -170,9 +170,9 @@ function ttRenderSpans(root, content, spans) {
  */
 function ttHint(unix, style) {
     if (style !== 'R') return ttRelativeText(unix);
-    if (Math.abs(unix - Date.now() / 1000) < 86400) return ttFormat(unix, 't');
+    if (Math.abs(unix - VectorSvelte.now() / 1000) < 86400) return ttFormat(unix, 't');
     const at = new Date(unix * 1000);
-    const thisYear = at.getFullYear() === new Date().getFullYear();
+    const thisYear = at.getFullYear() === VectorSvelte.nowDate().getFullYear();
     return ttFormatter(thisYear ? 'hint' : 'hintYear', { weekday: 'short', day: 'numeric', month: 'short', ...(thisYear ? {} : { year: 'numeric' }) }).format(at);
 }
 
@@ -284,12 +284,12 @@ function ttDayFirst() {
  * 5pm, 5:30 pm, 17:30, noon, midnight or morning / afternoon / evening / night. A word
  * it can't place makes the whole phrase null rather than a guess.
  */
-function ttParse(input, now = new Date()) {
+function ttParse(input, now = VectorSvelte.nowDate()) {
     return ttParseFull(input, now)?.unix ?? null;
 }
 
 /** As ttParse, plus `dateOnly` when no time of day was given (it then reads as noon). */
-function ttParseFull(input, now = new Date()) {
+function ttParseFull(input, now = VectorSvelte.nowDate()) {
     const read = ttRead(input, now);
     if (read === null) return null;
     const out = typeof read === 'number' ? { unix: read, dateOnly: false } : read;
@@ -494,7 +494,7 @@ const TT_SUGGEST_FORMS = [
  * own zone: `{ start, end, unix, style }` (string indices of `before`), or null.
  * "in 6 hours" becomes a countdown, a date a date, a date with a time both.
  */
-function ttSuggest(before, now = new Date()) {
+function ttSuggest(before, now = VectorSvelte.nowDate()) {
     if (!before || before.length < 6) return null;
     const tail = before.slice(-80);
     const offset = before.length - tail.length;

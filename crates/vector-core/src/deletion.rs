@@ -23,6 +23,7 @@
 //! follows the spec it changes nothing.
 
 use crate::event_ext::FinalizeUnsignedWithId;
+use crate::event_ext::FinalizeOnClock;
 use nostr_sdk::prelude::*;
 
 use crate::inbox_relays::{get_publish_tracker, resolve_gift_wrap_targets, send_gift_wrap, teardown_gift_wrap_targets};
@@ -259,7 +260,7 @@ pub async fn delete_received_dm(rumor_id: &EventId) -> Result<DeleteOutcome, Str
 /// A deletion of gift wraps: `k` names their kind, and it expires once nothing could
 /// still re-broadcast them.
 pub(crate) fn wrap_deletion(wrap_ids: &[EventId]) -> EventBuilder {
-    let expires = Timestamp::now().as_secs().saturating_add(WRAP_DELETION_EXPIRY_SECS);
+    let expires = crate::clock::timestamp().as_secs().saturating_add(WRAP_DELETION_EXPIRY_SECS);
     wrap_ids
         .iter()
         .fold(EventBuilder::new(Kind::EventDeletion, ""), |b, id| b.tag(Tag::event(*id)))
@@ -303,7 +304,7 @@ async fn dispatch_wrap_deletions(
         }
     }
     for stored in keys {
-        let deletion = match wrap_deletion(&[stored.wrap_event_id]).finalize(&Keys::new(stored.secret.clone())) {
+        let deletion = match wrap_deletion(&[stored.wrap_event_id]).finalize_on_clock(&Keys::new(stored.secret.clone())) {
             Ok(ev) => ev,
             Err(e) => {
                 crate::log_warn!("[NIP-17 delete] failed to sign deletion for wrap {}: {}", stored.wrap_event_id.to_hex(), e);
@@ -732,10 +733,7 @@ async fn publish_cooperative_hide(
     original_kind: u16,
 ) -> Result<(), String> {
     let my_pk = my_public_key().ok_or("Public key not set")?;
-    let now = web_time::SystemTime::now()
-        .duration_since(web_time::UNIX_EPOCH)
-        .map_err(|e| e.to_string())?
-        .as_secs();
+    let now = crate::clock::now_secs();
     let expiration_ts = now + COOPERATIVE_HIDE_EXPIRY_SECS;
 
     // Build the kind-5 rumor (signed by our main key via the gift-wrap

@@ -137,14 +137,14 @@ function armExpiry(at) {
     clearTimeout(_expiryTimer);
     _expiryAt = at;
     // setTimeout fires at once past 2^31-1 ms; a far expiry re-arms on the way.
-    _expiryTimer = setTimeout(_derezExpired, Math.min(Math.max(0, at * 1000 - Date.now()), 0x7fffffff));
+    _expiryTimer = setTimeout(_derezExpired, Math.min(Math.max(0, at * 1000 - VectorSvelte.now()), 0x7fffffff));
 }
 function _derezExpired() {
     _expiryTimer = null;
     _expiryAt = Infinity;
     const chat = strOpenChat ? getChat(strOpenChat) : null;
     if (!chat?.messages?.length) return;
-    const now = Math.floor(Date.now() / 1000);
+    const now = Math.floor(VectorSvelte.now() / 1000);
     let expired = null;
     let next = Infinity;
     for (const m of chat.messages) {
@@ -447,7 +447,7 @@ function applyChatWallpaper(chatId, path, blur, dim, ts) {
         image = '';
         if (newPath) {
             const url = convertFileSrc(newPath);
-            const busted = url + (url.includes('?') ? '&' : '?') + 't=' + (ts || Date.now());
+            const busted = url + (url.includes('?') ? '&' : '?') + 't=' + (ts || VectorSvelte.now());
             if (_wallpapersKept.has(busted)) {
                 keepWallpaper(busted, _wallpapersKept.get(busted));
                 image = `url("${busted}")`;
@@ -581,9 +581,9 @@ async function applyWallpaperPreview(chatId, previewResult) {
         ? (chat.wallpaper_dim ?? WALLPAPER_DEFAULT_DIM)
         : (previewResult.recommended_dim ?? WALLPAPER_DEFAULT_DIM);
     writeWallpaperSliders(blur, dim);
-    // Use Date.now() as the cache key so picking a second image with the
+    // Use VectorSvelte.now() as the cache key so picking a second image with the
     // same extension (same on-disk preview path) forces a refetch.
-    const previewTs = Date.now();
+    const previewTs = VectorSvelte.now();
     wallpaperPreviewState = { chatId, previewPath: previewResult.path, blur, dim, ts: previewTs };
     clearWallpaperUploadProgress();
     setWallpaperEditBusy(false);
@@ -617,7 +617,7 @@ async function confirmWallpaperChange() {
         if (document.body.classList.contains('chat-bg-disabled')) {
             // Setting is off — clear the just-previewed image and let them know
             // it's hidden on their end (their chat partner still sees it).
-            applyChatWallpaper(chatId, '', 0, WALLPAPER_DEFAULT_DIM, Date.now());
+            applyChatWallpaper(chatId, '', 0, WALLPAPER_DEFAULT_DIM, VectorSvelte.now());
             popupConfirm(
                 'Background Wallpaper',
                 'Your wallpaper is set. If you want to be able to see it, please enable <b>Settings → Display → Background Wallpaper</b>.',
@@ -656,7 +656,7 @@ async function removeWallpaper(chatId) {
     if (!ok) return;
     try {
         await invoke('remove_wallpaper', { chatId });
-        applyChatWallpaper(chatId, '', 0, 50, Date.now());
+        applyChatWallpaper(chatId, '', 0, 50, VectorSvelte.now());
     } catch (err) {
         popupConfirm('Wallpaper not removed', escapeHtml(String(err)), true, '', 'vector_warning.svg');
     }
@@ -1185,7 +1185,7 @@ async function openChat(contact, { reread = true, fade = true } = {}) {
     }
 
     // Record when the chat was opened
-    chatOpenTimestamp = Date.now();
+    chatOpenTimestamp = VectorSvelte.now();
 
     // Chat-open paths render the latest messages and scroll-to-bottom,
     // so the user starts pinned. Reset here in case the previous chat
@@ -1820,7 +1820,7 @@ let _programmaticScrollUntil = 0;
  *  user). Call immediately before any programmatic scrollTop change so a drop-top
  *  compensation (scrollTop -= droppedHeight) isn't misread as a user scroll-up. */
 function beginProgrammaticScroll() {
-    _programmaticScrollUntil = Date.now() + PROGRAMMATIC_SCROLL_MS;
+    _programmaticScrollUntil = VectorSvelte.now() + PROGRAMMATIC_SCROLL_MS;
     // Re-baseline so the very next scroll event's delta is measured from the
     // post-jump position, not the pre-jump one.
     if (domChatMessages) lastScrollTop = domChatMessages.scrollTop;
@@ -1900,7 +1900,7 @@ function handleChatScrollIntent() {
     const scrollTop = domChatMessages.scrollTop;
     const scrollHeight = domChatMessages.scrollHeight;
     const pxFromBottom = scrollHeight - scrollTop - domChatMessages.clientHeight;
-    const isProgrammatic = Date.now() < _programmaticScrollUntil;
+    const isProgrammatic = VectorSvelte.now() < _programmaticScrollUntil;
     // Content grew and the view did NOT move up: the world got taller beneath us,
     // which is never the user leaving the bottom.
     const prevHeight = _lastPinEvalHeight;

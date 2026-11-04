@@ -105,12 +105,12 @@ document.addEventListener('keydown', (e) => {
 // Only a USER scroll dismisses: a new message auto-scrolls the chat, which must not
 // yank the popup closed. wheel/touch open a short intent window.
 let _miniProfileScrollIntentUntil = 0;
-const _markMiniProfileScrollIntent = () => { _miniProfileScrollIntentUntil = Date.now() + 200; };
+const _markMiniProfileScrollIntent = () => { _miniProfileScrollIntentUntil = VectorSvelte.now() + 200; };
 document.addEventListener('wheel', _markMiniProfileScrollIntent, { capture: true, passive: true });
 document.addEventListener('touchmove', _markMiniProfileScrollIntent, { capture: true, passive: true });
 
 document.addEventListener('scroll', (e) => {
     const popup = _miniProfilePopup();
     if (!popup || popup.contains(e.target)) return;
-    if (Date.now() < _miniProfileScrollIntentUntil) hideMiniProfile();
+    if (VectorSvelte.now() < _miniProfileScrollIntentUntil) hideMiniProfile();
 }, true);

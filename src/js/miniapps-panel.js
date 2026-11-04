@@ -38,20 +38,27 @@ async function showAttachmentPanelMiniApps() {
 /** The tab lit before the marketplace took over, so closing hands it back. */
 let strMarketplacePrevTab = '';
 
-/** Open the Nexus on its front page; opened again, it goes back there. */
-function showMarketplacePanel() {
+/** Open the Nexus on a page (its front page unless told); opened again, it goes back there. */
+function showMarketplacePanel(view = 'discover') {
     const st = VectorSvelte.mktState();
     if (st.panelOpen && !st.panelClosing) {
         popBack('app-details');
-        VectorSvelte.mktShow('discover');
+        VectorSvelte.mktShow(view);
         return;
     }
     pushBack('marketplace', () => { hideMarketplacePanel(); });
     strMarketplacePrevTab = VectorSvelte.shellState().tab;
     navbarSelect('miniapps-btn');
     VectorSvelte.mktReset();
+    if (view !== 'discover') VectorSvelte.mktShow(view);
     VectorSvelte.mktOpenPanel();
     initMarketplace();
+}
+
+/** Mini Apps: your Library when anything is installed (as the Library counts it), else Discover. */
+async function showMiniApps() {
+    if (!marketplaceApps.length) await getCachedMarketplaceApps().catch(() => {});
+    showMarketplacePanel(marketplaceApps.some(a => a.installed || a.local_path) ? 'library' : 'discover');
 }
 
 /**
@@ -463,7 +470,7 @@ async function playMiniAppSolo() {
         // Open the Mini App directly using the cached file path (openMiniApp
         // runs the network consent gate). The 'solo' chat keys the window
         // per package; the message id only seeds a realtime topic.
-        await openMiniApp(app.src_url, 'solo', `solo_${Date.now()}`, null, null);
+        await openMiniApp(app.src_url, 'solo', `solo_${VectorSvelte.now()}`, null, null);
     } catch (e) {
         console.error('Failed to open Mini App:', e);
     }
@@ -603,8 +610,8 @@ async function waitForOwnXdcMessage(chatId, sendPromise, priorXdcId) {
         // final id the receiver holds — the one split that breaks joining.
         return found && found.filePath && found.topicId && found.messageId !== priorXdcId ? found : null;
     };
-    const deadline = Date.now() + 10_000;
-    while (Date.now() < deadline) {
+    const deadline = VectorSvelte.now() + 10_000;
+    while (VectorSvelte.now() < deadline) {
         const found = fresh();
         if (found) return found;
         if (settled) {
@@ -743,7 +750,7 @@ async function playMiniAppSoloInternal(app) {
 
         // Open the Mini App directly using the cached file path (openMiniApp
         // runs the network consent gate).
-        await openMiniApp(app.src_url, 'solo', `solo_${Date.now()}`, null, null);
+        await openMiniApp(app.src_url, 'solo', `solo_${VectorSvelte.now()}`, null, null);
     } catch (e) {
         console.error('Failed to open Mini App:', e);
     }

@@ -183,10 +183,7 @@ impl ServerInfo {
 }
 
 fn now_secs() -> i64 {
-    web_time::SystemTime::now()
-        .duration_since(web_time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
+    crate::clock::now_secs() as i64
 }
 
 fn norm_url(url: &str) -> String {
@@ -336,7 +333,11 @@ where
         return Ok(None);
     }
     let body = resp.text().await.map_err(|e| format!("Info body unreadable: {}", e))?;
-    Ok(serde_json::from_str::<Value>(&body).ok().and_then(|v| ServerInfo::parse(&v)))
+    let doc = serde_json::from_str::<Value>(&body).ok();
+    if doc.as_ref().and_then(|d| d.pointer("/caller/retry")).and_then(Value::as_str) == Some("fix_clock") {
+        crate::clock::resync_soon();
+    }
+    Ok(doc.and_then(|v| ServerInfo::parse(&v)))
 }
 
 /// The document for `server_url`, fetched unless a copy younger than

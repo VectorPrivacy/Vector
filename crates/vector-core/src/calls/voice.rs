@@ -167,7 +167,7 @@ fn live() -> Option<Arc<Voice>> {
 }
 
 fn now_ms() -> u64 {
-    web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64)
+    crate::clock::now_ms()
 }
 
 /// The lower EndpointId dials, so a pair never opens two connections.

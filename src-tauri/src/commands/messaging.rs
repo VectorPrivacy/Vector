@@ -25,6 +25,10 @@ async fn serve_window_from_state(
     messages: Vec<Message>,
 ) -> Result<Vec<Message>, String> {
     vector_core::db::scoped(async move {
+        // Before login the vault can't open these rows, and a window cached now outlives the unlock.
+        if vector_core::state::my_public_key().is_none() {
+            return Err("Not logged in".to_string());
+        }
         if messages.is_empty() {
             return Ok(messages);
         }

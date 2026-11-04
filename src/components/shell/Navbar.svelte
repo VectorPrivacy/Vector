@@ -19,7 +19,7 @@
     // Bookmarks is your own chat: lit while it is open, and Chat stands down meanwhile.
     const bookmarksOpen = $derived(!!openChatId() && openChatId() === h().myNpub?.());
     const start = startMenuState();
-    // With the Start Menu, your row opens it: the switcher and profile live inside.
+    // With the Main Menu, your row opens it: the switcher and profile live inside.
     function startTrigger(e) {
         if (!st.ws || start.mode !== 'start') return;
         e.stopPropagation();
@@ -60,7 +60,7 @@
         <p class="navbar-text">Bookmarks</p>
     </div>
     <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-    <div id="miniapps-btn" class="btn navbar-btn" class:navbar-btn-inactive={st.tab !== 'miniapps-btn'} style:display={st.ws ? null : 'none'} onclick={() => h().openMiniApps?.()} oncontextmenu={(e) => placeMenu(e, 'Nexus', 'nexus')}>
+    <div id="miniapps-btn" class="btn navbar-btn" class:navbar-btn-inactive={st.tab !== 'miniapps-btn'} style:display={st.ws ? null : 'none'} onclick={() => h().openMiniApps?.()} oncontextmenu={(e) => placeMenu(e, 'App Store', 'nexus')}>
         <span class="icon icon-grid-fill navbar-icon"></span>
         <p class="navbar-text">Mini Apps</p>
     </div>

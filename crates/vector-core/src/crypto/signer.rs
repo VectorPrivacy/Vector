@@ -56,6 +56,7 @@ impl GuardedSigner {
     /// NIP-59 seal under one vault read; the trait path reads it to encrypt and again to
     /// sign. The identity check rides on the keypair signing derives anyway.
     pub fn seal(identity: &PublicKey, rumor: UnsignedEvent, receiver: &PublicKey) -> Result<Event, SignerError> {
+        // device-clock: NIP-59 backdates a seal at random; its rumor carries the real time.
         Self::new(*identity)
             .with_keys(|keys| GiftWrapSealBuilder::new(rumor, *receiver).finalize(keys).map_err(SignerError::backend))
     }
@@ -68,6 +69,7 @@ impl GuardedSigner {
         extra_tags: Vec<Tag>,
     ) -> Result<Event, SignerError> {
         Self::new(*identity).with_keys(|keys| {
+            // device-clock: NIP-59 backdates a wrap at random; its rumor carries the real time.
             GiftWrapBuilder::new(*receiver, rumor)
                 .extra_tags(extra_tags)
                 .finalize(keys)
@@ -235,6 +237,7 @@ impl SignEvent for GuardedSigner {
     type Error = SignerError;
 
     fn sign_event(&self, unsigned: UnsignedEvent) -> Result<Event, Self::Error> {
+        let unsigned = crate::clock::restamp(unsigned);
         self.with_keys(|keys| SignEvent::sign_event(keys, unsigned).map_err(SignerError::backend))
     }
 }

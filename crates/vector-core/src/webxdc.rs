@@ -21,6 +21,7 @@ pub fn mint_topic_id(file_hash: &str, sender_hex: &str) -> String {
     use sha2::{Digest, Sha256};
     use std::sync::atomic::{AtomicU64, Ordering};
     static MINTED: AtomicU64 = AtomicU64::new(0);
+    // device-clock: entropy for an id, not a time anyone reads.
     let nanos = web_time::SystemTime::now()
         .duration_since(web_time::UNIX_EPOCH)
         .map(|d| d.as_nanos())

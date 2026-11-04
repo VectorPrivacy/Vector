@@ -193,10 +193,7 @@ pub fn run() {
         // write (eprintln! itself panics when stderr is gone).
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let backtrace = std::backtrace::Backtrace::force_capture();
-            let secs = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs();
+            let secs = vector_core::clock::now_secs();
             let msg = format!("[PANIC {:02}:{:02}:{:02}Z] {info}\n\nBacktrace:\n{backtrace}\n",
                 (secs / 3600) % 24, (secs / 60) % 60, secs % 60);
             use std::io::Write;
@@ -850,6 +847,8 @@ pub fn run() {
             commands::messaging::get_unread_counts,
             commands::messaging::set_active_chat,
             commands::system::get_platform_features,
+            commands::clock::get_clock_status,
+            commands::clock::set_decentralised_clock,
             commands::system::get_device_memory,
             // Invite and badge commands (commands/invites.rs)
             commands::invites::get_or_create_invite_code,
@@ -965,6 +964,7 @@ pub fn run() {
             pivx::pivx_get_preferred_currency,
             // Audio engine commands (all platforms)
             commands::audio::audio_probe,
+            commands::audio::play_claim_sound,
             commands::audio::get_audio_metadata,
             commands::audio::audio_load,
             commands::audio::audio_play,
@@ -1319,6 +1319,18 @@ mod spawn_binding_tests {
         vector_core::spawn_audit::assert_all_spawns_bound(
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")),
             &[],
+        );
+    }
+
+    /// The shell stamps and judges times too; it reads them from the same clock as the core.
+    #[test]
+    fn nothing_in_the_shell_reads_the_device_clock_unmarked() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let found = vector_core::clock::device_clock_reads(root, &root.join("src"));
+        assert!(
+            found.is_empty(),
+            "these read the device's clock: use vector_core::clock, or mark the site `// device-clock: <why>`:\n  {}",
+            found.join("\n  ")
         );
     }
 }

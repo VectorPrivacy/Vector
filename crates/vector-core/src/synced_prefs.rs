@@ -428,7 +428,7 @@ pub enum Pref {
     Settings,
     /// Chats tidied out of the list until someone speaks in them again.
     Archive,
-    /// The widescreen Start Menu's pins and folders.
+    /// The widescreen Main Menu's pins and folders.
     Start,
 }
 
@@ -723,7 +723,7 @@ fn claim_archive_publish(now: u64) -> Result<(String, u64), String> {
 
 async fn publish_archive(client: &Client) -> Result<(), String> {
     let my_pk = crate::state::my_public_key().ok_or_else(|| "Not logged in".to_string())?;
-    let (json, at) = claim_archive_publish(Timestamp::now().as_secs())?;
+    let (json, at) = claim_archive_publish(crate::clock::timestamp().as_secs())?;
     send_list(client, my_pk, Pref::Archive, &json, Some(at)).await
 }
 
@@ -932,7 +932,7 @@ pub async fn publish_settings(client: &Client, refresh: bool) -> Result<Option<S
             }
         }
     }
-    let (json, at) = claim_publish(Timestamp::now().as_secs());
+    let (json, at) = claim_publish(crate::clock::timestamp().as_secs());
     send_list(client, my_pk, Pref::Settings, &json, Some(at)).await?;
     settings_published(&json, at);
     Ok(shown)
@@ -969,7 +969,7 @@ pub fn load_rail() -> crate::rail_layout::RailLayout {
     load_layout(Pref::Rail)
 }
 
-/// The Start Menu's pins, in the rail's shape: keys are pin keys (`crate::start_menu`).
+/// The Main Menu's pins, in the rail's shape: keys are pin keys (`crate::start_menu`).
 pub fn load_start() -> crate::rail_layout::RailLayout {
     load_layout(Pref::Start)
 }
@@ -1207,7 +1207,7 @@ fn set_layout_dirty(pref: Pref, dirty: bool) {
 
 /// Commit an arrangement: on disk now, on the relays once the dragging stops.
 ///
-/// The local mirror is the truth the rail and the Start Menu paint from, so the UI
+/// The local mirror is the truth the rail and the Main Menu paint from, so the UI
 /// never waits on a relay to show a drag landing.
 pub fn save_layout_debounced(pref: Pref, layout: &crate::rail_layout::RailLayout) -> Result<(), String> {
     if !pref.is_layout() {
@@ -1248,7 +1248,7 @@ pub async fn flush_layout(pref: Pref) {
     let generation = layout_gen(pref).load(std::sync::atomic::Ordering::Relaxed);
     let Some(json) = load_local_raw(pref) else { return };
     // Dated after every copy we hold, so ours is the newest wherever it lands.
-    let at = Timestamp::now().as_secs().max(layout_seen(pref) + 1);
+    let at = crate::clock::timestamp().as_secs().max(layout_seen(pref) + 1);
     match send_list(&client, my_pk, pref, &json, Some(at)).await {
         // An edit made while this copy was out is still unsent; its own timer sends it.
         Ok(()) => {

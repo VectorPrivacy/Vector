@@ -6,19 +6,29 @@
     import { credentialState } from '../lib/credential.svelte.js';
     import { popIn } from '../lib/popin.js';
     import Avatar from '../ui/Avatar.svelte';
+    import { now as clockNow } from '../lib/clock.svelte.js';
     let { h } = $props();   // h: TransferHelpers (js/transfer.js)
     const st = transferModal.state();
     const cred = credentialState();
 
-    let now = $state(Date.now());
+    let now = $state(clockNow());
     $effect(() => {
         if (!st.active || st.stage !== 'show') return;
-        now = Date.now();
-        const id = setInterval(() => { now = Date.now(); }, 1000);
+        now = clockNow();
+        const id = setInterval(() => { now = clockNow(); }, 1000);
         return () => clearInterval(id);
     });
     const left = $derived(Math.max(0, Math.ceil((st.expiresAt - now) / 1000)));
     const clock = $derived(`${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')}`);
+    // The code copies from itself or its button; a tick stands in for the icon a moment after.
+    let copied = $state(false);
+    let copiedTimer = null;
+    async function copy() {
+        if (!(await h.copyCode(st.code))) return;
+        copied = true;
+        clearTimeout(copiedTimer);
+        copiedTimer = setTimeout(() => { copied = false; }, 1500);
+    }
 
     const sender = $derived(st.role === 'sender');
     const title = $derived({
@@ -105,10 +115,18 @@
             </p>
             <div class="xfer-qr-tile"><div class="xfer-qr" aria-label="Transfer QR code" use:qr={st.qr}></div></div>
             <div class="xfer-code">
-                <span class="xfer-code-text">{st.code}</span>
+                <div class="xfer-code-row">
+                    <button type="button" class="xfer-code-text" title="Copy" onclick={copy}>{st.code}</button>
+                    <button type="button" class="xfer-copy" title="Copy" aria-label="Copy the code" onclick={copy}>
+                        <span class="icon icon-{copied ? 'check' : 'copy'}"></span>
+                    </button>
+                </div>
                 <span class="xfer-expiry" class:low={left <= 30}>{left ? `Expires in ${clock}` : 'Expired'}</span>
             </div>
             <div class="vcard-actions">
+                {#if !left}
+                    <button type="button" class="vcard-btn" onclick={() => h.showCode()}>Get a New Code</button>
+                {/if}
                 {#if st.canScan}
                     <button type="button" class="vcard-btn ghost" onclick={() => h.scan()}>Scan the other device instead</button>
                 {/if}

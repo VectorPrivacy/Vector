@@ -10,6 +10,7 @@
     import Avatar from '../ui/Avatar.svelte';
     import RouteButton from './RouteButton.svelte';
     import StayOnScreen from './StayOnScreen.svelte';
+    import { now as clockNow } from '../lib/clock.svelte.js';
     /**
      * @typedef {object} VoiceBarHelpers
      * @property {(on: boolean) => void} setMuted
@@ -42,11 +43,11 @@
     // The ring glows with whoever is loudest, on the 1:1 pill's curve.
     const talk = $derived(Math.min(1, Math.max(0, (Math.max(0, ...linked.map((p) => p.level || 0)) - 0.3) / 0.55)));
 
-    let now = $state(Date.now());
+    let now = $state(clockNow());
     $effect(() => {
         if (!v) return;
-        now = Date.now();
-        const t = setInterval(() => { now = Date.now(); }, 1000);
+        now = clockNow();
+        const t = setInterval(() => { now = clockNow(); }, 1000);
         return () => clearInterval(t);
     });
     function clock(ms) {

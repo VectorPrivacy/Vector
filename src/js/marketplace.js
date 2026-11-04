@@ -366,6 +366,7 @@ window.__TAURI__.event.listen('inline_image_cached', (event) => {
  * @property {(app: object) => void} editListing
  * @property {(url: string) => void} openUrl
  * @property {(app: object) => void} copyLink   its page in the Nexus
+ * @property {(app: object, x: number, y: number) => void} appMenu   right-click: copy its link, pin it to the Main Menu
  * @property {() => void} back
  */
 function registerMarketplaceHandlers() {
@@ -397,6 +398,13 @@ function registerMarketplaceHandlers() {
         editListing: (app) => showEditListingDialog(current(app)),
         openUrl: (url) => confirmAndOpenUrl(url),   // a listing's source URL is relay data
         copyLink: (app) => copyPlaceLink('App', `nexus/${app.id}`),
+        appMenu: (app, x, y) => showContextMenu({
+            x, y,
+            items: [
+                { label: 'Copy Link', icon: 'share', onClick: () => copyPlaceLink('App', `nexus/${app.id}`) },
+                ...startPinItems(`app/${app.id}`),
+            ],
+        }),
         back: () => { hideMarketplacePanel(); },
     };
     VectorSvelte.setMarketplaceHandlers(h);
@@ -406,7 +414,7 @@ document.addEventListener('DOMContentLoaded', registerMarketplaceHandlers, { onc
 
 /** How long ago something was played, said briefly: "just now", "5m ago", "2d ago", "3 Oct". */
 function formatPlayedAgo(ms) {
-    const s = Math.max(0, (Date.now() - ms) / 1000);
+    const s = Math.max(0, (VectorSvelte.now() - ms) / 1000);
     if (s < 60) return 'just now';
     if (s < 3600) return `${Math.floor(s / 60)}m ago`;
     if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
@@ -654,7 +662,7 @@ async function initMarketplace() {
     } catch (error) {
         console.error('Failed to initialize marketplace:', error);
         VectorSvelte.mktSetError(error.toString());
-        if (marketplaceApps.length) showToast("Couldn't refresh the Nexus");
+        if (marketplaceApps.length) showToast("Couldn't refresh the App Store");
     } finally {
         _marketplaceInitInProgress = false;
     }
@@ -813,7 +821,7 @@ async function showPublishAppDialog(filePath, miniAppInfo) {
                     );
                     console.log('Published app with event ID:', eventId);
                     close();
-                    popupConfirm('Published!', `${name} has been published to the Nexus.`, true, '', 'vector-check.svg');
+                    popupConfirm('Published!', `${name} has been published to the App Store.`, true, '', 'vector-check.svg');
                     resolve(true);
                 } catch (error) {
                     console.error('Failed to publish:', error);

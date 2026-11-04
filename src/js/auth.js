@@ -58,8 +58,8 @@ function stopBunkerSessionTimer() {
 
 /** One tick of the live countdown; at expiry the single-use link is spent, so its popup goes. */
 function tickBunkerSession() {
-    if (bunkerSessionDeadline - Date.now() > 0) {
-        VectorSvelte.bunkerTick(Date.now());
+    if (bunkerSessionDeadline - VectorSvelte.now() > 0) {
+        VectorSvelte.bunkerTick(VectorSvelte.now());
         return;
     }
     stopBunkerSessionTimer();
@@ -72,13 +72,13 @@ function tickBunkerSession() {
 /** The QR popup: a live link is shown again as it is; otherwise a fresh session starts. */
 function openBunkerQr() {
     VectorSvelte.bunkerQrOpen(true);
-    if (strBunkerNostrConnectUrl && bunkerSessionDeadline > Date.now()) return;
+    if (strBunkerNostrConnectUrl && bunkerSessionDeadline > VectorSvelte.now()) return;
     startBunkerSession();
 }
 
 function armBunkerSessionTimer() {
     stopBunkerSessionTimer();
-    bunkerSessionDeadline = Date.now() + BUNKER_SESSION_TIMEOUT_MS;
+    bunkerSessionDeadline = VectorSvelte.now() + BUNKER_SESSION_TIMEOUT_MS;
     VectorSvelte.bunkerDeadline(bunkerSessionDeadline);
     bunkerSessionTimerHandle = setInterval(tickBunkerSession, 1000);
 }
@@ -347,6 +347,7 @@ async function login(skipAnimations = false) {
                 requestAnimationFrame(() => adjustSize());
 
                 // Deferred so login animations finish first.
+                setTimeout(() => offerBadgeDrops().catch((e) => console.warn('[Badge drop] offer failed:', e)), 1200);
                 if (platformFeatures.os === 'web' || platformFeatures.os === 'android') {
                     setTimeout(() => offerNotifications().catch((e) => console.warn('[Notify] offer failed:', e)), 1500);
                 }
@@ -974,6 +975,8 @@ const loginNet = {
         let v;
         try { v = await invoke('transport_get_state'); } catch (_) { return; }
         applyTransportView(v);
+        // Gone while it asked, as when Add Profile backs out: there's no sign in to line up for.
+        if (!VectorSvelte.loginState().shown) return;
         const kinds = v.supported || [];
         // A remembered choice that is unreadable, or that this build lacks, picks nothing: never direct by default.
         const unusable = !addAccountFlow.active && (v.prelogin === 'unknown' || !kinds.includes(v.prelogin));
@@ -1218,10 +1221,33 @@ async function createAccount() {
 
 function openImportScreen() {
     try { loginNet.ready(); } catch (e) { popupConfirm(e, '', true, '', 'vector_warning.svg'); return; }
+    VectorSvelte.patchLogin({ method: 'qr' });
     VectorSvelte.loginScreen('import', true);
     // Hide the picker pill — once the user is entering an nsec / seed
     // phrase, the active-account-from-marker context no longer applies.
     loginPicker.hide();
+}
+
+/** Sign in with: the step above the dropdown becomes the chosen way in, and leaves the last one behind. */
+function setLoginMethod(method) {
+    const l = VectorSvelte.loginState();
+    const current = l.bunker ? 'signer' : l.method;
+    if (method === current) return;
+    if (current === 'signer') {
+        invoke('cancel_bunker_session').catch((err) => console.warn('[sign in with] cancel_bunker_session failed:', err));
+        hideBunkerForm();
+        VectorSvelte.loginScreen('import', true);
+    }
+    VectorSvelte.patchLogin({ method });
+    if (method === 'signer') showBunkerForm('new');
+}
+
+function showLoginMethodInfo() {
+    popupConfirm('Ways to Sign In',
+        '<b>QR Code</b><br>Use a device you\'re already signed in on. There, open Settings and choose Sign in on Another Device, then scan the code this device shows or type it in. Both devices confirm a number, so your keys pass between them without anyone else being able to read them.'
+        + '<br><br><b>Private Key</b><br>Paste your nsec or type your seed phrase. Good when you have your key backed up and no other device to hand.'
+        + '<br><br><b>Remote Signer</b><br>Keep your key in a signer app such as Amber or nsec.app, which approves what Vector signs. Paste its bunker:// link, or pair it by scanning the code Vector shows.',
+        true);
 }
 
 async function importKey() {
@@ -1361,7 +1387,7 @@ async function connectBunkerUrl() {
 }
 
 async function loginBack() {
-    // A signer reached from the private key step swaps back to it, whatever flow is around it.
+    // Leaving the sign in screen leaves a signer chosen there too.
     const bunker = VectorSvelte.bunkerState();
     if (VectorSvelte.loginState().bunker && bunker.fromImport) {
         invoke('cancel_bunker_session').catch((err) => {
@@ -1369,7 +1395,6 @@ async function loginBack() {
         });
         hideBunkerForm();
         VectorSvelte.loginScreen('import', true);
-        return;
     }
     // Add Profile flow back has two cases — independent of which sub-
     // screen the user happens to be on (start / import / encryption /
@@ -1451,7 +1476,9 @@ async function loginBack() {
  * @property {() => void} createAccount
  * @property {() => void} openImport
  * @property {() => void} importKey
- * @property {() => void} transfer
+ * @property {() => void} transfer   the Sign in with Another Device card
+ * @property {(method: 'qr'|'key'|'signer') => void} method   the Sign in with dropdown
+ * @property {() => void} methodInfo
  * @property {() => void} invite
  * @property {() => void} nip55
  * @property {() => void} nip07
@@ -1468,6 +1495,8 @@ const LOGIN_HELPERS = {
     openImport: () => openImportScreen(),
     importKey: () => importKey(),
     transfer: () => openTransfer(false),
+    method: (m) => setLoginMethod(m),
+    methodInfo: () => showLoginMethodInfo(),
     invite: () => submitInvite(),
     nip55: () => loginWithNip55(),
     nip07: () => loginWithNip07(),

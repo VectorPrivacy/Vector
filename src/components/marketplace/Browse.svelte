@@ -55,7 +55,7 @@
     <div class="nx-empty">
         <span class="nx-g g-grid nx-empty-g"></span>
         <p class="nx-empty-title">Nothing installed yet</p>
-        <p class="nx-empty-hint">Apps you install from the Nexus live here</p>
+        <p class="nx-empty-hint">Apps you install from the App Store live here</p>
         <button type="button" class="nx-btn accent" onclick={() => h.show('discover')}>Discover Apps</button>
     </div>
 {:else if st.view === 'updates' && !q}

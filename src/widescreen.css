@@ -343,7 +343,7 @@ body.ws #settings-btn {
   display: flex !important;
 }
 
-/* The Start Menu holds the tabs: the rail keeps your communities and the row that opens it. */
+/* The Main Menu holds the tabs: the rail keeps your communities and the row that opens it. */
 body.ws.ws-start #profile-btn,
 body.ws.ws-start #chat-btn,
 body.ws.ws-start #bookmarks-btn,
@@ -370,10 +370,9 @@ body.ws.ws-start #ws-rail-account { position: relative; }
   box-shadow: 0 0 0 2px var(--ws-rail-bg, #0b0b0b);
   pointer-events: none;
 }
-/* The menu opens upward from the row, so its caret points there, and back down while it's open. */
-body.ws.ws-start:not(.ws-rail-collapsed) #ws-rail-account .ws-account-caret {
-  transform: rotate(180deg);
-  transition: transform 0.15s ease, border-top-color 0.12s ease;
+/* With the Main Menu the whole row opens it, and the switcher lives inside: no caret. */
+body.ws.ws-start #ws-rail-account .ws-account-caret {
+  display: none;
 }
 
 
@@ -1437,9 +1436,10 @@ body:is(.ws, .cc) #ws-rail-messages {
 body:is(.ws, .cc) .ws-rail-messages {
   display: flex;
   align-items: center;
+  justify-content: center;
   gap: 11px;
   margin: 0 8px;
-  padding: 0 10px 0 14px;
+  padding: 0 12px;
   height: 40px;
   border-radius: 6px;
   color: rgba(255, 255, 255, 0.7);
@@ -1469,6 +1469,21 @@ body:is(.ws, .cc) .ws-rail-messages svg {
   flex-shrink: 0;
 }
 
+/* A dot, not a count: the door only flags that something is new. It sits off the
+   label's top-right like the list tabs' .cc-tab-dot, and takes no width, so the
+   centred content never shifts. */
+.ws-rail-item-badge.ws-rail-messages-dot {
+  position: relative;
+  top: -9px;
+  min-width: 8px;
+  width: 8px;
+  height: 8px;
+  padding: 0;
+  /* Back over the 11px gap to 1px past the label, then give up its own width. */
+  margin: 0 -9px 0 -10px;
+  border-radius: 50%;
+}
+
 /* Collapsed, the tile is a band the conversation header's height, and its seam
    runs on from the header's across the rail. */
 body.ws.ws-rail-collapsed #ws-rail-shortcuts {
@@ -1486,6 +1501,7 @@ body:is(.ws.ws-rail-collapsed, .cc) #ws-rail-messages {
 }
 
 body:is(.ws.ws-rail-collapsed, .cc) .ws-rail-messages {
+  position: relative;
   justify-content: center;
   gap: 0;
   width: 45px;
@@ -1493,6 +1509,12 @@ body:is(.ws.ws-rail-collapsed, .cc) .ws-rail-messages {
   padding: 0;
   margin: 0 auto;
   border-radius: 8.5px;
+}
+
+/* Centred on the glyph's top-right corner: the 33x27 glyph sits centred in the 45px tile. */
+body:is(.ws.ws-rail-collapsed, .cc) .ws-rail-messages .ws-rail-messages-dot {
+  top: calc((45px - 27px) / 2 - 5px);
+  right: calc((45px - 33px) / 2 - 5px);
 }
 
 /* The design's 62x51 glyph at its frame's 1.876 units to the pixel. */
@@ -1677,15 +1699,18 @@ body:is(.ws, .cc) .chatlist-community-head:hover {
   color: #fff;
 }
 
+/* As wide as its digits: one digit makes a circle, more stretch it into a pill. */
 .ws-rail-item-badge {
   flex-shrink: 0;
-  min-width: 20px;
+  box-sizing: border-box;
+  min-width: 19px;
+  margin-left: auto;
   padding: 0 6px;
   border-radius: 10px;
   background-color: var(--primary-color, #33db98);
   color: #000;
   font-size: 11px;
-  font-weight: 600;
+  font-weight: 700;
   line-height: 19px;
   text-align: center;
 }
@@ -1831,24 +1856,37 @@ body:is(.ws, .cc) #ws-rail-spaces .ws-rail-item::before {
   content: '';
   position: absolute;
   left: -8px;
-  top: 3px;
-  bottom: 3px;
+  top: 50%;
   width: 4px;
+  /* Sized by height, not scaled: a scale squashes the round end flat. */
+  height: 10px;
+  transform: translateY(-50%);
   border-radius: 0 4px 4px 0;
   background-color: var(--icon-color-primary, #59fcb3);
   opacity: 0;
-  transform: scaleY(0.35);
   pointer-events: none;
-  transition: opacity 130ms ease-out, transform 130ms ease-out;
+  transition: opacity 130ms ease-out, height 130ms ease-out, background-color 130ms ease-out;
 }
 
 body:is(.ws.ws-rail-collapsed, .cc) #ws-rail-spaces .ws-rail-item::before {
   left: calc((45px - var(--ws-rail-w)) / 2);
 }
 
+/* Shut with something new, a short bar: gray for unread, the accent for a ping. */
+body:is(.ws, .cc) #ws-rail-spaces .ws-rail-item.has-unread::before {
+  opacity: 1;
+  background-color: #b2b2b2;
+}
+
+body:is(.ws, .cc) #ws-rail-spaces .ws-rail-item.has-ping::before {
+  opacity: 1;
+  background-color: var(--icon-color-primary, #59fcb3);
+}
+
 body:is(.ws, .cc) #ws-rail-spaces .ws-rail-item.active::before {
   opacity: 1;
-  transform: scaleY(1);
+  height: calc(100% - 6px);
+  background-color: var(--icon-color-primary, #59fcb3);
 }
 
 body:is(.ws.ws-rail-collapsed, .cc) #ws-rail-spaces .ws-rail-item-avatar,
@@ -2498,7 +2536,7 @@ body.ws #chat-list .chatlist-contact::before {
   opacity: 0;
   transform: scaleY(0.35);
   pointer-events: none;
-  transition: opacity 130ms ease-out, transform 130ms ease-out;
+  transition: opacity 130ms ease-out, transform 130ms ease-out, background-color 130ms ease-out;
 }
 body.ws #chat-list .chatlist-contact.ws-active::before {
   opacity: 1;

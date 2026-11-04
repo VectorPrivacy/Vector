@@ -87,7 +87,7 @@ images), relays and Blossom settings, notification levels and mutes, cross-devic
 pins, blocks, mutes, nicknames and the community list, voice transcription and translation
 (on-device Whisper), browser notifications, emoji and
 GIF pickers, DM wallpapers, emoji pack creation, editing, reordering and animated pack emoji,
-mini apps (from chats, history, `.xdc` links and the Nexus marketplace; per-app storage;
+mini apps (from chats, history, `.xdc` links and the App Store; per-app storage;
 permissions; realtime multiplayer over Iroh), voice and video calls with screen sharing
 (web to web and web to desktop), private windows and Tor Browser.
 
@@ -97,7 +97,7 @@ Notifications while the page is closed (no push), notification sounds, sending f
 screen-share audio in calls, video compression. A call ends when a
 phone locks or backgrounds the page.
 
-Not planned: the PIVX wallet, Nexus publishing, in-app Tor (use Tor Browser), NIP-55
+Not planned: the PIVX wallet, App Store publishing, in-app Tor (use Tor Browser), NIP-55
 (Amber, Android-only), legacy (v1) community writes. Avatars and images load through the
 media proxy; without one, hosts that send no CORS headers are shown by URL.
 

@@ -544,7 +544,7 @@ pub async fn fetch_messages<R: Runtime>(
                 vector_core::db::spawn_bound(async move {
                     let t = std::time::Instant::now();
                     let mut full_load = false;
-                    let mut bound = Timestamp::now().as_secs().saturating_sub(7 * 24 * 3600);
+                    let mut bound = vector_core::clock::timestamp().as_secs().saturating_sub(7 * 24 * 3600);
                     for url in wrapper_client.relays().await.keys() {
                         let u = url.as_str();
                         // No-NIP-77 relays only ever get windowed REQs — they can
@@ -728,7 +728,7 @@ pub async fn fetch_messages<R: Runtime>(
                 }
 
                 // Anchor before any reconcile begins.
-                let archive_anchor = Timestamp::now().as_secs();
+                let archive_anchor = vector_core::clock::timestamp().as_secs();
                 let mut all_missing: std::collections::HashSet<EventId> = std::collections::HashSet::new();
                 // Reconciled clean but reported missing events: their first cursor
                 // is only earned once every requested event arrives AND persists.

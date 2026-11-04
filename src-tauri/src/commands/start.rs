@@ -1,4 +1,4 @@
-//! The widescreen Start Menu's pins and folders, synced across the account's own
+//! The widescreen Main Menu's pins and folders, synced across the account's own
 //! devices as their own settings document (`vector/start`). Keys and pinning rules
 //! are vector-core's `start_menu`; the arrangement is the rail's shape.
 

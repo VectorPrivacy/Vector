@@ -276,7 +276,7 @@ function chatlistHelpers() {
         // An invite row and a community still joining (locked until it is readable) stay put.
         rowClick: (vm) => {
             if (wasContextMenuJustDismissed()) return;
-            if (Date.now() - (window._chatRowMenuAt || 0) < 500) { window._chatRowMenuAt = 0; return; }
+            if (VectorSvelte.now() - (window._chatRowMenuAt || 0) < 500) { window._chatRowMenuAt = 0; return; }
             if (vm.joining) return;
             if (vm.isGroup && vm.communityId && ccActive()) return ccOpenCommunity(vm.communityId, vm.chat.id);
             if (!vm.isGroup && ccActive() && !chatOnScreen(vm.chat.id)) return ccSlideInto(vm.chat.id);
@@ -297,7 +297,7 @@ function chatlistHelpers() {
         declineInvite: declineCommunityInvite,
         openInvite: (invite) => {
             if (wasContextMenuJustDismissed()) return;
-            if (Date.now() - (window._chatRowMenuAt || 0) < 500) { window._chatRowMenuAt = 0; return; }
+            if (VectorSvelte.now() - (window._chatRowMenuAt || 0) < 500) { window._chatRowMenuAt = 0; return; }
             openInviteDetails(invite);
         },
         inviteMenu: showInviteMenu,
@@ -567,7 +567,7 @@ function bindViktor(img) {
     const smile = () => {
         clearTimeout(timer);
         mode = 'smile';
-        smileStart = Date.now();
+        smileStart = VectorSvelte.now();
         img.src = fresh(SMILE);
     };
     const exclaim = () => {
@@ -592,7 +592,7 @@ function bindViktor(img) {
         hovering = false;
         if (mode !== 'smile') return;
         // Let the loop in progress run to its end before settling to idle.
-        const remainder = SMILE_MS - ((Date.now() - smileStart) % SMILE_MS);
+        const remainder = SMILE_MS - ((VectorSvelte.now() - smileStart) % SMILE_MS);
         clearTimeout(timer);
         timer = setTimeout(() => {
             if (mode === 'smile' && !hovering) toIdle();

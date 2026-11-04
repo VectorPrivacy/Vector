@@ -1,4 +1,4 @@
-//! The widescreen Start Menu's pins: what a user keeps one click away, in the
+//! The widescreen Main Menu's pins: what a user keeps one click away, in the
 //! rail's shape ([`RailLayout`]) and synced the same way, as its own document
 //! (`vector/start`, [`crate::synced_prefs::Pref::Start`]).
 //!

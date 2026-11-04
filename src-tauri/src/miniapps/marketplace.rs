@@ -232,10 +232,7 @@ pub async fn fetch_marketplace_apps(trusted_only: bool) -> Result<Vec<Marketplac
     // If a recent fetch already succeeded, return cached data (dedup)
     {
         let state = MARKETPLACE_STATE.read().await;
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
+        let now = vector_core::clock::now_secs();
         if state.last_sync > 0 && now.saturating_sub(state.last_sync) < 30 {
             log_info!("[Marketplace] Skipping fetch — last sync {}s ago", now - state.last_sync);
             return Ok(state.get_apps());
@@ -298,10 +295,7 @@ pub async fn fetch_marketplace_apps(trusted_only: bool) -> Result<Vec<Marketplac
             apps.push(app);
         }
 
-        state.last_sync = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
+        state.last_sync = vector_core::clock::now_secs();
     } // Write lock dropped — readers unblocked before I/O
 
     log_info!("Fetched {} marketplace apps", apps.len());

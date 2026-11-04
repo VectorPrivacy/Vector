@@ -142,10 +142,10 @@ async function openGoLink(link) {
     jumpToMessage(link.message);
     // Stored but never drawn: say so, not nothing. Having appeared once is success; the user is
     // free to scroll it away straight after.
-    const deadline = Date.now() + 2500;
+    const deadline = VectorSvelte.now() + 2500;
     const watch = () => {
         if (document.getElementById(link.message) || strOpenChat !== chatId) return;
-        if (Date.now() < deadline) setTimeout(watch, 100);
+        if (VectorSvelte.now() < deadline) setTimeout(watch, 100);
         else showToast("That message can't be shown");
     };
     watch();
@@ -341,7 +341,7 @@ function _placeNames(path) {
     const [kind, first, second] = path.split('/');
     if (kind === 'nexus') {
         const app = first && marketplaceApps.find(a => a.id === first);
-        return { icon: 'nexus', names: first ? ['Nexus', app?.name || first] : ['Nexus'] };
+        return { icon: 'nexus', names: first ? ['App Store', app?.name || first] : ['App Store'] };
     }
     if (kind === 'requests') return { icon: 'mail', names: ['Requests'] };
     // A section id may stand alone, as Settings itself accepts.

@@ -19,6 +19,7 @@
     import I2pOptions from './I2pOptions.svelte';
     import BlockedUsers from './BlockedUsers.svelte';
     import Display from './Display.svelte';
+    import ClockCard from './ClockCard.svelte';
     import Notifications from './Notifications.svelte';
     import NetworkList from './network/NetworkList.svelte';
     import StorageDonut from './StorageDonut.svelte';
@@ -73,7 +74,7 @@
             id: 'appearance', label: 'Appearance', icon: 'palette',
             anchors: [
                 { id: 'theme', label: 'Theme', icon: 'palette', keys: 'theme colour color vector satoshi chatstr cosmic purple neon xmr' },
-                { id: 'display', label: 'Display', icon: 'image', keys: `display image types background wallpaper rich composer emoticon suggestions time suggestions countdown autocorrect send on enter return key floating player${shell.ws ? ' start menu navbar navigation pins sidebar tabs' : ' hide community rail sidebar pull tab chat list filters'}` },
+                { id: 'display', label: 'Display', icon: 'image', keys: `display image types background wallpaper rich composer emoticon suggestions time suggestions countdown autocorrect send on enter return key floating player${shell.ws ? ' main menu navbar navigation pins sidebar tabs' : ' hide community rail sidebar pull tab chat list filters'}` },
             ],
         },
         {
@@ -95,6 +96,7 @@
             anchors: [
                 { id: 'relays', label: 'Nostr Relays', icon: 'globe', keys: 'network nostr relays add custom' },
                 { id: 'servers', label: 'Media Servers', icon: 'folder', keys: 'network media servers blossom upload add custom' },
+                { id: 'clock', label: 'Clock', icon: 'clock', keys: 'clock time date decentralised decentralized device relays slow fast timestamp' },
             ],
         },
         {
@@ -108,7 +110,7 @@
             anchors: [
                 { id: 'privacy', label: 'Privacy', icon: 'eye-off', keys: 'web previews video players youtube embeds url tracking typing indicators proxy media' },
                 { id: 'streamer', label: 'Streamer Mode', icon: 'video', keys: 'streamer stream streaming live obs twitch screen share hide names pictures notifications' },
-                ...(routingOffered() ? [{ id: 'routing', label: 'Routing', icon: 'shield-filled', keys: 'routing network tor i2p onion clearnet bridges obfs4 circuit outproxy sam router anonymity' }] : []),
+                ...(routingOffered() ? [{ id: 'routing', label: 'Routing', icon: 'shield-filled', keys: 'routing network tor i2p onion standard clearnet bridges obfs4 circuit outproxy sam router anonymity' }] : []),
                 { id: 'blocked', label: 'Blocked Users', icon: 'x-user', keys: 'blocked users block unblock' },
             ],
         },
@@ -541,6 +543,7 @@
     {:else if id === 'battery'}{@render batteryBody()}
     {:else if id === 'relays'}{#if hs.network}<NetworkList h={hs.network} part="relays" />{/if}
     {:else if id === 'servers'}{#if hs.network}<NetworkList h={hs.network} part="servers" />{/if}
+    {:else if id === 'clock'}<ClockCard h={h.clock} />
     {:else if id === 'storage'}{@render storageBody()}
     {:else if id === 'privacy'}{@render privacyBody()}
     {:else if id === 'streamer'}<StreamerCard h={h.streamer} />

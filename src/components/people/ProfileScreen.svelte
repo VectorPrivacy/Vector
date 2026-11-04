@@ -2,10 +2,12 @@
     // The expanded profile: header, banner and avatar, names and status, badges, the contact
     // options, description and npub, plus our own profile's Edit Mode. Every field derives
     // from the open profile's signal; the container (#profile) stays with the nav.
+    import { untrack } from 'svelte';
     import { profileViewState, profileVersion, chatVersion } from '../lib/signals.svelte.js';
     import { paneShown } from '../lib/shell.svelte.js';
     import { profileEdit, profileEditDirty } from '../lib/profileedit.svelte.js';
     import { profileScreen, bindProfileEl, setOwnProfileShown } from '../lib/profilescreen.svelte.js';
+    import { badgeDrops } from '../lib/badgecard.svelte.js';
     import ProfileEditFields from './ProfileEditFields.svelte';
     import Avatar from '../ui/Avatar.svelte';
 
@@ -130,6 +132,16 @@
         h.invitedCount(id).then((count) => { if (still() && count > 0) badges = { ...badges, invites: count }; }).catch(() => {});
         h.fawkesBadge(id, mine).then((has) => { if (still() && has) badges = { ...badges, fawkes: true }; }).catch(() => {});
         h.bugHunterTier(id, mine).then((tier) => { if (still() && tier > 0) badges = { ...badges, bug: tier }; }).catch(() => {});
+    });
+
+    // ── badge drops: claimed ones show on your own profile at once; a fresh claim arrives with
+    //    a pop and the sync line pulsing under the row ──
+    const DROP_2026 = 'vector-2026';
+    const drops = badgeDrops();
+    let arriving = $state('');
+    $effect(() => {
+        const { id, tick } = drops.celebrate;
+        if (tick && untrack(() => m?.mine)) arriving = id;
     });
 
     // ── the More dropdown: a click anywhere else closes it, as does a profile change ──
@@ -285,6 +297,10 @@
             <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_noninteractive_element_interactions -->
             <img src={'./icons/bughunter_' + (badges.bug || 1) + '.svg'} alt="Bug Hunter" class="btn" style="height: 30px; width: 30px; margin-left: 5px;"
                  style:display={badges.bug > 0 ? '' : 'none'} onclick={() => h.showBugHunterCard(badges.bug)}>
+            <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_noninteractive_element_interactions -->
+            <img src="./icons/vforvector2026.svg" alt="V for Vector 2026" class="btn" class:profile-badge-arrive={arriving === DROP_2026}
+                 style="height: 30px; width: 30px; margin-left: 5px;"
+                 style:display={m.mine && drops.claimed[DROP_2026] ? '' : 'none'} onclick={() => h.showDropBadge(DROP_2026)} onanimationend={() => { arriving = ''; }}>
         </div>
         <div class="profile-options" style:display={m.mine ? 'none' : ''}>
             <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->

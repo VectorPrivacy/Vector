@@ -199,7 +199,7 @@ async function loadCommunityTimeouts(communityId) {
     clearTimeout(timeoutExpiryTimers.get(communityId));
     const soonest = Math.min(...Object.values(running || {}).map(t => t.until * 1000));
     if (Number.isFinite(soonest)) {
-        timeoutExpiryTimers.set(communityId, setTimeout(() => refreshCommunityTimeouts(communityId), Math.min(Math.max(soonest - Date.now(), 0) + 1000, 2 ** 31 - 1)));
+        timeoutExpiryTimers.set(communityId, setTimeout(() => refreshCommunityTimeouts(communityId), Math.min(Math.max(soonest - VectorSvelte.now(), 0) + 1000, 2 ** 31 - 1)));
     }
     return changed;
 }

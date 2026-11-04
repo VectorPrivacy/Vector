@@ -448,10 +448,7 @@ pub async fn paint_all(targets: Vec<PaintTarget>) -> (Vec<(String, usize)>, Voll
                 // so recently-active channels still confirm against a live gating
                 // relay. Dormant ones trust the batch.
                 const RECENT_SECS: u64 = 7 * 24 * 3600;
-                let now = web_time::SystemTime::now()
-                    .duration_since(web_time::UNIX_EPOCH)
-                    .map(|d| d.as_secs())
-                    .unwrap_or(0);
+                let now = crate::clock::now_secs();
                 j.since.is_some_and(|s| now.saturating_sub(s) < RECENT_SECS)
                     && live.iter().any(|r| gating.contains(r.as_str()))
             })

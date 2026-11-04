@@ -21,7 +21,7 @@
                 <span class="vcard-badge ma-perm-badge" aria-hidden="true"></span>
                 <h3 id="ma-perm-title" class="vcard-title">{st.appName} asks for access</h3>
             </div>
-            <p class="vcard-lead">Turn on what you're happy to share. It may work with less, and you can change these later on its Nexus page.</p>
+            <p class="vcard-lead">Turn on what you're happy to share. It may work with less, and you can change these later on its App Store page.</p>
             <div class="ma-list">
                 {#each st.items as item (item.id)}
                     <label class="ma-list-row">

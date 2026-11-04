@@ -6,6 +6,7 @@
 // mutates underneath (prepends, mid-inserts), and ids survive that where indices do
 // not. `rev` says "the slice's contents changed in place" (an edit, a splice).
 import { SvelteMap, createSubscriber } from 'svelte/reactivity';
+import { now as clockNow } from './clock.svelte.js';
 
 const win = $state({ chatId: null, topId: null, bottomId: null, seq: 0 });
 const divider = $state({ targetId: null, after: false });
@@ -73,10 +74,10 @@ export function setArrival(id) { arrival.id = id || null; }
 
 // A once-a-second clock for the countdowns: a row reading it re-derives on the tick. It
 // runs only while a countdown is on screen.
-const clock = $state({ sec: Math.floor(Date.now() / 1000) });
+const clock = $state({ sec: Math.floor(clockNow() / 1000) });
 const clockSubscribe = createSubscriber(() => {
-    clock.sec = Math.floor(Date.now() / 1000);
-    const timer = setInterval(() => { clock.sec = Math.floor(Date.now() / 1000); }, 1000);
+    clock.sec = Math.floor(clockNow() / 1000);
+    const timer = setInterval(() => { clock.sec = Math.floor(clockNow() / 1000); }, 1000);
     return () => clearInterval(timer);
 });
 export function clockSec() {

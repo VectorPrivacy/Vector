@@ -20,6 +20,7 @@ pub mod attachments;
 pub mod account;
 pub mod biometric;
 pub mod system;
+pub mod clock;
 pub mod invites;
 pub mod media;
 pub mod messaging;

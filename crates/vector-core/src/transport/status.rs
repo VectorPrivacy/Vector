@@ -144,7 +144,7 @@ pub fn waits_for_user() -> bool {
 }
 
 fn now_secs() -> u64 {
-    web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+    crate::clock::now_secs()
 }
 
 static PHASE_SINCE: Mutex<Option<(String, Phase, u64)>> = Mutex::new(None);

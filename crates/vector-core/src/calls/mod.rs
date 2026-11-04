@@ -15,7 +15,7 @@ pub mod video;
 #[cfg(feature = "calls")]
 pub mod voice;
 
-/// The Start Menu's switches: remembered for every call, and applied to the one under way.
+/// The Main Menu's switches: remembered for every call, and applied to the one under way.
 #[cfg(feature = "calls")]
 pub async fn set_mic(s: settings::MicState) -> Result<(), String> {
     settings::remember_mic(s);

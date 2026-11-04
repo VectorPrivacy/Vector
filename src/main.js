@@ -865,7 +865,7 @@ function getOrCreateChat(id, chatType = 'DirectMessage') {
             participants: isGroupType ? [] : [id],
             messages: [],
             last_read: '',
-            created_at: Math.floor(Date.now() / 1000),
+            created_at: Math.floor(VectorSvelte.now() / 1000),
             metadata: {},
             muted: false
         };
@@ -1547,11 +1547,11 @@ let typingTimer = 0;
 /** Typing indicators lapse TYPING_TTL_SECS after their last update; armed only while someone types. */
 function armTypingExpiry(lastUpdate) {
     if (typingTimer) return;
-    const due = (lastUpdate + TYPING_TTL_SECS) * 1000 - Date.now();
+    const due = (lastUpdate + TYPING_TTL_SECS) * 1000 - VectorSvelte.now();
     typingTimer = setTimeout(() => { typingTimer = 0; expireTypers(); }, Math.max(0, due) + 50);
 }
 function expireTypers() {
-    const now = Date.now() / 1000;
+    const now = VectorSvelte.now() / 1000;
     const listOnScreen = VectorSvelte.paneShown('chats') || wsActive();
     let nextLast = Infinity;
     for (const chat of arrChats) {
@@ -2440,6 +2440,9 @@ window.addEventListener("DOMContentLoaded", async () => {
                 // Monitor relay connections and render relay list
                 invoke("monitor_relay_connections");
                 renderRelayList();
+
+                // The login flow offers badge drops; hot reload skips it.
+                offerBadgeDrops().catch((e) => console.warn('[Badge drop] offer failed:', e));
                 
                 // Initialize the updater (version info, update button)
                 initializeUpdater();
@@ -2622,7 +2625,7 @@ window.addEventListener("DOMContentLoaded", async () => {
     }
 
     // Hook up our static buttons
-    VectorSvelte.mergeShellHandlers({ openInvites, openProfile: () => openProfile(), openChatlist, openSettings, openNewChat, openCreateGroup, openMiniApps: () => showMarketplacePanel(), openBookmarks: () => openChat(strPubkey), myNpub: () => strPubkey,
+    VectorSvelte.mergeShellHandlers({ openInvites, openProfile: () => openProfile(), openChatlist, openSettings, openNewChat, openCreateGroup, openMiniApps: () => showMiniApps(), openBookmarks: () => openChat(strPubkey), myNpub: () => strPubkey,
         placeMenu: (e, what, path) => showContextMenu({ x: e.clientX, y: e.clientY, items: placeLinkItems(what, path) }) });
     VectorSvelte.setAccountHandlers({
         openProfile: () => openProfile(),

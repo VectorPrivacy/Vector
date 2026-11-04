@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-set-decentralised-clock"
+description = "Enables the set_decentralised_clock command without any pre-configured scope."
+commands.allow = ["set_decentralised_clock"]
+
+[[permission]]
+identifier = "deny-set-decentralised-clock"
+description = "Denies the set_decentralised_clock command without any pre-configured scope."
+commands.deny = ["set_decentralised_clock"]

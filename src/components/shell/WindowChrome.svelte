@@ -49,7 +49,7 @@
         </div>
     </div>
     {#if updates.phase === 'available' && updates.newVersion}
-        <button class="chrome-update" onclick={() => h?.openUpdates()}>New update · Vector v{updates.newVersion}. Download now.</button>
+        <button class="chrome-update" onclick={() => h?.openUpdates()}>New Vector Update Available ({updates.newVersion}). Download Now</button>
     {/if}
     <div id="chrome-controls">
         <button class="chrome-ctl chrome-help" title="Help" aria-label="Help" onclick={() => h?.openHelp()}>

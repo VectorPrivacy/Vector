@@ -23,7 +23,7 @@ mod relay_probe {
     async fn every_trusted_relay_carries_an_ephemeral_transfer_event() {
         for url in crate::state::TRUSTED_RELAYS {
             let room = Keys::generate().public_key();
-            let filter = Filter::new().kind(Kind::Custom(24681)).pubkey(room).since(Timestamp::now() - 60);
+            let filter = Filter::new().kind(Kind::Custom(24681)).pubkey(room).since(crate::clock::timestamp() - 60);
 
             let listener = Client::builder().build();
             listener.add_managed_relay(*url).await.unwrap();

@@ -983,7 +983,7 @@ const NOTIF_EXPLAINERS = {
 };
 
 const DISPLAY_EXPLAINERS = {
-    startMenu: ['Start Menu', '<b>When enabled:</b> your Profile, Chat, Bookmarks, Mini Apps and Settings live in a Start Menu that opens from your row at the bottom of the sidebar, beside pins for the apps, chats and places you use most.<br><br><b>When disabled:</b> they sit down the sidebar as tabs, as before.<br><br>This applies to this device only.'],
+    startMenu: ['Main Menu', '<b>When enabled:</b> your Profile, Chat, Bookmarks, Mini Apps and Settings live in a Main Menu that opens from your row at the bottom of the sidebar, beside pins for the apps, chats and places you use most.<br><br><b>When disabled:</b> they sit down the sidebar as tabs, as before.<br><br>This applies to this device only.'],
     hideRail: ['Hide Community Rail', 'When enabled, the <b>community rail and its pull tab are hidden</b>, and your communities sit in the chat list behind the <b>All</b>, <b>Messages</b>, <b>Communities</b> and <b>Requests</b> filters.<br><br>This applies to this device only.'],
     imageTypes: ['Display Image Types', 'When enabled, images in chat will display a <b>small badge showing the file type</b> (e.g., PNG, GIF, WEBP) in the corner.<br><br>This helps identify image formats at a glance.'],
     chatBg: ['Background Wallpaper', 'This feature enables and disables background images inside of Chats (Private & Group Chats).<br><br>Only applies to certain themes.'],
@@ -2031,6 +2031,7 @@ function updateMigrationProgress(total, completed, phase) {
 // Help prompts: one explainer per info icon. A function body resolves at click
 // time (the change-PIN wording follows the security type).
 const SETTINGS_HELP = {
+    clock: ['Decentralised Clock', 'When enabled, Vector keeps time by your Nostr relays instead of this device. It asks up to eight of them for the time every hour, and uses their time only when at least three agree; otherwise it keeps this device’s.<br><br>A device whose clock has drifted otherwise sends messages that look minutes old or from the future, sees others’ messages the same way, and gets turned away by media servers that check the time.<br><br>Off: Vector uses this device’s clock as it is.'],
     keepMedia: ['Keep Files on This Device', '<b>When enabled:</b> every file you receive is kept on this device, encrypted, so it opens instantly and never downloads twice.<br><br><b>When disabled:</b> files stay in memory while Vector is open, and load again after it closes. One too large to hold waits for a tap, then is kept. Turning it off deletes what it kept.'],
     keepUnencrypted: () => ['Keep Unencrypted', `What Vector keeps is saved as normal files in ${publicFolderName()}, so other apps and backups can open them.<br><br>Anyone with access to this device's files can open them too.`],
     stripTracking: ['Strip Tracking Markers', 'When enabled, Vector will <b>automatically remove tracking markers</b> from URLs before displaying or sending them.<br><br>This helps reduce your footprint and enhances your privacy with no loss in functionality, only disable if you know what you\'re doing.'],
@@ -2137,6 +2138,12 @@ async function reauthorizeSigner() {
 
 // The Settings screen's helpers. Section owners that come up later (the updater,
 // the relay list, voice) register their own bags on the store.
+/**
+ * @typedef {Object} ClockHelpers
+ * @property {(key: string) => void} help
+ * @property {(on: boolean) => Promise<void>} setDecentralised
+ */
+
 const SETTINGS_HELPERS = {
     help: showSettingsHelp,
     // `path`: `category[/section]`.
@@ -2151,6 +2158,13 @@ const SETTINGS_HELPERS = {
         initStorageSection();
     },
     setPrivacy: setPrivacySetting,
+    /** @type {ClockHelpers} */
+    clock: {
+        help: showSettingsHelp,
+        setDecentralised: async (on) => {
+            try { VectorSvelte.setClock(await invoke('set_decentralised_clock', { on })); } catch (e) { showToast(String(e)); }
+        },
+    },
     transport: TRANSPORT_HANDLERS,
     tor: {
         help: showSettingsHelp,

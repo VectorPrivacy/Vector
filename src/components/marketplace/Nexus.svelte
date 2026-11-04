@@ -112,7 +112,7 @@
             {#if !ws || app}
                 <button type="button" class="nx-top-back" aria-label="Back" onclick={back}><span class="nx-g g-left"></span></button>
             {/if}
-            <h2 class="nx-top-title" class:center={!ws}>{ws ? title : (app ? app.name : 'Nexus')}</h2>
+            <h2 class="nx-top-title" class:center={!ws}>{ws ? title : (app ? app.name : 'App Store')}</h2>
             <button type="button" class="nx-top-btn" class:nx-spinning={st.loading} aria-label="Refresh" onclick={() => h.retry()} disabled={st.loading}>
                 <span class="nx-g g-refresh"></span>
             </button>
@@ -122,7 +122,7 @@
             <div class="nx-mhead">
                 <div class="nx-msearch" class:has-query={searching}>
                     <span class="nx-g g-search"></span>
-                    <input type="text" placeholder="Search the Nexus" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"
+                    <input type="text" placeholder="Search the App Store" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"
                            value={st.query} oninput={(e) => mktSetQuery(e.currentTarget.value)} use:searchField>
                     {#if searching}
                         <button type="button" class="nx-msearch-clear" aria-label="Clear search" onclick={() => mktSetQuery('')}>
@@ -151,12 +151,12 @@
                     {#if st.loading && !mktApps().length}
                         <div class="nx-empty">
                             <span class="nx-g g-nexus nx-empty-g nx-pulse"></span>
-                            <p class="nx-empty-title">Opening the Nexus</p>
+                            <p class="nx-empty-title">Opening the App Store</p>
                         </div>
                     {:else if st.error && !mktApps().length}
                         <div class="nx-empty">
                             <span class="nx-g g-warn nx-empty-g"></span>
-                            <p class="nx-empty-title">The Nexus didn't load</p>
+                            <p class="nx-empty-title">The App Store didn't load</p>
                             <p class="nx-empty-hint">{st.error}</p>
                             <button type="button" class="nx-btn accent" onclick={() => h.retry()}>Try Again</button>
                         </div>

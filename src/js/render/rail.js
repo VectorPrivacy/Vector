@@ -96,7 +96,7 @@ function renderRailShortcuts() {
             // Both return you to the channel you left the community in, not its primary.
             openCommunity: (communityId, fallbackChatId) => {
                 // The tap a long-press ends on opened the menu, not the community.
-                if (Date.now() - (window._chatRowMenuAt || 0) < 500) { window._chatRowMenuAt = 0; return; }
+                if (VectorSvelte.now() - (window._chatRowMenuAt || 0) < 500) { window._chatRowMenuAt = 0; return; }
                 if (!wsActive()) return ccOpenCommunity(communityId, fallbackChatId);
                 const id = wsChannelForCommunity(communityId) || fallbackChatId;
                 if (!chatOnScreen(id)) openChat(id);
@@ -107,7 +107,7 @@ function renderRailShortcuts() {
             attachLongPressContextMenu,
             // A shortcut stands for the whole community, so it opens the community's menu
             // rather than its anchoring channel's row menu.
-            openCommunityMenu: (chat, x, y) => { window._chatRowMenuAt = Date.now(); openCommunityMenu(chat, null, { x, y }); },
+            openCommunityMenu: (chat, x, y) => { window._chatRowMenuAt = VectorSvelte.now(); openCommunityMenu(chat, null, { x, y }); },
             showChatRowContextMenu: _showChatRowContextMenu,
             syncRailFade,
             onUnreadDms: syncChatTabBadge,

@@ -26,10 +26,7 @@ const BADGE_CHECK_TS_KEY: &str = "badge_check_ts";
 const RECHECK_COOLDOWN_SECS: u64 = 6 * 3600;
 
 fn unix_now() -> u64 {
-    web_time::SystemTime::now()
-        .duration_since(web_time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
+    crate::clock::now_secs()
 }
 
 /// Whether a kind-30078 event is a valid Fawkes badge claim: right content and

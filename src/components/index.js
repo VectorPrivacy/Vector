@@ -139,7 +139,7 @@ export { contextMenuEls, setContextMenuHandlers, setContextMenu } from './lib/co
 export { setRekey } from './lib/rekey.svelte.js';
 export { setInviteModalHandlers, setInviteModal, setInviteModalStatus, inviteModalPicker } from './lib/invitemodal.svelte.js';
 export { ceOverlay, openChannelEditor, closeChannelEditor, setChannelEditorBusy, setChannelPerms, channelEditorState, channelEditorDirty, channelEditorNudge, channelEditorSaved, setChannelEditorPrivate, resetChannelEditor, channelOverviewDirty, overwriteDirty } from './lib/channel-editor.svelte.js';
-export { badgeCardState, badgeCardEls, setBadgeCardHandlers, setBadgeCard, setBadgeTiltVars } from './lib/badgecard.svelte.js';
+export { badgeCardState, badgeCardEls, setBadgeCardHandlers, setBadgeCard, setBadgeTiltVars, setDropClaimed, celebrateDrop } from './lib/badgecard.svelte.js';
 export { imageViewerState, imageViewerEls, setImageViewerHandlers, setImageViewer, setImageViewerZoom, setImageViewerTip } from './lib/imageviewer.svelte.js';
 export { setModelViewer, setModelViewerHandlers } from './lib/modelviewer.svelte.js';
 export { setModelDownload, claimPlayback, releasePlayback, waveformBytes } from './lib/audio.svelte.js';
@@ -155,6 +155,8 @@ export {
     setFilePreviewContent as fpContent,
     patchFilePreview as fpPatch,
 } from './lib/filepreview.svelte.js';
+// Vector's clock: the relays' agreed time, or the device's.
+export { setClock, now, nowDate } from './lib/clock.svelte.js';
 // Settings: every section's state and the handler registries the sections read.
 export { setTorMulti, setTorCircuits, setTorEngine, reloadBlockedUsers, setStorageDistribution, setStorageLoading, setNotifSettings, setNotifPush, setSecurity, setSigner, setSignerDot, setDisplaySettings, setUpdates, setNetwork, voiceState, setVoice, setVoiceDownloadProgress, settingsScreen, setSettingsScreen, requestSettingsScroll, setSettingsHandlers } from './lib/settings.svelte.js';
 // The composer's state: mode (reply/edit), draft emptiness, lock, command bar.
@@ -248,4 +250,4 @@ export { requestState, setChatRequest, setRequestHandlers } from './lib/request.
 export { canvasReadsTrue } from './lib/artcolor.js';
 export { voiceSession, setVoiceSession, setVoicePresent, setVoiceStage, setVoiceCallHandlers, toggleVoiceMic, voiceJoining, setVoiceJoining } from './lib/voice.svelte.js';
 
-export { startMenuState, setStartMode, setStartLayout, setStartOpen } from './lib/startmenu.svelte.js';
+export { startMenuState, setStartMode, setStartLayout, setStartOpen, setStartAccounts } from './lib/startmenu.svelte.js';

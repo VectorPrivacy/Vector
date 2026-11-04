@@ -379,6 +379,8 @@ const addAccountFlow = {
         this.active = true;
         this.committed = false;
         loginNet._addChoice = null;
+        // A line left from an earlier visit isn't about this one.
+        VectorSvelte.patchLoginNet({ failed: '', failedCode: '' });
 
         // Cache who we'll need to restore to if the user backs out AFTER
         // committing. We grab it now while CURRENT_ACCOUNT is still set
@@ -405,6 +407,8 @@ const addAccountFlow = {
 
         VectorSvelte.loginScreen('start', true);
         VectorSvelte.loginShowForm(true);
+        // Start may already be the screen, so its own arrival refresh won't run.
+        loginNet.refresh();
 
         // Hide the pre-login picker pill during Add Profile — the user is
         // creating a new account, not picking an existing one. Without

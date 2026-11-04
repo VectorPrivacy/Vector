@@ -6,10 +6,7 @@
 use rusqlite::{params, OptionalExtension};
 
 fn now_secs() -> u64 {
-    web_time::SystemTime::now()
-        .duration_since(web_time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
+    crate::clock::now_secs()
 }
 
 /// Store a validated manifest for `pubkey_hex`, keeping whichever edition is

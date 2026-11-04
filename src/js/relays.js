@@ -164,7 +164,7 @@ async function refreshRelayInfoDialog() {
         let lastCheck = '--';
         if (metrics.last_check) {
             const checked = new Date(metrics.last_check * 1000);
-            const diffSecs = Math.floor((Date.now() - checked) / 1000);
+            const diffSecs = Math.floor((VectorSvelte.now() - checked) / 1000);
             lastCheck = diffSecs < 60 ? `${diffSecs}s ago`
                 : diffSecs < 3600 ? `${Math.floor(diffSecs / 60)}m ago`
                 : checked.toLocaleTimeString();

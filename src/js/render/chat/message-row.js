@@ -517,7 +517,7 @@ function _selfDestructTooltip(el) {
     const exp = parseInt(el.dataset.expiration, 10);
     if (!exp) return;
     const tick = () => {
-        const remaining = exp - Math.floor(Date.now() / 1000);
+        const remaining = exp - Math.floor(VectorSvelte.now() / 1000);
         showGlobalTooltip(remaining > 0
             ? 'Message dissolves in ' + VectorSvelte.fmtCountdown(remaining)
             : 'Dissolving...', el);
@@ -952,7 +952,7 @@ function dmsgReactOptimistic(msgId, emoji, url = null) {
     if (!cMsg) return null;
     cMsg.reactions = cMsg.reactions || [];
     if (cMsg.reactions.some(r => r.emoji === emoji && r.author_id === strPubkey)) return null;
-    const provisional = { id: `pending-react-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`, reference_id: msgId, author_id: strPubkey, emoji, emoji_url: url, at: Date.now() };
+    const provisional = { id: `pending-react-${VectorSvelte.now()}-${Math.random().toString(36).slice(2, 6)}`, reference_id: msgId, author_id: strPubkey, emoji, emoji_url: url, at: VectorSvelte.now() };
     cMsg.reactions.push({ id: provisional.id, reference_id: msgId, author_id: strPubkey, emoji, emoji_url: url });
     const inflight = pendingReactions.get(msgId) || [];
     inflight.push(provisional);

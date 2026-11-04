@@ -3,6 +3,7 @@
 // changes, so every name showing a Timeout re-derives together.
 
 import { SvelteMap } from 'svelte/reactivity';
+import { now as clockNow } from './clock.svelte.js';
 
 const byCommunity = new SvelteMap();
 
@@ -14,7 +15,7 @@ export function communityTimeouts(communityId) {
 /** When `npub`'s Timeout in a community ends (unix seconds), 0 when they have none. */
 export function timedOutUntil(communityId, npub) {
     const until = communityTimeouts(communityId)?.[npub]?.until || 0;
-    return until * 1000 > Date.now() ? until : 0;
+    return until * 1000 > clockNow() ? until : 0;
 }
 
 /** Hold a community's running Timeouts. Returns whether anything changed. */

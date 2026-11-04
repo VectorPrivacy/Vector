@@ -13,6 +13,7 @@
 //! and the in-plane delete alone hides it.
 
 use nostr_sdk::prelude::*;
+use crate::event_ext::FinalizeOnClock;
 
 use super::transport::Transport;
 use super::v2::{chat::ChatEvent, derive, stream};
@@ -202,7 +203,7 @@ pub async fn in_plane_delete_expiry(message_id: &str, scrubbed: Scrubbed) -> Opt
     if !scrubbed.everywhere() {
         return None;
     }
-    let until = Timestamp::now().as_secs().saturating_add(OWNED_DELETE_EXPIRY_SECS);
+    let until = crate::clock::timestamp().as_secs().saturating_add(OWNED_DELETE_EXPIRY_SECS);
     let message = crate::self_destruct::edit_expiry(message_id).await.ok().flatten();
     Some(message.map_or(until, |m| m.min(until)))
 }
@@ -210,7 +211,7 @@ pub async fn in_plane_delete_expiry(message_id: &str, scrubbed: Scrubbed) -> Opt
 /// The deletion of one wrap by the key kept for it, and the relays it goes to.
 fn deletion_by((keys, outer, sent_to): &(Keys, String, Vec<String>), relays: &[String]) -> Result<(Event, Vec<String>), String> {
     let wrap = EventId::from_hex(outer).map_err(|e| e.to_string())?;
-    let deletion = crate::deletion::wrap_deletion(&[wrap]).finalize(keys).map_err(|e| e.to_string())?;
+    let deletion = crate::deletion::wrap_deletion(&[wrap]).finalize_on_clock(keys).map_err(|e| e.to_string())?;
     Ok((deletion, union(relays, sent_to)))
 }
 

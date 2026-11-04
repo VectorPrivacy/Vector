@@ -1,5 +1,6 @@
 package io.vectorapp
 
+import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Rect
@@ -14,13 +15,46 @@ import android.webkit.WebSettings
 import android.webkit.WebView
 import android.os.Bundle
 import android.view.View
+import android.view.ViewGroup
+import android.widget.FrameLayout
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
 import io.vectorapp.miniapp.MiniAppManager
 
 
 /** Chromium the shared frontend needs (Vector Web's preflight floor). */
 private const val MIN_WEBVIEW = 98
+
+/**
+ * Some WebView versions hide the keyboard whenever their window loses focus (crbug.com/560321831),
+ * and the keyboard's own input-method switcher takes that focus, so the switcher closed as it
+ * opened. While the keyboard is up, a focus loss is held back from the WebView.
+ */
+private class ImeFocusGuard(context: Context) : FrameLayout(context) {
+    private var heldLoss = false
+
+    override fun dispatchWindowFocusChanged(hasFocus: Boolean) {
+        if (!hasFocus && imeVisible()) {
+            heldLoss = true
+            return
+        }
+        heldLoss = false
+        super.dispatchWindowFocusChanged(hasFocus)
+    }
+
+    /** Hands the WebView a held focus loss once the app is really leaving the foreground. */
+    fun releaseHeldLoss() {
+        if (heldLoss && !hasWindowFocus()) {
+            heldLoss = false
+            super.dispatchWindowFocusChanged(false)
+        }
+    }
+
+    private fun imeVisible() =
+        ViewCompat.getRootWindowInsets(this)?.isVisible(WindowInsetsCompat.Type.ime()) == true
+}
 
 class MainActivity : TauriActivity() {
 
@@ -47,6 +81,19 @@ class MainActivity : TauriActivity() {
     }
 
     private var managedWebView: WebView? = null
+    private var focusGuard: ImeFocusGuard? = null
+
+    // wry hands the WebView straight to setContentView; it goes in behind the focus guard.
+    override fun setContentView(view: View) {
+        if (view !is WebView || view.parent != null) {
+            super.setContentView(view)
+            return
+        }
+        val guard = ImeFocusGuard(this)
+        guard.addView(view, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+        focusGuard = guard
+        super.setContentView(guard)
+    }
 
     // ===== Device-tilt for the badge card =====
     // Started/stopped from JS (window.__vectorGyroBridge) only while the card is open, so the sensor
@@ -200,6 +247,7 @@ class MainActivity : TauriActivity() {
     }
 
     override fun onPause() {
+        focusGuard?.releaseHeldLoss()
         super.onPause()
         stopGyro()   // never leave the rotation sensor running while backgrounded
         try { nativeOnPause() } catch (_: Exception) {}
@@ -207,6 +255,8 @@ class MainActivity : TauriActivity() {
 
     override fun onStop() {
         super.onStop()
+        // The window's focus loss can land after onPause, so a loss held then is released here.
+        focusGuard?.releaseHeldLoss()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
             setShowWhenLocked(false)
             setTurnScreenOn(false)

@@ -1,6 +1,7 @@
 // The network the account connects through: the backend's last TransportStateView, which
 // network's panel Settings shows, I2P's settings, the per-server I2P addresses and the route
 // each listed relay or server takes. js/transport.js writes here; the components render.
+import { now as clockNow } from './clock.svelte.js';
 const t = $state({
     view: null,      // TransportStateView, or null before the first read
     at: 0,           // when `view` arrived (ms): `retry_in` counts down from here
@@ -22,7 +23,7 @@ export function setTransportView(view) {
     // Another network in use (a switch, an account change): the panel follows it.
     if (t.view && t.view.kind !== view.kind) t.viewKind = '';
     t.view = view;
-    t.at = Date.now();
+    t.at = clockNow();
 }
 export function setTransportViewKind(kind) { t.viewKind = kind || ''; }
 export function setTransportLocked(locked) { t.locked = !!locked; }

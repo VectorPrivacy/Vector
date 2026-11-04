@@ -4064,10 +4064,7 @@ pub async fn sync_guestbook<T: Transport + ?Sized>(
                 // not write this.
                 if ev.observed_at.is_none() {
                     ev.observed_at = Some(
-                        web_time::SystemTime::now()
-                            .duration_since(web_time::UNIX_EPOCH)
-                            .map(|d| d.as_secs())
-                            .unwrap_or(0),
+                        crate::clock::now_secs(),
                     );
                 }
                 written.insert(ev.rumor_id, events.len());
@@ -4210,10 +4207,7 @@ fn mark_guestbook_observed_since(cid_hex: &str) {
     if crate::db::settings::get_sql_setting(key.clone()).ok().flatten().is_some() {
         return; // never moves forward — a later stamp would erase our own coverage
     }
-    let now = web_time::SystemTime::now()
-        .duration_since(web_time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
+    let now = crate::clock::now_secs();
     let _ = crate::db::settings::set_sql_setting(key, now.to_string());
 }
 

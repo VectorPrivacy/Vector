@@ -710,7 +710,7 @@ fn last_left_of(session: &Arc<crate::db::Session>) -> Arc<Mutex<HashMap<[u8; 32]
 }
 
 fn unix_now() -> u64 {
-    web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+    crate::clock::now_secs()
 }
 
 /// Advertise our node on the session's topic. Dated after our own last
@@ -719,7 +719,7 @@ fn unix_now() -> u64 {
 async fn advertise(shared: &Shared, addr: &str) -> Result<(), String> {
     let left = last_left_of(&shared.session).lock().unwrap().get(&shared.topic).copied();
     if let Some(left) = left {
-        let now = web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).unwrap_or_default();
+        let now = Duration::from_millis(crate::clock::now_ms());
         if now.as_secs() <= left {
             let next = Duration::from_secs(left + 1).saturating_sub(now);
             crate::rt::time::sleep(next + Duration::from_millis(50)).await;
