@@ -204,12 +204,12 @@ function startNavItems() {
     const st = VectorSvelte.startMenuState();
     // More than one account: pick among them in the pins' place. One: straight to adding another.
     const account = st.accounts.length > 1
-        ? [{ id: 'accounts', label: 'Accounts', icon: 'users-multi', pane: 'accounts' }]
+        ? [{ id: 'accounts', label: 'Accounts', icon: 'users-multi-fill', pane: 'accounts' }]
         : st.canAddAccount ? [{ id: 'add-account', label: 'Accounts', icon: 'add-user', run: () => addAccountFlow.start() }] : [];
     const items = [
         ...account,
         { id: 'profile', label: 'Profile', icon: 'start-profile', run: () => openProfile() },
-        { id: 'chat', label: 'Chat', icon: 'chats', run: () => openChatlist(), dot: !!shell.chatBadge },
+        { id: 'chat', label: 'Chat', icon: 'chats-fill', run: () => openChatlist(), dot: !!shell.chatBadge },
         { id: 'bookmarks', label: 'Bookmarks', icon: 'bookmark-fill', run: () => openChat(strPubkey) },
         { id: 'miniapps', label: 'Mini Apps', icon: 'grid-fill', run: () => showMiniApps(), key: 'nexus' },
         { id: 'settings', label: 'Settings', icon: 'start-settings', run: () => openSettings(), key: 'settings', dot: !!shell.updateDot },

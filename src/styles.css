@@ -52,6 +52,10 @@
   mask-image: url("./icons/users-multi.svg");
 }
 
+.icon-users-multi-fill {
+  mask-image: url("./icons/users-multi-fill.svg");
+}
+
 .icon-battery-full {
   mask-image: url("./icons/battery-full.svg");
 }
@@ -62,6 +66,10 @@
 
 .icon-chats {
   mask-image: url("./icons/chats.svg");
+}
+
+.icon-chats-fill {
+  mask-image: url("./icons/chats-fill.svg");
 }
 
 .icon-mail {

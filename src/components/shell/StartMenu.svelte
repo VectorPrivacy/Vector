@@ -158,7 +158,7 @@
         return {
             current,
             label: name,
-            sub: veiled ? '' : current ? 'Signed in' : `${meta.npub.slice(0, 12)}…${meta.npub.slice(-4)}`,
+            sub: veiled ? '' : `${meta.npub.slice(0, 12)}…${meta.npub.slice(-4)}`,
             glyph: src ? { src, round: true } : { initial: (name.match(/[\p{L}\p{N}]/u)?.[0] || '?').toUpperCase(), round: true },
         };
     }
@@ -523,6 +523,7 @@
                                     aria-current={a.current ? 'true' : undefined} onclick={() => { if (!a.current) run(() => h.switchAccount(meta.npub)); }}>
                                 <span class="stm-box is-bare" class:is-row={list}>{@render glyph(a.glyph, list ? 28 : 80)}</span>
                                 {@render caption(a.label, a.sub)}
+                                {#if list && a.current}<span class="stm-signed">Signed in</span>{/if}
                             </button>
                         {/each}
                         {#if st.canAddAccount}
@@ -832,6 +833,7 @@
     .stm-tile.is-current { cursor: default; }
     .stm-tile.is-current .stm-box > * { box-shadow: 0 0 0 2px var(--icon-color-primary); }
     .stm-tile.is-current .stm-label { color: #fff; font-weight: 600; }
+    .stm-signed { flex: none; font-size: 12px; color: rgba(255, 255, 255, 0.45); }
 
     .stm-view { display: flex; gap: 2px; margin-left: auto; }
     .stm-view-btn { all: unset; display: flex; padding: 4px; cursor: pointer; }
