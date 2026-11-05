@@ -87,7 +87,7 @@ The word "QR Code" is a registered trademark of DENSO WAVE INCORPORATED.
 
 | Library | Version | License | Copyright | Where |
 |---------|---------|---------|-----------|-------|
-| [FFmpeg](https://ffmpeg.org) | 8.0.1 | [LGPL 2.1 or later](https://www.gnu.org/licenses/old-licenses/lgpl-2.1.html) | © the FFmpeg developers | macOS and Windows releases (video compression) |
+| [FFmpeg](https://ffmpeg.org) | 8.0.3 | [LGPL 2.1 or later](https://www.gnu.org/licenses/old-licenses/lgpl-2.1.html) | © the FFmpeg developers | macOS and Windows releases (video compression) |
 | [whisper.cpp](https://github.com/ggml-org/whisper.cpp) and ggml | 1.9.5, with Vector's patches | [MIT](https://github.com/ggml-org/whisper.cpp/blob/master/LICENSE) | © Georgi Gerganov and the ggml authors | voice transcription and dictation, desktop, Android and Vector Web |
 | [KleidiAI](https://github.com/ARM-software/kleidiai) | | [Apache 2.0](https://github.com/ARM-software/kleidiai/tree/main/LICENSES) | © Arm Limited | Android arm64 transcription |
 | [Opus](https://opus-codec.org) | 1.6.1 | [BSD 3-Clause](https://opus-codec.org/license/) | © Xiph.Org Foundation, Skype Limited, Octasic, Jean-Marc Valin, Timothy B. Terriberry, CSIRO, Gregory Maxwell, Mark Borgerding, Erik de Castro Lopo | calls and voice channels |
@@ -98,7 +98,7 @@ The word "QR Code" is a registered trademark of DENSO WAVE INCORPORATED.
 
 ### FFmpeg
 
-Vector's macOS and Windows releases statically link FFmpeg, built by [`scripts/build-ffmpeg.sh`](../scripts/build-ffmpeg.sh) with only LGPL components: no `--enable-gpl` and no `--enable-nonfree`. FFmpeg is free software licensed under the [GNU Lesser General Public License, version 2.1](https://www.gnu.org/licenses/old-licenses/lgpl-2.1.html) or later. Its source is at [ffmpeg.org/releases/ffmpeg-8.0.1.tar.xz](https://ffmpeg.org/releases/ffmpeg-8.0.1.tar.xz), and the build script above pins it by SHA-256 and records every configure flag, so you can rebuild FFmpeg with your own changes and relink Vector against it from this repository. Builds without the `video` feature (Linux, Android and bare builds) contain no FFmpeg.
+Vector's macOS and Windows releases statically link FFmpeg, built by [`scripts/build-ffmpeg.sh`](../scripts/build-ffmpeg.sh) with only LGPL components: no `--enable-gpl` and no `--enable-nonfree`. FFmpeg is free software licensed under the [GNU Lesser General Public License, version 2.1](https://www.gnu.org/licenses/old-licenses/lgpl-2.1.html) or later. Its source is at [ffmpeg.org/releases/ffmpeg-8.0.3.tar.xz](https://ffmpeg.org/releases/ffmpeg-8.0.3.tar.xz), and the build script above pins it by SHA-256 and records every configure flag, so you can rebuild FFmpeg with your own changes and relink Vector against it from this repository. Builds without the `video` feature (Linux, Android and bare builds) contain no FFmpeg.
 
 ---
 
