@@ -539,8 +539,34 @@ const communityMemberCounts = new Map();
 const communityMembersCache = new Map();
 /** A community's role graph (roles + grants), cached so the roster paints grouped on reopen. */
 const communityRoleGraphCache = new Map();
-/** Each graph's chat tags, npub → { name, color }. */
-const _roleTagsByGraph = new WeakMap();
+/** Each graph's per-member styling: `tags` npub → { name, color }, `colors` npub → 0xRRGGBB. */
+const _roleStylesByGraph = new WeakMap();
+
+/** A graph's styling, worked out once: each member's topmost role among those `pick` admits. */
+function _roleStyles(graph) {
+    let styles = _roleStylesByGraph.get(graph);
+    if (styles) return styles;
+    const topBy = (pick) => {
+        const roles = new Map((graph.roles || []).filter(pick).map(r => [r.role_id, r]));
+        const out = new Map();
+        for (const g of graph.grants || []) {
+            let top = null;
+            for (const id of g.role_ids || []) {
+                const r = roles.get(id);
+                if (r && (!top || r.position < top.position)) top = r;
+            }
+            if (top) out.set(g.npub, top);
+        }
+        return out;
+    };
+    const tags = new Map();
+    for (const [npub, r] of topBy(r => r.display)) tags.set(npub, { name: r.name, color: r.color || 0 });
+    const colors = new Map();
+    for (const [npub, r] of topBy(r => !!r.color)) colors.set(npub, r.color);
+    styles = { tags, colors };
+    _roleStylesByGraph.set(graph, styles);
+    return styles;
+}
 
 /**
  * A member's chat tag: their topmost role shown separately, as { name, color }. null for
@@ -550,21 +576,19 @@ function communityRoleTag(communityId, npub) {
     const graph = communityRoleGraphCache.get(communityId);
     if (!graph) return null;
     if (!graph.activated) return undefined;
-    let tags = _roleTagsByGraph.get(graph);
-    if (!tags) {
-        const shown = new Map((graph.roles || []).filter(r => r.display).map(r => [r.role_id, r]));
-        tags = new Map();
-        for (const g of graph.grants || []) {
-            let top = null;
-            for (const id of g.role_ids || []) {
-                const r = shown.get(id);
-                if (r && (!top || r.position < top.position)) top = r;
-            }
-            if (top) tags.set(g.npub, { name: top.name, color: top.color || 0 });
-        }
-        _roleTagsByGraph.set(graph, tags);
-    }
-    return tags.get(npub) || null;
+    return _roleStyles(graph).tags.get(npub) || null;
+}
+
+/** A member's name colour: their topmost role that has one, as "#rrggbb"; null for none. */
+function communityRoleColor(communityId, npub) {
+    const graph = communityRoleGraphCache.get(communityId);
+    if (!graph?.activated) return null;
+    return roleColorHex(_roleStyles(graph).colors.get(npub));
+}
+
+/** A role colour (0xRRGGBB) as CSS; null for none. */
+function roleColorHex(color) {
+    return color ? '#' + color.toString(16).padStart(6, '0') : null;
 }
 
 /** Read a community's role graph; the open channel's tags follow. */

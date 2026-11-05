@@ -121,8 +121,10 @@
         const tag = communityId ? h.roleTag(communityId, authorFullId) : null;
         const legacy = tag === undefined;
         const admin = legacy && ctx.isGroupChat && !!chat?.metadata?.admins?.includes(authorFullId);
-        return { admin, owner: legacy && isOwner, tag: tag || null };
+        return { admin, owner: legacy && isOwner, tag: tag || null, color: communityId ? h.roleColor(communityId, authorFullId) : null };
     });
+    // The role chip is held back for emblem-style nametags; for now a role shows as the name's colour.
+    const SHOW_ROLE_TAGS = false;
     // A role's colour behind its name, with whichever ink reads on it. Colourless takes the accent.
     const tagBg = $derived(rank.tag?.color ? '#' + rank.tag.color.toString(16).padStart(6, '0') : null);
     const tagInk = $derived.by(() => {
@@ -216,12 +218,12 @@
     {:else if isBlocked || isTimedOut}
         <div class="dmsg-body">
             <div class="dmsg-header">
-                <span class="dmsg-author btn" data-npub={authorFullId || undefined} use:name={displayName}></span>
+                <span class="dmsg-author btn" data-npub={authorFullId || undefined} style:color={rank.color} use:name={displayName}></span>
                 {#if isBot}
                     <!-- svelte-ignore a11y_no_static_element_interactions -->
                     <span class="icon icon-bot dmsg-author-bot-icon" onmouseenter={(e) => h.showTooltip('Bot', e.currentTarget)} onmouseleave={() => h.hideTooltip()}></span>
                 {/if}
-                {#if rank.tag}<span class="dmsg-author-badge role" class:admin={!tagBg} style:background-color={tagBg} style:color={tagInk}>{rank.tag.name}</span>
+                {#if SHOW_ROLE_TAGS && rank.tag}<span class="dmsg-author-badge role" class:admin={!tagBg} style:background-color={tagBg} style:color={tagInk}>{rank.tag.name}</span>
                 {:else if rank.admin}<span class="dmsg-author-badge admin">admin</span>{/if}
                 {#if rank.owner}<span class="dmsg-author-badge owner">Owner</span>{/if}
                 {#if timeoutUntil}<span class="icon icon-clock-snooze dmsg-author-timeout" role="img" aria-label="Timed out" use:countdownTip={{ ...timeoutTip, until: timeoutUntil }}></span>{/if}
@@ -240,7 +242,7 @@
             <ReplyQuote view={quote} {h} />
         {/if}
         <div class="dmsg-header">
-            <span class="dmsg-author btn" data-npub={authorFullId || undefined} use:name={displayName}></span>
+            <span class="dmsg-author btn" data-npub={authorFullId || undefined} style:color={rank.color} use:name={displayName}></span>
             {#if isBot}
                 <!-- svelte-ignore a11y_no_static_element_interactions -->
                 <span
@@ -249,7 +251,7 @@
                     onmouseleave={() => h.hideTooltip()}
                 ></span>
             {/if}
-            {#if rank.tag}
+            {#if SHOW_ROLE_TAGS && rank.tag}
                 <span class="dmsg-author-badge role" class:admin={!tagBg} style:background-color={tagBg} style:color={tagInk}>{rank.tag.name}</span>
             {:else if rank.admin}
                 <span class="dmsg-author-badge admin">admin</span>

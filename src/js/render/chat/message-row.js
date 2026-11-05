@@ -405,6 +405,7 @@ const _dmsgMediaHelpers = {
  *   reducedMotion: () => boolean,
  *   reactionChipRemoved: () => void,
  *   roleTag: (communityId: string, npub: string) => ({ name: string, color: number }|null|undefined),
+ *   roleColor: (communityId: string, npub: string) => (string|null),
  * }} RowHelpers
  */
 const _dmsgRowHelpers = {
@@ -427,6 +428,7 @@ const _dmsgRowHelpers = {
     },
     hiddenLabel: (ctx) => _dmsgHiddenLabel(ctx),
     roleTag: (communityId, npub) => communityRoleTag(communityId, npub),
+    roleColor: (communityId, npub) => communityRoleColor(communityId, npub),
     renderCustomEmojiShortcodes: (el, tags) => renderCustomEmojiShortcodes(el, tags),
     showMiniProfile: (npub, el) => showMiniProfile(npub, el),
     systemEventName: (npub) => chatName(npub),

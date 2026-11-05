@@ -160,6 +160,9 @@
     const topBy = $derived(highest(() => true));
     // A member's section is their highest role that heads one.
     const heldBy = $derived(highest(sectionRole));
+    // On the new roles a name takes the colour of its holder's highest role that has one.
+    const colorBy = $derived(graph?.activated ? highest((r) => !!r.color) : new Map());
+    const hex = (c) => (c ? '#' + c.toString(16).padStart(6, '0') : null);
 
     // Sections are ROLES in hierarchy order. The legacy roles fall back to an Admin/Members
     // pair; on the new ones a member with no role shown separately is a Member, the owner too.
@@ -212,6 +215,7 @@
                 isAdmin,
                 rank: isOwner ? 'owner' : isAdmin ? 'admin' : null,
                 rankLabel: heldBy.get(m.npub)?.name || null,
+                nameColor: hex(colorBy.get(m.npub)?.color),
                 timeoutUntil: timedOutUntil(communityId, m.npub),
                 unlisted: m.unlisted || null,
                 canModerate: iOutrank(m.npub) && !!(caps.kick || caps.ban || caps.moderate_members),
@@ -396,6 +400,7 @@
                         veiled={vm.veiled}
                         rank={vm.rank}
                         rankLabel={vm.rankLabel}
+                        nameColor={vm.nameColor}
                         timeoutUntil={vm.timeoutUntil}
                         unlisted={vm.unlisted}
                         onunlisted={() => h.explainUnlisted(vm.unlisted)}

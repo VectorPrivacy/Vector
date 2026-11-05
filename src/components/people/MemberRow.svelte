@@ -14,6 +14,7 @@
         hasName = false,
         rank = null,
         rankLabel = null,
+        nameColor = null,         // see MemberName's color
         hoverBg = '',             // inline background for the hover overlay ('' = the CSS default)
         dim = false,              // banned / inactive rendering
         acting = false,           // pins hover-revealed controls visible during an async action
@@ -60,6 +61,7 @@
         {hasName}
         {rank}
         {rankLabel}
+        color={nameColor}
         bot={!!profile?.bot}
         {keyHint}
         {timeoutUntil}

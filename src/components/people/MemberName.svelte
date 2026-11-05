@@ -9,6 +9,7 @@
         hasName = false,          // real name → twemojify; a truncated npub has nothing to render
         rank = null,              // 'owner' | 'admin' | null
         rankLabel = null,         // the role's own name when the shield stands for a positioned role
+        color = null,             // the name's colour: their topmost coloured role
         bot = false,
         status = null,            // { title, emojiTags } — the person's NIP-38 status line
         keyHint = '',             // a shortened npub beside the name, so a copied name can't pass as its owner
@@ -63,7 +64,7 @@
 
 <div class="member-pick-identity" {style}>
     <div class="member-pick-nameline">
-        <div class="compact-member-name" use:name={display}></div>
+        <div class="compact-member-name" style:color={color} use:name={display}></div>
         {#if keyHint}<span class="member-pick-keyhint">{keyHint}</span>{/if}
         {#if rank === 'owner' || rank === 'admin'}
             <span
