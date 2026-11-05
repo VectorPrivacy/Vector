@@ -9,7 +9,6 @@
     import ProfileScreen from '../people/ProfileScreen.svelte';
     import Settings from '../settings/Settings.svelte';
     import InvitesScreen from '../people/InvitesScreen.svelte';
-    import NewChat from '../people/NewChat.svelte';
     import CreateCommunity from '../community/CreateCommunity.svelte';
     import LoginScreen from '../auth/LoginScreen.svelte';
     import Navbar from './Navbar.svelte';
@@ -119,9 +118,6 @@ import VoiceBar from '../calls/VoiceBar.svelte';
         </div>
     </div>
 
-    <div id="chat-new" style:display={panes.chatNew ? null : 'none'}>
-        {#if screens.chatNew}<NewChat h={screens.chatNew.h} />{/if}
-    </div>
     <div id="create-group" class="create-group-container" style:display={panes.createGroup ? null : 'none'}>
         {#if screens.createGroup}<CreateCommunity h={screens.createGroup.h} />{/if}
     </div>

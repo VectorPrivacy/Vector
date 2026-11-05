@@ -143,11 +143,9 @@ function closeQrScanner() {
 
 /**
  * The scanner is entered from the New Chat screen; put that screen away
- * before routing or the destination view stacks on top of it. Awaited
- * BEFORE opening the destination — closeChat hides the profile view too.
+ * before routing or the destination view stacks on top of it.
  */
 async function dismissNewChatForScan() {
-    if (VectorSvelte.paneShown('chatNew')) await closeChat();
     if (VectorSvelte.paneShown('createGroup')) leaveCreateGroup();
 }
 

@@ -108,11 +108,6 @@ document.addEventListener('DOMContentLoaded', registerCreateGroupScreen, { once:
 
 /** Open the New Chat panel: a DM or, with two or more people, a Community. */
 function openCreateGroup() {
-    // Mutually exclusive with Start New Chat — see openNewChat for why the pane and
-    // its back entry both have to go.
-    popBack('new-chat');
-    VectorSvelte.showPane('chatNew', false);
-
     pushBack('create-group', closeCreateGroup);
     VectorSvelte.ccOpen();
     VectorSvelte.showPane('createGroup', true);

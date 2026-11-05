@@ -257,7 +257,6 @@ body.ws #ws-conv-empty {
    list, so the chat list is permanently on screen in widescreen. They stack over
    #chat / #ws-conv-empty in the same cell and win on z-index. */
 body.ws #profile,
-body.ws #chat-new,
 body.ws #create-group,
 body.ws #invites {
   grid-column: 3;
@@ -323,7 +322,6 @@ body.ws #group-overview,
 body.ws #profile,
 body.ws #settings,
 body.ws #invites,
-body.ws #chat-new,
 body.ws #create-group,
 body.ws #ws-rail-account #account {
   animation-duration: 0s !important;
@@ -457,8 +455,7 @@ body.ws #chats > .fadeout-bottom {
    matters most: the entire profile body lives inside it, and left-unset it drops
    its banner-anchored Edit button on top of the rail. */
 body.ws .profile-header,
-body.ws .profile-content,
-body.ws .chat-new-header {
+body.ws .profile-content {
   left: var(--ws-main-left);
 }
 

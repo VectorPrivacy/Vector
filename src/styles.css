@@ -2879,17 +2879,7 @@ html, body {
 }
 @keyframes xfer-spin { to { transform: rotate(360deg); } }
 
-/* New Chat scan button — camera scanner entry, mobile-only (body.mobile) */
-#chat-new-scan-btn {
-  display: none;
-  color: #b2b2b2;
-  margin-right: 3px;
-  cursor: pointer;
-  /* Snug: the container's default 10px padding leaves the glyph tiny */
-  padding: 6px;
-}
 
-body.mobile #chat-new-scan-btn { display: block; }
 
 /* New Chat's link preview: a pasted invite or Vector link shows here, in the list's place,
    from the moment it is recognised: a skeleton while it loads, then the community. */
@@ -3030,13 +3020,7 @@ body.mobile #chat-new-scan-btn { display: block; }
 }
 body.mobile .create-group-scan { display: flex; }
 body.mobile #create-group-filter { padding-right: 46px !important; }
-#chat-new-scan-btn:hover { color: #fff; }
 
-#chat-new-scan-btn svg {
-  width: 100%;
-  height: 100%;
-  display: block;
-}
 
 /* Fullscreen QR scanner */
 .qr-scanner {
@@ -13229,32 +13213,6 @@ select:disabled:hover {
   color: var(--accent-color);
 }
 
-/* Text-accompanied "Back" Navigation button */
-.chat-new-back-text-btn {
-  display: flex;
-  align-items: center;
-  margin-left: 10px;
-}
-
-.chat-new-back-text {
-  font-size: 18px;
-  line-height: normal;
-  margin-left: 2px;
-}
-
-.chat-new-header {
-  position: fixed;
-  top: var(--chrome-h);
-  left: 0;
-  right: 0;
-  height: 60px;
-  background-color: rgba(22, 22, 22, 0.85);
-  z-index: 100;
-  backdrop-filter: blur(8px);
-  display: flex;
-  align-items: center;
-}
-
 .chat-new-content {
   margin-left: 50px;
   margin-right: 50px;
@@ -13274,25 +13232,8 @@ select:disabled:hover {
   margin-bottom: 10px;
 }
 
-.chat-new-npub {
-  opacity: 0.75;
-  font-size: 14px;
-  display: block;
-  line-break: anywhere;
-}
 
-#chat-new {
-  position: relative;
-  height: calc(100vh - var(--chrome-h));
-  overflow: hidden;
-  user-select: none;
-  -webkit-user-select: none;
-}
 
-#chat-new-input {
-  user-select: text;
-  -webkit-user-select: text;
-}
 
 .chat-new-center-content {
   position: absolute;
@@ -13318,124 +13259,20 @@ select:disabled:hover {
   opacity: 0.35;
 }
 
-.chat-new-subtitle {
-  margin-bottom: 0px;
-  letter-spacing: 1px;
-  text-align: center;
-  align-items: center;
-}
 
-.chat-new-subtitle-divider {
-  margin-top: 8px;
-  margin-bottom: 10px;
-  width: 325px;
-  margin: 0.5rem auto;
-}
 
-.chat-new-description {
-  opacity: 0.75;
-  font-size: 14px;
-  line-height: 18px !important;
-}
 
-#chat-new-box {
-  position: absolute;
-  bottom: 0;
-  width: 100%;
-  flex-shrink: 0;
-  padding-top: 5px;
-  padding-bottom: 5px;
-}
 
-#chat-new-input {
-  /* Flex sizing: `-webkit-fill-available` is unknown to older Firefox (Tor Browser),
-     which then falls back to the input's ~20-character default. */
-  flex: 1;
-  min-width: 0;
-  height: 20px;
-  padding: 10px;
-  padding-left: 14px;
-  line-height: inherit;
-  border: none;
-  background: transparent;
-  color: white;
-  font-size: 15px;
-}
 
-#chat-new-btn .icon {
-  background-color: var(--primary-color);
-}
 
-.chat-new-help {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  margin-top: auto;
-  padding-bottom: 5px;
-  gap: 6px;
-}
 
-.chat-new-help-icon {
-  position: relative;
-  width: 18px;
-  height: 18px;
-  min-width: 16px;
-  opacity: 0.5;
-  display: inline-block;
-  background-color: currentColor;
-  mask-size: contain;
-  mask-repeat: no-repeat;
-  mask-position: center;
-  padding: 0;
-  margin: 0;
-  top: auto;
-  left: auto;
-  right: auto;
-  bottom: auto;
-}
 
-.chat-new-help-title {
-  font-size: 14px;
-  opacity: 0.5;
-  font-weight: 500;
-}
 
-.chat-new-help-steps {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
-  margin-top: 6px;
-  padding-bottom: 25px;
-}
 
-.chat-new-help-step {
-  color: #ffffff80;
-  font-size: 13px;
-  font-weight: 500;
-}
 
-.chat-new-help-step:hover {
-  color: #ffffff;
-}
 
-.chat-new-help-arrow {
-  opacity: 1;
-  font-size: 14px;
-  color: var(--icon-color-primary);
-}
 
-.chat-new-help-link {
-  display: inline-flex;
-  align-items: center;
-  cursor: pointer;
-  color: #5B6060;
-}
 
-.chat-new-help-link:hover .chat-new-help-icon {
-  background-color: var(--icon-color-primary);
-  opacity: 1;
-}
 
 .settings-divider {
   margin-top: 40px;
@@ -13570,7 +13407,6 @@ body.mobile:not(.ws) .navbar-btn::before {
 @media (max-height: 500px) {
 
   .chat-new-center-content .chat-new-icon,
-  .chat-new-center-content .chat-new-subtitle,
   .chat-new-center-content .divider {
     display: none;
   }

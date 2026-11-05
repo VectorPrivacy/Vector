@@ -1079,7 +1079,6 @@ async function openChat(contact, { reread = true, fade = true } = {}) {
     navbarSelect('chat-btn');
     if (fProfileEditMode) exitProfileEditMode(true);
     VectorSvelte.showPane('profile', false);
-    VectorSvelte.showPane('chatNew', false);
     VectorSvelte.showPane('createGroup', false);
     VectorSvelte.showPane('chats', false);
     // Widescreen docks the roster beside the conversation: moving between community
@@ -1097,7 +1096,6 @@ async function openChat(contact, { reread = true, fade = true } = {}) {
     // entries behind would send back-nav to a panel that is no longer on screen.
     if (!keepDetails) popBack('group-overview');
     popBack('create-group');
-    popBack('new-chat');
     VectorSvelte.showPane('chat', true);
     // Match the fade transition the navbar/account tabs use for visual cohesion.
     if (fade && !swap) VectorSvelte.revealPane('chat', 'fadein-anim');
@@ -1479,7 +1477,6 @@ function openNewChat() {
  */
 async function closeChat() {
     popBack('chat');
-    popBack('new-chat');
     pinsOnChatClosed();
 
     // Clear any auto-scroll timer
@@ -1550,7 +1547,6 @@ async function closeChat() {
     VectorSvelte.showPane('profile', false);
     VectorSvelte.showPane('groupOverview', false);
     VectorSvelte.setShellFlag('settingsTab', true);
-    VectorSvelte.showPane('chatNew', false);
     VectorSvelte.showPane('chat', false);
     // Stash the unsent text as this chat's draft and clear the composer, so
     // the next open restores its own draft with a coherent mic/send state.
@@ -1951,21 +1947,6 @@ window.onresize = adjustSize;
 
 /** Wire the chat view chrome: bookmarks, scroll, new chat, reply bar. */
 async function wireChatUi() {
-    VectorSvelte.setScreen('chatNew', { h: {
-        back: closeChat,
-        // Same parser as the QR scanner: invites join, npubs DM, Vector links open, and any
-        // URL wrapper around them is ignored. No extractable npub falls through raw; openChat rejects.
-        start: (text) => {
-            const parsed = parseContactInput(text);
-            if (parsed?.kind === 'invite') { previewAndJoinCommunityLink(parsed.url); return; }
-            if (parsed?.kind === 'go') { closeChat().then(() => executeDeepLinkAction({ action_type: 'go', target: parsed.payload })); return; }
-            openChat(parsed?.npub || text);
-        },
-        scan: () => openQrScanner(),
-        helpEnter: (el) => showGlobalTooltip('Visit the Vector Privacy Docs', el),
-        helpLeave: hideGlobalTooltip,
-    } });
-
     // Self-Destruct Timer: right-click / long-press the Send button, plus the
     // active-timer clock indicator injected next to the composer.
 
