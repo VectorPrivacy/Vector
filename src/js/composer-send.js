@@ -281,7 +281,7 @@ async function sendMessage(messageText) {
         }
         // A colour command works in an edit too, unless a bot here claims the name.
         const editCmd = tcCommand(cleanedText);
-        if (editCmd && !editCmd.error && (!commandCtrl || commandCtrl.systemOwns(editCmd.typed))) {
+        if (editCmd && !editCmd.error && hasTextEffects() && (!commandCtrl || commandCtrl.systemOwns(editCmd.typed))) {
             cleanedText = tcCommandToMarkup(cleanedText);
         }
 

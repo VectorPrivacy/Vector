@@ -52,6 +52,16 @@ fn collect<'a>(tags: impl Iterator<Item = Vec<&'a str>>, content: &str) -> Vec<T
     out
 }
 
+/// `extract` for something this account sends or edits: the colour markup still comes out,
+/// but its colour only rides along with the Text Effects perk.
+pub fn extract_own(content: &str) -> (String, Vec<TextSpan>) {
+    let (plain, mut spans) = extract(content);
+    if !crate::badges::has_text_effects() {
+        spans.retain(|s| !matches!(s, TextSpan::Color(_)));
+    }
+    (plain, spans)
+}
+
 /// Take the markup out of `content`: colour tags, then `<t:…>` times. Returns the plain
 /// text and its spans, offsets in chars of that text.
 pub fn extract(content: &str) -> (String, Vec<TextSpan>) {

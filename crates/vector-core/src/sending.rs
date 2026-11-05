@@ -738,7 +738,7 @@ pub async fn send_dm(
     let receiver = PublicKey::from_bech32(receiver_npub)
         .map_err(|e| format!("Invalid npub: {}", e))?;
 
-    let (plain, text_spans) = crate::text_spans::extract(content);
+    let (plain, text_spans) = crate::text_spans::extract_own(content);
     let content = plain.as_str();
 
     // NIP-30: resolve any `:shortcode:` in the outbound text against the

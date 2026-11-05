@@ -32,11 +32,13 @@
 const SYSTEM_COMMAND_OWNER = 'system';
 const SYSTEM_COMMANDS = [
     {
+        textEffect: true,
         name: 'rainbow',
         description: `Send your message in rainbow ${TC_COLOR_WORD}s`,
         args: [{ name: 'text', type: 'string', required: true, description: `The message to ${TC_COLOR_WORD}` }],
     },
     {
+        textEffect: true,
         name: 'gradient',
         description: `Fade your message from one ${TC_COLOR_WORD} to another`,
         args: [
@@ -47,6 +49,7 @@ const SYSTEM_COMMANDS = [
     },
     {
         // `/color` or `/colour` by locale; the other spelling still runs it.
+        textEffect: true,
         name: TC_COLOR_WORD,
         description: `Send your message in one ${TC_COLOR_WORD}`,
         args: [
@@ -180,7 +183,8 @@ function initCommandSelector(textarea, io) {
                 out.push({ bot: b.bot, name: c.name, description: c.description || '', args: c.args || [] });
             }
         }
-        for (const c of SYSTEM_COMMANDS) out.push({ bot: SYSTEM_COMMAND_OWNER, ...c });
+        // The colour commands are a badge perk: without one they aren't commands at all.
+        for (const c of SYSTEM_COMMANDS) if (!c.textEffect || hasTextEffects()) out.push({ bot: SYSTEM_COMMAND_OWNER, ...c });
         return out;
     }
 

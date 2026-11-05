@@ -151,7 +151,7 @@ pub async fn send_community_message(channel_id: String, content: String, replied
         let reply = replied_to.filter(|r| !r.is_empty());
         let community_id = db::community::community_id_for_channel(&channel_id)?.ok_or("Unknown Community channel")?;
         let (content, role_mentions) = vector_core::community::mentions::resolve_in(&community_id, &content);
-        let (content, text_spans) = vector_core::text_spans::extract(&content);
+        let (content, text_spans) = vector_core::text_spans::extract_own(&content);
         let bot_pk = bot.as_deref().filter(|b| !b.is_empty()).and_then(|b| PublicKey::parse(b).ok());
         let mut extra_tags: Vec<Tag> = bot_pk.map(|pk| vec![vector_core::bot_interface::bot_tag(&pk)]).unwrap_or_default();
         extra_tags.extend(vector_core::text_spans::to_nostr_tags(&text_spans));

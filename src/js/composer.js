@@ -258,6 +258,8 @@ const CMP_UNPAINTED = new Set(['code', 'mention', 'npubmention', 'channelref', '
  * `colorKey` changes whenever a glyph would change colour, which repaints.
  */
 function cmpApplyColor(src, tokens, opts) {
+    // Colour is a badge perk: without it the markup sends as plain text, so it previews so.
+    if (!hasTextEffects()) return tokens;
     const pairs = tcScan(src);
     const cmd = tcCommand(src);
     // A bot in the chat that claims the name runs instead, and gets the text as typed.

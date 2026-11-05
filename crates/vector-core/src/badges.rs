@@ -154,6 +154,12 @@ pub fn effective_tier() -> u8 {
     bug_hunter_tier().max(if has_vector_badge() { 3 } else { 0 })
 }
 
+/// Text Effects (coloured text, gradients, rainbows) are a perk of any badge: tier 1 and up.
+/// Others' coloured messages always render; only sending colour is gated.
+pub fn has_text_effects() -> bool {
+    effective_tier() >= 1
+}
+
 /// A process role, not account state: the SDK runs one bot per process.
 static BOT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
@@ -671,6 +677,20 @@ mod tests {
         assert!(has_vector_badge());
         assert_eq!(effective_tier(), 3);
         rename_settings("settings_away", "settings");
+    }
+
+    #[test]
+    fn colour_only_sends_with_a_badge() {
+        let (_tmp, _guard, _me) = init_test_db();
+        let colours = |text: &str| {
+            let (plain, spans) = crate::text_spans::extract_own(text);
+            (plain, spans.iter().filter(|s| matches!(s, crate::text_spans::TextSpan::Color(_))).count())
+        };
+        assert!(!has_text_effects());
+        assert_eq!(colours("I <rainbow>love</rainbow> it"), ("I love it".into(), 0), "the markup goes, its colour with it");
+        store_bug_hunter_tier(1);
+        assert!(has_text_effects());
+        assert_eq!(colours("I <rainbow>love</rainbow> it"), ("I love it".into(), 1));
     }
 
     #[test]

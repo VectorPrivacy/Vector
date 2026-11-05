@@ -1139,7 +1139,7 @@ impl VectorCore {
             let receiver_pubkey = PublicKey::from_bech32(to_npub).map_err(|e| VectorError::Nostr(e.to_string()))?;
             let reference_event = EventId::from_hex(message_id).map_err(|e| VectorError::Nostr(e.to_string()))?;
 
-            let (plain, text_spans) = crate::text_spans::extract(new_content);
+            let (plain, text_spans) = crate::text_spans::extract_own(new_content);
             let new_content = plain.as_str();
             // NIP-30: resolve `:shortcode:` so the edit carries emoji image tags.
             let emoji_tags = emoji_packs::resolve_outbound_emoji_tags(new_content);
@@ -2192,7 +2192,7 @@ impl VectorCore {
         let (named, role_mentions) = crate::community::mentions::resolve_in(&crate::simd::hex::bytes_to_hex_32(&id.0), content);
         // NIP-30: resolve `:shortcode:` against subscribed packs so the rumor
         // carries `["emoji", ...]` pairs.
-        let (plain, text_spans) = crate::text_spans::extract(&named);
+        let (plain, text_spans) = crate::text_spans::extract_own(&named);
         let content = plain.as_str();
         let emoji_owned = crate::emoji_packs::resolve_outbound_emoji_tags(content);
         let emoji_pairs: Vec<(&str, &str)> = emoji_owned.iter().map(|t| (t.shortcode.as_str(), t.url.as_str())).collect();
@@ -2382,7 +2382,7 @@ impl VectorCore {
         let id = self.v2_community_for_channel(channel_id)?.ok_or_else(|| VectorError::Other("unknown community channel".into()))?;
         // An edit names a Role in text only: it pings nobody anew.
         let (named, _) = crate::community::mentions::resolve_in(&crate::simd::hex::bytes_to_hex_32(&id.0), new_content);
-        let (plain, text_spans) = crate::text_spans::extract(&named);
+        let (plain, text_spans) = crate::text_spans::extract_own(&named);
         let new_content = plain.as_str();
         let span_tags: Vec<nostr_sdk::prelude::Tag> = crate::text_spans::to_nostr_tags(&text_spans).collect();
         let emoji_tags = emoji_packs::resolve_outbound_emoji_tags(new_content);

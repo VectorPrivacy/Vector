@@ -642,7 +642,7 @@ pub async fn send_community_message(
         let community_id = vector_core::db::community::community_id_for_channel(&channel_id)?
             .ok_or("Unknown Community channel")?;
         let (content, role_mentions) = vector_core::community::mentions::resolve_in(&community_id, &content);
-        let (content, text_spans) = vector_core::text_spans::extract(&content);
+        let (content, text_spans) = vector_core::text_spans::extract_own(&content);
         let span_tags: Vec<nostr_sdk::prelude::Tag> = vector_core::text_spans::to_nostr_tags(&text_spans)
             .chain(vector_core::community::mentions::to_tags(&role_mentions))
             .collect();
@@ -1195,7 +1195,7 @@ async fn dispatch_community_attachment_message(
             .ok_or("Unknown Community channel")?;
         // A caption names a Role in text only.
         let (content, _) = vector_core::community::mentions::resolve_in(&community_id, &content);
-        let (content, text_spans) = vector_core::text_spans::extract(&content);
+        let (content, text_spans) = vector_core::text_spans::extract_own(&content);
         let id_bytes = hex_to_id32(&community_id)?;
         // Resolved before any upload work.
         let community = vector_core::db::community::load_community_v2(&CommunityId(id_bytes))?

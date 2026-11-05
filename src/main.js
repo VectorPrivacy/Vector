@@ -249,6 +249,12 @@ let fProfileEditMode = false;
 // the own-profile badge display reads the reliable persisted flag instead of
 // re-querying the (often flaky) holding relay on every open.
 let _myBadges = null;
+/** Text Effects (colour, gradients, rainbows) come with any badge: effective tier 1 and up.
+ *  The backend enforces it on send; this keeps the tools out of reach without it. */
+function hasTextEffects() {
+    return (_myBadges?.tier | 0) >= 1;
+}
+
 // Session cache of other users' Fawkes-badge results, keyed by npub, so
 // re-opening a profile doesn't re-fetch from the relay each time. Badges are
 // permanent, so a session-lifetime cache is safe; next launch re-resolves.
