@@ -151,6 +151,100 @@ pub(crate) use services::{NotificationData, show_notification_generic};
 const MAIN_WINDOW_STATE: tauri_plugin_window_state::StateFlags = tauri_plugin_window_state::StateFlags::all()
     .difference(tauri_plugin_window_state::StateFlags::VISIBLE.union(tauri_plugin_window_state::StateFlags::DECORATIONS));
 
+/// A fresh install opens wide enough for the full rail, as a share of the screen at most.
+#[cfg(desktop)]
+const FRESH_WINDOW: (f64, f64) = (1280.0, 800.0);
+#[cfg(desktop)]
+const FRESH_WINDOW_SHARE: f64 = 0.9;
+/// tauri.conf.json's minimum, given up only where the screen is smaller still.
+#[cfg(desktop)]
+const MIN_WINDOW: (f64, f64) = (385.0, 575.0);
+
+/// The main window's saved frame, in physical pixels: size, top-left corner, and whether it was
+/// maximized or fullscreen. None on a fresh install.
+#[cfg(desktop)]
+struct SavedFrame {
+    w: i64,
+    h: i64,
+    x: i64,
+    y: i64,
+    maximized: bool,
+    fullscreen: bool,
+}
+
+/// Read from the window-state file itself: a restore is applied to the window a moment after
+/// it is asked for on macOS, so the window can't yet be asked what it was restored to.
+#[cfg(desktop)]
+fn saved_main_frame(app: &tauri::AppHandle) -> Option<SavedFrame> {
+    use tauri_plugin_window_state::AppHandleExt;
+    let dir = app.path().app_config_dir().ok()?;
+    let state: serde_json::Value = serde_json::from_slice(&std::fs::read(dir.join(app.filename())).ok()?).ok()?;
+    let main = state.get("main")?;
+    let int = |k: &str| main.get(k).and_then(|v| v.as_i64());
+    let flag = |k: &str| main.get(k).and_then(|v| v.as_bool()).unwrap_or(false);
+    Some(SavedFrame {
+        w: int("width")?,
+        h: int("height")?,
+        x: int("x")?,
+        y: int("y")?,
+        maximized: flag("maximized"),
+        fullscreen: flag("fullscreen"),
+    })
+}
+
+/// Holds the main window to a screen's usable area (less the menu bar, Dock or taskbar). A first
+/// launch takes FRESH_WINDOW, centred on the primary screen; a restored window keeps its place on
+/// the screen it was saved on, moved and shrunk only as far as it takes to fit there.
+#[cfg(desktop)]
+fn fit_main_window(window: &tauri::WebviewWindow, saved: Option<&SavedFrame>) {
+    use tauri::{PhysicalPosition, PhysicalSize};
+    // macOS calls any window past the screen's size "maximized"; elsewhere a maximized window
+    // already fills the work area, its frame hanging just past it.
+    if saved.is_some_and(|f| f.fullscreen || (f.maximized && !cfg!(target_os = "macos"))) {
+        return;
+    }
+    let overlap = |m: &tauri::Monitor, f: &SavedFrame| {
+        let a = m.work_area();
+        let (ax, ay) = (a.position.x as i64, a.position.y as i64);
+        let w = (f.x + f.w).min(ax + a.size.width as i64) - f.x.max(ax);
+        let h = (f.y + f.h).min(ay + a.size.height as i64) - f.y.max(ay);
+        w.max(0) * h.max(0)
+    };
+    let on_saved = saved.and_then(|f| {
+        window.available_monitors().ok()?.into_iter().filter(|m| overlap(m, f) > 0).max_by_key(|m| overlap(m, f))
+    });
+    let Some(monitor) = on_saved.or_else(|| window.primary_monitor().ok().flatten()) else { return };
+    let area = *monitor.work_area();
+    let (ax, ay) = (area.position.x as i64, area.position.y as i64);
+    let (aw, ah) = (area.size.width as i64, area.size.height as i64);
+    if aw == 0 || ah == 0 {
+        return;
+    }
+    let scale = monitor.scale_factor();
+    let (min_w, min_h) = ((MIN_WINDOW.0 * scale).round() as i64, (MIN_WINDOW.1 * scale).round() as i64);
+    if min_w > aw || min_h > ah {
+        let _ = window.set_min_size(Some(PhysicalSize::new(min_w.min(aw) as u32, min_h.min(ah) as u32)));
+    }
+    let (w, h, x, y) = match saved {
+        None => {
+            let w = (FRESH_WINDOW.0 * scale).min(aw as f64 * FRESH_WINDOW_SHARE).round() as i64;
+            let h = (FRESH_WINDOW.1 * scale).min(ah as f64 * FRESH_WINDOW_SHARE).round() as i64;
+            let (w, h) = (w.max(min_w).min(aw), h.max(min_h).min(ah));
+            (w, h, ax + (aw - w) / 2, ay + (ah - h) / 2)
+        }
+        Some(f) => {
+            let (w, h) = (f.w.min(aw), f.h.min(ah));
+            let (x, y) = (f.x.clamp(ax, ax + aw - w), f.y.clamp(ay, ay + ah - h));
+            if (w, h, x, y) == (f.w, f.h, f.x, f.y) {
+                return;
+            }
+            (w, h, x, y)
+        }
+    };
+    let _ = window.set_size(PhysicalSize::new(w as u32, h as u32));
+    let _ = window.set_position(PhysicalPosition::new(x as i32, y as i32));
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // The UI thread runs every synchronous command: a database wait there freezes the window.
@@ -466,7 +560,11 @@ pub fn run() {
             #[cfg(desktop)]
             {
                 use tauri_plugin_window_state::WindowExt;
-                let _ = window.restore_state(MAIN_WINDOW_STATE);
+                let saved = saved_main_frame(app.handle());
+                if saved.is_some() {
+                    let _ = window.restore_state(MAIN_WINDOW_STATE);
+                }
+                fit_main_window(&window, saved.as_ref());
             }
 
             // The window is born hidden (tauri.conf `visible: false`) so the frontend
