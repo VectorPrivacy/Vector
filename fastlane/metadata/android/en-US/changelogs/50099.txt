@@ -1,0 +1,9 @@
+Vector 0.5.0 "Vigil".
+- Widescreen and slim layouts, with a Main Menu
+- Voice and video calls, and voice channels in Communities
+- Roles, permissions, categories and private channels
+- Tor, I2P or Standard routing for every connection
+- Private media storage and message Requests
+- Notifications while Vector is closed
+- Sign in on another device by scanning a code
+- One New Chat for DMs, Communities and invites
