@@ -72,8 +72,22 @@ function abandonTransfer() {
 /** A phone being set up starts on scanning, since the device it moves from shows its code by default. */
 const scanFirst = () => !transferSend && platformFeatures.is_mobile;
 
-/** Open the card. `send` only from Settings on the signed-in device: never from a link or a scan. */
+/** Open the card. `send` only on a signed-in device the user is holding: Settings, or a code
+ *  scanned there. Never from a link. */
 function openTransfer(send) {
+    openTransferCard(send);
+    if (scanFirst()) transferPatch({ stage: 'pick' });
+    else showTransferCode();
+}
+
+/** The scanner read a new device's code on this signed-in one: send to it. The number match,
+ *  the warning and the user's proof still stand between the scan and the account leaving. */
+function sendTransferTo(code) {
+    openTransferCard(true);
+    joinTransfer(code);
+}
+
+function openTransferCard(send) {
     transferSend = send;
     VectorSvelte.transferModal.open({
         role: send ? 'sender' : 'receiver', stage: 'connecting', code: '', qr: '', expiresAt: 0,
@@ -81,8 +95,6 @@ function openTransfer(send) {
         finishFailed: false, error: '', canScan: !!platformFeatures.is_mobile,
     });
     pushBack('transfer', onTransferBack);
-    if (scanFirst()) transferPatch({ stage: 'pick' });
-    else showTransferCode();
 }
 
 function closeTransfer() {

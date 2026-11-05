@@ -5,6 +5,7 @@
 let qrScanStream = null;
 let qrScanRafId = 0;
 let qrScanToastGate = false;
+let qrScanRouting = false;
 /** A flow that opened the scanner for itself gets what it reads; it answers true if it took it. */
 let qrScanTaker = null;
 // The scanner's video element, handed over by the component once it mounts.
@@ -171,20 +172,39 @@ function parseContactInput(text) {
     return null;
 }
 
-/** Route a decoded QR payload: profile npubs, Community invites and Vector links. */
+/** Route a decoded QR payload: anything Vector opens. A new device's sign-in code sends this
+ *  account to it; a link opens its place (a profile, an invite's card, a pack, Settings, an
+ *  app, a Vector link); a bare npub or a wrapped invite opens as typed into New Chat would. */
 async function handleScannedQr(text) {
+    // Frames keep decoding while a link is looked up: the first one routes, the rest are dropped.
+    if (qrScanRouting) return;
+    qrScanRouting = true;
+    try { await routeScannedQr(text); } finally { qrScanRouting = false; }
+}
+
+async function routeScannedQr(text) {
     if (qrScanTaker) {
         if (qrScanTaker(text)) closeQrScanner();
         else nudgeNotOurQr('Not a transfer code');
         return;
     }
-    // A transfer code is never routed from here: sending an account starts only from Settings.
-    if (/^\s*vector transfer code:/i.test(text)) {
+    if (TRANSFER_CODE_RE.test(text)) {
         closeQrScanner();
         await dismissNewChatForScan();
-        popupConfirm('Transfer Code',
-            'To sign this account in on another device, open Settings and choose Sign in on another device.',
-            true, '', 'vector_warning.svg');
+        // Signed in, this device sends; before login it is the new device, and receives.
+        if (strPubkey) {
+            sendTransferTo(text);
+        } else {
+            openTransferCard(false);
+            joinTransfer(text);
+        }
+        return;
+    }
+    const place = await invoke('parse_deep_link', { url: text.trim() }).catch(() => null);
+    if (place) {
+        closeQrScanner();
+        await dismissNewChatForScan();
+        executeDeepLinkAction(place);
         return;
     }
     const parsed = parseContactInput(text);
