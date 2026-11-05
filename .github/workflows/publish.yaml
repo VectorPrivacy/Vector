@@ -15,6 +15,8 @@ env:
   # The rustc scripts/fdroid-build.sh pins too: a build repeats exactly, and its caches stay warm
   # until this line moves.
   RUST_TOOLCHAIN: 1.98.0
+  # A retried `tauri build` reuses this job's dist/ (scripts/build-frontend.mjs).
+  VECTOR_FRONTEND_ONCE: ${{ github.sha }}
 
 jobs:
   # The release this push builds into, made once before any build starts: jobs that each made it
@@ -234,11 +236,12 @@ jobs:
           releaseId: ${{ needs.release.outputs.id }}
           # latest.json is built once by `checksums`: every matrix job editing the shared asset raced.
           includeUpdaterJson: false
-          # One more `tauri build` (compiled crates kept) and upload on a failure: a flake this late
-          # would otherwise cost the whole job again.
+          # One more `tauri build` and upload on a failure: a flake this late would otherwise cost
+          # the whole job again. tauri.ci.conf.json and VECTOR_FRONTEND_ONCE keep the retry from
+          # recompiling the app.
           retryAttempts: 1
           tauriScript: npm run tauri
-          args: ${{ matrix.args }} ${{ needs.release.outputs.prerelease == 'true' && '--config src-tauri/tauri.preview.conf.json' || '' }}
+          args: ${{ matrix.args }} --config src-tauri/tauri.ci.conf.json ${{ needs.release.outputs.prerelease == 'true' && '--config src-tauri/tauri.preview.conf.json' || '' }}
 
       # The executable before bundling: two builds of one commit should print the same hash.
       - name: Fingerprint the binary

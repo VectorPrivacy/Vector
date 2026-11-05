@@ -20,7 +20,8 @@ the same input rather than mint a versionCode that can't be ordered.
 
 ## Cutting a release
 
-1. Bump `version` in `src-tauri/Cargo.toml`, and `package.json` to match. Mirror the pair into
+1. Bump `version` in `src-tauri/Cargo.toml`, and `package.json` to match (and its two lines in
+   `package-lock.json`). Mirror the pair into
    `src-tauri/gen/android/app/version.properties` (F-Droid reads it; Gradle and a test refuse a
    stale one).
    For an official release, add `fastlane/metadata/android/en-US/changelogs/<versionCode>.txt`
