@@ -158,14 +158,14 @@
     // A member's section is their highest role that heads one.
     const heldBy = $derived(highest(sectionRole));
 
-    // Sections are ROLES in hierarchy order; Admin/Members is the fallback pair when
-    // the graph defines nothing.
+    // Sections are ROLES in hierarchy order. The legacy roles fall back to an Admin/Members
+    // pair; on the new ones a member with no role shown separately is a Member, the owner too.
     const sectionOrder = $derived.by(() => {
         const order = [];
         for (const role of [...(graph?.roles || [])].filter(sectionRole).sort((a, b) => a.position - b.position)) {
             order.push({ id: role.role_id, label: role.name, role: true });
         }
-        if (!order.length) order.push({ id: 'admin', label: 'Admin' });
+        if (!order.length && !graph?.activated) order.push({ id: 'admin', label: 'Admin' });
         order.push({ id: 'members', label: 'Members' });
         return order;
     });
