@@ -56,6 +56,7 @@ async function ccPickAvatar() {
  * @property {(key: string) => Promise<object>} resolveInvite   { state: 'ok'|'err', info, iconSrc }
  * @property {(communityId: string) => boolean} isMember
  * @property {(key: string, communityId: string) => Promise<void>} joinInvite
+ * @property {() => void} openHub
  */
 function registerCreateGroupScreen() {
     VectorSvelte.setScreen('createGroup', {
@@ -85,6 +86,7 @@ function registerCreateGroupScreen() {
             resolveInvite: (key) => _resolveCommunityInvitePreview(key),
             isMember: (communityId) => !!findCommunityChat(communityId),
             joinInvite: ccJoinInvite,
+            openHub: () => openUrl('https://vectorapp.io/hub'),
             pickerProps: async () => ({
                 profiles: [...arrProfiles],
                 getProfile: (npub) => getProfile(npub),

@@ -21918,19 +21918,6 @@ body.profile-switcher-editing .profile-switcher-add {
   line-height: 1.2;
   color: rgba(255, 255, 255, 0.8);
 }
-/* Decorative oversized glyph, sunk past the pill's top and right bounds. */
-.chatlist-get-started-watermark {
-  position: absolute;
-  top: -16px;
-  bottom: 0;
-  right: -15px;
-  width: 100px;
-  height: 100px;
-  pointer-events: none;
-}
-.chatlist-get-started-watermark .icon {
-  background-color: var(--accent-color, #59fcb3);
-}
 /* Bottom-of-list welcome: Viktor beside a short nudge toward the Hub.
    Fixed above the navbar, same anchoring as the list's fadeout. */
 .chatlist-intro {
@@ -21970,6 +21957,22 @@ body.profile-switcher-editing .profile-switcher-add {
 .chatlist-intro-link {
   color: var(--accent-color, #59fcb3);
   cursor: pointer;
+}
+/* New Chat's empty picker sits in the middle of the room the list would fill. */
+#create-group-list:has(> .cp-empty) {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+#create-group-list > .cp-empty { padding-bottom: 40px; }
+/* New Chat's empty picker: the Hub invitation under "No contacts yet". */
+.cmt-empty.cp-hub {
+  /* The words dim as the line above does; the link keeps its full accent. */
+  opacity: 1;
+  color: rgba(255, 255, 255, 0.4);
+  margin: -6px 0 0;
+  text-align: center;
+  line-height: 1.5;
 }
 .chatlist-intro-link:hover {
   text-decoration: underline;

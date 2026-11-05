@@ -545,7 +545,7 @@ body:is(.ws, .cc) .chatlist-get-started-badge .icon {
 body:is(.ws, .cc) .chatlist-get-started-text {
   flex: 1;
   min-width: 0;
-  padding-right: 44px;
+  padding-right: 12px;
 }
 body:is(.ws, .cc) .chatlist-get-started-text h4 {
   font-size: 15px;
@@ -565,14 +565,6 @@ body:is(.ws, .cc) .chatlist-get-started-text p {
 @container (min-width: 290px) {
   body:is(.ws, .cc) .chatlist-get-started-text p { display: block; }
 }
-body:is(.ws, .cc) .chatlist-get-started-watermark {
-  top: 2px;
-  right: -8px;
-  width: 44px;
-  height: 44px;
-  opacity: 0.55;
-}
-
 body.ws.ws-details .pins-drawer {
   right: var(--ws-details-w);
 }
@@ -729,9 +721,14 @@ body.ws #ws-rail-account #account-avatar-container {
   display: flex;
 }
 
-body.ws #ws-rail-account #account-avatar-container img {
+body.ws #ws-rail-account #account-avatar-container img,
+body.ws #ws-rail-account #account-avatar-container .placeholder-avatar {
   width: 38px !important;
   height: 38px !important;
+  min-width: 38px !important;
+  min-height: 38px !important;
+  max-width: 38px !important;
+  max-height: 38px !important;
 }
 
 body.ws:not(.ws-rail-collapsed) #ws-rail-account #account-name {
@@ -1571,7 +1568,8 @@ body:is(.ws, .cc) #ws-rail-spaces .ws-rail-rows::-webkit-scrollbar {
    The label carries its own rule, so a hidden group takes its heading and its
    hairline with it — one box to hide rather than three siblings to keep in
    step. `hidden` is set by js/render/rail.js when a group has no rows. */
-body:is(.ws, .cc) .ws-rail-group[hidden] {
+body:is(.ws, .cc) .ws-rail-group[hidden],
+body:is(.ws, .cc) #ws-rail-spaces[hidden] {
   display: none;
 }
 
@@ -2408,6 +2406,42 @@ body.ws.ws-resizing #chat {
   margin: 0;
   font-size: 14px;
   color: rgba(255, 255, 255, 0.35);
+}
+
+/* With no chats yet, Viktor's welcome takes the pane in place of the watermark: a list with
+   nothing in it has nothing to pick. */
+#ws-conv-empty:has(.chatlist-intro) > img,
+#ws-conv-empty:has(.chatlist-intro) > p {
+  display: none;
+}
+body.ws #ws-conv-empty .chatlist-intro {
+  position: static;
+  flex-direction: column;
+  gap: 18px;
+  max-width: 400px;
+  padding: 0 24px;
+  text-align: center;
+  animation: ws-intro-in 0.4s cubic-bezier(0.22, 1, 0.36, 1);
+}
+@keyframes ws-intro-in {
+  from { opacity: 0; transform: translateY(8px); }
+}
+body.ws #ws-conv-empty .chatlist-intro-viktor {
+  width: 146px;
+  height: 146px;
+  opacity: 1;   /* not the watermark's */
+}
+body.ws #ws-conv-empty .chatlist-intro-text h4 {
+  margin-bottom: 10px;
+  font-size: 24px;
+  font-weight: 700;
+}
+body.ws #ws-conv-empty .chatlist-intro-text p {
+  font-size: 15px;
+  line-height: 1.55;
+}
+@media (prefers-reduced-motion: reduce) {
+  body.ws #ws-conv-empty .chatlist-intro { animation: none; }
 }
 
 /* ===================== 8. Widescreen list-row polish ===================== */

@@ -127,7 +127,7 @@
             <div id="create-group-list" class="create-group-list" style:display={link ? 'none' : null}>
                 {#key st.seq}
                     {#if pickerProps}
-                        <ContactPicker bind:this={picker} {...pickerProps} onSelectionChange={(sel) => ccSetSelected(sel.size)} />
+                        <ContactPicker bind:this={picker} {...pickerProps} onHub={h.openHub} onSelectionChange={(sel) => ccSetSelected(sel.size)} />
                     {/if}
                 {/key}
             </div>

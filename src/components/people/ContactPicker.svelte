@@ -28,6 +28,7 @@
         profiles = [],               // initial snapshot; later profile loads ride setProfiles()
         getProfile = null,           // (npub) => live profile; rows track its signal when given
         onSelectionChange = () => {}, // (sel: Set) — fires with a copy on every selection change
+        onHub = null,                // () => void — given, an empty list invites people to the Hub
     } = $props();
 
     // Raw discipline: profiles are shared by reference with the page's arrProfiles array —
@@ -140,9 +141,15 @@
 </script>
 
 {#if rows.length === 0}
-    <p class="cmt-empty" style="text-align:center;">
-        {filter.trim() ? 'No matches.' : 'No contacts yet. Paste an npub to invite someone.'}
-    </p>
+    <div class="cp-empty">
+        <p class="cmt-empty" style="text-align:center;">
+            {filter.trim() ? 'No matches.' : 'No contacts yet. Paste an npub to invite someone.'}
+        </p>
+        {#if onHub && !filter.trim()}
+            <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+            <p class="cmt-empty cp-hub"><span class="chatlist-intro-link" onclick={onHub}>Explore the Vector Hub</span> to discover communities to join and meet new people.</p>
+        {/if}
+    </div>
 {:else}
     {#each rows as row (row.npub)}
         <MemberRow
