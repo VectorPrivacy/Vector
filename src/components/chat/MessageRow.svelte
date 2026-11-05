@@ -114,10 +114,21 @@
     const rank = $derived.by(() => {
         if (communityId) communityVersion(communityId);
         const chat = ctx.currentChat;
-        const admin = ctx.isGroupChat && !!chat?.metadata?.admins?.includes(authorFullId);
-        const owner = !!(chat?.metadata?.custom_fields?.owner_npub && authorFullId
+        const isOwner = !!(chat?.metadata?.custom_fields?.owner_npub && authorFullId
             && chat.metadata.custom_fields.owner_npub === authorFullId);
-        return { admin, owner };
+        // On the new roles the tag is their topmost role shown separately, the owner's too; the
+        // legacy roles have only the Owner and admin chips.
+        const tag = communityId ? h.roleTag(communityId, authorFullId) : null;
+        const legacy = tag === undefined;
+        const admin = legacy && ctx.isGroupChat && !!chat?.metadata?.admins?.includes(authorFullId);
+        return { admin, owner: legacy && isOwner, tag: tag || null };
+    });
+    // A role's colour behind its name, with whichever ink reads on it. Colourless takes the accent.
+    const tagBg = $derived(rank.tag?.color ? '#' + rank.tag.color.toString(16).padStart(6, '0') : null);
+    const tagInk = $derived.by(() => {
+        const c = rank.tag?.color;
+        if (!c) return null;
+        return 0.299 * (c >> 16 & 255) + 0.587 * (c >> 8 & 255) + 0.114 * (c & 255) > 150 ? '#000' : '#fff';
     });
 
     // ── actions: the vanilla leaf builders ──
@@ -210,7 +221,8 @@
                     <!-- svelte-ignore a11y_no_static_element_interactions -->
                     <span class="icon icon-bot dmsg-author-bot-icon" onmouseenter={(e) => h.showTooltip('Bot', e.currentTarget)} onmouseleave={() => h.hideTooltip()}></span>
                 {/if}
-                {#if rank.admin}<span class="dmsg-author-badge admin">admin</span>{/if}
+                {#if rank.tag}<span class="dmsg-author-badge role" class:admin={!tagBg} style:background-color={tagBg} style:color={tagInk}>{rank.tag.name}</span>
+                {:else if rank.admin}<span class="dmsg-author-badge admin">admin</span>{/if}
                 {#if rank.owner}<span class="dmsg-author-badge owner">Owner</span>{/if}
                 {#if timeoutUntil}<span class="icon icon-clock-snooze dmsg-author-timeout" role="img" aria-label="Timed out" use:countdownTip={{ ...timeoutTip, until: timeoutUntil }}></span>{/if}
                 <time class="dmsg-time">{hourMinute}</time>
@@ -237,7 +249,9 @@
                     onmouseleave={() => h.hideTooltip()}
                 ></span>
             {/if}
-            {#if rank.admin}
+            {#if rank.tag}
+                <span class="dmsg-author-badge role" class:admin={!tagBg} style:background-color={tagBg} style:color={tagInk}>{rank.tag.name}</span>
+            {:else if rank.admin}
                 <span class="dmsg-author-badge admin">admin</span>
             {/if}
             {#if rank.owner}

@@ -173,6 +173,8 @@ async function loadCommunityRoles(communityId) {
     try { adminNpubs = await invoke('get_community_admins', { communityId }); } catch (_) { return; }
     await loadCommunityMentions(communityId);
     applyCommunityAdmins(communityId, adminNpubs);
+    // Read for chat tags once a channel of it has opened; kept current from then on.
+    if (communityRoleGraphCache.has(communityId)) loadCommunityRoleGraph(communityId);
 }
 
 /** Read what members are called in a community; names already painted follow. */
@@ -537,6 +539,41 @@ const communityMemberCounts = new Map();
 const communityMembersCache = new Map();
 /** A community's role graph (roles + grants), cached so the roster paints grouped on reopen. */
 const communityRoleGraphCache = new Map();
+/** Each graph's chat tags, npub → { name, color }. */
+const _roleTagsByGraph = new WeakMap();
+
+/**
+ * A member's chat tag: their topmost role shown separately, as { name, color }. null for
+ * none or a graph not read yet; undefined on the legacy roles, where the admin chip stands.
+ */
+function communityRoleTag(communityId, npub) {
+    const graph = communityRoleGraphCache.get(communityId);
+    if (!graph) return null;
+    if (!graph.activated) return undefined;
+    let tags = _roleTagsByGraph.get(graph);
+    if (!tags) {
+        const shown = new Map((graph.roles || []).filter(r => r.display).map(r => [r.role_id, r]));
+        tags = new Map();
+        for (const g of graph.grants || []) {
+            let top = null;
+            for (const id of g.role_ids || []) {
+                const r = shown.get(id);
+                if (r && (!top || r.position < top.position)) top = r;
+            }
+            if (top) tags.set(g.npub, { name: top.name, color: top.color || 0 });
+        }
+        _roleTagsByGraph.set(graph, tags);
+    }
+    return tags.get(npub) || null;
+}
+
+/** Read a community's role graph; the open channel's tags follow. */
+async function loadCommunityRoleGraph(communityId) {
+    let graph;
+    try { graph = await invoke('get_community_role_graph', { communityId }); } catch (_) { return; }
+    communityRoleGraphCache.set(communityId, graph);
+    communityChanged(communityId);
+}
 const _communityCountLastFetch = new Map();
 const _communityCountInFlight = new Set();
 /** One `get_community_members` per community at a time: the header count and the roster ask together. */

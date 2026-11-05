@@ -1366,6 +1366,7 @@ async function openChat(contact, { reread = true, fade = true } = {}) {
     // composer the same way a blocked DM does and mark the timeline's end.
     const isDissolvedChat = chatIsDissolved(chat);
     const communityId = communityIdOfChat(chat);
+    if (communityId && !communityRoleGraphCache.has(communityId)) loadCommunityRoleGraph(communityId);
     const openChannel = communityId ? communityChannelsCache.get(communityId)?.find(c => c.id === chat.id) : null;
     document.body.classList.toggle('ws-channel-private', !!openChannel?.private);
     document.body.classList.toggle('ws-channel-voice', openChannel?.view === 'voice');

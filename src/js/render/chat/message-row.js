@@ -404,6 +404,7 @@ const _dmsgMediaHelpers = {
  *   bindCachedImg: (img: HTMLImageElement, url: string, onUnavailable?: () => void) => void,
  *   reducedMotion: () => boolean,
  *   reactionChipRemoved: () => void,
+ *   roleTag: (communityId: string, npub: string) => ({ name: string, color: number }|null|undefined),
  * }} RowHelpers
  */
 const _dmsgRowHelpers = {
@@ -425,6 +426,7 @@ const _dmsgRowHelpers = {
         VectorSvelte.flushSync();
     },
     hiddenLabel: (ctx) => _dmsgHiddenLabel(ctx),
+    roleTag: (communityId, npub) => communityRoleTag(communityId, npub),
     renderCustomEmojiShortcodes: (el, tags) => renderCustomEmojiShortcodes(el, tags),
     showMiniProfile: (npub, el) => showMiniProfile(npub, el),
     systemEventName: (npub) => chatName(npub),

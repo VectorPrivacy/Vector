@@ -20696,7 +20696,8 @@ textarea.command-part-input {
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.5px;
-  padding: 2px 5px;
+  /* Capitals ride high in Rubik's em box (the descender space sits below them): drop them to centre. */
+  padding: 2.75px 5px 1.25px;
   border-radius: 3px;
   line-height: 1;
   vertical-align: center;
@@ -20708,6 +20709,12 @@ textarea.command-part-input {
 .dmsg-author-badge.owner {
   background: #fce459;
   color: #000;
+}
+.dmsg-author-badge.role {
+  max-width: 14em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .dmsg-time {

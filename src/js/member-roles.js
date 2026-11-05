@@ -186,8 +186,9 @@ async function memberRolesChanged(communityId) {
     let graph = null;
     try { admins = await invoke('get_community_admins', { communityId }); } catch (_) {}
     try { graph = await invoke('get_community_role_graph', { communityId }); } catch (_) {}
-    if (admins) applyCommunityAdmins(communityId, admins);
     if (graph) communityRoleGraphCache.set(communityId, graph);
+    if (admins) applyCommunityAdmins(communityId, admins);
+    else if (graph) communityChanged(communityId);
     if (groupRoster && groupRosterCommunityId === communityId) {
         groupRoster.setRoster({ ...(admins ? { admins } : {}), ...(graph ? { roleGraph: graph } : {}) });
     }
