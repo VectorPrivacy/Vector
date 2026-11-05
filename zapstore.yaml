@@ -23,7 +23,7 @@ description: |
     - Private notifications: hide sender and content from your notification shade
     - Photos strip EXIF and location metadata by default
     - Zero metadata leakage
-    - Integrated WebXDC mini-app store (Nexus)
+    - Integrated WebXDC mini-app store (Vector App Store)
     - Mentions, reactions, emoji shortcodes, image spoilers, and rich link previews
 summary: A decentralized, privacy-focused community messenger with zero metadata leakage
 tags:
