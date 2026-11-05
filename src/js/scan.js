@@ -148,6 +148,7 @@ function closeQrScanner() {
  */
 async function dismissNewChatForScan() {
     if (VectorSvelte.paneShown('chatNew')) await closeChat();
+    if (VectorSvelte.paneShown('createGroup')) leaveCreateGroup();
 }
 
 /**

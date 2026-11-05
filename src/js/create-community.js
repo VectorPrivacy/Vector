@@ -48,6 +48,14 @@ async function ccPickAvatar() {
  * @property {() => void} close
  * @property {(selection: string[]) => Promise<void>} create
  * @property {() => Promise<object>} pickerProps     ContactPicker's props for this open
+ * @property {(text: string) => ('invite'|'go'|null)} linkKind   a pasted link the footer can open
+ * @property {(text: string) => void} openLink
+ * @property {(npub: string) => void} startDm
+ * @property {() => void} scan
+ * @property {(text: string) => string|null} inviteKey   the invite a pasted link names
+ * @property {(key: string) => Promise<object>} resolveInvite   { state: 'ok'|'err', info, iconSrc }
+ * @property {(communityId: string) => boolean} isMember
+ * @property {(key: string, communityId: string) => Promise<void>} joinInvite
  */
 function registerCreateGroupScreen() {
     VectorSvelte.setScreen('createGroup', {
@@ -58,6 +66,25 @@ function registerCreateGroupScreen() {
             pickAvatar: ccPickAvatar,
             close: closeCreateGroup,
             create: createCommunityFromPanel,
+            linkKind: (text) => {
+                const kind = parseContactInput(text)?.kind;
+                return kind === 'invite' || kind === 'go' ? kind : null;
+            },
+            openLink: (text) => {
+                const parsed = parseContactInput(text);
+                leaveCreateGroup();
+                if (parsed?.kind === 'invite') previewAndJoinCommunityLink(parsed.url);
+                else if (parsed?.kind === 'go') executeDeepLinkAction({ action_type: 'go', target: parsed.payload });
+            },
+            startDm: (npub) => { leaveCreateGroup(); openChat(npub); },
+            scan: () => openQrScanner(),
+            inviteKey: (text) => {
+                const m = (text || '').match(/(naddr1[a-z0-9]{20,})[^#\s]*#([A-Za-z0-9_-]{20,})/i);
+                return m ? `${m[1].toLowerCase()}#${m[2]}` : null;
+            },
+            resolveInvite: (key) => _resolveCommunityInvitePreview(key),
+            isMember: (communityId) => !!findCommunityChat(communityId),
+            joinInvite: ccJoinInvite,
             pickerProps: async () => ({
                 profiles: [...arrProfiles],
                 getProfile: (npub) => getProfile(npub),
@@ -79,7 +106,7 @@ function registerCreateGroupScreen() {
 // Registered once every script is in: the bag calls helpers from files that load later.
 document.addEventListener('DOMContentLoaded', registerCreateGroupScreen, { once: true });
 
-/** Open the Create Community panel. */
+/** Open the New Chat panel: a DM or, with two or more people, a Community. */
 function openCreateGroup() {
     // Mutually exclusive with Start New Chat — see openNewChat for why the pane and
     // its back entry both have to go.
@@ -92,6 +119,26 @@ function openCreateGroup() {
     VectorSvelte.showPane('chats', false);
     VectorSvelte.showPane('chat', false);
     VectorSvelte.showPane('navbar', false);
+}
+
+/** Join (or, as a member, open) the community a pasted invite names. The panel stays up,
+ *  busy, through the join's few seconds, and steps aside once the community opens. */
+async function ccJoinInvite(key, communityId) {
+    const member = findCommunityChat(communityId);
+    if (member) { leaveCreateGroup(); openChat(member.id); return; }
+    VectorSvelte.ccSetBusy(true, 'Joining...');
+    await _joinCommunityFromCard(key, communityId);
+    if (!findCommunityChat(communityId)) { VectorSvelte.ccSetBusy(false); return; }
+    // The join opened the community, which already took the screen.
+    popBack('create-group');
+    VectorSvelte.showPane('createGroup', false);
+}
+
+/** Put the panel away for whatever it opens next: the destination takes the screen. */
+function leaveCreateGroup() {
+    popBack('create-group');
+    VectorSvelte.showPane('createGroup', false);
+    VectorSvelte.showPane('navbar', true);
 }
 
 /** Close the panel and return to the chat list. */

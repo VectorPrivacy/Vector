@@ -2890,6 +2890,146 @@ html, body {
 }
 
 body.mobile #chat-new-scan-btn { display: block; }
+
+/* New Chat's link preview: a pasted invite or Vector link shows here, in the list's place,
+   from the moment it is recognised: a skeleton while it loads, then the community. */
+.cg-link {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  width: 100%;
+  /* As wide as the two actions under it: two 220px buttons and their 10px gap. */
+  max-width: 450px;
+  margin: 28px auto 0;
+  padding: 36px 24px 34px;
+  box-sizing: border-box;
+  border: 1px solid #262626;
+  border-radius: 16px;
+  background: linear-gradient(180deg, #161616, #0d0d0d);
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.45);
+  text-align: center;
+  animation: cg-link-in 0.32s cubic-bezier(0.22, 1, 0.36, 1);
+}
+@keyframes cg-link-in {
+  from { opacity: 0; transform: translateY(10px) scale(0.98); }
+}
+.cg-link-eyebrow {
+  margin-bottom: 18px;
+  color: var(--icon-color-primary, #59fcb3);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+.cg-link-icon {
+  display: block;
+  width: 88px;
+  height: 88px;
+  border-radius: 22px;
+  object-fit: cover;
+  background-color: #0a0a0a;
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.06), 0 10px 28px rgba(0, 0, 0, 0.5);
+}
+.cg-link-icon.is-warning,
+.cg-link-icon.is-mark { padding: 18px; box-sizing: border-box; object-fit: contain; }
+.cg-link-name {
+  margin-top: 16px;
+  max-width: 100%;
+  overflow: hidden;
+  color: #fff;
+  font-size: 22px;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cg-link-desc {
+  display: -webkit-box;
+  margin-top: 8px;
+  overflow: hidden;
+  color: #a8a8a8;
+  font-size: 14px;
+  line-height: 1.5;
+  white-space: pre-line;
+  overflow-wrap: anywhere;
+  -webkit-line-clamp: 4;
+  -webkit-box-orient: vertical;
+}
+.cg-link-member {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 16px;
+  padding: 5px 12px 5px 8px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--icon-color-primary, #59fcb3) 12%, transparent);
+  color: var(--icon-color-primary, #59fcb3);
+  font-size: 12px;
+  font-weight: 600;
+}
+.cg-link-member .icon {
+  position: relative;
+  width: 14px;
+  height: 14px;
+  background-color: currentColor;
+}
+.cg-link-skel-name { display: block; width: 58%; height: 20px; margin-top: 18px; }
+.cg-link-skel-desc { display: block; width: 82%; height: 12px; margin-top: 12px; }
+.cg-link-skel-desc.short { width: 50%; margin-top: 8px; }
+.cg-link-wait {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 20px;
+  color: #8a8a8a;
+  font-size: 13px;
+}
+.cg-link-spin {
+  width: 14px;
+  height: 14px;
+  border: 2px solid rgba(255, 255, 255, 0.15);
+  border-top-color: var(--icon-color-primary, #59fcb3);
+  border-radius: 50%;
+  animation: cg-link-spin 0.8s linear infinite;
+}
+@keyframes cg-link-spin { to { transform: rotate(360deg); } }
+.cg-link.is-invalid .cg-link-eyebrow { color: #8a8a8a; }
+.create-group-footer.cg-link-actions {
+  width: 100%;
+  box-sizing: border-box;
+  max-width: 450px;
+  margin: 14px auto 0;
+  padding: 0;
+  flex-wrap: nowrap;
+}
+@media (prefers-reduced-motion: reduce) {
+  .cg-link { animation: none; }
+}
+
+/* New Chat's scan button: phones only, where there is a camera to point. */
+.create-group-scan {
+  display: none;
+  position: absolute;
+  top: 50%;
+  right: 6px;
+  transform: translateY(-50%);
+  align-items: center;
+  justify-content: center;
+  padding: 6px;
+  border: none;
+  background: none;
+  color: #b2b2b2;
+  cursor: pointer;
+}
+.create-group-scan:hover { color: #fff; }
+.create-group-scan-glyph {
+  width: 22px;
+  height: 22px;
+  background-color: currentColor;
+  -webkit-mask: url("./icons/qr-scan.svg") center / contain no-repeat;
+  mask: url("./icons/qr-scan.svg") center / contain no-repeat;
+}
+body.mobile .create-group-scan { display: flex; }
+body.mobile #create-group-filter { padding-right: 46px !important; }
 #chat-new-scan-btn:hover { color: #fff; }
 
 #chat-new-scan-btn svg {
@@ -16875,6 +17015,16 @@ button.popout-thumb {
   flex-direction: column;
   height: calc(100vh - var(--chrome-h));
   overflow: hidden;
+  container-type: inline-size;
+}
+/* The settings' page gutters, on everything the panel holds. */
+.create-group-content,
+.create-group-container > .create-group-footer {
+  box-sizing: border-box;
+  width: 100%;
+  max-width: calc(var(--page-content-max) + 2 * var(--page-gutter));
+  margin-inline: auto;
+  padding-inline: var(--page-gutter);
 }
 
 .create-group-content {
@@ -24415,18 +24565,21 @@ body.mobile .cs-close-key { display: none; }
   container-type: inline-size;
 }
 
-/* Side gutters are a share of the pane, so a page keeps its proportions from a laptop to a
-   4K screen. Where the pane gets tight they give their room up first, holding the content
-   at --cs-content-min, then fall to the phone's 18px; past --cs-content-max a very wide
-   pane centres the page instead of stretching its rows apart. */
+/* Page gutters (Settings, New Chat): a share of the pane, so a page keeps its proportions
+   from a laptop to a 4K screen. Where the pane gets tight they give their room up first,
+   holding the content at --page-content-min, then fall to the phone's 18px; past
+   --page-content-max a very wide pane centres the page instead of stretching its rows
+   apart. cqi reads the nearest container: the page's pane. */
+:root {
+  --page-content-min: 584px;
+  --page-content-max: 1100px;
+  --page-gutter: max(18px, min(18cqi, (100cqi - var(--page-content-min)) / 2));
+}
 .cs-content {
-  --cs-content-min: 584px;
-  --cs-content-max: 1100px;
-  --cs-gutter: max(18px, min(18cqi, (100cqi - var(--cs-content-min)) / 2));
-  max-width: var(--cs-content-max);
+  max-width: var(--page-content-max);
   margin: 0 auto;
   /* The save bar floats over the bottom; the last block must scroll clear of it. */
-  padding: 12px var(--cs-gutter) 140px;
+  padding: 12px var(--page-gutter) 140px;
   transition: opacity 0.2s ease;
 }
 .cs-content.loading { opacity: 0.4; pointer-events: none; }

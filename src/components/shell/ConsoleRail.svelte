@@ -16,7 +16,7 @@
             <RailShortcuts h={screens.rail.h} snapshot={screens.rail.snapshot}>
                 {#snippet tail()}
                     <!-- The last things in the list, so they scroll with the communities. -->
-                    <button class="cc-rail-add" title="New Community" aria-label="New Community" onclick={() => h().openCreateGroup?.()}>
+                    <button class="cc-rail-add" title="New Chat" aria-label="New Chat" onclick={() => h().openNewChat?.()}>
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
                     </button>
                     <button class="cc-rail-fold" title="Hide communities" aria-label="Hide communities" onclick={() => h().consoleSetRail?.(false)}>

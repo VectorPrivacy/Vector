@@ -1469,25 +1469,9 @@ async function handleIncomingShare(payload) {
     showToast('Choose a chat to forward to');
 }
 
-/**
- * Open the dialog for starting a new chat
- */
+/** Start a new chat: the one panel that opens a DM or makes a Community. */
 function openNewChat() {
-    // The two composers are alternatives, not layers. Left up, the other one stays
-    // behind this pane with its back entry intact, so closing this one reveals it
-    // instead of returning to the list. Not closeCreateGroup(): that navigates to
-    // the chat list, which is where we are leaving.
-    popBack('create-group');
-    VectorSvelte.showPane('createGroup', false);
-
-    pushBack('new-chat', closeChat);
-    // Display the UI
-    VectorSvelte.showPane('chatNew', true);
-    VectorSvelte.showPane('chats', false);
-    VectorSvelte.showPane('chat', false);
-
-    // Hide the Navbar
-    VectorSvelte.showPane('navbar', false);
+    openCreateGroup();
 }
 
 /**
