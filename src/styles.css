@@ -24411,13 +24411,22 @@ body.mobile .cs-close-key { display: none; }
   flex: 1;
   min-height: 0;
   overflow-y: auto;
+  /* The page's gutters are measured against this pane, not the window. */
+  container-type: inline-size;
 }
 
+/* Side gutters are a share of the pane, so a page keeps its proportions from a laptop to a
+   4K screen. Where the pane gets tight they give their room up first, holding the content
+   at --cs-content-min, then fall to the phone's 18px; past --cs-content-max a very wide
+   pane centres the page instead of stretching its rows apart. */
 .cs-content {
-  max-width: 584px;
+  --cs-content-min: 584px;
+  --cs-content-max: 1100px;
+  --cs-gutter: max(18px, min(18cqi, (100cqi - var(--cs-content-min)) / 2));
+  max-width: var(--cs-content-max);
   margin: 0 auto;
   /* The save bar floats over the bottom; the last block must scroll clear of it. */
-  padding: 12px 36px 140px;
+  padding: 12px var(--cs-gutter) 140px;
   transition: opacity 0.2s ease;
 }
 .cs-content.loading { opacity: 0.4; pointer-events: none; }
