@@ -34,11 +34,11 @@
 
 <div class="create-group-content">
     <center class="chat-new-content">
-        <h2 class="chat-new-title"><span class="icon icon-chats chat-new-icon" style="width: 50px; height: 30px; opacity: 0.7; display: inline-block; vertical-align: bottom;"></span>Create New Group</h2>
+        <h2 class="chat-new-title"><span class="icon icon-chats chat-new-icon" style="width: 50px; height: 30px; opacity: 0.7; display: inline-block; vertical-align: bottom;"></span>Create New Community</h2>
         <hr class="divider chat-new-divider">
         <div class="row create-group-name-row" style="gap: 12px; align-items: center; padding: 0 15px;">
             <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-            <div class="create-group-avatar-picker" class:has-image={!!st.avatarPreview} title="Choose group avatar" onclick={h.pickAvatar}>
+            <div class="create-group-avatar-picker" class:has-image={!!st.avatarPreview} title="Choose community icon" onclick={h.pickAvatar}>
                 {#if st.avatarPreview}
                     <img class="create-group-avatar-preview" src={st.avatarPreview} alt="">
                 {:else}
@@ -47,7 +47,7 @@
                 <div class="create-group-avatar-edit"><span class="icon icon-plus-circle"></span></div>
             </div>
             <div class="create-group-name-wrap" class:needs-name={st.selected > 0}>
-                <input id="create-group-name" placeholder="Group Name..." maxlength="32" class="chat-input-container chat-new-input" bind:value={st.name} bind:this={nameInput}>
+                <input id="create-group-name" placeholder="Community Name..." maxlength="32" class="chat-input-container chat-new-input" bind:value={st.name} bind:this={nameInput}>
                 <span class="create-group-name-required">Required*</span>
             </div>
         </div>
@@ -76,6 +76,6 @@
     <p class="chat-contact-status" class:cmt-err={st.error}>
         {#if st.status}{st.status}{:else if st.selected}<span class="create-group-selection-pill"><span class="cg-pill-glyph"><span class="icon icon-users-multi"></span></span>{st.selected} User{st.selected === 1 ? '' : 's'} Selected</span>{/if}
     </p>
-    <button id="create-group-create-btn" class="btn accept-btn btn-bounce" disabled={!nameOk || st.busy} onclick={() => h.create([...(picker?.getSelection() || [])])}>{st.busy ? 'Creating...' : 'Create Group'}</button>
+    <button id="create-group-create-btn" class="btn accept-btn btn-bounce" disabled={!nameOk || st.busy} onclick={() => h.create([...(picker?.getSelection() || [])])}>{st.busy ? 'Creating...' : 'Create Community'}</button>
     <button class="btn cancel-btn" onclick={h.close}>Cancel</button>
 </div>

@@ -1074,8 +1074,8 @@ body:is(.ws, .cc) .chatlist-channels-pane .chatlist-channel.active {
   color: #fff;
 }
 
-/* New Chat and Group Chat both start DMs; over a community's channels they are
-   answers to a question nobody asked. The rail's mark is one click away. */
+/* New Chat and New Community belong to the chat list; over a community's channels
+   they are answers to a question nobody asked. The rail's mark is one click away. */
 body.ws.ws-community-pane #chat-new-actions {
   display: none !important;
 }
@@ -2480,7 +2480,7 @@ body.ws .chatlist-contact-timestamp {
   margin-right: 8px;
 }
 
-/* The pair of composer buttons has less room per button here, and "Group Chat"
+/* The pair of composer buttons has less room per button here, and "New Community"
    was wrapping to a second line while "New Chat" stayed on one. */
 body.ws .new-chat-btn {
   font-size: 13px;
@@ -2491,8 +2491,8 @@ body.ws .new-chat-btn {
    drives it: two of them plus the gap outgrow the container right about where the
    text would wrap, so flex-wrap decides and no width threshold lives in JS.
 
-   132px, not the 128px "Group Chat" actually measures. A basis equal to the label's
-   own width leaves the buttons exactly 128.00px wide on the pane width where they
+   163px, not the 158.8px "New Community" actually measures. A basis equal to the
+   label's own width leaves the buttons exactly that wide on the pane width where they
    unstack — and the label needs a hair over that, so one single pane width still
    wrapped. The 4px is the margin that window closes into. nowrap is the backstop:
    at a width nobody predicted the label clips rather than reflowing the row.
@@ -2505,7 +2505,7 @@ body.ws #chat-new-actions {
 }
 
 body.ws #chat-new-actions .new-chat-btn {
-  flex: 1 1 132px;
+  flex: 1 1 163px;
   min-width: 0;
   width: auto !important;
   margin: 0 !important;

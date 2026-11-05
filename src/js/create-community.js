@@ -29,7 +29,7 @@ function ccPasteNpub(np, picker) {
 async function ccPickAvatar() {
     const { open } = window.__TAURI__.dialog;
     const file = await open({
-        title: 'Choose Group Avatar', multiple: false, directory: false,
+        title: 'Choose Community Icon', multiple: false, directory: false,
         filters: [{ name: 'Image', extensions: ['png', 'jpeg', 'jpg', 'gif', 'webp'] }],
     });
     if (!file) return;

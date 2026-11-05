@@ -153,7 +153,7 @@
                 <!-- svelte-ignore a11y_no_static_element_interactions -->
                 <span
                     class="icon icon-users-multi chatlist-type-icon"
-                    onmouseenter={(e) => h.showGlobalTooltip('Group Chat', e.currentTarget)}
+                    onmouseenter={(e) => h.showGlobalTooltip('Community', e.currentTarget)}
                     onmouseleave={() => h.hideGlobalTooltip()}
                 ></span>
             {:else if vm.profile?.bot}

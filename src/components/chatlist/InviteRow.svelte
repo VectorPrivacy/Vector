@@ -32,8 +32,8 @@
     <div class="chatlist-contact-preview">
         <div class="chatlist-contact-header">
             <h4 class="cutoff">{invite.name || 'Community'}</h4>
-            <span class="icon icon-users-multi chatlist-type-icon" role="img" aria-label="Group Chat"
-                  onmouseenter={(e) => h.showGlobalTooltip('Group Chat', e.currentTarget)} onmouseleave={() => h.hideGlobalTooltip()}></span>
+            <span class="icon icon-users-multi chatlist-type-icon" role="img" aria-label="Community"
+                  onmouseenter={(e) => h.showGlobalTooltip('Community', e.currentTarget)} onmouseleave={() => h.hideGlobalTooltip()}></span>
         </div>
         <p class="cutoff">Community invite</p>
     </div>

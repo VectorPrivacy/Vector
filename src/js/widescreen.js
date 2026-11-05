@@ -135,8 +135,8 @@ function wsOpenDmHome() {
 }
 
 /** Mirror the pane's mode onto the body, for the chrome that belongs to one of
- *  them: New Chat / Group Chat start DMs, so they have no place over a
- *  community's channels. */
+ *  them: New Chat / New Community belong to the chat list, so they have no place
+ *  over a community's channels. */
 function wsSyncPaneMode() {
     document.body.classList.toggle('ws-community-pane', !!wsListCommunityId());
 }
