@@ -21,7 +21,8 @@ export function timedOutUntil(communityId, npub) {
 /** Hold a community's running Timeouts. Returns whether anything changed. */
 export function setCommunityTimeouts(communityId, running) {
     const next = running || {};
-    if (JSON.stringify(byCommunity.get(communityId) || null) === JSON.stringify(next)) return false;
-    byCommunity.set(communityId, next);
-    return true;
+    // A first read that finds none changes nothing already painted.
+    const changed = JSON.stringify(byCommunity.get(communityId) || {}) !== JSON.stringify(next);
+    if (changed || !byCommunity.has(communityId)) byCommunity.set(communityId, next);
+    return changed;
 }

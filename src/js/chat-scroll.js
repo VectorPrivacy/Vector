@@ -163,9 +163,14 @@ async function renderWindow(startIdx, endIdx) {
 
     // Re-insert the unread divider if its anchor row is in the window, preserving
     // the original anchor mode (after the boundary row vs before the first-unread).
+    // Off this slice it waits for its row: the divider lasts until the chat closes.
     if (dividerTargetId) {
         const node = document.getElementById(dividerTargetId);
         if (node) insertUnreadDivider(node, dividerAnchorAfter);
+        else {
+            _pendingUnreadDividerId = dividerTargetId;
+            _pendingUnreadDividerAfter = dividerAnchorAfter;
+        }
     }
     // Land a pending manual-scroll frontier divider if its row just entered the slice.
     tryPlacePendingDivider();

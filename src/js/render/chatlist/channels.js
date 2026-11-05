@@ -226,7 +226,12 @@ async function refreshTimeoutLock(chat) {
     const hadDenied = [...(channelSendDeniedCache.get(chat.id) || [])].join();
     channelSendDeniedCache.set(chat.id, new Set(denied));
     const changed = timeoutsChanged || hadDenied !== [...channelSendDeniedCache.get(chat.id)].join();
-    if (changed && strOpenChat === chat.id) openChat(strOpenChat);
+    // Repaint in place: re-opening would read the chat again and drop its "New" divider.
+    if (changed && strOpenChat === chat.id) {
+        VectorSvelte.touchWindow();
+        VectorSvelte.flushSync();
+        compensateChatScrollForResize();
+    }
     const mine = communityTimeoutsFor(communityId)?.[strPubkey];
     if (!mine || strOpenChat !== chat.id) return;
     const until = new Date(mine.until * 1000).toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' });

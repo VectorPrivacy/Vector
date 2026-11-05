@@ -2680,15 +2680,14 @@ window.addEventListener("DOMContentLoaded", async () => {
 
         // Single catch-up entry point for "the user is now actually looking":
         // window regained focus OR tab became visible. Marks the open chat as
-        // read and clears its divider, but only when pinned — scrolled-up
-        // users haven't seen the new messages just because they refocused.
+        // read, but only when pinned — scrolled-up users haven't seen the new
+        // messages just because they refocused. The divider stays until the chat closes.
         const onWindowResumed = () => {
             if (!strOpenChat || !chatPinnedToBottom) return;
             const currentChat = getChat(strOpenChat);
             if (!currentChat?.messages?.length) return;
             const latestNonMine = findLatestContactMessage(currentChat.messages);
             if (latestNonMine) markAsRead(currentChat, latestNonMine);
-            clearUnreadDivider();
         };
 
         await getCurrentWindow().onFocusChanged((event) => {

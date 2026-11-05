@@ -885,8 +885,6 @@ async function setupRustListeners() {
             // the tail (the user saw it) — never on a data-only/frozen path.
             if (!newMessage.mine && rendered && tailAppend && chatPinnedToBottom && isWindowActive()) {
                 markAsRead(chat, newMessage);
-                // A chat held unread keeps its divider.
-                if (!isChatUnreadLatched(chat.id) && !chat.unread_from) clearUnreadDivider();
             }
             // Own-send catches up to the latest non-mine message AT OR BEFORE this send
             // (never past it — see findLatestContactMessage).

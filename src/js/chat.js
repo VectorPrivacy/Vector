@@ -355,10 +355,11 @@ function _updateChatWindow(chat, sortedMessages, single) {
             VectorSvelte.setArrival(single.id);
             // Bump the scroll-down badge if the user is reading above; drop a divider
             // when the window is inactive (pinned but tabbed out, so unseen).
+            // A divider waiting off-window already marks an older boundary.
             if (!chatPinnedToBottom) {
                 incrementUnreadBelow();
-                insertUnreadDivider(domMsg);
-            } else if (!isWindowActive()) {
+                if (!_pendingUnreadDividerId) insertUnreadDivider(domMsg);
+            } else if (!isWindowActive() && !_pendingUnreadDividerId) {
                 insertUnreadDivider(domMsg);
             }
         }
@@ -367,6 +368,7 @@ function _updateChatWindow(chat, sortedMessages, single) {
         // Sending counts as "read up to here".
         scrollToBottom(domChatMessages, false);
         clearUnreadDivider();
+        _pendingUnreadDividerId = null;
     }
     // Only the newest own message shows its "Sent" mark.
 }
@@ -1854,8 +1856,8 @@ function insertUnreadDivider(anchorEl, anchorAfter = false) {
 /**
  * Drop the "New" divider without moving what the reader sees.
  *
- * It is cleared from places that know nothing about scroll: refocusing the
- * window, sending, the last unread below being deleted. Removing it shrinks the
+ * It is cleared from places that know nothing about scroll: sending, the last
+ * unread below being deleted. Removing it shrinks the
  * list by its height, so a pinned view is re-pinned explicitly (WKWebView can
  * leave its scroll layer past the new bottom when the clamp lands during a focus
  * change, showing blank space until the next gesture), and a view scrolled past
