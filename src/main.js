@@ -2697,6 +2697,12 @@ window.addEventListener("DOMContentLoaded", async () => {
             syncMotion();
             syncBackendActiveChat();
         });
+        // A window focused before the listener existed never reports it, and the page's own
+        // hasFocus() is often false at launch: ask the window.
+        try {
+            windowFocused = await getCurrentWindow().isFocused();
+            syncMotion();
+        } catch { /* stays as the page guessed until the next focus change */ }
 
         document.addEventListener('visibilitychange', () => {
             const wasActive = isWindowActive();
