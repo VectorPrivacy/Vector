@@ -11,8 +11,9 @@
  *   node scripts/build-frontend.mjs --dev    # plain copy, no minification
  */
 
-import { cpSync, rmSync, readdirSync, readFileSync, writeFileSync, statSync, symlinkSync, lstatSync, unlinkSync, readlinkSync } from 'fs';
+import { cpSync, rmSync, readdirSync, readFileSync, writeFileSync, statSync, symlinkSync, lstatSync, unlinkSync, readlinkSync, existsSync } from 'fs';
 import { join, dirname, extname, basename } from 'path';
+import { tmpdir } from 'os';
 import { fileURLToPath } from 'url';
 import { buildSvelte } from './build-svelte.mjs';
 
@@ -25,6 +26,16 @@ const isDev = process.argv.includes('--dev');
 const isCopy = process.argv.includes('--copy');
 
 console.log(`[build-frontend] ${isDev ? 'DEV' : isCopy ? 'COPY' : 'RELEASE'} build`);
+
+// CI sets VECTOR_FRONTEND_ONCE to the commit: a retried `tauri build` keeps the dist/ it
+// already made, since rewriting it re-links the app from scratch (~45 min on an Intel Mac).
+const builtStamp = process.env.VECTOR_FRONTEND_ONCE
+    ? join(tmpdir(), `vector-frontend-${process.env.VECTOR_FRONTEND_ONCE}`)
+    : null;
+if (!isDev && !isCopy && builtStamp && existsSync(builtStamp) && existsSync(DIST)) {
+    console.log('  dist/ already built for this commit in this job (kept)');
+    process.exit(0);
+}
 
 // ── Step 0: compile Svelte islands → src/components.bundle.js ─────────────
 // Runs first in every mode so the bundle exists in src/ before the symlink/copy.
@@ -233,6 +244,7 @@ for (const file of htmlFiles) {
 const totalPct = ((1 - totalAfter / totalBefore) * 100).toFixed(1);
 console.log(`\n  Total: ${(totalBefore / 1024).toFixed(1)}K → ${(totalAfter / 1024).toFixed(1)}K (${totalPct}% reduction)`);
 console.log('  Done!');
+if (builtStamp) writeFileSync(builtStamp, '');
 
 if (replacedDevLink) {
     console.log('\n  NOTE: this replaced the dev symlink with a real dist/.');
