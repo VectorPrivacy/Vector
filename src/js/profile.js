@@ -62,6 +62,7 @@ function registerProfileScreen() {
             },
             invitedCount: (npub) => invoke('get_invited_users', { npub }),
             fawkesBadge: resolveFawkesBadge,
+            v2026Badge: resolveV2026Badge,
             bugHunterTier: resolveBugHunterTier,
             showInviteBadge: (count) => showBadgeCard({ title: 'Vector Beta Inviter', html: `Acquired by inviting <b>${count} ${count === 1 ? 'user' : 'users'}</b> to the Vector Beta!`, svg: 'vector_badge_placeholder.svg' }),
             showFawkesCard,

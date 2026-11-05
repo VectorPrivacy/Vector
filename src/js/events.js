@@ -313,8 +313,9 @@ async function setupRustListeners() {
     // Badge cache resolved post-sync — lift emoji-pack limits if we hold the
     // Vector badge. Pure UI gating; the backend enforces authoritatively.
     _on('badges_updated', (evt) => {
-        _myBadges = { vector: !!evt.payload?.vector, tier: evt.payload?.tier | 0, bug_hunter: evt.payload?.bug_hunter | 0 };
+        _myBadges = { ...evt.payload, vector: !!evt.payload?.vector, tier: evt.payload?.tier | 0, bug_hunter: evt.payload?.bug_hunter | 0 };
         applyTierLimits(_myBadges.tier);
+        syncDropBadges(_myBadges);
         // Our own open profile re-derives its badges from the fresh cache.
         if (VectorSvelte.paneShown('profile') && VectorSvelte.profileViewState().id === strPubkey) {
             VectorSvelte.touchProfile(strPubkey);

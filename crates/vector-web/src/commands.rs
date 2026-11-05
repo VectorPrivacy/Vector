@@ -306,11 +306,7 @@ pub async fn dispatch(cmd: &str, a: Args) -> Result<Value, String> {
         }
         "get_blossom_servers_config" => to_value(vector_core::blossom_servers::list_all_servers()),
         "get_media_servers" => to_value(vector_core::state::get_blossom_servers()),
-        "get_my_badges" => Ok(json!({
-            "vector": vector_core::badges::has_vector_badge(),
-            "tier": vector_core::badges::effective_tier(),
-            "bug_hunter": vector_core::badges::bug_hunter_tier(),
-        })),
+        "get_my_badges" => Ok(vector_core::badges::own_summary()),
         "get_max_account_tier" => Ok(json!(vector_core::badges::max_account_tier())),
 
         // --- Chats ---

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-claim-vector-2026-badge"
+description = "Enables the claim_vector_2026_badge command without any pre-configured scope."
+commands.allow = ["claim_vector_2026_badge"]
+
+[[permission]]
+identifier = "deny-claim-vector-2026-badge"
+description = "Denies the claim_vector_2026_badge command without any pre-configured scope."
+commands.deny = ["claim_vector_2026_badge"]

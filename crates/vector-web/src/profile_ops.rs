@@ -64,6 +64,8 @@ pub fn dispatch<'a>(cmd: &'a str, a: &'a Args) -> Pin<Box<dyn Future<Output = Op
             "get_invited_users" => get_invited_users(a).await,
             "check_fawkes_badge" => check_fawkes_badge(a).await,
             "get_bug_hunter_tier" => get_bug_hunter_tier(a).await,
+            "claim_vector_2026_badge" => vector_core::badges::claim_v2026().await.map(|()| Value::Null),
+            "check_vector_2026_badge" => vector_core::badges::check_v2026(&pubkey_arg(a, "npub")?).await.map(|has| json!(has)),
 
             // --- Storage ---
             "get_storage_info" => Ok(storage_info().await),

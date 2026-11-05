@@ -244,11 +244,20 @@ pub async fn check_fawkes_badge(npub: String) -> Result<bool, String> {
 /// Drives badge-gated UI such as the emoji-pack limits.
 #[tauri::command]
 pub fn get_my_badges() -> serde_json::Value {
-    serde_json::json!({
-        "vector": vector_core::badges::has_vector_badge(),
-        "tier": vector_core::badges::effective_tier(),
-        "bug_hunter": vector_core::badges::bug_hunter_tier(),
-    })
+    vector_core::badges::own_summary()
+}
+
+/// Claim V for Vector 2026 for this account, while its window is open.
+#[tauri::command]
+pub async fn claim_vector_2026_badge() -> Result<(), String> {
+    vector_core::badges::claim_v2026().await
+}
+
+/// Whether a user holds V for Vector 2026 (on-demand profile view).
+#[tauri::command]
+pub async fn check_vector_2026_badge(npub: String) -> Result<bool, String> {
+    let pk = PublicKey::from_bech32(&npub).map_err(|e| e.to_string())?;
+    vector_core::badges::check_v2026(&pk).await
 }
 
 /// Resolve a user's Bug Hunter tier (0-3) live from the issuer's awards minus
