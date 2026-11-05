@@ -6653,8 +6653,10 @@ async fn grant_roles_with_roster_sealing<T: Transport + ?Sized>(
     }
     // A grant that leaves the member staff carries the staff write key in the
     // edition itself (CORD-04 §3) — promotion and delivery are one signed
-    // edition: nothing separate to send, race, or watch an inbox for.
-    let control_wrap = control_wrap_owed(community, roster.roles_make_staff(&role_ids), member).await?;
+    // edition: nothing separate to send, race, or watch an inbox for. The owner
+    // holds the key by right.
+    let owner_self = community.owner().is_ok_and(|o| o == *member);
+    let control_wrap = control_wrap_owed(community, !owner_self && roster.roles_make_staff(&role_ids), member).await?;
     let grant = crate::community::roles::MemberGrant { member: member.to_hex(), role_ids };
     let content = super::roles::grant_content_json_with_wrap(&grant, control_wrap)?;
     let eid = super::derive::grant_locator(community.id(), &member.to_bytes());
@@ -8185,6 +8187,13 @@ enum Seal {
 /// Before a reduction, publish each member's Tenure sealing their current heads at the
 /// standing they hold now (CORD-04 §9), so what they decided outlives the change.
 async fn seal_standing<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, members: &[PublicKey], mode: Seal) -> Result<(), String> {
+    // The owner's Roles are display alone, so no Tenure names the owner (CORD-04 §3).
+    let owner = community.owner().ok();
+    let members: Vec<PublicKey> = members.iter().filter(|m| Some(**m) != owner).copied().collect();
+    if members.is_empty() {
+        return Ok(());
+    }
+    let members = members.as_slice();
     crate::db::scoped(async move {
         let cid = community.id();
         let cid_hex = crate::simd::hex::bytes_to_hex_32(&cid.0);
@@ -8298,12 +8307,17 @@ pub async fn set_member_roles<T: Transport + ?Sized>(
         let view = fetch_authority(transport, community).await;
         let author = role_author(community, &view)?;
         let member_hex = member.to_hex();
-        if member_hex == author.owner_hex {
-            return Err("the owner's standing isn't granted by roles".to_string());
+        // The owner may hold Roles, for display alone, and only the owner sets them (CORD-04 §3).
+        let owner_self = member_hex == author.owner_hex;
+        if owner_self && author.me_hex != author.owner_hex {
+            return Err("only the owner sets the owner's roles".to_string());
+        }
+        if owner_self && view.roles.everyone.is_none() {
+            return Err("the owner holds roles only on the new roles".to_string());
         }
         require_grant_head(community, &view, &member_hex)?;
         let member_rank = view.roles.highest_position(&member_hex).unwrap_or(u32::MAX);
-        if author.me_hex == member_hex || !author.supports(member_rank, 0) {
+        if !owner_self && (author.me_hex == member_hex || !author.supports(member_rank, 0)) {
             return Err("you can only change the roles of members beneath you".to_string());
         }
         let current: Vec<String> = view
@@ -8349,6 +8363,9 @@ pub async fn set_member_roles<T: Transport + ?Sized>(
         grant_roles_with_roster(transport, community, member, next.clone(), &view.roles).await?;
         let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
         merge_local_roster(&cid_hex, None, Some(&crate::community::roles::MemberGrant { member: member_hex.clone(), role_ids: next.clone() }));
+        if owner_self {
+            return Ok(()); // the owner already holds every channel's key
+        }
         settle_channel_keys(transport, community, &view, member, &current, &next).await
     })
     .await
@@ -18826,13 +18843,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_members_role_set_is_written_whole_and_the_owner_is_never_a_target() {
+    async fn a_members_role_set_is_written_whole_and_the_owner_holds_roles_for_display_alone() {
         use crate::community::roles::{Permissions, RoleScope};
         let (bed, owner, _m) = TestBed::new();
         bed.swap_to(&owner);
         let community = create_community(&bed.relay, "Grants", bed.relays.clone(), None).await.unwrap();
         let a = create_role(&bed.relay, &community, "A", 0, Permissions::KICK, RoleScope::Server).await.unwrap();
         let b = create_role(&bed.relay, &community, "B", 0, 0, RoleScope::Server).await.unwrap();
+        let admin_role = create_role(&bed.relay, &community, "Admin", 0, Permissions::MANAGE_ROLES, RoleScope::Server).await.unwrap();
+        let below = create_role(&bed.relay, &community, "Below", 0, 0, RoleScope::Server).await.unwrap();
+        let lowest = create_role(&bed.relay, &community, "Lowest", 0, 0, RoleScope::Server).await.unwrap();
         let member = Keys::generate().public_key();
 
         set_member_roles(&bed.relay, &community, &member, vec![a.clone(), b.clone()]).await.unwrap();
@@ -18845,8 +18865,31 @@ mod tests {
         let held: Vec<String> = view.roles.roles_of(&member.to_hex()).map(|r| r.role_id.clone()).collect();
         assert_eq!(held, vec![b.clone()], "the set replaces, it does not append");
 
-        let err = set_member_roles(&bed.relay, &community, &owner.keys.public_key(), vec![a]).await.unwrap_err();
-        assert!(err.contains("owner"), "the owner is never a role target: {err}");
+        // The owner may hold Roles, for display alone, on the new roles (CORD-04 §3).
+        let owner_pk = owner.keys.public_key();
+        let owner_hex = owner_pk.to_hex();
+        let err = set_member_roles(&bed.relay, &community, &owner_pk, vec![below.clone()]).await.unwrap_err();
+        assert!(err.contains("new roles"), "not on the legacy roles: {err}");
+        activate_roles_v2(&bed.relay, &community, crate::community::v2::roles::EVERYONE_DEFAULT).await.unwrap();
+        let community = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        set_member_roles(&bed.relay, &community, &owner_pk, vec![below.clone()]).await.unwrap();
+        let view = fetch_authority(&bed.relay, &community).await;
+        let held: Vec<String> = view.roles.roles_of(&owner_hex).map(|r| r.role_id.clone()).collect();
+        assert_eq!(held, vec![below.clone()], "the owner holds the role they gave themselves");
+        assert!(view.roles.outranks(&owner_hex, Some(&owner_hex), 1), "and still outranks every role");
+        assert_eq!(fork_rank(&view.roles, Some(&owner_hex), &owner_hex), 0, "their rank stays the owner's");
+
+        // Nobody else's Grant names the owner, even an admin above every Role it touches.
+        let admin = Keys::generate();
+        publish_grant(&bed.relay, &community, &owner.keys, &admin.public_key(), vec![admin_role], 1).await;
+        publish_grant(&bed.relay, &community, &admin, &owner_pk, vec![below.clone(), lowest.clone()], 2).await;
+        let view = fetch_authority(&bed.relay, &community).await;
+        let held: Vec<String> = view.roles.roles_of(&owner_hex).map(|r| r.role_id.clone()).collect();
+        assert_eq!(held, vec![below.clone()], "an admin's Grant naming the owner is refused");
+        let other = Keys::generate().public_key();
+        publish_grant(&bed.relay, &community, &admin, &other, vec![below.clone(), lowest], 1).await;
+        let view = fetch_authority(&bed.relay, &community).await;
+        assert_eq!(view.roles.roles_of(&other.to_hex()).count(), 2, "the same Grant stands for anyone else");
     }
 
     #[tokio::test]

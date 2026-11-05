@@ -121,9 +121,12 @@
     }
 
     // Whether the row menu offers their roles: Manage Roles and a strict outrank, the
-    // backend's own gate, read off the graph so the handle shows without a fetch.
+    // backend's own gate, read off the graph so the handle shows without a fetch. The
+    // owner sets their own, for display, on the new roles.
     function mayRole(npub) {
-        if (!caps.manage_roles || npub === ownerNpub || npub === myNpub) return false;
+        if (!caps.manage_roles) return false;
+        if (npub === ownerNpub) return iAmOwner && !!graph?.activated;
+        if (npub === myNpub) return false;
         if (iAmOwner) return true;
         const mine = topBy.get(myNpub)?.position ?? Infinity;
         return mine < (topBy.get(npub)?.position ?? Infinity);

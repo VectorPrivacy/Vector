@@ -26,9 +26,13 @@ function memberRank(view, npub) {
     return best;
 }
 
-/** Whether the caller may change `npub`'s roles: Manage Roles and a strict outrank, never the owner. */
+/**
+ * Whether the caller may change `npub`'s roles: Manage Roles and a strict outrank. The owner's
+ * own are for display, set by the owner alone, and only on the new roles (CORD-04 §3).
+ */
 function canEditMemberRoles(view, npub) {
-    if (!view?.can_manage || !npub || npub === view.owner) return false;
+    if (!view?.can_manage || !npub) return false;
+    if (npub === view.owner) return !!(view.is_owner && view.activated);
     return view.is_owner || (view.rank != null && view.rank < memberRank(view, npub));
 }
 
