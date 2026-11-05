@@ -139,7 +139,8 @@ body.ws.ws-rail-collapsed #chrome-typeface {
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 46px;
+  /* 37px leaves 27px between the 10px glyphs: a quarter less than the 36px of a 46px button. */
+  width: 37px;
   height: 100%;
   border: 0;
   border-radius: 0;
@@ -172,6 +173,7 @@ body.ws.ws-rail-collapsed #chrome-typeface {
 
 .chrome-help {
   margin-right: 8px;
+  color: #474747;
 }
 
 .chrome-ctl.chrome-help:hover {
