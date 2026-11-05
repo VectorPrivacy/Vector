@@ -28,13 +28,24 @@ jobs:
       # SIGN_WITH should be a NIP-46 bunker URL, never the account's nsec:
       # the key stays on the owner's device and the grant can be revoked.
       # Without the secret this is a no-op, so a release never fails on it.
+      #
+      # The bunker answers only the client key that first used its one-shot
+      # secret, and a runner starts with none: ZAPSTORE_BUNKER_CLIENT_KEY is
+      # that key, installed where zsp looks for it (docs/zapstore-bunker.md).
       - name: Publish to Zapstore
         env:
           SIGN_WITH: ${{ secrets.ZAPSTORE_SIGN_WITH }}
+          CLIENT_KEY: ${{ secrets.ZAPSTORE_BUNKER_CLIENT_KEY }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           if [ -z "$SIGN_WITH" ]; then
             echo "::notice::ZAPSTORE_SIGN_WITH not set; publish to Zapstore by hand (zsp publish)."
             exit 0
+          fi
+          if [ -n "$CLIENT_KEY" ]; then
+            signer=$(printf '%s' "$SIGN_WITH" | sed -E 's#^bunker://([0-9a-f]{64}).*#\1#')
+            dir="${XDG_CONFIG_HOME:-$HOME/.config}/zsp/bunker-keys"
+            install -d -m 700 "$dir"
+            ( umask 077; printf '%s\n' "$CLIENT_KEY" > "$dir/$signer.key" )
           fi
           ./zsp publish --quiet zapstore.yaml

@@ -26,6 +26,11 @@ Amber is the bunker: the key lives on the phone, and each event kind is approved
    waits on a tap. Do not grant "sign everything" to this app: the per-kind grant is the
    whole point.
 3. Add the URI as the `ZAPSTORE_SIGN_WITH` repository secret.
+4. The secret in the URI is single-use: the bunker now answers only the client key zsp made for
+   step 2, saved under `zsp/bunker-keys/<signer-pubkey>.key` in your config directory
+   (`~/Library/Application Support` on macOS, `~/.config` on Linux). Add that file's contents as
+   the `ZAPSTORE_BUNKER_CLIENT_KEY` repository secret; `distribute.yaml` installs it on the runner.
+   Without it every runner arrives as a stranger and the bunker refuses it ("no permission").
 
 Turn battery optimisation off for Amber. If the phone is unreachable when a release publishes,
 the job fails cleanly; re-run it from the Actions tab. Revoke by deleting the app in Amber.
@@ -89,12 +94,13 @@ GitHub secret, and rotating it is one edit here.
    SIGN_WITH='bunker://...' zsp publish --offline --quiet zapstore.yaml
    ```
 
-5. Add the URI as the `ZAPSTORE_SIGN_WITH` repository secret. The next stable release publishes
-   itself.
+5. Add the URI as the `ZAPSTORE_SIGN_WITH` repository secret, and the client key from step 4 as
+   `ZAPSTORE_BUNKER_CLIENT_KEY`, as in the Amber steps. The next stable release publishes itself.
 
 ## Rotating or revoking
 
-Change `NAK_CLIENT_SECRET`, restart the service, update the GitHub secret. The old URI is dead
+Change `NAK_CLIENT_SECRET`, restart the service, update the GitHub secrets (a new URI means a new
+client key: prove it once from your laptop, then copy both). The old URI is dead
 the moment the service restarts. Your nsec never moved.
 
 ## Alternative with kind scoping, server-side
