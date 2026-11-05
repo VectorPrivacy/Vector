@@ -75,6 +75,7 @@ function renderRailShortcuts() {
      * @property {(unreadDms: number) => void} onUnreadDms
      * @property {(source: object, target: object, live: string[]) => void} railDrop
      * @property {(folder: object, x: number, y: number) => void} openFolderMenu
+     * @property {(x: number, y: number) => void} openMessagesMenu
      * @property {(node: HTMLElement) => void} closeMenu
      */
     VectorSvelte.setScreen('rail', {
@@ -101,7 +102,10 @@ function renderRailShortcuts() {
                 const id = wsChannelForCommunity(communityId) || fallbackChatId;
                 if (!chatOnScreen(id)) openChat(id);
             },
-            openDmHome: () => (wsActive() ? wsOpenDmHome() : ccHome()),
+            openDmHome: () => {
+                if (VectorSvelte.now() - (window._chatRowMenuAt || 0) < 500) { window._chatRowMenuAt = 0; return; }
+                wsActive() ? wsOpenDmHome() : ccHome();
+            },
             wsChannelForCommunity,
             voiceChannelIds: (communityId) => (getCommunityChannels(communityId) || []).filter((c) => c.view === 'voice').map((c) => c.id),
             attachLongPressContextMenu,
@@ -113,6 +117,7 @@ function renderRailShortcuts() {
             onUnreadDms: syncChatTabBadge,
             railDrop,
             openFolderMenu,
+            openMessagesMenu,
             closeMenu: hideContextMenu,
         },
         snapshot: () => ({ chats: arrChats, myNpub: strPubkey }),
@@ -152,6 +157,27 @@ const RAIL_FOLDER_HUES = [
     ['Red', 0], ['Orange', 28], ['Yellow', 50], ['Green', 140],
     ['Teal', 175], ['Blue', 212], ['Purple', 265], ['Pink', 320],
 ];
+
+/** The Messages door's menu: every chat under it (DMs and groups outside a community) read at once. */
+function openMessagesMenu(x, y) {
+    // A long-press ends on a tap: stamped so the door doesn't open behind the menu.
+    window._chatRowMenuAt = VectorSvelte.now();
+    const unread = arrChats.filter((c) => !communityIdOfChat(c) && c.id !== strPubkey && computeRowUnreadCount(c) > 0);
+    showContextMenu({
+        x, y,
+        items: [{
+            label: 'Mark All as Read',
+            icon: 'check',
+            disabled: !unread.length,
+            onClick: () => {
+                for (const chat of unread) {
+                    markChatCaughtUp(chat, /* explicit */ true);
+                    chatChanged(chat);
+                }
+            },
+        }],
+    });
+}
 
 function openFolderMenu(folder, x, y) {
     const edit = async (cmd, args) => {
