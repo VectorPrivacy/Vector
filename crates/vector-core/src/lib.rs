@@ -110,6 +110,7 @@ pub mod image_crop;
 pub mod deep_link;
 pub mod golink;
 pub mod badges;
+pub mod history_gaps;
 pub mod bot_interface;
 pub mod webxdc;
 pub mod webxdc_permissions;
@@ -2544,6 +2545,27 @@ impl VectorCore {
         Ok((count, warnings))
     }
 
+    /// Fill the hole in a channel's held history that a scroll up from `before_ms` is about to
+    /// cross, with the relay pages just below it. The count of messages that arrived; 0 when
+    /// there is no hole there, or the relays can't be reached (it stays for the next scroll).
+    pub async fn fill_community_gap(&self, channel_id: &str, before_ms: u64) -> Result<usize> {
+        let before = before_ms / 1000;
+        if history_gaps::gap_at(channel_id, before).is_none() {
+            return Ok(0);
+        }
+        let id = self.v2_community_for_channel(channel_id)?.ok_or_else(|| VectorError::Other("unknown community channel".into()))?;
+        let count = Self::v2_backfill_channel_counted(
+            &id, channel_id, 50, 2, None, Some(before),
+            crate::community::transport::Evidence::Fast, 12,
+        ).await;
+        // A walk that can't step below where it began (a second holding more than its pages)
+        // would be asked again on every scroll: let the hole go.
+        if count.next_before.is_some_and(|n| n >= before) {
+            history_gaps::abandon(channel_id, before);
+        }
+        Ok(count.new_messages)
+    }
+
     /// [`sync_community_channel`](Self::sync_community_channel) with a back-paging
     /// cursor: `before_secs` bounds the fetch to messages at or older than it.
     ///
@@ -3741,6 +3763,8 @@ impl VectorCore {
         };
         let fetched = page.len() + held.into_inner();
         let (new_messages, waiting) = Self::v2_ingest_chat_page_keeping(channel_id, my_pk, session, page).await;
+        // A walk that stops while still finding new messages leaves a hole above what it held.
+        crate::history_gaps::note_walk(channel_id, until, next_before, |t| crate::db::events::newest_message_before(channel_id, t));
         (BackfillCount { fetched, new_messages, next_before }, waiting)
     }
 

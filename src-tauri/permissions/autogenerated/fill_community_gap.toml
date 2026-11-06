@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-fill-community-gap"
+description = "Enables the fill_community_gap command without any pre-configured scope."
+commands.allow = ["fill_community_gap"]
+
+[[permission]]
+identifier = "deny-fill-community-gap"
+description = "Denies the fill_community_gap command without any pre-configured scope."
+commands.deny = ["fill_community_gap"]

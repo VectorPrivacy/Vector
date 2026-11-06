@@ -144,6 +144,14 @@ pub async fn sync_community_channel(channel_id: &str, before_ms: Option<u64>) ->
     Ok(json!({ "new_messages": count.new_messages, "reached_start": reached_start, "oldest_ms": count.next_before.map(|s| s * 1000) }))
 }
 
+/// Fill the hole a scroll up from `before_ms` is about to cross; how many messages arrived.
+pub async fn fill_community_gap(channel_id: &str, before_ms: u64) -> Result<Value, String> {
+    let Some(_claim) = vector_core::community::cache::claim_page_fetch(channel_id, true) else {
+        return Ok(json!(0));
+    };
+    db::scoped(VectorCore.fill_community_gap(channel_id, before_ms)).await.map(|n| json!(n)).map_err(|e| e.to_string())
+}
+
 /// Send with an optimistic bubble whose id is the real one: the rumor is built
 /// first, so the echo and the pending row are the same message.
 pub async fn send_community_message(channel_id: String, content: String, replied_to: Option<String>, bot: Option<String>) -> Result<(), String> {

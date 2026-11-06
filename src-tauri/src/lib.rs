@@ -1261,6 +1261,7 @@ pub fn run() {
             commands::community::send_community_files,
             commands::community::send_community_cached_file,
             commands::community::sync_community_channel,
+            commands::community::fill_community_gap,
             commands::pinned::get_pinned_chats,
             commands::pinned::pin_chat,
             commands::pinned::unpin_chat,

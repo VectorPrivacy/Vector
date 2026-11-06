@@ -461,6 +461,7 @@ pub async fn dispatch(cmd: &str, a: Args) -> Result<Value, String> {
         "sync_community_channel" => {
             cm::sync_community_channel(&a.str("channelId")?, a.de("beforeMs")?).await
         }
+        "fill_community_gap" => cm::fill_community_gap(&a.str("channelId")?, a.de("beforeMs")?).await,
         "send_community_message" => cm::send_community_message(a.str("channelId")?, a.opt_str("content").unwrap_or_default(), a.opt_str("repliedTo"), a.opt_str("bot"))
             .await
             .map(|_| Value::Null),

@@ -880,6 +880,20 @@ pub struct StoredPost {
     pub edit_of: Option<String>,
 }
 
+/// The newest message `chat_identifier` holds dated before `before_secs`, in Unix seconds.
+pub fn newest_message_before(chat_identifier: &str, before_secs: u64) -> Option<u64> {
+    let chat_id = super::id_cache::get_chat_id_by_identifier(chat_identifier).ok()?;
+    let conn = super::get_db_connection_guard_static().ok()?;
+    conn.query_row(
+        "SELECT MAX(created_at) FROM events WHERE chat_id = ?1 AND kind IN (?2, ?3, ?4) AND created_at < ?5",
+        rusqlite::params![chat_id, event_kind::CHAT_MESSAGE as i32, event_kind::FILE_ATTACHMENT as i32, event_kind::PRIVATE_DIRECT_MESSAGE as i32, before_secs as i64],
+        |r| r.get::<_, Option<i64>>(0),
+    )
+    .ok()
+    .flatten()
+    .map(|s| s.max(0) as u64)
+}
+
 /// The messages `chat_identifier` holds dated at or after `since_ms`.
 pub fn posts_since(chat_identifier: &str, since_ms: u64) -> Result<Vec<StoredPost>, String> {
     posts_since_by(chat_identifier, since_ms, None)

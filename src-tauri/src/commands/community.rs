@@ -1510,6 +1510,20 @@ pub async fn sync_community_channel(channel_id: String, before_ms: Option<u64>) 
     sync_community_channel_inner(&channel_id, before_ms, is_older).await
 }
 
+/// Fill the hole in a channel's held history that a scroll up from `before_ms` (the oldest
+/// displayed message's `at`) is about to cross. Returns how many messages arrived; the frontend
+/// then reads them from the DB like any older page.
+#[tauri::command]
+pub async fn fill_community_gap(channel_id: String, before_ms: u64) -> Result<u32, String> {
+    let Some(_claim) = vector_core::community::cache::claim_page_fetch(&channel_id, true) else {
+        return Ok(0);
+    };
+    vector_core::db::scoped(async move {
+        vector_core::VectorCore.fill_community_gap(&channel_id, before_ms).await.map(|n| n as u32).map_err(|e| e.to_string())
+    })
+    .await
+}
+
 async fn sync_community_channel_inner(
     channel_id: &str,
     before_ms: Option<u64>,
