@@ -190,12 +190,17 @@ for (const needed of ['Content-Security-Policy', '/web/preflight.js', '<noscript
 
 // Release: the page's scripts as a few bundles, joined in document order so they run exactly as
 // before. The onion is plain HTTP/1.1, where every file is another Tor round trip.
-if (release) await bundleScripts();
+// build-frontend's options: a bare property read (`store.seq;`) is a Svelte subscription.
+const terserOptions = () => ({ compress: { dead_code: true, drop_console: true, passes: 3 }, mangle: true, format: { comments: false } });
+
+if (release) {
+    await bundleScripts();
+    await minifyShipped();
+}
 
 async function bundleScripts() {
     const { minify } = await import('terser');
-    // build-frontend's options: a bare property read (`store.seq;`) is a Svelte subscription.
-    const options = () => ({ compress: { dead_code: true, drop_console: true, passes: 3 }, mangle: true, format: { comments: false } });
+    const options = terserOptions;
     const probe = await minify('function f(o) { o.seq; return 1; }', options());
     if (!/\.seq/.test(probe.code)) throw new Error('[build-web] terser options drop bare property reads');
 
@@ -219,11 +224,62 @@ async function bundleScripts() {
         const { code } = await minify(joined, options());
         const name = `/web/bundle-${n++}.js`;
         writeFileSync(join(OUT, name), code);
+        // Bundled, the sources are never fetched: they don't ship.
+        for (const src of g.srcs) rmSync(join(OUT, src));
         page = page.replace(g.tags[0], `    <script src="${name}"${g.defer ? ' defer' : ''}></script>\n`);
         for (const tag of g.tags.slice(1)) page = page.replace(tag, '');
         console.log(`[build-web] ${name}: ${g.srcs.length} scripts${g.defer ? ' (deferred)' : ''}, ${(joined.length / 1024).toFixed(0)} KB → ${(code.length / 1024).toFixed(0)} KB`);
     }
     writeFileSync(indexPath, page);
+}
+
+/** Release: everything that ships as text goes out minified, with no comment left in it: scripts
+ *  (and the ones inline in a page), stylesheets, pages, data and SVGs. The bundles are minified as
+ *  they're made, and Whisper's two builds come out of emscripten that way. */
+async function minifyShipped() {
+    const { minify } = await import('terser');
+    const { transform } = await import('lightningcss');
+    // Desktop and Android pages: nothing on the web loads them.
+    for (const page of ['overlay.html', 'composer-lab.html']) rmSync(join(OUT, page), { force: true });
+    const skip = /^\/web\/(bundle-\d+\.js|whisper\/whisper-(cpu|gpu)\.js)$/;
+    const files = (dir) => readdirSync(dir).flatMap((name) => {
+        const path = join(dir, name);
+        return statSync(path).isDirectory() ? files(path) : [path];
+    });
+    const js = async (src) => (await minify(src, { ...terserOptions(), module: /^\s*(import|export)\b/m.test(src) })).code;
+    const css = (src, filename) => transform({ filename, code: Buffer.from(src), minify: true }).code.toString();
+    let before = 0, after = 0;
+    for (const path of files(OUT)) {
+        const rel = path.slice(OUT.length);
+        const kind = /\.(m?js|css|html|svg|json|webmanifest)$/.exec(rel)?.[1];
+        if (!kind || skip.test(rel)) continue;
+        const src = readFileSync(path, 'utf8');
+        let out;
+        if (kind === 'css') {
+            out = css(src, rel);
+        } else if (kind === 'json' || kind === 'webmanifest') {
+            out = JSON.stringify(JSON.parse(src));
+        } else if (kind === 'svg') {
+            out = src.replace(/<!--[\s\S]*?-->/g, '').replace(/(<style[^>]*>)([\s\S]*?)(<\/style>)/g, (_, a, b, c) => a + b.replace(/\/\*[\s\S]*?\*\//g, '') + c);
+            // Text lays out by its whitespace: an SVG with any keeps it.
+            if (!/<(text|tspan|foreignObject)\b|xml:space/.test(out)) out = out.replace(/>\s+</g, '><');
+            out = out.trim();
+        } else if (kind === 'html') {
+            const parts = [];
+            for (const m of src.matchAll(/<script(?![^>]*\bsrc=)([^>]*)>([\s\S]*?)<\/script>|<style([^>]*)>([\s\S]*?)<\/style>/g)) {
+                parts.push([m[0], m[2] !== undefined ? `<script${m[1]}>${await js(m[2])}</script>` : `<style${m[3]}>${css(m[4], rel)}</style>`]);
+            }
+            out = src;
+            for (const [from, to] of parts) out = out.replace(from, () => to);
+            out = out.replace(/<!--[\s\S]*?-->/g, '').replace(/>\s+</g, '><').replace(/^\s+/gm, '').replace(/\n{2,}/g, '\n').trim();
+        } else {
+            out = await js(src);
+        }
+        before += src.length;
+        after += out.length;
+        writeFileSync(path, out);
+    }
+    console.log(`[build-web] shipped files minified: ${(before / 1024).toFixed(0)} KB → ${(after / 1024).toFixed(0)} KB`);
 }
 
 console.log(`[build-web] → ${OUT}`);

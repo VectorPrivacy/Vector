@@ -24,6 +24,9 @@ async function loadEsbuild() {
 }
 const esbuild = await loadEsbuild();
 
+// A component's own <style> ships as a string in the bundle, comments and all: release drops them.
+const stripStyleComments = { style: ({ content }) => ({ code: content.replace(/\/\*[\s\S]*?\*\//g, '') }) };
+
 async function buildWithRollup(options, dev) {
     const { rollup } = await import('rollup');
     const svelte = (await import('rollup-plugin-svelte')).default;
@@ -31,7 +34,7 @@ async function buildWithRollup(options, dev) {
     const bundle = await rollup({
         input: options.entryPoints[0],
         plugins: [
-            svelte({ compilerOptions: { css: 'injected', dev }, emitCss: false }),
+            svelte({ compilerOptions: { css: 'injected', dev }, emitCss: false, preprocess: dev ? [] : [stripStyleComments] }),
             nodeResolve({
                 browser: true,
                 exportConditions: options.conditions,
@@ -101,7 +104,7 @@ export async function buildSvelte({ watch = false, dev = true } = {}) {
         return;
     }
     const esbuildSvelte = (await import('esbuild-svelte')).default;
-    options.plugins = [esbuildSvelte({ compilerOptions: { css: 'injected', dev } })];
+    options.plugins = [esbuildSvelte({ compilerOptions: { css: 'injected', dev }, preprocess: dev ? [] : [stripStyleComments] })];
     if (watch) {
         const ctx = await esbuild.context(options);
         await ctx.watch();

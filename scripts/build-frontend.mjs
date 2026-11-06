@@ -4,7 +4,7 @@
  *
  * Copies src/ → dist/ and minifies JS (terser) + CSS (lightningcss) in-place.
  * Skips files already minified (*.min.js, *.min.css).
- * HTML is minified by collapsing whitespace and removing comments.
+ * HTML is minified by collapsing whitespace and removing every comment.
  *
  * Usage:
  *   node scripts/build-frontend.mjs          # full minified build
@@ -171,8 +171,8 @@ function minifyCss(filePath) {
 function minifyHtml(filePath) {
     const html = readFileSync(filePath, 'utf-8');
     const minified = html
-        // Remove HTML comments (but not IE conditionals)
-        .replace(/<!--(?!\[if)[\s\S]*?-->/g, '')
+        // Remove every HTML comment
+        .replace(/<!--[\s\S]*?-->/g, '')
         // Collapse whitespace between tags
         .replace(/>\s+</g, '><')
         // Trim leading/trailing whitespace per line
