@@ -6326,7 +6326,10 @@ textarea#chat-input::placeholder {
   max-width: 400px;
   height: 350px;
   box-shadow: 0 -8px 32px rgba(0, 0, 0, 0.5);
-  transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.3s ease;
+  /* Once faded, parked below the screen: still drawn, so opening it paints nothing, but over
+     nothing a slide moves, and its animated emoji out of view stay still. */
+  translate: 0 100vh;
+  transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.3s ease, translate 0s linear 0.3s;
   pointer-events: none;
   opacity: 0;
   flex-direction: column;
@@ -6336,14 +6339,10 @@ textarea#chat-input::placeholder {
 
 .emoji-picker.visible {
   transform: translateX(-50%) translateY(0);
+  translate: none;
+  transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.3s ease, translate 0s;
   pointer-events: auto;
   opacity: 1;
-}
-
-/* Out while a drawer or chat slides: a closed panel's loaded grid stays composited and
-   re-rasters under every frame of the slide. */
-body.cc-drawer-on .emoji-picker:not(.visible) {
-  visibility: hidden;
 }
 
 .emoji-picker:has(.emoji-pack-creator-error:not([hidden])) {
@@ -15098,7 +15097,6 @@ button.popout-thumb {
     height: 20px;
     transform: translateY(-9px) scaleY(0.15);
     transform-origin: bottom center;
-    will-change: transform;
     transition: opacity 0.1s ease, box-shadow 0.2s ease;
 }
 
@@ -21247,7 +21245,6 @@ textarea.command-part-input {
 .dmsg-reactions .rc-value {
   display: block;
   line-height: 1;
-  will-change: transform;
 }
 .dmsg-reactions .rc-old {
   position: absolute;

@@ -766,7 +766,9 @@ body.cc.cc-layer #chats {
   z-index: 110;
   /* The list's own ground; the drawer's lighter one is the tint below, faded as it widens. */
   background-color: rgb(5, 5, 5);
-  transform: translateX(calc((var(--cc-drawer-p, 0) - 1) * 100%));
+  /* Away it parks past its own shadow (lib/drawer.js SHADOW), still drawn: a hidden layer
+     loses its pixels, and the next pull would wait on painting the whole list again. */
+  transform: translateX(calc((var(--cc-drawer-p, 0) - 1) * (100% + 32px)));
   touch-action: pan-y;
   box-shadow: 4px 0 24px rgba(0, 0, 0, 0.5);
   /* The shadow falls on the channel only, never up under the status bar. */
@@ -805,9 +807,9 @@ body.cc.cc-layer.cc-flat {
   --cc-peek: 0px;
 }
 
-/* Away, it neither paints nor takes a press. */
+/* Away, it takes no press. */
 body.cc.cc-layer:not(.cc-drawer-on) #chats {
-  visibility: hidden;
+  pointer-events: none;
 }
 
 .cc-drawer-shade {

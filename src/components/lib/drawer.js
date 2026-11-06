@@ -6,6 +6,8 @@ import { settleMs, SETTLE_EASING } from './railmotion.js';
 // The channel left showing beside the open drawer (`--cc-peek`, which a chat with no
 // drawer of its own sets to nothing).
 const PEEK = 64;
+// How far past its edge the drawer parks, so its shadow is off screen too (console.css).
+const SHADOW = 32;
 document.documentElement.style.setProperty('--cc-peek', PEEK + 'px');
 
 // Set on the panes that read them, not the root: registered as not inherited
@@ -186,7 +188,7 @@ export function drawerPull({ live, grabs, end }) {
             pEase.stop();
             document.body.classList.remove('cc-drawer-leaving');
             pDone = null;
-            span = Math.max(1, window.innerWidth - (parseFloat(getComputedStyle(document.body).getPropertyValue('--cc-peek')) || 0));
+            span = Math.max(1, window.innerWidth - (parseFloat(getComputedStyle(document.body).getPropertyValue('--cc-peek')) || 0) + SHADOW);
             return pEase.get();
         },
         move: (v) => {
