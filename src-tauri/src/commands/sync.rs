@@ -229,6 +229,7 @@ pub async fn fetch_messages<R: Runtime>(
             vector_core::transport::prelogin::commit();
             // Every login, whatever the sync finds to do: badges gate the account's perks.
             vector_core::db::spawn_bound(vector_core::badges::refresh_own());
+            vector_core::db::spawn_bound(vector_core::profile::sync::stamp_vector_client_after_sync());
         }
 
         // One-time (per-account) migration of legacy app-private downloads into the

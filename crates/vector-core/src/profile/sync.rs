@@ -361,13 +361,131 @@ async fn fetch_newest_metadata(client: &Client, pubkey: PublicKey) -> Result<Opt
         .map_err(|e| e.to_string())
 }
 
-/// Our newest kind-0, `Ok(None)` when the relays hold none, `Err` when none of them answered.
-/// For read-modify-writes, which must not mistake a dead relay set for an empty profile.
-async fn fetch_own_metadata(client: &Client, pubkey: PublicKey) -> Result<Option<Metadata>, String> {
+/// Our kind-0 as it stands on the relays, whole: its content's JSON object with every key it
+/// holds, whatever Vector makes of them, and every tag. Profiles carry what other clients
+/// invented (emoji in names, profile fields, identity proofs); a save edits, never rebuilds.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct OwnKind0 {
+    content: serde_json::Map<String, serde_json::Value>,
+    tags: Vec<Vec<String>>,
+}
+
+/// What a save changes. Every other key and tag of the relay copy stands.
+#[derive(Default)]
+pub(crate) struct Kind0Edit<'a> {
+    name: &'a str,
+    avatar: &'a str,
+    banner: &'a str,
+    about: &'a str,
+    bot: bool,
+    consent: Option<bool>,
+}
+
+/// Our newest kind-0, `Ok(None)` when the relays hold none, `Err` when none of them answered or the
+/// newest is no JSON object: unreadable is not absent, and publishing over it would erase it.
+async fn fetch_own_kind0(client: &Client, pubkey: PublicKey) -> Result<Option<OwnKind0>, String> {
     let filter = Filter::new().author(pubkey).kind(Kind::Metadata).limit(1);
     let timeout = crate::relay_request_timeout(Duration::from_secs(15));
-    let events = crate::fetch_answered(client, filter, timeout).await?;
-    Ok(crate::newest_replaceable(events).and_then(|e| Metadata::from_json(&e.content).ok()))
+    let mut events = crate::fetch_answered(client, filter.clone(), timeout).await?;
+    // The Discovery Relays too: a profile last written elsewhere may be newest there.
+    let pooled = client.relays().all().await;
+    let discovery: Vec<RelayUrl> = crate::state::discovery_relay_iter()
+        .filter_map(|u| RelayUrl::parse(u).ok())
+        .filter(|u| pooled.contains_key(u))
+        .collect();
+    drop(pooled);
+    if !discovery.is_empty() {
+        let target = ReqTarget::manual(discovery.into_iter().map(|u| (u, vec![filter.clone()])));
+        if let Ok(more) = client.fetch_events(target).timeout(timeout).await {
+            events.extend(more);
+        }
+    }
+    crate::newest_replaceable(events).map(|e| kind0_of(&e)).transpose()
+}
+
+fn kind0_of(event: &Event) -> Result<OwnKind0, String> {
+    match serde_json::from_str::<serde_json::Value>(&event.content) {
+        Ok(serde_json::Value::Object(content)) => Ok(OwnKind0 {
+            content,
+            tags: event.tags.iter().map(|t| t.as_slice().to_vec()).collect(),
+        }),
+        _ => Err("your profile on the relays isn't one Vector can read, so it was left as it is".to_string()),
+    }
+}
+
+/// `base` with `edit` applied and our client tag in place of any other: keys and tags it doesn't
+/// touch are carried verbatim.
+fn edit_kind0(base: OwnKind0, edit: &Kind0Edit) -> OwnKind0 {
+    let mut content = base.content;
+    let mut put = |key: &str, value: serde_json::Value| { content.insert(key.to_string(), value); };
+    if !edit.name.is_empty() {
+        put("name", edit.name.into());
+    }
+    if let Ok(url) = Url::parse(edit.avatar) {
+        put("picture", url.to_string().into());
+    }
+    if let Ok(url) = Url::parse(edit.banner) {
+        put("banner", url.to_string().into());
+    }
+    if !edit.about.is_empty() {
+        put("about", edit.about.into());
+    }
+    if edit.bot {
+        put("bot", true.into());
+    }
+    if edit.consent == Some(true) {
+        put(crate::profile::STREAM_CONSENT_KEY, true.into());
+    }
+    if removes(edit.banner) {
+        content.remove("banner");
+    }
+    if edit.consent == Some(false) {
+        content.remove(crate::profile::STREAM_CONSENT_KEY);
+    }
+    OwnKind0 { content, tags: with_client_tag(base.tags) }
+}
+
+/// A first kind-0, from what this device holds of the profile.
+fn fresh_kind0(local: &Profile, edit: &Kind0Edit) -> OwnKind0 {
+    let mut meta = own_metadata(local, edit.name, edit.avatar, edit.banner, edit.about, edit.bot);
+    if let Some(on) = edit.consent {
+        meta = crate::profile::with_stream_consent(meta, on);
+    }
+    let content = match serde_json::to_value(&meta) {
+        Ok(serde_json::Value::Object(map)) => map,
+        _ => serde_json::Map::new(),
+    };
+    OwnKind0 { content, tags: with_client_tag(Vec::new()) }
+}
+
+fn with_client_tag(tags: Vec<Vec<String>>) -> Vec<Vec<String>> {
+    tags.into_iter()
+        .filter(|t| t.first().map(String::as_str) != Some("client"))
+        .chain(std::iter::once(vec!["client".to_string(), "vector".to_string()]))
+        .collect()
+}
+
+fn names_vector(tags: &[Vec<String>]) -> bool {
+    tags.iter().any(|t| t.len() >= 2 && t[0] == "client" && t[1] == "vector")
+}
+
+fn consents(content: &serde_json::Map<String, serde_json::Value>) -> bool {
+    content.get(crate::profile::STREAM_CONSENT_KEY).is_some_and(|v| match v.as_bool() {
+        Some(b) => b,
+        None => v.as_str().is_some_and(|s| s.eq_ignore_ascii_case("true")),
+    })
+}
+
+/// The fields Vector reads, from a content whose keys may hold anything: a known field of an
+/// unexpected type is left out rather than failing the whole profile.
+fn metadata_view(content: &serde_json::Map<String, serde_json::Value>) -> Metadata {
+    const KNOWN: [&str; 9] = ["name", "display_name", "about", "picture", "banner", "website", "nip05", "lud06", "lud16"];
+    let readable = content
+        .iter()
+        .filter(|(k, v)| !KNOWN.contains(&k.as_str()) || v.is_string())
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    serde_json::from_value(serde_json::Value::Object(readable)).unwrap_or_default()
 }
 
 /// Fetch a profile's metadata and status from relays, update STATE, and
@@ -561,29 +679,23 @@ async fn update_profile_inner(
         _ => return false,
     };
 
-    let local = STATE.lock().await.get_profile(&npub).cloned();
-    let meta = match local {
-        Some(profile) => own_metadata(&profile, &name, &avatar, &banner, &about, is_bot),
-        // An SDK or agent login holds no profile of its own: edit the relay copy, or the publish
-        // would drop every field it carries, stream consent included.
-        None => {
-            let pk = match my_public_key() {
-                Some(pk) => pk,
-                None => return false,
-            };
-            match fetch_own_metadata(&client, pk).await {
-                Ok(Some(remote)) => edit_metadata(remote, &name, &avatar, &banner, &about, is_bot),
-                // Never published (a freshly-created bot): start blank.
-                Ok(None) => own_metadata(&Profile::default(), &name, &avatar, &banner, &about, is_bot),
-                Err(e) => {
-                    crate::log_warn!("[update_profile] couldn't read the current profile: {e}");
-                    return false;
-                }
-            }
+    let Some(pk) = my_public_key() else { return false };
+    let edit = Kind0Edit { name: &name, avatar: &avatar, banner: &banner, about: &about, bot: is_bot, consent: None };
+    // Always the relay copy, edited: a save that rebuilt from Vector's own fields would drop every
+    // key and tag another client wrote. Unread, nothing is published at all.
+    let kind0 = match fetch_own_kind0(&client, pk).await {
+        Ok(Some(base)) => edit_kind0(base, &edit),
+        Ok(None) => {
+            let local = STATE.lock().await.get_profile(&npub).cloned().unwrap_or_default();
+            fresh_kind0(&local, &edit)
+        }
+        Err(e) => {
+            crate::log_warn!("[update_profile] couldn't read the current profile: {e}");
+            return false;
         }
     };
 
-    match publish_own_metadata(&client, &npub, meta, handler).await {
+    match publish_kind0(&client, &npub, kind0, handler).await {
         Ok(()) => true,
         Err(e) => {
             crate::log_warn!("[update_profile] {e}");
@@ -641,43 +753,48 @@ pub(crate) fn own_metadata(
     crate::profile::with_stream_consent(meta, profile.flags.is_stream_consent())
 }
 
-/// `meta` with each non-empty argument replacing its field; every other key stands.
-fn edit_metadata(mut meta: Metadata, name: &str, avatar: &str, banner: &str, about: &str, is_bot: bool) -> Metadata {
-    if !name.is_empty() {
-        meta.name = Some(name.to_string());
-    }
-    if let Ok(url) = Url::parse(avatar) {
-        meta.picture = Some(url.to_string());
-    }
-    if removes(banner) {
-        meta.banner = None;
-    } else if let Ok(url) = Url::parse(banner) {
-        meta.banner = Some(url.to_string());
-    }
-    if !about.is_empty() {
-        meta.about = Some(about.to_string());
-    }
-    if is_bot {
-        meta.custom.insert("bot".to_string(), serde_json::Value::Bool(true));
-    }
-    meta
+/// Sign and broadcast our kind-0, then fold it into STATE, the UI and the DB.
+async fn publish_kind0(client: &Client, npub: &str, kind0: OwnKind0, handler: &dyn ProfileSyncHandler) -> Result<(), String> {
+    send_kind0(client, &kind0).await?;
+    apply_own_metadata(npub, metadata_view(&kind0.content), handler).await
 }
 
-/// Sign and broadcast our kind-0, then fold it into STATE, the UI and the DB.
-async fn publish_own_metadata(
-    client: &Client, npub: &str, meta: Metadata, handler: &dyn ProfileSyncHandler,
-) -> Result<(), String> {
-    let metadata_json = serde_json::to_string(&meta).map_err(|e| e.to_string())?;
-    let metadata_event = EventBuilder::new(Kind::Metadata, metadata_json)
-        .tag(Tag::custom("client", vec!["vector"]));
-    let event = crate::sign_builder(metadata_event).await?;
-
+async fn send_kind0(client: &Client, kind0: &OwnKind0) -> Result<(), String> {
+    let content = serde_json::to_string(&kind0.content).map_err(|e| e.to_string())?;
+    let builder = EventBuilder::new(Kind::Metadata, content).tags(kind0.tags.iter().filter_map(|t| Tag::parse(t).ok()));
+    let event = crate::sign_builder(builder).await?;
     // First-ACK so the UI updates as soon as the fastest relay responds.
     crate::inbox_relays::send_event_pool_first_ok(client, &event)
         .await
-        .map_err(|e| format!("relay broadcast failed: {e}"))?;
+        .map(|_| ())
+        .map_err(|e| format!("relay broadcast failed: {e}"))
+}
 
-    apply_own_metadata(npub, meta, handler).await
+/// Once a login: a profile last written by another client takes our client tag, every key and
+/// tag of it kept, so servers that serve Vector's users recognise the account. Returns whether
+/// it published.
+pub async fn stamp_vector_client() -> Result<bool, String> {
+    let client = nostr_client().ok_or("Not connected")?;
+    let pk = my_public_key().ok_or("No active account")?;
+    let Some(base) = fetch_own_kind0(&client, pk).await? else { return Ok(false) };
+    if names_vector(&base.tags) {
+        return Ok(false);
+    }
+    if !crate::db::session_is_live() {
+        return Err("account changed during the operation".to_string());
+    }
+    send_kind0(&client, &OwnKind0 { tags: with_client_tag(base.tags), content: base.content }).await?;
+    Ok(true)
+}
+
+/// [`stamp_vector_client`] once the login's sync has settled: its relays are busiest before it.
+pub async fn stamp_vector_client_after_sync() {
+    crate::rt::time::sleep(Duration::from_secs(30)).await;
+    match stamp_vector_client().await {
+        Ok(true) => crate::log_info!("[Profile] added Vector's client tag to the profile"),
+        Ok(false) => {}
+        Err(e) => crate::log_warn!("[Profile] client tag not added: {e}"),
+    }
 }
 
 async fn apply_own_metadata(npub: &str, meta: Metadata, handler: &dyn ProfileSyncHandler) -> Result<(), String> {
@@ -705,25 +822,26 @@ async fn apply_own_metadata(npub: &str, meta: Metadata, handler: &dyn ProfileSyn
 #[derive(Debug, PartialEq)]
 pub(crate) enum ConsentPlan {
     /// The relays already say it: adopt their copy, publish nothing.
-    Unchanged(Metadata),
-    Publish(Metadata),
+    Unchanged(OwnKind0),
+    Publish(OwnKind0),
 }
 
-/// A read-modify-write of the relay copy, so every field another client wrote survives. With no
-/// relay copy, the local profile is carried, and refused when there is none to carry: a fresh
-/// device must never publish a blank profile over the real one.
-pub(crate) fn consent_plan(fetched: Option<Metadata>, local: &Profile, on: bool) -> Result<ConsentPlan, String> {
+/// A read-modify-write of the relay copy, so every key and tag another client wrote survives.
+/// With no relay copy, the local profile is carried, and refused when there is none to carry: a
+/// fresh device must never publish a blank profile over the real one.
+pub(crate) fn consent_plan(fetched: Option<OwnKind0>, local: &Profile, on: bool) -> Result<ConsentPlan, String> {
+    let edit = Kind0Edit { consent: Some(on), ..Default::default() };
     match fetched {
-        Some(remote) if crate::profile::metadata_stream_consent(&remote) == on => Ok(ConsentPlan::Unchanged(remote)),
-        Some(remote) => Ok(ConsentPlan::Publish(crate::profile::with_stream_consent(remote, on))),
+        Some(remote) if consents(&remote.content) == on => Ok(ConsentPlan::Unchanged(remote)),
+        Some(remote) => Ok(ConsentPlan::Publish(edit_kind0(remote, &edit))),
         None => {
             if local.name().is_empty() && local.display_name().is_empty()
                 && local.about().is_empty() && local.avatar().is_empty()
             {
                 return Err("Couldn't find your profile on your relays".to_string());
             }
-            let meta = own_metadata(local, "", "", "", "", local.flags.is_bot());
-            Ok(ConsentPlan::Publish(crate::profile::with_stream_consent(meta, on)))
+            let edit = Kind0Edit { bot: local.flags.is_bot(), ..edit };
+            Ok(ConsentPlan::Publish(fresh_kind0(local, &edit)))
         }
     }
 }
@@ -736,7 +854,7 @@ pub async fn set_stream_consent(on: bool, handler: &dyn ProfileSyncHandler) -> R
     let my_public_key = my_public_key().ok_or("No active account")?;
     let npub = my_public_key.to_bech32().map_err(|e| e.to_string())?;
 
-    let fetched = fetch_own_metadata(&client, my_public_key)
+    let fetched = fetch_own_kind0(&client, my_public_key)
         .await
         .map_err(|_| "Couldn't read your profile from your relays".to_string())?;
     let local = STATE.lock().await.get_profile(&npub).cloned().unwrap_or_default();
@@ -746,8 +864,8 @@ pub async fn set_stream_consent(on: bool, handler: &dyn ProfileSyncHandler) -> R
         return Err("account changed during the operation".to_string());
     }
     match plan {
-        ConsentPlan::Unchanged(remote) => apply_own_metadata(&npub, remote, handler).await?,
-        ConsentPlan::Publish(meta) => publish_own_metadata(&client, &npub, meta, handler).await?,
+        ConsentPlan::Unchanged(remote) => apply_own_metadata(&npub, metadata_view(&remote.content), handler).await?,
+        ConsentPlan::Publish(kind0) => publish_kind0(&client, &npub, kind0, handler).await?,
     }
     Ok(on)
 }
@@ -1498,6 +1616,63 @@ mod tests {
         assert!(republished.flags.is_stream_consent());
     }
 
+    /// A relay copy, as `fetch_own_kind0` reads one.
+    fn kind0(content: &str, tags: &[&[&str]]) -> OwnKind0 {
+        OwnKind0 {
+            content: serde_json::from_str(content).unwrap(),
+            tags: tags.iter().map(|t| t.iter().map(|s| s.to_string()).collect()).collect(),
+        }
+    }
+
+    /// A real profile that leans on what Vector doesn't model: `emoji` tags drawing a name
+    /// from custom emoji, Ditto's `fields`, a camelCase `displayName`.
+    fn henky() -> OwnKind0 {
+        let content: String = serde_json::from_str(HENKY_CONTENT).unwrap();
+        OwnKind0 { content: serde_json::from_str(&content).unwrap(), tags: serde_json::from_str(HENKY_TAGS).unwrap() }
+    }
+    const HENKY_CONTENT: &str = r#####""{\"about\":\"Sysadmin | AI Entertainment Enthusiast | Game Server Operator | Liberal (as in Liberty) Nationalist (each country has a right to be sovereign and should not impose their will on other countries)\\r\\n- There is only a paradox if you don't admit it\\r\\n\\r\\nSee me post with a really long address on mastodon? That's a bridge. My real profile is : https://ditto.pub/@henk.tech\\n\\nMy webhost blocks some requests behind proof of work, if my NIP-05 errors for you then you can verify it manually. I unfortunately can't disable this.\",\"bot\":false,\"name\":\":H::e::n::k::y:!!\",\"nip05\":\"Henk.Tech\",\"picture\":\"https://turbo.henk.tech/avatar/HenkyAnimated.gif\",\"fields\":[[\"KoboldAI\",\"https://koboldai.com\"]],\"website\":\"https://henk.tech\",\"displayName\":\"Henky!!\",\"banner\":\"https://turbo.henk.tech/avatar/BannerHenky.png\"}""#####;
+    const HENKY_TAGS: &str = r#####"[["emoji", "H", "https://dl.vanderwarker.family/images/nostr/emojis/language/human/mc_font/h.png"], ["emoji", "e", "https://dl.vanderwarker.family/images/nostr/emojis/language/human/mc_font/e.png"], ["emoji", "n", "https://dl.vanderwarker.family/images/nostr/emojis/language/human/mc_font/n.png"], ["emoji", "k", "https://dl.vanderwarker.family/images/nostr/emojis/language/human/mc_font/k.png"], ["emoji", "y", "https://dl.vanderwarker.family/images/nostr/emojis/language/human/mc_font/y.png"], ["alt", "User profile for :H::e::n::k::y:!!"], ["name", ":H::e::n::k::y:!!"], ["picture", "https://turbo.henk.tech/avatar/HenkyAnimated.gif"], ["website", "https://henk.tech"], ["about", "Sysadmin | AI Entertainment Enthusiast | Game Server Operator | Liberal (as in Liberty) Nationalist (each country has a right to be sovereign and should not impose their will on other countries)\r\n- There is only a paradox if you don't admit it\r\n\r\nSee me post with a really long address on mastodon? That's a bridge. My real profile is : https://ditto.pub/@henk.tech\n\nMy webhost blocks some requests behind proof of work, if my NIP-05 errors for you then you can verify it manually. I unfortunately can't disable this."], ["nip05", "Henk.Tech"], ["client", "Amethyst"], ["banner", "https://turbo.henk.tech/avatar/BannerHenky.png"]]"#####;
+
+    #[test]
+    fn a_save_keeps_every_key_and_tag_another_client_wrote() {
+        let before = henky();
+        let edit = Kind0Edit { about: "new bio", ..Default::default() };
+        let after = edit_kind0(before.clone(), &edit);
+
+        assert_eq!(after.content.get("about"), Some(&serde_json::json!("new bio")));
+        for (key, value) in &before.content {
+            if key != "about" {
+                assert_eq!(after.content.get(key), Some(value), "{key} is carried verbatim");
+            }
+        }
+        let emoji = |k: &OwnKind0| k.tags.iter().filter(|t| t[0] == "emoji").cloned().collect::<Vec<_>>();
+        assert!(!emoji(&before).is_empty());
+        assert_eq!(emoji(&after), emoji(&before), "the name's custom emoji survive");
+        assert!(names_vector(&after.tags));
+        assert_eq!(after.tags.len(), before.tags.iter().filter(|t| t[0] != "client").count() + 1);
+    }
+
+    #[test]
+    fn our_client_tag_replaces_another_clients_and_is_never_doubled() {
+        let other = kind0(r#"{"name":"a"}"#, &[&["client", "Amethyst"], &["i", "github:a", "proof"]]);
+        let saved = edit_kind0(other, &Kind0Edit::default());
+        assert_eq!(saved.tags, vec![vec!["i".to_string(), "github:a".into(), "proof".into()], vec!["client".into(), "vector".into()]]);
+        let again = edit_kind0(saved.clone(), &Kind0Edit::default());
+        assert_eq!(again.tags, saved.tags);
+    }
+
+    #[test]
+    fn a_profile_vector_reads_oddly_still_shows_what_it_can() {
+        let odd = kind0(r#"{"name":"a","website":42,"about":["x"],"fields":[["k","v"]]}"#, &[]);
+        let view = metadata_view(&odd.content);
+        assert_eq!(view.name.as_deref(), Some("a"));
+        assert_eq!(view.website, None);
+        // Edited, the odd values go back out exactly as they came.
+        let saved = edit_kind0(odd, &Kind0Edit { name: "b", ..Default::default() });
+        assert_eq!(saved.content.get("website"), Some(&serde_json::json!(42)));
+        assert_eq!(saved.content.get("fields"), Some(&serde_json::json!([["k", "v"]])));
+    }
+
     #[test]
     fn a_blank_banner_removes_it_and_an_empty_one_keeps_it() {
         let mut p = Profile::new();
@@ -1507,10 +1682,12 @@ mod tests {
         assert_eq!(own_metadata(&p, "", "", "", "", false).banner.as_deref(), Some("https://x/b.png"));
         let removed = own_metadata(&p, "", "", " ", "", false);
         assert_eq!(removed.banner, None);
-        let remote = Metadata::from_json(r#"{"name":"a","banner":"https://x/b.png","website":"https://w"}"#).unwrap();
-        let edited = edit_metadata(remote, "", "", " ", "", false);
-        assert_eq!(edited.banner, None);
-        assert_eq!(edited.website.as_deref(), Some("https://w"), "every other key stands");
+        let remote = kind0(r#"{"name":"a","banner":"https://x/b.png","website":"https://w"}"#, &[]);
+        let kept = edit_kind0(remote.clone(), &Kind0Edit::default());
+        assert_eq!(kept.content.get("banner"), Some(&serde_json::json!("https://x/b.png")));
+        let edited = edit_kind0(remote, &Kind0Edit { banner: " ", ..Default::default() });
+        assert!(!edited.content.contains_key("banner"));
+        assert_eq!(edited.content.get("website"), Some(&serde_json::json!("https://w")), "every other key stands");
 
         assert!(p.from_metadata(removed), "a kind-0 without its banner clears it");
         assert_eq!(p.banner(), "");
@@ -1531,51 +1708,56 @@ mod tests {
         // With a profile of its own to carry, it publishes that.
         let mut p = consenting_profile();
         p.flags.set_stream_consent(false);
-        let Ok(ConsentPlan::Publish(meta)) = consent_plan(None, &p, true) else { panic!("publishes the local copy") };
-        assert!(crate::profile::metadata_stream_consent(&meta));
-        assert_eq!(meta.name.as_deref(), Some("old"));
+        let Ok(ConsentPlan::Publish(kind0)) = consent_plan(None, &p, true) else { panic!("publishes the local copy") };
+        assert!(consents(&kind0.content));
+        assert_eq!(kind0.content.get("name"), Some(&serde_json::json!("old")));
+        assert!(names_vector(&kind0.tags));
     }
 
     #[test]
-    fn a_consent_change_keeps_every_key_the_relay_copy_holds() {
-        let remote = Metadata::from_json(r#"{"name":"r","pronouns":"they","bot":true}"#).unwrap();
-        let Ok(ConsentPlan::Publish(meta)) = consent_plan(Some(remote), &Profile::default(), true) else {
+    fn a_consent_change_keeps_every_key_and_tag_the_relay_copy_holds() {
+        let remote = kind0(r#"{"name":"r","pronouns":"they","bot":true}"#, &[&["emoji", "r", "https://x/r.png"]]);
+        let Ok(ConsentPlan::Publish(on)) = consent_plan(Some(remote), &Profile::default(), true) else {
             panic!("a change is published")
         };
-        assert!(crate::profile::metadata_stream_consent(&meta));
-        assert_eq!(meta.custom.get("pronouns"), Some(&serde_json::json!("they")));
-        assert_eq!(meta.custom.get("bot"), Some(&serde_json::json!(true)));
-        assert_eq!(meta.name.as_deref(), Some("r"), "the relay copy wins over the local one");
+        assert!(consents(&on.content));
+        assert_eq!(on.content.get("pronouns"), Some(&serde_json::json!("they")));
+        assert_eq!(on.content.get("bot"), Some(&serde_json::json!(true)));
+        assert_eq!(on.content.get("name"), Some(&serde_json::json!("r")), "the relay copy wins over the local one");
+        assert!(on.tags.contains(&vec!["emoji".to_string(), "r".into(), "https://x/r.png".into()]));
 
-        let withdrawn = consent_plan(Some(meta), &consenting_profile(), false).unwrap();
-        let ConsentPlan::Publish(off) = withdrawn else { panic!("withdrawing is published") };
-        assert!(!off.custom.contains_key(crate::profile::STREAM_CONSENT_KEY), "off is the absent key");
-        assert_eq!(off.custom.get("pronouns"), Some(&serde_json::json!("they")));
+        let Ok(ConsentPlan::Publish(off)) = consent_plan(Some(on), &consenting_profile(), false) else {
+            panic!("withdrawing is published")
+        };
+        assert!(!off.content.contains_key(crate::profile::STREAM_CONSENT_KEY), "off is the absent key");
+        assert_eq!(off.content.get("pronouns"), Some(&serde_json::json!("they")));
     }
 
     #[test]
     fn a_relay_copy_that_already_says_it_publishes_nothing() {
-        let remote = Metadata::from_json(r#"{"name":"r","stream_consent":true}"#).unwrap();
-        assert!(matches!(consent_plan(Some(remote.clone()), &Profile::default(), true), Ok(ConsentPlan::Unchanged(_))));
-        let bare = Metadata::from_json(r#"{"name":"r"}"#).unwrap();
+        let remote = kind0(r#"{"name":"r","stream_consent":true}"#, &[]);
+        assert!(matches!(consent_plan(Some(remote), &Profile::default(), true), Ok(ConsentPlan::Unchanged(_))));
+        let bare = kind0(r#"{"name":"r"}"#, &[]);
         assert!(matches!(consent_plan(Some(bare), &consenting_profile(), false), Ok(ConsentPlan::Unchanged(_))));
     }
 
     #[test]
     fn an_sdk_edit_of_the_relay_copy_keeps_its_other_fields() {
-        let remote = Metadata::from_json(
+        let remote = kind0(
             r#"{"name":"old","display_name":"Old","nip05":"a@b.c","lud16":"z@b.c","stream_consent":true,"pronouns":"they"}"#,
-        )
-        .unwrap();
-        let meta = edit_metadata(remote, "new", "https://x/a.png", "", "", true);
+            &[],
+        );
+        let edit = Kind0Edit { name: "new", avatar: "https://x/a.png", bot: true, ..Default::default() };
+        let saved = edit_kind0(remote, &edit);
+        let meta = metadata_view(&saved.content);
         assert_eq!(meta.name.as_deref(), Some("new"));
         assert_eq!(meta.picture.as_deref(), Some("https://x/a.png"));
         assert_eq!(meta.display_name.as_deref(), Some("Old"));
         assert_eq!(meta.nip05.as_deref(), Some("a@b.c"));
         assert_eq!(meta.lud16.as_deref(), Some("z@b.c"));
-        assert!(crate::profile::metadata_stream_consent(&meta), "consent is not revoked by an edit");
-        assert_eq!(meta.custom.get("pronouns"), Some(&serde_json::json!("they")));
-        assert_eq!(meta.custom.get("bot"), Some(&serde_json::json!(true)));
+        assert!(consents(&saved.content), "consent is not revoked by an edit");
+        assert_eq!(saved.content.get("pronouns"), Some(&serde_json::json!("they")));
+        assert_eq!(saved.content.get("bot"), Some(&serde_json::json!(true)));
     }
 
     #[test]

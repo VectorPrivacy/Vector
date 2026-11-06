@@ -97,6 +97,7 @@ pub async fn fetch_messages(init: bool) -> Result<(), String> {
         if init {
             db::spawn_bound(merge_media_servers());
             db::spawn_bound(vector_core::badges::refresh_own());
+            db::spawn_bound(vector_core::profile::sync::stamp_vector_client_after_sync());
         }
     });
     Ok(())
