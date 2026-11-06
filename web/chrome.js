@@ -39,7 +39,8 @@
         if (height !== applied) {
             applied = height;
             const list = document.getElementById('chat-messages');
-            const fromBottom = list ? list.scrollHeight - list.scrollTop - list.clientHeight : 0;
+            // The list scrolls bottom-up: scrollTop is already its distance from the end.
+            const fromBottom = list ? -list.scrollTop : 0;
             root.style.setProperty('--floor', `${keyboard ? 0 : radius}px`);
             root.style.height = height;
             if (keyboard) {
@@ -50,7 +51,7 @@
                 root.style.removeProperty('--kb');
                 for (const el of document.querySelectorAll('[data-kb-fit]')) delete el.dataset.kbFit;
             }
-            if (list?.clientHeight) list.scrollTop = list.scrollHeight - list.clientHeight - fromBottom;
+            if (list?.clientHeight) list.scrollTop = -fromBottom;
             if (keyboard) reveal();
         }
         if (keyboard && (scrollY || vv.offsetTop)) scrollTo(0, 0);
