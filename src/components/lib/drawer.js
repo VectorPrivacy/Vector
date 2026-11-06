@@ -26,10 +26,15 @@ export function drawerPane(node) {
 let p = 0;
 let pTo = 0;
 let pDone = null;
+const outListeners = new Set();
+/** `fn()` each time the drawer starts to come out, from wherever. */
+export function onDrawerOut(fn) { outListeners.add(fn); return () => outListeners.delete(fn); }
 function paint(v) {
+    const coming = v > 0 && p <= 0;
     p = v;
     put('--cc-drawer-p', v);
     document.body.classList.toggle('cc-drawer-on', v > 0);
+    if (coming) for (const fn of outListeners) fn();
     if (v === pTo && pDone) {
         const done = pDone;
         pDone = null;

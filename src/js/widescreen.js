@@ -541,6 +541,19 @@ function ccSetDrawer(open, instant = false) {
     ccSyncDrawerBack(chat);
 }
 
+// What floats over the conversation goes as the drawer starts over it, by hand or not.
+VectorSvelte.onDrawerOut(() => {
+    if (VectorSvelte.pickerVisible()) closeEmojiPanel();
+    if (VectorSvelte.attachmentVisible()) closeAttachmentPanel();
+    hideReactionHoverTip();
+    hideReactionDetails();
+    hideMiniProfile();
+    hideContextMenu();
+    hideMessageToolbar();
+    hideEditHistory();
+    hideGlobalTooltip();
+});
+
 /** The Messages door, or the folded list's Back: from a channel's drawer that's out of the
  *  community, which is the only way back to the tab bar where nothing has a Back button. */
 function ccHome() {
