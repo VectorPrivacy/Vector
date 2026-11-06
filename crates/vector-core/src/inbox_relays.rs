@@ -470,7 +470,9 @@ async fn inbox_query_targets(client: &Client) -> Vec<RelayUrl> {
         .await
         .iter()
         .filter(|(url, relay)| {
-            relay.capabilities().load().can_read() || discovery.contains(&normalize_relay_url(url.as_str()))
+            // The READ flag itself: can_read() also counts GOSSIP, which would ask every
+            // Community relay about our npub.
+            relay.capabilities().load().has_any(RelayCapabilities::READ) || discovery.contains(&normalize_relay_url(url.as_str()))
         })
         .map(|(url, _)| url.clone())
         .collect()
@@ -1306,6 +1308,87 @@ fn merge_inbox_relays(
     MergePlan { list, changed: has_addition || has_removal, contributed }
 }
 
+/// Most outbox relays joined for one look at our own list.
+const OUTBOX_LOOKUP_CAP: usize = 8;
+
+/// Our 10050 from the relays our kind 10002 names that the first pass did not ask, each joined
+/// just for this read and dropped after. `Ok(None)` only when one of them answered without it.
+async fn fetch_from_outbox(
+    client: &Client,
+    filter: &Filter,
+    relay_list: &Event,
+    asked: &[RelayUrl],
+) -> Result<Option<(Vec<String>, u64)>, String> {
+    let asked: HashSet<String> = asked.iter().map(|u| normalize_relay_url(u.as_str())).collect();
+    let mut wanted: Vec<RelayUrl> = Vec::new();
+    for (url, _) in nip65::extract_relay_list(relay_list) {
+        let norm = normalize_relay_url(url.as_str());
+        if !asked.contains(&norm) && !wanted.iter().any(|u| normalize_relay_url(u.as_str()) == norm) {
+            wanted.push(url.clone());
+        }
+    }
+    wanted.truncate(OUTBOX_LOOKUP_CAP);
+    if wanted.is_empty() {
+        return Ok(None);
+    }
+
+    let pooled: HashSet<String> = client.relays().all().await.keys().map(|u| normalize_relay_url(u.as_str())).collect();
+    let mut added: Vec<RelayUrl> = Vec::new();
+    for url in &wanted {
+        if pooled.contains(&normalize_relay_url(url.as_str())) {
+            continue;
+        }
+        // GOSSIP: reachable by this targeted read, invisible to pool-wide DM and profile ops.
+        if client.add_managed_relay(url.as_str()).capabilities(crate::community_relay_capabilities()).await.is_ok() {
+            if let Ok(Some(relay)) = client.relay(url.as_str()).await {
+                relay.connect();
+                added.push(relay.url().clone());
+            }
+        }
+    }
+
+    let found = async {
+        let deadline = Instant::now() + crate::relay_connect_timeout(std::time::Duration::from_secs(6));
+        let live: Vec<RelayUrl> = loop {
+            let relays = client.relays().all().await;
+            let live: Vec<RelayUrl> = wanted
+                .iter()
+                .filter_map(|u| relays.iter().find(|(p, _)| normalize_relay_url(p.as_str()) == normalize_relay_url(u.as_str())))
+                .filter(|(_, r)| r.status() == RelayStatus::Connected)
+                .map(|(p, _)| p.clone())
+                .collect();
+            if live.len() == wanted.len() || Instant::now() >= deadline {
+                break live;
+            }
+            crate::rt::time::sleep(std::time::Duration::from_millis(250)).await;
+        };
+        if live.is_empty() {
+            return Err("no 10050 found and none of our outbox relays reachable; refusing to bootstrap".to_string());
+        }
+        let budget = crate::relay_request_timeout(std::time::Duration::from_secs(6));
+        let asked = Instant::now();
+        let events = client
+            .fetch_events(nostr_sdk::prelude::ReqTarget::manual(live.into_iter().map(|u| (u, vec![filter.clone()]))))
+            .timeout(budget)
+            .await
+            .map_err(|e| e.to_string())?;
+        let newest = events
+            .into_iter()
+            .max_by(|a, b| a.created_at.cmp(&b.created_at).then(b.id.cmp(&a.id)))
+            .map(|e| (parse_relay_tags(&e.tags), e.created_at.as_secs()));
+        if newest.is_none() && asked.elapsed() >= budget {
+            return Err("no 10050 found before an outbox relay answered; refusing to bootstrap".to_string());
+        }
+        Ok(newest)
+    }
+    .await;
+
+    for url in &added {
+        let _ = client.remove_relay(url).await;
+    }
+    found
+}
+
 /// Fetch our OWN current 10050 from read + Discovery relays, with its
 /// created_at. `Ok(None)` means the network answered and no list exists;
 /// `Err` means we could not get a trustworthy answer (offline, nothing
@@ -1321,32 +1404,30 @@ pub async fn fetch_own_inbox_list(client: &Client) -> Result<Option<(Vec<String>
     // Wait (bounded) for targets to be live: a fetch raced against boot-time
     // connection setup returns empty, which reads as "no list exists" and
     // triggers a bootstrap publish over a list we simply couldn't see yet.
-    // A Discovery Relay counts for an early exit (they are the rendezvous
-    // most likely to hold the list); otherwise any connected target at the
-    // deadline is best-effort, and zero connected targets aborts the sync.
+    // Every Discovery Relay gets the deadline, not just the first: the first up
+    // may hold no copy, and its empty answer alone would read as "no list".
+    // Any connected target at the deadline is best-effort; zero aborts the sync.
     let discovery: HashSet<String> = crate::state::discovery_relay_iter()
         .map(normalize_relay_url)
         .collect();
     let deadline = Instant::now() + crate::relay_connect_timeout(std::time::Duration::from_secs(8));
     loop {
-        let relays = client.relays().all().await;
-        let connected: Vec<&RelayUrl> = targets
-            .iter()
-            .filter(|url| {
-                relays
-                    .get(url)
-                    .map(|r| r.status() == RelayStatus::Connected)
-                    .unwrap_or(false)
-            })
-            .collect();
-        let discovery_up = connected
-            .iter()
-            .any(|url| discovery.contains(&normalize_relay_url(url.as_str())));
-        if discovery_up {
+        let (any_up, discovery_waiting) = {
+            let relays = client.relays().all().await;
+            let mut any_up = false;
+            let mut discovery_waiting = false;
+            for url in &targets {
+                let up = relays.get(url).is_some_and(|r| r.status() == RelayStatus::Connected);
+                any_up |= up;
+                discovery_waiting |= !up && discovery.contains(&normalize_relay_url(url.as_str()));
+            }
+            (any_up, discovery_waiting)
+        };
+        if any_up && !discovery_waiting {
             break;
         }
         if Instant::now() >= deadline {
-            if connected.is_empty() {
+            if !any_up {
                 return Err("no query target connected".to_string());
             }
             break;
@@ -1355,6 +1436,7 @@ pub async fn fetch_own_inbox_list(client: &Client) -> Result<Option<(Vec<String>
     }
 
     let filter = Filter::new().author(me).kind(Kind::Custom(10050)).limit(1);
+    let outbox = Filter::new().author(me).kind(Kind::RelayList).limit(1);
     let budget = crate::relay_request_timeout(std::time::Duration::from_secs(6));
     // Ask only live sockets, so a timeout below means a connected relay went quiet, not that
     // one target was down.
@@ -1368,18 +1450,28 @@ pub async fn fetch_own_inbox_list(client: &Client) -> Result<Option<(Vec<String>
     let asked = Instant::now();
     let events = client
         .fetch_events(nostr_sdk::prelude::ReqTarget::manual(
-            live.iter().cloned().map(|u| (u, vec![filter.clone()])),
+            live.iter().cloned().map(|u| (u, vec![filter.clone(), outbox.clone()])),
         ))
         .timeout(budget)
         .await
         .map_err(|e| e.to_string())?;
     // A fetch that ran its whole budget returns whatever arrived: some target never answered.
     let timed_out = asked.elapsed() >= budget;
+    let (lists, relay_lists): (Vec<Event>, Vec<Event>) =
+        events.into_iter().partition(|e| e.kind == Kind::Custom(10050));
     // NIP-01 replaceable tie-break: newest created_at, lowest id on a tie.
-    let newest = events
+    let mut newest = lists
         .into_iter()
         .max_by(|a, b| a.created_at.cmp(&b.created_at).then(b.id.cmp(&a.id)))
         .map(|e| (parse_relay_tags(&e.tags), e.created_at.as_secs()));
+
+    // A client that writes only to the account's outbox leaves the list where neither our pool
+    // nor a Discovery Relay looks: ask the relays its kind 10002 names before calling it absent.
+    if newest.is_none() && !timed_out {
+        if let Some(relay_list) = relay_lists.iter().max_by_key(|e| e.created_at) {
+            newest = fetch_from_outbox(client, &filter, relay_list, &live).await?;
+        }
+    }
 
     // "No list found" is only trustworthy when a Discovery Relay answered:
     // a list curated elsewhere may live on none of our own relays, and a
@@ -1635,7 +1727,8 @@ pub async fn publish_inbox_relays_synced(
         .await
         .iter()
         .filter(|(url, relay)| {
-            !relay.capabilities().load().can_write() && discovery.contains(&normalize_relay_url(url.as_str()))
+            // The WRITE flag itself: can_write() also counts GOSSIP, which every Discovery Relay has.
+            !relay.capabilities().load().has_any(RelayCapabilities::WRITE) && discovery.contains(&normalize_relay_url(url.as_str()))
         })
         .map(|(url, _)| url.clone())
         .collect();
