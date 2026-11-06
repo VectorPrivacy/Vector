@@ -462,10 +462,11 @@ class EventCache {
         const seekRegion = sliceSorted.filter(e => !tailIds.has(e.id));
 
         // Contiguity test: the seek region touches/overlaps the tail when its newest
-        // event is at-or-after the tail's oldest event. (When the slice fully overlapped
-        // the tail, seekRegion is empty and it's trivially contiguous.)
+        // event is at-or-after the tail's oldest event, or when the slice shared rows with
+        // the tail (one unbroken DB range meeting another). An empty seekRegion is trivially
+        // contiguous.
         let gapAfterId = null;
-        if (seekRegion.length && tail.length) {
+        if (seekRegion.length && tail.length && seekRegion.length === sliceSorted.length) {
             const seekNewestAt = seekRegion[seekRegion.length - 1].at;
             const tailOldestAt = tail[0].at;
             if (seekNewestAt < tailOldestAt) {

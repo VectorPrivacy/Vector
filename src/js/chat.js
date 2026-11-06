@@ -1977,6 +1977,7 @@ async function wireChatUi() {
         handleChatScrollIntent();
         noteScrollActivity();
         recordTailAnchor();
+        scheduleChatScrollbar();
         handleProceduralScroll();
     }, { passive: true });
     // Hook up a scroll handler in the chat to display UI elements at certain scroll depths

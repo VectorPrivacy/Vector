@@ -1890,6 +1890,44 @@ pub async fn get_messages_around(
     compose_message_views(decrypted).await
 }
 
+/// Where a message sits in its chat: how many messages sort after it and how many there are,
+/// in the order and under the ban filter `get_messages_around` uses. None when it isn't held.
+#[derive(serde::Serialize, Debug, PartialEq, Eq)]
+pub struct MessagePosition {
+    pub newer: usize,
+    pub total: usize,
+}
+
+pub fn get_message_position(chat_id: i64, anchor_id: &str) -> Result<Option<MessagePosition>, String> {
+    use rusqlite::OptionalExtension;
+    let k = [event_kind::CHAT_MESSAGE, event_kind::PRIVATE_DIRECT_MESSAGE, event_kind::FILE_ATTACHMENT].map(|k| k as i32);
+    let conn = super::get_db_connection_guard_static()?;
+    let community = ban_param(&conn, chat_id);
+    let Some((at, rt, rowid)) = conn.query_row(
+        "SELECT created_at, received_at, rowid FROM events WHERE id = ?1 AND chat_id = ?2",
+        rusqlite::params![anchor_id, chat_id],
+        |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?, row.get::<_, i64>(2)?)),
+    ).optional().map_err(|e| format!("Failed to find message: {}", e))? else {
+        return Ok(None);
+    };
+    let kinds = "chat_id = ?1 AND kind IN (?2, ?3, ?4)";
+    let newer: i64 = conn.query_row(
+        &format!(
+            "SELECT COUNT(*) FROM events WHERE {kinds} \
+             AND (created_at > ?5 OR (created_at = ?5 AND (received_at > ?6 OR (received_at = ?6 AND rowid > ?7)))){}",
+            ban_filter_sql(8)
+        ),
+        rusqlite::params![chat_id, k[0], k[1], k[2], at, rt, rowid, community],
+        |row| row.get(0),
+    ).map_err(|e| format!("Failed to count messages: {}", e))?;
+    let total: i64 = conn.query_row(
+        &format!("SELECT COUNT(*) FROM events WHERE {kinds}{}", ban_filter_sql(5)),
+        rusqlite::params![chat_id, k[0], k[1], k[2], community],
+        |row| row.get(0),
+    ).map_err(|e| format!("Failed to count messages: {}", e))?;
+    Ok(Some(MessagePosition { newer: newer as usize, total: total as usize }))
+}
+
 /// Get the last message for ALL chats in a single batch query.
 /// Optimized for app startup (chat list sidebar).
 pub async fn get_all_chats_last_messages() -> Result<std::collections::HashMap<String, Vec<Message>>, String> {
@@ -3683,6 +3721,28 @@ mod tests {
             win.iter().all(|m| m.npub.as_deref() == Some(good.as_str())),
             "no banned author reachable by jumping to a message near them",
         );
+    }
+
+    #[tokio::test]
+    async fn a_message_position_counts_what_sorts_after_it_without_banned_authors() {
+        let (_tmp, _guard) = init_test_db();
+        let chat = "channel_position";
+        link_channel_to_community(chat, "comm_position");
+        let (raider_hex, raider) = ban_pair();
+        let (_, good) = ban_pair();
+        for i in 0..10u64 {
+            let m = Message { id: format!("p_real{i}"), content: "hi".into(), at: 1_000_000 + i * 1_000, npub: Some(good.clone()), ..Default::default() };
+            save_message(chat, &m).await.unwrap();
+        }
+        let spam = Message { id: "p_spam".into(), content: "buy".into(), at: 1_009_500, npub: Some(raider.clone()), ..Default::default() };
+        save_message(chat, &spam).await.unwrap();
+        let chat_id = crate::db::id_cache::get_chat_id_by_identifier(chat).unwrap();
+
+        assert_eq!(get_message_position(chat_id, "p_real3").unwrap(), Some(MessagePosition { newer: 7, total: 11 }));
+        crate::db::community::set_community_banlist("comm_position", &[raider_hex], 1).unwrap();
+        assert_eq!(get_message_position(chat_id, "p_real3").unwrap(), Some(MessagePosition { newer: 6, total: 10 }));
+        assert_eq!(get_message_position(chat_id, "p_real9").unwrap(), Some(MessagePosition { newer: 0, total: 10 }));
+        assert_eq!(get_message_position(chat_id, "missing").unwrap(), None);
     }
 
     /// A DM has no community, so the predicate must not exclude anything.

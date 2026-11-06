@@ -136,6 +136,11 @@ pub fn get_chat_message_count(chat_id: &str) -> Result<usize, String> {
     db::events::get_chat_message_count(id)
 }
 
+pub fn get_message_position(chat_id: &str, message_id: &str) -> Result<Option<db::events::MessagePosition>, String> {
+    let id = db::id_cache::get_chat_id_by_identifier(chat_id)?;
+    db::events::get_message_position(id, message_id)
+}
+
 pub fn get_system_events(conversation_id: &str) -> Result<Value, String> {
     let events = db::events::get_system_events_for_chat(conversation_id)?;
     Ok(Value::Array(

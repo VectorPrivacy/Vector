@@ -46,6 +46,8 @@ let windowAtTail = true;
 let _windowSuppressAutoScroll = false;
 // Set while a whole window renders: the caller places the view after, so no anchor holds through it.
 let _windowRendering = false;
+// Counts whole-window renders: a load that awaited across one belongs to a window that is gone.
+let _windowGen = 0;
 
 // True for the duration of a jumpToUnread resolve (relay-walk + DB pull). The
 // window must NEVER shift until the jump renders, so realtime arrivals during
@@ -114,6 +116,7 @@ function isAtDataBottom() {
  * the slice (caller may also re-insert). Returns the rendered slice array.
  */
 async function renderWindow(startIdx, endIdx) {
+    _windowGen++;
     const chat = arrChats.find(c => c.id === strOpenChat);
     if (!chat) return [];
     const msgs = _windowMessages();
@@ -186,6 +189,7 @@ async function renderWindow(startIdx, endIdx) {
     // The rendered range moved — the scroll-return button's data-bottom term
     // may have flipped. (No scroll event fires from a programmatic render.)
     refreshScrollReturnButton();
+    scheduleChatScrollbar();
 
     return slice;
 }
@@ -289,13 +293,8 @@ function windowTrimTopIfOver() {
  * window with it (drops the seeked slice).
  */
 async function windowJumpToBottom() {
-    // Explicit user action (↓ button / own-send): it MUST reach the live tail, never silently no-op.
-    // If a scroll-triggered load holds the gate, WAIT for it to finish (don't bail) then claim it — so
-    // the re-seed-to-tail still runs, and it stays race-free by serialising after the in-flight load.
-    let _waitGuard = 0;
-    while (proceduralScrollState.isLoading && _waitGuard++ < 160) {
-        await new Promise(r => setTimeout(r, 25));
-    }
+    // Explicit user action (↓ button / own-send / the scrollbar): it MUST reach the live tail. A load
+    // in flight is overtaken, not waited on: it belongs to the window this replaces (_windowGen).
     proceduralScrollState.isLoading = true;
     try {
     const chatId = strOpenChat;
@@ -459,6 +458,7 @@ async function windowExtendOlder() {
         const anchorId = windowTopId;
         if (!anchorId) return false;
         const chatId = strOpenChat;
+        const gen = _windowGen;
         // Pill active → user is paging toward a (possibly deep) unread boundary; pull a larger batch
         // so the cache reaches it in far fewer round-trips (rendered window still steps by WINDOW_STEP).
         const seekFetch = (_unreadJumpPill && _unreadJumpPill.classList.contains('visible'))
@@ -468,23 +468,23 @@ async function windowExtendOlder() {
         if (chat.chat_type === 'Community') {
             const topAt = msgs0[start]?.at;
             if (topAt) await invoke('fill_community_gap', { channelId: chatId, beforeMs: topAt }).catch(() => 0);
-            if (strOpenChat !== chatId) return true;
+            if (strOpenChat !== chatId || gen !== _windowGen) return true;
         }
         let older = [];
         try {
             older = await invoke('get_messages_around', { chatId, anchorId, before: seekFetch + 1, after: 0 }) || [];
         } catch (e) { console.warn('[unread-jump] extend-older anchored load failed:', e); }
-        if (strOpenChat !== chatId) return true;
+        if (strOpenChat !== chatId || gen !== _windowGen) return true;
 
         // ≤1 row back = only the anchor (the `<= anchor` include) → DB history start.
         // For a Community, try the network to grow the DB first, THEN re-read.
         if (older.length <= 1 && chat.chat_type === 'Community') {
             await maybeLoadCommunityOlderFromNetwork(chatId);
-            if (strOpenChat !== chatId) return true;
+            if (strOpenChat !== chatId || gen !== _windowGen) return true;
             try {
                 older = await invoke('get_messages_around', { chatId, anchorId, before: seekFetch + 1, after: 0 }) || [];
             } catch (e) { console.warn('[unread-jump] extend-older re-read failed:', e); }
-            if (strOpenChat !== chatId) return true;
+            if (strOpenChat !== chatId || gen !== _windowGen) return true;
         }
         if (older.length <= 1) return true;   // history start
 
@@ -578,11 +578,12 @@ async function windowExtendNewer() {
         const anchorId = windowBottomId;
         if (!anchorId) return false;
         const chatId = strOpenChat;
+        const gen = _windowGen;
         let newer = [];
         try {
             newer = await invoke('get_messages_around', { chatId, anchorId, before: 0, after: WINDOW_STEP }) || [];
         } catch (e) { console.warn('[unread-jump] extend-newer anchored load failed:', e); }
-        if (strOpenChat !== chatId) return true;
+        if (strOpenChat !== chatId || gen !== _windowGen) return true;
 
         // No genuinely-newer rows in the DB past the anchor.
         if (!newer.length) {
@@ -925,6 +926,7 @@ function holdChatBottom(ms = BOTTOM_HOLD_MS) {
  */
 let _pinGuardHeight = 0;
 function _pinGuardCheck() {
+    scheduleChatScrollbar();
     const el = domChatMessages;
     const height = el.scrollHeight;
     if (height === _pinGuardHeight) return;
@@ -946,7 +948,7 @@ new MutationObserver(() => {
  * Handle procedural scroll loading of older messages
  */
 function handleProceduralScroll() {
-    if (!strOpenChat || proceduralScrollState.isLoading) return;
+    if (!strOpenChat || proceduralScrollState.isLoading || _barDragging) return;
 
     const reach = Math.max(proceduralScrollState.scrollThreshold, domChatMessages.clientHeight * 1.5);
     const nearTop = scrollFromStart(domChatMessages) <= reach;
@@ -1579,3 +1581,176 @@ async function jumpToUnread(lastReadId) {
     hideUnreadJumpPill();
     } finally { _unreadJumpResolving = false; }
 }
+// ===========================================================================
+// The chat's scrollbar: where the view sits in the whole chat, not in the rendered window. A row's
+// place is its rank among the chat's messages (vector-core counts what sorts after it), and a drag
+// seeks: it loads the window at the pointer's place instead of scrolling the one it has.
+// ===========================================================================
+const _barRanks = new Map();   // message id → { newer, total, at }, or { none, at } when not held
+const BAR_RANK_TTL_MS = 2000;
+const _barDateFmt = new Intl.DateTimeFormat([], { dateStyle: 'medium' });
+let _barAsking = null;
+let _barRaf = 0;
+let _barInset = 0;             // the header lying over the top of the list, where it does
+let _barLast = { total: 0, visible: 0 };
+let _barDragging = false;
+let _barWant = null;           // the place a drag last asked for, while a seek runs
+let _barSeeking = false;
+
+function scheduleChatScrollbar() {
+    if (!_barRaf) _barRaf = requestAnimationFrame(updateChatScrollbar);
+}
+
+/** A held message's rank, asked of the backend at most once at a time; a stale answer serves until
+ *  the fresh one lands. */
+function _barRank(chatId, id) {
+    const hit = _barRanks.get(id);
+    if (hit && VectorSvelte.now() - hit.at < BAR_RANK_TTL_MS) return hit.none ? null : hit;
+    if (_barAsking !== id) {
+        _barAsking = id;
+        if (_barRanks.size > 200) _barRanks.clear();
+        invoke('get_message_position', { chatId, messageId: id })
+            .then((pos) => _barRanks.set(id, pos ? { ...pos, at: VectorSvelte.now() } : { none: true, at: VectorSvelte.now() }))
+            .catch(() => _barRanks.set(id, { none: true, at: VectorSvelte.now() }))
+            .finally(() => {
+                if (_barAsking === id) _barAsking = null;
+                if (strOpenChat === chatId) scheduleChatScrollbar();
+            });
+    }
+    return hit && !hit.none ? hit : null;
+}
+
+const _barCounted = (m) => m && !m.system_event && !m.pending && !m.failed;
+
+function updateChatScrollbar() {
+    _barRaf = 0;
+    const el = domChatMessages;
+    const chatId = strOpenChat;
+    const msgs = chatId ? _windowMessages() : null;
+    if (!el || !msgs?.length || _windowRendering || el.scrollHeight <= el.clientHeight + 1) {
+        VectorSvelte.setChatScrollbar({ shown: false });
+        return;
+    }
+    // The row at the top of the view, how far the view has passed into it, and how many rows show.
+    const view = el.getBoundingClientRect();
+    const edge = view.top + _barInset;
+    let top = null, into = 0, visible = 0;
+    for (const row of domChatRows.children) {
+        if (!row.id || row.id === 'dmsg-toolbar') continue;
+        const r = row.getBoundingClientRect();
+        if (r.bottom <= edge) continue;
+        if (r.top >= view.bottom) break;
+        if (!r.height) continue;
+        if (!top) { top = row; into = Math.max(0, Math.min(1, (edge - r.top) / r.height)); }
+        visible += (Math.min(r.bottom, view.bottom) - Math.max(r.top, edge)) / r.height;
+    }
+    const i = top ? msgs.findIndex(m => m.id === top.id) : -1;
+    if (i === -1) return;
+    // Rank the newest held row of the run the view is in (a seek leaves the tail as a run of its own).
+    const gapId = eventCache.getGapAfterId(chatId);
+    const gi = gapId != null ? msgs.findIndex(m => m.id === gapId) : -1;
+    let j = gi !== -1 && i <= gi ? gi : msgs.length - 1;
+    while (j > i && !_barCounted(msgs[j])) j--;
+    const rank = _barRank(chatId, msgs[j].id);
+    if (!rank) return;
+    let newer = rank.newer;
+    for (let k = i + 1; k <= j; k++) if (_barCounted(msgs[k])) newer++;
+    const total = Math.max(1, rank.total);
+    const at = Math.max(0, total - 1 - newer) + into;
+    _barLast = { total, visible };
+    const patch = { shown: total > visible + 0.5, size: Math.min(1, visible / total), label: _barDateFmt.format(new Date(msgs[i].at)) };
+    if (!_barDragging) patch.top = Math.max(0, Math.min(1, at / Math.max(1, total - visible)));
+    VectorSvelte.setChatScrollbar(patch);
+}
+
+/** The track runs beside the list, below a header that lies over it. */
+function layoutChatScrollbar() {
+    const pane = domChatMessages.parentElement;
+    const v = domChatMessages.getBoundingClientRect();
+    const head = pane.querySelector('.chat-header')?.getBoundingClientRect();
+    _barInset = head && head.bottom > v.top && head.bottom < v.bottom ? head.bottom - v.top : 0;
+    VectorSvelte.setChatScrollbar({
+        trackTop: v.top - pane.getBoundingClientRect().top + _barInset + 4,
+        trackHeight: Math.max(0, v.height - _barInset - 8),
+    });
+    scheduleChatScrollbar();
+}
+new ResizeObserver(layoutChatScrollbar).observe(domChatMessages);
+
+/** A drag or click on the track: `p` is the view's place, 0 (the start) to 1 (the newest). */
+function seekChatScrollbar(p, done) {
+    _barDragging = !done;
+    VectorSvelte.setChatScrollbar({ top: p, dragging: !done });
+    _barWant = p;
+    if (!_barSeeking) _runChatScrollbarSeeks();
+}
+
+async function _runChatScrollbarSeeks() {
+    _barSeeking = true;
+    try {
+        while (_barWant != null) {
+            const p = _barWant;
+            _barWant = null;
+            await _seekChatTo(p);
+        }
+    } finally {
+        _barSeeking = false;
+        scheduleChatScrollbar();
+    }
+}
+
+async function _seekChatTo(p) {
+    const chatId = strOpenChat;
+    const el = domChatMessages;
+    const { total, visible } = _barLast;
+    if (!chatId || !el || !total) return;
+    const newer = Math.max(0, Math.round(total - 1 - p * Math.max(0, total - visible)));
+    if (newer <= visible) {
+        if (!windowAtTail) await windowJumpToBottom();
+        else { beginProgrammaticScroll(); scrollToEnd(el); }
+        chatPinnedToBottom = true;
+        _userScrolledAway = false;
+        return;
+    }
+    // A load in flight is overtaken, not waited on: it belongs to the window this replaces.
+    proceduralScrollState.isLoading = true;
+    try {
+        // The target row with a screenful of newer rows under it, and room to scroll on above.
+        const offset = Math.max(0, newer - WINDOW_STEP * 2);
+        let page = [];
+        try { page = await invoke('get_message_views', { chatId, limit: MAX_WINDOW_ROWS, offset }) || []; } catch (_) { return; }
+        if (strOpenChat !== chatId || !page.length) return;
+        const target = page[Math.min(page.length - 1, newer - offset)];   // newest first
+        page.sort((a, b) => a.at - b.at);
+        eventCache.seedWindow(chatId, page);
+        const chat = arrChats.find(c => c.id === chatId);
+        if (chat) chat.messages = eventCache.getEventsRef(chatId) || chat.messages;
+        const msgs = _windowMessages() || [];
+        const ti = msgs.findIndex(m => m.id === target.id);
+        if (ti === -1) return;
+        const gapId = eventCache.getGapAfterId(chatId);
+        const gi = gapId != null ? msgs.findIndex(m => m.id === gapId) : -1;
+        const inSeek = gi !== -1 && ti <= gi;
+        const start = Math.max(inSeek ? 0 : gi + 1, ti - WINDOW_STEP);
+        const end = Math.min(inSeek ? gi + 1 : msgs.length, ti + MAX_WINDOW_ROWS - WINDOW_STEP);
+        chatPinnedToBottom = false;
+        _userScrolledAway = true;
+        windowAtTail = end >= msgs.length;
+        await renderWindow(start, end);
+        if (strOpenChat !== chatId) return;
+        setTailRoom(windowAtTail ? 0 : TAIL_RESERVE);
+        const row = document.getElementById(target.id);
+        if (row) {
+            beginProgrammaticScroll();
+            el.scrollTop = Math.min(row.offsetTop - _barInset, scrollEnd(el));
+        }
+        recordTailAnchor();
+    } finally {
+        proceduralScrollState.isLoading = false;
+    }
+}
+
+VectorSvelte.setChatScrollbarHandlers({
+    seek: seekChatScrollbar,
+    wheel: (e) => { domChatMessages.scrollTop += e.deltaMode === 1 ? e.deltaY * 16 : e.deltaY; },
+});

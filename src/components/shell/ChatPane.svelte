@@ -10,6 +10,7 @@
     import VoiceStage from '../calls/VoiceStage.svelte';
     import WallpaperLayer from '../chat/WallpaperLayer.svelte';
     import WallpaperPreviewBar from '../chat/WallpaperPreviewBar.svelte';
+    import ChatScrollbar from '../chat/ChatScrollbar.svelte';
     import ComposerBox from '../composer/ComposerBox.svelte';
     import RequestBar from '../chat/RequestBar.svelte';
     import { requestState } from '../lib/request.svelte.js';
@@ -78,6 +79,7 @@
         <div class="tail-room" aria-hidden="true"></div>
         <div class="chat-rows"></div>
     </div>
+    <ChatScrollbar />
     <WallpaperPreviewBar />
     <ComposerBox />
 </div>

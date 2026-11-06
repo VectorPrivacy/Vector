@@ -134,6 +134,7 @@ export { deriveWindow } from './lib/chatwindow.js';
 export { setWindow, clearWindow, touchWindow, touchMessage, setDivider, clearDivider, setNotice, setArrival } from './lib/chatview.svelte.js';
 export { setSelfDestructSecs } from './lib/composer.svelte.js';
 export { toolbarHost, toolbarEls, setToolbarHandlers, setToolbarHost, setToolbarSwipe } from './lib/toolbar.svelte.js';
+export { setChatScrollbar, setChatScrollbarHandlers } from './lib/scrollbar.svelte.js';
 export { showToast, hideToast } from './lib/toast.svelte.js';
 export { contextMenuEls, setContextMenuHandlers, setContextMenu } from './lib/contextmenu.svelte.js';
 export { setRekey } from './lib/rekey.svelte.js';

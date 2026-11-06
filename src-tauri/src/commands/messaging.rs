@@ -115,6 +115,16 @@ pub async fn get_chat_message_count<R: Runtime>(
     db::get_chat_message_count(&chat_id).await
 }
 
+/// Where a message sits in its chat (messages newer than it, and the total), for the chat's scrollbar.
+#[tauri::command]
+pub async fn get_message_position(
+    chat_id: String,
+    message_id: String,
+) -> Result<Option<vector_core::db::events::MessagePosition>, String> {
+    let chat_int_id = vector_core::db::id_cache::get_chat_id_by_identifier(&chat_id)?;
+    vector_core::db::events::get_message_position(chat_int_id, &message_id)
+}
+
 /// Get message views (composed from events table) for a chat
 /// This is the new event-based approach that computes reactions from flat events
 #[tauri::command]
