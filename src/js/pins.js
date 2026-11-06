@@ -10,6 +10,8 @@ let pinsCtx = { communityId: null, channelId: null, canPin: false };
 // Verified pins for the open channel, keyed for the toolbar's Pin/Unpin flip.
 let pinsCache = { pins: [], sealed: false, version: 0 };
 let pinsDrawerOpen = false;
+// Each channel's last known button state, so moving between channels doesn't flash it.
+const pinsShown = new Map();
 
 /// Resolve the pin context when a chat opens. Pins exist only on Concord v2
 /// community channels (64-hex community id); everything else hides the button.
@@ -17,20 +19,23 @@ async function pinsOnChatOpened(chatId) {
     pinsSetDrawerVisible(false, true);
     pinsCtx = { communityId: null, channelId: null, canPin: false };
     pinsCache = { pins: [], sealed: false, version: 0 };
-    VectorSvelte.setPinsButtonVisible(false);
 
     const chat = arrChats.find(c => c.id === chatId);
     const communityId = chat?.chat_type === 'Community'
         ? chat.metadata?.custom_fields?.community_id
         : null;
     if (!communityId || communityId.length !== 64) {
+        VectorSvelte.setPinsButtonVisible(false);
         return;
     }
     pinsCtx = { communityId, channelId: chatId, canPin: false };
+    // Until its pins load, a channel shows what was last known of it, else the button stays as it was.
+    if (pinsShown.has(chatId)) VectorSvelte.setPinsButtonVisible(pinsShown.get(chatId));
 
     // Capability + current pins, both non-blocking for the chat open.
     try {
         const caps = await invoke('get_community_capabilities', { communityId });
+        if (pinsCtx.channelId !== chatId) return;
         pinsCtx.canPin = !!caps?.pin_messages;
     } catch (e) { /* affordances stay read-only */ }
     await pinsRefresh();
@@ -63,21 +68,26 @@ async function pinsResolveJumpable(rumorId) {
 
 /// Re-fetch the open channel's pins from the locally folded head.
 async function pinsRefresh() {
-    if (!pinsCtx.channelId) return;
+    const channelId = pinsCtx.channelId;
+    if (!channelId) return;
+    let fetched;
     try {
-        pinsCache = await invoke('get_channel_pins', {
+        fetched = await invoke('get_channel_pins', {
             communityId: pinsCtx.communityId,
-            channelId: pinsCtx.channelId,
+            channelId,
         });
     } catch (e) {
         console.error('Pins: fetch failed:', e);
-        pinsCache = { pins: [], sealed: false, version: 0 };
+        fetched = { pins: [], sealed: false, version: 0 };
     }
     // Jumpability resolved HERE (async) so the render stays sync and rows
     // never flicker between clickable and inert.
-    await Promise.all((pinsCache.pins || []).map(async (p) => {
+    await Promise.all((fetched.pins || []).map(async (p) => {
         p._jumpable = await pinsResolveJumpable(p.rumor_id);
     }));
+    // A channel left meanwhile keeps its answer out of the one now open.
+    if (pinsCtx.channelId !== channelId) return;
+    pinsCache = fetched;
     pinsUpdateButton();
     pinsRenderDrawer();
 }
@@ -87,6 +97,7 @@ async function pinsRefresh() {
 /// FIRST pin is made from the message context menu, so no button is needed.
 function pinsUpdateButton() {
     const show = !!pinsCtx.channelId && (pinsCache.pins.length > 0 || pinsCache.sealed);
+    if (pinsCtx.channelId) pinsShown.set(pinsCtx.channelId, show);
     VectorSvelte.setPinsButtonVisible(show);
 }
 
