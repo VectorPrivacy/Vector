@@ -38,7 +38,7 @@
     }
 </script>
 
-<div id="navbar" class="row navbar" style:display={panes.navbar ? null : 'none'} use:bindNavbar use:reveal={['navbar', reveals.navbar]} use:drawerPane>
+<div id="navbar" class="row navbar" style:display={panes.navbar ? null : 'none'} use:bindNavbar use:reveal={['navbar', reveals.navbar]} use:drawerPane={{ home: 'motion' }}>
     <!-- Unread DMs over communities; the strip renders once rail.js registers its bag. -->
     <div id="ws-rail-shortcuts">
         {#if st.ws && screens.rail}<RailShortcuts h={screens.rail.h} snapshot={screens.rail.snapshot} />{/if}

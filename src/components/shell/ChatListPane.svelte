@@ -87,8 +87,8 @@
 </script>
 
 <!-- A community channel on screen keeps the pane up as its drawer, away until pulled. -->
-<div id="chats" class="chats" style:display={panes.chats || cc.layer ? null : 'none'} use:bindChats use:reveal={['chats', reveals.chats]} use:railPull={drawerGrip} use:drawerPane>
-    {#if cc.layer}<div class="cc-drawer-tint" use:drawerPane></div>{/if}
+<div id="chats" class="chats" style:display={panes.chats || cc.layer ? null : 'none'} use:bindChats use:reveal={['chats', reveals.chats]} use:railPull={drawerGrip} use:drawerPane={{ p: 'motion', home: 'frame' }}>
+    {#if cc.layer}<div class="cc-drawer-tint" use:drawerPane={{ home: 'motion' }}></div>{/if}
     {#if slim}<ConsoleHeader />{/if}
     <!-- A sync that starts under the login form waits for the list to be on screen. -->
     <div id="sync-line" class="sync-line" class:active={sync.active && !login.shown} class:fade-out={sync.fadeOut} class:progress={sync.progress !== null}
@@ -135,7 +135,7 @@
                     {#if screens.communityBanner}<CommunityBanner h={screens.communityBanner.h} />{/if}
                 {/if}
             </div>
-            <div id="chat-list" bind:this={listEl} use:tiling use:bindList use:listFade use:drawerPane use:reveal={['chatList', reveals.chatList]}>
+            <div id="chat-list" bind:this={listEl} use:tiling use:bindList use:listFade use:drawerPane={{ home: 'frame' }} use:reveal={['chatList', reveals.chatList]}>
                 {#if screens.chatlist}<Chatlist h={screens.chatlist.h} snapshot={screens.chatlist.snapshot} />{/if}
             </div>
         </div>
@@ -144,5 +144,5 @@
 {#if cc.layer}
     <!-- The channel under the drawer, shaded: a tap or a pull back puts the drawer away. -->
     <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-    <div class="cc-drawer-shade" data-edge-skip use:railPull={drawerGrip} use:drawerPane onclick={() => shellHandlers().consoleDrawer?.(false)}></div>
+    <div class="cc-drawer-shade" data-edge-skip use:railPull={drawerGrip} use:drawerPane={{ p: 'motion' }} onclick={() => shellHandlers().consoleDrawer?.(false)}></div>
 {/if}

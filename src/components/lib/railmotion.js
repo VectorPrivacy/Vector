@@ -7,16 +7,24 @@ const FLING = 0.35;
 // Movement before a press becomes a pull or a scroll.
 const SLOP = 6;
 
+/** How long an ease from `from` to `to` takes, 0 for none. A shorter way home takes a
+ *  shorter time, so a nearly-shut rail doesn't crawl. */
+export function settleMs(from, to) {
+    if (from === to || matchMedia('(prefers-reduced-motion: reduce)').matches) return 0;
+    return SETTLE_MS * Math.min(1, 0.35 + Math.abs(to - from));
+}
+
+/** The settle's curve (a cubic ease-out) for a compositor animation. */
+export const SETTLE_EASING = 'cubic-bezier(0.33, 1, 0.68, 1)';
+
 /** Eases a value toward a target frame by frame; a newer `to` takes over. */
 export function settler(set) {
     let frame = 0;
     return {
         to(from, to) {
             cancelAnimationFrame(frame);
-            const instant = from === to || matchMedia('(prefers-reduced-motion: reduce)').matches;
-            if (instant) { set(to); return; }
-            // A shorter way home takes a shorter time, so a nearly-shut rail doesn't crawl.
-            const ms = SETTLE_MS * Math.min(1, 0.35 + Math.abs(to - from));
+            const ms = settleMs(from, to);
+            if (!ms) { set(to); return; }
             const start = performance.now();
             const step = (now) => {
                 // A frame's timestamp can precede `start`; below 0 the curve overshoots.
