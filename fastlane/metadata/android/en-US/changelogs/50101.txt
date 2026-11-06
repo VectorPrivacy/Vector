@@ -1,0 +1,7 @@
+First preview of 0.5.1.
+- Animated emoji move on Android, iOS and the web
+- Smoother drawers and chat slides on modest phones
+- Profile saves keep everything other apps added
+- Emoji packs from other Nostr apps show up
+- Ogg Opus voice clips play, and audio files transcribe
+- Fixes: DM relay list reset on sign-in, unread during sync, edit drafts, double sends
