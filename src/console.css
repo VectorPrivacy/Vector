@@ -73,6 +73,8 @@ body.cc #sync-line {
 
 body.cc .navbar {
   background-color: #131313;
+  /* Its own layer, so rising with a slide moves it without repainting it. */
+  will-change: transform;
 }
 
 /* ============================== The header =============================== */
@@ -575,6 +577,14 @@ body.cc #chat-list {
     transparent 100%
   );
   mask-repeat: no-repeat;
+}
+
+/* Widening into the list, its foot is under the rising tab bar: the mask ends at the bar's
+   edge, so the fade rides up with it rather than appearing once the bar has landed. */
+body.cc.cc-layer.cc-homing #chat-list {
+  mask-size: 100% calc(100% - var(--cc-nav-h) * var(--cc-home, 0));
+  /* The rows under the bar are still to come, whatever the scroll says: a full fade. */
+  --ws-list-fade: 24px !important;
 }
 
 body.cc #chat-list > :last-child {

@@ -135,7 +135,7 @@
                     {#if screens.communityBanner}<CommunityBanner h={screens.communityBanner.h} />{/if}
                 {/if}
             </div>
-            <div id="chat-list" bind:this={listEl} use:tiling use:bindList use:listFade use:reveal={['chatList', reveals.chatList]}>
+            <div id="chat-list" bind:this={listEl} use:tiling use:bindList use:listFade use:drawerPane use:reveal={['chatList', reveals.chatList]}>
                 {#if screens.chatlist}<Chatlist h={screens.chatlist.h} snapshot={screens.chatlist.snapshot} />{/if}
             </div>
         </div>
