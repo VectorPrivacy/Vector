@@ -32,7 +32,7 @@ use crate::db;
 
 use std::path::Path;
 use symphonia::core::audio::SampleBuffer;
-use symphonia::core::codecs::{DecoderOptions, CODEC_TYPE_NULL};
+use symphonia::core::codecs::{DecoderOptions, CODEC_TYPE_NULL, CODEC_TYPE_OPUS};
 use symphonia::core::errors::Error as SymphoniaError;
 use symphonia::core::formats::FormatOptions;
 use symphonia::core::io::MediaSourceStream;
@@ -548,6 +548,9 @@ pub(crate) fn symphonia_decode_mono(file_bytes: Vec<u8>, extension: Option<&str>
         .ok_or("No supported audio tracks found")?;
 
     let track_id = track.id;
+    if track.codec_params.codec == CODEC_TYPE_OPUS {
+        return opus_decode_mono(format, track_id);
+    }
     let declared_rate = track.codec_params.sample_rate.ok_or("Unknown sample rate")?;
 
     let mut decoder = symphonia::default::get_codecs()
@@ -602,6 +605,28 @@ pub(crate) fn symphonia_decode_mono(file_bytes: Vec<u8>, extension: Option<&str>
     }
 
     Ok((mono_samples, sample_rate))
+}
+
+/// Opus (most voice clips sent as .ogg), which symphonia demuxes but cannot decode: libopus,
+/// as calls use, at 48 kHz into one channel, which it mixes down itself.
+fn opus_decode_mono(mut format: Box<dyn symphonia::core::formats::FormatReader>, track_id: u32) -> Result<(Vec<f32>, u32), String> {
+    let mut decoder = opus::Decoder::new(48_000, opus::Channels::Mono).map_err(|e| format!("Failed to create Opus decoder: {e}"))?;
+    let mut mono_samples = Vec::new();
+    // 120 ms at 48 kHz: the longest an Opus packet can be.
+    let mut frame = vec![0f32; 5760];
+    loop {
+        let packet = match format.next_packet() {
+            Ok(p) => p,
+            Err(_) => break,
+        };
+        if packet.track_id() != track_id {
+            continue;
+        }
+        if let Ok(n) = decoder.decode_float(&packet.data, &mut frame, false) {
+            mono_samples.extend_from_slice(&frame[..n]);
+        }
+    }
+    Ok((mono_samples, 48_000))
 }
 
 /// Internal: Decode audio file with options

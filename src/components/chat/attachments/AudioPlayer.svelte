@@ -24,7 +24,6 @@
     const up = $derived(uploading ? transfer(msg.id) : null);
     const download = modelDownloadState();
     const transcription = $derived(info?.transcription ?? null);
-    const canTranscribe = $derived(!uploading && h.transcriptionSupported(att));
 
     // ── playback: a session this row owns, or takes back from the pop-out ──
     // svelte-ignore state_referenced_locally
@@ -35,6 +34,7 @@
     let positionMs = $state(session?.position() ?? 0);   // what the time display shows
     let durationMs = $derived(info?.durationMs || 0);
     const meta = $derived(info?.meta ?? null);
+    const canTranscribe = $derived(!uploading && h.transcriptionSupported(att, meta));
     const title = $derived(meta?.track ? (meta.artist ? `${meta.artist} — ${meta.track}` : meta.track) : (att.name || ''));
     // The controls wear the art's colour on an album card; grey art leaves them white.
     const accent = $derived(accentOf(meta));

@@ -821,7 +821,7 @@ class VoiceTranscriptionUI {
  * @property {(event: string, fn: (e: object) => void) => Promise<() => void>} listen
  * @property {() => string} glowColor
  * @property {(secs: number) => string} formatTime
- * @property {(att: object) => boolean} transcriptionSupported
+ * @property {(att: object, meta?: object|null) => boolean} transcriptionSupported  a named file needs its read tags (`meta`)
  * @property {(path: string) => Promise<void>} transcribe
  * @property {() => void} cancelModelDownload
  * @property {(msg: object) => boolean} autoTranscribe
@@ -849,8 +849,11 @@ const AUDIO_PLAYER_HELPERS = {
         const secs = Math.floor(seconds % 60);
         return `${mins}:${secs.toString().padStart(2, '0')}`;
     },
-    // Voice messages (no file name) in a format Whisper reads, on a platform that has it.
-    transcriptionSupported: (att) => !att.name && !!platformFeatures.transcription && ['wav', 'mp3', 'flac'].includes(att.extension),
+    // Speech in a format Whisper reads, on a platform that has it: a voice message, or a named
+    // file whose tags (once read) name no track. Music shows its own lyrics or nothing.
+    transcriptionSupported: (att, meta) => !!platformFeatures.transcription
+        && ['wav', 'mp3', 'flac', 'ogg', 'opus', 'oga', 'm4a', 'aac'].includes(att.extension)
+        && (!att.name || (!!meta && !meta.track && !meta.artist && !meta.album && !meta.lyrics)),
     transcribe: async (path) => {
         if (!await window.cTranscriber.ensureModelReady(true)) throw new Error('Voice model setup failed');
         return window.cTranscriber.transcribeAudioFile(path);
