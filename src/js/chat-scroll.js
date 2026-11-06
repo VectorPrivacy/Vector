@@ -44,6 +44,8 @@ let windowAtTail = true;
 // updateChat's auto-scroll-to-bottom tail doesn't yank the viewport — the slide
 // owns scrollTop itself. Read by updateChat in main.js.
 let _windowSuppressAutoScroll = false;
+// Set while a whole window renders: the caller places the view after, so no anchor holds through it.
+let _windowRendering = false;
 
 // True for the duration of a jumpToUnread resolve (relay-walk + DB pull). The
 // window must NEVER shift until the jump renders, so realtime arrivals during
@@ -84,7 +86,7 @@ function _currentWindowRange() {
  *  is rendered. Walks children from the end, returning the first that resolves. */
 function _windowBottomRenderedIndex() {
     if (!domChatMessages) return -1;
-    const children = domChatMessages.children;
+    const children = domChatRows.children;
     for (let i = children.length - 1; i >= 0; i--) {
         const id = children[i].id;
         if (!id) continue;                       // overlays, date dividers, "New"
@@ -152,10 +154,10 @@ async function renderWindow(startIdx, endIdx) {
     // the old one are kept by the keyed each instead of being rebuilt.
     ensureMessageList();
     windowTopId = windowBottomId = null;
-    _windowSuppressAutoScroll = true;
+    _windowSuppressAutoScroll = _windowRendering = true;
     try {
         await updateChat(chat, slice, profile, false);
-    } finally { _windowSuppressAutoScroll = false; }
+    } finally { _windowSuppressAutoScroll = _windowRendering = false; _tailAnchor = null; }
 
     // Set anchors from the slice edges.
     windowTopId = slice[0]?.id || null;
@@ -175,7 +177,7 @@ async function renderWindow(startIdx, endIdx) {
     // Land a pending manual-scroll frontier divider if its row just entered the slice.
     tryPlacePendingDivider();
 
-    resetHistorySpacer(startIdx);
+    setTailRoom(0);
 
     // Keep procedural-scroll bookkeeping consistent with what's rendered.
     proceduralScrollState.renderedMessageCount = slice.length;
@@ -189,10 +191,9 @@ async function renderWindow(startIdx, endIdx) {
 }
 
 /**
- * Drop `count` rows (by id) from the BOTTOM of the rendered window. The dropped
- * rows are below the viewport (we just prepended above), so scrollTop is
- * unaffected; only scrollHeight shrinks. Re-derives the new bottom anchor and
- * heals day-separators. Returns the number of .dmsg rows removed.
+ * Drop `count` rows (by id) from the BOTTOM of the rendered window. They are below the
+ * view, so the caller hands their height to the tail room (keepTailAnchor). Re-derives
+ * the new bottom anchor and heals day-separators. Returns the number of rows removed.
  */
 function _windowDropBottom(count) {
     const range = _currentWindowRange();
@@ -212,9 +213,8 @@ function _windowDropBottom(count) {
 }
 
 /**
- * Drop `count` rows (by id) from the TOP of the rendered window. The dropped
- * rows are ABOVE the viewport, so the caller must apply scrollTop -= droppedHeight
- * synchronously to keep the viewport fixed. Returns the total pixel height removed.
+ * Drop `count` rows (by id) from the TOP of the rendered window. They are above the
+ * view, which the bottom-up scroller keeps where it is. Returns the pixel height removed.
  */
 function _windowDropTop(count) {
     const range = _currentWindowRange();
@@ -259,9 +259,8 @@ function _windowRenderedRowCount() {
 
 /**
  * After a realtime append while pinned at the bottom, drop the oldest rows from
- * the top if the rendered window exceeds MAX. When pinned, the user is reading
- * the bottom so dropped top rows are above the viewport; we adjust scrollTop by
- * the removed height SYNCHRONOUSLY so the view doesn't jump, then keep the pin.
+ * the top if the rendered window exceeds MAX. They are above the view, which the
+ * bottom-up scroller keeps where it is.
  */
 function windowTrimTopIfOver() {
     if (!domChatMessages) return;
@@ -270,14 +269,7 @@ function windowTrimTopIfOver() {
     // Anchors may be stale after updateChat's own append — re-seat them to the
     // current DOM edges before dropping.
     _windowReseatAnchorsFromDom();
-    const droppedHeight = _windowDropTop(overflow);
-    if (droppedHeight > 0) _historyStart = false;
-    if (chatPinnedToBottom) {
-        // Stay pinned: simplest correct behaviour is to re-snap to bottom.
-        scrollToBottom(domChatMessages, false);
-    } else if (droppedHeight > 0) {
-        keepScrollAnchor();
-    }
+    _windowDropTop(overflow);
     // Content shrank below the viewport: no scroll event fires to clear the
     // scroll-away latch, so the pin would stay false forever. At the trivial
     // bottom, release the latch and re-pin so new tail messages auto-scroll.
@@ -384,8 +376,8 @@ function _windowReleaseAnchor(id) {
  *  (rows OR system events both carry an id that resolves into chat.messages).
  *  Used after updateChat mutates the DOM directly (append/prepend path). */
 function _windowReseatAnchorsFromDom() {
-    if (!domChatMessages) return;
-    const children = domChatMessages.children;
+    if (!domChatRows) return;
+    const children = domChatRows.children;
     let first = null, last = null;
     for (let i = 0; i < children.length; i++) {
         const id = children[i].id;
@@ -494,12 +486,7 @@ async function windowExtendOlder() {
             } catch (e) { console.warn('[unread-jump] extend-older re-read failed:', e); }
             if (strOpenChat !== chatId) return true;
         }
-        if (older.length <= 1) {
-            // History start reached: the room above closes once the scroll rests.
-            _historyStart = true;
-            settleHistorySpacer();
-            return true;
-        }
+        if (older.length <= 1) return true;   // history start
 
         // addEvents(prepend) dedups the anchor row, so only the genuinely-older rows
         // enter chat.messages. Re-derive the slice from the cache so indices stay valid.
@@ -518,31 +505,25 @@ async function windowExtendOlder() {
         if (!olderSlice.length) return true;
     }
 
-    // Noted here, after every await: the reader may have scrolled on while the rows loaded.
-    recordScrollAnchor();
+    // The rows go in above the view, which the bottom-up scroller keeps where it is.
     _windowSuppressAutoScroll = true;
     try {
         await updateChat(chat, olderSlice, profile, false);
     } finally { _windowSuppressAutoScroll = false; }
     windowTopId = olderSlice[0]?.id || windowTopId;
 
-    // The rows went in above the view: hold it on the row it showed.
-    restoreScrollAnchor();
-    recordScrollAnchor();
-
-    // Drop from the bottom (below the viewport → scrollTop unaffected). This moves
-    // the window off the live tail.
+    // Drop from the bottom, into the tail room. This moves the window off the live tail.
     const overOld = _windowRenderedRowCount() - MAX_WINDOW_ROWS;
-    if (overOld > 0) { _windowDropBottom(overOld); windowAtTail = false; }
+    if (overOld > 0) { windowAtTail = false; _windowDropBottom(overOld); keepTailAnchor(); }
     refreshScrollReturnButton();
     tryPlacePendingDivider();
     return true;
 }
 
 /**
- * Scroll-down: append the next WINDOW_STEP newer rows below the rendered window,
- * then drop from the TOP and apply scrollTop -= droppedHeight SYNCHRONOUSLY so the
- * viewport stays fixed. Returns true if it handled the scroll.
+ * Scroll-down: append the next WINDOW_STEP newer rows below the rendered window (they
+ * take their height from the tail room), then drop from the TOP. Returns true if it
+ * handled the scroll.
  *
  * Gap-aware. Sources, in order:
  *  1. In-memory rows below the window AND the window bottom is NOT the gap edge:
@@ -650,6 +631,7 @@ async function windowExtendNewer() {
         await updateChat(chat, newerSlice, profile, false);
     } finally { _windowSuppressAutoScroll = false; }
     windowBottomId = newerSlice[newerSlice.length - 1]?.id || windowBottomId;
+    keepTailAnchor();
 
     // Authoritative tail check: the window's bottom row is the last in the buffer and
     // there's no gap left to fill. A gap-fill that just closed (seek met tail) still
@@ -659,131 +641,110 @@ async function windowExtendNewer() {
         const atBufferEnd = msgsFinal.length > 0 && windowBottomId === msgsFinal[msgsFinal.length - 1].id;
         if (atBufferEnd && eventCache.getGapAfterId(strOpenChat) == null) windowAtTail = true;
     }
+    if (windowAtTail) settleTailRoom();
 
-    // Drop from the top (above the viewport → must compensate scrollTop). Apply
-    // synchronously in this frame (WKWebView flashes if deferred to rAF).
+    // Drop from the top: above the view, which stays where it is.
     const overNew = _windowRenderedRowCount() - MAX_WINDOW_ROWS;
-    if (overNew > 0) {
-        // The rows dropped above the view become room there: nothing below them moves.
-        if (_windowDropTop(overNew) > 0) {
-            _historyStart = false;
-            keepScrollAnchor();
-        }
-    }
+    if (overNew > 0) _windowDropTop(overNew);
     refreshScrollReturnButton();
     tryPlacePendingDivider();
     return true;
 }
 
-// Manual scroll anchoring (WebKit has none): unless the view is pinned to the bottom, the row at
-// the top of the view keeps its place while anything above it is added, removed or resized.
-// Its place is kept as an offset into the content, which scrolling never changes: a resize
-// landing in the same frame as the reader's own scroll then can't take that scroll back.
-let _scrollAnchor = null;   // { el, at }: a row, and its offset from the top of the content
-
-function _contentOffset(row) {
-    return row.getBoundingClientRect().top - domChatMessages.getBoundingClientRect().top + domChatMessages.scrollTop;
-}
-
-/** Note the first row that starts inside the view, and where it sits in the content. A row
- *  cut off at the top would be a poor anchor: its media growing pushes down all that shows. */
-function recordScrollAnchor() {
-    _scrollAnchor = null;
-    if (!domChatMessages) return;
-    const edge = domChatMessages.getBoundingClientRect().top;
-    let cut = null;
-    for (const row of domChatMessages.children) {
-        if (!row.id) continue;   // a divider or overlay moves with the rows around it
-        const r = row.getBoundingClientRect();
-        if (r.top >= edge) {
-            _scrollAnchor = { el: row, at: _contentOffset(row) };
-            return;
-        }
-        if (r.bottom > edge) cut = row;
-    }
-    // One row taller than the view: it is the only one there is.
-    if (cut) _scrollAnchor = { el: cut, at: _contentOffset(cut) };
-}
-
-/** Put the noted row back where it sat in the content; true when anything moved. The change is
- *  taken from (or given back to) the room above the oldest row, so the scroll position never has
- *  to follow: a scroll in flight (trackpad momentum) overwrites any position set under it, and
- *  each lost correction left the view on freshly loaded older rows, which loaded more. */
-function restoreScrollAnchor() {
-    const a = _scrollAnchor;
-    if (!a || !a.el.isConnected || !domChatMessages) return false;
-    const delta = _contentOffset(a.el) - a.at;
-    if (Math.abs(delta) < 1) return false;
-    const take = Math.min(delta, _spacer);
-    if (take !== 0) setHistorySpacer(_spacer - take);
-    // Past the room, the view itself has to move: rare with the room kept topped up.
-    if (delta - take >= 1) {
-        beginProgrammaticScroll();
-        domChatMessages.scrollTop += delta - take;
-    }
-    a.at = _contentOffset(a.el);
-    return true;
-}
-
-// Room above the oldest rendered row (`--history-spacer`), kept while older history may follow:
-// a fling of several pages takes it all without the scroll position moving. Under SPACER_LOW a
-// scroll in flight waits to load more until it rests and the room is topped up again.
-const SPACER_RESERVE = 24000;
-const SPACER_LOW = 8000;
+// The list scrolls bottom-up, so rows added, removed or resized ABOVE the view never move it: the
+// engine keeps its distance from the end. A change BELOW the view would, so unless the view belongs
+// at the bottom, the last row ending in view keeps its distance from the end. The difference comes
+// out of (or goes into) the room under the rows; only past the room does the scroll position move,
+// which a scroll in flight could overwrite.
+let _tailAnchor = null;   // { el, at }: a row, and its distance from the end of the content
+let _tailRoom = 0;
+// Room kept under a window seeked into history, for the newer rows a scroll down brings back.
+const TAIL_RESERVE = 24000;
 // A scroll is in flight until it has been quiet this long (momentum included).
 const SCROLL_IDLE_MS = 160;
-let _spacer = 0;
-let _historyStart = false;   // the oldest rendered row is the chat's first
 let _lastScrollAt = 0;
-let _spacerTimer = 0;
+let _tailTimer = 0;
 
-function setHistorySpacer(px) {
-    _spacer = Math.max(0, Math.round(px));
-    const el = VectorSvelte.chatListEls().spacer;
-    if (el) el.style.height = _spacer + 'px';
+function chatTailRoom() { return _tailRoom; }
+
+function setTailRoom(px) {
+    _tailRoom = Math.max(0, Math.round(px));
+    if (domChatTailRoom) domChatTailRoom.style.height = _tailRoom + 'px';
 }
 
-/** A freshly rendered window from `startIdx`: room above it, unless it starts at the chat's first message. */
-function resetHistorySpacer(startIdx) {
-    const chat = arrChats.find(c => c.id === strOpenChat);
-    const stats = eventCache.getStats(strOpenChat);
-    const networkDone = chat?.chat_type !== 'Community' || _communityOlderExhausted.has(strOpenChat);
-    _historyStart = startIdx === 0 && !!stats && !stats.hasMoreEvents && networkDone;
-    setHistorySpacer(_historyStart ? 0 : SPACER_RESERVE);
+function _fromEnd(row) {
+    return domChatMessages.getBoundingClientRect().bottom - row.getBoundingClientRect().bottom - domChatMessages.scrollTop;
+}
+
+/** Note the last row that ends inside the view, and its distance from the end. A row cut off at
+ *  the bottom would be a poor anchor: its media growing pushes up all that shows. */
+function recordTailAnchor() {
+    _tailAnchor = null;
+    if (!domChatRows) return;
+    const view = domChatMessages.getBoundingClientRect();
+    const rows = domChatRows.children;
+    let cut = null;
+    for (let i = rows.length - 1; i >= 0; i--) {
+        const row = rows[i];
+        // A divider moves with the rows around it; the hover toolbar follows the pointer.
+        if (!row.id || row.id === 'dmsg-toolbar') continue;
+        const r = row.getBoundingClientRect();
+        if (r.bottom <= view.bottom) {
+            const el = r.bottom > view.top ? row : cut;
+            if (el) _tailAnchor = { el, at: _fromEnd(el) };
+            return;
+        }
+        if (r.top < view.bottom) cut = row;
+    }
+    // One row taller than the view: it is the only one there is.
+    if (cut) _tailAnchor = { el: cut, at: _fromEnd(cut) };
+}
+
+/** Put the noted row back at its distance from the end. */
+function restoreTailAnchor() {
+    const a = _tailAnchor;
+    if (!a || !a.el.isConnected) return;
+    const delta = _fromEnd(a.el) - a.at;   // what grew below it (shrank, when negative)
+    if (Math.abs(delta) < 1) return;
+    const take = Math.min(delta, _tailRoom);
+    if (take !== 0) setTailRoom(_tailRoom - take);
+    if (delta - take >= 1) {
+        beginProgrammaticScroll();
+        domChatMessages.scrollTop -= delta - take;
+    }
+}
+
+/** Hold the view through a change below it, unless it belongs at the bottom, and note it afresh. */
+function keepTailAnchor() {
+    if (_windowRendering || _unreadJumpResolving || !domChatRows) { _tailAnchor = null; return; }
+    if (!chatPinnedToBottom || !isAtDataBottom()) restoreTailAnchor();
+    recordTailAnchor();
 }
 
 /** Every scroll event: the reader's scroll is in flight until it has been quiet a while. */
 function noteScrollActivity() {
     _lastScrollAt = VectorSvelte.now();
-    clearTimeout(_spacerTimer);
-    _spacerTimer = setTimeout(settleHistorySpacer, SCROLL_IDLE_MS);
+    if (_tailRoom && windowAtTail) {
+        clearTimeout(_tailTimer);
+        _tailTimer = setTimeout(settleTailRoom, SCROLL_IDLE_MS);
+    }
 }
 
-/** With the scroll at rest, top the room back up while older history may follow, or close it at
- *  history's start. Both move every row, so the scroll position follows them: only safe at rest. */
-function settleHistorySpacer() {
-    clearTimeout(_spacerTimer);
-    if (!domChatMessages || !strOpenChat) return;
+/** Back at the live tail, the room has nothing left to stand in for: close it once the scroll
+ *  rests. Everything in view moves with it, so the scroll position follows: only safe at rest. */
+function settleTailRoom() {
+    clearTimeout(_tailTimer);
+    if (!_tailRoom || !windowAtTail || !domChatMessages) return;
     const quiet = VectorSvelte.now() - _lastScrollAt;
     if (quiet < SCROLL_IDLE_MS || proceduralScrollState.isLoading) {
-        _spacerTimer = setTimeout(settleHistorySpacer, Math.max(SCROLL_IDLE_MS - quiet, 50));
+        _tailTimer = setTimeout(settleTailRoom, Math.max(SCROLL_IDLE_MS - quiet, 50));
         return;
     }
-    const delta = (_historyStart ? 0 : SPACER_RESERVE) - _spacer;
-    if (Math.abs(delta) < 1) return;
-    setHistorySpacer(_spacer + delta);
+    const room = _tailRoom;
+    setTailRoom(0);
     beginProgrammaticScroll();
-    domChatMessages.scrollTop += delta;
-    recordScrollAnchor();
-    // A load held back for want of room goes ahead now.
-    handleProceduralScroll();
-}
-
-/** Hold the view on its anchor through a change above it, unless it belongs at the bottom. */
-function keepScrollAnchor() {
-    if (chatPinnedToBottom && isAtDataBottom()) return;
-    restoreScrollAnchor();
-    recordScrollAnchor();
+    domChatMessages.scrollTop += room;
+    recordTailAnchor();
 }
 
 // Procedural scroll state
@@ -860,7 +821,7 @@ async function maybeLoadCommunityOlderFromNetwork(chatId) {
  *
  * Every resizable element behaves identically:
  *  - inside the open window  → snap to bottom (user just opened, expects bottom)
- *  - scrolled away from "now" → the row at the top of the view keeps its place
+ *  - scrolled away from "now" → the view keeps its place (keepTailAnchor)
  *  - steady-state            → soft scroll only if the user is still pinned
  */
 function compensateChatScrollForResize() {
@@ -869,7 +830,7 @@ function compensateChatScrollForResize() {
         scrollToBottom(domChatMessages, false);
         holdChatBottom();
     } else if (!chatPinnedToBottom || !isAtDataBottom()) {
-        keepScrollAnchor();
+        keepTailAnchor();
     } else {
         softChatScroll();
     }
@@ -935,7 +896,7 @@ function holdChatBottom(ms = BOTTOM_HOLD_MS) {
             // the user left.
             if (lastSet !== null && el.scrollTop < lastSet - 4
                 && _lastScrollGesture > lastSetAt
-                && height - el.scrollTop - el.clientHeight > 8) {
+                && scrollFromEnd(el) > 8) {
                 _bottomHoldUntil = 0;
                 _userScrolledAway = true;
                 chatPinnedToBottom = false;
@@ -943,7 +904,7 @@ function holdChatBottom(ms = BOTTOM_HOLD_MS) {
             }
             if (firstTick || height !== lastHeight) {
                 lastHeight = height;
-                if (height - el.scrollTop - el.clientHeight > 1) {
+                if (scrollFromEnd(el) > 1) {
                     beginProgrammaticScroll();
                     scrollToEnd(el);
                     lastSet = el.scrollTop;
@@ -958,13 +919,9 @@ function holdChatBottom(ms = BOTTOM_HOLD_MS) {
 }
 
 /**
- * The pin's standing guard: while pinned, any change in the content's height restates the
- * end. The hold covers the moments after a render; this covers everything else (a row that
- * shrinks as it joins a streak, a divider that comes and goes, a reaction row). A SHRINK
- * matters most: WebKit pulls scrollTop back into range itself, that clamp never reaches its
- * scrolling layer, and the view paints at the old offset (blank below the last row, hover
- * landing a row high) until the user scrolls. Event-driven, so an idle chat costs nothing:
- * rows are watched for size, the list for rows coming and going.
+ * The content's standing guard: any change in its height holds the view. Pinned, the bottom-up
+ * scroller already keeps the end; only a view that drifted off it is put back. Away from it,
+ * the tail anchor holds. Event-driven, so an idle chat costs nothing.
  */
 let _pinGuardHeight = 0;
 function _pinGuardCheck() {
@@ -972,17 +929,18 @@ function _pinGuardCheck() {
     const height = el.scrollHeight;
     if (height === _pinGuardHeight) return;
     _pinGuardHeight = height;
-    if (!strOpenChat || _windowSuppressAutoScroll || _unreadJumpResolving) return;
-    if (!chatPinnedToBottom || !isAtDataBottom()) return keepScrollAnchor();
+    if (!strOpenChat || _windowRendering || _unreadJumpResolving) return;
+    if (!chatPinnedToBottom || !isAtDataBottom()) return keepTailAnchor();
+    if (_windowSuppressAutoScroll || Math.abs(scrollFromEnd(el)) < 1) return;
     beginProgrammaticScroll();
     scrollToEnd(el);
 }
 VectorSvelte.guardTiling(domChatMessages, _pinGuardCheck);
 // Rows coming and going are seen here before the frame paints (the guard above checks them a frame
-// later), so a row added or removed above the view never shows it out of place.
+// later), so a row added or removed below the view never shows it out of place.
 new MutationObserver(() => {
-    if (strOpenChat && !_windowSuppressAutoScroll && !_unreadJumpResolving) keepScrollAnchor();
-}).observe(domChatMessages, { childList: true });
+    if (strOpenChat) keepTailAnchor();
+}).observe(domChatRows, { childList: true });
 
 /**
  * Handle procedural scroll loading of older messages
@@ -990,12 +948,9 @@ new MutationObserver(() => {
 function handleProceduralScroll() {
     if (!strOpenChat || proceduralScrollState.isLoading) return;
 
-    const scrollTop = domChatMessages.scrollTop;
-    const maxScroll = domChatMessages.scrollHeight - domChatMessages.clientHeight;
-    const pxFromBottom = maxScroll - scrollTop;
     const reach = Math.max(proceduralScrollState.scrollThreshold, domChatMessages.clientHeight * 1.5);
-    const nearTop = scrollTop - _spacer <= reach;
-    const nearBottom = pxFromBottom <= reach;
+    const nearTop = scrollFromStart(domChatMessages) <= reach;
+    const nearBottom = scrollFromEnd(domChatMessages) <= reach;
 
     // Scroll DOWN near the DOM bottom: if newer in-memory rows sit below the
     // rendered window (we dropped them on an earlier extend), slide the window
@@ -1008,10 +963,6 @@ function handleProceduralScroll() {
 
     // Scroll UP near the top.
     if (!nearTop) return;
-
-    // Low on room mid-scroll: what loads now could only be held in place by moving the scroll,
-    // which the scroll in flight would undo. Wait for it to rest (settleHistorySpacer resumes).
-    if (_spacer < SPACER_LOW && !_historyStart && VectorSvelte.now() - _lastScrollAt < SCROLL_IDLE_MS) return;
 
     // windowExtendOlder slides up from in-memory rows above the window and, when the
     // window top reaches the slice start, anchored-loads older rows from the DB itself
@@ -1064,9 +1015,7 @@ async function loadMoreMessages() {
         const isGroup = chatIsGroup(chat);
         const profile = !isGroup ? getProfile(chat.id) : null;
 
-        // Render the older events + newly-revealed system events (prepend), the view held on
-        // the row it showed once the batch arrived.
-        recordScrollAnchor();
+        // Render the older events + newly-revealed system events (prepend), above the view.
         await updateChat(chat, [...olderMessages, ...revealedSys], profile, false);
 
         // Update rendered count
@@ -1076,16 +1025,11 @@ async function loadMoreMessages() {
         const newStats = eventCache.getStats(strOpenChat);
         proceduralScrollState.totalMessageCount = newStats?.totalInDb || proceduralScrollState.totalMessageCount;
 
-        restoreScrollAnchor();
-        recordScrollAnchor();
-
-        // DOM windowing: dropped rows are below the viewport (we just prepended
-        // above), so scrollTop is unaffected — only scrollHeight shrinks. Trim
-        // back down to MAX.
+        // DOM windowing: trim back down to MAX from the bottom, into the tail room.
         {
             _windowReseatAnchorsFromDom();
             const over = _windowRenderedRowCount() - MAX_WINDOW_ROWS;
-            if (over > 0) _windowDropBottom(over);
+            if (over > 0) { windowAtTail = false; _windowDropBottom(over); keepTailAnchor(); }
             // Dropping the bottom can move the window off the live tail.
             refreshScrollReturnButton();
         }
@@ -1124,11 +1068,8 @@ async function loadMoreMessages() {
     const isGroup = chatIsGroup(chat);
     const profile = !isGroup ? getProfile(chat.id) : null;
 
-    // Render the older messages, the view held on the row it showed.
-    recordScrollAnchor();
+    // Render the older messages, above the view.
     await updateChat(chat, olderMessages, profile, false);
-    restoreScrollAnchor();
-    recordScrollAnchor();
 
     // Update rendered count
     proceduralScrollState.renderedMessageCount += messagesToLoad;
@@ -1309,6 +1250,7 @@ async function loadAndScrollToMessage(targetMsgId) {
         // The window is centered on the target, mid-history — its bottom is not the
         // live tail. Scrolling down will extend and re-latch windowAtTail at the tail.
         windowAtTail = false;
+        setTailRoom(TAIL_RESERVE);
     }
 
     // Wait for all media (images, videos) to load before scrolling
@@ -1363,7 +1305,7 @@ async function ensureChatScrollable() {
         const chatId = strOpenChat;
         let guard = 0;
         while (guard++ < 15 && strOpenChat === chatId) {
-            if (domChatMessages.scrollHeight - _spacer - domChatMessages.clientHeight > 60) break;  // overflows → scrollable
+            if (domChatMessages.scrollHeight - _tailRoom - domChatMessages.clientHeight > 60) break;  // overflows → scrollable
             const before = (_windowMessages() || []).length;
             await windowExtendOlder();
             if (strOpenChat !== chatId) return;
@@ -1612,6 +1554,7 @@ async function jumpToUnread(lastReadId) {
         const start = center - Math.floor(MAX_WINDOW_ROWS / 2);
         const end = center + Math.ceil(MAX_WINDOW_ROWS / 2);
         await renderWindow(start, end);
+        setTailRoom(TAIL_RESERVE);
     }
     await waitForMediaToLoad();
     chatPinnedToBottom = false;   // re-assert after updateChat's own auto-scroll

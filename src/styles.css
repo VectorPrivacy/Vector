@@ -3348,10 +3348,10 @@ body.mobile #create-group-filter { padding-right: 46px !important; }
   transition: box-shadow 0.16s ease, border-color 0.16s ease, background-color 0.16s ease;
 }
 /* Themed chats paint a bg image via `.chat-messages::before` and lift content
-   with `.chat-messages > * { position: relative; z-index: 1 }`. That ties our
+   with `.chat-rows > * { position: relative; z-index: 1 }`. That ties our
    base rule's specificity and would knock the chip out of absolute positioning
    (and behind messages). Re-assert with matching specificity + a higher layer. */
-.chat-messages > .dmsg-swipe-reply {
+.chat-rows > .dmsg-swipe-reply {
   position: absolute;
   z-index: 2;
 }
@@ -4953,8 +4953,9 @@ body:not(.ws) #group-overview > .chat-header > .profile-header-info {
 
 .chat-messages {
   display: flex;
-  flex-direction: column;
-  align-items: flex-end;
+  /* Bottom-up: scrollTop is 0 at the newest row and runs negative into history, so rows
+     arriving or growing above the view never move it (WebKit has no scroll anchoring). */
+  flex-direction: column-reverse;
   overflow-y: scroll;
   overflow-x: hidden;
   /* Use flex: 1 to fill remaining space between header and chat-box */
@@ -4971,23 +4972,30 @@ body:not(.ws) #group-overview > .chat-header > .profile-header-info {
 
   overscroll-behavior-y: contain;
 
-  /* DOM windowing owns scroll-position math (manual scrollTop corrections on
-     window slide). Chromium auto-anchors scroll on DOM mutation, WebKit does
-     not — disabling it gives engine parity and avoids double-correction. */
+  /* The bottom-up layout keeps the view; Chromium's own anchoring would correct it twice. */
   overflow-anchor: none;
 }
 
 #chat { --typing-strip: 28px; }
 
-/* The room above the oldest rendered message (chat-scroll.js): older rows take it as they arrive,
-   instead of moving the scroll position, which a scroll in flight would overwrite. */
-.history-spacer {
+/* Under the rows, standing in for newer rows the window let go (chat-scroll.js), so letting them
+   go moves nothing in view. */
+.tail-room {
   flex: none;
-  width: 100%;
   pointer-events: none;
 }
 
-.chat-messages > *:last-child {
+/* The rows, top to bottom, inside the bottom-up scroller. */
+.chat-rows {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  flex: none;
+  /* A chat shorter than the view starts at the top. */
+  margin-bottom: auto;
+}
+
+.chat-rows > *:last-child {
   /* The last child should have extra margin from the bottom — covers
      both `.dmsg` divs and `.msg-inline-timestamp` paragraphs (system
      events, date dividers, unread marker). It clears the typing strip,
@@ -4996,17 +5004,17 @@ body:not(.ws) #group-overview > .chat-header > .profile-header-info {
   margin-bottom: calc(5px + var(--typing-strip));
 }
 
-/* CONTRACT for any OVERLAY added as a direct child of `.chat-messages`
+/* CONTRACT for any OVERLAY added as a direct child of `.chat-rows`
    (hover toolbar, swipe-reply chip, future jump-to-bottom, typing dot, …):
      1. Insert it FIRST (prepend / before the first row), never append — an
         out-of-flow overlay landing as `:last-child` steals the 20px above
         from the real last message.
-     2. Out-specify `.chat-messages > *` (the themed-bg layering rule sets
+     2. Out-specify `.chat-rows > *` (the themed-bg layering rule sets
         `position: relative; z-index: 1` on every child). Use an id
-        (`#dmsg-toolbar`) or `.chat-messages > .your-class`, and a z-index
+        (`#dmsg-toolbar`) or `.chat-rows > .your-class`, and a z-index
         above 1, or themes knock the overlay out of position and behind rows.
    In-flow CONTENT (rows, separators, system events) wants the default
-   `.chat-messages > *` treatment and is exempt. */
+   `.chat-rows > *` treatment and is exempt. */
 
 /* Chat background toggle */
 body.chat-bg-disabled .chat-messages::before {
@@ -5025,10 +5033,10 @@ body.chat-bg-disabled .chat-messages::before {
   justify-content: center;
 }
 /* A divider owns the gap on BOTH sides — kill the next row's streak/continuation top-margin so it
- * doesn't stack on the divider's bottom margin and re-introduce the lop-sidedness. The `.chat-messages >`
+ * doesn't stack on the divider's bottom margin and re-introduce the lop-sidedness. The `.chat-rows >`
  * prefix lifts specificity to (0,3,0) so it beats `.dmsg[data-streak="…"]` (0,2,0) regardless of order. */
-.chat-messages > .msg-inline-timestamp + .dmsg,
-.chat-messages > .msg-inline-timestamp + .msg-inline-timestamp { margin-top: 0; }
+.chat-rows > .msg-inline-timestamp + .dmsg,
+.chat-rows > .msg-inline-timestamp + .msg-inline-timestamp { margin-top: 0; }
 .msg-inline-timestamp::before,
 .msg-inline-timestamp::after {
   content: '';
@@ -20461,7 +20469,7 @@ textarea.command-part-input {
 .dmsg[data-streak="continuation"] { margin-top: var(--dmsg-continuation-gap); }
 /* Folded into its blocked run's head. Zero height rather than display:none: the scroll engine
  * reads offsetTop off rows, and a last-child row still carries the list's bottom clearance. */
-.chat-messages > .dmsg.dmsg--merged {
+.chat-rows > .dmsg.dmsg--merged {
   height: 0;
   margin-top: 0;
   padding-top: 0;
@@ -20471,7 +20479,7 @@ textarea.command-part-input {
 }
 /* A revealed blocked message dims what it says; the author reads as it did collapsed. */
 .dmsg--revealed .dmsg-body > :not(.dmsg-header) { opacity: 0.4; }
-/* Last-child bottom clearance is unified on `.chat-messages > *:last-child`
+/* Last-child bottom clearance is unified on `.chat-rows > *:last-child`
  * (covers dmsg rows + system-event paragraphs alike) — see that rule. */
 /* Top clearance for the fixed chat-header is handled by `.chat-messages`'s
  * padding-top — see that rule. Putting it on the container instead of on

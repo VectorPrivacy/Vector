@@ -23,10 +23,10 @@ const MAX_DISPLAYED_REACTIONS = 12;
 /** The mounted list island, one per page life (re-mounted if its target was replaced). */
 let _dmsgListIsland = null;
 function ensureMessageList() {
-    if (!domChatMessages) return false;
-    if (_dmsgListIsland && _dmsgListIsland._target === domChatMessages) return true;
-    _dmsgListIsland = VectorSvelte.mountMessageList(domChatMessages, { h: _dmsgListHelpers });
-    _dmsgListIsland._target = domChatMessages;
+    if (!domChatRows) return false;
+    if (_dmsgListIsland && _dmsgListIsland._target === domChatRows) return true;
+    _dmsgListIsland = VectorSvelte.mountMessageList(domChatRows, { h: _dmsgListHelpers });
+    _dmsgListIsland._target = domChatRows;
     // The mount cleared the container; the toolbar is re-created on demand.
     initMessageToolbar();
     return true;

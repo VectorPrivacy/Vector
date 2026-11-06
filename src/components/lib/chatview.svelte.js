@@ -63,10 +63,6 @@ export function clearDivider() {
 // What the list shows beside the rows: the "start of channel" marker of an empty
 // community and the end-of-timeline notices (blocked peer, dissolved community). The
 // openers write these; the list renders them after the rows.
-// The room above the oldest row (chat-scroll.js sets its height directly, every resize above the view).
-const listEls = { spacer: null };
-export function chatListEls() { return listEls; }
-
 const notices = $state({ empty: '', blocked: false, dissolved: '' });
 export function noticeState() { return notices; }
 export function setNotice(key, value) { notices[key] = value; }

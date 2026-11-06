@@ -278,7 +278,7 @@ async function updateChat(chat, arrMessages = [], profile = null, fClicked = fal
         // Gated on the intent-aware pin, NOT raw distance: a user resting just below the
         // pin threshold during a sync must not be yanked to the tail. Suppressed during a
         // window slide (extend-newer/drop), which owns scrollTop itself.
-        const pxFromBottom = domChatMessages.scrollHeight - domChatMessages.scrollTop - domChatMessages.clientHeight;
+        const pxFromBottom = scrollFromEnd(domChatMessages);
         if (!_windowSuppressAutoScroll && ((chatPinnedToBottom && pxFromBottom < 500) || fClicked)) {
             const cLastMsg = chat.messages[chat.messages.length - 1];
             if (strLastMsgID !== cLastMsg.id || fClicked) {
@@ -1330,7 +1330,7 @@ async function openChat(contact, { reread = true, fade = true } = {}) {
         // Anchor the window to the freshly-rendered tail so isAtDataBottom() and
         // the scroll-extend paths have valid anchors.
         _windowReseatAnchorsFromDom();
-        resetHistorySpacer(0);
+        setTailRoom(0);
         scrollToBottom(domChatMessages, false);
     }
     // Initial open lands on the newest message — the window bottom IS the live tail.
@@ -1835,8 +1835,8 @@ let _userScrolledAway = false;
  *  the move as ours: a re-render is never the reader leaving the page. */
 let _programmaticScrollUntil = 0;
 /** Mark a short window during which scroll events are the app's own (not the
- *  user). Call immediately before any programmatic scrollTop change so a drop-top
- *  compensation (scrollTop -= droppedHeight) isn't misread as a user scroll-up. */
+ *  user). Call immediately before any programmatic scrollTop change so it isn't
+ *  misread as a user scroll-up. */
 function beginProgrammaticScroll() {
     _programmaticScrollUntil = VectorSvelte.now() + PROGRAMMATIC_SCROLL_MS;
     // Re-baseline so the very next scroll event's delta is measured from the
@@ -1866,7 +1866,7 @@ function insertUnreadDivider(anchorEl, anchorAfter = false) {
     // its anchor mode are kept for the callers that measure it.
     VectorSvelte.setDivider(anchorEl.id, anchorAfter);
     VectorSvelte.flushSync();
-    const p = domChatMessages.querySelector(':scope > .unread-divider');
+    const p = domChatRows.querySelector(':scope > .unread-divider');
     if (p) { p._targetId = anchorEl.id; p._anchorAfter = anchorAfter; unreadDividerEl = p; }
 }
 /**
@@ -1876,22 +1876,16 @@ function insertUnreadDivider(anchorEl, anchorAfter = false) {
  * unread below being deleted. Removing it shrinks the
  * list by its height, so a pinned view is re-pinned explicitly (WKWebView can
  * leave its scroll layer past the new bottom when the clamp lands during a focus
- * change, showing blank space until the next gesture), and a view scrolled past
- * it keeps its top row where it was.
+ * change, showing blank space until the next gesture), and any other view keeps its place.
  */
 function clearUnreadDivider() {
     const div = unreadDividerEl?.isConnected ? unreadDividerEl : null;
-    const el = domChatMessages;
-    const above = !!(div && el && !chatPinnedToBottom && div.offsetTop + div.offsetHeight <= el.scrollTop);
     VectorSvelte.clearDivider();
     VectorSvelte.flushSync();
     unreadDividerEl = null;
-    if (!div || !el) return;
-    if (above) {
-        keepScrollAnchor();
-    } else {
-        softChatScroll();
-    }
+    if (!div || !domChatMessages) return;
+    if (chatPinnedToBottom) softChatScroll();
+    else keepTailAnchor();
 }
 function setUnreadBelow(n) {
     unreadBelowCount = Math.max(0, n);
@@ -1910,7 +1904,7 @@ function handleChatScrollIntent() {
     if (!strOpenChat || !domChatMessages) return;
     const scrollTop = domChatMessages.scrollTop;
     const scrollHeight = domChatMessages.scrollHeight;
-    const pxFromBottom = scrollHeight - scrollTop - domChatMessages.clientHeight;
+    const pxFromBottom = scrollFromEnd(domChatMessages);
     const isProgrammatic = VectorSvelte.now() < _programmaticScrollUntil;
     // Content grew and the view did NOT move up: the world got taller beneath us,
     // which is never the user leaving the bottom.
@@ -1919,8 +1913,7 @@ function handleChatScrollIntent() {
     const grewUnderUs = scrollHeight > prevHeight && scrollTop >= lastScrollTop;
 
     // User scrolled UP (and it wasn't us) → release and latch until they're
-    // back at the true bottom. Drop-top compensations move scrollTop up too,
-    // but they're wrapped in beginProgrammaticScroll, so isProgrammatic gates them out.
+    // back at the true bottom. The app's own moves are wrapped in beginProgrammaticScroll.
     //
     // A shrink clamp (a shorter chat, hidden rows) moves scrollTop without the user and
     // lands at the bottom; a real scroll-up leaves distance below.
@@ -1983,7 +1976,7 @@ async function wireChatUi() {
     domChatMessages.addEventListener('scroll', () => {
         handleChatScrollIntent();
         noteScrollActivity();
-        recordScrollAnchor();
+        recordTailAnchor();
         handleProceduralScroll();
     }, { passive: true });
     // Hook up a scroll handler in the chat to display UI elements at certain scroll depths

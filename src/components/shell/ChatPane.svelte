@@ -46,7 +46,7 @@
         const pane = node.parentElement;
         let fade = -1, bar = -1;
         const sync = () => {
-            const below = node.scrollHeight - node.clientHeight - node.scrollTop;
+            const below = -node.scrollTop;
             const f = Math.round(Math.max(0, Math.min(1, below / TYPING_FADE)) * 100) / 100;
             const b = node.offsetWidth - node.clientWidth;
             if (f !== fade) { fade = f; pane.style.setProperty('--typing-fade', String(f)); }
@@ -72,7 +72,12 @@
     <PinsDrawer />
     <VoiceStage />
     <div id="msg-top-fade" class="fadeout-top-msgs" style="top: 60px;"></div>
-    <div id="chat-messages" class="chat-messages" use:typingFade></div>
+    <!-- Scrolls bottom-up (column-reverse): rows arriving or growing above the view never move it.
+         The tail room under the rows stands in for newer rows the window let go. -->
+    <div id="chat-messages" class="chat-messages" use:typingFade>
+        <div class="tail-room" aria-hidden="true"></div>
+        <div class="chat-rows"></div>
+    </div>
     <WallpaperPreviewBar />
     <ComposerBox />
 </div>

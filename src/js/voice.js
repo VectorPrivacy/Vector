@@ -871,8 +871,8 @@ const AUDIO_PLAYER_HELPERS = {
     // Absolute, not a running sum of per-frame nudges: each nudge is rounded, and an
     // open and a close rounded apart leave the conversation a little higher every time.
     holdScroll: () => {
-        const fromBottom = domChatMessages.scrollHeight - domChatMessages.scrollTop;
-        return () => { domChatMessages.scrollTop = domChatMessages.scrollHeight - fromBottom; };
+        const fromBottom = domChatMessages.clientHeight - domChatMessages.scrollTop;
+        return () => { domChatMessages.scrollTop = domChatMessages.clientHeight - fromBottom; };
     },
     nextVoice: (chatId, msgId) => {
         const msgs = _dmsgListHelpers.messages(chatId);
