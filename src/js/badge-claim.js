@@ -3,23 +3,20 @@
 // until the backend's claim event is accepted, then the backend holds it. The window and its
 // test mode come from the backend (`get_my_badges`), which also refuses a claim outside it.
 
-/** V for Vector, 2026 edition: 24 hours from v0.5.0's release on the 5th of November. */
-const BADGE_DROPS = [{
-    id: 'vector-2026',
-    minVersion: [0, 5, 0],
-    /** This drop as our own badges see it: its window, and whether this account holds it. */
-    state: (badges) => ({ win: badges?.drop_2026 || null, held: !!badges?.vector_2026 }),
-    claim: () => invoke('claim_vector_2026_badge'),
-    /** A claim this account published elsewhere; found, the backend holds it from now on. */
-    claimedElsewhere: () => invoke('check_vector_2026_badge', { npub: strPubkey }),
-    card: {
-        title: 'V for Vector Badge',
-        subtitle: '2026 Edition',
-        html: '<span class="badge-card-line">Remember, Remember... the&nbsp;Fifth&nbsp;of&nbsp;November.</span>“People should not be afraid of their governments. Governments should be afraid of their people.”',
-        svg: 'vforvector2026.svg',
-        access: 'Partial Premium Access',
-    },
-}];
+/**
+ * @typedef {object} BadgeDrop
+ * @property {string} id
+ * @property {number[]} minVersion  the release the drop asks for, [major, minor, patch]
+ * @property {(badges: object) => { win: { opens_at: number, closes_at: number, test?: boolean }|null, held: boolean }} state
+ *           this drop as our own badges (`get_my_badges`) see it: its window, and whether this account holds it
+ * @property {() => Promise<void>} claim             publish the claim; a "closed…" error takes the badge back
+ * @property {() => Promise<boolean>} claimedElsewhere  a claim this account published elsewhere
+ * @property {object} card                           showBadgeCard's view of it
+ */
+
+/** None open: V for Vector 2026 (24 hours from v0.5.0's release) closed for good on the 6th of
+ *  November 2026 and is now a held badge like the rest (main.js). @type {BadgeDrop[]} */
+const BADGE_DROPS = [];
 
 /** A pending claim, per drop, window and account: a test window's claim never stands for the
  *  launch one. Cleared once the backend holds the badge. */
@@ -131,27 +128,14 @@ function showDropBadgeCard(id) {
     if (drop) showBadgeCard(drop.card);
 }
 
-// Others' V for Vector 2026, looked up once a session.
-const _v2026BadgeCache = new Map();
-
-/** Whether someone else holds V for Vector 2026. Our own reads the profile's drop state. */
-async function resolveV2026Badge(npub) {
-    if (_v2026BadgeCache.has(npub)) return _v2026BadgeCache.get(npub);
-    try {
-        const has = await invoke('check_vector_2026_badge', { npub });
-        _v2026BadgeCache.set(npub, has);
-        return has;
-    } catch { return false; }
-}
-
 // Development: offer a drop outside its window, or forget this account's pending claim of it.
-async function previewBadgeDrop(id = BADGE_DROPS[0].id) {
+async function previewBadgeDrop(id) {
     const drop = BADGE_DROPS.find((d) => d.id === id);
     if (!drop) return;
     const badges = await invoke('get_my_badges').catch(() => null);
     showDropOffer(drop, drop.state(badges).win);
 }
-async function resetBadgeDrop(id = BADGE_DROPS[0].id) {
+async function resetBadgeDrop(id) {
     const drop = BADGE_DROPS.find((d) => d.id === id);
     if (!drop) return;
     const badges = await invoke('get_my_badges').catch(() => null);

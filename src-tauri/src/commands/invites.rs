@@ -247,12 +247,6 @@ pub fn get_my_badges() -> serde_json::Value {
     vector_core::badges::own_summary()
 }
 
-/// Claim V for Vector 2026 for this account, while its window is open.
-#[tauri::command]
-pub async fn claim_vector_2026_badge() -> Result<(), String> {
-    vector_core::badges::claim_v2026().await
-}
-
 /// Whether a user holds V for Vector 2026 (on-demand profile view).
 #[tauri::command]
 pub async fn check_vector_2026_badge(npub: String) -> Result<bool, String> {

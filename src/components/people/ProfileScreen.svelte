@@ -16,7 +16,7 @@
     let { h } = $props();
     // h: getProfile, getName, streamHidden, getProfileAvatarSrc, getProfileBannerSrc, twemojify,
     //    renderCustomEmojiShortcodes, renderMentions, isMuted, botIcon, invitedCount, fawkesBadge, v2026Badge,
-    //    bugHunterTier, showInviteBadge, showFawkesCard, showBugHunterCard, showNavbar(on),
+    //    bugHunterTier, showInviteBadge, showFawkesCard, showV2026Card, showBugHunterCard, showDropBadge(id), showNavbar(on),
     //    back(), message(), toggleMute(), copyProfileLink() → Promise<boolean>, copyNpub() → Promise<boolean>,
     //    showQr(), block(), nickname(), enterEdit(), exitEdit(cancel), setStatus(), pickPicture(kind),
     //    toggleSwitcher(), toggleSwitcherEdit()
@@ -132,12 +132,11 @@
         h.invitedCount(id).then((count) => { if (still() && count > 0) badges = { ...badges, invites: count }; }).catch(() => {});
         h.fawkesBadge(id, mine).then((has) => { if (still() && has) badges = { ...badges, fawkes: true }; }).catch(() => {});
         h.bugHunterTier(id, mine).then((tier) => { if (still() && tier > 0) badges = { ...badges, bug: tier }; }).catch(() => {});
-        // Our own 2026 badge is the drop's state (shown the moment it's claimed); others' is looked up.
-        if (!mine) h.v2026Badge(id).then((has) => { if (still() && has) badges = { ...badges, v2026: true }; }).catch(() => {});
+        h.v2026Badge(id, mine).then((has) => { if (still() && has) badges = { ...badges, v2026: true }; }).catch(() => {});
     });
 
-    // ── badge drops: claimed ones show on your own profile at once; a fresh claim pops in ──
-    const DROP_2026 = 'vector-2026';
+    // ── badge drops (js/badge-claim.js): a drop's badge shows on your own profile the moment
+    //    it's claimed (`drops.claimed[id]`) and pops in (`class:profile-badge-arrive={arriving === id}`) ──
     const drops = badgeDrops();
     let arriving = $state('');
     $effect(() => {
@@ -299,9 +298,8 @@
             <img src={'./icons/bughunter_' + (badges.bug || 1) + '.svg'} alt="Bug Hunter" class="btn" style="height: 30px; width: 30px; margin-left: 5px;"
                  style:display={badges.bug > 0 ? '' : 'none'} onclick={() => h.showBugHunterCard(badges.bug)}>
             <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_noninteractive_element_interactions -->
-            <img src="./icons/vforvector2026.svg" alt="V for Vector 2026" class="btn" class:profile-badge-arrive={arriving === DROP_2026}
-                 style="height: 30px; width: 30px; margin-left: 5px;"
-                 style:display={(m.mine ? drops.claimed[DROP_2026] : badges.v2026) ? '' : 'none'} onclick={() => h.showDropBadge(DROP_2026)} onanimationend={() => { arriving = ''; }}>
+            <img src="./icons/vforvector2026.svg" alt="V for Vector 2026" class="btn" style="height: 30px; width: 30px; margin-left: 5px;"
+                 style:display={badges.v2026 ? '' : 'none'} onclick={() => h.showV2026Card()}>
         </div>
         <div class="profile-options" style:display={m.mine ? 'none' : ''}>
             <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->

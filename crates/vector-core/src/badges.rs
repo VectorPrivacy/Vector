@@ -70,25 +70,16 @@ pub async fn has_fawkes_badge(pubkey: &PublicKey) -> Result<bool, String> {
     Ok(false)
 }
 
-// ── V for Vector 2026 (self-claimed, the 24 hours from release) ──────────────────
+// ── V for Vector 2026 (self-claimed in the 24 hours from v0.5.0's release; closed) ─────────
 
 /// The claim window, unix seconds, half-open: 16:00 UTC on 2026-11-05 to the next day's 16:00.
-pub const V2026_START: u64 = 1793894400;
-pub const V2026_END: u64 = 1793980800;
-/// For a test window: a claim carries a NIP-40 expiration this many seconds out, so relays drop
-/// it and the local cache lets it go, and any build may claim. None for the real thing.
-pub const V2026_CLAIM_TTL: Option<u64> = None;
+const V2026_START: u64 = 1793894400;
+const V2026_END: u64 = 1793980800;
 
 const V2026_D: &str = "vector_2026";
 const V2026_CONTENT: &str = "vector_2026_badge_claimed";
-/// Per-account settings key: "true" once the badge is ours, or (a test claim) the unix-secs
-/// it expires at.
+/// Per-account settings key: "true" once the badge is ours.
 const BADGE_V2026_KEY: &str = "badge_vector_2026";
-
-/// Whether the claim window is open on Vector's clock.
-pub fn v2026_open() -> bool {
-    (V2026_START..V2026_END).contains(&unix_now())
-}
 
 fn is_valid_v2026_claim(content: &str, created_at: u64) -> bool {
     content == V2026_CONTENT && (V2026_START..V2026_END).contains(&created_at)
@@ -120,11 +111,11 @@ pub async fn has_v2026_badge(pubkey: &PublicKey) -> Result<bool, String> {
     Ok(false)
 }
 
-/// Cached: whether this account holds V for Vector 2026 (a test claim, until it expires).
+/// Cached: whether this account holds V for Vector 2026.
 pub fn has_vector_2026_badge() -> bool {
     match crate::db::settings::get_sql_setting_strict(BADGE_V2026_KEY) {
         Ok(v) => {
-            let held = v2026_held(v.as_deref(), unix_now());
+            let held = v.as_deref() == Some("true");
             with_last(|l| l.vector_2026 = Some(held));
             held
         }
@@ -132,44 +123,9 @@ pub fn has_vector_2026_badge() -> bool {
     }
 }
 
-fn v2026_held(cached: Option<&str>, now: u64) -> bool {
-    match cached {
-        Some("true") => true,
-        Some(expires) => expires.parse::<u64>().is_ok_and(|at| now < at),
-        None => false,
-    }
-}
-
-fn store_v2026_badge(expires_at: Option<u64>) {
+fn store_v2026_badge() {
     with_last(|l| l.vector_2026 = Some(true));
-    let value = expires_at.map_or_else(|| "true".to_string(), |at| at.to_string());
-    let _ = crate::db::set_sql_setting(BADGE_V2026_KEY.to_string(), value);
-}
-
-/// Claim V for Vector 2026 for this account: publish its claim while the window is open, then
-/// hold the badge. Claiming again is harmless: the claim is a replaceable event.
-pub async fn claim_v2026() -> Result<(), String> {
-    // Bound to the account that claims: a swap mid-publish keeps the badge with it.
-    crate::db::scoped_result(async move {
-        if !v2026_open() {
-            return Err("closed: the claim window isn't open".to_string());
-        }
-        let client = crate::state::nostr_client().ok_or("Nostr client not initialized")?;
-        let mut builder = EventBuilder::new(Kind::ApplicationSpecificData, V2026_CONTENT)
-            .tag(Tag::identifier(V2026_D));
-        let expires_at = V2026_CLAIM_TTL.map(|ttl| unix_now() + ttl);
-        if let Some(at) = expires_at {
-            builder = builder.tag(Tag::expiration(Timestamp::from_secs(at)));
-        }
-        let sent = crate::sign_and_send(&client, builder).await?;
-        if sent.success.is_empty() {
-            return Err("no relay accepted the claim".to_string());
-        }
-        store_v2026_badge(expires_at);
-        emit_badges();
-        Ok(())
-    })
-    .await
+    let _ = crate::db::set_sql_setting(BADGE_V2026_KEY.to_string(), "true".to_string());
 }
 
 /// Someone's V for Vector 2026, looked up on demand (a profile). Our own, when found, is held,
@@ -177,36 +133,30 @@ pub async fn claim_v2026() -> Result<(), String> {
 pub async fn check_v2026(pubkey: &PublicKey) -> Result<bool, String> {
     let has = has_v2026_badge(pubkey).await?;
     if has && !has_vector_2026_badge() && crate::state::my_public_key().as_ref() == Some(pubkey) {
-        store_v2026_badge(V2026_CLAIM_TTL.map(|ttl| unix_now() + ttl));
+        store_v2026_badge();
         emit_badges();
     }
     Ok(has)
 }
 
-/// This account's badges and perk tier, with the 2026 claim window, for the UI.
+/// This account's badges and perk tier, for the UI.
 pub fn own_summary() -> serde_json::Value {
     serde_json::json!({
         "vector": has_vector_badge(),
         "vector_2026": has_vector_2026_badge(),
         "tier": effective_tier(),
         "bug_hunter": bug_hunter_tier(),
-        "drop_2026": {
-            "opens_at": V2026_START * 1000,
-            "closes_at": V2026_END * 1000,
-            "test": V2026_CLAIM_TTL.is_some(),
-        },
     })
 }
 
-/// Our own claim, made on another device (or before a reinstall): found once the window has
-/// opened and kept, as the 2025 badge is.
+/// Our own claim, made on another device (or before a reinstall): found and kept, as the 2025
+/// badge is.
 async fn refresh_own_v2026(pk: PublicKey) {
-    if has_vector_2026_badge() || unix_now() < V2026_START {
+    if has_vector_2026_badge() {
         return;
     }
     if let Ok(true) = has_v2026_badge(&pk).await {
-        // A test claim found on a relay is about to expire there too: hold it no longer.
-        store_v2026_badge(V2026_CLAIM_TTL.map(|ttl| unix_now() + ttl));
+        store_v2026_badge();
         emit_badges();
     }
 }
@@ -381,7 +331,7 @@ fn read_account_tier(npub: &str) -> Option<u8> {
     };
     let bug = get(BADGE_BUG_HUNTER_TIER_KEY).and_then(|v| v.parse::<u8>().ok()).map(|t| t.min(3)).unwrap_or(0);
     let vector = get(BADGE_VECTOR_KEY).map(|v| v == "true").unwrap_or(false);
-    let vector_2026 = v2026_held(get(BADGE_V2026_KEY).as_deref(), unix_now());
+    let vector_2026 = get(BADGE_V2026_KEY).as_deref() == Some("true");
     Some(badge_tier(bug, vector, vector_2026))
 }
 
@@ -829,17 +779,13 @@ mod tests {
     }
 
     #[test]
-    fn v2026_claims_count_inside_the_window_and_test_claims_lapse() {
+    fn v2026_claims_count_inside_the_window() {
         assert!(is_valid_v2026_claim(V2026_CONTENT, V2026_START));
         assert!(is_valid_v2026_claim(V2026_CONTENT, V2026_END - 1));
         assert!(!is_valid_v2026_claim(V2026_CONTENT, V2026_START - 1), "before the window");
         assert!(!is_valid_v2026_claim(V2026_CONTENT, V2026_END), "the window is half-open");
         assert!(!is_valid_v2026_claim("fawkes_badge_claimed", V2026_START), "another badge's claim");
 
-        assert!(v2026_held(Some("true"), u64::MAX), "a launch claim is kept");
-        assert!(v2026_held(Some("1000"), 999), "a test claim, before it expires");
-        assert!(!v2026_held(Some("1000"), 1000), "and not after");
-        assert!(!v2026_held(None, 0));
     }
 
     #[test]

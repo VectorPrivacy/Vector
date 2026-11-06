@@ -955,7 +955,6 @@ pub fn run() {
             commands::invites::get_invited_users,
             commands::invites::check_fawkes_badge,
             commands::invites::get_my_badges,
-            commands::invites::claim_vector_2026_badge,
             commands::invites::check_vector_2026_badge,
             commands::invites::get_bug_hunter_tier,
             commands::invites::get_max_account_tier,

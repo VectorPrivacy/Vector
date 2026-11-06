@@ -310,6 +310,42 @@ function showFawkesCard() {
     });
 }
 
+// Session cache of others' V for Vector 2026, as for the 2025 badge.
+const _v2026BadgeCache = new Map();
+let _ownV2026LiveChecked = false;
+
+/** Resolve whether `npub` holds V for Vector 2026. Own → the persisted flag, with one live
+ *  look per session while it reads false (a hit persists and emits badges_updated). Others →
+ *  fetched once per session. */
+async function resolveV2026Badge(npub, isMine) {
+    if (isMine) {
+        if (_myBadges === null) {
+            try { _myBadges = await invoke('get_my_badges'); } catch {}
+        }
+        if (_myBadges?.vector_2026) return true;
+        if (_ownV2026LiveChecked) return false;
+        _ownV2026LiveChecked = true;
+    } else if (_v2026BadgeCache.has(npub)) {
+        return _v2026BadgeCache.get(npub);
+    }
+    try {
+        const has = await invoke('check_vector_2026_badge', { npub });
+        if (!isMine) _v2026BadgeCache.set(npub, has);
+        return has;
+    } catch { return false; }
+}
+
+/** V for Vector 2026 badge card: claimed in the 24 hours from v0.5.0's release. Grants Partial Premium (tier 1). */
+function showV2026Card() {
+    showBadgeCard({
+        title: 'V for Vector Badge',
+        subtitle: '2026 Edition',
+        html: '<span class="badge-card-line">Remember, Remember... the&nbsp;Fifth&nbsp;of&nbsp;November.</span>“People should not be afraid of their governments. Governments should be afraid of their people.”',
+        svg: 'vforvector2026.svg',
+        access: 'Partial Premium Access',
+    });
+}
+
 /** Resolve a user's Bug Hunter tier (0-3). Own → the cached value (filled by the
  *  post-sync refresh), with one live look per session while it reads 0; a hit
  *  there persists and emits badges_updated, which lifts the perks. Others → a
