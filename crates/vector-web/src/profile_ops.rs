@@ -562,6 +562,12 @@ async fn storage_info() -> Value {
         count += 1;
         *distribution.entry(ext).or_insert(0) += size;
     }
+    // Files kept in the media store, by the type each was kept as.
+    for (mime, files, bytes) in vector_core::db::media_store::totals().unwrap_or_default() {
+        total += bytes;
+        count += files;
+        *distribution.entry(kept_ext(&mime)).or_insert(0) += bytes;
+    }
     let cache: u64 = list_files(Path::new("/cache"), true).await.iter().map(|(_, s)| s).sum();
     if cache > 0 {
         distribution.insert("/cache".into(), cache);
@@ -666,11 +672,29 @@ async fn set_keep_media(on: bool) -> Result<Value, String> {
         db::set_sql_setting("keep_media".into(), "true".into())?;
         return Err("Turn this off once your downloads finish.".into());
     }
-    let gone: HashSet<[u8; 32]> = vector_core::db::media_store::totals_by_hash()?.into_iter().map(|(hash, _)| hash).collect();
+    forget_kept(None).await?;
+    images::forget_inline().await;
+    vector_core::webfiles::remove(Path::new(KEPT_LINK_MEDIA[1])).await;
+    Ok(Value::Null)
+}
+
+/// The type a kept file is charted and cleared as: the one it was kept as.
+fn kept_ext(mime: &str) -> String {
+    let ext = vector_core::crypto::extension_from_mime(mime);
+    if ext.is_empty() { "bin".into() } else { ext }
+}
+
+/// Forget the files Keep Files kept (all, or those of the given extensions); loaded messages that
+/// showed one load it again. Returns the chats touched.
+async fn forget_kept(exts: Option<&HashSet<String>>) -> Result<usize, String> {
+    let gone: HashSet<[u8; 32]> = vector_core::db::media_store::totals_by_hash()?
+        .into_iter()
+        .filter(|(_, mime)| exts.is_none_or(|set| set.contains(&kept_ext(mime))))
+        .map(|(hash, _)| hash)
+        .collect();
     for hash in &gone {
         vector_core::media::store::forget(hash).await;
     }
-    // Loaded messages that showed a kept copy load it again.
     let mut updates: Vec<(String, Vec<vector_core::Message>)> = Vec::new();
     {
         let mut state = STATE.lock().await;
@@ -706,9 +730,7 @@ async fn set_keep_media(on: bool) -> Result<Value, String> {
             vector_core::emit_event("message_update", &json!({ "old_id": message.id, "message": message, "chat_id": chat_id }));
         }
     }
-    images::forget_inline().await;
-    vector_core::webfiles::remove(Path::new(KEPT_LINK_MEDIA[1])).await;
-    Ok(Value::Null)
+    Ok(updates.len())
 }
 
 /// Forget every cached picture, repaint the profiles that showed one, and fetch them again.
@@ -747,7 +769,7 @@ async fn clear_media_caches() {
 
 async fn clear_storage() -> Result<Value, String> {
     let before = total_bytes().await;
-    let updated_chats = clear_attachment_files(None).await?;
+    let updated_chats = clear_attachment_files(None).await? + forget_kept(None).await?;
     clear_media_caches().await;
     let freed = before.saturating_sub(total_bytes().await);
     Ok(json!({
@@ -769,6 +791,7 @@ async fn clear_storage_category(a: &Args) -> Result<Value, String> {
                 return Err("No file types to clear".into());
             }
             clear_attachment_files(Some(&set)).await?;
+            forget_kept(Some(&set)).await?;
             let downloads = db::get_download_dir();
             for (name, _) in list_files(&downloads, false).await {
                 if bucket_of(&name).is_some_and(|e| set.contains(&e)) {
