@@ -6326,27 +6326,24 @@ textarea#chat-input::placeholder {
   max-width: 400px;
   height: 350px;
   box-shadow: 0 -8px 32px rgba(0, 0, 0, 0.5);
-  /* Hidden once the fade ends: an invisible panel still kept its whole grid (tens of
-     thousands of px) composited and re-rastered under every transition behind it. */
-  transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.3s ease, visibility 0s linear 0.3s;
+  transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.3s ease;
   pointer-events: none;
   opacity: 0;
-  visibility: hidden;
   flex-direction: column;
   overflow: hidden;
   display: flex;
-}
-
-.emoji-picker.asleep {
-  content-visibility: hidden;
 }
 
 .emoji-picker.visible {
   transform: translateX(-50%) translateY(0);
   pointer-events: auto;
   opacity: 1;
-  visibility: visible;
-  transition-delay: 0s;
+}
+
+/* Out while a drawer or chat slides: a closed panel's loaded grid stays composited and
+   re-rasters under every frame of the slide. */
+body.cc-drawer-on .emoji-picker:not(.visible) {
+  visibility: hidden;
 }
 
 .emoji-picker:has(.emoji-pack-creator-error:not([hidden])) {
