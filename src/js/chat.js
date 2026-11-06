@@ -1330,6 +1330,8 @@ async function openChat(contact, { reread = true, fade = true } = {}) {
         // Anchor the window to the freshly-rendered tail so isAtDataBottom() and
         // the scroll-extend paths have valid anchors.
         _windowReseatAnchorsFromDom();
+        resetHistorySpacer(0);
+        scrollToBottom(domChatMessages, false);
     }
     // Initial open lands on the newest message — the window bottom IS the live tail.
     windowAtTail = true;
@@ -1875,25 +1877,18 @@ function insertUnreadDivider(anchorEl, anchorAfter = false) {
  * list by its height, so a pinned view is re-pinned explicitly (WKWebView can
  * leave its scroll layer past the new bottom when the clamp lands during a focus
  * change, showing blank space until the next gesture), and a view scrolled past
- * it is shifted up by the same amount.
+ * it keeps its top row where it was.
  */
 function clearUnreadDivider() {
     const div = unreadDividerEl?.isConnected ? unreadDividerEl : null;
     const el = domChatMessages;
-    // Measured, not summed from the divider's box: the row after it has its top
-    // margin zeroed while the divider stands, and gets it back when it goes.
     const above = !!(div && el && !chatPinnedToBottom && div.offsetTop + div.offsetHeight <= el.scrollTop);
-    const heightBefore = el ? el.scrollHeight : 0;
     VectorSvelte.clearDivider();
     VectorSvelte.flushSync();
     unreadDividerEl = null;
     if (!div || !el) return;
     if (above) {
-        const removed = heightBefore - el.scrollHeight;
-        if (removed > 0) {
-            beginProgrammaticScroll();
-            el.scrollTop -= removed;
-        }
+        keepScrollAnchor();
     } else {
         softChatScroll();
     }
@@ -1987,6 +1982,7 @@ async function wireChatUi() {
     // reader (one load at a time), so older rows are in place before they reach the top.
     domChatMessages.addEventListener('scroll', () => {
         handleChatScrollIntent();
+        noteScrollActivity();
         recordScrollAnchor();
         handleProceduralScroll();
     }, { passive: true });

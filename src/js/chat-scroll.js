@@ -175,6 +175,8 @@ async function renderWindow(startIdx, endIdx) {
     // Land a pending manual-scroll frontier divider if its row just entered the slice.
     tryPlacePendingDivider();
 
+    resetHistorySpacer(startIdx);
+
     // Keep procedural-scroll bookkeeping consistent with what's rendered.
     proceduralScrollState.renderedMessageCount = slice.length;
     proceduralScrollState.totalMessageCount = msgs.length;
@@ -269,13 +271,12 @@ function windowTrimTopIfOver() {
     // current DOM edges before dropping.
     _windowReseatAnchorsFromDom();
     const droppedHeight = _windowDropTop(overflow);
+    if (droppedHeight > 0) _historyStart = false;
     if (chatPinnedToBottom) {
         // Stay pinned: simplest correct behaviour is to re-snap to bottom.
         scrollToBottom(domChatMessages, false);
     } else if (droppedHeight > 0) {
-        // Drop-top moves scrollTop UP — guard so it isn't misread as a user scroll-up.
-        beginProgrammaticScroll();
-        domChatMessages.scrollTop -= droppedHeight;
+        keepScrollAnchor();
     }
     // Content shrank below the viewport: no scroll event fires to clear the
     // scroll-away latch, so the pin would stay false forever. At the trivial
@@ -493,7 +494,12 @@ async function windowExtendOlder() {
             } catch (e) { console.warn('[unread-jump] extend-older re-read failed:', e); }
             if (strOpenChat !== chatId) return true;
         }
-        if (older.length <= 1) return true;   // history start reached; handled, don't loop
+        if (older.length <= 1) {
+            // History start reached: the room above closes once the scroll rests.
+            _historyStart = true;
+            settleHistorySpacer();
+            return true;
+        }
 
         // addEvents(prepend) dedups the anchor row, so only the genuinely-older rows
         // enter chat.messages. Re-derive the slice from the cache so indices stay valid.
@@ -658,9 +664,11 @@ async function windowExtendNewer() {
     // synchronously in this frame (WKWebView flashes if deferred to rAF).
     const overNew = _windowRenderedRowCount() - MAX_WINDOW_ROWS;
     if (overNew > 0) {
-        const droppedHeight = _windowDropTop(overNew);
-        // Drop-top moves scrollTop UP — guard so it isn't misread as a user scroll-up.
-        if (droppedHeight > 0) { beginProgrammaticScroll(); domChatMessages.scrollTop -= droppedHeight; }
+        // The rows dropped above the view become room there: nothing below them moves.
+        if (_windowDropTop(overNew) > 0) {
+            _historyStart = false;
+            keepScrollAnchor();
+        }
     }
     refreshScrollReturnButton();
     tryPlacePendingDivider();
@@ -697,17 +705,78 @@ function recordScrollAnchor() {
     if (cut) _scrollAnchor = { el: cut, at: _contentOffset(cut) };
 }
 
-/** Move the view by however far the noted row moved in the content; true when it moved. */
+/** Put the noted row back where it sat in the content; true when anything moved. The change is
+ *  taken from (or given back to) the room above the oldest row, so the scroll position never has
+ *  to follow: a scroll in flight (trackpad momentum) overwrites any position set under it, and
+ *  each lost correction left the view on freshly loaded older rows, which loaded more. */
 function restoreScrollAnchor() {
     const a = _scrollAnchor;
     if (!a || !a.el.isConnected || !domChatMessages) return false;
-    const at = _contentOffset(a.el);
-    const delta = at - a.at;
-    a.at = at;
+    const delta = _contentOffset(a.el) - a.at;
     if (Math.abs(delta) < 1) return false;
+    const take = Math.min(delta, _spacer);
+    if (take !== 0) setHistorySpacer(_spacer - take);
+    // Past the room, the view itself has to move: rare with the room kept topped up.
+    if (delta - take >= 1) {
+        beginProgrammaticScroll();
+        domChatMessages.scrollTop += delta - take;
+    }
+    a.at = _contentOffset(a.el);
+    return true;
+}
+
+// Room above the oldest rendered row (`--history-spacer`), kept while older history may follow:
+// a fling of several pages takes it all without the scroll position moving. Under SPACER_LOW a
+// scroll in flight waits to load more until it rests and the room is topped up again.
+const SPACER_RESERVE = 24000;
+const SPACER_LOW = 8000;
+// A scroll is in flight until it has been quiet this long (momentum included).
+const SCROLL_IDLE_MS = 160;
+let _spacer = 0;
+let _historyStart = false;   // the oldest rendered row is the chat's first
+let _lastScrollAt = 0;
+let _spacerTimer = 0;
+
+function setHistorySpacer(px) {
+    _spacer = Math.max(0, Math.round(px));
+    const el = VectorSvelte.chatListEls().spacer;
+    if (el) el.style.height = _spacer + 'px';
+}
+
+/** A freshly rendered window from `startIdx`: room above it, unless it starts at the chat's first message. */
+function resetHistorySpacer(startIdx) {
+    const chat = arrChats.find(c => c.id === strOpenChat);
+    const stats = eventCache.getStats(strOpenChat);
+    const networkDone = chat?.chat_type !== 'Community' || _communityOlderExhausted.has(strOpenChat);
+    _historyStart = startIdx === 0 && !!stats && !stats.hasMoreEvents && networkDone;
+    setHistorySpacer(_historyStart ? 0 : SPACER_RESERVE);
+}
+
+/** Every scroll event: the reader's scroll is in flight until it has been quiet a while. */
+function noteScrollActivity() {
+    _lastScrollAt = VectorSvelte.now();
+    clearTimeout(_spacerTimer);
+    _spacerTimer = setTimeout(settleHistorySpacer, SCROLL_IDLE_MS);
+}
+
+/** With the scroll at rest, top the room back up while older history may follow, or close it at
+ *  history's start. Both move every row, so the scroll position follows them: only safe at rest. */
+function settleHistorySpacer() {
+    clearTimeout(_spacerTimer);
+    if (!domChatMessages || !strOpenChat) return;
+    const quiet = VectorSvelte.now() - _lastScrollAt;
+    if (quiet < SCROLL_IDLE_MS || proceduralScrollState.isLoading) {
+        _spacerTimer = setTimeout(settleHistorySpacer, Math.max(SCROLL_IDLE_MS - quiet, 50));
+        return;
+    }
+    const delta = (_historyStart ? 0 : SPACER_RESERVE) - _spacer;
+    if (Math.abs(delta) < 1) return;
+    setHistorySpacer(_spacer + delta);
     beginProgrammaticScroll();
     domChatMessages.scrollTop += delta;
-    return true;
+    recordScrollAnchor();
+    // A load held back for want of room goes ahead now.
+    handleProceduralScroll();
 }
 
 /** Hold the view on its anchor through a change above it, unless it belongs at the bottom. */
@@ -925,7 +994,7 @@ function handleProceduralScroll() {
     const maxScroll = domChatMessages.scrollHeight - domChatMessages.clientHeight;
     const pxFromBottom = maxScroll - scrollTop;
     const reach = Math.max(proceduralScrollState.scrollThreshold, domChatMessages.clientHeight * 1.5);
-    const nearTop = scrollTop <= reach;
+    const nearTop = scrollTop - _spacer <= reach;
     const nearBottom = pxFromBottom <= reach;
 
     // Scroll DOWN near the DOM bottom: if newer in-memory rows sit below the
@@ -939,6 +1008,10 @@ function handleProceduralScroll() {
 
     // Scroll UP near the top.
     if (!nearTop) return;
+
+    // Low on room mid-scroll: what loads now could only be held in place by moving the scroll,
+    // which the scroll in flight would undo. Wait for it to rest (settleHistorySpacer resumes).
+    if (_spacer < SPACER_LOW && !_historyStart && VectorSvelte.now() - _lastScrollAt < SCROLL_IDLE_MS) return;
 
     // windowExtendOlder slides up from in-memory rows above the window and, when the
     // window top reaches the slice start, anchored-loads older rows from the DB itself
@@ -1290,7 +1363,7 @@ async function ensureChatScrollable() {
         const chatId = strOpenChat;
         let guard = 0;
         while (guard++ < 15 && strOpenChat === chatId) {
-            if (domChatMessages.scrollHeight - domChatMessages.clientHeight > 60) break;  // overflows → scrollable
+            if (domChatMessages.scrollHeight - _spacer - domChatMessages.clientHeight > 60) break;  // overflows → scrollable
             const before = (_windowMessages() || []).length;
             await windowExtendOlder();
             if (strOpenChat !== chatId) return;

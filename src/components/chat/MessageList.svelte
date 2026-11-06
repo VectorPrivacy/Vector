@@ -7,7 +7,7 @@
     // The DOM stays flat and identical to the vanilla list: rows and separators are
     // direct children (the engine still walks `children` by id), overlays the vanilla
     // side appends after the each (toolbar, empty state, notices) are untouched.
-    import { windowState, dividerState, noticeState } from '../lib/chatview.svelte.js';
+    import { windowState, dividerState, noticeState, chatListEls } from '../lib/chatview.svelte.js';
     import { deriveWindow } from '../lib/chatwindow.js';
     import MessageRow from './MessageRow.svelte';
     import MessageToolbar from './MessageToolbar.svelte';
@@ -24,6 +24,8 @@
     const tbEls = toolbarEls();
     const tbh = () => toolbarHandlers();
     function bindHost(node) { tbEls.host = node; return { destroy() { tbEls.host = null; } }; }
+    const listEls = chatListEls();
+    function bindSpacer(node) { listEls.spacer = node; return { destroy() { if (listEls.spacer === node) listEls.spacer = null; } }; }
 
     const items = $derived.by(() => {
         win.seq;
@@ -64,6 +66,8 @@
     <span class="dmsg-swipe-reply__icon icon icon-reply"></span>
 </div>
 
+<!-- The room older rows take as they arrive above, so the scroll position never has to move. -->
+<div class="history-spacer" aria-hidden="true" use:bindSpacer></div>
 {#each items as it (rowKey(it.msg))}
     {#if it.dayBreak}
         <p class="msg-inline-timestamp date-divider">{@html h.dayLabel(it.msg.at)}</p>

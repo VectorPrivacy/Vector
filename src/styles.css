@@ -4979,6 +4979,14 @@ body:not(.ws) #group-overview > .chat-header > .profile-header-info {
 
 #chat { --typing-strip: 28px; }
 
+/* The room above the oldest rendered message (chat-scroll.js): older rows take it as they arrive,
+   instead of moving the scroll position, which a scroll in flight would overwrite. */
+.history-spacer {
+  flex: none;
+  width: 100%;
+  pointer-events: none;
+}
+
 .chat-messages > *:last-child {
   /* The last child should have extra margin from the bottom — covers
      both `.dmsg` divs and `.msg-inline-timestamp` paragraphs (system
