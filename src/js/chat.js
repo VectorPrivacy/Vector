@@ -787,8 +787,11 @@ function syncSendMicToInput() {
     VectorSvelte.flushSync();
 }
 
-/** Per-chat composer drafts, runtime-only (chat id → { text, replyRef, edit }). */
+/** Per-chat composer drafts, runtime-only (chat id → { text, replyRef, edit, held }). */
 const chatDrafts = new Map();
+
+/** What the composer held when an edit began ({ text, replyRef }): it comes back when the edit ends. */
+let editHeldDraft = null;
 
 /**
  * Stash the open chat's composer text, reply target and any edit in progress as its
@@ -799,11 +802,13 @@ function stashComposerDraft() {
     const text = domChatMessageInput.value;
     const replyRef = strCurrentReplyReference;
     const edit = strCurrentEditMessageId ? { id: strCurrentEditMessageId, original: strCurrentEditOriginalContent } : null;
-    if (text || replyRef || edit) chatDrafts.set(strOpenChat, { text, replyRef, edit });
+    const held = edit ? editHeldDraft : null;
+    if (text || replyRef || edit) chatDrafts.set(strOpenChat, { text, replyRef, edit, held });
     else chatDrafts.delete(strOpenChat);
     if (edit) {
         strCurrentEditMessageId = '';
         strCurrentEditOriginalContent = '';
+        editHeldDraft = null;
         VectorSvelte.cancelEdit();
     }
     // Drop the bar without the focus a user cancel implies.
@@ -844,14 +849,24 @@ function cancelReply() {
  * @param {{ focus?: boolean }} [opts] - focus: false when resuming a drafted edit on chat open
  */
 function startEditMessage(messageId, content, { focus = true } = {}) {
+    // A message half-typed (or a reply being drafted) waits out the edit. Moving from one edit
+    // to another keeps what the first one set aside.
+    if (!strCurrentEditMessageId) {
+        const text = domChatMessageInput.value;
+        editHeldDraft = text.trim() || strCurrentReplyReference ? { text, replyRef: strCurrentReplyReference } : null;
+    }
+
     // Cancel any existing reply first
     if (strCurrentReplyReference) {
         cancelReply();
     }
 
-    // Cancel any existing edit
+    // Cancel any existing edit, keeping what it set aside for this one
     if (strCurrentEditMessageId) {
+        const held = editHeldDraft;
+        editHeldDraft = null;
         cancelEdit();
+        editHeldDraft = held;
     }
 
     // Editing needs the real textarea back — drop any open command composer.
@@ -886,11 +901,15 @@ function cancelEdit() {
     strCurrentEditMessageId = '';
     strCurrentEditOriginalContent = '';
 
-    // Clear the input; the chrome follows the mode back to idle.
-    domChatMessageInput.value = '';
+    // The composer goes back to what it held before the edit; the chrome follows the mode back to idle.
+    const held = editHeldDraft;
+    editHeldDraft = null;
+    domChatMessageInput.value = held?.text || '';
     VectorSvelte.cancelEdit();
-    VectorSvelte.setDraftEmpty(true, false);
+    VectorSvelte.setDraftEmpty(!domChatMessageInput.value.trim(), false);
     VectorSvelte.flushSync();
+    const chat = held?.replyRef && getChat(strOpenChat);
+    if (chat?.messages?.some(m => m.id === held.replyRef)) _dmsgSelectReply(held.replyRef, { focus: false });
 
     // Focus the input (desktop only)
     if (!platformFeatures.is_mobile) {
@@ -1396,7 +1415,10 @@ async function openChat(contact, { reread = true, fade = true } = {}) {
         if (domChatMessageInput.value === '') {
             const draft = chatDrafts.get(contact);
             // An edit in progress resumes on its message, with what was typed so far.
-            if (draft?.edit) startEditMessage(draft.edit.id, draft.edit.original, { focus: false });
+            if (draft?.edit) {
+                startEditMessage(draft.edit.id, draft.edit.original, { focus: false });
+                editHeldDraft = draft.held || null;
+            }
             domChatMessageInput.value = draft?.text || '';
             autoResizeChatInput();
             // A drafted reply returns with its text, while its target still exists.

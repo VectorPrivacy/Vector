@@ -784,7 +784,8 @@ async function initComposerVoice() {
             return;
         }
         if (strCurrentEditMessageId) cancelEdit();
-        domChatMessageInput.value = text;
+        // After whatever the composer holds, as a dictation into another chat's draft is.
+        domChatMessageInput.value = domChatMessageInput.value.trim() ? `${domChatMessageInput.value} ${text}` : text;
         VectorSvelte.setDraftEmpty(false, false);
         VectorSvelte.flushSync();
         domChatMessageInput.focus();
