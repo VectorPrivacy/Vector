@@ -98,7 +98,8 @@ export function railPull(node, o) {
     let x0 = 0, y0 = 0, p0 = 0, last = 0;
     let axis = null;
     let samples = [];
-    let swallowUntil = 0;
+    // The click a pull or stray swipe ends on, if one comes, before the next press.
+    let swallowNext = false;
 
     const clamp = (p) => Math.max(0, Math.min(1, p));
     const amount = (x) => clamp(p0 + (x - x0) / opts.width());
@@ -107,7 +108,7 @@ export function railPull(node, o) {
         pulling = false;
         id = null;
         // The click a pull ends on is the pull's, not a tap on what's under it.
-        swallowUntil = performance.now() + 350;
+        swallowNext = true;
         opts.end(open);
     }
     function abandon() {
@@ -116,6 +117,7 @@ export function railPull(node, o) {
 
     function down(e) {
         abandon();
+        swallowNext = false;
         if (e.pointerType === 'mouse' && e.button !== 0) return;
         refused = !!opts.grabs && !opts.grabs(e.target);
         stray = false;
@@ -147,7 +149,7 @@ export function railPull(node, o) {
     function up(e) {
         if (e.pointerId !== id) return;
         // A swipe across a tile is neither a pull nor a tap on it.
-        if (stray) swallowUntil = performance.now() + 350;
+        if (stray) swallowNext = true;
         if (!pulling) { id = null; return; }
         const [t0, sx] = samples[0];
         const v = (e.clientX - sx) / Math.max(1, e.timeStamp - t0);
@@ -169,7 +171,10 @@ export function railPull(node, o) {
         if (e.target === node && e.pointerId === id) abandon();
     }
     function swallow(e) {
-        if (performance.now() < swallowUntil) { e.stopPropagation(); e.preventDefault(); }
+        if (!swallowNext) return;
+        swallowNext = false;
+        e.stopPropagation();
+        e.preventDefault();
     }
     // A two-finger swipe: mostly sideways, not a pinch (ctrlKey), not the tail of a scroll.
     function wheel(e) {

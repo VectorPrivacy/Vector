@@ -830,6 +830,11 @@ body.cc.cc-layer.cc-drawer-on .cc-drawer-shade {
   touch-action: none;
 }
 
+/* On its way away, a tap is for the conversation coming back, not the shade leaving it. */
+body.cc.cc-drawer-leaving .cc-drawer-shade {
+  pointer-events: none;
+}
+
 /* Sideways over the conversation is the drawer's, or a reply's; up and down still scroll. */
 body.cc.cc-layer #chat-messages {
   touch-action: pan-y;

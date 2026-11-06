@@ -49,22 +49,29 @@ function glide(name, key, from, to, ms) {
     return anims;
 }
 
-/** One value eased between rests, or held to a finger; `land(v)` once it rests at `v`. */
+/** One value eased between rests, or held to a finger; `land(v)` once it rests at `v`. Timed
+ *  by its compositor animations when it has any: they start at the first frame drawn, which
+ *  a busy page delays, and landing early would cut their last frames. */
 function easer(name, key, land) {
-    let value = 0, from = 0, to = 0, start = 0, ms = 0, frame = 0, anims = [];
+    let value = 0, from = 0, to = 0, start = 0, ms = 0, frame = 0, run = 0, anims = [];
     function set(v) {
         value = v;
         put(name, key, v);
     }
-    function get() {
-        if (!ms) return value;
+    function progress() {
+        const a = anims[0];
+        if (a) return a.playState === 'finished' ? 1 : (a.effect.getComputedTiming().progress ?? 0);
         const t = Math.max(0, Math.min(1, (performance.now() - start) / ms));
-        return from + (to - from) * (1 - (1 - t) ** 3);
+        return 1 - (1 - t) ** 3;
+    }
+    function get() {
+        return ms ? from + (to - from) * progress() : value;
     }
     function stop() {
         if (!ms) return;
         const v = get();
         ms = 0;
+        run++;
         cancelAnimationFrame(frame);
         for (const a of anims) a.cancel();
         anims = [];
@@ -82,18 +89,23 @@ function easer(name, key, land) {
         to = b;
         anims = glide(name, key, a, b, ms);
         start = performance.now();
+        const mine = ++run;
+        const arrive = () => {
+            if (mine !== run) return;
+            ms = 0;
+            cancelAnimationFrame(frame);
+            anims = [];
+            set(b);
+            land(b);
+        };
         const framed = [...panes.values()].some((r) => r[key] === 'frame');
         const step = () => {
-            if (performance.now() - start >= ms) {
-                ms = 0;
-                anims = [];
-                set(b);
-                return land(b);
-            }
+            if (!anims.length && performance.now() - start >= ms) return arrive();
             if (framed) put(name, key, get(), 'frame');
             frame = requestAnimationFrame(step);
         };
-        frame = requestAnimationFrame(step);
+        if (anims.length) Promise.all(anims.map((x) => x.finished)).then(arrive, () => {});
+        if (framed || !anims.length) frame = requestAnimationFrame(step);
     }
     return { go, stop, get, set: (v) => { stop(); set(v); } };
 }
@@ -111,6 +123,7 @@ function showing(v) {
     if (on) for (const fn of outListeners) fn();
 }
 function landP(v) {
+    document.body.classList.remove('cc-drawer-leaving');
     showing(v);
     if (v === pTo && pDone) {
         const done = pDone;
@@ -130,6 +143,7 @@ export function drawerTo(open, instant = false, done = null) {
     }
     const from = pEase.get();
     showing(Math.max(from, pTo));
+    document.body.classList.toggle('cc-drawer-leaving', pTo === 0 && from > 0);
     pEase.go(from, pTo);
 }
 
@@ -170,6 +184,7 @@ export function drawerPull({ live, grabs, end }) {
         width: () => span,
         begin: () => {
             pEase.stop();
+            document.body.classList.remove('cc-drawer-leaving');
             pDone = null;
             span = Math.max(1, window.innerWidth - (parseFloat(getComputedStyle(document.body).getPropertyValue('--cc-peek')) || 0));
             return pEase.get();
