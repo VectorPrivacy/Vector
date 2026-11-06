@@ -424,9 +424,6 @@ async function windowExtendOlder() {
     const profile = !isGroup ? getProfile(chat.id) : null;
     const msgs0 = _windowMessages();
 
-    const scrollHeightBefore = domChatMessages.scrollHeight;
-    const scrollTopBefore = domChatMessages.scrollTop;
-
     // When the window TOP sits in the tail (a gap below it, in the seek region) an
     // in-memory step up must not cross the gap into the seek region. Floor the reach
     // at the tail's start; the step landing on the tail-start row then anchored-fills
@@ -473,6 +470,13 @@ async function windowExtendOlder() {
         // so the cache reaches it in far fewer round-trips (rendered window still steps by WINDOW_STEP).
         const seekFetch = (_unreadJumpPill && _unreadJumpPill.classList.contains('visible'))
             ? UNREAD_SEEK_FETCH_STEP : WINDOW_STEP;
+        // A Community channel can hold a hole above its older rows (a catch-up that ran out of
+        // pages): the relays fill it first, or the read below would step straight across it.
+        if (chat.chat_type === 'Community') {
+            const topAt = msgs0[start]?.at;
+            if (topAt) await invoke('fill_community_gap', { channelId: chatId, beforeMs: topAt }).catch(() => 0);
+            if (strOpenChat !== chatId) return true;
+        }
         let older = [];
         try {
             older = await invoke('get_messages_around', { chatId, anchorId, before: seekFetch + 1, after: 0 }) || [];
@@ -508,17 +512,17 @@ async function windowExtendOlder() {
         if (!olderSlice.length) return true;
     }
 
+    // Noted here, after every await: the reader may have scrolled on while the rows loaded.
+    recordScrollAnchor();
     _windowSuppressAutoScroll = true;
     try {
         await updateChat(chat, olderSlice, profile, false);
     } finally { _windowSuppressAutoScroll = false; }
     windowTopId = olderSlice[0]?.id || windowTopId;
 
-    // Maintain visual position for the prepended rows. Programmatic: prepend grows
-    // scrollHeight, so we add back the delta to hold the viewport — must not read as user intent.
-    const scrollHeightAfter = domChatMessages.scrollHeight;
-    beginProgrammaticScroll();
-    domChatMessages.scrollTop = scrollTopBefore + (scrollHeightAfter - scrollHeightBefore);
+    // The rows went in above the view: hold it on the row it showed.
+    restoreScrollAnchor();
+    recordScrollAnchor();
 
     // Drop from the bottom (below the viewport → scrollTop unaffected). This moves
     // the window off the live tail.
@@ -663,15 +667,63 @@ async function windowExtendNewer() {
     return true;
 }
 
+// Manual scroll anchoring (WebKit has none): unless the view is pinned to the bottom, the row at
+// the top of the view keeps its place while anything above it is added, removed or resized.
+// Its place is kept as an offset into the content, which scrolling never changes: a resize
+// landing in the same frame as the reader's own scroll then can't take that scroll back.
+let _scrollAnchor = null;   // { el, at }: a row, and its offset from the top of the content
+
+function _contentOffset(row) {
+    return row.getBoundingClientRect().top - domChatMessages.getBoundingClientRect().top + domChatMessages.scrollTop;
+}
+
+/** Note the first row that starts inside the view, and where it sits in the content. A row
+ *  cut off at the top would be a poor anchor: its media growing pushes down all that shows. */
+function recordScrollAnchor() {
+    _scrollAnchor = null;
+    if (!domChatMessages) return;
+    const edge = domChatMessages.getBoundingClientRect().top;
+    let cut = null;
+    for (const row of domChatMessages.children) {
+        if (!row.id) continue;   // a divider or overlay moves with the rows around it
+        const r = row.getBoundingClientRect();
+        if (r.top >= edge) {
+            _scrollAnchor = { el: row, at: _contentOffset(row) };
+            return;
+        }
+        if (r.bottom > edge) cut = row;
+    }
+    // One row taller than the view: it is the only one there is.
+    if (cut) _scrollAnchor = { el: cut, at: _contentOffset(cut) };
+}
+
+/** Move the view by however far the noted row moved in the content; true when it moved. */
+function restoreScrollAnchor() {
+    const a = _scrollAnchor;
+    if (!a || !a.el.isConnected || !domChatMessages) return false;
+    const at = _contentOffset(a.el);
+    const delta = at - a.at;
+    a.at = at;
+    if (Math.abs(delta) < 1) return false;
+    beginProgrammaticScroll();
+    domChatMessages.scrollTop += delta;
+    return true;
+}
+
+/** Hold the view on its anchor through a change above it, unless it belongs at the bottom. */
+function keepScrollAnchor() {
+    if (chatPinnedToBottom && isAtDataBottom()) return;
+    restoreScrollAnchor();
+    recordScrollAnchor();
+}
+
 // Procedural scroll state
 const proceduralScrollState = {
     isLoading: false,
     renderedMessageCount: 0,
     totalMessageCount: 0,
     messagesPerBatch: 20,
-    scrollThreshold: 300, // pixels from top to trigger load
-    lastScrollHeight: 0, // Track scroll height for media load correction
-    isLoadingOlderMessages: false, // Flag to indicate we're in procedural load mode
+    scrollThreshold: 600, // pixels from an edge to load more, at least (a screen and a half, where taller)
     chatId: null, // Current chat ID for cache lookups
     useCache: false // Whether to use the message cache
 };
@@ -733,35 +785,13 @@ async function maybeLoadCommunityOlderFromNetwork(chatId) {
 }
 
 /**
- * Correct scroll position when media loads during procedural scroll
- * This prevents "snap-back" when images/videos load after messages are rendered
- */
-function correctScrollForMediaLoad() {
-    // Only correct if we're not at the bottom and we have a baseline
-    if (!proceduralScrollState.lastScrollHeight || !domChatMessages) return;
-    
-    const currentScrollHeight = domChatMessages.scrollHeight;
-    const scrollHeightDiff = currentScrollHeight - proceduralScrollState.lastScrollHeight;
-    
-    // Only correct if there's a meaningful difference (media loaded)
-    if (scrollHeightDiff > 5) {
-        const currentScrollTop = domChatMessages.scrollTop;
-        // Programmatic media-load correction — don't read as user intent.
-        beginProgrammaticScroll();
-        domChatMessages.scrollTop = currentScrollTop + scrollHeightDiff;
-        proceduralScrollState.lastScrollHeight = currentScrollHeight;
-    }
-}
-
-/**
  * Re-pin / position-correct the chat after an in-chat element grows or shrinks
  * once its row is already laid out: media finishing load, an emoji-pack preview
  * resolving its canvas height, the "New" unread divider being inserted, etc.
  *
- * Same three branches the media-load path uses, so every resizable element
- * behaves identically:
+ * Every resizable element behaves identically:
  *  - inside the open window  → snap to bottom (user just opened, expects bottom)
- *  - back-paging older history → keep the visual anchor (don't snap away)
+ *  - scrolled away from "now" → the row at the top of the view keeps its place
  *  - steady-state            → soft scroll only if the user is still pinned
  */
 function compensateChatScrollForResize() {
@@ -769,8 +799,8 @@ function compensateChatScrollForResize() {
     if (chatOpenTimestamp && VectorSvelte.now() - chatOpenTimestamp < 100) {
         scrollToBottom(domChatMessages, false);
         holdChatBottom();
-    } else if (proceduralScrollState.isLoadingOlderMessages) {
-        correctScrollForMediaLoad();
+    } else if (!chatPinnedToBottom || !isAtDataBottom()) {
+        keepScrollAnchor();
     } else {
         softChatScroll();
     }
@@ -873,11 +903,17 @@ function _pinGuardCheck() {
     const height = el.scrollHeight;
     if (height === _pinGuardHeight) return;
     _pinGuardHeight = height;
-    if (!strOpenChat || !chatPinnedToBottom || _windowSuppressAutoScroll || _unreadJumpResolving || !isAtDataBottom()) return;
+    if (!strOpenChat || _windowSuppressAutoScroll || _unreadJumpResolving) return;
+    if (!chatPinnedToBottom || !isAtDataBottom()) return keepScrollAnchor();
     beginProgrammaticScroll();
     scrollToEnd(el);
 }
 VectorSvelte.guardTiling(domChatMessages, _pinGuardCheck);
+// Rows coming and going are seen here before the frame paints (the guard above checks them a frame
+// later), so a row added or removed above the view never shows it out of place.
+new MutationObserver(() => {
+    if (strOpenChat && !_windowSuppressAutoScroll && !_unreadJumpResolving) keepScrollAnchor();
+}).observe(domChatMessages, { childList: true });
 
 /**
  * Handle procedural scroll loading of older messages
@@ -888,8 +924,9 @@ function handleProceduralScroll() {
     const scrollTop = domChatMessages.scrollTop;
     const maxScroll = domChatMessages.scrollHeight - domChatMessages.clientHeight;
     const pxFromBottom = maxScroll - scrollTop;
-    const nearTop = scrollTop <= proceduralScrollState.scrollThreshold;
-    const nearBottom = pxFromBottom <= proceduralScrollState.scrollThreshold;
+    const reach = Math.max(proceduralScrollState.scrollThreshold, domChatMessages.clientHeight * 1.5);
+    const nearTop = scrollTop <= reach;
+    const nearBottom = pxFromBottom <= reach;
 
     // Scroll DOWN near the DOM bottom: if newer in-memory rows sit below the
     // rendered window (we dropped them on an earlier extend), slide the window
@@ -931,11 +968,6 @@ async function loadMoreMessages() {
         }
 
         proceduralScrollState.isLoading = true;
-        proceduralScrollState.isLoadingOlderMessages = true;
-
-        // Store scroll position BEFORE rendering
-        const scrollHeightBefore = domChatMessages.scrollHeight;
-        const scrollTopBefore = domChatMessages.scrollTop;
 
         // Load more events from cache (fetches from DB if needed)
         const olderMessages = await eventCache.loadMoreEvents(
@@ -945,7 +977,6 @@ async function loadMoreMessages() {
 
         if (olderMessages.length === 0) {
             proceduralScrollState.isLoading = false;
-            proceduralScrollState.isLoadingOlderMessages = false;
             return;
         }
 
@@ -960,7 +991,9 @@ async function loadMoreMessages() {
         const isGroup = chatIsGroup(chat);
         const profile = !isGroup ? getProfile(chat.id) : null;
 
-        // Render the older events + newly-revealed system events (prepend)
+        // Render the older events + newly-revealed system events (prepend), the view held on
+        // the row it showed once the batch arrived.
+        recordScrollAnchor();
         await updateChat(chat, [...olderMessages, ...revealedSys], profile, false);
 
         // Update rendered count
@@ -970,13 +1003,8 @@ async function loadMoreMessages() {
         const newStats = eventCache.getStats(strOpenChat);
         proceduralScrollState.totalMessageCount = newStats?.totalInDb || proceduralScrollState.totalMessageCount;
 
-        // Correct scroll position to prevent "snapping"
-        const scrollHeightAfter = domChatMessages.scrollHeight;
-        const scrollHeightDiff = scrollHeightAfter - scrollHeightBefore;
-
-        // Adjust scroll position to maintain visual position (programmatic).
-        beginProgrammaticScroll();
-        domChatMessages.scrollTop = scrollTopBefore + scrollHeightDiff;
+        restoreScrollAnchor();
+        recordScrollAnchor();
 
         // DOM windowing: dropped rows are below the viewport (we just prepended
         // above), so scrollTop is unaffected — only scrollHeight shrinks. Trim
@@ -989,17 +1017,7 @@ async function loadMoreMessages() {
             refreshScrollReturnButton();
         }
 
-        // Store the current scroll height for media load correction
-        proceduralScrollState.lastScrollHeight = domChatMessages.scrollHeight;
-
         proceduralScrollState.isLoading = false;
-
-        // Keep the flag active for a bit longer to catch late-loading media
-        setTimeout(() => {
-            proceduralScrollState.isLoadingOlderMessages = false;
-            proceduralScrollState.lastScrollHeight = 0;
-        }, 2000);
-
         return;
     }
 
@@ -1012,7 +1030,6 @@ async function loadMoreMessages() {
     if (currentRendered >= totalMessages) return;
 
     proceduralScrollState.isLoading = true;
-    proceduralScrollState.isLoadingOlderMessages = true;
 
     // Calculate how many more messages to load
     const messagesToLoad = Math.min(
@@ -1027,42 +1044,23 @@ async function loadMoreMessages() {
 
     if (olderMessages.length === 0) {
         proceduralScrollState.isLoading = false;
-        proceduralScrollState.isLoadingOlderMessages = false;
         return;
     }
-
-    // Store scroll position BEFORE rendering
-    const scrollHeightBefore = domChatMessages.scrollHeight;
-    const scrollTopBefore = domChatMessages.scrollTop;
 
     // Get profile for rendering
     const isGroup = chatIsGroup(chat);
     const profile = !isGroup ? getProfile(chat.id) : null;
 
-    // Render the older messages
+    // Render the older messages, the view held on the row it showed.
+    recordScrollAnchor();
     await updateChat(chat, olderMessages, profile, false);
+    restoreScrollAnchor();
+    recordScrollAnchor();
 
     // Update rendered count
     proceduralScrollState.renderedMessageCount += messagesToLoad;
 
-    // Correct scroll position to prevent "snapping"
-    const scrollHeightAfter = domChatMessages.scrollHeight;
-    const scrollHeightDiff = scrollHeightAfter - scrollHeightBefore;
-
-    // Adjust scroll position to maintain visual position (programmatic).
-    beginProgrammaticScroll();
-    domChatMessages.scrollTop = scrollTopBefore + scrollHeightDiff;
-
-    // Store the current scroll height for media load correction
-    proceduralScrollState.lastScrollHeight = domChatMessages.scrollHeight;
-
     proceduralScrollState.isLoading = false;
-
-    // Keep the flag active for a bit longer to catch late-loading media
-    setTimeout(() => {
-        proceduralScrollState.isLoadingOlderMessages = false;
-        proceduralScrollState.lastScrollHeight = 0;
-    }, 2000);
 }
 
 /**
@@ -1099,8 +1097,6 @@ function initProceduralScrollWithCache(chatId, initialCount, totalCount) {
     proceduralScrollState.renderedMessageCount = initialCount;
     proceduralScrollState.totalMessageCount = totalCount;
     proceduralScrollState.isLoading = false;
-    proceduralScrollState.isLoadingOlderMessages = false;
-    proceduralScrollState.lastScrollHeight = 0;
     // Re-arm network back-paging each open: if history truly ended, the backend's
     // history-start short-circuit answers instantly (no network) and we re-latch; if it
     // grew reachable again (rejoin, epoch backfill), scroll-up probes instead of staying dead.
@@ -1114,8 +1110,6 @@ function resetProceduralScroll() {
     proceduralScrollState.isLoading = false;
     proceduralScrollState.renderedMessageCount = 0;
     proceduralScrollState.totalMessageCount = 0;
-    proceduralScrollState.lastScrollHeight = 0;
-    proceduralScrollState.isLoadingOlderMessages = false;
     proceduralScrollState.chatId = null;
     proceduralScrollState.useCache = false;
 }

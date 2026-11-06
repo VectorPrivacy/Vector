@@ -1983,15 +1983,13 @@ async function wireChatUi() {
     // Self-Destruct Timer: right-click / long-press the Send button, plus the
     // active-timer clock indicator injected next to the composer.
 
-    // Add scroll event listener for procedural message loading + intent tracking
-    let scrollTimeout;
+    // Scroll: intent, the anchor a change above the view holds it on, and loading ahead of the
+    // reader (one load at a time), so older rows are in place before they reach the top.
     domChatMessages.addEventListener('scroll', () => {
         handleChatScrollIntent();
-        if (scrollTimeout) clearTimeout(scrollTimeout);
-        scrollTimeout = setTimeout(() => {
-            handleProceduralScroll();
-        }, 100);
-    });
+        recordScrollAnchor();
+        handleProceduralScroll();
+    }, { passive: true });
     // Hook up a scroll handler in the chat to display UI elements at certain scroll depths
     createScrollHandler(domChatMessages, VectorSvelte.composerEls().scrollReturn, {
         threshold: 500,

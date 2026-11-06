@@ -203,7 +203,7 @@ const _dmsgLookups = {
     openChat: () => strOpenChat,
     openUrl: (url) => _dmsgOpenPreviewUrl(url),
     backendCachedImg: (img, url, fit) => bindBackendCachedImg(img, url, fit),
-    onThumbLoad: () => { if (proceduralScrollState.isLoadingOlderMessages) correctScrollForMediaLoad(); else softChatScroll(); },
+    onThumbLoad: () => compensateChatScrollForResize(),
 };
 
 /**
