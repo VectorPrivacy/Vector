@@ -6326,9 +6326,12 @@ textarea#chat-input::placeholder {
   max-width: 400px;
   height: 350px;
   box-shadow: 0 -8px 32px rgba(0, 0, 0, 0.5);
-  transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.3s ease;
+  /* Hidden once the fade ends: an invisible panel still kept its whole grid (tens of
+     thousands of px) composited and re-rastered under every transition behind it. */
+  transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.3s ease, visibility 0s linear 0.3s;
   pointer-events: none;
   opacity: 0;
+  visibility: hidden;
   flex-direction: column;
   overflow: hidden;
   display: flex;
@@ -6338,6 +6341,8 @@ textarea#chat-input::placeholder {
   transform: translateX(-50%) translateY(0);
   pointer-events: auto;
   opacity: 1;
+  visibility: visible;
+  transition-delay: 0s;
 }
 
 .emoji-picker:has(.emoji-pack-creator-error:not([hidden])) {
