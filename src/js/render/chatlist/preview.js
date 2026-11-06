@@ -13,10 +13,9 @@
  * @param {Chat} chat - The chat object
  * @returns {string|null} - The typing text, or null if no one is typing
  */
-/** Who is typing in a chat, minus anyone blocked (a group can carry them). */
+/** Who is typing in a chat, minus anyone blocked, in a DM as in a community. */
 function visibleTypers(chat) {
-    const typers = chat.active_typers || [];
-    return chatIsGroup(chat) ? typers.filter(npub => !getProfile(npub)?.is_blocked) : typers;
+    return (chat.active_typers || []).filter(npub => !getProfile(npub)?.is_blocked);
 }
 
 function generateTypingText(chat) {

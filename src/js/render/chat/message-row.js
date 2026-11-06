@@ -123,7 +123,7 @@ function _dmsgRowCtx(msg) {
             myNpub: strPubkey,
             isGroupChat,
             currentChat,
-            pinged: !unauthorized && _dmsgIsPinged(msg, currentChat, isGroupChat),
+            pinged: !unauthorized && !blocked && _dmsgIsPinged(msg, currentChat, isGroupChat),
             blocked: blocked && !revealed,
             revealedBlocked: (blocked || unauthorized) && revealed,
             // A reader collapses, never drops, what a timed-out member posted.

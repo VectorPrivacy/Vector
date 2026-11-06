@@ -1452,14 +1452,18 @@ impl ChatState {
     // Typing Indicators
     // ========================================================================
 
+    /// A blocked user's typing is never shown, in any chat: neither recorded nor listed.
     pub fn update_typing_and_get_active(&mut self, chat_id: &str, npub: &str, expires_at: u64) -> Vec<String> {
-        let handle = self.interner.intern(npub);
-        if let Some(chat) = self.chats.iter_mut().find(|c| c.id == chat_id) {
+        let blocked = |state: &Self, npub: &str| state.get_profile(npub).is_some_and(|p| p.flags.is_blocked());
+        let handle = (!blocked(self, npub)).then(|| self.interner.intern(npub));
+        let Some(chat) = self.chats.iter_mut().find(|c| c.id == chat_id) else {
+            return Vec::new();
+        };
+        if let Some(handle) = handle {
             chat.update_typing_participant(handle, expires_at);
-            chat.get_active_typers(&self.interner)
-        } else {
-            Vec::new()
         }
+        let typers = chat.get_active_typers(&self.interner);
+        typers.into_iter().filter(|t| !blocked(self, t)).collect()
     }
 }
 
@@ -2600,6 +2604,26 @@ mod tests {
         let active = state.update_typing_and_get_active("npub1peer", "npub1typer", far_future);
         assert_eq!(active.len(), 1, "should have one active typer");
         assert_eq!(active[0], "npub1typer", "typer npub should match");
+    }
+
+    #[test]
+    fn a_blocked_user_never_shows_as_typing() {
+        let mut state = ChatState::new();
+        state.create_dm_chat("npub1peer");
+        let far_future = web_time::SystemTime::now()
+            .duration_since(web_time::UNIX_EPOCH).unwrap().as_secs() + 300;
+        let mut profile = Profile::new();
+        profile.flags.set_blocked(true);
+        state.insert_or_replace_profile("npub1blocked", profile);
+
+        assert!(state.update_typing_and_get_active("npub1peer", "npub1blocked", far_future).is_empty());
+        assert_eq!(state.update_typing_and_get_active("npub1peer", "npub1typer", far_future), vec!["npub1typer"]);
+
+        // Blocked mid-typing: gone from the next list.
+        let mut typer = Profile::new();
+        typer.flags.set_blocked(true);
+        state.insert_or_replace_profile("npub1typer", typer);
+        assert!(state.update_typing_and_get_active("npub1peer", "npub1other", 0).is_empty());
     }
 
     #[test]
