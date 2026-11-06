@@ -32,7 +32,7 @@ use crate::db;
 
 use std::path::Path;
 use symphonia::core::audio::SampleBuffer;
-use symphonia::core::codecs::{DecoderOptions, CODEC_TYPE_NULL, CODEC_TYPE_OPUS};
+use symphonia::core::codecs::{DecoderOptions, CODEC_TYPE_NULL};
 use symphonia::core::errors::Error as SymphoniaError;
 use symphonia::core::formats::FormatOptions;
 use symphonia::core::io::MediaSourceStream;
@@ -548,12 +548,9 @@ pub(crate) fn symphonia_decode_mono(file_bytes: Vec<u8>, extension: Option<&str>
         .ok_or("No supported audio tracks found")?;
 
     let track_id = track.id;
-    if track.codec_params.codec == CODEC_TYPE_OPUS {
-        return opus_decode_mono(format, track_id);
-    }
     let declared_rate = track.codec_params.sample_rate.ok_or("Unknown sample rate")?;
 
-    let mut decoder = symphonia::default::get_codecs()
+    let mut decoder = crate::audio_codecs::codecs()
         .make(&track.codec_params, &DecoderOptions::default())
         .map_err(|e| format!("Failed to create decoder: {}", e))?;
 
@@ -607,28 +604,6 @@ pub(crate) fn symphonia_decode_mono(file_bytes: Vec<u8>, extension: Option<&str>
     Ok((mono_samples, sample_rate))
 }
 
-/// Opus (most voice clips sent as .ogg), which symphonia demuxes but cannot decode: libopus,
-/// as calls use, at 48 kHz into one channel, which it mixes down itself.
-fn opus_decode_mono(mut format: Box<dyn symphonia::core::formats::FormatReader>, track_id: u32) -> Result<(Vec<f32>, u32), String> {
-    let mut decoder = opus::Decoder::new(48_000, opus::Channels::Mono).map_err(|e| format!("Failed to create Opus decoder: {e}"))?;
-    let mut mono_samples = Vec::new();
-    // 120 ms at 48 kHz: the longest an Opus packet can be.
-    let mut frame = vec![0f32; 5760];
-    loop {
-        let packet = match format.next_packet() {
-            Ok(p) => p,
-            Err(_) => break,
-        };
-        if packet.track_id() != track_id {
-            continue;
-        }
-        if let Ok(n) = decoder.decode_float(&packet.data, &mut frame, false) {
-            mono_samples.extend_from_slice(&frame[..n]);
-        }
-    }
-    Ok((mono_samples, 48_000))
-}
-
 /// Internal: Decode audio file with options
 ///
 /// - `to_mono`: If true, multi-channel audio is mixed down to mono
@@ -664,7 +639,7 @@ fn decode_audio_internal(path: &Path, to_mono: bool) -> Result<(Vec<f32>, u32, u
     let codec_params = &track.codec_params;
 
     let decoder_opts = DecoderOptions::default();
-    let mut decoder = symphonia::default::get_codecs()
+    let mut decoder = crate::audio_codecs::codecs()
         .make(codec_params, &decoder_opts)
         .map_err(|e| format!("Failed to create decoder: {}", e))?;
 

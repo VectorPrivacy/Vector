@@ -81,6 +81,7 @@ mod pivx;
 
 // Audio processing: resampling (all platforms) + notification playback (desktop only)
 mod audio;
+mod audio_codecs;
 
 // Unified audio engine: persistent cpal stream, mixing, precomputed FFT waveform
 mod audio_engine;

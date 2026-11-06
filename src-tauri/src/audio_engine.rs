@@ -1505,7 +1505,7 @@ fn probe_audio_metadata(input: &AudioInput) -> Result<(u32, usize, u64), String>
     // let it override the declared rate/channels.
     let mut sample_rate = declared_rate;
     let mut channels = params.channels.map(|c| c.count());
-    if let Ok(mut decoder) = symphonia::default::get_codecs().make(&params, &DecoderOptions::default()) {
+    if let Ok(mut decoder) = crate::audio_codecs::codecs().make(&params, &DecoderOptions::default()) {
         let mut format = probed.format;
         for _ in 0..16 {
             let packet = match format.next_packet() {
@@ -1630,7 +1630,7 @@ impl PacketCursor {
             .find(|t| t.codec_params.codec != CODEC_TYPE_NULL)
             .ok_or("no audio track")?;
         let (track_id, time_base) = (track.id, track.codec_params.time_base);
-        let decoder = symphonia::default::get_codecs()
+        let decoder = crate::audio_codecs::codecs()
             .make(&track.codec_params, &DecoderOptions::default())
             .map_err(|e| format!("decoder: {}", e))?;
         Ok(Self { format, decoder, track_id, time_base, buf: None, frame: 0 })
