@@ -109,7 +109,7 @@ function easer(name, key, land) {
         if (anims.length) Promise.all(anims.map((x) => x.finished)).then(arrive, () => {});
         if (framed || !anims.length) frame = requestAnimationFrame(step);
     }
-    return { go, stop, get, set: (v) => { stop(); set(v); } };
+    return { go, stop, get, moving: () => ms > 0, set: (v) => { stop(); set(v); } };
 }
 
 let pTo = 0;
@@ -196,10 +196,13 @@ export function drawerPull({ live, grabs, end }) {
             showing(v);
         },
         grabs,
-        // Only a pull that can move it: out while it's away, back while it's out.
+        // Only a pull that can move it: out while it's away, back while it's out. Mid-slide any
+        // pull can, the slide's start included, which a busy page can hold back for a while.
         declines: (dx) => {
+            if (!live()) return true;
+            if (pEase.moving()) return false;
             const p = pEase.get();
-            return !live() || (p <= 0 && dx < 0) || (p >= 1 && dx > 0);
+            return (p <= 0 && dx < 0) || (p >= 1 && dx > 0);
         },
         end,
     };
