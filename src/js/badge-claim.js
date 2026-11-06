@@ -10,6 +10,8 @@ const BADGE_DROPS = [{
     /** This drop as our own badges see it: its window, and whether this account holds it. */
     state: (badges) => ({ win: badges?.drop_2026 || null, held: !!badges?.vector_2026 }),
     claim: () => invoke('claim_vector_2026_badge'),
+    /** A claim this account published elsewhere; found, the backend holds it from now on. */
+    claimedElsewhere: () => invoke('check_vector_2026_badge', { npub: strPubkey }),
     card: {
         title: 'V for Vector Badge',
         subtitle: '2026 Edition',
@@ -74,6 +76,13 @@ async function offerBadgeDrops() {
         const pending = readDropClaim(drop, win);
         if (pending && !held) submitDropClaim(drop, win);
         if (!held && !pending && dropOpen(win) && await meetsDropVersion(drop.minVersion, win)) {
+            // Another device or a reinstall may already hold it: only this device's cache is empty.
+            const npub = strPubkey;
+            if (await drop.claimedElsewhere().catch(() => false)) {
+                if (npub === strPubkey) VectorSvelte.setDropClaimed(drop.id, true);
+                continue;
+            }
+            if (npub !== strPubkey) return;
             showDropOffer(drop, win);
             return;
         }
