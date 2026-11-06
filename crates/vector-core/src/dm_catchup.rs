@@ -572,6 +572,11 @@ where
             }
         }
     }
+    // The page's arrivals are already on screen: stored now, unread counts and an opened chat
+    // read them without waiting out every other relay's catch-up.
+    if ctx.batcher.buffered() > 0 && ctx.batcher.try_flush().await.is_err() {
+        ctx.flush_ok.store(false, Ordering::SeqCst);
+    }
 }
 
 #[cfg(test)]
