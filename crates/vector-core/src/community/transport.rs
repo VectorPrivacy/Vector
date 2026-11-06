@@ -1333,9 +1333,9 @@ fn drop_refused(targets: Vec<String>) -> Result<Vec<String>, String> {
 
 /// Shed pooled Community relays from `candidates` that no JOINED community still needs. Used by both
 /// the leave path (relays of a community we left) and the invite-preload TTL cleanup (relays an
-/// unsolicited/declined invite warmed but never became a join, #297). Keep rules: a relay is kept if
-/// a remaining joined community lists it, OR it carries READ/WRITE (the user's own chat relays —
-/// Community relays are GOSSIP-only, so never READ/WRITE). A pruned relay re-warms automatically if
+/// unsolicited/declined invite warmed but never became a join, #297). A relay is kept if a held
+/// community lists it or still listens on it after a move, if it is a Discovery Relay, or if it
+/// carries the READ or WRITE flag (the user's own relays). A pruned relay re-warms automatically if
 /// its invite is later accepted (the join's subscription re-adds it), so pruning a still-pending
 /// invite's relay is safe.
 pub async fn prune_unneeded_community_relays(candidates: &[String]) {
@@ -1343,25 +1343,39 @@ pub async fn prune_unneeded_community_relays(candidates: &[String]) {
         return;
     }
     let Some(client) = crate::state::nostr_client() else { return };
+    prune_relays(&client, candidates, &still_needed_relays()).await;
+}
 
-    let still_needed = crate::db::community::held_community_relays().unwrap_or_default();
+/// Normalised urls of every relay a held community lists or still listens on.
+fn still_needed_relays() -> std::collections::HashSet<String> {
+    use crate::inbox_relays::normalize_relay_url;
+    let mut needed: std::collections::HashSet<String> =
+        crate::db::community::held_community_relays().unwrap_or_default().iter().map(|r| normalize_relay_url(r)).collect();
+    for id in crate::db::community::list_community_ids().unwrap_or_default() {
+        let retired = crate::community::v2::service::retired_relays(&crate::simd::hex::bytes_to_hex_32(&id.0));
+        needed.extend(retired.iter().map(|r| normalize_relay_url(r)));
+    }
+    needed
+}
 
-    let pool = client;
-    // all_relays(): community relays carry GOSSIP, so they're absent from `relays()` (READ/WRITE only).
+async fn prune_relays(pool: &Client, candidates: &[String], still_needed: &std::collections::HashSet<String>) {
+    use crate::inbox_relays::normalize_relay_url;
+    // all(): community relays carry GOSSIP, so they're absent from `relays()` (READ/WRITE only).
     let pooled = pool.relays().all().await;
     for url in candidates {
-        if still_needed.contains(url) {
+        let norm = normalize_relay_url(url);
+        if still_needed.contains(&norm) || crate::state::discovery_relay_iter().any(|d| normalize_relay_url(d) == norm) {
             continue;
         }
-        if let Ok(parsed) = nostr_sdk::prelude::RelayUrl::parse(url) {
-            if let Some(relay) = pooled.get(&parsed) {
-                if relay.capabilities().load().can_read() || relay.capabilities().load().can_write() {
-                    continue; // a real chat relay (or an overlap) — never sever
-                }
+        let Ok(parsed) = nostr_sdk::prelude::RelayUrl::parse(url) else { continue };
+        if let Some(relay) = pooled.get(&parsed) {
+            // The flags themselves: can_read()/can_write() also count the GOSSIP every community relay has.
+            if relay.capabilities().load().has_any(RelayCapabilities::READ | RelayCapabilities::WRITE) {
+                continue;
             }
-            let _ = pool.remove_relay(parsed).force().await; // plain remove refuses GOSSIP
-            forget_warmed_relay(url);
         }
+        let _ = pool.remove_relay(parsed).force().await; // plain remove refuses GOSSIP
+        forget_warmed_relay(url);
     }
 }
 
@@ -3077,6 +3091,30 @@ mod tests {
         let targets: Vec<String> = ["wss://a", "wss://b"].map(String::from).into();
         let out = drop_unrevivable(targets.clone(), |_| true);
         assert_eq!(out, targets);
+    }
+
+    #[tokio::test]
+    async fn pruning_severs_a_lone_community_relay_and_keeps_every_shared_one() {
+        let client = crate::nostr_client_builder().build();
+        let gossip = crate::community_relay_capabilities();
+        for (url, caps) in [
+            ("wss://left.example", gossip),
+            ("wss://other.example", gossip),
+            ("wss://nos.lol", crate::discovery_relay_capabilities()),
+            ("wss://own-read.example", RelayCapabilities::READ),
+            ("wss://own-write.example", RelayCapabilities::WRITE),
+        ] {
+            client.add_managed_relay(url).capabilities(caps).await.unwrap();
+        }
+        let candidates: Vec<String> = ["wss://left.example/", "wss://OTHER.example", "wss://nos.lol", "wss://own-read.example", "wss://own-write.example"]
+            .map(String::from)
+            .into();
+        let needed = ["wss://other.example".to_string()].into_iter().collect();
+        prune_relays(&client, &candidates, &needed).await;
+
+        let mut left: Vec<String> = client.relays().all().await.keys().map(|u| u.to_string().trim_end_matches('/').to_string()).collect();
+        left.sort();
+        assert_eq!(left, ["wss://nos.lol", "wss://other.example", "wss://own-read.example", "wss://own-write.example"]);
     }
 
     // ── Ready gate (community publish while the chosen network still connects) ──
