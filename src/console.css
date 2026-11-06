@@ -581,6 +581,13 @@ body.cc #chat-list {
 
 /* Widening into the list, its foot is under the rising tab bar: the mask ends at the bar's
    edge, so the fade rides up with it rather than appearing once the bar has landed. */
+/* Over a chat the list runs on under where the tab bar lands: room for it at the foot keeps the
+   scroll (and its scrollbar) as it will be once landed, instead of both arriving with the bar. */
+body.cc.cc-layer #chat-list,
+body.cc.cc-layer.cc-community #chat-list {
+  padding-bottom: calc(16px + var(--cc-nav-h));
+}
+
 body.cc.cc-layer.cc-homing #chat-list {
   mask-size: 100% calc(100% - var(--cc-nav-h) * var(--cc-home, 0));
   /* The rows under the bar are still to come, whatever the scroll says: a full fade. */
