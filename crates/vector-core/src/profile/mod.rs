@@ -425,7 +425,12 @@ impl Profile {
             (WEBSITE, &meta.website),
             (NIP05, &meta.nip05),
         ] {
-            let Some(value) = value.as_deref() else { continue };
+            // A picture the kind-0 no longer names was removed; other fields keep their last value.
+            let value = match value.as_deref() {
+                Some(value) => value,
+                None if i == AVATAR || i == BANNER => "",
+                None => continue,
+            };
             if blocked && (i == AVATAR || i == BANNER) {
                 continue;
             }

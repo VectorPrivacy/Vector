@@ -592,6 +592,11 @@ async fn update_profile_inner(
     }
 }
 
+/// A picture argument that removes the field: blank but not empty, since empty leaves it as it is.
+fn removes(value: &str) -> bool {
+    !value.is_empty() && value.trim().is_empty()
+}
+
 /// Our kind-0 rebuilt from `profile`, with each non-empty argument replacing its field.
 ///
 /// Carries stream consent forward, so editing a name or avatar never revokes it.
@@ -606,7 +611,7 @@ pub(crate) fn own_metadata(
     if let Ok(url) = Url::parse(&avatar_url) {
         meta = meta.picture(url);
     }
-    let banner_url = pick(banner, profile.banner());
+    let banner_url = if removes(banner) { String::new() } else { pick(banner, profile.banner()) };
     if let Ok(url) = Url::parse(&banner_url) {
         meta = meta.banner(url);
     }
@@ -644,7 +649,9 @@ fn edit_metadata(mut meta: Metadata, name: &str, avatar: &str, banner: &str, abo
     if let Ok(url) = Url::parse(avatar) {
         meta.picture = Some(url.to_string());
     }
-    if let Ok(url) = Url::parse(banner) {
+    if removes(banner) {
+        meta.banner = None;
+    } else if let Ok(url) = Url::parse(banner) {
         meta.banner = Some(url.to_string());
     }
     if !about.is_empty() {
@@ -1489,6 +1496,24 @@ mod tests {
         let mut republished = p.clone();
         assert!(!republished.from_metadata(own_metadata(&p, "", "", "", "", false)), "a no-op edit changes nothing");
         assert!(republished.flags.is_stream_consent());
+    }
+
+    #[test]
+    fn a_blank_banner_removes_it_and_an_empty_one_keeps_it() {
+        let mut p = Profile::new();
+        p.from_metadata(Metadata::from_json(r#"{"name":"a","banner":"https://x/b.png"}"#).unwrap());
+        assert_eq!(p.banner(), "https://x/b.png");
+
+        assert_eq!(own_metadata(&p, "", "", "", "", false).banner.as_deref(), Some("https://x/b.png"));
+        let removed = own_metadata(&p, "", "", " ", "", false);
+        assert_eq!(removed.banner, None);
+        let remote = Metadata::from_json(r#"{"name":"a","banner":"https://x/b.png","website":"https://w"}"#).unwrap();
+        let edited = edit_metadata(remote, "", "", " ", "", false);
+        assert_eq!(edited.banner, None);
+        assert_eq!(edited.website.as_deref(), Some("https://w"), "every other key stands");
+
+        assert!(p.from_metadata(removed), "a kind-0 without its banner clears it");
+        assert_eq!(p.banner(), "");
     }
 
     #[test]

@@ -1,7 +1,7 @@
 <script>
     // The Edit Mode fields, bound to the draft. Status is set from the profile itself. Values go through DOM properties,
     // never markup.
-    import { profileEdit } from '../lib/profileedit.svelte.js';
+    import { profileEdit, removeProfileEditPicture } from '../lib/profileedit.svelte.js';
 
     const edit = profileEdit();
     const field = 'background: none; border: none; outline: none; color: inherit; font-size: 16px; width: 100%;';
@@ -17,6 +17,9 @@
     }
 </script>
 
+{#if !edit.removed.banner && (edit.preview.banner || edit.snapshot.hasBanner)}
+    <button type="button" class="cs-remove" onclick={() => removeProfileEditPicture('banner')}>Remove Banner</button>
+{/if}
 <label class="profile-edit-label" for="profile-edit-name-input">Username</label>
 <div class="profile-edit-field-wrapper" style="position: relative;">
     <div class="profile-edit-field-text"><input id="profile-edit-name-input" type="text" maxlength="50" style={field} bind:value={edit.draft.name}></div>

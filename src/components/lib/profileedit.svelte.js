@@ -7,6 +7,7 @@ const edit = $state({
     pending: { avatar: null, banner: null },     // picked file paths
     preview: { avatar: '', banner: '' },         // their on-screen previews
     crop: { avatar: null, banner: null },        // the part of each pick to upload
+    removed: { banner: false },                  // taken off, to publish without it
 });
 
 export function profileEdit() { return edit; }
@@ -17,6 +18,7 @@ export function startProfileEdit(snapshot) {
     edit.pending = { avatar: null, banner: null };
     edit.preview = { avatar: '', banner: '' };
     edit.crop = { avatar: null, banner: null };
+    edit.removed = { banner: false };
     edit.active = true;
 }
 export function endProfileEdit() {
@@ -24,15 +26,22 @@ export function endProfileEdit() {
     edit.pending = { avatar: null, banner: null };
     edit.preview = { avatar: '', banner: '' };
     edit.crop = { avatar: null, banner: null };
+    edit.removed = { banner: false };
 }
 export function setProfileEditPicture(kind, path, preview, crop = null) {
     edit.pending[kind] = path;
     edit.preview[kind] = preview || '';
     edit.crop[kind] = crop;
+    if (kind in edit.removed) edit.removed[kind] = false;
+}
+/** Take the picture off: a pick is dropped, and saving publishes the profile without one. */
+export function removeProfileEditPicture(kind) {
+    setProfileEditPicture(kind, null, '');
+    edit.removed[kind] = true;
 }
 /** Whether anything differs from the snapshot. */
 export function profileEditDirty() {
     const { draft: d, snapshot: s, pending } = edit;
     return d.name.trim() !== (s.name || '') || d.about.trim() !== (s.about || '')
-        || pending.avatar !== null || pending.banner !== null;
+        || pending.avatar !== null || pending.banner !== null || edit.removed.banner;
 }

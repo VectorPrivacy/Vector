@@ -66,7 +66,7 @@
     });
 
     // ── pictures: the profile's, or the pick previewed in Edit Mode ──
-    const bannerSrc = $derived(edit.active && edit.preview.banner ? edit.preview.banner : (m?.bannerSrc || ''));
+    const bannerSrc = $derived(edit.active && edit.removed.banner ? '' : edit.active && edit.preview.banner ? edit.preview.banner : (m?.bannerSrc || ''));
     const avatarSrc = $derived(edit.active && edit.preview.avatar ? edit.preview.avatar : (m?.avatarFull || ''));
     let bannerBroken = $state(false);
     let avatarBroken = $state(false);

@@ -211,6 +211,7 @@ function enterProfileEditMode() {
         about: typeof cProfile.about === 'string' ? cProfile.about : '',
         avatar: getProfileAvatarSrc(cProfile, true) || null,
         banner: getProfileBannerSrc(cProfile) || null,
+        hasBanner: !!cProfile.banner,
     });
 }
 
@@ -268,6 +269,7 @@ function exitProfileEditMode(fCancel = false) {
     const snapshot = edit.snapshot;
     const pending = { ...edit.pending };
     const crop = { ...edit.crop };
+    const removedBanner = edit.removed.banner;
     fProfileEditMode = false;
     VectorSvelte.endProfileEdit();
     VectorSvelte.setProfileEditing(false);
@@ -280,11 +282,12 @@ function exitProfileEditMode(fCancel = false) {
 
             const nameChanged = draft.name !== (snapshot.name || '');
             const aboutChanged = draft.about !== (snapshot.about || '');
-            if (nameChanged || aboutChanged) {
+            if (nameChanged || aboutChanged || removedBanner) {
                 invoke('update_profile', {
                     name: nameChanged ? draft.name : '',
                     avatar: '',
-                    banner: '',
+                    // Blank, not empty: empty leaves the banner as it is.
+                    banner: removedBanner ? ' ' : '',
                     about: aboutChanged ? (draft.about.length > 0 ? draft.about : ' ') : '',
                 }).then(ok => {
                     if (!ok) popupConfirm('Profile Update Failed!', 'Failed to broadcast profile update to the network.', true, '', 'vector_warning.svg');
