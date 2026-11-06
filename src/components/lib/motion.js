@@ -43,7 +43,8 @@ export function startMotion(opts) {
 export function setMotionActive(on) {
     if (active === !!on) return;
     active = !!on;
-    if (!active) hovered = null;
+    // A pointer already resting on a row sends no pointerover when the window comes back.
+    hovered = active && !NO_HOVER.matches ? hostOf([...document.querySelectorAll(':hover')].pop()) : null;
     for (const el of tracked) apply(el);
     loops(active);
 }
@@ -250,8 +251,11 @@ function each(node, fn) {
 
 function onPointer(e) {
     if (e.pointerType === 'touch') return;
-    const t = e.target;
-    hover(t.closest?.(HOST) ?? (t.tagName === 'IMG' ? t : null));
+    hover(hostOf(e.target));
+}
+
+function hostOf(t) {
+    return t?.closest?.(HOST) ?? (t?.tagName === 'IMG' ? t : null);
 }
 
 function hover(host) {

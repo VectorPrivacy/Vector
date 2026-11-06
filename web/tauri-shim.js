@@ -453,11 +453,18 @@
         outerPosition: async () => new PhysicalPosition(screenX * dpr(), screenY * dpr()),
         theme: async () => 'dark',
         onFocusChanged: async (cb) => {
-            const focus = () => cb({ payload: true });
-            const blur = () => cb({ payload: false });
+            // Focus moving into an iframe (a player, an embed) blurs the page while it stays in front.
+            // Nothing reports focus leaving that iframe, so ask until it has.
+            let poll = 0;
+            const focus = () => { clearInterval(poll); cb({ payload: true }); };
+            const blur = () => setTimeout(() => {
+                clearInterval(poll);
+                if (!document.hasFocus()) return cb({ payload: false });
+                poll = setInterval(() => { if (!document.hasFocus()) { clearInterval(poll); cb({ payload: false }); } }, 1000);
+            });
             addEventListener('focus', focus);
             addEventListener('blur', blur);
-            return () => { removeEventListener('focus', focus); removeEventListener('blur', blur); };
+            return () => { clearInterval(poll); removeEventListener('focus', focus); removeEventListener('blur', blur); };
         },
         onResized: async (cb) => {
             const h = () => cb({ payload: new PhysicalSize(innerWidth * dpr(), innerHeight * dpr()) });

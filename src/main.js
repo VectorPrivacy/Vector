@@ -54,6 +54,11 @@ function srcRef(src) {
     return asset ? decodeURIComponent(asset[1]) : null;
 }
 
+/** Phones and tablets, native or in a browser, have no window focus: visibility alone says the app is in front. */
+function focusless() {
+    return platformFeatures.os === 'android' || platformFeatures.os === 'ios' || matchMedia('(hover: none) and (pointer: coarse)').matches;
+}
+
 /** Everything that animates follows the window: still while it is inactive. */
 function syncMotion() {
     const on = isWindowActive();
@@ -2051,7 +2056,9 @@ window.addEventListener("DOMContentLoaded", async () => {
     // Fetch platform features to determine OS-specific behavior
     await fetchPlatformFeatures();
     VectorSvelte.startMotion({ stillOf: imageStill });
-    VectorSvelte.setMotionActive(document.hasFocus() && !document.hidden);
+    windowFocused = focusless() || document.hasFocus();
+    documentVisible = !document.hidden;
+    VectorSvelte.setMotionActive(isWindowActive());
 
     // Downgrade gate, before any other boot step: this build must not touch a
     // database a newer Vector wrote. Terminal by design — nothing below runs.
@@ -2683,42 +2690,38 @@ window.addEventListener("DOMContentLoaded", async () => {
                 }
             }
         });
+    }
 
-        // Single catch-up entry point for "the user is now actually looking":
-        // window regained focus OR tab became visible. Marks the open chat as
-        // read, but only when pinned — scrolled-up users haven't seen the new
-        // messages just because they refocused. The divider stays until the chat closes.
-        const onWindowResumed = () => {
-            if (!strOpenChat || !chatPinnedToBottom) return;
-            const currentChat = getChat(strOpenChat);
-            if (!currentChat?.messages?.length) return;
-            const latestNonMine = findLatestContactMessage(currentChat.messages);
-            if (latestNonMine) markAsRead(currentChat, latestNonMine);
-        };
+    // Single catch-up entry point for "the user is now actually looking":
+    // window regained focus OR the page became visible. Marks the open chat as
+    // read, but only when pinned — scrolled-up users haven't seen the new
+    // messages just because they refocused. The divider stays until the chat closes.
+    const onWindowResumed = () => {
+        if (!strOpenChat || !chatPinnedToBottom) return;
+        const currentChat = getChat(strOpenChat);
+        if (!currentChat?.messages?.length) return;
+        const latestNonMine = findLatestContactMessage(currentChat.messages);
+        if (latestNonMine) markAsRead(currentChat, latestNonMine);
+    };
+    const setActivity = (change) => {
+        const wasActive = isWindowActive();
+        change();
+        // A share that foregrounded the app (onNewIntent stored it) may have been emitted before
+        // the WebView resumed; poll for it on every resume so it isn't stranded until a later tap.
+        if (!wasActive && isWindowActive()) { onWindowResumed(); if (!fInit) consumePendingShare(); }
+        syncMotion();
+        syncBackendActiveChat();
+    };
 
-        await getCurrentWindow().onFocusChanged((event) => {
-            const wasActive = isWindowActive();
-            windowFocused = !!event.payload;
-            if (!wasActive && isWindowActive()) { onWindowResumed(); if (!fInit) consumePendingShare(); }
-            syncMotion();
-            syncBackendActiveChat();
-        });
+    document.addEventListener('visibilitychange', () => setActivity(() => { documentVisible = !document.hidden; }));
+    if (!focusless()) {
+        await getCurrentWindow().onFocusChanged((event) => setActivity(() => { windowFocused = !!event.payload; }));
         // A window focused before the listener existed never reports it, and the page's own
         // hasFocus() is often false at launch: ask the window.
         try {
-            windowFocused = await getCurrentWindow().isFocused();
-            syncMotion();
+            const focused = await getCurrentWindow().isFocused();
+            setActivity(() => { windowFocused = focused; });
         } catch { /* stays as the page guessed until the next focus change */ }
-
-        document.addEventListener('visibilitychange', () => {
-            const wasActive = isWindowActive();
-            documentVisible = !document.hidden;
-            // A share that foregrounded the app (onNewIntent stored it) may have been emitted before
-            // the WebView resumed; poll for it on every resume so it isn't stranded until a later tap.
-            if (!wasActive && isWindowActive()) { onWindowResumed(); if (!fInit) consumePendingShare(); }
-            syncMotion();
-            syncBackendActiveChat();
-        });
     }
 
 
