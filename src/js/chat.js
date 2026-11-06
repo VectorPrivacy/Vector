@@ -1235,6 +1235,11 @@ async function openChat(contact, { reread = true, fade = true } = {}) {
         proceduralScrollState.messagesPerBatch
     );
     if (openSeq !== _openChatSeq) return;
+    // Arrivals already shown that the store doesn't hold yet (a sync's write still pending) stay.
+    const newestStored = initialMessages.at(-1)?.at ?? 0;
+    for (const m of chat?.messages || []) {
+        if (m.at >= newestStored && !m.system_event) eventCache.addEvent(contact, m);
+    }
 
     // Merge any historical PIVX payments — helper in pivx.js
     await mergePivxPaymentsIntoChat(contact, initialMessages);
