@@ -233,8 +233,21 @@ async function confirmSecretSend(text, chatId) {
     return choice === 'send';
 }
 
+/** Set from a send's start until its text leaves the composer: the checks before that await the
+ *  backend, and a second Enter or tap meanwhile would send the same text again. */
+let composerSendPending = null;
+
 async function sendMessage(messageText) {
-    if (!messageText || !messageText.trim()) return;
+    if (!messageText || !messageText.trim() || composerSendPending) return;
+    const send = composerSendPending = {};
+    try {
+        await sendComposed(messageText);
+    } finally {
+        if (composerSendPending === send) composerSendPending = null;
+    }
+}
+
+async function sendComposed(messageText) {
     releaseUnreadHold();
 
     // Clean tracking parameters from any URLs in the message for privacy (if enabled)
@@ -287,6 +300,7 @@ async function sendMessage(messageText) {
 
         // Clear input and show editing state
         domChatMessageInput.value = '';
+        composerSendPending = null;
         resetSendMicButtons(); // Immediately reset to mic button (avoids animation race)
         resetChatInputSize();
         VectorSvelte.setComposerStatus('Saving edit...');
@@ -365,6 +379,7 @@ async function sendMessage(messageText) {
 
     // Clear input and show sending state
     domChatMessageInput.value = '';
+    composerSendPending = null;
     resetSendMicButtons(); // Immediately reset to mic button (avoids animation race)
     resetChatInputSize();
     VectorSvelte.setComposerStatus('Sending...');
