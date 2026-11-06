@@ -766,8 +766,7 @@ body.cc.cc-layer #chats {
   z-index: 110;
   /* The list's own ground; the drawer's lighter one is the tint below, faded as it widens. */
   background-color: rgb(5, 5, 5);
-  /* Away it parks past its own shadow (lib/drawer.js SHADOW), still drawn: a hidden layer
-     loses its pixels, and the next pull would wait on painting the whole list again. */
+  /* Fully out, it sits past its own shadow too (lib/drawer.js SHADOW). */
   transform: translateX(calc((var(--cc-drawer-p, 0) - 1) * (100% + 32px)));
   touch-action: pan-y;
   box-shadow: 4px 0 24px rgba(0, 0, 0, 0.5);
@@ -807,8 +806,11 @@ body.cc.cc-layer.cc-flat {
   --cc-peek: 0px;
 }
 
-/* Away, it takes no press. */
+/* Away, it waits in place but unseen, so its tiles stay painted for the next pull or slide
+   (one off screen loses them, and slides in half drawn), and takes no press. */
 body.cc.cc-layer:not(.cc-drawer-on) #chats {
+  transform: none;
+  opacity: 0;
   pointer-events: none;
 }
 
