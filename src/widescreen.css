@@ -2081,6 +2081,19 @@ body:is(.ws, .cc) .ws-rail-folder-inner {
   /* Visible overflow brings back a grid item's min-content floor, which let a long
      name widen the folder past the rail. */
   min-width: 0;
+  /* No transform or opacity of its own: iOS clips a composited box to its bounds on
+     both axes, which hid the unread bars past its edge until the fold finished. Its
+     communities fade in themselves instead. */
+  opacity: 1;
+  transform: none;
+  transition: none;
+}
+body:is(.ws, .cc) .ws-rail-folder-inner > * {
+  opacity: 0;
+  transition: opacity 0.2s ease;
+}
+body:is(.ws, .cc) .ws-rail-folder.is-open .ws-rail-folder-inner > * {
+  opacity: 1;
 }
 body:is(.ws.ws-rail-collapsed, .cc) .ws-rail-folder-inner {
   display: flex;
