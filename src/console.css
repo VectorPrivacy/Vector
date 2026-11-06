@@ -747,8 +747,8 @@ body.cc.cc-layer #chats {
   right: calc(var(--cc-peek) * (1 - var(--cc-home, 0)));
   bottom: 0;
   z-index: 110;
-  /* Toward the list's own ground as it widens into it. */
-  background-color: color-mix(in srgb, #0b0b0b calc((1 - var(--cc-home, 0)) * 100%), rgb(5, 5, 5));
+  /* The list's own ground; the drawer's lighter one is the tint below, faded as it widens. */
+  background-color: rgb(5, 5, 5);
   transform: translateX(calc((var(--cc-drawer-p, 0) - 1) * 100%));
   touch-action: pan-y;
   box-shadow: 4px 0 24px rgba(0, 0, 0, 0.5);
@@ -756,9 +756,20 @@ body.cc.cc-layer #chats {
   clip-path: inset(0 -32px 0 0);
 }
 
-/* The tab bar rises under it as it widens into the list, and sinks as it narrows back. */
-body.cc.cc-layer.cc-homing #chats {
-  bottom: calc(max(var(--cc-nav-h), var(--kb, 0px)) * var(--cc-home, 0));
+/* Every frame of a slide moves layers only: the tint fades on its own layer rather than
+   repainting the list, and the tab bar rises over the list's foot rather than resizing it. */
+.cc-drawer-tint {
+  display: none;
+}
+body.cc.cc-layer .cc-drawer-tint {
+  display: block;
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  background-color: #0b0b0b;
+  opacity: calc(1 - var(--cc-home, 0));
+  will-change: opacity;
+  pointer-events: none;
 }
 
 body.cc.cc-homing .navbar {
@@ -798,6 +809,7 @@ body.cc.cc-layer.cc-drawer-on .cc-drawer-shade {
   z-index: 109;
   background-color: rgba(0, 0, 0, 0.55);
   opacity: var(--cc-drawer-p);
+  will-change: opacity;
   touch-action: none;
 }
 
