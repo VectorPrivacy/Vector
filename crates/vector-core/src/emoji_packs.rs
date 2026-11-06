@@ -692,23 +692,6 @@ async fn decrypt_emoji_list_plaintext(
     }
 }
 
-/// Like [`decrypt_subscribed_addresses`], but also returns the theme-slot
-/// anchor carried in the encrypted list (`None` = old-format list, no marker).
-async fn decrypt_subscribed_addresses_with_anchor(
-    client: &Client,
-    my_pk: &PublicKey,
-    event: &Event,
-) -> (Vec<PackAddress>, Option<String>) {
-    match decrypt_emoji_list_plaintext(client, my_pk, event).await {
-        Some(plaintext) => {
-            let (raw, anchor) = parse_inner_tag_list_with_anchor(&plaintext);
-            let addrs = raw.iter().filter_map(|s| parse_pack_address(s).ok()).collect();
-            (addrs, anchor)
-        }
-        None => (Vec::new(), None),
-    }
-}
-
 // ============================================================================
 // DB persistence
 // ============================================================================
@@ -1665,9 +1648,19 @@ pub async fn fetch_subscribed_packs(
                 local_addrs()
             }
             Some(ev) => {
-                let (a, anchor) = decrypt_subscribed_addresses_with_anchor(client, &my_pubkey, &ev).await;
-                fetched_anchor = anchor;
-                a
+                let public: Vec<Vec<String>> = ev.tags.iter().map(|t| t.as_slice().to_vec()).collect();
+                let private = match decrypt_emoji_list_plaintext(client, &my_pubkey, &ev).await {
+                    Some(plaintext) => {
+                        let (raw, anchor) = parse_inner_tag_list_with_anchor(&plaintext);
+                        fetched_anchor = anchor;
+                        Some(raw)
+                    }
+                    None => None,
+                };
+                let local = load_subscriptions().unwrap_or_default();
+                let merged = merge_emoji_list(private, &public_addrs(&public), &local, &public_addrs(&load_public_tags()));
+                save_public_tags(&public);
+                merged.iter().filter_map(|s| parse_pack_address(s).ok()).collect()
             }
             None => {
                 crate::log_debug!(
@@ -1866,6 +1859,55 @@ fn save_theme_slot_anchor(raw_addr: &str) -> Result<(), String> {
     crate::db::settings::set_sql_setting(THEME_SLOT_ANCHOR_KEY.to_string(), raw_addr.to_string())
 }
 
+/// The public tags of the last kind-10030 we trusted, as JSON tuples. Other clients list packs
+/// (and single emoji) there; ours carries them forward so a publish never erases them.
+const EMOJI_LIST_PUBLIC_KEY: &str = "emoji_list_public_tags";
+
+fn load_public_tags() -> Vec<Vec<String>> {
+    crate::db::settings::get_sql_setting(EMOJI_LIST_PUBLIC_KEY.to_string())
+        .ok()
+        .flatten()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+fn save_public_tags(tags: &[Vec<String>]) {
+    if let Ok(json) = serde_json::to_string(tags) {
+        let _ = crate::db::settings::set_sql_setting(EMOJI_LIST_PUBLIC_KEY.to_string(), json);
+    }
+}
+
+/// The pack addresses among a list's public tags, normalised as subscriptions are stored.
+fn public_addrs(tags: &[Vec<String>]) -> Vec<String> {
+    tags.iter()
+        .filter(|t| t.len() >= 2 && t[0] == "a")
+        .filter_map(|t| parse_pack_address(&t[1]).ok())
+        .map(|a| a.to_addr_string())
+        .collect()
+}
+
+/// The subscription set a kind-10030 stands for: its private items in their order, then the
+/// public ones other clients listed. A list with no private part (another client wrote it)
+/// keeps our earlier private picks, never the public ones it has since dropped.
+fn merge_emoji_list(private: Option<Vec<String>>, public_now: &[String], local: &[String], public_before: &[String]) -> Vec<String> {
+    let mut list = private.unwrap_or_else(|| local.iter().filter(|a| !public_before.contains(a)).cloned().collect());
+    for addr in public_now {
+        if !list.contains(addr) {
+            list.push(addr.clone());
+        }
+    }
+    list
+}
+
+/// The public tags to publish: every one carried forward, but a pack only while still subscribed.
+fn carried_public_tags(public: &[Vec<String>], subscribed: &[String]) -> Vec<Vec<String>> {
+    public.iter()
+        .filter(|t| t.first().map(String::as_str) != Some("a")
+            || t.get(1).and_then(|a| parse_pack_address(a).ok()).is_some_and(|a| subscribed.contains(&a.to_addr_string())))
+        .cloned()
+        .collect()
+}
+
 /// Build the kind-10030 inner tuple list from the subscription order, splicing
 /// in exactly one `["theme_slot"]` marker at the anchored position. Empty
 /// anchor (or an anchor naming a pack no longer subscribed) puts the marker at
@@ -1897,9 +1939,9 @@ fn build_inner_tags_with_marker(addrs: &[String], anchor: &str) -> Vec<Vec<Strin
 /// Encrypted-items mode: the entire subscription set lives inside a
 /// NIP-44-self-encrypted JSON array of `["a", "30030:pk:d"]` tuples
 /// stored in `content`, plus one `["theme_slot"]` marker recording where the
-/// theme pack renders. The event's public `tags` field is left empty
-/// — Vector treats which packs a user follows as private information,
-/// matching the NIP-51 "encrypted items" pattern that mute lists use.
+/// theme pack renders. Packs followed in Vector stay private (the NIP-51
+/// "encrypted items" pattern mute lists use); the public tags other clients
+/// listed are carried forward, minus any pack unsubscribed here.
 /// Replaceable per spec, so peers (the same npub on another device)
 /// always read the freshest set on next sync.
 pub async fn publish_emoji_list(client: &Client) -> Result<(), String> {
@@ -1917,9 +1959,12 @@ pub async fn publish_emoji_list(client: &Client) -> Result<(), String> {
     let content = signer.nip44_encrypt_async(&my_pk, &plaintext).await
         .map_err(|e| format!("nip44 encrypt emoji list: {}", e))?;
 
-    let builder = EventBuilder::new(Kind::Custom(KIND_EMOJI_LIST), content);
+    let public = carried_public_tags(&load_public_tags(), &addrs);
+    let builder = EventBuilder::new(Kind::Custom(KIND_EMOJI_LIST), content)
+        .tags(public.iter().filter_map(|t| Tag::parse(t).ok()));
     crate::sign_and_send(client, builder).await
         .map_err(|e| format!("Failed to publish emoji list (kind 10030): {}", e))?;
+    save_public_tags(&public);
 
     crate::log_info!("[EmojiPacks] Published encrypted kind 10030 with {} pack subscription(s)", addrs.len());
     Ok(())
@@ -2742,6 +2787,37 @@ mod tests {
         assert_eq!(parsed.kind, 30030);
         assert_eq!(parsed.pubkey, k.public_key());
         assert_eq!(parsed.identifier, "myId");
+    }
+
+    #[test]
+    fn an_emoji_list_reads_its_public_packs_and_keeps_ours_when_another_client_wrote_it() {
+        let hex = keys().public_key().to_hex();
+        let addr = |d: &str| format!("30030:{hex}:{d}");
+        let (ours, theirs, gone) = (addr("ours"), addr("theirs"), addr("gone"));
+
+        let merged = merge_emoji_list(Some(vec![ours.clone()]), &[theirs.clone(), ours.clone()], &[], &[]);
+        assert_eq!(merged, [ours.clone(), theirs.clone()], "private order first, public appended once");
+
+        // Another client rewrote the list without our encrypted part, and dropped `gone`.
+        let local = [ours.clone(), gone.clone()];
+        let merged = merge_emoji_list(None, &[theirs.clone()], &local, &[gone.clone()]);
+        assert_eq!(merged, [ours.clone(), theirs.clone()], "our private pick survives; a dropped public pack goes");
+    }
+
+    #[test]
+    fn a_published_emoji_list_carries_public_tags_but_not_unsubscribed_packs() {
+        let hex = keys().public_key().to_hex();
+        let kept = format!("30030:{hex}:kept");
+        let dropped = format!("30030:{hex}:dropped");
+        let public = vec![
+            vec!["a".to_string(), kept.clone()],
+            vec!["a".to_string(), dropped],
+            vec!["emoji".to_string(), "wave".to_string(), "https://x/w.png".to_string()],
+        ];
+        let ours = format!("30030:{hex}:ours");
+        let carried = carried_public_tags(&public, &[kept.clone(), ours]);
+        assert_eq!(carried, [public[0].clone(), public[2].clone()], "a pack followed in Vector never goes public");
+        assert!(carried_public_tags(&[], &[kept]).is_empty(), "nothing public to carry, nothing public written");
     }
 
     #[test]
