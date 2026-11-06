@@ -787,20 +787,25 @@ function syncSendMicToInput() {
     VectorSvelte.flushSync();
 }
 
-/** Per-chat composer drafts, runtime-only (chat id → { text, replyRef }). */
+/** Per-chat composer drafts, runtime-only (chat id → { text, replyRef, edit }). */
 const chatDrafts = new Map();
 
 /**
- * Stash the open chat's composer text and reply target as its draft and clear
- * both, so the next chat starts clean and restores its own. Edit text is not a
- * draft — callers cancel an in-progress edit first.
+ * Stash the open chat's composer text, reply target and any edit in progress as its
+ * draft and clear them, so the next chat starts clean and restores its own.
  */
 function stashComposerDraft() {
     if (!strOpenChat) return;
     const text = domChatMessageInput.value;
     const replyRef = strCurrentReplyReference;
-    if (text || replyRef) chatDrafts.set(strOpenChat, { text, replyRef });
+    const edit = strCurrentEditMessageId ? { id: strCurrentEditMessageId, original: strCurrentEditOriginalContent } : null;
+    if (text || replyRef || edit) chatDrafts.set(strOpenChat, { text, replyRef, edit });
     else chatDrafts.delete(strOpenChat);
+    if (edit) {
+        strCurrentEditMessageId = '';
+        strCurrentEditOriginalContent = '';
+        VectorSvelte.cancelEdit();
+    }
     // Drop the bar without the focus a user cancel implies.
     if (replyRef) {
         strCurrentReplyReference = '';
@@ -836,8 +841,9 @@ function cancelReply() {
  * Start editing a message
  * @param {string} messageId - The ID of the message to edit
  * @param {string} content - The current content of the message
+ * @param {{ focus?: boolean }} [opts] - focus: false when resuming a drafted edit on chat open
  */
-function startEditMessage(messageId, content) {
+function startEditMessage(messageId, content, { focus = true } = {}) {
     // Cancel any existing reply first
     if (strCurrentReplyReference) {
         cancelReply();
@@ -863,8 +869,10 @@ function startEditMessage(messageId, content) {
     VectorSvelte.flushSync();
 
     // Focus the input and move cursor to end
-    domChatMessageInput.focus();
-    domChatMessageInput.setSelectionRange(content.length, content.length);
+    if (focus) {
+        domChatMessageInput.focus();
+        domChatMessageInput.setSelectionRange(content.length, content.length);
+    }
 
     // Auto-resize the input
     autoResizeChatInput();
@@ -1062,10 +1070,7 @@ async function openChat(contact, { reread = true, fade = true } = {}) {
     dismissNostrEmbed();
     // A direct chat-to-chat jump never passes through closeChat: stash the
     // outgoing chat's draft here so it doesn't bleed into the new one.
-    if (strOpenChat && strOpenChat !== contact) {
-        if (strCurrentEditMessageId) cancelEdit();
-        stashComposerDraft();
-    }
+    if (strOpenChat && strOpenChat !== contact) stashComposerDraft();
     pushBack('chat', closeChat);
     // Abandon a wallpaper preview staged in a different chat so its edit
     // overlay doesn't leak onto this header.
@@ -1390,6 +1395,8 @@ async function openChat(contact, { reread = true, fade = true } = {}) {
         // holds live text — a same-chat re-open must not clobber typing.
         if (domChatMessageInput.value === '') {
             const draft = chatDrafts.get(contact);
+            // An edit in progress resumes on its message, with what was typed so far.
+            if (draft?.edit) startEditMessage(draft.edit.id, draft.edit.original, { focus: false });
             domChatMessageInput.value = draft?.text || '';
             autoResizeChatInput();
             // A drafted reply returns with its text, while its target still exists.
@@ -1550,7 +1557,6 @@ async function closeChat() {
     VectorSvelte.showPane('chat', false);
     // Stash the unsent text as this chat's draft and clear the composer, so
     // the next open restores its own draft with a coherent mic/send state.
-    if (strCurrentEditMessageId) cancelEdit();
     stashComposerDraft();
     strOpenChat = "";
     _openChatSeq++;
