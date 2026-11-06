@@ -404,7 +404,9 @@ jobs:
     steps:
       - uses: actions/checkout@v5
         with:
-          sparse-checkout: scripts/updater-manifest.mjs
+          sparse-checkout: |
+            scripts/updater-manifest.mjs
+            fastlane/metadata/android/en-US/changelogs
           sparse-checkout-cone-mode: false
 
       - name: Download the release's assets

@@ -6,8 +6,9 @@
 //
 // URLs name the tag: `releases/latest/download` resolves to the newest stable release, so a
 // preview's own files would 404 there.
-import { readdirSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const [dir, tag, repo] = process.argv.slice(2);
 if (!dir || !tag || !repo) {
@@ -64,4 +65,22 @@ if (problems.length) {
 
 const sorted = Object.fromEntries(Object.keys(platforms).sort().map((k) => [k, platforms[k]]));
 const version = tag.replace(/^(rehearsal-)?v/, '');
-process.stdout.write(JSON.stringify({ version, notes: '', pub_date: new Date().toISOString(), platforms: sorted }, null, 2) + '\n');
+
+// The update's notes are the release's store changelog (F-Droid's what's-new), named by the Android
+// versionCode the build derives (AppVersion.kt): (major·10000 + minor·100 + patch)·100 + the preview
+// number, 99 for stable. One text for the stores and the in-app update; none written, no notes.
+export function versionCode(v) {
+    const [core, pre = ''] = v.split('+')[0].split('-');
+    const [major = 0, minor = 0, patch = 0] = core.split('.').map((n) => parseInt(n, 10) || 0);
+    const slot = pre === '' ? 99 : parseInt(pre, 10);
+    return slot >= 1 && slot <= 99 ? (major * 10000 + minor * 100 + patch) * 100 + slot : null;
+}
+
+function notes(v) {
+    const code = versionCode(v);
+    if (code == null) return '';
+    const file = join(dirname(fileURLToPath(import.meta.url)), '..', 'fastlane/metadata/android/en-US/changelogs', `${code}.txt`);
+    return existsSync(file) ? readFileSync(file, 'utf8').trim() : '';
+}
+
+process.stdout.write(JSON.stringify({ version, notes: notes(version), pub_date: new Date().toISOString(), platforms: sorted }, null, 2) + '\n');

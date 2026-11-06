@@ -1,11 +1,12 @@
 name: distribute
 
-# Store publishing, fired when a release is published (the draft is un-drafted
-# with its changelog written). Stable releases only: previews never go to
-# stores, and the pointer release carries no APK.
+# Store publishing, fired when a stable release goes out: published directly, or a
+# pre-release (a stable build held back for testing) promoted to a full release.
+# Stable releases only: previews never go to stores, and the pointer release
+# carries no APK.
 on:
   release:
-    types: [published]
+    types: [released]
 
 jobs:
   zapstore:
