@@ -187,6 +187,18 @@ error: could not find system library 'webkit2gtk-4.1'
 sudo apt install libwebkit2gtk-4.1-dev
 ```
 
+### Full build: Vulkan or `spirv` headers missing
+
+The full build (`npm run build`) compiles Whisper's GPU shaders and needs the Vulkan toolchain:
+`glslc`, the Vulkan headers and loader, and the SPIR-V headers. Release builds install LunarG's
+SDK, which carries all of them:
+
+```bash
+wget -qO - https://packages.lunarg.com/lunarg-signing-key-pub.asc | sudo tee /etc/apt/trusted.gpg.d/lunarg.asc > /dev/null
+sudo wget -qO /etc/apt/sources.list.d/lunarg-vulkan-jammy.list https://packages.lunarg.com/vulkan/lunarg-vulkan-jammy.list
+sudo apt update && sudo apt install -y vulkan-sdk
+```
+
 ### OpenSSL errors
 
 ```

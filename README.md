@@ -161,6 +161,7 @@ Prefer to build from source? See [Compiling](#compiling) below.
 | Platform | Guide |
 |----------|-------|
 | Ubuntu / Debian | [docs/build/ubuntu.md](docs/build/ubuntu.md) |
+| Arch Linux | [docs/build/arch.md](docs/build/arch.md) |
 | macOS → Android | [docs/build/macos-android.md](docs/build/macos-android.md) |
 | Your OS missing? | [Contribute a guide!](docs/build/) |
 
