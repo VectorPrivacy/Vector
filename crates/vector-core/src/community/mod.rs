@@ -164,6 +164,63 @@ pub const MAX_COMMUNITY_RELAYS: usize = 5;
 
 /// Dedupe (order-preserving) + truncate a relay set to [`MAX_COMMUNITY_RELAYS`]. Dedup first so the
 /// cap means "up to 5 DISTINCT relays" — a bundle padding one relay 5× can't waste the budget.
+/// Whether an older page asked from `before_secs` reached the channel's start: the relays
+/// answered, brought nothing this device lacked, left no cursor to go on from, and nothing held
+/// lies below the cursor. Relays serve the cursor's own second again, so a page of only held
+/// messages can still be the end.
+pub fn reached_history_start(channel_id: &str, before_secs: Option<u64>, count: &crate::BackfillCount) -> bool {
+    reached_start(count, before_secs, |b| crate::db::events::newest_message_before(channel_id, b).is_some())
+}
+
+/// Whether this account holds the key a channel's history began under. A member who joined
+/// after a rotation holds only the epochs since: what came before sits on the relays sealed
+/// under keys it never received, so the oldest message it can read is not the channel's first.
+pub fn holds_history_from_start(channel_id: &str) -> bool {
+    let Ok(Some(cid)) = crate::db::community::community_id_for_channel(channel_id) else { return true };
+    let id = CommunityId(crate::simd::hex::hex_to_bytes_32(&cid));
+    let Ok(Some(community)) = crate::db::community::load_community_v2(&id) else { return true };
+    let ch = ChannelId(crate::simd::hex::hex_to_bytes_32(channel_id));
+    let Some(channel) = community.channel(&ch) else { return true };
+    let scope = if channel.private { channel_id } else { SERVER_ROOT_SCOPE_HEX };
+    let current = (channel.private && channel.key.is_some()).then_some(channel.epoch.0);
+    let oldest = crate::db::community::held_epoch_keys(&cid, scope).unwrap_or_default().into_iter().map(|(e, _)| e.0).chain(current).min();
+    oldest.is_none_or(|e| e == 0)
+}
+
+fn reached_start(count: &crate::BackfillCount, before_secs: Option<u64>, held_below: impl Fn(u64) -> bool) -> bool {
+    if count.unreachable || count.next_before.is_some() || count.new_messages > 0 {
+        return false;
+    }
+    count.fetched == 0 || before_secs.is_some_and(|b| !held_below(b))
+}
+
+#[cfg(test)]
+mod start_tests {
+    use super::reached_start;
+    use crate::BackfillCount;
+
+    #[test]
+    fn a_page_of_only_the_cursors_own_second_is_the_start() {
+        let held_boundary = BackfillCount { fetched: 3, new_messages: 0, next_before: None, unreachable: false };
+        assert!(reached_start(&held_boundary, Some(1000), |_| false), "nothing older held or served");
+        assert!(!reached_start(&held_boundary, Some(1000), |_| true), "held history below: a page that met it, not the start");
+    }
+
+    #[test]
+    fn silence_is_never_the_start() {
+        let silent = BackfillCount { unreachable: true, ..Default::default() };
+        assert!(!reached_start(&silent, Some(1000), |_| false));
+        let answered_empty = BackfillCount::default();
+        assert!(reached_start(&answered_empty, Some(1000), |_| false));
+    }
+
+    #[test]
+    fn more_to_walk_or_new_rows_is_not_the_start() {
+        assert!(!reached_start(&BackfillCount { fetched: 50, new_messages: 0, next_before: Some(900), unreachable: false }, Some(1000), |_| false));
+        assert!(!reached_start(&BackfillCount { fetched: 50, new_messages: 4, next_before: None, unreachable: false }, Some(1000), |_| false));
+    }
+}
+
 pub fn cap_relays(relays: Vec<String>) -> Vec<String> {
     let mut seen = std::collections::HashSet::new();
     let mut out = Vec::with_capacity(relays.len().min(MAX_COMMUNITY_RELAYS));

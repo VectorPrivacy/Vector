@@ -125,6 +125,13 @@ pub async fn get_message_position(
     vector_core::db::events::get_message_position(chat_int_id, &message_id)
 }
 
+/// When the message `newer` places from the newest was sent (ms), for the scrollbar's date.
+#[tauri::command]
+pub async fn get_message_time_at(chat_id: String, newer: usize) -> Result<Option<u64>, String> {
+    let chat_int_id = vector_core::db::id_cache::get_chat_id_by_identifier(&chat_id)?;
+    vector_core::db::events::get_message_time_at(chat_int_id, newer)
+}
+
 /// Get message views (composed from events table) for a chat
 /// This is the new event-based approach that computes reactions from flat events
 #[tauri::command]

@@ -60,12 +60,17 @@ export function clearDivider() {
     divider.after = false;
 }
 
-// What the list shows beside the rows: the "start of channel" marker of an empty
-// community and the end-of-timeline notices (blocked peer, dissolved community). The
-// openers write these; the list renders them after the rows.
-const notices = $state({ empty: '', blocked: false, dissolved: '' });
+// What the list shows beside the rows: the end-of-timeline notices (blocked peer, dissolved
+// community). The openers write these; the list renders them after the rows.
+const notices = $state({ blocked: false, dissolved: '' });
 export function noticeState() { return notices; }
 export function setNotice(key, value) { notices[key] = value; }
+
+// The top of the history, above the oldest row this device holds: older rows on their way,
+// the chat's true beginning, or a fetch that failed.
+const edge = $state({ state: '', alone: false, chatId: '', communityId: '', title: '', note: '' });
+export function historyEdge() { return edge; }
+export function setHistoryEdge(patch) { Object.assign(edge, patch); }
 
 // The live arrival that plays the slide-in: one id, cleared when its animation ends.
 const arrival = $state({ id: null });

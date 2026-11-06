@@ -131,7 +131,7 @@ export { openReactionTip, closeReactionTip, openReactionDetails, closeReactionDe
 // The chat window as a derivation (streaks, day breaks, merged system events).
 export { deriveWindow } from './lib/chatwindow.js';
 // The chat view's window state: the engine sets it, the list island derives from it.
-export { setWindow, clearWindow, touchWindow, touchMessage, setDivider, clearDivider, setNotice, setArrival } from './lib/chatview.svelte.js';
+export { setWindow, clearWindow, touchWindow, touchMessage, setDivider, clearDivider, setNotice, setHistoryEdge, setArrival } from './lib/chatview.svelte.js';
 export { setSelfDestructSecs } from './lib/composer.svelte.js';
 export { toolbarHost, toolbarEls, setToolbarHandlers, setToolbarHost, setToolbarSwipe } from './lib/toolbar.svelte.js';
 export { setChatScrollbar, setChatScrollbarHandlers } from './lib/scrollbar.svelte.js';
@@ -183,7 +183,7 @@ export {
     composerMode,
     setAttachmentOpen,
     setEmojiIcon,
-    setScrollBadge, setScrollReturnVisible,
+    setScrollBadge, setScrollReturnVisible, dropScrollReturn,
     setComposerHandlers,
     composerEls,
 } from './lib/composer.svelte.js';

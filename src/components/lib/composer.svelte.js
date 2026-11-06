@@ -131,11 +131,13 @@ export function closePopup(kind) {
 // The box's chrome flags: the add-file button's open state (mirrors the attachment
 // panel), the emoji button's face (a wink while the picker is up), and the
 // scroll-return badge.
-const chrome = $state({ scrollReturn: false, attachmentOpen: false, emojiIcon: 'smile', scrollBadge: '', selfDestructSecs: 0 });
+const chrome = $state({ scrollReturn: false, scrollReturnSnap: false, attachmentOpen: false, emojiIcon: 'smile', scrollBadge: '', selfDestructSecs: 0 });
 export function composerChrome() { return chrome; }
 export function setAttachmentOpen(on) { chrome.attachmentOpen = !!on; }
 export function setEmojiIcon(face) { chrome.emojiIcon = face === 'wink' ? 'wink' : 'smile'; }
-export function setScrollReturnVisible(on) { chrome.scrollReturn = !!on; }
+export function setScrollReturnVisible(on) { if (on) chrome.scrollReturnSnap = false; chrome.scrollReturn = !!on; }
+/** Gone at once, no fade: the chat it belonged to has left. */
+export function dropScrollReturn() { chrome.scrollReturnSnap = true; chrome.scrollReturn = false; }
 export function setScrollBadge(text) { chrome.scrollBadge = text || ''; }
 /** The open chat's Self-Destruct Timer, shown as the clock badge on Send. */
 export function setSelfDestructSecs(secs) { chrome.selfDestructSecs = secs || 0; }

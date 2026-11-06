@@ -324,6 +324,8 @@ async function setupRustListeners() {
 
     _on('sync_finished', async (_) => {
         fSyncing = false;
+        refreshHistoryEdge();
+        nudgeHistoryEdge();
         // Mark sync as complete - this allows real-time messages to be cached
         fSyncComplete = true;
         
@@ -346,7 +348,7 @@ async function setupRustListeners() {
         // meant it never showed a bar for the fastest, most common sync. Only the
         // layout reflow below needs the gate.
         const { mode, current, total } = evt.payload || {};
-        fSyncing = true;
+        if (!fSyncing) { fSyncing = true; refreshHistoryEdge(); }
         // `active` is the centre reveal and carries BOTH modes — a determinate sync
         // (the common one, since the quick phase runs inside boot) used to jump
         // straight to `progress` and grow out of the left edge instead.
@@ -834,9 +836,10 @@ async function setupRustListeners() {
             if (frozen) {
                 // Data-only: chat.messages/cache already holds it. No DOM, no badge.
                 proceduralScrollState.totalMessageCount++;
-            } else if (newMessage.mine && !tailAppend) {
+            } else if (newMessage.mine && !tailAppend && newIdx === (_windowMessages()?.length ?? 0) - 1) {
                 // Own send while scrolled up / seeked away: re-seat the window at the
                 // live tail so the sent row is visible, then pin (windowJumpToBottom snaps).
+                // Only the newest counts: our own old messages arrive with back-paged history.
                 windowJumpToBottom();
                 rendered = true;
                 refreshChatEmptyState();
@@ -874,6 +877,8 @@ async function setupRustListeners() {
                     })();
                     rendered = true;
                     proceduralScrollState.renderedMessageCount++;
+                } else {
+                    nudgeHistoryEdge();   // older history landing while the reader waits at its top
                 }
                 proceduralScrollState.totalMessageCount++;
                 const winMsgs = _windowMessages();

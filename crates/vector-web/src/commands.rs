@@ -319,6 +319,7 @@ pub async fn dispatch(cmd: &str, a: Args) -> Result<Value, String> {
         "mark_as_read" => Ok(json!(messaging::mark_as_read(a.str("chatId")?, a.opt_str("messageId")).await)),
         "get_chat_message_count" => to_value(messaging::get_chat_message_count(&a.str("chatId")?)?),
         "get_message_position" => to_value(messaging::get_message_position(&a.str("chatId")?, &a.str("messageId")?)?),
+        "get_message_time_at" => to_value(messaging::get_message_time_at(&a.str("chatId")?, a.usize("newer")?)?),
         "get_message_views" => to_value(
             messaging::get_message_views(&a.str("chatId")?, a.usize("limit")?, a.usize("offset")?).await?,
         ),

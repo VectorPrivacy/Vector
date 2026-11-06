@@ -1484,6 +1484,10 @@ pub struct CommunitySyncResult {
     /// Where the relay walk stopped (ms) with history still unread below: the cursor for the
     /// next older page, which skips nothing. `None` when the page reached what it was after.
     pub oldest_ms: Option<u64>,
+    /// Another fetch of this channel holds the walk: nothing was asked of the relays.
+    pub busy: bool,
+    /// At the start, but of this account's history only: older epochs are sealed to it.
+    pub history_limited: bool,
 }
 
 /// Sync one PAGE of a Community channel from the network (Discord-style).
@@ -1504,7 +1508,7 @@ pub async fn sync_community_channel(channel_id: String, before_ms: Option<u64>) 
     // Anti-stampede: one in-flight fetch per channel per direction. Claimed FIRST so the cursor reset
     // below runs UNDER the claim — it can't clear the floor out from under a racing scroll-up fetch.
     let Some(_claim) = vector_core::community::cache::claim_page_fetch(&channel_id, is_older) else {
-        return Ok(CommunitySyncResult::default());
+        return Ok(CommunitySyncResult { busy: true, ..Default::default() });
     };
 
     sync_community_channel_inner(&channel_id, before_ms, is_older).await
@@ -1541,11 +1545,13 @@ async fn sync_community_channel_inner(
             .await
             .map(|(c, _warnings)| c)
             .unwrap_or_default();
-        // An older page is finished only when the RELAY had nothing at or before the cursor:
-        // judged by new-count, the scroll would stop at the first page of already-held history,
-        // which is exactly where a rotated channel's older epochs sit.
-        let reached_start = if is_older { count.fetched == 0 && count.next_before.is_none() } else { count.new_messages < limit };
-        Ok(CommunitySyncResult { new_messages: count.new_messages as u32, reached_start, oldest_ms: count.next_before.map(|s| s * 1000) })
+        let reached_start = if is_older {
+            vector_core::community::reached_history_start(channel_id, before_secs, &count)
+        } else {
+            count.new_messages < limit
+        };
+        let history_limited = reached_start && is_older && !vector_core::community::holds_history_from_start(channel_id);
+        Ok(CommunitySyncResult { new_messages: count.new_messages as u32, reached_start, oldest_ms: count.next_before.map(|s| s * 1000), busy: false, history_limited })
     })
     .await
 }

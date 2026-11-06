@@ -43,6 +43,8 @@ function ensureMessageList() {
  * @property {(msg: object) => object|null} senderFor
  * @property {(msg: object) => object} ctxFor
  * @property {RowHelpers} row
+ * @property {() => void} retryHistory
+ * @property {(chatId: string) => { src: string|null, group: boolean }} edgeArt
  */
 const _dmsgListHelpers = {
     // The chat's own array is the complete one: the cache entry can be a fresh
@@ -56,6 +58,16 @@ const _dmsgListHelpers = {
         blocked: (m) => _dmsgListHelpers.ctxFor(m).blocked,
     },
     dayLabel: (at) => dayDividerHtml(at),
+    retryHistory: () => retryHistoryEdge(),
+    edgeArt: (chatId) => {
+        const chat = arrChats.find(c => c.id === chatId);
+        if (chatIsGroup(chat)) {
+            const path = chat.metadata?.avatar_cached;
+            return { src: path ? convertFileSrc(path) : null, group: true };
+        }
+        const profile = getProfile(chatId);
+        return { src: (profile && getProfileAvatarSrc(profile, true)) || null, group: false };
+    },
     get maxRows() { return typeof MAX_WINDOW_ROWS === 'number' ? MAX_WINDOW_ROWS : 80; },
     senderFor: (msg) => {
         if (msg.mine) return getProfile(strPubkey) || null;

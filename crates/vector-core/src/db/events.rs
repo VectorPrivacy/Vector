@@ -1928,6 +1928,26 @@ pub fn get_message_position(chat_id: i64, anchor_id: &str) -> Result<Option<Mess
     Ok(Some(MessagePosition { newer: newer as usize, total: total as usize }))
 }
 
+/// When the message `newer` places from the newest was sent (ms, to the second), in the order and
+/// under the ban filter of `get_message_position`. None past the oldest.
+pub fn get_message_time_at(chat_id: i64, newer: usize) -> Result<Option<u64>, String> {
+    use rusqlite::OptionalExtension;
+    let k = [event_kind::CHAT_MESSAGE, event_kind::PRIVATE_DIRECT_MESSAGE, event_kind::FILE_ATTACHMENT].map(|k| k as i32);
+    let conn = super::get_db_connection_guard_static()?;
+    let community = ban_param(&conn, chat_id);
+    conn.query_row(
+        &format!(
+            "SELECT created_at FROM events WHERE chat_id = ?1 AND kind IN (?2, ?3, ?4){} \
+             ORDER BY created_at DESC, received_at DESC, rowid DESC LIMIT 1 OFFSET ?6",
+            ban_filter_sql(5)
+        ),
+        rusqlite::params![chat_id, k[0], k[1], k[2], community, newer as i64],
+        |row| row.get::<_, i64>(0),
+    ).optional()
+        .map(|at| at.map(|s| s.max(0) as u64 * 1000))
+        .map_err(|e| format!("Failed to read message time: {}", e))
+}
+
 /// Get the last message for ALL chats in a single batch query.
 /// Optimized for app startup (chat list sidebar).
 pub async fn get_all_chats_last_messages() -> Result<std::collections::HashMap<String, Vec<Message>>, String> {
@@ -3743,6 +3763,10 @@ mod tests {
         assert_eq!(get_message_position(chat_id, "p_real3").unwrap(), Some(MessagePosition { newer: 6, total: 10 }));
         assert_eq!(get_message_position(chat_id, "p_real9").unwrap(), Some(MessagePosition { newer: 0, total: 10 }));
         assert_eq!(get_message_position(chat_id, "missing").unwrap(), None);
+
+        assert_eq!(get_message_time_at(chat_id, 0).unwrap(), Some(1_009_000));
+        assert_eq!(get_message_time_at(chat_id, 6).unwrap(), Some(1_003_000), "the spam row no longer counts");
+        assert_eq!(get_message_time_at(chat_id, 10).unwrap(), None);
     }
 
     /// A DM has no community, so the predicate must not exclude anything.

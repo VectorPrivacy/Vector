@@ -1062,9 +1062,8 @@ function revealSystemEventsInWindow(chatId) {
  * render/content change for the open chat.
  */
 function refreshChatEmptyState() {
-    const chat = strOpenChat ? arrChats.find(c => c.id === strOpenChat) : null;
-    const isEmptyCommunity = !!chat && chat.chat_type === 'Community' && (!chat.messages || chat.messages.length === 0);
-    VectorSvelte.setNotice('empty', isEmptyCommunity ? (chat.metadata?.custom_fields?.name || 'this community') : '');
+    scheduleChatScrollbar();
+    refreshHistoryEdge();
 }
 
 // Bumped by every open and close: an open that awaited past a newer one paints nothing.
@@ -1217,6 +1216,9 @@ async function openChat(contact, { reread = true, fade = true } = {}) {
     // prior chat — re-entering a chat counts as "I've read up to here".
     chatPinnedToBottom = true;
     _userScrolledAway = false;   // fresh open lands at the live tail; release any prior latch
+    windowAtTail = true;
+    VectorSvelte.dropScrollReturn();
+    resetHistoryEdge();
     clearUnreadBelow();
     clearUnreadDivider();
     syncBackendActiveChat();
@@ -1336,6 +1338,7 @@ async function openChat(contact, { reread = true, fade = true } = {}) {
     // Initial open lands on the newest message — the window bottom IS the live tail.
     windowAtTail = true;
     VectorSvelte.markOpenChat();
+    refreshScrollReturnButton();
     // A chat open is where the most media resolves at once, and every one of
     // those loads grows the content below the fold — hold the bottom until the
     // layout settles instead of finishing short of the newest message.

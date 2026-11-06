@@ -7,9 +7,13 @@ const bar = $state({
     trackTop: 0,     // the track's box in the chat pane (px)
     trackHeight: 0,
     dragging: false,
-    label: '',       // the date under the view, while dragging
+    active: false,   // the reader scrolled a moment ago: on touch, the handle and the floating date show
+    edgeShown: false, // the top of the history is in view, with its own word on what lies above
+    tip: '',         // the date at the place last pointed at
+    here: '',        // the date at the top of the view
+    more: '',        // set while older history may still come: what the rail's top mark says
 });
-let handlers = $state.raw({});   // seek(p, done), wheel(dy)
+let handlers = $state.raw({});   // seek(p, done), point(p), wheel(e)
 export function chatScrollbar() { return bar; }
 export function setChatScrollbar(patch) { Object.assign(bar, patch); }
 export function chatScrollbarHandlers() { return handlers; }

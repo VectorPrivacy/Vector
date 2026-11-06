@@ -117,6 +117,7 @@ function isAtDataBottom() {
  */
 async function renderWindow(startIdx, endIdx) {
     _windowGen++;
+    _chatStartHeld = false;
     const chat = arrChats.find(c => c.id === strOpenChat);
     if (!chat) return [];
     const msgs = _windowMessages();
@@ -352,7 +353,7 @@ async function windowJumpToBottom() {
     // uses), unless the user deliberately scrolled away during the wait.
     await waitForMediaToLoad();
     if (strOpenChat === chatId && !_userScrolledAway) scrollToBottom(domChatMessages, false);
-    } finally { proceduralScrollState.isLoading = false; }
+    } finally { proceduralScrollState.isLoading = false; rekickHistoryEdge(); }
 }
 
 /** A row is leaving: if it anchors the window, hand the anchor to its neighbour
@@ -722,8 +723,30 @@ function keepTailAnchor() {
     recordTailAnchor();
 }
 
+// Landed at the very start: like the pin at the end, the view stays there while rows in it grow
+// (the bottom-up scroller would otherwise keep the end still and push the start away), until the
+// reader scrolls.
+let _chatStartHeld = false;
+
+function holdChatStart() {
+    _chatStartHeld = true;
+    beginProgrammaticScroll();
+    domChatMessages.scrollTop = -domChatMessages.scrollHeight;
+}
+
+// A reader's scroll wakes the touch handle and the floating date; they rest once it has been
+// still this long.
+const BAR_REST_MS = 1500;
+let _barRestTimer = 0;
+
 /** Every scroll event: the reader's scroll is in flight until it has been quiet a while. */
 function noteScrollActivity() {
+    if (VectorSvelte.now() >= _programmaticScrollUntil) {
+        _chatStartHeld = false;
+        VectorSvelte.setChatScrollbar({ active: true });
+        clearTimeout(_barRestTimer);
+        _barRestTimer = setTimeout(() => VectorSvelte.setChatScrollbar({ active: false }), BAR_REST_MS);
+    }
     _lastScrollAt = VectorSvelte.now();
     if (_tailRoom && windowAtTail) {
         clearTimeout(_tailTimer);
@@ -763,6 +786,8 @@ const proceduralScrollState = {
 // at a time, and a set of channels whose network history-start has been reached (stop trying).
 const _communityOlderInFlight = new Set();
 const _communityOlderExhausted = new Set();
+// Channels whose start reached here is only this account's: older epochs are sealed to it.
+const _communityHistoryLimited = new Set();
 // Where each channel's relay walk last stopped with history unread below (ms): a scroll goes on
 // from the lower of that and the oldest row held.
 const _communityOlderCursor = new Map();
@@ -786,21 +811,27 @@ async function maybeLoadCommunityOlderFromNetwork(chatId) {
     const oldestMs = events.reduce((min, e) => (e.at < min ? e.at : min), events[0].at);
 
     _communityOlderInFlight.add(chatId);
+    _communityOlderFailed.delete(chatId);
+    let grew = false, busy = false;
     try {
         const prevTotal = (eventCache.getStats(chatId) || {}).totalInDb || 0;
         let beforeMs = Math.min(oldestMs, _communityOlderCursor.get(chatId) ?? Infinity);
         for (let hop = 0; hop < 8; hop++) {
             const res = await invoke('sync_community_channel', { channelId: chatId, beforeMs });
+            // Another fetch of this channel holds the relay walk: ask again once it lets go.
+            if (res?.busy) { busy = true; break; }
             // Refresh the cache count so hasMoreEvents reflects any newly-ingested older rows,
             // then load (prepend) them.
             const newTotal = await invoke('get_chat_message_count', { chatId });
             if (newTotal > prevTotal) {
+                grew = true;
                 eventCache.updateTotalCount(chatId, newTotal);
                 if (strOpenChat === chatId) loadMoreMessages();
             }
             // Terminate ONLY on the backend's authoritative "no more older" signal — a page that
             // returned just already-known events (no count growth) does NOT mean history's start.
             if (res && res.reached_start) _communityOlderExhausted.add(chatId);
+            if (res && res.history_limited) _communityHistoryLimited.add(chatId);
             if (res && res.oldest_ms != null) _communityOlderCursor.set(chatId, res.oldest_ms);
             else _communityOlderCursor.delete(chatId);
             if (newTotal > prevTotal || !res || res.reached_start || strOpenChat !== chatId) break;
@@ -812,6 +843,10 @@ async function maybeLoadCommunityOlderFromNetwork(chatId) {
         console.warn('Community older-page fetch failed:', e);
     } finally {
         _communityOlderInFlight.delete(chatId);
+        // Neither older rows nor the relays' word that there are none: say so, with a retry.
+        if (!grew && !busy && !_communityOlderExhausted.has(chatId)) _communityOlderFailed.add(chatId);
+        if (strOpenChat === chatId) refreshHistoryEdge();
+        if (busy) setTimeout(rekickHistoryEdge, 800);
     }
 }
 
@@ -932,6 +967,7 @@ function _pinGuardCheck() {
     if (height === _pinGuardHeight) return;
     _pinGuardHeight = height;
     if (!strOpenChat || _windowRendering || _unreadJumpResolving) return;
+    if (_chatStartHeld) return holdChatStart();
     if (!chatPinnedToBottom || !isAtDataBottom()) return keepTailAnchor();
     if (_windowSuppressAutoScroll || Math.abs(scrollFromEnd(el)) < 1) return;
     beginProgrammaticScroll();
@@ -959,7 +995,7 @@ function handleProceduralScroll() {
     // toward "now" from memory — no backend.
     if (nearBottom && !isAtDataBottom()) {
         proceduralScrollState.isLoading = true;
-        windowExtendNewer().finally(() => { proceduralScrollState.isLoading = false; });
+        windowExtendNewer().finally(() => { proceduralScrollState.isLoading = false; rekickHistoryEdge(); });
         return;
     }
 
@@ -970,7 +1006,7 @@ function handleProceduralScroll() {
     // window top reaches the slice start, anchored-loads older rows from the DB itself
     // (community network-fill included).
     proceduralScrollState.isLoading = true;
-    windowExtendOlder().finally(() => { proceduralScrollState.isLoading = false; });
+    windowExtendOlder().finally(() => { proceduralScrollState.isLoading = false; rekickHistoryEdge(); });
 }
 
 /**
@@ -1472,6 +1508,7 @@ async function jumpToUnread(lastReadId) {
             let res = null;
             try { res = await invoke('sync_community_channel', { channelId: chatId, beforeMs: cursor }); } catch (e) { if (strOpenChat === chatId) console.warn('[unread-jump] sync threw', e); break; }
             if (res && res.reached_start) _communityOlderExhausted.add(chatId);
+            if (res && res.history_limited) _communityHistoryLimited.add(chatId);
             synced += (res && res.new_messages) || 0;
             const next = res && res.oldest_ms;
             if (next == null || next >= cursor) break;   // relay returned nothing older
@@ -1627,8 +1664,13 @@ function updateChatScrollbar() {
     const el = domChatMessages;
     const chatId = strOpenChat;
     const msgs = chatId ? _windowMessages() : null;
-    if (!el || !msgs?.length || _windowRendering || el.scrollHeight <= el.clientHeight + 1) {
+    if (!el || !chatId || _windowRendering) {
         VectorSvelte.setChatScrollbar({ shown: false });
+        return;
+    }
+    if (!msgs?.some(_barCounted)) {
+        VectorSvelte.setChatScrollbar({ shown: false });
+        _setHistoryAtStart(true);
         return;
     }
     // The row at the top of the view, how far the view has passed into it, and how many rows show.
@@ -1646,6 +1688,10 @@ function updateChatScrollbar() {
     }
     const i = top ? msgs.findIndex(m => m.id === top.id) : -1;
     if (i === -1) return;
+    const edgeEl = domChatRows.querySelector(':scope > .history-edge');
+    const edgeShown = !!edgeEl && edgeEl.getBoundingClientRect().bottom > edge;
+    _unreadJumpPill?.classList.toggle('at-edge', edgeShown);
+    VectorSvelte.setChatScrollbar({ here: _barDateFmt.format(new Date(msgs[i].at)), edgeShown });
     // Rank the newest held row of the run the view is in (a seek leaves the tail as a run of its own).
     const gapId = eventCache.getGapAfterId(chatId);
     const gi = gapId != null ? msgs.findIndex(m => m.id === gapId) : -1;
@@ -1655,12 +1701,112 @@ function updateChatScrollbar() {
     if (!rank) return;
     let newer = rank.newer;
     for (let k = i + 1; k <= j; k++) if (_barCounted(msgs[k])) newer++;
+    // Nothing held above the window's first row: the window starts the history held here.
+    const wi = _windowIndexOfId(windowTopId);
+    if (wi !== -1 && wi <= j) {
+        let held = 0;
+        for (let k = wi; k <= j; k++) if (_barCounted(msgs[k])) held++;
+        _setHistoryAtStart(rank.newer + held >= rank.total);
+    }
     const total = Math.max(1, rank.total);
     const at = Math.max(0, total - 1 - newer) + into;
     _barLast = { total, visible };
-    const patch = { shown: total > visible + 0.5, size: Math.min(1, visible / total), label: _barDateFmt.format(new Date(msgs[i].at)) };
+    const overflows = el.scrollHeight > el.clientHeight + 1;
+    const patch = { shown: overflows && total > visible + 0.5, size: Math.min(1, visible / total) };
     if (!_barDragging) patch.top = Math.max(0, Math.min(1, at / Math.max(1, total - visible)));
     VectorSvelte.setChatScrollbar(patch);
+}
+
+// ===========================================================================
+// The top of the history. Above the oldest row held here, the list says what lies beyond: older
+// rows still coming (a channel's relays not yet walked to its start, DMs still syncing), the
+// chat's true beginning, or a fetch that failed. The rail marks its top while more may come.
+// ===========================================================================
+const _communityOlderFailed = new Set();
+let _edgeAtStart = false;
+let _edgeNudge = 0;
+
+/** A chat opening: nothing is known of its top until the first measure. */
+function resetHistoryEdge() {
+    _edgeAtStart = false;
+    VectorSvelte.setHistoryEdge({ state: '' });
+}
+
+function _setHistoryAtStart(atStart) {
+    if (atStart === _edgeAtStart) return;
+    _edgeAtStart = atStart;
+    refreshHistoryEdge();
+}
+
+function refreshHistoryEdge() {
+    const chatId = strOpenChat;
+    const chat = chatId ? arrChats.find(c => c.id === chatId) : null;
+    if (!chat) {
+        VectorSvelte.setHistoryEdge({ state: '' });
+        return;
+    }
+    const community = chat.chat_type === 'Community';
+    const more = community ? !_communityOlderExhausted.has(chatId) : fSyncing;
+    _setRailMore(more ? (community ? 'Older messages load from the relays' : 'Older messages are still syncing') : '');
+    if (!_edgeAtStart) {
+        VectorSvelte.setHistoryEdge({ state: '' });
+        return;
+    }
+    if (more) {
+        VectorSvelte.setHistoryEdge({ state: community && _communityOlderFailed.has(chatId) ? 'retry' : 'loading' });
+        // Sat at the top with nothing on its way: ask for it.
+        if (community && !_communityOlderFailed.has(chatId)) nudgeHistoryEdge();
+        return;
+    }
+    const alone = !(_windowMessages() || []).some(_barCounted);
+    const cf = chat.metadata?.custom_fields || {};
+    const base = { state: 'start', alone, chatId, communityId: cf.community_id || '' };
+    if (community) {
+        VectorSvelte.setHistoryEdge({
+            ...base,
+            title: `Welcome to #${cf.channel_name || 'general'}`,
+            note: _communityHistoryLimited.has(chatId)
+                ? `This is the beginning of your history${cf.name ? ` in ${cf.name}` : ''}.`
+                : alone ? 'This is the very beginning of the channel, say hello! 👋'
+                : `This is the beginning of the channel${cf.name ? ` in ${cf.name}` : ''}.`,
+        });
+    } else if (chatIsGroup(chat)) {
+        VectorSvelte.setHistoryEdge({ ...base, title: cf.name || 'Group', note: 'This is the beginning of the group.' });
+    } else if (chatId === strPubkey) {
+        VectorSvelte.setHistoryEdge({ ...base, title: 'Notes', note: 'This is the beginning of your notes.' });
+    } else {
+        const name = getName(chat.id);
+        VectorSvelte.setHistoryEdge({ ...base, title: name, note: `This is the beginning of your conversation with ${name}.` });
+    }
+}
+
+/** Older rows may have reached the database while the reader sits at the top: load them. */
+function nudgeHistoryEdge() {
+    if (!_edgeAtStart || _edgeNudge) return;
+    _edgeNudge = setTimeout(() => { _edgeNudge = 0; handleProceduralScroll(); }, 300);
+}
+
+/** A load just let go of the gate: a channel whose relays may still hold older pages goes on
+ *  fetching while the reader waits at its top. */
+function rekickHistoryEdge() {
+    const chatId = strOpenChat;
+    const chat = chatId ? arrChats.find(c => c.id === chatId) : null;
+    if (chat?.chat_type !== 'Community' || _communityOlderExhausted.has(chatId) || _communityOlderFailed.has(chatId)) return;
+    nudgeHistoryEdge();
+}
+
+function retryHistoryEdge() {
+    _communityOlderFailed.delete(strOpenChat);
+    refreshHistoryEdge();
+    handleProceduralScroll();
+}
+
+let _railMore = '';
+function _setRailMore(tip) {
+    if (tip === _railMore) return;
+    _railMore = tip;
+    VectorSvelte.setChatScrollbar({ more: tip });
+    layoutChatScrollbar();
 }
 
 /** The track runs beside the list, below a header that lies over it. */
@@ -1669,20 +1815,70 @@ function layoutChatScrollbar() {
     const v = domChatMessages.getBoundingClientRect();
     const head = pane.querySelector('.chat-header')?.getBoundingClientRect();
     _barInset = head && head.bottom > v.top && head.bottom < v.bottom ? head.bottom - v.top : 0;
+    // While more may come, the rail's top carries a mark above the track.
+    const mark = _railMore ? 16 : 0;
     VectorSvelte.setChatScrollbar({
-        trackTop: v.top - pane.getBoundingClientRect().top + _barInset + 4,
-        trackHeight: Math.max(0, v.height - _barInset - 8),
+        trackTop: v.top - pane.getBoundingClientRect().top + _barInset + 4 + mark,
+        trackHeight: Math.max(0, v.height - _barInset - 8 - mark),
     });
     scheduleChatScrollbar();
 }
 new ResizeObserver(layoutChatScrollbar).observe(domChatMessages);
 
+/** The message a place on the track puts at the top of the view, counted from the newest. */
+function _barNewerAt(p) {
+    const { total, visible } = _barLast;
+    return Math.max(0, Math.round(total - 1 - p * Math.max(0, total - visible)));
+}
+
 /** A drag or click on the track: `p` is the view's place, 0 (the start) to 1 (the newest). */
 function seekChatScrollbar(p, done) {
+    if (!done && !_barDragging) navigator.vibrate?.(8);   // taken hold of
     _barDragging = !done;
+    if (done) _barTickTip = '';
     VectorSvelte.setChatScrollbar({ top: p, dragging: !done });
+    pointChatScrollbar(p);
     _barWant = p;
     if (!_barSeeking) _runChatScrollbarSeeks();
+}
+
+// The date at a place on the track, read straight from the database: one ask at a time, the latest
+// place wins, and each place is remembered.
+const _barTimes = new Map();   // `${chatId}:${newer}` → ms, or null past the oldest
+let _barTickTip = '';          // the day a drag last ticked on
+let _barPointWant = null;
+let _barPointing = false;
+
+function pointChatScrollbar(p) {
+    _barPointWant = p;
+    if (!_barPointing) _runChatScrollbarPoints();
+}
+
+async function _runChatScrollbarPoints() {
+    _barPointing = true;
+    try {
+        while (_barPointWant != null) {
+            const p = _barPointWant;
+            _barPointWant = null;
+            const chatId = strOpenChat;
+            if (!chatId || !_barLast.total) break;
+            const key = chatId + ':' + _barNewerAt(p);
+            let at = _barTimes.get(key);
+            if (at === undefined) {
+                at = await invoke('get_message_time_at', { chatId, newer: _barNewerAt(p) }).catch(() => null);
+                if (_barTimes.size > 500) _barTimes.clear();
+                _barTimes.set(key, at);
+            }
+            if (!at || strOpenChat !== chatId) continue;
+            const tip = _barDateFmt.format(new Date(at));
+            // A drag ticks under the thumb as it passes from one day to the next.
+            if (_barDragging && _barTickTip && tip !== _barTickTip) navigator.vibrate?.(6);
+            _barTickTip = _barDragging ? tip : '';
+            VectorSvelte.setChatScrollbar({ tip });
+        }
+    } finally {
+        _barPointing = false;
+    }
 }
 
 async function _runChatScrollbarSeeks() {
@@ -1704,7 +1900,7 @@ async function _seekChatTo(p) {
     const el = domChatMessages;
     const { total, visible } = _barLast;
     if (!chatId || !el || !total) return;
-    const newer = Math.max(0, Math.round(total - 1 - p * Math.max(0, total - visible)));
+    const newer = _barNewerAt(p);
     if (newer <= visible) {
         if (!windowAtTail) await windowJumpToBottom();
         else { beginProgrammaticScroll(); scrollToEnd(el); }
@@ -1741,16 +1937,25 @@ async function _seekChatTo(p) {
         setTailRoom(windowAtTail ? 0 : TAIL_RESERVE);
         const row = document.getElementById(target.id);
         if (row) {
+            // The day and unread dividers above the row belong to it: they show with it.
+            let lead = row;
+            for (let n = row.previousElementSibling; n && !n.id; n = n.previousElementSibling) {
+                if (n.classList.contains('msg-inline-timestamp')) lead = n;
+            }
+            const top = lead.offsetTop - parseFloat(getComputedStyle(lead).marginTop || 0) - _barInset;
             beginProgrammaticScroll();
-            el.scrollTop = Math.min(row.offsetTop - _barInset, scrollEnd(el));
+            if (p <= 0) holdChatStart();
+            else el.scrollTop = Math.min(top, scrollEnd(el));
         }
         recordTailAnchor();
     } finally {
         proceduralScrollState.isLoading = false;
+        rekickHistoryEdge();
     }
 }
 
 VectorSvelte.setChatScrollbarHandlers({
     seek: seekChatScrollbar,
+    point: pointChatScrollbar,
     wheel: (e) => { domChatMessages.scrollTop += e.deltaMode === 1 ? e.deltaY * 16 : e.deltaY; },
 });

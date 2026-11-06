@@ -124,9 +124,8 @@ pub fn get_community_invite_summary(community_id: &str) -> Result<Value, String>
 pub async fn sync_community_channel(channel_id: &str, before_ms: Option<u64>) -> Result<Value, String> {
     use vector_core::community::cache;
     let is_older = before_ms.is_some();
-    let empty = json!({ "new_messages": 0, "reached_start": false, "oldest_ms": null });
     let Some(_claim) = cache::claim_page_fetch(channel_id, is_older) else {
-        return Ok(empty);
+        return Ok(json!({ "new_messages": 0, "reached_start": false, "oldest_ms": null, "busy": true }));
     };
 
     let community_id = db::community::community_id_for_channel(channel_id)?.ok_or("Unknown Community channel")?;
@@ -140,8 +139,9 @@ pub async fn sync_community_channel(channel_id: &str, before_ms: Option<u64>) ->
         .await
         .map(|(c, _)| c)
         .unwrap_or_default();
-    let reached_start = if is_older { count.fetched == 0 && count.next_before.is_none() } else { count.new_messages < LIMIT };
-    Ok(json!({ "new_messages": count.new_messages, "reached_start": reached_start, "oldest_ms": count.next_before.map(|s| s * 1000) }))
+    let reached_start = if is_older { vector_core::community::reached_history_start(channel_id, before, &count) } else { count.new_messages < LIMIT };
+    let history_limited = reached_start && is_older && !vector_core::community::holds_history_from_start(channel_id);
+    Ok(json!({ "new_messages": count.new_messages, "reached_start": reached_start, "oldest_ms": count.next_before.map(|s| s * 1000), "history_limited": history_limited }))
 }
 
 /// Fill the hole a scroll up from `before_ms` is about to cross; how many messages arrived.

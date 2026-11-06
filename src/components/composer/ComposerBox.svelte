@@ -177,9 +177,10 @@
 
 <div class="row input-box" id="chat-box" class:replying={isReply} class:commanding={command.active} use:bindBox>
     <!-- Anchored to #chat-box's top edge so it rides up as the composer grows. -->
-    <button id="chat-scroll-return" class="corner-float scroll-return-btn" class:visible={chrome.scrollReturn} use:bindScrollReturn>
+    <button id="chat-scroll-return" class="scroll-return-bar" class:visible={chrome.scrollReturn} class:snap={chrome.scrollReturnSnap} class:unread={!!chrome.scrollBadge}
+            tabindex={chrome.scrollReturn ? 0 : -1} use:bindScrollReturn>
         <span class="icon icon-chevron-down"></span>
-        <span class="scroll-return-badge" class:visible={!!chrome.scrollBadge}>{chrome.scrollBadge}</span>
+        <span>{chrome.scrollBadge ? `${chrome.scrollBadge} new ${chrome.scrollBadge === '1' ? 'message' : 'messages'}` : 'Jump to present'}</span>
     </button>
     <div id="msg-bottom-fade" class="fadeout-bottom-msgs"></div>
     <TypingIndicator />

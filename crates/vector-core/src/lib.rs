@@ -583,6 +583,8 @@ pub struct BackfillCount {
     /// Where an older page goes on from (Unix seconds) when this one stopped with relay history
     /// still unread; `None` when it reached what it was after.
     pub next_before: Option<u64>,
+    /// No relay answered: nothing is known about what lies past the cursor.
+    pub unreachable: bool,
 }
 
 impl VectorCore {
@@ -3759,13 +3761,13 @@ impl VectorCore {
         )
         .await
         else {
-            return (BackfillCount::default(), Vec::new());
+            return (BackfillCount { unreachable: true, ..Default::default() }, Vec::new());
         };
         let fetched = page.len() + held.into_inner();
         let (new_messages, waiting) = Self::v2_ingest_chat_page_keeping(channel_id, my_pk, session, page).await;
         // A walk that stops while still finding new messages leaves a hole above what it held.
         crate::history_gaps::note_walk(channel_id, until, next_before, |t| crate::db::events::newest_message_before(channel_id, t));
-        (BackfillCount { fetched, new_messages, next_before }, waiting)
+        (BackfillCount { fetched, new_messages, next_before, unreachable: false }, waiting)
     }
 
     /// Ingest a fetched chat page: STATE apply, batched persist with delete

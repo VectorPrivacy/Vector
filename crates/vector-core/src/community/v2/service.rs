@@ -952,6 +952,8 @@ pub async fn fetch_channel_history_paged<T: Transport + ?Sized>(
             // freshly-adopted epoch never load. Per-plane authed fetches + union.
             let mut wraps: Vec<Event> = Vec::new();
             let mut wrap_ids: std::collections::HashSet<nostr_sdk::prelude::EventId> = std::collections::HashSet::new();
+            // An empty page means drained only when a relay said so: silence everywhere is not the start.
+            let mut answered = false;
             for (plane, _) in &planes {
                 let q = Query {
                     kinds: vec![stream::KIND_WRAP],
@@ -968,6 +970,7 @@ pub async fn fetch_channel_history_paged<T: Transport + ?Sized>(
                     None => transport.fetch(&q, &community.relays).await,
                 };
                 if let Ok(evs) = fetched {
+                    answered = true;
                     note_page(&evs);
                     for e in evs {
                         if wrap_ids.insert(e.id) {
@@ -983,13 +986,20 @@ pub async fn fetch_channel_history_paged<T: Transport + ?Sized>(
                     Some((e, _, group)) if e == wepoch => transport.fetch_plane(group.keys(), &q, &community.relays).await.map(|f| f.events),
                     _ => transport.fetch(&q, &community.relays).await,
                 };
-                let fetched = fetched.unwrap_or_default();
+                let Ok(fetched) = fetched else { continue };
+                answered = true;
                 note_page(&fetched);
                 for e in fetched {
                     if wrap_ids.insert(e.id) {
                         wraps.push(e);
                     }
                 }
+            }
+            if !answered {
+                if out.is_empty() {
+                    return Err("no relay answered".into());
+                }
+                break; // keeps `until` as the cursor: the walk goes on from here next time
             }
             if wraps.is_empty() {
                 ended = true;
