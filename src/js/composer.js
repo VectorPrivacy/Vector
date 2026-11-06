@@ -121,11 +121,13 @@ function cmpTokenize(src, opts) {
     // Emoji goes LAST: `*️⃣` and `*italic*` both start with `*`, and the engine only
     // falls through to a later alternative once the earlier one fails to match.
     const re = new RegExp(
-        '(`[^`\\n]+`)|(\\*\\*\\*[^*\\n]+\\*\\*\\*)|(\\*\\*[^*\\n]+\\*\\*)|(~~[^~\\n]+~~)|(\\|\\|[^|\\n]+\\|\\|)'
-        + '|(\\*[^*\\n]+\\*)'
+        // Emphasis only where marked gives it: the text inside may not start or end with
+        // whitespace (`**bold **` stays literal in a sent message, so it does here).
+        '(`[^`\\n]+`)|(\\*\\*\\*(?!\\s)[^*\\n]+(?<!\\s)\\*\\*\\*)|(\\*\\*(?!\\s)[^*\\n]+(?<!\\s)\\*\\*)|(~~(?!\\s)[^~\\n]+(?<!\\s)~~)|(\\|\\|[^|\\n]+\\|\\|)'
+        + '|(\\*(?!\\s)[^*\\n]+(?<!\\s)\\*)'
         // Underscore emphasis is boundary-gated in the handler, mirroring
         // marked: `_this_` italicises, `snake_case_name` stays literal.
-        + '|(___[^_\\n]+___)|(__[^_\\n]+__)|(_[^_\\n]+_)'
+        + '|(___(?!\\s)[^_\\n]+(?<!\\s)___)|(__(?!\\s)[^_\\n]+(?<!\\s)__)|(_(?!\\s)[^_\\n]+(?<!\\s)_)'
         // The npub form comes before the name form: a pasted `@npub1…` is all
         // name-shaped characters, so the greedy name rule would swallow it and
         // leave 63 characters of key on screen.
@@ -223,8 +225,19 @@ function cmpTokenize(src, opts) {
         last = to;
     }
     if (last < src.length) out.push({ kind: 'text', from: last, to: src.length });
+    // Emoji inside a formatted run show as they will in the sent message.
+    for (const t of out) {
+        if (!CMP_STYLED.has(t.kind)) continue;
+        const end = CMP_STYLED_SHUT.has(t.kind) ? t.to - t.mark : t.to;
+        t.inner = cmpTokenize(src.slice(t.from + t.mark, end), { ...opts, emojiOnly: true })
+            .map((it) => ({ ...it, from: it.from + t.from + t.mark, to: it.to + t.from + t.mark }));
+    }
     return cmpApplyColor(src, cmpApplyTime(src, cmpApplyAnsi(src, out)), opts);
 }
+
+// Runs whose text takes a style (and, after it, its emoji); the second set closes with its mark.
+const CMP_STYLED = new Set(['bold', 'bolditalic', 'italic', 'strike', 'header', 'subtext']);
+const CMP_STYLED_SHUT = new Set(['bold', 'bolditalic', 'italic', 'strike']);
 
 /** Discord time codes as atomic chips: the draft keeps `<t:…>`, the eye sees the time. */
 function cmpApplyTime(src, tokens) {
@@ -416,6 +429,7 @@ function cmpSignature(tokens, src) {
         if (t.kind === 'ansitext') s += cmpAnsiKey(t.style);
         // Levels share a kind, but `#` -> `##` must still repaint the mark.
         if (t.kind === 'header') s += t.mark;
+        if (t.inner) for (const it of t.inner) if (it.kind !== 'text') s += '[' + src.slice(it.from, it.to) + ']';
         s += '|';
     }
     if (tokens.colorKey) s += tokens.colorKey;
@@ -511,13 +525,58 @@ function createRichComposer(host, opts = {}) {
     }
 
     /** A decoration keeps its markers visible but dimmed, so source == display. */
-    function decorated(cls, raw, markLen) {
+    function decorated(cls, raw, markLen, t) {
         const wrap = document.createElement('span');
         wrap.className = cls;
         wrap.appendChild(span('cmp-mark', raw.slice(0, markLen)));
-        wrap.appendChild(span('cmp-body', raw.slice(markLen, raw.length - markLen)));
+        wrap.appendChild(styledBody(raw.slice(markLen, raw.length - markLen), t));
         wrap.appendChild(span('cmp-mark', raw.slice(raw.length - markLen)));
         return wrap;
+    }
+
+    /** A styled run's text, its emoji as widgets inside it. */
+    function styledBody(text, t) {
+        const body = document.createElement('span');
+        body.className = 'cmp-body';
+        if (!t?.inner?.some((it) => it.kind !== 'text')) {
+            body.textContent = text;
+            return body;
+        }
+        for (const it of t.inner) {
+            const piece = src.slice(it.from, it.to);
+            if (it.kind === 'text') body.appendChild(document.createTextNode(piece));
+            else emojiImg(body, it, piece);
+        }
+        return body;
+    }
+
+    // Emoji widgets are BARE <img> elements, deliberately: an image is inherently atomic
+    // (nothing to type inside) and reads to an IME as an ordinary object character. The
+    // previous shape (a contenteditable=false span between ZWSP sentinels) made old Android
+    // WebViews reset the input connection whenever a native edit landed the caret against it.
+    function emojiImg(parent, t, raw) {
+        const img = document.createElement('img');
+        img.className = t.kind === 'twemoji' ? 'cmp-twemoji' : 'cmp-emoji';
+        img.dataset.src = raw;
+        img.alt = raw;
+        img.draggable = false;
+        // Appended first: the fallback replaces the widget, which needs a parent.
+        parent.appendChild(img);
+        const fail = () => { if (img.parentNode) img.replaceWith(document.createTextNode(raw)); };
+        if (t.kind === 'twemoji') {
+            // Always a BUNDLED asset path from `cmpTwemojiUrl` (/twemoji/svg/…), never a
+            // network URL. Artwork the manifest claims but the build doesn't ship degrades
+            // to the character rather than a broken icon.
+            img.src = t.url;
+            img.addEventListener('error', fail, { once: true });
+        } else if (opts.bindEmojiImg) {
+            // Pack art is REMOTE. This module never assigns such a src itself: the backend
+            // proxy is the only thing allowed to reach the network, and it is what carries
+            // Tor routing. A host without a binder gets the literal `:shortcode:`.
+            try { opts.bindEmojiImg(img, t.url, fail); } catch (_) { fail(); }
+        } else {
+            fail();
+        }
     }
 
     function render(tokens) {
@@ -525,10 +584,10 @@ function createRichComposer(host, opts = {}) {
         for (const t of tokens) {
             const raw = src.slice(t.from, t.to);
             switch (t.kind) {
-                case 'bold': el.appendChild(decorated('cmp-bold', raw, 2)); break;
-                case 'bolditalic': el.appendChild(decorated('cmp-bolditalic', raw, 3)); break;
-                case 'italic': el.appendChild(decorated('cmp-italic', raw, 1)); break;
-                case 'strike': el.appendChild(decorated('cmp-strike', raw, 2)); break;
+                case 'bold': el.appendChild(decorated('cmp-bold', raw, 2, t)); break;
+                case 'bolditalic': el.appendChild(decorated('cmp-bolditalic', raw, 3, t)); break;
+                case 'italic': el.appendChild(decorated('cmp-italic', raw, 1, t)); break;
+                case 'strike': el.appendChild(decorated('cmp-strike', raw, 2, t)); break;
                 case 'spoiler': el.appendChild(decorated('cmp-spoiler', raw, 2)); break;
                 case 'code': el.appendChild(decorated('cmp-code', raw, 1)); break;
                 case 'header':
@@ -537,7 +596,7 @@ function createRichComposer(host, opts = {}) {
                     const wrap = document.createElement('span');
                     wrap.className = t.kind === 'header' ? 'cmp-h' + (t.mark - 1) : 'cmp-subtext';
                     wrap.appendChild(span('cmp-mark', raw.slice(0, t.mark)));
-                    wrap.appendChild(span('cmp-body', raw.slice(t.mark)));
+                    wrap.appendChild(styledBody(raw.slice(t.mark), t));
                     el.appendChild(wrap);
                     break;
                 }
@@ -602,49 +661,10 @@ function createRichComposer(host, opts = {}) {
                     // ("@npub1…"), so the caret must not enter it.
                     atom('cmp-mention', '@' + t.label, raw);
                     break;
-                // Emoji widgets are BARE <img> elements, deliberately: an image is
-                // inherently atomic (nothing to type inside) and reads to an IME as
-                // an ordinary object character. The previous shape — a
-                // contenteditable=false span between ZWSP sentinels — made old
-                // Android WebViews reset the input connection (keyboard close)
-                // whenever a native edit landed the caret against the island.
-                case 'twemoji': {
-                    const img = document.createElement('img');
-                    img.className = 'cmp-twemoji';
-                    img.dataset.src = raw;
-                    // Always a BUNDLED asset path from `cmpTwemojiUrl` (/twemoji/svg/…),
-                    // never a network URL — unlike pack art, which must go through the host.
-                    img.src = t.url;
-                    img.alt = raw;
-                    img.draggable = false;
-                    // Second safety net: artwork the manifest claims but the build
-                    // doesn't ship degrades to the character rather than a broken icon.
-                    img.addEventListener('error', () => {
-                        img.replaceWith(document.createTextNode(raw));
-                    }, { once: true });
-                    el.appendChild(img);
+                case 'twemoji':
+                case 'emoji':
+                    emojiImg(el, t, raw);
                     break;
-                }
-                case 'emoji': {
-                    const img = document.createElement('img');
-                    img.className = 'cmp-emoji';
-                    img.dataset.src = raw;
-                    img.alt = raw;
-                    img.draggable = false;
-                    el.appendChild(img);
-                    // Appended first: the fallback replaces the widget, which needs a parent.
-                    const fail = () => { if (img.parentNode) img.replaceWith(document.createTextNode(raw)); };
-                    // Pack art is REMOTE. This module never assigns such a src itself: the
-                    // backend proxy is the only thing allowed to reach the network, and it
-                    // is what carries Tor routing. A host without a binder gets the literal
-                    // `:shortcode:` — never a direct fetch.
-                    if (opts.bindEmojiImg) {
-                        try { opts.bindEmojiImg(img, t.url, fail); } catch (_) { fail(); }
-                    } else {
-                        fail();
-                    }
-                    break;
-                }
                 default: {
                     // Newlines need real <br>; a bare "\n" in a div collapses.
                     const parts = raw.split('\n');
