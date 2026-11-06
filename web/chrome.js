@@ -78,9 +78,20 @@
             }
         }
     }
+    // The keyboard's last resize can report a height from mid-animation, before its accessory
+    // bar has landed: measured again once it has settled.
+    const settles = [0, 0];
+    function refit() {
+        fit();
+        clearTimeout(settles[0]);
+        clearTimeout(settles[1]);
+        settles[0] = setTimeout(fit, 150);
+        settles[1] = setTimeout(fit, 500);
+    }
     fit();
     addEventListener('focusin', reveal);
-    window.visualViewport?.addEventListener('resize', fit);
+    addEventListener('focusin', refit);
+    window.visualViewport?.addEventListener('resize', refit);
     window.visualViewport?.addEventListener('scroll', fit);
     addEventListener('resize', fit);
     addEventListener('scroll', fit, { passive: true });
