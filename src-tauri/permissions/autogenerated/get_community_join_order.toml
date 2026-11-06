@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-get-community-join-order"
+description = "Enables the get_community_join_order command without any pre-configured scope."
+commands.allow = ["get_community_join_order"]
+
+[[permission]]
+identifier = "deny-get-community-join-order"
+description = "Denies the get_community_join_order command without any pre-configured scope."
+commands.deny = ["get_community_join_order"]

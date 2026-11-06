@@ -243,6 +243,7 @@
     "allow-unpin-chat",
     "allow-move-pinned-chat",
     "allow-get-rail-layout",
+    "allow-get-community-join-order",
     "allow-rail-apply-drop",
     "allow-rail-rename-folder",
     "allow-rail-set-folder-hue",

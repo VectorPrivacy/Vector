@@ -227,6 +227,9 @@ pub async fn dispatch(cmd: &str, a: Args) -> Result<Value, String> {
         }
         "get_pinned_chats" => to_value(vector_core::pinned_chats::load_local().chats),
         "get_rail_layout" => to_value(vector_core::synced_prefs::load_rail()),
+        "get_community_join_order" => to_value(
+            db::community::list_community_ids()?.iter().rev().map(|id| vector_core::simd::hex::bytes_to_hex_32(&id.0)).collect::<Vec<_>>(),
+        ),
         "get_hidden_banners" => to_value(vector_core::synced_prefs::load_hidden_banners().ids),
         "set_banner_hidden" => {
             let hidden = a.bool("hidden").ok_or("missing argument `hidden`")?;

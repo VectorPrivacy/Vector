@@ -50,6 +50,7 @@ function renderRailShortcuts() {
     /**
      * RailHelpers: the rail's shortcut strip and its items.
      * @typedef {Object} RailHelpers
+     * @property {() => void} refreshRailJoinOrder
      * @property {(chat: object) => boolean} chatIsGroup
      * @property {(chat: object) => boolean} isPrimaryChannelChat
      * @property {(chat: object) => string|null} communityIdOfChat
@@ -116,6 +117,7 @@ function renderRailShortcuts() {
             syncRailFade,
             onUnreadDms: syncChatTabBadge,
             railDrop,
+            refreshRailJoinOrder,
             openFolderMenu,
             openMessagesMenu,
             closeMenu: hideContextMenu,
@@ -133,11 +135,27 @@ function renderRailShortcuts() {
  */
 async function loadRailLayout() {
     VectorSvelte.setRailLayout(null);
+    VectorSvelte.setRailJoinOrder([]);
+    _railJoinOrderAt = 0;
+    refreshRailJoinOrder();
     try {
         VectorSvelte.setRailLayout(await invoke('get_rail_layout'));
     } catch (e) {
         console.warn('[Rail] layout load failed:', e);
     }
+}
+
+/** The held communities, newest joined first. Re-read when the rail meets one it doesn't place. */
+let _railJoinOrderAsk = null;
+let _railJoinOrderAt = 0;
+function refreshRailJoinOrder() {
+    // A chat whose community isn't held (yet) would otherwise ask on every repaint.
+    if (_railJoinOrderAsk || VectorSvelte.now() - _railJoinOrderAt < 5000) return;
+    _railJoinOrderAt = VectorSvelte.now();
+    _railJoinOrderAsk = invoke('get_community_join_order')
+        .then((ids) => VectorSvelte.setRailJoinOrder(ids))
+        .catch((e) => console.warn('[Rail] join order load failed:', e))
+        .finally(() => { _railJoinOrderAsk = null; });
 }
 
 /**

@@ -1,5 +1,5 @@
 <script>
-    import { bindRailEl, railEls, railLayout, railFolderOpen } from '../lib/rail.svelte.js';
+    import { bindRailEl, railEls, railLayout, railFolderOpen, railJoinOrder } from '../lib/rail.svelte.js';
     import { startMenuState } from '../lib/startmenu.svelte.js';
     const start = startMenuState();
     import { tiling } from '../lib/tiling.js';
@@ -11,7 +11,7 @@
     // order (listVersion) and from each candidate chat's own signal, so a reply in one
     // chat re-derives the DM selection (a cheap scan) and patches one item; a rename
     // or avatar touches one item; nothing rebuilds the strip.
-    import { tick } from 'svelte';
+    import { tick, untrack } from 'svelte';
     import { listVersion, chatVersion, markedChatId, paneState } from '../lib/signals.svelte.js';
     import { shellState } from '../lib/shell.svelte.js';
     import RailItem from './RailItem.svelte';
@@ -76,8 +76,8 @@
 
     // ── arrangement ──
     // The stored layout painted over the live communities. A key this device cannot
-    // resolve is skipped, never dropped; a community the layout has never seen joins
-    // at the end, in the order the list found it.
+    // resolve is skipped, never dropped. A community the layout has never placed goes on
+    // top, newest joined first: the rail follows joins and drags, never activity.
     const cid = (chat) => chat.metadata?.custom_fields?.community_id;
     const rows = $derived.by(() => {
         const byKey = new Map();
@@ -100,11 +100,12 @@
             }
             if (members.length) out.push({ type: 'folder', id: node.id, name: node.name || '', hue: node.hue ?? null, members });
         }
-        for (const chat of groups.spaces) {
-            const key = cid(chat);
-            if (!seen.has(key)) { seen.add(key); out.push({ type: 'item', key, chat }); }
-        }
-        return out;
+        const rank = new Map(railJoinOrder().map((key, i) => [key, i]));
+        const unplaced = groups.spaces.filter((chat) => !seen.has(cid(chat)));
+        // Not in the join order yet: joined since it was read, so newest of all.
+        if (unplaced.some((chat) => !rank.has(cid(chat)))) untrack(() => h.refreshRailJoinOrder());
+        unplaced.sort((a, b) => (rank.get(cid(a)) ?? -1) - (rank.get(cid(b)) ?? -1) || (b.created_at || 0) - (a.created_at || 0));
+        return [...unplaced.map((chat) => ({ type: 'item', key: cid(chat), chat })), ...out];
     });
 
     // ── drag to rearrange ──

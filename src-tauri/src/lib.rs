@@ -1269,6 +1269,7 @@ pub fn run() {
             commands::pinned::unpin_chat,
             commands::pinned::move_pinned_chat,
             commands::rail::get_rail_layout,
+            commands::rail::get_community_join_order,
             commands::rail::rail_apply_drop,
             commands::rail::rail_rename_folder,
             commands::rail::rail_set_folder_hue,

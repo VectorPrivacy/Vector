@@ -13,6 +13,18 @@ pub async fn get_rail_layout() -> Result<RailLayout, String> {
     vector_core::db::scoped(async move { Ok(synced_prefs::load_rail()) }).await
 }
 
+/// Every community this account holds, newest joined first: where the rail puts what its
+/// arrangement has never placed. A join is stamped once and synced with the community list,
+/// so every device agrees.
+#[tauri::command]
+pub async fn get_community_join_order() -> Result<Vec<String>, String> {
+    vector_core::db::scoped(async move {
+        let ids = vector_core::db::community::list_community_ids()?;
+        Ok(ids.iter().rev().map(|id| vector_core::simd::hex::bytes_to_hex_32(&id.0)).collect())
+    })
+    .await
+}
+
 /// A drag let go. `live` is every community on the rail in its painted order:
 /// the drop lands on what the user SAW, and a rail that was never arranged
 /// stores nothing until now, so the first drag is what fixes its order.

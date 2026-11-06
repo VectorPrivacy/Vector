@@ -14,6 +14,11 @@ let layout = $state.raw({ v: 1, nodes: [] });
 export function railLayout() { return layout; }
 export function setRailLayout(next) { layout = next && Array.isArray(next.nodes) ? next : { v: 1, nodes: [] }; }
 
+// Community ids, newest joined first: the order of what the arrangement has never placed.
+let joinOrder = $state.raw([]);
+export function railJoinOrder() { return joinOrder; }
+export function setRailJoinOrder(ids) { joinOrder = Array.isArray(ids) ? ids : []; }
+
 // Which folders are open is the screen's business, not the account's: two devices
 // would otherwise fold each other's rails shut.
 const OPEN_KEY = 'vector_rail_open_folders';
