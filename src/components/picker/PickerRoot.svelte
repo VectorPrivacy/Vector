@@ -12,6 +12,7 @@
 <div class="emoji-picker" tabindex="-1" use:rootEl
      onclickcapture={(e) => h?.rootClickCapture(e)} onclick={(e) => h?.rootClick(e)}
      class:visible={r.visible}
+     class:asleep={r.asleep}
      class:emoji-picker-status-mode={r.statusMode}
      class:emoji-picker-no-gifs={r.noGifs}
      class:emoji-picker-no-kaomoji={r.noKaomoji}

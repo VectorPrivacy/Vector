@@ -41,7 +41,11 @@ export function setPickerNamingError(message) { if (panel.naming) panel.naming.e
 // close in the app writes here; PickerRoot paints it. `teleporting` suppresses the
 // transform transition for one frame so an anchor swap while closed does not slide.
 import { flushSync } from 'svelte';
-const root = $state({ visible: false, statusMode: false, noGifs: false, noKaomoji: false, messageType: false, bottom: '', teleporting: false });
+const root = $state({ visible: false, asleep: true, statusMode: false, noGifs: false, noKaomoji: false, messageType: false, bottom: '', teleporting: false });
+// Closed past its fade, the panel's subtree (most of the page's elements once its grids are
+// built) sits out of style and layout, so a style change anywhere doesn't re-match it.
+const SLEEP_AFTER_MS = 320;
+let sleepTimer = 0;
 const rootEls = { root: null };
 let handlers = $state.raw(null);   // the app's bag for PickerPanel
 const visibilityListeners = new Set();
@@ -55,6 +59,9 @@ export function onPickerVisibility(fn) { visibilityListeners.add(fn); return () 
 export function pickerVisible() { return root.visible; }
 export function setPickerVisible(on) {
     if (root.visible === !!on) return;
+    clearTimeout(sleepTimer);
+    if (on) root.asleep = false;
+    else sleepTimer = setTimeout(() => { if (!root.visible) root.asleep = true; }, SLEEP_AFTER_MS);
     root.visible = !!on;
     flushSync();
     for (const fn of visibilityListeners) fn(root.visible);

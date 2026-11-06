@@ -6337,6 +6337,10 @@ textarea#chat-input::placeholder {
   display: flex;
 }
 
+.emoji-picker.asleep {
+  content-visibility: hidden;
+}
+
 .emoji-picker.visible {
   transform: translateX(-50%) translateY(0);
   pointer-events: auto;
