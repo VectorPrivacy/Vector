@@ -861,7 +861,24 @@ impl VectorCore {
                 return Err(DownloadError::Cancelled);
             }
             let mut stream = resp.bytes_stream();
-            while let Some(chunk) = stream.next().await {
+            loop {
+                // Every declared byte is here: done, without waiting on an end of body WebKit can hold back.
+                if total.is_some_and(|t| encrypted.len() as u64 >= t) {
+                    break;
+                }
+                // A browser's fetch has no read timeout: a body that goes silent fails over here instead.
+                #[cfg(target_arch = "wasm32")]
+                let next = match crate::rt::time::timeout(crate::transport::budget(crate::transport::Op::HttpRead, crate::net::transfer_stall()), stream.next()).await {
+                    Ok(next) => next,
+                    Err(_) => {
+                        last_err = "read body: stalled".to_string();
+                        all_answered = false;
+                        next_source!();
+                    }
+                };
+                #[cfg(not(target_arch = "wasm32"))]
+                let next = stream.next().await;
+                let Some(chunk) = next else { break };
                 let chunk = match chunk {
                     Ok(c) => c,
                     Err(e) => {
