@@ -20,16 +20,26 @@ export function anchorScroll(first = null) {
             if (el.scrollTop + el.clientHeight >= el.scrollHeight - 2) current = blocks[blocks.length - 1];
             s.active = current.dataset.anchor;
         },
-        jump(id) {
+        /** To a block, or to the element `inner` selects inside it when it has one. */
+        jump(id, inner = '') {
             const el = s.el;
             const block = el?.querySelector(`[data-anchor="${id}"]`);
             if (!block) return;
+            const target = (inner && block.querySelector(inner)) || block;
             s.active = id;
             // The smooth scroll passes every block between here and there; the spy would
             // strobe the timeline through each of them.
             mutedUntil = performance.now() + 700;
-            const offset = block.getBoundingClientRect().top - el.getBoundingClientRect().top;
-            el.scrollTo({ top: el.scrollTop + offset - 28, behavior: 'smooth' });
+            const aim = () => {
+                const offset = target.getBoundingClientRect().top - el.getBoundingClientRect().top - 28;
+                if (Math.abs(offset) > 2) el.scrollTo({ top: el.scrollTop + offset, behavior: 'smooth' });
+            };
+            aim();
+            // A section that loads as it's shown can grow after the scroll was clamped short;
+            // aim once more when it settles, unless the reader has taken over.
+            const ac = new AbortController();
+            for (const type of ['wheel', 'touchstart', 'keydown']) el.addEventListener(type, () => ac.abort(), { signal: ac.signal, passive: true });
+            setTimeout(() => { if (!ac.signal.aborted) { mutedUntil = performance.now() + 700; aim(); } ac.abort(); }, 600);
         },
         top(id) {
             if (s.el) s.el.scrollTop = 0;

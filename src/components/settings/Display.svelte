@@ -1,13 +1,7 @@
-<script>
-    // The Display section: toggle rows derived from display state. Each change
-    // hands the new value to the app, which persists and applies it.
-    import { displayState } from '../lib/settings.svelte.js';
-    import { shellState } from '../lib/shell.svelte.js';
-    // grouped: a faint label above each run of rows that share a group.
-    let { h, grouped = false } = $props();   // h: DisplayHelpers (js/settings.js)
+<script module>
+    /** A label's id in a link to it (`settings/appearance/display/composer`). */
+    export const groupId = (label) => label.toLowerCase().replace(/[^a-z0-9]+/g, '-');
 
-    const d = displayState();
-    const shell = shellState();
     // `slim` / `wide`: only that layout has the row's subject.
     const ROWS = [
         { key: 'startMenu', id: 'start-menu-toggle', label: 'Main Menu', group: 'Navigation', wide: true },
@@ -20,14 +14,38 @@
         { key: 'sendOnEnter', id: 'send-on-enter-toggle', label: 'Send on Enter', group: 'Composer' },
         { key: 'floatingPlayer', id: 'floating-player-toggle', label: 'Floating Player', group: 'Media' },
     ];
-    const rows = $derived(ROWS.filter((r) => (shell.ws ? !r.slim : !r.wide)));
+    const rowsFor = (ws) => ROWS.filter((r) => (ws ? !r.slim : !r.wide));
+
+    /** The group labels this layout shows, in order: the lead's (the theme) first. */
+    export const displayGroups = (ws) => ['Appearance', ...new Set(rowsFor(ws).map((r) => r.group))];
+
+    /** Each row this layout shows as `[label, group label]`, the lead's included. */
+    export const displayRows = (ws) => [['Theme', 'Appearance'], ...rowsFor(ws).map((r) => [r.label, r.group])];
+</script>
+
+<script>
+    // The Display section: toggle rows derived from display state. Each change
+    // hands the new value to the app, which persists and applies it.
+    import { displayState } from '../lib/settings.svelte.js';
+    import { shellState } from '../lib/shell.svelte.js';
+    // grouped: a label above each run of rows that share a group. lead: the Appearance
+    // group's rows (the theme picker), owned by the screen.
+    let { h, grouped = false, lead = null } = $props();   // h: DisplayHelpers (js/settings.js)
+
+    const d = displayState();
+    const shell = shellState();
+    const rows = $derived(rowsFor(shell.ws));
     function info(key) {
         return (e) => { e.preventDefault(); e.stopPropagation(); h.explain(key); };
     }
 </script>
 
+{#if lead}
+    {#if grouped}<p class="st-group section-label" data-group="appearance">Appearance</p>{/if}
+    {@render lead()}
+{/if}
 {#each rows as r, i (r.key)}
-    {#if grouped && r.group !== rows[i - 1]?.group}<p class="st-group">{r.group}</p>{/if}
+    {#if grouped && r.group !== rows[i - 1]?.group}<p class="st-group section-label" data-group={groupId(r.group)}>{r.group}</p>{/if}
     <div class="form-group">
         <label class="toggle-container">
             <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->

@@ -4,24 +4,49 @@
     // one expanded. A search opens every section and keeps only the anchors it matches.
     // Nothing unmounts as the query changes: rows fold shut and open again, so typing
     // reads as motion rather than rows blinking in and out.
-    // sections: [{ id, label, icon?, danger?, anchors: [{ id, label, icon, keys? }] }]
+    // sections: [{ id, label, icon?, danger?, anchors: [{ id, label, keys?, fresh? }] }]
+    // An anchor's `fresh` puts a NEW pill on it, and on its section while that is shut.
     let { sections, section, anchor, query, onquery, ongo, onanchor, head, footer } = $props();
 
     const q = $derived(query.trim().toLowerCase());
     const nav = $derived(sections.map((sec) => {
         const hits = sec.anchors.map((a) => !q || `${sec.label} ${a.label} ${a.keys || ''}`.toLowerCase().includes(q));
-        // The timeline draws from the first shown dot to the last, whatever is folded between.
-        const first = hits.indexOf(true);
-        const last = hits.lastIndexOf(true);
+        const open = q ? hits.includes(true) : sec.id === section;
         return {
             ...sec,
-            shown: first !== -1,
-            open: q ? first !== -1 : sec.id === section,
-            anchors: sec.anchors.map((a, i) => ({ ...a, shown: hits[i], first: i === first, last: i === last })),
+            shown: hits.includes(true),
+            open,
+            fresh: !open && sec.anchors.some((a) => a.fresh),
+            anchors: sec.anchors.map((a, i) => ({ ...a, shown: hits[i] })),
         };
     }));
     const empty = $derived(!nav.some((sec) => sec.shown));
     let searchEl = null;
+
+    // The open section's marker is one element that slides to the anchor being read, so
+    // it trails the scroll rather than jumping row to row.
+    const rows = {};
+    function row(node, key) {
+        rows[key] = node;
+        return { destroy() { if (rows[key] === node) delete rows[key]; } };
+    }
+    let markY = $state(null);
+    $effect(() => {
+        const key = `${section}:${anchor}`;
+        const measure = () => {
+            const el = !q && rows[key];
+            markY = el ? el.offsetTop + el.offsetHeight / 2 : null;
+        };
+        measure();
+        // Rows a search folded shut take their fold's time to open again.
+        const t = setTimeout(measure, 300);
+        return () => clearTimeout(t);
+    });
+    // Placed where it belongs when its section opens; only later moves are animated.
+    function settle(node) {
+        node.style.transition = 'none';
+        requestAnimationFrame(() => requestAnimationFrame(() => { node.style.transition = ''; }));
+    }
 </script>
 
 <aside class="cs-nav">
@@ -46,16 +71,19 @@
                             tabindex={sec.shown ? 0 : -1} onclick={() => ongo(sec.id)}>
                         {#if sec.icon}<span class="cs-section-icon"><span class="icon icon-{sec.icon}"></span></span>{/if}
                         <span class="cutoff">{sec.label}</span>
+                        {#if sec.fresh}<span class="badge-new">NEW</span>{/if}
                     </button>
                     <div class="cs-anchors-wrap" class:open={sec.open}>
                         <div class="cs-anchors">
+                            {#if sec.id === section && markY !== null}
+                                <span class="cs-anchor-marker" style:transform="translateY({markY}px)" use:settle></span>
+                            {/if}
                             {#each sec.anchors as a (a.id)}
                                 <button class="cs-anchor" class:active={sec.id === section && anchor === a.id}
-                                        class:shut={!a.shown} class:first={a.first} class:last={a.last}
+                                        class:shut={!a.shown} use:row={`${sec.id}:${a.id}`}
                                         tabindex={sec.open && a.shown ? 0 : -1} onclick={() => onanchor(sec.id, a.id)}>
-                                    <span class="cs-anchor-dot"></span>
-                                    <span class="cs-anchor-icon"><span class="icon icon-{a.icon}"></span></span>
                                     <span class="cs-anchor-label cutoff">{a.label}</span>
+                                    {#if a.fresh}<span class="badge-new">NEW</span>{/if}
                                 </button>
                             {/each}
                         </div>

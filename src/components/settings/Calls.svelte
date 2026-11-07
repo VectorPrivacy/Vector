@@ -1,3 +1,8 @@
+<script module>
+    /** The group labels, in order, as a link names them. */
+    export const callsGroups = ['Microphone', 'Connection'];
+</script>
+
 <script>
     // The Calls section: the devices and their volumes, a microphone test that shows
     // what the other side would hear, then the voice processing switches. Every change
@@ -26,12 +31,11 @@
         io.observe(node);
         return { destroy: () => io.disconnect() };
     }
-    // '' is the system default: it follows the OS rather than naming a device.
-    const byDefault = (name) => name ? `System Default - ${name}` : 'System Default';
-    const inputs = $derived([{ value: '', label: byDefault(dev.defaultInput) },
-        ...dev.inputs.map((name) => ({ value: name, label: name }))]);
-    const outputs = $derived([{ value: '', label: byDefault(dev.defaultOutput) },
-        ...dev.outputs.map((name) => ({ value: name, label: name }))]);
+    // '' is the system default: it follows the OS rather than naming a device. The
+    // device's name leads, so a narrow field clips the tag's side, never the name.
+    const byDefault = (name) => ({ value: '', label: name || 'System Default', tag: name ? 'Default' : null });
+    const inputs = $derived([byDefault(dev.defaultInput), ...dev.inputs.map((name) => ({ value: name, label: name }))]);
+    const outputs = $derived([byDefault(dev.defaultOutput), ...dev.outputs.map((name) => ({ value: name, label: name }))]);
     const pick = (kind) => (v) => h.setDevice(kind, v === '' ? null : v);
 
     const SWITCHES = [
@@ -99,7 +103,7 @@
     <VoiceMeter level={inCall ? c.levels.mic : a.micLevel} active={inCall || a.micTest} />
 </div>
 
-<p class="st-group">Microphone</p>
+<p class="st-group section-label" data-group="microphone">Microphone</p>
 {#each SWITCHES as s (s.key)}
     <div class="form-group">
         <label class="toggle-container">
@@ -110,7 +114,7 @@
     </div>
 {/each}
 
-<p class="st-group">Connection</p>
+<p class="st-group section-label" data-group="connection">Connection</p>
 <div class="form-group">
     <label class="toggle-container">
         <span><InfoIcon onclick={() => h.explain('direct')} />Direct Connection</span>

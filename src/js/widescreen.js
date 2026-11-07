@@ -210,6 +210,12 @@ function wsUpdate() {
         // of room, not the user closing anything, and widening re-derives the pane
         // from it through wsSyncOpenChat.
         if (VectorSvelte.paneShown('groupOverview')) wsCloseDetails();
+        // Widescreen lays a tab (Settings, a profile, Invites) over a still-open chat;
+        // narrow shows every visible pane, so the tab the user is on keeps the screen.
+        // The chat stays open underneath, and widening brings it back beside the list.
+        if (VectorSvelte.paneShown('chat') && ['settings', 'profile', 'invites'].some(p => VectorSvelte.paneShown(p))) {
+            VectorSvelte.showPane('chat', false);
+        }
         // A roster opened narrow hid every other pane as a whole screen, and widening
         // may have closed it (no chat beside it). Widescreen forced the panes visible
         // regardless; narrow honours their inline none, so land where the user was.

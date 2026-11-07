@@ -203,6 +203,8 @@ function chatlistSnapshot() {
  * @property {(communityId: string, channel: object) => void} openChannel   a voice channel's also joins its call
  * @property {(communityId: string, channel: object) => void} openChannelChat   a voice channel's chat, without joining
  * @property {(communityId: string, channel: object, x: number, y: number) => void} openChannelMenu
+ * @property {(communityId: string) => void} inviteToCommunity
+ * @property {(communityId: string, channel: object) => void} editChannel
  * @property {(vm: object) => void} rowClick
  * @property {(communityId: string, isPrivate: boolean, categoryId?: string|null) => void} createChannel
  * @property {(communityId: string) => object[]} getCategories   [{ id, name }] in sidebar order
@@ -271,6 +273,11 @@ function chatlistHelpers() {
         },
         openChannelChat: (communityId, channel) => { openCommunityChannel(communityId, channel); ccSetDrawer(false); },
         openChannelMenu,
+        inviteToCommunity: (communityId) => {
+            const primary = arrChats.find(c => communityIdOfChat(c) === communityId && isPrimaryChannelChat(c));
+            if (primary) openCommunityInvitePanel(primary);
+        },
+        editChannel: openChannelEditorFor,
         // A tap that dismissed an open context menu must only close it, not also open the
         // chat behind it; the trailing tap a long-press synthesises is swallowed the same way.
         // An invite row and a community still joining (locked until it is readable) stay put.
@@ -332,7 +339,6 @@ function mountChatlist() {
      * @property {(communityId: string) => object|null} primaryChat
      * @property {(path: string) => string} convertFileSrc
      * @property {(el: Element) => void} twemojify
-     * @property {(communityId: string) => string} communityMemberSubtext
      * @property {(communityId: string) => object|null} raidAlert
      * @property {(communityId: string) => void} refreshMemberCount
      * @property {(communityId: string) => void} refreshRaidAlert
@@ -344,7 +350,6 @@ function mountChatlist() {
                     || arrChats.find(c => communityIdOfChat(c) === id),
                 convertFileSrc,
                 twemojify,
-                communityMemberSubtext,
                 raidAlert: (id) => { const v = communityRaidAlerts.get(id); return v && (v.detected || v.suspects > 0) ? v : null; },
                 refreshMemberCount: (id) => refreshCommunityMemberCount(id),
                 refreshRaidAlert: (id) => refreshCommunityRaidAlert(id),

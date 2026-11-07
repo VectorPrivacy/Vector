@@ -1,7 +1,7 @@
 //! Deep links: the places a link opens in Vector, in the one grammar every client parses.
 //!
 //! A place is a path: `profile/<npub>`, `emojis/pack/<naddr>`, `dm/<npub>`,
-//! `settings[/<category>[/<section>]]`, `nexus[/<app>]` or `requests`. It rides `vector://<path>`,
+//! `settings[/<category>[/<section>[/<group>]]]`, `nexus[/<app>]` or `requests`. It rides `vector://<path>`,
 //! Vector Web's own address `https://web.vectorapp.io/#<path>`, and a Vector link's fragment
 //! (`https://vectorapp.io/go#<path>`). The website's own paths carry only the places it has a
 //! page for (profiles, emoji packs, DMs), so the rest of its namespace stays the website's.
@@ -80,7 +80,7 @@ fn parse_path(path: &str) -> Option<DeepLinkAction> {
             let naddr = strip_html_suffix(naddr);
             valid_naddr(naddr).then(|| action("emoji_pack", naddr))
         }
-        ["settings", rest @ ..] => (rest.len() <= 2 && rest.iter().all(|s| settings_id(s))).then(|| action("settings", rest.join("/"))),
+        ["settings", rest @ ..] => (rest.len() <= 3 && rest.iter().all(|s| settings_id(s))).then(|| action("settings", rest.join("/"))),
         ["nexus"] => Some(action("nexus", "")),
         ["nexus", app] => crate::webxdc::is_safe_app_id(app).then(|| action("nexus", *app)),
         ["requests"] => Some(action("requests", "")),
@@ -98,7 +98,7 @@ fn valid_naddr(naddr: &str) -> bool {
     naddr.starts_with("naddr1") && naddr.len() >= 30
 }
 
-/// A Settings category or section id; an unknown one opens Settings where it would anyway.
+/// A Settings category, section or group id; an unknown one opens Settings where it would anyway.
 fn settings_id(s: &str) -> bool {
     s.len() <= 32 && s.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
 }
@@ -144,6 +144,7 @@ mod tests {
             ("settings".to_string(), "settings", String::new()),
             ("settings/network".to_string(), "settings", "network".to_string()),
             ("settings/network/relays".to_string(), "settings", "network/relays".to_string()),
+            ("settings/appearance/display/composer".to_string(), "settings", "appearance/display/composer".to_string()),
             ("nexus".to_string(), "nexus", String::new()),
             ("nexus/chess.v2_beta".to_string(), "nexus", "chess.v2_beta".to_string()),
             ("requests".to_string(), "requests", String::new()),
@@ -173,7 +174,7 @@ mod tests {
             "vector://profile/notanpub".to_string(),
             format!("vector://dm/{}/extra", npub()),
             "vector://emojis/pack/naddr1short".to_string(),
-            "vector://settings/network/relays/more".to_string(),
+            "vector://settings/network/relays/more/deeper".to_string(),
             "vector://settings/Network".to_string(),
             "vector://settings/../danger".to_string(),
             "vector://nexus/../../etc".to_string(),

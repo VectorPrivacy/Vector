@@ -159,7 +159,7 @@ export {
 // Vector's clock: the relays' agreed time, or the device's.
 export { setClock, now, nowDate } from './lib/clock.svelte.js';
 // Settings: every section's state and the handler registries the sections read.
-export { setTorMulti, setTorCircuits, setTorEngine, reloadBlockedUsers, setStorageDistribution, setStorageLoading, setNotifSettings, setNotifPush, setSecurity, setSigner, setSignerDot, setDisplaySettings, setUpdates, setNetwork, voiceState, setVoice, setVoiceDownloadProgress, settingsScreen, setSettingsScreen, requestSettingsScroll, setSettingsHandlers } from './lib/settings.svelte.js';
+export { setTorMulti, setTorCircuits, setTorEngine, reloadBlockedUsers, setStorageDistribution, setStorageLoading, setNotifSettings, setNotifPush, setSecurity, setSigner, setSignerDot, setDisplaySettings, setUpdates, setNetwork, voiceState, setVoice, setVoiceDownloadProgress, settingsScreen, setSettingsScreen, requestSettingsScroll, settingsPath, setSettingsHandlers } from './lib/settings.svelte.js';
 // The composer's state: mode (reply/edit), draft emptiness, lock, command bar.
 export {
     startReply,

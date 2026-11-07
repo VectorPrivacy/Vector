@@ -789,6 +789,10 @@ body.ws.ws-rail-collapsed #ws-rail-account .ws-account-caret {
    as --ws-main-left above. */
 body:is(.ws, .cc) {
   --ws-pane-gutter: 12px;
+  /* The channel pane's density, in one place. */
+  --channel-row-height: 32px;
+  --channel-row-gap: 2px;
+  --channel-font-size: 15px;
 }
 
 /* The community's identity heads its own pane, hosted above the scroller so the
@@ -830,11 +834,9 @@ body:is(.ws, .cc) .chatlist-community-head-avatar {
    of sizing itself to some intrinsic guess. */
 body:is(.ws, .cc) .chatlist-community-head-meta {
   display: flex;
-  flex-direction: column;
-  justify-content: center;
+  align-items: center;
   flex: 1;
   min-width: 0;
-  gap: 2px;
 }
 
 body:is(.ws, .cc) .chatlist-community-head-name {
@@ -853,34 +855,6 @@ body:is(.ws, .cc) .chatlist-community-head-name .emoji {
   height: 15px;
   vertical-align: -3px;
   margin: 0;
-}
-
-body:is(.ws, .cc) .chatlist-community-head-members {
-  display: flex;
-  align-items: center;
-  gap: 2.5px;
-  font-size: 12px;
-  line-height: 14px;
-  color: rgba(255, 255, 255, 0.42);
-  white-space: nowrap;
-  overflow: hidden;
-}
-
-body:is(.ws, .cc) .chatlist-community-head-members > span:last-child {
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-body:is(.ws, .cc) .chatlist-community-head-members-icon {
-  position: relative;
-  flex-shrink: 0;
-  width: 13px;
-  height: 13px;
-  /* `.icon` ships `margin: auto` to centre itself inside its absolute inset.
-     As a flex item that instead absorbs the free space and floats the glyph to
-     the middle of the row, so it has to be zeroed here. */
-  margin: 0;
-  background-color: rgba(255, 255, 255, 0.42);
 }
 
 /* Says the header is a menu, not a label. `position: relative` is load-bearing:
@@ -944,13 +918,34 @@ body:is(.ws, .cc) .chatlist-channels-pane::before {
 /* Floating rows, like the rail's: an inset pill rather than a band that runs
    wall to wall, so the selection reads as an object you picked. */
 body:is(.ws, .cc) .chatlist-channels-pane .chatlist-channel {
-  height: 34px;
-  margin: 0 8px;
+  height: var(--channel-row-height);
+  margin: 0 8px var(--channel-row-gap);
   padding: 0 8px;
   gap: 8px;
   border-radius: 4px;
-  font-size: 15px;
+  font-size: var(--channel-font-size);
 }
+
+/* A private channel's lock sits between its hash and its name, in the hash's colour. */
+body:is(.ws, .cc) .chatlist-channels-pane .chatlist-channel-lock {
+  position: relative;
+  flex-shrink: 0;
+  width: 11px;
+  height: 11px;
+  margin-left: -4px;
+  opacity: 0.55;
+}
+body:is(.ws, .cc) .chatlist-channels-pane .chatlist-channel-lock .icon {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  background-color: currentColor;
+}
+
+/* Invite and Edit: on the row being pointed at or read, absent otherwise. */
+body:is(.ws, .cc) .chatlist-channels-pane .chatlist-channel-hover { display: none; }
+body:is(.ws, .cc) .chatlist-channels-pane .chatlist-channel:is(:hover, .active) .chatlist-channel-hover { display: flex; }
+body:is(.ws, .cc) .chatlist-channels-pane .chatlist-channel.active .chatlist-channel-action { opacity: 0.6; }
 
 /* ── Sections ──────────────────────────────────────────────────────────── */
 
@@ -986,9 +981,6 @@ body:is(.ws, .cc) .chatlist-channel-section-label {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-family: 'Rubik', Inter, Avenir, Helvetica, Arial, sans-serif;
-  font-size: 15px;
-  color: rgba(255, 255, 255, 0.38);
   transition: color 0.12s ease;
 }
 

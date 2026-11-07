@@ -72,7 +72,7 @@
         {:else if current?.downloaded}
             <div class="alert alert-success">Vector AI is ready</div>
         {:else if current}
-            <div class="alert alert-warning">AI model is not downloaded</div>
+            <div class="alert alert-warning">Model not downloaded</div>
         {/if}
     </div>
 </div>

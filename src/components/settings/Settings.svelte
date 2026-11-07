@@ -6,7 +6,7 @@
     // whose owners register later (updates, network, voice) render once their handler bag exists.
     import { tick, untrack } from 'svelte';
     import { tiling } from '../lib/tiling.js';
-    import { settingsScreen, settingsHandlers, updatesState } from '../lib/settings.svelte.js';
+    import { settingsScreen, settingsHandlers, updatesState, settingsPath } from '../lib/settings.svelte.js';
     import { transportState, viewedKind, routingOffered } from '../lib/transport.svelte.js';
     import { advancedState } from '../lib/advanced.svelte.js';
     import { playersState } from '../lib/players.svelte.js';
@@ -18,7 +18,7 @@
     import TorOptions from './TorOptions.svelte';
     import I2pOptions from './I2pOptions.svelte';
     import BlockedUsers from './BlockedUsers.svelte';
-    import Display from './Display.svelte';
+    import Display, { displayGroups, displayRows, groupId } from './Display.svelte';
     import ClockCard from './ClockCard.svelte';
     import Notifications from './Notifications.svelte';
     import NetworkList from './network/NetworkList.svelte';
@@ -26,7 +26,7 @@
     import Updates from './Updates.svelte';
     import SecurityCard from './SecurityCard.svelte';
     import Voice from './Voice.svelte';
-    import Calls from './Calls.svelte';
+    import Calls, { callsGroups } from './Calls.svelte';
     import SectionNav from './SectionNav.svelte';
     import Select from '../ui/Select.svelte';
 
@@ -38,7 +38,7 @@
     //    copyLink(path), placeMenu(node, path)
 
     const sc = settingsScreen();
-    // Themes whose Dangerzone face glitches green rather than red.
+    // Themes whose Danger Zone face glitches green rather than red.
     const GREEN_GLITCH = new Set(['vector', 'cyberpunk']);
     const hs = settingsHandlers();
     const net = transportState();
@@ -73,15 +73,14 @@
         {
             id: 'appearance', label: 'Appearance', icon: 'palette',
             anchors: [
-                { id: 'theme', label: 'Theme', icon: 'palette', keys: 'theme colour color vector satoshi chatstr cosmic purple neon xmr' },
-                { id: 'display', label: 'Display', icon: 'image', keys: `display image types background wallpaper rich composer emoticon suggestions time suggestions countdown autocorrect send on enter return key floating player${shell.ws ? ' main menu navbar navigation pins sidebar tabs' : ' hide community rail sidebar pull tab chat list filters'}` },
+                { id: 'display', label: 'Display', icon: 'image', groups: displayGroups(shell.ws), rows: displayRows(shell.ws), keys: `theme colour color vector satoshi chatstr cosmic purple neon xmr display image types background wallpaper rich composer emoticon suggestions time suggestions countdown autocorrect send on enter return key floating player${shell.ws ? ' main menu navbar navigation pins sidebar tabs' : ' hide community rail sidebar pull tab chat list filters'}` },
             ],
         },
         {
             id: 'audio', label: 'Audio', icon: 'volume-max',
             anchors: [
                 ...(sc.platform.voice && hs.voice ? [{ id: 'voice', label: 'Voice', icon: 'mic-on', keys: 'voice whisper transcribe transcription translate model download' }] : []),
-                ...(h.calls ? [{ id: 'calls', label: 'Calls', icon: 'volume-max', keys: 'calls microphone speaker automatic gain echo cancellation noise suppression test mic device' }] : []),
+                ...(h.calls ? [{ id: 'calls', label: 'Calls', icon: 'volume-max', since: '0.5', groups: callsGroups, keys: 'calls microphone speaker automatic gain echo cancellation noise suppression test mic device' }] : []),
             ],
         },
         {
@@ -109,8 +108,8 @@
             id: 'privacy', label: 'Privacy', icon: 'eye-off',
             anchors: [
                 { id: 'privacy', label: 'Privacy', icon: 'eye-off', keys: 'web previews video players youtube embeds url tracking typing indicators proxy media' },
-                { id: 'streamer', label: 'Streamer Mode', icon: 'video', keys: 'streamer stream streaming live obs twitch screen share hide names pictures notifications' },
-                ...(routingOffered() ? [{ id: 'routing', label: 'Routing', icon: 'shield-filled', keys: 'routing network tor i2p onion standard clearnet bridges obfs4 circuit outproxy sam router anonymity' }] : []),
+                { id: 'streamer', label: 'Streamer Mode', icon: 'video', since: '0.5', keys: 'streamer stream streaming live obs twitch screen share hide names pictures notifications' },
+                ...(routingOffered() ? [{ id: 'routing', label: 'Routing', icon: 'shield-filled', since: '0.5', keys: 'routing network tor i2p onion standard clearnet bridges obfs4 circuit outproxy sam router anonymity' }] : []),
                 { id: 'blocked', label: 'Blocked Users', icon: 'x-user', keys: 'blocked users block unblock' },
             ],
         },
@@ -127,7 +126,7 @@
             ],
         }] : []),
         {
-            id: 'danger', label: 'Dangerzone', icon: 'warning', danger: true,
+            id: 'danger', label: 'Danger Zone', icon: 'warning', danger: true,
             anchors: [
                 { id: 'advanced', label: 'Advanced', icon: 'file-code', keys: 'advanced mode developer bot ids copy id identifier' },
                 { id: 'logs', label: 'Logs', icon: 'copy', keys: 'copy logs crash debug' },
@@ -139,7 +138,31 @@
     let catId = $state('appearance');
     let query = $state('');
     const category = $derived(CATEGORIES.find((c) => c.id === catId) || CATEGORIES[0]);
-    const anchors = anchorScroll('theme');
+    const anchors = anchorScroll('display');
+
+    // NEW on a setting through the release line it arrived in (`since`, major.minor), until
+    // its block has been on screen. Seen ids are kept per install. Past three the pill stops
+    // meaning "look here", so a release flags its best three at most.
+    const MAX_NEW = 3;
+    const SEEN_KEY = 'settings_seen';
+    let seen = $state(readSeen());
+    function readSeen() {
+        try { return new Set(JSON.parse(localStorage.getItem(SEEN_KEY) || '[]')); } catch { return new Set(); }
+    }
+    const line = $derived(/(\d+\.\d+)/.exec(updates.version || '')?.[1] || '');
+    const freshIds = $derived(new Set(CATEGORIES.flatMap((c) => c.anchors)
+        .filter((a) => line && a.since === line && !seen.has(a.id)).slice(0, MAX_NEW).map((a) => a.id)));
+    const navSections = $derived(CATEGORIES.map((c) => ({
+        ...c,
+        anchors: c.anchors.map((a) => ({ ...a, fresh: freshIds.has(a.id) })),
+    })));
+    // The block being read counts as visited.
+    $effect(() => {
+        const id = anchors.active;
+        if (!shell.ws || !id || seen.has(id) || !category.anchors.some((a) => a.id === id && a.since)) return;
+        seen = new Set([...seen, id]);
+        try { localStorage.setItem(SEEN_KEY, JSON.stringify([...seen])); } catch { /* shows again next launch */ }
+    });
 
     // The section a nav click or a link brought into view; a category alone names none.
     let section = $state('');
@@ -152,13 +175,13 @@
         anchors.top(category.anchors[0]?.id);
     }
 
-    async function goAnchor(catIdTo, anchorId) {
+    async function goAnchor(catIdTo, anchorId, group = '') {
         section = anchorId;
         if (catId !== catIdTo) {
             catId = catIdTo;
             await tick();
         }
-        anchors.jump(anchorId);
+        anchors.jump(anchorId, group && groupSelector(group));
     }
 
     // ── phone: the categories as an accordion ──
@@ -266,35 +289,39 @@
     }
 
     // Once the category that was open has folded, so the row is aimed at where it settles.
-    function reveal(id, anchorId = null) {
+    function reveal(id, anchorId = null, group = '') {
         setTimeout(() => {
-            const el = anchorId ? phoneEl?.querySelector(`[data-anchor="${anchorId}"]`) : rows[id];
+            const block = anchorId ? phoneEl?.querySelector(`[data-anchor="${anchorId}"]`) : rows[id];
+            const el = (group && block?.querySelector(groupSelector(group))) || block;
             el?.scrollIntoView({ behavior: 'smooth', block: 'start' });
         }, 300);
     }
 
+    /** A group label inside a section, by the id a link names it with. */
+    const groupSelector = (group) => `.st-group[data-group="${CSS.escape(group)}"]`;
+
     // A requested scroll (a link, an update waiting, the network needing attention) lands after
-    // the screen has been shown. `category[/section]`, or a bare section id; anything this build
-    // doesn't have leaves the screen where it is.
+    // the screen has been shown. `category[/section[/group]]`, or a bare section id; anything this
+    // build doesn't have leaves the screen where it is, and a group it lacks lands on its section.
     $effect(() => {
         const { target, seq } = sc.scroll;
         if (!seq || !target) return;
         untrack(() => {
-            const [first, second] = target.split('/');
+            const [first, second, group = ''] = settingsPath(target).split('/');
             const cat = CATEGORIES.find((c) => c.id === first)
                 || (!second && CATEGORIES.find((c) => c.anchors.some((a) => a.id === first)));
             if (!cat) return;
             const anchorId = second || (cat.id === first ? '' : first);
             if (anchorId && !cat.anchors.some((a) => a.id === anchorId)) return;
             if (shell.ws) {
-                if (anchorId) goAnchor(cat.id, anchorId);
+                if (anchorId) goAnchor(cat.id, anchorId, group);
                 else goCategory(cat.id);
                 return;
             }
             setQuery('');
             openCat = cat.id;
             section = anchorId;
-            reveal(cat.id, anchorId || null);
+            reveal(cat.id, anchorId || null, group);
         });
     });
 
@@ -309,6 +336,8 @@
             label: c.label, icon: c.icon,
             sections: Object.fromEntries(c.anchors.map((a) => [a.id, a.label])),
             sectionIcons: Object.fromEntries(c.anchors.map((a) => [a.id, a.icon])),
+            groups: Object.fromEntries(c.anchors.filter((a) => a.groups).map((a) => [a.id, Object.fromEntries(a.groups.map((g) => [groupId(g), g]))])),
+            rows: Object.fromEntries(c.anchors.filter((a) => a.rows).map((a) => [a.id, a.rows.map(([label, g]) => [label, groupId(g)])])),
         }]));
     });
 
@@ -500,7 +529,7 @@
     <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
     <span onclick={() => h.openLink('donate')}>Donate</span>
     <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-    <span onclick={() => h.openLink('gitbook')}>GitBook</span>
+    <span onclick={() => h.openLink('gitbook')}>Docs</span>
     <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
     <span onclick={() => h.openLink('privacy')}>Privacy Policy</span>
 {/snippet}
@@ -529,14 +558,16 @@
     </div>
 {/snippet}
 
+{#snippet themeRow()}
+    <div class="form-group st-line">
+        <span class="st-line-label">Theme</span>
+        {@render themeBody()}
+    </div>
+{/snippet}
+
 <!-- One anchored block's body, by anchor id. -->
 {#snippet block(id)}
-    {#if id === 'theme'}
-        <div class="form-group st-line">
-            <span class="st-line-label">Change Theme</span>
-            {@render themeBody()}
-        </div>
-    {:else if id === 'display'}<Display h={h.display} grouped />
+    {#if id === 'display'}<Display h={h.display} grouped lead={themeRow} />
     {:else if id === 'voice'}<Voice h={hs.voice} />
     {:else if id === 'calls'}<Calls h={h.calls} />
     {:else if id === 'notifications'}<Notifications h={h.notif} />
@@ -558,11 +589,10 @@
 {/snippet}
 
 {#if shell.ws}
-    <SectionNav sections={CATEGORIES} section={category.id} anchor={anchors.active} {query}
+    <SectionNav sections={navSections} section={category.id} anchor={anchors.active} {query}
                 onquery={(v) => { query = v; }} ongo={goCategory} onanchor={goAnchor}>
         {#snippet head()}
-            <span class="cs-nav-glyph"><span class="icon icon-settings"></span></span>
-            <span class="cs-nav-title cutoff">Settings</span>
+            <h2 class="cs-nav-title cs-nav-page-title cutoff">Settings</h2>
         {/snippet}
         {#snippet footer()}
             <div class="settings-footer">{@render links()}</div>

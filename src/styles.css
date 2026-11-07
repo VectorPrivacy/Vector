@@ -437,6 +437,8 @@
   --status-fair: #FCA559;
   --status-poor: var(--danger-color);
   --text-color: #f6f6f6;
+  /* Section labels; each theme keeps it at 4.5:1 or better against its panels. */
+  --text-label: #8a8a8a;
   font-family: Inter, Avenir, Helvetica, Arial, sans-serif;
   font-size: 16px;
   line-height: 24px;
@@ -451,6 +453,16 @@
   -webkit-text-size-adjust: 100%;
 
   overscroll-behavior: none;
+}
+
+/* A small label over a run of related items: Settings groups, channel sections, the Main
+   Menu's lists. One typography everywhere; the colour is the theme's. */
+.section-label {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--text-label);
 }
 
 html, body {
@@ -10321,6 +10333,22 @@ select {
   font-size: 14px;
   min-height: 20px;
 }
+/* The theme's accent says the model is ready; anything wanting attention is neutral
+   text with an amber mark, never the colour that means fine. */
+.model-status .alert-warning {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #b2b2b2;
+}
+.model-status .alert-warning::before {
+  content: '';
+  flex-shrink: 0;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background-color: var(--status-fair);
+}
 
 #cancel-download {
   margin-top: 16px;
@@ -12793,6 +12821,20 @@ input[type="checkbox"]:checked + .neon-toggle:before {
 .vselect.open .vselect-btn { border-color: #474747; }
 .vselect-btn:focus { outline: none; }
 .vselect-label { flex: 1; min-width: 0; }
+/* A tag sits against its label; the caret keeps the far edge. */
+.vselect-label:has(+ .vselect-tag) { flex: 0 1 auto; }
+.vselect-tag + .vselect-caret { margin-left: auto; }
+.vselect-tag {
+  flex-shrink: 0;
+  padding: 1px 6px;
+  border: 1px solid #3a3a3a;
+  border-radius: 999px;
+  color: #9a9a9a;
+  font-size: 10px;
+  line-height: 13px;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+}
 .vselect-caret {
   width: 0;
   height: 0;
@@ -24426,22 +24468,35 @@ body.profile-switcher-editing .profile-switcher-add {
   font-weight: 700;
   color: #fff;
 }
+/* The panel's own name: a title, not a row among its sections. */
+.cs-nav-page-title {
+  margin: 0;
+  font-size: 20px;
+  line-height: 24px;
+}
 
+.cs-nav-scroll {
+  /* One geometry for parent and child rows: a child's text starts where its parent's
+     does, and the tree's line runs down the middle of the parent's icon column. */
+  --nav-pad: 11px;
+  --nav-icon: 17px;
+  --nav-gap: 12px;
+}
 .cs-section {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--nav-gap);
   width: 100%;
-  height: 34px;
-  padding: 0 8px;
+  height: 38px;
+  padding: 0 var(--nav-pad);
   margin: 0 0 1px;
   border: none;
   border-radius: 8px;
   background: none;
   color: #b2b2b2;
   font-family: inherit;
-  font-size: 16px;
-  line-height: 19px;
+  font-size: 15px;
+  line-height: 18px;
   font-weight: 400;
   text-align: left;
   cursor: pointer;
@@ -24452,11 +24507,12 @@ body.profile-switcher-editing .profile-switcher-add {
 .cs-section,
 .cs-anchor { backdrop-filter: none; }
 .cs-section.active { background-color: #1b1b1b; color: #fff; }
-.cs-section.danger { color: var(--danger-color); }
+/* Colour is not the only warning: the label is heavier too. */
+.cs-section.danger { color: var(--danger-color); font-weight: 600; }
 .cs-section-icon {
   position: relative;
-  width: 16px;
-  height: 16px;
+  width: var(--nav-icon);
+  height: var(--nav-icon);
   flex-shrink: 0;
 }
 .cs-section-icon .icon {
@@ -24484,7 +24540,6 @@ body.profile-switcher-editing .profile-switcher-add {
   min-height: 0;
   overflow: hidden;
   /* Padding counts even at 0fr, so it collapses along with the row. */
-  padding-top: 0;
   padding-bottom: 0;
   opacity: 0;
   transform: translateY(-4px);
@@ -24492,54 +24547,62 @@ body.profile-switcher-editing .profile-switcher-add {
     padding 0.28s cubic-bezier(0.22, 1, 0.36, 1);
 }
 .cs-anchors-wrap.open > .cs-anchors {
-  padding-top: 1px;
-  padding-bottom: 20px;
+  padding-bottom: 6px;
   opacity: 1;
   transform: none;
 }
 
-/* The anchors hang off a line, dots on it, the one being read lit. A button clips what
-   it draws to its own box, so each row draws only its own stretch: from its dot down
-   for the first, through it for the middle, down to its dot for the last. */
-.cs-anchors {
-  position: relative;
-  /* The design's indent: each dot's centre 53.5px into the column. */
-  padding: 1px 0 20px 38px;
-}
-.cs-anchor::after {
+/* The anchors hang off one track in the parent's icon column, inset at both ends; the
+   one being read gets a marker shorter than its row, pointing at it. */
+.cs-anchors { position: relative; }
+.cs-anchors::before {
   content: '';
   position: absolute;
-  left: 4.5px;
-  top: 0;
-  bottom: 0;
+  left: calc(var(--nav-pad) + var(--nav-icon) / 2 - 1px);
+  top: 6px;
+  /* The open list's own bottom padding, plus the inset. */
+  bottom: 12px;
   width: 2px;
-  background-color: #444;
+  background-color: #333;
 }
-.cs-anchor.first::after { top: 50%; }
-.cs-anchor.last::after { bottom: 50%; }
-.cs-anchor.shut::after { opacity: 0; }
 .cs-anchor {
   position: relative;
   display: flex;
   align-items: center;
   gap: 8px;
   width: 100%;
-  height: 26px;
-  /* The row clips so it can fold shut; the left inset keeps the lit dot's growth inside it. */
-  padding: 0 8px 0 2px;
+  height: 34px;
+  padding: 0 var(--nav-pad) 0 calc(var(--nav-pad) + var(--nav-icon) + var(--nav-gap));
   border: none;
   background: none;
   color: #b2b2b2;
   font-family: inherit;
-  font-size: 12px;
-  line-height: 14px;
+  font-size: 14px;
+  line-height: 17px;
   font-weight: 400;
   text-align: left;
   cursor: pointer;
   overflow: hidden;
-  /* Square: the timeline runs past the row's corners, and a rounded one notches it. */
   border-radius: 0;
   transition: color 0.15s ease, height 0.28s cubic-bezier(0.22, 1, 0.36, 1), opacity 0.2s ease;
+}
+/* Sits at the top of the list and is moved down to the centre of the row being read
+   (its own top margin centres it). A soft ease-out, so it trails the reader slightly. */
+.cs-anchor-marker {
+  position: absolute;
+  z-index: 1;
+  left: calc(var(--nav-pad) + var(--nav-icon) / 2 - 1px);
+  top: 0;
+  width: 2px;
+  height: 20px;
+  margin-top: -10px;
+  border-radius: 1px;
+  background-color: #fff;
+  pointer-events: none;
+  transition: transform 0.5s cubic-bezier(0.25, 0.8, 0.3, 1) 0.05s;
+}
+@media (prefers-reduced-motion: reduce) {
+  .cs-anchor-marker { transition: none; }
 }
 .cs-anchor.shut {
   height: 0;
@@ -24547,35 +24610,23 @@ body.profile-switcher-editing .profile-switcher-add {
   pointer-events: none;
 }
 .cs-anchor:hover { color: #e6e6e6; }
-.cs-anchor.active { color: #fff; }
-.cs-anchor-dot {
-  position: relative;
-  z-index: 1;
-  width: 7px;
-  height: 7px;
-  margin-right: 2px;
-  flex-shrink: 0;
-  border-radius: 50%;
-  background-color: #444;
-  transition: background-color 0.2s ease, transform 0.2s ease;
-}
-.cs-anchor.active .cs-anchor-dot {
-  background-color: #e6e6e6;
-  transform: scale(1.12);
-}
-.cs-anchor-icon {
-  position: relative;
-  width: 12px;
-  height: 12px;
-  flex-shrink: 0;
-  opacity: 0.85;
-}
-.cs-anchor-icon .icon {
-  width: 12px;
-  height: 12px;
-  background-color: currentColor;
-}
+.cs-anchor.active { color: #fff; font-weight: 600; }
 .cs-anchor-label { min-width: 0; }
+
+/* A setting new in this release line, until it has been seen. Each theme sets the
+   pair so the label stays readable on its accent. */
+.badge-new {
+  flex-shrink: 0;
+  margin-left: auto;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background-color: var(--badge-bg, var(--accent-color, #59fcb3));
+  color: var(--badge-ink, #052b1e);
+  font-size: 10px;
+  line-height: 12px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+}
 
 /* A search folds non-matching sections shut rather than unmounting them. */
 .cs-fold {
@@ -24703,9 +24754,17 @@ body.mobile .cs-close-key { display: none; }
   transition: opacity 0.2s ease;
 }
 .cs-content.loading { opacity: 0.4; pointer-events: none; }
+/* A label and its control read as one unit only so far apart: Settings keeps a 720px column
+   at the left of its pane. */
+.cs-content.st-page {
+  max-width: 720px;
+  margin: 0;
+}
 
-/* A section arrives with a short rise, the same soft settle the anchors use. */
-.cs-content-enter {
+/* A section arrives with a short rise, the same soft settle the anchors use. Its blocks
+   animate, not the column: WebKit holds an animating element's container-relative
+   gutters at their first value, so the column would shift when the rise ended. */
+.cs-content-enter > * {
   animation: cs-content-in 0.3s cubic-bezier(0.22, 1, 0.36, 1);
 }
 @keyframes cs-content-in {
@@ -25134,15 +25193,19 @@ body.mobile .cs-close-key { display: none; }
 .st-page .model-select-container { margin: 0; }
 .st-page .model-select-container .vselect { width: 230px; }
 
-/* A faint label over a run of related rows. */
+/* A label over a run of related rows (with .section-label). */
 .st-group {
   margin: 18px 0 6px;
-  color: #474747;
-  font-size: 14px;
-  line-height: 17px;
+  line-height: 14px;
   text-align: left;
 }
 .cs-heading + .st-group { margin-top: 0; }
+/* Grouped rows escalate their gaps, text edge to text edge: label to its first row 16, row to
+   row 22, last row to the next label 44, so the space alone shows where a group ends. */
+.st-page :is(.cs-block, .sm-block):has(> .st-group) :is(.toggle-container, .st-line) { margin-bottom: 5px; }
+.st-page :is(.cs-block, .sm-block) > .st-group { margin: 36px 0 7px; scroll-margin-top: 16px; }
+.st-page :is(.cs-block, .sm-block) > :is(.cs-heading, .sm-heading) + .st-group,
+.st-page :is(.cs-block, .sm-block) > .st-group:first-child { margin-top: 0; }
 
 /* ============================ Settings, phone ============================ */
 /* The categories as one card of rows, each folding its settings open beneath it in the

@@ -2,7 +2,8 @@
     // A dropdown drawn in-app rather than by the OS, so each option can carry a lead
     // (a logo, a swatch) and the list matches the rest of the UI. Arrow keys move the
     // highlight while it is open, Enter or Space picks, Escape or a click outside closes.
-    // options: [{ value, label, disabled? }]; lead(option) draws what sits before a label.
+    // options: [{ value, label, tag?, disabled? }]; lead(option) draws what sits before a
+    // label, and a tag is a small pill after it that never truncates.
     // label: the accessible name, when no <label> points at the button.
     let { options, value, onchange, lead = null, id = undefined, label = undefined, class: cls = '', disabled = false } = $props();
 
@@ -57,6 +58,7 @@
             onclick={toggle} onkeydown={onkey}>
         {#if lead}<span class="vselect-lead">{@render lead(current)}</span>{/if}
         <span class="vselect-label cutoff">{current?.label ?? ''}</span>
+        {#if current?.tag}<span class="vselect-tag">{current.tag}</span>{/if}
         <span class="vselect-caret"></span>
     </button>
     <div class="vselect-list" role="listbox" bind:this={list}>
@@ -67,6 +69,7 @@
                  onmouseenter={() => { if (!o.disabled) hi = i; }} onclick={() => pick(o)}>
                 {#if lead}<span class="vselect-lead">{@render lead(o)}</span>{/if}
                 <span class="cutoff">{o.label}</span>
+                {#if o.tag}<span class="vselect-tag">{o.tag}</span>{/if}
                 {#if o.value === value}<span class="icon icon-check"></span>{/if}
             </div>
         {/each}

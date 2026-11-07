@@ -235,12 +235,6 @@
                                 <Avatar src={pane.iconSrc} size={36} group={true} class="chatlist-community-head-avatar" />
                                 <div class="chatlist-community-head-meta">
                                     <span class="chatlist-community-head-name cutoff">{pane.name || 'Community'}</span>
-                                    {#if pane.members}
-                                        <span class="chatlist-community-head-members">
-                                            <span class="icon icon-users-multi chatlist-community-head-members-icon"></span>
-                                            <span>{pane.members}</span>
-                                        </span>
-                                    {/if}
                                 </div>
                                 <div class="chatlist-community-head-caret"><span class="icon icon-chevron-down"></span></div>
                             </div>
@@ -252,7 +246,7 @@
                                         <div class="chatlist-channel-section">
                                             <div class="chatlist-channel-section-head">
                                                 <div class="chatlist-channel-section-toggle">
-                                                    <span class="chatlist-channel-section-label">{section.label}</span>
+                                                    <span class="chatlist-channel-section-label section-label">{section.label}</span>
                                                     <span class="chatlist-channel-section-caret"><span class="icon icon-chevron-down"></span></span>
                                                 </div>
                                             </div>

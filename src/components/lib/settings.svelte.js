@@ -156,6 +156,11 @@ export function setSettingsScreen(patch) {
 }
 export function requestSettingsScroll(target) { screen.scroll = { target, seq: screen.scroll.seq + 1 }; }
 
+// Places that moved, so links and pins made before still land.
+const MOVED = { theme: 'appearance/display/appearance', 'appearance/theme': 'appearance/display/appearance' };
+/** A settings path (`category[/section[/group]]`) as this build lays it out. */
+export function settingsPath(path) { return MOVED[path] || path; }
+
 // Section handler bags that other modules register when they are ready (the
 // updater, the relay list, voice). A section renders once its bag exists.
 const handlers = $state({});

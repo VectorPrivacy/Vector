@@ -12,6 +12,7 @@
     let { communityId, h } = $props();
     // h: getChannels, getCategories, canAddChannels, sectionClosed, toggleSection, chatById,
     //    computeRowUnreadCount, countPingMessages, isPrimaryChannelId, openChannel, openChannelChat, openChannelMenu,
+    //    inviteToCommunity, editChannel,
     //    openCategoryMenu, attachLongPressContextMenu, createChannel, moveChannel, moveCategory
 
     const state = $derived.by(() => {
@@ -166,12 +167,26 @@
          use:rowEl={channel.id}
          use:channelGesture={channel}
          onclick={() => h.openChannel(communityId, channel)}>
-        <!-- Grouped by Category, a private channel says so with its own glyph. -->
-        <span class="chatlist-channel-hash"><span class="icon {channel.view === 'voice' ? 'icon-volume-max' : categories.length && channel.private ? 'icon-locked' : 'icon-channel-hash'}"></span></span>
+        <span class="chatlist-channel-hash"><span class="icon {channel.view === 'voice' ? 'icon-volume-max' : 'icon-channel-hash'}"></span></span>
+        {#if channel.private}<span class="chatlist-channel-lock" title="Private Channel"><span class="icon icon-locked"></span></span>{/if}
         <span class="chatlist-channel-name cutoff">{channel.name}</span>
         <!-- A number only for someone calling your name; ordinary unread is the row's own weight. -->
         {#if r.pings}
             <span class="chatlist-channel-badge">{r.pings > 99 ? '99+' : r.pings}</span>
+        {/if}
+        <!-- Shown on hover and on the open row only, so they take no width at rest. An invite
+             is to the community: a private channel's own access is its roles'. -->
+        {#if !channel.private}
+            <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+            <div class="chatlist-channel-action chatlist-channel-hover btn" title="Invite People" onclick={(e) => { e.stopPropagation(); h.inviteToCommunity(communityId); }}>
+                <span class="icon icon-add-user"></span>
+            </div>
+        {/if}
+        {#if canManage}
+            <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+            <div class="chatlist-channel-action chatlist-channel-hover btn" title="Edit Channel" onclick={(e) => { e.stopPropagation(); h.editChannel(communityId, channel); }}>
+                <span class="icon icon-settings"></span>
+            </div>
         {/if}
         {#if channel.view === 'voice'}
             <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
@@ -225,7 +240,7 @@
                 {#snippet head()}
                     <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
                     <div class="chatlist-channel-section-toggle btn" onclick={() => toggle(section.id)}>
-                        <span class="chatlist-channel-section-label">{section.label}</span>
+                        <span class="chatlist-channel-section-label section-label">{section.label}</span>
                         <span class="chatlist-channel-section-caret"><span class="icon icon-chevron-down"></span></span>
                     </div>
                     {#if section.canAdd}

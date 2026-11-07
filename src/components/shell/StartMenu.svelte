@@ -462,7 +462,7 @@
 
             <section class="stm-pane" bind:this={pane}>
                 {#if searching}
-                    <div class="stm-head" class:hidden={!adding && !results.length}>
+                    <div class="stm-head section-label" class:hidden={!adding && !results.length}>
                         {#if adding}
                             <button type="button" class="stm-back" aria-label="Back" onclick={() => { adding = false; query = ''; }}><span class="icon icon-chevron-left"></span></button>
                         {/if}
@@ -511,7 +511,7 @@
                         {/each}
                     </div>
                 {:else if picking}
-                    <div class="stm-head">
+                    <div class="stm-head section-label">
                         <button type="button" class="stm-back" aria-label="Back" onclick={() => { picking = false; }}><span class="icon icon-chevron-left"></span></button>
                         <span>Accounts</span>
                         {@render viewSwitch()}
@@ -534,7 +534,7 @@
                         {/if}
                     </div>
                 {:else if folder}
-                    <div class="stm-head">
+                    <div class="stm-head section-label">
                         <button type="button" class="stm-back" aria-label="Back" onclick={() => { folderId = null; }}><span class="icon icon-chevron-left"></span></button>
                         {#if renaming}
                             <input class="stm-rename" value={folder.name} maxlength="48" use:takeFocus
@@ -548,7 +548,7 @@
                         {#each folder.keys as key (key)}<div class="stm-cell" animate:flip={SLIDE}>{@render tile({ type: 'item', key })}</div>{/each}
                     </div>
                 {:else}
-                    <div class="stm-head"><span>Pinned</span>{@render viewSwitch()}</div>
+                    <div class="stm-head section-label"><span>Pinned</span>{@render viewSwitch()}</div>
                     <div class="stm-grid" class:is-list={list} class:is-switching={switching} bind:this={grid}>
                         {#each nodes as node (nodeIdOf(node))}<div class="stm-cell" animate:flip={SLIDE}>{@render tile(node)}</div>{/each}
                         <button type="button" class="stm-tile" data-node-id="add" class:is-row={list} class:drop-before={dropAt?.mode === 'end'}
@@ -689,11 +689,6 @@
         gap: 6px;
         height: 32px;
         margin-bottom: 10px;
-        font-size: 12px;
-        font-weight: 600;
-        letter-spacing: 0.16em;
-        text-transform: uppercase;
-        color: rgba(255, 255, 255, 0.5);
     }
     .stm-back { all: unset; display: flex; padding: 4px; border-radius: 8px; cursor: pointer; }
     .stm-back .icon { position: static; width: 18px; height: 18px; margin: 0; background-color: #bbb; }

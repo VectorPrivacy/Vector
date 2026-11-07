@@ -72,15 +72,16 @@ function startInitial(name) {
     return (String(name || '?').match(/[\p{L}\p{N}]/u)?.[0] || '?').toUpperCase();
 }
 
-/** Settings' categories and sections as the screen names them. */
+/** Settings' categories, sections and their groups as the screen names them. */
 function startSettingsPlace(path) {
-    const [cat, section] = path.split('/');
+    const [cat, section, group] = VectorSvelte.settingsPath(path).split('/');
     const places = VectorSvelte.settingsScreen().places || {};
     const c = places[cat];
     if (!c) return null;
+    const sectionLabel = section && (c.sections[section] || section);
     return {
-        label: section ? (c.sections[section] || section) : c.label,
-        sub: section ? `Settings › ${c.label}` : 'Settings',
+        label: group ? (c.groups?.[section]?.[group] || group) : sectionLabel || c.label,
+        sub: group ? `Settings › ${sectionLabel}` : section ? `Settings › ${c.label}` : 'Settings',
         icon: (section && c.sectionIcons?.[section]) || c.icon || 'settings',
     };
 }
@@ -248,6 +249,13 @@ function startCandidates(withChannels) {
         out.push({ key: `settings/${cat}`, label: c.label, sub: 'Settings', icon: c.icon || 'settings' });
         for (const [sec, label] of Object.entries(c.sections || {})) {
             if (label !== c.label) out.push({ key: `settings/${cat}/${sec}`, label, sub: `Settings › ${c.label}`, icon: c.sectionIcons?.[sec] || c.icon || 'settings' });
+            for (const [group, groupLabel] of Object.entries(c.groups?.[sec] || {})) {
+                out.push({ key: `settings/${cat}/${sec}/${group}`, label: groupLabel, sub: `Settings › ${label}`, icon: c.sectionIcons?.[sec] || c.icon || 'settings', group: true });
+            }
+            // A row opens its group: one result per group, under the name searched for.
+            for (const [rowLabel, group] of c.rows?.[sec] || []) {
+                out.push({ key: `settings/${cat}/${sec}/${group}`, label: rowLabel, sub: `Settings › ${label} › ${c.groups?.[sec]?.[group] || group}`, icon: c.sectionIcons?.[sec] || c.icon || 'settings', group: true });
+            }
         }
     }
     out.push({ key: 'nexus', ...resolveStartKey('nexus') }, { key: 'requests', ...resolveStartKey('requests') });
@@ -308,7 +316,7 @@ function searchStart(query, { adding = false } = {}) {
         const all = startCandidates(false).filter(c => !startPinned(c.key));
         const apps = all.filter(c => c.app && c.installed);
         const recent = all.filter(c => c.recent).sort((x, y) => y.recent - x.recent).slice(0, 8);
-        const places = all.filter(c => !c.app && !c.recent && !c.key.startsWith('dm/'));
+        const places = all.filter(c => !c.app && !c.recent && !c.group && !c.key.startsWith('dm/'));
         list = [...apps, ...recent, ...places];
     } else {
         // A place that opens a pane in the menu, not a page, has nothing for a result to run.
@@ -318,7 +326,8 @@ function searchStart(query, { adding = false } = {}) {
             return l.startsWith(q) ? 2 : l.includes(q) ? 1 : 0;
         };
         list = [...nav, ...startCandidates(true)]
-            .map(c => ({ c, s: score(c.label) * 2 + (score(c.sub) ? 1 : 0) }))
+            // A settings group answers to its own name only: its section's name finds the section.
+            .map(c => ({ c, s: score(c.label) * 2 + (score(c.sub) && !c.group ? 1 : 0) }))
             .filter(x => x.s > 0)
             .sort((x, y) => y.s - x.s)
             .map(x => x.c);

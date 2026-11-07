@@ -1,4 +1,7 @@
 :root {
+  --text-label: #8a8a8a;
+  --badge-bg: var(--accent-color);
+  --badge-ink: #030303;
   background-color: #030303;
   --voice-highlight-bg: #59FCF430;
   --voice-highlight-text: #59FCF4;
