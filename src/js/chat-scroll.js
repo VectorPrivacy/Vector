@@ -683,6 +683,11 @@ function _fromEnd(row) {
 function recordTailAnchor() {
     _tailAnchor = null;
     if (!domChatRows) return;
+    if (_jumpHeld?.isConnected) {
+        _tailAnchor = { el: _jumpHeld, at: _fromEnd(_jumpHeld) };
+        return;
+    }
+    _jumpHeld = null;
     const view = domChatMessages.getBoundingClientRect();
     const rows = domChatRows.children;
     let cut = null;
@@ -719,8 +724,32 @@ function restoreTailAnchor() {
 /** Hold the view through a change below it, unless it belongs at the bottom, and note it afresh. */
 function keepTailAnchor() {
     if (_windowRendering || _unreadJumpResolving || !domChatRows) { _tailAnchor = null; return; }
-    if (!chatPinnedToBottom || !isAtDataBottom()) restoreTailAnchor();
+    if (_jumpHeld?.isConnected) centreHeld();
+    else if (!chatPinnedToBottom || !isAtDataBottom()) restoreTailAnchor();
     recordTailAnchor();
+}
+
+// A row jumped to stays centred until the reader scrolls: older rows load in above it and media
+// grows around it, and a landing short of the centre (too little drawn above) is made good.
+let _jumpHeld = null;
+
+function centreHeld() {
+    const view = domChatMessages;
+    const el = _jumpHeld;
+    const start = -(view.scrollHeight - view.clientHeight);
+    const top = Math.max(start, Math.min(el.offsetTop - (view.clientHeight - el.offsetHeight) / 2, scrollEnd(view)));
+    if (Math.abs(view.scrollTop - top) < 1) return;
+    beginProgrammaticScroll();
+    view.scrollTop = top;
+}
+
+/** Centre `el` at once and hold it there. */
+function landOn(el) {
+    chatPinnedToBottom = false;
+    _userScrolledAway = true;
+    _jumpHeld = el;
+    centreHeld();
+    _tailAnchor = { el, at: _fromEnd(el) };
 }
 
 // Landed at the very start: like the pin at the end, the view stays there while rows in it grow
@@ -743,6 +772,7 @@ let _barRestTimer = 0;
 function noteScrollActivity() {
     if (VectorSvelte.now() >= _programmaticScrollUntil) {
         _chatStartHeld = false;
+        _jumpHeld = null;
         VectorSvelte.setChatScrollbar({ active: true });
         clearTimeout(_barRestTimer);
         _barRestTimer = setTimeout(() => VectorSvelte.setChatScrollbar({ active: false }), BAR_REST_MS);
@@ -1291,13 +1321,10 @@ async function loadAndScrollToMessage(targetMsgId) {
         setTailRoom(TAIL_RESERVE);
     }
 
-    // Wait for all media (images, videos) to load before scrolling
-    await waitForMediaToLoad();
-
-    // Now scroll to the target message and flash to bring the user's eye to it.
+    // Land on the target and flash it to bring the user's eye to it.
     const domMsg = document.getElementById(targetMsgId);
     if (domMsg) {
-        centerInView(domMsg);
+        landOn(domMsg);
         applyHighlight(domMsg, 'jumped');
     }
 }
@@ -1595,7 +1622,6 @@ async function jumpToUnread(lastReadId) {
         await renderWindow(start, end);
         setTailRoom(TAIL_RESERVE);
     }
-    await waitForMediaToLoad();
     chatPinnedToBottom = false;   // re-assert after updateChat's own auto-scroll
 
     // Inject exactly one divider above the first unread row and center it (the
@@ -1605,11 +1631,11 @@ async function jumpToUnread(lastReadId) {
     const node = dividerMsg && document.getElementById(dividerMsg.id);
     if (node) {
         insertUnreadDivider(node);
-        if (unreadDividerEl) centerInView(unreadDividerEl);
+        if (unreadDividerEl) landOn(unreadDividerEl);
     } else {
         // Row not in DOM (shouldn't happen — the whole slice is rendered) — center last_read if present.
         const lr = document.getElementById(lastReadId);
-        if (lr) centerInView(lr);
+        if (lr) landOn(lr);
     }
     // Jumping to unread IS catching up — mark the whole chat read so the badge + pill clear in one
     // shot even though the viewport rests at the divider. Without this last_read stays at the old

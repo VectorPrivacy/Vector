@@ -769,7 +769,7 @@ function jumpToMessage(targetMsgId) {
     VectorSvelte.setPlaceMessage(strOpenChat, targetMsgId);
     const domMsg = document.getElementById(targetMsgId);
     if (domMsg) {
-        centerInView(domMsg);
+        landOn(domMsg);
         applyHighlight(domMsg, 'jumped');
     } else {
         loadAndScrollToMessage(targetMsgId);
