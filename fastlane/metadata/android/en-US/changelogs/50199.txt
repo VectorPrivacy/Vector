@@ -4,4 +4,4 @@ Vector 0.5.1.
 - Smoother drawers and slides on phones and the web
 - Animated emoji move on Android, iOS and the web
 - Ogg Opus voice clips play, and audio files transcribe
-- Fixes: emoji packs from other apps, profile saves, double sends, edit drafts
+- 40 rapid-fire bug fixes
