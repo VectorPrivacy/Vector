@@ -58,6 +58,7 @@ async fn run(cmd: &str, a: &Args) -> Result<Option<Value>, String> {
         }
         "fetch_msg_metadata" => json!(fetch_msg_metadata(a.str("chatId")?, a.str("msgId")?).await),
         "cancel_download" => json!(crate::attachments::cancel_download(&a.str("attachmentId")?)),
+        "web_download_flow" => crate::attachments::flow(),
         "verify_remote_media" => verify_remote_media(a.de("urls")?).await,
         "bump_emoji_usage" => {
             if db::get_current_account().is_ok() {

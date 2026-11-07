@@ -839,6 +839,7 @@
         hasServiceWorker,
         /** Call media plumbing (web/calls.js): straight to the worker, ports and all. */
         callPost: (msg, transfer = []) => { if (ready && worker) worker.postMessage(msg, transfer); },
+        ping: () => post({ t: 'ping' }),
         onCall: null,
     };
 

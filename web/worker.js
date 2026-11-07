@@ -55,6 +55,8 @@ addEventListener('error', (e) => { if (trapped(e.error ?? e.message)) die(e.erro
 addEventListener('unhandledrejection', (e) => { if (trapped(e.reason)) die(e.reason); });
 
 onmessage = async ({ data }) => {
+    // Answered at once: how long it waits is how busy this thread is.
+    if (data.t === 'ping') return postMessage({ t: 'result', id: data.id, ok: true, value: true });
     // The page's half of a call: worklet ports and failures, never answered.
     if (data.t?.startsWith('call-')) {
         await booted.catch(() => {});

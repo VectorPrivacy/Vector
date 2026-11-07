@@ -2,7 +2,7 @@
 //! kept goes to the origin's files sealed, and the page shows either as a blob.
 
 use std::cell::RefCell;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use serde_json::json;
 use vector_core::{db, DownloadError, DownloadStep, VectorCore, STATE};
@@ -12,6 +12,15 @@ use crate::emitter;
 thread_local! {
     static ACTIVE: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
     static CANCELLED: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
+    static FLOW: RefCell<HashMap<String, Flow>> = RefCell::new(HashMap::new());
+}
+
+/// How a running download is moving, for the diagnostics panel.
+struct Flow {
+    bytes: u64,
+    total: Option<u64>,
+    started: web_time::Instant,
+    last: web_time::Instant,
 }
 
 /// One download per attachment id; its stop, if any, retires with it.
@@ -28,7 +37,29 @@ impl Drop for Active {
     fn drop(&mut self) {
         ACTIVE.with(|a| a.borrow_mut().remove(&self.0));
         CANCELLED.with(|c| c.borrow_mut().remove(&self.0));
+        FLOW.with(|f| f.borrow_mut().remove(&self.0));
     }
+}
+
+/// Every running download: bytes so far, and how long since the last of them arrived.
+pub fn flow() -> serde_json::Value {
+    let now = web_time::Instant::now();
+    FLOW.with(|f| {
+        let f = f.borrow();
+        let rows: Vec<_> = f
+            .iter()
+            .map(|(id, x)| {
+                json!({
+                    "id": id,
+                    "bytes": x.bytes,
+                    "total": x.total,
+                    "running_ms": now.duration_since(x.started).as_millis() as u64,
+                    "quiet_ms": now.duration_since(x.last).as_millis() as u64,
+                })
+            })
+            .collect();
+        json!(rows)
+    })
 }
 
 /// Whether any attachment is downloading.
@@ -109,6 +140,14 @@ pub async fn download_attachment(chat: String, msg_id: String, attachment_id: St
     let report = |step: DownloadStep| {
         match step {
             DownloadStep::Received { bytes, total } => {
+                FLOW.with(|f| {
+                    let now = web_time::Instant::now();
+                    let mut f = f.borrow_mut();
+                    let x = f.entry(active.0.clone()).or_insert(Flow { bytes, total, started: now, last: now });
+                    x.bytes = bytes;
+                    x.total = total.or(declared);
+                    x.last = now;
+                });
                 if bytes == 0 {
                     last_pct = -1;
                     last_bytes = 0;
