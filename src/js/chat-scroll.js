@@ -807,15 +807,15 @@ async function maybeLoadCommunityOlderFromNetwork(chatId) {
     // back-paging (loadMoreEvents prepends descending batches), so reduce to the minimum `at`
     // rather than trusting index 0. getEventsRef is read-only (no LRU side effect).
     const events = eventCache.getEventsRef(chatId) || chat.messages || [];
-    if (!events.length) return;
-    const oldestMs = events.reduce((min, e) => (e.at < min ? e.at : min), events[0].at);
+    // Holding nothing, there is no oldest message to page back from: the newest page is the ask.
+    const oldestMs = events.length ? events.reduce((min, e) => (e.at < min ? e.at : min), events[0].at) : null;
 
     _communityOlderInFlight.add(chatId);
     _communityOlderFailed.delete(chatId);
     let grew = false, busy = false;
     try {
         const prevTotal = (eventCache.getStats(chatId) || {}).totalInDb || 0;
-        let beforeMs = Math.min(oldestMs, _communityOlderCursor.get(chatId) ?? Infinity);
+        let beforeMs = oldestMs == null ? (_communityOlderCursor.get(chatId) ?? null) : Math.min(oldestMs, _communityOlderCursor.get(chatId) ?? Infinity);
         for (let hop = 0; hop < 8; hop++) {
             const res = await invoke('sync_community_channel', { channelId: chatId, beforeMs });
             // Another fetch of this channel holds the relay walk: ask again once it lets go.
@@ -836,7 +836,7 @@ async function maybeLoadCommunityOlderFromNetwork(chatId) {
             else _communityOlderCursor.delete(chatId);
             if (newTotal > prevTotal || !res || res.reached_start || strOpenChat !== chatId) break;
             // A page that added nothing still moved the relay walk down: go on from there.
-            if (res.oldest_ms == null || res.oldest_ms >= beforeMs) break;
+            if (res.oldest_ms == null || beforeMs == null || res.oldest_ms >= beforeMs) break;
             beforeMs = res.oldest_ms;
         }
     } catch (e) {
@@ -1690,6 +1690,7 @@ function updateChatScrollbar() {
     if (i === -1) return;
     const edgeEl = domChatRows.querySelector(':scope > .history-edge');
     const edgeShown = !!edgeEl && edgeEl.getBoundingClientRect().bottom > edge;
+    _edgeInView = edgeShown;
     _unreadJumpPill?.classList.toggle('at-edge', edgeShown);
     VectorSvelte.setChatScrollbar({ here: _barDateFmt.format(new Date(msgs[i].at)), edgeShown });
     // Rank the newest held row of the run the view is in (a seek leaves the tail as a run of its own).
@@ -1728,6 +1729,9 @@ let _edgeNudge = 0;
 
 /** A chat opening: nothing is known of its top until the first measure. */
 function resetHistoryEdge() {
+    clearTimeout(_edgeWatch);
+    _edgeWatch = 0;
+    _edgeWatchKicked = false;
     _edgeAtStart = false;
     VectorSvelte.setHistoryEdge({ state: '' });
 }
@@ -1752,13 +1756,19 @@ function refreshHistoryEdge() {
         VectorSvelte.setHistoryEdge({ state: '' });
         return;
     }
+    const alone = !(_windowMessages() || []).some(_barCounted);
     if (more) {
-        VectorSvelte.setHistoryEdge({ state: community && _communityOlderFailed.has(chatId) ? 'retry' : 'loading' });
-        // Sat at the top with nothing on its way: ask for it.
-        if (community && !_communityOlderFailed.has(chatId)) nudgeHistoryEdge();
+        const failed = community && _communityOlderFailed.has(chatId);
+        VectorSvelte.setHistoryEdge({ state: failed ? 'retry' : 'loading' });
+        if (community && !failed) {
+            // Sat at the top with nothing on its way: ask for it. An empty channel has no row
+            // to page back from, so it asks the relays itself.
+            if (alone) maybeLoadCommunityOlderFromNetwork(chatId);
+            else nudgeHistoryEdge();
+            watchHistoryEdge(chatId);
+        }
         return;
     }
-    const alone = !(_windowMessages() || []).some(_barCounted);
     const cf = chat.metadata?.custom_fields || {};
     const base = { state: 'start', alone, chatId, communityId: cf.community_id || '' };
     if (community) {
@@ -1778,6 +1788,35 @@ function refreshHistoryEdge() {
         const name = getName(chat.id);
         VectorSvelte.setHistoryEdge({ ...base, title: name, note: `This is the beginning of your conversation with ${name}.` });
     }
+}
+
+// A loader with nothing behind it is a stall: after a while it asks again once, and if still
+// nothing is on its way, it offers a retry instead of spinning on.
+const EDGE_IDLE_MS = 8000;
+let _edgeWatch = 0;
+let _edgeInView = false;
+let _edgeWatchKicked = false;
+
+function watchHistoryEdge(chatId) {
+    clearTimeout(_edgeWatch);
+    _edgeWatch = setTimeout(() => {
+        _edgeWatch = 0;
+        if (strOpenChat !== chatId || !_edgeAtStart || _communityOlderExhausted.has(chatId) || _communityOlderFailed.has(chatId)) return;
+        // Only a loader the reader can see is judged: one scrolled away waits for them to come back.
+        if (_communityOlderInFlight.has(chatId) || proceduralScrollState.isLoading || (!_edgeInView && (_windowMessages() || []).some(_barCounted))) {
+            _edgeWatchKicked = false;
+            return watchHistoryEdge(chatId);
+        }
+        if (!_edgeWatchKicked) {
+            _edgeWatchKicked = true;
+            if (!(_windowMessages() || []).some(_barCounted)) maybeLoadCommunityOlderFromNetwork(chatId);
+            else handleProceduralScroll();
+            return watchHistoryEdge(chatId);
+        }
+        _edgeWatchKicked = false;
+        _communityOlderFailed.add(chatId);
+        refreshHistoryEdge();
+    }, EDGE_IDLE_MS);
 }
 
 /** Older rows may have reached the database while the reader sits at the top: load them. */
