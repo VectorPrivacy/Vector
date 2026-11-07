@@ -113,9 +113,9 @@ fn spawn_blossom_bootstrap(bg_client: Client, my_public_key: PublicKey) {
             Err(e) => vector_core::log_warn!("[BlossomServers] Bootstrap fetch failed: {}", e),
         }
 
-        if !session.is_live() { return; }
-        // Route through the active client signer (covers both local
-        // and bunker accounts).
+        // Each document fetch and probe upload is signed: an external signer would be asked to
+        // approve every one at each login. Its first real upload teaches the routing instead.
+        if !session.is_live() || vector_core::signer::is_keyless() { return; }
         let _client = match crate::nostr_client() { Some(c) => c, None => return };
         let signer = match vector_core::signer::active_signer() { Ok(s) => s, Err(_) => return };
         let enabled_servers = vector_core::state::get_blossom_servers();

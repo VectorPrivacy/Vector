@@ -1296,6 +1296,8 @@ async function loginWithNip55() {
         // Activity-result bridge resolves this once they return.
         const { public: pubKey, existing } = await invoke('login_with_nip55');
         strPubkey = pubKey;
+        // These links also sit on the Remote Signer form: it closes with the sign-in.
+        hideBunkerForm();
         if (existing) {
             // Identity already on disk; backend armed session_reload.
             return;
@@ -1320,6 +1322,8 @@ async function loginWithNip07() {
         if (addAccountFlow.active && !(await addAccountFlow.commit())) return;
         const { public: pubKey, existing } = await invoke('login_with_nip07');
         strPubkey = pubKey;
+        // These links also sit on the Remote Signer form: it closes with the sign-in.
+        hideBunkerForm();
         if (existing) return;
         openEncryptionFlow(false);
         invoke('connect').catch((err) => {

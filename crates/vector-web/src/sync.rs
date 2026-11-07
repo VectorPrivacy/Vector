@@ -113,6 +113,11 @@ async fn merge_media_servers() {
         Ok(n) => vector_core::log_info!("[BlossomServers] merged {n} server(s) from the account's list"),
         Err(e) => vector_core::log_warn!("[BlossomServers] list fetch failed: {e}"),
     }
+    // Each document fetch and probe upload is signed: an external signer would be asked to
+    // approve every one at each login. Its first real upload teaches the routing instead.
+    if vector_core::signer::is_keyless() {
+        return;
+    }
     let Ok(signer) = vector_core::signer::active_signer() else { return };
     let servers = state::get_blossom_servers();
     if blossom_info::refresh_all(signer.clone(), servers.clone(), std::time::Duration::from_secs(60)).await > 0 {
