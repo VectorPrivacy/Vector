@@ -1930,12 +1930,13 @@ function reactToMessageRouted(referenceId, chatId, emoji, emojiUrl) {
     } else {
         bumpEmojiUsage('unicode', emoji);
     }
-    if (chat && chat.chat_type === 'Community') {
-        return invoke('react_to_community_message', { channelId: chatId, messageId: referenceId, emoji, emojiUrl: emojiUrl || null });
-    }
-    const args = { referenceId, chatId, emoji };
-    if (emojiUrl) args.emojiUrl = emojiUrl;
-    return invoke('react_to_message', args);
+    const sent = chat && chat.chat_type === 'Community'
+        ? invoke('react_to_community_message', { channelId: chatId, messageId: referenceId, emoji, emojiUrl: emojiUrl || null })
+        : invoke('react_to_message', emojiUrl ? { referenceId, chatId, emoji, emojiUrl } : { referenceId, chatId, emoji });
+    return sent.catch(e => {
+        showToast('Reaction not sent: ' + String(e));
+        throw e;
+    });
 }
 
 /** Raw upload error → user-friendly { title, body }. Technical detail

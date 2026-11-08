@@ -384,6 +384,11 @@ async function sendComposed(messageText) {
     resetChatInputSize();
     VectorSvelte.setComposerStatus('Sending...');
 
+    // A row the backend paints for this send is new among my pending or failed ones.
+    const sendChat = getChat(sendTo);
+    const ownUnsent = (chat) => (chat?.messages || []).filter(m => m.mine && (m.pending || m.failed)).map(m => m.id);
+    const unsentBefore = new Set(ownUnsent(sendChat));
+
     try {
         const replyRef = strCurrentReplyReference;
         cancelReply();
@@ -393,12 +398,21 @@ async function sendComposed(messageText) {
         bumpEmojiUsageBatch(extractMessageEmojis(cleanedText));
 
         // Send message (unified function handles both DMs and MLS groups)
-        await message(strOpenChat, cleanedText, replyRef, commandBot);
+        await message(sendTo, cleanedText, replyRef, commandBot);
 
         nLastTypingIndicator = 0;
         if (mentionCtrl) mentionCtrl.clearMentions();
     } catch(e) {
         console.error('Failed to send message:', e);
+        // A failed bubble offers its own retry. Refused before one painted, the words go back.
+        if (!ownUnsent(sendChat).some(id => !unsentBefore.has(id))) {
+            showToast('Not sent: ' + String(e));
+            if (strOpenChat === sendTo && !domChatMessageInput.value) {
+                domChatMessageInput.value = messageText;
+                VectorSvelte.setDraftEmpty(false, false);
+                autoResizeChatInput();
+            }
+        }
     } finally {
         VectorSvelte.setComposerStatus('');
     }
