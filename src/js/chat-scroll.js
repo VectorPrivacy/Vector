@@ -1799,9 +1799,9 @@ function refreshHistoryEdge() {
             ...base,
             title: `Welcome to #${cf.channel_name || 'general'}`,
             note: _communityHistoryLimited.has(chatId)
-                ? `This is the beginning of your history${cf.name ? ` in ${cf.name}` : ''}.`
+                ? 'This is the beginning of your history.'
                 : alone ? 'This is the very beginning of the channel, say hello! 👋'
-                : `This is the beginning of the channel${cf.name ? ` in ${cf.name}` : ''}.`,
+                : 'This is the beginning of the channel.',
         });
     } else if (chatIsGroup(chat)) {
         VectorSvelte.setHistoryEdge({ ...base, title: cf.name || 'Group', note: 'This is the beginning of the group.' });
@@ -1809,7 +1809,7 @@ function refreshHistoryEdge() {
         VectorSvelte.setHistoryEdge({ ...base, title: 'Notes', note: 'This is the beginning of your notes.' });
     } else {
         const name = getName(chat.id);
-        VectorSvelte.setHistoryEdge({ ...base, title: name, note: `This is the beginning of your conversation with ${name}.` });
+        VectorSvelte.setHistoryEdge({ ...base, title: name, note: 'This is the beginning of your conversation.' });
     }
 }
 
