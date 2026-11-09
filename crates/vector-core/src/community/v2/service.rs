@@ -860,12 +860,31 @@ pub async fn fetch_channel_history<T: Transport + ?Sized>(
     // for `keep_paging`.
     settled: impl Fn(&[nostr_sdk::prelude::EventId]) -> std::collections::HashSet<nostr_sdk::prelude::EventId>,
 ) -> Result<Vec<FetchedEvent>, String> {
-    fetch_channel_history_paged(transport, community, channel_id, page, max_pages, since, start_until, evidence, keep_paging, settled).await.map(|(events, _)| events)
+    let mut keep_paging = keep_paging;
+    fetch_channel_history_paged(transport, community, channel_id, page, max_pages, since, start_until, evidence, |p, s, _| keep_paging(p, s), settled).await.map(|(events, _)| events)
+}
+
+/// Whether a catch-up pages on past this page: while it holds a message we don't (`held` by
+/// rumor id), or no message at all (reactions and edits decide nothing), or only held messages
+/// but the next page (`next`) still starts above `floor`. Held rows up there may have arrived
+/// live over a stretch nothing read.
+pub fn catch_up_pages_on(page: &[FetchedEvent], settled: usize, next: Option<u64>, floor: Option<u64>, held: impl Fn(&str) -> bool) -> bool {
+    let mut saw_message = settled > 0;
+    for f in page {
+        if matches!(&f.event, ChatEvent::Message { .. }) {
+            saw_message = true;
+            if !held(&f.event.opened().rumor_id.to_hex()) {
+                return true;
+            }
+        }
+    }
+    !saw_message || floor.zip(next).is_some_and(|(f, n)| n > f)
 }
 
 /// [`fetch_channel_history`], with where to page on from (Unix seconds) when it stopped with
 /// addresses still unread: every row it returns is at or above that, so a caller that pages
-/// from there skips nothing, even after a page whose rows were all dropped.
+/// from there skips nothing, even after a page whose rows were all dropped. `keep_paging` is
+/// also told where the next page would start (None: this one wasn't full, so none follows).
 #[allow(clippy::too_many_arguments)]
 pub async fn fetch_channel_history_paged<T: Transport + ?Sized>(
     transport: &T,
@@ -876,7 +895,7 @@ pub async fn fetch_channel_history_paged<T: Transport + ?Sized>(
     since: Option<u64>,
     start_until: Option<u64>,
     evidence: crate::community::transport::Evidence,
-    mut keep_paging: impl FnMut(&[FetchedEvent], usize) -> bool,
+    mut keep_paging: impl FnMut(&[FetchedEvent], usize, Option<u64>) -> bool,
     settled: impl Fn(&[nostr_sdk::prelude::EventId]) -> std::collections::HashSet<nostr_sdk::prelude::EventId>,
 ) -> Result<(Vec<FetchedEvent>, Option<u64>), String> {
     crate::db::scoped(async move {
@@ -1098,7 +1117,7 @@ pub async fn fetch_channel_history_paged<T: Transport + ?Sized>(
                 until = Some(o - 1);
                 continue;
             }
-            let stop = (!page_events.is_empty() || held > 0) && !keep_paging(&page_events, held);
+            let stop = (!page_events.is_empty() || held > 0) && !keep_paging(&page_events, held, full_oldest);
             out.extend(page_events.into_iter().map(|e| (e.event.opened().at_ms, e)));
             if stop {
                 ended = true;
@@ -30822,11 +30841,40 @@ mod tests {
         }
         // Read once the flood is due, so it is paged rather than held.
         crate::clock::shift_for_test(3 * 60_000);
-        let (got, cursor) = fetch_channel_history_paged(&bed.relay, &held(), &general, 10, 2, None, None, crate::community::transport::Evidence::Quorum, |_, _| true, |_| Default::default()).await.unwrap();
+        let (got, cursor) = fetch_channel_history_paged(&bed.relay, &held(), &general, 10, 2, None, None, crate::community::transport::Evidence::Quorum, |_, _, _| true, |_| Default::default()).await.unwrap();
         assert!(!got.iter().any(|f| f.event.opened().rumor.content == "a writer's post") && cursor.is_some_and(|c| c > (now + 1_000) / 1000), "nothing below where the relay walk stopped");
-        let (got, _) = fetch_channel_history_paged(&bed.relay, &held(), &general, 10, 4, None, cursor, crate::community::transport::Evidence::Quorum, |_, _| true, |_| Default::default()).await.unwrap();
+        let (got, _) = fetch_channel_history_paged(&bed.relay, &held(), &general, 10, 4, None, cursor, crate::community::transport::Evidence::Quorum, |_, _, _| true, |_| Default::default()).await.unwrap();
         crate::clock::shift_for_test(0);
         assert!(got.iter().any(|f| f.event.opened().rumor.content == "a writer's post"), "paging on from the cursor reaches it");
+    }
+
+    #[tokio::test]
+    async fn a_catch_up_reads_through_held_rows_down_to_its_floor() {
+        let (_tmp, _guard, _owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "Hole", vec!["wss://r".into()], None).await.unwrap();
+        let general = community.channels[0].id;
+        let now = now_ms();
+        let at = |i: u64| now - (30 - i) * 60_000;
+        for i in 0..30u64 {
+            send_chat_message_at(&relay, &community, &general, &format!("m{i}"), None, &[], vec![], at(i)).await.unwrap();
+        }
+        let all = fetch_channel(&relay, &community, &general, 100).await.unwrap();
+        let id_of = |text: &str| all.iter().find(|f| f.event.opened().rumor.content == text).map(|f| f.event.opened().rumor_id.to_hex()).unwrap();
+        // The oldest ten were read before going away and the newest ten arrived live after; nothing read the middle.
+        let held: std::collections::HashSet<String> = (0..10).chain(20..30).map(|i| id_of(&format!("m{i}"))).collect();
+        let walk = |floor: Option<u64>| {
+            let held = held.clone();
+            let relay = &relay;
+            let community = &community;
+            async move {
+                let (got, _) = fetch_channel_history_paged(relay, community, &general, 10, 10, None, None, crate::community::transport::Evidence::Quorum, |p, s, n| catch_up_pages_on(p, s, n, floor, |id| held.contains(id)), |_| Default::default()).await.unwrap();
+                got.iter().map(|f| f.event.opened().rumor.content.clone()).collect::<std::collections::HashSet<_>>()
+            }
+        };
+        assert!(!walk(None).await.contains("m15"), "without a floor the first held page ends the walk");
+        let got = walk(Some(at(5) / 1000)).await;
+        assert!((10..20).all(|i| got.contains(&format!("m{i}"))), "the unread middle is read");
     }
 
     #[tokio::test]

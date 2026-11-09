@@ -213,7 +213,7 @@ pub fn history_catchup() {
             relay.inject(&e, &c.relays);
         }
         let walk = || async {
-            service::fetch_channel_history_paged(&relay, &c, &channel, 200, n / 200 + 2, None, None, crate::community::transport::Evidence::Quorum, |_, _| true, |_| Default::default())
+            service::fetch_channel_history_paged(&relay, &c, &channel, 200, n / 200 + 2, None, None, crate::community::transport::Evidence::Quorum, |_, _, _| true, |_| Default::default())
                 .await
                 .unwrap()
                 .0

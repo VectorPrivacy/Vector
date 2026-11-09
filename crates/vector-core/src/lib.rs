@@ -3738,6 +3738,8 @@ impl VectorCore {
         let ch = crate::community::ChannelId(crate::simd::hex::hex_to_bytes_32(channel_id));
         let transport = crate::community::transport::LiveTransport::with_timeout(std::time::Duration::from_secs(transport_secs));
         let held = std::sync::atomic::AtomicUsize::new(0);
+        let began = crate::clock::now_secs();
+        let floor = crate::history_gaps::floor(channel_id, until, began);
         let Ok((page, next_before)) = crate::community::v2::service::fetch_channel_history_paged(
             &transport,
             &community,
@@ -3747,22 +3749,9 @@ impl VectorCore {
             since,
             until,
             evidence,
-            // Keep paging while a page still contains a MESSAGE we don't hold; a page
-            // whose messages are all known means we've reached our own history. Only
-            // message kinds get their own rows (reactions/edits fold into their
-            // targets), so a page with no messages is undecidable — keep paging.
             // A settled wrap is a held row, which decides the page like a held message.
-            |page, settled| {
-                let mut saw_message = settled > 0;
-                for f in page {
-                    if matches!(&f.event, crate::community::v2::chat::ChatEvent::Message { .. }) {
-                        saw_message = true;
-                        if !crate::db::events::event_exists(&f.event.opened().rumor_id.to_hex()).unwrap_or(false) {
-                            return true;
-                        }
-                    }
-                }
-                !saw_message
+            |page, settled, next| {
+                crate::community::v2::service::catch_up_pages_on(page, settled, next, floor, |id| crate::db::events::event_exists(id).unwrap_or(false))
             },
             // Only a catch-up skips what it holds: a back-page feeds the reader what it scrolled to.
             |wraps| {
@@ -3783,7 +3772,11 @@ impl VectorCore {
         let fetched = page.len() + held.into_inner();
         let (new_messages, waiting) = Self::v2_ingest_chat_page_keeping(channel_id, my_pk, session, page).await;
         // A walk that stops while still finding new messages leaves a hole above what it held.
-        crate::history_gaps::note_walk(channel_id, until, next_before, |t| crate::db::events::newest_message_before(channel_id, t));
+        crate::history_gaps::note_walk(channel_id, until, next_before, floor, |t| crate::db::events::newest_message_before(channel_id, t));
+        // From the top, everything down to the floor is now read or in the ledger.
+        if until.is_none() && since.is_none() {
+            crate::history_gaps::prove(channel_id, began);
+        }
         (BackfillCount { fetched, new_messages, next_before, unreachable: false }, waiting)
     }
 
