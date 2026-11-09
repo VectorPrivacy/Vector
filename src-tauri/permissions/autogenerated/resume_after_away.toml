@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-resume-after-away"
+description = "Enables the resume_after_away command without any pre-configured scope."
+commands.allow = ["resume_after_away"]
+
+[[permission]]
+identifier = "deny-resume-after-away"
+description = "Denies the resume_after_away command without any pre-configured scope."
+commands.deny = ["resume_after_away"]

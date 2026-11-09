@@ -41,6 +41,9 @@ static BACKGROUND_SYNC_ACTIVE: AtomicBool = AtomicBool::new(false);
 /// When true, notifications are suppressed (user is looking at the app).
 static ACTIVITY_IN_FOREGROUND: AtomicBool = AtomicBool::new(false);
 
+/// When the activity last went to the background (device ms), so a resume knows how long it was away.
+static PAUSED_AT_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// Whether an Activity has been created in this process's lifetime.
 /// Set to true on first onResume, NEVER set back to false.
 /// Distinguishes full-app mode (Activity exists, even if briefly paused) from
@@ -149,6 +152,18 @@ pub extern "C" fn Java_io_vectorapp_MainActivity_nativeOnResume(
             });
         }
 
+        // Sockets and live subscriptions may have died while away, PIN-locked accounts included,
+        // whose foreground client was never swapped out above.
+        let paused = PAUSED_AT_MS.swap(0, Ordering::AcqRel);
+        let away = if paused == 0 { 0 } else { device_ms().saturating_sub(paused) };
+        if away >= 30_000 {
+            tauri::async_runtime::spawn(async move {
+                if let Some(client) = crate::nostr_client() {
+                    vector_core::db::spawn_bound(async move { vector_core::live_subs::revive(&client, away, true).await });
+                }
+            });
+        }
+
         // A message for the chat the user already has open, arriving while softly backgrounded, is
         // auto-marked read but still posts a notification (the activity wasn't foreground). The chat
         // never re-opens, so the in-app read path can't clear it — cancel the active chat's notification
@@ -159,6 +174,11 @@ pub extern "C" fn Java_io_vectorapp_MainActivity_nativeOnResume(
 })
 }
 
+fn device_ms() -> u64 {
+    // device-clock: how long the activity was away.
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
+}
+
 /// Called from MainActivity.onPause via JNI
 #[no_mangle]
 pub extern "C" fn Java_io_vectorapp_MainActivity_nativeOnPause(
@@ -167,6 +187,7 @@ pub extern "C" fn Java_io_vectorapp_MainActivity_nativeOnPause(
 ) {
     crate::android::utils::jni_fence("Java_io_vectorapp_MainActivity_nativeOnPause", || (), move || {
         ACTIVITY_IN_FOREGROUND.store(false, Ordering::Release);
+        PAUSED_AT_MS.store(device_ms(), Ordering::Release);
         logcat("Activity paused (background)");
 
         // Start standalone sync if the foreground service is active but standalone sync isn't running.

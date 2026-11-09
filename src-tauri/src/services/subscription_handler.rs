@@ -55,8 +55,11 @@ pub(crate) async fn subscribe_self_sync() {
         .author(my_pk)
         .kind(Kind::Custom(vector_core::stored_event::event_kind::APPLICATION_SPECIFIC))
         .identifiers(vector_core::synced_prefs::live_d_tags());
-    match client.subscribe(self_lists_filter).await {
-        Ok(out) => new_ids.push(out.value),
+    match client.subscribe(self_lists_filter.clone()).await {
+        Ok(out) => {
+            vector_core::live_subs::keep_output(&out, vec![self_lists_filter]);
+            new_ids.push(out.value)
+        }
         Err(e) => eprintln!("[self-sync] self-lists subscribe failed: {:?}", e),
     }
     // Community List (addressable kind 33302, CORD-02 §8 — one event per fragment), so a join
@@ -64,14 +67,20 @@ pub(crate) async fn subscribe_self_sync() {
     let v2_list_filter = Filter::new()
         .author(my_pk)
         .kind(Kind::Custom(vector_core::community::v2::kind::COMMUNITY_LIST_FRAG));
-    match client.subscribe(v2_list_filter).await {
-        Ok(out) => new_ids.push(out.value),
+    match client.subscribe(v2_list_filter.clone()).await {
+        Ok(out) => {
+            vector_core::live_subs::keep_output(&out, vec![v2_list_filter]);
+            new_ids.push(out.value)
+        }
         Err(e) => eprintln!("[self-sync] v2 community-list subscribe failed: {:?}", e),
     }
     // Emoji-pack List (replaceable kind 10030).
     let emoji_filter = Filter::new().author(my_pk).kind(Kind::Custom(10030));
-    match client.subscribe(emoji_filter).await {
-        Ok(out) => new_ids.push(out.value),
+    match client.subscribe(emoji_filter.clone()).await {
+        Ok(out) => {
+            vector_core::live_subs::keep_output(&out, vec![emoji_filter]);
+            new_ids.push(out.value)
+        }
         Err(e) => eprintln!("[self-sync] emoji-list subscribe failed: {:?}", e),
     }
 
@@ -80,6 +89,7 @@ pub(crate) async fn subscribe_self_sync() {
         std::mem::replace(&mut *ids, new_ids)
     };
     for id in displaced {
+        vector_core::live_subs::forget(&id);
         let _ = client.unsubscribe(&id).await;
     }
 }
@@ -320,7 +330,8 @@ async fn subscribe_dms_verbose(label: &str) -> Result<nostr_sdk::prelude::Subscr
     let client = nostr_client().ok_or("no client")?;
     let me = vector_core::state::my_public_key().ok_or("not logged in")?;
     let filter = Filter::new().pubkey(me).kind(Kind::GiftWrap).limit(0);
-    let output = client.subscribe(filter).await.map_err(|e| e.to_string())?;
+    let output = client.subscribe(filter.clone()).await.map_err(|e| e.to_string())?;
+    vector_core::live_subs::keep_output(&output, vec![filter]);
     println!(
         "[dm-sub] {label}: id {} — ok on {:?}, failed on {:?}",
         *output,
@@ -334,6 +345,7 @@ pub(crate) async fn reassert_dm_sub() {
     let Some(client) = nostr_client() else { return };
     let old = DM_SUB_ID.lock().unwrap_or_else(|e| e.into_inner()).take();
     if let Some(id) = old {
+        vector_core::live_subs::forget(&id);
         let _ = client.unsubscribe(&id).await;
     }
     match subscribe_dms_verbose("post-sweep").await {
@@ -420,7 +432,11 @@ pub(crate) async fn start_subscriptions() -> Result<bool, String> {
     stage!("dm subscribe: begin");
     let gift_sub_id = subscribe_dms_verbose("boot").await?;
     let _ = &core;
-    *DM_SUB_ID.lock().unwrap_or_else(|e| e.into_inner()) = Some(gift_sub_id.clone());
+    let displaced = DM_SUB_ID.lock().unwrap_or_else(|e| e.into_inner()).replace(gift_sub_id.clone());
+    if let Some(old) = displaced.filter(|old| *old != gift_sub_id) {
+        vector_core::live_subs::forget(&old);
+        let _ = client.unsubscribe(&old).await;
+    }
     stage!("dm subscribe: LIVE");
 
     // Community plane subscription (authors-addressed wraps) + boot catch-up: enqueue a

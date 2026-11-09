@@ -159,6 +159,7 @@
     "allow-send-community-cached-file",
     "allow-sync-community-channel",
     "allow-fill-community-gap",
+    "allow-resume-after-away",
     "allow-sync-communities-boot",
     "allow-debug-v2-community-state",
     "allow-debug-v2-control-editions",

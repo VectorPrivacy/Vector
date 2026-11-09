@@ -148,8 +148,11 @@ async fn subscribe() {
     let emoji = Filter::new().author(me).kind(Kind::Custom(10030));
     let mut subs = Vec::new();
     for filter in [lists, v2_list, emoji] {
-        match client.subscribe(filter).await {
-            Ok(out) => subs.push(out.value),
+        match client.subscribe(filter.clone()).await {
+            Ok(out) => {
+                vector_core::live_subs::keep_output(&out, vec![filter]);
+                subs.push(out.value)
+            }
             Err(e) => vector_core::log_warn!("[self-sync] subscribe failed: {e:?}"),
         }
     }

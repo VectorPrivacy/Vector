@@ -688,10 +688,12 @@ pub async fn force_refresh_subscription(client: &Client) {
     {
         let mut sub_guard = V2_SUB_ID.lock().await;
         if let Some(old) = sub_guard.take() {
+            crate::live_subs::forget(&old);
             let _ = client.unsubscribe(&old).await;
         }
         let mut pw = V2_POOLWIDE_SUB_ID.lock().await;
         if let Some(old) = pw.take() {
+            crate::live_subs::forget(&old);
             let _ = client.unsubscribe(&old).await;
         }
         // Clearing the remembered plan too, so the equality check cannot match.
@@ -769,12 +771,14 @@ pub async fn refresh_subscription(client: &Client) {
         return; // the pool re-applies the live subs across reconnects.
     }
     if let Some(old) = sub_guard.take() {
+        crate::live_subs::forget(&old);
         let _ = client.unsubscribe(&old).await;
     }
     *fp_guard = Some(fingerprint);
 
     if plan.authors.is_empty() {
         if let Some(old_pw) = V2_POOLWIDE_SUB_ID.lock().await.take() {
+            crate::live_subs::forget(&old_pw);
             let _ = client.unsubscribe(&old_pw).await;
         }
         // Completed with nothing to hear: READY with zero planes, which is a
@@ -789,10 +793,13 @@ pub async fn refresh_subscription(client: &Client) {
     {
         let mut pw = V2_POOLWIDE_SUB_ID.lock().await;
         if let Some(old) = pw.take() {
+            crate::live_subs::forget(&old);
             let _ = client.unsubscribe(&old).await;
         }
-        match client.subscribe(live_filter(authors, since)).await {
+        let filter = live_filter(authors, since);
+        match client.subscribe(filter.clone()).await {
             Ok(out) => {
+                crate::live_subs::keep_output(&out, vec![filter]);
                 crate::log_info!(
                     "[v2-sub] poolwide {}: ok {:?} failed {:?}",
                     *out,
@@ -804,13 +811,11 @@ pub async fn refresh_subscription(client: &Client) {
             Err(e) => crate::log_warn!("[v2-sub] poolwide subscribe FAILED: {e}"),
         }
     }
-    match client
-        .subscribe(nostr_sdk::prelude::ReqTarget::manual(
-            per_relay.into_iter().map(|(url, share)| (url, vec![live_filter(share, since)])),
-        ))
-        .await
-    {
+    let targeted: std::collections::HashMap<RelayUrl, Vec<Filter>> =
+        per_relay.into_iter().map(|(url, share)| (url, vec![live_filter(share, since)])).collect();
+    match client.subscribe(nostr_sdk::prelude::ReqTarget::manual(targeted.clone())).await {
         Ok(out) => {
+            crate::live_subs::keep(&out.value, targeted);
             crate::log_info!(
                 "[v2-sub] targeted {}: ok {:?} failed {:?}",
                 *out,

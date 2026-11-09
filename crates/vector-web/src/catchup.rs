@@ -11,7 +11,6 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use futures_util::stream::{self, StreamExt};
-use nostr_sdk::prelude::*;
 use vector_core::community::v2::realtime;
 use vector_core::community::v2::volley::{self, PaintTarget};
 use vector_core::community::CommunityId;
@@ -76,34 +75,23 @@ pub async fn resume(hidden_ms: u64) {
         // Pooled plane logins went quiet with the page; later reads dial fresh.
         vector_core::community::transport::clear_plane_pool();
     }
-    stream::iter(client.relays().await)
-        .map(|(url, relay)| {
-            let client = client.clone();
-            async move {
-                if relay.status() == RelayStatus::Connected {
-                    let probe = client
-                        .fetch_events(ReqTarget::single(url.to_string(), [Filter::new().kind(Kind::Metadata).limit(1)]))
-                        .timeout(Duration::from_secs(4))
-                        .await;
-                    if probe.is_ok() {
-                        return;
-                    }
-                    relay.disconnect();
-                }
-                let _ = relay.try_connect().timeout(Duration::from_secs(8)).await;
-            }
-        })
-        .buffer_unordered(8)
-        .collect::<Vec<()>>()
-        .await;
+    vector_core::live_subs::revive(&client, hidden_ms, true).await;
+}
 
+/// What a dropped live subscription or a stretch away missed.
+pub fn catch_up(what: vector_core::live_subs::CatchUp) {
     if !live() {
         return;
     }
-    // Subscriptions a dead socket took down come back on the redialled one.
-    realtime::force_refresh_subscription(&client).await;
-    request();
-    dms(true).await;
+    match what {
+        vector_core::live_subs::CatchUp::Relay(_) => after_reconnect(),
+        vector_core::live_subs::CatchUp::All { .. } => {
+            request();
+            db::spawn_bound(async {
+                dms(true).await;
+            });
+        }
+    }
 }
 
 fn live() -> bool {

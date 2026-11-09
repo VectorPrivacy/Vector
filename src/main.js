@@ -2756,6 +2756,18 @@ window.addEventListener("DOMContentLoaded", async () => {
     document.addEventListener('visibilitychange', () => setActivity(() => { documentVisible = !document.hidden; }));
     // The boot show() reveals the window before this listener exists, so its event never arrives.
     setActivity(() => { documentVisible = !document.hidden; });
+    // Back from a while hidden or offline: relays proven, live subscriptions re-armed, the gap
+    // caught up. Vector Web's shim sends its own.
+    if (!window.__vectorWeb) {
+        let hiddenAt = 0;
+        document.addEventListener('visibilitychange', () => {
+            if (document.hidden) { hiddenAt = Date.now(); return; }
+            const away = hiddenAt ? Date.now() - hiddenAt : 0;
+            hiddenAt = 0;
+            if (away >= 60_000) invoke('resume_after_away', { awayMs: away }).catch(() => {});
+        });
+        addEventListener('online', () => invoke('resume_after_away', { awayMs: 0, network: true }).catch(() => {}));
+    }
     if (!focusless()) {
         // Visibility is re-read too: a focus change is the user looking, whatever events WebKit dropped.
         await getCurrentWindow().onFocusChanged((event) => setActivity(() => { windowFocused = !!event.payload; documentVisible = !document.hidden; }));

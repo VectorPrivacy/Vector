@@ -89,6 +89,7 @@ pub mod events_tracker;
 pub mod proxy;
 pub mod negentropy;
 pub mod dm_catchup;
+pub mod live_subs;
 pub mod blossom;
 pub mod media;
 pub mod blossom_servers;
@@ -242,6 +243,8 @@ pub async fn resubscribe_relay_after_reconnect(
         }
     }
     println!("[subs] {relay}: re-sent {sent} live sub(s), {failed} refused");
+    // What a relay closed was never in the pool to re-send.
+    live_subs::heal(client).await;
 }
 
 /// A relay connect budget for the transport in use: the caller's clearnet value, raised to the
@@ -5504,8 +5507,9 @@ impl VectorCore {
             .kind(Kind::GiftWrap)
             .limit(0);
 
-        let output = client.subscribe(filter).await
+        let output = client.subscribe(filter.clone()).await
             .map_err(|e| VectorError::Nostr(e.to_string()))?;
+        live_subs::keep_output(&output, vec![filter]);
         Ok(output.value)
     }
 
@@ -5653,6 +5657,7 @@ impl VectorCore {
         let listening_since = crate::clock::now_ms();
         let notifications = client.notifications();
         let dm_sub_id = self.subscribe_dms().await?;
+        live_subs::watch(&client);
         let (live_tx, mut live_rx) = tokio::sync::mpsc::channel::<(LiveRoute, Box<nostr_sdk::prelude::Event>)>(4096);
         let dm_sid = dm_sub_id.clone();
         db::spawn_bound(async move {

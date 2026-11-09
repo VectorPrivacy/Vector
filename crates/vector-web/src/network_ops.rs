@@ -666,6 +666,7 @@ pub fn start_relay_monitor(client: &Client) {
     if db::current_session().scoped::<MonitorStarted, AtomicBool>().swap(true, Ordering::SeqCst) {
         return;
     }
+    vector_core::live_subs::set_catch_up(crate::catchup::catch_up);
 
     if let Some(monitor) = client.monitor() {
         let mut rx = monitor.subscribe();

@@ -1139,6 +1139,45 @@ fn seen_connected() -> Arc<std::sync::Mutex<std::collections::HashSet<String>>> 
     vector_core::db::current_session().scoped::<SeenConnected, _>()
 }
 
+/// Catch up what a dropped live subscription or a stretch away missed, for the live account.
+fn catch_up(what: vector_core::live_subs::CatchUp) {
+    use vector_core::live_subs::CatchUp;
+    vector_core::db::spawn_bound(async move {
+        let Some(client) = nostr_client() else { return };
+        match what {
+            CatchUp::Relay(url) => {
+                let has_read = matches!(client.relay(&url).await, Ok(Some(r)) if r.capabilities().has_read());
+                if has_read {
+                    if let Some(handle) = TAURI_APP.get().cloned() {
+                        crate::commands::sync::fetch_messages(handle, false, Some(url.clone())).await;
+                    }
+                }
+                crate::commands::community::trigger_community_reconnect_resync(url, has_read);
+            }
+            CatchUp::All { .. } => {
+                // The boot sync is already fetching everything.
+                if crate::STATE.lock().await.is_syncing {
+                    return;
+                }
+                for (url, relay) in client.relays().all().await {
+                    crate::commands::community::trigger_community_reconnect_resync(url.to_string(), relay.capabilities().has_read());
+                }
+                crate::commands::sync::dm_catch_up_retrying(vector_core::dm_catchup::Opts { is_new: true, only: None, bootstrap: false }).await;
+            }
+        }
+    });
+}
+
+/// The window is back after `away_ms` hidden, or the network came back (`network`): relays are
+/// proven or redialled, live subscriptions re-armed, and the gap caught up where needed.
+#[tauri::command]
+pub async fn resume_after_away(away_ms: u64, network: Option<bool>) -> Result<(), String> {
+    let client = nostr_client().ok_or("no session")?;
+    let suspended = network.unwrap_or(false);
+    vector_core::db::spawn_bound(async move { vector_core::live_subs::revive(&client, away_ms, suspended).await });
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn monitor_relay_connections() -> Result<bool, String> {
     if monitor_started().swap(true, std::sync::atomic::Ordering::SeqCst) {
@@ -1161,10 +1200,14 @@ pub async fn monitor_relay_connections() -> Result<bool, String> {
             return Err("Failed to get monitor".to_string());
         }
     };
+    vector_core::live_subs::set_catch_up(catch_up);
+    vector_core::live_subs::watch(&client);
+    vector_core::live_subs::start_wake_watch();
     let mut receiver = monitor.subscribe();
 
     // Spawn task for real-time relay status notifications
     let handle_clone = handle.clone();
+    let monitored = client.clone();
     // spawn-detached: relay status notifications — pool health, which is the live pool by definition.
     tokio::spawn(async move {
         loop {
@@ -1208,9 +1251,9 @@ pub async fn monitor_relay_connections() -> Result<bool, String> {
                     if status == RelayStatus::Connected {
                         // Vector owns reconnects (`reconnect(false)`), so a fresh socket carries no
                         // live sub. Boot included: under Tor and I2P relays come up mid-sync.
-                        if let (Some(client), Ok(relay_url)) =
-                            (vector_core::state::nostr_client(), nostr_sdk::prelude::RelayUrl::parse(&url_str))
-                        {
+                        // The client this monitor belongs to: on Android, bg-sync swaps another in
+                        // as the global while this one's relays keep reconnecting.
+                        if let (client, Ok(relay_url)) = (monitored.clone(), nostr_sdk::prelude::RelayUrl::parse(&url_str)) {
                             // spawn-detached: reconnecting one relay — socket work, no account storage.
                             tokio::spawn(async move {
                                 vector_core::resubscribe_relay_after_reconnect(&client, &relay_url).await;

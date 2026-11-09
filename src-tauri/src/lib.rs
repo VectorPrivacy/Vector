@@ -1210,6 +1210,7 @@ pub fn run() {
             commands::relays::get_relay_logs,
             commands::relays::set_log_level,
             commands::relays::monitor_relay_connections,
+            commands::relays::resume_after_away,
             // Attachment commands (commands/attachments.rs)
             commands::attachments::generate_thumbhash_preview,
             commands::attachments::decode_thumbhash,
