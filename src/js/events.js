@@ -278,8 +278,8 @@ async function setupRustListeners() {
             // here would misplace it. When windowed-and-scrolled-up the data is in the cache; the next
             // scroll-down windows it in.
             if (strOpenChat === conversation_id && domChatMessages) {
-                // Same windowing render gate as message_new: a jumpToUnread resolve
-                // freezes the window (data-only), and we paint ONLY on a genuine
+                // Same windowing render gate as message_new: a jumpToUnread window
+                // swap is data-only, and we paint ONLY on a genuine
                 // tail-append (this event lands immediately after the DOM's bottom row).
                 // A historical replay sorts into the middle — it must not append here.
                 const frozen = _unreadJumpResolving;
@@ -816,10 +816,8 @@ async function setupRustListeners() {
             // Any row already rendered quoting THIS message can now draw its strip:
             // it's in chat.messages as of the insert above.
             backfillReplyContext(newMessage.id);
-            // DOM windowing render gate. A jumpToUnread resolve freezes the window
-            // entirely — its relay-walk/DB-pull echoes are data-only (already in
-            // chat.messages above), so skip ALL rendering AND badge updates; the
-            // window renders once, at the jump.
+            // DOM windowing render gate. While jumpToUnread swaps the window, arrivals
+            // are data-only (already in chat.messages above), reached by scrolling down.
             const frozen = _unreadJumpResolving;
             // Gate on a GENUINE tail-append, not "at bottom": a row renders only if
             // it lands immediately AFTER the DOM's bottom-rendered message (or the
@@ -832,7 +830,7 @@ async function setupRustListeners() {
             // slice and would satisfy the index check, so it must ALSO be at the tail.
             const atTail = isAtDataBottom();
             const tailAppend = atTail && (bottomIdx === -1 || newIdx === bottomIdx + 1);
-            let rendered = false;
+            let rendered = false, jumping = false;
             if (frozen) {
                 // Data-only: chat.messages/cache already holds it. No DOM, no badge.
                 proceduralScrollState.totalMessageCount++;
@@ -841,7 +839,7 @@ async function setupRustListeners() {
                 // live tail so the sent row is visible, then pin (windowJumpToBottom snaps).
                 // Only the newest counts: our own old messages arrive with back-paged history.
                 windowJumpToBottom();
-                rendered = true;
+                rendered = jumping = true;
                 refreshChatEmptyState();
                 proceduralScrollState.renderedMessageCount++;
                 proceduralScrollState.totalMessageCount++;
@@ -884,6 +882,11 @@ async function setupRustListeners() {
                 const winMsgs = _windowMessages();
                 const newestIdx = (winMsgs?.length || chat.messages.length) - 1;
                 if (!newMessage.mine && !midWindowLive && newIdx === newestIdx) incrementUnreadBelow();
+            }
+            // This device's send must be on screen whatever the gate decided.
+            if (newMessage.pending && !frozen && !jumping && !document.getElementById(newMessage.id)) {
+                console.warn('[send] own row missed the window', { atTail, tailAppend, bottomIdx, newIdx, top: windowTopId, bottom: windowBottomId });
+                windowJumpToBottom();
             }
             // Open chat + pinned + window actually visible = user saw it
             // land. Tabbed-out arrivals stay unread until refocus, even when
@@ -1042,14 +1045,7 @@ async function setupRustListeners() {
         // (the backend does the same).
         if (cChat.unread_from === id) cChat.unread_from = (msgIdx !== -1 && cChat.messages[msgIdx]?.id) || '';
 
-        // Remove from event cache
-        if (eventCache.has(chat_id)) {
-            const cachedEvents = eventCache.getEvents(chat_id);
-            if (cachedEvents) {
-                const cacheIdx = cachedEvents.findIndex(m => m.id === id);
-                if (cacheIdx !== -1) cachedEvents.splice(cacheIdx, 1);
-            }
-        }
+        eventCache.removeEvent(chat_id, id);
 
         // Fade out and remove DOM element if this chat is open
         if (strOpenChat === chat_id) {

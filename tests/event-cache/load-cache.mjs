@@ -27,11 +27,12 @@ const SOURCE_PATH = resolve(__dirname, '../../src/js/event-cache.js');
  * Each call builds a brand-new vm context so tests can't leak the `eventCache`
  * singleton or EVENT_CACHE_CONFIG mutations into one another.
  *
+ * @param {{ respond?: (cmd: string, args: object) => any }} [opts] - answers invoke() calls
  * @returns {{ EventCache: Function, ConversationCacheEntry: Function,
  *             eventCache: object, EVENT_CACHE_CONFIG: object,
  *             invokeCalls: Array }}
  */
-export function loadCache() {
+export function loadCache({ respond } = {}) {
     const source = readFileSync(SOURCE_PATH, 'utf8');
 
     // The in-memory shim. Uses the REAL identifiers found in the source:
@@ -62,6 +63,7 @@ export function loadCache() {
     const sandbox = {
         invoke: async (cmd, args) => {
             invokeCalls.push({ cmd, args });
+            if (respond) return respond(cmd, args);
             // get_chat_message_count expects a number; everything else an array.
             if (cmd === 'get_chat_message_count') return 0;
             return [];

@@ -427,3 +427,76 @@ test('loader: pure methods never call invoke()', () => {
     // cap; with one conversation it must not have reached the backend.
     assert.equal(mod.invokeCalls.length, 0, 'pure state-machine ops issued no invoke()');
 });
+
+/* ------------------------------------------------------------------ *
+ *  ORDER: every merge keeps the buffer ascending
+ * ------------------------------------------------------------------ */
+
+test('loadMoreEvents: a newest-first DB page lands ascending', async () => {
+    // The DB serves get_message_views newest-first.
+    const db = run('m', 1000, 60);
+    const page = (offset, limit) => db.slice().reverse().slice(offset, offset + limit);
+    const mod = loadCache({
+        respond: (cmd, args) => cmd === 'get_chat_message_count' ? db.length : page(args.offset, args.limit),
+    });
+    const cache = mod.eventCache;
+    await cache.loadInitialEvents(CID, 20);
+    const entry = cache.cache.get(CID);
+    assertInvariants(entry, { label: 'after initial page' });
+    const older = await cache.loadMoreEvents(CID, 20);
+    assert.equal(older.length, 20);
+    for (let i = 1; i < older.length; i++) assert.ok(older[i - 1].at <= older[i].at, 'returned ascending');
+    assertInvariants(entry, { label: 'after loadMoreEvents' });
+    assert.deepEqual(Array.from(entry.events, e => e.at), db.slice(20).map(e => e.at));
+});
+
+test('loadMoreEvents: an offset page that reaches above the oldest row merges sorted', async () => {
+    // A catch-up filled rows below the newest page after the window opened: offset 20 now
+    // serves rows newer than the oldest one held, some of them new.
+    let db = run('m', 1000, 40, 10);
+    const mod = loadCache({
+        respond: (cmd, args) => cmd === 'get_chat_message_count'
+            ? db.length
+            : db.slice().reverse().slice(args.offset, args.offset + args.limit),
+    });
+    const cache = mod.eventCache;
+    await cache.loadInitialEvents(CID, 20);
+    const entry = cache.cache.get(CID);
+    db = [...db, ...run('fill', 1205, 10, 1)].sort((a, b) => a.at - b.at);
+    cache.updateTotalCount(CID, db.length);
+    await cache.loadMoreEvents(CID, 20);
+    assertInvariants(entry, { label: 'after overlapping offset page' });
+});
+
+test('addEvents(prepend) with an overlapping batch stays sorted and keeps the gap boundary', () => {
+    const { cache, tail } = fresh();
+    const tailRun = run('tail', 1000, 5);
+    cache.addEvents(CID, tailRun, false);
+    tail.observeAll(tailRun);
+    cache.seedWindow(CID, run('seek', 100, 5)); // seek 100..104
+    const entry = cache.cache.get(CID);
+    cache.addEvents(CID, [ev('a', 90), ev('b', 102), ev('c', 106)], true);
+    assertInvariants(entry, { tail, label: 'after overlapping prepend' });
+    assert.equal(entry.gapAfterId, 'c', 'the seek region now ends at its newest row');
+});
+
+test('addEvents(append) across a gap that overlaps the tail interleaves', () => {
+    const { cache, tail } = fresh();
+    const tailRun = [ev('t1', 1000), ev('t2', 1200)];
+    cache.addEvents(CID, tailRun, false);
+    tail.observeAll(tailRun);
+    cache.seedWindow(CID, run('seek', 100, 5));
+    const entry = cache.cache.get(CID);
+    const fill = [ev('f1', 1100), ev('f2', 1300)];
+    tail.observeAll(fill);
+    cache.addEvents(CID, fill, false);
+    assert.equal(entry.gapAfterId, null);
+    assertInvariants(entry, { tail, label: 'after overlapping gap append' });
+});
+
+test('addEvents(append) into a contiguous buffer below its newest row merges sorted', () => {
+    const { cache } = fresh();
+    cache.addEvents(CID, run('m', 1000, 5, 10), false);
+    cache.addEvents(CID, [ev('x', 1015), ev('y', 1100)], false);
+    assertInvariants(cache.cache.get(CID), { label: 'after contiguous overlapping append' });
+});

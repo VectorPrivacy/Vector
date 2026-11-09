@@ -49,9 +49,8 @@ let _windowRendering = false;
 // Counts whole-window renders: a load that awaited across one belongs to a window that is gone.
 let _windowGen = 0;
 
-// True for the duration of a jumpToUnread resolve (relay-walk + DB pull). The
-// window must NEVER shift until the jump renders, so realtime arrivals during
-// the resolve are data-only (no DOM rows, no badge). Cleared in jumpToUnread's
+// True while jumpToUnread swaps the window to the unread boundary (local work only,
+// never the relay walk), so arrivals then are data-only. Cleared in jumpToUnread's
 // finally and as a safety net at the top of openChat.
 let _unreadJumpResolving = false;
 
@@ -833,9 +832,7 @@ async function maybeLoadCommunityOlderFromNetwork(chatId) {
     const chat = arrChats.find(c => c.id === chatId);
     if (!chat || chat.chat_type !== 'Community') return;
 
-    // Cursor = the TRUE oldest message we hold. The cache array is NOT reliably sorted after
-    // back-paging (loadMoreEvents prepends descending batches), so reduce to the minimum `at`
-    // rather than trusting index 0. getEventsRef is read-only (no LRU side effect).
+    // Cursor = the oldest message we hold. getEventsRef is read-only (no LRU side effect).
     const events = eventCache.getEventsRef(chatId) || chat.messages || [];
     // Holding nothing, there is no oldest message to page back from: the newest page is the ask.
     const oldestMs = events.length ? events.reduce((min, e) => (e.at < min ? e.at : min), events[0].at) : null;
@@ -850,13 +847,14 @@ async function maybeLoadCommunityOlderFromNetwork(chatId) {
             const res = await invoke('sync_community_channel', { channelId: chatId, beforeMs });
             // Another fetch of this channel holds the relay walk: ask again once it lets go.
             if (res?.busy) { busy = true; break; }
-            // Refresh the cache count so hasMoreEvents reflects any newly-ingested older rows,
-            // then load (prepend) them.
+            // Refresh the cache count so hasMoreEvents reflects any newly-ingested older rows.
+            // A window with rows re-reads anchored to its top once this returns; only an empty
+            // one pages them in here, as the offset page has nothing to anchor on.
             const newTotal = await invoke('get_chat_message_count', { chatId });
             if (newTotal > prevTotal) {
                 grew = true;
                 eventCache.updateTotalCount(chatId, newTotal);
-                if (strOpenChat === chatId) loadMoreMessages();
+                if (strOpenChat === chatId && !(_windowMessages() || []).some(_barCounted)) loadMoreMessages();
             }
             // Terminate ONLY on the backend's authoritative "no more older" signal — a page that
             // returned just already-known events (no count growth) does NOT mean history's start.
@@ -1480,11 +1478,6 @@ async function jumpToUnread(lastReadId) {
     }
     if (boundaryAt == null) { hideUnreadJumpPill(); return; }
 
-    // Freeze the window for the whole resolve: realtime echoes of the gap messages
-    // must not touch the DOM or badge until Step 3 renders the jump. try/finally so a
-    // navigate-away (the `strOpenChat !== chatId` bails) can't leave it stuck.
-    _unreadJumpResolving = true;
-    try {
     const stale = boundaryAt < (VectorSvelte.now() - UNREAD_JUMP_STALE_MS);
 
     // Only REAL messages drive the resolve frontier. Presence/system events stream into chat.messages
@@ -1569,6 +1562,10 @@ async function jumpToUnread(lastReadId) {
         return;
     }
 
+    // Frozen only while the window swaps: the walk above is network-bound and can run for
+    // minutes, and live arrivals at the tail must keep painting through it.
+    _unreadJumpResolving = true;
+    try {
     // Seed the window: merge the slice into the cache in place (alias-safe), keeping
     // the pinned tail (so the chat-list preview stays correct) and recording the gap
     // between the seek region and the tail. Then render the slice.

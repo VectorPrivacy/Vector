@@ -81,33 +81,6 @@ class ConversationCacheEntry {
     }
 
     /**
-     * Add events to the cache (prepend older events)
-     * O(m) Set sync + O(n+m) spread - optimal for sorted batches from backend
-     * @param {Array} newEvents - Events to add (should be older than existing)
-     * @param {boolean} prepend - If true, add to beginning (older events)
-     */
-    addEvents(newEvents, prepend = true) {
-        // Sync Set for future O(1) duplicate checks in addEvent()
-        for (const e of newEvents) {
-            this.eventIds.add(e.id);
-        }
-
-        if (prepend) {
-            // Prepend older events
-            this.events = [...newEvents, ...this.events];
-        } else {
-            // Append newer events
-            this.events = [...this.events, ...newEvents];
-        }
-
-        // NOTE: We do NOT trim here during active loading
-        // Trimming only happens during LRU eviction (when conversation is closed/evicted)
-        // This allows procedural scroll to load all events as needed
-
-        this.touch();
-    }
-
-    /**
      * Index of the first event in the PINNED tail segment. The tail is the newest
      * `tailBudget` events that are part of the contiguous run reaching the live tail.
      * When there's a gap, the tail starts AFTER the gap (everything below gapAfterId
@@ -189,9 +162,10 @@ class ConversationCacheEntry {
                 this._insertSortedInRange(event, 0, this.events.length);
             } else {
                 const tailStart = gapIdx + 1;
-                const tailOldestAt = this.events[tailStart]?.at ?? Infinity;
+                const tailOldestAt = this.events[tailStart]?.at;
                 const seekNewestAt = this.events[gapIdx].at;
-                if (event.at >= tailOldestAt) {
+                // An emptied tail takes anything newer than the seek region.
+                if (tailOldestAt != null ? event.at >= tailOldestAt : event.at > seekNewestAt) {
                     // Belongs in the tail (incl. the common genuine-newest tail arrival).
                     this._insertSortedInRange(event, tailStart, this.events.length);
                 } else if (event.at <= seekNewestAt) {
@@ -410,12 +384,13 @@ class EventCache {
                 return [];
             }
 
-            // Prepend older events
-            entry.addEvents(events, true);
+            // get_message_views is newest-first; an offset page can also reach above our oldest
+            // row once a catch-up has filled history below the newest page.
+            this.addEvents(conversationId, events, true);
             entry.loadedOffset += events.length;
             entry.isFullyLoaded = entry.loadedOffset >= entry.totalInDb;
 
-            return events;
+            return events.slice().sort((a, b) => a.at - b.at);
         } catch (error) {
             return [];
         }
@@ -507,6 +482,15 @@ class EventCache {
         return entry.addEvent(event);
     }
 
+    /** Drop one event, id included: a resend reuses its id and must not read as a duplicate. */
+    removeEvent(conversationId, eventId) {
+        const entry = this.cache.get(conversationId);
+        if (!entry) return;
+        const i = entry.events.findIndex(e => e.id === eventId);
+        if (i !== -1) entry.events.splice(i, 1);
+        entry.eventIds.delete(eventId);
+    }
+
     /**
      * Merge a batch of events into a conversation, deduping by id and keeping the
      * array IN PLACE (chat.messages aliases survive). Used by the anchored window
@@ -535,10 +519,18 @@ class EventCache {
         for (const e of fresh) entry.eventIds.add(e.id);
         fresh.sort((a, b) => a.at - b.at);
 
+        const events = entry.events;
         if (prepend) {
-            // Older rows go to the front (grow the seek region / the head). The gap
-            // (if any) sits further down and is unaffected.
-            entry.events.unshift(...fresh);
+            // Older rows grow the front of the seek region (or of a contiguous buffer). A batch
+            // that reaches above the front merges sorted into that region, never across the gap.
+            if (!events.length || fresh[fresh.length - 1].at <= events[0].at) {
+                events.unshift(...fresh);
+            } else {
+                const gapIdx = entry.gapAfterId != null ? events.findIndex(e => e.id === entry.gapAfterId) : -1;
+                let hi = gapIdx === -1 ? events.length : gapIdx + 1;
+                for (const e of fresh) entry._insertSortedInRange(e, 0, hi++);
+                if (gapIdx !== -1) entry.gapAfterId = events[hi - 1].id;
+            }
         } else if (entry.gapAfterId != null) {
             // Newer rows fill the gap between the seek region and the tail. Insert
             // them right after the gap boundary, then advance/close the gap.
@@ -559,9 +551,18 @@ class EventCache {
             entry.gapAfterId = (reachedTail || newGapIdx + 1 >= entry.events.length)
                 ? null
                 : newGapId;
-        } else {
+            // Rows that overlap the tail interleave with it.
+            if (reachedTail) {
+                const rest = events.splice(insertAt);
+                rest.sort((a, b) => a.at - b.at);
+                events.push(...rest);
+            }
+        } else if (!events.length || fresh[0].at >= events[events.length - 1].at) {
             // Contiguous buffer: newer rows extend the tail at the end.
-            entry.events.push(...fresh);
+            events.push(...fresh);
+        } else {
+            let hi = events.length;
+            for (const e of fresh) entry._insertSortedInRange(e, 0, hi++);
         }
         entry.totalInDb = Math.max(entry.totalInDb, entry.events.length);
         entry.touch();

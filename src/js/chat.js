@@ -115,10 +115,7 @@ function derezMessageLocally(id, chatId) {
     if (cChat) {
         const mi = cChat.messages.findIndex(m => m.id === id);
         if (mi !== -1) cChat.messages.splice(mi, 1);
-        if (eventCache.has(chatId)) {
-            const ce = eventCache.getEvents(chatId);
-            if (ce) { const ci = ce.findIndex(m => m.id === id); if (ci !== -1) ce.splice(ci, 1); }
-        }
+        eventCache.removeEvent(chatId, id);
     }
     if (strOpenChat === chatId) {
         const domMsg = document.getElementById(id);
