@@ -2754,8 +2754,11 @@ window.addEventListener("DOMContentLoaded", async () => {
     };
 
     document.addEventListener('visibilitychange', () => setActivity(() => { documentVisible = !document.hidden; }));
+    // The boot show() reveals the window before this listener exists, so its event never arrives.
+    setActivity(() => { documentVisible = !document.hidden; });
     if (!focusless()) {
-        await getCurrentWindow().onFocusChanged((event) => setActivity(() => { windowFocused = !!event.payload; }));
+        // Visibility is re-read too: a focus change is the user looking, whatever events WebKit dropped.
+        await getCurrentWindow().onFocusChanged((event) => setActivity(() => { windowFocused = !!event.payload; documentVisible = !document.hidden; }));
         // A window focused before the listener existed never reports it, and the page's own
         // hasFocus() is often false at launch: ask the window.
         try {
