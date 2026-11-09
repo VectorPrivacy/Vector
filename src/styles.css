@@ -21355,11 +21355,13 @@ textarea.command-part-input {
   margin-top: 6px;
 }
 /* A video link: thumbnail and player share one 16:9 box, so starting it moves nothing.
-   YouTube asks for a player of at least 200px each way. */
+   YouTube asks for a player of at least 200px each way. A definite width keeps the min-height
+   from widening the box through its ratio past a narrow card. */
 .dmsg-preview-video {
   position: relative;
+  width: 100%;
   aspect-ratio: 16 / 9;
-  min-width: 200px;
+  min-width: min(200px, 100%);
   min-height: 200px;
   margin-top: 6px;
   border-radius: 4px;
