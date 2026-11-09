@@ -44,7 +44,8 @@
             chatVersion(chat.id);
             if (!h.computeRowUnreadCount(chat)) continue;
             unreadDms++;
-            if (dms.length < DM_COUNT) dms.push(chat);
+            // A request waits under Requests until it's answered or accepted.
+            if (dms.length < DM_COUNT && !h.chatIsRequest(chat)) dms.push(chat);
         }
         return { dms, spaces, unreadDms };
     });

@@ -52,6 +52,7 @@ function renderRailShortcuts() {
      * @typedef {Object} RailHelpers
      * @property {() => void} refreshRailJoinOrder
      * @property {(chat: object) => boolean} chatIsGroup
+     * @property {(chat: object) => boolean} chatIsRequest
      * @property {(chat: object) => boolean} isPrimaryChannelChat
      * @property {(chat: object) => string|null} communityIdOfChat
      * @property {(npub: string) => object|null} getProfile
@@ -82,6 +83,7 @@ function renderRailShortcuts() {
     VectorSvelte.setScreen('rail', {
         h: {
             chatIsGroup,
+            chatIsRequest,
             isPrimaryChannelChat,
             communityIdOfChat,
             getProfile,
