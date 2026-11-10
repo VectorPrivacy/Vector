@@ -684,8 +684,6 @@ async function openCommunityMenu(chat, ev, at, { inList = false } = {}) {
     // sentence-long label stretched the menu to twice its useful width. It reads in
     // the details pane, which has the room for it.
     const items = [];
-    const members = cf.community_id && communityMemberSubtext(cf.community_id);
-    if (members) items.push({ header: members });
     if (cf.community_id && communityHasUnread(cf.community_id)) {
         items.push({
             label: 'Mark as Read',

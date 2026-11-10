@@ -1,7 +1,7 @@
 <script>
     // The community's identity at the top of its channel pane (widescreen): icon,
-    // name, raid pip. Derives from the pane's community and that community's signal,
-    // so a rename repaints one span.
+    // name, member count, raid pip. Derives from the pane's community and that
+    // community's signal, so a count landing or a rename repaints one span.
     import { untrack } from 'svelte';
     import { avatarThumb } from '../lib/avatar.js';
     import { paneState, communityVersion } from '../lib/signals.svelte.js';
@@ -23,12 +23,13 @@
             primary,
             name: cf.name || 'Community',
             avatarSrc: primary?.metadata?.avatar_cached ? h.convertFileSrc(avatarThumb(primary.metadata.avatar_cached)) : null,
+            members: h.communityMemberSubtext(id),
             raid: h.raidAlert(id),
         };
     });
 
-    // The count (for the community's menu) and the raid verdict are fetched when the
-    // pane shows a community; their landing touches the community. Keyed on the id alone: their own
+    // The count and the raid verdict are fetched when the pane shows a community;
+    // their landing touches the community. Keyed on the id alone: their own
     // landing must not refetch.
     $effect(() => {
         const id = vm?.id;
@@ -67,9 +68,14 @@
             </button>
         {/if}
         <Avatar src={vm.avatarSrc} size={36} group class="chatlist-community-head-avatar" />
-        <!-- One line: the member count lives in the community's menu. -->
         <div class="chatlist-community-head-meta">
             <span class="chatlist-community-head-name cutoff" use:name={vm.name}></span>
+            <span class="chatlist-community-head-members">
+                <!-- The glyph says "people" before the number is read, and holds the
+                     line's height while the count is still empty. -->
+                <span class="icon icon-users-multi chatlist-community-head-members-icon"></span>
+                <span>{vm.members}</span>
+            </span>
         </div>
         {#if vm.raid}
             <span class="chatlist-community-head-alert" title="{vm.raid.suspects} accounts flagged as a raid — open Moderation"></span>

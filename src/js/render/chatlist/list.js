@@ -339,6 +339,7 @@ function mountChatlist() {
      * @property {(communityId: string) => object|null} primaryChat
      * @property {(path: string) => string} convertFileSrc
      * @property {(el: Element) => void} twemojify
+     * @property {(communityId: string) => string} communityMemberSubtext
      * @property {(communityId: string) => object|null} raidAlert
      * @property {(communityId: string) => void} refreshMemberCount
      * @property {(communityId: string) => void} refreshRaidAlert
@@ -350,6 +351,7 @@ function mountChatlist() {
                     || arrChats.find(c => communityIdOfChat(c) === id),
                 convertFileSrc,
                 twemojify,
+                communityMemberSubtext,
                 raidAlert: (id) => { const v = communityRaidAlerts.get(id); return v && (v.detected || v.suspects > 0) ? v : null; },
                 refreshMemberCount: (id) => refreshCommunityMemberCount(id),
                 refreshRaidAlert: (id) => refreshCommunityRaidAlert(id),

@@ -203,6 +203,7 @@ function csBannerPreviewContext(communityId) {
         background: getComputedStyle(document.body).backgroundColor,
         name: st.saved.name,
         iconSrc: st.saved.iconSrc,
+        members: communityMemberSubtext(communityId),
         sections,
     };
 }

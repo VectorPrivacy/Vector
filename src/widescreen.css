@@ -829,9 +829,11 @@ body:is(.ws, .cc) .chatlist-community-head-avatar {
    of sizing itself to some intrinsic guess. */
 body:is(.ws, .cc) .chatlist-community-head-meta {
   display: flex;
-  align-items: center;
+  flex-direction: column;
+  justify-content: center;
   flex: 1;
   min-width: 0;
+  gap: 2px;
 }
 
 body:is(.ws, .cc) .chatlist-community-head-name {
@@ -850,6 +852,34 @@ body:is(.ws, .cc) .chatlist-community-head-name .emoji {
   height: 15px;
   vertical-align: -3px;
   margin: 0;
+}
+
+body:is(.ws, .cc) .chatlist-community-head-members {
+  display: flex;
+  align-items: center;
+  gap: 2.5px;
+  font-size: 12px;
+  line-height: 14px;
+  color: rgba(255, 255, 255, 0.42);
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+body:is(.ws, .cc) .chatlist-community-head-members > span:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+body:is(.ws, .cc) .chatlist-community-head-members-icon {
+  position: relative;
+  flex-shrink: 0;
+  width: 13px;
+  height: 13px;
+  /* `.icon` ships `margin: auto` to centre itself inside its absolute inset.
+     As a flex item that instead absorbs the free space and floats the glyph to
+     the middle of the row, so it has to be zeroed here. */
+  margin: 0;
+  background-color: rgba(255, 255, 255, 0.42);
 }
 
 /* Says the header is a menu, not a label. `position: relative` is load-bearing:
