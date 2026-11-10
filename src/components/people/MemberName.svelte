@@ -55,6 +55,23 @@
     const timeoutLabel = (left) => (left > 0 ? 'Timeout ends in ' + fmtCountdown(left) : 'Timeout ending');
     const unlistedLabel = $derived(unlisted === 'departed' ? 'Posting after leaving' : 'Never announced joining');
 
+    // A mark's tooltip. Also hidden on destroy: a row filtered away under the cursor gets no mouseleave.
+    function tip(node, text) {
+        let label = text, shown = false;
+        const enter = () => { shown = true; ui.showTooltip(label, node); };
+        const leave = () => { if (!shown) return; shown = false; ui.hideTooltip(); };
+        node.addEventListener('mouseenter', enter);
+        node.addEventListener('mouseleave', leave);
+        return {
+            update(next) { label = next; },
+            destroy() {
+                leave();
+                node.removeEventListener('mouseenter', enter);
+                node.removeEventListener('mouseleave', leave);
+            },
+        };
+    }
+
     function explain(e) {
         e.stopPropagation();
         ui.hideTooltip();
@@ -71,8 +88,7 @@
                 class="icon member-rank-mark {rank === 'owner' ? 'icon-crown member-rank-owner' : 'icon-shield-filled member-rank-admin'}"
                 role="img"
                 aria-label={rankWord}
-                onmouseenter={(e) => ui.showTooltip(rankWord, e.currentTarget)}
-                onmouseleave={() => ui.hideTooltip()}
+                use:tip={rankWord}
             ></span>
         {/if}
         {#if bot}
@@ -80,8 +96,7 @@
                 class="icon icon-bot member-pick-bot"
                 role="img"
                 aria-label="Bot"
-                onmouseenter={(e) => ui.showTooltip('Bot', e.currentTarget)}
-                onmouseleave={() => ui.hideTooltip()}
+                use:tip={'Bot'}
             ></span>
         {/if}
         {#if timeoutUntil}
@@ -96,8 +111,7 @@
                 aria-label={unlistedLabel}
                 onclick={explain}
                 onkeydown={(e) => (e.key === 'Enter' || e.key === ' ') && (e.preventDefault(), explain(e))}
-                onmouseenter={(e) => ui.showTooltip(unlistedLabel, e.currentTarget)}
-                onmouseleave={() => ui.hideTooltip()}
+                use:tip={unlistedLabel}
             ></span>
         {/if}
     </div>
