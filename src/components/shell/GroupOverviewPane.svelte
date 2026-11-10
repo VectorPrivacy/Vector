@@ -31,10 +31,12 @@
 
 <div id="group-overview" class="chats" style:display={panes.groupOverview ? null : 'none'} use:reveal={['groupOverview', reveals.groupOverview]} use:railPull={sheetGrip} use:sheetPane data-group-id={ov.groupId || undefined}>
     <div class="chat-header" style="top: 0px;">
-        <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-        <div id="group-overview-back-btn" class="btn nav-back-btn" onclick={() => h().back?.()}>
-            <span class="icon icon-chevron-double-left nav-icon"></span>
-        </div>
+        {#if !shell.ws}
+            <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+            <div id="group-overview-back-btn" class="btn nav-back-btn" onclick={() => h().back?.()}>
+                <span class="icon icon-chevron-double-left nav-icon"></span>
+            </div>
+        {/if}
         <div class="profile-header-info">
             <div class="profile-header-name-row">
                 <div id="group-overview-header-avatar-container">

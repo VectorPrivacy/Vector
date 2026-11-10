@@ -589,11 +589,6 @@ body.ws #group-overview > div:not(.chat-header) {
   height: auto !important;
 }
 
-/* Points away from the conversation now that the pane docks on the right. */
-body.ws #group-overview-back-btn .nav-icon {
-  transform: rotate(180deg);
-}
-
 /* The overview's vertical rhythm was drawn for a full phone screen: 100px of
    lead-in above a 100px avatar, 75px of tail. In a 300px column that pushed the
    member list below the fold. */
@@ -2627,9 +2622,49 @@ body.ws .ws-member-search .emoji-search-icon {
   background-color: #5b6060 !important;
 }
 
-/* The details column's collapse chevron shares the header with the search. */
-body.ws #group-overview > .chat-header .ws-member-search {
-  margin-left: 54px;
+/* ── Details toggle ─────────────────────────────────────────────────────── */
+body.ws #chat > .chat-header .details-toggle {
+  margin-left: 4px;
+}
+
+.details-toggle {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  backdrop-filter: none;
+  color: #b2b2b2;
+  transition: background-color 0.12s ease, color 0.12s ease;
+}
+
+.details-toggle:hover {
+  background-color: var(--ws-hover);
+  color: #fff;
+}
+
+.details-toggle:focus-visible {
+  outline: 2px solid var(--icon-color-primary);
+  outline-offset: 1px;
+}
+
+.details-toggle svg {
+  width: 20px;
+  height: 20px;
+}
+
+.details-toggle .fill {
+  opacity: 0;
+  transition: opacity 150ms ease;
+}
+
+.details-toggle[aria-expanded="true"] .fill {
+  opacity: 1;
 }
 
 /* The avatar carries the taller row rather than floating in it. */

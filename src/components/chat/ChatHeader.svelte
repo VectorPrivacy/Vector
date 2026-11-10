@@ -9,6 +9,10 @@
     import { wallpaperState } from '../lib/wallpaper.svelte.js';
     import Avatar from '../ui/Avatar.svelte';
     import { now as clockNow } from '../lib/clock.svelte.js';
+    import { shellState, shellPanes } from '../lib/shell.svelte.js';
+    import PanelToggle from '../ui/PanelToggle.svelte';
+    const shell = shellState();
+    const panes = shellPanes();
 
     const h = () => chatHeaderHandlers();
     // The pins scrim's hit-test needs the button: a tap on it toggles, never dismisses.
@@ -48,7 +52,7 @@
         // header naming the channel shows its topic or nothing.
         else if (group) { const t = H.channelTopic(chat); topic = !!t; subtext = t || (H.namesChannel(chat) ? '' : H.memberSubtext(communityId)); }
         else if (!H.streamHidden(profile || id)) { subtext = profile?.status?.title || ''; tags = profile?.status?.emoji_tags || []; }
-        return { id, notes, group, name, twemoji, avatarSrc, click, subtext, tags, topic, menu: !!chat && H.menuCount(chat) > 0 };
+        return { id, notes, group, community: !!communityId, chat, name, twemoji, avatarSrc, click, subtext, tags, topic, menu: !!chat && H.menuCount(chat) > 0 };
     });
 
     function nameInto(node, [text, twemoji]) {
@@ -169,6 +173,9 @@
     <div class="btn nav-menu-btn" title="Chat Options" style:display={vm?.menu ? null : 'none'} onclick={openMenu}>
         <span class="icon icon-dots-horizontal nav-icon"></span>
     </div>
+    {#if shell.ws && vm?.community}
+        <PanelToggle expanded={panes.groupOverview} controls="group-overview" onclick={() => h()?.openCommunity(vm.chat)} />
+    {/if}
     </div>
     <!-- Mirrors the Profile edit bar over the header while a wallpaper preview is staged. -->
     {#if wp.editShown}

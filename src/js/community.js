@@ -883,8 +883,8 @@ function registerCommunityOverview() {
 // Registered once every script is in: the bag calls helpers from files that load later.
 document.addEventListener('DOMContentLoaded', registerCommunityOverview, { once: true });
 
-/** The overview header's back button. Widescreen: the roster's own close button goes through
- *  the same pair as the header's Members toggle, or the preference keeps reading "open". */
+/** The overview header's back button. Widescreen closes through the same pair as the chat
+ *  header's Details toggle, or the preference keeps reading "open". */
 function closeGroupOverviewFromHeader() {
     if (wsActive()) {
         wsCloseDetails();
