@@ -25,6 +25,8 @@ const ALL: &[(&str, fn())] = &[
     ("concord::history_catchup", concord_history_catchup),
     ("concord::control_fold", concord_control_fold),
     ("concord::guestbook_ingest", concord_guestbook_ingest),
+    ("concord::guestbook_sync", concord_guestbook_sync),
+    ("concord::control_sync", concord_control_sync),
     ("concord::ledger_chain", vector_core::community::v2::bench::ledger_chain),
     ("db::pool_uncontended", pool::uncontended),
     ("db::pool_contended", pool::contended),
@@ -84,6 +86,16 @@ fn concord_control_fold() {
 fn concord_guestbook_ingest() {
     fresh_account();
     vector_core::community::v2::bench::guestbook_ingest();
+}
+
+fn concord_guestbook_sync() {
+    fresh_account();
+    vector_core::community::v2::bench::guestbook_sync();
+}
+
+fn concord_control_sync() {
+    fresh_account();
+    vector_core::community::v2::bench::control_sync();
 }
 
 /// Log in a new account under a temp root that lives until the process exits.

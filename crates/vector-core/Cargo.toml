@@ -31,6 +31,8 @@ vector-push = { path = "../vector-push", version = "0.1.0" }
 # or not at all.
 nostr = { version = "=0.45.5", features = ["nip04", "nip06", "nip44", "nip46", "nip59", "rand", "os-rng"] }
 nostr-sdk = "=0.45.4"
+# The set reconciliation nostr-sdk itself syncs with: Control Plane reads drive it directly.
+negentropy = "=0.5.2"
 # Named for the bounded dedup tracker short-lived clients take (`events_tracker.rs`).
 nostr-database = "=0.45.2"
 nostr-connect = "=0.45.2"

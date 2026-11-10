@@ -1204,6 +1204,13 @@ fn delete_community_inner(community_id: &str, retain_keys: bool) -> Result<(), S
         Some("DELETE FROM community_bans WHERE community_id = ?1"),
         Some("DELETE FROM community_writers WHERE community_id = ?1"),
         Some("DELETE FROM community_held_wraps WHERE community_id = ?1"),
+        // With the floors: a re-join reads the plane afresh, as its floors start afresh.
+        Some("DELETE FROM community_control_wraps WHERE community_id = ?1"),
+        Some("DELETE FROM settings WHERE key LIKE 'ctl_reads:' || ?1 || '%'"),
+        Some("DELETE FROM settings WHERE key LIKE 'pln_reads:' || ?1 || '%'"),
+        Some("DELETE FROM community_guestbook_wraps WHERE community_id = ?1"),
+        Some("DELETE FROM settings WHERE key = 'gbk_reads:' || ?1"),
+        Some("DELETE FROM settings WHERE key = 'gb_reads:' || ?1"),
         Some("DELETE FROM community_audit_local WHERE community_id = ?1"),
         Some("DELETE FROM settings WHERE key LIKE 'writer_postable:' || ?1 || ':%'"),
         Some("DELETE FROM settings WHERE key LIKE 'writer_cert:' || ?1 || ':%'"),
@@ -3348,6 +3355,9 @@ pub fn set_guestbook(
     let book = guestbook_book(&tx, community_id)?;
     tx.execute("DELETE FROM community_guestbook_events WHERE book = ?1", params![book])
         .map_err(|e| format!("save guestbook: {e}"))?;
+    // A replaced Guestbook no longer vouches for the wraps read into the one before it.
+    tx.execute("DELETE FROM community_guestbook_wraps WHERE community_id = ?1", params![community_id])
+        .map_err(|e| format!("save guestbook: {e}"))?;
     insert_guestbook_events(&tx, community_id, events, false)?;
     upsert_guestbook_cursor(&tx, community_id, cursor_secs)?;
     tx.commit().map_err(|e| format!("save guestbook commit: {e}"))?;
@@ -5302,6 +5312,13 @@ mod tests {
         set_guestbook(&cid, &[], 9).unwrap();
         set_community_pins(&cid, &ch, r#"{"pins":["x"]}"#, 1).unwrap();
         record_audit_local(&cid, "e1", 5, r#"{"action":"message_delete"}"#).unwrap();
+        let control_wrap = br#"{"kind":1059,"content":"a control wrap as a relay served it"}"#.to_vec();
+        store_control_wraps(&cid, &[0x77; 32], 1, 5, &[([0x11; 32], 5, Some(control_wrap.clone())), ([0x12; 32], 6, None)]).unwrap();
+        let control_wraps = || control_wrap_page(&cid, &[0x77; 32], None, 10).unwrap();
+        assert_eq!(control_wraps(), vec![([0x11; 32], 5, control_wrap.clone())]);
+        let on_disk: Vec<u8> = crate::db::get_db_connection_guard_static().unwrap()
+            .query_row("SELECT wrap FROM community_control_wraps WHERE wrap IS NOT NULL", [], |r| r.get(0)).unwrap();
+        assert_ne!(on_disk, control_wrap, "a held Control wrap is sealed on disk");
 
         // A DM with a link preview and a file, and an unconfirmed send's retained rumor.
         let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
@@ -5427,6 +5444,8 @@ mod tests {
         at_rest::rekey(&K, &K2, &crate::crypto::Kdf::fresh(), "pin", None, &|_| {}).unwrap();
         crate::state::ENCRYPTION_KEY.set(K2, &[]);
         assert_eq!(read(), before, "every value reads back after a PIN change");
+        assert_eq!(control_wraps(), vec![([0x11; 32], 5, control_wrap.clone())], "a held Control wrap moves with the key");
+        assert_eq!(control_wrap_counts(&cid, &[0x77; 32]).unwrap().1, 1, "and a refusal, which holds no body, stays as it was");
         assert_eq!(
             crate::db::chats::take_held_wallpaper(&dm_chat).unwrap().as_deref(),
             Some(r#"{"url":"https://blossom.example/held-wallpaper"}"#),
@@ -6085,6 +6104,215 @@ pub fn hold_wrap(community_id: &str, channel_id: &str, wrap_id: &str, wrap: &str
         conn.execute("DELETE FROM events WHERE wrapper_event_id = ?1 AND instr(tags, '[\"unauthorized\"]') > 0", params![id]).map_err(|e| format!("trim held copy: {e}"))?;
     }
     Ok(!evicted.iter().any(|id| *id == wrap_id))
+}
+
+// ── Control wraps: every wrap of a Control Plane view this device has read ──
+
+/// A stored Control wrap: its id, its own timestamp (seconds), and its body unless it was refused.
+pub type ControlWrapRow = ([u8; 32], u64, Option<Vec<u8>>);
+
+/// Every wrap id held for `view`, the refused ones too, each with its timestamp.
+pub fn control_wrap_ids(community_id: &str, view: &[u8; 32]) -> Result<Vec<([u8; 32], u64)>, String> {
+    let conn = super::get_db_connection_guard_static()?;
+    let mut stmt = conn
+        .prepare_cached("SELECT wrap_id, created_at FROM community_control_wraps WHERE community_id = ?1 AND view = ?2")
+        .map_err(|e| format!("control wrap ids: {e}"))?;
+    let rows = stmt
+        .query_map(params![community_id, &view[..]], |r| Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, i64>(1)?)))
+        .map_err(|e| format!("control wrap ids: {e}"))?;
+    let mut out = Vec::new();
+    for row in rows {
+        let (id, at) = row.map_err(|e| format!("control wrap ids: {e}"))?;
+        out.push((id.try_into().map_err(|_| "control wrap ids: a wrap id is not 32 bytes".to_string())?, at.max(0) as u64));
+    }
+    Ok(out)
+}
+
+/// Store `rows` judged under `rules`, all or none. A wrap already held keeps its row. Returns how
+/// many were new.
+pub fn store_control_wraps(community_id: &str, view: &[u8; 32], rules: u32, now_secs: u64, rows: &[ControlWrapRow]) -> Result<usize, String> {
+    if rows.is_empty() {
+        return Ok(0);
+    }
+    let _seal = crate::crypto::gate::sealing();
+    let conn = super::get_write_connection_guard_static()?;
+    let tx = conn.unchecked_transaction().map_err(|e| format!("store control wraps tx: {e}"))?;
+    let mut stored = 0usize;
+    {
+        let mut stmt = tx
+            .prepare_cached(
+                "INSERT OR IGNORE INTO community_control_wraps (community_id, view, wrap_id, created_at, wrap, rules, judged_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            )
+            .map_err(|e| format!("store control wraps: {e}"))?;
+        crate::crypto::seal_batch(|sealer| -> Result<(), String> {
+            for (id, at, body) in rows {
+                let sealed = body.as_deref().map(|b| sealer.seal_blob(b)).transpose()?;
+                stored += stmt
+                    .execute(params![community_id, &view[..], &id[..], *at as i64, sealed, rules, now_secs as i64])
+                    .map_err(|e| format!("store control wraps: {e}"))?;
+            }
+            Ok(())
+        })?;
+    }
+    tx.commit().map_err(|e| format!("store control wraps commit: {e}"))?;
+    Ok(stored)
+}
+
+/// The next `limit` bodies of `view` below `below` (a wrap's timestamp and id), newest first.
+pub fn control_wrap_page(community_id: &str, view: &[u8; 32], below: Option<(u64, [u8; 32])>, limit: usize) -> Result<Vec<([u8; 32], u64, Vec<u8>)>, String> {
+    let rows: Vec<(Vec<u8>, i64, Vec<u8>)> = {
+        let conn = super::get_db_connection_guard_static()?;
+        // The far corner of the order stands in for no bound.
+        let (at, id) = below.map_or((i64::MAX, vec![0xff; 33]), |(at, id)| (at as i64, id.to_vec()));
+        let mut stmt = conn
+            .prepare_cached(
+                "SELECT wrap_id, created_at, wrap FROM community_control_wraps
+                 WHERE community_id = ?1 AND view = ?2 AND wrap IS NOT NULL AND (created_at, wrap_id) < (?3, ?4)
+                 ORDER BY created_at DESC, wrap_id DESC LIMIT ?5",
+            )
+            .map_err(|e| format!("control wrap page: {e}"))?;
+        let rows = stmt
+            .query_map(params![community_id, &view[..], at, id, limit as i64], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .map_err(|e| format!("control wrap page: {e}"))?;
+        rows.collect::<Result<_, _>>().map_err(|e| format!("control wrap page: {e}"))?
+    };
+    crate::crypto::open_batch(|o| {
+        rows.into_iter()
+            .map(|(id, at, body)| Ok((id.try_into().map_err(|_| "control wrap page: a wrap id is not 32 bytes".to_string())?, at.max(0) as u64, o.open_blob_or_keep(&body))))
+            .collect()
+    })
+}
+
+/// The bodies of `ids` in `view`, opened, for those held with one.
+pub fn control_wrap_bodies(community_id: &str, view: &[u8; 32], ids: &[[u8; 32]]) -> Result<Vec<Vec<u8>>, String> {
+    let mut sealed: Vec<Vec<u8>> = Vec::with_capacity(ids.len());
+    {
+        let conn = super::get_db_connection_guard_static()?;
+        let mut stmt = conn
+            .prepare_cached("SELECT wrap FROM community_control_wraps WHERE community_id = ?1 AND view = ?2 AND wrap_id = ?3 AND wrap IS NOT NULL")
+            .map_err(|e| format!("control wrap bodies: {e}"))?;
+        for id in ids {
+            if let Some(body) = stmt.query_row(params![community_id, &view[..], &id[..]], |r| r.get::<_, Vec<u8>>(0)).optional().map_err(|e| format!("control wrap bodies: {e}"))? {
+                sealed.push(body);
+            }
+        }
+    }
+    crate::crypto::open_batch(|o| Ok(sealed.iter().map(|body| o.open_blob_or_keep(body)).collect()))
+}
+
+/// What `view` holds: bodies, refusals, and the bodies' bytes as stored.
+pub fn control_wrap_counts(community_id: &str, view: &[u8; 32]) -> Result<(usize, usize, usize), String> {
+    let conn = super::get_db_connection_guard_static()?;
+    conn.query_row(
+        "SELECT COUNT(wrap), COUNT(*) - COUNT(wrap), COALESCE(SUM(length(wrap)), 0) FROM community_control_wraps WHERE community_id = ?1 AND view = ?2",
+        params![community_id, &view[..]],
+        |r| Ok((r.get::<_, i64>(0)? as usize, r.get::<_, i64>(1)? as usize, r.get::<_, i64>(2)? as usize)),
+    )
+    .map_err(|e| format!("control wrap counts: {e}"))
+}
+
+/// The Guestbook wraps of `plane` this device has read, with their timestamps.
+pub fn guestbook_wrap_ids(community_id: &str, plane: &[u8; 32]) -> Result<Vec<([u8; 32], u64)>, String> {
+    let conn = super::get_db_connection_guard_static()?;
+    let mut stmt = conn
+        .prepare_cached("SELECT wrap_id, created_at FROM community_guestbook_wraps WHERE community_id = ?1 AND plane = ?2")
+        .map_err(|e| format!("guestbook wrap ids: {e}"))?;
+    let rows = stmt
+        .query_map(params![community_id, &plane[..]], |r| Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, i64>(1)?)))
+        .map_err(|e| format!("guestbook wrap ids: {e}"))?;
+    let mut out = Vec::new();
+    for row in rows {
+        let (id, at) = row.map_err(|e| format!("guestbook wrap ids: {e}"))?;
+        out.push((id.try_into().map_err(|_| "guestbook wrap ids: a wrap id is not 32 bytes".to_string())?, at.max(0) as u64));
+    }
+    Ok(out)
+}
+
+/// Record Guestbook wraps as read: (id, timestamp, rules), `rules` 0 for one whose entry is stored.
+pub fn store_guestbook_wraps(community_id: &str, plane: &[u8; 32], now_secs: u64, rows: &[([u8; 32], u64, u32)]) -> Result<(), String> {
+    if rows.is_empty() {
+        return Ok(());
+    }
+    let conn = super::get_write_connection_guard_static()?;
+    let tx = conn.unchecked_transaction().map_err(|e| format!("store guestbook wraps tx: {e}"))?;
+    {
+        let mut stmt = tx
+            .prepare_cached("INSERT OR IGNORE INTO community_guestbook_wraps (community_id, plane, wrap_id, created_at, rules, judged_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)")
+            .map_err(|e| format!("store guestbook wraps: {e}"))?;
+        for (id, at, rules) in rows {
+            stmt.execute(params![community_id, &plane[..], &id[..], *at as i64, rules, now_secs as i64]).map_err(|e| format!("store guestbook wraps: {e}"))?;
+        }
+    }
+    tx.commit().map_err(|e| format!("store guestbook wraps commit: {e}"))
+}
+
+/// Forget the Guestbook wraps of any plane but `plane`, the refusals of `plane` judged under
+/// rules other than `rules`, and the `oldest` longest standing of its other refusals.
+pub fn forget_guestbook_wraps(community_id: &str, plane: &[u8; 32], rules: u32, oldest: usize) -> Result<(), String> {
+    let conn = super::get_write_connection_guard_static()?;
+    conn.execute(
+        "DELETE FROM community_guestbook_wraps WHERE community_id = ?1 AND (plane != ?2 OR (rules != 0 AND rules != ?3))",
+        params![community_id, &plane[..], rules],
+    )
+    .map_err(|e| format!("forget guestbook wraps: {e}"))?;
+    if oldest > 0 {
+        conn.execute(
+            "DELETE FROM community_guestbook_wraps WHERE community_id = ?1 AND plane = ?2 AND wrap_id IN (
+                 SELECT wrap_id FROM community_guestbook_wraps WHERE community_id = ?1 AND plane = ?2 AND rules != 0 ORDER BY judged_at LIMIT ?3)",
+            params![community_id, &plane[..], oldest as i64],
+        )
+        .map_err(|e| format!("forget guestbook wraps: {e}"))?;
+    }
+    Ok(())
+}
+
+/// Drop every Guestbook wrap recorded for a community, and how its relays were read.
+pub fn purge_guestbook_wraps(community_id: &str) -> Result<(), String> {
+    let conn = super::get_write_connection_guard_static()?;
+    conn.execute("DELETE FROM community_guestbook_wraps WHERE community_id = ?1", params![community_id]).map_err(|e| format!("purge guestbook wraps: {e}"))?;
+    conn.execute("DELETE FROM settings WHERE key = 'gbk_reads:' || ?1", params![community_id]).map_err(|e| format!("purge guestbook wraps: {e}"))?;
+    Ok(())
+}
+
+/// Drop everything held of a community's Control Plane, and how its relays were read.
+pub fn purge_control_wraps(community_id: &str) -> Result<(), String> {
+    let conn = super::get_write_connection_guard_static()?;
+    conn.execute("DELETE FROM community_control_wraps WHERE community_id = ?1", params![community_id]).map_err(|e| format!("purge control wraps: {e}"))?;
+    conn.execute("DELETE FROM settings WHERE key LIKE 'ctl_reads:' || ?1 || '%' OR key LIKE 'pln_reads:' || ?1 || '%'", params![community_id]).map_err(|e| format!("purge control wraps: {e}"))?;
+    Ok(())
+}
+
+/// Forget one wrap of `view`, so a sync asks for it again.
+pub fn drop_control_wrap(community_id: &str, view: &[u8; 32], wrap_id: &[u8; 32]) -> Result<(), String> {
+    let conn = super::get_write_connection_guard_static()?;
+    conn.execute(
+        "DELETE FROM community_control_wraps WHERE community_id = ?1 AND view = ?2 AND wrap_id = ?3",
+        params![community_id, &view[..], &wrap_id[..]],
+    )
+    .map_err(|e| format!("drop control wrap: {e}"))?;
+    Ok(())
+}
+
+/// Forget `view`'s refusals judged under any rules but `rules`, and the `oldest` longest
+/// standing of the rest, so each is fetched and judged again. Returns how many went.
+pub fn forget_control_refusals(community_id: &str, view: &[u8; 32], rules: u32, oldest: usize) -> Result<usize, String> {
+    let conn = super::get_write_connection_guard_static()?;
+    let other = conn
+        .execute(
+            "DELETE FROM community_control_wraps WHERE community_id = ?1 AND view = ?2 AND wrap IS NULL AND rules != ?3",
+            params![community_id, &view[..], rules],
+        )
+        .map_err(|e| format!("forget control refusals: {e}"))?;
+    let aged = conn
+        .execute(
+            "DELETE FROM community_control_wraps WHERE rowid IN (
+                 SELECT rowid FROM community_control_wraps WHERE community_id = ?1 AND view = ?2 AND wrap IS NULL
+                 ORDER BY judged_at, wrap_id LIMIT ?3)",
+            params![community_id, &view[..], oldest as i64],
+        )
+        .map_err(|e| format!("forget control refusals: {e}"))?;
+    Ok(other + aged)
 }
 
 /// Note an Audit Log act no Control edition records (a moderator's delete, a voice directive),

@@ -109,6 +109,49 @@ pub struct Query {
     /// [`Evidence::Quorum`]; opt into [`Evidence::Fast`] only for positive-data
     /// reads. Ignored by the in-memory test relay (inherently full-coverage).
     pub evidence: Evidence,
+    /// One page of a newest-first walk, whose caller goes on from the oldest event it is given:
+    /// the answer is cut where the shallowest relay's page ended ([`PageFloor`]).
+    pub paged: bool,
+}
+
+/// Where a page read from several relays stops being whole.
+///
+/// Each relay answers with its own newest `limit` events, so their pages end at different
+/// depths. Below the shallowest of those ends, a relay that filled its page holds events nobody
+/// has asked it for yet, and a walk stepping to the oldest event any relay returned would pass
+/// them by. Cut there, the oldest event left is where every relay has been read down to.
+///
+/// A short answer is the end of that relay's plane, as each walk's own end check reads it.
+pub(crate) struct PageFloor {
+    limit: usize,
+    until: Option<u64>,
+    floor: Option<u64>,
+}
+
+impl PageFloor {
+    pub(crate) fn of(query: &Query) -> Option<PageFloor> {
+        let limit = query.limit.filter(|l| query.paged && *l > 0)?;
+        Some(PageFloor { limit, until: query.until, floor: None })
+    }
+
+    /// One relay's answer.
+    pub(crate) fn note(&mut self, events: &[Event]) {
+        if events.len() < self.limit {
+            return;
+        }
+        let Some(bottom) = events.iter().map(|e| e.created_at.as_secs()).min() else { return };
+        // A full page no deeper than where it was asked from is a same-second wall, the walk's to judge.
+        if self.until.is_some_and(|until| bottom >= until) {
+            return;
+        }
+        self.floor = self.floor.max(Some(bottom));
+    }
+
+    pub(crate) fn cut(&self, events: &mut Vec<Event>) {
+        if let Some(floor) = self.floor {
+            events.retain(|e| e.created_at.as_secs() >= floor);
+        }
+    }
 }
 
 impl Query {
@@ -208,6 +251,42 @@ impl Query {
     }
 }
 
+/// What one relay holds of a query, against what the asker holds.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct Diff {
+    /// Held by the relay, not by the asker.
+    pub need: Vec<EventId>,
+    /// Held by the asker, not by the relay.
+    pub lack: Vec<EventId>,
+    /// Both sets were compared to the end; `false` when the budget of named ids came first.
+    pub complete: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReconcileFail {
+    /// The relay does not reconcile sets (no NIP-77).
+    Unsupported,
+    /// It wants an identity this connection has not shown.
+    Gated,
+    /// No answer.
+    Unreached,
+    /// It answered, and the exchange broke.
+    Failed(String),
+}
+
+/// Set reconciliation with one relay (NIP-77): which of the events matching `query` each side
+/// lacks, without either sending the events. `held` is every matching event the asker holds, by
+/// id and `created_at`; naming stops at `budget` ids the asker lacks.
+#[async_trait::async_trait]
+pub trait Reconcile: Send + Sync {
+    async fn reconcile(&self, query: &Query, held: &[(EventId, u64)], relay: &str, budget: usize) -> Result<Diff, ReconcileFail>;
+
+    /// [`Self::reconcile`] for a plane a relay may serve only to a connection authed as it.
+    async fn reconcile_plane(&self, _plane: &Keys, query: &Query, held: &[(EventId, u64)], relay: &str, budget: usize) -> Result<Diff, ReconcileFail> {
+        self.reconcile(query, held, relay, budget).await
+    }
+}
+
 /// Publish + fetch over a set of relays. Async to match the live Nostr client (the
 /// whole app is tokio-based and network I/O is async); `async-trait` boxes the
 /// futures as `Send` so impls work inside spawned tasks.
@@ -236,6 +315,17 @@ pub trait Transport {
     /// (Required, not defaulted — a default async-trait method would force a `Sync` bound on every
     /// generic `T: Transport` caller. The in-memory test relay implements it as a single publish.)
     async fn publish_durable(&self, event: &Event, relays: &[String]) -> Result<(), String>;
+
+    /// Set reconciliation, where this transport can do it. Without it a plane is read by pages.
+    fn reconciler(&self) -> Option<&dyn Reconcile> {
+        None
+    }
+
+    /// A transport of its own for work that outlives the call. Without one, that work is done
+    /// before the call returns.
+    fn detached(&self) -> Option<std::sync::Arc<dyn Transport + Send + Sync>> {
+        None
+    }
 }
 
 /// Per-relay broadcast cap: retry each relay up to this many times before giving up on it (matching the
@@ -881,6 +971,17 @@ fn redial_waits(generation: u64, key: &str) -> bool {
     with_plane_relay(generation, key, |r| r.dial_failed).is_some_and(|at| at.elapsed() < PLANE_REDIAL_GAP)
 }
 
+/// Plane reconciliations open at once on one relay: relays cap NIP-77 sessions per connection
+/// (Magnitude at 8), and DM catch-up shares the connection.
+const NEG_SESSIONS_PER_RELAY: usize = 4;
+
+fn neg_permits(url: &str) -> std::sync::Arc<tokio::sync::Semaphore> {
+    type Permits = std::collections::HashMap<String, std::sync::Arc<tokio::sync::Semaphore>>;
+    static PERMITS: std::sync::LazyLock<std::sync::Mutex<Permits>> = std::sync::LazyLock::new(Default::default);
+    let mut permits = PERMITS.lock().unwrap_or_else(|e| e.into_inner());
+    permits.entry(crate::inbox_relays::normalize_relay_url(url)).or_insert_with(|| std::sync::Arc::new(tokio::sync::Semaphore::new(NEG_SESSIONS_PER_RELAY))).clone()
+}
+
 fn open_read_permits(key: &str) -> std::sync::Arc<tokio::sync::Semaphore> {
     type Permits = std::collections::HashMap<String, std::sync::Arc<tokio::sync::Semaphore>>;
     static PERMITS: std::sync::LazyLock<std::sync::Mutex<Permits>> = std::sync::LazyLock::new(Default::default);
@@ -1495,14 +1596,15 @@ impl LiveTransport {
 
     /// A plane read over a connection authed as the plane, for the relays that ask for AUTH:
     /// the events, how many relays answered, and how many could be asked.
-    async fn read_authed_plane(&self, plane: &Keys, filter: &Filter, targets: Vec<String>, generation: u64) -> (Vec<Event>, usize, usize) {
-        let key = plane_pool_key(&plane.public_key().to_hex(), &targets);
+    /// A connection authed AS `plane` to `targets`, pooled so the NIP-42 handshake happens once.
+    async fn plane_client(&self, plane: &Keys, filter: &Filter, targets: &[String], generation: u64) -> nostr_sdk::prelude::Client {
+        let key = plane_pool_key(&plane.public_key().to_hex(), targets);
 
         // Reuse a warm, already-authed pooled connection if one exists — this is
         // the win: the NIP-42 handshake happens ONCE, not per page/epoch.
         let (hit, evicted) = PLANE_POOL.take(generation, &key);
         disconnect_clients(evicted);
-        let client = if let Some(c) = hit {
+        if let Some(c) = hit {
             c
         } else {
             // Cold: a dedicated connection authed AS the plane key (a NIP-42
@@ -1526,11 +1628,11 @@ impl LiveTransport {
             // bare add_relay leaves ConnectionMode::Direct, so under active Tor the
             // plane fetch — and the NIP-42 auth AS the plane key — would connect
             // direct and tie the user's IP to community membership.
-            for r in &targets {
+            for r in targets {
                 let _ = client.add_managed_relay(r.clone()).capabilities(crate::community_relay_capabilities()).await;
             }
             let mut frames = Vec::with_capacity(targets.len());
-            for r in &targets {
+            for r in targets {
                 if let Ok(Some(relay)) = client.relay(r).await {
                     frames.push(relay.notifications());
                 }
@@ -1538,7 +1640,7 @@ impl LiveTransport {
             client.connect().await;
             // Warmup with the gated filter shape triggers each relay's NIP-42
             // challenge so auto-auth completes ONCE here; pooled reuses skip it.
-            for r in &targets {
+            for r in targets {
                 let _ = client
                     .fetch_events(nostr_sdk::prelude::ReqTarget::single(r.clone(), [filter.clone()]))
                     // Tor-aware: this warmup carries a NIP-42 challenge round trip, so a
@@ -1554,7 +1656,11 @@ impl LiveTransport {
             let ev = PLANE_POOL.insert(generation, key, client.clone());
             disconnect_clients(ev);
             client
-        };
+        }
+    }
+
+    async fn read_authed_plane(&self, plane: &Keys, filter: &Filter, targets: Vec<String>, generation: u64, floor: &mut Option<PageFloor>) -> (Vec<Event>, usize, usize) {
+        let client = self.plane_client(plane, filter, &targets, generation).await;
 
         // This walk is SERIAL, so a dead socket taxes every page its full budget;
         // judged against the PLANE pool's statuses (a separate client — nothing
@@ -1587,6 +1693,9 @@ impl LiveTransport {
                 breaker_record(&r, res.is_ok(), true);
                 if let Ok(events) = res {
                     successes += 1;
+                    if let Some(floor) = floor.as_mut() {
+                        floor.note(&events);
+                    }
                     for e in events {
                         if seen.insert(e.id) {
                             result.push(e);
@@ -1649,11 +1758,16 @@ impl LiveTransport {
             return res.map(|evs| (evs, 1, 1));
         }
 
+        /// One relay's answer into the union.
         fn merge_events(
             evs: Vec<Event>,
             result: &mut Vec<Event>,
             seen: &mut std::collections::HashSet<EventId>,
+            floor: &mut Option<PageFloor>,
         ) {
+            if let Some(floor) = floor {
+                floor.note(&evs);
+            }
             for e in evs {
                 if seen.insert(e.id) {
                     result.push(e);
@@ -1692,6 +1806,7 @@ impl LiveTransport {
         let mut plan = UnionPlan::new(evidence, targets.len());
         let mut result: Vec<Event> = Vec::new();
         let mut union_ids: std::collections::HashSet<EventId> = std::collections::HashSet::new();
+        let mut floor = PageFloor::of(query);
 
         // Phase 1 — wait for the tier's coverage requirement. Quorum's majority
         // wait is TIME-BOUNDED from the first success so a dead relay can't
@@ -1714,7 +1829,7 @@ impl LiveTransport {
             match joined {
                 Ok((url, full_budget, Ok(evs))) => {
                     breaker_record(&url, true, full_budget);
-                    merge_events(evs, &mut result, &mut union_ids);
+                    merge_events(evs, &mut result, &mut union_ids, &mut floor);
                     plan.record(true);
                     if evidence == Evidence::Quorum && quorum_deadline.is_none() {
                         quorum_deadline = Some(
@@ -1750,7 +1865,7 @@ impl LiveTransport {
                     next = fetches.next() => match next {
                         Some(Ok((url, full_budget, Ok(evs)))) => {
                             breaker_record(&url, true, full_budget);
-                            merge_events(evs, &mut result, &mut union_ids);
+                            merge_events(evs, &mut result, &mut union_ids, &mut floor);
                         }
                         Some(Ok((url, full_budget, Err(())))) => {
                             breaker_record(&url, false, full_budget);
@@ -1760,6 +1875,10 @@ impl LiveTransport {
                     }
                 }
             }
+        }
+
+        if let Some(floor) = &floor {
+            floor.cut(&mut result);
         }
 
         // Background-merge the relays that haven't finished: dedup by event id ONLY (identical bytes)
@@ -1900,6 +2019,7 @@ impl Transport for LiveTransport {
         let mut seen: std::collections::HashSet<EventId> = std::collections::HashSet::new();
         let mut keep = |events: Vec<Event>| result.extend(events.into_iter().filter(|e| seen.insert(e.id)));
         let (mut successes, mut asked) = (0usize, 0usize);
+        let mut floor = PageFloor::of(query);
         let open_reads = futures_util::future::join_all(open.iter().map(|r| {
             let filter = filter.clone();
             async move { (r, read_open_plane(generation, r, filter, self.timeout).await) }
@@ -1909,7 +2029,7 @@ impl Transport for LiveTransport {
             if gated.is_empty() {
                 (Vec::new(), 0, 0)
             } else {
-                self.read_authed_plane(plane, &filter, gated.clone(), generation).await
+                self.read_authed_plane(plane, &filter, gated.clone(), generation, &mut floor).await
             }
         };
         let (reads, (events, answered, reached)) = futures_util::future::join(open_reads, known_gated).await;
@@ -1923,6 +2043,9 @@ impl Transport for LiveTransport {
                     breaker_record(r, true, true);
                     successes += 1;
                     asked += 1;
+                    if let Some(floor) = floor.as_mut() {
+                        floor.note(&events);
+                    }
                     keep(events);
                 }
                 OpenRead::Failed => {
@@ -1934,10 +2057,13 @@ impl Transport for LiveTransport {
             }
         }
         if !newly_gated.is_empty() {
-            let (events, answered, reached) = self.read_authed_plane(plane, &filter, newly_gated, generation).await;
+            let (events, answered, reached) = self.read_authed_plane(plane, &filter, newly_gated, generation, &mut floor).await;
             successes += answered;
             asked += reached;
             keep(events);
+        }
+        if let Some(floor) = &floor {
+            floor.cut(&mut result);
         }
         // Zero EOSE = every relay refused/timed out — an honest transient failure,
         // NOT a "the plane is empty" verdict (a genuine empty plane EOSEs with no
@@ -2032,6 +2158,112 @@ impl Transport for LiveTransport {
         });
         Ok(())
     }
+
+    fn reconciler(&self) -> Option<&dyn Reconcile> {
+        Some(self)
+    }
+
+    fn detached(&self) -> Option<std::sync::Arc<dyn Transport + Send + Sync>> {
+        Some(std::sync::Arc::new(LiveTransport { timeout: self.timeout }))
+    }
+}
+
+/// How long a relay's "no NIP-77" stands before it is asked again: relays gain it with an upgrade.
+const PLANE_NEG_TTL_SECS: u64 = 24 * 60 * 60;
+
+/// Apart from the DM reads' `neg_cap2:` record: a relay's answer for a plane's `authors` filter
+/// says nothing of its answer for our own `p` filter, nor the other way.
+fn plane_neg_setting(url: &str) -> String {
+    format!("neg_plane2:{}", crate::inbox_relays::normalize_relay_url(url))
+}
+
+/// Whether `url` reconciled a plane when last asked, and when.
+fn plane_neg(url: &str) -> Option<(bool, u64)> {
+    let raw = crate::db::get_sql_setting(plane_neg_setting(url)).ok().flatten()?;
+    let (flag, at) = raw.split_once(':')?;
+    Some((flag == "1", at.parse().ok()?))
+}
+
+/// What `url` is on record as doing with a plane reconciliation: nothing until it was asked.
+#[cfg(test)]
+pub(crate) fn plane_reconciles(url: &str) -> Option<bool> {
+    plane_neg(url).map(|(reconciles, _)| reconciles)
+}
+
+fn note_plane_neg(url: &str, reconciles: bool) {
+    // A standing yes is rewritten once a day, not on every pass.
+    if reconciles && plane_neg(url).is_some_and(|(ok, at)| ok && now_secs().saturating_sub(at) < PLANE_NEG_TTL_SECS) {
+        return;
+    }
+    let _ = crate::db::set_sql_setting(plane_neg_setting(url), format!("{}:{}", u8::from(reconciles), now_secs()));
+}
+
+#[async_trait::async_trait]
+impl Reconcile for LiveTransport {
+    async fn reconcile(&self, query: &Query, held: &[(EventId, u64)], relay: &str, budget: usize) -> Result<Diff, ReconcileFail> {
+        let seen = plane_neg(relay);
+        if seen.is_some_and(|(ok, at)| !ok && now_secs().saturating_sub(at) < PLANE_NEG_TTL_SECS) {
+            return Err(ReconcileFail::Unsupported);
+        }
+        let client = Self::warm_client(std::slice::from_ref(&relay.to_string()), self.timeout).await.map_err(|_| ReconcileFail::Unreached)?;
+        let handle = client.relay(relay).await.ok().flatten().ok_or(ReconcileFail::Unreached)?;
+        if !crate::negentropy::wait_connected(&handle, crate::relay_connect_timeout(std::time::Duration::from_secs(3)).min(self.timeout)).await {
+            breaker_record(relay, false, true);
+            return Err(ReconcileFail::Unreached);
+        }
+        let first = crate::relay_request_timeout(std::time::Duration::from_secs(5)).min(self.timeout);
+        let permits = neg_permits(relay);
+        let _permit = permits.acquire().await;
+        match super::plane_neg::reconcile(&handle, query.to_filter(), held, budget, first, self.timeout).await {
+            Ok(diff) => {
+                breaker_record(relay, true, true);
+                note_plane_neg(relay, true);
+                Ok(diff)
+            }
+            Err(super::plane_neg::Ended::Fail(fail)) => {
+                if fail == ReconcileFail::Unsupported {
+                    note_plane_neg(relay, false);
+                }
+                Err(fail)
+            }
+            // A relay that has reconciled before is slow, not unable.
+            Err(super::plane_neg::Ended::Silent) if seen.is_some_and(|(ok, _)| ok) => Err(ReconcileFail::Failed("no answer".to_string())),
+            // Silence says nothing by itself. A relay that answers a plain read and not this has
+            // no NIP-77; one that answers neither was not reached.
+            Err(super::plane_neg::Ended::Silent) => match fetch_relay_eose(&client, relay, query.to_filter().limit(0), first).await {
+                Ok(_) => {
+                    note_plane_neg(relay, false);
+                    Err(ReconcileFail::Unsupported)
+                }
+                Err(()) => Err(ReconcileFail::Unreached),
+            },
+        }
+    }
+
+    async fn reconcile_plane(&self, plane: &Keys, query: &Query, held: &[(EventId, u64)], relay: &str, budget: usize) -> Result<Diff, ReconcileFail> {
+        let generation = crate::db::current_session_id();
+        if plane_gate(generation, relay) != Some(RelayGate::Auth) {
+            match self.reconcile(query, held, relay, budget).await {
+                Err(ReconcileFail::Gated) => {}
+                answered => return answered,
+            }
+        }
+        let filter = query.to_filter();
+        let client = self.plane_client(plane, &filter, std::slice::from_ref(&relay.to_string()), generation).await;
+        let handle = client.relay(relay).await.ok().flatten().ok_or(ReconcileFail::Unreached)?;
+        if !crate::negentropy::wait_connected(&handle, crate::relay_connect_timeout(std::time::Duration::from_secs(3)).min(self.timeout)).await {
+            return Err(ReconcileFail::Unreached);
+        }
+        let first = crate::relay_request_timeout(std::time::Duration::from_secs(5)).min(self.timeout);
+        let permits = neg_permits(relay);
+        let _permit = permits.acquire().await;
+        match super::plane_neg::reconcile(&handle, filter, held, budget, first, self.timeout).await {
+            Ok(diff) => Ok(diff),
+            Err(super::plane_neg::Ended::Fail(fail)) => Err(fail),
+            Err(super::plane_neg::Ended::Silent) => Err(ReconcileFail::Failed("no answer".to_string())),
+        }
+    }
+
 }
 
 #[cfg(any(test, feature = "bench"))]
@@ -2049,6 +2281,10 @@ pub(crate) mod memory {
         subscribers: Mutex<Vec<(Query, tokio::sync::mpsc::UnboundedSender<Event>)>>,
         /// Relays that judge a wrap's deletion by its `p`-tagged owner, as CORD-01 asks.
         owner_rule: Mutex<HashSet<String>>,
+        /// Relays without NIP-77.
+        no_reconcile: Mutex<HashSet<String>>,
+        /// Reconciliations answered, by anyone asking.
+        reconciled: std::sync::atomic::AtomicU64,
     }
 
     /// NIP-01 ephemeral range: relays stream these to live subscriptions but never store
@@ -2063,7 +2299,21 @@ pub(crate) mod memory {
                 per_relay: Mutex::new(HashMap::new()),
                 subscribers: Mutex::new(Vec::new()),
                 owner_rule: Mutex::new(HashSet::new()),
+                no_reconcile: Mutex::new(HashSet::new()),
+                reconciled: Default::default(),
             }
+        }
+
+        /// Have `relays` answer a reconciliation as a relay without NIP-77 does.
+        #[cfg(test)]
+        pub fn without_reconcile(&self, relays: &[String]) {
+            self.no_reconcile.lock().unwrap().extend(relays.iter().cloned());
+        }
+
+        /// Reconciliations answered since the last ask.
+        #[cfg(test)]
+        pub fn reconciled(&self) -> u64 {
+            self.reconciled.swap(0, std::sync::atomic::Ordering::Relaxed)
         }
 
         /// Have `relays` follow CORD-01 §Deletions: a wrap goes only by its `p`-tagged owner's
@@ -2205,27 +2455,31 @@ pub(crate) mod memory {
 
         async fn fetch(&self, query: &Query, relays: &[String]) -> Result<Vec<Event>, String> {
             let map = self.per_relay.lock().unwrap();
+            let newest_first = |a: &&Event, b: &&Event| b.created_at.cmp(&a.created_at).then_with(|| b.id.cmp(&a.id));
             let mut seen = HashSet::new();
             let mut out = Vec::new();
+            let mut floor = PageFloor::of(query);
             for r in relays {
-                if let Some(events) = map.get(r) {
-                    for ev in events {
-                        // Never stored, but guard the read path too: a real relay never
-                        // serves an ephemeral from a fetch, whatever got in.
-                        if is_ephemeral(ev.kind.as_u16()) {
-                            continue;
-                        }
-                        if query.matches(ev) && seen.insert(ev.id) {
-                            out.push(ev.clone());
-                        }
-                    }
+                let Some(events) = map.get(r) else { continue };
+                // Never stored, but guard the read path too: a real relay never
+                // serves an ephemeral from a fetch, whatever got in.
+                let mut page: Vec<&Event> = events.iter().filter(|ev| !is_ephemeral(ev.kind.as_u16()) && query.matches(ev)).collect();
+                // The page cap is each relay's own, newest first: the union of several runs past it.
+                if let Some(limit) = query.limit {
+                    page.sort_by(newest_first);
+                    page.truncate(limit);
                 }
+                let page: Vec<Event> = page.into_iter().cloned().collect();
+                if let Some(floor) = floor.as_mut() {
+                    floor.note(&page);
+                }
+                out.extend(page.into_iter().filter(|e| seen.insert(e.id)));
             }
-            // Apply the relay-side page cap newest-first (matches how relays honor `limit`):
-            // sort by created_at desc, keep the newest `limit`. Mirrors production paging.
-            if let Some(limit) = query.limit {
-                out.sort_by(|a, b| b.created_at.cmp(&a.created_at).then_with(|| b.id.cmp(&a.id)));
-                out.truncate(limit);
+            if let Some(floor) = &floor {
+                floor.cut(&mut out);
+            }
+            if query.limit.is_some() {
+                out.sort_by(|a, b| newest_first(&a, &b));
             }
             Ok(out)
         }
@@ -2233,6 +2487,31 @@ pub(crate) mod memory {
         async fn fetch_plane(&self, _plane: &Keys, query: &Query, relays: &[String]) -> Result<PlaneFetch, String> {
             // No auth in the in-memory relay — a plane fetch is just a fetch.
             Ok(PlaneFetch::whole(self.fetch(query, relays).await?))
+        }
+
+        fn reconciler(&self) -> Option<&dyn Reconcile> {
+            Some(self)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Reconcile for MemoryRelay {
+        async fn reconcile(&self, query: &Query, held: &[(EventId, u64)], relay: &str, budget: usize) -> Result<Diff, ReconcileFail> {
+            if self.no_reconcile.lock().unwrap().contains(relay) {
+                return Err(ReconcileFail::Unsupported);
+            }
+            self.reconciled.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let map = self.per_relay.lock().unwrap();
+            let theirs: HashSet<EventId> =
+                map.get(relay).into_iter().flatten().filter(|e| !is_ephemeral(e.kind.as_u16()) && query.matches(e)).map(|e| e.id).collect();
+            let ours: HashSet<EventId> = held.iter().map(|(id, _)| *id).collect();
+            let mut need: Vec<EventId> = theirs.difference(&ours).copied().collect();
+            need.sort_unstable();
+            let complete = need.len() <= budget;
+            need.truncate(budget);
+            let mut lack: Vec<EventId> = ours.difference(&theirs).copied().collect();
+            lack.sort_unstable();
+            Ok(Diff { need, lack, complete })
         }
     }
 }
@@ -2275,6 +2554,12 @@ pub(crate) mod wire {
         mute: AtomicBool,
         /// Challenge once a connection has been served a read.
         challenges_after: AtomicBool,
+        /// How a NEG-OPEN is met: 0 reconciled, 1 a notice as from a relay without NIP-77, 2 silence.
+        neg: std::sync::atomic::AtomicU8,
+        /// NEG-OPENs received.
+        neg_opens: AtomicUsize,
+        /// NIP-77 sessions one connection may hold open, as Magnitude caps them. 0 for none.
+        neg_cap: AtomicUsize,
     }
 
     impl WireRelay {
@@ -2341,6 +2626,26 @@ pub(crate) mod wire {
         pub fn hold(&self, events: impl IntoIterator<Item = Event>) {
             self.held.lock().unwrap().extend(events);
         }
+
+        /// Meet a NEG-OPEN as a relay without NIP-77 does: with a notice, or with `silent` nothing.
+        pub fn no_nip77(&self, silent: bool) {
+            self.modes.neg.store(if silent { 2 } else { 1 }, Ordering::SeqCst);
+        }
+
+        /// Reconcile again.
+        pub fn nip77(&self) {
+            self.modes.neg.store(0, Ordering::SeqCst);
+        }
+
+        /// NEG-OPENs received so far.
+        pub fn neg_opens(&self) -> usize {
+            self.modes.neg_opens.load(Ordering::SeqCst)
+        }
+
+        /// Refuse a NIP-77 session past `cap` open on one connection, as Magnitude does.
+        pub fn cap_neg_sessions(&self, cap: usize) {
+            self.modes.neg_cap.store(cap, Ordering::SeqCst);
+        }
     }
 
     async fn serve(tcp: tokio::net::TcpStream, url: RelayUrl, modes: Arc<Modes>, held: Arc<Mutex<Vec<Event>>>) {
@@ -2352,6 +2657,7 @@ pub(crate) mod wire {
         let challenge = format!("challenge-{}", CONNECTION.fetch_add(1, Ordering::SeqCst));
         let (mut challenged, mut authed) = (greet, HashSet::<PublicKey>::new());
         let mut open = HashSet::<SubscriptionId>::new();
+        let mut reconciling = std::collections::HashMap::<SubscriptionId, negentropy::Negentropy<'static, negentropy::NegentropyStorageVector>>::new();
         if greet && sink.send(Ws::Text(RelayMessage::auth(challenge.clone()).as_json().into())).await.is_err() {
             return;
         }
@@ -2380,7 +2686,13 @@ pub(crate) mod wire {
                     } else {
                         open.insert(id.clone());
                         let held = held.lock().unwrap();
-                        for e in held.iter().filter(|e| filters.iter().any(|f| f.match_event(e, MatchEventOptions::new()))) {
+                        let mut matched: Vec<&Event> = held.iter().filter(|e| filters.iter().any(|f| f.match_event(e, MatchEventOptions::new()))).collect();
+                        // The newest `limit`, as a relay pages.
+                        if let Some(limit) = filters.iter().filter_map(|f| f.limit).max() {
+                            matched.sort_by(|a, b| b.created_at.cmp(&a.created_at).then_with(|| b.id.cmp(&a.id)));
+                            matched.truncate(limit);
+                        }
+                        for e in matched {
                             out.push(RelayMessage::event(id.clone(), e.clone()));
                         }
                         out.push(RelayMessage::eose(id));
@@ -2392,6 +2704,41 @@ pub(crate) mod wire {
                 }
                 Ok(ClientMessage::Close(id)) => {
                     open.remove(id.as_ref());
+                }
+                Ok(ClientMessage::NegOpen { subscription_id, filter, initial_message }) => {
+                    modes.neg_opens.fetch_add(1, Ordering::SeqCst);
+                    let id = subscription_id.into_owned();
+                    let named = filter.authors.iter().flatten().copied();
+                    match modes.neg.load(Ordering::SeqCst) {
+                        1 => out.push(RelayMessage::notice("ERROR: bad msg: unknown cmd")),
+                        2 => {}
+                        _ if modes.neg_cap.load(Ordering::SeqCst) > 0 && reconciling.len() >= modes.neg_cap.load(Ordering::SeqCst) => {
+                            out.push(RelayMessage::NegErr { subscription_id: std::borrow::Cow::Owned(id), message: "blocked: too many open negentropy sessions".into() });
+                        }
+                        _ if modes.gated.load(Ordering::SeqCst) && !named.into_iter().all(|a| authed.contains(&a)) => {
+                            out.push(RelayMessage::NegErr { subscription_id: std::borrow::Cow::Owned(id), message: "auth-required: all authors must be authenticated".into() });
+                        }
+                        _ => {
+                            let mut storage = negentropy::NegentropyStorageVector::new();
+                            for e in held.lock().unwrap().iter().filter(|e| filter.match_event(e, MatchEventOptions::new())) {
+                                storage.insert(e.created_at.as_secs(), negentropy::Id::from_byte_array(e.id.to_bytes())).unwrap();
+                            }
+                            storage.seal().unwrap();
+                            let mut neg = negentropy::Negentropy::owned(storage, 60_000).unwrap();
+                            let answer = neg.reconcile(&crate::simd::hex::hex_string_to_bytes(&initial_message)).unwrap();
+                            out.push(RelayMessage::NegMsg { subscription_id: std::borrow::Cow::Owned(id.clone()), message: crate::simd::hex::bytes_to_hex_string(&answer).into() });
+                            reconciling.insert(id, neg);
+                        }
+                    }
+                }
+                Ok(ClientMessage::NegMsg { subscription_id, message }) => {
+                    if let Some(neg) = reconciling.get_mut(subscription_id.as_ref()) {
+                        let answer = neg.reconcile(&crate::simd::hex::hex_string_to_bytes(&message)).unwrap();
+                        out.push(RelayMessage::NegMsg { subscription_id, message: crate::simd::hex::bytes_to_hex_string(&answer).into() });
+                    }
+                }
+                Ok(ClientMessage::NegClose { subscription_id }) => {
+                    reconciling.remove(subscription_id.as_ref());
                 }
                 Ok(ClientMessage::Auth(event)) => {
                     let ok = nostr::nips::nip42::is_valid_auth_event(&event, &url, &challenge);
@@ -3339,6 +3686,171 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(secs(&start), vec![1]);
+    }
+
+    // ── A page read from several relays ───────────────────────────────────────
+
+    fn page_of(secs: &[u64]) -> Vec<Event> {
+        secs.iter().map(|s| evt_at(3300, *s)).collect()
+    }
+
+    fn paged(limit: usize, until: Option<u64>) -> Query {
+        Query { kinds: vec![3300], limit: Some(limit), until, paged: true, ..Default::default() }
+    }
+
+    fn secs_of(events: &[Event]) -> Vec<u64> {
+        let mut secs: Vec<u64> = events.iter().map(|e| e.created_at.as_secs()).collect();
+        secs.sort_unstable_by(|a, b| b.cmp(a));
+        secs
+    }
+
+    #[test]
+    fn a_page_is_cut_where_the_shallowest_full_answer_ended() {
+        let mut floor = PageFloor::of(&paged(3, None)).unwrap();
+        floor.note(&page_of(&[10, 9, 8]));
+        floor.note(&page_of(&[10, 9, 3]));
+        let mut union = page_of(&[10, 9, 8, 3]);
+        floor.cut(&mut union);
+        assert_eq!(secs_of(&union), vec![10, 9, 8], "below 8 the first relay hasn't been asked");
+    }
+
+    #[test]
+    fn a_short_answer_cuts_nothing() {
+        let mut floor = PageFloor::of(&paged(3, None)).unwrap();
+        floor.note(&page_of(&[10, 9]));
+        let mut union = page_of(&[10, 9]);
+        floor.cut(&mut union);
+        assert_eq!(secs_of(&union), vec![10, 9]);
+        floor.note(&page_of(&[10, 7, 5]));
+        let mut union = page_of(&[10, 9, 7, 5]);
+        floor.cut(&mut union);
+        assert_eq!(secs_of(&union), vec![10, 9, 7, 5], "a relay at the end of its plane holds nothing further down for a deeper page to wait on");
+    }
+
+    #[test]
+    fn a_full_answer_no_deeper_than_it_was_asked_from_cuts_nothing() {
+        let mut floor = PageFloor::of(&paged(3, Some(8))).unwrap();
+        floor.note(&page_of(&[8, 8, 8]));
+        floor.note(&page_of(&[8, 5, 4]));
+        let mut union = page_of(&[8, 8, 8, 8, 5, 4]);
+        floor.cut(&mut union);
+        assert_eq!(secs_of(&union), vec![8, 8, 8, 8, 5, 4], "a relay stuck on one second leaves the walk to the others, as before");
+    }
+
+    #[test]
+    fn only_a_paged_query_with_a_limit_is_cut() {
+        assert!(PageFloor::of(&Query { limit: Some(3), ..Default::default() }).is_none());
+        assert!(PageFloor::of(&Query { paged: true, ..Default::default() }).is_none());
+        assert!(PageFloor::of(&Query { paged: true, limit: Some(0), ..Default::default() }).is_none());
+    }
+
+    /// A plane walked to its end as the pagers walk one: inclusive `until`, on from the oldest
+    /// event the page gave.
+    async fn walk<T: Transport>(transport: &T, relays: &[String], mut query: Query) -> Vec<u64> {
+        let mut seen = std::collections::HashSet::new();
+        let mut read = Vec::new();
+        let mut oldest: Option<u64> = None;
+        for _ in 0..64 {
+            query.until = oldest;
+            let page = transport.fetch(&query, relays).await.unwrap();
+            let fresh: Vec<u64> = page.iter().filter(|e| seen.insert(e.id)).map(|e| e.created_at.as_secs()).collect();
+            if fresh.is_empty() {
+                break;
+            }
+            oldest = oldest.into_iter().chain(fresh.iter().copied()).min();
+            read.extend(fresh);
+        }
+        read.sort_unstable();
+        read
+    }
+
+    /// Events at seconds 1 to 10 on `full`, and on `sparse` all but 4 to 8.
+    fn differing(mut hold: impl FnMut(&Event, bool)) {
+        for s in 1..=10u64 {
+            hold(&evt_at(3300, s), !(4..=8).contains(&s));
+        }
+    }
+
+    #[tokio::test]
+    async fn a_walk_over_relays_that_hold_different_amounts_reads_every_event() {
+        let relay = super::memory::MemoryRelay::new();
+        let both = ["wss://full".to_string(), "wss://sparse".to_string()];
+        differing(|e, on_sparse| {
+            relay.inject(e, &both[..1]);
+            if on_sparse {
+                relay.inject(e, &both[1..]);
+            }
+        });
+        assert_eq!(walk(&relay, &both, paged(3, None)).await, (1..=10).collect::<Vec<_>>());
+        // Unpaged, every relay's newest page comes back whole: the sparse one's reaches down to
+        // 3, and a walk going on from there never asks the full one for 4 to 7.
+        let unpaged = Query { paged: false, ..paged(3, None) };
+        assert_eq!(walk(&relay, &both, unpaged).await, vec![1, 2, 3, 8, 9, 10]);
+    }
+
+    fn plane_wraps(plane: &Keys, secs: impl IntoIterator<Item = u64>) -> Vec<Event> {
+        use nostr_sdk::prelude::FinalizeEvent;
+        secs.into_iter()
+            .map(|s| EventBuilder::new(Kind::Custom(crate::community::v2::stream::KIND_WRAP), "sealed").custom_created_at(Timestamp::from(s)).finalize(plane).unwrap())
+            .collect()
+    }
+
+    /// A plane's wraps at seconds 1 to 10 on one relay, and all but 4 to 8 on another.
+    async fn differing_wire(plane: &Keys) -> (wire::WireRelay, wire::WireRelay) {
+        let (full, sparse) = (wire::WireRelay::start().await, wire::WireRelay::start().await);
+        let wraps = plane_wraps(plane, 1..=10);
+        sparse.hold(wraps.iter().filter(|w| !(4..=8).contains(&w.created_at.as_secs())).cloned());
+        full.hold(wraps);
+        (full, sparse)
+    }
+
+    fn plane_page(plane: &Keys) -> Query {
+        Query { kinds: vec![crate::community::v2::stream::KIND_WRAP], authors: vec![plane.public_key().to_hex()], limit: Some(3), paged: true, ..Default::default() }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[allow(clippy::await_holding_lock)]
+    async fn a_paged_plane_read_stops_where_the_shallowest_relay_did() {
+        let _s = GateScene::new();
+        let plane = Keys::generate();
+        let (full, sparse) = differing_wire(&plane).await;
+        let live = LiveTransport::with_timeout(std::time::Duration::from_secs(5));
+        let read = live.fetch_plane(&plane, &plane_page(&plane), &[full.url(), sparse.url()]).await.unwrap();
+        assert_eq!(secs_of(&read.events), vec![10, 9, 8]);
+        assert!(read.is_complete());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[allow(clippy::await_holding_lock)]
+    async fn a_paged_plane_read_over_authed_connections_stops_there_too() {
+        let _s = GateScene::new();
+        let plane = Keys::generate();
+        let (full, sparse) = differing_wire(&plane).await;
+        full.gate(true);
+        sparse.gate(true);
+        let live = LiveTransport::with_timeout(std::time::Duration::from_secs(5));
+        let urls = [full.url(), sparse.url()];
+        let learning = live.fetch_plane(&plane, &plane_page(&plane), &urls).await.unwrap();
+        assert_eq!(secs_of(&learning.events), vec![10, 9, 8], "the read that learns both relays gate");
+        assert_eq!((gate_of(&full), gate_of(&sparse)), (Some(RelayGate::Auth), Some(RelayGate::Auth)));
+        let knowing = live.fetch_plane(&plane, &plane_page(&plane), &urls).await.unwrap();
+        assert_eq!(secs_of(&knowing.events), vec![10, 9, 8], "and the next, which knows");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[allow(clippy::await_holding_lock)]
+    async fn a_paged_fetch_stops_where_the_shallowest_relay_did() {
+        let _s = GateScene::new();
+        let plane = Keys::generate();
+        let (full, sparse) = differing_wire(&plane).await;
+        crate::state::set_nostr_client(crate::nostr_client_builder().build());
+        let live = LiveTransport::with_timeout(std::time::Duration::from_secs(5));
+        let urls = [full.url(), sparse.url()];
+        let read = live.fetch(&Query { evidence: Evidence::Full, ..plane_page(&plane) }, &urls).await;
+        let walked = walk(&live, &urls, Query { evidence: Evidence::Full, ..plane_page(&plane) }).await;
+        let _ = crate::state::take_nostr_client();
+        assert_eq!(secs_of(&read.unwrap()), vec![10, 9, 8]);
+        assert_eq!(walked, (1..=10).collect::<Vec<_>>());
     }
 
     #[test]

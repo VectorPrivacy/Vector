@@ -8160,6 +8160,7 @@ dependencies = [
  "libc",
  "libcrux-ml-kem",
  "ml-kem",
+ "negentropy",
  "noq-proto",
  "nostr",
  "nostr-connect",

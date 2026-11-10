@@ -3743,13 +3743,14 @@ impl VectorCore {
         let held = std::sync::atomic::AtomicUsize::new(0);
         let began = crate::clock::now_secs();
         let floor = crate::history_gaps::floor(channel_id, until, began);
-        let Ok((page, next_before)) = crate::community::v2::service::fetch_channel_history_paged(
+        let reach = crate::history_gaps::reach(since, floor);
+        let Ok((page, next_before, complete)) = crate::community::v2::service::fetch_channel_history_paged(
             &transport,
             &community,
             &ch,
             limit.max(50),
             max_pages,
-            since,
+            reach,
             until,
             evidence,
             // A settled wrap is a held row, which decides the page like a held message.
@@ -3776,8 +3777,9 @@ impl VectorCore {
         let (new_messages, waiting) = Self::v2_ingest_chat_page_keeping(channel_id, my_pk, session, page).await;
         // A walk that stops while still finding new messages leaves a hole above what it held.
         crate::history_gaps::note_walk(channel_id, until, next_before, floor, |t| crate::db::events::newest_message_before(channel_id, t));
-        // From the top, everything down to the floor is now read or in the ledger.
-        if until.is_none() && since.is_none() {
+        // From the top, everything down to the floor is now read or in the ledger: proven once every
+        // relay answered, so one that didn't is read from the old floor next time.
+        if until.is_none() && since.is_none() && complete {
             crate::history_gaps::prove(channel_id, began);
         }
         (BackfillCount { fetched, new_messages, next_before, unreachable: false }, waiting)

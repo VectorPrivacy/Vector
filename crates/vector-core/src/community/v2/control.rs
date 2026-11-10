@@ -333,6 +333,17 @@ impl ControlPlane {
         stream::check_signatures_together(&page)
     }
 
+    /// This view, by what an open here depends on: its address, read key and restriction.
+    /// Hashed, so no key sits where it is stored.
+    pub(crate) fn view_id(&self) -> [u8; 32] {
+        let mut h = crate::crypto::sha256::Sha256::new();
+        h.update(b"concord/control-store");
+        h.update(self.pk.to_bytes());
+        h.update(self.conv_key.as_bytes());
+        h.update([self.restricted as u8]);
+        h.finalize()
+    }
+
     /// What this view's open of `wrap` is memoized under: an open is a pure function of the
     /// wrap, which its id and signature pin (the id leaves the signature out), and of the view's
     /// address, read key and restriction. Hashed, so no key sits in the map.
@@ -433,7 +444,7 @@ fn opened_memo() -> std::sync::Arc<std::sync::Mutex<OpenedMemo>> {
 }
 
 /// Empty this session's [`OpenedMemo`], so the next opens run whole.
-#[cfg(test)]
+#[cfg(any(test, feature = "bench"))]
 pub(crate) fn forget_opened() {
     *opened_memo().lock().unwrap() = OpenedMemo::default();
 }

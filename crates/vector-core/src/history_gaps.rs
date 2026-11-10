@@ -64,7 +64,7 @@ fn proof_key(chat_id: &str) -> String {
 
 /// Where `chat_id`'s held history was last proven whole (Unix seconds): below it, only the
 /// ledger's holes are missing.
-fn proven(chat_id: &str) -> Option<u64> {
+pub fn proven(chat_id: &str) -> Option<u64> {
     crate::db::get_sql_setting(proof_key(chat_id)).ok().flatten().and_then(|v| v.parse().ok())
 }
 
@@ -89,6 +89,15 @@ fn floor_of(gaps: &[Gap], proven: Option<u64>, from: Option<u64>, now: u64) -> O
     }
     let proof = proven.unwrap_or_else(|| now.saturating_sub(FIRST_LOOK_SECS));
     from.is_none_or(|f| f > proof).then_some(proof)
+}
+
+/// The lower bound a walk asks the relays for: its own `since`, raised to its floor, since below
+/// the floor was read before.
+pub fn reach(since: Option<u64>, floor: Option<u64>) -> Option<u64> {
+    match (since, floor) {
+        (Some(s), Some(f)) => Some(s.max(f)),
+        (s, f) => s.or(f),
+    }
 }
 
 /// A walk from `from` (None: the newest) ended at `stopped` (its next cursor, None when it reached
@@ -218,5 +227,12 @@ mod tests {
         let out = walked(&[], None, Some(800), Some(1000), |t| (t > 500).then_some(500));
         assert_eq!(out, vec![g(500, 800)]);
     }
-}
 
+    #[test]
+    fn a_walk_asks_only_from_its_floor() {
+        assert_eq!(reach(None, Some(1000)), Some(1000), "a catch-up from the top: from the proof");
+        assert_eq!(reach(Some(1500), Some(1000)), Some(1500));
+        assert_eq!(reach(Some(500), Some(1000)), Some(1000));
+        assert_eq!(reach(None, None), None, "a back-page in proven history asks for everything older");
+    }
+}

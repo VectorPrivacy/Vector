@@ -606,6 +606,7 @@ mod xform_tests {
              CREATE TABLE nip17_wrap_keys (rumor_json TEXT);
              CREATE TABLE community_bans (community_id TEXT, npub TEXT);
              CREATE TABLE community_held_wraps (wrap_id TEXT PRIMARY KEY, wrap TEXT);
+             CREATE TABLE community_control_wraps (wrap_id BLOB PRIMARY KEY, wrap BLOB);
              CREATE TABLE community_audit_local (id TEXT PRIMARY KEY, entry TEXT);
              CREATE TABLE dm_held_wallpapers (chat_id TEXT, payload TEXT);",
         ).unwrap();
@@ -938,6 +939,7 @@ const SWEEP: &[(&str, &[&str])] = &[
     ("community_writers", &["content"]),
     ("community_bans", &["npub"]),
     ("community_held_wraps", &["wrap"]),
+    ("community_control_wraps", &["wrap"]),
     ("community_audit_local", &["entry"]),
     ("dm_held_wallpapers", &["payload"]),
 ];

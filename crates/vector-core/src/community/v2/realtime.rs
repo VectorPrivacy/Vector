@@ -892,6 +892,16 @@ pub(crate) async fn resubscribe_relay(client: &Client, relay: &RelayUrl) {
     }
 }
 
+/// Fold a Guestbook entry that came in live into the store, and record its wrap as read so a
+/// sync never asks a relay for it. Returns whether the entry was new.
+fn ingest_live(c: &CommunityV2, entry: super::guestbook::GuestbookEvent, wrap: &Event) -> bool {
+    let stored = super::service::ingest_guestbook_event(c, entry, wrap.created_at.as_secs());
+    if stored.is_ok() {
+        super::service::hold_guestbook_wrap(c, wrap);
+    }
+    stored.unwrap_or(false)
+}
+
 /// Fold a live control edition without re-reading the plane. `false` when it can't (a follow
 /// holds the community, or the held window can't decide it), so the caller queues the follow.
 /// A change that moves planes, keys, writers or authority still queues a full pass, for the rekey
@@ -1070,7 +1080,7 @@ pub async fn dispatch_event(event: Event, handler: Arc<dyn InboundEventHandler>)
                     // Live membership motion: fold it into the persisted Guestbook so
                     // the memberlist stays a local read (the presence callback already
                     // fired inline), and refresh the overview when it lands.
-                    let changed = super::service::ingest_guestbook_event(c, *ev, event.created_at.as_secs()).unwrap_or(false);
+                    let changed = ingest_live(c, *ev, &event);
                     remember();
                     if changed {
                         handler.on_community_refreshed(&crate::simd::hex::bytes_to_hex_32(&c.id().0));
@@ -1080,13 +1090,13 @@ pub async fn dispatch_event(event: Event, handler: Arc<dyn InboundEventHandler>)
                 inbound::DispatchedV2::Nickname(ev) | inbound::DispatchedV2::Timeout(ev) => {
                     let changed = if matches!(ev.entry, super::guestbook::GuestbookEntry::Nickname { .. }) { "community_nicknames" } else { "community_timeouts" };
                     remember();
-                    if super::service::ingest_guestbook_event(c, *ev, event.created_at.as_secs()).unwrap_or(false) {
+                    if ingest_live(c, *ev, &event) {
                         crate::traits::emit_event_json(changed, serde_json::json!({ "community_id": crate::simd::hex::bytes_to_hex_32(&c.id().0) }));
                     }
                     return;
                 }
                 inbound::DispatchedV2::Kick { target, event: ev } => {
-                    if !super::service::ingest_guestbook_event(c, *ev, event.created_at.as_secs()).unwrap_or(false) {
+                    if !ingest_live(c, *ev, &event) {
                         return;
                     }
                     let community_id = crate::simd::hex::bytes_to_hex_32(&c.id().0);

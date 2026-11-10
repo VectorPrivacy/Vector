@@ -144,7 +144,7 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 /// applies on first run, then this build reads its own database as newer and
 /// refuses to open it. The `debug_assert` in [`run_atomic_migration`] and
 /// `highest_migration_id_matches_the_runner` both catch that before release.
-pub const HIGHEST_MIGRATION_ID: u32 = 125;
+pub const HIGHEST_MIGRATION_ID: u32 = 127;
 
 /// Highest migration id recorded in this DB; 0 for a fresh or pre-tracking one.
 ///
@@ -1735,6 +1735,45 @@ pub fn run_migrations(conn: &mut rusqlite::Connection) -> Result<(), String> {
     run_atomic_migration(conn, 125, "Pending invite send time", |tx| {
         tx.execute("ALTER TABLE pending_community_invites ADD COLUMN sent_at INTEGER NOT NULL DEFAULT 0", [])
             .map_err(|e| format!("migration 125: {e}"))?;
+        Ok(())
+    })?;
+
+    // Every Control wrap this device has read, per plane view, so a sync asks each relay only for
+    // what it lacks. A NULL body is a wrap that was refused: held by id, so it isn't asked for again.
+    run_atomic_migration(conn, 126, "Control wraps", |tx| {
+        tx.execute_batch(
+            "CREATE TABLE IF NOT EXISTS community_control_wraps (
+                community_id TEXT NOT NULL,
+                view         BLOB NOT NULL,
+                wrap_id      BLOB NOT NULL,
+                created_at   INTEGER NOT NULL,
+                wrap         BLOB,
+                rules        INTEGER NOT NULL,
+                judged_at    INTEGER NOT NULL,
+                PRIMARY KEY (community_id, view, wrap_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_control_wraps_page
+                ON community_control_wraps(community_id, view, created_at DESC, wrap_id DESC) WHERE wrap IS NOT NULL;",
+        )
+        .map_err(|e| format!("migration 126: {e}"))?;
+        Ok(())
+    })?;
+
+    // The Guestbook wraps this device has read, by id: what a sync tells each relay it holds.
+    // `rules` 0 is a wrap whose entry is in the Guestbook; any other is one refused under them.
+    run_atomic_migration(conn, 127, "Guestbook wraps", |tx| {
+        tx.execute_batch(
+            "CREATE TABLE IF NOT EXISTS community_guestbook_wraps (
+                community_id TEXT NOT NULL,
+                plane        BLOB NOT NULL,
+                wrap_id      BLOB NOT NULL,
+                created_at   INTEGER NOT NULL,
+                rules        INTEGER NOT NULL,
+                judged_at    INTEGER NOT NULL,
+                PRIMARY KEY (community_id, plane, wrap_id)
+            ) WITHOUT ROWID;",
+        )
+        .map_err(|e| format!("migration 127: {e}"))?;
         Ok(())
     })?;
 

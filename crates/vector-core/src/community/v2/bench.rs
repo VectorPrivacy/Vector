@@ -43,6 +43,113 @@ fn time(name: &str, n: u32, mut f: impl FnMut()) {
     report(name, best);
 }
 
+/// Every relay asked on its own, as the live transport does: what the wire carries.
+struct Metered<'a> {
+    relay: &'a MemoryRelay,
+    reqs: std::sync::atomic::AtomicU64,
+    events: std::sync::atomic::AtomicU64,
+    bytes: std::sync::atomic::AtomicU64,
+    /// Reconciliations, and the bytes their messages took both ways.
+    reconciles: std::sync::atomic::AtomicU64,
+}
+
+impl<'a> Metered<'a> {
+    fn new(relay: &'a MemoryRelay) -> Self {
+        Metered { relay, reqs: Default::default(), events: Default::default(), bytes: Default::default(), reconciles: Default::default() }
+    }
+
+    fn header() {
+        println!("{:<52} {:>5} {:>5} {:>7} {:>11} {:>9}", "", "REQs", "NEGs", "events", "bytes", "CPU ms");
+    }
+
+    /// One row for what was asked since the last, `ours` being the time spent this side of the
+    /// wire and `receive` what the relay pool spends on each event it is sent.
+    fn row(&self, name: &str, ours: std::time::Duration, receive: std::time::Duration) {
+        use std::sync::atomic::Ordering::Relaxed;
+        let (reqs, events, bytes, negs) = (self.reqs.swap(0, Relaxed), self.events.swap(0, Relaxed), self.bytes.swap(0, Relaxed), self.reconciles.swap(0, Relaxed));
+        let cpu = (ours + receive * events as u32).as_secs_f64() * 1e3;
+        println!("{name:<52} {reqs:>5} {negs:>5} {events:>7} {bytes:>11} {cpu:>9.1}");
+    }
+}
+
+/// The NIP-77 exchange itself, both ends run here, so what it puts on the wire is counted.
+#[async_trait::async_trait]
+impl crate::community::transport::Reconcile for Metered<'_> {
+    async fn reconcile(&self, query: &crate::community::transport::Query, held: &[(nostr_sdk::prelude::EventId, u64)], relay: &str, budget: usize) -> Result<crate::community::transport::Diff, crate::community::transport::ReconcileFail> {
+        use crate::community::transport::Transport;
+        use negentropy::{Id, Negentropy, NegentropyStorageVector};
+        use std::sync::atomic::Ordering::Relaxed;
+        let theirs = self.relay.fetch(query, std::slice::from_ref(&relay.to_string())).await.unwrap_or_default();
+        let side = |items: &mut dyn Iterator<Item = ([u8; 32], u64)>| {
+            let mut storage = NegentropyStorageVector::new();
+            for (id, at) in items {
+                storage.insert(at, Id::from_byte_array(id)).unwrap();
+            }
+            storage.seal().unwrap();
+            Negentropy::owned(storage, 60_000).unwrap()
+        };
+        let (mut ours, opening) = crate::community::plane_neg::open(held).unwrap();
+        let mut relay_side = side(&mut theirs.iter().map(|e| (e.id.to_bytes(), e.created_at.as_secs())));
+        let mut diff = crate::community::transport::Diff::default();
+        // ["NEG-OPEN", id, filter, hex] out, then ["NEG-MSG", id, hex] each way.
+        let mut wire = 160u64;
+        let mut message = Some(opening);
+        while let Some(out) = message.take() {
+            let answer = relay_side.reconcile(&out).unwrap();
+            wire += (out.len() + answer.len()) as u64 * 2 + 2 * 80;
+            let (mut have, mut need) = (Vec::new(), Vec::new());
+            message = ours.reconcile_with_ids(&answer, &mut have, &mut need).unwrap();
+            diff.lack.extend(have.into_iter().map(|id| nostr_sdk::prelude::EventId::from_byte_array(id.to_bytes())));
+            diff.need.extend(need.into_iter().map(|id| nostr_sdk::prelude::EventId::from_byte_array(id.to_bytes())));
+            if diff.need.len() >= budget {
+                break;
+            }
+        }
+        diff.complete = message.is_none() && diff.need.len() <= budget;
+        diff.need.truncate(budget);
+        self.reconciles.fetch_add(1, Relaxed);
+        self.bytes.fetch_add(wire, Relaxed);
+        Ok(diff)
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::community::transport::Transport for Metered<'_> {
+    async fn publish(&self, e: &Event, r: &[String]) -> Result<(), String> {
+        self.relay.publish(e, r).await
+    }
+    async fn publish_durable(&self, e: &Event, r: &[String]) -> Result<(), String> {
+        self.relay.publish_durable(e, r).await
+    }
+    async fn fetch(&self, q: &crate::community::transport::Query, relays: &[String]) -> Result<Vec<Event>, String> {
+        use std::sync::atomic::Ordering::Relaxed;
+        let mut seen = std::collections::HashSet::new();
+        let mut out = Vec::new();
+        let mut floor = crate::community::transport::PageFloor::of(q);
+        for r in relays {
+            let evs = self.relay.fetch(q, std::slice::from_ref(r)).await?;
+            self.reqs.fetch_add(1, Relaxed);
+            self.events.fetch_add(evs.len() as u64, Relaxed);
+            // Each event arrives in a ["EVENT","<sub id>",…] frame.
+            self.bytes.fetch_add(evs.iter().map(|e| e.as_json().len() as u64 + 30).sum(), Relaxed);
+            if let Some(floor) = floor.as_mut() {
+                floor.note(&evs);
+            }
+            out.extend(evs.into_iter().filter(|e| seen.insert(e.id)));
+        }
+        if let Some(floor) = &floor {
+            floor.cut(&mut out);
+        }
+        Ok(out)
+    }
+    async fn fetch_plane(&self, _p: &Keys, q: &crate::community::transport::Query, r: &[String]) -> Result<crate::community::transport::PlaneFetch, String> {
+        Ok(crate::community::transport::PlaneFetch::whole(self.fetch(q, r).await?))
+    }
+    fn reconciler(&self) -> Option<&dyn crate::community::transport::Reconcile> {
+        Some(self)
+    }
+}
+
 /// `communities` held communities of `channels` public channels each, on one relay.
 async fn hold(relay: &MemoryRelay, communities: usize, channels: usize) -> Vec<CommunityV2> {
     let mut out = Vec::new();
@@ -345,6 +452,134 @@ pub fn ledger_chain() {
     while t.elapsed().as_secs() < loops {
         black_box(service::bench_ledger_chain(1024, true));
     }
+}
+
+/// A Guestbook sync's wire and CPU cost on a plane of `CONCORD_GUESTBOOK_SYNC` (default 1050)
+/// entries held on three relays: the first, whole read, then the reads every later sync makes.
+pub fn guestbook_sync() {
+    use nostr_sdk::prelude::*;
+
+    let n: u64 = std::env::var("CONCORD_GUESTBOOK_SYNC").ok().and_then(|v| v.parse().ok()).unwrap_or(1050);
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    rt.block_on(async {
+        let me = Keys::generate();
+        as_identity(&me);
+        let relay = MemoryRelay::new();
+        let relays: Vec<String> = ["wss://a", "wss://b", "wss://c"].map(String::from).to_vec();
+        let c = service::create_community(&relay, "Guestbook", relays.clone(), None).await.unwrap();
+        let gb = derive::guestbook_group_key(&c.community_root, c.id(), c.root_epoch);
+        let join = |at: u64| {
+            let k = Keys::generate();
+            let rumor = super::guestbook::build_join_rumor(k.public_key(), None, at * 1000);
+            super::guestbook::seal_guestbook_rumor(&rumor, &gb, &k, Timestamp::from_secs(at)).unwrap().0
+        };
+        // Spread over three months, and older than the hour each read looks back over.
+        let now = crate::clock::now_secs();
+        let held: Vec<Event> = (0..n).map(|i| join(now - 90 * 86_400 + i * (89 * 86_400 / n.max(1)))).collect();
+        for w in &held {
+            relay.inject(w, &relays);
+        }
+        // What the relay pool spends on each event it receives: parse and verify.
+        let json: Vec<String> = held.iter().take(300).map(|w| w.as_json()).collect();
+        let t = Instant::now();
+        for j in &json {
+            Event::from_json(j).unwrap().verify().unwrap();
+        }
+        let receive = t.elapsed() / json.len() as u32;
+        report("relay pool receive, per event", receive);
+
+        let wire = Metered::new(&relay);
+        Metered::header();
+        let step = async |name: &str| {
+            let t = Instant::now();
+            service::sync_guestbook(&wire, &c).await.unwrap();
+            wire.row(name, t.elapsed(), receive);
+        };
+        step(&format!("first sync, {n} entries on 3 relays (whole)")).await;
+        step("next sync, nothing new").await;
+        for i in 0..3 {
+            relay.inject(&join(crate::clock::now_secs() - i), &relays);
+        }
+        step("next sync, 3 new joins").await;
+        step("next sync, nothing new").await;
+    });
+}
+
+/// A control follow's wire and CPU cost on a plane of `CONCORD_CONTROL_SYNC` (default `20x300`)
+/// roles and granted members held on four relays: the first follow of a session, the follows
+/// every later one makes, and an admin's whole read.
+pub fn control_sync() {
+    use crate::community::transport::Transport;
+    use nostr_sdk::prelude::*;
+    let (roles, members) = std::env::var("CONCORD_CONTROL_SYNC").ok().and_then(|v| {
+        let (a, b) = v.split_once('x')?;
+        Some((a.parse::<usize>().ok()?, b.parse::<usize>().ok()?))
+    }).unwrap_or((20, 300));
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    rt.block_on(async {
+        let me = Keys::generate();
+        as_identity(&me);
+        crate::state::ENCRYPTION_KEY.set([0x55u8; 32], &[]);
+        crate::state::set_encryption_enabled(true);
+        let relay = MemoryRelay::new();
+        let relays: Vec<String> = ["wss://a", "wss://b", "wss://c", "wss://d"].map(String::from).to_vec();
+        let t = Instant::now();
+        let c = service::create_community(&relay, "Control", relays.clone(), None).await.unwrap();
+        let held = || crate::db::community::load_community_v2(c.id()).unwrap().unwrap();
+        service::activate_roles_v2(&relay, &held(), 0).await.unwrap();
+        let mut ids = Vec::new();
+        for r in 0..roles {
+            ids.push(service::create_role_v2(&relay, &held(), &format!("role {r}"), 0x55aa00, 1 << (r % 8)).await.unwrap());
+        }
+        for m in 0..members {
+            let member = Keys::generate().public_key();
+            service::set_member_roles(&relay, &held(), &member, vec![ids[m % ids.len()].clone()]).await.unwrap();
+        }
+        let banned: Vec<String> = (0..40).map(|_| Keys::generate().public_key().to_hex()).collect();
+        service::set_banlist(&relay, &held(), &banned).await.unwrap();
+        let control = super::control::ControlPlane::of(&held());
+        let plane = relay
+            .fetch(&crate::community::transport::Query { kinds: vec![stream::KIND_WRAP], authors: vec![control.pk_hex()], ..Default::default() }, &relays[..1])
+            .await
+            .unwrap();
+        println!("setup: {roles} roles, {members} grants, {} wraps on each of {} relays in {:.1}s", plane.len(), relays.len(), t.elapsed().as_secs_f64());
+        let json: Vec<String> = plane.iter().take(300).map(|w| w.as_json()).collect();
+        let t = Instant::now();
+        for j in &json {
+            Event::from_json(j).unwrap().verify().unwrap();
+        }
+        let receive = t.elapsed() / json.len() as u32;
+        report("relay pool receive, per event", receive);
+
+        let wire = Metered::new(&relay);
+        Metered::header();
+        let follow = async |name: &str| {
+            let t = Instant::now();
+            black_box(service::follow_control(&wire, &held()).await.unwrap());
+            wire.row(name, t.elapsed(), receive);
+        };
+        if service::bench_control_store_on() {
+            service::bench_forget_control_wraps(&held());
+            super::control::forget_opened();
+            follow("first follow ever: nothing held of the plane").await;
+        }
+        super::control::forget_opened();
+        follow("first follow of a session").await;
+        follow("next follow, nothing new").await;
+        // One wrap from elsewhere: an edition this device has never held.
+        let stranger = Keys::generate();
+        let rumor = super::control::build_edition_rumor(stranger.public_key(), super::vsk::CHANNEL_METADATA, &[0xAB; 32], 1, None, "{\"name\":\"elsewhere\",\"private\":false}", crate::clock::now_secs(), None);
+        let (wrap, _) = super::control::seal_control_edition(&rumor, &control.write_group().unwrap(), &stranger, crate::clock::timestamp()).unwrap();
+        relay.inject(&wrap, &relays);
+        follow("next follow, one new wrap on the plane").await;
+        follow("next follow, nothing new").await;
+        let t = Instant::now();
+        let read = service::bench_control_whole(&wire, &held()).await;
+        wire.row(&format!("an admin's whole read ({read} editions)"), t.elapsed(), receive);
+        let t = Instant::now();
+        black_box(service::bench_control_whole(&wire, &held()).await);
+        wire.row("the same again", t.elapsed(), receive);
+    });
 }
 
 /// A Guestbook of `CONCORD_GUESTBOOK` (default 5000) joins and leaves: one live event's ingest,
