@@ -15,6 +15,14 @@ pub fn publish_projection(pref: Pref) {
         if !synced_prefs::is_hydrated(pref) {
             return;
         }
+        if pref == Pref::Settings {
+            match synced_prefs::publish_settings(&client, true).await {
+                Ok(Some(json)) => super::emit("synced_settings_updated", synced_prefs::SyncedSettings::from_json(&json).view()),
+                Ok(None) => {}
+                Err(e) => eprintln!("[SyncedPrefs] publishing {} failed: {e}", pref.d_tag()),
+            }
+            return;
+        }
         let json = match pref {
             Pref::Blocks => {
                 let mut l = IdList::default();
@@ -190,4 +198,15 @@ pub fn set_sql(key: &'static str, value: String) {
 
 pub fn sql(key: &'static str) -> Option<String> {
     vector_core::db::settings::get_sql_setting(key.to_string()).ok().flatten()
+}
+
+pub fn synced_settings() -> synced_prefs::SyncedSettings {
+    synced_prefs::load_settings()
+}
+
+/// One synced-settings edit, published behind the caller.
+pub fn edit_synced(edit: impl FnOnce() -> Result<synced_prefs::SyncedSettings, String>) -> Result<synced_prefs::SyncedSettings, String> {
+    let settings = edit()?;
+    publish_projection(Pref::Settings);
+    Ok(settings)
 }

@@ -96,83 +96,115 @@ pub struct Offers {
     pub updates: bool,
 }
 
-/// The Display block's toggles (`Display.svelte`).
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Display {
-    StartMenu,
-    ImageTypes,
-    ChatBg,
-    Emoticons,
-    TimeSuggestions,
-    Autocorrect,
-    SendOnEnter,
-    FloatingPlayer,
+/// Where a toggle's value lives.
+#[derive(Clone, Copy, PartialEq)]
+pub enum Home {
+    /// An account setting, with its default when never set.
+    Sql(bool),
+    /// This device's own, stored as one of two words: (on, off, default).
+    Device(&'static str, &'static str, bool),
+    /// The account's synced settings document.
+    Synced,
+    /// A field of our own profile.
+    Profile,
 }
 
-impl Display {
-    pub const ALL: [Display; 8] = [
-        Display::StartMenu,
-        Display::ImageTypes,
-        Display::ChatBg,
-        Display::Emoticons,
-        Display::TimeSuggestions,
-        Display::Autocorrect,
-        Display::SendOnEnter,
-        Display::FloatingPlayer,
-    ];
+pub struct Toggle {
+    pub key: &'static str,
+    pub label: &'static str,
+    pub help: &'static str,
+    pub home: Home,
+    group: &'static str,
+}
 
-    /// The account setting it persists to, with its default; None for this device's own.
-    pub fn sql_key(self) -> Option<(&'static str, bool)> {
-        Some(match self {
-            Display::StartMenu | Display::SendOnEnter => return None,
-            Display::ImageTypes => ("display_image_types", false),
-            Display::ChatBg => ("chat_bg_enabled", true),
-            Display::Emoticons => ("emoticon_suggestions", true),
-            Display::TimeSuggestions => ("time_suggestions", true),
-            Display::Autocorrect => ("autocorrect", true),
-            Display::FloatingPlayer => ("floating_player", true),
-        })
-    }
+const fn t(key: &'static str, label: &'static str, help: &'static str, home: Home, group: &'static str) -> Toggle {
+    Toggle { key, label, help, home, group }
+}
 
-    pub fn from_sql_key(key: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|d| d.sql_key().is_some_and(|(k, _)| k == key))
-    }
+/// `Display.svelte`'s rows in widescreen.
+pub const DISPLAY: [Toggle; 8] = [
+    t("ws_nav", "Main Menu", "startMenu", Home::Device("start", "navbar", true), "Navigation"),
+    t("display_image_types", "Display Image Types", "imageTypes", Home::Sql(false), "Chat"),
+    t("chat_bg_enabled", "Background Wallpaper", "chatBg", Home::Sql(true), "Chat"),
+    t("emoticon_suggestions", "Emoticon Suggestions", "emoticons", Home::Sql(true), "Composer"),
+    t("time_suggestions", "Time Suggestions", "timeSuggestions", Home::Sql(true), "Composer"),
+    t("autocorrect", "Autocorrect", "autocorrect", Home::Sql(true), "Composer"),
+    t("send_on_enter", "Send on Enter", "sendOnEnter", Home::Device("true", "false", true), "Composer"),
+    t("floating_player", "Floating Player", "floatingPlayer", Home::Sql(true), "Media"),
+];
 
-    pub fn label(self) -> &'static str {
-        match self {
-            Display::StartMenu => "Main Menu",
-            Display::ImageTypes => "Display Image Types",
-            Display::ChatBg => "Background Wallpaper",
-            Display::Emoticons => "Emoticon Suggestions",
-            Display::TimeSuggestions => "Time Suggestions",
-            Display::Autocorrect => "Autocorrect",
-            Display::SendOnEnter => "Send on Enter",
-            Display::FloatingPlayer => "Floating Player",
+pub const PRIVACY: [Toggle; 4] = [
+    t("web_previews", "Display Web Previews", "webPreviews", Home::Sql(true), ""),
+    t("strip_tracking", "Prevent URL Tracking", "stripTracking", Home::Sql(true), ""),
+    t("send_typing_indicators", "Send Typing Indicators", "sendTyping", Home::Sql(true), ""),
+    t("privacy_proxy_media", "Proxy Previews & Media", "proxyMedia", Home::Sql(true), ""),
+];
+
+pub const OTHER: [Toggle; 4] = [
+    t("streamer_on", "Streamer Mode", "streamerMode", Home::Synced, ""),
+    t("stream_consent", "Show me on streams", "streamConsent", Home::Profile, ""),
+    t("streamer_wallpapers", "Hide chat wallpapers", "streamerWallpapers", Home::Synced, ""),
+    t("advanced", "Advanced Mode", "advancedMode", Home::Synced, ""),
+];
+
+pub fn toggles() -> impl Iterator<Item = &'static Toggle> {
+    DISPLAY.iter().chain(PRIVACY.iter()).chain(OTHER.iter())
+}
+
+pub fn toggle_of(key: &str) -> Option<&'static Toggle> {
+    toggles().find(|t| t.key == key)
+}
+
+/// One explainer per (i): a title and HTML-lite text (`SETTINGS_HELP`, `DISPLAY_EXPLAINERS`).
+pub fn help(key: &str) -> Option<(&'static str, String)> {
+    let (title, text) = match key {
+        "startMenu" => ("Main Menu", "<b>When enabled:</b> your Profile, Chat, Bookmarks, Mini Apps and Settings live in a Main Menu that opens from your row at the bottom of the sidebar, beside pins for the apps, chats and places you use most.<br><br><b>When disabled:</b> they sit down the sidebar as tabs, as before.<br><br>This applies to this device only."),
+        "imageTypes" => ("Display Image Types", "When enabled, images in chat will display a <b>small badge showing the file type</b> (e.g., PNG, GIF, WEBP) in the corner.<br><br>This helps identify image formats at a glance."),
+        "chatBg" => ("Background Wallpaper", "This feature enables and disables background images inside of Chats (DMs & Communities).<br><br>Only applies to certain themes."),
+        "timeSuggestions" => ("Time Suggestions", "When you type a time to come, like <b>in 6 hours</b> or <b>dec 25 at 8pm</b>, the composer offers to send it as a time everyone sees in their own zone: a live countdown, or the date and time where they are.<br><br>Press <b>Tab</b> or tap the suggestion to use it; keep typing to leave it as written."),
+        "emoticons" => ("Emoticon Suggestions", "When enabled, text emoticons suggest the matching emoji as you type:<br><br><b>:)</b> → 🙂&nbsp;&nbsp; <b>:D</b> → 😄&nbsp;&nbsp; <b>:P</b> → 😛&nbsp;&nbsp; <b>:3</b> → 😺<br><br>Turn it off to type emoticons as plain text (e.g. <b>:3</b>) without the emoji selector getting in the way."),
+        "autocorrect" => ("Autocorrect", "When enabled, your device corrects typos as you type in the chat box, using your system's autocorrect.<br><br>Turn it off if your system keeps \"fixing\" words you meant to type."),
+        "sendOnEnter" => ("Send on Enter", "When enabled, <b>Enter</b> sends your message, and <b>Shift + Enter</b> starts a new line.<br><br>Turn it off to have Enter always start a new line; send with the Send button, or <b>Ctrl + Enter</b> (<b>Cmd + Enter</b> on a Mac).<br><br>On by default on computers and off on phones. This applies to this device only."),
+        "floatingPlayer" => ("Floating Player", "When enabled, <b>audio and video keep playing</b> when you leave their chat, in a small player you can move and resize anywhere.<br><br>Runs of voice messages play through, and a video can shrink to sound only.<br><br>Turn it off to stop media when you leave its chat."),
+        "clock" => ("Decentralised Clock", "When enabled, Vector keeps time by your Nostr relays instead of this device. It asks up to eight of them for the time every hour, and uses their time only when at least three agree; otherwise it keeps this device’s.<br><br>A device whose clock has drifted otherwise sends messages that look minutes old or from the future, sees others’ messages the same way, and gets turned away by media servers that check the time.<br><br>Off: Vector uses this device’s clock as it is."),
+        "keepMedia" => ("Keep Files on This Device", "<b>When enabled:</b> every file you receive is kept on this device, encrypted, so it opens instantly and never downloads twice.<br><br><b>When disabled:</b> files stay in memory while Vector is open, and load again after it closes. One too large to hold waits for a tap, then is kept. Turning it off deletes what it kept."),
+        "stripTracking" => ("Strip Tracking Markers", "When enabled, Vector will <b>automatically remove tracking markers</b> from URLs before displaying or sending them.<br><br>This helps reduce your footprint and enhances your privacy with no loss in functionality, only disable if you know what you're doing."),
+        "sendTyping" => ("Send Typing Indicators", "When enabled, Vector will <b>notify your contacts when you are typing</b> a message to them.<br><br>Disable this if you prefer to type without others knowing you are composing a message."),
+        "proxyMedia" => ("Proxy Previews & Media", "Fetches link previews and every download (avatars, banners, custom emoji, GIFs, pictures posted as links, attachments, wallpapers, community logos, mini apps) through your Magnitude server instead of from this device. Only your Nostr relays and Vector's own servers are reached directly.<br><br>A file loaded directly is a request from <b>your</b> address to whoever hosts it; through Magnitude, they see the server instead. Needs a Magnitude server in your Blossom list that offers it.<br><br>On Tor or I2P, a link preview with no Magnitude server to fetch it loads through that network instead.<br><br>Off: everything loads directly from its source."),
+        "transport" => ("Routing", "Choose how Vector reaches relays and servers.<br><br><b>Tor</b> and <b>I2P</b> hide your IP address. Calls and multiplayer Mini Apps ask before connecting outside them."),
+        "autoDownload" => ("Auto-Download Media", "When enabled, Vector automatically downloads incoming photos, videos, voice messages and files (up to the size limit below).<br><br>Turn this off to keep attachments as previews and download them by hand, one at a time."),
+        "autoDownloadLimit" => ("Auto-Download Limit", "The largest attachment size Vector will fetch automatically.<br><br>Anything above this waits for you to tap Download. Only applies while Auto-Download Media is on."),
+        "videoQuality" => ("Video Quality", "How much Vector shrinks the videos you send. Smaller videos send faster and play smoothly on older phones.<br><br><b>Small</b> fits 540p, <b>Balanced</b> and <b>High</b> fit 720p, all at up to 30 fps. A video that is already small enough is sent as it is.<br><br><b>Original</b> never compresses, and the Compress option no longer shows."),
+        "clearStorage" => ("Clear Storage", "Deletes the downloaded and sent files Vector has cached on this device, to free up space.<br><br>Your messages stay. Attachments can be downloaded again later if they are still available from their sender."),
+        "encryption" => ("Local Encryption", "Protects your messages and keys if your device is lost or stolen.<br><br>Disabling speeds up app launch but stores data in plain text."),
+        "exportAccount" => ("Private Keys", "Shows your private key and seed phrase. You only need these to back up your account offline or to use it in another Nostr app. To use Vector on another device, use Sign in on Another Device instead."),
+        "transfer" => ("Sign in on Another Device", "Bring this account to a phone, computer or browser by scanning a code or typing it in. Both devices check a number together and you approve on this device, so your keys never leave it in a form anyone else can read. This device stays signed in."),
+        "streamerMode" => ("Streamer Mode", "Hides the names, pictures and keys of anyone who has not allowed streams, so you can share your screen."),
+        "streamConsent" => ("Show me on streams", "Lets people using Streamer Mode show your name and picture on their streams."),
+        "streamerWallpapers" => ("Hide chat wallpapers", "Shows a plain background in chats while you stream, since a wallpaper can give away who you are talking to."),
+        "streamerNotif" => ("While streaming, also hide", "Hides more of each notification while Streamer Mode is on, on top of Notification Content Privacy."),
+        "players" => ("Video Players", "Lets YouTube links play right in the chat, from their Web Preview. Nothing loads from YouTube until you press play, and then YouTube sees your IP address like any visit would.<br><br>Players stay off while you use Tor or I2P, since they load outside them.<br><br>This setting follows your account to your other devices."),
+        "advancedMode" => ("Advanced Mode", "Shows extra detail meant for developers, such as <b>Copy ID</b> on communities, channels and messages, so a bot can be set up to work in just one of them.<br><br>This setting follows your account to your other devices."),
+        "crashLog" => ("Logs", "Copies error logs and crash details to your clipboard.<br><br>Share with developers when reporting bugs to help diagnose issues."),
+        "logout" => ("Logout", "Logout will erase the local database and remove all stored keys. You will lose access to your communities unless you have a backup."),
+        "webPreviews" => {
+            // Off Clearnet every preview fetch rides the chosen network, or fails closed.
+            let lead = "When enabled, Vector will <b>automatically fetch and display previews</b> for links shared in messages.<br><br>";
+            use vector_core::transport::{Kind, prefs, supported};
+            let kind = prefs::live().kind().filter(|k| *k != Kind::Clearnet).map(Kind::label);
+            let text = match kind {
+                Some(label) => format!("{lead}You have <b>{label}</b> on, so preview fetches route through it. Your IP address stays hidden from the linked sites."),
+                None => {
+                    let others = supported().into_iter().filter(|k| *k != Kind::Clearnet).map(Kind::label).collect::<Vec<_>>().join(" or ");
+                    let hint = if others.is_empty() { "<b>Use a VPN</b>".to_string() } else { format!("<b>Use {others}</b> (Privacy, Routing) <b>or a VPN</b>") };
+                    format!("{lead}This may expose your IP address to the linked sites. {hint} if that's a concern.")
+                }
+            };
+            return Some(("Web Previews", text));
         }
-    }
-
-    fn group(self) -> &'static str {
-        match self {
-            Display::StartMenu => "Navigation",
-            Display::ImageTypes | Display::ChatBg => "Chat",
-            Display::Emoticons | Display::TimeSuggestions | Display::Autocorrect | Display::SendOnEnter => "Composer",
-            Display::FloatingPlayer => "Media",
-        }
-    }
-
-    /// The explainer its (i) opens: a title, and HTML-lite text.
-    pub fn explainer(self) -> &'static str {
-        match self {
-            Display::StartMenu => "<b>When enabled:</b> your Profile, Chat, Bookmarks, Mini Apps and Settings live in a Main Menu that opens from your row at the bottom of the sidebar, beside pins for the apps, chats and places you use most.<br><br><b>When disabled:</b> they sit down the sidebar as tabs, as before.<br><br>This applies to this device only.",
-            Display::ImageTypes => "When enabled, images in chat will display a <b>small badge showing the file type</b> (e.g., PNG, GIF, WEBP) in the corner.<br><br>This helps identify image formats at a glance.",
-            Display::ChatBg => "This feature enables and disables background images inside of Chats (DMs & Communities).<br><br>Only applies to certain themes.",
-            Display::TimeSuggestions => "When you type a time to come, like <b>in 6 hours</b> or <b>dec 25 at 8pm</b>, the composer offers to send it as a time everyone sees in their own zone: a live countdown, or the date and time where they are.<br><br>Press <b>Tab</b> or tap the suggestion to use it; keep typing to leave it as written.",
-            Display::Emoticons => "When enabled, text emoticons suggest the matching emoji as you type:<br><br><b>:)</b> → 🙂&nbsp;&nbsp; <b>:D</b> → 😄&nbsp;&nbsp; <b>:P</b> → 😛&nbsp;&nbsp; <b>:3</b> → 😺<br><br>Turn it off to type emoticons as plain text (e.g. <b>:3</b>) without the emoji selector getting in the way.",
-            Display::Autocorrect => "When enabled, your device corrects typos as you type in the chat box, using your system's autocorrect.<br><br>Turn it off if your system keeps \"fixing\" words you meant to type.",
-            Display::SendOnEnter => "When enabled, <b>Enter</b> sends your message, and <b>Shift + Enter</b> starts a new line.<br><br>Turn it off to have Enter always start a new line; send with the Send button, or <b>Ctrl + Enter</b> (<b>Cmd + Enter</b> on a Mac).<br><br>On by default on computers and off on phones. This applies to this device only.",
-            Display::FloatingPlayer => "When enabled, <b>audio and video keep playing</b> when you leave their chat, in a small player you can move and resize anywhere.<br><br>Runs of voice messages play through, and a video can shrink to sound only.<br><br>Turn it off to stop media when you leave its chat.",
-        }
-    }
+        _ => return None,
+    };
+    Some((title, text.to_string()))
 }
 
 pub struct Theme {
@@ -198,23 +230,42 @@ pub struct Settings {
     pub scroll: ScrollHandle,
     pub offers: Offers,
     pub theme: String,
-    pub theme_open: bool,
-    pub display: std::collections::HashMap<Display, bool>,
+    /// The dropdown open, by its id.
+    pub open_select: Option<&'static str>,
+    /// Every toggle's value, by its key.
+    pub on: std::collections::HashMap<&'static str, bool>,
     /// Toggles flipped while open: only those slide.
-    pub flipped: HashSet<Display>,
+    pub flipped: HashSet<&'static str>,
+    /// What notifications also hide while streaming, and the base privacy that already hides.
+    pub streamer_notif: String,
+    pub notif_privacy: String,
+    /// Blocked users, once loaded.
+    pub blocked: Option<Vec<Blocked>>,
     /// Anchors whose NEW pill has been seen.
     pub seen: HashSet<String>,
     /// The anchor a nav click scrolled to, until the reader scrolls.
     pub jumped: Option<&'static str>,
 }
 
+pub struct Blocked {
+    pub npub: String,
+    pub name: String,
+    /// The name is a streamer veil, not one to qualify with the key.
+    pub veiled: bool,
+    pub avatar: Option<std::path::PathBuf>,
+}
+
 pub enum Act {
     Category(&'static str),
     Anchor(&'static str, &'static str),
-    Display(Display, bool),
-    Explain(Display),
-    ThemeOpen,
-    Theme(&'static str),
+    Toggle(&'static str, bool),
+    Help(&'static str),
+    /// Open or close a dropdown.
+    Select(&'static str),
+    Pick(&'static str, &'static str),
+    Unblock(String),
+    CopyLogs,
+    Logout,
     Link(&'static str),
     ClearSearch,
     /// The reader scrolled the page: the spy takes over from a jump.
@@ -364,7 +415,7 @@ fn swatch(t: &Theme, size: f32) -> AnyElement {
 /// The theme picker: a `.vselect` whose rows wear each theme's swatch.
 fn theme_picker(s: &Settings, on: &OnAct) -> AnyElement {
     let current = THEMES.iter().find(|t| t.value == s.theme).unwrap_or(&THEMES[0]);
-    let open = s.theme_open;
+    let open = s.open_select == Some("theme");
     let caret = svg()
         .path("ui/caret-down.svg")
         .w(px(10.))
@@ -387,7 +438,7 @@ fn theme_picker(s: &Settings, on: &OnAct) -> AnyElement {
         .text_size(px(16.))
         .text_color(c(0xffffff))
         .cursor_pointer()
-        .on_click(click(on, || Act::ThemeOpen))
+        .on_click(click(on, || Act::Select("theme")))
         .child(div().size(px(18.)).flex().items_center().justify_center().child(swatch(current, 16.)))
         .child(div().flex_1().min_w_0().truncate().child(current.label))
         .child(caret);
@@ -427,7 +478,7 @@ fn theme_picker(s: &Settings, on: &OnAct) -> AnyElement {
                     .text_color(c(if selected { 0xffffff } else { 0xcfcfcf }))
                     .hover(|d| d.bg(c(0x1f1f1f)).text_color(c(0xffffff)))
                     .cursor_pointer()
-                    .on_click(click(on, move || Act::Theme(v)))
+                    .on_click(click(on, move || Act::Pick("theme", v)))
                     .child(div().size(px(18.)).flex().items_center().justify_center().child(swatch(t, 16.)))
                     .child(div().flex_1().min_w_0().truncate().child(t.label))
                     .when(selected, |d| d.child(svg().path("icons/check.svg").size(px(14.)).text_color(c(ACCENT)))),
@@ -436,6 +487,15 @@ fn theme_picker(s: &Settings, on: &OnAct) -> AnyElement {
         root = root.child(gpui::deferred(list).with_priority(2));
     }
     root.into_any_element()
+}
+
+/// A row for the toggle `key`, grouped or not.
+fn row(s: &Settings, key: &'static str, on: &OnAct, grouped: bool) -> AnyElement {
+    let Some(t) = toggle_of(key) else { return div().into_any_element() };
+    let value = s.on.get(key).copied().unwrap_or(false);
+    let help = t.help;
+    let switch = toggle(SharedString::from(format!("tg-{key}")), value, s.flipped.contains(key), click(on, move || Act::Toggle(key, !value)));
+    toggle_row(key, t.label, Some(Box::new(click(on, move || Act::Help(help)))), switch, grouped).into_any_element()
 }
 
 fn display_block(s: &Settings, on: &OnAct) -> AnyElement {
@@ -450,23 +510,213 @@ fn display_block(s: &Settings, on: &OnAct) -> AnyElement {
             .child(theme_picker(s, on)),
     );
     let mut last = "";
-    for d in Display::ALL {
-        if d.group() != last {
-            col = col.child(group_label(d.group(), false));
-            last = d.group();
+    for t in &DISPLAY {
+        if t.group != last {
+            col = col.child(group_label(t.group, false));
+            last = t.group;
         }
-        let value = s.display.get(&d).copied().unwrap_or(true);
-        let switch = toggle(SharedString::from(format!("display-{}", d as u8)), value, s.flipped.contains(&d), click(on, move || Act::Display(d, !value)));
-        col = col.child(toggle_row(&format!("display-{}", d as u8), d.label(), Some(Box::new(click(on, move || Act::Explain(d)))), switch, true));
+        col = col.child(row(s, t.key, on, true));
     }
     col.into_any_element()
 }
 
-fn block(id: &str, s: &Settings, on: &OnAct) -> Option<AnyElement> {
-    match id {
-        "display" => Some(display_block(s, on)),
-        _ => None,
+fn privacy_block(s: &Settings, on: &OnAct) -> AnyElement {
+    div().flex().flex_col().children(PRIVACY.iter().map(|t| row(s, t.key, on, false))).into_any_element()
+}
+
+/// A `.st-line`: a label, its explainer, and a control flush right.
+fn line(id: &str, label: &'static str, help: Option<&'static str>, control: AnyElement, on: &OnAct) -> impl IntoElement {
+    let mut name = div().flex().items_center().gap(px(6.)).text_size(px(16.)).line_height(px(19.)).text_color(c(0xffffff)).child(label);
+    if let Some(help) = help {
+        name = name.child(info(SharedString::from(format!("{id}-info")), click(on, move || Act::Help(help))));
     }
+    div().min_h(px(36.)).mb(px(10.)).flex().items_center().justify_between().gap(px(12.)).child(name).child(control)
+}
+
+/// Notification privacy as two bits: 1 hides the sender, 2 hides the message.
+fn notif_bits(level: &str) -> u8 {
+    match level {
+        "hide_sender" => 1,
+        "hide_content" => 2,
+        "hide_all" => 3,
+        _ => 0,
+    }
+}
+
+const STREAMER_LEVELS: [crate::kit::Choice; 4] = [
+    crate::kit::Choice { value: "none", label: "Nothing extra" },
+    crate::kit::Choice { value: "hide_content", label: "Messages" },
+    crate::kit::Choice { value: "hide_sender", label: "Names" },
+    crate::kit::Choice { value: "hide_all", label: "Names and messages" },
+];
+
+fn streamer_block(s: &Settings, on: &OnAct) -> AnyElement {
+    let live = s.on.get("streamer_on").copied().unwrap_or(false);
+    let base = notif_bits(&s.notif_privacy);
+    let bits = base | notif_bits(&s.streamer_notif);
+    let caption = format!(
+        "Notifications while streaming: {}, {}",
+        if bits & 1 != 0 { "name hidden" } else { "name shown if they allow streams" },
+        if bits & 2 != 0 { "message hidden" } else { "message shown" }
+    );
+    let disabled: Vec<&'static str> = STREAMER_LEVELS.iter().filter(|o| o.value != "none" && notif_bits(o.value) & !base == 0).map(|o| o.value).collect();
+    let card = div()
+        .mb(px(18.))
+        .flex()
+        .items_center()
+        .gap(px(16.))
+        .py(px(14.))
+        .px(px(16.))
+        .rounded(px(14.))
+        .bg(white_a(0.03))
+        .border_1()
+        .border_color(if live { c(ACCENT).opacity(0.35) } else { white_a(0.06) })
+        .child(div().size(px(72.)).flex_shrink_0().flex().items_center().justify_center().child(svg().path("icons/video.svg").size(px(37.44)).text_color(if live { c(ACCENT) } else { white_a(0.35) })))
+        .child(
+            div().flex_1().min_w_0().flex().justify_center().items_center().gap(px(8.)).child(
+                div().text_size(px(15.)).font_weight(FontWeight::MEDIUM).text_color(white_a(0.92)).child("Streamer Mode"),
+            ).child(info("streamer-card-info", click(on, || Act::Help("streamerMode")))),
+        )
+        .child(div().mb(px(10.)).child(toggle("tg-streamer_on", live, s.flipped.contains("streamer_on"), click(on, move || Act::Toggle("streamer_on", !live)))));
+    let select = crate::kit::select_with(
+        "streamer-notif",
+        180.,
+        12.,
+        &STREAMER_LEVELS,
+        &disabled,
+        &s.streamer_notif,
+        s.open_select == Some("streamer-notif"),
+        {
+            let on = on.clone();
+            move |w, cx| on(Act::Select("streamer-notif"), w, cx)
+        },
+        {
+            let on = on.clone();
+            move |v, w, cx| on(Act::Pick("streamer-notif", v), w, cx)
+        },
+    );
+    div()
+        .flex()
+        .flex_col()
+        .child(card)
+        .child(row(s, "stream_consent", on, false))
+        .child(row(s, "streamer_wallpapers", on, false))
+        .child(line("streamer-notif", "While streaming, also hide", Some("streamerNotif"), select, on))
+        // Its 6px top margin collapses into the row's 10.
+        .child(div().mb(px(16.)).text_size(px(12.)).line_height(px(12. * 1.4)).text_color(white_a(0.5)).child(caption))
+        .into_any_element()
+}
+
+fn blocked_block(s: &Settings, on: &OnAct) -> AnyElement {
+    let Some(list) = &s.blocked else { return div().into_any_element() };
+    if list.is_empty() {
+        return div().my(px(13.)).text_size(px(13.)).text_color(c(0x666666)).child("No blocked users").into_any_element();
+    }
+    div()
+        .flex()
+        .flex_col()
+        .children(list.iter().map(|u| {
+            let npub = u.npub.clone();
+            let avatar = match &u.avatar {
+                Some(p) => img(p.clone()).size(px(30.)).rounded_full().flex_shrink_0().into_any_element(),
+                None => img("icons/user-placeholder.svg").size(px(30.)).rounded_full().flex_shrink_0().into_any_element(),
+            };
+            let name: AnyElement = if u.veiled {
+                div().child(u.name.clone()).into_any_element()
+            } else if !u.name.is_empty() {
+                div().flex().gap(px(4.)).child(u.name.clone()).child(div().opacity(0.4).text_size(px(12.)).child(format!("({})", &u.npub[..8.min(u.npub.len())]))).into_any_element()
+            } else {
+                div().child(format!("{}...", &u.npub[..20.min(u.npub.len())])).into_any_element()
+            };
+            div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .py(px(8.))
+                .px(px(10.))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(10.))
+                        .min_w_0()
+                        .flex_1()
+                        .child(avatar)
+                        .child(div().flex_1().min_w_0().truncate().text_size(px(14.)).text_color(c(0xdddddd)).child(name)),
+                )
+                .child(
+                    div()
+                        .id(SharedString::from(format!("unblock-{}", u.npub)))
+                        .px(px(10.))
+                        .py(px(4.))
+                        .rounded(px(6.))
+                        .border_1()
+                        .border_color(c(crate::timeline::DANGER))
+                        .text_size(px(13.))
+                        .text_color(c(crate::timeline::DANGER))
+                        .hover(|d| d.bg(c(crate::timeline::DANGER).opacity(0.15)))
+                        .cursor_pointer()
+                        .on_click(click(on, move || Act::Unblock(npub.clone())))
+                        .child("Unblock"),
+                )
+        }))
+        .into_any_element()
+}
+
+/// `.st-page .cancel-btn`: the small grey button.
+fn small_button(id: &'static str, label: &'static str, act: impl Fn() -> Act + 'static, on: &OnAct) -> AnyElement {
+    div()
+        .id(id)
+        .h(px(32.))
+        .px(px(14.))
+        .flex()
+        .items_center()
+        .rounded(px(6.))
+        .border_1()
+        .border_color(c(0x333333))
+        .bg(c(0x262626))
+        .hover(|d| d.bg(c(0x333333)))
+        .text_size(px(12.))
+        .text_color(c(0xffffff))
+        .cursor_pointer()
+        .on_click(click(on, act))
+        .child(label)
+        .into_any_element()
+}
+
+fn danger_button(on: &OnAct) -> AnyElement {
+    div()
+        .id("logout-btn")
+        .h(px(32.))
+        .px(px(14.))
+        .pt(px(2.))
+        .flex()
+        .items_center()
+        .gap(px(6.))
+        .rounded(px(6.))
+        .border_1()
+        .border_color(c(crate::timeline::DANGER))
+        .text_size(px(12.))
+        .text_color(c(0xffffff))
+        .cursor_pointer()
+        .hover(|d| d.opacity(0.75))
+        .on_click(click(on, || Act::Logout))
+        .child(svg().path("icons/vector_warning.svg").size(px(18.)).mt(px(-2.)).text_color(c(crate::timeline::DANGER)))
+        .child("Logout")
+        .into_any_element()
+}
+
+fn block(id: &str, s: &Settings, on: &OnAct) -> Option<AnyElement> {
+    Some(match id {
+        "display" => display_block(s, on),
+        "privacy" => privacy_block(s, on),
+        "streamer" => streamer_block(s, on),
+        "blocked" => blocked_block(s, on),
+        "advanced" => row(s, "advanced", on, false),
+        "logs" => line("logs", "Copy Logs", Some("crashLog"), small_button("copy-logs", "Copy", || Act::CopyLogs, on), on).into_any_element(),
+        "logout" => line("logout", "Logout", Some("logout"), danger_button(on), on).into_any_element(),
+        _ => return None,
+    })
 }
 
 fn nav_icon(name: &str, color: gpui::Hsla) -> impl IntoElement {

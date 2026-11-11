@@ -122,6 +122,8 @@ enum PopupAct {
     BlockRequest { npub: String },
     Nickname { npub: String },
     RemoveAccount { npub: String },
+    Unblock { npub: String },
+    Logout,
 }
 
 impl VectorApp {
@@ -926,6 +928,19 @@ impl VectorApp {
                 self.set_blocked(npub, true, cx);
             }
             PopupAct::RemoveAccount { npub } => self.remove_account(npub, window, cx),
+            PopupAct::Unblock { npub } => {
+                if let Some(s) = self.settings.as_mut()
+                    && let Some(list) = s.blocked.as_mut()
+                {
+                    list.retain(|u| u.npub != npub);
+                }
+                self.set_blocked(npub, false, cx);
+            }
+            PopupAct::Logout => {
+                let me = self.store.borrow().my_npub.clone();
+                self.settings = None;
+                self.remove_account(me, window, cx);
+            }
             PopupAct::Nickname { npub } => {
                 if let Some(input) = popup.input {
                     let nick = input.read(cx).text().trim().to_string();
@@ -2667,16 +2682,35 @@ impl VectorApp {
     }
 
     fn open_settings(&mut self, cat: &'static str, window: &mut Window, cx: &mut Context<Self>) {
-        use crate::settings::{Display, Settings};
+        use crate::settings::{Home, Settings};
         let search = cx.new(|cx| TextInput::new("Search", cx).with_look(crate::composer::Look { size: px(14.), line_height: px(17.), weight: FontWeight::NORMAL, placeholder: c(0xb2b2b2), ..kit::field_look() }));
         cx.subscribe_in(&search, window, |_, _, _: &crate::composer::InputChanged, _, cx| cx.notify()).detach();
         let seen = backend::device::get("settings_seen").and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok()).unwrap_or_default();
-        let keys: Vec<(&'static str, bool)> = Display::ALL.iter().filter_map(|d| d.sql_key()).collect();
-        let sql = if self.live { backend::prefs::sql_bools(&keys) } else { keys.iter().map(|(_, d)| *d).collect() };
-        let mut display: HashMap<Display, bool> = keys.iter().zip(sql).map(|((k, _), v)| (Display::from_sql_key(k).unwrap(), v)).collect();
-        display.insert(Display::StartMenu, backend::device::get("ws_nav").as_deref() != Some("navbar"));
-        display.insert(Display::SendOnEnter, backend::device::get("send_on_enter").as_deref() != Some("false"));
+        let sql_keys: Vec<(&'static str, bool)> = crate::settings::toggles()
+            .filter_map(|t| match t.home {
+                Home::Sql(default) => Some((t.key, default)),
+                _ => None,
+            })
+            .collect();
+        let sql = if self.live { backend::prefs::sql_bools(&sql_keys) } else { sql_keys.iter().map(|(_, d)| *d).collect() };
+        let mut on: HashMap<&'static str, bool> = sql_keys.iter().map(|(k, _)| *k).zip(sql).collect();
+        for t in crate::settings::toggles() {
+            if let Home::Device(yes, no, default) = t.home {
+                on.insert(t.key, match backend::device::get(t.key) {
+                    Some(v) if v == yes => true,
+                    Some(v) if v == no => false,
+                    _ => default,
+                });
+            }
+        }
+        let synced = if self.live { Some(backend::prefs::synced_settings()) } else { None };
+        on.insert("advanced", synced.as_ref().is_some_and(|s| s.advanced));
+        on.insert("streamer_on", synced.as_ref().is_some_and(|s| s.streamer.on));
+        on.insert("streamer_wallpapers", synced.as_ref().is_none_or(|s| s.streamer.hide_wallpapers));
+        let me = self.store.borrow().my_npub.clone();
+        on.insert("stream_consent", self.store.borrow().profiles.get(&me).is_some_and(|p| p.stream_consent));
         let theme = if self.live { backend::prefs::sql("theme") } else { None }.unwrap_or_else(|| "vector".into());
+        let notif_privacy = if self.live { backend::prefs::sql("notif_content_privacy") } else { None }.unwrap_or_else(|| "full".into());
         self.profile = None;
         self.new_chat = None;
         self.switcher = None;
@@ -2684,16 +2718,52 @@ impl VectorApp {
             cat,
             search,
             scroll: gpui::ScrollHandle::new(),
-            offers: crate::settings::Offers { voice: false, routing: true, updates: true },
+            offers: crate::settings::Offers { voice: false, routing: vector_core::transport::supported().len() > 1, updates: true },
             theme,
-            theme_open: false,
-            display,
+            open_select: None,
+            on,
             flipped: HashSet::new(),
+            streamer_notif: synced.map(|s| s.streamer.notif).unwrap_or_else(|| "none".into()),
+            notif_privacy,
+            blocked: None,
             seen: seen.into_iter().collect(),
             jumped: None,
         });
+        self.load_blocked(cx);
         self.mark_settings_seen(None);
         cx.notify();
+    }
+
+    fn load_blocked(&mut self, cx: &mut Context<Self>) {
+        let fill = |this: &mut Self, list: Vec<vector_core::SlimProfile>| {
+            let store = this.store.borrow();
+            let rows = list
+                .into_iter()
+                .map(|p| {
+                    let name = [&p.nickname, &p.name, &p.display_name].into_iter().find(|n| !n.is_empty()).cloned().unwrap_or_default();
+                    crate::settings::Blocked { avatar: store.avatar_path(&p.id), npub: p.id, name, veiled: false }
+                })
+                .collect();
+            drop(store);
+            if let Some(s) = this.settings.as_mut() {
+                s.blocked = Some(rows);
+            }
+        };
+        if !self.live {
+            let list = self.store.borrow().profiles.values().filter(|p| p.is_blocked).cloned().collect();
+            fill(self, list);
+            return;
+        }
+        let rx = backend::run(vector_core::profile::sync::get_blocked_users());
+        cx.spawn(async move |this, cx| {
+            let Ok(list) = rx.await else { return };
+            this.update(cx, |this, cx| {
+                fill(this, list);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// The block now being read stops wearing its NEW pill.
@@ -2713,12 +2783,12 @@ impl VectorApp {
     }
 
     fn on_settings(&mut self, act: crate::settings::Act, window: &mut Window, cx: &mut Context<Self>) {
-        use crate::settings::{Act, Display};
+        use crate::settings::{Act, Home};
         let Some(s) = self.settings.as_mut() else { return };
         cx.notify();
         match act {
             Act::Category(id) => {
-                s.theme_open = false;
+                s.open_select = None;
                 s.jumped = None;
                 if s.cat != id {
                     s.cat = id;
@@ -2727,7 +2797,7 @@ impl VectorApp {
                 }
             }
             Act::Anchor(cat, anchor) => {
-                s.theme_open = false;
+                s.open_select = None;
                 if s.cat != cat {
                     s.cat = cat;
                     s.scroll = gpui::ScrollHandle::new();
@@ -2740,32 +2810,95 @@ impl VectorApp {
                 self.mark_settings_seen(Some(anchor));
             }
             Act::Scrolled => s.jumped = None,
-            Act::Display(d, on) => {
-                s.display.insert(d, on);
-                s.flipped.insert(d);
-                match d {
-                    Display::StartMenu => backend::device::set("ws_nav", if on { "start" } else { "navbar" }),
-                    Display::SendOnEnter => backend::device::set("send_on_enter", if on { "true" } else { "false" }),
-                    _ => {
-                        if let (Some((key, _)), true) = (d.sql_key(), self.live) {
-                            backend::prefs::set_sql(key, on.to_string());
+            Act::Toggle(key, value) => {
+                let Some(t) = crate::settings::toggle_of(key) else { return };
+                s.on.insert(key, value);
+                s.flipped.insert(key);
+                match t.home {
+                    Home::Device(yes, no, _) => backend::device::set(key, if value { yes } else { no }),
+                    Home::Sql(_) if self.live => backend::prefs::set_sql(key, value.to_string()),
+                    Home::Synced if self.live => {
+                        use vector_core::synced_prefs as sp;
+                        let rx = backend::run(async move {
+                            backend::prefs::edit_synced(|| match key {
+                                "advanced" => sp::set_advanced(value),
+                                "streamer_on" => sp::set_streamer_on(value),
+                                _ => sp::set_streamer_wallpapers(value),
+                            })
+                        });
+                        self.settle_toggle(key, rx, cx);
+                    }
+                    Home::Profile if self.live => {
+                        let rx = backend::run(async move {
+                            vector_core::db::scoped_result(vector_core::profile::sync::set_stream_consent(value, &backend::sync::ProfileHandler)).await
+                        });
+                        cx.spawn(async move |this, cx| {
+                            let stuck = matches!(rx.await, Ok(Ok(true))) == value;
+                            this.update(cx, |this, cx| {
+                                if let Some(s) = this.settings.as_mut() {
+                                    s.on.insert(key, if stuck { value } else { !value });
+                                }
+                                cx.notify();
+                            })
+                            .ok();
+                        })
+                        .detach();
+                    }
+                    _ => {}
+                }
+            }
+            Act::Help(key) => {
+                if let Some((title, text)) = crate::settings::help(key) {
+                    let mut popup = kit::Popup::notice(title);
+                    popup.icon = None;
+                    popup.text = Some(text.into());
+                    self.popup = Some((popup, PopupAct::Notice));
+                }
+            }
+            Act::Select(id) => s.open_select = if s.open_select == Some(id) { None } else { Some(id) },
+            Act::Pick(id, value) => {
+                s.open_select = None;
+                match id {
+                    "theme" => {
+                        s.theme = value.to_string();
+                        if self.live {
+                            backend::prefs::set_sql("theme", value.to_string());
                         }
                     }
+                    "streamer-notif" => {
+                        s.streamer_notif = value.to_string();
+                        if self.live {
+                            let _ = backend::run(async move { backend::prefs::edit_synced(|| vector_core::synced_prefs::set_streamer_notif(value)) });
+                        }
+                    }
+                    _ => {}
                 }
             }
-            Act::Explain(d) => {
-                let mut popup = kit::Popup::notice(d.label());
-                popup.icon = None;
-                popup.text = Some(d.explainer().into());
-                self.popup = Some((popup, PopupAct::Notice));
+            Act::Unblock(npub) => {
+                let name = self.store.borrow().name(&npub);
+                let mut popup = kit::Popup::notice("Unblock User");
+                popup.text = Some(format!("Are you sure you want to unblock {name}?").into());
+                popup.confirm = "Confirm".into();
+                popup.cancel = Some("Cancel".into());
+                self.popup = Some((popup, PopupAct::Unblock { npub }));
             }
-            Act::ThemeOpen => s.theme_open = !s.theme_open,
-            Act::Theme(v) => {
-                s.theme_open = false;
-                s.theme = v.to_string();
-                if self.live {
-                    backend::prefs::set_sql("theme", v.to_string());
+            Act::CopyLogs => {
+                let log = backend::default_data_dir().join("vector.log");
+                match std::fs::read_to_string(log).ok().filter(|l| !l.trim().is_empty()) {
+                    Some(text) => {
+                        let lines = text.lines().filter(|l| !l.trim().is_empty()).count();
+                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+                        self.show_toast(&format!("Copied {lines} log entries to clipboard"), cx);
+                    }
+                    None => self.show_toast("No logs to copy!", cx),
                 }
+            }
+            Act::Logout => {
+                let mut popup = kit::Popup::notice("Going Incognito?");
+                popup.text = Some("Logging out of Vector will fully erase the database, <b>ensure you have a backup of your keys before logging out!</b><br><br>That said, would you like to continue?".into());
+                popup.confirm = "Confirm".into();
+                popup.cancel = Some("Cancel".into());
+                self.popup = Some((popup, PopupAct::Logout));
             }
             Act::Link(key) => cx.open_url(match key {
                 "donate" => "https://vector-privacy.gitbook.io/vector-privacy/vector-messenger/more/donations",
@@ -2778,6 +2911,26 @@ impl VectorApp {
                 window.focus(&search.focus_handle(cx), cx);
             }
         }
+    }
+
+    /// A synced toggle shows what stuck once the save answers.
+    fn settle_toggle(&mut self, key: &'static str, rx: futures::channel::oneshot::Receiver<Result<vector_core::synced_prefs::SyncedSettings, String>>, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            let Ok(Ok(view)) = rx.await else { return };
+            this.update(cx, |this, cx| {
+                if let Some(s) = this.settings.as_mut() {
+                    let stuck = match key {
+                        "advanced" => view.advanced,
+                        "streamer_on" => view.streamer.on,
+                        _ => view.streamer.hide_wallpapers,
+                    };
+                    s.on.insert(key, stuck);
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     fn open_new_chat(&mut self, window: &mut Window, cx: &mut Context<Self>) {

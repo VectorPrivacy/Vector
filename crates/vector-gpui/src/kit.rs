@@ -61,6 +61,22 @@ pub fn select(
     on_toggle: impl Fn(&mut Window, &mut App) + 'static,
     on_pick: impl Fn(&'static str, &mut Window, &mut App) + 'static + Clone,
 ) -> AnyElement {
+    select_with(id, width, 14., choices, &[], value, open, on_toggle, on_pick)
+}
+
+/// [`select`] at a font size, with some choices `disabled`.
+#[allow(clippy::too_many_arguments)]
+pub fn select_with(
+    id: impl Into<ElementId>,
+    width: f32,
+    font: f32,
+    choices: &[Choice],
+    disabled: &[&str],
+    value: &str,
+    open: bool,
+    on_toggle: impl Fn(&mut Window, &mut App) + 'static,
+    on_pick: impl Fn(&'static str, &mut Window, &mut App) + 'static + Clone,
+) -> AnyElement {
     let label = choices.iter().find(|c| c.value == value).map(|c| c.label).unwrap_or("");
     let caret = div()
         .w(px(10.))
@@ -86,8 +102,8 @@ pub fn select(
         .hover(|s| s.border_color(c(0x474747)))
         .rounded(px(6.))
         .bg(c(0x0a0a0a))
-        .text_size(px(14.))
-        .line_height(px(17.))
+        .text_size(px(font))
+        .line_height(px(font * 1.2))
         .text_color(c(0xffffff))
         .cursor_pointer()
         .on_click(move |_, w, cx| on_toggle(w, cx))
@@ -115,6 +131,7 @@ pub fn select(
             .occlude();
         for choice in choices {
             let selected = choice.value == value;
+            let off = disabled.contains(&choice.value);
             let pick = on_pick.clone();
             let v = choice.value;
             list = list.child(
@@ -126,12 +143,11 @@ pub fn select(
                     .h(px(34.))
                     .px(px(8.))
                     .rounded(px(6.))
-                    .text_size(px(14.))
+                    .text_size(px(font))
                     .text_color(c(if selected { 0xffffff } else { 0xcfcfcf }))
                     .when(selected, |s| s.bg(c(0x1f1f1f)))
-                    .hover(|s| s.bg(c(0x1f1f1f)).text_color(c(0xffffff)))
-                    .cursor_pointer()
-                    .on_click(move |_, w, cx| pick(v, w, cx))
+                    .when(off, |s| s.opacity(0.4))
+                    .when(!off, |s| s.hover(|s| s.bg(c(0x1f1f1f)).text_color(c(0xffffff))).cursor_pointer().on_click(move |_, w, cx| pick(v, w, cx)))
                     .child(div().flex_1().min_w_0().child(choice.label))
                     .when(selected, |s| s.child(gpui::svg().path("icons/check.svg").size(px(14.)).text_color(c(PRIMARY)))),
             );
@@ -171,7 +187,8 @@ pub fn popup(p: &Popup, answer: impl Fn(bool, &mut Window, &mut App) + 'static +
         div().font_weight(FontWeight::BOLD).text_size(px(24.)).line_height(px(24.)).text_center().my(px(20.)).child(p.title.clone()),
     );
     if let Some(text) = &p.text {
-        content = content.child(div().text_center().text_color(c(TEXT)).mb(px(16.)).max_w(px(420.)).child(text.clone()));
+        let body: AnyElement = if text.contains('<') || text.contains('&') { rich(text).into_any_element() } else { text.clone().into_any_element() };
+        content = content.child(div().text_center().text_color(c(TEXT)).mb(px(16.)).when(p.icon.is_some(), |d| d.max_w(px(420.))).child(body));
     }
     if let Some(input) = &p.input {
         content = content.child(div().w_full().h(px(41.2)).px(px(19.2)).rounded(px(8.)).bg(c(DIVIDER)).flex().items_center().child(input.clone()));
@@ -332,4 +349,35 @@ pub fn bezier(x1: f32, y1: f32, x2: f32, y2: f32) -> impl Fn(f32) -> f32 {
         }
         at(y1, y2, t)
     }
+}
+
+/// The HTML subset explainers are written in: `<b>`, `<br>` and a few entities.
+pub fn rich(html: &str) -> gpui::StyledText {
+    let mut text = String::with_capacity(html.len());
+    let mut bold = Vec::new();
+    let mut open: Option<usize> = None;
+    let mut rest = html;
+    while !rest.is_empty() {
+        if let Some(r) = rest.strip_prefix("<b>") {
+            open = Some(text.len());
+            rest = r;
+        } else if let Some(r) = rest.strip_prefix("</b>") {
+            if let Some(start) = open.take() {
+                bold.push(start..text.len());
+            }
+            rest = r;
+        } else if let Some(r) = rest.strip_prefix("<br>") {
+            text.push('\n');
+            rest = r;
+        } else if let Some((ent, ch)) = [("&nbsp;", '\u{a0}'), ("&amp;", '&'), ("&lt;", '<'), ("&gt;", '>'), ("&quot;", '"')].iter().find(|(e, _)| rest.starts_with(e)) {
+            text.push(*ch);
+            rest = &rest[ent.len()..];
+        } else {
+            let ch = rest.chars().next().unwrap();
+            text.push(ch);
+            rest = &rest[ch.len_utf8()..];
+        }
+    }
+    let strong = gpui::HighlightStyle { font_weight: Some(FontWeight::BOLD), ..Default::default() };
+    gpui::StyledText::new(text).with_highlights(bold.into_iter().map(|r| (r, strong)))
 }
