@@ -26,6 +26,7 @@ mod linkcard;
 mod login;
 mod markdown;
 mod media;
+mod mentions;
 #[allow(dead_code, clippy::all)]
 mod message;
 mod moderation;

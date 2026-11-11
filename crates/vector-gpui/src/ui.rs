@@ -91,6 +91,14 @@ pub struct VectorApp {
     shortcode: Option<crate::shortcodes::Popup>,
     /// `:)` and friends suggest their emoji.
     emoticons: bool,
+    /// The composer's `@` or `#` suggestions.
+    mention: Option<crate::mentions::Popup>,
+    /// Who a `@` can name in the open chat, gathered once per open panel.
+    mention_pool: Option<Rc<Vec<crate::mentions::Item>>>,
+    /// The draft's picked mentions: the name shown, and what it sends as.
+    tracked: Vec<(String, String)>,
+    /// Each Community's taggable Roles and @everyone rule.
+    mention_rules: HashMap<String, crate::mentions::Rules>,
     /// The draft has text: Send stands where the mic does.
     send_shown: bool,
     /// Typed flips between the two, each animated once.
@@ -523,6 +531,10 @@ impl VectorApp {
             pending_link: None,
             shortcode: None,
             emoticons: true,
+            mention: None,
+            mention_pool: None,
+            tracked: Vec::new(),
+            mention_rules: HashMap::new(),
             send_shown: false,
             send_flips: 0,
             jumped: None,
@@ -2115,6 +2127,11 @@ impl VectorApp {
         self.timeline = timeline_state(count, cx.entity().downgrade());
         self.jumped = None;
         self.opening = self.live.then_some(None);
+        self.tracked.clear();
+        self.mention = None;
+        self.mention_pool = None;
+        self.shortcode = None;
+        self.input.update(cx, |i, _| i.set_nav(false));
         window.focus(&self.input.read(cx).focus_handle(cx), cx);
         if !self.live {
             return;
@@ -3029,6 +3046,7 @@ impl VectorApp {
 
     fn send(&mut self, text: String, cx: &mut Context<Self>) {
         let Some(id) = self.open.clone() else { return };
+        let text = crate::mentions::resolve(&text, &std::mem::take(&mut self.tracked));
         let mode = std::mem::replace(&mut self.mode, Mode::Normal);
         if let Mode::Edit { id: msg_id } = &mode {
             if self.live {
@@ -3099,8 +3117,12 @@ impl VectorApp {
 impl Render for VectorApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.send_shown = !self.input.read(cx).text().trim().is_empty();
-        if self.shortcode.is_some() && !self.input.focus_handle(cx).is_focused(window) {
+        if (self.shortcode.is_some() || self.mention.is_some())
+            && !self.input.focus_handle(cx).is_focused(window)
+        {
             self.shortcode = None;
+            self.mention = None;
+            self.mention_pool = None;
             self.input.update(cx, |i, _| i.set_nav(false));
         }
         if matches!(self.screen, Screen::Main)
@@ -4741,16 +4763,29 @@ impl VectorApp {
                 (self.picker_open && !self.picker_status)
                     .then(|| (self.emoji_picker.clone(), self.picker.is_none())),
                 self.attach,
-                self.shortcode.as_ref().map(|p| {
-                    let app = cx.entity().downgrade();
-                    crate::shortcodes::view(
-                        p,
-                        &mut self.media.borrow_mut(),
-                        Rc::new(move |i, w, cx| {
-                            app.update(cx, |app, cx| app.pick_shortcode(i, w, cx)).ok();
-                        }),
-                    )
-                }),
+                self.mention
+                    .as_ref()
+                    .map(|p| {
+                        let app = cx.entity().downgrade();
+                        crate::mentions::view(
+                            p,
+                            Rc::new(move |i, w, cx| {
+                                app.update(cx, |app, cx| app.pick_mention(i, w, cx)).ok();
+                            }),
+                        )
+                    })
+                    .or_else(|| {
+                        self.shortcode.as_ref().map(|p| {
+                            let app = cx.entity().downgrade();
+                            crate::shortcodes::view(
+                                p,
+                                &mut self.media.borrow_mut(),
+                                Rc::new(move |i, w, cx| {
+                                    app.update(cx, |app, cx| app.pick_shortcode(i, w, cx)).ok();
+                                }),
+                            )
+                        })
+                    }),
                 (
                     self.send_shown || matches!(self.mode, Mode::Edit { .. }),
                     self.send_flips,
@@ -7933,9 +7968,117 @@ impl VectorApp {
             self.send_shown = send;
             self.send_flips += 1;
         }
+        if let Some(p) = self.suggest_mention(&text, caret, cx) {
+            self.shortcode = None;
+            self.mention = Some(p);
+            self.input.update(cx, |i, _| i.set_nav(true));
+            return cx.notify();
+        }
+        self.mention = None;
+        self.mention_pool = None;
         let popup =
             crate::shortcodes::suggest(&text, caret, self.emoji_picker.read(cx), self.emoticons);
         self.set_shortcode(popup, cx);
+    }
+
+    /// `@` people, Roles and @everyone; `#` the Community's channels.
+    fn suggest_mention(
+        &mut self,
+        text: &str,
+        caret: usize,
+        cx: &mut Context<Self>,
+    ) -> Option<crate::mentions::Popup> {
+        use crate::mentions;
+        let chat_id = self.open.clone()?;
+        if let Some((start, query)) = mentions::trigger(text, caret, '@') {
+            let pool = match self.mention_pool.clone() {
+                Some(p) => p,
+                None => {
+                    let community = self
+                        .store
+                        .borrow()
+                        .community_of(&chat_id)
+                        .map(|c| c.community_id.clone());
+                    if let Some(id) = community
+                        .as_ref()
+                        .filter(|id| self.live && !self.mention_rules.contains_key(*id))
+                    {
+                        self.load_mention_rules(id.clone(), cx);
+                    }
+                    let store = self.store.borrow();
+                    let chat = store.chat(&chat_id)?;
+                    let roster = self
+                        .community
+                        .as_ref()
+                        .map(|v| v.members.as_slice())
+                        .unwrap_or_default();
+                    let rules = community.as_ref().and_then(|id| self.mention_rules.get(id));
+                    let p = Rc::new(mentions::candidates(&store, chat, roster, rules));
+                    drop(store);
+                    self.mention_pool = Some(p.clone());
+                    p
+                }
+            };
+            let items = mentions::filter(&pool, query, 5);
+            return (!items.is_empty()).then_some(mentions::Popup {
+                start,
+                items,
+                active: 0,
+            });
+        }
+        let (start, query) = mentions::trigger(text, caret, '#')?;
+        let pool = mentions::channels(&self.store.borrow(), &chat_id);
+        let items = mentions::filter(&pool, query, 8);
+        (!items.is_empty()).then_some(mentions::Popup {
+            start,
+            items,
+            active: 0,
+        })
+    }
+
+    fn load_mention_rules(&mut self, community: String, cx: &mut Context<Self>) {
+        self.mention_rules
+            .insert(community.clone(), Default::default());
+        let id = community.clone();
+        let rx = backend::run(async move { vector_core::VectorCore.community_mentions(&id).ok() });
+        cx.spawn(async move |this, cx| {
+            let Ok(Some(v)) = rx.await else { return };
+            let Ok(rules) = serde_json::from_value::<crate::mentions::Rules>(v) else {
+                return;
+            };
+            this.update(cx, |this, cx| {
+                this.mention_rules.insert(community, rules);
+                if this.mention.is_some() {
+                    this.mention_pool = None;
+                    this.update_shortcode(cx);
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn pick_mention(&mut self, i: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(p) = self.mention.take() else { return };
+        let Some(item) = p.items.get(i).cloned() else {
+            return;
+        };
+        self.mention_pool = None;
+        self.input.update(cx, |input, cx| {
+            input.set_nav(false);
+            let caret = input.caret();
+            input.replace(p.start..caret, &crate::mentions::insert(&item), window, cx);
+        });
+        if !matches!(item.kind, crate::mentions::Kind::Channel { .. })
+            && !self
+                .tracked
+                .iter()
+                .any(|(n, k)| *n == item.name && *k == item.npub)
+        {
+            self.tracked.push((item.name, item.npub));
+        }
+        self.mention = None;
+        cx.notify();
     }
 
     fn set_shortcode(&mut self, popup: Option<crate::shortcodes::Popup>, cx: &mut Context<Self>) {
@@ -7952,6 +8095,23 @@ impl VectorApp {
         cx: &mut Context<Self>,
     ) {
         use crate::composer::Nav;
+        if let Some(p) = self.mention.as_mut() {
+            let n = p.items.len();
+            match nav {
+                Nav::Up => p.active = (p.active + n - 1) % n,
+                Nav::Down => p.active = (p.active + 1) % n,
+                Nav::Pick => {
+                    let i = p.active;
+                    return self.pick_mention(i, window, cx);
+                }
+                Nav::Close => {
+                    self.mention = None;
+                    self.mention_pool = None;
+                    self.input.update(cx, |i, _| i.set_nav(false));
+                }
+            }
+            return cx.notify();
+        }
         let Some(p) = self.shortcode.as_mut() else {
             return self.input.update(cx, |i, _| i.set_nav(false));
         };

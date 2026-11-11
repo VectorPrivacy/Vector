@@ -123,38 +123,74 @@ pub fn view(
     media: &mut Media,
     pick: Rc<dyn Fn(usize, &mut Window, &mut App)>,
 ) -> AnyElement {
-    let rows = p.items.iter().enumerate().map(|(i, cell)| {
-        let (art, label): (AnyElement, String) = match cell {
-            Cell::Stock(e) => (
-                match crate::emoji::twemoji(e.emoji) {
-                    Some(path) => img(path).size(px(28.)).flex_shrink_0().into_any_element(),
-                    None => div()
-                        .size(px(28.))
-                        .flex_shrink_0()
-                        .text_size(px(22.))
-                        .line_height(px(28.))
-                        .text_center()
-                        .child(e.emoji)
-                        .into_any_element(),
-                },
-                format!(":{}:", e.shortcode),
-            ),
-            Cell::Custom(e) => (
-                match media.custom(&e.src, false) {
-                    Custom::Ready(i) => img(gpui::ImageSource::Render(i))
-                        .size(px(28.))
-                        .flex_shrink_0()
-                        .object_fit(gpui::ObjectFit::Contain)
-                        .into_any_element(),
-                    _ => div().size(px(28.)).flex_shrink_0().into_any_element(),
-                },
-                format!(":{}:", e.code),
-            ),
-        };
-        let active = i == p.active;
+    let rows = p
+        .items
+        .iter()
+        .map(|cell| {
+            let (art, label): (AnyElement, String) = match cell {
+                Cell::Stock(e) => (
+                    match crate::emoji::twemoji(e.emoji) {
+                        Some(path) => img(path).size(px(28.)).flex_shrink_0().into_any_element(),
+                        None => div()
+                            .size(px(28.))
+                            .flex_shrink_0()
+                            .text_size(px(22.))
+                            .line_height(px(28.))
+                            .text_center()
+                            .child(e.emoji)
+                            .into_any_element(),
+                    },
+                    format!(":{}:", e.shortcode),
+                ),
+                Cell::Custom(e) => (
+                    match media.custom(&e.src, false) {
+                        Custom::Ready(i) => img(gpui::ImageSource::Render(i))
+                            .size(px(28.))
+                            .flex_shrink_0()
+                            .object_fit(gpui::ObjectFit::Contain)
+                            .into_any_element(),
+                        _ => div().size(px(28.)).flex_shrink_0().into_any_element(),
+                    },
+                    format!(":{}:", e.code),
+                ),
+            };
+            Row {
+                art,
+                label: label.into(),
+                hint: None,
+            }
+        })
+        .collect();
+    panel(
+        "emoji-shortcode-selector",
+        p.header.into(),
+        rows,
+        p.active,
+        342.,
+        pick,
+    )
+}
+
+/// One row of an autocomplete: its picture, its name, and a hint at the right.
+pub struct Row {
+    pub art: AnyElement,
+    pub label: SharedString,
+    pub hint: Option<SharedString>,
+}
+
+/// The shell every composer autocomplete shares (`AnchoredPanel` with `.mention-selector`'s look).
+pub fn panel(
+    id: &'static str,
+    header: SharedString,
+    rows: Vec<Row>,
+    active: usize,
+    max_w: f32,
+    pick: Rc<dyn Fn(usize, &mut Window, &mut App)>,
+) -> AnyElement {
+    let rows = rows.into_iter().enumerate().map(|(i, r)| {
         let pick = pick.clone();
         div()
-            .id(SharedString::from(format!("shortcode-{i}")))
+            .id(SharedString::from(format!("{id}-{i}")))
             .relative()
             .flex()
             .items_center()
@@ -165,7 +201,7 @@ pub fn view(
             .text_size(px(14.))
             .text_color(white_a(0.9))
             .hover(|s| s.bg(white_a(0.08)))
-            .when(active, |d| {
+            .when(i == active, |d| {
                 d.bg(white_a(0.08)).child(
                     div()
                         .absolute()
@@ -181,7 +217,7 @@ pub fn view(
                 cx.stop_propagation();
                 pick(i, w, cx)
             })
-            .child(art)
+            .child(r.art)
             .child(
                 div()
                     .flex_1()
@@ -189,21 +225,31 @@ pub fn view(
                     .overflow_hidden()
                     .text_ellipsis()
                     .whitespace_nowrap()
-                    .child(label),
+                    .child(r.label),
             )
+            .children(r.hint.map(|h| {
+                div()
+                    .ml_auto()
+                    .flex_shrink_0()
+                    .text_size(px(12.))
+                    .text_color(white_a(0.45))
+                    .whitespace_nowrap()
+                    .child(h)
+            }))
     });
     div()
-        .id("emoji-shortcode-selector")
+        .id(id)
         .occlude()
         .w_full()
-        .max_w(px(342.))
+        .max_w(px(max_w))
         .py(px(6.))
         .bg(c(0x0a0a0a))
         .border_1()
         .border_color(ca(90, 252, 180, 0.36))
         .rounded(px(12.))
         .overflow_hidden()
-        .font_family(RUBIK)
+        .font_family(INTER)
+        .line_height(px(24.))
         .shadow(vec![gpui::BoxShadow {
             color: ca(0, 0, 0, 0.5),
             offset: gpui::point(px(0.), px(-8.)),
@@ -220,7 +266,7 @@ pub fn view(
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(c(PRIMARY))
                 .opacity(0.7)
-                .child(p.header.to_uppercase()),
+                .child(header.to_uppercase()),
         )
         .children(rows)
         .into_any_element()
