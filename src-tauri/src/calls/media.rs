@@ -44,7 +44,8 @@ const VOICE_MAX_KBPS: u32 = START_KBPS;
 
 /// How far ahead of the speaker the decoder keeps the play ring. Small on purpose:
 /// the jitter buffer holds the margin, the ring only covers the callback's stride.
-pub(crate) const PLAY_AHEAD_MS: u32 = 30;
+// pub(crate) const PLAY_AHEAD_MS: u32 = 30;
+pub(crate) const PLAY_AHEAD_MS: u32 = 60;
 
 /// Where captured frames go: one call's peer, or everyone in a voice Channel's call.
 #[derive(Clone)]
