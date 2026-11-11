@@ -61,5 +61,35 @@ for (const [seed, name, last, minsAgo, unread] of people) {
         muted: false, notify: 2, everyone_pings: true, community_muted: false,
     });
 }
+
+// A conversation exercising the message renderer: streaks, a reply, reactions, edits, send
+// states and the markdown Vector supports.
+{
+    const id = npub('vee');
+    profiles.push(profile({ id, name: 'vee', display_name: 'Vee', avatar: 'https://example.invalid/alice.png', avatar_cached: 'avatars/alice.png' }));
+    const at = NOW - 60_000;
+    const m = (i, mine, content, back, extra = {}) => ({
+        id: hex(`vee-${i}`), content, replied_to: '', preview_metadata: null, attachments: [], reactions: [],
+        at: at - back * 60_000, pending: false, failed: false, mine, npub: mine ? me : id, edited: false, ...extra,
+    });
+    const react = (msg, author, emoji) => ({ id: hex(`r-${msg}-${author}-${emoji}`), reference_id: hex(`vee-${msg}`), author_id: author, emoji });
+    const messages = [
+        m(0, false, 'Have you tried the **new** markdown? It handles *italics*, ~~strikes~~ and `inline code`.', 60 * 26),
+        m(1, false, 'Lists too:\n- one\n- two\n- three', 60 * 26 - 1),
+        m(2, true, '> quoting you here\nand replying below the quote', 60 * 26 - 3, { reactions: [react(2, id, '❤️'), react(2, me, '❤️'), react(2, id, '😂')] }),
+        m(3, true, '```rust\nfn main() {\n    println!("hello");\n}\n```', 60 * 26 - 4),
+        m(4, false, 'Nice! That one has a ||secret spoiler|| inside, and a [link](https://vectorapp.io).', 30, { edited: true }),
+        m(5, false, '# A heading\n-# and some subtext', 29),
+        m(6, true, 'Replying to that heading', 10, { replied_to: hex('vee-5'), replied_to_content: '# A heading\n-# and some subtext', replied_to_npub: id }),
+        m(7, true, 'This one is still sending', 2, { pending: true }),
+        m(8, true, 'And this one failed', 1, { failed: true }),
+        m(9, false, '👍', 0, { reactions: [react(9, me, '🔥')] }),
+    ];
+    chats.unshift({
+        id, chat_type: 'DirectMessage', participants: [id], messages, last_read: messages[messages.length - 1].id,
+        unread_from: '', created_at: Math.floor((at - 86400_000 * 2) / 1000), metadata: { custom_fields: {} },
+        muted: false, notify: 2, everyone_pings: true, community_muted: false,
+    });
+}
 writeFileSync(new URL('./fixtures.json', import.meta.url), JSON.stringify({ now: NOW, npub: me, profiles, chats }, null, 1));
 console.log(`${chats.length} chats, ${profiles.length} profiles`);

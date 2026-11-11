@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use chrono::{DateTime, Datelike, Local, TimeZone};
+use chrono::{DateTime, Local, TimeZone};
 use serde::Deserialize;
 use vector_core::chat::SerializableChat;
 use vector_core::profile::SlimProfile;
@@ -180,9 +180,7 @@ pub fn day_label(now_ms: u64, ms: u64) -> String {
     match (now - then).num_days() {
         0 => "Today".into(),
         1 => "Yesterday".into(),
-        2..7 => then.format("%A").to_string(),
-        _ if then.year() == now.year() => then.format("%B %-d").to_string(),
-        _ => then.format("%B %-d, %Y").to_string(),
+        _ => then.format("%-m/%-d/%Y").to_string(),
     }
 }
 
@@ -190,7 +188,29 @@ pub fn day_label(now_ms: u64, ms: u64) -> String {
 pub enum Row {
     Date { label: String, time: String },
     Unread,
-    Message(usize),
+    /// `first` heads a streak (avatar and header); otherwise a continuation.
+    Message { index: usize, first: bool },
+}
+
+const STREAK_WINDOW_MS: u64 = 7 * 60 * 1000;
+
+/// `shouldCollapseStreak` (message-streak.js): same sender within 7 minutes, never a reply.
+pub fn collapses(prev: &vector_core::types::Message, cur: &vector_core::types::Message) -> bool {
+    if !cur.replied_to.is_empty() || prev.at == 0 || cur.at == 0 {
+        return false;
+    }
+    if cur.at < prev.at || cur.at - prev.at >= STREAK_WINDOW_MS {
+        return false;
+    }
+    match (prev.mine, cur.mine) {
+        (true, true) => true,
+        (false, false) => match (&prev.npub, &cur.npub) {
+            (Some(a), Some(b)) => a == b,
+            (None, None) => true,
+            _ => false,
+        },
+        _ => false,
+    }
 }
 
 /// Lays a chat's messages out as the Tauri timeline does: a date divider before the first
@@ -210,7 +230,9 @@ pub fn timeline(chat: &SerializableChat, now_ms: u64, read_anchor: Option<&str>)
         if read_at.is_some_and(|r| i == r + 1) && !m.mine {
             rows.push(Row::Unread);
         }
-        rows.push(Row::Message(i));
+        // As `deriveWindow`: a day divider doesn't end a streak.
+        let first = i == 0 || !collapses(&chat.messages[i - 1], m);
+        rows.push(Row::Message { index: i, first });
     }
     rows
 }

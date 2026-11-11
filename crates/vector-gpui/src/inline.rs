@@ -1,0 +1,644 @@
+//! Inline formatting as CSS lays it out: runs at mixed sizes and weights, emoji images and
+//! boxed spans (inline code, spoilers, mention pills) filled into lines that break after
+//! spaces (UAX #14), anywhere inside a word too wide for a line (`overflow-wrap: anywhere`),
+//! with baselines aligned and each line as tall as its tallest box.
+//!
+//! GPUI's own text shapes one size per layout and has no inline boxes, which a chat message
+//! needs on every line: `(edited)` at 10px after 15px text, a bordered code chip, a twemoji.
+
+use std::cell::{Cell, RefCell};
+use std::ops::Range;
+use std::rc::Rc;
+
+use gpui::{
+    AnyElement, App, Bounds, Corners, CursorStyle, Edges, Element, ElementId, Font, FontStyle, FontWeight,
+    GlobalElementId, Hitbox, HitboxBehavior, Hsla, InspectorElementId, IntoElement, LayoutId, Styled, MouseButton,
+    MouseDownEvent, MouseUpEvent, Pixels, ShapedLine, SharedString, Size, StrikethroughStyle, Style, TextAlign,
+    TextRun, Window, fill, img, outline, point, px, size,
+};
+use unicode_segmentation::UnicodeSegmentation;
+
+use crate::theme::*;
+
+/// How a run of text looks.
+#[derive(Clone, PartialEq)]
+pub struct Look {
+    pub family: SharedString,
+    pub size: f32,
+    pub line_height: f32,
+    pub weight: FontWeight,
+    pub italic: bool,
+    pub color: Hsla,
+    pub strike: bool,
+}
+
+impl Look {
+    pub fn new(family: &'static str, size: f32, line_height: f32, color: Hsla) -> Self {
+        Self { family: family.into(), size, line_height, weight: FontWeight::NORMAL, italic: false, color, strike: false }
+    }
+
+    fn font(&self) -> Font {
+        Font {
+            family: self.family.clone(),
+            features: Default::default(),
+            fallbacks: None,
+            weight: self.weight,
+            style: if self.italic { FontStyle::Italic } else { FontStyle::Normal },
+        }
+    }
+
+    fn run(&self, len: usize, color: Hsla) -> TextRun {
+        TextRun {
+            len,
+            font: self.font(),
+            color,
+            background_color: None,
+            underline: None,
+            strikethrough: self.strike.then(|| StrikethroughStyle { thickness: px(1.), color: Some(color) }),
+        }
+    }
+}
+
+/// What a run is, beyond its look: what clicking it does and the box drawn behind it.
+#[derive(Clone, PartialEq)]
+pub enum Kind {
+    Plain,
+    Link(SharedString),
+    /// `code`: a bordered chip, copied on click.
+    Code,
+    /// `||spoiler||`, hidden until clicked; the id is its index in the message.
+    Spoiler { id: u32, revealed: bool },
+    /// A profile pill.
+    Mention(SharedString),
+}
+
+impl Kind {
+    /// Horizontal padding plus border, each side.
+    fn pad(&self) -> f32 {
+        match self {
+            Kind::Code => 7.,
+            Kind::Spoiler { .. } => 4.,
+            Kind::Mention(_) => 4.,
+            _ => 0.,
+        }
+    }
+
+    fn target(&self, text: &str) -> Option<Target> {
+        match self {
+            Kind::Plain => None,
+            Kind::Link(url) => Some(Target::Link(url.clone())),
+            Kind::Code => Some(Target::Code(text.to_string().into())),
+            Kind::Spoiler { id, revealed: false } => Some(Target::Spoiler(*id)),
+            Kind::Spoiler { .. } => None,
+            Kind::Mention(npub) => Some(Target::Mention(npub.clone())),
+        }
+    }
+}
+
+#[derive(Clone)]
+pub enum Atom {
+    Text { text: SharedString, look: Look, kind: Kind },
+    /// A square image (a twemoji or custom emoji), `vertical-align` below the baseline by `drop`.
+    Image { src: SharedString, size: f32, drop: f32 },
+    /// Fixed space that never breaks from what follows (an inline box's margin).
+    Gap(f32),
+    /// A forced line break.
+    Break,
+}
+
+/// What a click landed on.
+#[derive(Clone, Debug)]
+pub enum Target {
+    Link(SharedString),
+    Code(SharedString),
+    Spoiler(u32),
+    Mention(SharedString),
+}
+
+pub type OnClick = Rc<dyn Fn(Target, &mut Window, &mut App)>;
+
+/// A paragraph of atoms; `base` is the block's own font, whose strut every line keeps.
+pub struct Inline {
+    id: Option<ElementId>,
+    atoms: Rc<[Atom]>,
+    base: Look,
+    on_click: Option<OnClick>,
+    clock: f32,
+}
+
+pub fn inline(atoms: impl Into<Rc<[Atom]>>, base: Look) -> Inline {
+    Inline { id: None, atoms: atoms.into(), base, on_click: None, clock: 0. }
+}
+
+impl Inline {
+    pub fn id(mut self, id: impl Into<ElementId>) -> Self {
+        self.id = Some(id.into());
+        self
+    }
+
+    pub fn on_click(mut self, f: OnClick) -> Self {
+        self.on_click = Some(f);
+        self
+    }
+
+    /// Seconds, for the hidden spoilers' shimmer.
+    pub fn clock(mut self, t: f32) -> Self {
+        self.clock = t;
+        self
+    }
+}
+
+/// A piece of one atom placed on a line.
+struct Placed {
+    atom: usize,
+    /// Byte range of a text atom.
+    range: Range<usize>,
+    x: f32,
+    width: f32,
+    /// Box padding before and after the glyphs (a chip's first and last piece).
+    lead: f32,
+    tail: f32,
+}
+
+struct Line {
+    top: f32,
+    height: f32,
+    baseline: f32,
+    items: Vec<Placed>,
+}
+
+#[derive(Default)]
+pub struct Laid {
+    width: Option<f32>,
+    lines: Vec<Line>,
+    size: Size<Pixels>,
+}
+
+/// A breakable unit: a span of one atom that ends where a line may break.
+struct Seg {
+    atom: usize,
+    range: Range<usize>,
+    width: f32,
+    /// Width of the trailing spaces, which hang past the line's end.
+    hang: f32,
+    lead: f32,
+    tail: f32,
+    /// A line may break after this segment.
+    brk: bool,
+    /// Forced line break after.
+    hard: bool,
+}
+
+struct Metrics {
+    ascent: f32,
+    descent: f32,
+}
+
+fn metrics(look: &Look, window: &Window) -> Metrics {
+    let ts = window.text_system();
+    let id = ts.resolve_font(&look.font());
+    let s = px(look.size);
+    Metrics { ascent: ts.ascent(id, s).into(), descent: ts.descent(id, s).into() }
+}
+
+fn shape(text: &str, look: &Look, color: Hsla, window: &Window) -> ShapedLine {
+    let text: SharedString = text.to_string().into();
+    window.text_system().shape_line(text.clone(), px(look.size), &[look.run(text.len(), color)], None)
+}
+
+fn segments(atoms: &[Atom], window: &Window) -> Vec<Seg> {
+    let mut segs = Vec::new();
+    for (i, atom) in atoms.iter().enumerate() {
+        match atom {
+            Atom::Break => {
+                if let Some(last) = segs.last_mut() {
+                    let last: &mut Seg = last;
+                    last.hard = true;
+                    last.brk = true;
+                } else {
+                    segs.push(Seg { atom: i, range: 0..0, width: 0., hang: 0., lead: 0., tail: 0., brk: true, hard: true });
+                }
+            }
+            Atom::Gap(w) => {
+                segs.push(Seg { atom: i, range: 0..0, width: *w, hang: 0., lead: 0., tail: 0., brk: false, hard: false });
+            }
+            Atom::Image { size, .. } => {
+                // A replaced element breaks on either side.
+                if let Some(last) = segs.last_mut() {
+                    last.brk = true;
+                }
+                segs.push(Seg { atom: i, range: 0..0, width: *size, hang: 0., lead: 0., tail: 0., brk: true, hard: false });
+            }
+            Atom::Text { text, look, kind } => {
+                if text.is_empty() {
+                    continue;
+                }
+                let line = shape(text, look, look.color, window);
+                let pad = kind.pad();
+                let mut start = 0;
+                let first = segs.len();
+                for (end, _) in unicode_linebreak::linebreaks(text) {
+                    let piece = &text[start..end];
+                    let trimmed = piece.trim_end();
+                    let full = f32::from(line.x_for_index(end) - line.x_for_index(start));
+                    let body = f32::from(line.x_for_index(start + trimmed.len()) - line.x_for_index(start));
+                    let at_end = end == text.len();
+                    segs.push(Seg {
+                        atom: i,
+                        range: start..end,
+                        width: full,
+                        hang: full - body,
+                        lead: 0.,
+                        tail: 0.,
+                        // The text's end breaks only on a space either side of it.
+                        brk: !at_end || piece.ends_with(char::is_whitespace),
+                        hard: false,
+                    });
+                    start = end;
+                }
+                if pad > 0. && segs.len() > first {
+                    segs[first].lead = pad;
+                    segs.last_mut().unwrap().tail = pad;
+                }
+            }
+        }
+    }
+    // A text atom that opens with a space lets the previous segment break.
+    for k in 1..segs.len() {
+        if let Atom::Text { text, .. } = &atoms[segs[k].atom] {
+            if segs[k].range.start == 0 && text.starts_with(char::is_whitespace) {
+                segs[k - 1].brk = true;
+            }
+        }
+    }
+    segs
+}
+
+/// `segs[a..b]`, split where it overflows `limit`: graphemes, as `overflow-wrap: anywhere`.
+fn split_word(atoms: &[Atom], seg: &Seg, room: f32, window: &Window) -> Option<usize> {
+    let Atom::Text { text, look, .. } = &atoms[seg.atom] else { return None };
+    let line = shape(text, look, look.color, window);
+    let base = f32::from(line.x_for_index(seg.range.start));
+    let mut cut = None;
+    for (off, g) in text[seg.range.clone()].grapheme_indices(true) {
+        let end = seg.range.start + off + g.len();
+        if end == seg.range.end {
+            break;
+        }
+        if f32::from(line.x_for_index(end)) - base + seg.lead <= room {
+            cut = Some(end);
+        } else {
+            break;
+        }
+    }
+    // At least one grapheme per line.
+    cut.or_else(|| text[seg.range.clone()].graphemes(true).next().map(|g| seg.range.start + g.len()).filter(|&e| e < seg.range.end))
+}
+
+fn piece_width(atoms: &[Atom], atom: usize, range: Range<usize>, window: &Window) -> f32 {
+    let Atom::Text { text, look, .. } = &atoms[atom] else { return 0. };
+    let line = shape(text, look, look.color, window);
+    f32::from(line.x_for_index(range.end) - line.x_for_index(range.start))
+}
+
+fn layout(atoms: &[Atom], base: &Look, width: f32, window: &Window) -> Laid {
+    let mut segs = segments(atoms, window);
+    let mut lines: Vec<Vec<Placed>> = vec![Vec::new()];
+    let mut x = 0f32;
+    let mut i = 0;
+    while i < segs.len() {
+        // The word: segments up to and including the next break opportunity.
+        let mut j = i;
+        let mut w = 0f32;
+        while j < segs.len() {
+            w += segs[j].lead + segs[j].width + segs[j].tail;
+            if segs[j].brk {
+                break;
+            }
+            j += 1;
+        }
+        let j = j.min(segs.len() - 1);
+        let visible = w - segs[j].hang;
+        if x > 0. && x + visible > width {
+            lines.push(Vec::new());
+            x = 0.;
+        }
+        if visible > width && x == 0. {
+            // Too wide for any line: place what fits, split the segment that overflows.
+            let mut k = i;
+            while k <= j {
+                let s = &segs[k];
+                let sw = s.lead + s.width + s.tail;
+                if x + sw - s.hang <= width || matches!(atoms[s.atom], Atom::Image { .. }) && x == 0. {
+                    place(&mut lines, &mut x, s, atoms);
+                    k += 1;
+                    continue;
+                }
+                match split_word(atoms, s, width - x, window) {
+                    Some(cut) if x == 0. || cut > s.range.start => {
+                        let head_w = piece_width(atoms, s.atom, s.range.start..cut, window);
+                        let head = Seg { atom: s.atom, range: s.range.start..cut, width: head_w, hang: 0., lead: s.lead, tail: 0., brk: true, hard: false };
+                        place(&mut lines, &mut x, &head, atoms);
+                        let rest_w = piece_width(atoms, s.atom, cut..s.range.end, window);
+                        let (end, hang, tail, brk, hard) = (s.range.end, s.hang, s.tail, s.brk, s.hard);
+                        segs[k] = Seg { atom: s.atom, range: cut..end, width: rest_w, hang, lead: 0., tail, brk, hard };
+                    }
+                    _ if x > 0. => {}
+                    _ => {
+                        place(&mut lines, &mut x, s, atoms);
+                        k += 1;
+                        continue;
+                    }
+                }
+                lines.push(Vec::new());
+                x = 0.;
+            }
+        } else {
+            for k in i..=j {
+                place(&mut lines, &mut x, &segs[k], atoms);
+            }
+        }
+        if segs[j].hard {
+            lines.push(Vec::new());
+            x = 0.;
+        }
+        i = j + 1;
+    }
+    if lines.len() > 1 && lines.last().is_some_and(|l| l.is_empty()) && !segs.last().is_some_and(|s| s.hard && matches!(atoms[s.atom], Atom::Break)) {
+        lines.pop();
+    }
+
+    // Vertical: every line holds the block's strut, then each box by its own line-height.
+    let strut = metrics(base, window);
+    let half = |m: &Metrics, lh: f32| (lh - (m.ascent + m.descent)) / 2.;
+    let strut_above = strut.ascent + half(&strut, base.line_height);
+    let strut_below = strut.descent + half(&strut, base.line_height);
+    let mut out = Vec::with_capacity(lines.len());
+    let mut top = 0f32;
+    let mut widest = 0f32;
+    for items in lines {
+        let (mut above, mut below) = (strut_above, strut_below);
+        for p in &items {
+            match &atoms[p.atom] {
+                Atom::Text { look, .. } if look != base => {
+                    let m = metrics(look, window);
+                    let h = half(&m, look.line_height);
+                    above = above.max(m.ascent + h);
+                    below = below.max(m.descent + h);
+                }
+                Atom::Image { size, drop, .. } => {
+                    above = above.max(size - drop);
+                    below = below.max(*drop);
+                }
+                _ => {}
+            }
+        }
+        let end = items.iter().map(|p| p.x + p.lead + p.width + p.tail).fold(0., f32::max);
+        widest = widest.max(end);
+        let height = above + below;
+        out.push(Line { top, height, baseline: top + above, items });
+        top += height;
+    }
+    Laid { width: Some(width), lines: out, size: size(px(widest.min(width).ceil()), px(top)) }
+}
+
+fn place(lines: &mut [Vec<Placed>], x: &mut f32, s: &Seg, atoms: &[Atom]) {
+    let line = lines.last_mut().unwrap();
+    if matches!(atoms[s.atom], Atom::Break) {
+        return;
+    }
+    line.push(Placed { atom: s.atom, range: s.range.clone(), x: *x, width: s.width, lead: s.lead, tail: s.tail });
+    *x += s.lead + s.width + s.tail;
+}
+
+pub struct Prepainted {
+    hits: Vec<(Hitbox, Target)>,
+    images: Vec<AnyElement>,
+}
+
+impl Element for Inline {
+    type RequestLayoutState = Rc<RefCell<Laid>>;
+    type PrepaintState = Prepainted;
+
+    fn id(&self) -> Option<ElementId> {
+        self.id.clone()
+    }
+
+    fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        window: &mut Window,
+        _: &mut App,
+    ) -> (LayoutId, Self::RequestLayoutState) {
+        let laid: Rc<RefCell<Laid>> = Rc::default();
+        let (atoms, base, state) = (self.atoms.clone(), self.base.clone(), laid.clone());
+        let id = window.request_measured_layout(Style::default(), move |known, available, window, _| {
+            let width = known.width.map(f32::from).unwrap_or(match available.width {
+                gpui::AvailableSpace::Definite(w) => w.into(),
+                gpui::AvailableSpace::MinContent => 0.,
+                gpui::AvailableSpace::MaxContent => f32::INFINITY,
+            });
+            let mut s = state.borrow_mut();
+            if s.width != Some(width) {
+                *s = layout(&atoms, &base, width, window);
+            }
+            s.size
+        });
+        (id, laid)
+    }
+
+    fn prepaint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        laid: &mut Self::RequestLayoutState,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Prepainted {
+        {
+            let w = f32::from(bounds.size.width);
+            let mut s = laid.borrow_mut();
+            if s.width.is_none_or(|lw| (lw - w).abs() > 0.5 && f32::from(s.size.width) > w) {
+                *s = layout(&self.atoms, &self.base, w, window);
+            }
+        }
+        let s = laid.borrow();
+        let mut hits = Vec::new();
+        let mut images = Vec::new();
+        for line in &s.lines {
+            // A box run (a chip) is one hit area per line.
+            let mut k = 0;
+            while k < line.items.len() {
+                let p = &line.items[k];
+                match &self.atoms[p.atom] {
+                    Atom::Text { text, look, kind } => {
+                        let mut end = k;
+                        let mut range = p.range.clone();
+                        while end + 1 < line.items.len() && line.items[end + 1].atom == p.atom {
+                            end += 1;
+                            range.end = line.items[end].range.end;
+                        }
+                        let last = &line.items[end];
+                        if let Some(target) = kind.target(&text[..]) {
+                            let m = metrics(look, window);
+                            let x0 = p.x;
+                            let x1 = last.x + last.lead + last.width + last.tail;
+                            let rect = Bounds::new(
+                                bounds.origin + point(px(x0), px(line.baseline - m.ascent - 2.)),
+                                size(px(x1 - x0), px(m.ascent + m.descent + 4.)),
+                            );
+                            hits.push((window.insert_hitbox(rect, HitboxBehavior::Normal), target));
+                        }
+                        let _ = range;
+                        k = end + 1;
+                        continue;
+                    }
+                    Atom::Image { src, size: sz, drop } => {
+                        let mut el = img(src.clone()).size(px(*sz)).into_any_element();
+                        let origin = bounds.origin + point(px(p.x), px(line.baseline + drop - sz));
+                        el.prepaint_as_root(origin, size(px(*sz), px(*sz)).map(Into::into), window, cx);
+                        images.push(el);
+                    }
+                    Atom::Break | Atom::Gap(_) => {}
+                }
+                k += 1;
+            }
+        }
+        Prepainted { hits, images }
+    }
+
+    fn paint(
+        &mut self,
+        id: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        laid: &mut Self::RequestLayoutState,
+        pre: &mut Prepainted,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let s = laid.borrow();
+        let mut shimmering = false;
+        for line in &s.lines {
+            // Boxes first, so text paints over them.
+            let mut k = 0;
+            while k < line.items.len() {
+                let p = &line.items[k];
+                if let Atom::Text { look, kind, .. } = &self.atoms[p.atom] {
+                    let mut end = k;
+                    while end + 1 < line.items.len() && line.items[end + 1].atom == p.atom {
+                        end += 1;
+                    }
+                    let last = &line.items[end];
+                    let x0 = p.x;
+                    let x1 = last.x + last.lead + last.width + last.tail;
+                    let m = metrics(look, window);
+                    let boxed = |pad_y: f32| {
+                        Bounds::new(
+                            bounds.origin + point(px(x0), px(line.baseline - m.ascent - pad_y)),
+                            size(px(x1 - x0), px(m.ascent + m.descent + pad_y * 2.)),
+                        )
+                    };
+                    match kind {
+                        Kind::Code => {
+                            let b = boxed(3.);
+                            window.paint_quad(fill(b, ca(89, 252, 179, 0.05)).corner_radii(Corners::all(px(3.))));
+                            window.paint_quad(
+                                outline(b, ca(89, 252, 179, 0.45), gpui::BorderStyle::Solid)
+                                    .corner_radii(Corners::all(px(3.)))
+                                    .border_widths(Edges::all(px(1.))),
+                            );
+                        }
+                        Kind::Spoiler { revealed: false, .. } => {
+                            window.paint_quad(fill(boxed(2.), ca(0, 0, 0, 0.35)).corner_radii(Corners::all(px(3.))));
+                            shimmering = true;
+                        }
+                        Kind::Mention(_) => {
+                            window.paint_quad(fill(boxed(1.), white_a(0.08)).corner_radii(Corners::all(px(4.))));
+                        }
+                        _ => {}
+                    }
+                    k = end + 1;
+                    continue;
+                }
+                k += 1;
+            }
+            for p in &line.items {
+                let Atom::Text { text, look, kind } = &self.atoms[p.atom] else { continue };
+                let m = metrics(look, window);
+                let lh = look.line_height;
+                let top = line.baseline - m.ascent - (lh - (m.ascent + m.descent)) / 2.;
+                let origin = bounds.origin + point(px(p.x + p.lead), px(top));
+                let piece = &text[p.range.clone()];
+                match kind {
+                    Kind::Spoiler { revealed: false, .. } => {
+                        // No blur in GPUI: offset copies at low alpha read as one, in the
+                        // shimmering accent the CSS gradient sweeps across.
+                        let phase = (self.clock / 4.).fract();
+                        let mid = (p.x + p.width / 2.) / s.size.width.max(px(1.)).to_f64() as f32;
+                        let t = ((mid - phase * 2.).rem_euclid(1.) * 2. - 1.).abs();
+                        let color = mix(c(ACCENT), c(0x04110d), 1. - t);
+                        for (dx, dy) in [(-1.5f32, -1.), (1.5, -1.), (-1.5, 1.), (1.5, 1.), (0., 0.), (-3., 0.), (3., 0.), (0., -2.), (0., 2.)] {
+                            let line = shape(piece, look, color.opacity(0.22), window);
+                            let _ = line.paint(origin + point(px(dx), px(dy)), px(lh), TextAlign::Left, None, window, cx);
+                        }
+                    }
+                    _ => {
+                        let line = shape(piece, look, look.color, window);
+                        let _ = line.paint(origin, px(lh), TextAlign::Left, None, window, cx);
+                    }
+                }
+            }
+        }
+        for el in &mut pre.images {
+            el.paint(window, cx);
+        }
+        if shimmering {
+            window.request_animation_frame();
+        }
+
+        if pre.hits.is_empty() {
+            return;
+        }
+        for (hitbox, _) in &pre.hits {
+            window.set_cursor_style(CursorStyle::PointingHand, hitbox);
+        }
+        let Some(on_click) = self.on_click.clone() else { return };
+        let pressed: Rc<Cell<Option<usize>>> = match id {
+            Some(id) => window.with_element_state(id, |state: Option<Rc<Cell<Option<usize>>>>, _| {
+                let state = state.unwrap_or_default();
+                (state.clone(), state)
+            }),
+            None => Rc::default(),
+        };
+        let hits: Rc<Vec<(Hitbox, Target)>> = Rc::new(std::mem::take(&mut pre.hits));
+        {
+            let (hits, pressed) = (hits.clone(), pressed.clone());
+            window.on_mouse_event(move |e: &MouseDownEvent, phase, window, _| {
+                if phase.bubble() && e.button == MouseButton::Left {
+                    pressed.set(hits.iter().position(|(h, _)| h.is_hovered(window)));
+                }
+            });
+        }
+        window.on_mouse_event(move |e: &MouseUpEvent, phase, window, cx| {
+            if !phase.bubble() || e.button != MouseButton::Left {
+                return;
+            }
+            let Some(i) = pressed.take() else { return };
+            if hits[i].0.is_hovered(window) {
+                on_click(hits[i].1.clone(), window, cx);
+            }
+        });
+    }
+}
+
+fn mix(a: Hsla, b: Hsla, t: f32) -> Hsla {
+    let (a, b) = (a.to_rgb(), b.to_rgb());
+    gpui::Rgba { r: a.r + (b.r - a.r) * t, g: a.g + (b.g - a.g) * t, b: a.b + (b.b - a.b) * t, a: 1. }.into()
+}

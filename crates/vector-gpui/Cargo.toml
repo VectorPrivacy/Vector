@@ -31,6 +31,9 @@ zeroize = "1.8"
 rusqlite = { version = "0.38", features = ["bundled"] }
 reqwest = { version = "0.13", default-features = false }
 dirs = "6"
+# The message renderer.
+pulldown-cmark = { version = "0.13", default-features = false }
+unicode-linebreak = "0.1"
 
 # Its own workspace: GPUI pins dependency versions the main client must not inherit.
 [workspace]

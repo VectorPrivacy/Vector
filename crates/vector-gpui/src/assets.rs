@@ -16,6 +16,10 @@ struct SharedIcons;
 struct UiIcons;
 
 #[derive(RustEmbed)]
+#[folder = "$CARGO_MANIFEST_DIR/../../src/twemoji/svg"]
+struct Twemoji;
+
+#[derive(RustEmbed)]
 #[folder = "$CARGO_MANIFEST_DIR/assets/fonts"]
 struct Fonts;
 
@@ -27,6 +31,8 @@ impl AssetSource for Assets {
             SharedIcons::get(p)
         } else if let Some(p) = path.strip_prefix("ui/") {
             UiIcons::get(p)
+        } else if let Some(p) = path.strip_prefix("twemoji/") {
+            Twemoji::get(p)
         } else {
             None
         };
@@ -45,4 +51,8 @@ impl AssetSource for Assets {
 
 pub fn fonts() -> Vec<Cow<'static, [u8]>> {
     Fonts::iter().filter_map(|name| Fonts::get(&name).map(|f| f.data)).collect()
+}
+
+pub fn twemoji_names() -> impl Iterator<Item = Cow<'static, str>> {
+    Twemoji::iter()
 }

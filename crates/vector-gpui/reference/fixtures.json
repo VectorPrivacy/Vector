@@ -226,9 +226,221 @@
    "avatar_cached": "avatars/heidi.png",
    "banner_cached": "",
    "stream_consent": false
+  },
+  {
+   "id": "npub15387nevpzd0u700y2t24ym9l0zxe8fsxx2w7qn47ysn6mndn9gvqqmlahu",
+   "name": "vee",
+   "display_name": "Vee",
+   "nickname": "",
+   "lud06": "",
+   "lud16": "",
+   "banner": "",
+   "avatar": "https://example.invalid/alice.png",
+   "about": "",
+   "website": "",
+   "nip05": "",
+   "status": {
+    "title": "",
+    "purpose": "",
+    "url": ""
+   },
+   "last_updated": 1794362400,
+   "mine": false,
+   "bot": false,
+   "is_blocked": false,
+   "avatar_cached": "avatars/alice.png",
+   "banner_cached": "",
+   "stream_consent": false
   }
  ],
  "chats": [
+  {
+   "id": "npub15387nevpzd0u700y2t24ym9l0zxe8fsxx2w7qn47ysn6mndn9gvqqmlahu",
+   "chat_type": "DirectMessage",
+   "participants": [
+    "npub15387nevpzd0u700y2t24ym9l0zxe8fsxx2w7qn47ysn6mndn9gvqqmlahu"
+   ],
+   "messages": [
+    {
+     "id": "46160c560d01fcd55bc718f8adef022d010f02cc27d8a1c9e066c8ae61f1f4b4",
+     "content": "Have you tried the **new** markdown? It handles *italics*, ~~strikes~~ and `inline code`.",
+     "replied_to": "",
+     "preview_metadata": null,
+     "attachments": [],
+     "reactions": [],
+     "at": 1794268740000,
+     "pending": false,
+     "failed": false,
+     "mine": false,
+     "npub": "npub15387nevpzd0u700y2t24ym9l0zxe8fsxx2w7qn47ysn6mndn9gvqqmlahu",
+     "edited": false
+    },
+    {
+     "id": "29e4fd18155e79dd760d101aca6abae460e8662b34ccf9bdaf9edd8e3b7a18b6",
+     "content": "Lists too:\n- one\n- two\n- three",
+     "replied_to": "",
+     "preview_metadata": null,
+     "attachments": [],
+     "reactions": [],
+     "at": 1794268800000,
+     "pending": false,
+     "failed": false,
+     "mine": false,
+     "npub": "npub15387nevpzd0u700y2t24ym9l0zxe8fsxx2w7qn47ysn6mndn9gvqqmlahu",
+     "edited": false
+    },
+    {
+     "id": "f5e8a64a4803fd9cf5c2f2cc23eb5a66b6126982b1394d53195b86220dda9ed3",
+     "content": "> quoting you here\nand replying below the quote",
+     "replied_to": "",
+     "preview_metadata": null,
+     "attachments": [],
+     "reactions": [
+      {
+       "id": "d989534175d49bdce27c894467617cf954aa81994482cb551c63b8fe08918b5a",
+       "reference_id": "f5e8a64a4803fd9cf5c2f2cc23eb5a66b6126982b1394d53195b86220dda9ed3",
+       "author_id": "npub15387nevpzd0u700y2t24ym9l0zxe8fsxx2w7qn47ysn6mndn9gvqqmlahu",
+       "emoji": "❤️"
+      },
+      {
+       "id": "78e8fce8c1f9dce779d3287be6a7ec18f29ebbe3a0386710d569e62dbd2da183",
+       "reference_id": "f5e8a64a4803fd9cf5c2f2cc23eb5a66b6126982b1394d53195b86220dda9ed3",
+       "author_id": "npub1yazve5gvw5em6um2mzg0nh2u4v4dkfas04gqh9yn72wdcssvktsqfmmmv4",
+       "emoji": "❤️"
+      },
+      {
+       "id": "06320cad2867c2713b524fa38138aa146bf402abd91c54d1f7eae469adc8187c",
+       "reference_id": "f5e8a64a4803fd9cf5c2f2cc23eb5a66b6126982b1394d53195b86220dda9ed3",
+       "author_id": "npub15387nevpzd0u700y2t24ym9l0zxe8fsxx2w7qn47ysn6mndn9gvqqmlahu",
+       "emoji": "😂"
+      }
+     ],
+     "at": 1794268920000,
+     "pending": false,
+     "failed": false,
+     "mine": true,
+     "npub": "npub1yazve5gvw5em6um2mzg0nh2u4v4dkfas04gqh9yn72wdcssvktsqfmmmv4",
+     "edited": false
+    },
+    {
+     "id": "9224c65fb1c0fa757b5f2b9f069eb1ef3a888b071604a532eb0a22ddf4bbe1db",
+     "content": "```rust\nfn main() {\n    println!(\"hello\");\n}\n```",
+     "replied_to": "",
+     "preview_metadata": null,
+     "attachments": [],
+     "reactions": [],
+     "at": 1794268980000,
+     "pending": false,
+     "failed": false,
+     "mine": true,
+     "npub": "npub1yazve5gvw5em6um2mzg0nh2u4v4dkfas04gqh9yn72wdcssvktsqfmmmv4",
+     "edited": false
+    },
+    {
+     "id": "12a8715a08bb5cf5558c3e30e350beb05103f589af9ef0f894481c2c93cf58bf",
+     "content": "Nice! That one has a ||secret spoiler|| inside, and a [link](https://vectorapp.io).",
+     "replied_to": "",
+     "preview_metadata": null,
+     "attachments": [],
+     "reactions": [],
+     "at": 1794360540000,
+     "pending": false,
+     "failed": false,
+     "mine": false,
+     "npub": "npub15387nevpzd0u700y2t24ym9l0zxe8fsxx2w7qn47ysn6mndn9gvqqmlahu",
+     "edited": true
+    },
+    {
+     "id": "f20c550ac443c1caf754848c6e70ebf4c46375e864ed7b1595b10f86f3ece07a",
+     "content": "# A heading\n-# and some subtext",
+     "replied_to": "",
+     "preview_metadata": null,
+     "attachments": [],
+     "reactions": [],
+     "at": 1794360600000,
+     "pending": false,
+     "failed": false,
+     "mine": false,
+     "npub": "npub15387nevpzd0u700y2t24ym9l0zxe8fsxx2w7qn47ysn6mndn9gvqqmlahu",
+     "edited": false
+    },
+    {
+     "id": "45593079abe5d2bad5a8311b974a1ce700bd7933fa79e86f2ec32d0ec977b569",
+     "content": "Replying to that heading",
+     "replied_to": "f20c550ac443c1caf754848c6e70ebf4c46375e864ed7b1595b10f86f3ece07a",
+     "preview_metadata": null,
+     "attachments": [],
+     "reactions": [],
+     "at": 1794361740000,
+     "pending": false,
+     "failed": false,
+     "mine": true,
+     "npub": "npub1yazve5gvw5em6um2mzg0nh2u4v4dkfas04gqh9yn72wdcssvktsqfmmmv4",
+     "edited": false,
+     "replied_to_content": "# A heading\n-# and some subtext",
+     "replied_to_npub": "npub15387nevpzd0u700y2t24ym9l0zxe8fsxx2w7qn47ysn6mndn9gvqqmlahu"
+    },
+    {
+     "id": "0334355612cd1b65f5c35f87e405a17bb0d60854077fb7fde302fc92fcedd230",
+     "content": "This one is still sending",
+     "replied_to": "",
+     "preview_metadata": null,
+     "attachments": [],
+     "reactions": [],
+     "at": 1794362220000,
+     "pending": true,
+     "failed": false,
+     "mine": true,
+     "npub": "npub1yazve5gvw5em6um2mzg0nh2u4v4dkfas04gqh9yn72wdcssvktsqfmmmv4",
+     "edited": false
+    },
+    {
+     "id": "bb49ca62931ae9d7d12f0641cacd899649c3975713d350c513db4fc027d504eb",
+     "content": "And this one failed",
+     "replied_to": "",
+     "preview_metadata": null,
+     "attachments": [],
+     "reactions": [],
+     "at": 1794362280000,
+     "pending": false,
+     "failed": true,
+     "mine": true,
+     "npub": "npub1yazve5gvw5em6um2mzg0nh2u4v4dkfas04gqh9yn72wdcssvktsqfmmmv4",
+     "edited": false
+    },
+    {
+     "id": "c045acf2d273a786b030c9bc52f82e5208621ae4f0f7400c6ed71f088498e0d3",
+     "content": "👍",
+     "replied_to": "",
+     "preview_metadata": null,
+     "attachments": [],
+     "reactions": [
+      {
+       "id": "c14e0ecfd58555fc3a9db5e78aa7c771b69b7ca246b1a388a2d342ee3ccb1cc9",
+       "reference_id": "c045acf2d273a786b030c9bc52f82e5208621ae4f0f7400c6ed71f088498e0d3",
+       "author_id": "npub1yazve5gvw5em6um2mzg0nh2u4v4dkfas04gqh9yn72wdcssvktsqfmmmv4",
+       "emoji": "🔥"
+      }
+     ],
+     "at": 1794362340000,
+     "pending": false,
+     "failed": false,
+     "mine": false,
+     "npub": "npub15387nevpzd0u700y2t24ym9l0zxe8fsxx2w7qn47ysn6mndn9gvqqmlahu",
+     "edited": false
+    }
+   ],
+   "last_read": "c045acf2d273a786b030c9bc52f82e5208621ae4f0f7400c6ed71f088498e0d3",
+   "unread_from": "",
+   "created_at": 1794189540,
+   "metadata": {
+    "custom_fields": {}
+   },
+   "muted": false,
+   "notify": 2,
+   "everyone_pings": true,
+   "community_muted": false
+  },
   {
    "id": "npub190vqdjtlpcq27xslcveglfmr4ynfwg7gmw86cnun4acakxrdd6gqnp929a",
    "chat_type": "DirectMessage",

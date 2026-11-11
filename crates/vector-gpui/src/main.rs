@@ -2,9 +2,15 @@ mod assets;
 mod backend;
 mod composer;
 mod data;
+mod emoji;
+mod highlight;
+mod inline;
 mod kit;
 mod login;
+mod markdown;
+mod preview;
 mod theme;
+mod timeline;
 mod ui;
 
 use std::path::PathBuf;

@@ -3,6 +3,7 @@
 //! block names the CSS selector it reproduces.
 
 use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use gpui::{
@@ -23,6 +24,8 @@ use crate::composer::{SendText, TextInput};
 use crate::login::{LoggedIn, LoginView};
 use crate::data::{self, Row, Store};
 use crate::theme::*;
+use crate::inline::Target;
+use crate::timeline;
 
 const CHROME_H: f32 = 32.;
 const RAIL_W: f32 = 201.;
@@ -50,6 +53,9 @@ pub struct VectorApp {
     read_anchor: Option<String>,
     input: Entity<TextInput>,
     syncing: bool,
+    /// Spoilers revealed, by message.
+    revealed: Rc<RefCell<HashMap<String, HashSet<u32>>>>,
+    started: std::time::Instant,
 }
 
 impl VectorApp {
@@ -66,6 +72,8 @@ impl VectorApp {
             read_anchor: None,
             input,
             syncing: false,
+            revealed: Rc::default(),
+            started: std::time::Instant::now(),
         }
     }
 
@@ -254,7 +262,7 @@ impl VectorApp {
         self.read_anchor = self.store.borrow().chat(&id).map(|c| c.last_read.clone());
         self.open = Some(id.clone());
         let count = self.rebuild_rows();
-        self.timeline = ListState::new(count, ListAlignment::Bottom, px(600.));
+        self.timeline = timeline_state(count);
         window.focus(&self.input.read(cx).focus_handle(cx), cx);
         if !self.live {
             return;
@@ -282,13 +290,26 @@ impl VectorApp {
                     chat.messages.extend(later);
                 }
                 let count = this.rebuild_rows();
-                this.timeline = ListState::new(count, ListAlignment::Bottom, px(600.));
+                this.timeline = timeline_state(count);
                 this.timeline.scroll_to_end();
                 cx.notify();
             })
             .ok();
         })
         .detach();
+    }
+
+    /// A click on a message's text.
+    fn on_text(&mut self, msg_id: String, target: Target, cx: &mut Context<Self>) {
+        match target {
+            Target::Spoiler(id) => {
+                self.revealed.borrow_mut().entry(msg_id).or_default().insert(id);
+                cx.notify();
+            }
+            Target::Link(url) => cx.open_url(&url),
+            Target::Code(text) => cx.write_to_clipboard(gpui::ClipboardItem::new_string(text.to_string())),
+            Target::Mention(_) => {}
+        }
     }
 
     fn send(&mut self, text: String, cx: &mut Context<Self>) {
@@ -822,7 +843,7 @@ fn empty_pane() -> impl IntoElement {
 }
 
 impl VectorApp {
-    fn chat_pane(&self, store: &Store, id: SharedString, _cx: &mut Context<Self>) -> impl IntoElement {
+    fn chat_pane(&self, store: &Store, id: SharedString, cx: &mut Context<Self>) -> impl IntoElement {
         let header = div()
             .h(px(61.))
             .flex_shrink_0()
@@ -876,14 +897,24 @@ impl VectorApp {
         let rows_store = self.store.clone();
         let rows_id = id.clone();
         let rows = self.rows.clone();
+        let revealed = self.revealed.clone();
+        let clock = self.started.elapsed().as_secs_f32();
+        let app = cx.entity().downgrade();
+        let on_text: timeline::OnText = Rc::new(move |msg_id, target, _window, cx| {
+            let msg_id = msg_id.to_string();
+            app.update(cx, |app, cx| app.on_text(msg_id, target, cx)).ok();
+        });
         let messages = list(self.timeline.clone(), move |i, _, _| {
             let rows_store = rows_store.borrow();
             let (Some(chat), Some(row)) = (rows_store.chat(&rows_id), rows.get(i)) else {
                 return div().into_any_element();
             };
-            // .dmsg carries a 14px top margin, zeroed after a divider; dividers take 10px each side.
-            let after_message = i > 0 && matches!(rows[i - 1], Row::Message(_));
-            timeline_row(&rows_store, chat, row, after_message)
+            let revealed = revealed.borrow();
+            let last_mine = chat.messages.iter().rev().find(|m| m.mine).map(|m| m.id.as_str());
+            let ctx = timeline::Ctx { store: &rows_store, chat, revealed: &revealed, clock, on_text: on_text.clone(), last_mine };
+            // A divider's 10px margins stand in for the row's own above it.
+            let after_message = i > 0 && matches!(rows[i - 1], Row::Message { .. });
+            timeline_row(&ctx, row, after_message)
         })
         .size_full();
 
@@ -900,7 +931,15 @@ impl VectorApp {
     }
 }
 
-fn timeline_row(store: &Store, chat: &SerializableChat, row: &Row, after_message: bool) -> AnyElement {
+/// A short chat sits at the top, as the Tauri list does; a long one opens at its end and
+/// follows new messages while scrolled there.
+fn timeline_state(count: usize) -> ListState {
+    let state = ListState::new(count, ListAlignment::Top, px(600.));
+    state.set_follow_mode(gpui::FollowMode::Tail);
+    state
+}
+
+fn timeline_row(ctx: &timeline::Ctx, row: &Row, after_message: bool) -> AnyElement {
     match row {
         Row::Date { label, time } => divider(
             div()
@@ -924,7 +963,10 @@ fn timeline_row(store: &Store, chat: &SerializableChat, row: &Row, after_message
             ca(89, 252, 179, 0.6),
             1.,
         ),
-        Row::Message(i) => message_row(store, &chat.messages[*i], after_message),
+        Row::Message { index, first } => {
+            let gap = if !after_message { 0. } else if *first { 14. } else { 1. };
+            timeline::message_row(ctx, *index, *first, gap)
+        }
     }
 }
 
@@ -945,54 +987,6 @@ fn divider(label: impl IntoElement, line: gpui::Hsla, opacity: f32) -> AnyElemen
                 .child(rule())
                 .child(label)
                 .child(rule()),
-        )
-        .into_any_element()
-}
-
-/// `.dmsg` (MessageRow.svelte).
-fn message_row(store: &Store, m: &Message, after_message: bool) -> AnyElement {
-    let author = m.npub.clone().unwrap_or_default();
-    div()
-        .when(after_message, |d| d.pt(px(14.)))
-        .h(px(if after_message { 59. } else { 45. }))
-        .child(
-            div()
-                .flex()
-                .pl(px(15.))
-                .pr(px(12.))
-                .child(div().w(px(56.)).flex_shrink_0().pt(px(2.)).child(avatar(store, &author, 40.)))
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .flex()
-                        .flex_col()
-                        .font_family(RUBIK)
-                        .child(
-                            div()
-                                .h(px(24.))
-                                .flex()
-                                .items_center()
-                                .gap(px(8.))
-                                .child(
-                                    div()
-                                        .font_weight(FontWeight::BOLD)
-                                        .text_size(px(15.))
-                                        .line_height(px(19.5))
-                                        .text_color(c(0xffffff))
-                                        .child(store.name(&author)),
-                                )
-                                .child(div().text_size(px(12.)).text_color(white_a(0.4)).child(data::clock(m.at))),
-                        )
-                        .child(
-                            div()
-                                .mt(px(-2.))
-                                .text_size(px(15.))
-                                .line_height(px(21.))
-                                .text_color(white_a(0.85))
-                                .child(m.content.clone()),
-                        ),
-                ),
         )
         .into_any_element()
 }
