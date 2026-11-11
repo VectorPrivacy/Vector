@@ -37,6 +37,7 @@ unicode-linebreak = "0.1"
 # Attachments: decoded at the size they draw.
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "tiff", "ico"] }
 fast-thumbhash = "0.2"
+qrcodegen = "1.8"
 
 # Its own workspace: GPUI pins dependency versions the main client must not inherit.
 [workspace]

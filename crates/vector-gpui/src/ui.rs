@@ -78,6 +78,8 @@ pub struct VectorApp {
     toast: Option<(SharedString, std::time::Instant)>,
     /// The Status dialog's field, while it is open.
     status: Option<Entity<TextInput>>,
+    /// The QR overlay's code, and what holds focus while it shows.
+    qr: Option<(std::sync::Arc<gpui::RenderImage>, gpui::FocusHandle)>,
 }
 
 #[derive(Clone, PartialEq)]
@@ -151,6 +153,7 @@ impl VectorApp {
             profile: None,
             toast: None,
             status: None,
+            qr: None,
         }
     }
 
@@ -852,6 +855,7 @@ impl Render for VectorApp {
                 }),
         )
         .children(self.status_view(&store, cx))
+        .children(self.qr_view(cx))
         .children(self.toast_view(window))
         .children(self.viewer.clone().map(|v| gpui::deferred(div().absolute().inset_0().child(v)).with_priority(10)))
     }
@@ -1757,7 +1761,16 @@ impl VectorApp {
                 }
             }
             Act::SetStatus => self.open_status(window, cx),
-            Act::Edit | Act::Switcher | Act::Qr => {}
+            Act::Qr => {
+                let side = (288. * window.scale_factor()).round() as u32;
+                if let Some(image) = crate::qr::image(&format!("https://vectorapp.io/profile/{npub}"), side) {
+                    let focus = cx.focus_handle();
+                    window.focus(&focus, cx);
+                    self.qr = Some((image, focus));
+                    cx.notify();
+                }
+            }
+            Act::Edit | Act::Switcher => {}
         }
     }
 
@@ -2105,6 +2118,69 @@ impl VectorApp {
                             cx.notify();
                         }),
                     )
+                    .child(card),
+            )
+            .with_priority(10)
+            .into_any_element(),
+        )
+    }
+}
+
+// ── #qr-overlay ─────────────────────────────────────────────────────────────────────────
+
+impl VectorApp {
+    fn qr_view(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let (image, focus) = self.qr.clone()?;
+        let close = |app: &mut Self, cx: &mut Context<Self>| {
+            app.qr = None;
+            cx.notify();
+        };
+        let card = div()
+            .flex()
+            .flex_col()
+            .items_center()
+            .gap(px(22.))
+            .p(px(24.))
+            .rounded(px(18.))
+            .border_1()
+            .border_color(c(0x2c2e2f))
+            .bg(c(0x101010))
+            .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .child(div().w(px(320.)).p(px(16.)).rounded(px(10.)).bg(c(0xffffff)).child(img(image).size(px(288.))))
+            .child(
+                div()
+                    .id("qr-overlay-close")
+                    .w_full()
+                    .py(px(12.))
+                    .rounded(px(12.))
+                    .bg(c(ACCENT))
+                    .text_color(c(0x000000))
+                    .text_size(px(16.))
+                    .line_height(px(19.))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_center()
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |app, _, _, cx| close(app, cx)))
+                    .child("Close"),
+            );
+        Some(
+            gpui::deferred(
+                div()
+                    .id("qr-overlay")
+                    .track_focus(&focus)
+                    .absolute()
+                    .inset_0()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .bg(ca(0, 0, 0, 0.88))
+                    .occlude()
+                    .on_key_down(cx.listener(move |app, e: &gpui::KeyDownEvent, _, cx| {
+                        if e.keystroke.key == "escape" {
+                            close(app, cx);
+                        }
+                    }))
+                    .on_mouse_down(gpui::MouseButton::Left, cx.listener(move |app, _, _, cx| close(app, cx)))
                     .child(card),
             )
             .with_priority(10)

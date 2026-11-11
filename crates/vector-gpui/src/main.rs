@@ -14,6 +14,7 @@ mod media;
 mod picker;
 mod preview;
 mod profile;
+mod qr;
 mod theme;
 mod timeline;
 mod ui;
