@@ -91,6 +91,10 @@ pub struct VectorApp {
     shortcode: Option<crate::shortcodes::Popup>,
     /// `:)` and friends suggest their emoji.
     emoticons: bool,
+    /// The draft has text: Send stands where the mic does.
+    send_shown: bool,
+    /// Typed flips between the two, each animated once.
+    send_flips: usize,
     /// The message a jump landed on, flashing.
     jumped: Option<(String, std::time::Instant)>,
     /// Older history is on its way.
@@ -519,6 +523,8 @@ impl VectorApp {
             pending_link: None,
             shortcode: None,
             emoticons: true,
+            send_shown: false,
+            send_flips: 0,
             jumped: None,
             paging: false,
             opening: None,
@@ -3092,6 +3098,7 @@ impl VectorApp {
 
 impl Render for VectorApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.send_shown = !self.input.read(cx).text().trim().is_empty();
         if self.shortcode.is_some() && !self.input.focus_handle(cx).is_focused(window) {
             self.shortcode = None;
             self.input.update(cx, |i, _| i.set_nav(false));
@@ -4744,6 +4751,10 @@ impl VectorApp {
                         }),
                     )
                 }),
+                (
+                    self.send_shown || matches!(self.mode, Mode::Edit { .. }),
+                    self.send_flips,
+                ),
                 cx,
             ))
     }
@@ -4918,6 +4929,7 @@ fn composer(
     picker: Option<(Entity<crate::picker::EmojiPicker>, bool)>,
     attach: Option<std::time::Instant>,
     popup: Option<AnyElement>,
+    send: (bool, usize),
     cx: &mut Context<VectorApp>,
 ) -> impl IntoElement {
     let icon = |path: &'static str| {
@@ -5070,7 +5082,7 @@ fn composer(
                         cx.listener(|app, _, window, cx| app.toggle_picker(None, window, cx)),
                     ),
                 )
-                .child(icon("icons/mic-on.svg")),
+                .child(send_or_mic(send, cx)),
         )
         .when_some(attach.filter(|_| !editing), |d, opened| {
             d.child(attachment_panel(opened, cx))
@@ -5089,6 +5101,75 @@ fn composer(
                 .with_priority(3),
             )
         })
+}
+
+/// `#chat-input-voice` / `#chat-input-send`: Send for a draft, the mic otherwise, swapped with a
+/// spin (`swapOut` 0.15s, then `swapIn` 0.2s) when typing flips it; `flips` names each swap.
+fn send_or_mic((send, flips): (bool, usize), cx: &mut Context<VectorApp>) -> impl IntoElement {
+    use gpui::AnimationExt as _;
+    let face = |send: bool| {
+        if send {
+            svg()
+                .path("icons/send.svg")
+                .size(px(20.))
+                .text_color(c(PRIMARY))
+        } else {
+            svg()
+                .path("icons/mic-on.svg")
+                .size(px(23.))
+                .text_color(c(ICON_MUTED))
+                .group_hover("chat-input-send", |s| s.text_color(c(0xffffff)))
+        }
+    };
+    let icon: AnyElement = if flips == 0 {
+        face(send).into_any_element()
+    } else {
+        face(send)
+            .with_animation(
+                gpui::ElementId::NamedInteger("send-swap".into(), flips as u64),
+                gpui::Animation::new(std::time::Duration::from_millis(350)),
+                move |s, t| {
+                    let at = t * 0.35;
+                    let ease = |p: f32| 1. - (1. - p).powi(2);
+                    let (p, out) = if at < 0.15 {
+                        (ease(at / 0.15), true)
+                    } else {
+                        (ease((at - 0.15) / 0.2), false)
+                    };
+                    let (scale, turn, alpha) = if out {
+                        (1. - 0.5 * p, -p, 1. - p)
+                    } else {
+                        (0.5 + 0.5 * p, 1. - p, p)
+                    };
+                    let s = if out { face(!send) } else { s };
+                    s.opacity(alpha).with_transformation(
+                        gpui::Transformation::rotate(gpui::radians(
+                            turn * std::f32::consts::FRAC_PI_2,
+                        ))
+                        .with_scaling(gpui::size(scale, scale)),
+                    )
+                },
+            )
+            .into_any_element()
+    };
+    div()
+        .id("chat-input-send")
+        .group("chat-input-send")
+        .w(px(38.))
+        .h(px(45.))
+        .mr(px(3.))
+        .flex_shrink_0()
+        .flex()
+        .items_center()
+        .justify_center()
+        .cursor_pointer()
+        .when(send, |d| {
+            d.on_mouse_down(gpui::MouseButton::Left, |_, w, _| w.prevent_default())
+                .on_click(cx.listener(|app, _, window, cx| {
+                    app.input.update(cx, |i, cx| i.submit(window, cx))
+                }))
+        })
+        .child(icon)
 }
 
 /// `#chat-input-file`: the plus, turned to a cross while the panel is open.
@@ -7847,6 +7928,11 @@ impl VectorApp {
     fn update_shortcode(&mut self, cx: &mut Context<Self>) {
         let input = self.input.read(cx);
         let (text, caret) = (input.text().to_string(), input.caret());
+        let send = !text.trim().is_empty();
+        if send != self.send_shown {
+            self.send_shown = send;
+            self.send_flips += 1;
+        }
         let popup =
             crate::shortcodes::suggest(&text, caret, self.emoji_picker.read(cx), self.emoticons);
         self.set_shortcode(popup, cx);
