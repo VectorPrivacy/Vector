@@ -257,7 +257,7 @@ impl VectorApp {
         }
         // Fixtures: VECTOR_START opens the Main Menu.
         if std::env::var("VECTOR_START").is_ok() {
-            app.toggle_start(cx);
+            app.toggle_start(window, cx);
         }
         // Fixtures: VECTOR_UPDATES=latest|avail shows what a check found.
         match std::env::var("VECTOR_UPDATES").as_deref() {
@@ -347,7 +347,7 @@ impl VectorApp {
         app
     }
 
-    fn toggle_start(&mut self, cx: &mut Context<Self>) {
+    fn toggle_start(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.start.take().is_some() {
             cx.notify();
             return;
@@ -355,9 +355,29 @@ impl VectorApp {
         let search = cx.new(|cx| {
             TextInput::new("Search", cx).with_look(crate::composer::Look { size: px(15.), line_height: px(18.), weight: FontWeight::NORMAL, placeholder: white_a(0.5), ..kit::field_look() })
         });
-        cx.subscribe(&search, |_, _, _: &crate::composer::InputChanged, cx| cx.notify()).detach();
-        let (layout, mic, accounts) = if self.live {
-            (vector_core::synced_prefs::load_start(), vector_core::calls::settings::mic_state(), backend::account::accounts().len())
+        cx.subscribe(&search, |app, _, _: &crate::composer::InputChanged, cx| {
+            if let Some(sm) = app.start.as_mut() {
+                sm.selected = 0;
+            }
+            cx.notify();
+        })
+        .detach();
+        cx.subscribe_in(&search, window, |app, _, _: &SendText, window, cx| {
+            let ix = app.start.as_ref().map(|s| s.selected).unwrap_or(0);
+            app.on_start(crate::startmenu::Act::Pick(ix), window, cx);
+        })
+        .detach();
+        cx.subscribe_in(&search, window, |app, _, _: &CancelInput, window, cx| app.start_escape(window, cx)).detach();
+        let (accounts, at_cap) = if self.live {
+            let cap = account::account_cap();
+            let rows: Vec<_> = account::accounts().into_iter().map(|a| crate::switcher::Row { npub: a.npub, name: a.name, avatar: a.avatar.map(Into::into) }).collect();
+            let full = rows.len() >= cap;
+            (rows, full)
+        } else {
+            (self.fixture_accounts(), false)
+        };
+        let (layout, mic) = if self.live {
+            (vector_core::synced_prefs::load_start(), vector_core::calls::settings::mic_state())
         } else {
             // Fixtures: VECTOR_START_PINS=key,f:Name=key|key stands in for the synced layout.
             use vector_core::rail_layout::RailNode;
@@ -370,8 +390,9 @@ impl VectorApp {
                     None => RailNode::item(k),
                 })
                 .collect();
-            (vector_core::rail_layout::RailLayout { nodes, ..Default::default() }, Default::default(), self.fixture_accounts().len())
+            (vector_core::rail_layout::RailLayout { nodes, ..Default::default() }, Default::default())
         };
+        window.focus(&search.focus_handle(cx), cx);
         self.start = Some(crate::startmenu::StartMenu {
             layout,
             list: backend::device::get("start_view").as_deref() == Some("list"),
@@ -379,9 +400,79 @@ impl VectorApp {
             folder: None,
             mic,
             accounts,
+            at_cap,
             opened: std::time::Instant::now(),
+            adding: false,
+            picking: false,
+            selected: 0,
         });
         cx.notify();
+    }
+
+    /// Escape steps back one layer: the query, Add Pin, Accounts, a folder, then the menu.
+    fn start_escape(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(sm) = self.start.as_mut() else { return };
+        if !sm.search.read(cx).text().is_empty() {
+            let search = sm.search.clone();
+            search.update(cx, |i, cx| i.clear(window, cx));
+        } else if sm.adding || sm.picking {
+            sm.adding = false;
+            sm.picking = false;
+        } else if sm.folder.is_some() {
+            sm.folder = None;
+        } else {
+            self.start = None;
+        }
+        cx.notify();
+    }
+
+    /// Pins edit only once the relay copy is read: an earlier edit could flatten pins arranged elsewhere.
+    fn start_pin(&mut self, key: String, cx: &mut Context<Self>) {
+        let Some(sm) = self.start.as_mut() else { return };
+        let pinned = sm.pinned(&key);
+        if !self.live {
+            if pinned {
+                vector_core::start_menu::unpin(&mut sm.layout, &key);
+            } else {
+                let _ = vector_core::start_menu::pin(&mut sm.layout, &key);
+            }
+            cx.notify();
+            return;
+        }
+        let rx = backend::run(async move {
+            vector_core::db::scoped(async move {
+                use vector_core::synced_prefs::{self, Pref};
+                if !synced_prefs::is_hydrated(Pref::Start) {
+                    return Err("Still syncing your pins, try again in a moment".to_string());
+                }
+                synced_prefs::edit_layout(Pref::Start, |l| {
+                    if pinned {
+                        vector_core::start_menu::unpin(l, &key);
+                        Ok(())
+                    } else {
+                        vector_core::start_menu::pin(l, &key).map(drop)
+                    }
+                })
+                .map(|(layout, _)| layout)
+            })
+            .await
+        });
+        cx.spawn(async move |this, cx| {
+            let result = rx.await.unwrap_or_else(|_| Err("Backend stopped".into()));
+            this.update(cx, |this, cx| {
+                match result {
+                    Ok(layout) => {
+                        if let Some(sm) = this.start.as_mut() {
+                            sm.layout = layout;
+                        }
+                    }
+                    Err(e) => this.show_toast(&e, cx),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     fn on_start(&mut self, act: crate::startmenu::Act, window: &mut Window, cx: &mut Context<Self>) {
@@ -412,12 +503,70 @@ impl VectorApp {
                 self.start = None;
                 self.open_settings("audio", window, cx);
             }
-            Act::AddPin => {}
+            Act::AddPin => {
+                sm.adding = true;
+                sm.selected = 0;
+            }
+            Act::Back => {
+                sm.adding = false;
+                sm.picking = false;
+                sm.selected = 0;
+                let search = sm.search.clone();
+                search.update(cx, |i, cx| i.clear(window, cx));
+            }
+            Act::Hover(ix) => sm.selected = ix,
+            Act::Step(d) => {
+                let query = sm.search.read(cx).text().to_string();
+                if query.trim().is_empty() && !sm.adding {
+                    return;
+                }
+                let n = crate::startmenu::hits(sm, &self.store.borrow(), &query).len();
+                if n > 0 {
+                    sm.selected = (sm.selected as i32 + d).rem_euclid(n as i32) as usize;
+                }
+            }
+            Act::Pick(ix) => {
+                let query = sm.search.read(cx).text().to_string();
+                if query.trim().is_empty() && !sm.adding {
+                    return;
+                }
+                let hits = crate::startmenu::hits(sm, &self.store.borrow(), &query);
+                let Some(hit) = hits.into_iter().nth(ix) else { return };
+                match (sm.adding, hit.key, hit.nav) {
+                    (true, Some(key), _) => self.start_pin(key, cx),
+                    (_, Some(key), _) if key.starts_with("dm/") && sm.search.read(cx).text().trim().starts_with("npub1") => {
+                        self.start = None;
+                        self.open_profile(key[3..].to_string(), cx);
+                    }
+                    (_, Some(key), _) => self.on_start(Act::Open(key), window, cx),
+                    (_, None, Some(nav)) => self.on_start(Act::Nav(nav), window, cx),
+                    _ => {}
+                }
+            }
+            Act::Pin(key) => self.start_pin(key, cx),
+            Act::Switch(npub) => {
+                self.start = None;
+                self.on_switcher(crate::switcher::Act::Pick(npub), window, cx);
+            }
+            Act::AddAccount => {
+                self.start = None;
+                self.on_switcher(crate::switcher::Act::Add, window, cx);
+            }
+            Act::Nav("accounts") => {
+                if sm.accounts.len() > 1 {
+                    sm.picking = true;
+                    sm.adding = false;
+                    let search = sm.search.clone();
+                    search.update(cx, |i, cx| i.clear(window, cx));
+                } else {
+                    self.start = None;
+                    self.on_switcher(crate::switcher::Act::Add, window, cx);
+                }
+            }
             Act::Nav(id) => {
                 self.start = None;
                 let me = self.store.borrow().my_npub.clone();
                 match id {
-                    "accounts" => self.open_switcher(cx),
                     "profile" => self.open_profile(me, cx),
                     "chat" => {
                         self.settings = None;
@@ -1364,9 +1513,9 @@ impl Render for VectorApp {
                 .min_h_0()
                 .child(rail(&store, self.open.as_ref(), {
                     let app = cx.entity().downgrade();
-                    move |_: &gpui::ClickEvent, _: &mut Window, cx: &mut gpui::App| {
+                    move |_: &gpui::ClickEvent, window: &mut Window, cx: &mut gpui::App| {
                         app.update(cx, |app, cx| {
-                            app.toggle_start(cx);
+                            app.toggle_start(window, cx);
                         })
                         .ok();
                     }
@@ -1449,7 +1598,7 @@ impl Render for VectorApp {
             let on: crate::startmenu::OnAct = Rc::new(move |act, window, cx| {
                 app.update(cx, |app, cx| app.on_start(act, window, cx)).ok();
             });
-            gpui::deferred(div().absolute().inset_0().child(crate::startmenu::render(sm, &self.store.borrow(), window, &on))).with_priority(8)
+            gpui::deferred(div().absolute().inset_0().child(crate::startmenu::render(sm, &self.store.borrow(), window, &on, cx))).with_priority(8)
         }))
     }
 }

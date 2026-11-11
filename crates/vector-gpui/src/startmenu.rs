@@ -20,8 +20,23 @@ pub struct StartMenu {
     /// The folder open in the pins' place.
     pub folder: Option<String>,
     pub mic: vector_core::calls::settings::MicState,
-    pub accounts: usize,
+    pub accounts: Vec<crate::switcher::Row>,
+    pub at_cap: bool,
     pub opened: std::time::Instant,
+    /// Add Pin: the search finds what to pin instead of what to open.
+    pub adding: bool,
+    /// Accounts: this device's accounts take the pins' place.
+    pub picking: bool,
+    pub selected: usize,
+}
+
+impl StartMenu {
+    pub fn pinned(&self, key: &str) -> bool {
+        self.layout.nodes.iter().any(|n| match n {
+            RailNode::Item { key: k } => k == key,
+            RailNode::Folder { keys, .. } => keys.iter().any(|k| k == key),
+        })
+    }
 }
 
 pub enum Act {
@@ -31,6 +46,15 @@ pub enum Act {
     Folder(Option<String>),
     View(bool),
     AddPin,
+    Back,
+    /// A search result, by its row.
+    Pick(usize),
+    Hover(usize),
+    /// Arrow keys through the results.
+    Step(i32),
+    Pin(String),
+    Switch(String),
+    AddAccount,
     Mute,
     Deafen,
     Devices,
@@ -92,6 +116,197 @@ fn resolve(key: &str, store: &Store) -> Resolved {
     }
 }
 
+pub struct Hit {
+    pub key: Option<String>,
+    pub nav: Option<&'static str>,
+    label: String,
+    sub: String,
+    glyph: Glyph,
+}
+
+const NAV: [(&str, &str, &str); 5] = [
+    ("profile", "Profile", "start-profile"),
+    ("chat", "Chat", "chats-fill"),
+    ("bookmarks", "Bookmarks", "bookmark-fill"),
+    ("miniapps", "Mini Apps", "grid-fill"),
+    ("settings", "Settings", "start-settings"),
+];
+
+fn is_npub(s: &str) -> bool {
+    s.len() == 63 && s.starts_with("npub1") && s.bytes().all(|b| b.is_ascii_alphanumeric())
+}
+
+/// Search: the left column's places and everything pinnable, best matches first. Empty while
+/// adding, it suggests recent conversations, then places. A whole npub finds that person.
+pub fn hits(sm: &StartMenu, store: &Store, query: &str) -> Vec<Hit> {
+    let q = query.trim().to_lowercase();
+    let q = q.strip_prefix("nostr:").unwrap_or(&q).to_string();
+    let hit = |key: String| {
+        let r = resolve(&key, store);
+        Hit { key: Some(key), nav: None, label: r.label, sub: r.sub, glyph: r.glyph }
+    };
+    if is_npub(&q) {
+        let mut h = hit(format!("dm/{q}"));
+        h.sub = if q == store.my_npub { "You".into() } else { "Person".into() };
+        return vec![h];
+    }
+    let mut dms: Vec<(u64, String)> = store
+        .chats
+        .iter()
+        .filter(|ch| ch.id.starts_with("npub1") && ch.id != store.my_npub && !store.is_request(ch))
+        .filter(|ch| !store.profiles.get(&ch.id).is_some_and(|p| p.is_blocked))
+        .map(|ch| (crate::data::last_activity(ch), format!("dm/{}", ch.id)))
+        .collect();
+    dms.sort_by(|a, b| b.0.cmp(&a.0));
+    let mut places = Vec::new();
+    for cat in crate::settings::categories(&crate::settings::Offers { voice: false, routing: true, updates: true }) {
+        places.push(format!("settings/{}", cat.id));
+        for a in cat.anchors.iter().filter(|a| a.label != cat.label) {
+            places.push(format!("settings/{}/{}", cat.id, a.id));
+        }
+    }
+    places.push("nexus".into());
+    places.push("requests".into());
+    let mut out: Vec<Hit> = if q.is_empty() {
+        dms.into_iter().map(|(_, k)| k).filter(|k| !sm.pinned(k)).take(8).chain(places.into_iter().filter(|k| !sm.pinned(k))).map(hit).collect()
+    } else {
+        let score = |l: &str| {
+            let l = l.to_lowercase();
+            if l.starts_with(&q) { 2 } else if l.contains(&q) { 1 } else { 0 }
+        };
+        let nav = NAV.iter().filter(|_| !sm.adding).map(|(id, label, icon)| Hit {
+            key: None,
+            nav: Some(id),
+            label: label.to_string(),
+            sub: "Vector".into(),
+            glyph: Glyph::Icon(SharedString::from(format!("icons/{icon}.svg"))),
+        });
+        let mut scored: Vec<(u8, Hit)> = nav
+            .chain(places.into_iter().chain(dms.into_iter().map(|(_, k)| k)).map(hit))
+            .map(|h| (score(&h.label) * 2 + u8::from(score(&h.sub) > 0), h))
+            .filter(|(s, _)| *s > 0)
+            .collect();
+        scored.sort_by(|a, b| b.0.cmp(&a.0));
+        scored.into_iter().map(|(_, h)| h).collect()
+    };
+    let mut seen = std::collections::HashSet::new();
+    out.retain(|h| seen.insert(h.key.clone().unwrap_or_else(|| format!("nav:{}", h.nav.unwrap_or("")))));
+    out.truncate(40);
+    out
+}
+
+fn results(sm: &StartMenu, store: &Store, query: &str, on: &OnAct) -> AnyElement {
+    let hits = hits(sm, store, query);
+    let mut col = div().flex().flex_col();
+    if sm.adding || !hits.is_empty() {
+        col = col.child(
+            div()
+                .h(px(32.))
+                .flex()
+                .items_center()
+                .text_size(px(11.))
+                .font_weight(FontWeight::BOLD)
+                .text_color(c(0x8a8a8a))
+                .when(sm.adding, |d| d.child(back(on)))
+                .child(crate::kit::spaced(if sm.adding { "ADD PINS" } else { "RESULTS" }, 11. * 0.09)),
+        );
+    }
+    if hits.is_empty() {
+        let q = query.trim();
+        return col
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .gap(px(6.))
+                    .pt(px(56.))
+                    .px(px(20.))
+                    .pb(px(24.))
+                    .child(div().size(px(64.)).mb(px(10.)).flex().items_center().justify_center().rounded_full().border_1().border_color(c(0x2c2c2c)).child(svg().path("icons/search.svg").size(px(26.)).text_color(white_a(0.5))))
+                    .child(div().text_size(px(15.)).text_color(c(0xffffff)).child(format!("{} “{q}”", if sm.adding { "Nothing to pin called" } else { "No results for" })))
+                    .child(div().text_size(px(13.)).text_color(white_a(0.5)).child(if sm.adding { "Pin a Mini App, a chat, a community or a place in Settings." } else { "Try a name, a community, a Mini App or a setting." })),
+            )
+            .into_any_element();
+    }
+    let mut list = div().mt(px(10.)).flex().flex_col().gap(px(2.));
+    for (ix, h) in hits.into_iter().enumerate() {
+        let selected = ix == sm.selected;
+        let pinned = h.key.as_deref().is_some_and(|k| sm.pinned(k));
+        let group = SharedString::from(format!("stm-r-{ix}"));
+        let mut row = div()
+            .id(group.clone())
+            .group(group.clone())
+            .flex()
+            .items_center()
+            .gap(px(12.))
+            .px(px(10.))
+            .py(px(5.))
+            .rounded(px(10.))
+            .cursor_pointer()
+            .when(selected, |d| d.bg(c(0x2a2a2a)))
+            .on_hover({
+                let on = on.clone();
+                move |hovered, w, cx| {
+                    if *hovered {
+                        on(Act::Hover(ix), w, cx);
+                    }
+                }
+            })
+            .on_click(click(on, move || Act::Pick(ix)))
+            .child(div().size(px(28.)).flex_shrink_0().flex().items_center().justify_center().child(glyph(&h.glyph, 28.)))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.))
+                    .child(div().text_size(px(14.)).line_height(px(17.)).overflow_hidden().text_ellipsis().whitespace_nowrap().child(h.label))
+                    .when(!h.sub.is_empty(), |d| d.child(div().text_size(px(12.)).line_height(px(14.)).text_color(white_a(0.45)).child(h.sub))),
+            );
+        // A pasted npub opens the profile; this messages it instead.
+        if let Some(npub) = h.key.as_deref().and_then(|k| k.strip_prefix("dm/")).filter(|_| !sm.adding && is_npub(query.trim())).map(String::from) {
+            row = row.child(
+                div()
+                    .id(SharedString::from(format!("stm-msg-{ix}")))
+                    .p(px(6.))
+                    .rounded(px(8.))
+                    .opacity(if selected { 1. } else { 0.35 })
+                    .group_hover(group.clone(), |d| d.opacity(1.))
+                    .hover(|d| d.bg(white_a(0.08)))
+                    .on_click(click(on, move || Act::Open(format!("dm/{npub}"))))
+                    .child(svg().path("icons/message.svg").size(px(16.)).text_color(c(0xffffff))),
+            );
+        }
+        if let Some(key) = h.key.clone() {
+            row = row.child(
+                div()
+                    .id(SharedString::from(format!("stm-pin-{ix}")))
+                    .p(px(6.))
+                    .rounded(px(8.))
+                    .opacity(if selected || pinned { 1. } else { 0.35 })
+                    .group_hover(group.clone(), |d| d.opacity(1.))
+                    .hover(|d| d.bg(white_a(0.08)))
+                    .on_click({
+                        let on = on.clone();
+                        move |_, w, cx| {
+                            cx.stop_propagation();
+                            on(Act::Pin(key.clone()), w, cx);
+                        }
+                    })
+                    .child(svg().path("icons/pin.svg").size(px(16.)).text_color(c(if pinned { PRIMARY } else { 0xffffff }))),
+            );
+        }
+        list = list.child(row);
+    }
+    col.child(list).into_any_element()
+}
+
+fn back(on: &OnAct) -> impl IntoElement {
+    div().id("stm-back").mr(px(6.)).cursor_pointer().on_click(click(on, || Act::Back)).child(svg().path("icons/chevron-left.svg").size(px(14.)).text_color(c(0x8a8a8a)))
+}
+
 fn glyph(g: &Glyph, size: f32) -> AnyElement {
     match g {
         Glyph::Picture(p, round) => img(p.clone()).size(px(size)).flex_shrink_0().when(*round, |d| d.rounded_full()).when(!*round, |d| d.rounded(px(10.))).into_any_element(),
@@ -109,6 +324,8 @@ fn glyph(g: &Glyph, size: f32) -> AnyElement {
             .text_color(c(0xdddddd))
             .child(ch.clone())
             .into_any_element(),
+        // The App Store's mark wears its own colours.
+        Glyph::Icon(path) if path.as_ref() == "icons/nexus.svg" => img(path.clone()).size(px(if size >= 40. { 34. } else { size * 0.7 })).into_any_element(),
         Glyph::Icon(path) => svg().path(path.clone()).size(px(if size >= 40. { 34. } else { size * 0.7 })).text_color(c(0xdddddd)).into_any_element(),
     }
 }
@@ -230,8 +447,25 @@ fn audio(id: &'static str, icon: &'static str, off: bool, toggle: Act, on: &OnAc
         )
 }
 
+/// Four to a row in the grid; one under another in the list.
+fn arrange(tiles: Vec<AnyElement>, list: bool) -> AnyElement {
+    if list {
+        return div().flex().flex_col().gap(px(2.)).children(tiles).into_any_element();
+    }
+    let mut rows = div().flex().flex_col().gap(px(16.));
+    let mut tiles = tiles.into_iter().peekable();
+    while tiles.peek().is_some() {
+        let mut row = div().flex().gap(px(14.));
+        for _ in 0..4 {
+            row = row.child(div().flex_1().min_w_0().flex().justify_center().children(tiles.next()));
+        }
+        rows = rows.child(row);
+    }
+    rows.into_any_element()
+}
+
 /// The menu's bottom-left corner is the rail row's, so its footer stands where the row stood.
-pub fn render(sm: &StartMenu, store: &Store, window: &Window, on: &OnAct) -> AnyElement {
+pub fn render(sm: &StartMenu, store: &Store, window: &Window, on: &OnAct, cx: &App) -> AnyElement {
     let viewport = window.viewport_size();
     let height = (viewport.height - px(20.)).min(px(562.));
     let list = sm.list;
@@ -264,7 +498,7 @@ pub fn render(sm: &StartMenu, store: &Store, window: &Window, on: &OnAct) -> Any
         .flex()
         .flex_col()
         .gap(px(4.))
-        .child(nav_item("accounts", "Accounts", if sm.accounts > 1 { "icons/users-multi-fill.svg" } else { "icons/add-user.svg" }, false, on))
+        .child(nav_item("accounts", "Accounts", if sm.accounts.len() > 1 { "icons/users-multi-fill.svg" } else { "icons/add-user.svg" }, false, on))
         .child(nav_item("profile", "Profile", "icons/start-profile.svg", false, on))
         .child(nav_item("chat", "Chat", "icons/chats-fill.svg", unread, on))
         .child(nav_item("bookmarks", "Bookmarks", "icons/bookmark-fill.svg", false, on))
@@ -336,19 +570,47 @@ pub fn render(sm: &StartMenu, store: &Store, window: &Window, on: &OnAct) -> Any
         let add = svg().path("icons/plus-circle.svg").size(px(if list { 22. } else { 34. })).text_color(c(0xbbbbbb)).into_any_element();
         tiles.push(tile("stm-add".into(), "Add Pin".into(), None, add, true, false, list, click(on, || Act::AddPin)));
     }
-    let grid = if list {
-        div().flex().flex_col().gap(px(2.)).children(tiles).into_any_element()
-    } else {
-        let mut rows = div().flex().flex_col().gap(px(16.));
-        let mut tiles = tiles.into_iter().peekable();
-        while tiles.peek().is_some() {
-            let mut row = div().flex().gap(px(14.));
-            for _ in 0..4 {
-                row = row.child(div().flex_1().min_w_0().flex().justify_center().children(tiles.next()));
-            }
-            rows = rows.child(row);
+    let grid = arrange(tiles, list);
+    let query = sm.search.read(cx).text().to_string();
+    let body: AnyElement = if !query.trim().is_empty() || sm.adding {
+        results(sm, store, &query, on)
+    } else if sm.picking {
+        let mut tiles: Vec<AnyElement> = sm
+            .accounts
+            .iter()
+            .enumerate()
+            .map(|(ix, a)| {
+                let current = a.npub == me;
+                let label = a.name.clone().unwrap_or_else(|| "Unnamed".into());
+                let g = match &a.avatar {
+                    Some(p) => Glyph::Picture(p.clone(), true),
+                    None => Glyph::Initial(initial(&label), true),
+                };
+                let npub = a.npub.clone();
+                let sub = format!("{}…{}", &a.npub[..12.min(a.npub.len())], &a.npub[a.npub.len().saturating_sub(4)..]);
+                let size = if list { 28. } else { 65. };
+                // The account signed in wears the primary ring.
+                let pic = div().rounded_full().when(current, |d| d.shadow(vec![gpui::BoxShadow { color: c(PRIMARY), offset: gpui::point(px(0.), px(0.)), blur_radius: px(0.), spread_radius: px(2.), inset: false }])).child(glyph(&g, size));
+                tile(SharedString::from(format!("stm-acct-{ix}")), label, Some(&sub), pic.into_any_element(), false, false, list, click(on, move || if current { Act::Back } else { Act::Switch(npub.clone()) }))
+            })
+            .collect();
+        if !sm.at_cap {
+            let add = svg().path("icons/add-user.svg").size(px(if list { 22. } else { 34. })).text_color(c(0xbbbbbb)).into_any_element();
+            tiles.push(tile("stm-add-acct".into(), "Add Account".into(), None, add, true, false, list, click(on, || Act::AddAccount)));
         }
-        rows.into_any_element()
+        let head = div()
+            .h(px(32.))
+            .flex()
+            .items_center()
+            .text_size(px(11.))
+            .font_weight(FontWeight::BOLD)
+            .text_color(c(0x8a8a8a))
+            .child(back(on))
+            .child(crate::kit::spaced("ACCOUNTS", 11. * 0.09))
+            .child(div().ml_auto().flex().gap(px(2.)).child(view_btn("stm-grid", "icons/grid.svg", !list, false)).child(view_btn("stm-list", "icons/list.svg", list, true)));
+        div().flex().flex_col().child(head).child(div().mt(px(10.)).child(arrange(tiles, list))).into_any_element()
+    } else {
+        div().flex().flex_col().child(head).child(div().mt(px(10.)).child(grid)).into_any_element()
     };
     let pane = div()
         .id("stm-pane")
@@ -361,8 +623,7 @@ pub fn render(sm: &StartMenu, store: &Store, window: &Window, on: &OnAct) -> Any
         .overflow_y_scroll()
         .flex()
         .flex_col()
-        .child(head)
-        .child(div().mt(px(10.)).child(grid));
+        .child(body);
 
     let name = if store.me().is_some() { store.name(&me) } else { "You".into() };
     let short = if me.len() > 16 { format!("{}…", &me[..16]) } else { me.clone() };
@@ -421,6 +682,14 @@ pub fn render(sm: &StartMenu, store: &Store, window: &Window, on: &OnAct) -> Any
         .text_color(c(0xffffff))
         .occlude()
         .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .on_key_down({
+            let on = on.clone();
+            move |e: &gpui::KeyDownEvent, w, cx| match e.keystroke.key.as_str() {
+                "down" => on(Act::Step(1), w, cx),
+                "up" => on(Act::Step(-1), w, cx),
+                _ => {}
+            }
+        })
         .child(search)
         .child(div().mt(px(16.)).flex_1().min_h_0().flex().child(nav).child(pane))
         .child(footer)
