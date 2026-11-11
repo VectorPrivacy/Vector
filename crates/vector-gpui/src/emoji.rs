@@ -194,6 +194,10 @@ pub fn search_scored(query: &str, used: impl Fn(&str) -> f64) -> Vec<(&'static E
 }
 
 /// The 24 most used, the dataset's order breaking ties (`getMostUsedEmojis`).
+pub fn by_char(ch: &str) -> Option<&'static Emoji> {
+    EMOJIS.iter().find(|e| e.emoji == ch)
+}
+
 pub fn most_used(used: impl Fn(&str) -> f64) -> Vec<&'static Emoji> {
     let mut all: Vec<&'static Emoji> = EMOJIS.iter().collect();
     all.sort_by(|a, b| used(b.emoji).total_cmp(&used(a.emoji)));

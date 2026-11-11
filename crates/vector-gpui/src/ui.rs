@@ -87,6 +87,10 @@ pub struct VectorApp {
     pack_details: Option<crate::packdetails::Details>,
     /// A link that arrived before an account was open.
     pending_link: Option<vector_core::deep_link::DeepLinkAction>,
+    /// The composer's `:shortcode` suggestions.
+    shortcode: Option<crate::shortcodes::Popup>,
+    /// `:)` and friends suggest their emoji.
+    emoticons: bool,
     /// The message a jump landed on, flashing.
     jumped: Option<(String, std::time::Instant)>,
     /// Older history is on its way.
@@ -321,6 +325,16 @@ impl VectorApp {
         .detach();
         cx.subscribe(&input, |app, _, _: &CancelInput, cx| app.cancel_mode(cx))
             .detach();
+        cx.subscribe(&input, |app, _, _: &crate::composer::InputChanged, cx| {
+            app.update_shortcode(cx)
+        })
+        .detach();
+        cx.subscribe_in(
+            &input,
+            window,
+            |app, _, nav: &crate::composer::Nav, window, cx| app.shortcode_nav(*nav, window, cx),
+        )
+        .detach();
         let emoji_picker = cx.new(crate::picker::EmojiPicker::new);
         cx.subscribe_in(
             &emoji_picker,
@@ -503,6 +517,8 @@ impl VectorApp {
             media: Rc::default(),
             pack_details: None,
             pending_link: None,
+            shortcode: None,
+            emoticons: true,
             jumped: None,
             paging: false,
             opening: None,
@@ -1736,19 +1752,28 @@ impl VectorApp {
             sync::notifs();
         });
         let rx = backend::run(async {
+            let b = backend::prefs::sql_bools(&[
+                ("web_previews", true),
+                ("emoticon_suggestions", true),
+            ]);
             (
                 backend::storage::auto_download(),
-                backend::prefs::sql_bools(&[("web_previews", true)])[0],
+                b[0],
+                b[1],
+                backend::actions::emoji_usage(),
             )
         });
         cx.spawn(async move |this, cx| {
-            let Ok(((on, limit), previews)) = rx.await else {
+            let Ok(((on, limit), previews, emoticons, used)) = rx.await else {
                 return;
             };
-            this.update(cx, |this, _| {
+            this.update(cx, |this, cx| {
                 let mut media = this.media.borrow_mut();
                 media.auto_download = crate::media::AutoDownload { on, limit };
                 media.web_previews_off = !previews;
+                drop(media);
+                this.emoticons = emoticons;
+                this.emoji_picker.update(cx, |p, cx| p.set_usage(used, cx));
             })
             .ok();
         })
@@ -3067,6 +3092,10 @@ impl VectorApp {
 
 impl Render for VectorApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.shortcode.is_some() && !self.input.focus_handle(cx).is_focused(window) {
+            self.shortcode = None;
+            self.input.update(cx, |i, _| i.set_nav(false));
+        }
         if matches!(self.screen, Screen::Main)
             && let Some(a) = self.pending_link.take()
         {
@@ -4705,6 +4734,16 @@ impl VectorApp {
                 (self.picker_open && !self.picker_status)
                     .then(|| (self.emoji_picker.clone(), self.picker.is_none())),
                 self.attach,
+                self.shortcode.as_ref().map(|p| {
+                    let app = cx.entity().downgrade();
+                    crate::shortcodes::view(
+                        p,
+                        &mut self.media.borrow_mut(),
+                        Rc::new(move |i, w, cx| {
+                            app.update(cx, |app, cx| app.pick_shortcode(i, w, cx)).ok();
+                        }),
+                    )
+                }),
                 cx,
             ))
     }
@@ -4878,6 +4917,7 @@ fn composer(
     mode: &Mode,
     picker: Option<(Entity<crate::picker::EmojiPicker>, bool)>,
     attach: Option<std::time::Instant>,
+    popup: Option<AnyElement>,
     cx: &mut Context<VectorApp>,
 ) -> impl IntoElement {
     let icon = |path: &'static str| {
@@ -4977,6 +5017,20 @@ fn composer(
                         .p(px(3.))
                         .child(cancel("reply-cancel", 18., cx)),
                 ),
+        );
+    }
+    if let Some(popup) = popup {
+        boxed = boxed.child(
+            gpui::deferred(
+                div()
+                    .absolute()
+                    .bottom_full()
+                    .left_0()
+                    .right_0()
+                    .mb(px(6.))
+                    .child(popup),
+            )
+            .with_priority(2),
         );
     }
     boxed
@@ -7789,6 +7843,83 @@ impl VectorApp {
         .detach();
     }
 
+    /// The `:` before the caret, re-read on every edit.
+    fn update_shortcode(&mut self, cx: &mut Context<Self>) {
+        let input = self.input.read(cx);
+        let (text, caret) = (input.text().to_string(), input.caret());
+        let popup =
+            crate::shortcodes::suggest(&text, caret, self.emoji_picker.read(cx), self.emoticons);
+        self.set_shortcode(popup, cx);
+    }
+
+    fn set_shortcode(&mut self, popup: Option<crate::shortcodes::Popup>, cx: &mut Context<Self>) {
+        let open = popup.is_some();
+        self.shortcode = popup;
+        self.input.update(cx, |i, _| i.set_nav(open));
+        cx.notify();
+    }
+
+    fn shortcode_nav(
+        &mut self,
+        nav: crate::composer::Nav,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::composer::Nav;
+        let Some(p) = self.shortcode.as_mut() else {
+            return self.input.update(cx, |i, _| i.set_nav(false));
+        };
+        let n = p.items.len();
+        match nav {
+            Nav::Up => p.active = (p.active + n - 1) % n,
+            Nav::Down => p.active = (p.active + 1) % n,
+            Nav::Pick => {
+                let i = p.active;
+                return self.pick_shortcode(i, window, cx);
+            }
+            Nav::Close => return self.set_shortcode(None, cx),
+        }
+        cx.notify();
+    }
+
+    fn pick_shortcode(&mut self, i: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(p) = self.shortcode.take() else {
+            return;
+        };
+        let Some(cell) = p.items.get(i).cloned() else {
+            return;
+        };
+        self.input.update(cx, |input, cx| {
+            input.set_nav(false);
+            let caret = input.caret();
+            input.replace(
+                p.start..caret,
+                &crate::shortcodes::insert(&cell),
+                window,
+                cx,
+            );
+        });
+        self.shortcode = None;
+        match cell {
+            crate::picker::Cell::Stock(e) => {
+                self.emoji_picker.update(cx, |p, _| p.bump(e.emoji));
+                if self.live {
+                    let _ = backend::run(async move { backend::actions::bump_emoji(e.emoji) });
+                }
+            }
+            crate::picker::Cell::Custom(e) => {
+                self.emoji_picker
+                    .update(cx, |p, _| p.bump(&format!(":{}:", e.code)));
+                if self.live {
+                    let (c, u) = (e.code.clone(), e.url.clone());
+                    let _ =
+                        backend::run(async move { backend::actions::bump_custom_emoji(&c, &u) });
+                }
+            }
+        }
+        cx.notify();
+    }
+
     /// A link clicked in the app: a Vector place opens in place, anything else in the browser.
     fn follow_url(&mut self, url: &str, window: &mut Window, cx: &mut Context<Self>) {
         match vector_core::deep_link::parse_deep_link(url) {
@@ -10247,6 +10378,9 @@ impl VectorApp {
                 }
                 if key == "web_previews" {
                     self.media.borrow_mut().web_previews_off = !value;
+                }
+                if key == "emoticon_suggestions" {
+                    self.emoticons = value;
                 }
                 if key == "notif_global_mute" && value {
                     backend::sound::purge();

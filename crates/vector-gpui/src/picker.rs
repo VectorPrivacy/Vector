@@ -201,7 +201,7 @@ pub fn packs_from_core(
 }
 
 #[derive(Clone)]
-enum Cell {
+pub enum Cell {
     Stock(&'static Emoji),
     Custom(Rc<PackEmoji>),
 }
@@ -1084,9 +1084,90 @@ impl EmojiPicker {
         *v = (*v + 1.).min(25.);
     }
 
+    /// Scored matches for `query`, best first, stock and custom together (`searchEmojis` and
+    /// `searchCustomEmojis`); `names` keeps only stock whose words contain it, as the picker does.
+    pub fn search(&self, query: &str, names: bool) -> Vec<Cell> {
+        let score = |e: &str| self.used.get(e).copied().unwrap_or(0.);
+        let q = query.to_lowercase();
+        let mut hits: Vec<(Cell, f64)> = emoji::search_scored(query, &score)
+            .into_iter()
+            .filter(|(e, _)| !names || e.name.to_lowercase().contains(&q))
+            .map(|(e, s)| (Cell::Stock(e), s))
+            .collect();
+        let q = q.trim_start_matches(':').trim_end_matches(':');
+        let mut seen = HashSet::new();
+        let mut custom = Vec::new();
+        for e in self.live_customs() {
+            let sc = e.code.split('~').next().unwrap_or(&e.code).to_lowercase();
+            let base = if sc == q {
+                -2.0
+            } else if sc.starts_with(q) {
+                -1.5
+            } else if sc.contains(q) {
+                0.3
+            } else {
+                continue;
+            };
+            if q.is_empty() || self.failed(e) || !seen.insert(e.code.clone()) {
+                continue;
+            }
+            custom.push((
+                Cell::Custom(e.clone()),
+                base - score(&format!(":{}:", e.code)) * emoji::USAGE_WEIGHT,
+                e.code.len(),
+            ));
+        }
+        custom.sort_by(|a, b| a.1.total_cmp(&b.1).then(a.2.cmp(&b.2)));
+        hits.extend(custom.into_iter().map(|(c, s, _)| (c, s)));
+        hits.sort_by(|a, b| a.1.total_cmp(&b.1));
+        hits.into_iter().map(|(c, _)| c).collect()
+    }
+
+    /// Most used first, stock and custom together.
+    pub fn recents(&self) -> Vec<Cell> {
+        let score = |e: &str| self.used.get(e).copied().unwrap_or(0.);
+        let mut recents: Vec<(Cell, f64)> = emoji::most_used(score)
+            .into_iter()
+            .map(|e| (Cell::Stock(e), score(e.emoji)))
+            .collect();
+        let mut seen = HashSet::new();
+        let mut custom: Vec<(Cell, f64)> = self
+            .live_customs()
+            .filter_map(|e| {
+                let used = score(&format!(":{}:", e.code));
+                (used > 0. && !self.failed(e) && seen.insert(e.code.clone()))
+                    .then(|| (Cell::Custom(e.clone()), used))
+            })
+            .collect();
+        custom.sort_by(|a, b| b.1.total_cmp(&a.1));
+        custom.truncate(24);
+        recents.extend(custom);
+        recents.sort_by(|a, b| b.1.total_cmp(&a.1));
+        recents.into_iter().map(|(c, _)| c).collect()
+    }
+
+    /// A stock emoji by its character.
+    pub fn stock(ch: &str) -> Option<&'static Emoji> {
+        emoji::by_char(ch)
+    }
+
+    fn live_customs(&self) -> impl Iterator<Item = &Rc<PackEmoji>> {
+        self.packs
+            .iter()
+            .filter(|p| !p.dead())
+            .flat_map(|p| p.emojis.iter())
+    }
+
+    fn failed(&self, e: &PackEmoji) -> bool {
+        self.media.as_ref().is_some_and(|(m, _)| {
+            matches!(
+                m.borrow().custom.get(&e.src),
+                Some(crate::media::Custom::Missing(_))
+            )
+        })
+    }
+
     fn rebuild(&mut self) {
-        let used = self.used.clone();
-        let score = move |e: &str| used.get(e).copied().unwrap_or(0.);
         let mut items = Vec::new();
         let mut starts = Vec::new();
         let section = |items: &mut Vec<Item>,
@@ -1108,84 +1189,18 @@ impl EmojiPicker {
                 });
             }
         };
-        let live = || {
-            self.packs
-                .iter()
-                .filter(|p| !p.dead())
-                .flat_map(|p| p.emojis.iter())
-        };
-        let failed = |e: &PackEmoji| {
-            self.media.as_ref().is_some_and(|(m, _)| {
-                matches!(
-                    m.borrow().custom.get(&e.src),
-                    Some(crate::media::Custom::Missing(_))
-                )
-            })
-        };
         if !self.query.is_empty() {
-            let q = self.query.to_lowercase();
-            let mut hits: Vec<(Cell, f64)> = emoji::search_scored(&self.query, &score)
-                .into_iter()
-                .filter(|(e, _)| e.name.to_lowercase().contains(&q))
-                .map(|(e, s)| (Cell::Stock(e), s))
-                .collect();
-            let q = q.trim_start_matches(':').trim_end_matches(':');
-            let mut seen = HashSet::new();
-            let mut custom = Vec::new();
-            for e in live() {
-                let sc = e.code.split('~').next().unwrap_or(&e.code).to_lowercase();
-                let base = if sc == q {
-                    -2.0
-                } else if sc.starts_with(q) {
-                    -1.5
-                } else if sc.contains(q) {
-                    0.3
-                } else {
-                    continue;
-                };
-                if q.is_empty() || failed(e) || !seen.insert(e.code.clone()) {
-                    continue;
-                }
-                custom.push((
-                    Cell::Custom(e.clone()),
-                    base - score(&format!(":{}:", e.code)) * emoji::USAGE_WEIGHT,
-                    e.code.len(),
-                ));
-            }
-            custom.sort_by(|a, b| a.1.total_cmp(&b.1).then(a.2.cmp(&b.2)));
-            hits.extend(custom.into_iter().map(|(c, s, _)| (c, s)));
-            hits.sort_by(|a, b| a.1.total_cmp(&b.1));
+            let mut hits = self.search(&self.query, true);
             hits.truncate(48);
-            section(
-                &mut items,
-                &mut starts,
-                Section::Results,
-                hits.into_iter().map(|(c, _)| c).collect(),
-                false,
-            );
+            section(&mut items, &mut starts, Section::Results, hits, false);
         } else {
-            let mut recents: Vec<(Cell, f64)> = emoji::most_used(&score)
-                .into_iter()
-                .map(|e| (Cell::Stock(e), score(e.emoji)))
-                .collect();
-            let mut seen = HashSet::new();
-            let mut custom: Vec<(Cell, f64)> = live()
-                .filter_map(|e| {
-                    let used = score(&format!(":{}:", e.code));
-                    (used > 0. && !failed(e) && seen.insert(e.code.clone()))
-                        .then(|| (Cell::Custom(e.clone()), used))
-                })
-                .collect();
-            custom.sort_by(|a, b| b.1.total_cmp(&a.1));
-            custom.truncate(24);
-            recents.extend(custom);
-            recents.sort_by(|a, b| b.1.total_cmp(&a.1));
+            let mut recents = self.recents();
             recents.truncate(24);
             section(
                 &mut items,
                 &mut starts,
                 Section::Recents,
-                recents.into_iter().map(|(c, _)| c).collect(),
+                recents,
                 self.collapsed.contains(&Section::Recents),
             );
             for (i, p) in self.packs.iter().enumerate() {
@@ -1199,7 +1214,12 @@ impl EmojiPicker {
                     items.push(Item::Dead(i));
                     continue;
                 }
-                let cells: Vec<_> = p.emojis.iter().filter(|e| !failed(e)).cloned().collect();
+                let cells: Vec<_> = p
+                    .emojis
+                    .iter()
+                    .filter(|e| !self.failed(e))
+                    .cloned()
+                    .collect();
                 let rows: Vec<_> = cells.chunks(COLS).map(|c| c.to_vec()).collect();
                 let n = rows.len().max(1);
                 if rows.is_empty() {

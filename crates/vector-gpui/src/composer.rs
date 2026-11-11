@@ -40,6 +40,7 @@ actions!(
         Down,
         SelectUp,
         SelectDown,
+        Tab,
     ]
 );
 
@@ -69,6 +70,17 @@ pub struct TextInput {
     max_chars: Option<usize>,
     /// The emoji drawn as art, for the content they were found in.
     subs: std::cell::RefCell<(SharedString, std::rc::Rc<[Sub]>)>,
+    /// An autocomplete is open: its keys go to it as `Nav`.
+    nav: bool,
+}
+
+/// A key an open autocomplete takes from the field.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Nav {
+    Up,
+    Down,
+    Pick,
+    Close,
 }
 
 /// An emoji drawn as art: its content bytes, and the placeholder holding its place in what is drawn.
@@ -974,8 +986,25 @@ impl Render for TextInput {
             .on_action(cx.listener(Self::cut))
             .on_action(cx.listener(Self::copy))
             .on_action(cx.listener(Self::newline))
-            .on_action(cx.listener(|this, _: &Up, w, cx| this.vertical(-1., false, w, cx)))
-            .on_action(cx.listener(|this, _: &Down, w, cx| this.vertical(1., false, w, cx)))
+            .on_action(cx.listener(|this, _: &Up, w, cx| {
+                if this.nav {
+                    return cx.emit(Nav::Up);
+                }
+                this.vertical(-1., false, w, cx)
+            }))
+            .on_action(cx.listener(|this, _: &Down, w, cx| {
+                if this.nav {
+                    return cx.emit(Nav::Down);
+                }
+                this.vertical(1., false, w, cx)
+            }))
+            .on_action(cx.listener(|this, _: &Tab, _, cx| {
+                if this.nav {
+                    cx.emit(Nav::Pick);
+                } else {
+                    cx.propagate();
+                }
+            }))
             .on_action(cx.listener(|this, _: &SelectUp, w, cx| this.vertical(-1., true, w, cx)))
             .on_action(cx.listener(|this, _: &SelectDown, w, cx| this.vertical(1., true, w, cx)))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
@@ -1017,6 +1046,7 @@ pub enum Pasted {
 }
 
 impl EventEmitter<SendText> for TextInput {}
+impl EventEmitter<Nav> for TextInput {}
 impl EventEmitter<CancelInput> for TextInput {}
 impl EventEmitter<Pasted> for TextInput {}
 
@@ -1042,6 +1072,7 @@ impl TextInput {
             twemoji: false,
             max_chars: None,
             subs: Default::default(),
+            nav: false,
         }
     }
 
@@ -1188,7 +1219,34 @@ impl TextInput {
     }
 
     fn cancel(&mut self, _: &Cancel, _: &mut Window, cx: &mut Context<Self>) {
+        if self.nav {
+            return cx.emit(Nav::Close);
+        }
         cx.emit(CancelInput);
+    }
+
+    /// Up, Down, Enter, Tab and Escape go to an open autocomplete.
+    pub fn set_nav(&mut self, on: bool) {
+        self.nav = on;
+    }
+
+    /// The caret's byte offset.
+    pub fn caret(&self) -> usize {
+        self.cursor_offset()
+    }
+
+    /// Replaces a byte range, the caret after what went in.
+    pub fn replace(
+        &mut self,
+        range: Range<usize>,
+        text: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let range = range.start.min(self.content.len())..range.end.min(self.content.len());
+        self.selected_range = range;
+        self.marked_range = None;
+        self.replace_text_in_range(None, text, window, cx);
     }
 
     /// A content offset as an offset into what is drawn.
@@ -1248,6 +1306,9 @@ impl TextInput {
         // Enter mid-composition commits the IME text rather than sending it.
         if self.marked_range.is_some() {
             return;
+        }
+        if self.nav {
+            return cx.emit(Nav::Pick);
         }
         let text = self.content.trim().to_string();
         if text.is_empty() && !self.submit_empty {
@@ -1314,5 +1375,6 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("shift-up", SelectUp, Some("TextInput")),
         KeyBinding::new("shift-down", SelectDown, Some("TextInput")),
         KeyBinding::new("escape", Cancel, Some("TextInput")),
+        KeyBinding::new("tab", Tab, Some("TextInput")),
     ]);
 }
