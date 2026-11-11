@@ -727,3 +727,77 @@ pub async fn set_role_holders(community_id: String, role_id: String, held: Vec<(
     })
     .await
 }
+
+/// `get_community_nicknames`: npub → nickname.
+pub fn nicknames(community_id: &str) -> std::collections::HashMap<String, String> {
+    VectorCore
+        .community_nicknames(community_id)
+        .ok()
+        .and_then(|v| serde_json::from_value(v).ok())
+        .unwrap_or_default()
+}
+
+/// Sets `npub`'s nickname in a community; "" clears it.
+pub async fn set_nickname(community_id: String, npub: String, nickname: String) -> Result<(), String> {
+    db::scoped(async move { VectorCore.set_community_nickname(&community_id, &npub, &nickname).await.map_err(|e| e.to_string()) }).await
+}
+
+async fn refresh_if_live() {
+    if db::session_is_live() {
+        if let Some(client) = vector_core::state::nostr_client() {
+            realtime::refresh_subscription(&client).await;
+        }
+    }
+}
+
+pub fn moderation_intel(community_id: &str) -> Result<Value, String> {
+    VectorCore.community_moderation_intel(community_id).map_err(|e| e.to_string())
+}
+
+/// `(detected, suspects)` for the menu's raid pip.
+pub fn check_raid(community_id: &str) -> (bool, usize) {
+    let v = VectorCore.check_community_raid(community_id).unwrap_or(Value::Null);
+    (v["detected"].as_bool().unwrap_or(false), v["suspects"].as_u64().unwrap_or(0) as usize)
+}
+
+/// Re-founds onto `retain`, reporting `(done, total)` of the kick sweep.
+pub async fn refound(community_id: String, retain: Vec<String>, progress: impl Fn(usize, usize) + Sync) -> Result<Value, String> {
+    db::scoped(async move {
+        let refs: Vec<&str> = retain.iter().map(String::as_str).collect();
+        let summary = VectorCore.purge_and_refound(&community_id, &refs, &progress).await.map_err(|e| e.to_string())?;
+        VectorCore::invalidate_raid_report(&community_id);
+        refresh_if_live().await;
+        super::emit("community_refreshed", community_id);
+        Ok(summary)
+    })
+    .await
+}
+
+pub async fn revoke_all_invites(community_id: String) -> Result<(usize, usize), String> {
+    db::scoped(async move {
+        let out = VectorCore.revoke_all_public_invites(&community_id).await.map_err(|e| e.to_string())?;
+        refresh_if_live().await;
+        Ok(out)
+    })
+    .await
+}
+
+pub fn policy_presets() -> Result<Value, String> {
+    VectorCore.policy_presets().map_err(|e| e.to_string())
+}
+
+pub fn policies(community_id: &str) -> Result<Value, String> {
+    VectorCore.list_community_policies(community_id).map_err(|e| e.to_string())
+}
+
+pub fn preview_policy(community_id: &str, bytes: &str) -> Result<Value, String> {
+    VectorCore.preview_community_policy(community_id, bytes).map_err(|e| e.to_string())
+}
+
+pub fn set_policy(community_id: &str, policy_id: &str, bytes: &str, enabled: bool) -> Result<Value, String> {
+    VectorCore.set_community_policy(community_id, policy_id, bytes, enabled).map_err(|e| e.to_string())
+}
+
+pub fn delete_policy(community_id: &str, policy_id: &str) -> Result<(), String> {
+    VectorCore.delete_community_policy(community_id, policy_id).map_err(|e| e.to_string())
+}

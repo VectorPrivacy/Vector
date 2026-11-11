@@ -151,7 +151,7 @@ pub fn message_row(ctx: &Ctx, index: usize, first: bool, gap: f32) -> AnyElement
                         .text_size(px(15.))
                         .line_height(px(19.5))
                         .text_color(c(0xffffff))
-                        .child(ctx.store.name(&author)),
+                        .child(ctx.store.chat_name(&author, &ctx.chat.id)),
                 )
                 .children(crate::community::author_badge(ctx.store, &ctx.chat.id, &author))
                 .child(div().flex_shrink_0().text_size(px(12.)).text_color(white_a(0.4)).child(data::clock(m.at))),
@@ -689,7 +689,7 @@ fn reply_quote(ctx: &Ctx, m: &Message) -> Option<AnyElement> {
                     .whitespace_nowrap()
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(white_a(0.7))
-                    .child(ctx.store.name(&npub)),
+                    .child(ctx.store.chat_name(&npub, &ctx.chat.id)),
             )
             .child(snippet)
             .into_any_element(),

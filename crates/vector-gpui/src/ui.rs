@@ -96,6 +96,9 @@ pub struct VectorApp {
     create_community: Option<crate::createcommunity::CreateCommunity>,
     invite: Option<crate::invite::Invite>,
     comm_settings: Option<crate::commsettings::CommSettings>,
+    moderation: Option<crate::moderation::Moderation>,
+    /// Each community's last raid check: `(detected, suspects)`.
+    raid: HashMap<String, (bool, usize)>,
     /// The pending invite whose details show.
     invite_details: Option<String>,
     /// Invite links looked up, by invite key.
@@ -160,6 +163,8 @@ enum MenuAct {
     CreateCategory(String),
     InvitePeople(String),
     CommunitySettings(String),
+    CommunityNickname(String),
+    Moderation(String),
     LeaveCommunity { id: String, name: String, owner: bool },
     Copy(String),
     NotifyLevel(String, Option<&'static str>),
@@ -170,6 +175,9 @@ enum MenuAct {
 
 enum PopupAct {
     Notice,
+    ModRevoke,
+    ModRotate,
+    ModBanRotate,
     RenameFolder { id: String },
     Delete { id: String, failed: bool },
     Block { npub: String },
@@ -187,6 +195,7 @@ enum PopupAct {
     /// Revoking the last link anywhere makes it private again.
     InvitePrivate { token: String },
     DeleteRole(String),
+    CommunityNickname { community: String, npub: String },
     ActivateRoles,
     AddServer,
     DisableRelay { url: String },
@@ -206,6 +215,9 @@ enum CallGo {
     Start(String),
     Accept,
 }
+
+#[path = "ui_moderation.rs"]
+mod moderation_ops;
 
 impl VectorApp {
     fn base(store: Store, live: bool, window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -277,6 +289,8 @@ impl VectorApp {
             create_community: None,
             invite: None,
             comm_settings: None,
+            moderation: None,
+            raid: HashMap::new(),
             invite_details: None,
             invite_previews: HashMap::new(),
             invite_scan: None,
@@ -358,6 +372,17 @@ impl VectorApp {
                     Ok("category") => app.open_create_channel(id.clone(), None, true, window, cx),
                     Ok("invite") => app.open_invite(id.clone(), window, cx),
                     _ => {}
+                }
+                // VECTOR_MODERATION=members|policies|<preset id> opens the console there.
+                if let Ok(tab) = std::env::var("VECTOR_MODERATION") {
+                    app.open_moderation(id.clone(), window, cx);
+                    if tab != "members" {
+                        app.on_moderation(crate::moderation::Act::Tab(crate::moderation::Tab::Policies), window, cx);
+                    }
+                    if !matches!(tab.as_str(), "members" | "policies") {
+                        let act = if tab == "defaults" { crate::policies::Act::Inspect } else { crate::policies::Act::Open(tab) };
+                        app.on_moderation(crate::moderation::Act::Policy(act), window, cx);
+                    }
                 }
                 if let Ok(section) = std::env::var("VECTOR_COMMUNITY_SETTINGS") {
                     let section = ["overview", "relays", "roles", "bans", "audit"].into_iter().find(|s| *s == section).unwrap_or("overview");
@@ -608,6 +633,11 @@ impl VectorApp {
             MenuAct::CreateCategory(community) => self.open_create_channel(community, None, true, window, cx),
             MenuAct::InvitePeople(community) => self.open_invite(community, window, cx),
             MenuAct::CommunitySettings(community) => self.open_comm_settings(community, "overview", window, cx),
+            MenuAct::CommunityNickname(community) => {
+                let me = self.store.borrow().my_npub.clone();
+                self.ask_community_nickname(community, me, window, cx);
+            }
+            MenuAct::Moderation(community) => self.open_moderation(community, window, cx),
             MenuAct::LeaveCommunity { id, name, owner } => self.ask_leave_community(id, name, owner, window, cx),
             MenuAct::Copy(text) => {
                 cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
@@ -1698,6 +1728,9 @@ impl VectorApp {
             }
             PopupAct::InvitePrivate { token } => self.revoke_invite_link(token, true, cx),
             PopupAct::DeleteRole(role_id) => self.role_op(true, role_id, cx),
+            PopupAct::ModRevoke => self.mod_revoke(cx),
+            PopupAct::ModRotate => self.mod_rotate(false, cx),
+            PopupAct::ModBanRotate => self.mod_rotate(true, cx),
             PopupAct::ActivateRoles => self.role_op(false, String::new(), cx),
             PopupAct::Block { npub } => self.set_blocked(npub, true, cx),
             PopupAct::BlockRequest { npub } => {
@@ -1769,6 +1802,10 @@ impl VectorApp {
                     let name = input.read(cx).text().trim().to_string();
                     self.start_edit(move |l| l.rename_folder(&id, &name), cx);
                 }
+            }
+            PopupAct::CommunityNickname { community, npub } => {
+                let nick = popup.input.map(|i| i.read(cx).text().trim().to_string()).unwrap_or_default();
+                self.set_community_nickname(community, npub, nick, cx);
             }
             PopupAct::Nickname { npub } => {
                 if let Some(input) = popup.input {
@@ -2054,6 +2091,13 @@ impl Render for VectorApp {
                 app.update(cx, |app, cx| app.on_comm_settings(act, window, cx)).ok();
             });
             crate::commsettings::view(m, &store, &on, cx)
+        }))
+        .children(self.moderation.as_ref().map(|m| {
+            let app = cx.entity().downgrade();
+            let on: crate::moderation::OnAct = Rc::new(move |act, window, cx| {
+                app.update(cx, |app, cx| app.on_moderation(act, window, cx)).ok();
+            });
+            crate::moderation::view(m, &store, f32::from(window.viewport_size().width), &on, cx)
         }))
         .children(self.create_channel.as_ref().map(|m| {
             let app = cx.entity().downgrade();
@@ -3466,6 +3510,9 @@ impl VectorApp {
             cx.subscribe(&search, |_, _, _: &crate::composer::InputChanged, cx| cx.notify()).detach();
             self.community = Some(crate::community::View { id: id.clone(), members, admins: Vec::new(), panel: true, search, folded: HashSet::new() });
             if self.live {
+                let named = backend::community::nicknames(&id);
+                self.store.borrow_mut().nicknames.insert(id.clone(), named);
+                self.check_raid(id.clone(), cx);
                 let rx = backend::run(backend::community::members(id.clone()));
                 cx.spawn(async move |this, cx| {
                     let Ok((members, admins)) = rx.await else { return };
@@ -3650,14 +3697,27 @@ impl VectorApp {
             rows.push((kit::MenuItem::divider(), MenuAct::Nothing));
         }
         rows.push((kit::MenuItem::new("Invite People", "add-user"), MenuAct::InvitePeople(id.clone())));
-        let caps = if self.live { backend::community::capabilities(&id) } else { ["manage_metadata", "ban", "manage_roles", "view_audit_log"].map(String::from).into() };
+        let caps = if self.live { backend::community::capabilities(&id) } else { ["manage_metadata", "manage_channels", "change_nickname", "ban", "manage_roles", "view_audit_log"].map(String::from).into() };
+        if caps.contains("manage_channels") {
+            rows.push((kit::MenuItem::new("Create Channel", "channel-hash"), MenuAct::CreateChannel { community: id.clone(), category: None }));
+            rows.push((kit::MenuItem::new("Create Category", "plus"), MenuAct::CreateCategory(id.clone())));
+        }
+        if caps.contains("change_nickname") {
+            rows.push((kit::MenuItem::new("Change Nickname", "edit"), MenuAct::CommunityNickname(id.clone())));
+        }
         if ["manage_metadata", "ban", "manage_roles", "view_audit_log"].iter().any(|c| caps.contains(*c)) {
             rows.push((kit::MenuItem::new("Community Settings", "settings"), MenuAct::CommunitySettings(id.clone())));
         }
-        rows.push((kit::MenuItem::new("Create Channel", "channel-hash"), MenuAct::CreateChannel { community: id.clone(), category: None }));
-        rows.push((kit::MenuItem::new("Create Category", "plus"), MenuAct::CreateCategory(id.clone())));
         rows.push((kit::MenuItem::divider(), MenuAct::Nothing));
         rows.extend(self.notify_rows(&id, Some(&id)));
+        if caps.contains("ban") {
+            let raid = self.raid.get(&id).filter(|r| r.0);
+            let mut item = kit::MenuItem::new("Moderation", "warning");
+            if let Some((_, n)) = raid {
+                item = item.danger().hint(Some(format!("{n} flagged").into()));
+            }
+            rows.push((item, MenuAct::Moderation(id.clone())));
+        }
         rows.push((kit::MenuItem::new("Copy Link", "share"), MenuAct::Copy(format!("https://vectorapp.io/c/{id}"))));
         rows.push((kit::MenuItem::divider(), MenuAct::Nothing));
         rows.push((kit::MenuItem::new(if owner { "Delete Community" } else { "Leave Community" }, "x-user").danger(), MenuAct::LeaveCommunity { id, name, owner }));
@@ -4725,6 +4785,67 @@ impl VectorApp {
         .detach();
     }
 
+    /// `promptCommunityNickname`: yours, or a member's beneath you.
+    fn ask_community_nickname(&mut self, community: String, npub: String, window: &mut Window, cx: &mut Context<Self>) {
+        let (title, own, current) = {
+            let store = self.store.borrow();
+            let mine = npub == store.my_npub;
+            let p = store.profiles.get(npub.as_str());
+            let own = p.map(|p| if !p.name.is_empty() { p.name.clone() } else { p.display_name.clone() }).unwrap_or_default();
+            let current = store.nicknames.get(&community).and_then(|n| n.get(&npub)).cloned().unwrap_or_default();
+            let title = if mine { "Change Nickname".to_string() } else { format!("Change {}'s Nickname", store.name(&npub)) };
+            (title, (own, mine), current)
+        };
+        let (own, mine) = own;
+        let placeholder = if own.is_empty() { "Nickname".to_string() } else { own };
+        let input = cx.new(|cx| {
+            let mut t = TextInput::new(placeholder, cx).with_look(kit::field_look()).keep_on_submit().submit_empty();
+            t.set_text(&current, cx);
+            t
+        });
+        cx.subscribe_in(&input, window, |app, _, _: &SendText, window, cx| app.answer_popup(true, window, cx)).detach();
+        cx.subscribe_in(&input, window, |app, _, _: &CancelInput, window, cx| app.answer_popup(false, window, cx)).detach();
+        window.focus(&input.focus_handle(cx), cx);
+        let mut popup = kit::Popup::notice(title);
+        popup.icon = None;
+        popup.text = Some(format!("Everyone in this community sees it. Leave it empty to go by {} own name.", if mine { "your" } else { "their" }).into());
+        popup.confirm = "Save".into();
+        popup.cancel = Some("Cancel".into());
+        popup.input = Some(input);
+        self.popup = Some((popup, PopupAct::CommunityNickname { community, npub }));
+        cx.notify();
+    }
+
+    fn set_community_nickname(&mut self, community: String, npub: String, nick: String, cx: &mut Context<Self>) {
+        if !self.live {
+            let mut store = self.store.borrow_mut();
+            let named = store.nicknames.entry(community).or_default();
+            if nick.is_empty() {
+                named.remove(&npub);
+            } else {
+                named.insert(npub, nick);
+            }
+            cx.notify();
+            return;
+        }
+        let rx = backend::run(backend::community::set_nickname(community.clone(), npub, nick));
+        cx.spawn(async move |this, cx| {
+            let res = rx.await.unwrap_or_else(|_| Err("Couldn't set the nickname".into()));
+            this.update(cx, |this, cx| {
+                match res {
+                    Ok(()) => {
+                        let named = backend::community::nicknames(&community);
+                        this.store.borrow_mut().nicknames.insert(community, named);
+                    }
+                    Err(e) => this.show_toast(&e, cx),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     fn on_invite(&mut self, act: crate::invite::Act, window: &mut Window, cx: &mut Context<Self>) {
         use crate::invite::Act;
         let Some(m) = self.invite.as_mut() else { return };
@@ -5014,12 +5135,22 @@ impl VectorApp {
         if !self.live {
             return;
         }
-        let rx = backend::run(async { backend::community::list() });
+        let open = self.community.as_ref().map(|v| v.id.clone());
+        let rx = backend::run(async move {
+            let named = open.map(|id| {
+                let n = backend::community::nicknames(&id);
+                (id, n)
+            });
+            (backend::community::list(), named)
+        });
         cx.spawn(async move |this, cx| {
-            let Ok(list) = rx.await else { return };
+            let Ok((list, named)) = rx.await else { return };
             let list: Vec<data::Community> = list.into_iter().filter_map(|v| serde_json::from_value(v).ok()).collect();
             this.update(cx, |this, cx| {
                 this.store.borrow_mut().communities = list;
+                if let Some((id, n)) = named {
+                    this.store.borrow_mut().nicknames.insert(id, n);
+                }
                 let gone = this.community.as_ref().is_some_and(|v| this.store.borrow().community(&v.id).is_none());
                 if gone {
                     this.leave_community();

@@ -339,7 +339,7 @@ fn status_line(text: &str) -> AnyElement {
     crate::inline::inline(crate::preview::atoms(text, usize::MAX, &look), look).single_line().into_any_element()
 }
 
-fn member_row(store: &Store, npub: &str, owner: bool) -> impl IntoElement {
+fn member_row(store: &Store, cid: &str, npub: &str, owner: bool) -> impl IntoElement {
     let status = store.profiles.get(npub).map(|p| p.status.title.clone()).filter(|t| !t.is_empty());
     div()
         .h(px(40.))
@@ -361,7 +361,7 @@ fn member_row(store: &Store, npub: &str, owner: bool) -> impl IntoElement {
                         .flex()
                         .items_center()
                         .gap(px(9.))
-                        .child(div().truncate().font_weight(FontWeight::SEMIBOLD).text_size(px(14.)).line_height(px(18.)).text_color(c(0xf7f4f4)).child(store.name(npub)))
+                        .child(div().truncate().font_weight(FontWeight::SEMIBOLD).text_size(px(14.)).line_height(px(18.)).text_color(c(0xf7f4f4)).child(store.name_in(npub, Some(cid))))
                         .when(owner, |d| d.child(icon("icons/crown.svg", 15., c(OWNER)))),
                 )
                 .children(status.map(|s| div().truncate().text_size(px(11.5)).line_height(px(15.5)).text_color(white_a(0.38)).child(status_line(&s)))),
@@ -372,7 +372,7 @@ fn member_row(store: &Store, npub: &str, owner: bool) -> impl IntoElement {
 pub fn members_panel(store: &Store, view: &View, com: &Community, on: &OnAct, cx: &App) -> impl IntoElement {
     let query = view.search.read(cx).text().trim().to_lowercase();
     let owner = com.owner_npub.as_deref();
-    let matches = |n: &&String| query.is_empty() || store.name(n).to_lowercase().contains(&query) || n.contains(&query);
+    let matches = |n: &&String| query.is_empty() || store.name_in(n, Some(&com.community_id)).to_lowercase().contains(&query) || n.contains(&query);
     let is_admin = |n: &str| owner == Some(n) || view.admins.iter().any(|a| a == n);
     let admins: Vec<&String> = view.members.iter().filter(|n| is_admin(n)).filter(matches).collect();
     let rest: Vec<&String> = view.members.iter().filter(|n| !is_admin(n)).filter(matches).collect();
@@ -400,7 +400,7 @@ pub fn members_panel(store: &Store, view: &View, com: &Community, on: &OnAct, cx
                             ),
                         ),
                 )
-                .when(!closed, |d| d.children(list.into_iter().map(|n| member_row(store, n, owner == Some(n.as_str())))))
+                .when(!closed, |d| d.children(list.into_iter().map(|n| member_row(store, &com.community_id, n, owner == Some(n.as_str())))))
         })
     };
     let admin_section = section("sec-admin", "ADMIN", admins);

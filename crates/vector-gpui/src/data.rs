@@ -24,6 +24,12 @@ struct Fixtures {
     audit: Option<serde_json::Value>,
     #[serde(default)]
     roles_view: Option<serde_json::Value>,
+    #[serde(default)]
+    nicknames: HashMap<String, HashMap<String, String>>,
+    #[serde(default)]
+    moderation: Option<serde_json::Value>,
+    #[serde(default)]
+    policy_presets: Option<serde_json::Value>,
 }
 
 /// `list_community_invites`' row: the bundle still as its JSON.
@@ -156,6 +162,11 @@ pub struct Store {
     /// The fixtures' Audit Log, as `get_community_audit_log` answers.
     pub fixture_audit: Option<serde_json::Value>,
     pub fixture_roles: Option<serde_json::Value>,
+    /// `get_moderation_intel` and `policy_presets`, as they answer.
+    pub fixture_moderation: Option<serde_json::Value>,
+    pub fixture_presets: Option<serde_json::Value>,
+    /// Each community's nicknames, npub → name.
+    pub nicknames: HashMap<String, HashMap<String, String>>,
 }
 
 impl Store {
@@ -181,6 +192,9 @@ impl Store {
             invites: f.invites.into_iter().map(Invite::from).collect(),
             fixture_audit: f.audit,
             fixture_roles: f.roles_view,
+            fixture_moderation: f.moderation,
+            fixture_presets: f.policy_presets,
+            nicknames: f.nicknames,
         })
     }
 
@@ -198,6 +212,9 @@ impl Store {
             invites: Vec::new(),
             fixture_audit: None,
             fixture_roles: None,
+            fixture_moderation: None,
+            fixture_presets: None,
+            nicknames: HashMap::new(),
         }
     }
 
@@ -264,8 +281,15 @@ impl Store {
 
     /// `getName` (main.js).
     pub fn name(&self, npub: &str) -> String {
+        self.name_in(npub, None)
+    }
+
+    /// `getName` with a community: its nickname ranks under your own, over their name.
+    pub fn name_in(&self, npub: &str, community: Option<&str>) -> String {
+        let nick = community.and_then(|c| self.nicknames.get(c)).and_then(|n| n.get(npub)).filter(|n| !n.is_empty());
         match self.profiles.get(npub) {
             Some(p) if !p.nickname.is_empty() => p.nickname.clone(),
+            _ if nick.is_some() => nick.cloned().unwrap_or_default(),
             Some(p) if !p.name.is_empty() => p.name.clone(),
             Some(p) if !p.display_name.is_empty() => p.display_name.clone(),
             _ => format!("{}…", &npub[..npub.len().min(12)]),
@@ -294,6 +318,11 @@ impl Store {
     }
 
     /// The Community a channel chat belongs to.
+    /// A name as `chat` shows it: a community channel uses that community's nicknames.
+    pub fn chat_name(&self, npub: &str, chat: &str) -> String {
+        self.name_in(npub, self.community_of(chat).map(|c| c.community_id.as_str()))
+    }
+
     pub fn community_of(&self, channel_id: &str) -> Option<&Community> {
         self.communities.iter().find(|c| c.channel(channel_id).is_some())
     }

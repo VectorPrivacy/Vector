@@ -1963,5 +1963,680 @@
   ],
   "max_roles": 100,
   "max_per_member": 64
+ },
+ "moderation": {
+  "community_id": "ca848c275e2117470342c641ada0ae4639dd0472ab4a5ec654a189bf1f689087",
+  "name": "Vector Devs",
+  "owner_npub": "npub1yazve5gvw5em6um2mzg0nh2u4v4dkfas04gqh9yn72wdcssvktsqfmmmv4",
+  "epoch": 3,
+  "report": {
+   "members": [
+    {
+     "npub": "npub1yazve5gvw5em6um2mzg0nh2u4v4dkfas04gqh9yn72wdcssvktsqfmmmv4",
+     "verdict": "protected",
+     "score": 0,
+     "reasons": [
+      "Community owner"
+     ],
+     "joined_at_ms": 1783994400000,
+     "invite_label": null,
+     "messages": 412,
+     "distinct": 380,
+     "cohort": 0,
+     "tenure_secs": 10368000,
+     "last_secs": 60,
+     "is_owner": true,
+     "is_admin": false,
+     "is_me": true
+    },
+    {
+     "npub": "npub190vqdjtlpcq27xslcveglfmr4ynfwg7gmw86cnun4acakxrdd6gqnp929a",
+     "verdict": "protected",
+     "score": 0,
+     "reasons": [
+      "Holds a role"
+     ],
+     "joined_at_ms": 1786586400000,
+     "invite_label": null,
+     "messages": 233,
+     "distinct": 220,
+     "cohort": 0,
+     "tenure_secs": 7776000,
+     "last_secs": 60,
+     "is_owner": false,
+     "is_admin": true,
+     "is_me": false
+    },
+    {
+     "npub": "npub1sxmr0k8u6trd5c6eu6trzyapzux7090ykujmsng7pdx0m8k93n5sd02fwn",
+     "verdict": "trusted",
+     "score": 0,
+     "reasons": [
+      "Long-standing member"
+     ],
+     "joined_at_ms": 1789178400000,
+     "invite_label": null,
+     "messages": 88,
+     "distinct": 80,
+     "cohort": 0,
+     "tenure_secs": 5184000,
+     "last_secs": 60,
+     "is_owner": false,
+     "is_admin": false,
+     "is_me": false
+    },
+    {
+     "npub": "npub1fsndjp6vylvfahjeyuxq4s2tw8s8rv2j89ge7a28fvhnhf35s86sg3uctf",
+     "verdict": "neutral",
+     "score": 0,
+     "reasons": [
+      "Joined through a link posted in a raid"
+     ],
+     "joined_at_ms": 1794189600000,
+     "invite_label": "Reddit",
+     "messages": 4,
+     "distinct": 4,
+     "cohort": 0,
+     "tenure_secs": 172800,
+     "last_secs": 60,
+     "is_owner": false,
+     "is_admin": false,
+     "is_me": false
+    },
+    {
+     "npub": "npub1v84qsqlcs56j8dmh6s22eccnpn2d87fdutxhl7rftseh67wzamhqfv9ft6",
+     "verdict": "neutral",
+     "score": 0,
+     "reasons": [],
+     "joined_at_ms": 1793152800000,
+     "invite_label": null,
+     "messages": 12,
+     "distinct": 11,
+     "cohort": 0,
+     "tenure_secs": 1209600,
+     "last_secs": 60,
+     "is_owner": false,
+     "is_admin": false,
+     "is_me": false
+    },
+    {
+     "npub": "npub1wajx7kj0x9nxxa38405e3eapgu87wtvtgv8svld04p3x8u0j872qnta00x",
+     "verdict": "suspect",
+     "score": 9,
+     "reasons": [
+      "Posted the same text as 3 others",
+      "Joined minutes ago"
+     ],
+     "joined_at_ms": 1794362160000,
+     "invite_label": "Reddit",
+     "messages": 6,
+     "distinct": 1,
+     "cohort": 0,
+     "tenure_secs": 240,
+     "last_secs": 60,
+     "is_owner": false,
+     "is_admin": false,
+     "is_me": false
+    },
+    {
+     "npub": "npub1qk3nrfl57xffl2k29zdxd7vdtgzm8p7ee045lrpdmqsy56cz8g2qqxdt9s",
+     "verdict": "suspect",
+     "score": 9,
+     "reasons": [
+      "Posted the same text as 3 others",
+      "Joined minutes ago"
+     ],
+     "joined_at_ms": 1794362170000,
+     "invite_label": "Reddit",
+     "messages": 5,
+     "distinct": 1,
+     "cohort": 0,
+     "tenure_secs": 230,
+     "last_secs": 60,
+     "is_owner": false,
+     "is_admin": false,
+     "is_me": false
+    },
+    {
+     "npub": "npub1uqg0688p4nqh8ca5sddhvd0c63sq6a6gdygz4k6uk76a0z2kfxaqmmg7t4",
+     "verdict": "suspect",
+     "score": 8,
+     "reasons": [
+      "Posted the same text as 3 others"
+     ],
+     "joined_at_ms": 1794362190000,
+     "invite_label": null,
+     "messages": 7,
+     "distinct": 1,
+     "cohort": 0,
+     "tenure_secs": 210,
+     "last_secs": 60,
+     "is_owner": false,
+     "is_admin": false,
+     "is_me": false
+    },
+    {
+     "npub": "npub10j7vkrzv4t0elnd4rmj902pge3e2gkresvd4h9u2ut3valzyjuzsz7ad26",
+     "verdict": "suspect",
+     "score": 8,
+     "reasons": [
+      "Posted the same text as 3 others"
+     ],
+     "joined_at_ms": 1794362200000,
+     "invite_label": null,
+     "messages": 4,
+     "distinct": 1,
+     "cohort": 0,
+     "tenure_secs": 200,
+     "last_secs": 60,
+     "is_owner": false,
+     "is_admin": false,
+     "is_me": false
+    }
+   ],
+   "suspects": 4,
+   "trusted": 1,
+   "protected": 2,
+   "cohorts": [
+    {
+     "sample": "FREE NOSTR AIRDROP claim now at the link in my profile",
+     "size": 4,
+     "members": [
+      "npub1wajx7kj0x9nxxa38405e3eapgu87wtvtgv8svld04p3x8u0j872qnta00x",
+      "npub1qk3nrfl57xffl2k29zdxd7vdtgzm8p7ee045lrpdmqsy56cz8g2qqxdt9s",
+      "npub1uqg0688p4nqh8ca5sddhvd0c63sq6a6gdygz4k6uk76a0z2kfxaqmmg7t4",
+      "npub10j7vkrzv4t0elnd4rmj902pge3e2gkresvd4h9u2ut3valzyjuzsz7ad26"
+     ]
+    }
+   ],
+   "burst_size": 4,
+   "burst_from_ms": 1794362160000,
+   "burst_to_ms": 1794362200000,
+   "raid_detected": true
+  },
+  "unlisted": [],
+  "invites": [
+   {
+    "token": "tok1",
+    "label": "Reddit",
+    "created_at": 0,
+    "expires_at": null,
+    "join_count": 3
+   },
+   {
+    "token": "tok2",
+    "label": null,
+    "created_at": 0,
+    "expires_at": null,
+    "join_count": 0
+   }
+  ],
+  "banlist_count": 2,
+  "banlist_max": 500,
+  "capabilities": {
+   "ban": true
+  },
+  "channels": [
+   {
+    "id": "a0f367a05f629b3bb09ee8f1561bf03267962217d9ff6fc7ce3b235235702bc1",
+    "name": "general"
+   },
+   {
+    "id": "d961d1281aed7b3ad2f6964aa7e59d427d8b921a8f7dd8c4c0f0a0e1422a17d1",
+    "name": "dev"
+   },
+   {
+    "id": "451269113943deb53e912b83f5e397cd38bdc2460928a14dbc4f766181425977",
+    "name": "design"
+   },
+   {
+    "id": "58e6267876fd6c4acb7fbc37091bb920e4f325e24df4887b8048d0ccf7137f2f",
+    "name": "Lounge"
+   }
+  ]
+ },
+ "policy_presets": {
+  "presets": [
+   {
+    "id": "vector_defaults",
+    "name": "Vector's Defaults",
+    "description": "Raid detection, running here already. Open it to read every rule, or save your own version.",
+    "example": "a swarm of fresh accounts posting one line",
+    "caveat": "A Built-In Anti-Raid Policy: detects raids proactively and alerts you with a list of suspects for quick handling.",
+    "dials": [
+     {
+      "key": "summary",
+      "label": "What these rules do",
+      "kind": "summary",
+      "hint": "Every rule that runs here, in order."
+     },
+     {
+      "key": "strictness",
+      "label": "Sensitivity",
+      "kind": "strictness",
+      "hint": "How much it takes to trip a rule, and how confident the result is."
+     }
+    ],
+    "rules": [
+     {
+      "label": "Many accounts, one line",
+      "detail": "3 or more separate accounts posting the same line at the same time. The shape of a raid.",
+      "armed": false
+     },
+     {
+      "label": "Join flood",
+      "detail": "12 or more joins within 5 minutes.",
+      "armed": false
+     },
+     {
+      "label": "New account",
+      "detail": "Joined less than 24 hours ago.",
+      "armed": true
+     },
+     {
+      "label": "Barely posted",
+      "detail": "Has posted at most 2 messages.",
+      "armed": true
+     }
+    ],
+    "bytes": "{\"format\":1,\"requires\":[\"armed_by_any\"],\"name\":\"raid-detection\",\"shields\":{\"trusted\":{\"tenure_secs\":604800,\"messages\":5,\"distinct\":3,\"veteran_secs\":2592000,\"roles_trust\":true}},\"window\":{\"hours\":168,\"max_messages\":4000},\"exempt\":{\"patterns\":[],\"roles\":[],\"channels\":[]},\"rules\":[{\"id\":\"cohort\",\"match\":{\"type\":\"cohort\",\"min\":3,\"quiet_max\":2,\"short_factor\":3,\"thin_ratio\":null},\"severity\":\"severe\",\"weight\":85,\"pierces_trusted\":false,\"exempt\":{\"patterns\":[],\"roles\":[],\"channels\":[]},\"enforcement\":\"advisory\"},{\"id\":\"burst\",\"match\":{\"type\":\"join_burst\",\"gap_secs\":300,\"min\":12},\"severity\":\"major\",\"weight\":40,\"pierces_trusted\":false,\"exempt\":{\"patterns\":[],\"roles\":[],\"channels\":[]},\"enforcement\":\"advisory\"},{\"id\":\"fresh\",\"match\":{\"type\":\"tenure_lt\",\"secs\":86400},\"severity\":\"notice\",\"weight\":12,\"pierces_trusted\":false,\"armed_by\":{\"rule\":\"cohort\",\"scope\":\"subject\",\"also\":[\"burst\"]},\"exempt\":{\"patterns\":[],\"roles\":[],\"channels\":[]},\"enforcement\":\"advisory\"},{\"id\":\"quiet\",\"match\":{\"type\":\"messages_lte\",\"n\":2},\"severity\":\"notice\",\"weight\":10,\"pierces_trusted\":false,\"armed_by\":{\"rule\":\"cohort\",\"scope\":\"subject\",\"also\":[\"burst\"]},\"exempt\":{\"patterns\":[],\"roles\":[],\"channels\":[]},\"enforcement\":\"advisory\"}]}"
+   },
+   {
+    "id": "scam_links",
+    "name": "Scam Links",
+    "description": "Blocks link shorteners and redirectors that scams hide behind.",
+    "example": "claim your airdrop at bit.ly/…",
+    "caveat": "Only catches the shorteners on the bundled list, plus any domain you add.",
+    "dials": [
+     {
+      "key": "domains",
+      "label": "Also block these domains",
+      "kind": "domainlist",
+      "hint": "One per line. The bundled shortener list is always included."
+     },
+     {
+      "key": "allow",
+      "label": "Never flag these domains",
+      "kind": "domainlist",
+      "hint": "Your own links, docs, anything you trust."
+     }
+    ],
+    "rules": [
+     {
+      "label": "Link domains",
+      "detail": "28 domains blocked, subdomains included. Trips at 1 hit in one message, then 3 hits in the window.",
+      "armed": false
+     }
+    ],
+    "bytes": "{\"format\":1,\"name\":\"Scam Links\",\"shields\":{\"trusted\":{\"tenure_secs\":604800,\"messages\":5,\"distinct\":3,\"veteran_secs\":2592000,\"roles_trust\":true}},\"window\":{\"hours\":168,\"max_messages\":4000},\"exempt\":{\"patterns\":[],\"roles\":[],\"channels\":[]},\"rules\":[{\"id\":\"shorteners\",\"match\":{\"type\":\"link\",\"patterns\":[\"bit.ly\",\"tinyurl.com\",\"t.co\",\"goo.gl\",\"ow.ly\",\"is.gd\",\"buff.ly\",\"adf.ly\",\"bit.do\",\"cutt.ly\",\"rebrand.ly\",\"shorturl.at\",\"rb.gy\",\"tiny.cc\",\"shorte.st\",\"bc.vc\",\"clck.ru\",\"soo.gd\",\"s2r.co\",\"tr.ee\",\"dub.sh\",\"e.vg\",\"paw.wf\",\"shm.to\",\"snl.ink\",\"surl.li\",\"url9.de\",\"waffl.link\"]},\"tiers\":{\"per_message\":[{\"hits\":1,\"severity\":\"severe\",\"weight\":70,\"pierces_trusted\":false}],\"per_window\":[{\"hits\":3,\"severity\":\"severe\",\"weight\":90,\"pierces_trusted\":false}]},\"pierces_trusted\":false,\"exempt\":{\"patterns\":[],\"roles\":[],\"channels\":[]},\"enforcement\":\"advisory\"}]}"
+   },
+   {
+    "id": "no_spam",
+    "name": "No Spam",
+    "description": "The same message over and over, from one account or many.",
+    "example": "the same pitch, twelve times",
+    "caveat": "Counts shapes, not words: changing case, punctuation or digits does not help a spammer.",
+    "dials": [
+     {
+      "key": "strictness",
+      "label": "Sensitivity",
+      "kind": "strictness",
+      "hint": "How much it takes to trip a rule, and how confident the result is."
+     }
+    ],
+    "rules": [
+     {
+      "label": "Same message repeated",
+      "detail": "One account posting the same thing over and over inside 30 minutes. Case, punctuation and digits are ignored, so changing them does not help. Trips at 4 hits, then 8 hits.",
+      "armed": false
+     },
+     {
+      "label": "Many accounts, one line",
+      "detail": "3 or more separate accounts posting the same line at the same time. The shape of a raid.",
+      "armed": false
+     }
+    ],
+    "bytes": "{\"format\":1,\"name\":\"No Spam\",\"shields\":{\"trusted\":{\"tenure_secs\":604800,\"messages\":5,\"distinct\":3,\"veteran_secs\":2592000,\"roles_trust\":true}},\"window\":{\"hours\":168,\"max_messages\":4000},\"exempt\":{\"patterns\":[],\"roles\":[],\"channels\":[]},\"rules\":[{\"id\":\"repeat\",\"match\":{\"type\":\"repeat\",\"normalize\":\"skeleton\",\"within_secs\":1800},\"tiers\":{\"per_window\":[{\"hits\":4,\"severity\":\"major\",\"weight\":50,\"pierces_trusted\":false},{\"hits\":8,\"severity\":\"severe\",\"weight\":85,\"pierces_trusted\":false}]},\"pierces_trusted\":false,\"exempt\":{\"patterns\":[],\"roles\":[],\"channels\":[]},\"enforcement\":\"advisory\"},{\"id\":\"cohort\",\"match\":{\"type\":\"cohort\",\"min\":3,\"quiet_max\":2,\"short_factor\":3,\"thin_ratio\":null},\"severity\":\"severe\",\"weight\":85,\"pierces_trusted\":false,\"exempt\":{\"patterns\":[],\"roles\":[],\"channels\":[]},\"enforcement\":\"advisory\"}]}"
+   },
+   {
+    "id": "word_filter",
+    "name": "Word Filter",
+    "description": "Any list of words you choose, with per-channel exceptions.",
+    "example": "spoilers, slurs, or a scam phrase",
+    "caveat": "Whole words by default, so filtering \"art\" leaves \"start\" alone.",
+    "dials": [
+     {
+      "key": "words",
+      "label": "Words to catch",
+      "kind": "wordlist",
+      "hint": "One per line. Use *word* to match inside longer words."
+     },
+     {
+      "key": "exempt_channels",
+      "label": "Allowed in these channels",
+      "kind": "channels",
+      "hint": "The filter ignores these channels entirely."
+     }
+    ],
+    "rules": [
+     {
+      "label": "Words",
+      "detail": "0 words on the list, matched as whole words unless you wrap them in *. Trips at 1 hit in one message, then 10 hits in the window.",
+      "armed": false
+     }
+    ],
+    "bytes": "{\"format\":1,\"name\":\"Word Filter\",\"shields\":{\"trusted\":{\"tenure_secs\":604800,\"messages\":5,\"distinct\":3,\"veteran_secs\":2592000,\"roles_trust\":true}},\"window\":{\"hours\":168,\"max_messages\":4000},\"exempt\":{\"patterns\":[],\"roles\":[],\"channels\":[]},\"rules\":[{\"id\":\"words\",\"match\":{\"type\":\"keyword\",\"patterns\":[],\"normalize\":\"fold\"},\"tiers\":{\"per_message\":[{\"hits\":1,\"severity\":\"minor\",\"weight\":10,\"pierces_trusted\":false}],\"per_window\":[{\"hits\":10,\"severity\":\"major\",\"weight\":45,\"pierces_trusted\":false}]},\"pierces_trusted\":false,\"exempt\":{\"patterns\":[],\"roles\":[],\"channels\":[]},\"enforcement\":\"advisory\"}]}"
+   },
+   {
+    "id": "mass_tagging",
+    "name": "Mass Tagging",
+    "description": "One message that names a crowd, rather than a person.",
+    "example": "a post tagging twelve people at once",
+    "caveat": "Counts distinct people per message: pinging one person twenty times reads as one, because it is.",
+    "dials": [
+     {
+      "key": "strictness",
+      "label": "Sensitivity",
+      "kind": "strictness",
+      "hint": "How much it takes to trip a rule, and how confident the result is."
+     },
+     {
+      "key": "exempt_channels",
+      "label": "Allowed in these channels",
+      "kind": "channels",
+      "hint": "Announcement channels where tagging everyone is the point."
+     }
+    ],
+    "rules": [
+     {
+      "label": "Mass tagging",
+      "detail": "How many DISTINCT people one message names. Tagging the same person repeatedly counts once. Trips at 6 hits in one message, then 12 hits in one message.",
+      "armed": false
+     }
+    ],
+    "bytes": "{\"format\":1,\"name\":\"Mass Tagging\",\"shields\":{\"trusted\":{\"tenure_secs\":604800,\"messages\":5,\"distinct\":3,\"veteran_secs\":2592000,\"roles_trust\":true}},\"window\":{\"hours\":168,\"max_messages\":4000},\"exempt\":{\"patterns\":[],\"roles\":[],\"channels\":[]},\"rules\":[{\"id\":\"mentions\",\"match\":{\"type\":\"mentions\"},\"tiers\":{\"per_message\":[{\"hits\":6,\"severity\":\"major\",\"weight\":50,\"pierces_trusted\":false},{\"hits\":12,\"severity\":\"severe\",\"weight\":85,\"pierces_trusted\":false}]},\"pierces_trusted\":false,\"exempt\":{\"patterns\":[],\"roles\":[],\"channels\":[]},\"enforcement\":\"advisory\"}]}"
+   },
+   {
+    "id": "rate_limit",
+    "name": "Rate Limit",
+    "description": "Too many messages too quickly from one account, whatever they say.",
+    "example": "twelve messages in ten seconds",
+    "caveat": "Counts messages, not content: a fast typer in a lively channel can trip it, so preview before enabling.",
+    "dials": [
+     {
+      "key": "per_secs",
+      "label": "Over how many seconds",
+      "kind": "seconds",
+      "hint": "The span it counts within. 10 catches a burst; 60 catches a sustained flood."
+     },
+     {
+      "key": "strictness",
+      "label": "Sensitivity",
+      "kind": "strictness",
+      "hint": "How much it takes to trip a rule, and how confident the result is."
+     }
+    ],
+    "rules": [
+     {
+      "label": "Posting too fast",
+      "detail": "One account's messages counted over any 10 seconds, whatever they say. Trips at 6 hits in the window, then 12 hits in the window.",
+      "armed": false
+     }
+    ],
+    "bytes": "{\"format\":1,\"name\":\"Rate Limit\",\"shields\":{\"trusted\":{\"tenure_secs\":604800,\"messages\":5,\"distinct\":3,\"veteran_secs\":2592000,\"roles_trust\":true}},\"window\":{\"hours\":168,\"max_messages\":4000},\"exempt\":{\"patterns\":[],\"roles\":[],\"channels\":[]},\"rules\":[{\"id\":\"rate\",\"match\":{\"type\":\"rate\",\"per_secs\":10},\"tiers\":{\"per_window\":[{\"hits\":6,\"severity\":\"major\",\"weight\":50,\"pierces_trusted\":false},{\"hits\":12,\"severity\":\"severe\",\"weight\":85,\"pierces_trusted\":false}]},\"pierces_trusted\":false,\"exempt\":{\"patterns\":[],\"roles\":[],\"channels\":[]},\"enforcement\":\"advisory\"}]}"
+   },
+   {
+    "id": "blank",
+    "name": "Start from scratch",
+    "description": "An empty policy. Name it, add the rules you want, preview before anything runs.",
+    "example": "whatever this community actually needs",
+    "caveat": "A policy with no rules catches nothing, and the preview will tell you so.",
+    "dials": [
+     {
+      "key": "name",
+      "label": "Policy name",
+      "kind": "text",
+      "hint": "What you will see in the list."
+     },
+     {
+      "key": "rules",
+      "label": "Rules",
+      "kind": "rules",
+      "hint": "Add as many as you like. Any one of them can convict on its own."
+     },
+     {
+      "key": "exempt_channels",
+      "label": "Allowed in these channels",
+      "kind": "channels",
+      "hint": "These channels are ignored entirely."
+     }
+    ],
+    "rules": [],
+    "bytes": "{\"format\":1,\"name\":\"New policy\",\"shields\":{\"trusted\":{\"tenure_secs\":604800,\"messages\":5,\"distinct\":3,\"veteran_secs\":2592000,\"roles_trust\":true}},\"window\":{\"hours\":168,\"max_messages\":4000},\"exempt\":{\"patterns\":[],\"roles\":[],\"channels\":[]},\"rules\":[]}"
+   }
+  ],
+  "rule_kinds": [
+   {
+    "id": "keyword",
+    "label": "Words",
+    "description": "Someone posts a word from your list.",
+    "input": "wordlist",
+    "input_label": "Words to catch",
+    "input_hint": "One per line. Use *word* to match inside longer words.",
+    "rule": {
+     "id": "words",
+     "match": {
+      "type": "keyword",
+      "patterns": [],
+      "normalize": "fold"
+     },
+     "tiers": {
+      "per_message": [
+       {
+        "hits": 1,
+        "severity": "minor",
+        "weight": 10,
+        "pierces_trusted": false
+       }
+      ],
+      "per_window": [
+       {
+        "hits": 10,
+        "severity": "major",
+        "weight": 45,
+        "pierces_trusted": false
+       }
+      ]
+     },
+     "pierces_trusted": false,
+     "exempt": {
+      "patterns": [],
+      "roles": [],
+      "channels": []
+     },
+     "enforcement": "advisory"
+    }
+   },
+   {
+    "id": "link",
+    "label": "Link domains",
+    "description": "Someone posts a link to a domain on your list.",
+    "input": "domainlist",
+    "input_label": "Domains to block",
+    "input_hint": "One per line. Matches the domain and its subdomains.",
+    "rule": {
+     "id": "links",
+     "match": {
+      "type": "link"
+     },
+     "tiers": {
+      "per_message": [
+       {
+        "hits": 1,
+        "severity": "severe",
+        "weight": 70,
+        "pierces_trusted": false
+       }
+      ],
+      "per_window": [
+       {
+        "hits": 3,
+        "severity": "severe",
+        "weight": 90,
+        "pierces_trusted": false
+       }
+      ]
+     },
+     "pierces_trusted": false,
+     "exempt": {
+      "patterns": [],
+      "roles": [],
+      "channels": []
+     },
+     "enforcement": "advisory"
+    }
+   },
+   {
+    "id": "repeat",
+    "label": "Same message repeated",
+    "description": "One account posting the same thing over and over inside half an hour. Case, punctuation and digits are ignored, so changing them does not help.",
+    "input": "none",
+    "input_label": "",
+    "input_hint": "",
+    "rule": {
+     "id": "repeat",
+     "match": {
+      "type": "repeat",
+      "normalize": "skeleton",
+      "within_secs": 1800
+     },
+     "tiers": {
+      "per_window": [
+       {
+        "hits": 4,
+        "severity": "major",
+        "weight": 50,
+        "pierces_trusted": false
+       },
+       {
+        "hits": 8,
+        "severity": "severe",
+        "weight": 85,
+        "pierces_trusted": false
+       }
+      ]
+     },
+     "pierces_trusted": false,
+     "exempt": {
+      "patterns": [],
+      "roles": [],
+      "channels": []
+     },
+     "enforcement": "advisory"
+    }
+   },
+   {
+    "id": "mentions",
+    "label": "Mass tagging",
+    "description": "One message naming a crowd. Counts distinct people, so twenty pings at one person is one person — annoying, but not a raid.",
+    "input": "none",
+    "input_label": "",
+    "input_hint": "",
+    "rule": {
+     "id": "mentions",
+     "match": {
+      "type": "mentions"
+     },
+     "tiers": {
+      "per_message": [
+       {
+        "hits": 6,
+        "severity": "major",
+        "weight": 50,
+        "pierces_trusted": false
+       },
+       {
+        "hits": 12,
+        "severity": "severe",
+        "weight": 85,
+        "pierces_trusted": false
+       }
+      ]
+     },
+     "pierces_trusted": false,
+     "exempt": {
+      "patterns": [],
+      "roles": [],
+      "channels": []
+     },
+     "enforcement": "advisory"
+    }
+   },
+   {
+    "id": "rate",
+    "label": "Posting too fast",
+    "description": "One account posting faster than a person reasonably types, whatever they are saying. Catches a spammer who varies their text just enough to look different every time.",
+    "input": "seconds",
+    "input_label": "Over how many seconds",
+    "input_hint": "The span it counts within. 10 catches a burst; 60 catches a sustained flood.",
+    "rule": {
+     "id": "rate",
+     "match": {
+      "type": "rate",
+      "per_secs": 10
+     },
+     "tiers": {
+      "per_window": [
+       {
+        "hits": 6,
+        "severity": "major",
+        "weight": 50,
+        "pierces_trusted": false
+       },
+       {
+        "hits": 12,
+        "severity": "severe",
+        "weight": 85,
+        "pierces_trusted": false
+       }
+      ]
+     },
+     "pierces_trusted": false,
+     "exempt": {
+      "patterns": [],
+      "roles": [],
+      "channels": []
+     },
+     "enforcement": "advisory"
+    }
+   },
+   {
+    "id": "cohort",
+    "label": "Many accounts, one line",
+    "description": "Separate accounts posting the same line at the same time. The shape of a raid.",
+    "input": "none",
+    "input_label": "",
+    "input_hint": "",
+    "rule": {
+     "id": "cohort",
+     "match": {
+      "type": "cohort",
+      "min": 3,
+      "quiet_max": 2,
+      "short_factor": 3,
+      "thin_ratio": null
+     },
+     "severity": "severe",
+     "weight": 85,
+     "pierces_trusted": false,
+     "exempt": {
+      "patterns": [],
+      "roles": [],
+      "channels": []
+     },
+     "enforcement": "advisory"
+    }
+   }
+  ]
  }
 }
