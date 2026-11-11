@@ -5,6 +5,7 @@ use std::collections::HashSet;
 use std::rc::Rc;
 
 use gpui::prelude::*;
+use gpui::AnimationExt;
 use gpui::{div, img, px, svg, AnyElement, App, Entity, FontWeight, SharedString, Window};
 
 use crate::composer::TextInput;
@@ -147,8 +148,26 @@ fn channel_row(store: &Store, ch: &Channel, open: bool, owner: bool, on: &OnAct)
         .when(!ch.is_voice() && owner, |d| d.gap(px(8.)).child(action("icons/add-user.svg", open, Some(|| Act::Invite))).child(action("icons/settings.svg", open, None)))
 }
 
+/// `.chatlist-community-head-alert`: pulses, since noticing a raid late costs the community.
+fn raid_pip() -> impl IntoElement {
+    let danger = c(crate::timeline::DANGER);
+    div().size(px(8.)).flex_shrink_0().rounded_full().bg(danger).with_animation(
+        "raid-pulse",
+        gpui::Animation::new(std::time::Duration::from_millis(1900)).repeat(),
+        move |d, t| {
+            let (spread, alpha) = if t < 0.7 {
+                let k = gpui::ease_out_quint()(t / 0.7);
+                (7. * k, 0.7 * (1. - k))
+            } else {
+                (7. * (1. - (t - 0.7) / 0.3), 0.)
+            };
+            d.shadow(vec![gpui::BoxShadow { color: danger.opacity(alpha), offset: gpui::point(px(0.), px(0.)), blur_radius: px(0.), spread_radius: px(spread), inset: false }])
+        },
+    )
+}
+
 /// `#chats` over a Community: its head, then its channels by Category.
-pub fn sidebar(store: &Store, view: &View, com: &Community, open: Option<&str>, on: &OnAct) -> AnyElement {
+pub fn sidebar(store: &Store, view: &View, com: &Community, open: Option<&str>, raid: bool, on: &OnAct) -> AnyElement {
     let head = div()
         .id("chatlist-community-head")
         .h(px(61.))
@@ -191,6 +210,7 @@ pub fn sidebar(store: &Store, view: &View, com: &Community, open: Option<&str>, 
                         }),
                 ),
         )
+        .when(raid, |d| d.child(raid_pip()))
         .child(div().size(px(30.)).flex().items_center().justify_center().child(icon("icons/chevron-down.svg", 19.5, white_a(0.4))));
 
     let owner = com.is_owner;

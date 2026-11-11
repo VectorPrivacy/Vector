@@ -1968,7 +1968,7 @@ impl Render for VectorApp {
                     row.child(div().flex_1().min_w_0().h_full().child(crate::settings::view(settings, width, &on, cx)))
                 })
                 .when(self.settings.is_none(), |row| match self.community.as_ref().and_then(|v| Some((v, store.community(&v.id)?))) {
-                    Some((view, com)) => row.child(crate::community::sidebar(&store, view, com, self.open.as_deref(), &on_community)),
+                    Some((view, com)) => row.child(crate::community::sidebar(&store, view, com, self.open.as_deref(), self.raid.get(&com.community_id).is_some_and(|r| r.0 || r.1 > 0), &on_community)),
                     None => row.child(chat_list(&self.store, &store, self.open.clone(), (self.requests_tab, self.tab_slid, no_messages), cx)),
                 })
                 .when(self.settings.is_none(), |row| row.child(match (&self.profile, self.open.clone()) {
@@ -3509,10 +3509,10 @@ impl VectorApp {
             });
             cx.subscribe(&search, |_, _, _: &crate::composer::InputChanged, cx| cx.notify()).detach();
             self.community = Some(crate::community::View { id: id.clone(), members, admins: Vec::new(), panel: true, search, folded: HashSet::new() });
+            self.check_raid(id.clone(), cx);
             if self.live {
                 let named = backend::community::nicknames(&id);
                 self.store.borrow_mut().nicknames.insert(id.clone(), named);
-                self.check_raid(id.clone(), cx);
                 let rx = backend::run(backend::community::members(id.clone()));
                 cx.spawn(async move |this, cx| {
                     let Ok((members, admins)) = rx.await else { return };
