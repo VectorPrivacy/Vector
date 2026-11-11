@@ -1038,11 +1038,6 @@ async function renderCommunityOverview(chat, preserveSearch = false) {
                     showContextMenu, attachLongPressContextMenu, showMiniProfile, getProfileAvatarSrc, getProfile,
                     getName, streamHidden, twemojify, renderCustomEmojiShortcodes, showGlobalTooltip, hideGlobalTooltip,
                     memberSectionClosed, setMemberSectionClosed, copyIdItems, memberMenuItems, explainUnlisted,
-                    channelPosters: (id) => {
-                        const open = arrChats.find(c => c.id === strOpenChat);
-                        if (communityIdOfChat(open) !== id) return null;
-                        return new Set((open.messages || []).map(m => (m.mine ? myNpub : m.npub)).filter(Boolean));
-                    },
                 },
                 onChange: ({ members }) => {
                     communityMembersCache.set(communityId, members);
