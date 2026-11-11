@@ -95,11 +95,13 @@
          style:--sync-progress={sync.progress !== null ? sync.progress : null}></div>
     <NetworkNotice />
     {#if shell.ws}
-        <div id="chat-new-actions" style="display: flex; flex-direction: row; margin: 0 15px 15px 15px;">
-            <button id="new-chat-btn" class="new-chat-btn btn" style="width: 100%; margin-right: 10px;" style:display={shell.newChatButtons ? null : 'none'}
-                    use:bindNewChat use:reveal={['newChat', reveals.newChat]} onclick={() => shellHandlers().openNewChat?.()}>
-                <span class="icon icon-new-msg"></span>
-                <span style="width: 100%">New Chat</span>
+        <!-- The list's title, and one + that branches into a message or a community. -->
+        <div id="chat-new-actions" class="chatlist-head" style:display={shell.newChatButtons ? null : 'none'}
+             use:bindNewChat use:reveal={['newChat', reveals.newChat]}>
+            <h2 class="chatlist-head-title">Chats</h2>
+            <button class="chatlist-head-new" title="New Message or Community" aria-label="New Message or Community" aria-haspopup="menu"
+                    onclick={(e) => shellHandlers().newMenu?.(e.currentTarget)}>
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
             </button>
         </div>
     {/if}

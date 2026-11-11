@@ -29,6 +29,7 @@
         getProfile = null,           // (npub) => live profile; rows track its signal when given
         onSelectionChange = () => {}, // (sel: Set) — fires with a copy on every selection change
         onHub = null,                // () => void — given, an empty list invites people to the Hub
+        single = false,              // one person at a time: a pick replaces the last
     } = $props();
 
     // Raw discipline: profiles are shared by reference with the page's arrProfiles array —
@@ -74,7 +75,7 @@
     /** Select from the paste path (no toggle: re-pasting an already-selected npub keeps it). */
     export function select(npub) {
         if (selection.has(npub)) return;
-        const next = new Set(selection);
+        const next = single ? new Set() : new Set(selection);
         next.add(npub);
         selection = next;
     }
@@ -130,10 +131,11 @@
     });
 
     function toggle(npub) {
-        const next = new Set(selection);
-        if (next.has(npub)) next.delete(npub);
-        else next.add(npub);
-        selection = next;
+        if (selection.has(npub)) {
+            const next = new Set(selection);
+            next.delete(npub);
+            selection = next;
+        } else select(npub);
     }
 
     // Fires with a copy so the caller can never mutate the live Set.
@@ -163,7 +165,7 @@
             {ui}
         >
             {#snippet trailing()}
-                <div class="member-pick-indicator" class:selected={selection.has(row.npub)}></div>
+                <div class="member-pick-indicator" class:selected={selection.has(row.npub)} class:is-single={single}></div>
             {/snippet}
         </MemberRow>
     {/each}

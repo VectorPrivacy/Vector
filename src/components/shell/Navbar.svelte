@@ -41,7 +41,20 @@
 <div id="navbar" class="row navbar" style:display={panes.navbar ? null : 'none'} use:bindNavbar use:reveal={['navbar', reveals.navbar]} use:drawerPane={{ home: 'motion' }}>
     <!-- Unread DMs over communities; the strip renders once rail.js registers its bag. -->
     <div id="ws-rail-shortcuts">
-        {#if st.ws && screens.rail}<RailShortcuts h={screens.rail.h} snapshot={screens.rail.snapshot} />{/if}
+        {#if st.ws && screens.rail}
+            <RailShortcuts h={screens.rail.h} snapshot={screens.rail.snapshot}>
+                {#snippet tail()}
+                    <!-- The last of the communities: a + tile folded, a named row open. -->
+                    <button class="ws-rail-item ws-rail-create" title={st.railCollapsed ? 'Create Community' : null} aria-label="Create Community"
+                            onclick={() => h().openCreateCommunity?.()}>
+                        <span class="ws-rail-create-tile">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+                        </span>
+                        <span class="ws-rail-item-name">Create Community</span>
+                    </button>
+                {/snippet}
+            </RailShortcuts>
+        {/if}
     </div>
     <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
     <div id="profile-btn" class="btn navbar-btn" class:navbar-btn-inactive={st.tab !== 'profile-btn'} onclick={() => h().openProfile?.()}>

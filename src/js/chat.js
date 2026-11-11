@@ -1503,7 +1503,7 @@ async function handleIncomingShare(payload) {
     showToast('Choose a chat to forward to');
 }
 
-/** Start a new chat: the one panel that opens a DM or makes a Community. */
+/** Start a new chat: the panel's New Chat, one person to DM. */
 function openNewChat() {
     openCreateGroup();
 }

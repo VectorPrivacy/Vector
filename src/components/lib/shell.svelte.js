@@ -12,7 +12,7 @@ const panes = $state({
 const shell = $state({ tab: 'chat-btn', invitesTab: false, settingsTab: true, updateDot: false, chatBadge: '', newChatButtons: false, ws: false, railCollapsed: false, railLocked: false });
 // Registered by two owners: main.js (the nav actions) and widescreen.js (the list
 // resizer), so writes must merge. { openProfile, openChatlist, openSettings, openInvites,
-// openNewChat, openCreateGroup, openRouting, openMiniApps, openBookmarks, myNpub,
+// openNewChat, openCreateCommunity, newMenu(anchor), openRouting, openMiniApps, openBookmarks, myNpub,
 // placeMenu(event, what, path), listResizeStart, listResizeReset }
 let handlers = $state.raw({});
 

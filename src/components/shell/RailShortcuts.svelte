@@ -18,7 +18,8 @@
     const shell = shellState();
     const pane = paneState();
 
-    // tail: what follows the last community in the scroller (the slim rail's + tile).
+    // tail: what follows the last community in the scroller (Create Community, and the
+    // slim rail's fold).
     let { h, snapshot, tail = null } = $props();   // h: RailHelpers (js/render/rail.js)
 
     /** How many unread DMs the rail surfaces. The Chat tab's badge carries the total. */

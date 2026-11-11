@@ -58,7 +58,7 @@ export { showProcessing, hideProcessing, openPermissionPrompt, activatePermissio
 export { popupState, openPopupDialog, closePopupDialog } from './lib/popup.svelte.js';
 export { loginState, loginNetState, patchLoginNet, bunkerState, pickerState as loginPickerState, encryptState, patchLogin, patchBunker, patchPicker, patchEncrypt, loginScreen, loginShowForm, loginHide, loginUp, loginShowBunker, loginHideBunker, bunkerQrOpen, bunkerStatus, bunkerLink, bunkerCopied, bunkerBusy, bunkerDeadline, bunkerTick, resetLoginPin, focusLoginInput } from './lib/login.svelte.js';
 export { credentialState, openCredentialDialog, closeCredentialDialog, showMigration, hideMigration, setMigrationProgress } from './lib/credential.svelte.js';
-export { ccState, ccOpen, ccSetAvatar, ccSetBusy, ccSetError, ccProfilesChanged } from './lib/createcommunity.svelte.js';
+export { ccState, ccOpen, ccSetAvatar, ccSetBusy, ccSetError, ccPatch, ccProfilesChanged } from './lib/createcommunity.svelte.js';
 export { editHistoryState, setEditHistory, openEditHistory, clearEditHistory } from './lib/edithistory.svelte.js';
 export { setBlossomCaps, setBlossomInfo, setBlossomStats, setRelayLogs } from './lib/network.svelte.js';
 export { patchRelayStatus } from './lib/settings.svelte.js';

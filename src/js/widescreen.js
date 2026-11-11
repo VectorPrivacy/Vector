@@ -220,7 +220,7 @@ function wsUpdate() {
         // may have closed it (no chat beside it). Widescreen forced the panes visible
         // regardless; narrow honours their inline none, so land where the user was.
         // Add Account hid every pane behind the login screen on purpose: it stays hidden.
-        const anyShown = ['chat', 'chats', 'profile', 'settings', 'groupOverview'].some(p => VectorSvelte.paneShown(p));
+        const anyShown = ['chat', 'chats', 'profile', 'settings', 'groupOverview', 'createGroup'].some(p => VectorSvelte.paneShown(p));
         if (!anyShown && !addAccountFlow.active) {
             if (strOpenChat) openChat(strOpenChat);
             else openChatlist();
@@ -669,11 +669,25 @@ function ccOpenCommunity(communityId, fallbackChatId) {
     if (instant && drawer && ccLayerChat()) ccCameFromList();
 }
 
+/** The two ways to start something: a DM, or a community of your own. */
+function newConversationItems() {
+    return [
+        { label: 'New Message', icon: 'chat-circle', lead: true, onClick: () => openNewChat() },
+        { label: 'New Community', icon: 'users-multi', lead: true, onClick: () => openCreateCommunity() },
+    ];
+}
+
+/** The chat list's + in widescreen: just the two. */
+function wsOpenNewMenu(anchor) {
+    const r = anchor.getBoundingClientRect();
+    showContextMenu({ x: r.left, y: r.bottom + 6, items: newConversationItems() });
+}
+
 /** The header's New menu, hung from the + under its right edge. */
 function ccOpenNewMenu(anchor) {
     const r = anchor.getBoundingClientRect();
     const items = [
-        { label: 'New Chat', icon: 'mail', lead: true, onClick: () => openNewChat() },
+        ...newConversationItems(),
         { label: 'Add Friend', icon: 'add-user', lead: true, onClick: () => openQrOverlay(`https://vectorapp.io/profile/${strPubkey}`) },
         { label: 'Bookmark', icon: 'bookmark', lead: true, onClick: () => openChat(strPubkey) },
     ];
@@ -693,6 +707,7 @@ function ccInit() {
         consoleSwitchAccount: (el) => profileSwitcher.toggle('header', el),
         consoleScan: () => openQrScanner(),
         consoleNewMenu: ccOpenNewMenu,
+        newMenu: wsOpenNewMenu,
         consoleSetRail: ccSetRail,
         consoleBack: ccHome,
         consoleDrawer: (open) => ccSetDrawer(open),
