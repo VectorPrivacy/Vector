@@ -610,6 +610,22 @@ pub async fn set_banned(community_id: String, npubs: Vec<String>, banned: bool) 
     db::scoped(async move {
         let refs: Vec<&str> = npubs.iter().map(String::as_str).collect();
         VectorCore.set_members_banned(&community_id, &refs, banned).await.map_err(|e| e.to_string())?;
+        if banned {
+            VectorCore::invalidate_raid_report(&community_id);
+        }
+        // A ban hides messages retroactively, which the incremental unread cache can't derive.
+        for ch in load(&community_id).ok().map(|c| c.channels.iter().map(|ch| bytes_to_hex_32(&ch.id.0)).collect::<Vec<_>>()).unwrap_or_default() {
+            let count = db::events::unread_count_for_chat(&ch).await.unwrap_or(0);
+            let mut state = STATE.lock().await;
+            if state.unread_seeded {
+                state.unread_set(&ch, count);
+            }
+        }
+        if db::session_is_live() {
+            if let Some(client) = vector_core::state::nostr_client() {
+                realtime::refresh_subscription(&client).await;
+            }
+        }
         super::emit("community_refreshed", community_id);
         Ok(())
     })
