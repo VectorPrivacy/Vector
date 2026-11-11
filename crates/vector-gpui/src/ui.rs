@@ -669,6 +669,7 @@ impl VectorApp {
                 }
             }
             Act::Pin(key) => self.start_pin(key, cx),
+            Act::Drop(source, target) => self.start_edit(move |l| l.apply_drop(&source, &target, &vector_core::rail_layout::new_folder_id()), cx),
             Act::Switch(npub) => {
                 self.start = None;
                 self.on_switcher(crate::switcher::Act::Pick(npub), window, cx);

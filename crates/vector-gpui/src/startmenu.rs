@@ -7,7 +7,7 @@ use std::rc::Rc;
 use gpui::prelude::*;
 use gpui::AnimationExt;
 use gpui::{AnyElement, App, Entity, FontWeight, SharedString, Window, div, img, px, svg};
-use vector_core::rail_layout::{RailLayout, RailNode};
+use vector_core::rail_layout::{RailAnchor, RailDrag, RailDrop, RailLayout, RailNode};
 
 use crate::composer::TextInput;
 use crate::data::Store;
@@ -59,20 +59,95 @@ pub enum Act {
     Deafen,
     /// `output` or `input`, at the chevron.
     Devices(&'static str, gpui::Point<gpui::Pixels>),
+    /// A pin or folder let go somewhere in the pins.
+    Drop(RailDrag, RailDrop),
     /// A pin's or folder's own menu; the key, or the folder id.
     Menu(gpui::Point<gpui::Pixels>, Option<String>, Option<String>),
 }
 
-/// Right-click opens the tile's own menu.
-fn with_menu(el: AnyElement, key: Option<String>, folder: Option<String>, on: &OnAct) -> AnyElement {
-    let on = on.clone();
-    div()
+/// What a drag carries: the pin or folder, and what its ghost shows.
+#[derive(Clone)]
+pub struct PinDrag {
+    source: RailDrag,
+    label: SharedString,
+}
+
+/// The lifted tile riding the pointer.
+struct Ghost(SharedString);
+
+impl Render for Ghost {
+    fn render(&mut self, _: &mut Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
+        div()
+            .size(px(80.))
+            .flex()
+            .items_center()
+            .justify_center()
+            .px(px(6.))
+            .rounded(px(12.))
+            .border(px(1.5))
+            .border_color(c(PRIMARY))
+            .bg(c(0x222222))
+            .opacity(0.9)
+            .text_size(px(12.))
+            .text_color(c(0xffffff))
+            .overflow_hidden()
+            .child(div().overflow_hidden().text_ellipsis().whitespace_nowrap().child(self.0.clone()))
+    }
+}
+
+/// Where a tile takes a drop: its middle files into it, either side places beside it.
+struct Zones {
+    before: RailDrop,
+    into: Option<RailDrop>,
+    after: RailDrop,
+}
+
+/// Right-click opens the tile's own menu; a drag lifts it; drops land on its zones.
+fn arrangeable(id: SharedString, el: AnyElement, drag: PinDrag, zones: Zones, menu: (Option<String>, Option<String>), list: bool, on: &OnAct) -> AnyElement {
+    let (key, folder) = menu;
+    let menu_on = on.clone();
+    let source = drag.source.clone();
+    let mut wrap = div()
+        .id(id.clone())
+        .relative()
         .on_mouse_down(gpui::MouseButton::Right, move |e, w, cx| {
             cx.stop_propagation();
-            on(Act::Menu(e.position, key.clone(), folder.clone()), w, cx);
+            menu_on(Act::Menu(e.position, key.clone(), folder.clone()), w, cx);
         })
-        .child(el)
-        .into_any_element()
+        .on_drag(drag, |d: &PinDrag, _, _, cx| cx.new(|_| Ghost(d.label.clone())))
+        .child(el);
+    for (name, drop, into) in [("before", Some(zones.before), false), ("into", zones.into, true), ("after", Some(zones.after), false)] {
+        let Some(drop) = drop else { continue };
+        let on = on.clone();
+        let src = source.clone();
+        let mut z = div().id(SharedString::from(format!("{id}-{name}"))).absolute();
+        z = match (list, name) {
+            (false, "before") => z.top_0().h(px(80.)).left(px(-7.)).w(px(18.)),
+            (false, "after") => z.top_0().h(px(80.)).right(px(-7.)).w(px(18.)),
+            (false, _) => z.top_0().h(px(80.)).left(px(11.)).right(px(11.)),
+            (true, "before") => z.left_0().right_0().top_0().h(gpui::relative(0.3)),
+            (true, "after") => z.left_0().right_0().bottom_0().h(gpui::relative(0.3)),
+            (true, _) => z.left_0().right_0().top(gpui::relative(0.3)).bottom(gpui::relative(0.3)),
+        };
+        let z = z
+            .drag_over::<PinDrag>(move |d, _, _, _| {
+                if into {
+                    d.rounded(px(12.)).border_2().border_color(c(PRIMARY))
+                } else if list {
+                    d.border_color(c(PRIMARY)).border_t_2()
+                } else {
+                    d.border_color(c(PRIMARY)).border_l_2()
+                }
+            })
+            .on_drop(move |d: &PinDrag, w, cx| {
+                // A tile dropped on itself stays put, and a folder never files into another.
+                if d.source != src && !(into && matches!(d.source, RailDrag::Folder { .. })) {
+                    on(Act::Drop(d.source.clone(), drop.clone()), w, cx);
+                }
+            });
+        wrap = wrap.child(z);
+    }
+    wrap.into_any_element()
 }
 
 pub type OnAct = Rc<dyn Fn(Act, &mut Window, &mut App)>;
@@ -465,6 +540,20 @@ fn audio(id: &'static str, kind: &'static str, icon: &'static str, off: bool, to
         )
 }
 
+/// Before a node, or after it (before the next); inside an open folder, by its keys.
+fn zones_for(nodes: &[RailNode], ix: usize, folder: Option<&str>, into: Option<RailDrop>) -> Zones {
+    let at = |i: usize| -> RailDrop {
+        match (folder, nodes.get(i)) {
+            (Some(f), Some(RailNode::Item { key })) => RailDrop::IntoFolder { folder_id: f.into(), before_key: Some(key.clone()) },
+            (Some(f), _) => RailDrop::IntoFolder { folder_id: f.into(), before_key: None },
+            (None, Some(RailNode::Item { key })) => RailDrop::Before { anchor: RailAnchor::Item { key: key.clone() } },
+            (None, Some(RailNode::Folder { id, .. })) => RailDrop::Before { anchor: RailAnchor::Folder { id: id.clone() } },
+            (None, None) => RailDrop::End,
+        }
+    };
+    Zones { before: at(ix), into, after: at(ix + 1) }
+}
+
 /// Four to a row in the grid; one under another in the list.
 fn arrange(tiles: Vec<AnyElement>, list: bool) -> AnyElement {
     if list {
@@ -564,25 +653,32 @@ pub fn render(sm: &StartMenu, store: &Store, window: &Window, on: &OnAct, cx: &A
         .child(div().ml_auto().flex().gap(px(2.)).child(view_btn("stm-grid", "icons/grid.svg", !list, false)).child(view_btn("stm-list", "icons/list.svg", list, true)));
 
     let mut tiles: Vec<AnyElement> = Vec::new();
-    let keys: Vec<RailNode> = match &folder {
+    let folder_id = sm.folder.clone().filter(|_| folder.is_some());
+    let shown: Vec<RailNode> = match &folder {
         Some((_, keys)) => keys.iter().map(|k| RailNode::item(k.clone())).collect(),
         None => sm.layout.nodes.clone(),
     };
-    for (ix, node) in keys.iter().enumerate() {
+    for (ix, node) in shown.iter().enumerate() {
         match node {
             RailNode::Item { key } => {
                 let r = resolve(key, store);
                 let plate = matches!(r.glyph, Glyph::Icon(_));
                 let k = key.clone();
+                let drag = PinDrag { source: RailDrag::Item { key: key.clone() }, label: r.label.clone().into() };
                 let t = tile(SharedString::from(format!("stm-pin-{ix}")), r.label, Some(r.sub.as_str()).filter(|s| !s.is_empty()), glyph(&r.glyph, if list { 28. } else if plate { 40. } else { 65. }), plate, r.missing, list, click(on, move || Act::Open(k.clone())));
-                tiles.push(with_menu(t, Some(key.clone()), None, on));
+                let into = if folder_id.is_none() { Some(RailDrop::Combine { with_key: key.clone() }) } else { None };
+                let zones = zones_for(&shown, ix, folder_id.as_deref(), into);
+                tiles.push(arrangeable(SharedString::from(format!("stm-a-{ix}")), t, drag, zones, (Some(key.clone()), None), list, on));
             }
             RailNode::Folder { id, name, keys, .. } => {
                 let mini = keys.iter().take(4).map(|k| glyph(&resolve(k, store).glyph, if list { 12. } else { 22. }));
                 let grid = div().w(px(if list { 28. } else { 50. })).flex().flex_wrap().gap(px(if list { 4. } else { 6. })).justify_center().children(mini);
                 let fid = id.clone();
-                let t = tile(SharedString::from(format!("stm-folder-{ix}")), if name.is_empty() { "Folder".into() } else { name.clone() }, Some("Folder"), grid.into_any_element(), true, false, list, click(on, move || Act::Folder(Some(fid.clone()))));
-                tiles.push(with_menu(t, None, Some(id.clone()), on));
+                let label = if name.is_empty() { "Folder".to_string() } else { name.clone() };
+                let drag = PinDrag { source: RailDrag::Folder { id: id.clone() }, label: label.clone().into() };
+                let t = tile(SharedString::from(format!("stm-folder-{ix}")), label, Some("Folder"), grid.into_any_element(), true, false, list, click(on, move || Act::Folder(Some(fid.clone()))));
+                let zones = zones_for(&shown, ix, None, Some(RailDrop::IntoFolder { folder_id: id.clone(), before_key: None }));
+                tiles.push(arrangeable(SharedString::from(format!("stm-a-{ix}")), t, drag, zones, (None, Some(id.clone())), list, on));
             }
         }
     }
