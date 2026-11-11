@@ -97,6 +97,10 @@ pub struct VectorApp {
     invite: Option<crate::invite::Invite>,
     /// The pending invite whose details show.
     invite_details: Option<String>,
+    /// Invite links looked up, by invite key.
+    invite_previews: HashMap<String, crate::newchat::Preview>,
+    /// The open chat as last scanned for invite links: its id, length and newest message.
+    invite_scan: Option<(String, usize, String)>,
     /// Add Profile is showing the login screen over this account: the account Back returns to,
     /// and whether the old session was already torn down for the new one.
     adding: Option<(String, bool)>,
@@ -269,6 +273,8 @@ impl VectorApp {
             create_community: None,
             invite: None,
             invite_details: None,
+            invite_previews: HashMap::new(),
+            invite_scan: None,
             adding: None,
             requests_tab: false,
             tab_slid: false,
@@ -407,6 +413,12 @@ impl VectorApp {
         }
         if let Ok(pick) = std::env::var("VECTOR_NEW_CHAT") {
             app.open_new_chat(window, cx);
+            if let Ok(text) = std::env::var("VECTOR_NEW_CHAT_TEXT") {
+                if let Some(key) = crate::newchat::invite_key(&text) {
+                    app.resolve_invite(key, cx);
+                }
+                app.new_chat.as_ref().unwrap().filter.update(cx, |t, cx| t.set_text(&text, cx));
+            }
             if let Ok(n) = pick.parse::<usize>()
                 && n > 0
             {
@@ -1350,6 +1362,14 @@ impl VectorApp {
     fn on_act(&mut self, id: String, act: timeline::Act, window: &mut Window, cx: &mut Context<Self>) {
         use timeline::Act;
         match act {
+            Act::Invite(key) => {
+                let Some(crate::newchat::Preview::Ready(info)) = self.invite_previews.get(&key).cloned() else { return };
+                if self.store.borrow().community(&info.community_id).is_some() {
+                    self.open_community(info.community_id, window, cx);
+                } else if self.live {
+                    self.join_by_link(key, info.name, window, cx);
+                }
+            }
             Act::Text(t) => self.on_text(id, t, cx),
             Act::Hover(true) => {
                 self.hover_gen += 1;
@@ -1817,6 +1837,7 @@ impl VectorApp {
 
 impl Render for VectorApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.scan_invites(cx);
         let root = div()
             .size_full()
             .relative()
@@ -1911,7 +1932,9 @@ impl Render for VectorApp {
                             app.update(cx, |app, cx| app.on_new_chat(act, window, cx)).ok();
                         });
                         let width = f32::from(window.viewport_size().width) - RAIL_W - LIST_W;
-                        div().flex_1().min_w_0().h_full().child(crate::newchat::view(self.new_chat.as_ref().unwrap(), &store, width, &on, cx)).into_any_element()
+                        let nc = self.new_chat.as_ref().unwrap();
+                        let invite = crate::newchat::invite_key(nc.filter.read(cx).text()).map(|k| self.invite_previews.get(&k).cloned().unwrap_or(crate::newchat::Preview::Loading));
+                        div().flex_1().min_w_0().h_full().child(crate::newchat::view(nc, &store, width, invite.as_ref(), &on, cx)).into_any_element()
                     }
                     (Some(p), _) => {
                         let app = cx.entity().downgrade();
@@ -2841,6 +2864,7 @@ impl VectorApp {
         let fail_reasons = self.fail_reasons.clone();
         let media = self.media.clone();
         let live = self.live;
+        let invites = Rc::new(self.invite_previews.clone());
         let messages = list(self.timeline.clone(), move |i, window, cx| {
             let rows_store = rows_store.borrow();
             let (Some(chat), Some(row)) = (rows_store.chat(&rows_id), rows.get(i)) else {
@@ -2861,6 +2885,7 @@ impl VectorApp {
                 media: &media,
                 scale: window.scale_factor(),
                 held: rows_store.is_request(chat),
+                invites: &invites,
             };
             // A divider's 10px margins stand in for the row's own above it.
             let after_message = i > 0 && matches!(rows[i - 1], Row::Message { .. });
@@ -4017,6 +4042,91 @@ impl VectorApp {
             }
         }
         cx.notify();
+    }
+
+    /// Looks up the invite links in the open chat, once per change to it.
+    fn scan_invites(&mut self, cx: &mut Context<Self>) {
+        let keys = {
+            let store = self.store.borrow();
+            let Some(chat) = self.open.as_deref().and_then(|id| store.chat(id)) else { return };
+            let stamp = (chat.id.clone(), chat.messages.len(), chat.messages.last().map(|m| m.id.clone()).unwrap_or_default());
+            if self.invite_scan.as_ref() == Some(&stamp) {
+                return;
+            }
+            self.invite_scan = Some(stamp);
+            if store.is_request(chat) {
+                return;
+            }
+            chat.messages.iter().flat_map(|m| crate::newchat::invite_card_keys(&m.content)).filter(|k| !self.invite_previews.contains_key(k)).collect::<Vec<_>>()
+        };
+        for key in keys {
+            self.resolve_invite(key, cx);
+        }
+    }
+
+    fn resolve_invite(&mut self, key: String, cx: &mut Context<Self>) {
+        if matches!(self.invite_previews.get(&key), Some(crate::newchat::Preview::Ready(_) | crate::newchat::Preview::Loading)) {
+            return;
+        }
+        self.invite_previews.insert(key.clone(), crate::newchat::Preview::Loading);
+        if !self.live {
+            let preview = std::env::var("VECTOR_INVITE_PREVIEW").ok().map(|name| crate::backend::community::InvitePreview {
+                community_id: "c".repeat(64),
+                name,
+                description: "Late-night builders, ships and shenanigans.".into(),
+            });
+            self.invite_previews.insert(key, preview.map_or(crate::newchat::Preview::Failed, crate::newchat::Preview::Ready));
+            return;
+        }
+        let rx = backend::run(backend::community::preview_invite(crate::newchat::invite_url(&key)));
+        cx.spawn(async move |this, cx| {
+            let res = rx.await;
+            this.update(cx, |this, cx| {
+                let state = match res {
+                    Ok(Ok(p)) => crate::newchat::Preview::Ready(p),
+                    _ => crate::newchat::Preview::Failed,
+                };
+                this.invite_previews.insert(key, state);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn join_by_link(&mut self, key: String, name: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.toast = Some((format!("Joining {name}…").into(), std::time::Instant::now()));
+        let rx = backend::run(backend::community::join_by_link(crate::newchat::invite_url(&key)));
+        cx.spawn_in(window, async move |this, cx| {
+            let res = rx.await;
+            this.update_in(cx, |this, window, cx| {
+                if let Some(n) = this.new_chat.as_mut() {
+                    n.joining = false;
+                }
+                match res {
+                    Ok(Ok(id)) => {
+                        this.new_chat = None;
+                        let rx = backend::run(async { backend::community::list() });
+                        cx.spawn_in(window, async move |this, cx| {
+                            let Ok(list) = rx.await else { return };
+                            let list: Vec<data::Community> = list.into_iter().filter_map(|v| serde_json::from_value(v).ok()).collect();
+                            this.update_in(cx, |this, window, cx| {
+                                this.store.borrow_mut().communities = list;
+                                this.open_community(id, window, cx);
+                                cx.notify();
+                            })
+                            .ok();
+                        })
+                        .detach();
+                    }
+                    Ok(Err(e)) => this.notice("Failed to Join", e, cx),
+                    Err(_) => {}
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     fn open_invite_details(&mut self, community: String, _window: &mut Window, cx: &mut Context<Self>) {
@@ -5528,6 +5638,9 @@ impl VectorApp {
         });
         cx.subscribe_in(&filter, window, |app, input, _: &crate::composer::InputChanged, _, cx| {
             let text = input.read(cx).text().to_string();
+            if let Some(key) = crate::newchat::invite_key(&text) {
+                app.resolve_invite(key, cx);
+            }
             app.pasted_npub(&text, cx);
             cx.notify();
         })
@@ -5540,7 +5653,7 @@ impl VectorApp {
         };
         self.profile = None;
         self.switcher = None;
-        self.new_chat = Some(crate::newchat::NewChat { filter, picked: None, strangers: Vec::new(), contacts: dm });
+        self.new_chat = Some(crate::newchat::NewChat { filter, picked: None, strangers: Vec::new(), contacts: dm, joining: false });
         if self.live {
             let rx = backend::run(async { vector_core::db::events::get_dm_contact_npubs().unwrap_or_default() });
             cx.spawn(async move |this, cx| {
@@ -5826,6 +5939,21 @@ impl VectorApp {
                 cx.notify();
             }
             Act::Hub => cx.open_url("https://vectorapp.io/hub"),
+            Act::Join => {
+                let Some(key) = crate::newchat::invite_key(n.filter.read(cx).text()) else { return };
+                let Some(crate::newchat::Preview::Ready(info)) = self.invite_previews.get(&key).cloned() else { return };
+                if n.joining {
+                    return;
+                }
+                if self.store.borrow().community(&info.community_id).is_some() {
+                    self.new_chat = None;
+                    self.open_community(info.community_id, window, cx);
+                    return;
+                }
+                n.joining = true;
+                cx.notify();
+                self.join_by_link(key, info.name, window, cx);
+            }
         }
     }
 

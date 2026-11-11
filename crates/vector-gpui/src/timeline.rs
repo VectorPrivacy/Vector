@@ -45,6 +45,8 @@ pub enum Act {
     OpenFile(String),
     /// Open a picture full screen.
     View(crate::viewer::Open),
+    /// An invite card's button: join its Community, or open it once joined.
+    Invite(String),
 }
 
 pub type OnAct = Rc<dyn Fn(&str, Act, &mut Window, &mut App)>;
@@ -73,6 +75,8 @@ pub struct Ctx<'a> {
     pub scale: f32,
     /// A DM request: what its sender sent stays unloaded.
     pub held: bool,
+    /// Invite links looked up, by invite key.
+    pub invites: &'a HashMap<String, crate::newchat::Preview>,
 }
 
 pub fn base_look() -> Look {
@@ -158,6 +162,7 @@ pub fn message_row(ctx: &Ctx, index: usize, first: bool, gap: f32) -> AnyElement
             .when(pending || failed, |d| d.opacity(0.6))
             .child(content(ctx, m))
             .children(crate::attachments::attachments(ctx, m))
+            .when(!ctx.held && !m.content.is_empty(), |d| d.children(crate::newchat::invite_card_keys(&m.content).into_iter().map(|k| invite_card(ctx, m, k))))
             .children(crate::linkcard::card(ctx, m)),
     );
     if let Some(reason) = ctx.fail_reasons.get(&m.id).filter(|_| failed) {
@@ -211,16 +216,17 @@ fn content(ctx: &Ctx, m: &Message) -> AnyElement {
     let id = m.id.clone();
     let act = ctx.on_act.clone();
     let click: OnClick = Rc::new(move |t, w, cx| act(&id, Act::Text(t), w, cx));
+    let text = crate::newchat::replace_invite_links(&m.content, "");
 
     // Emoji-only, up to six: jumbo glyphs (`.dmsg-emoji-only`).
-    let headed = m.content.lines().any(|l| {
+    let headed = text.lines().any(|l| {
         let t = l.trim_start();
         t.starts_with("-# ") || (t.starts_with('#') && t.trim_start_matches('#').starts_with([' ', '\t']))
     });
-    if !headed && let Some(n @ 1..=6) = emoji::only_emoji_count(&m.content) {
+    if !headed && let Some(n @ 1..=6) = emoji::only_emoji_count(&text) {
         let _ = n;
         let mut row = div().flex().items_center().py(px(4.));
-        for g in unicode_segmentation::UnicodeSegmentation::graphemes(m.content.as_str(), true) {
+        for g in unicode_segmentation::UnicodeSegmentation::graphemes(text.as_ref(), true) {
             if let Some(src) = emoji::twemoji(g) {
                 row = row.child(img(src).size(px(50.)).flex_shrink_0());
             }
@@ -228,7 +234,7 @@ fn content(ctx: &Ctx, m: &Message) -> AnyElement {
         return div().flex().items_end().child(row).children(marks(m)).into_any_element();
     }
 
-    let mut blocks = markdown::parse(m.content.trim(), &markdown::Ctx { base: base_look(), revealed });
+    let mut blocks = markdown::parse(text.trim(), &markdown::Ctx { base: base_look(), revealed });
     let trail = trailing_atoms(m);
     if !trail.is_empty() {
         match blocks.last_mut() {
@@ -756,4 +762,78 @@ fn toolbar(ctx: &Ctx, m: &Message, first: bool) -> Option<AnyElement> {
     }
     let root = div().absolute().top_0().right_0().child(bar);
     Some(root.into_any_element())
+}
+
+/// `InviteCard.svelte`: a Community invite link as its Community, with Join (or Open, once in).
+fn invite_card(ctx: &Ctx, m: &Message, key: String) -> AnyElement {
+    use crate::newchat::Preview;
+    let state = ctx.invites.get(&key);
+    let joined = match state {
+        Some(Preview::Ready(i)) => ctx.store.community(&i.community_id),
+        _ => None,
+    };
+    let (name, desc) = match (state, joined) {
+        (_, Some(c)) => (Some(c.name.clone()), c.description.clone()),
+        (Some(Preview::Ready(i)), None) => (Some(i.name.clone()), i.description.clone()),
+        (Some(Preview::Failed), _) => (Some("Invite Unavailable".to_string()), "This invite could not be loaded — it may be revoked or expired.".to_string()),
+        _ => (None, String::new()),
+    };
+    let invalid = matches!(state, Some(Preview::Failed));
+    let ready = matches!(state, Some(Preview::Ready(_)));
+    let skel = |w: f32, h: f32| div().w(px(w)).h(px(h)).rounded(px(4.)).bg(white_a(0.06));
+    let id = m.id.clone();
+    let act = ctx.on_act.clone();
+    let button = (!invalid).then(|| {
+        let k = key.clone();
+        div()
+            .id(SharedString::from(format!("cic-{}-{key}", m.id)))
+            .flex_shrink_0()
+            .px(px(18.))
+            .h(px(33.))
+            .flex()
+            .items_center()
+            .rounded(px(8.))
+            .font_weight(FontWeight::SEMIBOLD)
+            .text_size(px(13.))
+            .map(|d| if joined.is_some() { d.bg(white_a(0.08)).text_color(c(0xffffff)) } else { d.bg(c(ACCENT)).text_color(c(0x0e0e0e)) })
+            .when(!ready, |d| d.opacity(0.55))
+            .when(ready, |d| d.cursor_pointer().hover(|d| d.opacity(0.9)).on_click(move |_, w, cx| act(&id, Act::Invite(k.clone()), w, cx)))
+            .child(if joined.is_some() { "Open" } else { "Join" })
+    });
+    div()
+        .mt(px(8.))
+        .max_w(px(446.))
+        .p(px(12.))
+        .rounded(px(10.))
+        .border_1()
+        .border_color(white_a(0.08))
+        .bg(ca(10, 10, 10, 0.85))
+        .flex()
+        .flex_col()
+        .gap(px(10.))
+        .child(crate::kit::spaced("COMMUNITY INVITE", 0.9).font_weight(FontWeight::BOLD).text_size(px(10.)).line_height(px(14.)).text_color(white_a(0.45)))
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(10.))
+                .min_w_0()
+                .child(img("icons/group-placeholder.svg").size(px(42.)).flex_shrink_0().rounded_full().bg(white_a(0.05)).when(invalid, |d| d.opacity(0.5)))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .gap(px(2.))
+                        .map(|d| match name {
+                            Some(name) => d
+                                .child(div().truncate().font_weight(FontWeight::SEMIBOLD).text_size(px(14.)).line_height(px(19.6)).text_color(if invalid { white_a(0.6) } else { c(0xffffff) }).child(name))
+                                .when(!desc.is_empty(), |d| d.child(div().text_size(px(11.)).line_height(px(14.85)).text_color(white_a(0.55)).line_clamp(2).child(desc))),
+                            None => d.child(skel(140., 14.)).child(skel(200., 10.)),
+                        }),
+                )
+                .children(button),
+        )
+        .into_any_element()
 }

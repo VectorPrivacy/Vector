@@ -319,7 +319,7 @@ pub fn preview_text(chat: &SerializableChat) -> String {
     let body = if m.content.is_empty() && !m.attachments.is_empty() {
         "Sent a file".to_string()
     } else {
-        m.content.lines().next().unwrap_or_default().to_string()
+        crate::newchat::replace_invite_links(&m.content, "Community Invite").lines().next().unwrap_or_default().to_string()
     };
     if m.mine { format!("You: {body}") } else { body }
 }

@@ -20,7 +20,7 @@ const server = createServer((req, res) => {
     res.end(readFileSync(file));
 }).listen(0);
 const port = server.address().port;
-const fixtures = JSON.parse(readFileSync(join(HERE, 'fixtures.json'), 'utf8'));
+const fixtures = JSON.parse(readFileSync(process.env.FIXTURES || join(HERE, 'fixtures.json'), 'utf8'));
 // REQUESTS=<n>: the last n chats lose our side, so they wait under Requests.
 const requests = +process.env.REQUESTS || 0;
 if (requests) for (const chat of fixtures.chats.slice(-requests)) chat.messages = chat.messages.filter((m) => !m.mine);

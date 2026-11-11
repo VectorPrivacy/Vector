@@ -529,3 +529,40 @@ pub async fn accept_invite(community_id: String) -> Result<(), String> {
 pub async fn decline_invite(community_id: String) -> Result<(), String> {
     db::scoped(async move { VectorCore.decline_community_invite(&community_id).await.map(|_| ()).map_err(|e| e.to_string()) }).await
 }
+
+#[derive(Clone, Debug)]
+pub struct InvitePreview {
+    pub community_id: String,
+    pub name: String,
+    pub description: String,
+}
+
+/// What an invite link leads to, read off its bundle (or our copy, once joined).
+pub async fn preview_invite(url: String) -> Result<InvitePreview, String> {
+    db::scoped(async move {
+        vector_core::community::v2::invite::parse_invite_link(&url).map_err(|e| e.to_string())?;
+        let transport = LiveTransport::with_timeout(Duration::from_secs(12));
+        let bundle = vector_core::community::v2::service::fetch_public_bundle(&transport, &url).await?;
+        let community_id = bundle.community_id.clone();
+        if let Ok(local) = load(&community_id) {
+            return Ok(InvitePreview { community_id, name: local.name.clone(), description: local.description.clone().unwrap_or_default() });
+        }
+        let folded = vector_core::community::v2::service::preview_bundle(&transport, &bundle).await?;
+        Ok(InvitePreview { community_id, name: folded.name.clone(), description: folded.description.clone().unwrap_or_default() })
+    })
+    .await
+}
+
+/// Joins by link: the Community's id.
+pub async fn join_by_link(url: String) -> Result<String, String> {
+    db::scoped(async move {
+        let joined = VectorCore.join_community(&url).await.map_err(|e| e.to_string())?;
+        let id = joined.get("community_id").or_else(|| joined.get("id")).and_then(Value::as_str).ok_or("join returned no community id")?.to_string();
+        if let Ok(c) = load(&id) {
+            VectorCore.register_v2_chats(&c, &db::current_session()).await;
+        }
+        super::emit("communities_changed", ());
+        Ok(id)
+    })
+    .await
+}

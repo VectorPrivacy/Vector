@@ -40,6 +40,7 @@
         list_public_invites: () => [{ url: 'https://vectorapp.io/invite/' + 'Ab3'.repeat(20), token: 'tok1', label: 'Reddit', join_count: 3 }, { url: 'https://vectorapp.io/invite/' + 'Zx9'.repeat(20), token: 'tok2', label: null, join_count: 0 }],
         get_community_invite_summary: () => ({ is_public: true, creators: [{ npub: FIX.npub, count: 2 }] }),
         list_community_invites: () => FIX.invites || [],
+        preview_public_invite: () => ({ name: 'Night Owls', description: 'Late-night builders, ships and shenanigans.', icon: null, community_id: 'c'.repeat(64) }),
         get_notify_prefs: ({ communityId, scopeIds }) => [...new Set([communityId, ...(scopeIds || [])].filter(Boolean))].map((scope_id) => ({ scope_id, level: null, effective_level: scope_id === communityId ? 'mentions' : 'mentions', muted: false, mute_until: 0, suppress_everyone: false, everyone_muted_globally: false })), get_emoji_usage: () => [],
         cache_android_file: ({ filePath }) => {
             const name = filePath.split('/').pop();
