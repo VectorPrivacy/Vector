@@ -85,6 +85,8 @@ pub struct VectorApp {
     cropper: Option<(Entity<crate::cropper::Cropper>, std::path::PathBuf)>,
     /// The pack creator's square crop, and where its answer goes.
     pack_details: Option<crate::packdetails::Details>,
+    /// A link that arrived before an account was open.
+    pending_link: Option<vector_core::deep_link::DeepLinkAction>,
     pack_crop: Option<(
         Entity<crate::cropper::Cropper>,
         futures::channel::oneshot::Sender<Option<vector_core::image_crop::CropRect>>,
@@ -237,6 +239,10 @@ enum PopupAct {
     },
     Logout,
     ClearStorage,
+    JoinInvite {
+        key: String,
+        name: String,
+    },
     LeaveCommunity {
         id: String,
         name: String,
@@ -488,6 +494,7 @@ impl VectorApp {
             fail_reasons: Rc::default(),
             media: Rc::default(),
             pack_details: None,
+            pending_link: None,
             pack_crop: None,
             emoji_picker,
             picker_open: false,
@@ -812,6 +819,9 @@ impl VectorApp {
                     p.add_paths(files.split(':').map(Into::into).collect(), window, cx)
                 });
             }
+        }
+        if let Ok(url) = std::env::var("VECTOR_LINK") {
+            app.deep_link(&url, window, cx);
         }
         if let Ok(naddr) = std::env::var("VECTOR_PACK_DETAILS") {
             app.open_pack_details(naddr, cx);
@@ -2101,7 +2111,13 @@ impl VectorApp {
     }
 
     /// A click on a message's text.
-    fn on_text(&mut self, msg_id: String, target: Target, cx: &mut Context<Self>) {
+    fn on_text(
+        &mut self,
+        msg_id: String,
+        target: Target,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         match target {
             Target::Spoiler(id) => {
                 self.revealed
@@ -2111,11 +2127,11 @@ impl VectorApp {
                     .insert(id);
                 cx.notify();
             }
-            Target::Link(url) => cx.open_url(&url),
+            Target::Link(url) => self.follow_url(&url, window, cx),
             Target::Code(text) => {
                 cx.write_to_clipboard(gpui::ClipboardItem::new_string(text.to_string()))
             }
-            Target::Mention(_) => {}
+            Target::Mention(npub) => self.open_profile(npub.to_string(), cx),
         }
     }
 
@@ -2150,7 +2166,7 @@ impl VectorApp {
                     self.join_by_link(key, info.name, window, cx);
                 }
             }
-            Act::Text(t) => self.on_text(id, t, cx),
+            Act::Text(t) => self.on_text(id, t, window, cx),
             Act::Embed(a) => self.on_embed(a, window, cx),
             Act::Pack(a) => self.on_pack(a, cx),
             Act::Hover(true) => {
@@ -2663,6 +2679,7 @@ impl VectorApp {
             PopupAct::ModBanRotate => self.mod_rotate(true, cx),
             PopupAct::ActivateRoles => self.role_op(false, String::new(), cx),
             PopupAct::Block { npub } => self.set_blocked(npub, true, cx),
+            PopupAct::JoinInvite { key, name } => self.join_by_link(key, name, window, cx),
             PopupAct::BlockRequest { npub } => {
                 if self.open.as_deref() == Some(npub.as_str()) {
                     self.open = None;
@@ -2868,6 +2885,13 @@ impl VectorApp {
 
 impl Render for VectorApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if matches!(self.screen, Screen::Main)
+            && let Some(a) = self.pending_link.take()
+        {
+            cx.defer_in(window, move |app, window, cx| {
+                app.open_deep_link(a, window, cx)
+            });
+        }
         self.scan_invites(cx);
         let root = div()
             .capture_key_down(cx.listener(|app, e: &gpui::KeyDownEvent, _, cx| {
@@ -2947,7 +2971,7 @@ impl Render for VectorApp {
             app.open_paths_preview(paths.paths().to_vec(), window, cx);
         }));
         root.children(net_dialog)
-            .children(popup)
+            .children(popup.map(|p| gpui::deferred(p).with_priority(15)))
             .child(self.security.clone())
             .child(chrome(window, false).children(self.update_banner(cx)))
             .child(
@@ -7557,6 +7581,277 @@ impl VectorApp {
         .detach();
     }
 
+    /// A link clicked in the app: a Vector place opens in place, anything else in the browser.
+    fn follow_url(&mut self, url: &str, window: &mut Window, cx: &mut Context<Self>) {
+        match vector_core::deep_link::parse_deep_link(url) {
+            Some(a) => self.open_deep_link(a, window, cx),
+            None => cx.open_url(url),
+        }
+    }
+
+    /// A link from the OS: held until an account is open.
+    pub fn deep_link(&mut self, url: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(a) = vector_core::deep_link::parse_deep_link(url) else {
+            return;
+        };
+        window.activate_window();
+        if matches!(self.screen, Screen::Main) {
+            self.open_deep_link(a, window, cx);
+        } else {
+            self.pending_link = Some(a);
+        }
+    }
+
+    /// `openDeepLink`: a link only ever opens a place; joining takes a tap there.
+    fn open_deep_link(
+        &mut self,
+        a: vector_core::deep_link::DeepLinkAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if a.account
+            .as_ref()
+            .is_some_and(|n| *n != self.store.borrow().my_npub)
+        {
+            return;
+        }
+        if a.action_type != "emoji_pack" && a.action_type != "community_invite" {
+            self.pack_details = None;
+        }
+        match a.action_type.as_str() {
+            "profile" => self.open_profile(a.target, cx),
+            "chat" => {
+                if self.open.as_deref() != Some(a.target.as_str()) {
+                    self.open_chat(a.target.into(), window, cx);
+                }
+            }
+            "emoji_pack" => self.open_pack_details(a.target, cx),
+            "community_invite" => self.preview_invite_link(a.target, window, cx),
+            "go" => match vector_core::golink::GoLink::parse_payload(&a.target) {
+                Some(link) => self.open_go_link(link, window, cx),
+                None => {
+                    self.toast = Some(("That link is broken".into(), std::time::Instant::now()))
+                }
+            },
+            "settings" => self.open_settings_path(&a.target, window, cx),
+            "requests" | "home" => {
+                self.go_home();
+                if a.action_type == "requests" {
+                    self.requests_tab = true;
+                } else {
+                    self.requests_tab = false;
+                }
+            }
+            _ => {}
+        }
+        cx.notify();
+    }
+
+    /// The chat list, with nothing over it.
+    fn go_home(&mut self) {
+        self.leave_community();
+        self.profile = None;
+        self.settings = None;
+        self.new_chat = None;
+        self.open = None;
+    }
+
+    /// `category[/section[/group]]`: the category, at the deepest part this build has an anchor for.
+    fn open_settings_path(&mut self, path: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let path = match path {
+            "theme" | "appearance/theme" => "appearance/display/appearance",
+            p => p,
+        };
+        let mut parts = path.split('/').filter(|p| !p.is_empty());
+        let cats = crate::settings::categories(&crate::settings::Offers {
+            voice: self.live,
+            routing: true,
+            updates: true,
+        });
+        let want = parts.next().unwrap_or("");
+        let Some(cat) = cats.iter().find(|c| c.id == want).or(cats.first()) else {
+            return;
+        };
+        let anchor = parts
+            .rev()
+            .find_map(|p| cat.anchors.iter().find(|a| a.id == p))
+            .map(|a| a.id);
+        let id = cat.id;
+        self.open = None;
+        self.open_settings(id, window, cx);
+        if let Some(anchor) = anchor {
+            self.settings_act(crate::settings::Act::Anchor(id, anchor), window, cx);
+        }
+    }
+
+    /// `previewAndJoinCommunityLink`: a member goes in, anyone else is asked first.
+    fn preview_invite_link(&mut self, url: String, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(key) = crate::newchat::invite_card_keys(&url).into_iter().next() else {
+            self.notice(
+                "Invalid Invite",
+                "This invite link could not be loaded.".into(),
+                cx,
+            );
+            return;
+        };
+        self.toast = Some((
+            "Loading community invite…".into(),
+            std::time::Instant::now(),
+        ));
+        let rx = if self.live {
+            backend::run(backend::community::preview_invite(
+                crate::newchat::invite_url(&key),
+            ))
+        } else {
+            let (tx, rx) = futures::channel::oneshot::channel();
+            let preview = std::env::var("VECTOR_INVITE_PREVIEW").map(|name| {
+                crate::backend::community::InvitePreview {
+                    community_id: "c".repeat(64),
+                    name,
+                    description: "Late-night builders, ships and shenanigans.".into(),
+                    icon: None,
+                }
+            });
+            tx.send(preview.map_err(|_| "Not found on any relay".to_string()))
+                .ok();
+            rx
+        };
+        cx.spawn_in(window, async move |this, cx| {
+            let res = rx.await.unwrap_or_else(|_| Err("Cancelled".into()));
+            this.update_in(cx, |this, window, cx| {
+                this.toast = None;
+                match res {
+                    Err(e) => this.notice(
+                        "Invalid Invite",
+                        format!("This invite link could not be loaded.\n\n{e}"),
+                        cx,
+                    ),
+                    Ok(p) if this.store.borrow().community(&p.community_id).is_some() => {
+                        this.open_community(p.community_id, window, cx)
+                    }
+                    Ok(p) => {
+                        let mut text = format!("You've been invited to join {}.", p.name);
+                        if !p.description.is_empty() {
+                            text.push_str("\n\n");
+                            text.push_str(&p.description);
+                        }
+                        this.popup = Some((
+                            kit::Popup {
+                                title: format!("Join {}?", p.name).into(),
+                                text: Some(text.into()),
+                                icon: Some("icons/group-placeholder.svg"),
+                                confirm: "Confirm".into(),
+                                cancel: Some("Cancel".into()),
+                                input: None,
+                            },
+                            PopupAct::JoinInvite { key, name: p.name },
+                        ));
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// `openGoLink`: a Community, a channel, or a message, or why it can't be shown.
+    fn open_go_link(
+        &mut self,
+        link: vector_core::golink::GoLink,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use vector_core::golink::GoLink;
+        let (community, channel, message) = match link {
+            GoLink::Community { community } => (Some(community), None, None),
+            GoLink::Channel { community, channel } => (Some(community), Some(channel), None),
+            GoLink::ChannelMessage {
+                community,
+                channel,
+                message,
+            } => (Some(community), Some(channel), Some(message)),
+            GoLink::Message { message } => (None, None, Some(message)),
+        };
+        if let Some(community) = community {
+            if self.store.borrow().community(&community).is_none() {
+                return self.refuse_go("You're not in this community");
+            }
+            let Some(channel) = channel else {
+                return self.open_community(community, window, cx);
+            };
+            if self.store.borrow().chat(&channel).is_none() {
+                return self.refuse_go("That channel isn't available to you");
+            }
+            if self.open.as_deref() != Some(channel.as_str()) {
+                self.open_channel(channel.clone(), window, cx);
+            }
+            let Some(message) = message else { return };
+            self.locate_go_message(message, Some(channel), window, cx);
+        } else if let Some(message) = message {
+            self.locate_go_message(message, None, window, cx);
+        }
+    }
+
+    fn refuse_go(&mut self, text: &str) {
+        self.toast = Some((text.to_string().into(), std::time::Instant::now()));
+    }
+
+    /// Where a linked message is on this device; a link naming a room counts only there.
+    fn locate_go_message(
+        &mut self,
+        message: String,
+        room: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let rx = if self.live {
+            let m = message.clone();
+            backend::run(async move {
+                vector_core::db::scoped(async move { vector_core::db::events::locate_message(&m) })
+                    .await
+                    .unwrap_or_default()
+            })
+        } else {
+            let chat = self
+                .store
+                .borrow()
+                .chats
+                .iter()
+                .find(|c| c.messages.iter().any(|m| m.id == message))
+                .map(|c| c.id.clone());
+            let (tx, rx) = futures::channel::oneshot::channel();
+            tx.send(vector_core::db::events::MessageLocation {
+                chat,
+                deleted: false,
+            })
+            .ok();
+            rx
+        };
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(at) = rx.await else { return };
+            this.update_in(cx, |this, window, cx| {
+                match (at.chat, room) {
+                    (Some(chat), Some(room)) if chat == room => {}
+                    (Some(chat), None) => {
+                        if this.open.as_deref() != Some(chat.as_str()) {
+                            this.open_chat(chat.into(), window, cx);
+                        }
+                    }
+                    (_, room) if at.deleted => {
+                        let _ = room;
+                        this.refuse_go("That message was deleted");
+                    }
+                    (_, Some(_)) => this.refuse_go("That message isn't on this device yet"),
+                    (_, None) => this.refuse_go("That message isn't on this device"),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     /// `openPackDetailsModal`: the pack an naddr names, over every screen.
     fn open_pack_details(&mut self, naddr: String, cx: &mut Context<Self>) {
         let loading = matches!(
@@ -7707,18 +8002,21 @@ impl VectorApp {
                 cx.notify();
                 let live = self.live;
                 let (n, i) = (naddr.clone(), id.clone());
-                let rx = backend::run(async move {
-                    if !live {
-                        return Ok(());
-                    }
-                    if subscribed {
-                        vector_core::emoji_packs::unsubscribe_pack(&i).await
-                    } else {
-                        vector_core::emoji_packs::subscribe_pack(&n)
-                            .await
-                            .map(|_| ())
-                    }
-                });
+                let rx = if live {
+                    backend::run(async move {
+                        if subscribed {
+                            vector_core::emoji_packs::unsubscribe_pack(&i).await
+                        } else {
+                            vector_core::emoji_packs::subscribe_pack(&n)
+                                .await
+                                .map(|_| ())
+                        }
+                    })
+                } else {
+                    let (tx, rx) = futures::channel::oneshot::channel();
+                    tx.send(Ok(())).ok();
+                    rx
+                };
                 cx.spawn(async move |this, cx| {
                     // The label stays a beat: a local toggle lands in milliseconds.
                     cx.background_executor()

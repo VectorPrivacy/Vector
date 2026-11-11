@@ -14,6 +14,7 @@ mod createcommunity;
 mod crop;
 mod cropper;
 mod data;
+mod deeplink;
 mod embeds;
 mod emoji;
 mod filepreview;
@@ -114,23 +115,34 @@ fn main() {
         });
         (store, open)
     });
-    let events = fixtures.is_none().then(|| {
-        backend::start(
-            args.data_dir
-                .clone()
-                .unwrap_or_else(backend::default_data_dir),
-        )
-    });
+    let (links_tx, mut links) = futures::channel::mpsc::unbounded::<String>();
+    for url in deeplink::from_args() {
+        links_tx.unbounded_send(url).ok();
+    }
+    let data_dir = args
+        .data_dir
+        .clone()
+        .unwrap_or_else(backend::default_data_dir);
+    if fixtures.is_none() && !deeplink::claim(&data_dir, &deeplink::from_args(), links_tx.clone()) {
+        return;
+    }
+    let events = fixtures.is_none().then(|| backend::start(data_dir));
 
-    gpui_platform::application()
-        .with_assets(assets::Assets)
-        .run(move |cx: &mut App| {
-            cx.text_system()
-                .add_fonts(assets::fonts())
-                .expect("bundled fonts");
-            composer::bind_keys(cx);
-            let bounds = Bounds::centered(None, size(px(args.size.0), px(args.size.1)), cx);
-            cx.open_window(
+    let os_links = links_tx.clone();
+    let app = gpui_platform::application().with_assets(assets::Assets);
+    app.on_open_urls(move |urls| {
+        for url in urls {
+            os_links.unbounded_send(url).ok();
+        }
+    });
+    app.run(move |cx: &mut App| {
+        cx.text_system()
+            .add_fonts(assets::fonts())
+            .expect("bundled fonts");
+        composer::bind_keys(cx);
+        let bounds = Bounds::centered(None, size(px(args.size.0), px(args.size.1)), cx);
+        let window = cx
+            .open_window(
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
                     titlebar: None,
@@ -150,6 +162,23 @@ fn main() {
                 },
             )
             .expect("main window");
-            cx.activate(true);
-        });
+        cx.activate(true);
+        let _keep = links_tx;
+        cx.spawn(async move |cx| {
+            use futures::StreamExt;
+            while let Some(url) = links.next().await {
+                let ok = window.update(cx, |app, window, cx| {
+                    if url.is_empty() {
+                        window.activate_window();
+                    } else {
+                        app.deep_link(&url, window, cx);
+                    }
+                });
+                if ok.is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
+    });
 }
