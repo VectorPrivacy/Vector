@@ -15,6 +15,7 @@ pub mod prefs;
 pub mod unfurl;
 pub mod sync;
 pub mod upload;
+pub mod packs;
 pub mod archive;
 pub mod badges;
 pub mod calls;

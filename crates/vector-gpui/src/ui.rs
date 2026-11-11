@@ -83,6 +83,8 @@ pub struct VectorApp {
     file_preview: Option<Entity<crate::filepreview::FilePreview>>,
     /// The avatar cropper, and the picked file it cuts.
     cropper: Option<(Entity<crate::cropper::Cropper>, std::path::PathBuf)>,
+    /// The pack creator's square crop, and where its answer goes.
+    pack_crop: Option<(Entity<crate::cropper::Cropper>, futures::channel::oneshot::Sender<Option<vector_core::image_crop::CropRect>>)>,
     /// The expanded profile, shown in place of the chat.
     profile: Option<crate::profile::Screen>,
     toast: Option<(SharedString, std::time::Instant)>,
@@ -177,6 +179,11 @@ enum MenuAct {
     NotifyMute(String, i64),
     SuppressEveryone(String, bool),
     ChannelRead(String),
+    PackShare(String),
+    PackEdit(String),
+    PackRemove(String),
+    CreatorRename(usize),
+    CreatorDelete(usize),
 }
 
 enum PopupAct {
@@ -235,12 +242,60 @@ impl VectorApp {
         cx.subscribe(&input, |app, _, _: &CancelInput, cx| app.cancel_mode(cx)).detach();
         let emoji_picker = cx.new(crate::picker::EmojiPicker::new);
         cx.subscribe_in(&emoji_picker, window, |app, _, crate::picker::Picked(emoji, shift), window, cx| app.picked(emoji.clone(), *shift, window, cx)).detach();
-        cx.subscribe_in(&emoji_picker, window, |app, _, _: &crate::picker::Dismissed, window, cx| app.close_picker(window, cx)).detach();
+        cx.subscribe_in(&emoji_picker, window, |app, _, _: &crate::picker::Dismissed, window, cx| {
+            // A crop or a menu the creator raised sits outside the panel.
+            if app.pack_crop.is_none() && app.menu.is_none() {
+                app.close_picker(window, cx);
+            }
+        })
+        .detach();
+        cx.subscribe_in(&emoji_picker, window, |app, _, crate::picker::CropFor(image, natural, answer), window, cx| {
+            let Some(tx) = answer.borrow_mut().take() else { return };
+            let (image, natural) = (image.clone(), *natural);
+            let cropper = cx.new(|cx| crate::cropper::Cropper::new(image, natural, "Crop to Square", "Drag to move. Drag a corner to resize.", false, window, cx));
+            cx.subscribe(&cropper, |app, _, answer: &crate::cropper::Answer, cx| {
+                if let Some((_, tx)) = app.pack_crop.take() {
+                    let _ = tx.send(match answer {
+                        crate::cropper::Answer::Crop(r) => Some(r.clone()),
+                        crate::cropper::Answer::Cancel => None,
+                    });
+                }
+                cx.notify();
+            })
+            .detach();
+            app.pack_crop = Some((cropper, tx));
+            cx.notify();
+        })
+        .detach();
+        cx.subscribe_in(&emoji_picker, window, |app, _, crate::picker::CellMenu(idx, at), _, cx| {
+            let rows = vec![
+                (kit::MenuItem::new("Rename Emoji", "edit"), MenuAct::CreatorRename(*idx)),
+                (kit::MenuItem::new("Delete Emoji", "trash").danger(), MenuAct::CreatorDelete(*idx)),
+            ];
+            app.show_menu(*at, rows, cx);
+        })
+        .detach();
+        cx.subscribe_in(&emoji_picker, window, |app, _, _: &crate::picker::ShowAgain, window, cx| {
+            if !app.picker_open {
+                app.picker_closed = std::time::Instant::now() - std::time::Duration::from_secs(1);
+                app.toggle_picker(None, window, cx);
+            }
+        })
+        .detach();
         cx.subscribe_in(&emoji_picker, window, |app, _, crate::picker::PickedCustom(code, url, shift), window, cx| {
             app.picked_custom(code.clone(), url.clone(), *shift, window, cx)
         })
         .detach();
         cx.subscribe(&emoji_picker, |app, _, crate::picker::RemovePack(id), cx| app.remove_pack(id.clone(), cx)).detach();
+        cx.subscribe(&emoji_picker, |app, _, crate::picker::PackMenu(id, own, at), cx| {
+            let mut rows = vec![(kit::MenuItem::new("Share Pack", "share"), MenuAct::PackShare(id.clone()))];
+            if *own {
+                rows.push((kit::MenuItem::new("Edit Pack", "edit"), MenuAct::PackEdit(id.clone())));
+            }
+            rows.push((kit::MenuItem::new("Remove Pack", "x-user").danger(), MenuAct::PackRemove(id.clone())));
+            app.show_menu(*at, rows, cx);
+        })
+        .detach();
         // A GIF alone in the draft sends at once; beside text it waits for the user's Enter.
         cx.subscribe_in(&emoji_picker, window, |app, _, crate::picker::PickedGif(url), window, cx| {
             let was_empty = app.input.read(cx).text().trim().is_empty();
@@ -283,6 +338,7 @@ impl VectorApp {
             popup: None,
             fail_reasons: Rc::default(),
             media: Rc::default(),
+            pack_crop: None,
             emoji_picker,
             picker_open: false,
             picker_status: false,
@@ -508,6 +564,15 @@ impl VectorApp {
                 app.on_profile(crate::profile::Act::SwitcherEdit, window, cx);
             }
         }
+        if let Ok(which) = std::env::var("VECTOR_PACK_CREATOR") {
+            app.picker_closed = std::time::Instant::now() - std::time::Duration::from_secs(1);
+            app.toggle_picker(None, window, cx);
+            let id = (which == "edit").then(|| app.store.borrow().fixture_packs.values().find(|p| p.is_own).map(|p| p.id.clone())).flatten();
+            app.emoji_picker.update(cx, |p, cx| p.open_creator(id, window, cx));
+            if let Ok(files) = std::env::var("VECTOR_PACK_ADD") {
+                app.emoji_picker.update(cx, |p, cx| p.add_paths(files.split(':').map(Into::into).collect(), window, cx));
+            }
+        }
         if std::env::var("VECTOR_STATUS").is_ok() {
             app.open_status(window, cx);
         }
@@ -671,6 +736,15 @@ impl VectorApp {
             }
             MenuAct::Moderation(community) => self.open_moderation(community, window, cx),
             MenuAct::LeaveCommunity { id, name, owner } => self.ask_leave_community(id, name, owner, window, cx),
+            MenuAct::PackShare(id) => {
+                self.on_pack(crate::packs::Act::Copy(id), cx);
+                self.toast = Some(("Copied to Clipboard".into(), std::time::Instant::now()));
+                self.close_picker(window, cx);
+            }
+            MenuAct::PackRemove(id) => self.remove_pack(id, cx),
+            MenuAct::PackEdit(id) => self.emoji_picker.update(cx, |p, cx| p.open_creator(Some(id), window, cx)),
+            MenuAct::CreatorRename(idx) => self.emoji_picker.update(cx, |p, cx| p.creator_rename(idx, window, cx)),
+            MenuAct::CreatorDelete(idx) => self.emoji_picker.update(cx, |p, cx| p.creator_remove(idx, cx)),
             MenuAct::Copy(text) => {
                 cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
                 self.toast = Some(("Copied".into(), std::time::Instant::now()));
@@ -1640,6 +1714,7 @@ impl VectorApp {
         self.picker_open = false;
         self.picker = None;
         self.picker_closed = std::time::Instant::now();
+        self.emoji_picker.update(cx, |p, cx| p.leave_creator(cx));
         let field = if std::mem::take(&mut self.picker_status) { self.status.clone() } else { None };
         window.focus(&field.unwrap_or_else(|| self.input.clone()).read(cx).focus_handle(cx), cx);
         cx.notify();
@@ -2156,6 +2231,7 @@ impl Render for VectorApp {
         .children(self.viewer.clone().map(|v| gpui::deferred(div().absolute().inset_0().child(v)).with_priority(10)))
         .children(self.file_preview.clone().map(|v| gpui::deferred(div().absolute().inset_0().child(v)).with_priority(9)))
         .children(self.cropper.as_ref().map(|(v, _)| gpui::deferred(div().absolute().inset_0().child(v.clone())).with_priority(11)))
+        .children(self.pack_crop.as_ref().map(|(v, _)| gpui::deferred(div().absolute().inset_0().child(v.clone())).with_priority(11)))
         .children(self.comm_crop.as_ref().map(|(v, _, _)| gpui::deferred(div().absolute().inset_0().child(v.clone())).with_priority(14)))
         .children({
             let app = cx.entity().downgrade();

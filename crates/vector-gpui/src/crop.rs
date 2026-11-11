@@ -87,6 +87,18 @@ pub(crate) fn crop_image(bytes: Vec<u8>, x: u32, y: u32, w: u32, h: u32) -> Resu
     crop_and_reencode_blocking(EmojiCropInput { bytes, mime, x, y, w, h }, None)
 }
 
+/// A crop drawn for an emoji or pack logo: shrunk until it fits the upload cap.
+pub(crate) fn crop_emoji(bytes: Vec<u8>, crop: vector_core::image_crop::CropRect, max_bytes: usize) -> Result<Vec<u8>, String> {
+    let dims = vector_core::image_crop::upright_dims(&bytes).ok_or("Couldn't read the image")?;
+    let (x, y, w, h) = vector_core::image_crop::map_crop(crop, dims);
+    let side = w.min(h);
+    if side == 0 {
+        return Err("crop must be non-empty".to_string());
+    }
+    let mime = vector_core::crypto::mime_from_magic_bytes(&bytes).to_string();
+    crop_and_reencode_blocking(EmojiCropInput { bytes, mime, x, y, w: side, h: side }, Some(max_bytes))
+}
+
 /// A crop drawn on whatever copy the page showed (maybe a scaled preview), made on the image itself.
 pub(crate) fn crop_drawn(bytes: Vec<u8>, crop: vector_core::image_crop::CropRect) -> Result<Vec<u8>, String> {
     let dims = vector_core::image_crop::upright_dims(&bytes).ok_or("Couldn't read the image")?;

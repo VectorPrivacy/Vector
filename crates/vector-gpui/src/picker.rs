@@ -107,7 +107,11 @@ pub struct PackEmoji {
 /// An equipped pack, in the rail's order.
 pub struct Pack {
     pub id: String,
+    /// The `d` tag an edit republishes under.
+    pub identifier: String,
     pub title: String,
+    /// The logo as published.
+    pub logo_url: Option<String>,
     /// The logo's source; none draws the title's first letter.
     pub logo: Option<String>,
     pub own: bool,
@@ -153,6 +157,8 @@ pub fn packs_from_core(packs: Vec<vector_core::emoji_packs::EmojiPack>, src: imp
         .iter()
         .map(|p| Pack {
             id: p.id.clone(),
+            identifier: p.identifier.clone(),
+            logo_url: (!p.image_url.is_empty()).then(|| p.image_url.clone()),
             title: if p.title.is_empty() { p.identifier.clone() } else { p.title.clone() },
             logo: (!p.image_url.is_empty()).then(|| src(&p.image_url)),
             own: p.is_own,
@@ -209,6 +215,8 @@ pub struct Picked(pub String, pub bool);
 pub struct PickedCustom(pub String, pub String, pub bool);
 /// A dead pack's Remove Pack.
 pub struct RemovePack(pub String);
+/// A pack tab or header's context menu, at the pointer.
+pub struct PackMenu(pub String, pub bool, pub gpui::Point<gpui::Pixels>);
 /// A kaomoji, typed as text; Shift keeps the panel open. Carries the new recents to keep.
 pub struct PickedText(pub String, pub bool, pub Vec<String>);
 /// A GIF, as the URL its message carries.
@@ -236,11 +244,22 @@ pub struct EmojiPicker {
     gifs: Gifs,
     packs: Rc<Vec<Pack>>,
     media: Option<(Rc<std::cell::RefCell<crate::media::Media>>, bool)>,
+    creator: Option<creator::Creator>,
+    overlays: creator::Overlays,
 }
+
+#[path = "packcreator.rs"]
+mod creator;
+pub use creator::{CellMenu, CropFor, ShowAgain};
+
+impl EventEmitter<CropFor> for EmojiPicker {}
+impl EventEmitter<CellMenu> for EmojiPicker {}
+impl EventEmitter<ShowAgain> for EmojiPicker {}
 
 impl EventEmitter<Picked> for EmojiPicker {}
 impl EventEmitter<PickedCustom> for EmojiPicker {}
 impl EventEmitter<RemovePack> for EmojiPicker {}
+impl EventEmitter<PackMenu> for EmojiPicker {}
 impl EventEmitter<PickedGif> for EmojiPicker {}
 impl EventEmitter<PickedText> for EmojiPicker {}
 impl EventEmitter<Dismissed> for EmojiPicker {}
@@ -294,6 +313,8 @@ impl EmojiPicker {
             gifs: Gifs::default(),
             packs: Rc::default(),
             media: None,
+            creator: None,
+            overlays: Default::default(),
         };
         this.rebuild();
         this
@@ -929,6 +950,21 @@ impl EmojiPicker {
         }
     }
 
+    /// A rail tab: the creator saves and steps aside first.
+    fn go(&mut self, s: Section, cx: &mut Context<Self>) {
+        if self.creator.is_none() {
+            self.jump(s, cx);
+            return;
+        }
+        let task = self.close_creator(cx);
+        cx.spawn(async move |this, cx| {
+            if task.await {
+                this.update(cx, |this, cx| this.jump(s, cx)).ok();
+            }
+        })
+        .detach();
+    }
+
     fn toggle(&mut self, s: Section, cx: &mut Context<Self>) {
         if !self.collapsed.remove(&s) {
             self.collapsed.insert(s);
@@ -987,6 +1023,7 @@ impl EmojiPicker {
             .font_weight(FontWeight::MEDIUM)
             .when(p.dead(), |d| d.opacity(0.6))
             .on_click(cx.listener(move |this, _, _, cx| this.toggle(s, cx)))
+            .on_mouse_down(gpui::MouseButton::Right, cx.listener(move |this, ev: &gpui::MouseDownEvent, _, cx| this.pack_menu(i, ev.position, cx)))
             .children(logo)
             .child(div().min_w_0().overflow_hidden().text_ellipsis().whitespace_nowrap().text_size(px(14.)).text_color(c(0xffffff)).child(p.title.clone()))
             .child(div().flex_shrink_0().text_size(px(12.)).text_color(white_a(0.55)).child(format!("({})", p.emojis.len())))
@@ -1008,10 +1045,21 @@ impl EmojiPicker {
                         .flex_shrink_0()
                         .opacity(0.6)
                         .hover(|s| s.opacity(1.))
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            cx.stop_propagation();
+                            let id = this.packs.get(i).map(|p| p.id.clone());
+                            this.open_creator(id, window, cx);
+                        }))
                         .child(svg().path("icons/edit.svg").size(px(16.)).text_color(c(0xffffff))),
                 )
             })
             .into_any_element()
+    }
+
+    fn pack_menu(&mut self, i: usize, at: gpui::Point<gpui::Pixels>, cx: &mut Context<Self>) {
+        if let Some(p) = self.packs.get(i) {
+            cx.emit(PackMenu(p.id.clone(), p.own, at));
+        }
     }
 
     /// A custom emoji's picture, asked of the shared cache on first sight.
@@ -1235,10 +1283,10 @@ impl Render for EmojiPicker {
                 .hover(|d| d.opacity(0.7))
                 .when(s.is_none(), |d| d.border_1().border_dashed().border_color(white_a(0.18)))
                 .when(on, |d| d.child(div().absolute().left(px(-12.)).top(px(1.)).w(px(6.)).h(px(28.)).rounded(px(2.)).bg(c(PRIMARY))))
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    if let Some(s) = s {
-                        this.jump(s, cx);
-                    }
+                .on_click(cx.listener(move |this, _, window, cx| match s {
+                    Some(s) => this.go(s, cx),
+                    None if this.creator.is_none() => this.open_creator(None, window, cx),
+                    None => {}
                 }))
                 .child(svg().path(icon).size(px(26.)).text_color(if s.is_some() { c(0xffffff) } else { white_a(0.75) }))
         };
@@ -1288,7 +1336,8 @@ impl Render for EmojiPicker {
                     .hover(|d| d.opacity(0.7))
                     .when(p.dead(), |d| d.opacity(0.5))
                     .when(active == Some(s), |d| d.child(div().absolute().left(px(-12.)).top(px(1.)).w(px(6.)).h(px(28.)).rounded(px(2.)).bg(c(PRIMARY))))
-                    .on_click(cx.listener(move |this, _, _, cx| this.jump(s, cx)))
+                    .on_click(cx.listener(move |this, _, _, cx| this.go(s, cx)))
+                    .on_mouse_down(gpui::MouseButton::Right, cx.listener(move |this, ev: &gpui::MouseDownEvent, _, cx| this.pack_menu(i, ev.position, cx)))
                     .child(face)
             }))
             .child(div().mt(px(3.)).child(rail_btn("icons/plus-circle.svg", None, cx)));
@@ -1319,6 +1368,15 @@ impl Render for EmojiPicker {
         })
         .size_full();
 
+        let main: AnyElement = if self.creator.is_some() && self.query.is_empty() {
+            let body = self.creator_body(cx);
+            if let Some((m, live)) = &self.media {
+                crate::media::pump(m, cx.entity().downgrade(), *live, cx);
+            }
+            body
+        } else {
+            grid.into_any_element()
+        };
         let body = match self.mode {
             Mode::Emoji => div()
                 .flex_1()
@@ -1326,14 +1384,16 @@ impl Render for EmojiPicker {
                 .flex()
                 .bg(c(0x0a0a0a))
                 .child(rail)
-                .child(div().flex_1().h(px(280.)).pt(px(8.)).pl(px(8.)).pr(px(5.)).child(grid))
+                .child(div().flex_1().h(px(280.)).pt(px(8.)).pl(px(8.)).pr(px(5.)).child(main))
                 .into_any_element(),
             Mode::Kaomoji => self.kaomoji_body(cx),
             Mode::Gif => self.gif_body(window, cx),
         };
 
+        let overlays = self.overlays(cx);
         div()
             .id("emoji-picker")
+            .relative()
             .occlude()
             .w(px(402.))
             .h(px(352.))
@@ -1354,5 +1414,6 @@ impl Render for EmojiPicker {
             .on_mouse_down_out(cx.listener(|_, _, _, cx| cx.emit(Dismissed)))
             .child(search)
             .child(body)
+            .children(overlays)
     }
 }

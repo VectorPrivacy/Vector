@@ -174,7 +174,15 @@ pub async fn cache_all_profile_images() {
 
 /// Keep bytes we already hold (our own upload) under `url`, so it shows without a download.
 pub fn precache(url: &str, bytes: &[u8], banner: bool) {
-    let kind = if banner { Kind::Banner } else { Kind::Avatar };
+    precache_as(url, bytes, if banner { Kind::Banner } else { Kind::Avatar });
+}
+
+/// An emoji or pack logo we just uploaded.
+pub fn precache_emoji(url: &str, bytes: &[u8], icon: bool) {
+    precache_as(url, bytes, if icon { Kind::PackIcon } else { Kind::Emoji });
+}
+
+fn precache_as(url: &str, bytes: &[u8], kind: Kind) {
     if cached(url, kind).is_some() {
         return;
     }
