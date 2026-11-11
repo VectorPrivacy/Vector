@@ -1,6 +1,6 @@
 [package]
 name = "vector-gpui"
-version = "0.1.0"
+version = "0.5.1"
 edition = "2024"
 license = "MIT"
 description = "Vector on GPUI: the native-rendered client, at parity with the Tauri one."

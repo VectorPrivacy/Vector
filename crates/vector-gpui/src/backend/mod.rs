@@ -16,6 +16,7 @@ pub mod sync;
 pub mod upload;
 pub mod archive;
 pub mod badges;
+pub mod device;
 
 use std::future::Future;
 use std::path::PathBuf;
@@ -81,6 +82,7 @@ pub fn start(data_dir: PathBuf) -> mpsc::UnboundedReceiver<UiEvent> {
         vector_core::db::set_download_dir(dl.join("vector"));
     }
     let _ = std::fs::create_dir_all(&data_dir);
+    device::init(Some(data_dir.clone()));
     vector_core::VectorCore::init(vector_core::CoreConfig { data_dir, event_emitter: Some(Box::new(Emitter)) })
         .expect("vector-core init");
     vector_core::requests::enable_shield();

@@ -31,8 +31,8 @@ use crate::inline::Target;
 use crate::timeline;
 
 const CHROME_H: f32 = 32.;
-const RAIL_W: f32 = 201.;
-const LIST_W: f32 = 239.;
+pub(crate) const RAIL_W: f32 = 201.;
+pub(crate) const LIST_W: f32 = 239.;
 const ROW_PITCH: f32 = 54.;
 
 type Shared = Rc<RefCell<Store>>;
@@ -102,6 +102,7 @@ pub struct VectorApp {
     mutuals_asked: Vec<String>,
     /// Viktor, while the Messages list is empty.
     viktor: Option<Entity<crate::viktor::Viktor>>,
+    settings: Option<crate::settings::Settings>,
 }
 
 #[derive(Clone, PartialEq)]
@@ -193,6 +194,7 @@ impl VectorApp {
             tab_slid: false,
             mutuals_asked: Vec::new(),
             viktor: None,
+            settings: None,
         }
     }
 
@@ -221,6 +223,12 @@ impl VectorApp {
             if let Some(w) = held.get(n.saturating_sub(1)) {
                 app.on_profile(crate::profile::Act::Badge(*w), window, cx);
             }
+        }
+        // Fixtures: VECTOR_SETTINGS=<category> opens Settings there.
+        if let Ok(cat) = std::env::var("VECTOR_SETTINGS") {
+            let cats = crate::settings::categories(&crate::settings::Offers { voice: false, routing: true, updates: true });
+            let id = cats.iter().find(|c| c.id == cat).map(|c| c.id).unwrap_or("appearance");
+            app.open_settings(id, window, cx);
         }
         if let Ok(pick) = std::env::var("VECTOR_NEW_CHAT") {
             app.open_new_chat(window, cx);
@@ -1054,8 +1062,16 @@ impl Render for VectorApp {
                         .ok();
                     }
                 }))
-                .child(chat_list(&self.store, &store, self.open.clone(), (self.requests_tab, self.tab_slid, no_messages), cx))
-                .child(match (&self.profile, self.open.clone()) {
+                .when_some(self.settings.as_ref(), |row, settings| {
+                    let app = cx.entity().downgrade();
+                    let on: crate::settings::OnAct = Rc::new(move |act, window, cx| {
+                        app.update(cx, |app, cx| app.on_settings(act, window, cx)).ok();
+                    });
+                    let width = f32::from(window.viewport_size().width) - RAIL_W;
+                    row.child(div().flex_1().min_w_0().h_full().child(crate::settings::view(settings, width, &on, cx)))
+                })
+                .when(self.settings.is_none(), |row| row.child(chat_list(&self.store, &store, self.open.clone(), (self.requests_tab, self.tab_slid, no_messages), cx)))
+                .when(self.settings.is_none(), |row| row.child(match (&self.profile, self.open.clone()) {
                     _ if self.new_chat.is_some() => {
                         let app = cx.entity().downgrade();
                         let on: crate::newchat::OnAct = Rc::new(move |act, window, cx| {
@@ -1073,7 +1089,7 @@ impl Render for VectorApp {
                     }
                     (None, Some(id)) => self.chat_pane(&store, id, cx).into_any_element(),
                     (None, None) => empty_pane(self.viktor.clone()).into_any_element(),
-                }),
+                })),
         )
         .children(self.switcher.as_ref().filter(|_| self.profile.is_some()).map(|s| {
             let app = cx.entity().downgrade();
@@ -2648,6 +2664,120 @@ impl VectorApp {
             .ok();
         })
         .detach();
+    }
+
+    fn open_settings(&mut self, cat: &'static str, window: &mut Window, cx: &mut Context<Self>) {
+        use crate::settings::{Display, Settings};
+        let search = cx.new(|cx| TextInput::new("Search", cx).with_look(crate::composer::Look { size: px(14.), line_height: px(17.), weight: FontWeight::NORMAL, placeholder: c(0xb2b2b2), ..kit::field_look() }));
+        cx.subscribe_in(&search, window, |_, _, _: &crate::composer::InputChanged, _, cx| cx.notify()).detach();
+        let seen = backend::device::get("settings_seen").and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok()).unwrap_or_default();
+        let keys: Vec<(&'static str, bool)> = Display::ALL.iter().filter_map(|d| d.sql_key()).collect();
+        let sql = if self.live { backend::prefs::sql_bools(&keys) } else { keys.iter().map(|(_, d)| *d).collect() };
+        let mut display: HashMap<Display, bool> = keys.iter().zip(sql).map(|((k, _), v)| (Display::from_sql_key(k).unwrap(), v)).collect();
+        display.insert(Display::StartMenu, backend::device::get("ws_nav").as_deref() != Some("navbar"));
+        display.insert(Display::SendOnEnter, backend::device::get("send_on_enter").as_deref() != Some("false"));
+        let theme = if self.live { backend::prefs::sql("theme") } else { None }.unwrap_or_else(|| "vector".into());
+        self.profile = None;
+        self.new_chat = None;
+        self.switcher = None;
+        self.settings = Some(Settings {
+            cat,
+            search,
+            scroll: gpui::ScrollHandle::new(),
+            offers: crate::settings::Offers { voice: false, routing: true, updates: true },
+            theme,
+            theme_open: false,
+            display,
+            flipped: HashSet::new(),
+            seen: seen.into_iter().collect(),
+            jumped: None,
+        });
+        self.mark_settings_seen(None);
+        cx.notify();
+    }
+
+    /// The block now being read stops wearing its NEW pill.
+    fn mark_settings_seen(&mut self, anchor: Option<&'static str>) {
+        let Some(s) = self.settings.as_mut() else { return };
+        let cats = crate::settings::categories(&s.offers);
+        let Some(cat) = cats.iter().find(|c| c.id == s.cat) else { return };
+        let Some(id) = anchor.or(cat.anchors.first().map(|a| a.id)) else { return };
+        if !s.fresh_ids(&cats).contains(&id) {
+            return;
+        }
+        s.seen.insert(id.to_string());
+        let list: Vec<&String> = s.seen.iter().collect();
+        if let Ok(json) = serde_json::to_string(&list) {
+            backend::device::set("settings_seen", json);
+        }
+    }
+
+    fn on_settings(&mut self, act: crate::settings::Act, window: &mut Window, cx: &mut Context<Self>) {
+        use crate::settings::{Act, Display};
+        let Some(s) = self.settings.as_mut() else { return };
+        cx.notify();
+        match act {
+            Act::Category(id) => {
+                s.theme_open = false;
+                s.jumped = None;
+                if s.cat != id {
+                    s.cat = id;
+                    s.scroll = gpui::ScrollHandle::new();
+                    self.mark_settings_seen(None);
+                }
+            }
+            Act::Anchor(cat, anchor) => {
+                s.theme_open = false;
+                if s.cat != cat {
+                    s.cat = cat;
+                    s.scroll = gpui::ScrollHandle::new();
+                }
+                let cats = crate::settings::categories(&s.offers);
+                if let Some(ix) = cats.iter().find(|c| c.id == cat).and_then(|c| c.anchors.iter().position(|a| a.id == anchor)) {
+                    s.scroll.scroll_to_top_of_item(ix);
+                }
+                s.jumped = Some(anchor);
+                self.mark_settings_seen(Some(anchor));
+            }
+            Act::Scrolled => s.jumped = None,
+            Act::Display(d, on) => {
+                s.display.insert(d, on);
+                s.flipped.insert(d);
+                match d {
+                    Display::StartMenu => backend::device::set("ws_nav", if on { "start" } else { "navbar" }),
+                    Display::SendOnEnter => backend::device::set("send_on_enter", if on { "true" } else { "false" }),
+                    _ => {
+                        if let (Some((key, _)), true) = (d.sql_key(), self.live) {
+                            backend::prefs::set_sql(key, on.to_string());
+                        }
+                    }
+                }
+            }
+            Act::Explain(d) => {
+                let mut popup = kit::Popup::notice(d.label());
+                popup.icon = None;
+                popup.text = Some(d.explainer().into());
+                self.popup = Some((popup, PopupAct::Notice));
+            }
+            Act::ThemeOpen => s.theme_open = !s.theme_open,
+            Act::Theme(v) => {
+                s.theme_open = false;
+                s.theme = v.to_string();
+                if self.live {
+                    backend::prefs::set_sql("theme", v.to_string());
+                }
+            }
+            Act::Link(key) => cx.open_url(match key {
+                "donate" => "https://vector-privacy.gitbook.io/vector-privacy/vector-messenger/more/donations",
+                "gitbook" => "https://docs.vectorapp.io",
+                _ => "https://vectorapp.io/privacy-policy",
+            }),
+            Act::ClearSearch => {
+                let search = s.search.clone();
+                search.update(cx, |input, cx| input.clear(window, cx));
+                window.focus(&search.focus_handle(cx), cx);
+            }
+        }
     }
 
     fn open_new_chat(&mut self, window: &mut Window, cx: &mut Context<Self>) {

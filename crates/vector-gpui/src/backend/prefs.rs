@@ -173,3 +173,21 @@ pub async fn accept(npub: String) -> Result<(), String> {
 pub async fn request_mutuals() -> Vec<String> {
     vector_core::requests::request_mutuals().await
 }
+
+/// The account's boolean settings, each with its default when never set.
+pub fn sql_bools(keys: &[(&'static str, bool)]) -> Vec<bool> {
+    keys.iter()
+        .map(|(key, default)| match vector_core::db::settings::get_sql_setting(key.to_string()) {
+            Ok(Some(v)) => v == "true" || v == "1",
+            _ => *default,
+        })
+        .collect()
+}
+
+pub fn set_sql(key: &'static str, value: String) {
+    let _ = vector_core::db::settings::set_sql_setting(key.to_string(), value);
+}
+
+pub fn sql(key: &'static str) -> Option<String> {
+    vector_core::db::settings::get_sql_setting(key.to_string()).ok().flatten()
+}
