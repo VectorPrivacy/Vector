@@ -56,6 +56,8 @@ pub enum Act {
     Pack(crate::packs::Act),
     /// A reply's quote: go to the message it answers.
     Jump(String),
+    /// An audio attachment's controls, by attachment.
+    Audio(String, crate::audio::Act),
 }
 
 pub type OnAct = Rc<dyn Fn(&str, Act, &mut Window, &mut App)>;

@@ -301,6 +301,31 @@
    "avatar_cached": "avatars/bob.png",
    "banner_cached": "",
    "stream_consent": false
+  },
+  {
+   "id": "npub1yn2tjm6cmfk54pgjxyam6q4z36lse22aa3hyeph00r887q083zkq7g4t6h",
+   "name": "ana",
+   "display_name": "Ana",
+   "nickname": "",
+   "lud06": "",
+   "lud16": "",
+   "banner": "",
+   "avatar": "https://example.invalid/alice.png",
+   "about": "",
+   "website": "",
+   "nip05": "",
+   "status": {
+    "title": "",
+    "purpose": "",
+    "url": ""
+   },
+   "last_updated": 1794362400,
+   "mine": false,
+   "bot": false,
+   "is_blocked": false,
+   "avatar_cached": "avatars/alice.png",
+   "banner_cached": "",
+   "stream_consent": false
   }
  ],
  "chats": [
@@ -1725,6 +1750,95 @@
      "is_owner": "true",
      "channel_name": "Lounge"
     }
+   },
+   "muted": false,
+   "notify": 2,
+   "everyone_pings": true,
+   "community_muted": false
+  },
+  {
+   "id": "npub1yn2tjm6cmfk54pgjxyam6q4z36lse22aa3hyeph00r887q083zkq7g4t6h",
+   "chat_type": "DirectMessage",
+   "participants": [
+    "npub1yn2tjm6cmfk54pgjxyam6q4z36lse22aa3hyeph00r887q083zkq7g4t6h"
+   ],
+   "messages": [
+    {
+     "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "content": "send me the loop?",
+     "replied_to": "",
+     "preview_metadata": null,
+     "attachments": [],
+     "reactions": [],
+     "at": 1787880000000,
+     "pending": false,
+     "failed": false,
+     "mine": true,
+     "npub": "npub1yazve5gvw5em6um2mzg0nh2u4v4dkfas04gqh9yn72wdcssvktsqfmmmv4",
+     "edited": false
+    },
+    {
+     "id": "b02add15a54a6a91cf66fe50248abdec79f84ed022c788d67a3984fb4fcadc50",
+     "content": "",
+     "replied_to": "",
+     "preview_metadata": null,
+     "attachments": [
+      {
+       "id": "dbf76ea440dfc079815f321b2a42d64d59bf424324f88dd32b9c2eb09093c013",
+       "key": "",
+       "nonce": "",
+       "extension": "wav",
+       "name": "",
+       "url": "https://example.invalid/voice",
+       "path": "media/voice.wav",
+       "size": 118444,
+       "img_meta": null,
+       "downloading": false,
+       "downloaded": true
+      }
+     ],
+     "reactions": [],
+     "at": 1787880600000,
+     "pending": false,
+     "failed": false,
+     "mine": false,
+     "npub": "npub1yn2tjm6cmfk54pgjxyam6q4z36lse22aa3hyeph00r887q083zkq7g4t6h",
+     "edited": false
+    },
+    {
+     "id": "29f486453349e2b4b77608d08f98d9adb8df9e0c1e4b5c3e62fd8e3d34d0b4cd",
+     "content": "and the loop",
+     "replied_to": "",
+     "preview_metadata": null,
+     "attachments": [
+      {
+       "id": "cc3fe8261c75abf5327a1702b25bae4f31c36a248c8bbca54be9506eaff0725d",
+       "key": "",
+       "nonce": "",
+       "extension": "wav",
+       "name": "night-loop.wav",
+       "url": "https://example.invalid/loop",
+       "path": "media/loop.wav",
+       "size": 192044,
+       "img_meta": null,
+       "downloading": false,
+       "downloaded": true
+      }
+     ],
+     "reactions": [],
+     "at": 1787881200000,
+     "pending": false,
+     "failed": false,
+     "mine": false,
+     "npub": "npub1yn2tjm6cmfk54pgjxyam6q4z36lse22aa3hyeph00r887q083zkq7g4t6h",
+     "edited": false
+    }
+   ],
+   "last_read": "29f486453349e2b4b77608d08f98d9adb8df9e0c1e4b5c3e62fd8e3d34d0b4cd",
+   "unread_from": "",
+   "created_at": 1787796000,
+   "metadata": {
+    "custom_fields": {}
    },
    "muted": false,
    "notify": 2,

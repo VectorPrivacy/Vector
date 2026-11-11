@@ -94,6 +94,24 @@ pub fn attachments(ctx: &Ctx, m: &Message) -> Option<AnyElement> {
             Phase::Idle
         };
         let (el, bottom) = match phase {
+            Phase::Ready if crate::audio::EXTENSIONS.contains(&e.as_str()) && !unsent => {
+                let input = match source(ctx, att) {
+                    Source::Held(h) => crate::audio::AudioInputSpec::Held(h),
+                    Source::File(p) => crate::audio::AudioInputSpec::File(p),
+                };
+                media.audio.want_probe(&att.id, &input);
+                let duration = media.audio.duration(&att.id);
+                let (on_act, msg, aid) = (ctx.on_act.clone(), m.id.clone(), att.id.clone());
+                (
+                    crate::audio::view(
+                        att,
+                        media.audio.player(&att.id),
+                        duration,
+                        std::rc::Rc::new(move |a, w, cx| on_act(&msg, Act::Audio(aid.clone(), a), w, cx)),
+                    ),
+                    6.,
+                )
+            }
             Phase::Ready if IMAGES.contains(&e.as_str()) => {
                 match picture(ctx, &mut media, m, att) {
                     Some(el) => (el, 6.),

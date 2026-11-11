@@ -8895,6 +8895,7 @@ name = "vector-gpui"
 version = "0.5.1"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "bip39",
  "chrono",
  "color_quant",

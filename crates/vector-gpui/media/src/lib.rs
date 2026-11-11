@@ -23,6 +23,9 @@ pub mod calls;
 #[allow(dead_code)]
 pub mod mic_access;
 pub mod miniapps;
+#[path = "../../../../src-tauri/src/voice.rs"]
+#[allow(dead_code, unexpected_cfgs)]
+pub mod voice;
 
 #[path = "../../../../src-tauri/src/simd/audio.rs"]
 #[allow(dead_code)]

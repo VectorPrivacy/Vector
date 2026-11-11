@@ -1,6 +1,7 @@
 mod assets;
 use vector_media::{audio_devices, calls, mic_access};
 mod attachments;
+mod audio;
 mod audit;
 mod backend;
 mod badgecard;
@@ -39,6 +40,7 @@ mod policies;
 mod preview;
 mod profile;
 mod qr;
+mod recorder;
 mod roles;
 mod security;
 mod settings;

@@ -27,6 +27,7 @@ tokio = { version = "1.49.0", features = ["rt-multi-thread", "sync", "time", "ma
 futures = "0.3"
 rand = "0.8"
 regex = "1"
+base64 = "0.22"
 nostr-sdk = "=0.45.4"
 bip39 = "2.2.2"
 zeroize = "1.8"

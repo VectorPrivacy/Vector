@@ -109,8 +109,7 @@ pub fn start(data_dir: PathBuf) -> mpsc::UnboundedReceiver<UiEvent> {
             .expect("tokio runtime")
     });
     tauri::async_runtime::set(rt.handle().clone());
-    let _ =
-        vector_media::TAURI_APP.set(tauri::AppHandle::new(|event, payload| emit(event, payload)));
+    let _ = vector_media::TAURI_APP.set(tauri::AppHandle::new(engine_sink));
     {
         let _guard = rt.enter();
         crate::calls::session::install();
@@ -120,6 +119,29 @@ pub fn start(data_dir: PathBuf) -> mpsc::UnboundedReceiver<UiEvent> {
         Arc::new(sync::ProfileHandler),
     ));
     rx
+}
+
+fn engine_sink(event: &str, payload: serde_json::Value) {
+    if event.starts_with("audio_") && event != "audio_devices_changed" {
+        crate::audio::engine_event(event, payload);
+    } else {
+        emit(event, payload);
+    }
+}
+
+/// Without core (fixtures), the shared audio engine still needs a runtime and its events.
+pub fn fixture_runtime() {
+    static AUDIO_RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+    let rt = AUDIO_RT.get_or_init(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .thread_name("vector-audio")
+            .enable_all()
+            .build()
+            .expect("tokio runtime")
+    });
+    tauri::async_runtime::set(rt.handle().clone());
+    let _ = vector_media::TAURI_APP.set(tauri::AppHandle::new(crate::audio::engine_event));
 }
 
 /// Run `fut` on core's runtime; the receiver resolves with its output. Like a Tauri command,

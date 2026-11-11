@@ -331,3 +331,32 @@ pub async fn messages_around(
     let id = db::id_cache::get_chat_id_by_identifier(&chat_id)?;
     db::events::get_messages_around(id, &anchor, before, after).await
 }
+
+/// The stopped recording, encoded once and sent as a nameless `.wav`.
+pub async fn send_voice(receiver: String, replied_to: String) -> Result<(), String> {
+    if !receiver.starts_with("npub1") {
+        return Err("Voice messages can't be sent to a Community channel from this client yet".into());
+    }
+    let pending = vector_media::voice::AudioRecorder::global()
+        .take_pending()
+        .ok_or("No pending recording")?;
+    let _ = vector_media::audio_engine::AudioEngine::get().map(|e| e.stop(pending.source_id));
+    let wav = tokio::task::spawn_blocking(move || pending.encode_wav())
+        .await
+        .map_err(|e| e.to_string())??;
+    let reply = (!replied_to.is_empty()).then_some(replied_to.as_str());
+    let config = file_send_config(&receiver);
+    vector_core::sending::send_file_dm_with_meta(
+        &receiver,
+        Arc::new(wav),
+        "",
+        "wav",
+        None,
+        None,
+        reply,
+        &config,
+        Arc::new(Callback),
+    )
+    .await
+    .map(|_| ())
+}

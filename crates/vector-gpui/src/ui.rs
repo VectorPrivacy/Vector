@@ -104,6 +104,7 @@ pub struct VectorApp {
     time_suggestions: bool,
     /// The composer box as last painted, to put the chip under its phrase.
     composer_box: Rc<std::cell::Cell<Option<gpui::Bounds<gpui::Pixels>>>>,
+    rec: crate::recorder::Recorder,
     /// Who a `@` can name in the open chat, gathered once per open panel.
     mention_pool: Option<Rc<Vec<crate::mentions::Item>>>,
     /// The draft's picked mentions: the name shown, and what it sends as.
@@ -520,6 +521,23 @@ impl VectorApp {
             |app, _, e: &crate::security::Event, window, cx| app.on_security(e, window, cx),
         )
         .detach();
+        if !live {
+            backend::fixture_runtime();
+        }
+        if let Some(mut rx) = crate::audio::listen() {
+            cx.spawn(async move |this, cx| {
+                use futures::StreamExt;
+                while let Some((name, v)) = rx.next().await {
+                    if this
+                        .update(cx, |this, cx| this.on_audio_event(&name, v, cx))
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            })
+            .detach();
+        }
         Self {
             screen: Screen::Main,
             live,
@@ -549,6 +567,7 @@ impl VectorApp {
             chip_passed: HashSet::new(),
             time_suggestions: true,
             composer_box: Rc::default(),
+            rec: Default::default(),
             mention_pool: None,
             tracked: Vec::new(),
             mention_rules: HashMap::new(),
@@ -664,6 +683,10 @@ impl VectorApp {
                 .map(|c| c.id)
                 .unwrap_or("appearance");
             app.open_settings(id, window, cx);
+        }
+        // Fixtures: VECTOR_REC=recording|locked|preview holds the voice recorder in that state.
+        if let Ok(state) = std::env::var("VECTOR_REC") {
+            app.rec.fixture(&state);
         }
         // Fixtures: VECTOR_CALL=ringing|calling|active|open shows a call with alice in that state.
         if let Ok(state) = std::env::var("VECTOR_CALL") {
@@ -2140,6 +2163,13 @@ impl VectorApp {
         self.profile = None;
         self.embed_modal = None;
         self.new_chat = None;
+        if self.open.as_ref() != Some(&id) && self.rec.state != crate::recorder::State::Idle {
+            if let Some(src) = self.rec.source {
+                let _ = crate::audio::engine().map(|e| e.stop(src));
+            }
+            vector_media::voice::AudioRecorder::global().cancel();
+            self.rec.idle();
+        }
         self.read_anchor = self.store.borrow().chat(&id).map(|c| c.last_read.clone());
         self.open = Some(id.clone());
         let count = self.rebuild_rows();
@@ -2466,6 +2496,7 @@ impl VectorApp {
                 cx.notify();
             }
             Act::OpenFile(att) => self.open_file(id, att, cx),
+            Act::Audio(att, a) => self.audio_act(id, att, a, cx),
             Act::View(open) => {
                 let live = self.live;
                 let viewer = cx.new(|cx| crate::viewer::Viewer::new(open, live, window, cx));
@@ -2799,6 +2830,103 @@ impl VectorApp {
     }
 
     /// A file on this device: shown in its folder, or a held one saved where the user picks.
+    fn audio_input(&self, msg_id: &str, att_id: &str) -> Option<crate::audio::AudioInputSpec> {
+        let att = self
+            .message(msg_id)?
+            .attachments
+            .into_iter()
+            .find(|a| a.id == att_id)?;
+        if att.resident || att.path.is_empty() {
+            return vector_core::simd::hex::hex_to_bytes_32_checked(&att.id)
+                .map(crate::audio::AudioInputSpec::Held);
+        }
+        let path = std::path::PathBuf::from(&att.path);
+        Some(crate::audio::AudioInputSpec::File(if path.is_absolute() {
+            path
+        } else {
+            self.store.borrow().media_root.join(path)
+        }))
+    }
+
+    fn audio_act(
+        &mut self,
+        msg: String,
+        att: String,
+        act: crate::audio::Act,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(input) = self.audio_input(&msg, &att) else {
+            return;
+        };
+        let work = self.media.borrow_mut().audio.act(&msg, &att, input, act);
+        if let Some(w) = work {
+            self.audio_work(vec![w], cx);
+        }
+        cx.notify();
+    }
+
+    fn audio_work(&mut self, work: Vec<crate::audio::Work>, cx: &mut Context<Self>) {
+        for w in work {
+            let rx = crate::audio::run(w);
+            cx.spawn(async move |this, cx| {
+                let Ok(done) = rx.await else { return };
+                this.update(cx, |this, cx| {
+                    let mut media = this.media.borrow_mut();
+                    match done {
+                        crate::audio::WorkDone::Probed(att, ms) => media.audio.probed(att, ms),
+                        crate::audio::WorkDone::Loaded(att, res) => media.audio.loaded(&att, res),
+                    }
+                    drop(media);
+                    cx.notify();
+                })
+                .ok();
+            })
+            .detach();
+        }
+    }
+
+    /// A voice message that ended hands on to the next one in its chat.
+    fn on_audio_event(&mut self, name: &str, v: serde_json::Value, cx: &mut Context<Self>) {
+        if name == "audio_ended"
+            && self.rec.source.is_some()
+            && v.get("id").and_then(Value::as_u64) == self.rec.source.map(u64::from)
+        {
+            self.rec.ended();
+        }
+        let ended = self.media.borrow_mut().audio.on_event(name, &v);
+        cx.notify();
+        let Some(att) = ended else { return };
+        let Some(chat) = self.open.clone() else { return };
+        let next = {
+            let store = self.store.borrow();
+            let Some(chat) = store.chat(&chat) else { return };
+            let Some(at) = chat
+                .messages
+                .iter()
+                .position(|m| m.attachments.iter().any(|a| a.id == att))
+            else {
+                return;
+            };
+            let voice = |a: &vector_core::Attachment| {
+                a.name.is_empty()
+                    && (a.downloaded || a.resident)
+                    && crate::audio::EXTENSIONS.contains(&a.extension.to_ascii_lowercase().as_str())
+            };
+            if !chat.messages[at].attachments.iter().any(|a| a.id == att && voice(a)) {
+                return;
+            }
+            chat.messages.get(at + 1).and_then(|m| {
+                m.attachments
+                    .iter()
+                    .find(|a| voice(a))
+                    .map(|a| (m.id.clone(), a.id.clone()))
+            })
+        };
+        if let Some((msg, att)) = next {
+            self.audio_act(msg, att, crate::audio::Act::Toggle, cx);
+        }
+    }
+
     fn open_file(&mut self, msg_id: String, att_id: String, cx: &mut Context<Self>) {
         let Some(att) = self
             .message(&msg_id)
@@ -3133,6 +3261,14 @@ impl VectorApp {
 
 impl Render for VectorApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.media.borrow_mut().audio.tick() || self.rec.animating() {
+            window.request_animation_frame();
+        }
+        match self.rec.due() {
+            Some(crate::recorder::Due::Locked) => self.rec.locked(),
+            Some(crate::recorder::Due::Idle) => self.rec.idle(),
+            None => {}
+        }
         self.send_shown = !self.input.read(cx).text().trim().is_empty();
         if (self.shortcode.is_some()
             || self.mention.is_some()
@@ -4727,6 +4863,13 @@ impl VectorApp {
                     let _ = backend::run(backend::unfurl::fetch_msg_metadata(chat, msg));
                 }
             }
+            let probes = std::mem::take(&mut media.borrow_mut().audio.queue);
+            if !probes.is_empty() {
+                let app = app_media.clone();
+                cx.defer(move |cx| {
+                    app.update(cx, |app, cx| app.audio_work(probes, cx)).ok();
+                });
+            }
             let autos = std::mem::take(&mut media.borrow_mut().auto_queue);
             if !autos.is_empty() {
                 let app = app_media.clone();
@@ -4813,6 +4956,13 @@ impl VectorApp {
                     self.send_shown || matches!(self.mode, Mode::Edit { .. }),
                     self.send_flips,
                 ),
+                &self.rec,
+                {
+                    let app = cx.entity().downgrade();
+                    Rc::new(move |ui, w: &mut Window, cx: &mut gpui::App| {
+                        app.update(cx, |app, cx| app.rec_ui(ui, w, cx)).ok();
+                    })
+                },
                 cx,
             ))
     }
@@ -4989,8 +5139,14 @@ fn composer(
     popup: Option<AnyElement>,
     measure: Rc<std::cell::Cell<Option<gpui::Bounds<gpui::Pixels>>>>,
     send: (bool, usize),
+    rec: &crate::recorder::Recorder,
+    on_rec: crate::recorder::On,
     cx: &mut Context<VectorApp>,
 ) -> impl IntoElement {
+    use crate::recorder::State as R;
+    let busy = matches!(rec.state, R::Recording | R::Locked | R::Preview | R::Cancelled);
+    let previewing = rec.state == R::Preview;
+    let hides_mic = matches!(rec.state, R::Recording | R::Locked | R::Preview);
     let icon = |path: &'static str| {
         div()
             .w(px(38.))
@@ -5115,28 +5271,38 @@ fn composer(
         .child(
             // The buttons keep to the last line as the text grows upward.
             div()
+                .relative()
                 .min_h(px(45.))
                 .rounded(px(10.))
                 .bg(c(APP_BG))
                 .flex()
-                .items_end()
-                .child(if editing {
+                .when(busy, |d| d.items_center())
+                .when(!busy, |d| d.items_end())
+                .when(busy, |d| {
+                    d.child(if previewing {
+                        crate::recorder::preview(rec, on_rec.clone())
+                    } else {
+                        crate::recorder::strip(rec)
+                    })
+                })
+                .when(!busy, |d| d.child(if editing {
                     cancel("edit-cancel", 23., cx)
                         .w(px(38.))
                         .h(px(45.))
                         .into_any_element()
                 } else {
                     attach_button(attach.is_some(), cx).into_any_element()
-                })
+                }))
                 .child(
                     div()
                         .flex_1()
                         .min_w_0()
                         .py(px(12.))
                         .pr(px(10.))
+                        .when(busy, |d| d.absolute().invisible().size_0())
                         .child(input),
                 )
-                .child(
+                .when(!busy, |d| d.child(
                     icon(if picker.as_ref().is_some_and(|p| p.1) {
                         "icons/wink-face.svg"
                     } else {
@@ -5147,9 +5313,22 @@ fn composer(
                     .on_click(
                         cx.listener(|app, _, window, cx| app.toggle_picker(None, window, cx)),
                     ),
-                )
-                .child(send_or_mic(send, cx)),
+                ))
+                .when(!hides_mic || previewing, |d| {
+                    d.child(send_or_mic(
+                        (send.0 || previewing, send.1),
+                        rec.state == R::Pending,
+                        previewing,
+                        on_rec.clone(),
+                        cx,
+                    ))
+                })
+                .children(crate::recorder::dot(rec, on_rec.clone()))
+                .when(matches!(rec.state, R::Pending | R::Recording), |d| {
+                    d.child(crate::recorder::tracker(on_rec.clone()))
+                }),
         )
+        .children(crate::recorder::overlays(rec))
         .when_some(attach.filter(|_| !editing), |d, opened| {
             d.child(attachment_panel(opened, cx))
         })
@@ -5171,7 +5350,13 @@ fn composer(
 
 /// `#chat-input-voice` / `#chat-input-send`: Send for a draft, the mic otherwise, swapped with a
 /// spin (`swapOut` 0.15s, then `swapIn` 0.2s) when typing flips it; `flips` names each swap.
-fn send_or_mic((send, flips): (bool, usize), cx: &mut Context<VectorApp>) -> impl IntoElement {
+fn send_or_mic(
+    (send, flips): (bool, usize),
+    pending: bool,
+    voice_send: bool,
+    on_rec: crate::recorder::On,
+    cx: &mut Context<VectorApp>,
+) -> impl IntoElement {
     use gpui::AnimationExt as _;
     let face = |send: bool| {
         if send {
@@ -5229,13 +5414,23 @@ fn send_or_mic((send, flips): (bool, usize), cx: &mut Context<VectorApp>) -> imp
         .items_center()
         .justify_center()
         .cursor_pointer()
-        .when(send, |d| {
+        .when(voice_send, |d| {
+            d.on_mouse_down(gpui::MouseButton::Left, |_, w, _| w.prevent_default())
+                .on_click(cx.listener(|app, _, _, cx| app.send_voice(cx)))
+        })
+        .when(send && !voice_send, |d| {
             d.on_mouse_down(gpui::MouseButton::Left, |_, w, _| w.prevent_default())
                 .on_click(cx.listener(|app, _, window, cx| {
                     app.input.update(cx, |i, cx| i.submit(window, cx))
                 }))
         })
-        .child(icon)
+        .when(!send, move |d| {
+            d.on_mouse_down(gpui::MouseButton::Left, move |e, w, cx| {
+                w.prevent_default();
+                on_rec(crate::recorder::Ui::Press(e.position), w, cx)
+            })
+        })
+        .child(div().when(pending, |d| d.opacity(0.)).child(icon))
 }
 
 /// `#chat-input-file`: the plus, turned to a cross while the panel is open.
@@ -12669,4 +12864,165 @@ fn fixture_network() -> (
         ),
     ];
     (relays, servers)
+}
+
+// ── voice recorder ──────────────────────────────────────────────────────────────────────
+
+/// Run blocking recorder work off the UI thread.
+fn rec_thread<T: Send + 'static>(
+    f: impl FnOnce() -> T + Send + 'static,
+) -> futures::channel::oneshot::Receiver<T> {
+    let (tx, rx) = futures::channel::oneshot::channel();
+    // spawn-detached: device I/O on bytes in hand, no account state.
+    std::thread::spawn(move || {
+        let _ = tx.send(f());
+    });
+    rx
+}
+
+impl VectorApp {
+    fn rec_ui(&mut self, ui: crate::recorder::Ui, _: &mut Window, cx: &mut Context<Self>) {
+        use crate::recorder::{Effect, State, Ui};
+        match ui {
+            Ui::Press(at) => {
+                if self.open.is_none() {
+                    return;
+                }
+                let Some(press) = self.rec.press(at) else { return };
+                cx.spawn(async move |this, cx| {
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_millis(crate::recorder::HOLD_MS))
+                        .await;
+                    this.update(cx, |app, cx| {
+                        if app.rec.press == press && app.rec.state == State::Pending {
+                            app.rec_start(press, cx);
+                        }
+                    })
+                    .ok();
+                })
+                .detach();
+            }
+            Ui::Move(at) => match self.rec.moved(at) {
+                Effect::Cancel => self.rec_cancel(),
+                Effect::Lock => self.rec.lock(),
+                _ => {}
+            },
+            Ui::Release => {
+                if self.rec.released() == Effect::Stop {
+                    self.rec_stop(cx);
+                }
+            }
+            Ui::DotClick => {
+                if self.rec.state == State::Locked {
+                    self.rec_stop(cx);
+                }
+            }
+            Ui::Delete => {
+                if let Some(id) = self.rec.source {
+                    let _ = crate::audio::engine().map(|e| e.stop(id));
+                }
+                vector_media::voice::AudioRecorder::global().cancel();
+                self.rec.idle();
+            }
+            Ui::PlayPause => {
+                let Some(id) = self.rec.source else { return };
+                let Ok(e) = crate::audio::engine() else { return };
+                if self.rec.playing {
+                    let _ = e.pause(id);
+                    self.rec.paused();
+                } else {
+                    let pos = self.rec.position();
+                    let pos = if pos >= self.rec.duration { 0 } else { pos };
+                    let _ = e.seek(id, pos);
+                    if e.play(id).is_ok() {
+                        self.rec.played(pos);
+                    }
+                }
+            }
+            Ui::Seek(f) => {
+                let Some(id) = self.rec.source else { return };
+                let ms = (f.clamp(0., 1.) * self.rec.duration as f32) as u64;
+                if let Ok(e) = crate::audio::engine() {
+                    let _ = e.seek(id, ms);
+                }
+                self.rec.seek(ms);
+            }
+        }
+        cx.notify();
+    }
+
+    fn rec_start(&mut self, press: u64, cx: &mut Context<Self>) {
+        let rx = rec_thread(|| {
+            futures::executor::block_on(vector_media::mic_access::require())?;
+            crate::audio::engine()?;
+            vector_media::voice::AudioRecorder::global().start()
+        });
+        cx.spawn(async move |this, cx| {
+            let done = rx.await.unwrap_or_else(|e| Err(e.to_string()));
+            this.update(cx, |app, cx| {
+                use crate::recorder::State;
+                let live = app.rec.press == press && app.rec.state == State::Pending;
+                match done {
+                    Ok(()) if live => app.rec.recording(),
+                    Ok(()) => vector_media::voice::AudioRecorder::global().cancel(),
+                    Err(e) => {
+                        app.rec.idle();
+                        app.notice("Recording Failed", e, cx);
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn rec_cancel(&mut self) {
+        vector_media::voice::AudioRecorder::global().cancel();
+        self.rec.cancel();
+    }
+
+    fn rec_stop(&mut self, cx: &mut Context<Self>) {
+        self.rec.status = "Processing...";
+        let rx = rec_thread(|| vector_media::voice::AudioRecorder::global().stop());
+        cx.spawn(async move |this, cx| {
+            let done = rx.await.unwrap_or_else(|e| Err(e.to_string()));
+            this.update(cx, |app, cx| {
+                match done {
+                    Ok(r) => app.rec.preview(r.id, r.duration_ms),
+                    Err(e) => {
+                        app.rec.idle();
+                        app.notice("Recording Failed", e, cx);
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn send_voice(&mut self, cx: &mut Context<Self>) {
+        let Some(receiver) = self.open.clone() else { return };
+        let reply = match std::mem::replace(&mut self.mode, Mode::Normal) {
+            Mode::Reply { id, .. } => id,
+            other => {
+                self.mode = other;
+                String::new()
+            }
+        };
+        self.rec.idle();
+        cx.notify();
+        let rx = backend::run(messaging::send_voice(receiver.to_string(), reply));
+        cx.spawn(async move |this, cx| {
+            let err = match rx.await {
+                Ok(Ok(())) => return,
+                Ok(Err(e)) => e,
+                Err(e) => e.to_string(),
+            };
+            this.update(cx, |this, cx| this.notice("Voice Message Failed", err, cx))
+                .ok();
+        })
+        .detach();
+    }
 }

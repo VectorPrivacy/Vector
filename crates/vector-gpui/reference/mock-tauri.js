@@ -9,6 +9,7 @@
     };
     const msgs = (id) => (FIX.chats.find((c) => c.id === id)?.messages || []).slice().sort((a, b) => a.at - b.at);
     const fns = {
+        audio_probe: ({ path }) => (String(path).includes("loop") ? 12000 : 7400),
         get_chat_message_count: ({ chatId }) => msgs(chatId).length,
         get_message_views: ({ chatId, limit = 50, offset = 0 }) => msgs(chatId).reverse().slice(offset, offset + limit),
         get_messages_around: ({ chatId, anchorId, before = 0, after = 0 }) => {
