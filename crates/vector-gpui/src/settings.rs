@@ -23,7 +23,7 @@ pub struct Anchor {
 pub struct Category {
     pub id: &'static str,
     pub label: &'static str,
-    icon: &'static str,
+    pub icon: &'static str,
     danger: bool,
     pub anchors: Vec<Anchor>,
 }

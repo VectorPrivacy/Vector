@@ -109,6 +109,7 @@ pub struct VectorApp {
     update_url: Option<String>,
     /// A volume change waits on its throttle.
     audio_save_pending: bool,
+    start: Option<crate::startmenu::StartMenu>,
 }
 
 #[derive(Clone, PartialEq)]
@@ -218,6 +219,7 @@ impl VectorApp {
             updates: crate::settings::Updates { beta: backend::updates::beta(), ..Default::default() },
             update_url: None,
             audio_save_pending: false,
+            start: None,
         }
     }
 
@@ -252,6 +254,10 @@ impl VectorApp {
             let cats = crate::settings::categories(&crate::settings::Offers { voice: false, routing: true, updates: true });
             let id = cats.iter().find(|c| c.id == cat).map(|c| c.id).unwrap_or("appearance");
             app.open_settings(id, window, cx);
+        }
+        // Fixtures: VECTOR_START opens the Main Menu.
+        if std::env::var("VECTOR_START").is_ok() {
+            app.toggle_start(cx);
         }
         // Fixtures: VECTOR_UPDATES=latest|avail shows what a check found.
         match std::env::var("VECTOR_UPDATES").as_deref() {
@@ -339,6 +345,116 @@ impl VectorApp {
         })
         .detach();
         app
+    }
+
+    fn toggle_start(&mut self, cx: &mut Context<Self>) {
+        if self.start.take().is_some() {
+            cx.notify();
+            return;
+        }
+        let search = cx.new(|cx| {
+            TextInput::new("Search", cx).with_look(crate::composer::Look { size: px(15.), line_height: px(18.), weight: FontWeight::NORMAL, placeholder: white_a(0.5), ..kit::field_look() })
+        });
+        cx.subscribe(&search, |_, _, _: &crate::composer::InputChanged, cx| cx.notify()).detach();
+        let (layout, mic, accounts) = if self.live {
+            (vector_core::synced_prefs::load_start(), vector_core::calls::settings::mic_state(), backend::account::accounts().len())
+        } else {
+            // Fixtures: VECTOR_START_PINS=key,f:Name=key|key stands in for the synced layout.
+            use vector_core::rail_layout::RailNode;
+            let nodes = std::env::var("VECTOR_START_PINS")
+                .unwrap_or_default()
+                .split(',')
+                .filter(|k| !k.is_empty())
+                .map(|k| match k.strip_prefix("f:").and_then(|f| f.split_once('=')) {
+                    Some((name, keys)) => RailNode::Folder { id: name.into(), name: name.into(), hue: None, keys: keys.split('|').map(String::from).collect() },
+                    None => RailNode::item(k),
+                })
+                .collect();
+            (vector_core::rail_layout::RailLayout { nodes, ..Default::default() }, Default::default(), self.fixture_accounts().len())
+        };
+        self.start = Some(crate::startmenu::StartMenu {
+            layout,
+            list: backend::device::get("start_view").as_deref() == Some("list"),
+            search,
+            folder: None,
+            mic,
+            accounts,
+            opened: std::time::Instant::now(),
+        });
+        cx.notify();
+    }
+
+    fn on_start(&mut self, act: crate::startmenu::Act, window: &mut Window, cx: &mut Context<Self>) {
+        use crate::startmenu::Act;
+        let Some(sm) = self.start.as_mut() else { return };
+        cx.notify();
+        match act {
+            Act::Close => self.start = None,
+            Act::View(list) => {
+                sm.list = list;
+                backend::device::set("start_view", if list { "list" } else { "grid" });
+            }
+            Act::Folder(id) => sm.folder = id,
+            Act::Mute | Act::Deafen => {
+                let m = sm.mic;
+                sm.mic = match act {
+                    // Unmuting while deafened hears again too, as in a call.
+                    Act::Mute if m.deafened => vector_core::calls::settings::MicState { muted: false, deafened: false },
+                    Act::Mute => vector_core::calls::settings::MicState { muted: !m.muted, deafened: false },
+                    _ => vector_core::calls::settings::MicState { muted: m.muted, deafened: !m.deafened },
+                };
+                if self.live {
+                    let next = sm.mic;
+                    backend::run(async move { vector_core::db::scoped(async move { vector_core::calls::settings::remember_mic(next) }).await });
+                }
+            }
+            Act::Devices => {
+                self.start = None;
+                self.open_settings("audio", window, cx);
+            }
+            Act::AddPin => {}
+            Act::Nav(id) => {
+                self.start = None;
+                let me = self.store.borrow().my_npub.clone();
+                match id {
+                    "accounts" => self.open_switcher(cx),
+                    "profile" => self.open_profile(me, cx),
+                    "chat" => {
+                        self.settings = None;
+                        self.profile = None;
+                    }
+                    "bookmarks" => {
+                        self.settings = None;
+                        self.store.borrow_mut().ensure_dm(&me);
+                        self.open_chat(me.into(), window, cx);
+                    }
+                    "settings" => self.open_settings("appearance", window, cx),
+                    _ => self.show_toast("Mini Apps aren't in this build yet", cx),
+                }
+            }
+            Act::Open(key) => {
+                self.start = None;
+                let parts: Vec<&str> = key.split('/').collect();
+                match parts.as_slice() {
+                    ["dm", npub] => {
+                        self.settings = None;
+                        self.store.borrow_mut().ensure_dm(npub);
+                        self.open_chat(npub.to_string().into(), window, cx);
+                    }
+                    ["settings", rest @ ..] => {
+                        let cats = crate::settings::categories(&crate::settings::Offers { voice: false, routing: true, updates: true });
+                        let cat = rest.first().and_then(|id| cats.iter().find(|c| c.id == *id)).map(|c| c.id).unwrap_or("appearance");
+                        self.open_settings(cat, window, cx);
+                    }
+                    ["requests"] => {
+                        self.settings = None;
+                        self.profile = None;
+                        self.requests_tab = true;
+                    }
+                    _ => self.show_toast("This pin opens something not in this build yet", cx),
+                }
+            }
+        }
     }
 
     fn set_updates(&mut self, f: impl FnOnce(&mut crate::settings::Updates)) {
@@ -1250,8 +1366,7 @@ impl Render for VectorApp {
                     let app = cx.entity().downgrade();
                     move |_: &gpui::ClickEvent, _: &mut Window, cx: &mut gpui::App| {
                         app.update(cx, |app, cx| {
-                            let me = app.store.borrow().my_npub.clone();
-                            app.open_profile(me, cx);
+                            app.toggle_start(cx);
                         })
                         .ok();
                     }
@@ -1329,6 +1444,13 @@ impl Render for VectorApp {
         .children(self.viewer.clone().map(|v| gpui::deferred(div().absolute().inset_0().child(v)).with_priority(10)))
         .children(self.file_preview.clone().map(|v| gpui::deferred(div().absolute().inset_0().child(v)).with_priority(9)))
         .children(self.cropper.as_ref().map(|(v, _)| gpui::deferred(div().absolute().inset_0().child(v.clone())).with_priority(11)))
+        .children(self.start.as_ref().map(|sm| {
+            let app = cx.entity().downgrade();
+            let on: crate::startmenu::OnAct = Rc::new(move |act, window, cx| {
+                app.update(cx, |app, cx| app.on_start(act, window, cx)).ok();
+            });
+            gpui::deferred(div().absolute().inset_0().child(crate::startmenu::render(sm, &self.store.borrow(), window, &on))).with_priority(8)
+        }))
     }
 }
 
