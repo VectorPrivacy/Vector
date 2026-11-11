@@ -199,6 +199,8 @@ pub fn help(key: &str) -> Option<(&'static str, String)> {
         "changePassword" => ("Change Password", "Your password encrypts all local data including messages, keys, and secrets stored on your device. Resetting it will re-encrypt everything with your new password."),
         "exportAccount" => ("Private Keys", "Shows your private key and seed phrase. You only need these to back up your account offline or to use it in another Nostr app. To use Vector on another device, use Sign in on Another Device instead."),
         "transfer" => ("Sign in on Another Device", "Bring this account to a phone, computer or browser by scanning a code or typing it in. Both devices check a number together and you approve on this device, so your keys never leave it in a form anyone else can read. This device stays signed in."),
+        "updates" => ("Updates", "This copy of Vector checks for new releases by itself: Check for Updates finds the newest one, then Download Update takes you to it.<br><br>We recommend always running the latest version: every release carries security, privacy and stability fixes."),
+        "beta" => ("Beta Updates", "Beta builds are <b>release candidates of the next Vector version</b>, offered here before the official release.<br><br>They carry the newest fixes and features with a little less polish, and you'll be moved onto the official build the moment it releases.<br><br>Turning this off on a beta parks you on your current build until the next official release, then you ride stable from there."),
         "streamerMode" => ("Streamer Mode", "Hides the names, pictures and keys of anyone who has not allowed streams, so you can share your screen."),
         "streamConsent" => ("Show me on streams", "Lets people using Streamer Mode show your name and picture on their streams."),
         "streamerWallpapers" => ("Hide chat wallpapers", "Shows a plain background in chats while you stream, since a wallpaper can give away who you are talking to."),
@@ -277,6 +279,8 @@ pub struct Settings {
     pub sec_kind: String,
     /// The fold over Private Keys.
     pub sec_advanced: bool,
+    /// The release check, mirrored from the app's own.
+    pub updates: Updates,
     /// Blocked users, once loaded.
     pub blocked: Option<Vec<Blocked>>,
     /// Anchors whose NEW pill has been seen.
@@ -329,6 +333,8 @@ pub enum Act {
     ShowKeys,
     Transfer,
     SecAdvanced,
+    CheckUpdates,
+    Beta(bool),
     Link(&'static str),
     ClearSearch,
     /// The reader scrolled the page: the spy takes over from a jump.
@@ -1488,9 +1494,175 @@ fn security_block(s: &Settings, on: &OnAct) -> AnyElement {
     col.into_any_element()
 }
 
+#[derive(Clone, Default, PartialEq)]
+pub enum UpdPhase {
+    #[default]
+    Idle,
+    Checking,
+    /// A manual check that found nothing; it fades back to idle.
+    NoUpdates,
+    Available,
+    Error(String),
+}
+
+#[derive(Clone, Default)]
+pub struct Updates {
+    pub phase: UpdPhase,
+    /// A check found nothing newer: outlives its status line until the next check.
+    pub latest: bool,
+    pub found: Option<(String, String)>,
+    pub beta: bool,
+}
+
+/// `.upd-card`: the standing, its lead coloured.
+fn upd_card(lead: Option<(&str, gpui::Hsla)>, rest: &str) -> AnyElement {
+    let mut text = String::new();
+    let mut runs = Vec::new();
+    if let Some((lead, color)) = lead {
+        text.push_str(lead);
+        runs.push((0..lead.len(), gpui::HighlightStyle { color: Some(color), ..Default::default() }));
+        text.push(' ');
+    }
+    text.push_str(rest);
+    div()
+        .w_full()
+        .mb(px(16.))
+        .px(px(20.))
+        .py(px(14.))
+        .border_1()
+        .border_color(c(0x2c2c2c))
+        .rounded(px(8.))
+        .text_size(px(14.))
+        .line_height(px(20.3))
+        .text_color(c(0xb2b2b2))
+        .child(gpui::StyledText::new(text).with_highlights(runs))
+        .into_any_element()
+}
+
+/// `Updates.svelte`: the version and its standing, what a check found, the one action.
+fn updates_block(s: &Settings, on: &OnAct) -> AnyElement {
+    let u = &s.updates;
+    let current = crate::backend::updates::Version::current();
+    let found = if u.phase == UpdPhase::Available { u.found.as_ref() } else { None };
+    let standing = if found.is_some() { "outdated" } else if current.preview.is_some() { "preview" } else if u.latest { "latest" } else { "" };
+    let badge = match standing {
+        "outdated" => Some(img("ui/upd-outdated.svg").size(px(22.)).flex_shrink_0().into_any_element()),
+        "latest" => Some(img("ui/upd-latest.svg").size(px(22.)).flex_shrink_0().into_any_element()),
+        "preview" => Some(svg().path("ui/upd-preview.svg").w(px(21.)).h(px(20.)).flex_shrink_0().text_color(c(crate::timeline::DANGER)).into_any_element()),
+        _ => None,
+    };
+    let version_row = div()
+        .min_h(px(36.))
+        .mb(px(10.))
+        .flex()
+        .items_center()
+        .justify_between()
+        .gap(px(12.))
+        .text_size(px(16.))
+        .line_height(px(24.))
+        .text_color(c(0xffffff))
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .child("Current Version")
+                .child(info("upd-info", click(on, || Act::Help("updates")))),
+        )
+        .child(div().flex().items_center().gap(px(8.)).children(badge).child(current.display()));
+    let mut col = div().flex().flex_col().items_start().child(div().w_full().child(version_row));
+    col = match standing {
+        "outdated" => col.child(upd_card(None, &format!("Your client is currently out of date. The latest version is {}.", found.map(|f| f.0.as_str()).unwrap_or("")))),
+        "latest" => col.child(upd_card(Some(("Your client is up to date.", c(ACCENT))), "It is currently on the latest release.")),
+        "preview" => col.child(upd_card(
+            Some(("This is a Preview Build.", c(crate::timeline::DANGER))),
+            "It is released ahead of the official version. Preview Builds are public prototypes used to test new features and surface bugs, so feedback from users helps improve the final release. Expect bugs, unfinished features, and occasional instability.",
+        )),
+        _ => col,
+    };
+    if let Some((_, notes)) = found.filter(|f| !f.1.is_empty()) {
+        col = col.child(
+            div()
+                .w_full()
+                .flex()
+                .justify_center()
+                // The card's 16px margin collapses into this 20.
+                .mt(px(4.))
+                .mb(px(20.))
+                .child(
+                    div()
+                        .w(px(400.))
+                        .flex()
+                        .flex_col()
+                        .child(div().mb(px(10.)).text_size(px(16.)).line_height(px(24.)).font_weight(FontWeight::BOLD).text_color(c(0xf6f6f6)).child("What's New:"))
+                        .child(
+                            div()
+                                .id("changelog")
+                                .max_h(px(200.))
+                                .overflow_y_scroll()
+                                .p(px(15.))
+                                .rounded(px(8.))
+                                .bg(ca(0, 0, 0, 0.3))
+                                .border_1()
+                                .border_color(ca(89, 252, 179, 0.2))
+                                .text_size(px(14.))
+                                .line_height(px(22.4))
+                                .text_color(white_a(0.8))
+                                .child(notes.clone()),
+                        ),
+                ),
+        );
+    }
+    let beta = u.beta;
+    col = col.child(
+        // `.form-group`'s 15px under the row, which brings its own 10.
+        div().w_full().mb(px(5.)).child(toggle_row(
+            "beta",
+            "Beta Updates",
+            Some(Box::new(click(on, || Act::Help("beta")))),
+            toggle("tg-beta", beta, s.flipped.contains("beta"), click(on, move || Act::Beta(!beta))),
+            false,
+        )),
+    );
+    let (label, enabled) = match u.phase {
+        UpdPhase::Checking => ("Checking...", false),
+        UpdPhase::Available => ("Download Update", true),
+        _ => ("Check for Updates", true),
+    };
+    col = col.child(
+        div()
+            .id("check-updates-btn")
+            .h(px(37.))
+            .px(px(24.))
+            .flex()
+            .items_center()
+            .rounded(px(8.))
+            .border_1()
+            .border_color(ca(90, 252, 180, 0.65))
+            .bg(ca(89, 252, 179, 0.1))
+            .text_size(px(16.))
+            .font_weight(FontWeight::SEMIBOLD)
+            .text_color(c(0xffffff))
+            .child(label)
+            .when(!enabled, |d| d.opacity(0.5))
+            .when(enabled, |d| d.cursor_pointer().on_click(click(on, || Act::CheckUpdates))),
+    );
+    let status = match &u.phase {
+        UpdPhase::Checking => Some(("Checking for updates...".to_string(), white_a(0.8))),
+        UpdPhase::Error(e) => Some((e.clone(), c(0xff5252))),
+        UpdPhase::NoUpdates if current.preview.is_some() => Some(("No newer build yet. You'll be offered the official build as soon as it releases.".to_string(), c(ACCENT))),
+        _ => None,
+    };
+    if let Some((text, color)) = status {
+        col = col.child(div().mt(px(10.)).mb(px(15.)).text_size(px(14.)).line_height(px(24.)).text_color(color).child(text));
+    }
+    col.into_any_element()
+}
+
 fn block(id: &str, s: &Settings, on: &OnAct) -> Option<AnyElement> {
     Some(match id {
         "security" => security_block(s, on),
+        "updates" => updates_block(s, on),
         "display" => display_block(s, on),
         "privacy" => privacy_block(s, on),
         "notifications" => notifications_block(s, on),

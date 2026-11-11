@@ -104,6 +104,9 @@ pub struct VectorApp {
     viktor: Option<Entity<crate::viktor::Viktor>>,
     settings: Option<crate::settings::Settings>,
     security: Entity<crate::security::SecurityFlow>,
+    /// The release check, and where its find is installed from.
+    updates: crate::settings::Updates,
+    update_url: Option<String>,
 }
 
 #[derive(Clone, PartialEq)]
@@ -210,6 +213,8 @@ impl VectorApp {
             viktor: None,
             settings: None,
             security,
+            updates: crate::settings::Updates { beta: backend::updates::beta(), ..Default::default() },
+            update_url: None,
         }
     }
 
@@ -244,6 +249,15 @@ impl VectorApp {
             let cats = crate::settings::categories(&crate::settings::Offers { voice: false, routing: true, updates: true });
             let id = cats.iter().find(|c| c.id == cat).map(|c| c.id).unwrap_or("appearance");
             app.open_settings(id, window, cx);
+        }
+        // Fixtures: VECTOR_UPDATES=latest|avail shows what a check found.
+        match std::env::var("VECTOR_UPDATES").as_deref() {
+            Ok("latest") => app.set_updates(|u| u.latest = true),
+            Ok("avail") => app.set_updates(|u| {
+                u.phase = crate::settings::UpdPhase::Available;
+                u.found = Some(("v0.5.2".into(), "- Faster sync\n- Fixed a crash when opening large images".into()));
+            }),
+            _ => {}
         }
         // Fixtures: VECTOR_XFER=approve|match opens the transfer card at that step.
         if let Ok(step) = std::env::var("VECTOR_XFER") {
@@ -312,7 +326,85 @@ impl VectorApp {
         })
         .detach();
         app.probe(window, cx);
+        cx.spawn(async move |this, cx| {
+            loop {
+                if this.update(cx, |this, cx| this.check_updates(true, cx)).is_err() {
+                    break;
+                }
+                cx.background_executor().timer(std::time::Duration::from_secs(4 * 60 * 60)).await;
+            }
+        })
+        .detach();
         app
+    }
+
+    fn set_updates(&mut self, f: impl FnOnce(&mut crate::settings::Updates)) {
+        f(&mut self.updates);
+        if let Some(s) = self.settings.as_mut() {
+            s.updates = self.updates.clone();
+        }
+    }
+
+    /// A silent check only ever announces a find; a manual one says how it went.
+    fn check_updates(&mut self, silent: bool, cx: &mut Context<Self>) {
+        use crate::settings::UpdPhase;
+        if self.updates.phase == UpdPhase::Checking {
+            return;
+        }
+        if !silent {
+            self.set_updates(|u| {
+                u.phase = UpdPhase::Checking;
+                u.latest = false;
+            });
+            cx.notify();
+        }
+        let beta = self.updates.beta;
+        let rx = backend::run(async move { backend::updates::check(beta).await });
+        cx.spawn(async move |this, cx| {
+            let result = rx.await.unwrap_or_else(|_| Err("Failed to check for updates".into()));
+            let settled = this
+                .update(cx, |this, cx| {
+                    cx.notify();
+                    if this.updates.beta != beta {
+                        return None;
+                    }
+                    match result {
+                        Ok(Some(release)) => {
+                            this.update_url = Some(backend::updates::release_page(release.version));
+                            this.set_updates(|u| {
+                                u.phase = UpdPhase::Available;
+                                u.latest = false;
+                                u.found = Some((release.version.display(), release.notes));
+                            });
+                            None
+                        }
+                        Ok(None) if !silent => {
+                            this.set_updates(|u| {
+                                u.phase = UpdPhase::NoUpdates;
+                                u.latest = true;
+                            });
+                            Some((UpdPhase::NoUpdates, 3000))
+                        }
+                        Err(e) if !silent => {
+                            this.set_updates(|u| u.phase = UpdPhase::Error(e.clone()));
+                            Some((UpdPhase::Error(e), 5000))
+                        }
+                        _ => None,
+                    }
+                })
+                .ok()
+                .flatten();
+            let Some((phase, ms)) = settled else { return };
+            cx.background_executor().timer(std::time::Duration::from_millis(ms)).await;
+            this.update(cx, |this, cx| {
+                if this.updates.phase == phase {
+                    this.set_updates(|u| u.phase = UpdPhase::Idle);
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// Find the account on disk and open it, or ask how to.
@@ -1145,7 +1237,7 @@ impl Render for VectorApp {
         let root = root.on_drop(cx.listener(|app, paths: &gpui::ExternalPaths, window, cx| {
             app.open_paths_preview(paths.paths().to_vec(), window, cx);
         }));
-        root.children(net_dialog).children(popup).child(self.security.clone()).child(chrome(window, false)).child(
+        root.children(net_dialog).children(popup).child(self.security.clone()).child(chrome(window, false).children(self.update_banner(cx))).child(
             div()
                 .flex()
                 .flex_row()
@@ -1237,10 +1329,36 @@ impl Render for VectorApp {
     }
 }
 
+impl VectorApp {
+    /// `.chrome-update`: a find is announced in the title strip until it is acted on.
+    fn update_banner(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
+        let version = match (&self.updates.phase, &self.updates.found) {
+            (crate::settings::UpdPhase::Available, Some((v, _))) => v.clone(),
+            _ => return None,
+        };
+        Some(
+            div().absolute().top_0().left_0().right_0().h_full().flex().justify_center().child(
+                div()
+                    .id("chrome-update")
+                    .h_full()
+                    .px(px(12.))
+                    .flex()
+                    .items_center()
+                    .text_size(px(13.))
+                    .text_color(c(0x33db98))
+                    .cursor_pointer()
+                    .hover(|d| d.underline())
+                    .on_click(cx.listener(|this, _, window, cx| this.open_settings("updates", window, cx)))
+                    .child(format!("New Vector Update Available ({version}). Download Now")),
+            ),
+        )
+    }
+}
+
 // ── #window-chrome ──────────────────────────────────────────────────────────────────────
 
 /// The title strip; over the login screens it is only its controls, on the same art.
-fn chrome(window: &Window, login: bool) -> impl IntoElement {
+fn chrome(window: &Window, login: bool) -> gpui::Div {
     let maximized = window.is_maximized();
     let ctl = |id: &'static str, icon: &'static str, area: WindowControlArea, hover: u32| {
         div()
@@ -1256,6 +1374,7 @@ fn chrome(window: &Window, login: bool) -> impl IntoElement {
             .child(svg().path(icon).size(px(10.)).text_color(white_a(0.7)))
     };
     div()
+        .relative()
         .h(px(CHROME_H))
         .flex_shrink_0()
         .flex()
@@ -2817,6 +2936,7 @@ impl VectorApp {
             dialog: None,
             sec_kind: self.security.read(cx).kind().to_string(),
             sec_advanced: false,
+            updates: self.updates.clone(),
             donut: Default::default(),
             auto_limit: if self.live { backend::prefs::sql("max_auto_download_bytes").and_then(|v| v.parse().ok()).filter(|v: &u64| *v > 0) } else { None }.unwrap_or(10_485_760),
             clearing: false,
@@ -3483,6 +3603,26 @@ impl VectorApp {
             Act::ShowKeys => self.security.update(cx, |f, cx| f.show_keys(cx)),
             Act::Transfer => self.security.update(cx, |f, cx| f.open_transfer(true, cx)),
             Act::SecAdvanced => s.sec_advanced = !s.sec_advanced,
+            Act::CheckUpdates => {
+                if self.updates.phase == crate::settings::UpdPhase::Available {
+                    if let Some(url) = self.update_url.clone() {
+                        cx.open_url(&url);
+                    }
+                } else if self.live {
+                    self.check_updates(false, cx);
+                }
+            }
+            Act::Beta(on) => {
+                s.flipped.insert("beta");
+                backend::updates::set_beta(on);
+                self.update_url = None;
+                self.set_updates(|u| {
+                    *u = crate::settings::Updates { beta: on, ..Default::default() };
+                });
+                if self.live {
+                    self.check_updates(false, cx);
+                }
+            }
             Act::ClearSound => {
                 s.sound_custom = false;
                 s.notif_sound = "default".into();

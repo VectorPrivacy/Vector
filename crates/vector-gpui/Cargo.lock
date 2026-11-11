@@ -7648,6 +7648,7 @@ dependencies = [
  "anyhow",
  "bip39",
  "chrono",
+ "color_quant",
  "cpal",
  "crc32fast",
  "dirs",
