@@ -34,6 +34,7 @@ mod switcher;
 mod viktor;
 mod theme;
 mod timeline;
+mod transfer;
 mod ui;
 #[allow(dead_code)]
 mod util;

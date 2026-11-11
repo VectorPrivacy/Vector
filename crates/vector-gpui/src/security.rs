@@ -22,8 +22,8 @@ pub enum Event {
     /// Local Encryption as it now stands, for the toggle to follow.
     State { enabled: bool, kind: String },
     Toast(String),
-    /// Open Sign in on Another Device.
-    Transfer,
+    /// The account another device sent has arrived: sign in with it.
+    Received,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -64,7 +64,7 @@ struct Migration {
 }
 
 pub struct SecurityFlow {
-    live: bool,
+    pub(crate) live: bool,
     enabled: bool,
     kind: String,
     /// A flow is running: a second toggle or Change waits for it.
@@ -73,6 +73,7 @@ pub struct SecurityFlow {
     keys: Option<Keys>,
     migration: Option<Migration>,
     confirm: Option<(kit::Popup, oneshot::Sender<bool>)>,
+    pub(crate) xfer: Option<crate::transfer::Xfer>,
     pin_focus: FocusHandle,
     card_focus: FocusHandle,
     password: Entity<TextInput>,
@@ -81,7 +82,7 @@ pub struct SecurityFlow {
 impl EventEmitter<Event> for SecurityFlow {}
 
 /// A credential as it reads mid-sentence: "PIN" keeps its capitals, "password" doesn't.
-fn noun(kind: &str) -> &'static str {
+pub(crate) fn noun(kind: &str) -> &'static str {
     if kind == "password" { "password" } else { "PIN" }
 }
 
@@ -109,6 +110,7 @@ impl SecurityFlow {
             keys: None,
             migration: None,
             confirm: None,
+            xfer: None,
             pin_focus: cx.focus_handle(),
             card_focus: cx.focus_handle(),
             password,
@@ -301,7 +303,7 @@ impl SecurityFlow {
 
     fn transfer(&mut self, cx: &mut Context<Self>) {
         self.close_keys(cx);
-        cx.emit(Event::Transfer);
+        self.open_transfer(true, cx);
     }
 
     fn progress(&mut self, p: MigrationProgress, cx: &mut Context<Self>) {
@@ -334,7 +336,7 @@ fn thousands(n: usize) -> String {
 
 // ── Flows ─────────────────────────────────────────────────────────────────────
 
-type This = WeakEntity<SecurityFlow>;
+pub(crate) type This = WeakEntity<SecurityFlow>;
 
 async fn ask(this: &This, cx: &mut AsyncApp, mode: Mode, title: impl Into<SharedString>, lead: impl Into<SharedString>, error: bool, confirm: &str) -> Option<Zeroizing<String>> {
     let (title, lead) = (title.into(), lead.into());
@@ -355,19 +357,19 @@ async fn confirm(this: &This, cx: &mut AsyncApp, popup: kit::Popup) -> bool {
     rx.await.unwrap_or(false)
 }
 
-async fn notice(this: &This, cx: &mut AsyncApp, title: &str, text: String) {
+pub(crate) async fn notice(this: &This, cx: &mut AsyncApp, title: &str, text: String) {
     let mut popup = kit::Popup::notice(title.to_string());
     popup.text = Some(text.into());
     confirm(this, cx, popup).await;
 }
 
-fn kind(this: &This, cx: &mut AsyncApp) -> String {
+pub(crate) fn kind(this: &This, cx: &mut AsyncApp) -> String {
     this.read_with(cx, |f, _| f.kind.clone()).unwrap_or_else(|_| "pin".into())
 }
 
 /// Ask for the current PIN or password until `attempt` accepts it, holding the card while it
 /// checks. `Ok(None)` on a cancel.
-async fn with_current<T: Send + 'static>(
+pub(crate) async fn with_current<T: Send + 'static>(
     this: &This,
     cx: &mut AsyncApp,
     title: &str,
@@ -606,7 +608,7 @@ fn fixture_keys() -> (Zeroizing<String>, Option<Zeroizing<String>>) {
 // ── Rendering ─────────────────────────────────────────────────────────────────
 
 /// `.vcard-overlay` holding a `.vcard`.
-fn overlay(id: &'static str, priority: usize, card: gpui::Stateful<gpui::Div>) -> AnyElement {
+pub(crate) fn overlay(id: &'static str, priority: usize, card: gpui::Stateful<gpui::Div>) -> AnyElement {
     gpui::deferred(
         div()
             .id(id)
@@ -624,7 +626,7 @@ fn overlay(id: &'static str, priority: usize, card: gpui::Stateful<gpui::Div>) -
     .into_any_element()
 }
 
-fn card(id: &'static str) -> gpui::Stateful<gpui::Div> {
+pub(crate) fn card(id: &'static str) -> gpui::Stateful<gpui::Div> {
     div()
         .id(id)
         .w(px(440.))
@@ -646,7 +648,7 @@ fn card(id: &'static str) -> gpui::Stateful<gpui::Div> {
         .line_height(px(24.))
 }
 
-fn head(glyph: &'static str, title: SharedString, close: Option<Box<dyn Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App)>>) -> impl IntoElement {
+pub(crate) fn head(glyph: &'static str, title: SharedString, close: Option<Box<dyn Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App)>>) -> impl IntoElement {
     div()
         .flex()
         .items_center()
@@ -679,12 +681,12 @@ fn head(glyph: &'static str, title: SharedString, close: Option<Box<dyn Fn(&gpui
         }))
 }
 
-fn lead(text: impl IntoElement, error: bool) -> gpui::Div {
+pub(crate) fn lead(text: impl IntoElement, error: bool) -> gpui::Div {
     div().text_size(px(13.5)).line_height(px(20.25)).text_color(if error { c(0xff7a8a) } else { white_a(0.62) }).child(text)
 }
 
 /// A lead with some runs in white: `(text, white)` pairs.
-fn lead_mixed(parts: &[(&str, bool)]) -> gpui::Div {
+pub(crate) fn lead_mixed(parts: &[(&str, bool)]) -> gpui::Div {
     let mut text = String::new();
     let mut runs = Vec::new();
     for (part, white) in parts {
@@ -697,7 +699,7 @@ fn lead_mixed(parts: &[(&str, bool)]) -> gpui::Div {
     lead(gpui::StyledText::new(text).with_highlights(runs), false)
 }
 
-fn button(id: &'static str, text: impl Into<SharedString>, ghost: bool, enabled: bool, click: impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static) -> impl IntoElement {
+pub(crate) fn button(id: &'static str, text: impl Into<SharedString>, ghost: bool, enabled: bool, click: impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static) -> impl IntoElement {
     div()
         .id(id)
         .w_full()
@@ -706,17 +708,27 @@ fn button(id: &'static str, text: impl Into<SharedString>, ghost: bool, enabled:
         .items_center()
         .justify_center()
         .rounded(px(12.))
-        .bg(if ghost { c(0x1b1c1d) } else { c(ACCENT) })
-        .text_color(if ghost { c(0xffffff) } else { c(0x000000) })
+        // A disabled button is the CSS half-opacity composited over the card, label included.
+        .bg(match (ghost, enabled) {
+            (true, true) => c(0x1b1c1d),
+            (true, false) => c(0x161617),
+            (false, true) => c(ACCENT),
+            (false, false) => c(0x358662),
+        })
+        .text_color(match (ghost, enabled) {
+            (true, true) => c(0xffffff),
+            (true, false) => c(0x8b8b8b),
+            (false, true) => c(0x000000),
+            (false, false) => c(0x1a4331),
+        })
         .text_size(px(16.))
         .font_weight(FontWeight::SEMIBOLD)
         .when(ghost && enabled, |d| d.hover(|d| d.bg(c(0x232425))))
-        .when(!enabled, |d| d.opacity(0.5))
         .when(enabled, |d| d.cursor_pointer().on_click(click))
         .child(text.into())
 }
 
-fn actions() -> gpui::Div {
+pub(crate) fn actions() -> gpui::Div {
     div().flex().flex_col().gap(px(8.)).mt(px(4.))
 }
 
@@ -916,7 +928,7 @@ impl SecurityFlow {
                 .flex()
                 .items_center()
                 .justify_between()
-                .child(div().text_size(px(11.)).font_weight(FontWeight::BOLD).text_color(white_a(0.45)).child(kit::spaced(title.to_uppercase(), 1.54)))
+                .child(div().text_size(px(11.)).font_weight(FontWeight::BOLD).text_color(white_a(0.45)).child(kit::spaced(title.to_uppercase(), 0.6)))
                 .child(
                     div()
                         .id(which)
@@ -1097,6 +1109,7 @@ impl Render for SecurityFlow {
         let keys = self.keys_card(cx);
         let migration = self.migration_card(window);
         let prompt = self.prompt_card(window, cx);
+        let xfer = self.xfer_card(window, cx);
         let confirm = self.confirm.as_ref().map(|(p, _)| {
             let me = cx.entity().downgrade();
             kit::popup(p, move |yes, _, cx| {
@@ -1110,6 +1123,6 @@ impl Render for SecurityFlow {
             })
         });
         // Spans the window, so each overlay's inset is the window's.
-        div().absolute().inset_0().children(keys).children(migration).children(prompt).children(confirm)
+        div().absolute().inset_0().children(keys).children(xfer).children(migration).children(prompt).children(confirm)
     }
 }

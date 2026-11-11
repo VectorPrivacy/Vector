@@ -168,7 +168,7 @@ impl VectorApp {
         })
         .detach();
         let security = cx.new(|cx| crate::security::SecurityFlow::new(live, window, cx));
-        cx.subscribe(&security, |app, _, e: &crate::security::Event, cx| app.on_security(e, cx)).detach();
+        cx.subscribe_in(&security, window, |app, _, e: &crate::security::Event, window, cx| app.on_security(e, window, cx)).detach();
         Self {
             screen: Screen::Main,
             live,
@@ -244,6 +244,19 @@ impl VectorApp {
             let cats = crate::settings::categories(&crate::settings::Offers { voice: false, routing: true, updates: true });
             let id = cats.iter().find(|c| c.id == cat).map(|c| c.id).unwrap_or("appearance");
             app.open_settings(id, window, cx);
+        }
+        // Fixtures: VECTOR_XFER=approve|match opens the transfer card at that step.
+        if let Ok(step) = std::env::var("VECTOR_XFER") {
+            let send = step != "match";
+            let payload = if send {
+                serde_json::json!({ "id": 1, "stage": step })
+            } else {
+                serde_json::json!({ "id": 1, "stage": "match", "sas": "482913", "sender": "npub1ytm2q9jl8kcn4ajqqv2d6xtqy9pyzhml3s7d9dsg7nv8x8ufsjhsn5xzkl", "name": "jskitty" })
+            };
+            app.security.update(cx, |f, cx| {
+                f.open_transfer(send, cx);
+                f.transfer_state(&payload, cx);
+            });
         }
         if let Ok(pick) = std::env::var("VECTOR_NEW_CHAT") {
             app.open_new_chat(window, cx);
@@ -357,6 +370,7 @@ impl VectorApp {
         })
         .detach();
         cx.subscribe_in(&view, window, |this, _, e: &crate::login::AddProfile, window, cx| this.on_add_profile(e, window, cx)).detach();
+        cx.subscribe(&view, |this, _, _: &crate::login::OpenTransfer, cx| this.security.update(cx, |f, cx| f.open_transfer(false, cx))).detach();
         cx.subscribe_in(&view, window, |this, _, crate::login::PickAccount(npub), window, cx| {
             if !this.live {
                 return;
@@ -449,6 +463,7 @@ impl VectorApp {
     fn on_core_event(&mut self, name: &str, payload: Value, _window: &mut Window, cx: &mut Context<Self>) {
         let chat_id = payload.get("chat_id").and_then(Value::as_str).unwrap_or_default().to_string();
         match name {
+            "transfer_state" => self.security.update(cx, |f, cx| f.transfer_state(&payload, cx)),
             "message_removed" => {
                 let id = payload.get("id").and_then(Value::as_str).unwrap_or_default().to_string();
                 if let Some(chat) = self.store.borrow_mut().chat_mut(&chat_id) {
@@ -1097,7 +1112,10 @@ impl Render for VectorApp {
         match &self.screen {
             Screen::Booting => return root.child(div().absolute().inset_0().child(chrome(window, true))),
             Screen::Login(view) => {
-                return root.child(div().absolute().inset_0().child(view.clone())).child(div().absolute().top_0().left_0().right_0().child(chrome(window, true)));
+                return root
+                    .child(div().absolute().inset_0().child(view.clone()))
+                    .child(div().absolute().top_0().left_0().right_0().child(chrome(window, true)))
+                    .child(self.security.clone());
             }
             Screen::Main => {}
         }
@@ -3463,7 +3481,7 @@ impl VectorApp {
             Act::PickSound => self.pick_sound(cx),
             Act::ChangeCredential => self.security.update(cx, |f, cx| f.change(cx)),
             Act::ShowKeys => self.security.update(cx, |f, cx| f.show_keys(cx)),
-            Act::Transfer => self.show_toast("Sign in on Another Device is coming soon", cx),
+            Act::Transfer => self.security.update(cx, |f, cx| f.open_transfer(true, cx)),
             Act::SecAdvanced => s.sec_advanced = !s.sec_advanced,
             Act::ClearSound => {
                 s.sound_custom = false;
@@ -3929,7 +3947,22 @@ impl VectorApp {
     }
 
     /// `showToast`: one line over a bottom gradient, for 1.5s plus 40ms a character.
-    fn on_security(&mut self, e: &crate::security::Event, cx: &mut Context<Self>) {
+    /// The account another device sent has arrived: the login screen signs in with it.
+    fn finish_transfer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let security = self.security.clone();
+        let Screen::Login(view) = &self.screen else {
+            security.update(cx, |f, cx| f.transfer_finished(Err("Sign out of this account first".into()), cx));
+            return;
+        };
+        let rx = view.update(cx, |v, cx| v.finish_transfer(window, cx));
+        cx.spawn(async move |_, cx| {
+            let result = rx.await.unwrap_or_else(|_| Err("Backend stopped".into()));
+            security.update(cx, |f, cx| f.transfer_finished(result, cx));
+        })
+        .detach();
+    }
+
+    fn on_security(&mut self, e: &crate::security::Event, window: &mut Window, cx: &mut Context<Self>) {
         match e {
             crate::security::Event::State { enabled, kind } => {
                 if let Some(s) = self.settings.as_mut() {
@@ -3939,7 +3972,7 @@ impl VectorApp {
                 cx.notify();
             }
             crate::security::Event::Toast(text) => self.show_toast(text, cx),
-            crate::security::Event::Transfer => self.show_toast("Sign in on Another Device is coming soon", cx),
+            crate::security::Event::Received => self.finish_transfer(window, cx),
         }
     }
 

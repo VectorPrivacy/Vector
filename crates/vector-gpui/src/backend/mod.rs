@@ -20,6 +20,7 @@ pub mod device;
 pub mod sound;
 pub mod storage;
 pub mod security;
+pub mod transfer;
 
 use std::future::Future;
 use std::path::PathBuf;

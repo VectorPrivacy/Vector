@@ -34,6 +34,10 @@ impl EventEmitter<AddProfile> for LoginView {}
 /// Another account on this device was picked from the pill: open it instead.
 pub struct PickAccount(pub String);
 
+/// Sign in with Another Device: the transfer card, as the receiver.
+pub struct OpenTransfer;
+impl EventEmitter<OpenTransfer> for LoginView {}
+
 impl EventEmitter<PickAccount> for LoginView {}
 
 /// The pre-login account pill (`#login-account-picker`) and its list of the other accounts.
@@ -329,23 +333,52 @@ impl LoginView {
         cx.spawn_in(window, async move |this, cx| {
             let result = rx.await.unwrap_or_else(|_| Err("Backend stopped".into()));
             this.update_in(cx, |this, window, cx| match result {
-                Ok(account::Imported::Staged(_)) => this.open_encryption(cx),
-                // Already on this device: unlock it as a boot would.
-                Ok(account::Imported::Existing(_)) => {
-                    let info = account::boot();
-                    if info.encrypted {
-                        this.unlock = true;
-                        this.step = Step::Encrypt;
-                        this.start_credential(if info.security_type == "password" { Cred::Password } else { Cred::Pin }, window, cx);
-                    } else {
-                        this.finish_unlock(None, window, cx);
-                    }
-                }
+                Ok(imported) => this.imported(imported, window, cx),
                 Err(e) => this.show_error(e, cx),
             })
             .ok();
         })
         .detach();
+    }
+
+    /// Signed in with a key: a new one picks its security, one already here unlocks as at boot.
+    fn imported(&mut self, imported: account::Imported, window: &mut Window, cx: &mut Context<Self>) {
+        match imported {
+            account::Imported::Staged(_) => self.open_encryption(cx),
+            account::Imported::Existing(_) => {
+                let info = account::boot();
+                if info.encrypted {
+                    self.unlock = true;
+                    self.step = Step::Encrypt;
+                    self.start_credential(if info.security_type == "password" { Cred::Password } else { Cred::Pin }, window, cx);
+                } else {
+                    self.finish_unlock(None, window, cx);
+                }
+            }
+        }
+    }
+
+    /// Sign in with the account another device sent. Resolves once the sign-in has gone through
+    /// (or failed), before the security step.
+    pub fn finish_transfer(&mut self, window: &mut Window, cx: &mut Context<Self>) -> futures::channel::oneshot::Receiver<Result<(), String>> {
+        let (tx, done) = futures::channel::oneshot::channel();
+        let reset = self.commit_adding(cx);
+        let rx = backend::run(backend::transfer::finish(reset));
+        cx.spawn_in(window, async move |this, cx| {
+            let result = rx.await.unwrap_or_else(|_| Err("Backend stopped".into()));
+            this.update_in(cx, |this, window, cx| match result {
+                Ok(imported) => {
+                    let _ = tx.send(Ok(()));
+                    this.imported(imported, window, cx);
+                }
+                Err(e) => {
+                    let _ = tx.send(Err(e));
+                }
+            })
+            .ok();
+        })
+        .detach();
+        done
     }
 
     /// `openEncryptionFlow(false)`: a new account chooses how its key is kept.
@@ -709,9 +742,7 @@ impl LoginView {
                         lg_btn("lg-device", "Sign in with Another Device", 1)
                             .w(px(300.))
                             .text_size(px(18.))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.show_error("Signing in with another device isn't available in this client yet.", cx)
-                            })),
+                            .on_click(cx.listener(|_, _, _, cx| cx.emit(OpenTransfer))),
                     );
                 }
                 block
