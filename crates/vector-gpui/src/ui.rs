@@ -96,6 +96,16 @@ impl VectorApp {
         let emoji_picker = cx.new(crate::picker::EmojiPicker::new);
         cx.subscribe_in(&emoji_picker, window, |app, _, crate::picker::Picked(emoji, shift), window, cx| app.picked(emoji.clone(), *shift, window, cx)).detach();
         cx.subscribe_in(&emoji_picker, window, |app, _, _: &crate::picker::Dismissed, window, cx| app.close_picker(window, cx)).detach();
+        // A GIF alone in the draft sends at once; beside text it waits for the user's Enter.
+        cx.subscribe_in(&emoji_picker, window, |app, _, crate::picker::PickedGif(url), window, cx| {
+            let was_empty = app.input.read(cx).text().trim().is_empty();
+            app.input.update(cx, |input, cx| input.insert_spaced(url, window, cx));
+            app.close_picker(window, cx);
+            if was_empty {
+                app.input.update(cx, |input, cx| input.submit(window, cx));
+            }
+        })
+        .detach();
         cx.subscribe_in(&emoji_picker, window, |app, _, crate::picker::PickedText(face, shift, recents), window, cx| {
             if app.live {
                 let recents = recents.clone();
@@ -547,7 +557,10 @@ impl VectorApp {
         self.picker = target.clone();
         let picker = self.emoji_picker.clone();
         let reaction = target.is_some();
-        picker.update(cx, |p, cx| p.reset(reaction, std::collections::HashMap::new(), window, cx));
+        picker.update(cx, |p, cx| {
+            p.reset(reaction, std::collections::HashMap::new(), window, cx);
+            p.prefetch_gifs(cx);
+        });
         if self.live {
             let rx = backend::run(async { (backend::actions::emoji_usage(), backend::actions::kaomoji_recents()) });
             cx.spawn(async move |_, cx| {

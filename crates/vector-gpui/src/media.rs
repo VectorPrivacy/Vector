@@ -149,7 +149,7 @@ fn to_bgra(mut buf: image::RgbaImage) -> image::RgbaImage {
     buf
 }
 
-fn decode_thumbhash(hash: &str, px: (u32, u32)) -> Option<RenderImage> {
+pub fn decode_thumbhash(hash: &str, px: (u32, u32)) -> Option<RenderImage> {
     let bytes = fast_thumbhash::base91_decode(hash).ok()?;
     let (w, h, rgba) = fast_thumbhash::thumb_hash_to_rgba(&bytes).ok()?;
     let buf = image::RgbaImage::from_raw(w as u32, h as u32, rgba)?;
@@ -157,24 +157,46 @@ fn decode_thumbhash(hash: &str, px: (u32, u32)) -> Option<RenderImage> {
     Some(RenderImage::new(vec![Frame::new(to_bgra(buf))]))
 }
 
+/// An animated GIF's frames, each scaled to `to` when that is smaller.
+fn gif_frames(bytes: &[u8], to: impl Fn(u32, u32) -> (u32, u32)) -> Option<(Vec<Frame>, u32, u32)> {
+    let dec = image::codecs::gif::GifDecoder::new(Cursor::new(bytes)).ok()?;
+    let (w, h) = dec.dimensions();
+    let (tw, th) = to(w, h);
+    let scale = tw < w || th < h;
+    let frames = dec
+        .into_frames()
+        .map(|f| {
+            f.map(|f| {
+                let delay = f.delay();
+                let buf = f.into_buffer();
+                let buf = if scale { image::imageops::resize(&buf, tw.max(1), th.max(1), FilterType::Triangle) } else { buf };
+                Frame::from_parts(to_bgra(buf), 0, 0, delay)
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .ok()?;
+    Some((frames, w, h))
+}
+
+/// A GIF for a square tile it covers: no side drawn larger than `side` needs.
+pub fn decode_gif_cover(bytes: &[u8], side: u32) -> Option<RenderImage> {
+    let (frames, _, _) = gif_frames(bytes, |w, h| {
+        let s = (side as f32 / w.min(h).max(1) as f32).min(1.);
+        ((w as f32 * s).round() as u32, (h as f32 * s).round() as u32)
+    })?;
+    (!frames.is_empty()).then(|| RenderImage::new(frames))
+}
+
 /// A picture as frames no larger than `max`, with its natural size.
 pub fn decode(bytes: &[u8], ext: &str, max: (u32, u32)) -> Option<(RenderImage, u32, u32)> {
     if ext == "gif"
-        && let Ok(dec) = image::codecs::gif::GifDecoder::new(Cursor::new(bytes))
+        && let Some((frames, w, h)) = gif_frames(bytes, |w, h| {
+            let s = (max.0 as f32 / w.max(1) as f32).min(max.1 as f32 / h.max(1) as f32).min(1.);
+            ((w as f32 * s).round() as u32, (h as f32 * s).round() as u32)
+        })
+        && frames.len() > 1
     {
-        let (w, h) = dec.dimensions();
-        let frames = dec.into_frames().collect_frames().ok()?;
-        if frames.len() > 1 {
-            let frames: Vec<Frame> = frames
-                .into_iter()
-                .map(|f| {
-                    let delay = f.delay();
-                    let (left, top) = (f.left(), f.top());
-                    Frame::from_parts(to_bgra(f.into_buffer()), left, top, delay)
-                })
-                .collect();
-            return Some((RenderImage::new(frames), w, h));
-        }
+        return Some((RenderImage::new(frames), w, h));
     }
     let img = if ext == "svg" {
         let png = vector_core::svg::rasterize_png(bytes, 1024).ok()?;

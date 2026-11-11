@@ -5,6 +5,7 @@ pub mod account;
 pub mod actions;
 pub mod attachments;
 pub mod events;
+pub mod gifs;
 pub mod images;
 pub mod messaging;
 pub mod network;
@@ -91,16 +92,19 @@ pub fn start(data_dir: PathBuf) -> mpsc::UnboundedReceiver<UiEvent> {
 }
 
 /// Run `fut` on core's runtime; the receiver resolves with its output. Like a Tauri command,
-/// the call is unbound: account work it starts binds itself with `db::spawn_bound`.
+/// the call is unbound: account work it starts binds itself with `db::spawn_bound`. Without a
+/// backend (fixtures) the receiver closes unanswered.
 pub fn run<T, F>(fut: F) -> oneshot::Receiver<T>
 where
     T: Send + 'static,
     F: Future<Output = T> + Send + 'static,
 {
     let (tx, rx) = oneshot::channel();
-    // spawn-detached: an unbound UI call, the equivalent of a Tauri command.
-    RT.get().expect("backend started").spawn(async move {
-        let _ = tx.send(fut.await);
-    });
+    if let Some(rt) = RT.get() {
+        // spawn-detached: an unbound UI call, the equivalent of a Tauri command.
+        rt.spawn(async move {
+            let _ = tx.send(fut.await);
+        });
+    }
     rx
 }

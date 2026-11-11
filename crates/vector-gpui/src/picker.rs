@@ -1,9 +1,11 @@
 //! The emoji picker (`PickerPanel.svelte`): search, the mode toggle, the section rail, and the
 //! sections (search results, recently used, every emoji) as one virtual list, so the ~1,900
-//! cells cost only the rows on screen. Kaomoji mode is `KaomojiGrid.svelte`.
+//! cells cost only the rows on screen. Kaomoji mode is `KaomojiGrid.svelte`; GIF mode is
+//! `GifGrid.svelte` over `gifs.js`.
 
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
+use std::sync::Arc;
 
 use gpui::{
     AnyElement, App, Context, Entity, EventEmitter, FocusHandle, Focusable, FontWeight, IntoElement, ListAlignment, ListOffset,
@@ -11,6 +13,9 @@ use gpui::{
 };
 
 use crate::composer::{CancelInput, InputChanged, Look, SendText, TextInput};
+use gpui::AnimationExt;
+
+use crate::backend::gifs::Gif;
 use crate::emoji::{self, Emoji, Kaomoji};
 use crate::theme::*;
 
@@ -18,6 +23,63 @@ const COLS: usize = 6;
 const CELL: f32 = 42.;
 const GAP: f32 = 4.;
 const KAOMOJI_RECENTS: usize = 18;
+const GIF_PAGE: usize = 12;
+const GIF_GAP: f32 = 6.;
+const GIF_TRENDING_TTL: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+const GIF_SEARCHES: usize = 10;
+
+#[derive(Clone, PartialEq)]
+enum GifPhase {
+    Idle,
+    Loading,
+    Empty(String),
+    Ready,
+}
+
+enum Preview {
+    Loading,
+    Ready(Arc<gpui::RenderImage>),
+    Failed,
+}
+
+/// The GIF grid: the listing shown, its paging, and what has been fetched for it.
+struct Gifs {
+    phase: GifPhase,
+    items: Vec<Gif>,
+    /// The search shown; empty for trending.
+    query: String,
+    offset: usize,
+    more: bool,
+    loading_more: bool,
+    /// Bumped by each new listing, so a slower earlier answer lands nowhere.
+    seq: u64,
+    trending: Option<(std::time::Instant, Vec<Gif>)>,
+    searches: std::collections::VecDeque<(String, Vec<Gif>)>,
+    previews: HashMap<String, Preview>,
+    thumbs: HashMap<String, Option<Arc<gpui::RenderImage>>>,
+    scroll: ScrollHandle,
+    debounce: Option<gpui::Task<()>>,
+}
+
+impl Default for Gifs {
+    fn default() -> Self {
+        Self {
+            phase: GifPhase::Idle,
+            items: Vec::new(),
+            query: String::new(),
+            offset: 0,
+            more: false,
+            loading_more: false,
+            seq: 0,
+            trending: None,
+            searches: Default::default(),
+            previews: HashMap::new(),
+            thumbs: HashMap::new(),
+            scroll: ScrollHandle::new(),
+            debounce: None,
+        }
+    }
+}
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 enum Section {
@@ -60,6 +122,8 @@ pub enum Mode {
 pub struct Picked(pub String, pub bool);
 /// A kaomoji, typed as text; Shift keeps the panel open. Carries the new recents to keep.
 pub struct PickedText(pub String, pub bool, pub Vec<String>);
+/// A GIF, as the URL its message carries.
+pub struct PickedGif(pub String);
 pub struct Dismissed;
 
 pub struct EmojiPicker {
@@ -78,9 +142,11 @@ pub struct EmojiPicker {
     /// The category the kaomoji list is scrolled to.
     kaomoji_at: usize,
     kaomoji_recents: Vec<String>,
+    gifs: Gifs,
 }
 
 impl EventEmitter<Picked> for EmojiPicker {}
+impl EventEmitter<PickedGif> for EmojiPicker {}
 impl EventEmitter<PickedText> for EmojiPicker {}
 impl EventEmitter<Dismissed> for EmojiPicker {}
 
@@ -103,7 +169,12 @@ impl EmojiPicker {
         };
         let search = cx.new(|cx| TextInput::new("Search Emojis...", cx).with_look(look).keep_on_submit().submit_empty());
         cx.subscribe(&search, |this, input, _: &InputChanged, cx| {
-            this.query = input.read(cx).text().trim().to_string();
+            let text = input.read(cx).text().to_string();
+            if this.mode == Mode::Gif {
+                this.gif_search_later(text, cx);
+                return;
+            }
+            this.query = text.trim().to_string();
             this.rebuild();
             cx.notify();
         })
@@ -124,6 +195,7 @@ impl EmojiPicker {
             kaomoji_strip: ScrollHandle::new(),
             kaomoji_at: 0,
             kaomoji_recents: Vec::new(),
+            gifs: Gifs::default(),
         };
         this.rebuild();
         this
@@ -160,7 +232,288 @@ impl EmojiPicker {
             Mode::Kaomoji => "Search Kaomoji...",
         };
         self.search.update(cx, |s, cx| s.set_placeholder(placeholder, cx));
+        if mode == Mode::Gif {
+            let text = self.search.read(cx).text().trim().to_string();
+            if self.gifs.phase == GifPhase::Idle || text != self.gifs.query {
+                self.gif_list(text, cx);
+            }
+        } else {
+            // Emoji and kaomoji share one query: what's typed carries across.
+            let text = self.search.read(cx).text().trim().to_string();
+            if text != self.query {
+                self.query = text;
+                self.rebuild();
+            }
+        }
         cx.notify();
+    }
+
+    /// The open picker warms the trending page, so GIF mode shows it at once.
+    pub fn prefetch_gifs(&mut self, cx: &mut Context<Self>) {
+        if self.gifs.trending.as_ref().is_some_and(|(at, _)| at.elapsed() < GIF_TRENDING_TTL) {
+            return;
+        }
+        let rx = crate::backend::run(crate::backend::gifs::listing(crate::backend::gifs::trending(0, GIF_PAGE)));
+        cx.spawn(async move |this, cx| {
+            let Ok(Ok(gifs)) = rx.await else { return };
+            if gifs.is_empty() {
+                return;
+            }
+            this.update(cx, |this, _| this.gifs.trending = Some((std::time::Instant::now(), gifs))).ok();
+        })
+        .detach();
+    }
+
+    fn gif_search_later(&mut self, text: String, cx: &mut Context<Self>) {
+        self.gifs.debounce = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(std::time::Duration::from_millis(300)).await;
+            this.update(cx, |this, cx| this.gif_list(text.trim().to_string(), cx)).ok();
+        }));
+    }
+
+    /// The first page of trending (an empty query) or of a search, from cache when it has one.
+    fn gif_list(&mut self, query: String, cx: &mut Context<Self>) {
+        let g = &mut self.gifs;
+        g.seq += 1;
+        g.query = query.clone();
+        g.offset = 0;
+        g.more = true;
+        g.loading_more = false;
+        g.scroll.set_offset(gpui::point(px(0.), px(0.)));
+        let key = query.to_lowercase();
+        let cached = if query.is_empty() {
+            g.trending.as_ref().filter(|(at, _)| at.elapsed() < GIF_TRENDING_TTL).map(|(_, v)| v.clone())
+        } else {
+            g.searches.iter().position(|(k, _)| *k == key).and_then(|i| g.searches.remove(i)).map(|(k, v)| {
+                g.searches.push_back((k, v.clone()));
+                v
+            })
+        };
+        if let Some(items) = cached {
+            g.more = items.len() >= GIF_PAGE;
+            g.offset = items.len();
+            g.items = items;
+            g.phase = GifPhase::Ready;
+            cx.notify();
+            return;
+        }
+        g.phase = GifPhase::Loading;
+        g.items.clear();
+        let seq = g.seq;
+        let q = if query.is_empty() { crate::backend::gifs::trending(0, GIF_PAGE) } else { crate::backend::gifs::search(&query, 0, GIF_PAGE) };
+        let rx = crate::backend::run(crate::backend::gifs::listing(q));
+        cx.spawn(async move |this, cx| {
+            let result = rx.await.unwrap_or_else(|_| Err(String::new()));
+            this.update(cx, |this, cx| {
+                let g = &mut this.gifs;
+                if g.seq != seq {
+                    return;
+                }
+                match result {
+                    Ok(items) if !items.is_empty() => {
+                        if query.is_empty() {
+                            g.trending = Some((std::time::Instant::now(), items.clone()));
+                        } else {
+                            if g.searches.len() >= GIF_SEARCHES {
+                                g.searches.pop_front();
+                            }
+                            g.searches.push_back((key, items.clone()));
+                        }
+                        g.more = items.len() >= GIF_PAGE;
+                        g.offset = items.len();
+                        g.items = items;
+                        g.phase = GifPhase::Ready;
+                    }
+                    Ok(_) => {
+                        g.more = false;
+                        g.phase = GifPhase::Empty(if query.is_empty() {
+                            "No trending GIFs found".into()
+                        } else {
+                            let shown: String = query.chars().take(32).collect();
+                            let ellipsis = if query.chars().count() > 32 { "..." } else { "" };
+                            format!("No GIFs found for \"{shown}{ellipsis}\"")
+                        });
+                    }
+                    Err(_) => {
+                        g.more = false;
+                        g.phase = GifPhase::Empty(if query.is_empty() { "Failed to load GIFs".into() } else { "Search failed".into() });
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn gif_more(&mut self, cx: &mut Context<Self>) {
+        let g = &mut self.gifs;
+        if g.loading_more || !g.more || g.phase != GifPhase::Ready {
+            return;
+        }
+        g.loading_more = true;
+        let (seq, offset) = (g.seq, g.offset);
+        let q = if g.query.is_empty() { crate::backend::gifs::trending(offset, GIF_PAGE) } else { crate::backend::gifs::search(&g.query, offset, GIF_PAGE) };
+        let rx = crate::backend::run(crate::backend::gifs::listing(q));
+        cx.spawn(async move |this, cx| {
+            let result = rx.await.unwrap_or_else(|_| Err(String::new()));
+            this.update(cx, |this, cx| {
+                let g = &mut this.gifs;
+                if g.seq != seq {
+                    return;
+                }
+                g.loading_more = false;
+                match result {
+                    Ok(items) if !items.is_empty() => {
+                        g.more = items.len() >= GIF_PAGE;
+                        g.offset += items.len();
+                        g.items.extend(items);
+                    }
+                    _ => g.more = false,
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn gif_preview(&mut self, id: &str, side: u32, cx: &mut Context<Self>) {
+        if self.gifs.previews.contains_key(id) {
+            return;
+        }
+        self.gifs.previews.insert(id.to_string(), Preview::Loading);
+        let rx = crate::backend::run(crate::backend::gifs::preview(id.to_string()));
+        let id = id.to_string();
+        cx.spawn(async move |this, cx| {
+            let bytes = rx.await.ok().flatten();
+            let image = match bytes {
+                Some(b) => cx.background_executor().spawn(async move { crate::media::decode_gif_cover(&b, side) }).await,
+                None => None,
+            };
+            this.update(cx, |this, cx| {
+                this.gifs.previews.insert(id, image.map_or(Preview::Failed, |i| Preview::Ready(Arc::new(i))));
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn gif_body(&mut self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
+        // Two columns across the panel's 400px, less its 8px sides, 4px scrollbar room and the gap.
+        let side = (400. - 16. - 4. - GIF_GAP) / 2.;
+        let device = (side * window.scale_factor()).round() as u32;
+        let pitch = side + GIF_GAP;
+        let skeleton = |i: usize| {
+            div().id(SharedString::from(format!("gif-skel-{i}"))).h(px(side)).rounded(px(8.)).bg(c(0x1a1a1a)).with_animation(
+                SharedString::from(format!("gif-skel-a-{i}")),
+                gpui::Animation::new(std::time::Duration::from_millis(1500)).repeat(),
+                |d, t| {
+                    let wave = (1. - (t * 2. - 1.0f32).abs()).max(0.);
+                    let v = 0x1a as f32 + (0x25 - 0x1a) as f32 * wave;
+                    d.bg(gpui::rgb(((v as u32) << 16) | ((v as u32) << 8) | v as u32))
+                },
+            )
+        };
+        let grid = |cells: Vec<AnyElement>| {
+            let mut rows = div().flex().flex_col().gap(px(GIF_GAP));
+            let mut it = cells.into_iter().peekable();
+            while it.peek().is_some() {
+                let a = it.next().unwrap();
+                let b = it.next().unwrap_or_else(|| div().into_any_element());
+                rows = rows.child(div().flex().gap(px(GIF_GAP)).child(div().flex_1().min_w_0().child(a)).child(div().flex_1().min_w_0().child(b)));
+            }
+            rows
+        };
+        let content: AnyElement = match self.gifs.phase.clone() {
+            GifPhase::Idle | GifPhase::Loading => grid((0..GIF_PAGE).map(|i| skeleton(i).into_any_element()).collect()).into_any_element(),
+            GifPhase::Empty(message) => div()
+                .min_h(px(150.))
+                .p(px(20.))
+                .flex()
+                .flex_col()
+                .items_center()
+                .justify_center()
+                .gap(px(8.))
+                .text_size(px(13.))
+                .text_color(white_a(0.4))
+                .child(svg().path("icons/image.svg").size(px(32.)).text_color(white_a(0.2)))
+                .child(message)
+                .into_any_element(),
+            GifPhase::Ready => {
+                let view = self.gifs.scroll.bounds().size.height.max(px(280.));
+                let top = -self.gifs.scroll.offset().y;
+                let reach = ((f32::from(top + view) + 200.) / pitch).ceil() as usize * 2;
+                let wanted: Vec<String> = self.gifs.items.iter().take(reach).map(|g| g.id.clone()).collect();
+                for id in wanted {
+                    self.gif_preview(&id, device, cx);
+                }
+                let mut cells = Vec::with_capacity(self.gifs.items.len() + GIF_PAGE);
+                for gif in self.gifs.items.clone() {
+                    let thumb = match &gif.thumbhash {
+                        Some(h) => self.gifs.thumbs.entry(gif.id.clone()).or_insert_with(|| crate::media::decode_thumbhash(h, (device, device)).map(Arc::new)).clone(),
+                        None => None,
+                    };
+                    let inner: AnyElement = match self.gifs.previews.get(&gif.id) {
+                        Some(Preview::Ready(image)) => img(image.clone()).absolute().inset_0().size_full().object_fit(gpui::ObjectFit::Cover).into_any_element(),
+                        Some(Preview::Failed) => div().size_full().flex().items_center().justify_center().child(svg().path("icons/image.svg").size(px(24.)).text_color(white_a(0.3))).into_any_element(),
+                        _ => div()
+                            .size_full()
+                            .relative()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .children(thumb.map(|t| img(t).absolute().inset_0().size_full().object_fit(gpui::ObjectFit::Cover)))
+                            .child(crate::attachments::spinner(24., 2., 0.8, 0.25, white_a(0.1)))
+                            .into_any_element(),
+                    };
+                    let id = gif.id.clone();
+                    cells.push(
+                        div()
+                            .id(SharedString::from(format!("gif-{}", gif.id)))
+                            .relative()
+                            .w_full()
+                            .h(px(side))
+                            .rounded(px(8.))
+                            .overflow_hidden()
+                            .bg(c(0x1a1a1a))
+                            .border_2()
+                            .border_color(gpui::transparent_black())
+                            .hover(|s| s.border_color(c(PRIMARY)))
+                            .active(|s| s.border_color(c(PRIMARY)).opacity(0.8))
+                            .cursor_pointer()
+                            .on_click(cx.listener(move |_, _, _, cx| cx.emit(PickedGif(crate::backend::gifs::original_url(&id)))))
+                            .child(inner)
+                            .into_any_element(),
+                    );
+                }
+                if self.gifs.loading_more {
+                    cells.extend((0..GIF_PAGE).map(|i| skeleton(100 + i).into_any_element()));
+                }
+                // Within 100px of the end fetches the next page.
+                let max = self.gifs.scroll.max_offset().y;
+                if max > px(0.) && max - top < px(100.) {
+                    let me = cx.entity().downgrade();
+                    cx.defer(move |cx| {
+                        me.update(cx, |this, cx| this.gif_more(cx)).ok();
+                    });
+                }
+                grid(cells).into_any_element()
+            }
+        };
+        div()
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .px(px(8.))
+            .pb(px(8.))
+            .bg(c(0x0a0a0a))
+            .child(div().id("gif-grid").flex_1().min_h_0().overflow_y_scroll().track_scroll(&self.gifs.scroll).pr(px(4.)).child(content))
+            .into_any_element()
     }
 
     fn pick_kaomoji(&mut self, face: &'static str, shift: bool, cx: &mut Context<Self>) {
@@ -193,7 +546,11 @@ impl EmojiPicker {
                     self.pick_kaomoji(k.face, false, cx);
                 }
             }
-            Mode::Gif => {}
+            Mode::Gif => {
+                if let Some(g) = self.gifs.items.first().filter(|_| self.gifs.phase == GifPhase::Ready) {
+                    cx.emit(PickedGif(crate::backend::gifs::original_url(&g.id)));
+                }
+            }
         }
     }
 
@@ -456,7 +813,7 @@ impl EmojiPicker {
 }
 
 impl Render for EmojiPicker {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let mode_btn = |label: &'static str, mode: Mode, cx: &mut Context<Self>| {
             let active = self.mode == mode;
             div()
@@ -565,7 +922,7 @@ impl Render for EmojiPicker {
                 .child(div().flex_1().h(px(280.)).pt(px(8.)).pl(px(8.)).pr(px(5.)).child(grid))
                 .into_any_element(),
             Mode::Kaomoji => self.kaomoji_body(cx),
-            Mode::Gif => div().flex_1().bg(c(0x0a0a0a)).into_any_element(),
+            Mode::Gif => self.gif_body(window, cx),
         };
 
         div()

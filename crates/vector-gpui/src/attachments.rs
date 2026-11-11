@@ -303,14 +303,18 @@ fn download_box(ctx: &Ctx, m: &Message, att: &Attachment, w: f32, h: f32, failed
 /// `.miniapp-downloading-spinner`: a 4px ring filled to `pct` from the top, turning once
 /// every two seconds.
 pub fn ring(size: f32, pct: Option<f32>) -> AnyElement {
-    let fill = pct.unwrap_or(5.).clamp(0., 100.) / 100.;
+    spinner(size, 3.5, 2., pct.unwrap_or(5.).clamp(0., 100.) / 100., white_a(0.2))
+}
+
+/// A turning ring: `fill` of it in the accent over a `track`, one turn every `period` seconds.
+pub fn spinner(size: f32, thickness: f32, period: f32, fill: f32, track: gpui::Hsla) -> AnyElement {
     canvas(
         |_, _, _| {},
         move |bounds: Bounds<Pixels>, _, window, _| {
-            let turn = (EPOCH.elapsed().as_secs_f32() / 2.).fract() * TAU;
+            let turn = (EPOCH.elapsed().as_secs_f32() / period).fract() * TAU;
             let center = bounds.center();
             let r_out = f32::from(bounds.size.width.min(bounds.size.height)) / 2.;
-            let r_in = r_out - 3.5;
+            let r_in = r_out - thickness;
             let arc = |from: f32, to: f32| -> Option<gpui::Path<Pixels>> {
                 let steps = ((to - from).abs() / TAU * 96.).ceil().max(2.) as usize;
                 let at = |r: f32, a: f32| point(center.x + px(r * a.sin()), center.y - px(r * a.cos()));
@@ -329,7 +333,7 @@ pub fn ring(size: f32, pct: Option<f32>) -> AnyElement {
             if fill < 1.
                 && let Some(p) = arc(split, turn + TAU)
             {
-                window.paint_path(p, white_a(0.2));
+                window.paint_path(p, track);
             }
             if fill > 0.
                 && let Some(p) = arc(turn, split)

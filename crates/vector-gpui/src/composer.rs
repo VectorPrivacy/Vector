@@ -999,6 +999,11 @@ impl TextInput {
         self.content.grapheme_indices(true).nth(n).map(|(i, _)| i).unwrap_or(self.content.len())
     }
 
+    /// Enter, as if pressed.
+    pub fn submit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.send(&Send, window, cx);
+    }
+
     fn send(&mut self, _: &Send, window: &mut Window, cx: &mut Context<Self>) {
         // Enter mid-composition commits the IME text rather than sending it.
         if self.marked_range.is_some() {
