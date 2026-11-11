@@ -1,0 +1,46 @@
+[package]
+name = "vector-gpui"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Vector on GPUI: the native-rendered client, at parity with the Tauri one."
+publish = false
+
+[[bin]]
+name = "vector-gpui"
+path = "src/main.rs"
+
+[dependencies]
+gpui = { git = "https://github.com/zed-industries/zed", rev = "f8cfc7ed9e57503def9479138894f3139f5400cc" }
+gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "f8cfc7ed9e57503def9479138894f3139f5400cc", default-features = false, features = ["x11", "wayland"] }
+vector-core = { path = "../vector-core" }
+anyhow = "1"
+unicode-segmentation = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+rust-embed = { version = "8", features = ["interpolate-folder-path"] }
+log = "0.4"
+env_logger = "0.11"
+
+# Its own workspace: GPUI pins dependency versions the main client must not inherit.
+[workspace]
+
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[patch.crates-io]
+nostr = { git = "https://github.com/VectorPrivacy/nostr.git", branch = "vector-v0.45.4" }
+nostr-sdk = { git = "https://github.com/VectorPrivacy/nostr.git", branch = "vector-v0.45.4" }
+nostr-database = { git = "https://github.com/VectorPrivacy/nostr.git", branch = "vector-v0.45.4" }
+saturating-time = { path = "../vendor/saturating-time" }
+async-process = { git = "https://github.com/zed-industries/async-process.git", rev = "0b6d6713570af61806e1e5cb40e0f757cb93fd9d" }
+async-task = { git = "https://github.com/zed-industries/async-task.git", rev = "015845a19fc31752c02367567d3b8900a406f9da" }
+calloop = { git = "https://github.com/zed-industries/calloop", rev = "3759371fee14c40066d64777e2a36b6ffcc22590" }
+khronos-egl = { git = "https://github.com/zed-industries/khronos-egl", rev = "42214b36347b108fd9630ca6254b96dde59e04fe" }
