@@ -108,6 +108,7 @@ impl VectorApp {
     fn base(store: Store, live: bool, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let input = cx.new(|cx| TextInput::new("Enter message...", cx).multiline(px(126.)).twemoji());
         cx.subscribe(&input, |app, _, SendText(text), cx| app.send(text.clone(), cx)).detach();
+        cx.subscribe_in(&input, window, |app, _, pasted: &crate::composer::Pasted, window, cx| app.on_paste(pasted, window, cx)).detach();
         cx.subscribe(&input, |app, _, _: &CancelInput, cx| app.cancel_mode(cx)).detach();
         let emoji_picker = cx.new(crate::picker::EmojiPicker::new);
         cx.subscribe_in(&emoji_picker, window, |app, _, crate::picker::Picked(emoji, shift), window, cx| app.picked(emoji.clone(), *shift, window, cx)).detach();
@@ -1716,6 +1717,18 @@ fn composer(
     })
 }
 
+/// Where pasted pictures wait while they preview and send.
+fn paste_root() -> std::path::PathBuf {
+    std::env::temp_dir().join("vector-gpui-paste")
+}
+
+/// A pasted picture's copy goes once it has sent or been dismissed.
+fn forget_paste(path: &std::path::Path) {
+    if let Some(dir) = path.parent().filter(|d| d.starts_with(paste_root())) {
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
 /// `#chat-input-file`: the plus, turned to a cross while the panel is open.
 fn attach_button(open: bool, cx: &mut Context<VectorApp>) -> impl IntoElement {
     use gpui::AnimationExt as _;
@@ -1846,6 +1859,22 @@ impl VectorApp {
         .detach();
     }
 
+    /// A pasted picture is written out first, so it previews and sends as any picked file does.
+    fn on_paste(&mut self, pasted: &crate::composer::Pasted, window: &mut Window, cx: &mut Context<Self>) {
+        let path = match pasted {
+            crate::composer::Pasted::Path(p) => p.clone(),
+            crate::composer::Pasted::Image { bytes, ext } => {
+                let dir = paste_root().join(format!("{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos()));
+                let path = dir.join(format!("pasted_image.{ext}"));
+                if std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(&path, bytes)).is_err() {
+                    return;
+                }
+                path
+            }
+        };
+        self.open_file_preview(path, window, cx);
+    }
+
     fn open_file_preview(&mut self, path: std::path::PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         let Some(chat) = self.open.clone() else { return };
         let reply = match &self.mode {
@@ -1857,8 +1886,9 @@ impl VectorApp {
             this.file_preview = None;
             window.focus(&this.input.focus_handle(cx), cx);
             cx.notify();
-            if let crate::filepreview::Event::Send(send) = e {
-                this.send_file(send, cx);
+            match e {
+                crate::filepreview::Event::Send(send) => this.send_file(send, cx),
+                crate::filepreview::Event::Close(path) => forget_paste(path),
             }
         })
         .detach();
@@ -1871,6 +1901,7 @@ impl VectorApp {
             self.mode = Mode::Normal;
         }
         if !self.live {
+            forget_paste(&send.path);
             return;
         }
         let crate::filepreview::Send { path, receiver, reply, name, compress, keep_metadata, compressed } = send;
@@ -1882,8 +1913,10 @@ impl VectorApp {
                 Some(w) => w.await,
                 None => None,
             };
-            let rx = backend::run(messaging::send_file(receiver, reply, path, name, compress, keep_metadata, precompressed));
-            let err = match rx.await {
+            let rx = backend::run(messaging::send_file(receiver, reply, path.clone(), name, compress, keep_metadata, precompressed));
+            let done = rx.await;
+            forget_paste(&path);
+            let err = match done {
                 Ok(Ok(())) => return,
                 Ok(Err(e)) => e,
                 Err(e) => e.to_string(),

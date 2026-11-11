@@ -38,7 +38,8 @@ pub struct Send {
 
 pub enum Event {
     Send(Send),
-    Close,
+    /// Dismissed: the file it showed.
+    Close(PathBuf),
 }
 
 impl EventEmitter<Event> for FilePreview {}
@@ -252,7 +253,7 @@ impl FilePreview {
 
     fn close(&mut self, cx: &mut Context<Self>) {
         self.cancel.store(true, Ordering::Relaxed);
-        cx.emit(Event::Close);
+        cx.emit(Event::Close(self.path.clone()));
     }
 
     fn send(&mut self, window: &mut Window, cx: &mut Context<Self>) {

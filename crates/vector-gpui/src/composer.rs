@@ -267,7 +267,25 @@ impl TextInput {
     }
 
     fn paste(&mut self, _: &Paste, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
+        let item = cx.read_from_clipboard();
+        if item.as_ref().and_then(|i| i.text()).is_none() {
+            for entry in item.iter().flat_map(|i| i.entries()) {
+                match entry {
+                    gpui::ClipboardEntry::Image(img) => {
+                        cx.emit(Pasted::Image { bytes: img.bytes.clone(), ext: img.format.extension() });
+                        return;
+                    }
+                    gpui::ClipboardEntry::ExternalPaths(paths) => {
+                        if let Some(p) = paths.paths().iter().find(|p| p.is_file()) {
+                            cx.emit(Pasted::Path(p.clone()));
+                            return;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        if let Some(text) = item.and_then(|item| item.text()) {
             let text = if self.multiline.is_some() { text.replace("\r\n", "\n") } else { text.replace('\n', " ") };
             self.replace_text_in_range(None, &text, window, cx);
         }
@@ -832,8 +850,15 @@ impl EventEmitter<InputChanged> for TextInput {}
 /// Escape in the field.
 pub struct CancelInput;
 
+/// A paste that carried no text but a picture or a file.
+pub enum Pasted {
+    Image { bytes: Vec<u8>, ext: &'static str },
+    Path(std::path::PathBuf),
+}
+
 impl EventEmitter<SendText> for TextInput {}
 impl EventEmitter<CancelInput> for TextInput {}
+impl EventEmitter<Pasted> for TextInput {}
 
 impl TextInput {
     pub fn new(placeholder: impl Into<SharedString>, cx: &mut Context<Self>) -> Self {
