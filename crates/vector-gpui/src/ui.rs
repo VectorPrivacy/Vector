@@ -188,6 +188,9 @@ impl VectorApp {
             let npub = if who == "me" { app.store.borrow().my_npub.clone() } else { who };
             app.open_profile(npub, cx);
         }
+        if let Ok(mode) = std::env::var("VECTOR_LOGIN") {
+            app.show_login((mode != "welcome").then_some("pin"), window, cx);
+        }
         if let Ok(mode) = std::env::var("VECTOR_SWITCHER") {
             app.on_profile(crate::profile::Act::Switcher, window, cx);
             if mode == "edit" {
@@ -256,7 +259,21 @@ impl VectorApp {
 
     fn show_login(&mut self, unlock: Option<&str>, window: &mut Window, cx: &mut Context<Self>) {
         let view = cx.new(|cx| LoginView::new(unlock, window, cx));
-        self.attach_login(view, cx, window);
+        self.attach_login(view.clone(), cx, window);
+        if !self.live {
+            let rows = self.fixture_accounts();
+            let me = self.store.borrow().my_npub.clone();
+            let open = std::env::var("VECTOR_LOGIN").is_ok_and(|m| m == "picker");
+            view.update(cx, |v, cx| v.set_accounts(rows, Some(me), open, cx));
+            return;
+        }
+        let rx = backend::run(async { (account::accounts(), vector_core::db::read_active_account_file().ok().flatten()) });
+        cx.spawn(async move |_, cx| {
+            let Ok((accounts, active)) = rx.await else { return };
+            let rows = accounts.into_iter().map(|a| crate::switcher::Row { npub: a.npub, name: a.name, avatar: a.avatar.map(Into::into) }).collect();
+            view.update(cx, |v, cx| v.set_accounts(rows, active, false, cx));
+        })
+        .detach();
     }
 
     fn attach_login(&mut self, view: Entity<LoginView>, cx: &mut Context<Self>, window: &mut Window) {
@@ -271,6 +288,22 @@ impl VectorApp {
         })
         .detach();
         cx.subscribe_in(&view, window, |this, _, e: &crate::login::AddProfile, window, cx| this.on_add_profile(e, window, cx)).detach();
+        cx.subscribe_in(&view, window, |this, _, crate::login::PickAccount(npub), window, cx| {
+            if !this.live {
+                return;
+            }
+            let rx = backend::run(account::switch(npub.clone()));
+            cx.spawn_in(window, async move |this, cx| {
+                let result = rx.await.unwrap_or_else(|_| Err("Backend stopped".into()));
+                this.update_in(cx, |this, window, cx| match result {
+                    Ok(()) => this.reboot(window, cx),
+                    Err(e) => log::error!("account switch failed: {e}"),
+                })
+                .ok();
+            })
+            .detach();
+        })
+        .detach();
         self.screen = Screen::Login(view);
         cx.notify();
     }
@@ -2238,20 +2271,7 @@ impl VectorApp {
     fn open_switcher(&mut self, cx: &mut Context<Self>) {
         let active = self.store.borrow().my_npub.clone();
         if !self.live {
-            // Fixtures: ourselves and the first two contacts by name, as the reference mock lists them.
-            let store = self.store.borrow();
-            let mut others: Vec<&vector_core::SlimProfile> = store.profiles.values().filter(|p| p.id != active).collect();
-            others.sort_by_key(|p| p.name.to_lowercase());
-            let rows = std::iter::once(store.profiles.get(&active))
-                .flatten()
-                .chain(others.into_iter().take(2))
-                .map(|p| crate::switcher::Row {
-                    npub: p.id.to_string(),
-                    name: [&p.nickname, &p.display_name, &p.name].into_iter().find(|n| !n.is_empty()).map(|n| n.to_string()),
-                    avatar: store.avatar_path(&p.id),
-                })
-                .collect();
-            drop(store);
+            let rows = self.fixture_accounts();
             self.show_switcher(rows, active, false, cx);
             return;
         }
@@ -2269,6 +2289,23 @@ impl VectorApp {
             .ok();
         })
         .detach();
+    }
+
+    /// Fixtures: ourselves and the first two contacts by name, as the reference mock lists them.
+    fn fixture_accounts(&self) -> Vec<crate::switcher::Row> {
+        let store = self.store.borrow();
+        let active = &store.my_npub;
+        let mut others: Vec<&vector_core::SlimProfile> = store.profiles.values().filter(|p| &p.id != active).collect();
+        others.sort_by_key(|p| p.name.to_lowercase());
+        std::iter::once(store.profiles.get(active))
+            .flatten()
+            .chain(others.into_iter().take(2))
+            .map(|p| crate::switcher::Row {
+                npub: p.id.to_string(),
+                name: [&p.nickname, &p.display_name, &p.name].into_iter().find(|n| !n.is_empty()).map(|n| n.to_string()),
+                avatar: store.avatar_path(&p.id),
+            })
+            .collect()
     }
 
     fn show_switcher(&mut self, rows: Vec<crate::switcher::Row>, active: String, at_cap: bool, cx: &mut Context<Self>) {

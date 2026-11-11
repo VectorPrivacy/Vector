@@ -5,7 +5,7 @@
 use std::time::Instant;
 
 use gpui::{
-    AnyElement, App, Context, Entity, EventEmitter, FocusHandle, Focusable, FontWeight, IntoElement, KeyDownEvent,
+    AnimationExt, AnyElement, App, Context, Entity, EventEmitter, FocusHandle, Focusable, FontWeight, IntoElement, KeyDownEvent,
     ObjectFit, ParentElement, Render, SharedString, Styled, Window, div, img, linear_color_stop, linear_gradient,
     prelude::*, px, svg,
 };
@@ -30,6 +30,18 @@ pub enum AddProfile {
 }
 
 impl EventEmitter<AddProfile> for LoginView {}
+
+/// Another account on this device was picked from the pill: open it instead.
+pub struct PickAccount(pub String);
+
+impl EventEmitter<PickAccount> for LoginView {}
+
+/// The pre-login account pill (`#login-account-picker`) and its list of the other accounts.
+struct Picker {
+    rows: Vec<crate::switcher::Row>,
+    active: Option<String>,
+    open: bool,
+}
 
 #[derive(Clone, Copy, PartialEq)]
 enum Step {
@@ -76,6 +88,7 @@ pub struct LoginView {
     born: Instant,
     /// Adding a profile over a live account: whether that account was already torn down.
     adding: Option<bool>,
+    picker: Option<Picker>,
 }
 
 const DECRYPTING: &str = "Decrypting your keys...";
@@ -117,6 +130,7 @@ impl LoginView {
             popup: None,
             born: Instant::now(),
             adding: None,
+            picker: None,
         };
         if let Some(security) = unlock {
             view.unlock = true;
@@ -131,6 +145,125 @@ impl LoginView {
         let mut view = Self::new(None, window, cx);
         view.adding = Some(false);
         view
+    }
+
+    /// The device's accounts, for the pill: it shows only when there is a choice to make.
+    pub fn set_accounts(&mut self, rows: Vec<crate::switcher::Row>, active: Option<String>, open: bool, cx: &mut Context<Self>) {
+        self.picker = (rows.len() >= 2 && self.adding.is_none()).then(|| {
+            let active = active.filter(|a| rows.iter().any(|r| &r.npub == a));
+            Picker { rows, active, open }
+        });
+        cx.notify();
+    }
+
+    fn pill(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let p = self.picker.as_ref()?;
+        let me = p.active.as_ref().and_then(|a| p.rows.iter().find(|r| &r.npub == a));
+        let label = match me {
+            Some(r) => r.name.clone().unwrap_or_else(|| r.npub.clone()),
+            None => "Select Profile".into(),
+        };
+        let avatar = match me.and_then(|r| r.avatar.clone()) {
+            Some(path) => img(path).size(px(44.)).rounded_full().flex_shrink_0().into_any_element(),
+            None => img("icons/user-placeholder.svg").size(px(44.)).rounded_full().flex_shrink_0().into_any_element(),
+        };
+        let chevron = svg().path("icons/login/chevron.svg").w(px(10.)).h(px(6.)).ml(px(2.)).flex_shrink_0().text_color(c(0x474747));
+        Some(
+            div()
+                .id("login-account-picker")
+                .max_w(px(429.72))
+                .h(px(44.))
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .cursor_pointer()
+                .when(!self.busy, |d| {
+                    d.on_click(cx.listener(|this, _, _, cx| {
+                        if let Some(p) = this.picker.as_mut() {
+                            p.open = !p.open;
+                        }
+                        cx.notify();
+                    }))
+                })
+                .child(avatar)
+                .child(kit::spaced(&label, 2.).min_w_0().truncate().font_weight(FontWeight::BOLD).text_size(px(20.)).line_height(px(24.)))
+                .child(if p.open { chevron.with_transformation(gpui::Transformation::rotate(gpui::radians(std::f32::consts::PI))) } else { chevron })
+                .into_any_element(),
+        )
+    }
+
+    /// `.login-account-list`: the other accounts, below the pill over a dimmed screen.
+    fn account_list(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let p = self.picker.as_ref().filter(|p| p.open)?;
+        let rows = p.rows.iter().filter(|r| p.active.as_ref() != Some(&r.npub)).map(|r| {
+            let npub = r.npub.clone();
+            let avatar = match &r.avatar {
+                Some(path) => img(path.clone()).size(px(28.)).rounded_full().flex_shrink_0().into_any_element(),
+                None => img("icons/user-placeholder.svg").size(px(28.)).rounded_full().flex_shrink_0().into_any_element(),
+            };
+            div()
+                .id(SharedString::from(format!("login-pick-{}", r.npub)))
+                .h(px(40.))
+                .flex()
+                .items_center()
+                .gap(px(12.))
+                .pl(px(21.))
+                .pr(px(21.))
+                .border_l_3()
+                .border_color(gpui::transparent_black())
+                .cursor_pointer()
+                .hover(|s| s.bg(ca(89, 252, 179, 0.1)).border_color(c(ACCENT)))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    if let Some(p) = this.picker.as_mut() {
+                        p.open = false;
+                    }
+                    cx.emit(PickAccount(npub.clone()));
+                    cx.notify();
+                }))
+                .child(avatar)
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .gap(px(8.))
+                        .child(div().min_w_0().truncate().font_weight(FontWeight::MEDIUM).text_size(px(14.)).line_height(px(24.)).child(r.name.clone().unwrap_or_else(|| "Unnamed".into())))
+                        .child(div().flex_1().min_w_0().mt(px(1.)).truncate().text_size(px(10.)).line_height(px(24.)).text_color(c(0x5b6060)).child(r.npub.clone())),
+                )
+        });
+        Some(
+            div()
+                .absolute()
+                .inset_0()
+                .child(
+                    div().id("login-account-list-backdrop").absolute().inset_0().bg(ca(3, 3, 3, 0.9)).on_click(cx.listener(|this, _, _, cx| {
+                        if let Some(p) = this.picker.as_mut() {
+                            p.open = false;
+                        }
+                        cx.notify();
+                    })),
+                )
+                .child(
+                    div().absolute().top(px(170.)).left_0().right_0().flex().justify_center().child(
+                        div()
+                            .id("login-account-list")
+                            .occlude()
+                            .w(px(420.))
+                            .flex()
+                            .flex_col()
+                            .overflow_hidden()
+                            .border_2()
+                            .border_color(c(0x030303))
+                            .rounded(px(10.))
+                            .bg(ca(3, 3, 3, 0.5))
+                            .children(rows)
+                            .with_animation("login-account-list-in", gpui::Animation::new(std::time::Duration::from_millis(160)).with_easing(gpui::ease_out_quint()), |d, t| {
+                                d.opacity(t).mt(px(-8. * (1. - t)))
+                            }),
+                    ),
+                )
+                .into_any_element(),
+        )
     }
 
     /// Commit Add Profile: true when the live account must be torn down first.
@@ -688,6 +821,7 @@ impl Render for LoginView {
         let wide = window.viewport_size().width >= px(900.);
         let aggro = self.wrong.is_some();
         let stage = self.stage(window, cx);
+        let account_list = self.account_list(cx);
         let link = |id: &'static str, label: &'static str, url: &'static str| {
             div()
                 .id(id)
@@ -813,6 +947,8 @@ impl Render for LoginView {
                 )
                 .child(kit::spaced(if self.bg_hidden { "Show Background" } else { "Hide Background" }, 0.8)),
         )
+        .children(account_list)
+        .children(self.pill(cx).map(|pill| div().absolute().top(px(118.)).left_0().right_0().flex().justify_center().child(pill)))
         .when_some(self.popup.clone(), |root, p| {
             let entity = cx.entity();
             root.child(kit::popup(&p, move |_, _, cx| {
