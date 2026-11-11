@@ -101,6 +101,11 @@ pub fn install(platform: Arc<dyn CallPlatform>) {
     let _ = PLATFORM.set(platform);
 }
 
+/// Whether `platform` is the one installed: `install` keeps the first it is given.
+pub fn installed_is(platform: &Arc<dyn CallPlatform>) -> bool {
+    PLATFORM.get().is_some_and(|p| std::ptr::eq(Arc::as_ptr(p) as *const (), Arc::as_ptr(platform) as *const ()))
+}
+
 pub(crate) fn get() -> Result<Arc<dyn CallPlatform>, String> {
     PLATFORM.get().cloned().ok_or_else(|| "Calls are not available".to_string())
 }

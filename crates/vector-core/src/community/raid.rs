@@ -87,7 +87,7 @@ pub struct RaidParams {
     pub quiet_messages: u64,
     /// Distinct senders sharing one skeleton before it counts as a cohort.
     pub min_cohort: usize,
-    /// Multiplier on `min_cohort` for skeletons under [`MIN_SKELETON_LEN`].
+    /// Multiplier on `min_cohort` for skeletons under `MIN_SKELETON_LEN`.
     pub short_text_factor: usize,
     /// How far apart two joins may be and still belong to the same burst.
     pub burst_gap_secs: u64,

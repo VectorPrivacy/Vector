@@ -1245,7 +1245,7 @@ fn delete_community_inner(community_id: &str, retain_keys: bool) -> Result<(), S
 /// A member is included when they have real activity — a posted message/reaction/edit, OR a
 /// join presence (kind 3306) — UNLESS that is superseded by a more-recent leave, OR they are
 /// banned. So a "leave" actually removes a member, and a leave-then-rejoin/post re-adds them.
-/// `created_at` is in seconds. Result is capped (anti-flood); see [`COMMUNITY_MEMBER_CAP`].
+/// `created_at` is in seconds. Result is capped (anti-flood); see `COMMUNITY_MEMBER_CAP`.
 pub fn community_member_activity(community_id: &str) -> Result<Vec<(String, u64)>, String> {
     community_member_activity_capped(community_id, true)
 }
@@ -1472,7 +1472,7 @@ pub struct AuthorFootprint {
     pub last_secs: u64,
 }
 
-/// The `chats` row ids of a Community's channels. Deliberately not [`load_community`]:
+/// The `chats` row ids of a Community's channels. Deliberately not `load_community`:
 /// that decrypts every channel key and every retained epoch key, and all this needs is
 /// the ids. A channel with no events yet has no row and is simply absent.
 pub fn community_chat_row_ids(community_id: &str) -> Result<Vec<i64>, String> {
@@ -6436,6 +6436,18 @@ pub fn release_held_wrap(wrap_id: &str) -> Result<(), String> {
 
 /// A channel's stored Pin List head: `(raw content, version)`, `None` when no
 /// edition has ever folded for it.
+/// Each channel's folded Pin List version, without opening a list.
+pub fn get_community_pin_versions(community_id: &str) -> Result<std::collections::HashMap<String, i64>, String> {
+    let conn = super::get_db_connection_guard_static()?;
+    let mut stmt = conn
+        .prepare("SELECT channel_id, version FROM community_pins WHERE community_id = ?1")
+        .map_err(|e| format!("get pin versions: {e}"))?;
+    let rows = stmt
+        .query_map(params![community_id], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))
+        .map_err(|e| format!("get pin versions: {e}"))?;
+    rows.collect::<Result<_, _>>().map_err(|e| format!("get pin versions: {e}"))
+}
+
 pub fn get_community_pins(community_id: &str, channel_id: &str) -> Result<Option<(String, i64)>, String> {
     let conn = super::get_db_connection_guard_static()?;
     let row: Option<(String, i64)> = conn

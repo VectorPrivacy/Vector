@@ -200,7 +200,7 @@ impl MessageFlags {
         }
     }
 
-    /// Get replied_to_has_attachment as Option<bool>
+    /// Get replied_to_has_attachment as `Option<bool>`
     /// Returns None (unknown), Some(false), or Some(true)
     #[inline]
     pub fn replied_to_has_attachment(self) -> Option<bool> {
@@ -239,7 +239,7 @@ impl MessageFlags {
         }
     }
 
-    /// Set replied_to_has_attachment from Option<bool>
+    /// Set replied_to_has_attachment from `Option<bool>`
     #[inline]
     pub fn set_replied_to_has_attachment(&mut self, value: Option<bool>) {
         // Clear existing bits
@@ -1465,7 +1465,7 @@ pub struct CompactMessage {
     id: [u8; 32],
     /// Timestamp in milliseconds (full precision for sub-second ordering)
     pub at: u64,
-    /// Message content (Box<str> = 16 bytes vs String's 24 bytes)
+    /// Message content (`Box<str>` = 16 bytes vs String's 24 bytes)
     content: Box<str>,
     /// File attachments
     pub attachments: TinyVec<CompactAttachment>,

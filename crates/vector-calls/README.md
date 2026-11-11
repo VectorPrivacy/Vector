@@ -12,8 +12,9 @@ There is no clock in here. Every function that reasons about time takes millisec
 | --- | --- |
 | [`wire`](src/wire.rs) | The call's wire format over one QUIC connection: a reliable control stream (length-prefixed JSON `Control` messages), unreliable datagrams for audio (`pack` / `unpack`), and one stream per video frame (`VideoHeader`). |
 | [`jitter`](src/jitter.rs) | The adaptive jitter buffer: holds a few audio frames to smooth the network's unevenness, grows on late arrivals, and gives the latency back when the path settles. |
-| [`rate`](src/rate.rs) | Bitrate control fed by QUIC's own loss accounting: `RateControl` walks the audio ladder (12 to 64 kbps, with FEC), `VideoRate` the camera and screen rungs. |
-| [`link`](src/link.rs) | The binary messages between the media engine and whatever captures, encodes, decodes and paints video. |
+| [`rate`](src/rate.rs) | Bitrate control fed by QUIC's own loss and round-trip accounting: `RateControl` walks one link's audio ladder (12 to 64 kbps, with FEC), `MeshRate` runs a voice Channel's single encoder at its weakest link under an upload ceiling, and `VideoRate` walks the camera and screen rungs. |
+| [`gate`](src/gate.rs) | `SpeechGate`: a voice Channel member sends audio only while speaking, and a muted frame the rest of the time. |
+| [`link`](src/link.rs) | The binary messages between the media engine and whatever captures, encodes, decodes and paints video, a voice Channel's cameras and screens included. |
 | [`ring`](src/ring.rs) | A lock-free, allocation-free sample ring for audio callbacks. |
 | [`resample`](src/resample.rs) | A streaming linear resampler with no seam between blocks. |
 | [`declick`](src/declick.rs) | Removes the click a microphone makes when its cable is pulled or pushed in. |
@@ -54,8 +55,9 @@ match jitter.pop(concealed_in_a_row, now_ms, &stats) {
     Pop::Muted | Pop::Wait => { /* play silence */ }
 }
 
-// Once a second, with the connection's cumulative packet counts.
-if let Some(setting) = rate.observe(sent_packets, lost_packets) {
+// Once a second, with the connection's cumulative packet counts, its round trip, and
+// whether it runs through a relay.
+if let Some(setting) = rate.observe(sent_packets, lost_packets, rtt_ms, relayed) {
     // encoder.set_bitrate(setting.kbps * 1000); encoder.set_fec(setting.fec_pct);
 }
 ```

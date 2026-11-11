@@ -39,7 +39,7 @@ async fn main() -> vector_sdk::Result<()> {
                 println!("invite to {community_id} (auto-join attempted per whitelist)");
             }
             // Best-effort hello once we land in a community we accepted.
-            BotEvent::MemberJoin { channel_id, npub } if npub == bot.npub() => {
+            BotEvent::MemberJoin { channel_id, npub, .. } if npub == bot.npub() => {
                 let _ = bot.channel(channel_id).send("Hello! Reporting for duty 🫡").await;
             }
             BotEvent::Message(msg) if !msg.is_mine() => {

@@ -491,7 +491,7 @@ pub fn seal_control_edition(
 }
 
 /// Signer-driven twin of [`seal_control_edition`] for bunker / NIP-55 accounts:
-/// the plaintext seal signs through a [`VectorSigner`]. `author` is the identity
+/// the plaintext seal signs through a [`VectorSigner`](crate::signer::VectorSigner). `author` is the identity
 /// the signer signs as (must equal `my_public_key()`). Wire-identical output.
 pub async fn seal_control_edition_signed<S: crate::signer::VectorSigner + ?Sized>(
     signer: &S,
@@ -839,7 +839,7 @@ pub fn genesis(owner_keys: &Keys, mut metadata: CommunityMetadata, at_secs: u64)
 }
 
 /// Signer-driven twin of [`genesis`] for bunker / NIP-55 accounts: mints from the
-/// owner's public key and seals the two genesis editions through a [`VectorSigner`].
+/// owner's public key and seals the two genesis editions through a [`VectorSigner`](crate::signer::VectorSigner).
 /// `owner_pk` must equal `my_public_key()` (the identity the signer signs as).
 pub async fn genesis_signed<S: crate::signer::VectorSigner + ?Sized>(
     owner_pk: PublicKey,

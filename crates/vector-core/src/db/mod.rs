@@ -879,10 +879,10 @@ impl Session {
     /// Take a READ connection from this session, opening one against this
     /// session's own database if the pool is empty.
     ///
-    /// The pool grows to [`MAX_READERS`] and stays: a reader closed later would free its
+    /// The pool grows to `MAX_READERS` and stays: a reader closed later would free its
     /// schema and caches into pages shared with long-lived data, holes the system never
     /// takes back. Past the cap a read waits for one to come home (queries take micro- to
-    /// milliseconds); a nested read on this thread, or a wait past [`READER_WAIT`], opens a
+    /// milliseconds); a nested read on this thread, or a wait past `READER_WAIT`, opens a
     /// passing connection that closes on return.
     #[track_caller]
     pub fn acquire_read(self: &Arc<Self>) -> Result<ConnectionGuard, String> {
@@ -940,7 +940,7 @@ impl Session {
     ///
     /// SQLite takes one writer at a time, so a second connection gains nothing: it parses
     /// the schema, then sleeps in SQLite's busy poll. Waiting here wakes the moment the
-    /// writer returns. A nested write on this thread, or a holder past [`WRITER_WAIT`],
+    /// writer returns. A nested write on this thread, or a holder past `WRITER_WAIT`,
     /// opens its own.
     #[track_caller]
     pub fn acquire_write(self: &Arc<Self>) -> Result<WriteConnectionGuard, String> {

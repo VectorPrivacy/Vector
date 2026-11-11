@@ -104,8 +104,8 @@ pub trait InboundEventHandler: Send + Sync {
     /// way to know it is waiting on.
     ///
     /// `backfilled` counts the messages that predate the grant and were pulled
-    /// into LOCAL STATE before this fired. They are history, not delivery: none
-    /// of them reach [`on_message`](Self::on_message) — read them explicitly
+    /// into LOCAL STATE before this fired. A listener is told of those sent since it
+    /// began listening; older ones are history: read them explicitly
     /// (`get_messages_before`) and decide what deserves acting on.
     fn on_channel_keyed(&self, _community_id: &str, _channel_id: &str, _backfilled: usize) {}
 
@@ -114,9 +114,9 @@ pub trait InboundEventHandler: Send + Sync {
     /// stream auth completes in the background). Fires once per
     /// [`listen`](crate::VectorCore::listen), after the startup refresh commits —
     /// even when `communities` is 0, so "subscribed to nothing" and "still
-    /// connecting" are distinguishable. Community messages sent before this are
-    /// only recoverable by a later sync; DMs sent since `listen` began still
-    /// reach the handler.
+    /// connecting" are distinguishable. With [`CatchUp::Inline`](crate::CatchUp::Inline),
+    /// whatever was sent since `listen` began reaches the handler however it arrives,
+    /// before this or after ([`crate::news`]).
     fn on_subscription_ready(&self, _communities: usize) {}
 
     /// A Community's control plane was refreshed in realtime (banlist/roles/metadata/mode change,
@@ -126,6 +126,35 @@ pub trait InboundEventHandler: Send + Sync {
     /// A Community was DISSOLVED by its owner (CORD-02 §9): sealed read-only, held keys still open
     /// history but nothing new is honored. The platform surfaces the grave.
     fn on_community_dissolved(&self, _community_id: &str) {}
+
+    // --- Typed changes. DM and Community alike: `chat_id` is the contact's npub or the channel
+    // id. The coarse hooks above still fire; these say what happened.
+
+    /// A reaction landed. `msg` is the message with it applied. `at` (unix ms, here and below)
+    /// is when it was sent, as its sender dated it.
+    fn on_reaction_added(&self, _chat_id: &str, _msg: &Message, _reaction: &crate::types::Reaction, _at: u64) {}
+
+    /// A reaction was withdrawn by its reactor, `by` (an npub). `msg` is the message without it.
+    fn on_reaction_removed(&self, _chat_id: &str, _msg: &Message, _reaction_id: &str, _by: &str, _at: u64) {}
+
+    /// A message was edited by its author. `msg` carries the new content.
+    fn on_message_edited(&self, _chat_id: &str, _msg: &Message, _at: u64) {}
+
+    /// A message was removed by `by` (an npub): its author, or a moderator when `moderated`.
+    /// `by` is `None` when the Community's own rules took it back (a post held for review
+    /// that no longer stands), which reads as `moderated`; `at` is then when this device judged it.
+    fn on_message_removed(&self, _chat_id: &str, _message_id: &str, _by: Option<&str>, _moderated: bool, _at: u64) {}
+
+    /// A DM typing indicator. `until` is the unix-secs the typer stops being active.
+    fn on_dm_typing(&self, _chat_id: &str, _npub: &str, _until: u64) {}
+
+    /// Opt in to [`on_community_change`](Self::on_community_change): each refresh is then
+    /// compared with the last, which costs a few local reads per Community refresh.
+    fn wants_community_changes(&self) -> bool { false }
+
+    /// One change to a Community's settings, Roles, Channels or members, with who made it.
+    /// Fires only when [`wants_community_changes`](Self::wants_community_changes) says so.
+    fn on_community_change(&self, _community_id: &str, _change: &crate::community::v2::changes::CommunityChange) {}
 
     /// Bulk-sync persist intercept: return `true` to take ownership of persisting a committed
     /// DM/file message — the commit then SKIPS its per-message save AND its wrapper-ledger
@@ -141,10 +170,10 @@ pub struct NoOpEventHandler;
 impl InboundEventHandler for NoOpEventHandler {}
 
 /// For catch-up syncs: forwards to `inner` only what is live rather than
-/// history. Mini App peer signals always: a signal is live state, and a sync
-/// that opens one ledgers its wrapper, so the live subscription will never
-/// deliver it again. With [`from`](Self::from), also DMs and files sent since
-/// that moment: sent while the sync ran, they can reach us through it alone.
+/// history. Mini App peer signals and Community invites always: each is live state, and a
+/// sync that opens one ledgers its wrapper, so the live subscription will never
+/// deliver it again. With [`from`](Self::from), also messages, reactions, edits and
+/// deletions sent since that moment: a sync may be the only path that carries them.
 pub struct LiveOnly<'a> {
     inner: &'a dyn InboundEventHandler,
     live_from_ms: Option<u64>,
@@ -162,11 +191,20 @@ impl<'a> LiveOnly<'a> {
     }
 
     fn is_live(&self, msg: &Message) -> bool {
-        self.live_from_ms.is_some_and(|from| msg.at >= from)
+        self.is_live_at(msg.at)
+    }
+
+    fn is_live_at(&self, at_ms: u64) -> bool {
+        self.live_from_ms.is_some_and(|from| at_ms >= from)
     }
 }
 
 impl InboundEventHandler for LiveOnly<'_> {
+    /// An invite a sync parks is waiting on a decision now, however old its wrap.
+    fn on_community_invite(&self, community_id: &str) {
+        self.inner.on_community_invite(community_id)
+    }
+
     fn on_community_webxdc(&self, chat_id: &str, npub: &str, topic_id: &str, node_addr: Option<&str>, event_id: &str, created_at: u64) {
         self.inner.on_community_webxdc(chat_id, npub, topic_id, node_addr, event_id, created_at)
     }
@@ -184,6 +222,30 @@ impl InboundEventHandler for LiveOnly<'_> {
     fn on_file_received(&self, chat_id: &str, msg: &Message, is_new: bool) {
         if self.is_live(msg) {
             self.inner.on_file_received(chat_id, msg, is_new)
+        }
+    }
+
+    fn on_reaction_added(&self, chat_id: &str, msg: &Message, reaction: &crate::types::Reaction, at: u64) {
+        if self.is_live_at(at) {
+            self.inner.on_reaction_added(chat_id, msg, reaction, at)
+        }
+    }
+
+    fn on_reaction_removed(&self, chat_id: &str, msg: &Message, reaction_id: &str, by: &str, at: u64) {
+        if self.is_live_at(at) {
+            self.inner.on_reaction_removed(chat_id, msg, reaction_id, by, at)
+        }
+    }
+
+    fn on_message_edited(&self, chat_id: &str, msg: &Message, at: u64) {
+        if self.is_live_at(at) {
+            self.inner.on_message_edited(chat_id, msg, at)
+        }
+    }
+
+    fn on_message_removed(&self, chat_id: &str, message_id: &str, by: Option<&str>, moderated: bool, at: u64) {
+        if self.is_live_at(at) {
+            self.inner.on_message_removed(chat_id, message_id, by, moderated, at)
         }
     }
 }
@@ -375,6 +437,30 @@ impl InboundEventHandler for BatchingPersist<'_> {
     fn on_community_dissolved(&self, community_id: &str) {
         self.inner.on_community_dissolved(community_id)
     }
+    fn on_reaction_added(&self, chat_id: &str, msg: &Message, reaction: &crate::types::Reaction, at: u64) {
+        self.inner.on_reaction_added(chat_id, msg, reaction, at)
+    }
+    fn on_reaction_removed(&self, chat_id: &str, msg: &Message, reaction_id: &str, by: &str, at: u64) {
+        self.inner.on_reaction_removed(chat_id, msg, reaction_id, by, at)
+    }
+    fn on_message_edited(&self, chat_id: &str, msg: &Message, at: u64) {
+        self.inner.on_message_edited(chat_id, msg, at)
+    }
+    fn on_message_removed(&self, chat_id: &str, message_id: &str, by: Option<&str>, moderated: bool, at: u64) {
+        if let Ok(mut b) = self.buf.lock() {
+            b.retain(|e| e.msg.id != message_id);
+        }
+        self.inner.on_message_removed(chat_id, message_id, by, moderated, at)
+    }
+    fn on_dm_typing(&self, chat_id: &str, npub: &str, until: u64) {
+        self.inner.on_dm_typing(chat_id, npub, until)
+    }
+    fn wants_community_changes(&self) -> bool {
+        self.inner.wants_community_changes()
+    }
+    fn on_community_change(&self, community_id: &str, change: &crate::community::v2::changes::CommunityChange) {
+        self.inner.on_community_change(community_id, change)
+    }
 }
 
 /// Result of Phase 1 (prepare_event) — everything needed for sequential commit.
@@ -397,6 +483,8 @@ pub enum PreparedEvent {
         wrapper_event_id: String,
         wrapper_event_id_bytes: [u8; 32],
         wrapper_created_at: u64,
+        /// The rumor's own send time (unix ms): the wrap's is randomised.
+        rumor_at_ms: u64,
         /// Time spent on ECDH + ChaCha20Poly1305 decryption (nanoseconds)
         unwrap_ns: u64,
         /// Time spent on rumor parsing (nanoseconds)
@@ -588,6 +676,7 @@ fn finish_prepare(
         };
     };
 
+    let rumor_at_ms = rumor.created_at.as_secs().saturating_mul(1000);
     let rumor_event = RumorEvent {
         id: rumor_id,
         kind: rumor.kind,
@@ -614,7 +703,7 @@ fn finish_prepare(
             PreparedEvent::Processed {
                 result, contact, sender, is_mine,
                 wrapper_event_id, wrapper_event_id_bytes, wrapper_created_at,
-                unwrap_ns, parse_ns,
+                rumor_at_ms, unwrap_ns, parse_ns,
             }
         }
         Err(e) => {
@@ -736,7 +825,7 @@ mod revoked_reaction_tests {
         };
         crate::state::note_message_deleted(&id);
         let wrap = EventId::from_byte_array([8; 32]);
-        assert!(!commit_reaction(reaction, "contact", false, &wrap.to_hex(), &NoOpEventHandler).await);
+        assert!(!commit_reaction(reaction, "contact", false, &wrap.to_hex(), 0, &NoOpEventHandler).await);
         assert!(crate::deletion::pending_received_wrap_deletions().contains(&wrap), "and that wrap leaves the relays");
     }
 }
@@ -758,6 +847,22 @@ mod received_wrap_deletion_tests {
     }
 
     #[tokio::test]
+    async fn a_contact_cannot_edit_what_we_sent() {
+        let _guard = fresh_account();
+        let contact = Keys::generate().public_key().to_bech32().unwrap();
+        let ours = crate::types::Message { id: "c".repeat(64), content: "ours".into(), at: 1_700_000_000_000, mine: true, ..Default::default() };
+        crate::db::events::save_message(&contact, &ours).await.unwrap();
+        crate::state::STATE.lock().await.add_message_to_participant(&contact, &ours);
+        let edit = |id: &str| crate::stored_event::StoredEventBuilder::new().id(id.to_string()).kind(crate::stored_event::event_kind::MESSAGE_EDIT).content("forged".to_string()).build();
+        let forged = commit_edit(&mut edit(&"d".repeat(64)), &contact, &ours.id, "forged", 1_700_000_001_000, vec![], vec![], &"e".repeat(64), false, &NoOpEventHandler).await;
+        assert!(!forged, "the contact's edit of our message is refused");
+        let content = crate::state::STATE.lock().await.find_message(&ours.id).map(|(_, m)| m.content);
+        assert_eq!(content.as_deref(), Some("ours"));
+        let own = commit_edit(&mut edit(&"f".repeat(64)), &contact, &ours.id, "ours, edited", 1_700_000_002_000, vec![], vec![], &"e".repeat(64), true, &NoOpEventHandler).await;
+        assert!(own, "our own edit applies");
+    }
+
+    #[tokio::test]
     async fn an_honoured_hide_request_deletes_the_wrap_that_brought_the_message() {
         let _guard = fresh_account();
         let (peer, stranger) = (Keys::generate().public_key(), Keys::generate().public_key());
@@ -772,9 +877,9 @@ mod received_wrap_deletion_tests {
         };
         crate::db::events::save_message(&contact, &msg).await.unwrap();
         crate::state::STATE.lock().await.add_message_to_participant(&contact, &msg);
-        assert!(!commit_deletion(&msg.id, &contact, &stranger, &NoOpEventHandler).await, "only its author asks");
+        assert!(!commit_deletion(&msg.id, &contact, &stranger, 0, &NoOpEventHandler).await, "only its author asks");
         assert!(!crate::deletion::pending_received_wrap_deletions().contains(&wrap));
-        assert!(commit_deletion(&msg.id, &contact, &peer, &NoOpEventHandler).await);
+        assert!(commit_deletion(&msg.id, &contact, &peer, 0, &NoOpEventHandler).await);
         assert!(crate::deletion::pending_received_wrap_deletions().contains(&wrap), "our copy leaves the relays too");
         crate::db::close_database();
     }
@@ -791,8 +896,8 @@ mod received_wrap_deletion_tests {
         for msg in [&theirs, &ours] {
             crate::db::events::save_message(&contact, msg).await.unwrap();
         }
-        assert!(!commit_deletion(&ours.id, &contact, &peer, &NoOpEventHandler).await, "what we sent is never theirs to take down");
-        assert!(commit_deletion(&theirs.id, &contact, &me, &NoOpEventHandler).await);
+        assert!(!commit_deletion(&ours.id, &contact, &peer, 0, &NoOpEventHandler).await, "what we sent is never theirs to take down");
+        assert!(commit_deletion(&theirs.id, &contact, &me, 0, &NoOpEventHandler).await);
         assert!(!crate::db::events::event_exists(&theirs.id).unwrap() && crate::state::was_message_deleted(&theirs.id));
         assert!(crate::deletion::pending_received_wrap_deletions().contains(&wrap), "this device's copy leaves the relays too");
         crate::db::close_database();
@@ -830,7 +935,7 @@ mod received_wrap_deletion_tests {
             state.add_message_to_participant(&contact, &msg);
             state.add_reaction_to_message(&msg.id, reaction.clone());
         }
-        assert!(commit_reaction_deletion(&reaction.id, &peer).await);
+        assert!(commit_reaction_deletion(&reaction.id, &peer, 0, &NoOpEventHandler).await);
         assert!(crate::deletion::pending_received_wrap_deletions().contains(&wrap));
         crate::db::close_database();
     }
@@ -843,7 +948,7 @@ mod received_wrap_deletion_tests {
         let wrap = EventId::from_byte_array([2; 32]);
         let msg = crate::types::Message { id: "e".repeat(64), content: "old".into(), at: 1_600_000_000_000, wrapper_event_id: Some(wrap.to_hex()), ..Default::default() };
         crate::db::events::save_message(&contact, &msg).await.unwrap();
-        assert!(commit_deletion(&msg.id, &contact, &peer, &NoOpEventHandler).await, "stored, if not in memory");
+        assert!(commit_deletion(&msg.id, &contact, &peer, 0, &NoOpEventHandler).await, "stored, if not in memory");
         assert!(!crate::db::events::event_exists(&msg.id).unwrap());
         assert!(crate::state::was_message_deleted(&msg.id));
         assert!(crate::deletion::pending_received_wrap_deletions().contains(&wrap));
@@ -885,7 +990,7 @@ mod received_wrap_deletion_tests {
         let reaction = crate::types::Reaction { id: "6".repeat(64), reference_id: "m".into(), author_id: author.to_bech32().unwrap(), emoji: "+".into(), emoji_url: None };
         hold_deletion_until_met(&reaction.id, &author).await;
         let wrap = EventId::from_byte_array([1; 32]);
-        assert!(!commit_reaction(reaction.clone(), "contact", false, &wrap.to_hex(), &NoOpEventHandler).await);
+        assert!(!commit_reaction(reaction.clone(), "contact", false, &wrap.to_hex(), 0, &NoOpEventHandler).await);
         assert!(crate::state::was_message_deleted(&reaction.id));
         assert!(crate::deletion::pending_received_wrap_deletions().contains(&wrap));
         crate::db::close_database();
@@ -945,7 +1050,7 @@ pub async fn commit_prepared_event(
         return false;
     }
     match prepared {
-        PreparedEvent::Processed { result, contact, sender, is_mine, wrapper_event_id, wrapper_event_id_bytes, wrapper_created_at, .. } => {
+        PreparedEvent::Processed { result, contact, sender, is_mine, wrapper_event_id, wrapper_event_id_bytes, wrapper_created_at, rumor_at_ms, .. } => {
             // Cache wrapper for session dedup
             {
                 let mut cache = WRAPPER_ID_CACHE.lock().await;
@@ -1021,10 +1126,10 @@ pub async fn commit_prepared_event(
                     commit_dm_message(msg, &contact, is_mine, is_new, &wrapper_event_id, wrapper_event_id_bytes, wrapper_created_at, handler, true).await
                 }
                 RumorProcessingResult::Reaction(reaction) => {
-                    commit_reaction(reaction, &contact, is_mine, &wrapper_event_id, handler).await
+                    commit_reaction(reaction, &contact, is_mine, &wrapper_event_id, rumor_at_ms, handler).await
                 }
                 RumorProcessingResult::Edit { message_id, new_content, edited_at, emoji_tags, text_spans, mut event } => {
-                    commit_edit(&mut event, &contact, &message_id, &new_content, edited_at, emoji_tags, text_spans, &wrapper_event_id).await
+                    commit_edit(&mut event, &contact, &message_id, &new_content, edited_at, emoji_tags, text_spans, &wrapper_event_id, is_mine, handler).await
                 }
                 RumorProcessingResult::TypingIndicator { profile_id, until } => {
                     let active_typers = {
@@ -1035,6 +1140,7 @@ pub async fn commit_prepared_event(
                         "conversation_id": contact,
                         "typers": active_typers,
                     }));
+                    handler.on_dm_typing(&contact, &profile_id, until);
                     false
                 }
                 RumorProcessingResult::PivxPayment { gift_code, amount_piv, address, message_id, mut event } => {
@@ -1100,8 +1206,8 @@ pub async fn commit_prepared_event(
                     // A deletion targets a message OR a reaction (both event ids,
                     // never colliding). Try the message path; if it's not a known
                     // message, treat it as a reaction revocation.
-                    if commit_deletion(&target_event_id, &contact, &sender, handler).await
-                        || commit_reaction_deletion(&target_event_id, &sender).await
+                    if commit_deletion(&target_event_id, &contact, &sender, rumor_at_ms, handler).await
+                        || commit_reaction_deletion(&target_event_id, &sender, rumor_at_ms, handler).await
                     {
                         true
                     } else {
@@ -1331,12 +1437,26 @@ async fn commit_dm_message(
     added
 }
 
+/// Bring the DM a reaction or edit aims at into STATE from the database when it isn't resident:
+/// STATE holds a window, and the change must land on older messages too.
+async fn hydrate_dm_target(contact: &str, message_id: &str) {
+    if crate::state::STATE.lock().await.find_message(message_id).is_some() {
+        return;
+    }
+    if let Ok(Some((chat, msg))) = crate::db::events::get_message_by_id(message_id).await {
+        if chat == contact {
+            crate::state::STATE.lock().await.add_message_to_participant(contact, &msg);
+        }
+    }
+}
+
 /// Commit a reaction event.
 async fn commit_reaction(
     reaction: crate::types::Reaction,
     contact: &str,
     is_mine: bool,
     wrapper_event_id: &str,
+    at: u64,
     handler: &dyn InboundEventHandler,
 ) -> bool {
     // A revoked reaction can come back under a new wrapper id; its own id is the stable key.
@@ -1356,6 +1476,7 @@ async fn commit_reaction(
         return false;
     }
 
+    hydrate_dm_target(contact, &reaction.reference_id).await;
     // Add to STATE
     let msg_for_emit = {
         let mut state = crate::state::STATE.lock().await;
@@ -1370,6 +1491,7 @@ async fn commit_reaction(
     if let Some((chat_id, mut msg)) = msg_for_emit {
         crate::traits::emit_message_update(&chat_id, &reaction.reference_id, &mut msg).await;
         handler.on_reaction_received(&chat_id, &msg);
+        handler.on_reaction_added(&chat_id, &msg, &reaction, at);
     }
 
     // The kind-7 row is the reaction's only storage: the parent row never carries it.
@@ -1384,6 +1506,7 @@ async fn commit_reaction(
 }
 
 /// Commit a message edit.
+#[allow(clippy::too_many_arguments)]
 async fn commit_edit(
     event: &mut crate::stored_event::StoredEvent,
     contact: &str,
@@ -1393,8 +1516,19 @@ async fn commit_edit(
     emoji_tags: Vec<crate::types::EmojiTag>,
     text_spans: Vec<crate::text_spans::TextSpan>,
     wrapper_event_id: &str,
+    is_mine: bool,
+    handler: &dyn InboundEventHandler,
 ) -> bool {
     if crate::db::events::event_exists(&event.id).unwrap_or(false) {
+        return false;
+    }
+    // Only a message's author edits it: in a DM, the other side can't rewrite what we sent.
+    let resident = crate::state::STATE.lock().await.find_message(message_id).map(|(_, m)| m.mine);
+    let target_mine = match resident {
+        Some(mine) => Some(mine),
+        None => crate::db::events::get_message_by_id(message_id).await.ok().flatten().map(|(_, m)| m.mine),
+    };
+    if target_mine.is_some_and(|mine| mine != is_mine) {
         return false;
     }
     if let Ok(chat_id) = crate::db::id_cache::get_chat_id_by_identifier(contact) {
@@ -1403,6 +1537,7 @@ async fn commit_edit(
     event.wrapper_event_id = Some(wrapper_event_id.to_string());
     let _ = crate::db::events::save_event(event).await;
 
+    hydrate_dm_target(contact, message_id).await;
     let msg_for_emit = {
         let mut state = crate::state::STATE.lock().await;
         state.update_message_in_chat_with(contact, message_id, |msg, i| {
@@ -1411,6 +1546,9 @@ async fn commit_edit(
     };
     if let Some(mut msg) = msg_for_emit {
         crate::traits::emit_message_update(contact, message_id, &mut msg).await;
+        if crate::news::first_telling_hex(&event.id) {
+            handler.on_message_edited(contact, &msg, edited_at);
+        }
     }
     true
 }
@@ -1431,6 +1569,7 @@ async fn commit_deletion(
     target_event_id: &str,
     contact: &str,
     sender: &PublicKey,
+    at: u64,
     handler: &dyn InboundEventHandler,
 ) -> bool {
     // Not held here: the caller parks the request until its message arrives
@@ -1520,6 +1659,9 @@ async fn commit_deletion(
     );
 
     handler.on_message_deleted(&chat_id, target_event_id);
+    if crate::news::first_telling_hex(&format!("deleted {target_event_id}")) {
+        handler.on_message_removed(&chat_id, target_event_id, Some(&sender.to_bech32().unwrap_or_else(|_| sender.to_hex())), false, at);
+    }
     let _ = contact;
     true
 }
@@ -1552,7 +1694,7 @@ async fn deletion_target_known(target: &str) -> bool {
 /// author. Removes the reaction from its parent message and drops the kind-7
 /// row, then live-refreshes the parent's chips. Returns false if we don't hold
 /// the reaction or the sender isn't its author.
-async fn commit_reaction_deletion(target_reaction_id: &str, sender: &PublicKey) -> bool {
+async fn commit_reaction_deletion(target_reaction_id: &str, sender: &PublicKey, at: u64, handler: &dyn InboundEventHandler) -> bool {
     let found = {
         let state = crate::state::STATE.lock().await;
         state.find_reaction(target_reaction_id)
@@ -1599,6 +1741,9 @@ async fn commit_reaction_deletion(target_reaction_id: &str, sender: &PublicKey) 
     }
 
     crate::traits::emit_message_update(&chat_id, &message_id, &mut message).await;
+    if crate::news::first_telling_hex(&format!("deleted {target_reaction_id}")) {
+        handler.on_reaction_removed(&chat_id, &message, target_reaction_id, &sender.to_bech32().unwrap_or_else(|_| sender.to_hex()), at);
+    }
     true
 }
 
@@ -1795,5 +1940,57 @@ mod invite_wrap_tests {
         commit_prepared_event(invite(&cid, 0x33, now - 60), true, &NoOpEventHandler).await;
         assert!(crate::db::community::get_pending_invite(&cid).unwrap().is_none());
         assert_eq!(crate::deletion::queued_received_wrap_deletions(), [EventId::from_byte_array([0x33; 32])]);
+    }
+}
+
+#[cfg(test)]
+mod live_only_tests {
+    #[test]
+    fn a_sync_forwards_reactions_edits_and_deletions_sent_since_its_cutoff() {
+        #[derive(Default)]
+        struct Seen(std::sync::Mutex<Vec<&'static str>>);
+        impl InboundEventHandler for Seen {
+            fn on_reaction_added(&self, _: &str, _: &Message, _: &crate::types::Reaction, _: u64) {
+                self.0.lock().unwrap().push("react");
+            }
+            fn on_reaction_removed(&self, _: &str, _: &Message, _: &str, _: &str, _: u64) {
+                self.0.lock().unwrap().push("unreact");
+            }
+            fn on_message_edited(&self, _: &str, _: &Message, _: u64) {
+                self.0.lock().unwrap().push("edit");
+            }
+            fn on_message_removed(&self, _: &str, _: &str, _: Option<&str>, _: bool, _: u64) {
+                self.0.lock().unwrap().push("remove");
+            }
+        }
+        let seen = Seen::default();
+        let live = LiveOnly::from(&seen, 1_000);
+        let msg = Message::default();
+        let reaction = crate::types::Reaction { id: String::new(), reference_id: String::new(), author_id: String::new(), emoji: "+".into(), emoji_url: None };
+        for at in [999, 1_000] {
+            live.on_reaction_added("c", &msg, &reaction, at);
+            live.on_reaction_removed("c", &msg, "r", "b", at);
+            live.on_message_edited("c", &msg, at);
+            live.on_message_removed("c", "m", None, false, at);
+        }
+        assert_eq!(*seen.0.lock().unwrap(), vec!["react", "unreact", "edit", "remove"], "only what was sent from the cutoff on");
+    }
+
+    use super::*;
+
+    #[derive(Default)]
+    struct Invites(std::sync::Mutex<Vec<String>>);
+    impl InboundEventHandler for Invites {
+        fn on_community_invite(&self, community_id: &str) {
+            self.0.lock().unwrap().push(community_id.to_string());
+        }
+    }
+
+    #[test]
+    fn an_invite_a_sync_parks_reaches_the_handler() {
+        let inner = Invites::default();
+        LiveOnly::from(&inner, u64::MAX).on_community_invite("ab");
+        LiveOnly::signals(&inner).on_community_invite("cd");
+        assert_eq!(*inner.0.lock().unwrap(), vec!["ab", "cd"]);
     }
 }

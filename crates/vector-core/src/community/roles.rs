@@ -23,6 +23,20 @@ use serde::{Deserialize, Serialize};
 #[serde(transparent)]
 pub struct Permissions(pub u64);
 
+/// The bit constants are plain `u64`s, so `Permissions::KICK | Permissions::BAN` converts.
+impl From<u64> for Permissions {
+    fn from(bits: u64) -> Self {
+        Permissions(bits)
+    }
+}
+
+impl std::ops::BitOr for Permissions {
+    type Output = Permissions;
+    fn bitor(self, rhs: Permissions) -> Permissions {
+        Permissions(self.0 | rhs.0)
+    }
+}
+
 impl Permissions {
     pub const MANAGE_ROLES: u64 = 1 << 0;
     pub const MANAGE_CHANNELS: u64 = 1 << 1;
@@ -525,7 +539,7 @@ impl CommunityRoles {
         out
     }
 
-    /// [`channel_roles`], by id.
+    /// [`channel_roles`](Self::channel_roles), by id.
     pub fn channel_role_ids(&self, channel_hex: &str) -> Vec<String> {
         self.channel_roles(channel_hex).into_iter().map(|r| r.role_id.clone()).collect()
     }
@@ -576,7 +590,7 @@ impl CommunityRoles {
     /// roles plus roles scoped to that channel.
     ///
     /// ⚠️ **Offer-side only.** The fold stays scope-agnostic in every
-    /// implementation (CORD-04 §3, and [`effective_permissions`] is what judges
+    /// implementation (CORD-04 §3, and [`effective_permissions`](Self::effective_permissions) is what judges
     /// inbound authority) — this narrows only what THIS client offers its own
     /// user, never what it honors from others. Tightening the honor path would
     /// retroactively invalidate actions shipped clients already folded.

@@ -95,7 +95,7 @@ impl GuardedSigner {
     ///
     /// No identity check against `my_public_key`: a vault key that isn't the identity can
     /// only open wraps sealed to itself, which then authenticate their sender like any
-    /// DM. Signing and encrypting check the identity in [`Self::with_keys`].
+    /// DM. Signing and encrypting check the identity in `with_keys`.
     pub fn unwrap_batch(wraps: &[&Event]) -> Vec<Result<UnwrappedGift, SignerError>> {
         let checked: Vec<Result<(), SignerError>> = wraps
             .iter()

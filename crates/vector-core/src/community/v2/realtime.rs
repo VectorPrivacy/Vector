@@ -129,6 +129,23 @@ type FollowLocks = std::collections::HashMap<[u8; 32], Arc<Mutex<()>>>;
 static V2_FOLLOW_LOCKS: LazyLock<StdMutex<FollowLocks>> =
     LazyLock::new(|| StdMutex::new(std::collections::HashMap::new()));
 
+/// A Community's held state moved: the renderer redraws, and a handler that asked hears what changed.
+fn refreshed(handler: &dyn InboundEventHandler, community_id: &str) {
+    handler.on_community_refreshed(community_id);
+    super::changes::notify(handler, community_id);
+}
+
+/// This account no longer holds the Community: the change feed's view of it goes too.
+fn self_removed(handler: &dyn InboundEventHandler, community_id: &str) {
+    super::changes::forget(community_id);
+    handler.on_community_self_removed(community_id);
+}
+
+fn dissolved(handler: &dyn InboundEventHandler, community_id: &str) {
+    super::changes::forget(community_id);
+    handler.on_community_dissolved(community_id);
+}
+
 /// Whether a follow of this community is queued.
 pub(crate) fn follow_pending(id: &CommunityId) -> bool {
     V2_FOLLOW_PENDING.lock().unwrap_or_else(|e| e.into_inner()).contains(&id.0)
@@ -181,7 +198,7 @@ pub async fn subscribed_author_set() -> Vec<String> {
 /// Diagnostics: run the three follow stages once for `id` UNDER the follow lock
 /// (so it can't race the worker into a whole-row clobber) and return each
 /// stage's outcome as a display string. Reloads freshly-persisted state between
-/// stages, exactly like [`follow_community`]. Mutating — same writes a live
+/// stages, exactly like `follow_community`. Mutating — same writes a live
 /// follow makes; the lock serializes it against the worker.
 #[cfg(debug_assertions)]
 pub async fn debug_run_follow_stages(id: &CommunityId, session: &std::sync::Arc<crate::db::Session>) -> (String, String, String) {
@@ -260,7 +277,7 @@ pub async fn clear() {
 ///
 /// The **control plane** rides here so a long-running bot follows metadata +
 /// public-channel edits live ([`super::service::follow_control`] re-folds on a
-/// recognized wrap), and the next-epoch rekey planes ride via [`rekey_authors`]
+/// recognized wrap), and the next-epoch rekey planes ride via `rekey_authors`
 /// (each subscribed author has its `dispatch_wrap` arm — never one without the
 /// other).
 pub fn plane_authors(communities: &[CommunityV2]) -> Vec<PublicKey> {
@@ -858,6 +875,53 @@ fn prime_auth_in_background(client: &Client, relays: Vec<String>) {
     });
 }
 
+/// Fetch what the held planes carried since `since` and dispatch it as if it had arrived live:
+/// an event published while a subscription was down or being made reaches the handler all the
+/// same, and one already held is dropped as a duplicate. Each relay its own share, paged down to
+/// `since`; `only` keeps to one relay.
+pub(crate) async fn replay(client: &Client, since: Timestamp, only: Option<&str>, handler: Arc<dyn InboundEventHandler>) {
+    const PAGE: usize = 500;
+    const MAX_PAGES: usize = 20;
+    let SubPlan { per_relay, .. } = subscription_plan(&load_held_v2());
+    let budget = crate::relay_request_timeout(std::time::Duration::from_secs(10));
+    for (url, share) in per_relay.into_iter().filter(|(url, _)| only.is_none_or(|o| url.as_str().trim_end_matches('/') == o.trim_end_matches('/'))) {
+        let mut got: Vec<Event> = Vec::new();
+        let mut ids = HashSet::new();
+        let mut until: Option<Timestamp> = None;
+        for _ in 0..MAX_PAGES {
+            let mut filter = Filter::new().kinds([Kind::Custom(stream::KIND_WRAP)]).authors(share.clone()).since(since).limit(PAGE);
+            if let Some(until) = until {
+                filter = filter.until(until);
+            }
+            let page = match client.fetch_events(nostr_sdk::prelude::ReqTarget::single(url.clone(), [filter])).timeout(budget).await {
+                Ok(page) => page,
+                Err(e) => {
+                    crate::log_debug!("[v2-sub] replay of {url} since {} failed: {e}", since.as_secs());
+                    break;
+                }
+            };
+            let mut new = 0;
+            for e in page.into_iter() {
+                until = Some(until.map_or(e.created_at, |u| u.min(e.created_at)));
+                if ids.insert(e.id) {
+                    got.push(e);
+                    new += 1;
+                }
+            }
+            // Short of a page, or nothing older left: what the relay holds since `since` is in.
+            if new == 0 || until.is_none_or(|u| u <= since) {
+                break;
+            }
+        }
+        // Oldest first, so a reaction or edit follows the message it names.
+        got.sort_by_key(|e| e.created_at);
+        crate::log_debug!("[v2-sub] replay of {url} since {}: {} event(s)", since.as_secs(), got.len());
+        for event in got {
+            dispatch_event(event, handler.clone()).await;
+        }
+    }
+}
+
 /// Re-send the CURRENT v2 subscriptions (same ids) to ONE relay. An AUTH-gating
 /// relay CLOSEs a sub REQ that raced ahead of the stream AUTHs on a fresh
 /// connection, and it never re-challenges once the connection is authenticated —
@@ -869,6 +933,8 @@ fn prime_auth_in_background(client: &Client, relays: Vec<String>) {
 /// gets none.
 pub(crate) async fn resubscribe_relay(client: &Client, relay: &RelayUrl) {
     note_resubscribe();
+    // What the relay carried before it let these subscriptions in reaches a listener too.
+    crate::VectorCore::owe_catch_up(false, false, [(relay.to_string(), crate::clock::now_ms().saturating_sub(10 * 60_000))]);
     let targeted = V2_SUB_ID.lock().await.clone();
     let poolwide = V2_POOLWIDE_SUB_ID.lock().await.clone();
     if targeted.is_none() && poolwide.is_none() {
@@ -939,7 +1005,7 @@ async fn apply_live_control(c: &CommunityV2, wrap: &Event, handler: &dyn Inbound
         }
     }
     if follow.updated.is_some() {
-        handler.on_community_refreshed(&community_id);
+        refreshed(handler, &community_id);
     }
     if moved_planes || follow.authority_changed || banned {
         enqueue_follow_urgent(c.id());
@@ -1004,7 +1070,7 @@ pub async fn dispatch_event(event: Event, handler: Arc<dyn InboundEventHandler>)
                     // stop being subscribed + routed.
                     if crate::db::community::set_community_dissolved(&community_id).unwrap_or(false) {
                         stamp_dissolved_chats(c.id()).await;
-                        handler.on_community_dissolved(&community_id);
+                        dissolved(&*handler, &community_id);
                         if let Some(client) = crate::state::nostr_client() {
                             refresh_subscription(&client).await;
                         }
@@ -1034,30 +1100,11 @@ pub async fn dispatch_event(event: Event, handler: Arc<dyn InboundEventHandler>)
                     if outcome.is_some() || !inbound::awaits_target(&event).await {
                         remember();
                     }
-                    match outcome {
-                        // "New" = first ingest, which a relay-backfill replay of a month-old
-                        // event also satisfies — is_new comes from the inner send time so
-                        // stale replays persist + surface without ringing anything.
-                        Some(inbound::ChatPersist::New(message)) => {
-                            let fresh = crate::community::is_realtime_fresh(message.at);
-                            handler.on_community_message(&channel_id, &message, fresh);
-                        }
-                        // A reaction or an edit: the folded TARGET row (its id is the
-                        // target's). Both come
-                        // back out of STATE, whose compact form drops the quoted
-                        // attachment's extension, so re-resolve before rendering.
-                        Some(inbound::ChatPersist::Updated { mut message, .. }) => {
-                            let _ = crate::db::events::populate_reply_context(&mut message).await;
-                            handler.on_community_update(&channel_id, &message.id, &message);
-                        }
-                        // An un-react re-renders the PARENT (its chips changed) — the
-                        // same surface a landed reaction drives.
-                        Some(inbound::ChatPersist::ReactionRemoved { mut message, .. }) => {
-                            let _ = crate::db::events::populate_reply_context(&mut message).await;
-                            handler.on_community_update(&channel_id, &message.id, &message);
-                        }
-                        Some(inbound::ChatPersist::Removed(target_id)) => handler.on_community_removed(&channel_id, &target_id),
-                        None => {}
+                    // "New" = first ingest, which a relay-backfill replay of a month-old event
+                    // also satisfies: freshness comes from the inner send time, so stale replays
+                    // persist and surface without ringing anything.
+                    if let Some(outcome) = outcome {
+                        inbound::notify_chat_outcome(&*handler, &channel_id, &event, outcome, true).await;
                     }
                     return;
                 }
@@ -1071,7 +1118,9 @@ pub async fn dispatch_event(event: Event, handler: Arc<dyn InboundEventHandler>)
                     // A manager sees what was held, marked, and is never rung for it.
                     if let Some(marked) = marked {
                         if let Some(inbound::ChatPersist::New(message)) = inbound::persist_routed_chat_event(&marked, &channel_id, &c.id().0, &my_pk).await {
-                            handler.on_community_message(&channel_id, &message, false);
+                            // News to a listener, as the same post judged later is; never a ring.
+                            let news = crate::news::listening_since().is_some() && crate::news::is_news(message.at) && crate::news::first_telling_hex(&message.id);
+                            handler.on_community_message(&channel_id, &message, news);
                         }
                     }
                     return;
@@ -1082,6 +1131,7 @@ pub async fn dispatch_event(event: Event, handler: Arc<dyn InboundEventHandler>)
                     // fired inline), and refresh the overview when it lands.
                     let changed = ingest_live(c, *ev, &event);
                     remember();
+                    // Membership isn't a change the feed reports: joins and leaves have their own hook.
                     if changed {
                         handler.on_community_refreshed(&crate::simd::hex::bytes_to_hex_32(&c.id().0));
                     }
@@ -1091,11 +1141,17 @@ pub async fn dispatch_event(event: Event, handler: Arc<dyn InboundEventHandler>)
                     let changed = if matches!(ev.entry, super::guestbook::GuestbookEntry::Nickname { .. }) { "community_nicknames" } else { "community_timeouts" };
                     remember();
                     if ingest_live(c, *ev, &event) {
-                        crate::traits::emit_event_json(changed, serde_json::json!({ "community_id": crate::simd::hex::bytes_to_hex_32(&c.id().0) }));
+                        let community_id = crate::simd::hex::bytes_to_hex_32(&c.id().0);
+                        crate::traits::emit_event_json(changed, serde_json::json!({ "community_id": community_id }));
+                        super::changes::notify_soon(handler.clone(), &community_id);
                     }
                     return;
                 }
                 inbound::DispatchedV2::Kick { target, event: ev } => {
+                    let (actor, kick_rumor, kick_at) = match &ev.entry {
+                        super::guestbook::GuestbookEntry::Kick { actor, at_ms, .. } => (Some(*actor), ev.rumor_id, *at_ms),
+                        _ => (None, ev.rumor_id, crate::clock::now_ms()),
+                    };
                     if !ingest_live(c, *ev, &event) {
                         return;
                     }
@@ -1121,13 +1177,18 @@ pub async fn dispatch_event(event: Event, handler: Arc<dyn InboundEventHandler>)
                             &community_id[..8.min(community_id.len())]
                         );
                         super::service::record_eviction(c, at);
-                        handler.on_community_self_removed(&community_id);
+                        self_removed(&*handler, &community_id);
                     } else {
-                        crate::log_debug!(
-                            "[v2:kick {}] declined: target={} is not ruled kicked by the fold",
-                            &community_id[..8.min(community_id.len())], &target.to_hex()[..8]
-                        );
-                        handler.on_community_refreshed(&community_id);
+                        // Any member can store a Kick rumor: only the one the authorized fold rules by is a kick.
+                        if my_pk != target && handler.wants_community_changes() && super::service::stored_kick_rumor(c, &target) == Some(kick_rumor) {
+                            let change = super::changes::CommunityChange::new(
+                                actor.and_then(|a| nostr_sdk::prelude::ToBech32::to_bech32(&a).ok()),
+                                kick_at,
+                                super::changes::ChangeKind::MemberKicked { member: nostr_sdk::prelude::ToBech32::to_bech32(&target).unwrap_or_else(|_| target.to_hex()) },
+                            );
+                            super::changes::notify_one(&*handler, &community_id, change);
+                        }
+                        refreshed(&*handler, &community_id);
                     }
                     return;
                 }
@@ -1338,7 +1399,7 @@ async fn follow_community(session: &std::sync::Arc<crate::db::Session>, id: &Com
                 if !current.dissolved {
                     crate::log_warn!("[v2:teardown {}] DISSOLVED tombstone", &community_id[..8.min(community_id.len())]);
                     stamp_dissolved_chats(id).await;
-                    handler.on_community_dissolved(&community_id);
+                    dissolved(&*handler, &community_id);
                 }
                 return;
             }
@@ -1350,12 +1411,12 @@ async fn follow_community(session: &std::sync::Arc<crate::db::Session>, id: &Com
                 super::service::record_eviction(&current, follow.removed_at.unwrap_or_else(super::service::now_ms));
                 let _ = crate::db::community::delete_community_retain_keys(&community_id);
                 refresh_subscription(&client).await;
-                handler.on_community_self_removed(&community_id);
+                self_removed(&*handler, &community_id);
                 return;
             }
             Ok(follow) if follow.updated.is_some() => {
                 refresh_subscription(&client).await;
-                handler.on_community_refreshed(&community_id);
+                refreshed(&*handler, &community_id);
             }
             Ok(_) => {}
             Err(e) => {
@@ -1398,7 +1459,7 @@ async fn follow_community(session: &std::sync::Arc<crate::db::Session>, id: &Com
                     Ok(f) if f.self_removed || f.dissolved => {}
                     Ok(f) if f.updated.is_some() => {
                         refresh_subscription(&client).await;
-                        handler.on_community_refreshed(&community_id);
+                        refreshed(&*handler, &community_id);
                     }
                     Ok(_) => {}
                     Err(e) => crate::log_warn!(
@@ -1421,7 +1482,7 @@ async fn follow_community(session: &std::sync::Arc<crate::db::Session>, id: &Com
                 Ok(n) => {
                     crate::log_info!("[v2:follow {}] took {n} writer key(s)", &community_id[..8.min(community_id.len())]);
                     refresh_subscription(&client).await;
-                    handler.on_community_refreshed(&community_id);
+                    refreshed(&*handler, &community_id);
                 }
                 Err(e) => crate::log_warn!("[v2:follow {}] writer key read failed: {e}", &community_id[..8.min(community_id.len())]),
             }
@@ -1503,13 +1564,16 @@ async fn follow_community(session: &std::sync::Arc<crate::db::Session>, id: &Com
         }
         if control_changed {
             refresh_subscription(&client).await;
-            handler.on_community_refreshed(&community_id);
+            refreshed(&*handler, &community_id);
             // A control change can reveal rekey work that predates it — a just-announced
             // private channel's key crate is already sitting on its rekey plane (the key
             // ships BEFORE the vsk-2), and this pass's rekey walk ran before the channel
             // existed. Queue one more pass; it coalesces and converges (an unchanged
             // control fold doesn't re-queue).
             enqueue_follow(id);
+        } else if control_ok {
+            // A Roster or banlist fold leaves the document alone: the change feed still looks.
+            super::changes::notify(&*handler, &community_id);
         }
 
         // Banned by the banlist we just folded → self-remove NOW, not when the Refounding
@@ -1528,7 +1592,7 @@ async fn follow_community(session: &std::sync::Arc<crate::db::Session>, id: &Com
                     .and_then(|marks| marks.get(&me.to_hex()).map(|s| s.saturating_mul(1000)))
                     .unwrap_or_else(super::service::now_ms);
                 super::service::record_eviction(&current, banned_at.min(super::service::now_ms()));
-                handler.on_community_self_removed(&community_id);
+                self_removed(&*handler, &community_id);
                 return;
             }
         }
@@ -1546,15 +1610,16 @@ async fn follow_community(session: &std::sync::Arc<crate::db::Session>, id: &Com
             if let Some(at) = crate::state::my_public_key().and_then(|me| super::service::stored_kick_at(&current, &me)) {
                 crate::log_warn!("[v2:teardown {}] KICK read on catch-up: the authorized guestbook fold rules us kicked", &community_id[..8.min(community_id.len())]);
                 super::service::record_eviction(&current, at);
-                handler.on_community_self_removed(&community_id);
+                self_removed(&*handler, &community_id);
                 return;
             }
             if !fresh.is_empty() {
                 surface_presence(&current, &fresh, handler);
-                handler.on_community_refreshed(&community_id);
+                surface_kicks(&current, &fresh, handler);
+                refreshed(&*handler, &community_id);
             }
             match super::service::heal_my_join(&transport, &current).await {
-                Ok(true) => handler.on_community_refreshed(&community_id),
+                Ok(true) => refreshed(&*handler, &community_id),
                 Ok(false) => {}
                 Err(e) => crate::log_debug!("[v2:join {}] restore deferred: {e}", &community_id[..8.min(community_id.len())]),
             }
@@ -1562,7 +1627,7 @@ async fn follow_community(session: &std::sync::Arc<crate::db::Session>, id: &Com
                 Ok(0) => {}
                 Ok(n) => {
                     crate::log_info!("[v2:ban {}] wrote {n} lifted ban(s) to the Guestbook", &community_id[..8.min(community_id.len())]);
-                    handler.on_community_refreshed(&community_id);
+                    refreshed(&*handler, &community_id);
                 }
                 Err(e) => crate::log_debug!("[v2:ban {}] departures deferred: {e}", &community_id[..8.min(community_id.len())]),
             }
@@ -1593,6 +1658,25 @@ async fn follow_community(session: &std::sync::Arc<crate::db::Session>, id: &Com
         }
     })
     .await
+}
+
+/// Report the authorized Kicks a catch-up folded, as one heard live is.
+fn surface_kicks(community: &CommunityV2, fresh: &[super::guestbook::GuestbookEvent], handler: &dyn InboundEventHandler) {
+    use nostr_sdk::prelude::ToBech32;
+    if !handler.wants_community_changes() {
+        return;
+    }
+    let me = crate::state::my_public_key();
+    let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+    for ev in fresh {
+        let super::guestbook::GuestbookEntry::Kick { actor, target, at_ms, .. } = &ev.entry else { continue };
+        if Some(*target) == me || super::service::stored_kick_rumor(community, target) != Some(ev.rumor_id) {
+            continue;
+        }
+        let member = target.to_bech32().unwrap_or_else(|_| target.to_hex());
+        let change = super::changes::CommunityChange::new(actor.to_bech32().ok(), *at_ms, super::changes::ChangeKind::MemberKicked { member });
+        super::changes::notify_one(handler, &cid_hex, change);
+    }
 }
 
 /// Fire the presence-line surface for freshly-folded guestbook events — the
@@ -1626,7 +1710,9 @@ fn surface_presence(
             Some((c, l)) => (Some(c.as_str()), Some(l.as_str())),
             None => (None, None),
         };
-        handler.on_community_presence(&chat_id, &npub, joined, &event_id, at_ms / 1000, by, label);
+        if crate::news::first_telling(&ev.rumor_id) {
+            handler.on_community_presence(&chat_id, &npub, joined, &event_id, at_ms / 1000, by, label);
+        }
     }
 }
 

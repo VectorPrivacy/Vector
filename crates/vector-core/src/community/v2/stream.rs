@@ -344,7 +344,7 @@ pub fn wrap_owner(wrap: &Event) -> Option<PublicKey> {
 }
 
 /// Signer-driven twin of [`build_seal`] + [`wrap_seal_with_tags`]: seal a rumor
-/// into its wrap using a [`VectorSigner`] for the author signature, so a NIP-46
+/// into its wrap using a [`VectorSigner`](crate::signer::VectorSigner) for the author signature, so a NIP-46
 /// bunker (or NIP-55) account yields wire-identical output to the local-keys
 /// path. Only the seal signature needs the identity key; the seal content
 /// (symmetric group-key encrypt, or plaintext) and the group-key wrap do not.

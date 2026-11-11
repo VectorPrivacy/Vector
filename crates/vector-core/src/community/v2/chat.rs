@@ -429,7 +429,7 @@ pub fn seal_chat_rumor(
 }
 
 /// Signer-driven twin of [`seal_chat_rumor`] for bunker / NIP-55 accounts: the
-/// author seal signs through a [`VectorSigner`]; the group-key wrap is unchanged.
+/// author seal signs through a [`VectorSigner`](crate::signer::VectorSigner); the group-key wrap is unchanged.
 /// `author` is the identity the signer signs as (must equal `my_public_key()`); the wrap is
 /// `p`-tagged to `owner`, the key that may delete it.
 pub async fn seal_chat_rumor_signed<S: crate::signer::VectorSigner + ?Sized>(

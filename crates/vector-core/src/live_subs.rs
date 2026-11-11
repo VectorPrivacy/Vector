@@ -48,7 +48,7 @@ fn catch_up(what: CatchUp) {
 const HEAL_EVERY: Duration = Duration::from_secs(120);
 /// First wait before re-sending a closed subscription; doubles per close, up to [`MAX_BACKOFF`].
 const FIRST_BACKOFF: Duration = Duration::from_secs(1);
-const MAX_BACKOFF: Duration = Duration::from_secs(300);
+pub(crate) const MAX_BACKOFF: Duration = Duration::from_secs(300);
 /// A subscription quiet this long since its last close starts its backoff over.
 const BACKOFF_RESET_MS: u64 = 10 * 60 * 1000;
 /// How long a close waits for its subscription to be kept, before judging it one of ours.

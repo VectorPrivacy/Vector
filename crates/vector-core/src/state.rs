@@ -1317,7 +1317,7 @@ impl ChatState {
     // ========================================================================
 
     /// Sum DB-computed per-chat unread counts, applying the same muted/blocked filters as
-    /// [`count_unread_messages`] but sourcing each COUNT from `counts` (chat_identifier → unread)
+    /// [`count_unread_messages`](Self::count_unread_messages) but sourcing each COUNT from `counts` (chat_identifier → unread)
     /// rather than walking in-memory messages — so it's correct even when only the last message per
     /// chat is in RAM (the boot state). Muted chats and blocked-DM contacts contribute 0.
     pub fn sum_unread_from(&self, counts: &std::collections::HashMap<String, u32>) -> u32 {
@@ -1381,7 +1381,7 @@ impl ChatState {
     }
 
     /// Total unread for the badge, from the cache, applying the same muted/blocked filters as
-    /// [`sum_unread_from`].
+    /// [`sum_unread_from`](Self::sum_unread_from).
     pub fn sum_unread(&self) -> u32 {
         self.sum_unread_from(&self.unread_cache)
     }

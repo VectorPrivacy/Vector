@@ -68,6 +68,10 @@ pub trait VoiceMedia: Send + Sync {
     fn levels(&self) -> Vec<(Option<[u8; 32]>, f32)> {
         Vec::new()
     }
+    /// The engine itself, for a platform that hands its own engines back out.
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        None
+    }
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq)]
@@ -151,9 +155,14 @@ struct Voice {
     /// The channel's and community's names, and when we joined, for a phone's call notification.
     shown: (String, String, u64),
     tasks: Mutex<Vec<crate::rt::JoinHandle<()>>>,
+    /// The app's one call (`join`), rather than one of a bot's many (`join_also`): it follows a
+    /// move, and its mute is the account's.
+    exclusive: bool,
 }
 
-static VOICE: Mutex<Option<Arc<Voice>>> = Mutex::new(None);
+/// Every call this process is in, one per Channel. The app holds one at a time (`join` leaves the
+/// rest); a bot may hold many (`join_also`).
+static VOICE: Mutex<Vec<Arc<Voice>>> = Mutex::new(Vec::new());
 
 impl Voice {
     fn engine(&self) -> Option<Arc<dyn VoiceMedia>> {
@@ -161,9 +170,48 @@ impl Voice {
     }
 }
 
+/// This account's calls.
+fn calls() -> Vec<Arc<Voice>> {
+    let owner = crate::db::current_session().id();
+    VOICE.lock().unwrap_or_else(|e| e.into_inner()).iter().filter(|v| v.owner == owner).cloned().collect()
+}
+
+/// The call: the app is in one at most, so this is it.
 fn live() -> Option<Arc<Voice>> {
-    let v = VOICE.lock().unwrap_or_else(|e| e.into_inner()).clone()?;
-    (v.owner == crate::db::current_session().id()).then_some(v)
+    calls().into_iter().next()
+}
+
+/// Who an iroh endpoint in our call in `channel_hex` belongs to.
+pub fn peer_author(channel_hex: &str, endpoint: &[u8; 32]) -> Option<PublicKey> {
+    live_in(channel_hex)?.links.lock().unwrap_or_else(|e| e.into_inner()).get(endpoint).map(|l| l.author)
+}
+
+/// This account's call in `channel_hex`.
+fn live_in(channel_hex: &str) -> Option<Arc<Voice>> {
+    calls().into_iter().find(|v| v.channel_hex == channel_hex)
+}
+
+/// The media engine of this account's call in `channel_hex`, if it is in one with audio.
+pub fn media_in(channel_hex: &str) -> Option<Arc<dyn VoiceMedia>> {
+    live_in(channel_hex)?.engine()
+}
+
+/// Where a moderator moved each of a bot's calls: `from` → `to`, both channel ids.
+struct Moves;
+
+fn moves() -> Arc<Mutex<HashMap<String, String>>> {
+    crate::db::current_session().scoped::<Moves, Mutex<HashMap<String, String>>>()
+}
+
+/// Where a moderator moved the bot's call in `channel_hex`, which ended it: the channel to join
+/// to follow. Taken once.
+pub fn moved_to(channel_hex: &str) -> Option<String> {
+    moves().lock().unwrap_or_else(|e| e.into_inner()).remove(channel_hex)
+}
+
+/// Whether `v` is still a call in progress, not one taken down meanwhile.
+fn is_live(v: &Voice) -> bool {
+    VOICE.lock().unwrap_or_else(|e| e.into_inner()).iter().any(|now| std::ptr::eq(Arc::as_ptr(now), v))
 }
 
 fn now_ms() -> u64 {
@@ -320,11 +368,25 @@ fn showing(v: &Voice) -> presence::Showing {
 
 /// Join a voice Channel's call, leaving any other first.
 pub async fn join(community_id: &str, channel_id: &str) -> Result<VoiceState, String> {
+    join_with(community_id, channel_id, true).await
+}
+
+/// Join a voice Channel's call and stay in every other: a bot can be in many at once. Only a
+/// call already in this Channel is left first.
+pub async fn join_also(community_id: &str, channel_id: &str) -> Result<VoiceState, String> {
+    join_with(community_id, channel_id, false).await
+}
+
+async fn join_with(community_id: &str, channel_id: &str, alone: bool) -> Result<VoiceState, String> {
     crate::transport::realtime::check()?;
     if super::session::snapshot().is_some() {
         return Err("End your call first".into());
     }
-    leave().await;
+    if alone {
+        leave().await;
+    } else {
+        leave_channel(&channel_id.to_ascii_lowercase()).await;
+    }
     let me = crate::state::my_public_key().ok_or("Not signed in")?;
     let cid = CommunityId(crate::community::id32_from_hex(community_id).ok_or("bad community id")?);
     let channel = ChannelId(crate::community::id32_from_hex(channel_id).ok_or("bad channel id")?);
@@ -352,7 +414,9 @@ pub async fn join(community_id: &str, channel_id: &str) -> Result<VoiceState, St
         },
         Err(_) => None,
     };
-    let mic = super::settings::mic_state();
+    // As the app's member left them, so a muted member never sends a moment on arrival; a bot's
+    // calls each start open.
+    let mic = if alone { super::settings::mic_state() } else { super::settings::MicState::default() };
     let v = Arc::new(Voice {
         owner: crate::db::current_session().id(),
         community: cid,
@@ -363,7 +427,6 @@ pub async fn join(community_id: &str, channel_id: &str) -> Result<VoiceState, St
         links: Mutex::new(HashMap::new()),
         dialing: Mutex::new(HashSet::new()),
         media: Mutex::new(media.map(Arc::from)),
-        // As you left them, so a muted member never sends a moment on arrival.
         muted: AtomicBool::new(mic.muted),
         deafened: AtomicBool::new(mic.deafened),
         away: AtomicBool::new(false),
@@ -375,6 +438,7 @@ pub async fn join(community_id: &str, channel_id: &str) -> Result<VoiceState, St
         call_audio: Mutex::new(call_audio),
         shown: (ch.name.clone(), community.name.clone(), now_ms()),
         tasks: Mutex::new(Vec::new()),
+        exclusive: alone,
     });
     // Just after launch the relays may still be connecting: a refused first presence is retried.
     let mut tries = 0;
@@ -387,8 +451,14 @@ pub async fn join(community_id: &str, channel_id: &str) -> Result<VoiceState, St
         crate::rt::time::sleep(Duration::from_millis(1500)).await;
     }
     // A join that raced this one installed its call meanwhile: that call goes, not just its slot.
-    let raced = VOICE.lock().unwrap_or_else(|e| e.into_inner()).replace(v.clone());
-    if let Some(old) = raced {
+    let raced: Vec<Arc<Voice>> = {
+        let mut all = VOICE.lock().unwrap_or_else(|e| e.into_inner());
+        let (gone, kept): (Vec<_>, Vec<_>) = all.drain(..).partition(|o| alone || o.channel_hex == v.channel_hex);
+        *all = kept;
+        all.push(v.clone());
+        gone
+    };
+    for old in raced {
         crate::db::spawn_bound(shutdown(old));
     }
     if let Some(m) = v.engine() {
@@ -407,14 +477,43 @@ pub async fn join(community_id: &str, channel_id: &str) -> Result<VoiceState, St
     Ok(state(&v))
 }
 
-/// Leave the call, if in one: a `left` is best-effort, staleness heals a missed one.
+/// Leave every call: a `left` is best-effort, staleness heals a missed one.
 pub async fn leave() {
-    let Some(v) = VOICE.lock().unwrap_or_else(|e| e.into_inner()).take() else { return };
+    let all: Vec<Arc<Voice>> = VOICE.lock().unwrap_or_else(|e| e.into_inner()).drain(..).collect();
+    if all.is_empty() {
+        return;
+    }
     if let Some(ringer) = super::session::ringer() {
         ringer.voice(None);
     }
-    shutdown(v).await;
+    for v in all {
+        shutdown(v).await;
+    }
     crate::emit_event("voice_state", &serde_json::Value::Null);
+}
+
+/// Leave the call in `channel_hex`, if in one, and stay in any other.
+pub async fn leave_channel(channel_hex: &str) {
+    let owner = crate::db::current_session().id();
+    let gone: Vec<Arc<Voice>> = {
+        let mut all = VOICE.lock().unwrap_or_else(|e| e.into_inner());
+        let (gone, kept): (Vec<_>, Vec<_>) = all.drain(..).partition(|v| v.channel_hex == channel_hex && v.owner == owner);
+        *all = kept;
+        gone
+    };
+    if gone.is_empty() {
+        return;
+    }
+    for v in gone {
+        shutdown(v).await;
+    }
+    // Read after: a join that installed during the shutdown keeps its notification.
+    if VOICE.lock().unwrap_or_else(|e| e.into_inner()).is_empty() {
+        if let Some(ringer) = super::session::ringer() {
+            ringer.voice(None);
+        }
+        crate::emit_event("voice_state", &serde_json::Value::Null);
+    }
 }
 
 /// Take a call down: its tasks, its links, its devices, a `left`, its endpoint.
@@ -468,7 +567,7 @@ pub fn watch(member: &PublicKey, want: crate::calls::wire::Tracks) -> Result<(),
 /// changes who is heard.
 pub fn on_directive(channel_hex: &str, target: &PublicKey, directive: presence::Directive, to: Option<[u8; 32]>) {
     use presence::Directive;
-    let Some(v) = live().filter(|v| v.channel_hex == channel_hex) else { return };
+    let Some(v) = live_in(channel_hex) else { return };
     if *target != v.me {
         v.nudge.notify_one();
         changed(&v);
@@ -486,17 +585,24 @@ pub fn on_directive(channel_hex: &str, target: &PublicKey, directive: presence::
             }
         }
         Directive::Disconnect => {
-            crate::db::spawn_bound(async { leave().await });
+            let channel = v.channel_hex.clone();
+            crate::db::spawn_bound(async move { leave_channel(&channel).await });
             return;
         }
+        // The app follows; a bot's call ends and says where to, so the bot decides.
         Directive::Move => {
             let Some(to) = to else { return };
             let community = crate::simd::hex::bytes_to_hex_32(&v.community.0);
             let to = crate::simd::hex::bytes_to_hex_32(&to);
+            let from = v.channel_hex.clone();
+            if !v.exclusive {
+                moves().lock().unwrap_or_else(|e| e.into_inner()).insert(from.clone(), to);
+                crate::db::spawn_bound(async move { leave_channel(&from).await });
+                return;
+            }
             crate::db::spawn_bound(async move {
                 if let Err(e) = join(&community, &to).await {
                     crate::log_warn!("[voice] couldn't follow a move: {e}");
-                    leave().await;
                 }
             });
             return;
@@ -508,14 +614,14 @@ pub fn on_directive(channel_hex: &str, target: &PublicKey, directive: presence::
 /// Someone is newly reachable in our call: answer with our presence now rather than at our next
 /// heartbeat, since whichever of us has the lower id can't dial until it has our endpoint.
 pub fn greet(channel_hex: &str, author: &PublicKey) {
-    let Some(v) = live().filter(|v| v.channel_hex == channel_hex && v.me != *author) else { return };
+    let Some(v) = live_in(channel_hex).filter(|v| v.me != *author) else { return };
     if !crate::rt::can_spawn() || v.greeting.swap(true, Ordering::SeqCst) {
         return;
     }
     crate::db::spawn_bound(async move {
         crate::rt::time::sleep(Duration::from_millis(rand::random::<u64>() % GREET_JITTER_MS)).await;
         v.greeting.store(false, Ordering::SeqCst);
-        if !live().is_some_and(|now| Arc::ptr_eq(&now, &v)) {
+        if !is_live(&v) {
             return;
         }
         if let Err(e) = announce(&v, true).await {
@@ -526,7 +632,7 @@ pub fn greet(channel_hex: &str, author: &PublicKey) {
 
 /// Someone's presence changed in a Channel: re-check the mesh if it is ours.
 pub fn nudge(channel_hex: &str) {
-    if let Some(v) = live().filter(|v| v.channel_hex == channel_hex) {
+    if let Some(v) = live_in(channel_hex) {
         v.nudge.notify_one();
     }
 }
@@ -603,8 +709,27 @@ pub fn snapshot() -> Option<VoiceState> {
     live().map(|v| state(&v))
 }
 
+/// The call in `channel_hex`, if this account is in it.
+pub fn snapshot_in(channel_hex: &str) -> Option<VoiceState> {
+    live_in(channel_hex).map(|v| state(&v))
+}
+
+/// Every call this account is in.
+pub fn snapshots() -> Vec<VoiceState> {
+    calls().iter().map(|v| state(v)).collect()
+}
+
 pub fn set_muted(on: bool) -> Result<(), String> {
-    let v = live().ok_or("Not in a call")?;
+    mute(&live().ok_or("Not in a call")?, on)
+}
+
+/// [`set_muted`] for the call in `channel_hex`.
+pub fn set_muted_in(channel_hex: &str, on: bool) -> Result<(), String> {
+    mute(&live_in(channel_hex).ok_or("Not in that call")?, on)
+}
+
+fn mute(v: &Arc<Voice>, on: bool) -> Result<(), String> {
+    let v = v.clone();
     let (server_muted, server_deafened) = presence::server_state(&v.channel_hex, &v.me);
     if !on && server_muted {
         return Err("A moderator muted you in this call".into());
@@ -619,12 +744,23 @@ pub fn set_muted(on: bool) -> Result<(), String> {
     }
     reannounce(&v);
     changed(&v);
-    super::settings::remember_mic(super::settings::MicState { muted: on, deafened: v.deafened.load(Ordering::SeqCst) });
+    if v.exclusive {
+        super::settings::remember_mic(super::settings::MicState { muted: on, deafened: v.deafened.load(Ordering::SeqCst) });
+    }
     Ok(())
 }
 
 pub fn set_deafened(on: bool) -> Result<(), String> {
-    let v = live().ok_or("Not in a call")?;
+    deafen(&live().ok_or("Not in a call")?, on)
+}
+
+/// [`set_deafened`] for the call in `channel_hex`.
+pub fn set_deafened_in(channel_hex: &str, on: bool) -> Result<(), String> {
+    deafen(&live_in(channel_hex).ok_or("Not in that call")?, on)
+}
+
+fn deafen(v: &Arc<Voice>, on: bool) -> Result<(), String> {
+    let v = v.clone();
     if !on && presence::server_state(&v.channel_hex, &v.me).1 {
         return Err("A moderator deafened you in this call".into());
     }
@@ -635,22 +771,25 @@ pub fn set_deafened(on: bool) -> Result<(), String> {
     }
     reannounce(&v);
     changed(&v);
-    super::settings::remember_mic(super::settings::MicState { muted: v.muted.load(Ordering::SeqCst), deafened: on });
+    if v.exclusive {
+        super::settings::remember_mic(super::settings::MicState { muted: v.muted.load(Ordering::SeqCst), deafened: on });
+    }
     Ok(())
 }
 
 /// Our app is paused by its system or back: shown muted meanwhile, since nothing we say is
 /// sent; back, we announce at once and dial, as a long pause aged our presence out.
 pub fn set_away(on: bool) {
-    let Some(v) = live() else { return };
-    if v.away.swap(on, Ordering::SeqCst) == on && on {
-        return;
+    for v in calls() {
+        if v.away.swap(on, Ordering::SeqCst) == on && on {
+            continue;
+        }
+        reannounce(&v);
+        if !on {
+            v.nudge.notify_one();
+        }
+        changed(&v);
     }
-    reannounce(&v);
-    if !on {
-        v.nudge.notify_one();
-    }
-    changed(&v);
 }
 
 const VOLUMES_KEY: &str = "voice_volumes";
@@ -685,7 +824,7 @@ pub fn set_peer_volume(member: &PublicKey, gain: f32) -> Result<(), String> {
         all.insert(member.to_hex(), gain);
     }
     store_volumes(all)?;
-    if let Some(v) = live() {
+    for v in calls() {
         if let Some(m) = v.engine() {
             let ids: Vec<[u8; 32]> = v.links.lock().unwrap_or_else(|e| e.into_inner()).iter().filter(|(_, l)| l.author == *member).map(|(id, _)| *id).collect();
             for id in ids {
@@ -706,7 +845,7 @@ fn reannounce(v: &Arc<Voice>) {
     let v = v.clone();
     crate::db::spawn_bound(async move {
         // A call left meanwhile must not announce itself joined after its `left`.
-        if !live().is_some_and(|now| Arc::ptr_eq(&now, &v)) {
+        if !is_live(&v) {
             return;
         }
         if let Err(e) = announce(&v, true).await {
@@ -786,7 +925,7 @@ fn apply_to(v: &Voice, m: &dyn VoiceMedia) {
 /// Repaint, if this is still the live call: one taken down meanwhile paints nothing.
 fn changed(v: &Voice) {
     let state = state(v);
-    if live().is_some_and(|now| std::ptr::eq(Arc::as_ptr(&now), v)) {
+    if is_live(v) {
         refresh_awake(v);
         crate::emit_event("voice_state", &state);
         if let Some(ringer) = super::session::ringer() {
@@ -1082,6 +1221,7 @@ mod tests {
             call_audio: Mutex::new(None),
             shown: Default::default(),
             tasks: Mutex::new(Vec::new()),
+            exclusive: true,
         });
         let id = *b.id().as_bytes();
         link(&v, id, nostr_sdk::prelude::Keys::generate().public_key(), conn);
@@ -1131,6 +1271,7 @@ mod tests {
             call_audio: Mutex::new(None),
             shown: Default::default(),
             tasks: Mutex::new(Vec::new()),
+            exclusive: true,
         });
         let id = *b.id().as_bytes();
         v.links.lock().unwrap().insert(id, Link { author: nostr_sdk::prelude::Keys::generate().public_key(), conn });
@@ -1151,6 +1292,71 @@ mod tests {
         let fanned = run(Box::new(move || drop(video::targets(&f, crate::calls::wire::VideoKind::Screen))));
         let done = painted.recv_timeout(Duration::from_secs(20)).is_ok() && fanned.recv_timeout(Duration::from_secs(20)).is_ok();
         assert!(done, "the state read and a frame's fan-out each take the links and the viewers: never both at once");
+    }
+
+    /// A call in `channel`, as `owner`'s, with nobody linked.
+    async fn call_in(channel: u8, owner: u64, exclusive: bool) -> Arc<Voice> {
+        struct Offline;
+        impl iroh::endpoint::presets::Preset for Offline {
+            fn apply(self, b: iroh::endpoint::Builder) -> iroh::endpoint::Builder {
+                b.relay_mode(RelayMode::Disabled).crypto_provider(Arc::new(rustls::crypto::ring::default_provider()))
+            }
+        }
+        let endpoint = Endpoint::builder(Offline).alpns(vec![VOICE_ALPN.to_vec()]).bind().await.unwrap();
+        Arc::new(Voice {
+            owner,
+            community: CommunityId([0; 32]),
+            channel: ChannelId([channel; 32]),
+            channel_hex: crate::simd::hex::bytes_to_hex_32(&[channel; 32]),
+            endpoint,
+            me: nostr_sdk::prelude::Keys::generate().public_key(),
+            links: Mutex::new(HashMap::new()),
+            dialing: Mutex::new(HashSet::new()),
+            media: Mutex::new(None),
+            muted: AtomicBool::new(false),
+            deafened: AtomicBool::new(false),
+            away: AtomicBool::new(false),
+            nudge: tokio::sync::Notify::new(),
+            greeting: AtomicBool::new(false),
+            can_video: AtomicBool::new(false),
+            video: video::Video::default(),
+            awake: Mutex::new(None),
+            call_audio: Mutex::new(None),
+            shown: Default::default(),
+            tasks: Mutex::new(Vec::new()),
+            exclusive,
+        })
+    }
+
+    #[tokio::test]
+    async fn a_bot_leaving_one_call_stays_in_the_rest_and_another_accounts() {
+        let _guard = crate::db::DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        let me = crate::db::current_session().id();
+        let (a, b, theirs) = (call_in(0xA1, me, false).await, call_in(0xB2, me, false).await, call_in(0xA1, me + 1, false).await);
+        VOICE.lock().unwrap().extend([a.clone(), b.clone(), theirs.clone()]);
+        leave_channel(&a.channel_hex).await;
+        let left: Vec<String> = VOICE.lock().unwrap().iter().map(|v| format!("{}:{}", &v.channel_hex[..2], v.owner - me)).collect();
+        assert_eq!(left, vec!["b2:0", "a1:1"], "only this account's call in that channel");
+        VOICE.lock().unwrap().clear();
+    }
+
+    #[tokio::test]
+    async fn a_bots_moved_call_ends_and_says_where_to() {
+        let _guard = crate::db::DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        let me = crate::db::current_session().id();
+        let call = call_in(0xC3, me, false).await;
+        VOICE.lock().unwrap().push(call.clone());
+        on_directive(&call.channel_hex, &call.me, presence::Directive::Move, Some([0xD4; 32]));
+        for _ in 0..100 {
+            if live_in(&call.channel_hex).is_none() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(live_in(&call.channel_hex).is_none(), "the call ended");
+        assert!(calls().is_empty(), "and the bot joined nothing it has no handle for");
+        assert_eq!(moved_to(&call.channel_hex), Some(crate::simd::hex::bytes_to_hex_32(&[0xD4; 32])));
+        assert_eq!(moved_to(&call.channel_hex), None, "read once");
     }
 
     #[test]

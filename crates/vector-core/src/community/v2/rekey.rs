@@ -310,7 +310,7 @@ pub fn parse_bound_base_plaintext(pt: &[u8], community_id: &CommunityId, epoch: 
     Ok(BaseKeyDelivery { new_root, control_pk: Some(control_pk), control_root: Some(control_root) })
 }
 
-/// Build one BASE blob via a [`VectorSigner`] — the 104-byte member form, or
+/// Build one BASE blob via a [`VectorSigner`](crate::signer::VectorSigner) — the 104-byte member form, or
 /// 136 with `control_root` for a staff recipient (CORD-04 §3). Mirrors
 /// [`build_blob`]; the locator is the same public Root-scope locator.
 pub async fn build_base_blob<S: crate::signer::VectorSigner + ?Sized>(
@@ -333,7 +333,7 @@ pub async fn build_base_blob<S: crate::signer::VectorSigner + ?Sized>(
     })
 }
 
-/// Open a BASE blob addressed to me via a [`VectorSigner`]. Mirror of
+/// Open a BASE blob addressed to me via a [`VectorSigner`](crate::signer::VectorSigner). Mirror of
 /// [`open_blob`], but width-tolerant per CORD-06 §1 — the returned delivery
 /// says which form arrived.
 pub async fn open_base_blob<S: crate::signer::VectorSigner + ?Sized>(
@@ -441,7 +441,7 @@ pub fn open_blob_local(
     parse_bound_plaintext(&pt, scope, epoch)
 }
 
-/// Build one blob via a [`VectorSigner`] (the bunker / NIP-55 path). Wire-identical
+/// Build one blob via a [`VectorSigner`](crate::signer::VectorSigner) (the bunker / NIP-55 path). Wire-identical
 /// to [`build_blob_local`]: `signer.nip44_encrypt(recipient, bound_plaintext_b64)`
 /// whose conversation key is ECDH(signer_identity, recipient) — the same key the
 /// local path derives from the raw rotator secret. The `wrapped` field is the
@@ -465,7 +465,7 @@ pub async fn build_blob<S: crate::signer::VectorSigner + ?Sized>(
     })
 }
 
-/// Open a blob addressed to me via a [`VectorSigner`]. Mirror of [`open_blob_local`]:
+/// Open a blob addressed to me via a [`VectorSigner`](crate::signer::VectorSigner). Mirror of [`open_blob_local`]:
 /// `signer.nip44_decrypt(rotator, blob.wrapped)` yields the base64 bound plaintext,
 /// then the scope/epoch bound check gates it. Per D1 the locator is NOT gated.
 pub async fn open_blob<S: crate::signer::VectorSigner + ?Sized>(
@@ -535,7 +535,7 @@ pub struct RekeyChunk {
     /// The rotator's `vac` (CORD-06 §Authority: "a rotation cites the Grant it
     /// acts under like any authority action"). `None` when the owner rotates.
     pub citation: Option<crate::community::edition::AuthorityCitation>,
-    /// Severing containment marker ([`TAG_SEVER`], root scope only).
+    /// Severing containment marker (`TAG_SEVER`, root scope only).
     pub severed: bool,
     /// When the rotator sent it, in ms.
     pub at_ms: u64,
@@ -672,7 +672,7 @@ pub fn build_rekey_chunks_local(
 }
 
 /// Signer-driven twin of [`build_rekey_chunks_local`] for bunker / NIP-55 accounts:
-/// each chunk's encrypted seal signs through a [`VectorSigner`]. `rotator_pk` must
+/// each chunk's encrypted seal signs through a [`VectorSigner`](crate::signer::VectorSigner). `rotator_pk` must
 /// equal `my_public_key()`. Wire-identical to the local path.
 #[allow(clippy::too_many_arguments)]
 pub async fn build_rekey_chunks<S: crate::signer::VectorSigner + ?Sized>(

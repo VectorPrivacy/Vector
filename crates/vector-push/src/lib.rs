@@ -7,7 +7,7 @@
 //! and never sees who wrote, who receives, or what was said.
 //!
 //! - [`webpush`]: RFC 8291 message encryption, done by the sender.
-//! - [`vapid`]: RFC 8292 keys; the device owns its own, the pusher signs with it.
+//! - `vapid`: RFC 8292 keys; the device owns its own, the pusher signs with it.
 //! - [`ticket`]: what a contact holds, and the capability only the pusher can open.
 //! - [`request`]: the Nostr event a sender publishes for the pusher.
 //! - [`payload`]: the notification itself, authenticated per contact.

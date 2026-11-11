@@ -1382,6 +1382,9 @@ async fn rejudge_held_bound(community: &CommunityV2, handler: &dyn crate::event_
                     let _ = crate::state::STATE.lock().await.remove_message(&id);
                     let _ = crate::db::events::delete_event(&id).await;
                     handler.on_community_removed(&channel_hex, &id);
+                    if crate::news::first_telling_hex(&format!("taken back {id}")) {
+                        handler.on_message_removed(&channel_hex, &id, None, true, now_ms());
+                    }
                 }
                 // Its author is banned since: nothing to wait for.
                 Arrival::Dropped => {
@@ -1390,6 +1393,9 @@ async fn rejudge_held_bound(community: &CommunityV2, handler: &dyn crate::event_
                         let _ = crate::state::STATE.lock().await.remove_message(&id);
                         let _ = crate::db::events::delete_event(&id).await;
                         handler.on_community_removed(&channel_hex, &id);
+                        if crate::news::first_telling_hex(&format!("taken back {id}")) {
+                        handler.on_message_removed(&channel_hex, &id, None, true, now_ms());
+                    }
                     }
                 }
                 Arrival::Held(_) => {}
@@ -1404,12 +1410,8 @@ async fn rejudge_held_bound(community: &CommunityV2, handler: &dyn crate::event_
 
 /// Apply a judged post to its Channel as a late arrival: shown, never rung.
 async fn admit(event: &chat::ChatEvent, channel_hex: &str, community: &CommunityV2, me: &PublicKey, handler: &dyn crate::event_handler::InboundEventHandler) {
-    use super::super::inbound::ChatPersist;
-    match super::super::inbound::persist_routed_chat_event(event, channel_hex, &community.id().0, me).await {
-        Some(ChatPersist::New(message)) => handler.on_community_message(channel_hex, &message, false),
-        Some(ChatPersist::Updated { message, .. }) | Some(ChatPersist::ReactionRemoved { message, .. }) => handler.on_community_update(channel_hex, &message.id, &message),
-        Some(ChatPersist::Removed(target)) => handler.on_community_removed(channel_hex, &target),
-        None => {}
+    if let Some(outcome) = super::super::inbound::persist_routed_chat_event(event, channel_hex, &community.id().0, me).await {
+        super::super::inbound::notify_chat_outcome(handler, channel_hex, event, outcome, false).await;
     }
 }
 
@@ -1509,7 +1511,11 @@ async fn retract_since_bound<T: Transport + ?Sized>(transport: &T, community: &C
                     let _ = crate::db::events::delete_event(&post.id).await;
                     if let Ok(Some((chat, message))) = crate::db::events::get_message_by_id(target).await {
                         let shown = crate::state::STATE.lock().await.update_message_with(target, |m, i| *m = crate::compact::CompactMessage::from_message(&message, i));
-                        handler.on_community_update(&chat, target, &shown.map_or(message, |(_, m)| m));
+                        let shown = shown.map_or(message, |(_, m)| m);
+                        handler.on_community_update(&chat, target, &shown);
+                        if crate::news::first_telling_hex(&format!("edit taken back {}", post.id)) {
+                            handler.on_message_edited(&chat, &shown, now_ms());
+                        }
                     }
                 }
                 // A manager's flag needs a held wrap: one left on the relays is read again later.
@@ -1528,6 +1534,9 @@ async fn retract_since_bound<T: Transport + ?Sized>(transport: &T, community: &C
                     let _ = crate::state::STATE.lock().await.remove_message(&post.id);
                     let _ = crate::db::events::delete_event(&post.id).await;
                     handler.on_community_removed(&chan, &post.id);
+                    if crate::news::first_telling_hex(&format!("taken back {}", post.id)) {
+                        handler.on_message_removed(&chan, &post.id, None, true, now_ms());
+                    }
                 }
             }
         }

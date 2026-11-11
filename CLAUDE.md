@@ -76,11 +76,15 @@ All business logic lives here, fully decoupled from Tauri. Any client (GUI, CLI,
 - **`blossom.rs`** — File upload with progress tracking, retry, server failover
 - **`inbox_relays.rs`** — NIP-17 kind 10050 relay resolution, stampede-protected cache, gift-wrap sending
 - **`net.rs`** — SSRF protection, build_http_client
+- **`news.rs`** — what a listening client (`listen_with`, `CatchUp::Inline`) is told: everything sent since it began listening, once, whichever path carried it. Catch-ups and replays deliver through `news::listener()`; a UI client has none
 - **`stats.rs`** — CacheStats, DeepSize trait for memory benchmarking (debug builds)
 - **`traits.rs`** — EventEmitter trait (abstracts UI notification), ProgressReporter
 - **`rt.rs`** — spawn and timers: tokio natively, the browser event loop on wasm32
 - **`calls/`** — the `vector-calls` crate (wire format, jitter buffer, rate ladder) re-exported; with the `calls` feature, the call session, video track and audio settings, over a `CallPlatform` trait each client implements (endpoint, audio engine, video link)
   - **`calls/voice.rs`** + **`voice/video.rs`** — voice Channel calls (CORD-07 §8): a full iroh mesh per join, presence-bound dialling, moderator directives, and cameras/screens fanned out to whoever watches each; each client supplies a `VoiceMedia` engine (desktop `src-tauri/src/calls/voice.rs`, web `crates/vector-web/src/calls.rs`). Never hold `links` and `watchers` at once
+
+**`crates/vector-media`** — headless voice for bots and servers: an Opus engine behind core's `VoiceMedia`,
+installed as the process's `CallPlatform`. The SDK's `voice` feature builds on it.
 
 `src-tauri` consumes vector-core via `path = "../crates/vector-core"`. Types and globals are re-exported — same instances, shared memory.
 
@@ -99,6 +103,12 @@ All business logic lives here, fully decoupled from Tauri. Any client (GUI, CLI,
 - **`calls/`** — the desktop's `CallPlatform`: cpal + Opus + SpeexDSP media engine (1:1 and the voice Channel mixer), the webview's video socket, native screen audio
 - **`android/`** — JNI bindings, localhost media server, background sync
 - **`simd/`** — SIMD image, audio, URL, HTML operations (hex moved to vector-core)
+
+### Vector Lab (`crates/vector-lab/`)
+
+Live end-to-end checks of SDK bots against real relays (`cargo run -p vector-lab -- all`): each
+scenario runs its roles as child processes, throwaway identities and a throwaway Community, and
+exits non-zero on a failed check. Run it before a crates release.
 
 ### Vector Web (`crates/vector-web/`, `web/`)
 

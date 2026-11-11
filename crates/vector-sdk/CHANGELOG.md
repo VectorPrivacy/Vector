@@ -3,13 +3,72 @@
 All notable changes to `vector-sdk` are documented here. This project adheres to
 [Semantic Versioning](https://semver.org).
 
-## 0.12.0 (unreleased)
+## 0.12.0 (2026-11-11)
 
-Requires `vector-core` 0.11.0. Publish the two together: `vector_sdk` re-exports `vector_core`,
-so the transport changes below reach SDK users through `vector_sdk::vector_core`.
+Requires `vector-core` 0.11.0, and with `voice` the new `vector-media` 0.1.0. `vector-core` 0.11
+depends on `vector-calls` 0.2.0 and the new `vector-push` 0.1.0; all five are published together.
+`vector_sdk` re-exports `vector_core`, so the transport changes below reach SDK users through
+`vector_sdk::vector_core`.
 
 ### Added
 
+- **Voice Channels, behind the `voice` feature.** `channel.join_voice()` joins a voice
+  Channel's call and returns a `VoiceCall`: `listen()` gives what each member says as 48 kHz
+  mono PCM, a 20 ms frame at a time with who said it; `say(pcm)` queues audio sent in real time
+  (`say_and_wait`, `finished`, `hush`, `queued`); `set_muted`, `set_deafened`, `state`,
+  `connected` and `leave`. A bot can be in many calls at once, each its own `VoiceCall`. When a
+  moderator disconnects or moves the bot, the call ends: `listen()` returns `None`, `say` returns
+  false, and `moved_to()` names the channel a move sent it to.
+  `channel.voice_members()` and `BotEvent::VoicePresence` say who is in a call.
+  `voice::tone`, `voice::level` and `voice::decode_with_ffmpeg` help with audio. Opus comes
+  from the new `vector-media` crate (libopus built with cmake). A bot joins a call while it
+  listens (`run` or `on_event`). Examples: `voice_echo_bot`, `voice_radio_bot`.
+- **Transcription, behind the `whisper` feature.** `voice::Utterances` gathers a call's frames
+  into one clip per speaker per pause; `voice::Transcriber::load(model)` runs whisper.cpp over
+  a clip (`transcribe`), on the GPU on macOS. The `voice_whisper_bot` example is a voice
+  assistant built on both: it writes down what's said in the Channel's chat and answers out loud.
+- **Run a Community from a bot.** Roles (`create_role(RoleSpec)`, `Role::edit`, `rename`,
+  `set_permissions`, `delete`, `holders`, `reorder_roles`, `set_everyone_permissions`), member
+  Roles (`add_role`, `remove_role`, `set_roles`, `roles`, `permissions`), Categories
+  (`create_category`, `Category::rename/move_to/delete/set_overwrite`), Channel settings
+  (`create_channel_with(NewChannel)` for private, in-category, voice or forum Channels with a
+  topic; `Channel::info`, `rename`, `set_topic`, `set_view`, `set_read_only` for an announcement
+  channel, `move_to`), permission overwrites
+  (`Channel::set_overwrite(Overwrite::role(&mods).allow(..))`, `clear_overwrite`, `overwrites`,
+  `sync_permissions`, `permissions_of`), Timeouts (`Member::timeout`, `remove_timeout`,
+  `timed_out_until`, `Community::timeouts`), Community Nicknames (`Member::nickname`,
+  `set_nickname`, `Community::nicknames`), pins (`Channel::pin/unpin/pins`, `IncomingMessage::pin`)
+  and a typed Audit Log (`Community::audit_log` with `AuditAction` and `AuditTarget`). Each action
+  is checked the way every member's client will judge it before anything publishes.
+- **`BotEvent::CommunityChange`**: one event per change to a Community's metadata, relays, Roles,
+  `@everyone`, member Roles, bans, kicks, Channels, Categories, layout, overwrites, syncs, pins,
+  Timeouts and Nicknames, each naming who made it (`change.by`). Match on `ChangeKind`.
+- `BotEvent::Reaction`, `ReactionRemoved`, `Edit` and `Dissolved`, each with `at`, when it was
+  sent. DM edits and DM typing now reach the event stream.
+- `CommunityChange::at`, when a change was made, and `also_by`: everyone else whose edit a
+  change folds in, when several people changed one thing while the bot wasn't looking.
+- `bot.create_community(name, NewCommunity)`, `bot.join(link)` and `bot.preview_link(link)`. A
+  preview says whether it was read from the Community itself (`verified`) or is the link's word.
+- `Member::add_role` and `remove_role` change one Role against the freshest view, so a Role
+  another moderator granted or took meanwhile is left as they left it.
+- `Community::icon`, `banner`, `set_icon`, `set_banner`, `remove_icon`, `remove_banner`. Images are
+  stripped of metadata and fitted before they're encrypted for members.
+- `Community::relays`, `check_relays`, `move_relays`, `voice_relays`, `set_voice_relays`,
+  `invite_links`, `revoke_invite`, `revoke_all_invites`, `primary_channel`, `owner`, `admins`,
+  `description`, `categories`, `channel_infos`, `role`, `role_named`, `refound`,
+  `rescue_stranded`, `repair_roster`, `explain_epoch`, `raid_report`.
+- `Channel::post(text, PostOptions)`: a reply, an expiry, or the one bot a command is meant for
+  (the `["bot", pk]` tag), in one call. `send_file_with(path, opts)` and `send_bytes(bytes, name,
+  opts)` send files with a caption and a reply, from disk or memory. `unreact(message_id, emoji)`
+  withdraws a reaction.
+- The `VECTOR_DATA_DIR` environment variable chooses a bot's data directory when the builder
+  doesn't: two bots on one machine each need their own.
+- `bot.run(handler)`: `on_event` that exits cleanly on Ctrl-C. `builder().catch_up(CatchUp)`
+  chooses whether the bot catches up before going live.
+- `vector_sdk::net`: HTTP over the bot's own transport, for the requests a bot makes itself.
+- `Permissions` is re-exported, and its bit constants combine: `Permissions::KICK | Permissions::BAN`.
+- The guide [Moving your bot onto the SDK](guides/moving-onto-the-sdk.md), and the
+  `community_admin_bot` example.
 - **Custom emoji in what a bot writes.** `subscribe_emoji_pack(naddr)` equips a pack, and every
   `:code:` the bot sends that names one of its emoji carries the image tag. `emojis()` lists each
   code exactly as Vector's picker names it (`love~1`, `love~2` when packs collide);
@@ -30,6 +89,24 @@ so the transport changes below reach SDK users through `vector_sdk::vector_core`
 
 ### Changed
 
+- **Nothing sent while the bot listens is missed, and nothing arrives twice.** Everything sent
+  since the bot began listening (with a five-minute allowance for senders' clocks) arrives once,
+  however it reaches the bot: live, through the startup catch-up, after a reconnect, after a
+  relay drops a subscription, or after the machine sleeps. Community messages sent while the bot
+  started were stored without an event, and DMs sent during an outage were dropped; reactions,
+  edits and deletions a catch-up carried never arrived. What was sent before the bot began
+  listening is history, as before: `channel.history()`.
+- `CommunityChange` follows the same rule: a change made while the bot was offline is part of
+  what it starts from, and one made after it began listening is reported even when a catch-up
+  carried it. A Roster or banlist change a full read folded was reported only at the next
+  refresh, if any.
+- **Pictures are compressed before they're sent**, `send_file` included: fitted to 2560px,
+  re-encoded and stripped of metadata, the file's name following its new format. A PNG stays a
+  PNG when it fits, so a chart stays sharp. One too large to re-encode is stripped without
+  re-encoding, and one that can't be stripped either is refused rather than sent with its
+  metadata. `PostOptions::default().compress(false)` sends the bytes as they are.
+- A private Channel's messages sent since the bot began listening arrive as `Message` once its
+  key does; older ones are history, as before.
 - **Every connection is decided per connect, and fails closed.** vector-core routes relay sockets
   and HTTP through one transport layer: a network that is chosen but not up refuses in process
   instead of going direct.
@@ -46,6 +123,39 @@ so the transport changes below reach SDK users through `vector_sdk::vector_core`
 - A DM to a contact whose inbox list couldn't be looked up because the network was down or
   failing no longer falls back to the bot's own relays: the send waits for the network, then
   fails with the network's reason.
+- `Community::name`, `channels` and `is_dissolved` read one Community instead of listing them all.
+- A DM edit applies only from the author of the message it edits.
+- `ChangeKind::ChannelDeleted` comes from the deletion's purge, so a deletion a catch-up carried
+  is reported too, once.
+- A DM file's caption reaches the recipient, as a reply to the file: a DM file carries no text.
+- `vector-core` and `vector_sdk` require the nostr crates by caret (`nostr ^0.45.7`,
+  `nostr-sdk ^0.45.6`), not exactly: the exact versions they named were yanked upstream, which
+  left 0.11 unresolvable for a new bot.
+- A bot's own Community changes don't come back as `CommunityChange` events: the call that made
+  them returned their result.
+- An invite that arrives while the bot catches up (at startup, or after a reconnect) reaches the
+  invite policy at once. It used to wait, parked, for the next restart.
+- The slash-command manifest is published to indexers and Community relays without adding them
+  to the bot's own relays, where they carried its DM subscription and DM sync. A bot's startup
+  no longer waits on an indexer's NIP-77 timeout.
+- Startup runs one DM catch-up, behind the live subscription, instead of one before it.
+- A refused action is checked again after catching the Community up, so a grant that hasn't
+  folded yet doesn't read as `NotPermitted`.
+
+### Breaking
+
+- `BotEvent::MessageUpdate` is replaced by `Reaction`, `ReactionRemoved` and `Edit`.
+- `BotEvent::Delete` gains `by`, `moderated` and `at`; `MemberJoin` gains `community_id`, `invited_by`
+  and `invite_label`; `MemberLeave` gains `community_id`.
+- `update_profile`, `set_status`, `block`, `unblock` and `set_nickname` return `Result<()>`.
+- `Community::roles()` returns `Vec<RoleInfo>`; the old `{ owner, admins }` JSON is
+  `owner()` and `admins()`.
+- `bot.channel(id)` reads a hex pubkey as a DM to that key unless it names a channel the bot holds.
+- `VectorError` is `#[non_exhaustive]` and adds `NotPermitted { needs, action }` and `NotFound`.
+- `BotEvent::Delete`'s `by` is an `Option`: `None` when the Community's rules took back a post
+  held for review.
+
+The guide's last section walks through each.
 
 ## 0.11.0
 
@@ -75,6 +185,37 @@ Requires `vector-core` 0.10.0.
   `VECTOR_LOG`, like vector-core's, instead of stdout.
 - `listen()` subscribes to live DMs before its startup catch-up, so a message sent while
   the bot starts arrives live instead of at the next resync.
+
+## 0.10.0
+
+Requires `vector-core` 0.9.0.
+
+### Added
+
+- **Moderation policies.** `community.policies()` writes a rulebook from named rules (words,
+  links, repetition, flooding, a joining cohort), previews it against real history, enables and
+  retires it, and watches with verdicts a bot can act on. `is_provable()` separates what survives
+  replay from inference, so a strong hunch lands in `needs_human()` rather than `actionable()`.
+  Acting is dry-run until `.arm()`, and never removes anyone on less than proof. Verdicts carry
+  their band, standing and findings (rule, severity, the messages that convicted).
+- The `policy_bot` and `raid_guard` examples.
+
+### Changed
+
+- A join flood is a second way to convict a raid, alongside one script posted by many accounts.
+
+## 0.9.0
+
+Requires `vector-core` 0.8.0.
+
+### Changed
+
+- **Racing bans compose.** Concurrent `ban()` calls (one handler task per message during a spam
+  wave) used to build editions from the same snapshot, so the last one un-banned the rest. Bans
+  now queue per Community and drain into one edition, one strip pass and one key rotation.
+  `ban_many` and `unban_many` batch a whole wave into one rotation.
+- Messages and member joins reach handlers only when they're news: a relay backfilling old events
+  no longer greets members who joined a month ago.
 
 ## 0.8.0
 

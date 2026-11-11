@@ -743,8 +743,8 @@ pub fn save_pack(pack: &EmojiPack) -> Result<(), String> {
 ///   revoked (the author republished, or a relay restored from backup).
 /// - `Tombstoned` is deterministic: revoked immediately, no gauntlet.
 /// - `CleanMiss` runs the gauntlet: the counter moves at most once per
-///   [`PACK_MISS_RATELIMIT_SECS`], and promotion to missing requires BOTH
-///   [`PACK_MISS_PROMOTE_COUNT`] misses and [`PACK_MISS_PROMOTE_SECS`] since
+///   `PACK_MISS_RATELIMIT_SECS`, and promotion to missing requires BOTH
+///   `PACK_MISS_PROMOTE_COUNT` misses and `PACK_MISS_PROMOTE_SECS` since
 ///   the first — so neither rapid restarts nor one long offline stretch can
 ///   false-positive. A revoked pack ignores misses (stronger evidence holds).
 /// - `Unreachable` never moves anything in either direction.
@@ -2229,7 +2229,7 @@ pub async fn unsubscribe_pack(id: &str) -> Result<(), String> {
 ///
 /// `ordered_ids` is the FULL display order from the frontend: each element is a
 /// pack `id` (naddr) for a real subscribed pack, or the literal
-/// [`THEME_SLOT_TOKEN`] for the theme marker. Real packs are persisted in the
+/// `THEME_SLOT_TOKEN` for the theme marker. Real packs are persisted in the
 /// given order; the anchor is set to the raw addr of the pack immediately
 /// before the marker (`""` = top / marker absent).
 pub fn reorder_emoji_packs(ordered_ids: Vec<String>) -> Result<(), String> {

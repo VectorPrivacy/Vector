@@ -96,6 +96,16 @@ impl ChannelView {
         }
     }
 
+    /// A view this build knows by name, or `None`.
+    pub fn try_parse(s: &str) -> Option<ChannelView> {
+        match s {
+            "chat" => Some(ChannelView::Chat),
+            "forum" => Some(ChannelView::Forum),
+            "voice" => Some(ChannelView::Voice),
+            _ => None,
+        }
+    }
+
     /// An unknown view reads as chat.
     pub fn parse(s: &str) -> ChannelView {
         match s {

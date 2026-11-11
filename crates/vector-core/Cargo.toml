@@ -1,8 +1,8 @@
 [package]
 name = "vector-core"
-version = "0.10.0"
+version = "0.11.0"
 edition = "2021"
-description = "Core library for Vector — the single source of truth for all Vector clients, SDKs, and interfaces."
+description = "Core library for Vector: the single source of truth for all Vector clients, SDKs and interfaces."
 license = "MIT"
 repository = "https://github.com/VectorPrivacy/Vector"
 homepage = "https://vectorapp.io"
@@ -11,10 +11,14 @@ readme = "README.md"
 keywords = ["nostr", "messaging", "encryption", "vector"]
 categories = ["network-programming", "cryptography", "asynchronous"]
 
+[package.metadata.docs.rs]
+# Every optional surface documented; tor stays out for docs.rs's build budget.
+features = ["calls", "xdc", "i2p"]
+
 [dependencies]
 # Calls: the platform-free half, re-exported as `vector_core::calls` so every client
 # (the app, the CLI, bots) gets it the way it gets sending and profiles.
-vector-calls = { path = "../vector-calls", version = "0.1.0" }
+vector-calls = { path = "../vector-calls", version = "0.2.0" }
 # Sealed push: the wire format and the Web Push encryption a sender does for a recipient's devices.
 vector-push = { path = "../vector-push", version = "0.1.0" }
 # Nostr Protocol. Declared as crates.io versions so the crate is publishable; the
@@ -25,12 +29,12 @@ vector-push = { path = "../vector-push", version = "0.1.0" }
 # feature from nostr-sdk, and the sdk enables only std/rand/os-rng on `nostr`.
 # Cargo unifies these across the workspace, so this is the one place they're set.
 
-# EXACT-pinned (=) across the whole nostr family: a caret range lets a fresh
-# consumer resolve a MIXED set, and these crates share types across their
-# boundaries, so a mismatched sibling fails to compile. Bump all four together
-# or not at all.
-nostr = { version = "=0.45.5", features = ["nip04", "nip06", "nip44", "nip46", "nip59", "rand", "os-rng"] }
-nostr-sdk = "=0.45.4"
+# Caret, at the fork's versions: the workspace patch then still applies (an exact pin on a newer
+# release would leave it silently unused), and a published consumer resolves the newest stable
+# 0.45, never one upstream has yanked. One 0.45 of each is chosen, so the shared types agree.
+# Bump the fork and these together.
+nostr = { version = "0.45.7", features = ["nip04", "nip06", "nip44", "nip46", "nip59", "rand", "os-rng"] }
+nostr-sdk = "0.45.6"
 # The set reconciliation nostr-sdk itself syncs with: Control Plane reads drive it directly.
 negentropy = "=0.5.2"
 # Named for the bounded dedup tracker short-lived clients take (`events_tracker.rs`).

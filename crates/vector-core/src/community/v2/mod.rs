@@ -7,11 +7,12 @@
 //! `community_id`), the invite system (CORD-05), and the Guestbook plane (CORD-02 §5).
 //!
 //! Frozen wire constants live in two places: the derivation labels in
-//! [`derive`], and the kind registry below (CORD-02 Appendix B). A retired
+//! [`derive`](mod@derive), and the kind registry below (CORD-02 Appendix B). A retired
 //! number is burned forever, never reused.
 
 #[cfg(feature = "bench")]
 pub mod bench;
+pub mod changes;
 pub mod chat;
 pub mod community;
 pub mod control;

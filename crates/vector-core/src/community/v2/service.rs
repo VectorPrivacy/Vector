@@ -2,7 +2,7 @@
 //! to storage + transport. Free functions, `std::sync::Arc<crate::db::Session>`-gated at every write
 //! (a `swap_session` can land at any await — see CLAUDE.md).
 //!
-//! Signing + NIP-44 flow through the active [`VectorSigner`] (`active_signer()`):
+//! Signing + NIP-44 flow through the active [`VectorSigner`](crate::signer::VectorSigner) (`active_signer()`):
 //! the live client's signer for a NIP-46 bunker / NIP-55 offline account, else the
 //! local vault. Every identity op in v2 is `sign_event` / `nip44_encrypt` /
 //! `nip44_decrypt` — a remote signer's whole surface — so create, send, join,
@@ -29,7 +29,7 @@ mod inspect;
 pub use inspect::{inspect_bundle, inspect_public_link, InspectedChannel, InspectedMessage, InspectedPlane, Inspection, MessageRead};
 mod relocate;
 pub use relocate::{check_relays, move_relays, RelayCheck, RelayMove, RETIRED_RELAY_GRACE_MS};
-pub(crate) use relocate::{relays_moved, resume_relay_copy, retired_relays};
+pub(crate) use relocate::{clean_relays, relays_moved, resume_relay_copy, retired_relays};
 pub(crate) use audit::{note_moderation_delete, note_voice_directive};
 mod outbox;
 pub use outbox::{confirm_in, discard_unconfirmed, retry_unconfirmed};
@@ -2791,6 +2791,12 @@ pub async fn preview_public_link<T: Transport + ?Sized>(transport: &T, url: &str
 /// skip the Control-Plane walk entirely — the walk is the join gate, and `accept_public_link` runs
 /// it again regardless.
 pub async fn preview_bundle<T: Transport + ?Sized>(transport: &T, bundle: &CommunityInvite) -> Result<CommunityV2, String> {
+    preview_bundle_checked(transport, bundle).await.map(|(c, _)| c)
+}
+
+/// [`preview_bundle`], saying whether the owner's root verified: when it didn't, the name,
+/// description and icon are the link creator's word.
+pub async fn preview_bundle_checked<T: Transport + ?Sized>(transport: &T, bundle: &CommunityInvite) -> Result<(CommunityV2, bool), String> {
     let community = CommunityV2::from_bundle(bundle, 0)?;
     match verify_owner_root_and_reconcile(transport, community.clone()).await {
         Ok(vj) => {
@@ -2810,9 +2816,9 @@ pub async fn preview_bundle<T: Transport + ?Sized>(transport: &T, bundle: &Commu
                 roles: vj.roles,
                 authority_heads: vj.authority_heads,
             });
-            Ok(folded)
+            Ok((folded, true))
         }
-        Err(_) => Ok(community),
+        Err(_) => Ok((community, false)),
     }
 }
 
@@ -3126,7 +3132,7 @@ pub fn community_timeouts(community: &CommunityV2) -> Result<std::collections::B
 }
 
 /// Who a Timeout may silence: MODERATE_MEMBERS, unbanned, a strict outrank and the Grant it cites.
-fn timeout_judge(community: &CommunityV2) -> Result<impl Fn(&PublicKey, &PublicKey, Option<&crate::community::edition::AuthorityCitation>) -> bool, String> {
+pub(crate) fn timeout_judge(community: &CommunityV2) -> Result<impl Fn(&PublicKey, &PublicKey, Option<&crate::community::edition::AuthorityCitation>) -> bool, String> {
     use crate::community::roles::Permissions;
     let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
     let roster = crate::db::community::get_community_roles(&cid_hex)?;
@@ -3196,7 +3202,7 @@ pub async fn timeout_member<T: Transport + ?Sized>(transport: &T, community: &Co
 /// Whom a Nickname may name (CORD-04 §10), judged against the Roster as it stands: their own
 /// takes `CHANGE_NICKNAME` and no citation; anyone else's takes `MANAGE_NICKNAMES`, a strict
 /// outrank and the Grant it cites.
-fn nickname_judge(community: &CommunityV2) -> Result<impl Fn(&PublicKey, &PublicKey, Option<&crate::community::edition::AuthorityCitation>) -> bool, String> {
+pub(crate) fn nickname_judge(community: &CommunityV2) -> Result<impl Fn(&PublicKey, &PublicKey, Option<&crate::community::edition::AuthorityCitation>) -> bool, String> {
     let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
     let roster = crate::db::community::get_community_roles(&cid_hex)?;
     let banned = crate::db::community::get_community_banlist(&cid_hex).unwrap_or_default();
@@ -3224,6 +3230,16 @@ fn nicknames_on(community: &CommunityV2, epoch: Option<u64>) -> Result<std::coll
 }
 
 /// What each member is called in a community, for those who have a Nickname there.
+/// The Nicknames as their writers set them, before a Timeout silences any: a Timeout is its
+/// own change, not a Nickname one.
+pub(crate) fn nicknames_as_set(community: &CommunityV2) -> Result<std::collections::BTreeMap<PublicKey, guestbook::Nickname>, String> {
+    let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+    let held = crate::db::community::get_guestbook_standing(&cid_hex)?;
+    let events: Vec<guestbook::GuestbookEvent> = held.iter().filter(|e| e.epoch == Some(community.root_epoch.0)).cloned().collect();
+    let judge = nickname_judge(community)?;
+    Ok(guestbook::standing_nicknames(&events, now_ms(), &judge, &Default::default()))
+}
+
 pub fn community_nicknames(community: &CommunityV2) -> Result<std::collections::BTreeMap<PublicKey, String>, String> {
     Ok(standing_nicknames(community)?.into_iter().map(|(pk, n)| (pk, n.nick)).collect())
 }
@@ -4161,6 +4177,21 @@ pub fn stored_kick_verdict(community: &CommunityV2, member: &PublicKey) -> bool 
 }
 
 /// When the authorized Guestbook fold last ruled `member` kicked, if it does now.
+/// The rumor of the Kick the authorized fold rules `member` kicked by, if it does.
+pub fn stored_kick_rumor(community: &CommunityV2, member: &PublicKey) -> Option<[u8; 32]> {
+    let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+    let (events, _cursor) = crate::db::community::get_guestbook_shared(&cid_hex).ok()?;
+    let owner = community.owner().ok()?;
+    let owner_hex = owner.to_hex();
+    let roles = crate::db::community::get_community_roles(&cid_hex).unwrap_or_default();
+    let snapshot_authority = snapshot_authority_for(&cid_hex, community, &owner);
+    let can_kick = kick_judge(&cid_hex, &owner_hex, &roles);
+    guestbook::coalesce(&events, now_ms(), snapshot_authority.as_ref(), &can_kick)
+        .get(member)
+        .filter(|st| st.verdict == guestbook::Verdict::Kicked)
+        .map(|st| st.rumor_id)
+}
+
 pub fn stored_kick_at(community: &CommunityV2, member: &PublicKey) -> Option<u64> {
     let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
     let (events, _cursor) = crate::db::community::get_guestbook_shared(&cid_hex).ok()?;
@@ -4190,7 +4221,7 @@ pub fn record_eviction(community: &CommunityV2, removed_at: u64) {
 
 /// Catch the persisted Guestbook up with what each relay holds of its plane: a relay that
 /// reconciles is asked only for the wraps this device has not read, and one that cannot is read
-/// by pages from its own cursor (see [`control_sync`]). Returns the entries that were NEW to the
+/// by pages from its own cursor (see `control_sync`). Returns the entries that were NEW to the
 /// store: the caller surfaces them (presence lines) and refreshes on non-empty.
 pub async fn sync_guestbook<T: Transport + ?Sized>(
     transport: &T,
@@ -6763,7 +6794,7 @@ pub async fn set_role<T: Transport + ?Sized>(transport: &T, community: &Communit
 /// revoke. Gated on the reader side by `MANAGE_ROLES` + outrank of every role + the
 /// member. Staff-ness (whether the Grant must deliver the `control_root`,
 /// CORD-04 §3) is judged from the persisted roster; internal callers holding a
-/// fresher fetched view use [`grant_roles_with_roster`].
+/// fresher fetched view use `grant_roles_with_roster`.
 pub async fn grant_roles<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, member: &PublicKey, role_ids: Vec<String>) -> Result<(), String> {
     grant_roles_sealing(transport, community, member, role_ids, Seal::Strict).await
 }
@@ -8454,6 +8485,17 @@ pub async fn set_member_roles<T: Transport + ?Sized>(
     member: &PublicKey,
     role_ids: Vec<String>,
 ) -> Result<(), String> {
+    change_member_roles(transport, community, member, move |_| role_ids).await
+}
+
+/// [`set_member_roles`] to what `next` makes of the Roles the member holds by the freshest
+/// view, so a Role granted or taken elsewhere meanwhile is kept as it now stands.
+pub async fn change_member_roles<T: Transport + ?Sized, F: FnOnce(&[String]) -> Vec<String> + Send>(
+    transport: &T,
+    community: &CommunityV2,
+    member: &PublicKey,
+    next: F,
+) -> Result<(), String> {
     crate::db::scoped(async move {
         let view = fetch_authority(transport, community).await;
         let author = role_author(community, &view)?;
@@ -8478,6 +8520,7 @@ pub async fn set_member_roles<T: Transport + ?Sized>(
             .find(|g| g.member == member_hex)
             .map(|g| g.role_ids.clone())
             .unwrap_or_default();
+        let role_ids = next(&current);
         let mut next: Vec<String> = Vec::new();
         for id in role_ids.iter().map(|r| r.to_ascii_lowercase()) {
             if !next.contains(&id) {
@@ -10799,7 +10842,7 @@ pub async fn delete_channel<T: Transport + ?Sized>(transport: &T, community: &Co
         let mut updated = community.clone();
         updated.channels.retain(|c| c.id.0 != channel_id.0);
         crate::db::community::save_community_v2(&updated)?;
-        purge::purge_deleted_channel(community, channel_id).await;
+        purge::purge_deleted_channel(community, channel_id, Some(my_pk)).await;
         Ok(())
     })
     .await
@@ -10814,7 +10857,7 @@ pub async fn delete_channel<T: Transport + ?Sized>(transport: &T, community: &Co
 /// instead of freezing at its join-time view.
 ///
 /// **Authority (CORD-04 §5):** the roster (roles/grants/banlist) folds first into
-/// the owner-seeded authorized set ([`fold_authority`]), then each metadata/channel
+/// the owner-seeded authorized set (`fold_authority`), then each metadata/channel
 /// edition is eligible only if its signer CURRENTLY holds the entity's management
 /// bit (`MANAGE_METADATA`/`MANAGE_CHANNELS`) — so an authorized admin's edits fold,
 /// a demoted one's drop. The owner is supreme, proven by the self-certifying
@@ -11638,6 +11681,8 @@ async fn persist_control<T: Transport + ?Sized>(transport: &T, community: &Commu
     {
         let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
         let ControlRead { floors, editions, authority, fold, truncated, pages_read, healed, .. } = read;
+        // The change feed waits for this fold's own look, after the community row lands.
+        let _persisting = super::changes::persist_guard(community.id());
 
         // The fetches straddled awaits; a swap since the guard was captured must not
         // write account A's control state into B.
@@ -11689,6 +11734,10 @@ async fn persist_control<T: Transport + ?Sized>(transport: &T, community: &Commu
             }
             Ok(())
         })?;
+        if super::changes::wanted() {
+            let admitted = |id: &[u8; 32]| fold.admitted.contains(id) || authority.admitted.contains(id);
+            note_folded_chains(community, &floors, fold.heads.iter().chain(authority.heads.iter()), &editions, admitted);
+        }
         // Adopt the staff write key a promotion delivered inside MY OWN Grant
         // (CORD-04 §3): decrypt the control_wrap under the granter↔me pairwise key
         // and record the secret. Verified fail-closed inside — the epoch must be
@@ -11946,9 +11995,35 @@ async fn persist_control<T: Transport + ?Sized>(transport: &T, community: &Commu
             None => ControlFollow { updated: None, authority_changed },
         };
         for channel_id in &fold.deleted_channels {
-            purge::purge_deleted_channel(community, channel_id).await;
+            purge::purge_deleted_channel(community, channel_id, None).await;
         }
         Ok((follow, Some(editions)))
+    }
+}
+
+/// Tell the change feed which editions each advanced head moved through, walking its chain back
+/// to the floor this fold started from, so a change several people made credits each of them.
+fn note_folded_chains<'a>(community: &CommunityV2, floors: &Floors, heads: impl Iterator<Item = &'a FoldedHead>, editions: &[ParsedEdition], admitted: impl Fn(&[u8; 32]) -> bool) {
+    // Only what the fold authorized: the same content can arrive re-signed by someone else.
+    let by_hash: std::collections::HashMap<[u8; 32], &ParsedEdition> = editions.iter().filter(|e| admitted(&e.inner_id)).map(|e| (e.self_hash, e)).collect();
+    let by_id: std::collections::HashMap<[u8; 32], &ParsedEdition> = editions.iter().map(|e| (e.inner_id, e)).collect();
+    for h in heads.filter(|h| !h.rebased) {
+        let floor = floors.get(&h.entity_hex).map_or(0, |f| f.0);
+        if h.version <= floor {
+            continue;
+        }
+        let mut chain = Vec::new();
+        // The head is the edition the fold chose, by its own id; what it cites is walked by hash.
+        let mut next = by_id.get(&h.inner_id).copied();
+        while let Some(ed) = next {
+            if ed.version <= floor || chain.len() > 64 {
+                break;
+            }
+            chain.push((ed.version, ed.author, ed.created_at));
+            next = ed.prev_hash.and_then(|hash| by_hash.get(&hash).copied());
+        }
+        chain.reverse();
+        super::changes::note_folded(community.id(), &h.entity_hex, chain);
     }
 }
 
@@ -15927,7 +16002,7 @@ mod tests {
     }
 
     /// Legacy single-actor helper (the create/send tests below).
-    fn init_test_db() -> (tempfile::TempDir, std::sync::MutexGuard<'static, ()>, Keys) {
+    pub(super) fn init_test_db() -> (tempfile::TempDir, std::sync::MutexGuard<'static, ()>, Keys) {
         let guard = crate::db::DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
         crate::db::close_database();
         crate::db::clear_id_caches();
@@ -27226,12 +27301,12 @@ mod tests {
         };
         crate::db::events::save_message(&nostr_sdk::prelude::ToBech32::to_bech32(&Keys::generate().public_key()).unwrap(), &elsewhere).await.unwrap();
 
-        let purged = purge::purge_deleted_channel(&held, &doomed).await.expect("it held the channel");
+        let purged = purge::purge_deleted_channel(&held, &doomed, None).await.expect("it held the channel");
         assert_eq!(purged, purge::Purged { uploads: vec![gone_url.to_string()], scrubs: 1 }, "only my upload nothing else uses");
         assert!(crate::db::community::channel_events(&doomed_hex).unwrap().is_empty(), "its history is gone");
         assert!(!crate::state::STATE.lock().await.chats.iter().any(|c| c.id == doomed_hex));
         assert!(crate::db::events::event_exists(&elsewhere.id).unwrap(), "the forwarded copy stays");
-        assert_eq!(purge::purge_deleted_channel(&held, &doomed).await, None, "a second run finds nothing");
+        assert_eq!(purge::purge_deleted_channel(&held, &doomed, None).await, None, "a second run finds nothing");
 
         // My wrap leaves the relays from the queue, one at a time.
         assert_eq!(crate::db::community::next_wrap_scrub().unwrap().map(|(id, _)| id), Some(sent.clone()));
@@ -37472,5 +37547,44 @@ mod tests {
         move_relays(&bed.relay, &stale, &["wss://r".to_string(), "wss://new".to_string()]).await.unwrap();
         let held = crate::db::community::load_community_v2(stale.id()).unwrap().unwrap();
         assert_eq!((held.name.as_str(), held.relays.len()), ("Guild Two", 2), "the move is built on what the community holds now");
+    }
+}
+
+#[cfg(test)]
+mod folded_chain_tests {
+    use super::*;
+    use nostr_sdk::prelude::Keys;
+
+    #[tokio::test]
+    async fn a_fold_tells_the_feed_each_edition_on_the_heads_chain_since_its_floor() {
+        let (_tmp, _guard, _owner) = super::tests::init_test_db();
+        let relay = crate::community::transport::memory::MemoryRelay::new();
+        let community = create_community(&relay, "Chain", vec!["wss://r".into()], None).await.unwrap();
+        let entity = [0x5e; 32];
+        let (a, b, c) = (Keys::generate().public_key(), Keys::generate().public_key(), Keys::generate().public_key());
+        let edition = |version: u64, hash: u8, prev: Option<u8>, author: PublicKey| ParsedEdition {
+            author,
+            vsk: String::new(),
+            entity_id: entity,
+            version,
+            prev_hash: prev.map(|p| [p; 32]),
+            content: String::new(),
+            self_hash: [hash; 32],
+            created_at: version * 10,
+            inner_id: [hash; 32],
+            authority: None,
+            binding: None,
+        };
+        // v1 ← v2 (b) ← v3 (a), a rival v2 (c) off the chain, and v2's content re-signed by c.
+        let mut resigned = edition(2, 2, Some(1), c);
+        resigned.inner_id = [0x22; 32];
+        let editions = vec![edition(1, 1, None, a), edition(2, 2, Some(1), b), edition(3, 3, Some(2), a), edition(2, 9, Some(1), c), resigned];
+        let entity_hex = crate::simd::hex::bytes_to_hex_32(&entity);
+        let head = FoldedHead { entity_hex: entity_hex.clone(), version: 3, self_hash: [3; 32], inner_id: [3; 32], author: a.to_bytes(), rebased: false };
+        let mut floors = Floors::default();
+        floors.insert(entity_hex.clone(), (1, [1; 32], None, None, None));
+
+        note_folded_chains(&community, &floors, std::iter::once(&head), &editions, |id| *id != [0x22; 32]);
+        assert_eq!(super::super::changes::folded_marks(community.id(), &entity_hex), vec![(2, b), (3, a)]);
     }
 }

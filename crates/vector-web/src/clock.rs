@@ -21,7 +21,4 @@ impl MonotonicClock for BrowserClock {
     }
 }
 
-// `define_time_provider!` builds this name from the CALLER's CARGO_PKG_HOMEPAGE
-// in universal-time 0.3.0, so it never matches; export the library's own spelling.
-#[export_name = "\n\nerror: a time provider is required.\n       Use `define_time_provider!(YourProvider)` in your binary crate.\n       See: https://github.com/shadowylab/universal-time\n"]
-static TIME_PROVIDER: &dyn universal_time::TimeProvider = &BrowserClock;
+universal_time::define_time_provider!(BrowserClock);

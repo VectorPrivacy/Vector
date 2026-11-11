@@ -41,7 +41,7 @@ pub struct PinEntry {
     /// The original kind-20013 seal event: fields carried exactly, content
     /// string unaltered.
     pub seal: Event,
-    /// 76-byte lowercase hex: chacha_key[32] || chacha_nonce[12] || hmac_key[32].
+    /// 76-byte lowercase hex: `chacha_key[32] || chacha_nonce[12] || hmac_key[32]`.
     pub keys: String,
     /// Optional, UNVERIFIED locator hint for jump-to-context.
     #[serde(skip_serializing_if = "Option::is_none")]

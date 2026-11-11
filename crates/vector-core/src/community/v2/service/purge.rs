@@ -15,7 +15,8 @@ pub(crate) struct Purged {
 
 /// Drop everything this device holds of `channel_id`, whose deletion `community`'s Control
 /// Plane verifiably carries. A second run finds nothing, so it may run on every fold.
-pub(crate) async fn purge_deleted_channel(community: &CommunityV2, channel_id: &ChannelId) -> Option<Purged> {
+/// `deleted_by` names who deleted it when this device did; otherwise the deletion's edition does.
+pub(crate) async fn purge_deleted_channel(community: &CommunityV2, channel_id: &ChannelId, deleted_by: Option<PublicKey>) -> Option<Purged> {
     let (cid_hex, ch_hex) = (crate::simd::hex::bytes_to_hex_32(&community.id().0), crate::simd::hex::bytes_to_hex_32(&channel_id.0));
     let events = match crate::db::community::channel_events(&ch_hex) {
         Ok(events) => events,
@@ -54,6 +55,9 @@ pub(crate) async fn purge_deleted_channel(community: &CommunityV2, channel_id: &
     if !held && !in_memory {
         return None;
     }
+    // Reported from here, the first purge on this device: a deletion folded during catch-up is
+    // still news, where comparing the documents would see the Channel already gone.
+    crate::community::v2::changes::note_channel_deleted(community, channel_id, deleted_by.as_ref());
 
     // With the Channel's own rows gone, a file is unused once nothing outside it holds it.
     let mut uploads = Vec::new();

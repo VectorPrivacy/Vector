@@ -1,6 +1,6 @@
 //! Calls. The platform-free half (wire format, jitter buffer, rate control) is the
 //! `vector-calls` crate, re-exported here; with the `calls` feature, the session and
-//! its video track run here too, over whatever a client plugs into [`platform`].
+//! its video track run here too, over whatever a client plugs into [`platform`](crate::calls::platform).
 
 pub use vector_calls::*;
 

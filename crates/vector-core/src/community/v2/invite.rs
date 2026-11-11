@@ -752,7 +752,7 @@ pub fn unwrap_direct_invite(wrap: &Event, recipient_keys: &Keys) -> Result<(Publ
 
 // ── Signer-driven twins (bunker / NIP-55): identical wire, identity ops via VectorSigner ──
 
-/// [`build_invite_list_event`] via a [`VectorSigner`]. Self-encrypts to `my_pk` and
+/// [`build_invite_list_event`] via a [`VectorSigner`](crate::signer::VectorSigner). Self-encrypts to `my_pk` and
 /// signs the 13303 through the signer. `my_pk` must equal `my_public_key()`.
 pub async fn build_invite_list_event_signed<S: crate::signer::VectorSigner + ?Sized>(
     signer: &S,
@@ -776,7 +776,7 @@ pub async fn build_invite_list_event_at<S: crate::signer::VectorSigner + ?Sized>
     signer.sign_event_async(unsigned).await.map_err(|e| InviteError::Crypto(e.to_string()))
 }
 
-/// [`parse_invite_list_event`] via a [`VectorSigner`] (self-decrypt to `my_pk`).
+/// [`parse_invite_list_event`] via a [`VectorSigner`](crate::signer::VectorSigner) (self-decrypt to `my_pk`).
 pub async fn parse_invite_list_event_signed<S: crate::signer::VectorSigner + ?Sized>(
     signer: &S,
     my_pk: PublicKey,
@@ -789,7 +789,7 @@ pub async fn parse_invite_list_event_signed<S: crate::signer::VectorSigner + ?Si
     serde_json::from_str(&json).map_err(|e| InviteError::Json(e.to_string()))
 }
 
-/// [`build_direct_invite`] via a [`VectorSigner`]: the kind-13 seal's NIP-44 (inviter
+/// [`build_direct_invite`] via a [`VectorSigner`](crate::signer::VectorSigner): the kind-13 seal's NIP-44 (inviter
 /// → recipient) and signature go through the signer; the ephemeral wrap stays local.
 pub async fn build_direct_invite_signed<S: crate::signer::VectorSigner + ?Sized>(
     signer: &S,
@@ -825,7 +825,7 @@ pub async fn build_direct_invite_signed<S: crate::signer::VectorSigner + ?Sized>
         .map_err(|e| InviteError::Crypto(e.to_string()))
 }
 
-/// [`unwrap_direct_invite`] via a [`VectorSigner`]: both giftwrap peels decrypt
+/// [`unwrap_direct_invite`] via a [`VectorSigner`](crate::signer::VectorSigner): both giftwrap peels decrypt
 /// through the signer. Same seal-verify + author-bind gates as the local path.
 pub async fn unwrap_direct_invite_signed<S: crate::signer::VectorSigner + ?Sized>(
     signer: &S,
