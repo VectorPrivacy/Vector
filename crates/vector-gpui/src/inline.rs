@@ -94,6 +94,8 @@ pub enum Kind {
     },
     /// A profile pill.
     Mention(SharedString),
+    /// `.vt-time`: a time in the reader's zone, never broken across lines.
+    Time,
 }
 
 impl Kind {
@@ -102,14 +104,14 @@ impl Kind {
         match self {
             Kind::Code => 7.,
             Kind::Spoiler { .. } => 4.,
-            Kind::Mention(_) => 4.,
+            Kind::Mention(_) | Kind::Time => 4.,
             _ => 0.,
         }
     }
 
     fn target(&self, text: &str) -> Option<Target> {
         match self {
-            Kind::Plain => None,
+            Kind::Plain | Kind::Time => None,
             Kind::Link(url) => Some(Target::Link(url.clone())),
             Kind::Code => Some(Target::Code(text.to_string().into())),
             Kind::Spoiler {
@@ -340,7 +342,12 @@ fn segments(atoms: &[Atom], window: &Window) -> Vec<Seg> {
                 let pad = kind.pad();
                 let mut start = 0;
                 let first = segs.len();
-                for (end, _) in unicode_linebreak::linebreaks(text) {
+                let ends: Vec<usize> = if matches!(kind, Kind::Time) {
+                    vec![text.len()]
+                } else {
+                    unicode_linebreak::linebreaks(text).map(|(e, _)| e).collect()
+                };
+                for end in ends {
                     let piece = &text[start..end];
                     let trimmed = piece.trim_end();
                     let full = f32::from(line.x_for_index(end) - line.x_for_index(start));
@@ -858,6 +865,11 @@ impl Element for Inline {
                         Kind::Mention(_) => {
                             window.paint_quad(
                                 fill(boxed(1.), white_a(0.08)).corner_radii(Corners::all(px(4.))),
+                            );
+                        }
+                        Kind::Time => {
+                            window.paint_quad(
+                                fill(boxed(0.), white_a(0.09)).corner_radii(Corners::all(px(4.))),
                             );
                         }
                         _ => {}

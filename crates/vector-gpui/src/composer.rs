@@ -72,6 +72,7 @@ pub struct TextInput {
     subs: std::cell::RefCell<(SharedString, std::rc::Rc<[Sub]>)>,
     /// An autocomplete is open: its keys go to it as `Nav`.
     nav: bool,
+    chip: bool,
 }
 
 /// A key an open autocomplete takes from the field.
@@ -999,7 +1000,7 @@ impl Render for TextInput {
                 this.vertical(1., false, w, cx)
             }))
             .on_action(cx.listener(|this, _: &Tab, _, cx| {
-                if this.nav {
+                if this.nav || this.chip {
                     cx.emit(Nav::Pick);
                 } else {
                     cx.propagate();
@@ -1073,6 +1074,7 @@ impl TextInput {
             max_chars: None,
             subs: Default::default(),
             nav: false,
+            chip: false,
         }
     }
 
@@ -1219,7 +1221,7 @@ impl TextInput {
     }
 
     fn cancel(&mut self, _: &Cancel, _: &mut Window, cx: &mut Context<Self>) {
-        if self.nav {
+        if self.nav || self.chip {
             return cx.emit(Nav::Close);
         }
         cx.emit(CancelInput);
@@ -1228,6 +1230,24 @@ impl TextInput {
     /// Up, Down, Enter, Tab and Escape go to an open autocomplete.
     pub fn set_nav(&mut self, on: bool) {
         self.nav = on;
+    }
+
+    /// Tab and Escape (not Enter or the arrows) go to a suggestion chip.
+    pub fn set_chip(&mut self, on: bool) {
+        self.chip = on;
+    }
+
+    pub fn has_selection(&self) -> bool {
+        !self.selected_range.is_empty()
+    }
+
+    /// Where a content offset is drawn, in window coordinates, as of the last paint.
+    pub fn x_at(&self, offset: usize) -> Option<Pixels> {
+        let (bounds, layout) = (self.last_bounds?, self.last_layout.as_ref()?);
+        if layout.text != self.content {
+            return None;
+        }
+        Some(bounds.origin.x + layout.position(offset).x)
     }
 
     /// The caret's byte offset.

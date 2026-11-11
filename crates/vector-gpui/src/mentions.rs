@@ -39,6 +39,8 @@ pub enum Kind {
     Role(Option<u32>),
     Everyone,
     Channel { voice: bool, url: String },
+    /// Hands over to the `@time` picker.
+    Time,
 }
 
 #[derive(Clone)]
@@ -194,6 +196,9 @@ pub fn channels(store: &Store, chat: &str) -> Vec<Item> {
 /// Name prefix, then substring, then (for people only) the npub; at most `max`.
 pub fn filter(pool: &[Item], query: &str, max: usize) -> Vec<Item> {
     let q = query.to_lowercase();
+    if q == "time" {
+        return Vec::new();
+    }
     let tier = |c: &Item| {
         let n = c.name.to_lowercase();
         let s = c.search.to_lowercase();
@@ -213,13 +218,25 @@ pub fn filter(pool: &[Item], query: &str, max: usize) -> Vec<Item> {
         .filter(|(t, _)| *t < 3)
         .collect();
     v.sort_by_key(|(t, _)| *t);
-    v.into_iter().take(max).map(|(_, c)| c.clone()).collect()
+    let mut out: Vec<Item> = v.into_iter().take(max).map(|(_, c)| c.clone()).collect();
+    // After the people, so "@tim" + Enter still mentions Tim.
+    let people = pool.first().is_none_or(|c| !matches!(c.kind, Kind::Channel { .. }));
+    if people && !q.is_empty() && "time".starts_with(&q) {
+        out.push(Item {
+            npub: "@time".into(),
+            name: "time".into(),
+            search: String::new(),
+            kind: Kind::Time,
+        });
+    }
+    out
 }
 
 /// What a pick puts in place of `@query` or `#query`.
 pub fn insert(item: &Item) -> String {
     match &item.kind {
         Kind::Channel { url, .. } => format!("{url} "),
+        Kind::Time => "@time ".into(),
         _ => format!("@{} ", item.name),
     }
 }
@@ -262,7 +279,8 @@ pub fn resolve(text: &str, tracked: &[(String, String)]) -> String {
 pub fn view(p: &Popup, pick: Rc<dyn Fn(usize, &mut Window, &mut App)>) -> AnyElement {
     let header = match p.items.first().map(|i| &i.kind) {
         Some(Kind::Channel { .. }) => "Channels",
-        _ => "Members",
+        _ if p.items.iter().any(|i| !matches!(i.kind, Kind::Time)) => "Members",
+        _ => "Time",
     };
     let rows = p
         .items
@@ -311,6 +329,17 @@ pub fn view(p: &Popup, pick: Rc<dyn Fn(usize, &mut Window, &mut App)>) -> AnyEle
                         Some("Role"),
                     )
                 }
+                Kind::Time => (
+                    div()
+                        .size(px(28.))
+                        .flex_shrink_0()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(svg().path("icons/clock.svg").size(px(18.)).text_color(c(PRIMARY)))
+                        .into_any_element(),
+                    Some("A time everyone sees in their own zone"),
+                ),
                 Kind::Channel { voice, .. } => (
                     div()
                         .size(px(28.))
@@ -333,7 +362,7 @@ pub fn view(p: &Popup, pick: Rc<dyn Fn(usize, &mut Window, &mut App)>) -> AnyEle
                 ),
             };
             Row {
-                art,
+                art: Some(art),
                 label: SharedString::from(item.name.clone()),
                 hint: hint.map(SharedString::from),
             }
@@ -341,7 +370,8 @@ pub fn view(p: &Popup, pick: Rc<dyn Fn(usize, &mut Window, &mut App)>) -> AnyEle
         .collect();
     panel(
         "mention-selector",
-        header.into(),
+        crate::shortcodes::title(header, None),
+        None,
         rows,
         p.active,
         342.,

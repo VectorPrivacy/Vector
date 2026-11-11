@@ -314,7 +314,8 @@ fn content(ctx: &Ctx, m: &Message) -> AnyElement {
     let id = m.id.clone();
     let act = ctx.on_act.clone();
     let click: OnClick = Rc::new(move |t, w, cx| act(&id, Act::Text(t), w, cx));
-    let mut text = crate::newchat::replace_invite_links(&m.content, "");
+    let content = crate::texttime::spans_to_codes(&m.content, &m.text_spans);
+    let mut text = crate::newchat::replace_invite_links(&content, "");
     if let std::borrow::Cow::Owned(s) = crate::packs::strip(&text) {
         text = s.into();
     }
@@ -352,6 +353,7 @@ fn content(ctx: &Ctx, m: &Message) -> AnyElement {
         &markdown::Ctx {
             base: base_look(),
             revealed,
+            now: ctx.store.now_ms() as f64 / 1000.,
             custom: custom
                 .as_ref()
                 .map(|f| f as &dyn Fn(&str) -> Option<crate::media::Custom>),

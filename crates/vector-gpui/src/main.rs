@@ -49,6 +49,7 @@ mod shortcodes;
 mod simd;
 mod startmenu;
 mod switcher;
+mod texttime;
 mod theme;
 mod timeline;
 mod transfer;

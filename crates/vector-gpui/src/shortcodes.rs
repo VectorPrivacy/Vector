@@ -4,7 +4,7 @@ use std::rc::Rc;
 
 use gpui::{
     AnyElement, App, FontWeight, InteractiveElement, IntoElement, ParentElement, SharedString,
-    StatefulInteractiveElement, Styled, Window, div, img, prelude::*, px,
+    Styled, Window, div, img, prelude::*, px,
 };
 
 use crate::media::{Custom, Media};
@@ -155,7 +155,7 @@ pub fn view(
                 ),
             };
             Row {
-                art,
+                art: Some(art),
                 label: label.into(),
                 hint: None,
             }
@@ -163,7 +163,8 @@ pub fn view(
         .collect();
     panel(
         "emoji-shortcode-selector",
-        p.header.into(),
+        title(p.header, None),
+        None,
         rows,
         p.active,
         342.,
@@ -173,15 +174,32 @@ pub fn view(
 
 /// One row of an autocomplete: its picture, its name, and a hint at the right.
 pub struct Row {
-    pub art: AnyElement,
+    pub art: Option<AnyElement>,
     pub label: SharedString,
     pub hint: Option<SharedString>,
 }
 
 /// The shell every composer autocomplete shares (`AnchoredPanel` with `.mention-selector`'s look).
+/// `.mention-selector-header`, with `extra` left as typed.
+pub fn title(text: &str, extra: Option<String>) -> AnyElement {
+    div()
+        .pt(px(6.))
+        .px(px(12.))
+        .pb(px(4.))
+        .text_size(px(11.))
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(c(PRIMARY))
+        .opacity(0.7)
+        .child(text.to_uppercase())
+        .children(extra.map(|e| div().opacity(0.8).child(e)))
+        .flex()
+        .into_any_element()
+}
+
 pub fn panel(
     id: &'static str,
-    header: SharedString,
+    header: AnyElement,
+    lead: Option<AnyElement>,
     rows: Vec<Row>,
     active: usize,
     max_w: f32,
@@ -217,7 +235,7 @@ pub fn panel(
                 cx.stop_propagation();
                 pick(i, w, cx)
             })
-            .child(r.art)
+            .children(r.art)
             .child(
                 div()
                     .flex_1()
@@ -257,17 +275,8 @@ pub fn panel(
             spread_radius: px(0.),
             inset: false,
         }])
-        .child(
-            div()
-                .pt(px(6.))
-                .px(px(12.))
-                .pb(px(4.))
-                .text_size(px(11.))
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(c(PRIMARY))
-                .opacity(0.7)
-                .child(header.to_uppercase()),
-        )
+        .child(header)
+        .children(lead)
         .children(rows)
         .into_any_element()
 }

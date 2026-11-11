@@ -1031,6 +1031,7 @@ fn rich(
         &crate::markdown::Ctx {
             base: look,
             revealed: &empty,
+            now: env.store.now_ms() as f64 / 1000.,
             custom: custom
                 .as_ref()
                 .map(|f| f as &dyn Fn(&str) -> Option<crate::media::Custom>),

@@ -213,7 +213,7 @@ fn attr<'a>(args: &'a str, name: &str) -> Option<&'a str> {
 }
 
 /// Byte ranges markup must not reach into: fenced blocks and inline code.
-pub(crate) fn code_ranges(content: &str) -> Vec<(usize, usize)> {
+pub fn code_ranges(content: &str) -> Vec<(usize, usize)> {
     let mut out = Vec::new();
     let mut fence_start: Option<usize> = None;
     let mut line_start = 0;

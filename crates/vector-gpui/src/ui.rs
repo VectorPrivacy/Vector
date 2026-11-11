@@ -93,6 +93,17 @@ pub struct VectorApp {
     emoticons: bool,
     /// The composer's `@` or `#` suggestions.
     mention: Option<crate::mentions::Popup>,
+    /// The `@time` picker.
+    time_pick: Option<crate::texttime::Picker>,
+    /// The `@time` an Escape closed, until the draft moves past it.
+    time_dismissed: Option<usize>,
+    /// A time phrase the draft ends with, offered as a time code.
+    time_chip: Option<crate::texttime::Chip>,
+    /// Suggestions passed on for this draft.
+    chip_passed: HashSet<String>,
+    time_suggestions: bool,
+    /// The composer box as last painted, to put the chip under its phrase.
+    composer_box: Rc<std::cell::Cell<Option<gpui::Bounds<gpui::Pixels>>>>,
     /// Who a `@` can name in the open chat, gathered once per open panel.
     mention_pool: Option<Rc<Vec<crate::mentions::Item>>>,
     /// The draft's picked mentions: the name shown, and what it sends as.
@@ -532,6 +543,12 @@ impl VectorApp {
             shortcode: None,
             emoticons: true,
             mention: None,
+            time_pick: None,
+            time_dismissed: None,
+            time_chip: None,
+            chip_passed: HashSet::new(),
+            time_suggestions: true,
+            composer_box: Rc::default(),
             mention_pool: None,
             tracked: Vec::new(),
             mention_rules: HashMap::new(),
@@ -1773,16 +1790,17 @@ impl VectorApp {
             let b = backend::prefs::sql_bools(&[
                 ("web_previews", true),
                 ("emoticon_suggestions", true),
+                ("time_suggestions", true),
             ]);
             (
                 backend::storage::auto_download(),
                 b[0],
-                b[1],
+                (b[1], b[2]),
                 backend::actions::emoji_usage(),
             )
         });
         cx.spawn(async move |this, cx| {
-            let Ok(((on, limit), previews, emoticons, used)) = rx.await else {
+            let Ok(((on, limit), previews, (emoticons, times), used)) = rx.await else {
                 return;
             };
             this.update(cx, |this, cx| {
@@ -1791,6 +1809,7 @@ impl VectorApp {
                 media.web_previews_off = !previews;
                 drop(media);
                 this.emoticons = emoticons;
+                this.time_suggestions = times;
                 this.emoji_picker.update(cx, |p, cx| p.set_usage(used, cx));
             })
             .ok();
@@ -2128,10 +2147,8 @@ impl VectorApp {
         self.jumped = None;
         self.opening = self.live.then_some(None);
         self.tracked.clear();
-        self.mention = None;
-        self.mention_pool = None;
-        self.shortcode = None;
-        self.input.update(cx, |i, _| i.set_nav(false));
+        self.chip_passed.clear();
+        self.close_popups(cx);
         window.focus(&self.input.read(cx).focus_handle(cx), cx);
         if !self.live {
             return;
@@ -3117,13 +3134,13 @@ impl VectorApp {
 impl Render for VectorApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.send_shown = !self.input.read(cx).text().trim().is_empty();
-        if (self.shortcode.is_some() || self.mention.is_some())
+        if (self.shortcode.is_some()
+            || self.mention.is_some()
+            || self.time_pick.is_some()
+            || self.time_chip.is_some())
             && !self.input.focus_handle(cx).is_focused(window)
         {
-            self.shortcode = None;
-            self.mention = None;
-            self.mention_pool = None;
-            self.input.update(cx, |i, _| i.set_nav(false));
+            self.close_popups(cx);
         }
         if matches!(self.screen, Screen::Main)
             && let Some(a) = self.pending_link.take()
@@ -4332,8 +4349,13 @@ fn preview_line(chat: &SerializableChat, color: gpui::Hsla) -> AnyElement {
                 kind: crate::inline::Kind::Plain,
             });
         }
+        let content = crate::texttime::localize(
+            &m.content,
+            &m.text_spans,
+            chrono::Local::now().timestamp() as f64,
+        );
         v.extend(crate::preview::atoms(
-            &crate::embeds::for_preview(&m.content),
+            &crate::embeds::for_preview(&content),
             usize::MAX,
             &look,
         ));
@@ -4763,7 +4785,7 @@ impl VectorApp {
                 (self.picker_open && !self.picker_status)
                     .then(|| (self.emoji_picker.clone(), self.picker.is_none())),
                 self.attach,
-                self.mention
+                self.time_popup(cx).or_else(|| self.mention
                     .as_ref()
                     .map(|p| {
                         let app = cx.entity().downgrade();
@@ -4785,7 +4807,8 @@ impl VectorApp {
                                 }),
                             )
                         })
-                    }),
+                    })).or_else(|| self.time_chip_view(cx)),
+                self.composer_box.clone(),
                 (
                     self.send_shown || matches!(self.mode, Mode::Edit { .. }),
                     self.send_flips,
@@ -4964,6 +4987,7 @@ fn composer(
     picker: Option<(Entity<crate::picker::EmojiPicker>, bool)>,
     attach: Option<std::time::Instant>,
     popup: Option<AnyElement>,
+    measure: Rc<std::cell::Cell<Option<gpui::Bounds<gpui::Pixels>>>>,
     send: (bool, usize),
     cx: &mut Context<VectorApp>,
 ) -> impl IntoElement {
@@ -4995,6 +5019,13 @@ fn composer(
     let replying = matches!(mode, Mode::Reply { .. });
     let editing = matches!(mode, Mode::Edit { .. });
     let mut boxed = div()
+        .child(
+            gpui::canvas(move |b, _, _| measure.set(Some(b)), |_, _, _, _| {})
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full(),
+        )
         .relative()
         .flex_shrink_0()
         .px(px(8.))
@@ -7968,6 +7999,27 @@ impl VectorApp {
             self.send_shown = send;
             self.send_flips += 1;
         }
+        let now = self.now_local();
+        self.time_chip = None;
+        self.input.update(cx, |i, _| i.set_chip(false));
+        if let Some(d) = self.time_dismissed
+            && !text
+                .get(d..d + 5)
+                .is_some_and(|t| t.eq_ignore_ascii_case("@time") || t.eq_ignore_ascii_case("/time"))
+        {
+            self.time_dismissed = None;
+        }
+        let pick = crate::texttime::picker(&text, caret, now, self.time_pick.as_ref())
+            .filter(|p| Some(p.at) != self.time_dismissed);
+        if pick.is_some() {
+            self.shortcode = None;
+            self.mention = None;
+            self.mention_pool = None;
+            self.time_pick = pick;
+            self.input.update(cx, |i, _| i.set_nav(true));
+            return cx.notify();
+        }
+        self.time_pick = None;
         if let Some(p) = self.suggest_mention(&text, caret, cx) {
             self.shortcode = None;
             self.mention = Some(p);
@@ -7978,7 +8030,124 @@ impl VectorApp {
         self.mention_pool = None;
         let popup =
             crate::shortcodes::suggest(&text, caret, self.emoji_picker.read(cx), self.emoticons);
+        let none = popup.is_none();
         self.set_shortcode(popup, cx);
+        if none {
+            self.suggest_time(&text, caret, now, cx);
+        }
+    }
+
+    fn now_local(&self) -> chrono::DateTime<chrono::Local> {
+        use chrono::TimeZone;
+        chrono::Local
+            .timestamp_millis_opt(self.store.borrow().now_ms() as i64)
+            .single()
+            .unwrap_or_else(chrono::Local::now)
+    }
+
+    fn suggest_time(
+        &mut self,
+        text: &str,
+        caret: usize,
+        now: chrono::DateTime<chrono::Local>,
+        cx: &mut Context<Self>,
+    ) {
+        if text.is_empty() {
+            self.chip_passed.clear();
+        }
+        if !self.time_suggestions || self.input.read(cx).has_selection() {
+            return;
+        }
+        let chip = text
+            .get(..caret)
+            .and_then(|before| crate::texttime::suggest(before, now))
+            .map(|found| crate::texttime::Chip {
+                phrase: text[found.start..found.end].to_string(),
+                found,
+            })
+            .filter(|c| !self.chip_passed.contains(&c.key()));
+        let on = chip.is_some();
+        self.time_chip = chip;
+        self.input.update(cx, |i, _| i.set_chip(on));
+        cx.notify();
+    }
+
+    fn time_popup(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let p = self.time_pick.as_ref()?;
+        let app = cx.entity().downgrade();
+        let now = self.store.borrow().now_ms() as f64 / 1000.;
+        Some(crate::texttime::picker_view(
+            p,
+            now,
+            Rc::new(move |i, w, cx| {
+                app.update(cx, |app, cx| app.pick_time(i, w, cx)).ok();
+            }),
+        ))
+    }
+
+    fn time_chip_view(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let chip = self.time_chip.as_ref()?;
+        let left = self
+            .input
+            .read(cx)
+            .x_at(chip.found.start)
+            .zip(self.composer_box.get())
+            .map_or(0., |(x, b)| f32::from(x - b.origin.x).min(f32::from(b.size.width) - 200.));
+        let app = cx.entity().downgrade();
+        let now = self.store.borrow().now_ms() as f64 / 1000.;
+        Some(crate::texttime::chip_view(
+            chip,
+            now,
+            left,
+            Rc::new(move |w, cx| {
+                app.update(cx, |app, cx| app.accept_time_chip(w, cx)).ok();
+            }),
+        ))
+    }
+
+    fn close_popups(&mut self, cx: &mut Context<Self>) {
+        self.shortcode = None;
+        self.mention = None;
+        self.mention_pool = None;
+        self.time_pick = None;
+        self.time_chip = None;
+        self.input.update(cx, |i, _| {
+            i.set_nav(false);
+            i.set_chip(false);
+        });
+    }
+
+    fn pick_time(&mut self, i: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let input = self.input.read(cx);
+        let (text, caret) = (input.text().to_string(), input.caret());
+        let Some(p) = crate::texttime::picker(&text, caret, self.now_local(), None) else {
+            return;
+        };
+        let (Some(t), Some(&style)) = (&p.parsed, p.styles().get(i)) else {
+            return;
+        };
+        let code = format!("<t:{}:{style}> ", t.unix);
+        self.time_pick = None;
+        self.input.update(cx, |input, cx| {
+            input.set_nav(false);
+            input.replace(p.at..caret, &code, window, cx);
+        });
+        cx.notify();
+    }
+
+    fn accept_time_chip(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(chip) = self.time_chip.take() else {
+            return;
+        };
+        let s = &chip.found;
+        self.input.update(cx, |input, cx| {
+            input.set_chip(false);
+            let (text, caret) = (input.text().to_string(), input.caret().max(s.end));
+            let gap = if s.end == text.len() { " " } else { "" };
+            let code = format!("<t:{}:{}>{gap}{}", s.unix, s.style, &text[s.end..caret]);
+            input.replace(s.start..caret, &code, window, cx);
+        });
+        cx.notify();
     }
 
     /// `@` people, Roles and @everyone; `#` the Community's channels.
@@ -8069,7 +8238,10 @@ impl VectorApp {
             let caret = input.caret();
             input.replace(p.start..caret, &crate::mentions::insert(&item), window, cx);
         });
-        if !matches!(item.kind, crate::mentions::Kind::Channel { .. })
+        if !matches!(
+            item.kind,
+            crate::mentions::Kind::Channel { .. } | crate::mentions::Kind::Time
+        )
             && !self
                 .tracked
                 .iter()
@@ -8095,6 +8267,39 @@ impl VectorApp {
         cx: &mut Context<Self>,
     ) {
         use crate::composer::Nav;
+        if let Some(p) = self.time_pick.as_mut() {
+            let n = p.styles().len();
+            match nav {
+                Nav::Up if n > 0 => p.active = (p.active + n - 1) % n,
+                Nav::Down if n > 0 => p.active = (p.active + 1) % n,
+                Nav::Pick if n > 0 => {
+                    let i = p.active;
+                    return self.pick_time(i, window, cx);
+                }
+                Nav::Close => {
+                    self.time_dismissed = Some(p.at);
+                    self.time_pick = None;
+                    self.input.update(cx, |i, _| i.set_nav(false));
+                }
+                _ => {}
+            }
+            return cx.notify();
+        }
+        if self.mention.is_none()
+            && self.shortcode.is_none()
+            && let Some(chip) = &self.time_chip
+        {
+            match nav {
+                Nav::Pick => return self.accept_time_chip(window, cx),
+                Nav::Close => {
+                    self.chip_passed.insert(chip.key());
+                    self.time_chip = None;
+                    self.input.update(cx, |i, _| i.set_chip(false));
+                }
+                _ => {}
+            }
+            return cx.notify();
+        }
         if let Some(p) = self.mention.as_mut() {
             let n = p.items.len();
             match nav {
@@ -10627,6 +10832,9 @@ impl VectorApp {
                 }
                 if key == "emoticon_suggestions" {
                     self.emoticons = value;
+                }
+                if key == "time_suggestions" {
+                    self.time_suggestions = value;
                 }
                 if key == "notif_global_mute" && value {
                     backend::sound::purge();

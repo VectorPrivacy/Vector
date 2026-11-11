@@ -8918,6 +8918,7 @@ dependencies = [
  "qrcodegen",
  "rand 0.8.8",
  "rayon",
+ "regex",
  "reqwest",
  "rusqlite",
  "rust-embed",

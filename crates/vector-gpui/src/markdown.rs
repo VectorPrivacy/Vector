@@ -63,11 +63,14 @@ pub struct Ctx<'a> {
     pub revealed: &'a HashSet<u32>,
     /// NIP-30 custom emoji: what a `:shortcode:` draws as, when the message names it.
     pub custom: Option<&'a dyn Fn(&str) -> Option<crate::media::Custom>>,
+    /// Unix seconds, for times shown relative to now.
+    pub now: f64,
 }
 
 enum Swap {
     Spoiler(String),
     Shrug,
+    Time(i64, char),
 }
 
 /// Source lines rewritten so CommonMark reads them as Marked's configuration does, with
@@ -194,6 +197,12 @@ fn swap_inline(line: &str, swaps: &mut Vec<Swap>) -> String {
                     continue;
                 }
             }
+        }
+        if let Some((len, unix, style)) = crate::texttime::code_at(rest) {
+            out.push(marker(swaps.len()));
+            swaps.push(Swap::Time(unix, style));
+            i += len;
+            continue;
         }
         for shrug in ["¯\\\\_(ツ)_/¯", "¯\\_(ツ)_/¯"] {
             if rest.starts_with(shrug) {
@@ -382,6 +391,10 @@ impl Builder<'_> {
             self.prose(&rest[..i]);
             match &self.swaps[(ch as u32 - MARK) as usize] {
                 Swap::Shrug => self.styled("¯\\_(ツ)_/¯", Kind::Plain),
+                &Swap::Time(unix, style) => {
+                    let text = crate::texttime::format(unix, style, self.ctx.now);
+                    self.styled(&text, Kind::Time);
+                }
                 Swap::Spoiler(s) => {
                     let id = self.spoilers;
                     self.spoilers += 1;
