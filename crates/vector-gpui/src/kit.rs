@@ -383,17 +383,55 @@ pub fn rich(html: &str) -> gpui::StyledText {
 }
 
 /// One row of a `.context-menu`.
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct MenuItem {
     pub label: SharedString,
     pub icon: Option<SharedString>,
     pub danger: bool,
     pub checked: bool,
+    pub kind: MenuKind,
+    pub disabled: bool,
+    /// A dimmed qualifier after the label.
+    pub hint: Option<SharedString>,
+}
+
+#[derive(Clone, Copy, Default, PartialEq)]
+pub enum MenuKind {
+    #[default]
+    Item,
+    Divider,
+    /// A section label, e.g. @EVERYONE above its choices.
+    Header,
+    /// Drills into a submenu in place.
+    Sub,
+    /// The row back out of a submenu.
+    Back,
 }
 
 impl MenuItem {
     pub fn new(label: impl Into<SharedString>, icon: &str) -> Self {
-        Self { label: label.into(), icon: Some(SharedString::from(format!("icons/{icon}.svg"))), danger: false, checked: false }
+        Self { label: label.into(), icon: (!icon.is_empty()).then(|| SharedString::from(format!("icons/{icon}.svg"))), ..Default::default() }
+    }
+    pub fn divider() -> Self {
+        Self { kind: MenuKind::Divider, ..Default::default() }
+    }
+    pub fn header(label: impl Into<SharedString>) -> Self {
+        Self { label: label.into(), kind: MenuKind::Header, ..Default::default() }
+    }
+    pub fn back(label: impl Into<SharedString>) -> Self {
+        Self { label: label.into(), kind: MenuKind::Back, ..Default::default() }
+    }
+    pub fn sub(mut self) -> Self {
+        self.kind = MenuKind::Sub;
+        self
+    }
+    pub fn disabled(mut self, on: bool) -> Self {
+        self.disabled = on;
+        self
+    }
+    pub fn hint(mut self, hint: Option<String>) -> Self {
+        self.hint = hint.map(Into::into);
+        self
     }
     pub fn danger(mut self) -> Self {
         self.danger = true;
@@ -427,31 +465,63 @@ pub fn context_menu(
         .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .on_mouse_down(gpui::MouseButton::Right, |_, _, cx| cx.stop_propagation());
     for (ix, item) in items.iter().enumerate() {
+        match item.kind {
+            MenuKind::Divider => {
+                list = list.child(div().h(px(1.)).my(px(4.)).bg(white_a(0.06)));
+                continue;
+            }
+            MenuKind::Header => {
+                list = list.child(
+                    div().pt(px(9.)).pb(px(4.)).px(px(14.)).text_size(px(11.)).font_weight(gpui::FontWeight::SEMIBOLD).text_color(c(0x6f6f6f)).whitespace_nowrap().child(spaced(item.label.to_uppercase(), 0.66)),
+                );
+                continue;
+            }
+            _ => {}
+        }
         let pick = on_pick.clone();
         let danger = c(crate::timeline::DANGER);
-        let icon = if item.checked { Some(SharedString::from("icons/check.svg")) } else { item.icon.clone() };
+        let back = item.kind == MenuKind::Back;
+        let icon = match item.kind {
+            MenuKind::Sub => Some(SharedString::from("icons/chevron-right.svg")),
+            _ if item.checked => Some(SharedString::from("icons/check.svg")),
+            _ => item.icon.clone(),
+        };
+        let ink = if item.danger { danger } else if back { c(0x8b8b8b) } else { c(0xb2b2b2) };
+        let live = !item.disabled;
+        let label = div()
+            .min_w_0()
+            .overflow_hidden()
+            .text_ellipsis()
+            .flex()
+            .items_baseline()
+            .child(item.label.clone())
+            .children(item.hint.clone().map(|h| div().ml(px(6.)).opacity(0.5).text_size(px(11.9)).child(h)));
         list = list.child(
             div()
                 .id(("ctx", ix))
                 .flex()
                 .items_center()
-                .justify_between()
-                .gap(px(12.))
+                .when(!back, |d| d.justify_between().gap(px(12.)))
+                .when(back, |d| d.gap(px(8.)))
                 .px(px(14.))
                 .py(px(10.))
                 .text_size(px(14.))
-                .line_height(px(20.))
+                .line_height(px(24.))
                 .whitespace_nowrap()
-                .cursor_pointer()
-                .text_color(if item.danger { danger } else { c(0xb2b2b2) })
-                .when(item.danger, |d| d.hover(move |d| d.bg(danger.opacity(0.1))))
-                .when(!item.danger, |d| d.hover(|d| d.bg(c(0x2a2a2a)).text_color(c(0xffffff))))
-                .on_click(move |_, w, cx| pick(ix, w, cx))
-                .child(div().min_w_0().overflow_hidden().text_ellipsis().child(item.label.clone()))
-                .children(icon.map(|i| {
-                    let color = if item.checked { c(crate::theme::PRIMARY) } else if item.danger { danger } else { c(0xb2b2b2) };
-                    gpui::svg().path(i).size(px(20.)).flex_shrink_0().text_color(color)
-                })),
+                .text_color(ink)
+                .when(!live, |d| d.opacity(0.45))
+                .when(live, |d| d.cursor_pointer())
+                .when(live && item.danger, |d| d.hover(move |d| d.bg(danger.opacity(0.1))))
+                .when(live && !item.danger, |d| d.hover(|d| d.bg(c(0x2a2a2a)).text_color(c(0xffffff))))
+                .when(live, |d| d.on_click(move |_, w, cx| pick(ix, w, cx)))
+                .when(back, |d| d.child(gpui::svg().path("icons/chevron-left.svg").size(px(20.)).flex_shrink_0().text_color(ink)))
+                .child(label)
+                .when(!back, |d| {
+                    d.children(icon.map(|i| {
+                        let color = if item.checked && item.kind != MenuKind::Sub { c(crate::theme::PRIMARY) } else { ink };
+                        gpui::svg().path(i).size(px(20.)).flex_shrink_0().text_color(color)
+                    }))
+                }),
         );
     }
     let close = std::rc::Rc::new(on_close);

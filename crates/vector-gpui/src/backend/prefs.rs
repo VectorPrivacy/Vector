@@ -141,6 +141,88 @@ pub async fn toggle_mute(chat_id: String) -> Option<bool> {
     .await
 }
 
+/// One notify scope as a menu needs it: what it stores, and what its chain resolves to.
+#[derive(Clone, Debug, Default)]
+pub struct NotifyView {
+    pub scope_id: String,
+    /// Stored here alone; `None` inherits.
+    pub level: Option<&'static str>,
+    pub effective_level: &'static str,
+    pub mute_until: i64,
+    pub muted: bool,
+    pub suppress_everyone: Option<bool>,
+    pub everyone_muted_globally: bool,
+}
+
+/// The community first (when there is one), then each scope resolved against it.
+pub fn notify_views(community_id: Option<String>, scopes: Vec<String>) -> Vec<NotifyView> {
+    notify::warm();
+    let now = notify::now_ms();
+    let cid = community_id.as_deref();
+    let view = |scope: &str, community: Option<&str>| {
+        let stored = notify::prefs(scope);
+        let resolved = notify::resolve(scope, community, now);
+        NotifyView {
+            scope_id: scope.to_string(),
+            level: stored.level.map(|l| l.as_str()),
+            effective_level: resolved.level.as_str(),
+            mute_until: stored.mute_until,
+            muted: resolved.muted,
+            suppress_everyone: stored.suppress_everyone,
+            everyone_muted_globally: !notify::everyone_allowed(None),
+        }
+    };
+    let mut out: Vec<NotifyView> = cid.map(|id| view(id, None)).into_iter().collect();
+    out.extend(scopes.iter().filter(|s| Some(s.as_str()) != cid).map(|s| view(s, cid)));
+    out
+}
+
+async fn reconcile_notify() {
+    reconcile_mirror().await;
+    reseed_unread().await;
+    vector_core::emit_event("unread_counts_stale", &json!({ "chats": [] }));
+    publish_projection(Pref::Notify);
+}
+
+/// `level` is "all", "mentions" or "nothing"; `None` inherits.
+pub async fn set_notify_level(scope_id: String, level: Option<&'static str>) -> Result<(), String> {
+    let parsed = match level {
+        None => None,
+        Some(s) => Some(notify::NotifyLevel::from_label(s).ok_or_else(|| format!("unknown level: {s}"))?),
+    };
+    db::scoped(async move {
+        notify::set_level(&scope_id, parsed)?;
+        reconcile_notify().await;
+        Ok(())
+    })
+    .await
+}
+
+/// 0 unmutes; a negative length mutes until turned back on.
+pub async fn set_notify_mute(scope_id: String, duration_ms: i64) -> Result<(), String> {
+    let until = match duration_ms {
+        0 => notify::MUTE_OFF,
+        d if d < 0 => notify::MUTE_FOREVER,
+        d => notify::now_ms().saturating_add(d),
+    };
+    db::scoped(async move {
+        notify::set_mute(&scope_id, until)?;
+        reconcile_notify().await;
+        publish_projection(Pref::Mutes);
+        Ok(())
+    })
+    .await
+}
+
+pub async fn set_suppress_everyone(community_id: String, suppress: Option<bool>) -> Result<(), String> {
+    db::scoped(async move {
+        notify::set_suppress_everyone(&community_id, suppress)?;
+        reconcile_notify().await;
+        Ok(())
+    })
+    .await
+}
+
 pub async fn block(npub: String) -> bool {
     let ok = vector_core::profile::sync::block_user(npub, &super::sync::ProfileHandler).await;
     if ok {

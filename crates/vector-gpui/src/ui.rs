@@ -22,6 +22,7 @@ use serde_json::Value;
 use vector_core::profile::SlimProfile;
 
 use crate::backend::{self, UiEvent, account, messaging, sync};
+use chrono::TimeZone;
 use crate::composer::{CancelInput, SendText, TextInput};
 use crate::kit;
 use crate::login::{LoggedIn, LoginView};
@@ -115,6 +116,9 @@ pub struct VectorApp {
     call_ticking: bool,
     /// The open Community, whose channels replace the chat list.
     community: Option<crate::community::View>,
+    create_channel: Option<crate::createchannel::CreateChannel>,
+    /// The menus a submenu was opened from, for its row back.
+    menu_trail: Vec<(Vec<kit::MenuItem>, Vec<MenuAct>)>,
     start: Option<crate::startmenu::StartMenu>,
     /// The context menu open: where, its rows, and what each does.
     menu: Option<(gpui::Point<gpui::Pixels>, Vec<kit::MenuItem>, Vec<MenuAct>)>,
@@ -137,6 +141,20 @@ enum MenuAct {
     StartMoveOut(String),
     StartUnpin(String),
     Device(&'static str, Option<String>, backend::mic::DevicePrefs),
+    /// Rows that act on nothing: dividers and headers.
+    Nothing,
+    /// Drill into a submenu, behind a row back.
+    Sub(SharedString, Vec<kit::MenuItem>, Vec<MenuAct>),
+    Back,
+    CommunityRead(String),
+    CreateChannel { community: String, category: Option<String> },
+    CreateCategory(String),
+    LeaveCommunity { id: String, name: String, owner: bool },
+    Copy(String),
+    NotifyLevel(String, Option<&'static str>),
+    NotifyMute(String, i64),
+    SuppressEveryone(String, bool),
+    ChannelRead(String),
 }
 
 enum PopupAct {
@@ -151,6 +169,7 @@ enum PopupAct {
     Unblock { npub: String },
     Logout,
     ClearStorage,
+    LeaveCommunity { id: String, name: String, owner: bool },
     AddServer,
     DisableRelay { url: String },
     RemoveRelay { url: String },
@@ -251,6 +270,8 @@ impl VectorApp {
             call_audio: None,
             call_ticking: false,
             community: None,
+            create_channel: None,
+            menu_trail: Vec::new(),
             start: None,
             menu: None,
         }
@@ -296,13 +317,22 @@ impl VectorApp {
         if let Ok(name) = std::env::var("VECTOR_COMMUNITY") {
             let found = app.store.borrow().communities.iter().find(|c| c.name == name).map(|c| c.community_id.clone());
             if let Some(id) = found {
-                app.open_community(id, window, cx);
+                app.open_community(id.clone(), window, cx);
                 let channel = std::env::var("VECTOR_CHANNEL").ok().and_then(|n| {
                     let store = app.store.borrow();
                     store.community_of(app.open.as_deref()?)?.channels.iter().find(|c| c.name == n).map(|c| c.channel_id.clone())
                 });
                 if let Some(ch) = channel {
                     app.open_channel(ch, window, cx);
+                }
+                // VECTOR_COMMUNITY_MENU shows its header menu; VECTOR_CREATE=channel|category the modal.
+                if std::env::var("VECTOR_COMMUNITY_MENU").is_ok() {
+                    app.on_community(crate::community::Act::HeadMenu, window, cx);
+                }
+                match std::env::var("VECTOR_CREATE").as_deref() {
+                    Ok("channel") => app.open_create_channel(id.clone(), None, false, window, cx),
+                    Ok("category") => app.open_create_channel(id.clone(), None, true, window, cx),
+                    _ => {}
                 }
             }
         }
@@ -461,12 +491,69 @@ impl VectorApp {
     }
 
     fn on_menu(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
-        let Some((_, _, mut acts)) = self.menu.take() else { return };
+        let Some((at, items, mut acts)) = self.menu.take() else { return };
         cx.notify();
         if ix >= acts.len() {
             return;
         }
         match acts.swap_remove(ix) {
+            MenuAct::Nothing => {
+                acts.insert(ix.min(acts.len()), MenuAct::Nothing);
+                self.menu = Some((at, items, acts));
+            }
+            MenuAct::Sub(label, sub_items, sub_acts) => {
+                acts.insert(ix.min(acts.len()), MenuAct::Nothing);
+                self.menu_trail.push((items, acts));
+                let mut items = vec![kit::MenuItem::back(label)];
+                items.extend(sub_items);
+                let mut acts = vec![MenuAct::Back];
+                acts.extend(sub_acts);
+                self.menu = Some((at, items, acts));
+            }
+            MenuAct::Back => {
+                if let Some((items, acts)) = self.menu_trail.pop() {
+                    self.menu = Some((at, items, acts));
+                }
+            }
+            MenuAct::CommunityRead(id) => {
+                if self.live {
+                    let rx = backend::run(backend::community::mark_read(id));
+                    cx.spawn(async move |this, cx| {
+                        let _ = rx.await;
+                        this.update(cx, |this, cx| this.refresh_unread(cx)).ok();
+                    })
+                    .detach();
+                }
+            }
+            MenuAct::ChannelRead(id) => {
+                if self.live {
+                    let rx = backend::run(messaging::mark_as_read(id, None));
+                    cx.spawn(async move |this, cx| {
+                        let _ = rx.await;
+                        this.update(cx, |this, cx| this.refresh_unread(cx)).ok();
+                    })
+                    .detach();
+                }
+            }
+            MenuAct::CreateChannel { community, category } => self.open_create_channel(community, category, false, window, cx),
+            MenuAct::CreateCategory(community) => self.open_create_channel(community, None, true, window, cx),
+            MenuAct::LeaveCommunity { id, name, owner } => self.ask_leave_community(id, name, owner, window, cx),
+            MenuAct::Copy(text) => {
+                cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+                self.toast = Some(("Copied".into(), std::time::Instant::now()));
+            }
+            MenuAct::NotifyLevel(scope, level) => {
+                let rx = backend::run(backend::prefs::set_notify_level(scope, level));
+                self.report(rx, "Notification Settings", cx);
+            }
+            MenuAct::NotifyMute(scope, ms) => {
+                let rx = backend::run(backend::prefs::set_notify_mute(scope, ms));
+                self.report(rx, "Mute", cx);
+            }
+            MenuAct::SuppressEveryone(community, suppress) => {
+                let rx = backend::run(backend::prefs::set_suppress_everyone(community, Some(suppress)));
+                self.report(rx, "Notification Settings", cx);
+            }
             MenuAct::StartFolder(id) => {
                 if let Some(sm) = self.start.as_mut() {
                     sm.folder = Some(id);
@@ -635,10 +722,10 @@ impl VectorApp {
                 } else {
                     (devices.outputs, devices.default_output, devices.prefs.output.clone())
                 };
-                let mut items = vec![kit::MenuItem { label: if fallback.is_empty() { "System Default".into() } else { format!("System Default ({fallback})").into() }, icon: None, danger: false, checked: current.is_none() }];
+                let mut items = vec![kit::MenuItem { label: if fallback.is_empty() { "System Default".into() } else { format!("System Default ({fallback})").into() }, icon: None, checked: current.is_none(), ..Default::default() }];
                 let mut acts = vec![MenuAct::Device(kind, None, devices.prefs.clone())];
                 for name in names {
-                    items.push(kit::MenuItem { label: name.clone().into(), icon: None, danger: false, checked: current.as_ref() == Some(&name) });
+                    items.push(kit::MenuItem { label: name.clone().into(), icon: None, checked: current.as_ref() == Some(&name), ..Default::default() });
                     acts.push(MenuAct::Device(kind, Some(name), devices.prefs.clone()));
                 }
                 self.menu = Some((at, items, acts));
@@ -1499,6 +1586,30 @@ impl VectorApp {
         }
         match act {
             PopupAct::Notice => {}
+            PopupAct::LeaveCommunity { id, name, owner } => {
+                if owner && popup.input.as_ref().is_none_or(|i| i.read(cx).text().trim() != name) {
+                    self.notice("Not Deleted", "The name did not match, so nothing was changed.".into(), cx);
+                    return;
+                }
+                if !self.live {
+                    self.store.borrow_mut().communities.retain(|c| c.community_id != id);
+                    self.leave_community();
+                    return;
+                }
+                let rx = backend::run(backend::community::leave_or_delete(id, owner));
+                cx.spawn(async move |this, cx| {
+                    let result = rx.await;
+                    this.update(cx, |this, cx| match result {
+                        Ok(Err(e)) => this.notice(if owner { "Failed to Delete" } else { "Failed to Leave" }, e, cx),
+                        _ => {
+                            this.leave_community();
+                            this.reload_communities(cx);
+                        }
+                    })
+                    .ok();
+                })
+                .detach();
+            }
             PopupAct::Block { npub } => self.set_blocked(npub, true, cx),
             PopupAct::BlockRequest { npub } => {
                 if self.open.as_deref() == Some(npub.as_str()) {
@@ -1816,6 +1927,13 @@ impl Render for VectorApp {
             let proc_ = crate::call::Processing { auto_gain: a.auto_gain, echo_cancel: a.echo_cancel, noise_suppress: a.noise_suppress };
             crate::call::render(&self.call, &self.store.borrow(), &proc_, CHROME_H, &on)
         })
+        .children(self.create_channel.as_ref().map(|m| {
+            let app = cx.entity().downgrade();
+            let on: crate::createchannel::OnAct = Rc::new(move |act, window, cx| {
+                app.update(cx, |app, cx| app.on_create_channel(act, window, cx)).ok();
+            });
+            crate::createchannel::view(m, &on, window, cx)
+        }))
         .children(self.start.as_ref().map(|sm| {
             let app = cx.entity().downgrade();
             let on: crate::startmenu::OnAct = Rc::new(move |act, window, cx| {
@@ -3265,7 +3383,231 @@ impl VectorApp {
                     v.panel = !v.panel;
                 }
             }
+            Act::HeadMenu => {
+                if let Some(id) = self.community.as_ref().map(|v| v.id.clone()) {
+                    self.community_menu(id, gpui::point(px(RAIL_W - 1.), px(CHROME_H + 61. + 4.)), cx);
+                }
+            }
+            Act::ChannelMenu(channel, at) => {
+                if let Some(id) = self.community.as_ref().map(|v| v.id.clone()) {
+                    self.channel_menu(id, channel, at, cx);
+                }
+            }
+            Act::AddChannel(category) => {
+                if let Some(id) = self.community.as_ref().map(|v| v.id.clone()) {
+                    self.open_create_channel(id, Some(category), false, window, cx);
+                }
+            }
         }
+        cx.notify();
+    }
+
+    fn show_menu(&mut self, at: gpui::Point<gpui::Pixels>, rows: Vec<(kit::MenuItem, MenuAct)>, cx: &mut Context<Self>) {
+        self.menu_trail.clear();
+        let (items, acts) = rows.into_iter().unzip();
+        self.menu = Some((at, items, acts));
+        cx.notify();
+    }
+
+    /// `notifyMenuItems`: the level and mute submenus for a Community, a channel or a DM.
+    fn notify_rows(&self, scope: &str, community: Option<&str>) -> Vec<(kit::MenuItem, MenuAct)> {
+        const LEVELS: [(&str, &str); 3] = [("all", "All messages"), ("mentions", "Mentions"), ("nothing", "Nothing")];
+        const MUTES: [(&str, i64); 6] = [
+            ("For 15 minutes", 15 * 60_000),
+            ("For 1 hour", 60 * 60_000),
+            ("For 3 hours", 3 * 60 * 60_000),
+            ("For 8 hours", 8 * 60 * 60_000),
+            ("For 24 hours", 24 * 60 * 60_000),
+            ("Until I turn it back on", -1),
+        ];
+        let views = if self.live {
+            backend::prefs::notify_views(community.map(str::to_string), vec![scope.to_string()])
+        } else {
+            [community, Some(scope)].into_iter().flatten().map(|id| backend::prefs::NotifyView { scope_id: id.into(), effective_level: "mentions", ..Default::default() }).collect()
+        };
+        let Some(me) = views.iter().find(|v| v.scope_id == scope).cloned() else {
+            return vec![(kit::MenuItem::new("Notification settings unavailable", "").disabled(true), MenuAct::Nothing)];
+        };
+        let parent = community.and_then(|c| views.iter().find(|v| v.scope_id == c)).filter(|_| community != Some(scope));
+        let label = |v: &str| LEVELS.iter().find(|l| l.0 == v).map(|l| l.1).unwrap_or("All messages");
+        let mut levels: Vec<(kit::MenuItem, MenuAct)> = Vec::new();
+        if let Some(p) = parent {
+            levels.push((kit::MenuItem::new(format!("Use Community Default ({})", label(p.effective_level)), "").checked(me.level.is_none()), MenuAct::NotifyLevel(scope.into(), None)));
+        }
+        let ticked = me.level.or(if parent.is_some() { None } else { Some(me.effective_level) });
+        for (value, name) in LEVELS {
+            levels.push((kit::MenuItem::new(name, "").checked(ticked == Some(value)), MenuAct::NotifyLevel(scope.into(), Some(value))));
+        }
+        if community == Some(scope) {
+            let off = me.everyone_muted_globally;
+            let suppressed = me.suppress_everyone == Some(true);
+            levels.push((kit::MenuItem::header("@everyone"), MenuAct::Nothing));
+            levels.push((kit::MenuItem::new("Allow", "").checked(!suppressed).disabled(off).hint(off.then(|| "off in App Settings".into())), MenuAct::SuppressEveryone(scope.into(), false)));
+            levels.push((kit::MenuItem::new("Suppress", "").checked(suppressed).disabled(off), MenuAct::SuppressEveryone(scope.into(), true)));
+        }
+        let mut mutes: Vec<(kit::MenuItem, MenuAct)> = Vec::new();
+        if me.muted && me.mute_until == 0 {
+            mutes.push((kit::MenuItem::new("Muted by the community", "").disabled(true), MenuAct::Nothing));
+            mutes.push((kit::MenuItem::divider(), MenuAct::Nothing));
+        } else if me.muted {
+            mutes.push((kit::MenuItem::new("Unmute", "volume-max"), MenuAct::NotifyMute(scope.into(), 0)));
+            mutes.push((kit::MenuItem::divider(), MenuAct::Nothing));
+        }
+        for (name, ms) in MUTES {
+            mutes.push((kit::MenuItem::new(name, ""), MenuAct::NotifyMute(scope.into(), ms)));
+        }
+        let hint = (me.muted && me.mute_until > 0).then(|| {
+            let at = chrono::Local.timestamp_millis_opt(me.mute_until).single();
+            let today = chrono::Local::now().date_naive();
+            at.map(|t| if t.date_naive() == today { format!("until {}", t.format("%H:%M")) } else { format!("until {}", t.format("%a %H:%M")) }).unwrap_or_default()
+        });
+        let sub = |label: &str, icon: &str, rows: Vec<(kit::MenuItem, MenuAct)>| {
+            let (items, acts): (Vec<_>, Vec<_>) = rows.into_iter().unzip();
+            MenuAct::Sub(SharedString::from(label.to_string()), items, acts)
+        };
+        let mute_label = if me.muted { "Muted" } else { "Mute" };
+        vec![
+            (kit::MenuItem::new("Notification Settings", "bell").sub(), sub("Notification Settings", "bell", levels)),
+            (kit::MenuItem::new(mute_label, if me.muted { "volume-mute" } else { "volume-max" }).sub().hint(hint.clone()), sub(mute_label, "", mutes)),
+        ]
+    }
+
+    /// `openCommunityMenu`: the Community's own menu, hung off its header.
+    fn community_menu(&mut self, id: String, at: gpui::Point<gpui::Pixels>, cx: &mut Context<Self>) {
+        let (name, owner, unread) = {
+            let store = self.store.borrow();
+            let Some(com) = store.community(&id) else { return };
+            let unread = com.channels.iter().any(|ch| store.chat(&ch.channel_id).is_some_and(|c| store.unread_count(c) > 0));
+            (com.name.clone(), com.is_owner, unread)
+        };
+        let mut rows: Vec<(kit::MenuItem, MenuAct)> = Vec::new();
+        if unread {
+            rows.push((kit::MenuItem::new("Mark as Read", "check"), MenuAct::CommunityRead(id.clone())));
+            rows.push((kit::MenuItem::divider(), MenuAct::Nothing));
+        }
+        rows.push((kit::MenuItem::new("Create Channel", "channel-hash"), MenuAct::CreateChannel { community: id.clone(), category: None }));
+        rows.push((kit::MenuItem::new("Create Category", "plus"), MenuAct::CreateCategory(id.clone())));
+        rows.push((kit::MenuItem::divider(), MenuAct::Nothing));
+        rows.extend(self.notify_rows(&id, Some(&id)));
+        rows.push((kit::MenuItem::new("Copy Link", "share"), MenuAct::Copy(format!("https://vectorapp.io/c/{id}"))));
+        rows.push((kit::MenuItem::divider(), MenuAct::Nothing));
+        rows.push((kit::MenuItem::new(if owner { "Delete Community" } else { "Leave Community" }, "x-user").danger(), MenuAct::LeaveCommunity { id, name, owner }));
+        self.show_menu(at, rows, cx);
+    }
+
+    /// `openChannelMenu`: right-click on a channel row.
+    fn channel_menu(&mut self, community: String, channel: String, at: gpui::Point<gpui::Pixels>, cx: &mut Context<Self>) {
+        let unread = {
+            let store = self.store.borrow();
+            store.chat(&channel).is_some_and(|c| store.unread_count(c) > 0)
+        };
+        let mut rows: Vec<(kit::MenuItem, MenuAct)> = Vec::new();
+        if unread {
+            rows.push((kit::MenuItem::new("Mark as Read", "check"), MenuAct::ChannelRead(channel.clone())));
+            rows.push((kit::MenuItem::divider(), MenuAct::Nothing));
+        }
+        rows.extend(self.notify_rows(&channel, Some(&community)));
+        rows.push((kit::MenuItem::new("Copy Link", "share"), MenuAct::Copy(format!("https://vectorapp.io/c/{community}/{channel}"))));
+        self.show_menu(at, rows, cx);
+    }
+
+    fn open_create_channel(&mut self, community: String, category: Option<String>, is_category: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let category_name = category.as_ref().and_then(|id| {
+            let store = self.store.borrow();
+            store.community(&community)?.categories.iter().find(|c| &c.category_id == id).map(|c| c.name.clone())
+        });
+        let name = cx.new(|cx| {
+            TextInput::new(crate::createchannel::placeholder(is_category, false), cx)
+                .with_look(crate::composer::Look { size: px(15.), line_height: px(18.), ..kit::field_look() })
+                .keep_on_submit()
+        });
+        cx.subscribe_in(&name, window, |app, _, _: &SendText, window, cx| app.on_create_channel(crate::createchannel::Act::Submit, window, cx)).detach();
+        cx.subscribe_in(&name, window, |app, _, _: &CancelInput, window, cx| app.on_create_channel(crate::createchannel::Act::Close, window, cx)).detach();
+        cx.subscribe(&name, |app, _, _: &crate::composer::InputChanged, cx| {
+            if let Some(m) = app.create_channel.as_mut() {
+                m.error = None;
+            }
+            cx.notify();
+        })
+        .detach();
+        window.focus(&name.focus_handle(cx), cx);
+        self.create_channel = Some(crate::createchannel::CreateChannel { community, category, category_name, is_category, voice: false, private: false, name, busy: false, error: None });
+        cx.notify();
+    }
+
+    fn on_create_channel(&mut self, act: crate::createchannel::Act, window: &mut Window, cx: &mut Context<Self>) {
+        use crate::createchannel::Act;
+        let Some(m) = self.create_channel.as_mut() else { return };
+        match act {
+            Act::Close => self.create_channel = None,
+            Act::Private => m.private = !m.private,
+            Act::Voice(voice) => {
+                m.voice = voice;
+                let ph = crate::createchannel::placeholder(m.is_category, voice);
+                m.name.update(cx, |i, cx| i.set_placeholder(ph, cx));
+                window.focus(&m.name.focus_handle(cx), cx);
+            }
+            Act::Submit => {
+                if !m.valid(cx) || m.busy {
+                    return;
+                }
+                let name = m.name.read(cx).text().trim().to_string();
+                if !self.live {
+                    self.create_channel = None;
+                    cx.notify();
+                    return;
+                }
+                m.busy = true;
+                let (community, category, is_category, voice, private) = (m.community.clone(), m.category.clone(), m.is_category, m.voice, m.private);
+                let rx = backend::run(async move {
+                    if is_category {
+                        backend::community::create_category(community, name).await.map(|_| None)
+                    } else {
+                        backend::community::create_channel(community, name, private, category, voice).await.map(Some)
+                    }
+                });
+                cx.spawn_in(window, async move |this, cx| {
+                    let result = rx.await.unwrap_or_else(|_| Err("cancelled".into()));
+                    this.update_in(cx, |this, window, cx| {
+                        match result {
+                            Ok(channel) => {
+                                this.create_channel = None;
+                                this.reload_communities(cx);
+                                if let Some(ch) = channel.filter(|_| !voice) {
+                                    this.open_channel(ch, window, cx);
+                                }
+                            }
+                            Err(e) => {
+                                if let Some(m) = this.create_channel.as_mut() {
+                                    m.busy = false;
+                                    m.error = Some(e);
+                                }
+                            }
+                        }
+                        cx.notify();
+                    })
+                    .ok();
+                })
+                .detach();
+            }
+        }
+        cx.notify();
+    }
+
+    fn ask_leave_community(&mut self, id: String, name: String, owner: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let mut popup = kit::Popup::notice(if owner { "Delete this community?" } else { "Leave Community" });
+        popup.cancel = Some("Cancel".into());
+        if owner {
+            popup.text = Some(format!("This permanently ends \"<b>{name}</b>\" for everyone, including you. No new messages can be sent and no one can rejoin. People can still delete their own past messages. This cannot be undone.<br><br>Type the community name to confirm:").into());
+            let input = cx.new(|cx| TextInput::new(name.clone(), cx).with_look(kit::field_look()).keep_on_submit().submit_empty());
+            cx.subscribe_in(&input, window, |app, _, _: &SendText, window, cx| app.answer_popup(true, window, cx)).detach();
+            cx.subscribe_in(&input, window, |app, _, _: &CancelInput, window, cx| app.answer_popup(false, window, cx)).detach();
+            window.focus(&input.focus_handle(cx), cx);
+            popup.input = Some(input);
+        } else {
+            popup.text = Some(format!("Leave \"<b>{name}</b>\"? You'll need a new invite to rejoin.").into());
+        }
+        self.popup = Some((popup, PopupAct::LeaveCommunity { id, name, owner }));
         cx.notify();
     }
 

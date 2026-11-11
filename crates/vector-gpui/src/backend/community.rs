@@ -347,3 +347,86 @@ async fn ingest_list() {
     }
     realtime::refresh_subscription(&client).await;
 }
+
+// ── Lifecycle and layout ────────────────────────────────────────────────────
+
+fn channel_ids(community_id: &str) -> Vec<String> {
+    load(community_id).map(|c| c.channels.iter().map(|ch| bytes_to_hex_32(&ch.id.0)).collect()).unwrap_or_default()
+}
+
+async fn reregister(community_id: &str) {
+    if let Ok(c) = load(community_id) {
+        VectorCore.register_v2_chats(&c, &db::current_session()).await;
+    }
+    super::emit("communities_changed", ());
+}
+
+/// The new channel's id.
+pub async fn create_channel(community_id: String, name: String, private: bool, category_id: Option<String>, voice: bool) -> Result<String, String> {
+    db::scoped_result(async move {
+        let name = name.trim().to_string();
+        if name.is_empty() {
+            return Err("A channel needs a name".into());
+        }
+        let community = load(&community_id)?;
+        let transport = LiveTransport::with_timeout(Duration::from_secs(20));
+        let category = category_id.as_deref().map(id32).transpose()?;
+        let channel_id = vector_core::community::v2::service::create_channel_in(&transport, &community, &name, private, category).await?;
+        let hex = bytes_to_hex_32(&channel_id.0);
+        if voice {
+            VectorCore.edit_channel_details(&community_id, &hex, &name, None, "voice").await.map_err(|e| e.to_string())?;
+        }
+        reregister(&community_id).await;
+        Ok(hex)
+    })
+    .await
+}
+
+pub async fn create_category(community_id: String, name: String) -> Result<(), String> {
+    db::scoped(async move {
+        VectorCore.create_category(&community_id, name.trim()).await.map_err(|e| e.to_string())?;
+        reregister(&community_id).await;
+        Ok(())
+    })
+    .await
+}
+
+async fn teardown_local(id: &str, channels: &[String], relays: &[String]) {
+    let _ = db::community::delete_community_retain_keys(id);
+    if let Some(client) = vector_core::state::nostr_client() {
+        realtime::refresh_subscription(&client).await;
+    }
+    STATE.lock().await.chats.retain(|c| !channels.contains(&c.id));
+    for ch in channels {
+        let _ = db::chats::delete_chat(ch);
+    }
+    vector_core::community::transport::prune_unneeded_community_relays(relays).await;
+}
+
+/// Leave as a member, or dissolve it as its owner.
+pub async fn leave_or_delete(community_id: String, owner: bool) -> Result<(), String> {
+    db::scoped(async move {
+        let channels = channel_ids(&community_id);
+        let relays = load(&community_id).map(|c| c.relays).unwrap_or_default();
+        if owner {
+            if is_held(&community_id) && !db::community::get_community_dissolved(&community_id).unwrap_or(false) {
+                VectorCore.dissolve_community(&community_id).await.map_err(|e| e.to_string())?;
+            }
+        } else {
+            VectorCore.leave_community_now(&community_id).await.map_err(|e| e.to_string())?;
+        }
+        teardown_local(&community_id, &channels, &relays).await;
+        super::emit("communities_changed", ());
+        Ok(())
+    })
+    .await
+}
+
+/// Every channel read to its newest message.
+pub async fn mark_read(community_id: String) {
+    for ch in channel_ids(&community_id) {
+        super::messaging::mark_as_read(ch.clone(), None).await;
+        STATE.lock().await.unread_clear(&ch);
+    }
+    vector_core::emit_event("unread_counts_stale", &json!({ "chats": [] }));
+}

@@ -19,6 +19,11 @@ pub enum Act {
     /// A Category or member section folded or unfolded.
     Fold(String),
     Panel,
+    /// The Community's own menu, hung off its header.
+    HeadMenu,
+    ChannelMenu(String, gpui::Point<gpui::Pixels>),
+    /// A Category's "+": a new channel inside it.
+    AddChannel(String),
 }
 
 pub type OnAct = Rc<dyn Fn(Act, &mut Window, &mut App)>;
@@ -49,6 +54,7 @@ fn click(on: &OnAct, act: impl Fn() -> Act + 'static) -> impl Fn(&gpui::ClickEve
 pub fn rail_rows(store: &Store, active: Option<&str>, on: &OnAct) -> impl IntoElement {
     div().children(store.communities.iter().filter(|c| !c.dissolved).map(|com| {
         let open = active == Some(com.community_id.as_str());
+        let unread = !open && com.channels.iter().any(|ch| channel_unread(store, ch) > 0);
         let id = com.community_id.clone();
         div()
             .id(SharedString::from(format!("rail-c-{}", com.community_id)))
@@ -64,6 +70,7 @@ pub fn rail_rows(store: &Store, active: Option<&str>, on: &OnAct) -> impl IntoEl
             .hover(|d| d.bg(white_a(0.045)))
             .on_click(click(on, move || Act::Open(id.clone())))
             .when(open, |d| d.child(div().absolute().left(px(-8.)).top(px(3.)).w(px(4.)).h(px(25.)).rounded_r(px(4.)).bg(c(PRIMARY))))
+            .when(unread, |d| d.child(div().absolute().left(px(-8.)).top(px(10.5)).w(px(4.)).h(px(10.)).rounded_r(px(4.)).bg(c(ICON_MUTED))))
             .child(tile(26., 4.9))
             .child(div().flex_1().min_w_0().truncate().font_family(RUBIK).text_size(px(14.)).text_color(c(0xffffff)).child(com.name.clone()))
     }))
@@ -83,10 +90,15 @@ fn channel_glyph(ch: &Channel) -> &'static str {
     }
 }
 
-fn channel_row(ch: &Channel, open: bool, owner: bool, on: &OnAct) -> impl IntoElement {
+fn channel_unread(store: &Store, ch: &Channel) -> usize {
+    store.chat(&ch.channel_id).map(|chat| store.unread_count(chat)).unwrap_or(0)
+}
+
+fn channel_row(store: &Store, ch: &Channel, open: bool, owner: bool, on: &OnAct) -> impl IntoElement {
     let id = ch.channel_id.clone();
     let group = SharedString::from(format!("ch-{}", ch.channel_id));
-    let ink = if open { c(0xffffff) } else { white_a(0.55) };
+    let unread = !open && channel_unread(store, ch) > 0;
+    let ink = if open || unread { c(0xffffff) } else { white_a(0.55) };
     let action = |path: &'static str, shown: bool| {
         div()
             .size(px(18.))
@@ -114,8 +126,12 @@ fn channel_row(ch: &Channel, open: bool, owner: bool, on: &OnAct) -> impl IntoEl
         .when(open, |d| d.bg(white_a(0.09)))
         .when(!open, |d| d.hover(|d| d.bg(white_a(0.045)).text_color(c(0xffffff))))
         .on_click(click(on, move || Act::Channel(id.clone())))
+        .on_mouse_down(gpui::MouseButton::Right, {
+            let (on, id) = (on.clone(), ch.channel_id.clone());
+            move |e, w, cx| on(Act::ChannelMenu(id.clone(), e.position), w, cx)
+        })
         .child(icon(channel_glyph(ch), 18., ink))
-        .child(div().flex_1().min_w_0().truncate().text_size(px(15.)).line_height(px(24.)).child(ch.name.clone()))
+        .child(div().flex_1().min_w_0().truncate().text_size(px(15.)).line_height(px(24.)).when(unread, |d| d.font_weight(FontWeight::MEDIUM)).child(ch.name.clone()))
         .when(ch.is_voice(), |d| d.child(action("icons/chat-bubble.svg", false)))
         .when(!ch.is_voice() && owner, |d| d.gap(px(8.)).child(action("icons/add-user.svg", open)).child(action("icons/settings.svg", open)))
 }
@@ -133,6 +149,13 @@ pub fn sidebar(store: &Store, view: &View, com: &Community, open: Option<&str>, 
         .bg(c(0x171717))
         .border_b_1()
         .border_color(c(DIVIDER))
+        .cursor_pointer()
+        .hover(|d| d.bg(white_a(0.045)))
+        .on_click(click(on, || Act::HeadMenu))
+        .on_mouse_down(gpui::MouseButton::Right, {
+            let on = on.clone();
+            move |_, w, cx| on(Act::HeadMenu, w, cx)
+        })
         .child(tile(36., 11.))
         .child(
             div()
@@ -163,7 +186,7 @@ pub fn sidebar(store: &Store, view: &View, com: &Community, open: Option<&str>, 
     let loose: Vec<&Channel> = com.channels.iter().filter(|ch| ch.category_id.is_none()).collect();
     let mut sections = Vec::new();
     if !loose.is_empty() {
-        sections.push(div().pt(px(10.)).pb(px(2.)).flex().flex_col().gap(px(2.)).children(loose.iter().map(|ch| channel_row(ch, open == Some(ch.channel_id.as_str()), owner, on))).into_any_element());
+        sections.push(div().pt(px(10.)).pb(px(2.)).flex().flex_col().gap(px(2.)).children(loose.iter().map(|ch| channel_row(store, ch, open == Some(ch.channel_id.as_str()), owner, on))).into_any_element());
     }
     for cat in &com.categories {
         let inside: Vec<&Channel> = com.channels.iter().filter(|ch| ch.category_id.as_deref() == Some(cat.category_id.as_str())).collect();
@@ -199,16 +222,30 @@ pub fn sidebar(store: &Store, view: &View, com: &Community, open: Option<&str>, 
                             .child(icon("icons/chevron-down.svg", 11.7, white_a(0.38)).when(closed, |s| s.with_transformation(gpui::Transformation::rotate(gpui::radians(-std::f32::consts::FRAC_PI_2))))),
                     ),
             )
-            .when(owner, |d| d.child(div().size(px(22.)).rounded(px(6.)).flex().items_center().justify_center().hover(|d| d.bg(white_a(0.045))).child(icon("icons/plus.svg", 14.3, white_a(0.38)))));
+            .when(owner, |d| {
+                let key = cat.category_id.clone();
+                d.child(
+                    div()
+                        .id(SharedString::from(format!("cat-add-{}", cat.category_id)))
+                        .size(px(22.))
+                        .rounded(px(6.))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .cursor_pointer()
+                        .hover(|d| d.bg(white_a(0.045)))
+                        .on_click(click(on, move || Act::AddChannel(key.clone())))
+                        .child(icon("icons/plus.svg", 14.3, white_a(0.38))),
+                )
+            });
         sections.push(
             div()
                 .when(!sections.is_empty(), |d| d.mt(px(14.)))
                 .child(head)
-                .when(!closed, |d| d.child(div().pb(px(2.)).flex().flex_col().gap(px(2.)).children(inside.iter().map(|ch| channel_row(ch, open == Some(ch.channel_id.as_str()), owner, on)))))
+                .when(!closed, |d| d.child(div().pb(px(2.)).flex().flex_col().gap(px(2.)).children(inside.iter().map(|ch| channel_row(store, ch, open == Some(ch.channel_id.as_str()), owner, on)))))
                 .into_any_element(),
         );
     }
-    let _ = store;
     div()
         .w(px(crate::ui::LIST_W))
         .flex_shrink_0()
