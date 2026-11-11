@@ -2053,7 +2053,7 @@ impl VectorCore {
         expires_at_ms: Option<u64>,
         label: Option<String>,
     ) -> Result<String> {
-        use crate::community::{transport::LiveTransport, CommunityId};
+        use crate::community::CommunityId;
         if community_id.len() != 64 {
             return Err(VectorError::Other("malformed community id".into()));
         }
@@ -2061,14 +2061,12 @@ impl VectorCore {
         let community = crate::db::community::load_community_v2(&cid)
             .map_err(VectorError::Other)?
             .ok_or_else(|| VectorError::Other("v2 community not found".into()))?;
-        let transport = LiveTransport::with_timeout(std::time::Duration::from_secs(12));
         // `build_invite_url` appends its own `/invite/<naddr>`, so pass the bare domain.
         let base = crate::community::v2::invite::INVITE_URL_BASE.trim_end_matches("/invite");
         let label = Some(crate::community::v2::invite::resolve_invite_label(community_id, label).map_err(VectorError::Other)?);
-        let minted =
-            crate::community::v2::service::mint_public_link(&transport, &community, base, expires_at_ms, label)
-                .await
-                .map_err(VectorError::Other)?;
+        let minted = crate::community::v2::service::mint_public_link_sync_later(&community, base, expires_at_ms, label)
+            .await
+            .map_err(VectorError::Other)?;
         Ok(minted.url)
     }
 

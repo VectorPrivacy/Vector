@@ -1281,6 +1281,7 @@ pub async fn send_direct_invite<T: Transport + ?Sized>(
 /// A minted public link: the shareable URL plus the addressable bundle event to
 /// publish and the link keypair to retain (in the Invite List) for later refresh
 /// or revocation.
+#[derive(Clone)]
 pub struct MintedLink {
     pub url: String,
     pub bundle_event: Event,
@@ -1307,6 +1308,50 @@ pub async fn mint_public_link<T: Transport + ?Sized>(
     label: Option<String>,
 ) -> Result<MintedLink, String> {
     crate::db::scoped(async move {
+        let minted = publish_public_link(transport, community, base, expires_at_ms, label).await?;
+        // Best-effort: the link works without the sync.
+        let _ = record_minted_link(transport, community, &minted).await;
+        Ok(minted)
+    })
+    .await
+}
+
+/// [`mint_public_link`] for a caller waiting to show the link: it returns once the bundle is
+/// durable, and the cross-device record finishes on a task bound to this account.
+pub async fn mint_public_link_sync_later(
+    community: &CommunityV2,
+    base: &str,
+    expires_at_ms: Option<u64>,
+    label: Option<String>,
+) -> Result<MintedLink, String> {
+    crate::db::scoped(async move {
+        let transport = crate::community::transport::LiveTransport::with_timeout(std::time::Duration::from_secs(12));
+        let minted = publish_public_link(&transport, community, base, expires_at_ms, label).await?;
+        if !crate::rt::can_spawn() {
+            let _ = record_minted_link(&transport, community, &minted).await;
+            return Ok(minted);
+        }
+        let (community, record) = (community.clone(), minted.clone());
+        crate::db::spawn_bound(async move {
+            if let Err(e) = record_minted_link(&transport, &community, &record).await {
+                crate::log_warn!("[Invites] syncing a new link across devices failed: {e}");
+            }
+        });
+        Ok(minted)
+    })
+    .await
+}
+
+/// Mint and publish a link's bundle, and mirror it locally; the Invite List and Registry are
+/// [`record_minted_link`]'s.
+async fn publish_public_link<T: Transport + ?Sized>(
+    transport: &T,
+    community: &CommunityV2,
+    base: &str,
+    expires_at_ms: Option<u64>,
+    label: Option<String>,
+) -> Result<MintedLink, String> {
+    crate::db::scoped(async move {
         // Readers ignore a registry whose author lacks CREATE_INVITE (it can't even
         // flip the community Public) — refuse before minting a link nobody honors.
         ensure_folded_permission(community, &me_pk()?, crate::community::roles::Permissions::CREATE_INVITE, "minting a public invite link")?;
@@ -1320,22 +1365,21 @@ pub async fn mint_public_link<T: Transport + ?Sized>(
         let url = invite::build_invite_url(base, &link_signer.public_key(), &token, &community.relays).map_err(|e| e.to_string())?;
         let minted = MintedLink { url, bundle_event, link_signer, token, expires_at_ms, label: label.clone() };
         // A link the Invite List can't sync is one no other device can retire: refuse it up front.
-        if let Some(mut list) = fetch_invite_list(transport, &invite_list_relays(community).await).await? {
-            list.prune_expired(now_ms());
-            list.entries.push(link_entry(community, &minted));
-            if !list.fits() {
-                return Err("Too many invite links to sync: revoke some, or let them expire, first".into());
+        {
+            let gate = invite_list_gate();
+            let _held = gate.lock().await;
+            if let Some(mut list) = fetch_invite_list(transport, &invite_list_relays(community).await).await? {
+                list.prune_expired(now_ms());
+                list.entries.push(link_entry(community, &minted));
+                if !list.fits() {
+                    return Err("Too many invite links to sync: revoke some, or let them expire, first".into());
+                }
             }
         }
 
         transport.publish_durable(&minted.bundle_event, &community.relays).await?;
-        // Sync the link across the creator's devices (13303) + publish the Registry
-        // (vsk-8) so members see the community is Public. Best-effort — the link works
-        // without the sync.
-        let _ = record_minted_link(transport, community, &minted).await;
         // Local mirror so `list_public_invites` stays a sync local read;
-        // the 13303 list remains the cross-device record. Re-check the session: the
-        // publishes above straddled awaits, and this write must not land account A's
+        // the 13303 list remains the cross-device record.
         let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
         let token_hex = crate::simd::hex::bytes_to_hex_16(&minted.token);
         let _ = crate::db::community::save_public_invite(&token_hex, &cid_hex, &minted.url, expires_at_ms.map(|e| e as i64), label.as_deref());
@@ -1488,10 +1532,20 @@ fn link_entry(community: &CommunityV2, minted: &MintedLink) -> invite::InviteEnt
     }
 }
 
+struct InviteListWrite;
+
+/// Held across each Invite List read-modify-publish: the 13303 is replaceable, so two at once
+/// drop one's change, and a revoke must see a link whose record is still in flight.
+fn invite_list_gate() -> std::sync::Arc<tokio::sync::Mutex<()>> {
+    crate::db::current_session().scoped::<InviteListWrite, _>()
+}
+
 /// Record a freshly-minted public link across the creator's devices: append it to the
 /// 13303 Invite List and refresh the Registry (CORD-05 §4/§5).
 async fn record_minted_link<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, minted: &MintedLink) -> Result<(), String> {
     crate::db::scoped(async move {
+        let gate = invite_list_gate();
+        let _held = gate.lock().await;
         let session = crate::db::current_session();
         let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
         let token_hex = crate::simd::hex::bytes_to_hex_16(&minted.token);
@@ -1518,6 +1572,8 @@ async fn record_minted_link<T: Transport + ?Sized>(transport: &T, community: &Co
 /// the owner's separate read-cut).
 pub async fn revoke_public_link<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, token_hex: &str) -> Result<(), String> {
     crate::db::scoped(async move {
+        let gate = invite_list_gate();
+        let held = gate.lock().await;
         let session = crate::db::current_session();
         let my_pk = me_pk()?;
         let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
@@ -1580,6 +1636,8 @@ pub async fn revoke_public_link<T: Transport + ?Sized>(transport: &T, community:
         };
         publish_invite_registry(transport, community, &session, &signers).await?;
         let _ = crate::db::community::delete_public_invite(token_hex);
+        // Released before the Refounding, which severs links under this same gate.
+        drop(held);
         // CORD-06 §3: converting a Public Community to Private is a Refounding
         // trigger. Revoking only stops NEW acquisitions — everyone who already
         // fetched the bundle keeps the `community_root` until it rolls, so without
@@ -1712,6 +1770,8 @@ async fn sever_own_links<T: Transport + ?Sized>(
         if !maybe_mine {
             return Ok(0);
         }
+        let gate = invite_list_gate();
+        let _held = gate.lock().await;
         let Some((mut list, newest)) = read_invite_list(transport, &invite_list_relays(community).await).await?.map(|(l, n)| (l, Some(n))) else {
             return Ok(0); // no list ever published — nothing of mine exists.
         };
