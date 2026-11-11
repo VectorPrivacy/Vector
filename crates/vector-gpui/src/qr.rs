@@ -20,7 +20,11 @@ const LOGO_PATHS: &str = concat!(
 
 /// JS number formatting for the path data: integers bare, fractions as they come.
 fn n(v: f64) -> String {
-    if v.fract() == 0. { format!("{}", v as i64) } else { format!("{}", v) }
+    if v.fract() == 0. {
+        format!("{}", v as i64)
+    } else {
+        format!("{}", v)
+    }
 }
 
 fn rounded_square(x: f64, y: f64, w: f64, r: f64) -> String {
@@ -67,7 +71,17 @@ fn shield_hit(lx: f64, ly: f64, m: f64) -> bool {
 /// own scoring picks, so both clients draw the same pattern.
 fn encode(text: &str) -> Option<QrCode> {
     let segs = [QrSegment::make_bytes(text.as_bytes())];
-    let make = |m: u8| QrCode::encode_segments_advanced(&segs, QrCodeEcc::Quartile, Version::MIN, Version::MAX, Some(Mask::new(m)), false).ok();
+    let make = |m: u8| {
+        QrCode::encode_segments_advanced(
+            &segs,
+            QrCodeEcc::Quartile,
+            Version::MIN,
+            Version::MAX,
+            Some(Mask::new(m)),
+            false,
+        )
+        .ok()
+    };
     let mut best: Option<(f64, QrCode)> = None;
     for m in 0..8 {
         let qr = make(m)?;
@@ -82,11 +96,25 @@ fn encode(text: &str) -> Option<QrCode> {
 /// qrcode-generator's `getLostPoint`, scored as it scores: format and version modules light.
 fn lost_point(qr: &QrCode) -> f64 {
     let n = qr.size() as usize;
-    let mut g: Vec<Vec<bool>> = (0..n).map(|r| (0..n).map(|c| qr.get_module(c as i32, r as i32)).collect()).collect();
+    let mut g: Vec<Vec<bool>> = (0..n)
+        .map(|r| (0..n).map(|c| qr.get_module(c as i32, r as i32)).collect())
+        .collect();
     for i in 0..15 {
-        let row = if i < 6 { i } else if i < 8 { i + 1 } else { n - 15 + i };
+        let row = if i < 6 {
+            i
+        } else if i < 8 {
+            i + 1
+        } else {
+            n - 15 + i
+        };
         g[row][8] = false;
-        let col = if i < 8 { n - i - 1 } else if i < 9 { 7 } else { 15 - i - 1 };
+        let col = if i < 8 {
+            n - i - 1
+        } else if i < 9 {
+            7
+        } else {
+            15 - i - 1
+        };
         g[8][col] = false;
     }
     g[n - 8][8] = false;
@@ -119,7 +147,15 @@ fn lost_point(qr: &QrCode) -> f64 {
     }
     for row in 0..n - 1 {
         for col in 0..n - 1 {
-            let count = [d(row, col), d(row + 1, col), d(row, col + 1), d(row + 1, col + 1)].iter().filter(|&&x| x).count();
+            let count = [
+                d(row, col),
+                d(row + 1, col),
+                d(row, col + 1),
+                d(row + 1, col + 1),
+            ]
+            .iter()
+            .filter(|&&x| x)
+            .count();
             if count == 0 || count == 4 {
                 lost += 3.;
             }
@@ -152,7 +188,9 @@ pub fn svg(text: &str) -> Option<String> {
     let s = 4.;
     let r = s * 0.375;
     let size = count as f64 * s;
-    let finder = |row: i32, col: i32| (row < 7 && col < 7) || (row < 7 && col >= count - 7) || (row >= count - 7 && col < 7);
+    let finder = |row: i32, col: i32| {
+        (row < 7 && col < 7) || (row < 7 && col >= count - 7) || (row >= count - 7 && col < 7)
+    };
     let logo_h = size * 0.28;
     let k = logo_h / LOGO_H;
     let tx = (size - LOGO_W * k) / 2.;
@@ -160,9 +198,24 @@ pub fn svg(text: &str) -> Option<String> {
     let margin = (0.75 * s) / k;
     let holed = |row: i32, col: i32| {
         let (x, y) = (col as f64 * s, row as f64 * s);
-        [(x, y), (x + s, y), (x, y + s), (x + s, y + s), (x + s / 2., y + s / 2.)].iter().any(|&(px, py)| shield_hit((px - tx) / k, (py - ty) / k, margin))
+        [
+            (x, y),
+            (x + s, y),
+            (x, y + s),
+            (x + s, y + s),
+            (x + s / 2., y + s / 2.),
+        ]
+        .iter()
+        .any(|&(px, py)| shield_hit((px - tx) / k, (py - ty) / k, margin))
     };
-    let dark = |row: i32, col: i32| row >= 0 && col >= 0 && row < count && col < count && qr.get_module(col, row) && !holed(row, col);
+    let dark = |row: i32, col: i32| {
+        row >= 0
+            && col >= 0
+            && row < count
+            && col < count
+            && qr.get_module(col, row)
+            && !holed(row, col)
+    };
 
     let mut d = String::new();
     for row in 0..count {
@@ -171,7 +224,12 @@ pub fn svg(text: &str) -> Option<String> {
                 continue;
             }
             let (x, y) = (col as f64 * s, row as f64 * s);
-            let (top, bottom, left, right) = (dark(row - 1, col), dark(row + 1, col), dark(row, col - 1), dark(row, col + 1));
+            let (top, bottom, left, right) = (
+                dark(row - 1, col),
+                dark(row + 1, col),
+                dark(row, col - 1),
+                dark(row, col + 1),
+            );
             if dark(row, col) {
                 let tl = if !top && !left { r } else { 0. };
                 let tr = if !top && !right { r } else { 0. };
@@ -197,16 +255,56 @@ pub fn svg(text: &str) -> Option<String> {
             } else {
                 // Fillets only at true inner corners: diagonal-only welds read as noise.
                 if top && left && dark(row - 1, col - 1) {
-                    let _ = write!(d, "M{},{}L{},{}A{r},{r} 0 0 0 {},{}z", n(x), n(y), n(x + r), n(y), n(x), n(y + r), r = n(r));
+                    let _ = write!(
+                        d,
+                        "M{},{}L{},{}A{r},{r} 0 0 0 {},{}z",
+                        n(x),
+                        n(y),
+                        n(x + r),
+                        n(y),
+                        n(x),
+                        n(y + r),
+                        r = n(r)
+                    );
                 }
                 if top && right && dark(row - 1, col + 1) {
-                    let _ = write!(d, "M{},{}L{},{}A{r},{r} 0 0 0 {},{}z", n(x + s), n(y), n(x + s), n(y + r), n(x + s - r), n(y), r = n(r));
+                    let _ = write!(
+                        d,
+                        "M{},{}L{},{}A{r},{r} 0 0 0 {},{}z",
+                        n(x + s),
+                        n(y),
+                        n(x + s),
+                        n(y + r),
+                        n(x + s - r),
+                        n(y),
+                        r = n(r)
+                    );
                 }
                 if bottom && right && dark(row + 1, col + 1) {
-                    let _ = write!(d, "M{},{}L{},{}A{r},{r} 0 0 0 {},{}z", n(x + s), n(y + s), n(x + s - r), n(y + s), n(x + s), n(y + s - r), r = n(r));
+                    let _ = write!(
+                        d,
+                        "M{},{}L{},{}A{r},{r} 0 0 0 {},{}z",
+                        n(x + s),
+                        n(y + s),
+                        n(x + s - r),
+                        n(y + s),
+                        n(x + s),
+                        n(y + s - r),
+                        r = n(r)
+                    );
                 }
                 if bottom && left && dark(row + 1, col - 1) {
-                    let _ = write!(d, "M{},{}L{},{}A{r},{r} 0 0 0 {},{}z", n(x), n(y + s), n(x), n(y + s - r), n(x + r), n(y + s), r = n(r));
+                    let _ = write!(
+                        d,
+                        "M{},{}L{},{}A{r},{r} 0 0 0 {},{}z",
+                        n(x),
+                        n(y + s),
+                        n(x),
+                        n(y + s - r),
+                        n(x + r),
+                        n(y + s),
+                        r = n(r)
+                    );
                 }
             }
         }

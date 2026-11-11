@@ -21,7 +21,12 @@ pub fn init(dir: Option<PathBuf>) {
 
 pub fn get(key: &str) -> Option<String> {
     let guard = STORE.lock().unwrap();
-    guard.as_ref()?.1.get(key).and_then(|v| v.as_str()).map(String::from)
+    guard
+        .as_ref()?
+        .1
+        .get(key)
+        .and_then(|v| v.as_str())
+        .map(String::from)
 }
 
 pub fn set(key: &str, value: impl Into<String>) {

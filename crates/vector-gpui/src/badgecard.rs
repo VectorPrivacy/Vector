@@ -3,8 +3,8 @@
 
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, App, FontWeight, HighlightStyle, MouseButton, Pixels, Point, SharedString, StyledText, Window, div,
-    linear_color_stop, linear_gradient, point, px, svg,
+    AnyElement, App, FontWeight, HighlightStyle, MouseButton, Pixels, Point, SharedString,
+    StyledText, Window, div, linear_color_stop, linear_gradient, point, px, svg,
 };
 
 use crate::backend::badges::Badges;
@@ -36,13 +36,31 @@ pub struct Card {
 impl Card {
     pub fn of(which: Badge, b: Badges) -> Self {
         let p = |s: &str| (s.to_string(), Run::Plain);
-        let (svg, title, subtitle, desc, tier, access): (String, _, _, Vec<(Vec<(String, Run)>, f32)>, _, _) = match which {
+        let (svg, title, subtitle, desc, tier, access): (
+            String,
+            _,
+            _,
+            Vec<(Vec<(String, Run)>, f32)>,
+            _,
+            _,
+        ) = match which {
             Badge::Inviter => (
                 "icons/vector_badge_placeholder.svg".into(),
                 "Vector Beta Inviter",
                 None,
                 vec![(
-                    vec![p("Acquired by inviting "), (format!("{} {}", b.invites, if b.invites == 1 { "user" } else { "users" }), Run::Bold), p(" to the Vector Beta!")],
+                    vec![
+                        p("Acquired by inviting "),
+                        (
+                            format!(
+                                "{} {}",
+                                b.invites,
+                                if b.invites == 1 { "user" } else { "users" }
+                            ),
+                            Run::Bold,
+                        ),
+                        p(" to the Vector Beta!"),
+                    ],
                     0.,
                 )],
                 None,
@@ -53,8 +71,19 @@ impl Card {
                 "V for Vector Badge",
                 None,
                 vec![
-                    (vec![p("Acquired by logging in on Guy Fawkes Day\u{a0}(November 5, 2025).")], 21.),
-                    (vec![("Remember, remember the 5th of November...".into(), Run::Aside)], 0.),
+                    (
+                        vec![p(
+                            "Acquired by logging in on Guy Fawkes Day\u{a0}(November 5, 2025).",
+                        )],
+                        21.,
+                    ),
+                    (
+                        vec![(
+                            "Remember, remember the 5th of November...".into(),
+                            Run::Aside,
+                        )],
+                        0.,
+                    ),
                 ],
                 None,
                 "Full Premium Access",
@@ -63,23 +92,51 @@ impl Card {
                 format!("icons/bughunter_{}.svg", b.bug.clamp(1, 3)),
                 "Bug Hunter",
                 Some(format!("Tier {}", b.bug)),
-                vec![(vec![p("Bug Hunter badges are one of the most prestigious awards to true contributors of Vector who have identified and reported bugs or issues.")], 0.)],
+                vec![(
+                    vec![p(
+                        "Bug Hunter badges are one of the most prestigious awards to true contributors of Vector who have identified and reported bugs or issues.",
+                    )],
+                    0.,
+                )],
                 Some(b.bug),
-                if b.bug >= 3 { "Full Premium Access" } else { "Partial Premium Access" },
+                if b.bug >= 3 {
+                    "Full Premium Access"
+                } else {
+                    "Partial Premium Access"
+                },
             ),
             Badge::V2026 => (
                 "icons/vforvector2026.svg".into(),
                 "V for Vector Badge",
                 Some("2026 Edition".into()),
                 vec![
-                    (vec![p("Remember, Remember... the\u{a0}Fifth\u{a0}of\u{a0}November.")], 10.),
-                    (vec![p("\u{201c}People should not be afraid of their governments. Governments should be afraid of their people.\u{201d}")], 0.),
+                    (
+                        vec![p(
+                            "Remember, Remember... the\u{a0}Fifth\u{a0}of\u{a0}November.",
+                        )],
+                        10.,
+                    ),
+                    (
+                        vec![p(
+                            "\u{201c}People should not be afraid of their governments. Governments should be afraid of their people.\u{201d}",
+                        )],
+                        0.,
+                    ),
                 ],
                 None,
                 "Partial Premium Access",
             ),
         };
-        Self { svg: svg.into(), title, subtitle, desc, tier, access, tilt: Point::default(), opened: std::time::Instant::now() }
+        Self {
+            svg: svg.into(),
+            title,
+            subtitle,
+            desc,
+            tier,
+            access,
+            tilt: Point::default(),
+            opened: std::time::Instant::now(),
+        }
     }
 }
 
@@ -92,15 +149,28 @@ fn paragraph(runs: &[(String, Run)]) -> AnyElement {
         text.push_str(t);
         match kind {
             Run::Plain => {}
-            Run::Bold => highlights.push((start..text.len(), HighlightStyle { font_weight: Some(FontWeight::BOLD), color: Some(c(0xf6f6f6)), ..Default::default() })),
+            Run::Bold => highlights.push((
+                start..text.len(),
+                HighlightStyle {
+                    font_weight: Some(FontWeight::BOLD),
+                    color: Some(c(0xf6f6f6)),
+                    ..Default::default()
+                },
+            )),
             Run::Aside => aside = true,
         }
     }
     let line = div().w_full().text_center();
     if aside {
-        return line.text_size(px(13.)).italic().opacity(0.5).child(text).into_any_element();
+        return line
+            .text_size(px(13.))
+            .italic()
+            .opacity(0.5)
+            .child(text)
+            .into_any_element();
     }
-    line.child(StyledText::new(text).with_highlights(highlights)).into_any_element()
+    line.child(StyledText::new(text).with_highlights(highlights))
+        .into_any_element()
 }
 
 pub enum Ev {
@@ -109,7 +179,12 @@ pub enum Ev {
     Leave,
 }
 
-pub fn view(card: &Card, window: &Window, cx: &App, on: impl Fn(Ev, &mut Window, &mut App) + Clone + 'static) -> AnyElement {
+pub fn view(
+    card: &Card,
+    window: &Window,
+    cx: &App,
+    on: impl Fn(Ev, &mut Window, &mut App) + Clone + 'static,
+) -> AnyElement {
     // Layer heights above the card (`translateZ`), as drift per unit of tilt.
     let drift = |z: f32| point(px(card.tilt.x * z * 0.12), px(card.tilt.y * z * 0.12));
     let shift = |d: gpui::Div, z: f32| {
@@ -119,14 +194,37 @@ pub fn view(card: &Card, window: &Window, cx: &App, on: impl Fn(Ev, &mut Window,
     let t = (card.opened.elapsed().as_secs_f32() / 0.42).min(1.);
     let ease = 1. - (1. - t).powi(3);
     let tiers = card.tier.map(|held| {
-        let mut row = div().mt(px(18.)).flex().items_center().justify_center().gap(px(8.));
+        let mut row = div()
+            .mt(px(18.))
+            .flex()
+            .items_center()
+            .justify_center()
+            .gap(px(8.));
         for n in 1..=3u8 {
             let filled = n <= held;
             row = row.child(
-                div().size(px(40.)).flex_shrink_0().when(!filled, |d| d.opacity(0.35)).child(crate::kit::sharp_svg(format!("icons/bughunter_{n}.svg"), 40., window, cx).grayscale(!filled)),
+                div()
+                    .size(px(40.))
+                    .flex_shrink_0()
+                    .when(!filled, |d| d.opacity(0.35))
+                    .child(
+                        crate::kit::sharp_svg(format!("icons/bughunter_{n}.svg"), 40., window, cx)
+                            .grayscale(!filled),
+                    ),
             );
             if n < 3 {
-                row = row.child(div().w(px(20.)).h(px(3.)).rounded(px(2.)).flex_shrink_0().bg(if held >= n + 1 { c(ACCENT) } else { white_a(0.15) }));
+                row = row.child(
+                    div()
+                        .w(px(20.))
+                        .h(px(3.))
+                        .rounded(px(2.))
+                        .flex_shrink_0()
+                        .bg(if held >= n + 1 {
+                            c(ACCENT)
+                        } else {
+                            white_a(0.15)
+                        }),
+                );
             }
         }
         shift(row, 12.)
@@ -143,7 +241,13 @@ pub fn view(card: &Card, window: &Window, cx: &App, on: impl Fn(Ev, &mut Window,
                 .text_size(px(15.))
                 .line_height(px(16.))
                 .font_weight(FontWeight::MEDIUM)
-                .child(svg().path("ui/award.svg").size(px(16.)).flex_shrink_0().text_color(c(ACCENT)))
+                .child(
+                    svg()
+                        .path("ui/award.svg")
+                        .size(px(16.))
+                        .flex_shrink_0()
+                        .text_color(c(ACCENT)),
+                )
                 .child(card.access),
             14.,
         )
@@ -189,8 +293,18 @@ pub fn view(card: &Card, window: &Window, cx: &App, on: impl Fn(Ev, &mut Window,
                 .overflow_hidden()
                 .border_1()
                 .border_color(c(0x393b3c))
-                .bg(linear_gradient(160., linear_color_stop(c(0x171717), 0.), linear_color_stop(c(0x16181a), 1.)))
-                .shadow(vec![gpui::BoxShadow { color: gpui::black().opacity(0.6), offset: point(px(0.), px(24.)), blur_radius: px(70.), spread_radius: px(0.), inset: false }])
+                .bg(linear_gradient(
+                    160.,
+                    linear_color_stop(c(0x171717), 0.),
+                    linear_color_stop(c(0x16181a), 1.),
+                ))
+                .shadow(vec![gpui::BoxShadow {
+                    color: gpui::black().opacity(0.6),
+                    offset: point(px(0.), px(24.)),
+                    blur_radius: px(70.),
+                    spread_radius: px(0.),
+                    inset: false,
+                }])
                 .opacity(ease)
                 .top(px(10. * (1. - ease)))
                 .font_family(INTER)
@@ -205,13 +319,46 @@ pub fn view(card: &Card, window: &Window, cx: &App, on: impl Fn(Ev, &mut Window,
                     }
                 })
                 .child(glare)
-                .child(shift(div().flex().justify_center().mb(px(18.)), 46.).child(crate::kit::sharp_svg(card.svg.clone(), 172., window, cx)))
-                .child(shift(div().w_full().text_center().font_weight(FontWeight::BOLD).text_size(px(20.)).line_height(px(24.)).text_color(c(0xffffff)).mb(px(10.)), 26.).child(card.title))
+                .child(
+                    shift(div().flex().justify_center().mb(px(18.)), 46.)
+                        .child(crate::kit::sharp_svg(card.svg.clone(), 172., window, cx)),
+                )
+                .child(
+                    shift(
+                        div()
+                            .w_full()
+                            .text_center()
+                            .font_weight(FontWeight::BOLD)
+                            .text_size(px(20.))
+                            .line_height(px(24.))
+                            .text_color(c(0xffffff))
+                            .mb(px(10.)),
+                        26.,
+                    )
+                    .child(card.title),
+                )
                 .children(card.subtitle.clone().map(|s| {
-                    shift(div().w_full().mt(px(-4.)).mb(px(12.)).flex().justify_center().text_size(px(13.)).line_height(px(24.)).text_color(c(0x8a8a8a)), 22.)
-                        .child(crate::kit::spaced(&s, 0.78))
+                    shift(
+                        div()
+                            .w_full()
+                            .mt(px(-4.))
+                            .mb(px(12.))
+                            .flex()
+                            .justify_center()
+                            .text_size(px(13.))
+                            .line_height(px(24.))
+                            .text_color(c(0x8a8a8a)),
+                        22.,
+                    )
+                    .child(crate::kit::spaced(&s, 0.78))
                 }))
-                .child(shift(div().w_full().flex().flex_col(), 14.).children(card.desc.iter().map(|(runs, gap)| div().mb(px(*gap)).child(paragraph(runs)))))
+                .child(
+                    shift(div().w_full().flex().flex_col(), 14.).children(
+                        card.desc
+                            .iter()
+                            .map(|(runs, gap)| div().mb(px(*gap)).child(paragraph(runs))),
+                    ),
+                )
                 .children(tiers)
                 .children(access),
         )

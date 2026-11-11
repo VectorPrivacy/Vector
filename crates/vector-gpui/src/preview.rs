@@ -9,8 +9,42 @@ use crate::emoji;
 use crate::inline::{Atom, Kind, Look};
 
 const KNOWN_TAGS: &[&str] = &[
-    "a", "abbr", "b", "blockquote", "br", "code", "del", "details", "div", "em", "h1", "h2", "h3", "h4", "h5", "h6", "hr", "i",
-    "li", "ol", "p", "pre", "s", "span", "strong", "sub", "summary", "sup", "table", "tbody", "td", "th", "thead", "tr", "u", "ul",
+    "a",
+    "abbr",
+    "b",
+    "blockquote",
+    "br",
+    "code",
+    "del",
+    "details",
+    "div",
+    "em",
+    "h1",
+    "h2",
+    "h3",
+    "h4",
+    "h5",
+    "h6",
+    "hr",
+    "i",
+    "li",
+    "ol",
+    "p",
+    "pre",
+    "s",
+    "span",
+    "strong",
+    "sub",
+    "summary",
+    "sup",
+    "table",
+    "tbody",
+    "td",
+    "th",
+    "thead",
+    "tr",
+    "u",
+    "ul",
 ];
 
 /// `<br>` to a space, known tags stripped, unknown angle text kept.
@@ -21,7 +55,10 @@ fn strip_tags(s: &str) -> String {
         out.push_str(&rest[..i]);
         let after = &rest[i + 1..];
         let name_start = after.strip_prefix('/').unwrap_or(after);
-        let name: String = name_start.chars().take_while(|c| c.is_ascii_alphanumeric()).collect();
+        let name: String = name_start
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric())
+            .collect();
         let known = KNOWN_TAGS.contains(&name.to_ascii_lowercase().as_str());
         match after.find('>') {
             Some(j) if known => {
@@ -91,7 +128,11 @@ pub fn plain(content: &str) -> String {
         out.push_str(p);
     }
     let collapsed = out.split_whitespace().collect::<Vec<_>>().join(" ");
-    if collapsed.is_empty() && ruled { "Divider".into() } else { collapsed }
+    if collapsed.is_empty() && ruled {
+        "Divider".into()
+    } else {
+        collapsed
+    }
 }
 
 /// "Rust Codeblock" for a fence's language, else "Codeblock".
@@ -121,7 +162,11 @@ fn codeblock_label(lang: &str) -> String {
         "diff" => "Diff",
         _ => "",
     };
-    if name.is_empty() { "Codeblock".into() } else { format!("{name} Codeblock") }
+    if name.is_empty() {
+        "Codeblock".into()
+    } else {
+        format!("{name} Codeblock")
+    }
 }
 
 /// `truncateEmojiAware`: at most `max` graphemes, a `:shortcode:` priced as two.
@@ -170,7 +215,10 @@ pub fn atoms(content: &str, max: usize, look: &Look) -> Vec<Atom> {
         .split('\n')
         .map(|l| {
             let h = l.chars().take_while(|&c| c == '#').count();
-            if (1..=6).contains(&h) && l[h..].starts_with(char::is_whitespace) && !l[h..].trim().is_empty() {
+            if (1..=6).contains(&h)
+                && l[h..].starts_with(char::is_whitespace)
+                && !l[h..].trim().is_empty()
+            {
                 format!("**{}**", l[h..].trim())
             } else {
                 l.to_string()
@@ -179,11 +227,20 @@ pub fn atoms(content: &str, max: usize, look: &Look) -> Vec<Atom> {
         .collect::<Vec<_>>()
         .join("\n");
     let flat = plain(&demoted);
-    let text = if max == usize::MAX { flat } else { balance(truncate(&flat, max)) };
+    let text = if max == usize::MAX {
+        flat
+    } else {
+        balance(truncate(&flat, max))
+    };
     let mut out = Vec::new();
     let (mut bold, mut italic, mut strike, mut spoiler) = (false, false, false, false);
     let mut buf = String::new();
-    let flush = |buf: &mut String, out: &mut Vec<Atom>, bold: bool, italic: bool, strike: bool, spoiler: bool| {
+    let flush = |buf: &mut String,
+                 out: &mut Vec<Atom>,
+                 bold: bool,
+                 italic: bool,
+                 strike: bool,
+                 spoiler: bool| {
         if buf.is_empty() {
             return;
         }
@@ -193,19 +250,38 @@ pub fn atoms(content: &str, max: usize, look: &Look) -> Vec<Atom> {
         }
         l.italic = italic;
         l.strike = strike;
-        let kind = if spoiler { Kind::Spoiler { id: u32::MAX, revealed: false } } else { Kind::Plain };
+        let kind = if spoiler {
+            Kind::Spoiler {
+                id: u32::MAX,
+                revealed: false,
+            }
+        } else {
+            Kind::Plain
+        };
         let mut start = 0;
         for (i, g) in buf.grapheme_indices(true) {
             if let Some(src) = emoji::twemoji(g) {
                 if i > start {
-                    out.push(Atom::Text { text: buf[start..i].to_string().into(), look: l.clone(), kind: kind.clone() });
+                    out.push(Atom::Text {
+                        text: buf[start..i].to_string().into(),
+                        look: l.clone(),
+                        kind: kind.clone(),
+                    });
                 }
-                out.push(Atom::Image { src: src.into(), size: l.size * 1.15, drop: l.size * 0.2 });
+                out.push(Atom::Image {
+                    src: src.into(),
+                    size: l.size * 1.15,
+                    drop: l.size * 0.2,
+                });
                 start = i + g.len();
             }
         }
         if start < buf.len() {
-            out.push(Atom::Text { text: buf[start..].to_string().into(), look: l, kind });
+            out.push(Atom::Text {
+                text: buf[start..].to_string().into(),
+                look: l,
+                kind,
+            });
         }
         buf.clear();
     };

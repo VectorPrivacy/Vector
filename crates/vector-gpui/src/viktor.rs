@@ -31,16 +31,30 @@ pub struct Viktor {
 impl Viktor {
     /// `greet`: one exclamation shortly after the first paint.
     pub fn new(size: f32, greet: bool, cx: &mut Context<Self>) -> Self {
-        let mut v = Self { mode: Mode::Idle, play: 0, hovering: false, smile_start: Instant::now(), timer: None, size };
+        let mut v = Self {
+            mode: Mode::Idle,
+            play: 0,
+            hovering: false,
+            smile_start: Instant::now(),
+            timer: None,
+            size,
+        };
         if greet {
             v.after(400, cx, |v, cx| v.exclaim(cx));
         }
         v
     }
 
-    fn after(&mut self, ms: u64, cx: &mut Context<Self>, then: impl FnOnce(&mut Self, &mut Context<Self>) + 'static) {
+    fn after(
+        &mut self,
+        ms: u64,
+        cx: &mut Context<Self>,
+        then: impl FnOnce(&mut Self, &mut Context<Self>) + 'static,
+    ) {
         self.timer = Some(cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(Duration::from_millis(ms)).await;
+            cx.background_executor()
+                .timer(Duration::from_millis(ms))
+                .await;
             this.update(cx, |v, cx| then(v, cx)).ok();
         }));
     }
@@ -62,7 +76,9 @@ impl Viktor {
         self.mode = Mode::Exclaim;
         self.play += 1;
         cx.notify();
-        self.after(EXCLAIM_MS, cx, |v, cx| if v.hovering { v.smile(cx) } else { v.idle(cx) });
+        self.after(EXCLAIM_MS, cx, |v, cx| {
+            if v.hovering { v.smile(cx) } else { v.idle(cx) }
+        });
     }
 
     fn hover(&mut self, on: bool, cx: &mut Context<Self>) {
@@ -90,8 +106,14 @@ impl Render for Viktor {
         // Without an id an image holds no frame state, so the clip shows its first frame: the idle pose.
         let pose = match self.mode {
             Mode::Idle => img(SMILE).size(size).into_any_element(),
-            Mode::Smile => img(SMILE).id(SharedString::from(format!("viktor-{}", self.play))).size(size).into_any_element(),
-            Mode::Exclaim => img(EXCLAIM).id(SharedString::from(format!("viktor-{}", self.play))).size(size).into_any_element(),
+            Mode::Smile => img(SMILE)
+                .id(SharedString::from(format!("viktor-{}", self.play)))
+                .size(size)
+                .into_any_element(),
+            Mode::Exclaim => img(EXCLAIM)
+                .id(SharedString::from(format!("viktor-{}", self.play)))
+                .size(size)
+                .into_any_element(),
         };
         div()
             .id("viktor")

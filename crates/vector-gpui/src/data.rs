@@ -80,7 +80,11 @@ impl From<RawInvite> for Invite {
         let b: Bundle = serde_json::from_str(&r.bundle_json).unwrap_or_default();
         Self {
             community_id: r.community_id,
-            name: if b.name.is_empty() { "Community".into() } else { b.name },
+            name: if b.name.is_empty() {
+                "Community".into()
+            } else {
+                b.name
+            },
             inviter: r.inviter_npub,
             owner: b.owner,
             relays: b.relays,
@@ -194,7 +198,10 @@ impl Store {
         let f: Fixtures = serde_json::from_slice(&std::fs::read(path)?)?;
         let mut chats = f.chats;
         // VECTOR_REQUESTS=<n>: the last n chats lose our side, so they wait under Requests.
-        let requests = std::env::var("VECTOR_REQUESTS").ok().and_then(|n| n.parse::<usize>().ok()).unwrap_or(0);
+        let requests = std::env::var("VECTOR_REQUESTS")
+            .ok()
+            .and_then(|n| n.parse::<usize>().ok())
+            .unwrap_or(0);
         let from = chats.len().saturating_sub(requests);
         for chat in &mut chats[from..] {
             chat.messages.retain(|m| !m.mine);
@@ -255,7 +262,9 @@ impl Store {
 
     /// A message arrived or was sent: appended, or put in place by time.
     pub fn insert_message(&mut self, chat_id: &str, msg: vector_core::types::Message) -> bool {
-        let Some(chat) = self.chat_mut(chat_id) else { return false };
+        let Some(chat) = self.chat_mut(chat_id) else {
+            return false;
+        };
         if chat.messages.iter().any(|m| m.id == msg.id) {
             return true;
         }
@@ -266,9 +275,20 @@ impl Store {
     }
 
     /// A message changed (sent, failed, edited, reacted to): `old_id` is the one it replaces.
-    pub fn replace_message(&mut self, chat_id: &str, old_id: &str, msg: vector_core::types::Message) {
-        let Some(chat) = self.chat_mut(chat_id) else { return };
-        match chat.messages.iter().position(|m| m.id == old_id || m.id == msg.id) {
+    pub fn replace_message(
+        &mut self,
+        chat_id: &str,
+        old_id: &str,
+        msg: vector_core::types::Message,
+    ) {
+        let Some(chat) = self.chat_mut(chat_id) else {
+            return;
+        };
+        match chat
+            .messages
+            .iter()
+            .position(|m| m.id == old_id || m.id == msg.id)
+        {
             Some(i) => chat.messages[i] = msg,
             None => {
                 let at = chat.messages.partition_point(|m| m.at <= msg.at);
@@ -278,7 +298,8 @@ impl Store {
     }
 
     pub fn now_ms(&self) -> u64 {
-        self.frozen_now_ms.unwrap_or_else(|| Local::now().timestamp_millis() as u64)
+        self.frozen_now_ms
+            .unwrap_or_else(|| Local::now().timestamp_millis() as u64)
     }
 
     pub fn chat(&self, id: &str) -> Option<&SerializableChat> {
@@ -300,7 +321,8 @@ impl Store {
     }
 
     pub fn resort(&mut self) {
-        self.chats.sort_by_key(|c| std::cmp::Reverse(last_activity(c)));
+        self.chats
+            .sort_by_key(|c| std::cmp::Reverse(last_activity(c)));
     }
 
     pub fn me(&self) -> Option<&SlimProfile> {
@@ -314,7 +336,10 @@ impl Store {
 
     /// `getName` with a community: its nickname ranks under your own, over their name.
     pub fn name_in(&self, npub: &str, community: Option<&str>) -> String {
-        let nick = community.and_then(|c| self.nicknames.get(c)).and_then(|n| n.get(npub)).filter(|n| !n.is_empty());
+        let nick = community
+            .and_then(|c| self.nicknames.get(c))
+            .and_then(|n| n.get(npub))
+            .filter(|n| !n.is_empty());
         match self.profiles.get(npub) {
             Some(p) if !p.nickname.is_empty() => p.nickname.clone(),
             _ if nick.is_some() => nick.cloned().unwrap_or_default(),
@@ -342,13 +367,21 @@ impl Store {
     }
 
     pub fn icon(&self, id: &str) -> Option<PathBuf> {
-        let p = self.art.get(id).and_then(|a| a.icon.as_deref()).or_else(|| self.community(id).and_then(|c| c.icon.as_deref()))?;
+        let p = self
+            .art
+            .get(id)
+            .and_then(|a| a.icon.as_deref())
+            .or_else(|| self.community(id).and_then(|c| c.icon.as_deref()))?;
         Some(self.media_root.join(p))
     }
 
     /// The banner the community pane shows: none once hidden.
     pub fn banner(&self, id: &str) -> Option<PathBuf> {
-        let p = self.art.get(id).and_then(|a| a.banner.as_deref()).or_else(|| self.community(id).and_then(|c| c.banner.as_deref()))?;
+        let p = self
+            .art
+            .get(id)
+            .and_then(|a| a.banner.as_deref())
+            .or_else(|| self.community(id).and_then(|c| c.banner.as_deref()))?;
         Some(self.media_root.join(p))
     }
 
@@ -359,11 +392,16 @@ impl Store {
     /// The Community a channel chat belongs to.
     /// A name as `chat` shows it: a community channel uses that community's nicknames.
     pub fn chat_name(&self, npub: &str, chat: &str) -> String {
-        self.name_in(npub, self.community_of(chat).map(|c| c.community_id.as_str()))
+        self.name_in(
+            npub,
+            self.community_of(chat).map(|c| c.community_id.as_str()),
+        )
     }
 
     pub fn community_of(&self, channel_id: &str) -> Option<&Community> {
-        self.communities.iter().find(|c| c.channel(channel_id).is_some())
+        self.communities
+            .iter()
+            .find(|c| c.channel(channel_id).is_some())
     }
 
     /// A stranger whose request waits shows no pictures until it's accepted.
@@ -381,7 +419,11 @@ impl Store {
 }
 
 pub fn last_activity(chat: &SerializableChat) -> u64 {
-    chat.messages.iter().map(|m| m.at).max().unwrap_or(chat.created_at * 1000)
+    chat.messages
+        .iter()
+        .map(|m| m.at)
+        .max()
+        .unwrap_or(chat.created_at * 1000)
 }
 
 /// Messages after `last_read` that someone else sent: `computeListRowUnreadCount`.
@@ -400,7 +442,11 @@ pub fn preview_text(chat: &SerializableChat) -> String {
     let body = if m.content.is_empty() && !m.attachments.is_empty() {
         "Sent a file".to_string()
     } else {
-        crate::newchat::replace_invite_links(&m.content, "Community Invite").lines().next().unwrap_or_default().to_string()
+        crate::newchat::replace_invite_links(&m.content, "Community Invite")
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .to_string()
     };
     if m.mine { format!("You: {body}") } else { body }
 }
@@ -420,7 +466,10 @@ pub fn time_ago(now_ms: u64, at_ms: u64) -> String {
 }
 
 pub fn local(ms: u64) -> DateTime<Local> {
-    Local.timestamp_millis_opt(ms as i64).single().unwrap_or_else(Local::now)
+    Local
+        .timestamp_millis_opt(ms as i64)
+        .single()
+        .unwrap_or_else(Local::now)
 }
 
 /// A message's clock time, as `toLocaleTimeString([], {hour: 'numeric', minute: '2-digit'})`.
@@ -440,10 +489,16 @@ pub fn day_label(now_ms: u64, ms: u64) -> String {
 
 /// One row of the message timeline; `Message` indexes the chat's `messages`.
 pub enum Row {
-    Date { label: String, time: String },
+    Date {
+        label: String,
+        time: String,
+    },
     Unread,
     /// `first` heads a streak (avatar and header); otherwise a continuation.
-    Message { index: usize, first: bool },
+    Message {
+        index: usize,
+        first: bool,
+    },
 }
 
 const STREAK_WINDOW_MS: u64 = 7 * 60 * 1000;
@@ -478,7 +533,10 @@ pub fn timeline(chat: &SerializableChat, now_ms: u64, read_anchor: Option<&str>)
     for (i, m) in chat.messages.iter().enumerate() {
         let day = local(m.at).date_naive();
         if last_day != Some(day) {
-            rows.push(Row::Date { label: day_label(now_ms, m.at), time: clock(m.at) });
+            rows.push(Row::Date {
+                label: day_label(now_ms, m.at),
+                time: clock(m.at),
+            });
             last_day = Some(day);
         }
         if read_at.is_some_and(|r| i == r + 1) && !m.mine {

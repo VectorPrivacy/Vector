@@ -8,8 +8,9 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui::{
-    AnyElement, App, Context, Entity, EventEmitter, FocusHandle, Focusable, FontWeight, IntoElement, ListAlignment, ListOffset,
-    ListState, ParentElement, Render, ScrollHandle, SharedString, Styled, Window, div, img, list, prelude::*, px, svg,
+    AnyElement, App, Context, Entity, EventEmitter, FocusHandle, Focusable, FontWeight,
+    IntoElement, ListAlignment, ListOffset, ListState, ParentElement, Render, ScrollHandle,
+    SharedString, Styled, Window, div, img, list, prelude::*, px, svg,
 };
 
 use crate::composer::{CancelInput, InputChanged, Look, SendText, TextInput};
@@ -127,16 +128,30 @@ impl Pack {
 
     /// `deadPackMessage`: picked by the id so it never shuffles between opens.
     fn dead_message(&self) -> &'static str {
-        const REVOKED: [&str; 3] = ["The creator has taken this pack down.", "This pack was removed by its creator.", "The creator of this pack has retired it."];
-        const MISSING: [&str; 3] = ["This pack is no longer available.", "This pack seems to have disappeared.", "This pack couldn't be found anymore."];
-        let h = self.id.encode_utf16().fold(0u32, |h, c| h.wrapping_mul(31).wrapping_add(c as u32));
+        const REVOKED: [&str; 3] = [
+            "The creator has taken this pack down.",
+            "This pack was removed by its creator.",
+            "The creator of this pack has retired it.",
+        ];
+        const MISSING: [&str; 3] = [
+            "This pack is no longer available.",
+            "This pack seems to have disappeared.",
+            "This pack couldn't be found anymore.",
+        ];
+        let h = self
+            .id
+            .encode_utf16()
+            .fold(0u32, |h, c| h.wrapping_mul(31).wrapping_add(c as u32));
         (if self.status == 1 { REVOKED } else { MISSING })[h as usize % 3]
     }
 }
 
 /// `_assignEmojiDisambig`: a shortcode live packs use with different pictures becomes
 /// `code~N`, numbered by the sorted URLs, as the send resolver numbers them.
-pub fn packs_from_core(packs: Vec<vector_core::emoji_packs::EmojiPack>, src: impl Fn(&str) -> String) -> Vec<Pack> {
+pub fn packs_from_core(
+    packs: Vec<vector_core::emoji_packs::EmojiPack>,
+    src: impl Fn(&str) -> String,
+) -> Vec<Pack> {
     let mut urls: HashMap<&str, Vec<&str>> = HashMap::new();
     for p in packs.iter().filter(|p| !matches!(p.status, 1 | 2)) {
         for e in &p.emojis {
@@ -150,7 +165,10 @@ pub fn packs_from_core(packs: Vec<vector_core::emoji_packs::EmojiPack>, src: imp
         v.sort_unstable();
     }
     let code = |shortcode: &str, url: &str| match urls.get(shortcode) {
-        Some(v) if v.len() > 1 => v.iter().position(|u| *u == url).map_or(shortcode.to_string(), |i| format!("{shortcode}~{}", i + 1)),
+        Some(v) if v.len() > 1 => v
+            .iter()
+            .position(|u| *u == url)
+            .map_or(shortcode.to_string(), |i| format!("{shortcode}~{}", i + 1)),
         _ => shortcode.to_string(),
     };
     packs
@@ -159,11 +177,25 @@ pub fn packs_from_core(packs: Vec<vector_core::emoji_packs::EmojiPack>, src: imp
             id: p.id.clone(),
             identifier: p.identifier.clone(),
             logo_url: (!p.image_url.is_empty()).then(|| p.image_url.clone()),
-            title: if p.title.is_empty() { p.identifier.clone() } else { p.title.clone() },
+            title: if p.title.is_empty() {
+                p.identifier.clone()
+            } else {
+                p.title.clone()
+            },
             logo: (!p.image_url.is_empty()).then(|| src(&p.image_url)),
             own: p.is_own,
             status: p.status,
-            emojis: p.emojis.iter().map(|e| Rc::new(PackEmoji { code: code(&e.shortcode, &e.url), url: e.url.clone(), src: src(&e.url) })).collect(),
+            emojis: p
+                .emojis
+                .iter()
+                .map(|e| {
+                    Rc::new(PackEmoji {
+                        code: code(&e.shortcode, &e.url),
+                        url: e.url.clone(),
+                        src: src(&e.url),
+                    })
+                })
+                .collect(),
         })
         .collect()
 }
@@ -195,9 +227,15 @@ impl Section {
 
 enum Item {
     Header(Section),
-    Row { cells: Vec<Cell>, last: bool },
+    Row {
+        cells: Vec<Cell>,
+        last: bool,
+    },
     /// A pack's grid row: 38px, the thumbs at 28.
-    PackRow { cells: Vec<Rc<PackEmoji>>, last: bool },
+    PackRow {
+        cells: Vec<Rc<PackEmoji>>,
+        last: bool,
+    },
     /// A dead pack's grid, under its notice.
     Dead(usize),
 }
@@ -281,7 +319,12 @@ impl EmojiPicker {
             placeholder: c(0x757575),
             ..Default::default()
         };
-        let search = cx.new(|cx| TextInput::new("Search Emojis...", cx).with_look(look).keep_on_submit().submit_empty());
+        let search = cx.new(|cx| {
+            TextInput::new("Search Emojis...", cx)
+                .with_look(look)
+                .keep_on_submit()
+                .submit_empty()
+        });
         cx.subscribe(&search, |this, input, _: &InputChanged, cx| {
             let text = input.read(cx).text().to_string();
             if this.mode == Mode::Gif {
@@ -293,8 +336,10 @@ impl EmojiPicker {
             cx.notify();
         })
         .detach();
-        cx.subscribe(&search, |_, _, _: &CancelInput, cx| cx.emit(Dismissed)).detach();
-        cx.subscribe(&search, |this, _, _: &SendText, cx| this.pick_first(cx)).detach();
+        cx.subscribe(&search, |_, _, _: &CancelInput, cx| cx.emit(Dismissed))
+            .detach();
+        cx.subscribe(&search, |this, _, _: &SendText, cx| this.pick_first(cx))
+            .detach();
         let mut this = Self {
             search,
             query: String::new(),
@@ -321,7 +366,13 @@ impl EmojiPicker {
     }
 
     /// Opened afresh: an empty search, the top of the list, and the account's usage.
-    pub fn reset(&mut self, reaction: bool, used: HashMap<String, f64>, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn reset(
+        &mut self,
+        reaction: bool,
+        used: HashMap<String, f64>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.reaction = reaction;
         self.no_gifs = false;
         self.set_mode(Mode::Emoji, cx);
@@ -344,6 +395,10 @@ impl EmojiPicker {
         self.media = Some((media, live));
     }
 
+    pub fn pack_count(&self) -> usize {
+        self.packs.len()
+    }
+
     pub fn set_packs(&mut self, packs: Vec<Pack>, cx: &mut Context<Self>) {
         self.packs = Rc::new(packs);
         self.collapsed.retain(|s| !matches!(s, Section::Pack(_)));
@@ -359,7 +414,13 @@ impl EmojiPicker {
             if out.iter().any(|(c, _)| *c == code) {
                 continue;
             }
-            if let Some(e) = self.packs.iter().filter(|p| !p.dead()).flat_map(|p| p.emojis.iter()).find(|e| e.code == code) {
+            if let Some(e) = self
+                .packs
+                .iter()
+                .filter(|p| !p.dead())
+                .flat_map(|p| p.emojis.iter())
+                .find(|e| e.code == code)
+            {
                 out.push((code, e.url.clone()));
             }
         }
@@ -367,7 +428,11 @@ impl EmojiPicker {
     }
 
     pub fn set_kaomoji_recents(&mut self, recents: Vec<String>, cx: &mut Context<Self>) {
-        self.kaomoji_recents = recents.into_iter().filter(|f| emoji::kaomoji(f).is_some()).take(KAOMOJI_RECENTS).collect();
+        self.kaomoji_recents = recents
+            .into_iter()
+            .filter(|f| emoji::kaomoji(f).is_some())
+            .take(KAOMOJI_RECENTS)
+            .collect();
         cx.notify();
     }
 
@@ -378,7 +443,8 @@ impl EmojiPicker {
             Mode::Gif => "Search GIFs...",
             Mode::Kaomoji => "Search Kaomoji...",
         };
-        self.search.update(cx, |s, cx| s.set_placeholder(placeholder, cx));
+        self.search
+            .update(cx, |s, cx| s.set_placeholder(placeholder, cx));
         if mode == Mode::Gif {
             let text = self.search.read(cx).text().trim().to_string();
             if self.gifs.phase == GifPhase::Idle || text != self.gifs.query {
@@ -397,24 +463,37 @@ impl EmojiPicker {
 
     /// The open picker warms the trending page, so GIF mode shows it at once.
     pub fn prefetch_gifs(&mut self, cx: &mut Context<Self>) {
-        if self.gifs.trending.as_ref().is_some_and(|(at, _)| at.elapsed() < GIF_TRENDING_TTL) {
+        if self
+            .gifs
+            .trending
+            .as_ref()
+            .is_some_and(|(at, _)| at.elapsed() < GIF_TRENDING_TTL)
+        {
             return;
         }
-        let rx = crate::backend::run(crate::backend::gifs::listing(crate::backend::gifs::trending(0, GIF_PAGE)));
+        let rx = crate::backend::run(crate::backend::gifs::listing(
+            crate::backend::gifs::trending(0, GIF_PAGE),
+        ));
         cx.spawn(async move |this, cx| {
             let Ok(Ok(gifs)) = rx.await else { return };
             if gifs.is_empty() {
                 return;
             }
-            this.update(cx, |this, _| this.gifs.trending = Some((std::time::Instant::now(), gifs))).ok();
+            this.update(cx, |this, _| {
+                this.gifs.trending = Some((std::time::Instant::now(), gifs))
+            })
+            .ok();
         })
         .detach();
     }
 
     fn gif_search_later(&mut self, text: String, cx: &mut Context<Self>) {
         self.gifs.debounce = Some(cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(std::time::Duration::from_millis(300)).await;
-            this.update(cx, |this, cx| this.gif_list(text.trim().to_string(), cx)).ok();
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(300))
+                .await;
+            this.update(cx, |this, cx| this.gif_list(text.trim().to_string(), cx))
+                .ok();
         }));
     }
 
@@ -429,12 +508,19 @@ impl EmojiPicker {
         g.scroll.set_offset(gpui::point(px(0.), px(0.)));
         let key = query.to_lowercase();
         let cached = if query.is_empty() {
-            g.trending.as_ref().filter(|(at, _)| at.elapsed() < GIF_TRENDING_TTL).map(|(_, v)| v.clone())
+            g.trending
+                .as_ref()
+                .filter(|(at, _)| at.elapsed() < GIF_TRENDING_TTL)
+                .map(|(_, v)| v.clone())
         } else {
-            g.searches.iter().position(|(k, _)| *k == key).and_then(|i| g.searches.remove(i)).map(|(k, v)| {
-                g.searches.push_back((k, v.clone()));
-                v
-            })
+            g.searches
+                .iter()
+                .position(|(k, _)| *k == key)
+                .and_then(|i| g.searches.remove(i))
+                .map(|(k, v)| {
+                    g.searches.push_back((k, v.clone()));
+                    v
+                })
         };
         if let Some(items) = cached {
             g.more = items.len() >= GIF_PAGE;
@@ -447,7 +533,11 @@ impl EmojiPicker {
         g.phase = GifPhase::Loading;
         g.items.clear();
         let seq = g.seq;
-        let q = if query.is_empty() { crate::backend::gifs::trending(0, GIF_PAGE) } else { crate::backend::gifs::search(&query, 0, GIF_PAGE) };
+        let q = if query.is_empty() {
+            crate::backend::gifs::trending(0, GIF_PAGE)
+        } else {
+            crate::backend::gifs::search(&query, 0, GIF_PAGE)
+        };
         let rx = crate::backend::run(crate::backend::gifs::listing(q));
         cx.spawn(async move |this, cx| {
             let result = rx.await.unwrap_or_else(|_| Err(String::new()));
@@ -477,13 +567,21 @@ impl EmojiPicker {
                             "No trending GIFs found".into()
                         } else {
                             let shown: String = query.chars().take(32).collect();
-                            let ellipsis = if query.chars().count() > 32 { "..." } else { "" };
+                            let ellipsis = if query.chars().count() > 32 {
+                                "..."
+                            } else {
+                                ""
+                            };
                             format!("No GIFs found for \"{shown}{ellipsis}\"")
                         });
                     }
                     Err(_) => {
                         g.more = false;
-                        g.phase = GifPhase::Empty(if query.is_empty() { "Failed to load GIFs".into() } else { "Search failed".into() });
+                        g.phase = GifPhase::Empty(if query.is_empty() {
+                            "Failed to load GIFs".into()
+                        } else {
+                            "Search failed".into()
+                        });
                     }
                 }
                 cx.notify();
@@ -501,7 +599,11 @@ impl EmojiPicker {
         }
         g.loading_more = true;
         let (seq, offset) = (g.seq, g.offset);
-        let q = if g.query.is_empty() { crate::backend::gifs::trending(offset, GIF_PAGE) } else { crate::backend::gifs::search(&g.query, offset, GIF_PAGE) };
+        let q = if g.query.is_empty() {
+            crate::backend::gifs::trending(offset, GIF_PAGE)
+        } else {
+            crate::backend::gifs::search(&g.query, offset, GIF_PAGE)
+        };
         let rx = crate::backend::run(crate::backend::gifs::listing(q));
         cx.spawn(async move |this, cx| {
             let result = rx.await.unwrap_or_else(|_| Err(String::new()));
@@ -537,11 +639,18 @@ impl EmojiPicker {
         cx.spawn(async move |this, cx| {
             let bytes = rx.await.ok().flatten();
             let image = match bytes {
-                Some(b) => cx.background_executor().spawn(async move { crate::media::decode_gif_cover(&b, side) }).await,
+                Some(b) => {
+                    cx.background_executor()
+                        .spawn(async move { crate::media::decode_gif_cover(&b, side) })
+                        .await
+                }
                 None => None,
             };
             this.update(cx, |this, cx| {
-                this.gifs.previews.insert(id, image.map_or(Preview::Failed, |i| Preview::Ready(Arc::new(i))));
+                this.gifs.previews.insert(
+                    id,
+                    image.map_or(Preview::Failed, |i| Preview::Ready(Arc::new(i))),
+                );
                 cx.notify();
             })
             .ok();
@@ -555,15 +664,20 @@ impl EmojiPicker {
         let device = (side * window.scale_factor()).round() as u32;
         let pitch = side + GIF_GAP;
         let skeleton = |i: usize| {
-            div().id(SharedString::from(format!("gif-skel-{i}"))).h(px(side)).rounded(px(8.)).bg(c(0x1a1a1a)).with_animation(
-                SharedString::from(format!("gif-skel-a-{i}")),
-                gpui::Animation::new(std::time::Duration::from_millis(1500)).repeat(),
-                |d, t| {
-                    let wave = (1. - (t * 2. - 1.0f32).abs()).max(0.);
-                    let v = 0x1a as f32 + (0x25 - 0x1a) as f32 * wave;
-                    d.bg(gpui::rgb(((v as u32) << 16) | ((v as u32) << 8) | v as u32))
-                },
-            )
+            div()
+                .id(SharedString::from(format!("gif-skel-{i}")))
+                .h(px(side))
+                .rounded(px(8.))
+                .bg(c(0x1a1a1a))
+                .with_animation(
+                    SharedString::from(format!("gif-skel-a-{i}")),
+                    gpui::Animation::new(std::time::Duration::from_millis(1500)).repeat(),
+                    |d, t| {
+                        let wave = (1. - (t * 2. - 1.0f32).abs()).max(0.);
+                        let v = 0x1a as f32 + (0x25 - 0x1a) as f32 * wave;
+                        d.bg(gpui::rgb(((v as u32) << 16) | ((v as u32) << 8) | v as u32))
+                    },
+                )
         };
         let grid = |cells: Vec<AnyElement>| {
             let mut rows = div().flex().flex_col().gap(px(GIF_GAP));
@@ -571,12 +685,23 @@ impl EmojiPicker {
             while it.peek().is_some() {
                 let a = it.next().unwrap();
                 let b = it.next().unwrap_or_else(|| div().into_any_element());
-                rows = rows.child(div().flex().gap(px(GIF_GAP)).child(div().flex_1().min_w_0().child(a)).child(div().flex_1().min_w_0().child(b)));
+                rows = rows.child(
+                    div()
+                        .flex()
+                        .gap(px(GIF_GAP))
+                        .child(div().flex_1().min_w_0().child(a))
+                        .child(div().flex_1().min_w_0().child(b)),
+                );
             }
             rows
         };
         let content: AnyElement = match self.gifs.phase.clone() {
-            GifPhase::Idle | GifPhase::Loading => grid((0..GIF_PAGE).map(|i| skeleton(i).into_any_element()).collect()).into_any_element(),
+            GifPhase::Idle | GifPhase::Loading => grid(
+                (0..GIF_PAGE)
+                    .map(|i| skeleton(i).into_any_element())
+                    .collect(),
+            )
+            .into_any_element(),
             GifPhase::Empty(message) => div()
                 .min_h(px(150.))
                 .p(px(20.))
@@ -587,34 +712,81 @@ impl EmojiPicker {
                 .gap(px(8.))
                 .text_size(px(13.))
                 .text_color(white_a(0.4))
-                .child(svg().path("icons/image.svg").size(px(32.)).text_color(white_a(0.2)))
+                .child(
+                    svg()
+                        .path("icons/image.svg")
+                        .size(px(32.))
+                        .text_color(white_a(0.2)),
+                )
                 .child(message)
                 .into_any_element(),
             GifPhase::Ready => {
                 let view = self.gifs.scroll.bounds().size.height.max(px(280.));
                 let top = -self.gifs.scroll.offset().y;
                 let reach = ((f32::from(top + view) + 200.) / pitch).ceil() as usize * 2;
-                let wanted: Vec<String> = self.gifs.items.iter().take(reach).map(|g| g.id.clone()).collect();
+                let wanted: Vec<String> = self
+                    .gifs
+                    .items
+                    .iter()
+                    .take(reach)
+                    .map(|g| g.id.clone())
+                    .collect();
                 for id in wanted {
                     self.gif_preview(&id, device, cx);
                 }
                 let mut cells = Vec::with_capacity(self.gifs.items.len() + GIF_PAGE);
                 for gif in self.gifs.items.clone() {
                     let thumb = match &gif.thumbhash {
-                        Some(h) => self.gifs.thumbs.entry(gif.id.clone()).or_insert_with(|| crate::media::decode_thumbhash(h, (device, device)).map(Arc::new)).clone(),
+                        Some(h) => self
+                            .gifs
+                            .thumbs
+                            .entry(gif.id.clone())
+                            .or_insert_with(|| {
+                                crate::media::decode_thumbhash(h, (device, device)).map(Arc::new)
+                            })
+                            .clone(),
                         None => None,
                     };
                     let inner: AnyElement = match self.gifs.previews.get(&gif.id) {
-                        Some(Preview::Ready(image)) => img(image.clone()).absolute().inset_0().size_full().object_fit(gpui::ObjectFit::Cover).into_any_element(),
-                        Some(Preview::Failed) => div().size_full().flex().items_center().justify_center().child(svg().path("icons/image.svg").size(px(24.)).text_color(white_a(0.3))).into_any_element(),
+                        Some(Preview::Ready(image)) => img(image.clone())
+                            .absolute()
+                            .inset_0()
+                            .size_full()
+                            .object_fit(gpui::ObjectFit::Cover)
+                            .into_any_element(),
+                        Some(Preview::Failed) => div()
+                            .size_full()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(
+                                svg()
+                                    .path("icons/image.svg")
+                                    .size(px(24.))
+                                    .text_color(white_a(0.3)),
+                            )
+                            .into_any_element(),
                         _ => div()
                             .size_full()
                             .relative()
                             .flex()
                             .items_center()
                             .justify_center()
-                            .children(thumb.map(|t| img(t).absolute().inset_0().size_full().object_fit(gpui::ObjectFit::Cover)))
-                            .child(crate::attachments::spinner(24., 2., 0.8, 0.25, white_a(0.1), c(PRIMARY)))
+                            .children(thumb.map(|t| {
+                                img(t)
+                                    .absolute()
+                                    .inset_0()
+                                    .size_full()
+                                    .object_fit(gpui::ObjectFit::Cover)
+                            }))
+                            .child(crate::attachments::spinner(
+                                24.,
+                                2.,
+                                0.8,
+                                0.25,
+                                white_a(0.1),
+                                c(PRIMARY),
+                            ))
                             .into_any_element(),
                     };
                     let id = gif.id.clone();
@@ -632,7 +804,9 @@ impl EmojiPicker {
                             .hover(|s| s.border_color(c(PRIMARY)))
                             .active(|s| s.border_color(c(PRIMARY)).opacity(0.8))
                             .cursor_pointer()
-                            .on_click(cx.listener(move |_, _, _, cx| cx.emit(PickedGif(crate::backend::gifs::original_url(&id)))))
+                            .on_click(cx.listener(move |_, _, _, cx| {
+                                cx.emit(PickedGif(crate::backend::gifs::original_url(&id)))
+                            }))
                             .child(inner)
                             .into_any_element(),
                     );
@@ -659,7 +833,16 @@ impl EmojiPicker {
             .px(px(8.))
             .pb(px(8.))
             .bg(c(0x0a0a0a))
-            .child(div().id("gif-grid").flex_1().min_h_0().overflow_y_scroll().track_scroll(&self.gifs.scroll).pr(px(4.)).child(content))
+            .child(
+                div()
+                    .id("gif-grid")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .track_scroll(&self.gifs.scroll)
+                    .pr(px(4.))
+                    .child(content),
+            )
             .into_any_element()
     }
 
@@ -667,7 +850,11 @@ impl EmojiPicker {
         self.kaomoji_recents.retain(|f| f != face);
         self.kaomoji_recents.insert(0, face.to_string());
         self.kaomoji_recents.truncate(KAOMOJI_RECENTS);
-        cx.emit(PickedText(face.to_string(), shift, self.kaomoji_recents.clone()));
+        cx.emit(PickedText(
+            face.to_string(),
+            shift,
+            self.kaomoji_recents.clone(),
+        ));
         cx.notify();
     }
 
@@ -682,13 +869,18 @@ impl EmojiPicker {
                 });
                 match first {
                     Some(Cell::Stock(e)) => cx.emit(Picked(e.emoji.to_string(), false)),
-                    Some(Cell::Custom(e)) => cx.emit(PickedCustom(e.code.clone(), e.url.clone(), false)),
+                    Some(Cell::Custom(e)) => {
+                        cx.emit(PickedCustom(e.code.clone(), e.url.clone(), false))
+                    }
                     None => {}
                 }
             }
             Mode::Kaomoji => {
                 let first = if self.query.is_empty() {
-                    self.kaomoji_recents.first().and_then(|f| emoji::kaomoji(f)).or_else(|| emoji::KAOMOJI.first().and_then(|c| c.items.first()))
+                    self.kaomoji_recents
+                        .first()
+                        .and_then(|f| emoji::kaomoji(f))
+                        .or_else(|| emoji::KAOMOJI.first().and_then(|c| c.items.first()))
                 } else {
                     emoji::search_kaomoji(&self.query).into_iter().next()
                 };
@@ -697,7 +889,12 @@ impl EmojiPicker {
                 }
             }
             Mode::Gif => {
-                if let Some(g) = self.gifs.items.first().filter(|_| self.gifs.phase == GifPhase::Ready) {
+                if let Some(g) = self
+                    .gifs
+                    .items
+                    .first()
+                    .filter(|_| self.gifs.phase == GifPhase::Ready)
+                {
                     cx.emit(PickedGif(crate::backend::gifs::original_url(&g.id)));
                 }
             }
@@ -720,14 +917,20 @@ impl EmojiPicker {
             .whitespace_nowrap()
             .text_ellipsis()
             .tooltip(crate::kit::tooltip(k.name))
-            .on_click(cx.listener(move |this, ev: &gpui::ClickEvent, _, cx| this.pick_kaomoji(k.face, ev.modifiers().shift, cx)))
+            .on_click(cx.listener(move |this, ev: &gpui::ClickEvent, _, cx| {
+                this.pick_kaomoji(k.face, ev.modifiers().shift, cx)
+            }))
             .child(k.face)
             .into_any_element()
     }
 
     fn kaomoji_body(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let items = |this: &Self, faces: Vec<&'static Kaomoji>, cx: &mut Context<Self>| {
-            div().flex().flex_wrap().gap(px(6.)).children(faces.into_iter().map(|k| this.kaomoji_item(k, cx)))
+            div()
+                .flex()
+                .flex_wrap()
+                .gap(px(6.))
+                .children(faces.into_iter().map(|k| this.kaomoji_item(k, cx)))
         };
         let header = |icon: Option<&'static str>, title: &'static str| {
             div()
@@ -740,7 +943,13 @@ impl EmojiPicker {
                 .line_height(px(24.))
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(c(0xffffff))
-                .children(icon.map(|i| svg().path(i).size(px(18.)).mr(px(8.)).text_color(c(0xffffff))))
+                .children(icon.map(|i| {
+                    svg()
+                        .path(i)
+                        .size(px(18.))
+                        .mr(px(8.))
+                        .text_color(c(0xffffff))
+                }))
                 .child(title)
         };
         let mut list = div()
@@ -755,7 +964,11 @@ impl EmojiPicker {
             .font_weight(FontWeight::SEMIBOLD)
             .text_size(px(14.))
             .line_height(px(14. * 1.3));
-        let recents: Vec<_> = self.kaomoji_recents.iter().filter_map(|f| emoji::kaomoji(f)).collect();
+        let recents: Vec<_> = self
+            .kaomoji_recents
+            .iter()
+            .filter_map(|f| emoji::kaomoji(f))
+            .collect();
         let mut strip = None;
         if !self.query.is_empty() {
             let hits = emoji::search_kaomoji(&self.query);
@@ -775,10 +988,18 @@ impl EmojiPicker {
         } else {
             let shift = usize::from(!recents.is_empty());
             if !recents.is_empty() {
-                list = list.child(div().child(header(Some("icons/clock.svg"), "Recently Used")).child(items(self, recents, cx)));
+                list = list.child(
+                    div()
+                        .child(header(Some("icons/clock.svg"), "Recently Used"))
+                        .child(items(self, recents, cx)),
+                );
             }
             for cat in emoji::KAOMOJI {
-                list = list.child(div().child(header(None, cat.name)).child(items(self, cat.items.iter().collect(), cx)));
+                list = list.child(div().child(header(None, cat.name)).child(items(
+                    self,
+                    cat.items.iter().collect(),
+                    cx,
+                )));
             }
             // The strip follows the list: the category under the top edge lights up.
             let at = self.kaomoji_list.top_item().saturating_sub(shift);
@@ -813,11 +1034,18 @@ impl EmojiPicker {
             let x = -self.kaomoji_strip.offset().x;
             let fade = |left: bool| {
                 let (from, to) = if left { (1., 0.) } else { (0., 1.) };
-                div().absolute().top_0().bottom(px(6.)).w(px(48.)).when(left, |d| d.left_0()).when(!left, |d| d.right_0()).bg(gpui::linear_gradient(
-                    90.,
-                    gpui::linear_color_stop(ca(10, 10, 10, from), 0.),
-                    gpui::linear_color_stop(ca(10, 10, 10, to), 1.),
-                ))
+                div()
+                    .absolute()
+                    .top_0()
+                    .bottom(px(6.))
+                    .w(px(48.))
+                    .when(left, |d| d.left_0())
+                    .when(!left, |d| d.right_0())
+                    .bg(gpui::linear_gradient(
+                        90.,
+                        gpui::linear_color_stop(ca(10, 10, 10, from), 0.),
+                        gpui::linear_color_stop(ca(10, 10, 10, to), 1.),
+                    ))
             };
             strip = Some(
                 div()
@@ -838,7 +1066,15 @@ impl EmojiPicker {
                     .when(x < max - px(1.), |d| d.child(fade(false))),
             );
         }
-        div().flex_1().min_h_0().flex().flex_col().bg(c(0x0a0a0a)).children(strip).child(list).into_any_element()
+        div()
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .bg(c(0x0a0a0a))
+            .children(strip)
+            .child(list)
+            .into_any_element()
     }
 
     /// A pick counts toward the recents before the next open reloads them.
@@ -853,7 +1089,11 @@ impl EmojiPicker {
         let score = move |e: &str| used.get(e).copied().unwrap_or(0.);
         let mut items = Vec::new();
         let mut starts = Vec::new();
-        let section = |items: &mut Vec<Item>, starts: &mut Vec<(Section, usize)>, s: Section, cells: Vec<Cell>, collapsed: bool| {
+        let section = |items: &mut Vec<Item>,
+                       starts: &mut Vec<(Section, usize)>,
+                       s: Section,
+                       cells: Vec<Cell>,
+                       collapsed: bool| {
             starts.push((s, items.len()));
             items.push(Item::Header(s));
             if collapsed {
@@ -862,15 +1102,33 @@ impl EmojiPicker {
             let rows: Vec<_> = cells.chunks(COLS).map(|c| c.to_vec()).collect();
             let n = rows.len();
             for (i, cells) in rows.into_iter().enumerate() {
-                items.push(Item::Row { cells, last: i + 1 == n });
+                items.push(Item::Row {
+                    cells,
+                    last: i + 1 == n,
+                });
             }
         };
-        let live = || self.packs.iter().filter(|p| !p.dead()).flat_map(|p| p.emojis.iter());
-        let failed = |e: &PackEmoji| self.media.as_ref().is_some_and(|(m, _)| matches!(m.borrow().custom.get(&e.src), Some(crate::media::Custom::Missing(_))));
+        let live = || {
+            self.packs
+                .iter()
+                .filter(|p| !p.dead())
+                .flat_map(|p| p.emojis.iter())
+        };
+        let failed = |e: &PackEmoji| {
+            self.media.as_ref().is_some_and(|(m, _)| {
+                matches!(
+                    m.borrow().custom.get(&e.src),
+                    Some(crate::media::Custom::Missing(_))
+                )
+            })
+        };
         if !self.query.is_empty() {
             let q = self.query.to_lowercase();
-            let mut hits: Vec<(Cell, f64)> =
-                emoji::search_scored(&self.query, &score).into_iter().filter(|(e, _)| e.name.to_lowercase().contains(&q)).map(|(e, s)| (Cell::Stock(e), s)).collect();
+            let mut hits: Vec<(Cell, f64)> = emoji::search_scored(&self.query, &score)
+                .into_iter()
+                .filter(|(e, _)| e.name.to_lowercase().contains(&q))
+                .map(|(e, s)| (Cell::Stock(e), s))
+                .collect();
             let q = q.trim_start_matches(':').trim_end_matches(':');
             let mut seen = HashSet::new();
             let mut custom = Vec::new();
@@ -888,20 +1146,34 @@ impl EmojiPicker {
                 if q.is_empty() || failed(e) || !seen.insert(e.code.clone()) {
                     continue;
                 }
-                custom.push((Cell::Custom(e.clone()), base - score(&format!(":{}:", e.code)) * emoji::USAGE_WEIGHT, e.code.len()));
+                custom.push((
+                    Cell::Custom(e.clone()),
+                    base - score(&format!(":{}:", e.code)) * emoji::USAGE_WEIGHT,
+                    e.code.len(),
+                ));
             }
             custom.sort_by(|a, b| a.1.total_cmp(&b.1).then(a.2.cmp(&b.2)));
             hits.extend(custom.into_iter().map(|(c, s, _)| (c, s)));
             hits.sort_by(|a, b| a.1.total_cmp(&b.1));
             hits.truncate(48);
-            section(&mut items, &mut starts, Section::Results, hits.into_iter().map(|(c, _)| c).collect(), false);
+            section(
+                &mut items,
+                &mut starts,
+                Section::Results,
+                hits.into_iter().map(|(c, _)| c).collect(),
+                false,
+            );
         } else {
-            let mut recents: Vec<(Cell, f64)> = emoji::most_used(&score).into_iter().map(|e| (Cell::Stock(e), score(e.emoji))).collect();
+            let mut recents: Vec<(Cell, f64)> = emoji::most_used(&score)
+                .into_iter()
+                .map(|e| (Cell::Stock(e), score(e.emoji)))
+                .collect();
             let mut seen = HashSet::new();
             let mut custom: Vec<(Cell, f64)> = live()
                 .filter_map(|e| {
                     let used = score(&format!(":{}:", e.code));
-                    (used > 0. && !failed(e) && seen.insert(e.code.clone())).then(|| (Cell::Custom(e.clone()), used))
+                    (used > 0. && !failed(e) && seen.insert(e.code.clone()))
+                        .then(|| (Cell::Custom(e.clone()), used))
                 })
                 .collect();
             custom.sort_by(|a, b| b.1.total_cmp(&a.1));
@@ -909,7 +1181,13 @@ impl EmojiPicker {
             recents.extend(custom);
             recents.sort_by(|a, b| b.1.total_cmp(&a.1));
             recents.truncate(24);
-            section(&mut items, &mut starts, Section::Recents, recents.into_iter().map(|(c, _)| c).collect(), self.collapsed.contains(&Section::Recents));
+            section(
+                &mut items,
+                &mut starts,
+                Section::Recents,
+                recents.into_iter().map(|(c, _)| c).collect(),
+                self.collapsed.contains(&Section::Recents),
+            );
             for (i, p) in self.packs.iter().enumerate() {
                 let s = Section::Pack(i);
                 starts.push((s, items.len()));
@@ -925,13 +1203,25 @@ impl EmojiPicker {
                 let rows: Vec<_> = cells.chunks(COLS).map(|c| c.to_vec()).collect();
                 let n = rows.len().max(1);
                 if rows.is_empty() {
-                    items.push(Item::PackRow { cells: Vec::new(), last: true });
+                    items.push(Item::PackRow {
+                        cells: Vec::new(),
+                        last: true,
+                    });
                 }
                 for (i, cells) in rows.into_iter().enumerate() {
-                    items.push(Item::PackRow { cells, last: i + 1 == n });
+                    items.push(Item::PackRow {
+                        cells,
+                        last: i + 1 == n,
+                    });
                 }
             }
-            section(&mut items, &mut starts, Section::All, emoji::EMOJIS.iter().map(Cell::Stock).collect(), self.collapsed.contains(&Section::All));
+            section(
+                &mut items,
+                &mut starts,
+                Section::All,
+                emoji::EMOJIS.iter().map(Cell::Stock).collect(),
+                self.collapsed.contains(&Section::All),
+            );
         }
         self.starts = starts;
         self.list = ListState::new(items.len(), ListAlignment::Top, px(400.));
@@ -940,12 +1230,19 @@ impl EmojiPicker {
 
     fn active(&self) -> Option<Section> {
         let top = self.list.logical_scroll_top().item_ix;
-        self.starts.iter().rev().find(|(_, start)| *start <= top).map(|(s, _)| *s)
+        self.starts
+            .iter()
+            .rev()
+            .find(|(_, start)| *start <= top)
+            .map(|(s, _)| *s)
     }
 
     fn jump(&mut self, s: Section, cx: &mut Context<Self>) {
         if let Some((_, ix)) = self.starts.iter().find(|(x, _)| *x == s) {
-            self.list.scroll_to(ListOffset { item_ix: *ix, offset_in_item: px(0.) });
+            self.list.scroll_to(ListOffset {
+                item_ix: *ix,
+                offset_in_item: px(0.),
+            });
             cx.notify();
         }
     }
@@ -992,7 +1289,13 @@ impl EmojiPicker {
             .font_weight(FontWeight::MEDIUM)
             .text_color(c(0xffffff))
             .on_click(cx.listener(move |this, _, _, cx| this.toggle(s, cx)))
-            .children(s.icon().map(|i| svg().path(i).size(px(18.)).mr(px(8.)).text_color(c(0xffffff))))
+            .children(s.icon().map(|i| {
+                svg()
+                    .path(i)
+                    .size(px(18.))
+                    .mr(px(8.))
+                    .text_color(c(0xffffff))
+            }))
             .child(s.title())
             .child(
                 svg()
@@ -1000,7 +1303,11 @@ impl EmojiPicker {
                     .size(px(18.))
                     .ml(px(2.))
                     .text_color(white_a(0.5))
-                    .when(collapsed, |i| i.with_transformation(gpui::Transformation::rotate(gpui::radians(-std::f32::consts::FRAC_PI_2)))),
+                    .when(collapsed, |i| {
+                        i.with_transformation(gpui::Transformation::rotate(gpui::radians(
+                            -std::f32::consts::FRAC_PI_2,
+                        )))
+                    }),
             )
             .into_any_element()
     }
@@ -1008,8 +1315,17 @@ impl EmojiPicker {
     fn pack_header(&self, i: usize, cx: &mut Context<Self>) -> AnyElement {
         let s = Section::Pack(i);
         let collapsed = self.collapsed.contains(&s);
-        let Some(p) = self.packs.get(i) else { return div().into_any_element() };
-        let logo = p.logo.as_ref().map(|src| div().size(px(18.)).flex_shrink_0().rounded(px(4.)).overflow_hidden().child(self.thumb(src, 18., true)));
+        let Some(p) = self.packs.get(i) else {
+            return div().into_any_element();
+        };
+        let logo = p.logo.as_ref().map(|src| {
+            div()
+                .size(px(18.))
+                .flex_shrink_0()
+                .rounded(px(4.))
+                .overflow_hidden()
+                .child(self.thumb(src, 18., true))
+        });
         div()
             .id(SharedString::from(format!("picker-pack-{i}")))
             .w_full()
@@ -1023,10 +1339,30 @@ impl EmojiPicker {
             .font_weight(FontWeight::MEDIUM)
             .when(p.dead(), |d| d.opacity(0.6))
             .on_click(cx.listener(move |this, _, _, cx| this.toggle(s, cx)))
-            .on_mouse_down(gpui::MouseButton::Right, cx.listener(move |this, ev: &gpui::MouseDownEvent, _, cx| this.pack_menu(i, ev.position, cx)))
+            .on_mouse_down(
+                gpui::MouseButton::Right,
+                cx.listener(move |this, ev: &gpui::MouseDownEvent, _, cx| {
+                    this.pack_menu(i, ev.position, cx)
+                }),
+            )
             .children(logo)
-            .child(div().min_w_0().overflow_hidden().text_ellipsis().whitespace_nowrap().text_size(px(14.)).text_color(c(0xffffff)).child(p.title.clone()))
-            .child(div().flex_shrink_0().text_size(px(12.)).text_color(white_a(0.55)).child(format!("({})", p.emojis.len())))
+            .child(
+                div()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .whitespace_nowrap()
+                    .text_size(px(14.))
+                    .text_color(c(0xffffff))
+                    .child(p.title.clone()),
+            )
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .text_size(px(12.))
+                    .text_color(white_a(0.55))
+                    .child(format!("({})", p.emojis.len())),
+            )
             .child(
                 svg()
                     .path("icons/chevron-down.svg")
@@ -1034,7 +1370,11 @@ impl EmojiPicker {
                     .ml(px(-2.))
                     .flex_shrink_0()
                     .text_color(white_a(0.5))
-                    .when(collapsed, |i| i.with_transformation(gpui::Transformation::rotate(gpui::radians(-std::f32::consts::FRAC_PI_2)))),
+                    .when(collapsed, |i| {
+                        i.with_transformation(gpui::Transformation::rotate(gpui::radians(
+                            -std::f32::consts::FRAC_PI_2,
+                        )))
+                    }),
             )
             .when(p.own, |d| {
                 d.child(
@@ -1050,7 +1390,12 @@ impl EmojiPicker {
                             let id = this.packs.get(i).map(|p| p.id.clone());
                             this.open_creator(id, window, cx);
                         }))
-                        .child(svg().path("icons/edit.svg").size(px(16.)).text_color(c(0xffffff))),
+                        .child(
+                            svg()
+                                .path("icons/edit.svg")
+                                .size(px(16.))
+                                .text_color(c(0xffffff)),
+                        ),
                 )
             })
             .into_any_element()
@@ -1064,12 +1409,17 @@ impl EmojiPicker {
 
     /// A custom emoji's picture, asked of the shared cache on first sight.
     fn thumb(&self, src: &str, size: f32, icon: bool) -> AnyElement {
-        let state = self.media.as_ref().map(|(m, _)| m.borrow_mut().custom(src, icon));
+        let state = self
+            .media
+            .as_ref()
+            .map(|(m, _)| m.borrow_mut().custom(src, icon));
         thumb_of(state, size)
     }
 
     fn dead(&self, i: usize, picker: gpui::WeakEntity<Self>) -> AnyElement {
-        let Some(p) = self.packs.get(i) else { return div().into_any_element() };
+        let Some(p) = self.packs.get(i) else {
+            return div().into_any_element();
+        };
         let id = p.id.clone();
         div()
             .h(px(170. - 32.))
@@ -1081,8 +1431,21 @@ impl EmojiPicker {
             .justify_center()
             .gap(px(10.))
             .font_family(INTER)
-            .child(div().text_size(px(13.)).line_height(px(13. * 1.35)).text_color(white_a(0.85)).child(p.dead_message()))
-            .child(div().mt(px(-4.)).text_size(px(11.5)).line_height(px(11.5 * 1.35)).text_color(white_a(0.55)).child("Old messages will still show its emojis."))
+            .child(
+                div()
+                    .text_size(px(13.))
+                    .line_height(px(13. * 1.35))
+                    .text_color(white_a(0.85))
+                    .child(p.dead_message()),
+            )
+            .child(
+                div()
+                    .mt(px(-4.))
+                    .text_size(px(11.5))
+                    .line_height(px(11.5 * 1.35))
+                    .text_color(white_a(0.55))
+                    .child("Old messages will still show its emojis."),
+            )
             .child(
                 div()
                     .id(SharedString::from(format!("picker-dead-{i}")))
@@ -1090,44 +1453,74 @@ impl EmojiPicker {
                     .py(px(6.))
                     .rounded(px(8.))
                     .border_1()
-                    .border_color(c(ACCENT))
+                    .border_color(c(PRIMARY))
                     .bg(ca(0, 0, 0, 0.65))
                     .text_size(px(12.5))
-                    .text_color(c(ACCENT))
+                    .text_color(c(PRIMARY))
                     .cursor_pointer()
                     .on_click(move |_, _, cx| {
-                        picker.update(cx, |_, cx| cx.emit(RemovePack(id.clone()))).ok();
+                        picker
+                            .update(cx, |_, cx| cx.emit(RemovePack(id.clone())))
+                            .ok();
                     })
                     .child("Remove Pack"),
             )
             .into_any_element()
     }
 
-    fn pack_row(cells: &[Rc<PackEmoji>], last: bool, media: &MediaRef, picker: gpui::WeakEntity<Self>) -> AnyElement {
-        let mut row = div().w_full().h(px(PACK_ROW)).flex().gap(px(GAP)).when(last, |d| d.h(px(PACK_ROW + 3.)).pb(px(3.)));
+    fn pack_row(
+        cells: &[Rc<PackEmoji>],
+        last: bool,
+        media: &MediaRef,
+        picker: gpui::WeakEntity<Self>,
+    ) -> AnyElement {
+        let mut row = div()
+            .w_full()
+            .h(px(PACK_ROW))
+            .flex()
+            .gap(px(GAP))
+            .when(last, |d| d.h(px(PACK_ROW + 3.)).pb(px(3.)));
         for e in cells {
             let group: SharedString = format!("pick-c-{}", e.code).into();
-            let state = media.as_ref().map(|(m, _)| m.borrow_mut().custom(&e.src, false));
+            let state = media
+                .as_ref()
+                .map(|(m, _)| m.borrow_mut().custom(&e.src, false));
             let picker = picker.clone();
             let e = e.clone();
             row = row.child(
-                div().flex_1().min_w_0().h(px(PACK_ROW)).flex().items_center().justify_center().child(
-                    div()
-                        .id(group.clone())
-                        .group(group.clone())
-                        .size(px(PACK_BOX))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .rounded(px(6.))
-                        .cursor_pointer()
-                        .hover(|s| s.bg(white_a(0.1)))
-                        .on_click(move |ev, _, cx| {
-                            let shift = ev.modifiers().shift;
-                            picker.update(cx, |_, cx| cx.emit(PickedCustom(e.code.clone(), e.url.clone(), shift))).ok();
-                        })
-                        .child(div().size(px(PACK_THUMB)).group_hover(group, |s| s.size(px(PACK_THUMB * 1.125))).child(thumb_of(state, PACK_THUMB))),
-                ),
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .h(px(PACK_ROW))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(
+                        div()
+                            .id(group.clone())
+                            .group(group.clone())
+                            .size(px(PACK_BOX))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded(px(6.))
+                            .cursor_pointer()
+                            .hover(|s| s.bg(white_a(0.1)))
+                            .on_click(move |ev, _, cx| {
+                                let shift = ev.modifiers().shift;
+                                picker
+                                    .update(cx, |_, cx| {
+                                        cx.emit(PickedCustom(e.code.clone(), e.url.clone(), shift))
+                                    })
+                                    .ok();
+                            })
+                            .child(
+                                div()
+                                    .size(px(PACK_THUMB))
+                                    .group_hover(group, |s| s.size(px(PACK_THUMB * 1.125)))
+                                    .child(thumb_of(state, PACK_THUMB)),
+                            ),
+                    ),
             );
         }
         for _ in cells.len()..COLS {
@@ -1136,14 +1529,25 @@ impl EmojiPicker {
         row.into_any_element()
     }
 
-    fn row(cells: &[Cell], last: bool, media: &MediaRef, picker: gpui::WeakEntity<Self>) -> AnyElement {
-        let mut row = div().w_full().flex().gap(px(GAP)).pb(px(if last { 3. } else { GAP }));
+    fn row(
+        cells: &[Cell],
+        last: bool,
+        media: &MediaRef,
+        picker: gpui::WeakEntity<Self>,
+    ) -> AnyElement {
+        let mut row = div()
+            .w_full()
+            .flex()
+            .gap(px(GAP))
+            .pb(px(if last { 3. } else { GAP }));
         for cell in cells {
             let e = match cell {
                 Cell::Stock(e) => *e,
                 Cell::Custom(e) => {
                     let group: SharedString = format!("pick-c-{}", e.code).into();
-                    let state = media.as_ref().map(|(m, _)| m.borrow_mut().custom(&e.src, false));
+                    let state = media
+                        .as_ref()
+                        .map(|(m, _)| m.borrow_mut().custom(&e.src, false));
                     let picker = picker.clone();
                     let e = e.clone();
                     row = row.child(
@@ -1159,7 +1563,15 @@ impl EmojiPicker {
                                 .hover(|s| s.bg(white_a(0.08)))
                                 .on_click(move |ev, _, cx| {
                                     let shift = ev.modifiers().shift;
-                                    picker.update(cx, |_, cx| cx.emit(PickedCustom(e.code.clone(), e.url.clone(), shift))).ok();
+                                    picker
+                                        .update(cx, |_, cx| {
+                                            cx.emit(PickedCustom(
+                                                e.code.clone(),
+                                                e.url.clone(),
+                                                shift,
+                                            ))
+                                        })
+                                        .ok();
                                 })
                                 .child(thumb_of(state, PACK_THUMB)),
                         ),
@@ -1169,7 +1581,10 @@ impl EmojiPicker {
             };
             let group: SharedString = format!("pick-{}", e.emoji).into();
             let glyph: AnyElement = match emoji::twemoji(e.emoji) {
-                Some(src) => img(src).size(px(30.)).group_hover(group.clone(), |s| s.size(px(33.75))).into_any_element(),
+                Some(src) => img(src)
+                    .size(px(30.))
+                    .group_hover(group.clone(), |s| s.size(px(33.75)))
+                    .into_any_element(),
                 None => div().text_size(px(24.)).child(e.emoji).into_any_element(),
             };
             let picker = picker.clone();
@@ -1188,7 +1603,9 @@ impl EmojiPicker {
                         .hover(|s| s.bg(white_a(0.1)))
                         .on_click(move |ev, _, cx| {
                             let shift = ev.modifiers().shift;
-                            picker.update(cx, |_, cx| cx.emit(Picked(emoji.to_string(), shift))).ok();
+                            picker
+                                .update(cx, |_, cx| cx.emit(Picked(emoji.to_string(), shift)))
+                                .ok();
                         })
                         .child(glyph),
                 ),
@@ -1213,7 +1630,11 @@ fn thumb_of(state: Option<crate::media::Custom>, size: f32) -> AnyElement {
             .map(|i| gpui::StyledImage::object_fit(i, gpui::ObjectFit::Contain))
             .into_any_element(),
         Some(crate::media::Custom::Missing(_)) => div().into_any_element(),
-        _ => div().size(px(size)).rounded(px(4.)).bg(white_a(0.03)).into_any_element(),
+        _ => div()
+            .size(px(size))
+            .rounded(px(4.))
+            .bg(white_a(0.03))
+            .into_any_element(),
     }
 }
 
@@ -1233,7 +1654,10 @@ impl Render for EmojiPicker {
                 .text_size(px(12.))
                 .font_weight(FontWeight::SEMIBOLD)
                 .when(active, |d| d.bg(c(PRIMARY)).text_color(c(0x000000)))
-                .when(!active, |d| d.text_color(white_a(0.5)).hover(|s| s.text_color(white_a(0.8))))
+                .when(!active, |d| {
+                    d.text_color(white_a(0.5))
+                        .hover(|s| s.text_color(white_a(0.8)))
+                })
                 .on_click(cx.listener(move |this, _, _, cx| this.set_mode(mode, cx)))
                 .child(label)
         };
@@ -1255,7 +1679,15 @@ impl Render for EmojiPicker {
                     .flex()
                     .items_center()
                     .child(self.search.clone())
-                    .child(svg().path("icons/search.svg").absolute().left(px(12.)).top(px(8.)).size(px(24.)).text_color(white_a(0.4))),
+                    .child(
+                        svg()
+                            .path("icons/search.svg")
+                            .absolute()
+                            .left(px(12.))
+                            .top(px(8.))
+                            .size(px(24.))
+                            .text_color(white_a(0.4)),
+                    ),
             )
             .child(
                 div()
@@ -1264,10 +1696,16 @@ impl Render for EmojiPicker {
                     .gap(px(4.))
                     .child(mode_btn("Emoji", Mode::Emoji, cx))
                     .when(!self.no_gifs, |d| d.child(mode_btn("GIF", Mode::Gif, cx)))
-                    .when(!self.reaction, |d| d.child(mode_btn("(◕‿◕)", Mode::Kaomoji, cx))),
+                    .when(!self.reaction, |d| {
+                        d.child(mode_btn("(◕‿◕)", Mode::Kaomoji, cx))
+                    }),
             );
 
-        let active = if self.query.is_empty() { self.active() } else { None };
+        let active = if self.query.is_empty() {
+            self.active()
+        } else {
+            None
+        };
         let rail_btn = |icon: &'static str, s: Option<Section>, cx: &mut Context<Self>| {
             let on = s.is_some() && active == s;
             div()
@@ -1281,14 +1719,31 @@ impl Render for EmojiPicker {
                 .rounded(px(6.))
                 .cursor_pointer()
                 .hover(|d| d.opacity(0.7))
-                .when(s.is_none(), |d| d.border_1().border_dashed().border_color(white_a(0.18)))
-                .when(on, |d| d.child(div().absolute().left(px(-12.)).top(px(1.)).w(px(6.)).h(px(28.)).rounded(px(2.)).bg(c(PRIMARY))))
+                .when(s.is_none(), |d| {
+                    d.border_1().border_dashed().border_color(white_a(0.18))
+                })
+                .when(on, |d| {
+                    d.child(
+                        div()
+                            .absolute()
+                            .left(px(-12.))
+                            .top(px(1.))
+                            .w(px(6.))
+                            .h(px(28.))
+                            .rounded(px(2.))
+                            .bg(c(PRIMARY)),
+                    )
+                })
                 .on_click(cx.listener(move |this, _, window, cx| match s {
                     Some(s) => this.go(s, cx),
                     None if this.creator.is_none() => this.open_creator(None, window, cx),
                     None => {}
                 }))
-                .child(svg().path(icon).size(px(26.)).text_color(if s.is_some() { c(0xffffff) } else { white_a(0.75) }))
+                .child(svg().path(icon).size(px(26.)).text_color(if s.is_some() {
+                    c(0xffffff)
+                } else {
+                    white_a(0.75)
+                }))
         };
         let rail = div()
             .w(px(50.))
@@ -1308,7 +1763,12 @@ impl Render for EmojiPicker {
             .children(self.packs.iter().enumerate().map(|(i, p)| {
                 let s = Section::Pack(i);
                 let face: AnyElement = match &p.logo {
-                    Some(src) => div().size_full().rounded(px(6.)).overflow_hidden().child(self.thumb(src, 30., true)).into_any_element(),
+                    Some(src) => div()
+                        .size_full()
+                        .rounded(px(6.))
+                        .overflow_hidden()
+                        .child(self.thumb(src, 30., true))
+                        .into_any_element(),
                     None => div()
                         .size(px(28.))
                         .rounded(px(4.))
@@ -1320,7 +1780,13 @@ impl Render for EmojiPicker {
                         .text_size(px(13.))
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(c(0xffffff))
-                        .child(p.title.chars().next().map(|c| c.to_uppercase().to_string()).unwrap_or_default())
+                        .child(
+                            p.title
+                                .chars()
+                                .next()
+                                .map(|c| c.to_uppercase().to_string())
+                                .unwrap_or_default(),
+                        )
                         .into_any_element(),
                 };
                 div()
@@ -1335,12 +1801,32 @@ impl Render for EmojiPicker {
                     .cursor_pointer()
                     .hover(|d| d.opacity(0.7))
                     .when(p.dead(), |d| d.opacity(0.5))
-                    .when(active == Some(s), |d| d.child(div().absolute().left(px(-12.)).top(px(1.)).w(px(6.)).h(px(28.)).rounded(px(2.)).bg(c(PRIMARY))))
+                    .when(active == Some(s), |d| {
+                        d.child(
+                            div()
+                                .absolute()
+                                .left(px(-12.))
+                                .top(px(1.))
+                                .w(px(6.))
+                                .h(px(28.))
+                                .rounded(px(2.))
+                                .bg(c(PRIMARY)),
+                        )
+                    })
                     .on_click(cx.listener(move |this, _, _, cx| this.go(s, cx)))
-                    .on_mouse_down(gpui::MouseButton::Right, cx.listener(move |this, ev: &gpui::MouseDownEvent, _, cx| this.pack_menu(i, ev.position, cx)))
+                    .on_mouse_down(
+                        gpui::MouseButton::Right,
+                        cx.listener(move |this, ev: &gpui::MouseDownEvent, _, cx| {
+                            this.pack_menu(i, ev.position, cx)
+                        }),
+                    )
                     .child(face)
             }))
-            .child(div().mt(px(3.)).child(rail_btn("icons/plus-circle.svg", None, cx)));
+            .child(
+                div()
+                    .mt(px(3.))
+                    .child(rail_btn("icons/plus-circle.svg", None, cx)),
+            );
 
         let items = self.items.clone();
         let me = cx.entity().downgrade();
@@ -1350,7 +1836,9 @@ impl Render for EmojiPicker {
         let grid = list(self.list.clone(), move |i, _, cx| match &items[i] {
             Item::Header(s) => {
                 let s = *s;
-                header_of.update(cx, |this, cx| this.header(s, cx)).unwrap_or_else(|_| div().into_any_element())
+                header_of
+                    .update(cx, |this, cx| this.header(s, cx))
+                    .unwrap_or_else(|_| div().into_any_element())
             }
             Item::Row { cells, last } => Self::row(cells, *last, &media, me.clone()),
             Item::PackRow { cells, last } => {
@@ -1363,7 +1851,10 @@ impl Render for EmojiPicker {
             Item::Dead(i) => {
                 let i = *i;
                 let weak = dead_of.clone();
-                dead_of.upgrade().map(|p| p.read(cx).dead(i, weak)).unwrap_or_else(|| div().into_any_element())
+                dead_of
+                    .upgrade()
+                    .map(|p| p.read(cx).dead(i, weak))
+                    .unwrap_or_else(|| div().into_any_element())
             }
         })
         .size_full();
@@ -1384,7 +1875,15 @@ impl Render for EmojiPicker {
                 .flex()
                 .bg(c(0x0a0a0a))
                 .child(rail)
-                .child(div().flex_1().h(px(280.)).pt(px(8.)).pl(px(8.)).pr(px(5.)).child(main))
+                .child(
+                    div()
+                        .flex_1()
+                        .h(px(280.))
+                        .pt(px(8.))
+                        .pl(px(8.))
+                        .pr(px(5.))
+                        .child(main),
+                )
                 .into_any_element(),
             Mode::Kaomoji => self.kaomoji_body(cx),
             Mode::Gif => self.gif_body(window, cx),

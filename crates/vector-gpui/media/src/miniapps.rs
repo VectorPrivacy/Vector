@@ -1,7 +1,7 @@
 //! The account's Iroh node, which calls share with Mini Apps.
 
 pub mod realtime {
-    use anyhow::{Result, anyhow};
+    use anyhow::{anyhow, Result};
     use iroh::EndpointAddr;
     use std::sync::Arc;
 

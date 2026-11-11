@@ -21,7 +21,11 @@ pub fn generate_thumbhash_from_image(img: &image::DynamicImage) -> Option<String
         ((THUMBHASH_SIZE * width / height).max(1), THUMBHASH_SIZE)
     };
     let rgba = crate::shared::image::thumbnail(img, thumb_w, thumb_h).to_rgba8();
-    let hash = fast_thumbhash::rgba_to_thumb_hash(rgba.width() as usize, rgba.height() as usize, rgba.as_raw());
+    let hash = fast_thumbhash::rgba_to_thumb_hash(
+        rgba.width() as usize,
+        rgba.height() as usize,
+        rgba.as_raw(),
+    );
     Some(fast_thumbhash::base91_encode(&hash))
 }
 
@@ -47,8 +51,16 @@ pub fn relative_time(unix: i64, now: i64) -> String {
     };
     let n = n.round() as i64;
     let count = n.unsigned_abs();
-    let unit = if count == 1 { unit.to_string() } else { format!("{unit}s") };
-    if n < 0 || (n == 0 && diff < 0.) { format!("{count} {unit} ago") } else { format!("in {count} {unit}") }
+    let unit = if count == 1 {
+        unit.to_string()
+    } else {
+        format!("{unit}s")
+    };
+    if n < 0 || (n == 0 && diff < 0.) {
+        format!("{count} {unit} ago")
+    } else {
+        format!("in {count} {unit}")
+    }
 }
 
 #[cfg(test)]

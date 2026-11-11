@@ -4,8 +4,8 @@
 
 use std::rc::Rc;
 
-use gpui::prelude::*;
 use gpui::AnimationExt;
+use gpui::prelude::*;
 use gpui::{AnyElement, App, Entity, FontWeight, SharedString, Window, div, img, px, svg};
 use vector_core::rail_layout::{RailAnchor, RailDrag, RailDrop, RailLayout, RailNode};
 
@@ -91,7 +91,13 @@ impl Render for Ghost {
             .text_size(px(12.))
             .text_color(c(0xffffff))
             .overflow_hidden()
-            .child(div().overflow_hidden().text_ellipsis().whitespace_nowrap().child(self.0.clone()))
+            .child(
+                div()
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .whitespace_nowrap()
+                    .child(self.0.clone()),
+            )
     }
 }
 
@@ -103,7 +109,15 @@ struct Zones {
 }
 
 /// Right-click opens the tile's own menu; a drag lifts it; drops land on its zones.
-fn arrangeable(id: SharedString, el: AnyElement, drag: PinDrag, zones: Zones, menu: (Option<String>, Option<String>), list: bool, on: &OnAct) -> AnyElement {
+fn arrangeable(
+    id: SharedString,
+    el: AnyElement,
+    drag: PinDrag,
+    zones: Zones,
+    menu: (Option<String>, Option<String>),
+    list: bool,
+    on: &OnAct,
+) -> AnyElement {
     let (key, folder) = menu;
     let menu_on = on.clone();
     let source = drag.source.clone();
@@ -114,20 +128,32 @@ fn arrangeable(id: SharedString, el: AnyElement, drag: PinDrag, zones: Zones, me
             cx.stop_propagation();
             menu_on(Act::Menu(e.position, key.clone(), folder.clone()), w, cx);
         })
-        .on_drag(drag, |d: &PinDrag, _, _, cx| cx.new(|_| Ghost(d.label.clone())))
+        .on_drag(drag, |d: &PinDrag, _, _, cx| {
+            cx.new(|_| Ghost(d.label.clone()))
+        })
         .child(el);
-    for (name, drop, into) in [("before", Some(zones.before), false), ("into", zones.into, true), ("after", Some(zones.after), false)] {
+    for (name, drop, into) in [
+        ("before", Some(zones.before), false),
+        ("into", zones.into, true),
+        ("after", Some(zones.after), false),
+    ] {
         let Some(drop) = drop else { continue };
         let on = on.clone();
         let src = source.clone();
-        let mut z = div().id(SharedString::from(format!("{id}-{name}"))).absolute();
+        let mut z = div()
+            .id(SharedString::from(format!("{id}-{name}")))
+            .absolute();
         z = match (list, name) {
             (false, "before") => z.top_0().h(px(80.)).left(px(-7.)).w(px(18.)),
             (false, "after") => z.top_0().h(px(80.)).right(px(-7.)).w(px(18.)),
             (false, _) => z.top_0().h(px(80.)).left(px(11.)).right(px(11.)),
             (true, "before") => z.left_0().right_0().top_0().h(gpui::relative(0.3)),
             (true, "after") => z.left_0().right_0().bottom_0().h(gpui::relative(0.3)),
-            (true, _) => z.left_0().right_0().top(gpui::relative(0.3)).bottom(gpui::relative(0.3)),
+            (true, _) => z
+                .left_0()
+                .right_0()
+                .top(gpui::relative(0.3))
+                .bottom(gpui::relative(0.3)),
         };
         let z = z
             .drag_over::<PinDrag>(move |d, _, _, _| {
@@ -152,7 +178,10 @@ fn arrangeable(id: SharedString, el: AnyElement, drag: PinDrag, zones: Zones, me
 
 pub type OnAct = Rc<dyn Fn(Act, &mut Window, &mut App)>;
 
-fn click(on: &OnAct, act: impl Fn() -> Act + 'static) -> impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static {
+fn click(
+    on: &OnAct,
+    act: impl Fn() -> Act + 'static,
+) -> impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static {
     let on = on.clone();
     move |_, w, cx| on(act(), w, cx)
 }
@@ -171,13 +200,21 @@ struct Resolved {
 }
 
 fn initial(name: &str) -> String {
-    name.chars().find(|c| c.is_alphanumeric()).map(|c| c.to_uppercase().collect()).unwrap_or_else(|| "?".into())
+    name.chars()
+        .find(|c| c.is_alphanumeric())
+        .map(|c| c.to_uppercase().collect())
+        .unwrap_or_else(|| "?".into())
 }
 
 /// What a pin shows, from what this device holds; a key it can't resolve keeps its place.
 fn resolve(key: &str, store: &Store) -> Resolved {
     let icon = |name: &str| Glyph::Icon(SharedString::from(format!("icons/{name}.svg")));
-    let r = |label: String, sub: &str, glyph: Glyph, missing: bool| Resolved { label, sub: sub.into(), glyph, missing };
+    let r = |label: String, sub: &str, glyph: Glyph, missing: bool| Resolved {
+        label,
+        sub: sub.into(),
+        glyph,
+        missing,
+    };
     let parts: Vec<&str> = key.split('/').collect();
     match parts.as_slice() {
         ["dm", npub] => {
@@ -189,19 +226,39 @@ fn resolve(key: &str, store: &Store) -> Resolved {
             r(label, "Direct Message", glyph, false)
         }
         ["settings", rest @ ..] => {
-            let cats = crate::settings::categories(&crate::settings::Offers { voice: false, routing: true, updates: true });
-            let Some(cat) = rest.first().and_then(|id| cats.iter().find(|c| c.id == *id)) else {
+            let cats = crate::settings::categories(&crate::settings::Offers {
+                voice: false,
+                routing: true,
+                updates: true,
+            });
+            let Some(cat) = rest
+                .first()
+                .and_then(|id| cats.iter().find(|c| c.id == *id))
+            else {
                 return r("Settings".into(), "Settings", icon("settings"), false);
             };
-            match rest.get(1).and_then(|id| cat.anchors.iter().find(|a| a.id == *id)) {
-                Some(a) => r(a.label.into(), &format!("Settings › {}", cat.label), icon(cat.icon), false),
+            match rest
+                .get(1)
+                .and_then(|id| cat.anchors.iter().find(|a| a.id == *id))
+            {
+                Some(a) => r(
+                    a.label.into(),
+                    &format!("Settings › {}", cat.label),
+                    icon(cat.icon),
+                    false,
+                ),
                 None => r(cat.label.into(), "Settings", icon(cat.icon), false),
             }
         }
         ["requests"] => r("Requests".into(), "Messages", icon("mail"), false),
         ["nexus"] => r("App Store".into(), "Mini Apps", icon("nexus"), false),
         ["app", id] => r(id.to_string(), "Mini App", icon("grid-fill"), true),
-        ["c", ..] => r("Community".into(), "A community you're not in", icon("users-multi"), true),
+        ["c", ..] => r(
+            "Community".into(),
+            "A community you're not in",
+            icon("users-multi"),
+            true,
+        ),
         _ => r(key.into(), "", icon("share"), true),
     }
 }
@@ -233,11 +290,21 @@ pub fn hits(sm: &StartMenu, store: &Store, query: &str) -> Vec<Hit> {
     let q = q.strip_prefix("nostr:").unwrap_or(&q).to_string();
     let hit = |key: String| {
         let r = resolve(&key, store);
-        Hit { key: Some(key), nav: None, label: r.label, sub: r.sub, glyph: r.glyph }
+        Hit {
+            key: Some(key),
+            nav: None,
+            label: r.label,
+            sub: r.sub,
+            glyph: r.glyph,
+        }
     };
     if is_npub(&q) {
         let mut h = hit(format!("dm/{q}"));
-        h.sub = if q == store.my_npub { "You".into() } else { "Person".into() };
+        h.sub = if q == store.my_npub {
+            "You".into()
+        } else {
+            "Person".into()
+        };
         return vec![h];
     }
     let mut dms: Vec<(u64, String)> = store
@@ -249,7 +316,11 @@ pub fn hits(sm: &StartMenu, store: &Store, query: &str) -> Vec<Hit> {
         .collect();
     dms.sort_by(|a, b| b.0.cmp(&a.0));
     let mut places = Vec::new();
-    for cat in crate::settings::categories(&crate::settings::Offers { voice: false, routing: true, updates: true }) {
+    for cat in crate::settings::categories(&crate::settings::Offers {
+        voice: false,
+        routing: true,
+        updates: true,
+    }) {
         places.push(format!("settings/{}", cat.id));
         for a in cat.anchors.iter().filter(|a| a.label != cat.label) {
             places.push(format!("settings/{}/{}", cat.id, a.id));
@@ -258,21 +329,41 @@ pub fn hits(sm: &StartMenu, store: &Store, query: &str) -> Vec<Hit> {
     places.push("nexus".into());
     places.push("requests".into());
     let mut out: Vec<Hit> = if q.is_empty() {
-        dms.into_iter().map(|(_, k)| k).filter(|k| !sm.pinned(k)).take(8).chain(places.into_iter().filter(|k| !sm.pinned(k))).map(hit).collect()
+        dms.into_iter()
+            .map(|(_, k)| k)
+            .filter(|k| !sm.pinned(k))
+            .take(8)
+            .chain(places.into_iter().filter(|k| !sm.pinned(k)))
+            .map(hit)
+            .collect()
     } else {
         let score = |l: &str| {
             let l = l.to_lowercase();
-            if l.starts_with(&q) { 2 } else if l.contains(&q) { 1 } else { 0 }
+            if l.starts_with(&q) {
+                2
+            } else if l.contains(&q) {
+                1
+            } else {
+                0
+            }
         };
-        let nav = NAV.iter().filter(|_| !sm.adding).map(|(id, label, icon)| Hit {
-            key: None,
-            nav: Some(id),
-            label: label.to_string(),
-            sub: "Vector".into(),
-            glyph: Glyph::Icon(SharedString::from(format!("icons/{icon}.svg"))),
-        });
+        let nav = NAV
+            .iter()
+            .filter(|_| !sm.adding)
+            .map(|(id, label, icon)| Hit {
+                key: None,
+                nav: Some(id),
+                label: label.to_string(),
+                sub: "Vector".into(),
+                glyph: Glyph::Icon(SharedString::from(format!("icons/{icon}.svg"))),
+            });
         let mut scored: Vec<(u8, Hit)> = nav
-            .chain(places.into_iter().chain(dms.into_iter().map(|(_, k)| k)).map(hit))
+            .chain(
+                places
+                    .into_iter()
+                    .chain(dms.into_iter().map(|(_, k)| k))
+                    .map(hit),
+            )
             .map(|h| (score(&h.label) * 2 + u8::from(score(&h.sub) > 0), h))
             .filter(|(s, _)| *s > 0)
             .collect();
@@ -280,7 +371,13 @@ pub fn hits(sm: &StartMenu, store: &Store, query: &str) -> Vec<Hit> {
         scored.into_iter().map(|(_, h)| h).collect()
     };
     let mut seen = std::collections::HashSet::new();
-    out.retain(|h| seen.insert(h.key.clone().unwrap_or_else(|| format!("nav:{}", h.nav.unwrap_or("")))));
+    out.retain(|h| {
+        seen.insert(
+            h.key
+                .clone()
+                .unwrap_or_else(|| format!("nav:{}", h.nav.unwrap_or(""))),
+        )
+    });
     out.truncate(40);
     out
 }
@@ -298,7 +395,10 @@ fn results(sm: &StartMenu, store: &Store, query: &str, on: &OnAct) -> AnyElement
                 .font_weight(FontWeight::BOLD)
                 .text_color(c(0x8a8a8a))
                 .when(sm.adding, |d| d.child(back(on)))
-                .child(crate::kit::spaced(if sm.adding { "ADD PINS" } else { "RESULTS" }, 11. * 0.09)),
+                .child(crate::kit::spaced(
+                    if sm.adding { "ADD PINS" } else { "RESULTS" },
+                    11. * 0.09,
+                )),
         );
     }
     if hits.is_empty() {
@@ -313,9 +413,46 @@ fn results(sm: &StartMenu, store: &Store, query: &str, on: &OnAct) -> AnyElement
                     .pt(px(56.))
                     .px(px(20.))
                     .pb(px(24.))
-                    .child(div().size(px(64.)).mb(px(10.)).flex().items_center().justify_center().rounded_full().border_1().border_color(c(0x2c2c2c)).child(svg().path("icons/search.svg").size(px(26.)).text_color(white_a(0.5))))
-                    .child(div().text_size(px(15.)).text_color(c(0xffffff)).child(format!("{} “{q}”", if sm.adding { "Nothing to pin called" } else { "No results for" })))
-                    .child(div().text_size(px(13.)).text_color(white_a(0.5)).child(if sm.adding { "Pin a Mini App, a chat, a community or a place in Settings." } else { "Try a name, a community, a Mini App or a setting." })),
+                    .child(
+                        div()
+                            .size(px(64.))
+                            .mb(px(10.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded_full()
+                            .border_1()
+                            .border_color(c(0x2c2c2c))
+                            .child(
+                                svg()
+                                    .path("icons/search.svg")
+                                    .size(px(26.))
+                                    .text_color(white_a(0.5)),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(15.))
+                            .text_color(c(0xffffff))
+                            .child(format!(
+                                "{} “{q}”",
+                                if sm.adding {
+                                    "Nothing to pin called"
+                                } else {
+                                    "No results for"
+                                }
+                            )),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(13.))
+                            .text_color(white_a(0.5))
+                            .child(if sm.adding {
+                                "Pin a Mini App, a chat, a community or a place in Settings."
+                            } else {
+                                "Try a name, a community, a Mini App or a setting."
+                            }),
+                    ),
             )
             .into_any_element();
     }
@@ -344,7 +481,15 @@ fn results(sm: &StartMenu, store: &Store, query: &str, on: &OnAct) -> AnyElement
                 }
             })
             .on_click(click(on, move || Act::Pick(ix)))
-            .child(div().size(px(28.)).flex_shrink_0().flex().items_center().justify_center().child(glyph(&h.glyph, 28.)))
+            .child(
+                div()
+                    .size(px(28.))
+                    .flex_shrink_0()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(glyph(&h.glyph, 28.)),
+            )
             .child(
                 div()
                     .flex_1()
@@ -352,11 +497,33 @@ fn results(sm: &StartMenu, store: &Store, query: &str, on: &OnAct) -> AnyElement
                     .flex()
                     .flex_col()
                     .gap(px(2.))
-                    .child(div().text_size(px(14.)).line_height(px(17.)).overflow_hidden().text_ellipsis().whitespace_nowrap().child(h.label))
-                    .when(!h.sub.is_empty(), |d| d.child(div().text_size(px(12.)).line_height(px(14.)).text_color(white_a(0.45)).child(h.sub))),
+                    .child(
+                        div()
+                            .text_size(px(14.))
+                            .line_height(px(17.))
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .whitespace_nowrap()
+                            .child(h.label),
+                    )
+                    .when(!h.sub.is_empty(), |d| {
+                        d.child(
+                            div()
+                                .text_size(px(12.))
+                                .line_height(px(14.))
+                                .text_color(white_a(0.45))
+                                .child(h.sub),
+                        )
+                    }),
             );
         // A pasted npub opens the profile; this messages it instead.
-        if let Some(npub) = h.key.as_deref().and_then(|k| k.strip_prefix("dm/")).filter(|_| !sm.adding && is_npub(query.trim())).map(String::from) {
+        if let Some(npub) = h
+            .key
+            .as_deref()
+            .and_then(|k| k.strip_prefix("dm/"))
+            .filter(|_| !sm.adding && is_npub(query.trim()))
+            .map(String::from)
+        {
             row = row.child(
                 div()
                     .id(SharedString::from(format!("stm-msg-{ix}")))
@@ -366,7 +533,12 @@ fn results(sm: &StartMenu, store: &Store, query: &str, on: &OnAct) -> AnyElement
                     .group_hover(group.clone(), |d| d.opacity(1.))
                     .hover(|d| d.bg(white_a(0.08)))
                     .on_click(click(on, move || Act::Open(format!("dm/{npub}"))))
-                    .child(svg().path("icons/message.svg").size(px(16.)).text_color(c(0xffffff))),
+                    .child(
+                        svg()
+                            .path("icons/message.svg")
+                            .size(px(16.))
+                            .text_color(c(0xffffff)),
+                    ),
             );
         }
         if let Some(key) = h.key.clone() {
@@ -385,7 +557,12 @@ fn results(sm: &StartMenu, store: &Store, query: &str, on: &OnAct) -> AnyElement
                             on(Act::Pin(key.clone()), w, cx);
                         }
                     })
-                    .child(svg().path("icons/pin.svg").size(px(16.)).text_color(c(if pinned { PRIMARY } else { 0xffffff }))),
+                    .child(
+                        svg()
+                            .path("icons/pin.svg")
+                            .size(px(16.))
+                            .text_color(c(if pinned { PRIMARY } else { 0xffffff })),
+                    ),
             );
         }
         list = list.child(row);
@@ -394,12 +571,27 @@ fn results(sm: &StartMenu, store: &Store, query: &str, on: &OnAct) -> AnyElement
 }
 
 fn back(on: &OnAct) -> impl IntoElement {
-    div().id("stm-back").mr(px(6.)).cursor_pointer().on_click(click(on, || Act::Back)).child(svg().path("icons/chevron-left.svg").size(px(14.)).text_color(c(0x8a8a8a)))
+    div()
+        .id("stm-back")
+        .mr(px(6.))
+        .cursor_pointer()
+        .on_click(click(on, || Act::Back))
+        .child(
+            svg()
+                .path("icons/chevron-left.svg")
+                .size(px(14.))
+                .text_color(c(0x8a8a8a)),
+        )
 }
 
 fn glyph(g: &Glyph, size: f32) -> AnyElement {
     match g {
-        Glyph::Picture(p, round) => img(p.clone()).size(px(size)).flex_shrink_0().when(*round, |d| d.rounded_full()).when(!*round, |d| d.rounded(px(10.))).into_any_element(),
+        Glyph::Picture(p, round) => img(p.clone())
+            .size(px(size))
+            .flex_shrink_0()
+            .when(*round, |d| d.rounded_full())
+            .when(!*round, |d| d.rounded(px(10.)))
+            .into_any_element(),
         Glyph::Initial(ch, round) => div()
             .size(px(size))
             .flex_shrink_0()
@@ -415,17 +607,47 @@ fn glyph(g: &Glyph, size: f32) -> AnyElement {
             .child(ch.clone())
             .into_any_element(),
         // The App Store's mark wears its own colours.
-        Glyph::Icon(path) if path.as_ref() == "icons/nexus.svg" => img(path.clone()).size(px(if size >= 40. { 34. } else { size * 0.7 })).into_any_element(),
-        Glyph::Icon(path) => svg().path(path.clone()).size(px(if size >= 40. { 34. } else { size * 0.7 })).text_color(c(0xdddddd)).into_any_element(),
+        Glyph::Icon(path) if path.as_ref() == "icons/nexus.svg" => img(path.clone())
+            .size(px(if size >= 40. { 34. } else { size * 0.7 }))
+            .into_any_element(),
+        Glyph::Icon(path) => svg()
+            .path(path.clone())
+            .size(px(if size >= 40. { 34. } else { size * 0.7 }))
+            .text_color(c(0xdddddd))
+            .into_any_element(),
     }
 }
 
 /// A grid tile is named beneath; a list row reads like a search result.
-fn tile(id: SharedString, label: String, sub: Option<&str>, g: AnyElement, plate: bool, missing: bool, list: bool, on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static) -> AnyElement {
+fn tile(
+    id: SharedString,
+    label: String,
+    sub: Option<&str>,
+    g: AnyElement,
+    plate: bool,
+    missing: bool,
+    list: bool,
+    on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
+) -> AnyElement {
     if list {
-        let mut text = div().flex().flex_col().min_w_0().child(div().text_size(px(13.)).line_height(px(18.)).text_color(c(0xffffff)).overflow_hidden().text_ellipsis().whitespace_nowrap().child(label));
+        let mut text = div().flex().flex_col().min_w_0().child(
+            div()
+                .text_size(px(13.))
+                .line_height(px(18.))
+                .text_color(c(0xffffff))
+                .overflow_hidden()
+                .text_ellipsis()
+                .whitespace_nowrap()
+                .child(label),
+        );
         if let Some(sub) = sub {
-            text = text.child(div().text_size(px(12.)).line_height(px(16.)).text_color(white_a(0.45)).child(sub.to_string()));
+            text = text.child(
+                div()
+                    .text_size(px(12.))
+                    .line_height(px(16.))
+                    .text_color(white_a(0.45))
+                    .child(sub.to_string()),
+            );
         }
         return div()
             .id(id)
@@ -438,7 +660,16 @@ fn tile(id: SharedString, label: String, sub: Option<&str>, g: AnyElement, plate
             .hover(|d| d.bg(c(0x2a2a2a)))
             .cursor_pointer()
             .on_click(on_click)
-            .child(div().size(px(28.)).flex_shrink_0().flex().items_center().justify_center().when(missing, |d| d.opacity(0.5)).child(g))
+            .child(
+                div()
+                    .size(px(28.))
+                    .flex_shrink_0()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .when(missing, |d| d.opacity(0.5))
+                    .child(g),
+            )
             .child(text)
             .into_any_element();
     }
@@ -460,7 +691,12 @@ fn tile(id: SharedString, label: String, sub: Option<&str>, g: AnyElement, plate
                 .items_center()
                 .justify_center()
                 .rounded(px(12.))
-                .when(plate, |d| d.border(px(1.5)).border_color(c(0x3a3a3a)).bg(c(0x222222)).group_hover(group.clone(), |d| d.border_color(c(PRIMARY))))
+                .when(plate, |d| {
+                    d.border(px(1.5))
+                        .border_color(c(0x3a3a3a))
+                        .bg(c(0x222222))
+                        .group_hover(group.clone(), |d| d.border_color(c(PRIMARY)))
+                })
                 .when(!plate, |d| d.p(px(7.5)))
                 .when(missing, |d| d.opacity(0.5))
                 .child(g),
@@ -480,7 +716,13 @@ fn tile(id: SharedString, label: String, sub: Option<&str>, g: AnyElement, plate
         .into_any_element()
 }
 
-fn nav_item(id: &'static str, label: &'static str, icon: &'static str, dot: bool, on: &OnAct) -> impl IntoElement {
+fn nav_item(
+    id: &'static str,
+    label: &'static str,
+    icon: &'static str,
+    dot: bool,
+    on: &OnAct,
+) -> impl IntoElement {
     div()
         .id(id)
         .relative()
@@ -498,12 +740,35 @@ fn nav_item(id: &'static str, label: &'static str, icon: &'static str, dot: bool
         .line_height(px(24.))
         .text_color(c(0xe6e6e6))
         .on_click(click(on, move || Act::Nav(id)))
-        .child(svg().path(icon).size(px(24.)).flex_shrink_0().text_color(c(0x9a9a9a)))
+        .child(
+            svg()
+                .path(icon)
+                .size(px(24.))
+                .flex_shrink_0()
+                .text_color(c(0x9a9a9a)),
+        )
         .child(label)
-        .when(dot, |d| d.child(div().absolute().left(px(30.)).top(px(8.)).size(px(8.)).rounded_full().bg(c(PRIMARY))))
+        .when(dot, |d| {
+            d.child(
+                div()
+                    .absolute()
+                    .left(px(30.))
+                    .top(px(8.))
+                    .size(px(8.))
+                    .rounded_full()
+                    .bg(c(PRIMARY)),
+            )
+        })
 }
 
-fn audio(id: &'static str, kind: &'static str, icon: &'static str, off: bool, toggle: Act, on: &OnAct) -> impl IntoElement {
+fn audio(
+    id: &'static str,
+    kind: &'static str,
+    icon: &'static str,
+    off: bool,
+    toggle: Act,
+    on: &OnAct,
+) -> impl IntoElement {
     let toggle = Rc::new(std::cell::RefCell::new(Some(toggle)));
     let on2 = on.clone();
     div()
@@ -523,7 +788,11 @@ fn audio(id: &'static str, kind: &'static str, icon: &'static str, off: bool, to
                         on2(act, w, cx);
                     }
                 })
-                .child(svg().path(icon).size(px(26.)).text_color(c(if off { crate::timeline::DANGER } else { 0x888888 }))),
+                .child(svg().path(icon).size(px(26.)).text_color(c(if off {
+                    crate::timeline::DANGER
+                } else {
+                    0x888888
+                }))),
         )
         .child(
             div()
@@ -536,7 +805,12 @@ fn audio(id: &'static str, kind: &'static str, icon: &'static str, off: bool, to
                     let on = on.clone();
                     move |e, w, cx| on(Act::Devices(kind, e.position()), w, cx)
                 })
-                .child(svg().path("icons/chevron-down.svg").size(px(14.)).text_color(c(0x888888))),
+                .child(
+                    svg()
+                        .path("icons/chevron-down.svg")
+                        .size(px(14.))
+                        .text_color(c(0x888888)),
+                ),
         )
 }
 
@@ -544,27 +818,53 @@ fn audio(id: &'static str, kind: &'static str, icon: &'static str, off: bool, to
 fn zones_for(nodes: &[RailNode], ix: usize, folder: Option<&str>, into: Option<RailDrop>) -> Zones {
     let at = |i: usize| -> RailDrop {
         match (folder, nodes.get(i)) {
-            (Some(f), Some(RailNode::Item { key })) => RailDrop::IntoFolder { folder_id: f.into(), before_key: Some(key.clone()) },
-            (Some(f), _) => RailDrop::IntoFolder { folder_id: f.into(), before_key: None },
-            (None, Some(RailNode::Item { key })) => RailDrop::Before { anchor: RailAnchor::Item { key: key.clone() } },
-            (None, Some(RailNode::Folder { id, .. })) => RailDrop::Before { anchor: RailAnchor::Folder { id: id.clone() } },
+            (Some(f), Some(RailNode::Item { key })) => RailDrop::IntoFolder {
+                folder_id: f.into(),
+                before_key: Some(key.clone()),
+            },
+            (Some(f), _) => RailDrop::IntoFolder {
+                folder_id: f.into(),
+                before_key: None,
+            },
+            (None, Some(RailNode::Item { key })) => RailDrop::Before {
+                anchor: RailAnchor::Item { key: key.clone() },
+            },
+            (None, Some(RailNode::Folder { id, .. })) => RailDrop::Before {
+                anchor: RailAnchor::Folder { id: id.clone() },
+            },
             (None, None) => RailDrop::End,
         }
     };
-    Zones { before: at(ix), into, after: at(ix + 1) }
+    Zones {
+        before: at(ix),
+        into,
+        after: at(ix + 1),
+    }
 }
 
 /// Four to a row in the grid; one under another in the list.
 fn arrange(tiles: Vec<AnyElement>, list: bool) -> AnyElement {
     if list {
-        return div().flex().flex_col().gap(px(2.)).children(tiles).into_any_element();
+        return div()
+            .flex()
+            .flex_col()
+            .gap(px(2.))
+            .children(tiles)
+            .into_any_element();
     }
     let mut rows = div().flex().flex_col().gap(px(16.));
     let mut tiles = tiles.into_iter().peekable();
     while tiles.peek().is_some() {
         let mut row = div().flex().gap(px(14.));
         for _ in 0..4 {
-            row = row.child(div().flex_1().min_w_0().flex().justify_center().children(tiles.next()));
+            row = row.child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .justify_center()
+                    .children(tiles.next()),
+            );
         }
         rows = rows.child(row);
     }
@@ -577,7 +877,10 @@ pub fn render(sm: &StartMenu, store: &Store, window: &Window, on: &OnAct, cx: &A
     let height = (viewport.height - px(20.)).min(px(562.));
     let list = sm.list;
     let me = store.my_npub.clone();
-    let unread = store.chats.iter().any(|ch| store.listed(ch) && store.unread_count(ch) > 0);
+    let unread = store
+        .chats
+        .iter()
+        .any(|ch| store.listed(ch) && store.unread_count(ch) > 0);
 
     let search = div()
         .mx(px(28.))
@@ -590,8 +893,20 @@ pub fn render(sm: &StartMenu, store: &Store, window: &Window, on: &OnAct, cx: &A
         .px(px(18.))
         .rounded(px(22.))
         .bg(c(0x0f0f0f))
-        .child(svg().path("icons/search.svg").size(px(18.)).flex_shrink_0().text_color(c(0xffffff)))
-        .child(div().flex_1().min_w_0().font_family(RUBIK).child(sm.search.clone()));
+        .child(
+            svg()
+                .path("icons/search.svg")
+                .size(px(18.))
+                .flex_shrink_0()
+                .text_color(c(0xffffff)),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .font_family(RUBIK)
+                .child(sm.search.clone()),
+        );
 
     let nav = div()
         .w(px(233.))
@@ -605,16 +920,55 @@ pub fn render(sm: &StartMenu, store: &Store, window: &Window, on: &OnAct, cx: &A
         .flex()
         .flex_col()
         .gap(px(4.))
-        .child(nav_item("accounts", "Accounts", if sm.accounts.len() > 1 { "icons/users-multi-fill.svg" } else { "icons/add-user.svg" }, false, on))
-        .child(nav_item("profile", "Profile", "icons/start-profile.svg", false, on))
+        .child(nav_item(
+            "accounts",
+            "Accounts",
+            if sm.accounts.len() > 1 {
+                "icons/users-multi-fill.svg"
+            } else {
+                "icons/add-user.svg"
+            },
+            false,
+            on,
+        ))
+        .child(nav_item(
+            "profile",
+            "Profile",
+            "icons/start-profile.svg",
+            false,
+            on,
+        ))
         .child(nav_item("chat", "Chat", "icons/chats-fill.svg", unread, on))
-        .child(nav_item("bookmarks", "Bookmarks", "icons/bookmark-fill.svg", false, on))
-        .child(nav_item("miniapps", "Mini Apps", "icons/grid-fill.svg", false, on))
-        .child(nav_item("settings", "Settings", "icons/start-settings.svg", false, on));
+        .child(nav_item(
+            "bookmarks",
+            "Bookmarks",
+            "icons/bookmark-fill.svg",
+            false,
+            on,
+        ))
+        .child(nav_item(
+            "miniapps",
+            "Mini Apps",
+            "icons/grid-fill.svg",
+            false,
+            on,
+        ))
+        .child(nav_item(
+            "settings",
+            "Settings",
+            "icons/start-settings.svg",
+            false,
+            on,
+        ));
 
     let folder = sm.folder.as_ref().and_then(|id| {
         sm.layout.nodes.iter().find_map(|n| match n {
-            RailNode::Folder { id: fid, name, keys, .. } if fid == id => Some((name.clone(), keys.clone())),
+            RailNode::Folder {
+                id: fid,
+                name,
+                keys,
+                ..
+            } if fid == id => Some((name.clone(), keys.clone())),
             _ => None,
         })
     });
@@ -624,10 +978,20 @@ pub fn render(sm: &StartMenu, store: &Store, window: &Window, on: &OnAct, cx: &A
             .p(px(4.))
             .cursor_pointer()
             .on_click(click(on, move || Act::View(want)))
-            .child(svg().path(icon).size(px(16.)).text_color(c(if on_ { 0xffffff } else { 0x777777 })))
+            .child(svg().path(icon).size(px(16.)).text_color(c(if on_ {
+                0xffffff
+            } else {
+                0x777777
+            })))
     };
     let title = match &folder {
-        Some((name, _)) => if name.is_empty() { "Folder".to_string() } else { name.clone() },
+        Some((name, _)) => {
+            if name.is_empty() {
+                "Folder".to_string()
+            } else {
+                name.clone()
+            }
+        }
         None => "Pinned".into(),
     };
     let head = div()
@@ -646,11 +1010,23 @@ pub fn render(sm: &StartMenu, store: &Store, window: &Window, on: &OnAct, cx: &A
                     .mr(px(6.))
                     .cursor_pointer()
                     .on_click(click(on, || Act::Folder(None)))
-                    .child(svg().path("icons/chevron-left.svg").size(px(14.)).text_color(c(0x8a8a8a))),
+                    .child(
+                        svg()
+                            .path("icons/chevron-left.svg")
+                            .size(px(14.))
+                            .text_color(c(0x8a8a8a)),
+                    ),
             )
         })
         .child(crate::kit::spaced(title.to_uppercase(), 11. * 0.09))
-        .child(div().ml_auto().flex().gap(px(2.)).child(view_btn("stm-grid", "icons/grid.svg", !list, false)).child(view_btn("stm-list", "icons/list.svg", list, true)));
+        .child(
+            div()
+                .ml_auto()
+                .flex()
+                .gap(px(2.))
+                .child(view_btn("stm-grid", "icons/grid.svg", !list, false))
+                .child(view_btn("stm-list", "icons/list.svg", list, true)),
+        );
 
     let mut tiles: Vec<AnyElement> = Vec::new();
     let folder_id = sm.folder.clone().filter(|_| folder.is_some());
@@ -664,27 +1040,116 @@ pub fn render(sm: &StartMenu, store: &Store, window: &Window, on: &OnAct, cx: &A
                 let r = resolve(key, store);
                 let plate = matches!(r.glyph, Glyph::Icon(_));
                 let k = key.clone();
-                let drag = PinDrag { source: RailDrag::Item { key: key.clone() }, label: r.label.clone().into() };
-                let t = tile(SharedString::from(format!("stm-pin-{ix}")), r.label, Some(r.sub.as_str()).filter(|s| !s.is_empty()), glyph(&r.glyph, if list { 28. } else if plate { 40. } else { 65. }), plate, r.missing, list, click(on, move || Act::Open(k.clone())));
-                let into = if folder_id.is_none() { Some(RailDrop::Combine { with_key: key.clone() }) } else { None };
+                let drag = PinDrag {
+                    source: RailDrag::Item { key: key.clone() },
+                    label: r.label.clone().into(),
+                };
+                let t = tile(
+                    SharedString::from(format!("stm-pin-{ix}")),
+                    r.label,
+                    Some(r.sub.as_str()).filter(|s| !s.is_empty()),
+                    glyph(
+                        &r.glyph,
+                        if list {
+                            28.
+                        } else if plate {
+                            40.
+                        } else {
+                            65.
+                        },
+                    ),
+                    plate,
+                    r.missing,
+                    list,
+                    click(on, move || Act::Open(k.clone())),
+                );
+                let into = if folder_id.is_none() {
+                    Some(RailDrop::Combine {
+                        with_key: key.clone(),
+                    })
+                } else {
+                    None
+                };
                 let zones = zones_for(&shown, ix, folder_id.as_deref(), into);
-                tiles.push(arrangeable(SharedString::from(format!("stm-a-{ix}")), t, drag, zones, (Some(key.clone()), None), list, on));
+                tiles.push(arrangeable(
+                    SharedString::from(format!("stm-a-{ix}")),
+                    t,
+                    drag,
+                    zones,
+                    (Some(key.clone()), None),
+                    list,
+                    on,
+                ));
             }
             RailNode::Folder { id, name, keys, .. } => {
-                let mini = keys.iter().take(4).map(|k| glyph(&resolve(k, store).glyph, if list { 12. } else { 22. }));
-                let grid = div().w(px(if list { 28. } else { 50. })).flex().flex_wrap().gap(px(if list { 4. } else { 6. })).justify_center().children(mini);
+                let mini = keys
+                    .iter()
+                    .take(4)
+                    .map(|k| glyph(&resolve(k, store).glyph, if list { 12. } else { 22. }));
+                let grid = div()
+                    .w(px(if list { 28. } else { 50. }))
+                    .flex()
+                    .flex_wrap()
+                    .gap(px(if list { 4. } else { 6. }))
+                    .justify_center()
+                    .children(mini);
                 let fid = id.clone();
-                let label = if name.is_empty() { "Folder".to_string() } else { name.clone() };
-                let drag = PinDrag { source: RailDrag::Folder { id: id.clone() }, label: label.clone().into() };
-                let t = tile(SharedString::from(format!("stm-folder-{ix}")), label, Some("Folder"), grid.into_any_element(), true, false, list, click(on, move || Act::Folder(Some(fid.clone()))));
-                let zones = zones_for(&shown, ix, None, Some(RailDrop::IntoFolder { folder_id: id.clone(), before_key: None }));
-                tiles.push(arrangeable(SharedString::from(format!("stm-a-{ix}")), t, drag, zones, (None, Some(id.clone())), list, on));
+                let label = if name.is_empty() {
+                    "Folder".to_string()
+                } else {
+                    name.clone()
+                };
+                let drag = PinDrag {
+                    source: RailDrag::Folder { id: id.clone() },
+                    label: label.clone().into(),
+                };
+                let t = tile(
+                    SharedString::from(format!("stm-folder-{ix}")),
+                    label,
+                    Some("Folder"),
+                    grid.into_any_element(),
+                    true,
+                    false,
+                    list,
+                    click(on, move || Act::Folder(Some(fid.clone()))),
+                );
+                let zones = zones_for(
+                    &shown,
+                    ix,
+                    None,
+                    Some(RailDrop::IntoFolder {
+                        folder_id: id.clone(),
+                        before_key: None,
+                    }),
+                );
+                tiles.push(arrangeable(
+                    SharedString::from(format!("stm-a-{ix}")),
+                    t,
+                    drag,
+                    zones,
+                    (None, Some(id.clone())),
+                    list,
+                    on,
+                ));
             }
         }
     }
     if folder.is_none() {
-        let add = svg().path("icons/plus-circle.svg").size(px(if list { 22. } else { 34. })).text_color(c(0xbbbbbb)).into_any_element();
-        tiles.push(tile("stm-add".into(), "Add Pin".into(), None, add, true, false, list, click(on, || Act::AddPin)));
+        let add = svg()
+            .path("icons/plus-circle.svg")
+            .size(px(if list { 22. } else { 34. }))
+            .text_color(c(0xbbbbbb))
+            .into_any_element();
+        tiles.push(tile(
+            "stm-add".into(),
+            "Add Pin".into(),
+            None,
+            add,
+            true,
+            false,
+            list,
+            click(on, || Act::AddPin),
+        ));
     }
     let grid = arrange(tiles, list);
     let query = sm.search.read(cx).text().to_string();
@@ -703,16 +1168,59 @@ pub fn render(sm: &StartMenu, store: &Store, window: &Window, on: &OnAct, cx: &A
                     None => Glyph::Initial(initial(&label), true),
                 };
                 let npub = a.npub.clone();
-                let sub = format!("{}…{}", &a.npub[..12.min(a.npub.len())], &a.npub[a.npub.len().saturating_sub(4)..]);
+                let sub = format!(
+                    "{}…{}",
+                    &a.npub[..12.min(a.npub.len())],
+                    &a.npub[a.npub.len().saturating_sub(4)..]
+                );
                 let size = if list { 28. } else { 65. };
                 // The account signed in wears the primary ring.
-                let pic = div().rounded_full().when(current, |d| d.shadow(vec![gpui::BoxShadow { color: c(PRIMARY), offset: gpui::point(px(0.), px(0.)), blur_radius: px(0.), spread_radius: px(2.), inset: false }])).child(glyph(&g, size));
-                tile(SharedString::from(format!("stm-acct-{ix}")), label, Some(&sub), pic.into_any_element(), false, false, list, click(on, move || if current { Act::Back } else { Act::Switch(npub.clone()) }))
+                let pic = div()
+                    .rounded_full()
+                    .when(current, |d| {
+                        d.shadow(vec![gpui::BoxShadow {
+                            color: c(PRIMARY),
+                            offset: gpui::point(px(0.), px(0.)),
+                            blur_radius: px(0.),
+                            spread_radius: px(2.),
+                            inset: false,
+                        }])
+                    })
+                    .child(glyph(&g, size));
+                tile(
+                    SharedString::from(format!("stm-acct-{ix}")),
+                    label,
+                    Some(&sub),
+                    pic.into_any_element(),
+                    false,
+                    false,
+                    list,
+                    click(on, move || {
+                        if current {
+                            Act::Back
+                        } else {
+                            Act::Switch(npub.clone())
+                        }
+                    }),
+                )
             })
             .collect();
         if !sm.at_cap {
-            let add = svg().path("icons/add-user.svg").size(px(if list { 22. } else { 34. })).text_color(c(0xbbbbbb)).into_any_element();
-            tiles.push(tile("stm-add-acct".into(), "Add Account".into(), None, add, true, false, list, click(on, || Act::AddAccount)));
+            let add = svg()
+                .path("icons/add-user.svg")
+                .size(px(if list { 22. } else { 34. }))
+                .text_color(c(0xbbbbbb))
+                .into_any_element();
+            tiles.push(tile(
+                "stm-add-acct".into(),
+                "Add Account".into(),
+                None,
+                add,
+                true,
+                false,
+                list,
+                click(on, || Act::AddAccount),
+            ));
         }
         let head = div()
             .h(px(32.))
@@ -723,10 +1231,27 @@ pub fn render(sm: &StartMenu, store: &Store, window: &Window, on: &OnAct, cx: &A
             .text_color(c(0x8a8a8a))
             .child(back(on))
             .child(crate::kit::spaced("ACCOUNTS", 11. * 0.09))
-            .child(div().ml_auto().flex().gap(px(2.)).child(view_btn("stm-grid", "icons/grid.svg", !list, false)).child(view_btn("stm-list", "icons/list.svg", list, true)));
-        div().flex().flex_col().child(head).child(div().mt(px(10.)).child(arrange(tiles, list))).into_any_element()
+            .child(
+                div()
+                    .ml_auto()
+                    .flex()
+                    .gap(px(2.))
+                    .child(view_btn("stm-grid", "icons/grid.svg", !list, false))
+                    .child(view_btn("stm-list", "icons/list.svg", list, true)),
+            );
+        div()
+            .flex()
+            .flex_col()
+            .child(head)
+            .child(div().mt(px(10.)).child(arrange(tiles, list)))
+            .into_any_element()
     } else {
-        div().flex().flex_col().child(head).child(div().mt(px(10.)).child(grid)).into_any_element()
+        div()
+            .flex()
+            .flex_col()
+            .child(head)
+            .child(div().mt(px(10.)).child(grid))
+            .into_any_element()
     };
     let pane = div()
         .id("stm-pane")
@@ -741,8 +1266,16 @@ pub fn render(sm: &StartMenu, store: &Store, window: &Window, on: &OnAct, cx: &A
         .flex_col()
         .child(body);
 
-    let name = if store.me().is_some() { store.name(&me) } else { "You".into() };
-    let short = if me.len() > 16 { format!("{}…", &me[..16]) } else { me.clone() };
+    let name = if store.me().is_some() {
+        store.name(&me)
+    } else {
+        "You".into()
+    };
+    let short = if me.len() > 16 {
+        format!("{}…", &me[..16])
+    } else {
+        me.clone()
+    };
     let deaf = sm.mic.deafened;
     let muted = sm.mic.muted || deaf;
     let footer = div()
@@ -771,15 +1304,57 @@ pub fn render(sm: &StartMenu, store: &Store, window: &Window, on: &OnAct, cx: &A
                         .gap(px(3.))
                         .min_w_0()
                         .max_w(px(220.))
-                        .child(div().text_size(px(18.)).line_height(px(24.)).font_weight(FontWeight::SEMIBOLD).text_color(c(0xffffff)).overflow_hidden().text_ellipsis().whitespace_nowrap().child(name))
-                        .child(div().text_size(px(13.)).line_height(px(24.)).text_color(white_a(0.5)).overflow_hidden().text_ellipsis().whitespace_nowrap().child(short)),
+                        .child(
+                            div()
+                                .text_size(px(18.))
+                                .line_height(px(24.))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(c(0xffffff))
+                                .overflow_hidden()
+                                .text_ellipsis()
+                                .whitespace_nowrap()
+                                .child(name),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(13.))
+                                .line_height(px(24.))
+                                .text_color(white_a(0.5))
+                                .overflow_hidden()
+                                .text_ellipsis()
+                                .whitespace_nowrap()
+                                .child(short),
+                        ),
                 ),
         )
         .child(div().flex_1())
-        .child(audio("stm-deafen", "output", if deaf { "icons/headphones-off.svg" } else { "icons/headphones.svg" }, deaf, Act::Deafen, on))
-        .child(audio("stm-mute", "input", if muted { "icons/mic-off.svg" } else { "icons/mic-on.svg" }, muted, Act::Mute, on));
+        .child(audio(
+            "stm-deafen",
+            "output",
+            if deaf {
+                "icons/headphones-off.svg"
+            } else {
+                "icons/headphones.svg"
+            },
+            deaf,
+            Act::Deafen,
+            on,
+        ))
+        .child(audio(
+            "stm-mute",
+            "input",
+            if muted {
+                "icons/mic-off.svg"
+            } else {
+                "icons/mic-on.svg"
+            },
+            muted,
+            Act::Mute,
+            on,
+        ));
 
-    let grow = gpui::Animation::new(std::time::Duration::from_millis(280)).with_easing(crate::kit::bezier(0.2, 0.9, 0.25, 1.));
+    let grow = gpui::Animation::new(std::time::Duration::from_millis(280))
+        .with_easing(crate::kit::bezier(0.2, 0.9, 0.25, 1.));
     let menu = div()
         .id("stm")
         .absolute()
@@ -807,16 +1382,30 @@ pub fn render(sm: &StartMenu, store: &Store, window: &Window, on: &OnAct, cx: &A
             }
         })
         .child(search)
-        .child(div().mt(px(16.)).flex_1().min_h_0().flex().child(nav).child(pane))
+        .child(
+            div()
+                .mt(px(16.))
+                .flex_1()
+                .min_h_0()
+                .flex()
+                .child(nav)
+                .child(pane),
+        )
         .child(footer)
-        .with_animation(SharedString::from(format!("stm-grow-{:?}", sm.opened)), grow, |d, t| d.opacity(t));
+        .with_animation(
+            SharedString::from(format!("stm-grow-{:?}", sm.opened)),
+            grow,
+            |d, t| d.opacity(t),
+        );
     let close = on.clone();
     div()
         .id("stm-dim")
         .absolute()
         .inset_0()
         .bg(ca(0, 0, 0, 0.6))
-        .on_mouse_down(gpui::MouseButton::Left, move |_, w, cx| close(Act::Close, w, cx))
+        .on_mouse_down(gpui::MouseButton::Left, move |_, w, cx| {
+            close(Act::Close, w, cx)
+        })
         .child(menu)
         .into_any_element()
 }

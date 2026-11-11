@@ -4,8 +4,8 @@ use std::collections::HashSet;
 
 use futures::StreamExt;
 use gpui::prelude::*;
-use gpui::{px, Context, FontWeight, Window};
-use serde_json::{json, Value};
+use gpui::{Context, FontWeight, Window, px};
+use serde_json::{Value, json};
 
 use super::{PopupAct, VectorApp};
 use crate::backend;
@@ -20,12 +20,27 @@ fn plural(n: usize, word: &str) -> String {
 }
 
 impl VectorApp {
-    pub(super) fn open_moderation(&mut self, community: String, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn open_moderation(
+        &mut self,
+        community: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let query = cx.new(|cx| {
-            TextInput::new("Search members...", cx).with_look(crate::composer::Look { size: px(13.), line_height: px(16.), weight: FontWeight::NORMAL, placeholder: white_a(0.35), ..kit::field_look() })
+            TextInput::new("Search members...", cx).with_look(crate::composer::Look {
+                size: px(13.),
+                line_height: px(16.),
+                weight: FontWeight::NORMAL,
+                placeholder: white_a(0.35),
+                ..kit::field_look()
+            })
         });
-        cx.subscribe(&query, |_, _, _: &InputChanged, cx| cx.notify()).detach();
-        cx.subscribe_in(&query, window, |app, _, _: &CancelInput, window, cx| app.on_moderation(Act::Close, window, cx)).detach();
+        cx.subscribe(&query, |_, _, _: &InputChanged, cx| cx.notify())
+            .detach();
+        cx.subscribe_in(&query, window, |app, _, _: &CancelInput, window, cx| {
+            app.on_moderation(Act::Close, window, cx)
+        })
+        .detach();
         self.moderation = Some(Moderation {
             community,
             intel: None,
@@ -44,8 +59,18 @@ impl VectorApp {
     }
 
     fn load_moderation(&mut self, refresh: bool, cx: &mut Context<Self>) {
-        let Some(m) = self.moderation.as_mut() else { return };
-        let intel = if self.live { backend::community::moderation_intel(&m.community) } else { self.store.borrow().fixture_moderation.clone().ok_or_else(|| "No moderation data.".to_string()) };
+        let Some(m) = self.moderation.as_mut() else {
+            return;
+        };
+        let intel = if self.live {
+            backend::community::moderation_intel(&m.community)
+        } else {
+            self.store
+                .borrow()
+                .fixture_moderation
+                .clone()
+                .ok_or_else(|| "No moderation data.".to_string())
+        };
         match intel {
             Ok(intel) => m.set_intel(intel, refresh),
             Err(e) => {
@@ -62,7 +87,11 @@ impl VectorApp {
     pub(super) fn check_raid(&mut self, community: String, cx: &mut Context<Self>) {
         if !self.live {
             let fix = self.store.borrow().fixture_moderation.clone();
-            self.raid.insert(community, fix.map(|f| (true, f["report"]["suspects"].as_u64().unwrap_or(0) as usize)).unwrap_or((false, 0)));
+            self.raid.insert(
+                community,
+                fix.map(|f| (true, f["report"]["suspects"].as_u64().unwrap_or(0) as usize))
+                    .unwrap_or((false, 0)),
+            );
             return cx.notify();
         }
         if !backend::community::capabilities(&community).contains("ban") {
@@ -82,7 +111,9 @@ impl VectorApp {
     }
 
     pub(super) fn on_moderation(&mut self, act: Act, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(m) = self.moderation.as_mut() else { return };
+        let Some(m) = self.moderation.as_mut() else {
+            return;
+        };
         match act {
             Act::Close => {
                 if m.busy.is_none() {
@@ -113,7 +144,14 @@ impl VectorApp {
                 let cut = m.cut().len();
                 let live = m.invites();
                 let link = if live > 0 {
-                    format!("\n\n{} still live. Anyone holding one can rejoin straight after this. Revoke them first.", if live == 1 { "1 invite link is".to_string() } else { format!("{live} invite links are") })
+                    format!(
+                        "\n\n{} still live. Anyone holding one can rejoin straight after this. Revoke them first.",
+                        if live == 1 {
+                            "1 invite link is".to_string()
+                        } else {
+                            format!("{live} invite links are")
+                        }
+                    )
                 } else {
                     String::new()
                 };
@@ -159,7 +197,12 @@ impl VectorApp {
 
     fn mod_busy(&mut self, label: Option<String>, cx: &mut Context<Self>) {
         if let Some(m) = self.moderation.as_mut() {
-            m.busy = label.map(|l| (l, " Publishing. Leave this open until it finishes.".to_string()));
+            m.busy = label.map(|l| {
+                (
+                    l,
+                    " Publishing. Leave this open until it finishes.".to_string(),
+                )
+            });
         }
         cx.notify();
     }
@@ -170,7 +213,9 @@ impl VectorApp {
     }
 
     pub(super) fn mod_revoke(&mut self, cx: &mut Context<Self>) {
-        let Some(id) = self.moderation.as_ref().map(|m| m.community.clone()) else { return };
+        let Some(id) = self.moderation.as_ref().map(|m| m.community.clone()) else {
+            return;
+        };
         if !self.live {
             return;
         }
@@ -180,8 +225,12 @@ impl VectorApp {
             let res = rx.await.unwrap_or_else(|_| Err("cancelled".into()));
             this.update(cx, |app, cx| {
                 match res {
-                    Ok((revoked, 0)) => app.show_toast(&format!("Revoked {}", plural(revoked, "invite link")), cx),
-                    Ok((revoked, failed)) => app.show_toast(&format!("Revoked {revoked}, {failed} failed"), cx),
+                    Ok((revoked, 0)) => {
+                        app.show_toast(&format!("Revoked {}", plural(revoked, "invite link")), cx)
+                    }
+                    Ok((revoked, failed)) => {
+                        app.show_toast(&format!("Revoked {revoked}, {failed} failed"), cx)
+                    }
                     Err(e) => app.mod_fail("Couldn't revoke", e),
                 }
                 app.mod_done(cx);
@@ -193,18 +242,35 @@ impl VectorApp {
 
     /// Removes everyone unticked (or no one) and rotates; with `ban`, bans them first.
     pub(super) fn mod_rotate(&mut self, ban: bool, cx: &mut Context<Self>) {
-        let Some(m) = self.moderation.as_ref() else { return };
+        let Some(m) = self.moderation.as_ref() else {
+            return;
+        };
         let (id, cut) = (m.community.clone(), m.cut());
-        let retain: Vec<String> = if cut.is_empty() { Vec::new() } else { m.keep.iter().cloned().collect() };
+        let retain: Vec<String> = if cut.is_empty() {
+            Vec::new()
+        } else {
+            m.keep.iter().cloned().collect()
+        };
         if !self.live || (ban && cut.is_empty()) {
             return;
         }
         let n = cut.len();
-        self.mod_busy(Some(if ban { format!("Banning {n}…") } else if n > 0 { format!("Removing 0/{n}") } else { "Rotating keys…".into() }), cx);
+        self.mod_busy(
+            Some(if ban {
+                format!("Banning {n}…")
+            } else if n > 0 {
+                format!("Removing 0/{n}")
+            } else {
+                "Rotating keys…".into()
+            }),
+            cx,
+        );
         let (tx, mut progress) = futures::channel::mpsc::unbounded::<(usize, usize)>();
         let rx = backend::run(async move {
             if ban {
-                backend::community::set_banned(id.clone(), cut, true).await.map_err(|e| (true, e))?;
+                backend::community::set_banned(id.clone(), cut, true)
+                    .await
+                    .map_err(|e| (true, e))?;
             }
             backend::community::refound(id, retain, move |done, total| {
                 let _ = tx.unbounded_send((done, total));
@@ -257,16 +323,26 @@ impl VectorApp {
     }
 
     fn load_policies(&mut self, catalogue: bool, cx: &mut Context<Self>) {
-        let Some(m) = self.moderation.as_mut() else { return };
+        let Some(m) = self.moderation.as_mut() else {
+            return;
+        };
         let p = &mut m.policies;
         if catalogue && p.presets.is_empty() {
-            let cat = if self.live { backend::community::policy_presets().ok() } else { self.store.borrow().fixture_presets.clone() };
+            let cat = if self.live {
+                backend::community::policy_presets().ok()
+            } else {
+                self.store.borrow().fixture_presets.clone()
+            };
             if let Some(cat) = cat {
                 p.presets = cat["presets"].as_array().cloned().unwrap_or_default();
                 p.kinds = cat["rule_kinds"].as_array().cloned().unwrap_or_default();
             }
         }
-        let list = if self.live { backend::community::policies(&m.community).ok() } else { Some(json!({ "policies": [], "using_builtin": true })) };
+        let list = if self.live {
+            backend::community::policies(&m.community).ok()
+        } else {
+            Some(json!({ "policies": [], "using_builtin": true }))
+        };
         if let Some(list) = list {
             p.stored = list["policies"].as_array().cloned().unwrap_or_default();
             p.using_builtin = list["using_builtin"].as_bool().unwrap_or(true);
@@ -275,10 +351,25 @@ impl VectorApp {
         cx.notify();
     }
 
-    fn policy_input(&mut self, placeholder: &str, text: &str, multiline: bool, window: &mut Window, cx: &mut Context<Self>) -> gpui::Entity<TextInput> {
+    fn policy_input(
+        &mut self,
+        placeholder: &str,
+        text: &str,
+        multiline: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::Entity<TextInput> {
         let input = cx.new(|cx| {
-            let look = crate::composer::Look { size: px(13.), line_height: px(19.5), weight: FontWeight::NORMAL, placeholder: c(0x757575), ..kit::field_look() };
-            let mut t = TextInput::new(placeholder.to_string(), cx).with_look(look).keep_on_submit();
+            let look = crate::composer::Look {
+                size: px(13.),
+                line_height: px(19.5),
+                weight: FontWeight::NORMAL,
+                placeholder: c(0x757575),
+                ..kit::field_look()
+            };
+            let mut t = TextInput::new(placeholder.to_string(), cx)
+                .with_look(look)
+                .keep_on_submit();
             if multiline {
                 t = t.multiline(px(220.));
             }
@@ -292,26 +383,44 @@ impl VectorApp {
             cx.notify();
         })
         .detach();
-        cx.subscribe_in(&input, window, |app, _, _: &CancelInput, window, cx| app.on_moderation(Act::Close, window, cx)).detach();
+        cx.subscribe_in(&input, window, |app, _, _: &CancelInput, window, cx| {
+            app.on_moderation(Act::Close, window, cx)
+        })
+        .detach();
         input
     }
 
     fn open_policy(&mut self, preset: Value, window: &mut Window, cx: &mut Context<Self>) {
-        let policy: Value = preset["bytes"].as_str().and_then(|b| serde_json::from_str(b).ok()).unwrap_or(Value::Null);
+        let policy: Value = preset["bytes"]
+            .as_str()
+            .and_then(|b| serde_json::from_str(b).ok())
+            .unwrap_or(Value::Null);
         let id = preset["id"].as_str().unwrap_or("").to_string();
         let dials = preset["dials"].as_array().cloned().unwrap_or_default();
         let rules = policy["rules"].as_array().cloned().unwrap_or_default();
         let link = rules.iter().find(|r| r["match"]["type"] == "link");
-        let rate = rules.iter().find(|r| r["match"]["type"] == "rate").and_then(|r| r["match"]["per_secs"].as_u64()).unwrap_or(10);
+        let rate = rules
+            .iter()
+            .find(|r| r["match"]["type"] == "rate")
+            .and_then(|r| r["match"]["per_secs"].as_u64())
+            .unwrap_or(10);
         let mut seeded = false;
         let mut inputs = std::collections::HashMap::new();
         for d in &dials {
-            let (kind, key) = (d["kind"].as_str().unwrap_or(""), d["key"].as_str().unwrap_or(""));
+            let (kind, key) = (
+                d["kind"].as_str().unwrap_or(""),
+                d["key"].as_str().unwrap_or(""),
+            );
             let text = match kind {
                 "seconds" => rate.to_string(),
                 "domainlist" if id == "vector_defaults" && key == "domains" && link.is_some() => {
                     seeded = true;
-                    link.and_then(|l| l["match"]["patterns"].as_array()).into_iter().flatten().filter_map(Value::as_str).collect::<Vec<_>>().join("\n")
+                    link.and_then(|l| l["match"]["patterns"].as_array())
+                        .into_iter()
+                        .flatten()
+                        .filter_map(Value::as_str)
+                        .collect::<Vec<_>>()
+                        .join("\n")
                 }
                 "wordlist" | "domainlist" | "text" => String::new(),
                 _ => continue,
@@ -322,9 +431,20 @@ impl VectorApp {
                 "text" => "Spoiler filter",
                 _ => "",
             };
-            inputs.insert(key.to_string(), self.policy_input(placeholder, &text, kind != "text" && kind != "seconds", window, cx));
+            inputs.insert(
+                key.to_string(),
+                self.policy_input(
+                    placeholder,
+                    &text,
+                    kind != "text" && kind != "seconds",
+                    window,
+                    cx,
+                ),
+            );
         }
-        let Some(m) = self.moderation.as_mut() else { return };
+        let Some(m) = self.moderation.as_mut() else {
+            return;
+        };
         let p = &mut m.policies;
         p.draft = Some(Draft {
             id,
@@ -345,17 +465,29 @@ impl VectorApp {
 
     fn on_policy(&mut self, act: PAct, window: &mut Window, cx: &mut Context<Self>) {
         let live = self.live;
-        let Some(m) = self.moderation.as_mut() else { return };
+        let Some(m) = self.moderation.as_mut() else {
+            return;
+        };
         let community = m.community.clone();
         let p = &mut m.policies;
         match act {
             PAct::Inspect => {
-                if let Some(d) = p.presets.iter().find(|x| x["id"] == "vector_defaults").cloned() {
+                if let Some(d) = p
+                    .presets
+                    .iter()
+                    .find(|x| x["id"] == "vector_defaults")
+                    .cloned()
+                {
                     self.open_policy(d, window, cx);
                 }
             }
             PAct::Open(id) => {
-                if let Some(d) = p.presets.iter().find(|x| x["id"].as_str() == Some(id.as_str())).cloned() {
+                if let Some(d) = p
+                    .presets
+                    .iter()
+                    .find(|x| x["id"].as_str() == Some(id.as_str()))
+                    .cloned()
+                {
                     self.open_policy(d, window, cx);
                 }
             }
@@ -375,11 +507,23 @@ impl VectorApp {
                 p.dirty();
             }
             PAct::AddRule(kind) => {
-                let Some(k) = p.kind(&kind).cloned() else { return };
-                let text = if k["input"] == "seconds" { k["rule"]["match"]["per_secs"].as_u64().unwrap_or(10).to_string() } else { String::new() };
+                let Some(k) = p.kind(&kind).cloned() else {
+                    return;
+                };
+                let text = if k["input"] == "seconds" {
+                    k["rule"]["match"]["per_secs"]
+                        .as_u64()
+                        .unwrap_or(10)
+                        .to_string()
+                } else {
+                    String::new()
+                };
                 let placeholder = k["input_label"].as_str().unwrap_or("").to_string();
-                let input = self.policy_input(&placeholder, &text, k["input"] != "seconds", window, cx);
-                let Some(m) = self.moderation.as_mut() else { return };
+                let input =
+                    self.policy_input(&placeholder, &text, k["input"] != "seconds", window, cx);
+                let Some(m) = self.moderation.as_mut() else {
+                    return;
+                };
                 if let Some(d) = m.policies.draft.as_mut() {
                     d.rules.push(Rule { kind, input });
                 }
@@ -404,11 +548,18 @@ impl VectorApp {
                 let res = if live {
                     backend::community::preview_policy(&community, &doc.to_string())
                 } else {
-                    Ok(json!({ "valid": true, "flagged": [], "messages_cited": 0, "corpus": 0, "shielded_matches": [], "unevaluated": [] }))
+                    Ok(
+                        json!({ "valid": true, "flagged": [], "messages_cited": 0, "corpus": 0, "shielded_matches": [], "unevaluated": [] }),
+                    )
                 };
                 match res {
                     Ok(r) if r["valid"].as_bool() == Some(false) => {
-                        p.preview_error = Some(r["error"].as_str().unwrap_or("This policy is not valid.").to_string());
+                        p.preview_error = Some(
+                            r["error"]
+                                .as_str()
+                                .unwrap_or("This policy is not valid.")
+                                .to_string(),
+                        );
                         p.previewed = false;
                     }
                     Ok(r) => {
@@ -427,11 +578,19 @@ impl VectorApp {
                 if !p.previewed {
                     return;
                 }
-                let Some(doc) = policies::compose(p, cx) else { return };
+                let Some(doc) = policies::compose(p, cx) else {
+                    return;
+                };
                 let Some(d) = p.draft.as_ref() else { return };
-                let id = if d.id == "blank" { policies::new_id(doc["name"].as_str().unwrap_or(""), &p.stored) } else { d.id.clone() };
+                let id = if d.id == "blank" {
+                    policies::new_id(doc["name"].as_str().unwrap_or(""), &p.stored)
+                } else {
+                    d.id.clone()
+                };
                 if live {
-                    if let Err(e) = backend::community::set_policy(&community, &id, &doc.to_string(), true) {
+                    if let Err(e) =
+                        backend::community::set_policy(&community, &id, &doc.to_string(), true)
+                    {
                         self.mod_fail("Couldn't save the policy", e);
                         return;
                     }
@@ -442,9 +601,20 @@ impl VectorApp {
                 self.load_policies(false, cx);
             }
             PAct::Toggle(id) => {
-                let Some(s) = p.stored.iter().find(|s| s["policy_id"].as_str() == Some(id.as_str())) else { return };
+                let Some(s) = p
+                    .stored
+                    .iter()
+                    .find(|s| s["policy_id"].as_str() == Some(id.as_str()))
+                else {
+                    return;
+                };
                 if live {
-                    let _ = backend::community::set_policy(&community, &id, s["bytes"].as_str().unwrap_or(""), !s["enabled"].as_bool().unwrap_or(false));
+                    let _ = backend::community::set_policy(
+                        &community,
+                        &id,
+                        s["bytes"].as_str().unwrap_or(""),
+                        !s["enabled"].as_bool().unwrap_or(false),
+                    );
                 }
                 self.load_policies(false, cx);
             }
@@ -464,7 +634,12 @@ impl VectorApp {
         cx.notify();
     }
 
-    pub(super) fn set_banner_hidden(&mut self, community: String, hidden: bool, cx: &mut Context<Self>) {
+    pub(super) fn set_banner_hidden(
+        &mut self,
+        community: String,
+        hidden: bool,
+        cx: &mut Context<Self>,
+    ) {
         let list = if self.live {
             match backend::community::set_banner_hidden(&community, hidden) {
                 Ok(list) => list,
@@ -491,7 +666,12 @@ impl VectorApp {
             Some(id) => vec![id],
             None => {
                 let store = self.store.borrow();
-                store.communities.iter().filter(|c| !store.art.contains_key(&c.community_id)).map(|c| c.community_id.clone()).collect()
+                store
+                    .communities
+                    .iter()
+                    .filter(|c| !store.art.contains_key(&c.community_id))
+                    .map(|c| c.community_id.clone())
+                    .collect()
             }
         };
         if ids.is_empty() {
@@ -500,8 +680,14 @@ impl VectorApp {
         let rx = backend::run(async move {
             let mut out = Vec::new();
             for id in ids {
-                let icon = backend::community::image(id.clone(), false).await.ok().flatten();
-                let banner = backend::community::image(id.clone(), true).await.ok().flatten();
+                let icon = backend::community::image(id.clone(), false)
+                    .await
+                    .ok()
+                    .flatten();
+                let banner = backend::community::image(id.clone(), true)
+                    .await
+                    .ok()
+                    .flatten();
                 out.push((id, crate::data::Art { icon, banner }));
             }
             out

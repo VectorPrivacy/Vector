@@ -5,9 +5,9 @@
 use std::time::Instant;
 
 use gpui::{
-    AnimationExt, AnyElement, App, Context, Entity, EventEmitter, FocusHandle, Focusable, FontWeight, IntoElement, KeyDownEvent,
-    ObjectFit, ParentElement, Render, SharedString, Styled, Window, div, img, linear_color_stop, linear_gradient,
-    prelude::*, px, svg,
+    AnimationExt, AnyElement, App, Context, Entity, EventEmitter, FocusHandle, Focusable,
+    FontWeight, IntoElement, KeyDownEvent, ObjectFit, ParentElement, Render, SharedString, Styled,
+    Window, div, img, linear_color_stop, linear_gradient, prelude::*, px, svg,
 };
 use zeroize::Zeroizing;
 
@@ -62,9 +62,18 @@ enum Cred {
 }
 
 const METHODS: &[Choice] = &[
-    Choice { value: "qr", label: "QR Code" },
-    Choice { value: "key", label: "Private Key" },
-    Choice { value: "signer", label: "Remote Signer" },
+    Choice {
+        value: "qr",
+        label: "QR Code",
+    },
+    Choice {
+        value: "key",
+        label: "Private Key",
+    },
+    Choice {
+        value: "signer",
+        label: "Remote Signer",
+    },
 ];
 
 pub struct LoginView {
@@ -110,10 +119,24 @@ impl LoginView {
             masked_size: Some(px(20.)),
             ..Default::default()
         };
-        let key = cx.new(|cx| TextInput::new("Enter nsec or Seed Phrase...", cx).with_look(field.clone()).keep_on_submit());
-        let password = cx.new(|cx| TextInput::new("Enter Password...", cx).with_look(field).keep_on_submit());
-        cx.subscribe_in(&key, window, |this, _, _: &SendText, window, cx| this.import_key(window, cx)).detach();
-        cx.subscribe_in(&password, window, |this, _, _: &SendText, window, cx| this.submit_password(window, cx)).detach();
+        let key = cx.new(|cx| {
+            TextInput::new("Enter nsec or Seed Phrase...", cx)
+                .with_look(field.clone())
+                .keep_on_submit()
+        });
+        let password = cx.new(|cx| {
+            TextInput::new("Enter Password...", cx)
+                .with_look(field)
+                .keep_on_submit()
+        });
+        cx.subscribe_in(&key, window, |this, _, _: &SendText, window, cx| {
+            this.import_key(window, cx)
+        })
+        .detach();
+        cx.subscribe_in(&password, window, |this, _, _: &SendText, window, cx| {
+            this.submit_password(window, cx)
+        })
+        .detach();
         let mut view = Self {
             step: Step::Start,
             method: "qr",
@@ -139,7 +162,15 @@ impl LoginView {
         if let Some(security) = unlock {
             view.unlock = true;
             view.step = Step::Encrypt;
-            view.start_credential(if security == "password" { Cred::Password } else { Cred::Pin }, window, cx);
+            view.start_credential(
+                if security == "password" {
+                    Cred::Password
+                } else {
+                    Cred::Pin
+                },
+                window,
+                cx,
+            );
         }
         view
     }
@@ -152,7 +183,13 @@ impl LoginView {
     }
 
     /// The device's accounts, for the pill: it shows only when there is a choice to make.
-    pub fn set_accounts(&mut self, rows: Vec<crate::switcher::Row>, active: Option<String>, open: bool, cx: &mut Context<Self>) {
+    pub fn set_accounts(
+        &mut self,
+        rows: Vec<crate::switcher::Row>,
+        active: Option<String>,
+        open: bool,
+        cx: &mut Context<Self>,
+    ) {
         self.picker = (rows.len() >= 2 && self.adding.is_none()).then(|| {
             let active = active.filter(|a| rows.iter().any(|r| &r.npub == a));
             Picker { rows, active, open }
@@ -162,16 +199,33 @@ impl LoginView {
 
     fn pill(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let p = self.picker.as_ref()?;
-        let me = p.active.as_ref().and_then(|a| p.rows.iter().find(|r| &r.npub == a));
+        let me = p
+            .active
+            .as_ref()
+            .and_then(|a| p.rows.iter().find(|r| &r.npub == a));
         let label = match me {
             Some(r) => r.name.clone().unwrap_or_else(|| r.npub.clone()),
             None => "Select Profile".into(),
         };
         let avatar = match me.and_then(|r| r.avatar.clone()) {
-            Some(path) => img(path).size(px(44.)).rounded_full().flex_shrink_0().into_any_element(),
-            None => img("icons/user-placeholder.svg").size(px(44.)).rounded_full().flex_shrink_0().into_any_element(),
+            Some(path) => img(path)
+                .size(px(44.))
+                .rounded_full()
+                .flex_shrink_0()
+                .into_any_element(),
+            None => img("icons/user-placeholder.svg")
+                .size(px(44.))
+                .rounded_full()
+                .flex_shrink_0()
+                .into_any_element(),
         };
-        let chevron = svg().path("icons/login/chevron.svg").w(px(10.)).h(px(6.)).ml(px(2.)).flex_shrink_0().text_color(c(0x474747));
+        let chevron = svg()
+            .path("icons/login/chevron.svg")
+            .w(px(10.))
+            .h(px(6.))
+            .ml(px(2.))
+            .flex_shrink_0()
+            .text_color(c(0x474747));
         Some(
             div()
                 .id("login-account-picker")
@@ -190,8 +244,21 @@ impl LoginView {
                     }))
                 })
                 .child(avatar)
-                .child(kit::spaced(&label, 2.).min_w_0().truncate().font_weight(FontWeight::BOLD).text_size(px(20.)).line_height(px(24.)))
-                .child(if p.open { chevron.with_transformation(gpui::Transformation::rotate(gpui::radians(std::f32::consts::PI))) } else { chevron })
+                .child(
+                    kit::spaced(&label, 2.)
+                        .min_w_0()
+                        .truncate()
+                        .font_weight(FontWeight::BOLD)
+                        .text_size(px(20.))
+                        .line_height(px(24.)),
+                )
+                .child(if p.open {
+                    chevron.with_transformation(gpui::Transformation::rotate(gpui::radians(
+                        std::f32::consts::PI,
+                    )))
+                } else {
+                    chevron
+                })
                 .into_any_element(),
         )
     }
@@ -199,72 +266,117 @@ impl LoginView {
     /// `.login-account-list`: the other accounts, below the pill over a dimmed screen.
     fn account_list(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let p = self.picker.as_ref().filter(|p| p.open)?;
-        let rows = p.rows.iter().filter(|r| p.active.as_ref() != Some(&r.npub)).map(|r| {
-            let npub = r.npub.clone();
-            let avatar = match &r.avatar {
-                Some(path) => img(path.clone()).size(px(28.)).rounded_full().flex_shrink_0().into_any_element(),
-                None => img("icons/user-placeholder.svg").size(px(28.)).rounded_full().flex_shrink_0().into_any_element(),
-            };
-            div()
-                .id(SharedString::from(format!("login-pick-{}", r.npub)))
-                .h(px(40.))
-                .flex()
-                .items_center()
-                .gap(px(12.))
-                .pl(px(21.))
-                .pr(px(21.))
-                .border_l_3()
-                .border_color(gpui::transparent_black())
-                .cursor_pointer()
-                .hover(|s| s.bg(ca(89, 252, 179, 0.1)).border_color(c(ACCENT)))
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    if let Some(p) = this.picker.as_mut() {
-                        p.open = false;
-                    }
-                    cx.emit(PickAccount(npub.clone()));
-                    cx.notify();
-                }))
-                .child(avatar)
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .flex()
-                        .gap(px(8.))
-                        .child(div().min_w_0().truncate().font_weight(FontWeight::MEDIUM).text_size(px(14.)).line_height(px(24.)).child(r.name.clone().unwrap_or_else(|| "Unnamed".into())))
-                        .child(div().flex_1().min_w_0().mt(px(1.)).truncate().text_size(px(10.)).line_height(px(24.)).text_color(c(0x5b6060)).child(r.npub.clone())),
-                )
-        });
+        let rows = p
+            .rows
+            .iter()
+            .filter(|r| p.active.as_ref() != Some(&r.npub))
+            .map(|r| {
+                let npub = r.npub.clone();
+                let avatar = match &r.avatar {
+                    Some(path) => img(path.clone())
+                        .size(px(28.))
+                        .rounded_full()
+                        .flex_shrink_0()
+                        .into_any_element(),
+                    None => img("icons/user-placeholder.svg")
+                        .size(px(28.))
+                        .rounded_full()
+                        .flex_shrink_0()
+                        .into_any_element(),
+                };
+                div()
+                    .id(SharedString::from(format!("login-pick-{}", r.npub)))
+                    .h(px(40.))
+                    .flex()
+                    .items_center()
+                    .gap(px(12.))
+                    .pl(px(21.))
+                    .pr(px(21.))
+                    .border_l_3()
+                    .border_color(gpui::transparent_black())
+                    .cursor_pointer()
+                    .hover(|s| s.bg(ca(89, 252, 179, 0.1)).border_color(c(ACCENT)))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if let Some(p) = this.picker.as_mut() {
+                            p.open = false;
+                        }
+                        cx.emit(PickAccount(npub.clone()));
+                        cx.notify();
+                    }))
+                    .child(avatar)
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .gap(px(8.))
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .truncate()
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_size(px(14.))
+                                    .line_height(px(24.))
+                                    .child(r.name.clone().unwrap_or_else(|| "Unnamed".into())),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .mt(px(1.))
+                                    .truncate()
+                                    .text_size(px(10.))
+                                    .line_height(px(24.))
+                                    .text_color(c(0x5b6060))
+                                    .child(r.npub.clone()),
+                            ),
+                    )
+            });
         Some(
             div()
                 .absolute()
                 .inset_0()
                 .child(
-                    div().id("login-account-list-backdrop").absolute().inset_0().bg(ca(3, 3, 3, 0.9)).on_click(cx.listener(|this, _, _, cx| {
-                        if let Some(p) = this.picker.as_mut() {
-                            p.open = false;
-                        }
-                        cx.notify();
-                    })),
+                    div()
+                        .id("login-account-list-backdrop")
+                        .absolute()
+                        .inset_0()
+                        .bg(ca(3, 3, 3, 0.9))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            if let Some(p) = this.picker.as_mut() {
+                                p.open = false;
+                            }
+                            cx.notify();
+                        })),
                 )
                 .child(
-                    div().absolute().top(px(170.)).left_0().right_0().flex().justify_center().child(
-                        div()
-                            .id("login-account-list")
-                            .occlude()
-                            .w(px(420.))
-                            .flex()
-                            .flex_col()
-                            .overflow_hidden()
-                            .border_2()
-                            .border_color(c(0x030303))
-                            .rounded(px(10.))
-                            .bg(ca(3, 3, 3, 0.5))
-                            .children(rows)
-                            .with_animation("login-account-list-in", gpui::Animation::new(std::time::Duration::from_millis(160)).with_easing(gpui::ease_out_quint()), |d, t| {
-                                d.opacity(t).mt(px(-8. * (1. - t)))
-                            }),
-                    ),
+                    div()
+                        .absolute()
+                        .top(px(170.))
+                        .left_0()
+                        .right_0()
+                        .flex()
+                        .justify_center()
+                        .child(
+                            div()
+                                .id("login-account-list")
+                                .occlude()
+                                .w(px(420.))
+                                .flex()
+                                .flex_col()
+                                .overflow_hidden()
+                                .border_2()
+                                .border_color(c(0x030303))
+                                .rounded(px(10.))
+                                .bg(ca(3, 3, 3, 0.5))
+                                .children(rows)
+                                .with_animation(
+                                    "login-account-list-in",
+                                    gpui::Animation::new(std::time::Duration::from_millis(160))
+                                        .with_easing(gpui::ease_out_quint()),
+                                    |d, t| d.opacity(t).mt(px(-8. * (1. - t))),
+                                ),
+                        ),
                 )
                 .into_any_element(),
         )
@@ -342,7 +454,12 @@ impl LoginView {
     }
 
     /// Signed in with a key: a new one picks its security, one already here unlocks as at boot.
-    fn imported(&mut self, imported: account::Imported, window: &mut Window, cx: &mut Context<Self>) {
+    fn imported(
+        &mut self,
+        imported: account::Imported,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         match imported {
             account::Imported::Staged(_) => self.open_encryption(cx),
             account::Imported::Existing(_) => {
@@ -350,7 +467,15 @@ impl LoginView {
                 if info.encrypted {
                     self.unlock = true;
                     self.step = Step::Encrypt;
-                    self.start_credential(if info.security_type == "password" { Cred::Password } else { Cred::Pin }, window, cx);
+                    self.start_credential(
+                        if info.security_type == "password" {
+                            Cred::Password
+                        } else {
+                            Cred::Pin
+                        },
+                        window,
+                        cx,
+                    );
                 } else {
                     self.finish_unlock(None, window, cx);
                 }
@@ -360,7 +485,11 @@ impl LoginView {
 
     /// Sign in with the account another device sent. Resolves once the sign-in has gone through
     /// (or failed), before the security step.
-    pub fn finish_transfer(&mut self, window: &mut Window, cx: &mut Context<Self>) -> futures::channel::oneshot::Receiver<Result<(), String>> {
+    pub fn finish_transfer(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> futures::channel::oneshot::Receiver<Result<(), String>> {
         let (tx, done) = futures::channel::oneshot::channel();
         let reset = self.commit_adding(cx);
         let rx = backend::run(backend::transfer::finish(reset));
@@ -406,7 +535,8 @@ impl LoginView {
     fn set_title(&mut self, title: &'static str, busy: bool, cx: &mut Context<Self>) {
         self.title = title.into();
         self.busy = busy;
-        self.error = title.contains("Incorrect") || title.contains("match") || title.contains("at least");
+        self.error =
+            title.contains("Incorrect") || title.contains("match") || title.contains("at least");
         cx.notify();
     }
 
@@ -439,7 +569,12 @@ impl LoginView {
         if key == "backspace" {
             self.pin.pop();
             self.revert_error_title(cx);
-        } else if let Some(ch) = e.keystroke.key_char.as_deref().filter(|k| k.len() == 1 && k.as_bytes()[0].is_ascii_digit()) {
+        } else if let Some(ch) = e
+            .keystroke
+            .key_char
+            .as_deref()
+            .filter(|k| k.len() == 1 && k.as_bytes()[0].is_ascii_digit())
+        {
             if self.pin.len() < 6 {
                 self.pin.push_str(ch);
             }
@@ -482,7 +617,12 @@ impl LoginView {
     }
 
     /// A full PIN or a submitted password: unlock, or the first or confirming entry of a new one.
-    fn credential_entered(&mut self, value: Zeroizing<String>, window: &mut Window, cx: &mut Context<Self>) {
+    fn credential_entered(
+        &mut self,
+        value: Zeroizing<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let pin = self.cred == Cred::Pin;
         if self.unlock {
             self.wrong = None;
@@ -493,25 +633,54 @@ impl LoginView {
         match self.first.take() {
             None => {
                 self.first = Some(value);
-                self.set_title(if pin { "Re-enter Your Pin" } else { "Re-enter Your Password" }, false, cx);
+                self.set_title(
+                    if pin {
+                        "Re-enter Your Pin"
+                    } else {
+                        "Re-enter Your Password"
+                    },
+                    false,
+                    cx,
+                );
             }
             Some(first) if *first == *value => {
                 self.set_title(ENCRYPTING, true, cx);
-                self.commit(Some(first), if pin { "pin" } else { "password" }, window, cx);
+                self.commit(
+                    Some(first),
+                    if pin { "pin" } else { "password" },
+                    window,
+                    cx,
+                );
             }
             Some(_) => {
-                self.set_title(if pin { "Pin doesn't match, re-try" } else { "Passwords don't match, re-try" }, false, cx);
+                self.set_title(
+                    if pin {
+                        "Pin doesn't match, re-try"
+                    } else {
+                        "Passwords don't match, re-try"
+                    },
+                    false,
+                    cx,
+                );
             }
         }
     }
 
-    fn commit(&mut self, password: Option<Zeroizing<String>>, security: &'static str, window: &mut Window, cx: &mut Context<Self>) {
+    fn commit(
+        &mut self,
+        password: Option<Zeroizing<String>>,
+        security: &'static str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let rx = backend::run(async move { account::commit(password, security).await });
         cx.spawn_in(window, async move |this, cx| {
             let result = rx.await.unwrap_or_else(|_| Err("Backend stopped".into()));
             this.update_in(cx, |this, window, cx| match result {
                 Ok(()) => {
-                    let npub = vector_core::my_public_key().and_then(|pk| nostr_sdk::prelude::ToBech32::to_bech32(&pk).ok()).unwrap_or_default();
+                    let npub = vector_core::my_public_key()
+                        .and_then(|pk| nostr_sdk::prelude::ToBech32::to_bech32(&pk).ok())
+                        .unwrap_or_default();
                     cx.emit(LoggedIn { npub });
                 }
                 Err(e) => {
@@ -525,7 +694,12 @@ impl LoginView {
         .detach();
     }
 
-    fn finish_unlock(&mut self, password: Option<Zeroizing<String>>, window: &mut Window, cx: &mut Context<Self>) {
+    fn finish_unlock(
+        &mut self,
+        password: Option<Zeroizing<String>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let rx = backend::run(async move {
             let npub = account::unlock(password).await?;
             account::connect().await;
@@ -537,7 +711,15 @@ impl LoginView {
                 Ok(npub) => cx.emit(LoggedIn { npub }),
                 Err(e) if e.contains("Incorrect") => {
                     let pin = this.cred == Cred::Pin;
-                    this.set_title(if pin { "Incorrect pin, try again" } else { "Incorrect password, try again" }, false, cx);
+                    this.set_title(
+                        if pin {
+                            "Incorrect pin, try again"
+                        } else {
+                            "Incorrect password, try again"
+                        },
+                        false,
+                        cx,
+                    );
                     this.wrong = Some(if pin { "pin" } else { "password" });
                     this.pin.clear();
                     if pin {
@@ -547,7 +729,15 @@ impl LoginView {
                     }
                 }
                 Err(e) => {
-                    this.set_title(if this.cred == Cred::Pin { "Enter Your Decryption Pin" } else { "Enter Your Password" }, false, cx);
+                    this.set_title(
+                        if this.cred == Cred::Pin {
+                            "Enter Your Decryption Pin"
+                        } else {
+                            "Enter Your Password"
+                        },
+                        false,
+                        cx,
+                    );
                     this.show_error(e, cx);
                 }
             })
@@ -575,9 +765,19 @@ fn lg_btn(id: &'static str, label: &'static str, kind: u8) -> gpui::Stateful<gpu
         .cursor_pointer()
         .child(label);
     match kind {
-        1 => base.border_color(c(PRIMARY)).bg(c(PRIMARY)).text_color(c(APP_BG)).hover(|s| s.bg(c(0x3be9a4))),
-        2 => base.border_color(c(PRIMARY)).text_color(c(0xffffff)).hover(|s| s.bg(ca(51, 219, 152, 0.08))),
-        _ => base.border_color(c(0x393b3c)).text_color(c(0xffffff)).hover(|s| s.border_color(c(0x5b6060))),
+        1 => base
+            .border_color(c(PRIMARY))
+            .bg(c(PRIMARY))
+            .text_color(c(APP_BG))
+            .hover(|s| s.bg(c(0x3be9a4))),
+        2 => base
+            .border_color(c(PRIMARY))
+            .text_color(c(0xffffff))
+            .hover(|s| s.bg(ca(51, 219, 152, 0.08))),
+        _ => base
+            .border_color(c(0x393b3c))
+            .text_color(c(0xffffff))
+            .hover(|s| s.border_color(c(0x5b6060))),
     }
 }
 
@@ -588,11 +788,23 @@ fn lg_title(text: SharedString, lock: bool, color: u32) -> gpui::Div {
         .justify_center()
         .gap(px(10.))
         .mb(px(25.))
-        .when(lock, |d| d.child(img("icons/login/lock.svg").w(px(22.)).h(px(29.))))
-        .child(kit::spaced(&text, 1.6).font_weight(FontWeight::BOLD).text_size(px(16.)).line_height(px(24.)).text_color(c(color)))
+        .when(lock, |d| {
+            d.child(img("icons/login/lock.svg").w(px(22.)).h(px(29.)))
+        })
+        .child(
+            kit::spaced(&text, 1.6)
+                .font_weight(FontWeight::BOLD)
+                .text_size(px(16.))
+                .line_height(px(24.))
+                .text_color(c(color)),
+        )
 }
 
-fn lg_back(prompt: &'static str, label: &'static str, on: impl Fn(&mut Window, &mut App) + 'static) -> gpui::Div {
+fn lg_back(
+    prompt: &'static str,
+    label: &'static str,
+    on: impl Fn(&mut Window, &mut App) + 'static,
+) -> gpui::Div {
     div()
         .mt(px(25.))
         .flex()
@@ -612,7 +824,13 @@ fn lg_back(prompt: &'static str, label: &'static str, on: impl Fn(&mut Window, &
 }
 
 impl LoginView {
-    fn field(&self, input: Entity<TextInput>, eye: bool, on_go: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static, cx: &mut Context<Self>) -> gpui::Div {
+    fn field(
+        &self,
+        input: Entity<TextInput>,
+        eye: bool,
+        on_go: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
         div()
             .flex()
             .items_center()
@@ -628,7 +846,15 @@ impl LoginView {
                     .border_color(c(PRIMARY))
                     .rounded(px(7.))
                     .bg(c(APP_BG))
-                    .child(div().flex_1().min_w_0().pl(px(11.)).flex().items_center().child(input))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .pl(px(11.))
+                            .flex()
+                            .items_center()
+                            .child(input),
+                    )
                     .when(eye, |d| {
                         d.child(
                             div()
@@ -645,9 +871,17 @@ impl LoginView {
                                     window.focus(&this.password.focus_handle(cx), cx);
                                 }))
                                 .child(if self.reveal {
-                                    svg().path("icons/eye-off.svg").w(px(22.)).h(px(18.)).text_color(c(0x959899)).into_any_element()
+                                    svg()
+                                        .path("icons/eye-off.svg")
+                                        .w(px(22.))
+                                        .h(px(18.))
+                                        .text_color(c(0x959899))
+                                        .into_any_element()
                                 } else {
-                                    img("icons/login/eye.svg").w(px(22.)).h(px(16.)).into_any_element()
+                                    img("icons/login/eye.svg")
+                                        .w(px(22.))
+                                        .h(px(16.))
+                                        .into_any_element()
                                 }),
                         )
                     })
@@ -660,7 +894,9 @@ impl LoginView {
                             .flex()
                             .items_center()
                             .cursor_pointer()
-                            .on_click(cx.listener(move |this, _, window, cx| on_go(this, window, cx)))
+                            .on_click(
+                                cx.listener(move |this, _, window, cx| on_go(this, window, cx)),
+                            )
                             .child(img("icons/login/enter.svg").size(px(22.))),
                     ),
             )
@@ -706,9 +942,22 @@ impl LoginView {
                     .text_size(px(16.))
                     .line_height(px(19.))
                     .child("Sign in with")
-                    .child(svg().path("icons/info.svg").size(px(18.)).text_color(c(0x333333))),
+                    .child(
+                        svg()
+                            .path("icons/info.svg")
+                            .size(px(18.))
+                            .text_color(c(0x333333)),
+                    ),
             )
-            .child(kit::select("lg-method", 150., METHODS, self.method, self.select_open, toggle, pick))
+            .child(kit::select(
+                "lg-method",
+                150.,
+                METHODS,
+                self.method,
+                self.select_open,
+                toggle,
+                pick,
+            ))
     }
 
     fn stage(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
@@ -718,16 +967,25 @@ impl LoginView {
                 .flex_col()
                 .items_center()
                 .gap(px(13.))
-                .child(lg_btn("lg-create", "Create Account", 1).on_click(cx.listener(|this, _, w, cx| this.create_account(w, cx))))
-                .child(lg_btn("lg-login", "Login", 2).on_click(cx.listener(|this, _, w, cx| {
-                    this.method = "qr";
-                    this.step = Step::Import;
-                    let _ = w;
-                    cx.notify();
-                })))
+                .child(
+                    lg_btn("lg-create", "Create Account", 1)
+                        .on_click(cx.listener(|this, _, w, cx| this.create_account(w, cx))),
+                )
+                .child(
+                    lg_btn("lg-login", "Login", 2).on_click(cx.listener(|this, _, w, cx| {
+                        this.method = "qr";
+                        this.step = Step::Import;
+                        let _ = w;
+                        cx.notify();
+                    })),
+                )
                 .when(self.adding.is_some(), |d| {
                     let view = cx.entity();
-                    d.child(lg_back("Changed your mind?\u{a0}", "Go Back", move |_, cx| view.update(cx, |_, cx| cx.emit(AddProfile::Back))))
+                    d.child(lg_back(
+                        "Changed your mind?\u{a0}",
+                        "Go Back",
+                        move |_, cx| view.update(cx, |_, cx| cx.emit(AddProfile::Back)),
+                    ))
                 })
                 .into_any_element(),
             Step::Import => {
@@ -736,20 +994,29 @@ impl LoginView {
                 if self.method == "key" {
                     block = block
                         .child(lg_title("Enter Your Private Key".into(), true, 0xffffff))
-                        .child(self.field(self.key.clone(), false, |this, w, cx| this.import_key(w, cx), cx));
+                        .child(self.field(
+                            self.key.clone(),
+                            false,
+                            |this, w, cx| this.import_key(w, cx),
+                            cx,
+                        ));
                 } else {
-                    block = block.child(lg_title("Login with QR Code".into(), true, 0xffffff)).child(
-                        lg_btn("lg-device", "Sign in with Another Device", 1)
-                            .w(px(300.))
-                            .text_size(px(18.))
-                            .on_click(cx.listener(|_, _, _, cx| cx.emit(OpenTransfer))),
-                    );
+                    block = block
+                        .child(lg_title("Login with QR Code".into(), true, 0xffffff))
+                        .child(
+                            lg_btn("lg-device", "Sign in with Another Device", 1)
+                                .w(px(300.))
+                                .text_size(px(18.))
+                                .on_click(cx.listener(|_, _, _, cx| cx.emit(OpenTransfer))),
+                        );
                 }
                 block
                     .child(self.sign_in_with(cx))
-                    .child(lg_back("Want to change accounts?\u{a0}", "Back to Login", move |w, cx| {
-                        back.update(cx, |this, cx| this.back_to_start(w, cx))
-                    }))
+                    .child(lg_back(
+                        "Want to change accounts?\u{a0}",
+                        "Back to Login",
+                        move |w, cx| back.update(cx, |this, cx| this.back_to_start(w, cx)),
+                    ))
                     .into_any_element()
             }
             Step::Encrypt => self.encrypt(window, cx),
@@ -761,10 +1028,26 @@ impl LoginView {
         if self.cred == Cred::Choose && !self.busy {
             return block
                 .gap(px(16.))
-                .child(lg_btn("lg-skip", "Skip Encryption", 0).on_click(cx.listener(|this, _, w, cx| this.choose("skip", w, cx))))
-                .child(lg_btn("lg-password", "Create Password", 0).on_click(cx.listener(|this, _, w, cx| this.choose("password", w, cx))))
-                .child(div().my(px(-4.)).text_size(px(10.)).line_height(px(24.)).text_color(c(ACCENT)).child("*Recommended Option"))
-                .child(lg_btn("lg-pin", "Create PIN", 1).on_click(cx.listener(|this, _, w, cx| this.choose("pin", w, cx))))
+                .child(
+                    lg_btn("lg-skip", "Skip Encryption", 0)
+                        .on_click(cx.listener(|this, _, w, cx| this.choose("skip", w, cx))),
+                )
+                .child(
+                    lg_btn("lg-password", "Create Password", 0)
+                        .on_click(cx.listener(|this, _, w, cx| this.choose("password", w, cx))),
+                )
+                .child(
+                    div()
+                        .my(px(-4.))
+                        .text_size(px(10.))
+                        .line_height(px(24.))
+                        .text_color(c(ACCENT))
+                        .child("*Recommended Option"),
+                )
+                .child(
+                    lg_btn("lg-pin", "Create PIN", 1)
+                        .on_click(cx.listener(|this, _, w, cx| this.choose("pin", w, cx))),
+                )
                 .into_any_element();
         }
         if let Some(what) = self.wrong {
@@ -779,8 +1062,21 @@ impl LoginView {
                             .relative()
                             .w(px(172.))
                             .h(px(179.))
-                            .child(img("icons/login/aggroboi.svg").absolute().left_0().bottom_0().size(px(136.)))
-                            .child(img("icons/login/warning.svg").absolute().right(px(-4.)).top(px(-4.)).w(px(79.)).h(px(70.))),
+                            .child(
+                                img("icons/login/aggroboi.svg")
+                                    .absolute()
+                                    .left_0()
+                                    .bottom_0()
+                                    .size(px(136.)),
+                            )
+                            .child(
+                                img("icons/login/warning.svg")
+                                    .absolute()
+                                    .right(px(-4.))
+                                    .top(px(-4.))
+                                    .w(px(79.))
+                                    .h(px(70.)),
+                            ),
                     )
                     .child(
                         kit::spaced(format!("Oops! You entered the wrong {what}!"), 1.4)
@@ -790,22 +1086,36 @@ impl LoginView {
                             .text_color(c(0xff2ea9)),
                     )
                     .child(
-                        kit::spaced(if what == "pin" { "Enter the Correct Pin." } else { "Enter the Correct Password." }, 2.4)
-                            .mt(px(8.))
-                            .text_size(px(24.))
-                            .font_weight(FontWeight::BOLD),
+                        kit::spaced(
+                            if what == "pin" {
+                                "Enter the Correct Pin."
+                            } else {
+                                "Enter the Correct Password."
+                            },
+                            2.4,
+                        )
+                        .mt(px(8.))
+                        .text_size(px(24.))
+                        .font_weight(FontWeight::BOLD),
                     ),
             );
         } else if self.busy {
             window.request_animation_frame();
             let phase = (self.born.elapsed().as_secs_f32() / 6.).fract();
             block = block.child(
-                div()
-                    .mb(px(25.))
-                    .child(kit::gradient_text(&self.title, 1.6, phase).font_weight(FontWeight::BOLD).text_size(px(16.)).line_height(px(24.))),
+                div().mb(px(25.)).child(
+                    kit::gradient_text(&self.title, 1.6, phase)
+                        .font_weight(FontWeight::BOLD)
+                        .text_size(px(16.))
+                        .line_height(px(24.)),
+                ),
             );
         } else {
-            block = block.child(lg_title(self.title.clone(), true, if self.error { 0xff2ea9 } else { 0xffffff }));
+            block = block.child(lg_title(
+                self.title.clone(),
+                true,
+                if self.error { 0xff2ea9 } else { 0xffffff },
+            ));
         }
         if self.busy {
             return block.into_any_element();
@@ -839,7 +1149,12 @@ impl LoginView {
                 block = block.child(row);
             }
             Cred::Password => {
-                block = block.child(self.field(self.password.clone(), true, |this, w, cx| this.submit_password(w, cx), cx));
+                block = block.child(self.field(
+                    self.password.clone(),
+                    true,
+                    |this, w, cx| this.submit_password(w, cx),
+                    cx,
+                ));
             }
             Cred::Choose => {}
         }
@@ -863,7 +1178,12 @@ impl Render for LoginView {
                 .child(kit::spaced(label, 0.8))
         };
         let sep = || kit::spaced("|", 0.8);
-        let mut root = div().size_full().relative().font_family(RUBIK).text_color(c(0xffffff)).bg(c(APP_BG));
+        let mut root = div()
+            .size_full()
+            .relative()
+            .font_family(RUBIK)
+            .text_color(c(0xffffff))
+            .bg(c(APP_BG));
 
         // .lg-art: the camera, faded out towards the centre.
         if !self.bg_hidden {
@@ -890,7 +1210,14 @@ impl Render for LoginView {
             );
         }
         if aggro {
-            let face = |src: &'static str, l: f32, t: f32, w: f32, h: f32| img(src).absolute().left(gpui::relative(l)).top(gpui::relative(t)).w(px(w)).h(px(h));
+            let face = |src: &'static str, l: f32, t: f32, w: f32, h: f32| {
+                img(src)
+                    .absolute()
+                    .left(gpui::relative(l))
+                    .top(gpui::relative(t))
+                    .w(px(w))
+                    .h(px(h))
+            };
             root = root.child(
                 div()
                     .absolute()

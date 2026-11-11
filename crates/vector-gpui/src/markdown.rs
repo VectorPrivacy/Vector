@@ -40,11 +40,21 @@ pub struct Para {
 
 pub enum Block {
     Para(Para),
-    Code { lang: SharedString, text: SharedString },
+    Code {
+        lang: SharedString,
+        text: SharedString,
+    },
     Quote(Vec<Block>),
-    List { start: Option<u64>, items: Vec<Vec<Block>> },
+    List {
+        start: Option<u64>,
+        items: Vec<Vec<Block>>,
+    },
     Rule,
-    Table { align: Vec<Alignment>, head: Vec<Para>, rows: Vec<Vec<Para>> },
+    Table {
+        align: Vec<Alignment>,
+        head: Vec<Para>,
+        rows: Vec<Vec<Para>>,
+    },
 }
 
 /// What the text is set in, and what has been revealed.
@@ -233,9 +243,18 @@ struct Flags {
 enum Frame {
     Root(Vec<Block>),
     Quote(Vec<Block>),
-    List { start: Option<u64>, items: Vec<Vec<Block>> },
+    List {
+        start: Option<u64>,
+        items: Vec<Vec<Block>>,
+    },
     Item(Vec<Block>),
-    Table { align: Vec<Alignment>, head: Vec<Para>, rows: Vec<Vec<Para>>, row: Vec<Para>, in_head: bool },
+    Table {
+        align: Vec<Alignment>,
+        head: Vec<Para>,
+        rows: Vec<Vec<Para>>,
+        row: Vec<Para>,
+        in_head: bool,
+    },
 }
 
 impl Frame {
@@ -322,7 +341,11 @@ impl Builder<'_> {
             return;
         }
         let base = self.block_look(kind);
-        let para = Para { atoms: atoms.into(), base, kind };
+        let para = Para {
+            atoms: atoms.into(),
+            base,
+            kind,
+        };
         match self.stack.last_mut() {
             Some(Frame::Table { row, .. }) => row.push(para),
             Some(f) => {
@@ -349,7 +372,9 @@ impl Builder<'_> {
         self.ensure_para();
         let mut rest = t;
         while !rest.is_empty() {
-            let at = rest.char_indices().find(|(_, c)| (*c as u32) >= MARK && (*c as u32) < MARK + self.swaps.len() as u32);
+            let at = rest
+                .char_indices()
+                .find(|(_, c)| (*c as u32) >= MARK && (*c as u32) < MARK + self.swaps.len() as u32);
             let Some((i, ch)) = at else {
                 self.prose(rest);
                 break;
@@ -360,7 +385,10 @@ impl Builder<'_> {
                 Swap::Spoiler(s) => {
                     let id = self.spoilers;
                     self.spoilers += 1;
-                    let kind = Kind::Spoiler { id, revealed: self.ctx.revealed.contains(&id) };
+                    let kind = Kind::Spoiler {
+                        id,
+                        revealed: self.ctx.revealed.contains(&id),
+                    };
                     let s = s.clone();
                     self.emoji_text(&s, kind);
                 }
@@ -390,7 +418,9 @@ impl Builder<'_> {
 
     /// Text with its `:shortcode:`s swapped for the custom emoji the message carries.
     fn emoji_text(&mut self, t: &str, kind: Kind) {
-        let Some(custom) = self.ctx.custom else { return self.twemoji_text(t, kind) };
+        let Some(custom) = self.ctx.custom else {
+            return self.twemoji_text(t, kind);
+        };
         let mut last = 0;
         for (start, end) in shortcodes(t) {
             let code = &t[start + 1..end - 1];
@@ -400,7 +430,11 @@ impl Builder<'_> {
                 crate::media::Custom::Missing(_) => continue,
                 crate::media::Custom::Ready(image) => {
                     self.twemoji_text(&t[last..start], kind.clone());
-                    self.atoms.push(Atom::Image { src: image.into(), size: size * 1.15, drop: size * 0.2 });
+                    self.atoms.push(Atom::Image {
+                        src: image.into(),
+                        size: size * 1.15,
+                        drop: size * 0.2,
+                    });
                 }
                 crate::media::Custom::Pending => {
                     self.twemoji_text(&t[last..start], kind.clone());
@@ -419,7 +453,11 @@ impl Builder<'_> {
             if let Some(src) = emoji::twemoji(g) {
                 self.styled(&t[run_start..i], kind.clone());
                 let size = self.look().size;
-                self.atoms.push(Atom::Image { src: src.into(), size: size * 1.15, drop: size * 0.2 });
+                self.atoms.push(Atom::Image {
+                    src: src.into(),
+                    size: size * 1.15,
+                    drop: size * 0.2,
+                });
                 run_start = i + g.len();
             }
         }
@@ -435,13 +473,22 @@ impl Builder<'_> {
             look.color = gpui::rgb(0x59fcb3).into();
         }
         // Merge into the previous run when nothing differs.
-        if let Some(Atom::Text { text, look: l, kind: k }) = self.atoms.last_mut() {
+        if let Some(Atom::Text {
+            text,
+            look: l,
+            kind: k,
+        }) = self.atoms.last_mut()
+        {
             if *l == look && *k == kind && !matches!(kind, Kind::Spoiler { .. } | Kind::Code) {
                 *text = format!("{text}{t}").into();
                 return;
             }
         }
-        self.atoms.push(Atom::Text { text: t.to_string().into(), look, kind });
+        self.atoms.push(Atom::Text {
+            text: t.to_string().into(),
+            look,
+            kind,
+        });
     }
 
     fn code_span(&mut self, t: &str) {
@@ -450,14 +497,28 @@ impl Builder<'_> {
         look.family = MONO.into();
         look.size *= 0.9;
         look.line_height = look.size * 1.4;
-        self.atoms.push(Atom::Text { text: t.replace('\n', " ").into(), look, kind: Kind::Code });
+        self.atoms.push(Atom::Text {
+            text: t.replace('\n', " ").into(),
+            look,
+            kind: Kind::Code,
+        });
     }
 
     fn inline_html(&mut self, html: &str) {
         let tag = html.trim_start_matches('<').trim_start_matches('/');
-        let name: String = tag.chars().take_while(|c| c.is_ascii_alphanumeric()).collect::<String>().to_ascii_lowercase();
+        let name: String = tag
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric())
+            .collect::<String>()
+            .to_ascii_lowercase();
         let closing = html.starts_with("</");
-        let delta = |n: &mut u32| if closing { *n = n.saturating_sub(1) } else { *n += 1 };
+        let delta = |n: &mut u32| {
+            if closing {
+                *n = n.saturating_sub(1)
+            } else {
+                *n += 1
+            }
+        };
         match name.as_str() {
             "b" | "strong" => delta(&mut self.flags.bold),
             "i" | "em" => delta(&mut self.flags.italic),
@@ -519,14 +580,21 @@ impl Builder<'_> {
             Tag::CodeBlock(kind) => {
                 self.flush_para();
                 let lang = match kind {
-                    CodeBlockKind::Fenced(info) => info.split_whitespace().next().unwrap_or("").to_ascii_lowercase(),
+                    CodeBlockKind::Fenced(info) => info
+                        .split_whitespace()
+                        .next()
+                        .unwrap_or("")
+                        .to_ascii_lowercase(),
                     CodeBlockKind::Indented => String::new(),
                 };
                 self.code = Some((lang.into(), String::new()));
             }
             Tag::List(start) => {
                 self.flush_para();
-                self.stack.push(Frame::List { start, items: Vec::new() });
+                self.stack.push(Frame::List {
+                    start,
+                    items: Vec::new(),
+                });
             }
             Tag::Item => {
                 self.flush_para();
@@ -536,10 +604,18 @@ impl Builder<'_> {
             Tag::Strong => self.flags.bold += 1,
             Tag::Strikethrough => self.flags.strike += 1,
             Tag::Link { dest_url, .. } => self.flags.link.push(Some(dest_url.to_string().into())),
-            Tag::Image { dest_url, .. } => self.flags.image = Some((dest_url.to_string(), String::new())),
+            Tag::Image { dest_url, .. } => {
+                self.flags.image = Some((dest_url.to_string(), String::new()))
+            }
             Tag::Table(align) => {
                 self.flush_para();
-                self.stack.push(Frame::Table { align, head: Vec::new(), rows: Vec::new(), row: Vec::new(), in_head: false });
+                self.stack.push(Frame::Table {
+                    align,
+                    head: Vec::new(),
+                    rows: Vec::new(),
+                    row: Vec::new(),
+                    in_head: false,
+                });
             }
             Tag::TableHead => {
                 if let Some(Frame::Table { in_head, .. }) = self.stack.last_mut() {
@@ -567,7 +643,10 @@ impl Builder<'_> {
                     if text.ends_with('\n') {
                         text.pop();
                     }
-                    self.push_block(Block::Code { lang, text: text.into() });
+                    self.push_block(Block::Code {
+                        lang,
+                        text: text.into(),
+                    });
                 }
             }
             TagEnd::Item => {
@@ -598,12 +677,23 @@ impl Builder<'_> {
             TagEnd::TableCell => {
                 self.ensure_para();
                 if self.atoms.is_empty() {
-                    self.atoms.push(Atom::Text { text: "".into(), look: self.look(), kind: Kind::Plain });
+                    self.atoms.push(Atom::Text {
+                        text: "".into(),
+                        look: self.look(),
+                        kind: Kind::Plain,
+                    });
                 }
                 self.flush_para();
             }
             TagEnd::TableHead | TagEnd::TableRow => {
-                if let Some(Frame::Table { head, rows, row, in_head, .. }) = self.stack.last_mut() {
+                if let Some(Frame::Table {
+                    head,
+                    rows,
+                    row,
+                    in_head,
+                    ..
+                }) = self.stack.last_mut()
+                {
                     let cells = std::mem::take(row);
                     if *in_head {
                         *head = cells;
@@ -614,7 +704,10 @@ impl Builder<'_> {
                 }
             }
             TagEnd::Table => {
-                if let Some(Frame::Table { align, head, rows, .. }) = self.stack.pop() {
+                if let Some(Frame::Table {
+                    align, head, rows, ..
+                }) = self.stack.pop()
+                {
                     self.push_block(Block::Table { align, head, rows });
                 }
             }
@@ -627,11 +720,16 @@ impl Builder<'_> {
 /// other site (`mdLinkTextSpoofsHref`); otherwise its source shows.
 fn link_allowed(text: &str, href: &str) -> bool {
     let lower = href.trim().to_ascii_lowercase();
-    if !(lower.starts_with("http:") || lower.starts_with("https:") || lower.starts_with("mailto:")) {
+    if !(lower.starts_with("http:") || lower.starts_with("https:") || lower.starts_with("mailto:"))
+    {
         return false;
     }
     let actual = if lower.starts_with("mailto:") {
-        lower[7..].split(['?', '#']).next().and_then(|a| a.rsplit_once('@')).map(|(_, d)| d.to_string())
+        lower[7..]
+            .split(['?', '#'])
+            .next()
+            .and_then(|a| a.rsplit_once('@'))
+            .map(|(_, d)| d.to_string())
     } else {
         host_of(&lower)
     };
@@ -644,7 +742,9 @@ fn link_allowed(text: &str, href: &str) -> bool {
         } else {
             continue;
         };
-        let (Some(c), Some(a)) = (claimed, actual.as_deref()) else { return false };
+        let (Some(c), Some(a)) = (claimed, actual.as_deref()) else {
+            return false;
+        };
         if !(c == a || c.ends_with(&format!(".{a}")) || a.ends_with(&format!(".{c}"))) {
             return false;
         }
@@ -653,17 +753,83 @@ fn link_allowed(text: &str, href: &str) -> bool {
 }
 
 const BARE_TLDS: &[&str] = &[
-    "com", "net", "org", "io", "app", "dev", "co", "me", "ai", "gg", "xyz", "info", "to", "tv", "is", "fi", "de", "uk", "us", "ca",
-    "au", "fr", "it", "nl", "es", "jp", "cn", "in", "br", "ch", "at", "se", "no", "dk", "pl", "eu", "online", "site", "store",
-    "cash", "social", "chat", "link", "click", "download", "live", "news", "space", "world", "pro", "cloud", "tech", "money",
-    "vip", "win", "top", "club", "zone", "fund", "gold", "trade", "page", "land", "life", "network", "digital", "finance",
-    "exchange", "foundation",
+    "com",
+    "net",
+    "org",
+    "io",
+    "app",
+    "dev",
+    "co",
+    "me",
+    "ai",
+    "gg",
+    "xyz",
+    "info",
+    "to",
+    "tv",
+    "is",
+    "fi",
+    "de",
+    "uk",
+    "us",
+    "ca",
+    "au",
+    "fr",
+    "it",
+    "nl",
+    "es",
+    "jp",
+    "cn",
+    "in",
+    "br",
+    "ch",
+    "at",
+    "se",
+    "no",
+    "dk",
+    "pl",
+    "eu",
+    "online",
+    "site",
+    "store",
+    "cash",
+    "social",
+    "chat",
+    "link",
+    "click",
+    "download",
+    "live",
+    "news",
+    "space",
+    "world",
+    "pro",
+    "cloud",
+    "tech",
+    "money",
+    "vip",
+    "win",
+    "top",
+    "club",
+    "zone",
+    "fund",
+    "gold",
+    "trade",
+    "page",
+    "land",
+    "life",
+    "network",
+    "digital",
+    "finance",
+    "exchange",
+    "foundation",
 ];
 
 fn bare_domain(f: &str) -> bool {
     let host = f.split(['/', ':']).next().unwrap_or("");
     let mut parts = host.rsplit('.');
-    let Some(tld) = parts.next() else { return false };
+    let Some(tld) = parts.next() else {
+        return false;
+    };
     parts.next().is_some_and(|p| !p.is_empty()) && BARE_TLDS.contains(&tld)
 }
 
@@ -694,7 +860,9 @@ pub fn find_urls(t: &str) -> Vec<(usize, usize)> {
             continue;
         };
         let mut end = start
-            + t[start..].find(|c: char| c.is_whitespace() || "<>\"{}|\\^`[]".contains(c)).unwrap_or(t.len() - start);
+            + t[start..]
+                .find(|c: char| c.is_whitespace() || "<>\"{}|\\^`[]".contains(c))
+                .unwrap_or(t.len() - start);
         let trim = |end: &mut usize| {
             while *end > start && t[..*end].ends_with(['.', ',', ';', ':', '!', '?']) {
                 *end -= 1;
@@ -778,7 +946,12 @@ pub fn parse(src: &str, ctx: &Ctx) -> Vec<Block> {
         let mut events = Parser::new_ext(text, opts).peekable();
         while let Some(ev) = events.next() {
             // A markdown link that may not render as one shows its source.
-            if let Event::Start(Tag::Link { dest_url, link_type, .. }) = &ev {
+            if let Event::Start(Tag::Link {
+                dest_url,
+                link_type,
+                ..
+            }) = &ev
+            {
                 let mut inner = Vec::new();
                 for e in events.by_ref() {
                     if matches!(e, Event::End(TagEnd::Link)) {
@@ -786,8 +959,20 @@ pub fn parse(src: &str, ctx: &Ctx) -> Vec<Block> {
                     }
                     inner.push(e);
                 }
-                let text: String = inner.iter().filter_map(|e| if let Event::Text(t) | Event::Code(t) = e { Some(t.as_ref()) } else { None }).collect();
-                let autolink = matches!(link_type, pulldown_cmark::LinkType::Autolink | pulldown_cmark::LinkType::Email);
+                let text: String = inner
+                    .iter()
+                    .filter_map(|e| {
+                        if let Event::Text(t) | Event::Code(t) = e {
+                            Some(t.as_ref())
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                let autolink = matches!(
+                    link_type,
+                    pulldown_cmark::LinkType::Autolink | pulldown_cmark::LinkType::Email
+                );
                 if autolink || link_allowed(&text, dest_url) {
                     let url = dest_url.to_string();
                     b.flags.link.push(Some(url.into()));
@@ -820,7 +1005,9 @@ pub fn flatten(src: &str) -> String {
     for ev in Parser::new_ext(src, opts) {
         match ev {
             Event::Text(t) | Event::Code(t) => out.push_str(&t),
-            Event::SoftBreak | Event::HardBreak | Event::End(TagEnd::Paragraph | TagEnd::Heading(_) | TagEnd::Item) => {
+            Event::SoftBreak
+            | Event::HardBreak
+            | Event::End(TagEnd::Paragraph | TagEnd::Heading(_) | TagEnd::Item) => {
                 if !out.ends_with(' ') {
                     out.push(' ');
                 }
@@ -845,10 +1032,20 @@ mod custom_tests {
         let revealed = HashSet::new();
         let pic = std::sync::Arc::new(gpui::RenderImage::new(Vec::new()));
         let f = |c: &str| (c == "grin").then(|| crate::media::Custom::Ready(pic.clone()));
-        let ctx = Ctx { base: Look::new("Rubik", 15., 21., gpui::white()), revealed: &revealed, custom: Some(&f) };
+        let ctx = Ctx {
+            base: Look::new("Rubik", 15., 21., gpui::white()),
+            revealed: &revealed,
+            custom: Some(&f),
+        };
         let blocks = parse("Have you seen this? :grin: and 21:20:30", &ctx);
         let Block::Para(p) = &blocks[0] else { panic!() };
-        assert!(p.atoms.iter().any(|a| matches!(a, Atom::Image { src: gpui::ImageSource::Render(_), .. })));
+        assert!(p.atoms.iter().any(|a| matches!(
+            a,
+            Atom::Image {
+                src: gpui::ImageSource::Render(_),
+                ..
+            }
+        )));
         assert_eq!(shortcodes("21:20:30"), vec![]);
     }
 }

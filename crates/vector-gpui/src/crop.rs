@@ -15,7 +15,10 @@ fn decode_webp_frames(bytes: &[u8]) -> Result<Vec<(image::RgbaImage, u32)>, Stri
     // `image-webp` 0.2.x leaves transparent regions holding the prior frame.
     if let Ok(anim) = crate::shared::animated_webp::Decoder::new(bytes) {
         if anim.frame_count() > 1 {
-            if let Ok(frames) = anim.map(|f| f.map(|(rgba, ms)| (rgba, ms.max(20)))).collect() {
+            if let Ok(frames) = anim
+                .map(|f| f.map(|(rgba, ms)| (rgba, ms.max(20))))
+                .collect()
+            {
                 return Ok(frames);
             }
         }
@@ -34,7 +37,9 @@ fn decode_webp_frames(bytes: &[u8]) -> Result<Vec<(image::RgbaImage, u32)>, Stri
 fn decode_gif_frames(bytes: &[u8]) -> Result<Vec<(image::RgbaImage, u32)>, String> {
     let decoder = image::codecs::gif::GifDecoder::new(Cursor::new(bytes))
         .map_err(|e| format!("gif decoder: {}", e))?;
-    let frames: Vec<image::Frame> = decoder.into_frames().collect_frames()
+    let frames: Vec<image::Frame> = decoder
+        .into_frames()
+        .collect_frames()
         .map_err(|e| format!("gif frames: {}", e))?;
     Ok(frames.into_iter().map(extract_frame).collect())
 }
@@ -44,7 +49,9 @@ fn decode_apng_frames(bytes: &[u8]) -> Result<Vec<(image::RgbaImage, u32)>, Stri
         .map_err(|e| format!("png decoder: {}", e))?
         .apng()
         .map_err(|e| format!("apng: {}", e))?;
-    let frames: Vec<image::Frame> = decoder.into_frames().collect_frames()
+    let frames: Vec<image::Frame> = decoder
+        .into_frames()
+        .collect_frames()
         .map_err(|e| format!("apng frames: {}", e))?;
     Ok(frames.into_iter().map(extract_frame).collect())
 }
@@ -68,7 +75,6 @@ fn extract_frame(f: image::Frame) -> (image::RgbaImage, u32) {
     (f.into_buffer(), dur)
 }
 
-
 pub struct EmojiCropInput {
     pub bytes: Vec<u8>,
     pub mime: String,
@@ -78,17 +84,36 @@ pub struct EmojiCropInput {
     pub h: u32,
 }
 
-
-pub(crate) fn crop_image(bytes: Vec<u8>, x: u32, y: u32, w: u32, h: u32) -> Result<Vec<u8>, String> {
+pub(crate) fn crop_image(
+    bytes: Vec<u8>,
+    x: u32,
+    y: u32,
+    w: u32,
+    h: u32,
+) -> Result<Vec<u8>, String> {
     if w == 0 || h == 0 {
         return Err("crop must be non-empty".to_string());
     }
     let mime = vector_core::crypto::mime_from_magic_bytes(&bytes).to_string();
-    crop_and_reencode_blocking(EmojiCropInput { bytes, mime, x, y, w, h }, None)
+    crop_and_reencode_blocking(
+        EmojiCropInput {
+            bytes,
+            mime,
+            x,
+            y,
+            w,
+            h,
+        },
+        None,
+    )
 }
 
 /// A crop drawn for an emoji or pack logo: shrunk until it fits the upload cap.
-pub(crate) fn crop_emoji(bytes: Vec<u8>, crop: vector_core::image_crop::CropRect, max_bytes: usize) -> Result<Vec<u8>, String> {
+pub(crate) fn crop_emoji(
+    bytes: Vec<u8>,
+    crop: vector_core::image_crop::CropRect,
+    max_bytes: usize,
+) -> Result<Vec<u8>, String> {
     let dims = vector_core::image_crop::upright_dims(&bytes).ok_or("Couldn't read the image")?;
     let (x, y, w, h) = vector_core::image_crop::map_crop(crop, dims);
     let side = w.min(h);
@@ -96,19 +121,42 @@ pub(crate) fn crop_emoji(bytes: Vec<u8>, crop: vector_core::image_crop::CropRect
         return Err("crop must be non-empty".to_string());
     }
     let mime = vector_core::crypto::mime_from_magic_bytes(&bytes).to_string();
-    crop_and_reencode_blocking(EmojiCropInput { bytes, mime, x, y, w: side, h: side }, Some(max_bytes))
+    crop_and_reencode_blocking(
+        EmojiCropInput {
+            bytes,
+            mime,
+            x,
+            y,
+            w: side,
+            h: side,
+        },
+        Some(max_bytes),
+    )
 }
 
 /// A crop drawn on whatever copy the page showed (maybe a scaled preview), made on the image itself.
-pub(crate) fn crop_drawn(bytes: Vec<u8>, crop: vector_core::image_crop::CropRect) -> Result<Vec<u8>, String> {
+pub(crate) fn crop_drawn(
+    bytes: Vec<u8>,
+    crop: vector_core::image_crop::CropRect,
+) -> Result<Vec<u8>, String> {
     let dims = vector_core::image_crop::upright_dims(&bytes).ok_or("Couldn't read the image")?;
     let (x, y, w, h) = vector_core::image_crop::map_crop(crop, dims);
     crop_image(bytes, x, y, w, h)
 }
 
 /// `max_bytes`: shrink until the output fits, or `None` to keep the native size.
-fn crop_and_reencode_blocking(input: EmojiCropInput, max_bytes: Option<usize>) -> Result<Vec<u8>, String> {
-    let EmojiCropInput { bytes, mime, x, y, w, h } = input;
+fn crop_and_reencode_blocking(
+    input: EmojiCropInput,
+    max_bytes: Option<usize>,
+) -> Result<Vec<u8>, String> {
+    let EmojiCropInput {
+        bytes,
+        mime,
+        x,
+        y,
+        w,
+        h,
+    } = input;
     let mime = mime.to_lowercase();
 
     let format = if mime.contains("jpeg") || mime.contains("jpg") {
@@ -138,9 +186,12 @@ fn crop_and_reencode_blocking(input: EmojiCropInput, max_bytes: Option<usize>) -
     reader.limits(vector_core::crypto::bounded_image_limits());
     // Upright, as the cropper showed it: a webview applies EXIF orientation, so the
     // rectangle is in rotated pixels.
-    let mut decoder = reader.into_decoder().map_err(|e| format!("decode: {}", e))?;
+    let mut decoder = reader
+        .into_decoder()
+        .map_err(|e| format!("decode: {}", e))?;
     let orientation = image::ImageDecoder::orientation(&mut decoder).ok();
-    let mut dynimg = image::DynamicImage::from_decoder(decoder).map_err(|e| format!("decode: {}", e))?;
+    let mut dynimg =
+        image::DynamicImage::from_decoder(decoder).map_err(|e| format!("decode: {}", e))?;
     if let Some(o) = orientation {
         dynimg.apply_orientation(o);
     }
@@ -149,9 +200,16 @@ fn crop_and_reencode_blocking(input: EmojiCropInput, max_bytes: Option<usize>) -
     let mut cropped = dynimg.crop_imm(x, y, w, h).to_rgba8();
     // An emoji uploads at most MAX_UPLOAD_DIM wide: sized once here, the budget is met in one encode.
     if max_bytes.is_some() && w > MAX_UPLOAD_DIM {
-        cropped = image::imageops::resize(&cropped, MAX_UPLOAD_DIM, MAX_UPLOAD_DIM, image::imageops::FilterType::Lanczos3);
+        cropped = image::imageops::resize(
+            &cropped,
+            MAX_UPLOAD_DIM,
+            MAX_UPLOAD_DIM,
+            image::imageops::FilterType::Lanczos3,
+        );
     }
-    encode_within_budget(&[(cropped, 0u32)], max_bytes, |scaled| encode_static(&scaled[0].0, format))
+    encode_within_budget(&[(cropped, 0u32)], max_bytes, |scaled| {
+        encode_static(&scaled[0].0, format)
+    })
 }
 
 /// Encode `frames` via `encode`, shrinking them (aspect kept) until the output
@@ -169,10 +227,15 @@ where
     F: Fn(&[(image::RgbaImage, u32)]) -> Result<Vec<u8>, String>,
 {
     let out = encode(frames)?;
-    let (src_w, src_h) = frames.first().map(|(img, _)| img.dimensions()).unwrap_or((0, 0));
+    let (src_w, src_h) = frames
+        .first()
+        .map(|(img, _)| img.dimensions())
+        .unwrap_or((0, 0));
     // No budget, fits, or already at/below the floor (shrinking a tiny input
     // would only upscale it) — take the native encode.
-    let Some(max_bytes) = max_bytes else { return Ok(out) };
+    let Some(max_bytes) = max_bytes else {
+        return Ok(out);
+    };
     if out.len() <= max_bytes || src_w <= MIN_EMOJI_DIM {
         return Ok(out);
     }
@@ -197,7 +260,14 @@ where
     }
 }
 
-fn crop_animated_webp(bytes: &[u8], x: u32, y: u32, w: u32, h: u32, max_bytes: Option<usize>) -> Result<Vec<u8>, String> {
+fn crop_animated_webp(
+    bytes: &[u8],
+    x: u32,
+    y: u32,
+    w: u32,
+    h: u32,
+    max_bytes: Option<usize>,
+) -> Result<Vec<u8>, String> {
     // Reuse the existing libwebp-based decoder — it already returns
     // fully-composed RGBA frames with per-frame deltas (the spec's
     // disposal + blend logic is handled inside libwebp).
@@ -211,7 +281,10 @@ fn crop_animated_webp(bytes: &[u8], x: u32, y: u32, w: u32, h: u32, max_bytes: O
     let cropped: Vec<(image::RgbaImage, u32)> = frames
         .into_iter()
         .map(|(rgba, duration)| {
-            (image::imageops::crop_imm(&rgba, x, y, w, h).to_image(), duration.max(20))
+            (
+                image::imageops::crop_imm(&rgba, x, y, w, h).to_image(),
+                duration.max(20),
+            )
         })
         .collect();
 
@@ -225,7 +298,14 @@ fn crop_animated_webp(bytes: &[u8], x: u32, y: u32, w: u32, h: u32, max_bytes: O
     })
 }
 
-fn crop_gif(bytes: &[u8], x: u32, y: u32, w: u32, h: u32, max_bytes: Option<usize>) -> Result<Vec<u8>, String> {
+fn crop_gif(
+    bytes: &[u8],
+    x: u32,
+    y: u32,
+    w: u32,
+    h: u32,
+    max_bytes: Option<usize>,
+) -> Result<Vec<u8>, String> {
     if let Some(out) = vector_core::image_crop::crop_gif(bytes, x, y, w, h) {
         if max_bytes.is_none_or(|max| out.len() <= max) {
             return Ok(out);
@@ -241,7 +321,10 @@ fn crop_gif(bytes: &[u8], x: u32, y: u32, w: u32, h: u32, max_bytes: Option<usiz
     let cropped: Vec<(image::RgbaImage, u32)> = frames
         .into_iter()
         .map(|(rgba, duration_ms)| {
-            (image::imageops::crop_imm(&rgba, x, y, w, h).to_image(), duration_ms)
+            (
+                image::imageops::crop_imm(&rgba, x, y, w, h).to_image(),
+                duration_ms,
+            )
         })
         .collect();
 
@@ -276,7 +359,12 @@ fn validate_crop_bounds(x: u32, y: u32, w: u32, h: u32, sw: u32, sh: u32) -> Res
 fn encode_static(rgba: &image::RgbaImage, format: &str) -> Result<Vec<u8>, String> {
     if format == "webp" {
         // libwebp lossy: much smaller than image-webp's lossless-only encoder for natural images.
-        return crate::shared::animated_webp::encode_still(rgba.as_raw(), rgba.width(), rgba.height(), 88.0);
+        return crate::shared::animated_webp::encode_still(
+            rgba.as_raw(),
+            rgba.width(),
+            rgba.height(),
+            88.0,
+        );
     }
     let mut out = Vec::with_capacity((rgba.width() * rgba.height()) as usize);
     match format {
@@ -286,7 +374,12 @@ fn encode_static(rgba: &image::RgbaImage, format: &str) -> Result<Vec<u8>, Strin
                 image::codecs::png::CompressionType::Best,
                 image::codecs::png::FilterType::Adaptive,
             )
-            .write_image(rgba.as_raw(), rgba.width(), rgba.height(), image::ExtendedColorType::Rgba8)
+            .write_image(
+                rgba.as_raw(),
+                rgba.width(),
+                rgba.height(),
+                image::ExtendedColorType::Rgba8,
+            )
             .map_err(|e| format!("png encode: {}", e))?;
         }
         "jpeg" => {
@@ -301,11 +394,15 @@ fn encode_static(rgba: &image::RgbaImage, format: &str) -> Result<Vec<u8>, Strin
                 dst.0[2] = ((src.0[2] as u32 * a + 255 * inv) / 255) as u8;
             }
             image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 88)
-                .write_image(rgb.as_raw(), rgb.width(), rgb.height(), image::ExtendedColorType::Rgb8)
+                .write_image(
+                    rgb.as_raw(),
+                    rgb.width(),
+                    rgb.height(),
+                    image::ExtendedColorType::Rgb8,
+                )
                 .map_err(|e| format!("jpeg encode: {}", e))?;
         }
         _ => return Err(format!("encode: unsupported format {}", format)),
     }
     Ok(out)
 }
-

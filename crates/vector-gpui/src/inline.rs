@@ -11,10 +11,11 @@ use std::ops::Range;
 use std::rc::Rc;
 
 use gpui::{
-    AnyElement, App, Bounds, Corners, CursorStyle, Edges, Element, ElementId, Font, FontStyle, FontWeight,
-    GlobalElementId, Hitbox, HitboxBehavior, Hsla, InspectorElementId, IntoElement, LayoutId, Styled, MouseButton,
-    MouseDownEvent, MouseUpEvent, Pixels, ShapedLine, SharedString, Size, StrikethroughStyle, Style, TextAlign,
-    TextRun, Window, fill, img, outline, point, px, size,
+    AnyElement, App, Bounds, Corners, CursorStyle, Edges, Element, ElementId, Font, FontStyle,
+    FontWeight, GlobalElementId, Hitbox, HitboxBehavior, Hsla, InspectorElementId, IntoElement,
+    LayoutId, MouseButton, MouseDownEvent, MouseUpEvent, Pixels, ShapedLine, SharedString, Size,
+    StrikethroughStyle, Style, Styled, TextAlign, TextRun, Window, fill, img, outline, point, px,
+    size,
 };
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -34,7 +35,15 @@ pub struct Look {
 
 impl Look {
     pub fn new(family: &'static str, size: f32, line_height: f32, color: Hsla) -> Self {
-        Self { family: family.into(), size, line_height, weight: FontWeight::NORMAL, italic: false, color, strike: false }
+        Self {
+            family: family.into(),
+            size,
+            line_height,
+            weight: FontWeight::NORMAL,
+            italic: false,
+            color,
+            strike: false,
+        }
     }
 
     fn font(&self) -> Font {
@@ -43,7 +52,11 @@ impl Look {
             features: Default::default(),
             fallbacks: None,
             weight: self.weight,
-            style: if self.italic { FontStyle::Italic } else { FontStyle::Normal },
+            style: if self.italic {
+                FontStyle::Italic
+            } else {
+                FontStyle::Normal
+            },
         }
     }
 
@@ -54,7 +67,10 @@ impl Look {
             color,
             background_color: None,
             underline: None,
-            strikethrough: self.strike.then(|| StrikethroughStyle { thickness: px(1.), color: Some(color) }),
+            strikethrough: self.strike.then(|| StrikethroughStyle {
+                thickness: px(1.),
+                color: Some(color),
+            }),
         }
     }
 }
@@ -72,7 +88,10 @@ pub enum Kind {
     /// `code`: a bordered chip, copied on click.
     Code,
     /// `||spoiler||`, hidden until clicked; the id is its index in the message.
-    Spoiler { id: u32, revealed: bool },
+    Spoiler {
+        id: u32,
+        revealed: bool,
+    },
     /// A profile pill.
     Mention(SharedString),
 }
@@ -93,7 +112,10 @@ impl Kind {
             Kind::Plain => None,
             Kind::Link(url) => Some(Target::Link(url.clone())),
             Kind::Code => Some(Target::Code(text.to_string().into())),
-            Kind::Spoiler { id, revealed: false } => Some(Target::Spoiler(*id)),
+            Kind::Spoiler {
+                id,
+                revealed: false,
+            } => Some(Target::Spoiler(*id)),
             Kind::Spoiler { .. } => None,
             Kind::Mention(npub) => Some(Target::Mention(npub.clone())),
         }
@@ -102,9 +124,17 @@ impl Kind {
 
 #[derive(Clone)]
 pub enum Atom {
-    Text { text: SharedString, look: Look, kind: Kind },
+    Text {
+        text: SharedString,
+        look: Look,
+        kind: Kind,
+    },
     /// A square image (a twemoji or custom emoji), `vertical-align` below the baseline by `drop`.
-    Image { src: gpui::ImageSource, size: f32, drop: f32 },
+    Image {
+        src: gpui::ImageSource,
+        size: f32,
+        drop: f32,
+    },
     /// Fixed space that never breaks from what follows (an inline box's margin).
     Gap(f32),
     /// A linked picture's fetch (`.inline-image-loading`): 6px off the text, a 16px ring.
@@ -136,7 +166,14 @@ pub struct Inline {
 }
 
 pub fn inline(atoms: impl Into<Rc<[Atom]>>, base: Look) -> Inline {
-    Inline { id: None, atoms: atoms.into(), base, on_click: None, clock: 0., ellipsis: false }
+    Inline {
+        id: None,
+        atoms: atoms.into(),
+        base,
+        on_click: None,
+        clock: 0.,
+        ellipsis: false,
+    }
 }
 
 impl Inline {
@@ -214,12 +251,20 @@ fn metrics(look: &Look, window: &Window) -> Metrics {
     let ts = window.text_system();
     let id = ts.resolve_font(&look.font());
     let s = px(look.size);
-    Metrics { ascent: ts.ascent(id, s).into(), descent: ts.descent(id, s).into() }
+    Metrics {
+        ascent: ts.ascent(id, s).into(),
+        descent: ts.descent(id, s).into(),
+    }
 }
 
 fn shape(text: &str, look: &Look, color: Hsla, window: &Window) -> ShapedLine {
     let text: SharedString = text.to_string().into();
-    window.text_system().shape_line(text.clone(), px(look.size), &[look.run(text.len(), color)], None)
+    window.text_system().shape_line(
+        text.clone(),
+        px(look.size),
+        &[look.run(text.len(), color)],
+        None,
+    )
 }
 
 fn segments(atoms: &[Atom], window: &Window) -> Vec<Seg> {
@@ -232,24 +277,60 @@ fn segments(atoms: &[Atom], window: &Window) -> Vec<Seg> {
                     last.hard = true;
                     last.brk = true;
                 } else {
-                    segs.push(Seg { atom: i, range: 0..0, width: 0., hang: 0., lead: 0., tail: 0., brk: true, hard: true });
+                    segs.push(Seg {
+                        atom: i,
+                        range: 0..0,
+                        width: 0.,
+                        hang: 0.,
+                        lead: 0.,
+                        tail: 0.,
+                        brk: true,
+                        hard: true,
+                    });
                 }
             }
             Atom::Gap(w) => {
-                segs.push(Seg { atom: i, range: 0..0, width: *w, hang: 0., lead: 0., tail: 0., brk: false, hard: false });
+                segs.push(Seg {
+                    atom: i,
+                    range: 0..0,
+                    width: *w,
+                    hang: 0.,
+                    lead: 0.,
+                    tail: 0.,
+                    brk: false,
+                    hard: false,
+                });
             }
             Atom::Image { size, .. } => {
                 // A replaced element breaks on either side.
                 if let Some(last) = segs.last_mut() {
                     last.brk = true;
                 }
-                segs.push(Seg { atom: i, range: 0..0, width: *size, hang: 0., lead: 0., tail: 0., brk: true, hard: false });
+                segs.push(Seg {
+                    atom: i,
+                    range: 0..0,
+                    width: *size,
+                    hang: 0.,
+                    lead: 0.,
+                    tail: 0.,
+                    brk: true,
+                    hard: false,
+                });
             }
             Atom::Ring(_) => {
                 if let Some(last) = segs.last_mut() {
                     last.brk = true;
                 }
-                segs.push(Seg { atom: i, range: 0..0, width: RING + RING_GAP, hang: 0., lead: 0., tail: 0., brk: true, hard: false });
+                segs.push(Seg {
+                    atom: i,
+                    range: 0..0,
+                    width: RING + RING_GAP,
+                    hang: 0.,
+                    lead: 0.,
+                    tail: 0.,
+                    brk: true,
+                    hard: false,
+                });
             }
             Atom::Text { text, look, kind } => {
                 if text.is_empty() {
@@ -263,7 +344,9 @@ fn segments(atoms: &[Atom], window: &Window) -> Vec<Seg> {
                     let piece = &text[start..end];
                     let trimmed = piece.trim_end();
                     let full = f32::from(line.x_for_index(end) - line.x_for_index(start));
-                    let body = f32::from(line.x_for_index(start + trimmed.len()) - line.x_for_index(start));
+                    let body = f32::from(
+                        line.x_for_index(start + trimmed.len()) - line.x_for_index(start),
+                    );
                     let at_end = end == text.len();
                     segs.push(Seg {
                         atom: i,
@@ -298,7 +381,9 @@ fn segments(atoms: &[Atom], window: &Window) -> Vec<Seg> {
 
 /// `segs[a..b]`, split where it overflows `limit`: graphemes, as `overflow-wrap: anywhere`.
 fn split_word(atoms: &[Atom], seg: &Seg, room: f32, window: &Window) -> Option<usize> {
-    let Atom::Text { text, look, .. } = &atoms[seg.atom] else { return None };
+    let Atom::Text { text, look, .. } = &atoms[seg.atom] else {
+        return None;
+    };
     let line = shape(text, look, look.color, window);
     let base = f32::from(line.x_for_index(seg.range.start));
     let mut cut = None;
@@ -314,11 +399,19 @@ fn split_word(atoms: &[Atom], seg: &Seg, room: f32, window: &Window) -> Option<u
         }
     }
     // At least one grapheme per line.
-    cut.or_else(|| text[seg.range.clone()].graphemes(true).next().map(|g| seg.range.start + g.len()).filter(|&e| e < seg.range.end))
+    cut.or_else(|| {
+        text[seg.range.clone()]
+            .graphemes(true)
+            .next()
+            .map(|g| seg.range.start + g.len())
+            .filter(|&e| e < seg.range.end)
+    })
 }
 
 fn piece_width(atoms: &[Atom], atom: usize, range: Range<usize>, window: &Window) -> f32 {
-    let Atom::Text { text, look, .. } = &atoms[atom] else { return 0. };
+    let Atom::Text { text, look, .. } = &atoms[atom] else {
+        return 0.;
+    };
     let line = shape(text, look, look.color, window);
     f32::from(line.x_for_index(range.end) - line.x_for_index(range.start))
 }
@@ -351,7 +444,9 @@ fn layout(atoms: &[Atom], base: &Look, width: f32, window: &Window) -> Laid {
             while k <= j {
                 let s = &segs[k];
                 let sw = s.lead + s.width + s.tail;
-                if x + sw - s.hang <= width || matches!(atoms[s.atom], Atom::Image { .. }) && x == 0. {
+                if x + sw - s.hang <= width
+                    || matches!(atoms[s.atom], Atom::Image { .. }) && x == 0.
+                {
                     place(&mut lines, &mut x, s, atoms);
                     k += 1;
                     continue;
@@ -359,11 +454,30 @@ fn layout(atoms: &[Atom], base: &Look, width: f32, window: &Window) -> Laid {
                 match split_word(atoms, s, width - x, window) {
                     Some(cut) if x == 0. || cut > s.range.start => {
                         let head_w = piece_width(atoms, s.atom, s.range.start..cut, window);
-                        let head = Seg { atom: s.atom, range: s.range.start..cut, width: head_w, hang: 0., lead: s.lead, tail: 0., brk: true, hard: false };
+                        let head = Seg {
+                            atom: s.atom,
+                            range: s.range.start..cut,
+                            width: head_w,
+                            hang: 0.,
+                            lead: s.lead,
+                            tail: 0.,
+                            brk: true,
+                            hard: false,
+                        };
                         place(&mut lines, &mut x, &head, atoms);
                         let rest_w = piece_width(atoms, s.atom, cut..s.range.end, window);
-                        let (end, hang, tail, brk, hard) = (s.range.end, s.hang, s.tail, s.brk, s.hard);
-                        segs[k] = Seg { atom: s.atom, range: cut..end, width: rest_w, hang, lead: 0., tail, brk, hard };
+                        let (end, hang, tail, brk, hard) =
+                            (s.range.end, s.hang, s.tail, s.brk, s.hard);
+                        segs[k] = Seg {
+                            atom: s.atom,
+                            range: cut..end,
+                            width: rest_w,
+                            hang,
+                            lead: 0.,
+                            tail,
+                            brk,
+                            hard,
+                        };
                     }
                     _ if x > 0. => {}
                     _ => {
@@ -386,7 +500,12 @@ fn layout(atoms: &[Atom], base: &Look, width: f32, window: &Window) -> Laid {
         }
         i = j + 1;
     }
-    if lines.len() > 1 && lines.last().is_some_and(|l| l.is_empty()) && !segs.last().is_some_and(|s| s.hard && matches!(atoms[s.atom], Atom::Break)) {
+    if lines.len() > 1
+        && lines.last().is_some_and(|l| l.is_empty())
+        && !segs
+            .last()
+            .is_some_and(|s| s.hard && matches!(atoms[s.atom], Atom::Break))
+    {
         lines.pop();
     }
 
@@ -419,21 +538,40 @@ fn layout(atoms: &[Atom], base: &Look, width: f32, window: &Window) -> Laid {
                 _ => {}
             }
         }
-        let end = items.iter().map(|p| p.x + p.lead + p.width + p.tail).fold(0., f32::max);
+        let end = items
+            .iter()
+            .map(|p| p.x + p.lead + p.width + p.tail)
+            .fold(0., f32::max);
         widest = widest.max(end);
         let height = above + below;
-        out.push(Line { top, height, baseline: top + above, items });
+        out.push(Line {
+            top,
+            height,
+            baseline: top + above,
+            items,
+        });
         top += height;
     }
-    Laid { width: Some(width), lines: out, ellipsis: None, size: size(px(widest.min(width).ceil()), px(top)) }
+    Laid {
+        width: Some(width),
+        lines: out,
+        ellipsis: None,
+        size: size(px(widest.min(width).ceil()), px(top)),
+    }
 }
 
 /// One line at most `width` wide, cut at a grapheme with `…` after.
 fn layout_cut(atoms: &[Atom], base: &Look, width: f32, window: &Window) -> Laid {
     let mut laid = layout(atoms, base, f32::INFINITY, window);
     laid.lines.truncate(1);
-    let Some(line) = laid.lines.first_mut() else { return laid };
-    let end = line.items.last().map(|p| p.x + p.lead + p.width + p.tail).unwrap_or(0.);
+    let Some(line) = laid.lines.first_mut() else {
+        return laid;
+    };
+    let end = line
+        .items
+        .last()
+        .map(|p| p.x + p.lead + p.width + p.tail)
+        .unwrap_or(0.);
     if end <= width {
         laid.width = Some(width);
         laid.size.width = px(end.min(width).ceil());
@@ -469,7 +607,14 @@ fn layout_cut(atoms: &[Atom], base: &Look, width: f32, window: &Window) -> Laid 
                 let w = f32::from(line.x_for_index(trimmed)) - base_x;
                 let x = p.x;
                 let lead = p.lead;
-                keep.push(Placed { atom: p.atom, range: p.range.start..trimmed, x, width: w, lead, tail: 0. });
+                keep.push(Placed {
+                    atom: p.atom,
+                    range: p.range.start..trimmed,
+                    x,
+                    width: w,
+                    lead,
+                    tail: 0.,
+                });
                 cut_at = Some((x + lead + w, p.atom));
                 break;
             }
@@ -477,7 +622,12 @@ fn layout_cut(atoms: &[Atom], base: &Look, width: f32, window: &Window) -> Laid 
         cut_at = Some((p.x, p.atom));
         break;
     }
-    let cut = cut_at.unwrap_or((keep.last().map(|p| p.x + p.lead + p.width + p.tail).unwrap_or(0.), 0));
+    let cut = cut_at.unwrap_or((
+        keep.last()
+            .map(|p| p.x + p.lead + p.width + p.tail)
+            .unwrap_or(0.),
+        0,
+    ));
     line.items = keep;
     laid.ellipsis = Some(cut);
     laid.width = Some(width);
@@ -490,7 +640,14 @@ fn place(lines: &mut [Vec<Placed>], x: &mut f32, s: &Seg, atoms: &[Atom]) {
     if matches!(atoms[s.atom], Atom::Break) {
         return;
     }
-    line.push(Placed { atom: s.atom, range: s.range.clone(), x: *x, width: s.width, lead: s.lead, tail: s.tail });
+    line.push(Placed {
+        atom: s.atom,
+        range: s.range.clone(),
+        x: *x,
+        width: s.width,
+        lead: s.lead,
+        tail: s.tail,
+    });
     *x += s.lead + s.width + s.tail;
 }
 
@@ -519,19 +676,29 @@ impl Element for Inline {
         _: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
         let laid: Rc<RefCell<Laid>> = Rc::default();
-        let (atoms, base, state, cut) = (self.atoms.clone(), self.base.clone(), laid.clone(), self.ellipsis);
-        let id = window.request_measured_layout(Style::default(), move |known, available, window, _| {
-            let width = known.width.map(f32::from).unwrap_or(match available.width {
-                gpui::AvailableSpace::Definite(w) => w.into(),
-                gpui::AvailableSpace::MinContent => 0.,
-                gpui::AvailableSpace::MaxContent => f32::INFINITY,
+        let (atoms, base, state, cut) = (
+            self.atoms.clone(),
+            self.base.clone(),
+            laid.clone(),
+            self.ellipsis,
+        );
+        let id =
+            window.request_measured_layout(Style::default(), move |known, available, window, _| {
+                let width = known.width.map(f32::from).unwrap_or(match available.width {
+                    gpui::AvailableSpace::Definite(w) => w.into(),
+                    gpui::AvailableSpace::MinContent => 0.,
+                    gpui::AvailableSpace::MaxContent => f32::INFINITY,
+                });
+                let mut s = state.borrow_mut();
+                if s.width != Some(width) {
+                    *s = if cut {
+                        layout_cut(&atoms, &base, width, window)
+                    } else {
+                        layout(&atoms, &base, width, window)
+                    };
+                }
+                s.size
             });
-            let mut s = state.borrow_mut();
-            if s.width != Some(width) {
-                *s = if cut { layout_cut(&atoms, &base, width, window) } else { layout(&atoms, &base, width, window) };
-            }
-            s.size
-        });
         (id, laid)
     }
 
@@ -547,8 +714,14 @@ impl Element for Inline {
         {
             let w = f32::from(bounds.size.width);
             let mut s = laid.borrow_mut();
-            if s.width.is_none_or(|lw| (lw - w).abs() > 0.5 && (self.ellipsis || f32::from(s.size.width) > w)) {
-                *s = if self.ellipsis { layout_cut(&self.atoms, &self.base, w, window) } else { layout(&self.atoms, &self.base, w, window) };
+            if s.width.is_none_or(|lw| {
+                (lw - w).abs() > 0.5 && (self.ellipsis || f32::from(s.size.width) > w)
+            }) {
+                *s = if self.ellipsis {
+                    layout_cut(&self.atoms, &self.base, w, window)
+                } else {
+                    layout(&self.atoms, &self.base, w, window)
+                };
             }
         }
         let s = laid.borrow();
@@ -582,17 +755,43 @@ impl Element for Inline {
                         k = end + 1;
                         continue;
                     }
-                    Atom::Image { src, size: sz, drop } => {
-                        let mut el = gpui::StyledImage::object_fit(img(src.clone()).size(px(*sz)).aspect_ratio(1.), gpui::ObjectFit::Contain).into_any_element();
+                    Atom::Image {
+                        src,
+                        size: sz,
+                        drop,
+                    } => {
+                        let mut el = gpui::StyledImage::object_fit(
+                            img(src.clone()).size(px(*sz)).aspect_ratio(1.),
+                            gpui::ObjectFit::Contain,
+                        )
+                        .into_any_element();
                         let origin = bounds.origin + point(px(p.x), px(line.baseline + drop - sz));
-                        el.prepaint_as_root(origin, size(px(*sz), px(*sz)).map(Into::into), window, cx);
+                        el.prepaint_as_root(
+                            origin,
+                            size(px(*sz), px(*sz)).map(Into::into),
+                            window,
+                            cx,
+                        );
                         images.push(el);
                     }
                     Atom::Ring(pct) => {
                         let fill = pct.unwrap_or(5.).max(5.) / 100.;
-                        let mut el = crate::attachments::spinner(RING, 2., 2., fill, white_a(0.25), white_a(0.85));
-                        let origin = bounds.origin + point(px(p.x + RING_GAP), px(line.baseline + RING_DROP - RING));
-                        el.prepaint_as_root(origin, size(px(RING), px(RING)).map(Into::into), window, cx);
+                        let mut el = crate::attachments::spinner(
+                            RING,
+                            2.,
+                            2.,
+                            fill,
+                            white_a(0.25),
+                            white_a(0.85),
+                        );
+                        let origin = bounds.origin
+                            + point(px(p.x + RING_GAP), px(line.baseline + RING_DROP - RING));
+                        el.prepaint_as_root(
+                            origin,
+                            size(px(RING), px(RING)).map(Into::into),
+                            window,
+                            cx,
+                        );
                         images.push(el);
                     }
                     Atom::Break | Atom::Gap(_) => {}
@@ -638,19 +837,28 @@ impl Element for Inline {
                     match kind {
                         Kind::Code => {
                             let b = boxed(3.);
-                            window.paint_quad(fill(b, ca(89, 252, 179, 0.05)).corner_radii(Corners::all(px(3.))));
+                            window.paint_quad(
+                                fill(b, ca(89, 252, 179, 0.05)).corner_radii(Corners::all(px(3.))),
+                            );
                             window.paint_quad(
                                 outline(b, ca(89, 252, 179, 0.45), gpui::BorderStyle::Solid)
                                     .corner_radii(Corners::all(px(3.)))
                                     .border_widths(Edges::all(px(1.))),
                             );
                         }
-                        Kind::Spoiler { revealed: false, .. } => {
-                            window.paint_quad(fill(boxed(2.), ca(0, 0, 0, 0.35)).corner_radii(Corners::all(px(3.))));
+                        Kind::Spoiler {
+                            revealed: false, ..
+                        } => {
+                            window.paint_quad(
+                                fill(boxed(2.), ca(0, 0, 0, 0.35))
+                                    .corner_radii(Corners::all(px(3.))),
+                            );
                             shimmering = true;
                         }
                         Kind::Mention(_) => {
-                            window.paint_quad(fill(boxed(1.), white_a(0.08)).corner_radii(Corners::all(px(4.))));
+                            window.paint_quad(
+                                fill(boxed(1.), white_a(0.08)).corner_radii(Corners::all(px(4.))),
+                            );
                         }
                         _ => {}
                     }
@@ -660,23 +868,44 @@ impl Element for Inline {
                 k += 1;
             }
             for p in &line.items {
-                let Atom::Text { text, look, kind } = &self.atoms[p.atom] else { continue };
+                let Atom::Text { text, look, kind } = &self.atoms[p.atom] else {
+                    continue;
+                };
                 let m = metrics(look, window);
                 let lh = look.line_height;
                 let top = line.baseline - m.ascent - (lh - (m.ascent + m.descent)) / 2.;
                 let origin = bounds.origin + point(px(p.x + p.lead), px(top));
                 let piece = &text[p.range.clone()];
                 match kind {
-                    Kind::Spoiler { revealed: false, .. } => {
+                    Kind::Spoiler {
+                        revealed: false, ..
+                    } => {
                         // No blur in GPUI: offset copies at low alpha read as one, in the
                         // shimmering accent the CSS gradient sweeps across.
                         let phase = (self.clock / 4.).fract();
                         let mid = (p.x + p.width / 2.) / s.size.width.max(px(1.)).to_f64() as f32;
                         let t = ((mid - phase * 2.).rem_euclid(1.) * 2. - 1.).abs();
                         let color = mix(c(ACCENT), c(0x04110d), 1. - t);
-                        for (dx, dy) in [(-1.5f32, -1.), (1.5, -1.), (-1.5, 1.), (1.5, 1.), (0., 0.), (-3., 0.), (3., 0.), (0., -2.), (0., 2.)] {
+                        for (dx, dy) in [
+                            (-1.5f32, -1.),
+                            (1.5, -1.),
+                            (-1.5, 1.),
+                            (1.5, 1.),
+                            (0., 0.),
+                            (-3., 0.),
+                            (3., 0.),
+                            (0., -2.),
+                            (0., 2.),
+                        ] {
                             let line = shape(piece, look, color.opacity(0.22), window);
-                            let _ = line.paint(origin + point(px(dx), px(dy)), px(lh), TextAlign::Left, None, window, cx);
+                            let _ = line.paint(
+                                origin + point(px(dx), px(dy)),
+                                px(lh),
+                                TextAlign::Left,
+                                None,
+                                window,
+                                cx,
+                            );
                         }
                     }
                     _ => {
@@ -693,7 +922,14 @@ impl Element for Inline {
             };
             let m = metrics(&look, window);
             let top = line.baseline - m.ascent - (look.line_height - (m.ascent + m.descent)) / 2.;
-            let _ = shape("…", &look, look.color, window).paint(bounds.origin + point(px(x), px(top)), px(look.line_height), TextAlign::Left, None, window, cx);
+            let _ = shape("…", &look, look.color, window).paint(
+                bounds.origin + point(px(x), px(top)),
+                px(look.line_height),
+                TextAlign::Left,
+                None,
+                window,
+                cx,
+            );
         }
         for el in &mut pre.images {
             el.paint(window, cx);
@@ -708,12 +944,16 @@ impl Element for Inline {
         for (hitbox, _) in &pre.hits {
             window.set_cursor_style(CursorStyle::PointingHand, hitbox);
         }
-        let Some(on_click) = self.on_click.clone() else { return };
+        let Some(on_click) = self.on_click.clone() else {
+            return;
+        };
         let pressed: Rc<Cell<Option<usize>>> = match id {
-            Some(id) => window.with_element_state(id, |state: Option<Rc<Cell<Option<usize>>>>, _| {
-                let state = state.unwrap_or_default();
-                (state.clone(), state)
-            }),
+            Some(id) => {
+                window.with_element_state(id, |state: Option<Rc<Cell<Option<usize>>>>, _| {
+                    let state = state.unwrap_or_default();
+                    (state.clone(), state)
+                })
+            }
             None => Rc::default(),
         };
         let hits: Rc<Vec<(Hitbox, Target)>> = Rc::new(std::mem::take(&mut pre.hits));
@@ -739,7 +979,13 @@ impl Element for Inline {
 
 fn mix(a: Hsla, b: Hsla, t: f32) -> Hsla {
     let (a, b) = (a.to_rgb(), b.to_rgb());
-    gpui::Rgba { r: a.r + (b.r - a.r) * t, g: a.g + (b.g - a.g) * t, b: a.b + (b.b - a.b) * t, a: 1. }.into()
+    gpui::Rgba {
+        r: a.r + (b.r - a.r) * t,
+        g: a.g + (b.g - a.g) * t,
+        b: a.b + (b.b - a.b) * t,
+        a: 1.,
+    }
+    .into()
 }
 
 /// Plain text with its emoji drawn as twemoji at `emoji` px, on one line cut with `…`.
@@ -750,15 +996,27 @@ pub fn emoji_line(text: &str, look: Look, emoji: f32, drop: f32) -> Inline {
         match crate::emoji::twemoji(g) {
             Some(src) => {
                 if !run.is_empty() {
-                    atoms.push(Atom::Text { text: std::mem::take(&mut run).into(), look: look.clone(), kind: Kind::Plain });
+                    atoms.push(Atom::Text {
+                        text: std::mem::take(&mut run).into(),
+                        look: look.clone(),
+                        kind: Kind::Plain,
+                    });
                 }
-                atoms.push(Atom::Image { src: src.into(), size: emoji, drop });
+                atoms.push(Atom::Image {
+                    src: src.into(),
+                    size: emoji,
+                    drop,
+                });
             }
             None => run.push_str(g),
         }
     }
     if !run.is_empty() {
-        atoms.push(Atom::Text { text: run.into(), look: look.clone(), kind: Kind::Plain });
+        atoms.push(Atom::Text {
+            text: run.into(),
+            look: look.clone(),
+            kind: Kind::Plain,
+        });
     }
     inline(atoms, look).single_line()
 }

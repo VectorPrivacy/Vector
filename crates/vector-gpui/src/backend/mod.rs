@@ -3,7 +3,12 @@
 
 pub mod account;
 pub mod actions;
+pub mod archive;
 pub mod attachments;
+pub mod badges;
+pub mod calls;
+pub mod community;
+pub mod device;
 pub mod events;
 pub mod gifs;
 pub mod images;
@@ -11,21 +16,16 @@ pub mod inline;
 pub mod messaging;
 pub mod mic;
 pub mod network;
-pub mod prefs;
-pub mod unfurl;
-pub mod sync;
-pub mod upload;
 pub mod packs;
-pub mod archive;
-pub mod badges;
-pub mod calls;
-pub mod community;
-pub mod device;
+pub mod prefs;
+pub mod security;
 pub mod sound;
 pub mod storage;
-pub mod security;
+pub mod sync;
 pub mod transfer;
+pub mod unfurl;
 pub mod updates;
+pub mod upload;
 
 use std::future::Future;
 use std::path::PathBuf;
@@ -75,7 +75,9 @@ impl vector_core::EventEmitter for Emitter {
 /// Where accounts live: a directory of its own, so this client never shares a database with a
 /// running Tauri client. `--data-dir` points it anywhere else.
 pub fn default_data_dir() -> PathBuf {
-    dirs::data_dir().unwrap_or_else(std::env::temp_dir).join("io.vectorapp.gpui")
+    dirs::data_dir()
+        .unwrap_or_else(std::env::temp_dir)
+        .join("io.vectorapp.gpui")
 }
 
 /// Start core: the runtime, the emitter, the profile processor and the remembered account.
@@ -92,8 +94,11 @@ pub fn start(data_dir: PathBuf) -> mpsc::UnboundedReceiver<UiEvent> {
     }
     let _ = std::fs::create_dir_all(&data_dir);
     device::init(Some(data_dir.clone()));
-    vector_core::VectorCore::init(vector_core::CoreConfig { data_dir, event_emitter: Some(Box::new(Emitter)) })
-        .expect("vector-core init");
+    vector_core::VectorCore::init(vector_core::CoreConfig {
+        data_dir,
+        event_emitter: Some(Box::new(Emitter)),
+    })
+    .expect("vector-core init");
     vector_core::requests::enable_shield();
 
     let rt = RT.get_or_init(|| {
@@ -104,13 +109,16 @@ pub fn start(data_dir: PathBuf) -> mpsc::UnboundedReceiver<UiEvent> {
             .expect("tokio runtime")
     });
     tauri::async_runtime::set(rt.handle().clone());
-    let _ = vector_media::TAURI_APP.set(tauri::AppHandle::new(|event, payload| emit(event, payload)));
+    let _ =
+        vector_media::TAURI_APP.set(tauri::AppHandle::new(|event, payload| emit(event, payload)));
     {
         let _guard = rt.enter();
         crate::calls::session::install();
     }
     // spawn-detached: the processor serves whichever account is live, as on desktop.
-    rt.spawn(vector_core::profile::sync::start_profile_sync_processor(Arc::new(sync::ProfileHandler)));
+    rt.spawn(vector_core::profile::sync::start_profile_sync_processor(
+        Arc::new(sync::ProfileHandler),
+    ));
     rx
 }
 

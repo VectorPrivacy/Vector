@@ -25,7 +25,11 @@ pub async fn start(send: bool, code: Option<String>) -> Result<Started, String> 
     };
     let role = if send { Role::Sender } else { Role::Receiver };
     let s = service::start(role, code.as_deref(), identity).await?;
-    Ok(Started { id: s.id, code: s.code, qr: s.qr })
+    Ok(Started {
+        id: s.id,
+        code: s.code,
+        qr: s.qr,
+    })
 }
 
 /// Sender: the number from the new device's screen. `Err(Some(n))` when wrong, `n` tries left.
@@ -43,7 +47,9 @@ pub async fn approve(credential: Option<Zeroizing<String>>) -> Result<(), String
     }
     let session = vector_core::db::current_session();
     let key = if vector_core::state::is_encryption_enabled_fast() {
-        let credential = credential.filter(|c| !c.is_empty()).ok_or(vector_core::db::at_rest::CREDENTIAL_REQUIRED)?;
+        let credential = credential
+            .filter(|c| !c.is_empty())
+            .ok_or(vector_core::db::at_rest::CREDENTIAL_REQUIRED)?;
         Some(vector_core::db::at_rest::prove_credential(&credential).await?)
     } else {
         None
@@ -54,7 +60,9 @@ pub async fn approve(credential: Option<Zeroizing<String>>) -> Result<(), String
     }
     let bundle = Bundle::from_stored(&nsec, seed.as_deref().map(|s| s.as_str()));
     service::approve(bundle).await.map_err(|e| match e {
-        ApproveError::NotYours => "This device's stored key doesn't match the account, so nothing was sent".to_string(),
+        ApproveError::NotYours => {
+            "This device's stored key doesn't match the account, so nothing was sent".to_string()
+        }
         _ => NOT_WAITING.to_string(),
     })
 }

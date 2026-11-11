@@ -7,7 +7,9 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui::prelude::*;
-use gpui::{div, img, px, svg, AnyElement, App, Entity, FontWeight, RenderImage, SharedString, Window};
+use gpui::{
+    AnyElement, App, Entity, FontWeight, RenderImage, SharedString, Window, div, img, px, svg,
+};
 
 use crate::composer::TextInput;
 use crate::data::Store;
@@ -53,45 +55,88 @@ pub type OnAct = Rc<dyn Fn(Act, &mut Window, &mut App)>;
 
 const STEPS: [&str; 3] = ["Name", "Access", "Invite"];
 
-fn click(on: &OnAct, act: impl Fn() -> Act + 'static) -> impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static {
+fn click(
+    on: &OnAct,
+    act: impl Fn() -> Act + 'static,
+) -> impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static {
     let on = on.clone();
     move |_, w, cx| on(act(), w, cx)
 }
 
 fn steps(step: u8) -> impl IntoElement {
-    div().h(px(32.)).mt(px(20.)).flex().items_center().justify_center().gap(px(28.)).children(STEPS.iter().enumerate().map(|(i, label)| {
-        let n = i as u8 + 1;
-        let (done, current) = (step > n, step == n);
-        let dot = div().size(px(22.)).rounded_full().border_1().flex().items_center().justify_center().font_weight(FontWeight::BOLD).text_size(px(11.));
-        let dot = if done {
-            dot.border_color(c(PRIMARY)).bg(c(PRIMARY)).child(svg().path("icons/check.svg").size(px(12.)).text_color(c(0x000000)))
-        } else if current {
-            dot.border_color(c(PRIMARY)).text_color(c(PRIMARY)).child(n.to_string())
-        } else {
-            dot.border_color(white_a(0.2)).text_color(white_a(0.4)).child(n.to_string())
-        };
-        div()
-            .flex()
-            .items_center()
-            .gap(px(8.))
-            .text_size(px(13.))
-            .line_height(px(24.))
-            .text_color(if current { c(0xffffff) } else { white_a(0.4) })
-            .child(dot)
-            .child(*label)
-    }))
+    div()
+        .h(px(32.))
+        .mt(px(20.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .gap(px(28.))
+        .children(STEPS.iter().enumerate().map(|(i, label)| {
+            let n = i as u8 + 1;
+            let (done, current) = (step > n, step == n);
+            let dot = div()
+                .size(px(22.))
+                .rounded_full()
+                .border_1()
+                .flex()
+                .items_center()
+                .justify_center()
+                .font_weight(FontWeight::BOLD)
+                .text_size(px(11.));
+            let dot = if done {
+                dot.border_color(c(PRIMARY)).bg(c(PRIMARY)).child(
+                    svg()
+                        .path("icons/check.svg")
+                        .size(px(12.))
+                        .text_color(c(0x000000)),
+                )
+            } else if current {
+                dot.border_color(c(PRIMARY))
+                    .text_color(c(PRIMARY))
+                    .child(n.to_string())
+            } else {
+                dot.border_color(white_a(0.2))
+                    .text_color(white_a(0.4))
+                    .child(n.to_string())
+            };
+            div()
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .text_size(px(13.))
+                .line_height(px(24.))
+                .text_color(if current { c(0xffffff) } else { white_a(0.4) })
+                .child(dot)
+                .child(*label)
+        }))
 }
 
 fn radio(on: bool) -> gpui::Div {
-    let ring = div().size(px(18.)).flex_shrink_0().rounded_full().border_2();
+    let ring = div()
+        .size(px(18.))
+        .flex_shrink_0()
+        .rounded_full()
+        .border_2();
     if on {
-        ring.border_color(c(PRIMARY)).flex().items_center().justify_center().child(div().size(px(8.)).rounded_full().bg(c(PRIMARY)))
+        ring.border_color(c(PRIMARY))
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(div().size(px(8.)).rounded_full().bg(c(PRIMARY)))
     } else {
         ring.border_color(white_a(0.25))
     }
 }
 
-fn choice(id: &'static str, icon: &'static str, title: &'static str, desc: &'static str, on_it: bool, act: Act, on: &OnAct) -> impl IntoElement {
+fn choice(
+    id: &'static str,
+    icon: &'static str,
+    title: &'static str,
+    desc: &'static str,
+    on_it: bool,
+    act: Act,
+    on: &OnAct,
+) -> impl IntoElement {
     let on = on.clone();
     let act = Rc::new(std::cell::Cell::new(Some(act)));
     div()
@@ -104,14 +149,34 @@ fn choice(id: &'static str, icon: &'static str, title: &'static str, desc: &'sta
         .rounded(px(12.))
         .border_1()
         .cursor_pointer()
-        .when(on_it, |d| d.border_color(c(PRIMARY)).bg(ca(51, 219, 152, 0.07)))
-        .when(!on_it, |d| d.border_color(white_a(0.1)).bg(white_a(0.02)).hover(|d| d.bg(white_a(0.04))))
+        .when(on_it, |d| {
+            d.border_color(c(PRIMARY)).bg(ca(51, 219, 152, 0.07))
+        })
+        .when(!on_it, |d| {
+            d.border_color(white_a(0.1))
+                .bg(white_a(0.02))
+                .hover(|d| d.bg(white_a(0.04)))
+        })
         .on_click(move |_, w, cx| {
             if let Some(a) = act.take() {
                 on(a, w, cx);
             }
         })
-        .child(div().size(px(40.)).flex_shrink_0().rounded(px(10.)).bg(white_a(0.06)).flex().items_center().justify_center().child(svg().path(icon).size(px(20.)).text_color(if on_it { c(PRIMARY) } else { c(0xffffff) })))
+        .child(
+            div()
+                .size(px(40.))
+                .flex_shrink_0()
+                .rounded(px(10.))
+                .bg(white_a(0.06))
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(svg().path(icon).size(px(20.)).text_color(if on_it {
+                    c(PRIMARY)
+                } else {
+                    c(0xffffff)
+                })),
+        )
         .child(
             div()
                 .flex_1()
@@ -119,21 +184,45 @@ fn choice(id: &'static str, icon: &'static str, title: &'static str, desc: &'sta
                 .flex()
                 .flex_col()
                 .gap(px(3.))
-                .child(div().font_weight(FontWeight::SEMIBOLD).text_size(px(15.)).line_height(px(24.)).text_color(c(0xffffff)).child(title))
-                .child(div().text_size(px(13.)).line_height(px(18.2)).text_color(white_a(0.55)).child(desc)),
+                .child(
+                    div()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_size(px(15.))
+                        .line_height(px(24.))
+                        .text_color(c(0xffffff))
+                        .child(title),
+                )
+                .child(
+                    div()
+                        .text_size(px(13.))
+                        .line_height(px(18.2))
+                        .text_color(white_a(0.55))
+                        .child(desc),
+                ),
         )
         .child(radio(on_it))
 }
 
 /// The channel pane's own head and one channel, so the preview is how it will look.
 fn preview(name: &str) -> impl IntoElement {
-    let name = if name.trim().is_empty() { "Your Community".to_string() } else { name.trim().to_string() };
+    let name = if name.trim().is_empty() {
+        "Your Community".to_string()
+    } else {
+        name.trim().to_string()
+    };
     div()
         .mt(px(32.))
         .w(px(242.))
         .flex()
         .flex_col()
-        .child(crate::kit::spaced("PREVIEW", 0.66).justify_center().font_weight(FontWeight::SEMIBOLD).text_size(px(11.)).line_height(px(24.)).text_color(white_a(0.4)))
+        .child(
+            crate::kit::spaced("PREVIEW", 0.66)
+                .justify_center()
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_size(px(11.))
+                .line_height(px(24.))
+                .text_color(white_a(0.4)),
+        )
         .child(
             div()
                 .mt(px(8.))
@@ -152,7 +241,12 @@ fn preview(name: &str) -> impl IntoElement {
                         .items_center()
                         .gap(px(10.))
                         .px(px(12.))
-                        .child(img("icons/group-placeholder.svg").size(px(36.)).rounded(px(11.)).flex_shrink_0())
+                        .child(
+                            img("icons/group-placeholder.svg")
+                                .size(px(36.))
+                                .rounded(px(11.))
+                                .flex_shrink_0(),
+                        )
                         .child(
                             div()
                                 .flex_1()
@@ -160,7 +254,16 @@ fn preview(name: &str) -> impl IntoElement {
                                 .flex()
                                 .flex_col()
                                 .gap(px(2.))
-                                .child(div().truncate().font_family(RUBIK).font_weight(FontWeight::SEMIBOLD).text_size(px(15.)).line_height(px(18.)).text_color(c(0xffffff)).child(name))
+                                .child(
+                                    div()
+                                        .truncate()
+                                        .font_family(RUBIK)
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_size(px(15.))
+                                        .line_height(px(18.))
+                                        .text_color(c(0xffffff))
+                                        .child(name),
+                                )
                                 .child(
                                     div()
                                         .flex()
@@ -169,11 +272,28 @@ fn preview(name: &str) -> impl IntoElement {
                                         .text_size(px(12.))
                                         .line_height(px(14.))
                                         .text_color(white_a(0.42))
-                                        .child(svg().path("icons/users-multi.svg").size(px(13.)).text_color(white_a(0.42)))
+                                        .child(
+                                            svg()
+                                                .path("icons/users-multi.svg")
+                                                .size(px(13.))
+                                                .text_color(white_a(0.42)),
+                                        )
                                         .child("1 Member"),
                                 ),
                         )
-                        .child(div().size(px(30.)).flex().items_center().justify_center().child(svg().path("icons/chevron-down.svg").size(px(19.5)).text_color(white_a(0.4)))),
+                        .child(
+                            div()
+                                .size(px(30.))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .child(
+                                    svg()
+                                        .path("icons/chevron-down.svg")
+                                        .size(px(19.5))
+                                        .text_color(white_a(0.4)),
+                                ),
+                        ),
                 )
                 .child(
                     div().pt(px(8.)).px(px(8.)).child(
@@ -185,8 +305,19 @@ fn preview(name: &str) -> impl IntoElement {
                             .items_center()
                             .gap(px(8.))
                             .px(px(8.))
-                            .child(svg().path("icons/channel-hash.svg").size(px(18.)).text_color(c(0xffffff)))
-                            .child(div().text_size(px(15.)).line_height(px(24.)).text_color(c(0xffffff)).child("general")),
+                            .child(
+                                svg()
+                                    .path("icons/channel-hash.svg")
+                                    .size(px(18.))
+                                    .text_color(c(0xffffff)),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(15.))
+                                    .line_height(px(24.))
+                                    .text_color(c(0xffffff))
+                                    .child("general"),
+                            ),
                     ),
                 ),
         )
@@ -194,10 +325,16 @@ fn preview(name: &str) -> impl IntoElement {
 
 /// The link as people read it: no scheme, and the long key cut down the middle.
 fn pretty(link: &str) -> String {
-    let u = link.trim_start_matches("https://").trim_start_matches("http://");
+    let u = link
+        .trim_start_matches("https://")
+        .trim_start_matches("http://");
     let chars: Vec<char> = u.chars().collect();
     if chars.len() > 46 {
-        format!("{}…{}", chars[..32].iter().collect::<String>(), chars[chars.len() - 8..].iter().collect::<String>())
+        format!(
+            "{}…{}",
+            chars[..32].iter().collect::<String>(),
+            chars[chars.len() - 8..].iter().collect::<String>()
+        )
     } else {
         u.to_string()
     }
@@ -293,20 +430,54 @@ fn invite_list(m: &CreateCommunity, store: &Store, on: &OnAct, cx: &App) -> impl
                 .rounded(px(8.))
                 .border_1()
                 .border_color(ca(57, 57, 57, 0.5))
-                .child(svg().path("icons/search.svg").absolute().left(px(12.)).top(px(8.)).size(px(24.)).text_color(white_a(0.4)))
+                .child(
+                    svg()
+                        .path("icons/search.svg")
+                        .absolute()
+                        .left(px(12.))
+                        .top(px(8.))
+                        .size(px(24.))
+                        .text_color(white_a(0.4)),
+                )
                 .child(div().flex_1().min_w_0().child(m.filter.clone())),
         )
-        .child(div().id("cg-invite-list").mt(px(10.)).flex_1().min_h_0().overflow_y_scroll().p(px(6.)).children(people.into_iter().map(|npub| {
-            let id = npub.clone();
-            pick_row(store, &npub, m.picked.contains(&npub), false, click(on, move || Act::Toggle(id.clone())))
-        })))
+        .child(
+            div()
+                .id("cg-invite-list")
+                .mt(px(10.))
+                .flex_1()
+                .min_h_0()
+                .overflow_y_scroll()
+                .p(px(6.))
+                .children(people.into_iter().map(|npub| {
+                    let id = npub.clone();
+                    pick_row(
+                        store,
+                        &npub,
+                        m.picked.contains(&npub),
+                        false,
+                        click(on, move || Act::Toggle(id.clone())),
+                    )
+                })),
+        )
 }
 
 /// Who a multi-pick list shows, most recently talked to first: contacts matching `filter`, a
 /// pasted npub, and anyone already picked from outside the contacts.
-pub fn listed(store: &Store, contacts: Option<&HashSet<String>>, filter: &str, picked: &HashSet<String>, skip: impl Fn(&str) -> bool) -> Vec<String> {
+pub fn listed(
+    store: &Store,
+    contacts: Option<&HashSet<String>>,
+    filter: &str,
+    picked: &HashSet<String>,
+    skip: impl Fn(&str) -> bool,
+) -> Vec<String> {
     let filter = filter.trim().to_lowercase();
-    let matches = |id: &str| filter.is_empty() || format!("{} {}", store.name(id), id).to_lowercase().contains(&filter);
+    let matches = |id: &str| {
+        filter.is_empty()
+            || format!("{} {}", store.name(id), id)
+                .to_lowercase()
+                .contains(&filter)
+    };
     let mut people: Vec<String> = store
         .profiles
         .values()
@@ -316,10 +487,20 @@ pub fn listed(store: &Store, contacts: Option<&HashSet<String>>, filter: &str, p
         .map(|p| p.id.to_string())
         .collect();
     let activity = |id: &str| store.chat(id).map(crate::data::last_activity).unwrap_or(0);
-    people.sort_by(|a, b| activity(b).cmp(&activity(a)).then_with(|| store.name(a).cmp(&store.name(b))));
-    let mut extra: Vec<String> = picked.iter().filter(|n| !people.contains(n) && matches(n)).cloned().collect();
+    people.sort_by(|a, b| {
+        activity(b)
+            .cmp(&activity(a))
+            .then_with(|| store.name(a).cmp(&store.name(b)))
+    });
+    let mut extra: Vec<String> = picked
+        .iter()
+        .filter(|n| !people.contains(n) && matches(n))
+        .cloned()
+        .collect();
     extra.sort();
-    if let Some(n) = crate::newchat::extract_npub(&filter).filter(|n| *n != store.my_npub && !skip(n) && !people.contains(n) && !extra.contains(n)) {
+    if let Some(n) = crate::newchat::extract_npub(&filter)
+        .filter(|n| *n != store.my_npub && !skip(n) && !people.contains(n) && !extra.contains(n))
+    {
         extra.insert(0, n);
     }
     extra.extend(people);
@@ -327,7 +508,13 @@ pub fn listed(store: &Store, contacts: Option<&HashSet<String>>, filter: &str, p
 }
 
 /// One contact in a multi-pick list. `quiet` keeps an unpicked box grey, as Invite People does.
-pub fn pick_row<F: Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static>(store: &Store, npub: &str, picked: bool, quiet: bool, on: F) -> impl IntoElement + use<F> {
+pub fn pick_row<F: Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static>(
+    store: &Store,
+    npub: &str,
+    picked: bool,
+    quiet: bool,
+    on: F,
+) -> impl IntoElement + use<F> {
     div()
         .id(SharedString::from(format!("pick-{npub}")))
         .h(px(35.))
@@ -340,19 +527,50 @@ pub fn pick_row<F: Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static>(store
         .hover(|s| s.bg(ca(255, 255, 255, 0.085)))
         .on_click(on)
         .child(div().mr(px(10.)).child(crate::ui::avatar(store, npub, 25.)))
-        .child(div().flex_1().min_w_0().truncate().text_size(px(14.)).line_height(px(24.)).text_color(c(0xf7f4f4)).child(store.name(npub)))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .truncate()
+                .text_size(px(14.))
+                .line_height(px(24.))
+                .text_color(c(0xf7f4f4))
+                .child(store.name(npub)),
+        )
         .child(
             div()
                 .size(px(22.))
                 .mr(px(10.))
                 .rounded(px(4.))
                 .border_2()
-                .border_color(if quiet && !picked { white_a(0.28) } else { c(PRIMARY) })
-                .when(picked, |d| d.bg(c(PRIMARY)).flex().items_center().justify_center().child(svg().path("icons/check.svg").size(px(14.)).text_color(c(0x000000)))),
+                .border_color(if quiet && !picked {
+                    white_a(0.28)
+                } else {
+                    c(PRIMARY)
+                })
+                .when(picked, |d| {
+                    d.bg(c(PRIMARY))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(
+                            svg()
+                                .path("icons/check.svg")
+                                .size(px(14.))
+                                .text_color(c(0x000000)),
+                        )
+                }),
         )
 }
 
-fn button(id: &'static str, label: String, primary: bool, live: bool, act: Option<Act>, on: &OnAct) -> impl IntoElement {
+fn button(
+    id: &'static str,
+    label: String,
+    primary: bool,
+    live: bool,
+    act: Option<Act>,
+    on: &OnAct,
+) -> impl IntoElement {
     let on = on.clone();
     let act = Rc::new(std::cell::Cell::new(act));
     div()
@@ -367,16 +585,24 @@ fn button(id: &'static str, label: String, primary: bool, live: bool, act: Optio
         .border_1()
         .font_weight(FontWeight::SEMIBOLD)
         .text_size(px(16.))
-        .when(primary, |d| d.bg(c(0x58fcb3)).border_color(ca(90, 252, 180, 0.65)).text_color(c(0x000000)))
-        .when(!primary, |d| d.border_color(white_a(0.2)).text_color(c(0xffffff)))
+        .when(primary, |d| {
+            d.bg(c(0x58fcb3))
+                .border_color(ca(90, 252, 180, 0.65))
+                .text_color(c(0x000000))
+        })
+        .when(!primary, |d| {
+            d.border_color(white_a(0.2)).text_color(c(0xffffff))
+        })
         .when(!live && primary, |d| d.bg(ca(88, 252, 179, 0.5)))
         .when(!live && !primary, |d| d.opacity(0.45))
         .when(live, |d| {
-            d.cursor_pointer().hover(|s| s.opacity(0.75)).on_click(move |_, w, cx| {
-                if let Some(a) = act.take() {
-                    on(a, w, cx);
-                }
-            })
+            d.cursor_pointer()
+                .hover(|s| s.opacity(0.75))
+                .on_click(move |_, w, cx| {
+                    if let Some(a) = act.take() {
+                        on(a, w, cx);
+                    }
+                })
         })
         .child(label)
 }
@@ -386,10 +612,22 @@ pub fn view(m: &CreateCommunity, store: &Store, width: f32, on: &OnAct, cx: &App
     let name = m.name.read(cx).text().to_string();
     let name_ok = !name.trim().is_empty();
     let (title, lead) = match m.step {
-        1 => ("Name your community", "Pick a name and, if you like, an icon. You can change both later."),
-        2 => ("Who can join?", "You can change this later from Invite People."),
-        _ if m.public => ("Share your invite link", "Your community is live. Send this link wherever your people are."),
-        _ => ("Invite your friends", "Only the people you invite can join. Pick some now, or invite them later."),
+        1 => (
+            "Name your community",
+            "Pick a name and, if you like, an icon. You can change both later.",
+        ),
+        2 => (
+            "Who can join?",
+            "You can change this later from Invite People.",
+        ),
+        _ if m.public => (
+            "Share your invite link",
+            "Your community is live. Send this link wherever your people are.",
+        ),
+        _ => (
+            "Invite your friends",
+            "Only the people you invite can join. Pick some now, or invite them later.",
+        ),
     };
     let body: AnyElement = match m.step {
         1 => div()
@@ -408,8 +646,29 @@ pub fn view(m: &CreateCommunity, store: &Store, width: f32, on: &OnAct, cx: &App
                             .size(px(56.))
                             .flex_shrink_0()
                             .opacity(0.7)
-                            .child(img("icons/group-placeholder.svg").size(px(56.)).rounded_full())
-                            .child(div().absolute().left(px(31.)).top(px(31.)).size(px(26.)).rounded_full().bg(ca(0, 0, 0, 0.85)).flex().items_center().justify_center().child(svg().path("icons/plus-circle.svg").size(px(19.)).text_color(c(PRIMARY)))),
+                            .child(
+                                img("icons/group-placeholder.svg")
+                                    .size(px(56.))
+                                    .rounded_full(),
+                            )
+                            .child(
+                                div()
+                                    .absolute()
+                                    .left(px(31.))
+                                    .top(px(31.))
+                                    .size(px(26.))
+                                    .rounded_full()
+                                    .bg(ca(0, 0, 0, 0.85))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .child(
+                                        svg()
+                                            .path("icons/plus-circle.svg")
+                                            .size(px(19.))
+                                            .text_color(c(PRIMARY)),
+                                    ),
+                            ),
                     )
                     .child(
                         div()
@@ -424,7 +683,16 @@ pub fn view(m: &CreateCommunity, store: &Store, width: f32, on: &OnAct, cx: &App
                             .pl(px(12.))
                             .pr(px(52.))
                             .child(div().flex_1().min_w_0().child(m.name.clone()))
-                            .child(div().absolute().right(px(12.)).top(px(8.)).text_size(px(12.)).line_height(px(24.)).text_color(white_a(0.35)).child(format!("{}/{NAME_MAX}", name.chars().count()))),
+                            .child(
+                                div()
+                                    .absolute()
+                                    .right(px(12.))
+                                    .top(px(8.))
+                                    .text_size(px(12.))
+                                    .line_height(px(24.))
+                                    .text_color(white_a(0.35))
+                                    .child(format!("{}/{NAME_MAX}", name.chars().count())),
+                            ),
                     ),
             )
             .child(preview(&name))
@@ -435,27 +703,102 @@ pub fn view(m: &CreateCommunity, store: &Store, width: f32, on: &OnAct, cx: &App
             .flex()
             .flex_col()
             .gap(px(12.))
-            .child(choice("cg-private", "icons/locked.svg", "Private", "Only members can invite other people in.", !m.public, Act::Public(false), on))
-            .child(choice("cg-public", "icons/globe.svg", "Public", "Anyone with an invite link can join. You'll get one to share right away.", m.public, Act::Public(true), on))
+            .child(choice(
+                "cg-private",
+                "icons/locked.svg",
+                "Private",
+                "Only members can invite other people in.",
+                !m.public,
+                Act::Public(false),
+                on,
+            ))
+            .child(choice(
+                "cg-public",
+                "icons/globe.svg",
+                "Public",
+                "Anyone with an invite link can join. You'll get one to share right away.",
+                m.public,
+                Act::Public(true),
+                on,
+            ))
             .into_any_element(),
         _ if m.public => share(m, on).into_any_element(),
         _ => invite_list(m, store, on, cx).into_any_element(),
     };
     let n = m.picked.len();
     let buttons: Vec<AnyElement> = match m.step {
-        1 => vec![button("cg-next", "Next".into(), true, name_ok, Some(Act::Next), on).into_any_element(), button("cg-cancel", "Cancel".into(), false, true, Some(Act::Cancel), on).into_any_element()],
-        2 => vec![
-            button("cg-create", "Create Community".into(), true, !m.busy, Some(Act::Create), on).into_any_element(),
-            button("cg-back", "Back".into(), false, !m.busy, Some(Act::Back), on).into_any_element(),
+        1 => vec![
+            button("cg-next", "Next".into(), true, name_ok, Some(Act::Next), on).into_any_element(),
+            button(
+                "cg-cancel",
+                "Cancel".into(),
+                false,
+                true,
+                Some(Act::Cancel),
+                on,
+            )
+            .into_any_element(),
         ],
-        _ if m.public => vec![button("cg-open", "Open Community".into(), true, true, Some(Act::Finish), on).into_any_element()],
+        2 => vec![
+            button(
+                "cg-create",
+                "Create Community".into(),
+                true,
+                !m.busy,
+                Some(Act::Create),
+                on,
+            )
+            .into_any_element(),
+            button(
+                "cg-back",
+                "Back".into(),
+                false,
+                !m.busy,
+                Some(Act::Back),
+                on,
+            )
+            .into_any_element(),
+        ],
+        _ if m.public => vec![
+            button(
+                "cg-open",
+                "Open Community".into(),
+                true,
+                true,
+                Some(Act::Finish),
+                on,
+            )
+            .into_any_element(),
+        ],
         _ => vec![
-            button("cg-invite", if n > 0 { format!("Invite {n}") } else { "Invite".into() }, true, !m.busy && n > 0, Some(Act::Invite), on).into_any_element(),
-            button("cg-skip", "Skip for now".into(), false, !m.busy, Some(Act::Finish), on).into_any_element(),
+            button(
+                "cg-invite",
+                if n > 0 {
+                    format!("Invite {n}")
+                } else {
+                    "Invite".into()
+                },
+                true,
+                !m.busy && n > 0,
+                Some(Act::Invite),
+                on,
+            )
+            .into_any_element(),
+            button(
+                "cg-skip",
+                "Skip for now".into(),
+                false,
+                !m.busy,
+                Some(Act::Finish),
+                on,
+            )
+            .into_any_element(),
         ],
     };
     let status = if m.busy {
-        m.progress.as_ref().map(|(label, pct)| format!("{label} · {}%", (pct * 100.).round() as u32))
+        m.progress
+            .as_ref()
+            .map(|(label, pct)| format!("{label} · {}%", (pct * 100.).round() as u32))
     } else {
         m.error.clone()
     };
@@ -482,10 +825,30 @@ pub fn view(m: &CreateCommunity, store: &Store, width: f32, on: &OnAct, cx: &App
                         .font_weight(FontWeight::MEDIUM)
                         .text_size(px(24.))
                         .line_height(px(30.))
-                        .child(div().w(px(50.)).h(px(30.)).flex().justify_center().opacity(0.7).child(svg().path("icons/users-multi.svg").size(px(30.)).text_color(c(0xffffff))))
+                        .child(
+                            div()
+                                .w(px(50.))
+                                .h(px(30.))
+                                .flex()
+                                .justify_center()
+                                .opacity(0.7)
+                                .child(
+                                    svg()
+                                        .path("icons/users-multi.svg")
+                                        .size(px(30.))
+                                        .text_color(c(0xffffff)),
+                                ),
+                        )
                         .child(crate::kit::spaced("Create Community", 1.)),
                 )
-                .child(div().mt(px(8.)).mx(px(40.)).h(px(1.)).flex_shrink_0().bg(c(ACCENT)))
+                .child(
+                    div()
+                        .mt(px(8.))
+                        .mx(px(40.))
+                        .h(px(1.))
+                        .flex_shrink_0()
+                        .bg(c(ACCENT)),
+                )
                 .child(
                     div()
                         .flex_1()
@@ -494,9 +857,36 @@ pub fn view(m: &CreateCommunity, store: &Store, width: f32, on: &OnAct, cx: &App
                         .flex_col()
                         .px(px(15.))
                         .child(steps(m.step))
-                        .child(div().mt(px(22.)).text_center().font_weight(FontWeight::SEMIBOLD).text_size(px(20.)).line_height(px(24.)).text_color(c(0xffffff)).child(title))
-                        .child(div().mt(px(6.)).mx_auto().max_w(px(420.)).text_center().text_size(px(14.)).line_height(px(20.3)).text_color(white_a(0.55)).child(lead))
-                        .child(div().mt(px(24.)).flex_1().min_h_0().flex().flex_col().child(body)),
+                        .child(
+                            div()
+                                .mt(px(22.))
+                                .text_center()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_size(px(20.))
+                                .line_height(px(24.))
+                                .text_color(c(0xffffff))
+                                .child(title),
+                        )
+                        .child(
+                            div()
+                                .mt(px(6.))
+                                .mx_auto()
+                                .max_w(px(420.))
+                                .text_center()
+                                .text_size(px(14.))
+                                .line_height(px(20.3))
+                                .text_color(white_a(0.55))
+                                .child(lead),
+                        )
+                        .child(
+                            div()
+                                .mt(px(24.))
+                                .flex_1()
+                                .min_h_0()
+                                .flex()
+                                .flex_col()
+                                .child(body),
+                        ),
                 ),
         )
         .child(
@@ -507,8 +897,27 @@ pub fn view(m: &CreateCommunity, store: &Store, width: f32, on: &OnAct, cx: &App
                 .pb(px(15.))
                 .flex()
                 .flex_col()
-                .child(div().h(px(20.)).text_center().text_size(px(13.)).line_height(px(20.)).text_color(if m.busy { white_a(0.55) } else { c(crate::timeline::DANGER) }).children(status))
-                .child(div().mt(px(16.)).flex().justify_center().gap(px(10.)).children(buttons)),
+                .child(
+                    div()
+                        .h(px(20.))
+                        .text_center()
+                        .text_size(px(13.))
+                        .line_height(px(20.))
+                        .text_color(if m.busy {
+                            white_a(0.55)
+                        } else {
+                            c(crate::timeline::DANGER)
+                        })
+                        .children(status),
+                )
+                .child(
+                    div()
+                        .mt(px(16.))
+                        .flex()
+                        .justify_center()
+                        .gap(px(10.))
+                        .children(buttons),
+                ),
         )
         .into_any_element()
 }

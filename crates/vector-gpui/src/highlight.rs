@@ -28,10 +28,11 @@ struct Lang {
 
 const RUST: Lang = Lang {
     keywords: &[
-        "as", "async", "await", "break", "const", "continue", "crate", "dyn", "else", "enum", "extern", "fn", "for", "if", "impl",
-        "in", "let", "loop", "match", "mod", "move", "mut", "pub", "ref", "return", "self", "Self", "static", "struct", "super",
-        "trait", "type", "unsafe", "use", "where", "while", "i8", "i16", "i32", "i64", "i128", "isize", "u8", "u16", "u32", "u64",
-        "u128", "usize", "f32", "f64", "str", "char", "bool",
+        "as", "async", "await", "break", "const", "continue", "crate", "dyn", "else", "enum",
+        "extern", "fn", "for", "if", "impl", "in", "let", "loop", "match", "mod", "move", "mut",
+        "pub", "ref", "return", "self", "Self", "static", "struct", "super", "trait", "type",
+        "unsafe", "use", "where", "while", "i8", "i16", "i32", "i64", "i128", "isize", "u8", "u16",
+        "u32", "u64", "u128", "usize", "f32", "f64", "str", "char", "bool",
     ],
     literals: &["true", "false", "Some", "None", "Ok", "Err"],
     definers: &["fn"],
@@ -43,9 +44,46 @@ const RUST: Lang = Lang {
 
 const JS: Lang = Lang {
     keywords: &[
-        "as", "async", "await", "break", "case", "catch", "class", "const", "continue", "debugger", "default", "delete", "do",
-        "else", "export", "extends", "finally", "for", "from", "function", "if", "import", "in", "instanceof", "interface", "let",
-        "new", "of", "return", "static", "switch", "this", "throw", "try", "type", "typeof", "var", "void", "while", "yield",
+        "as",
+        "async",
+        "await",
+        "break",
+        "case",
+        "catch",
+        "class",
+        "const",
+        "continue",
+        "debugger",
+        "default",
+        "delete",
+        "do",
+        "else",
+        "export",
+        "extends",
+        "finally",
+        "for",
+        "from",
+        "function",
+        "if",
+        "import",
+        "in",
+        "instanceof",
+        "interface",
+        "let",
+        "new",
+        "of",
+        "return",
+        "static",
+        "switch",
+        "this",
+        "throw",
+        "try",
+        "type",
+        "typeof",
+        "var",
+        "void",
+        "while",
+        "yield",
     ],
     literals: &["true", "false", "null", "undefined", "NaN", "Infinity"],
     definers: &["function", "class"],
@@ -57,9 +95,10 @@ const JS: Lang = Lang {
 
 const PYTHON: Lang = Lang {
     keywords: &[
-        "and", "as", "assert", "async", "await", "break", "class", "continue", "def", "del", "elif", "else", "except", "finally",
-        "for", "from", "global", "if", "import", "in", "is", "lambda", "nonlocal", "not", "or", "pass", "raise", "return", "try",
-        "while", "with", "yield",
+        "and", "as", "assert", "async", "await", "break", "class", "continue", "def", "del",
+        "elif", "else", "except", "finally", "for", "from", "global", "if", "import", "in", "is",
+        "lambda", "nonlocal", "not", "or", "pass", "raise", "return", "try", "while", "with",
+        "yield",
     ],
     literals: &["True", "False", "None"],
     definers: &["def", "class"],
@@ -71,11 +110,67 @@ const PYTHON: Lang = Lang {
 
 const C_LIKE: Lang = Lang {
     keywords: &[
-        "auto", "break", "case", "char", "class", "const", "continue", "default", "do", "double", "else", "enum", "extends",
-        "extern", "final", "float", "for", "func", "go", "goto", "if", "implements", "import", "int", "interface", "long", "map",
-        "namespace", "new", "package", "private", "protected", "public", "return", "short", "signed", "sizeof", "static", "struct",
-        "switch", "template", "this", "throw", "try", "catch", "typedef", "union", "unsigned", "using", "var", "void", "volatile",
-        "while", "chan", "defer", "range", "select", "fun", "val", "let", "guard",
+        "auto",
+        "break",
+        "case",
+        "char",
+        "class",
+        "const",
+        "continue",
+        "default",
+        "do",
+        "double",
+        "else",
+        "enum",
+        "extends",
+        "extern",
+        "final",
+        "float",
+        "for",
+        "func",
+        "go",
+        "goto",
+        "if",
+        "implements",
+        "import",
+        "int",
+        "interface",
+        "long",
+        "map",
+        "namespace",
+        "new",
+        "package",
+        "private",
+        "protected",
+        "public",
+        "return",
+        "short",
+        "signed",
+        "sizeof",
+        "static",
+        "struct",
+        "switch",
+        "template",
+        "this",
+        "throw",
+        "try",
+        "catch",
+        "typedef",
+        "union",
+        "unsigned",
+        "using",
+        "var",
+        "void",
+        "volatile",
+        "while",
+        "chan",
+        "defer",
+        "range",
+        "select",
+        "fun",
+        "val",
+        "let",
+        "guard",
     ],
     literals: &["true", "false", "null", "nil", "nullptr", "NULL"],
     definers: &["func", "fun", "class", "struct"],
@@ -86,7 +181,10 @@ const C_LIKE: Lang = Lang {
 };
 
 const SHELL: Lang = Lang {
-    keywords: &["if", "then", "else", "elif", "fi", "for", "while", "do", "done", "case", "esac", "in", "function", "return", "export", "local"],
+    keywords: &[
+        "if", "then", "else", "elif", "fi", "for", "while", "do", "done", "case", "esac", "in",
+        "function", "return", "export", "local",
+    ],
     literals: &["true", "false"],
     definers: &["function"],
     line_comment: &["#"],
@@ -110,7 +208,8 @@ fn lang(name: &str) -> Option<&'static Lang> {
         "rust" | "rs" => &RUST,
         "js" | "javascript" | "jsx" | "ts" | "typescript" | "tsx" | "mjs" => &JS,
         "py" | "python" => &PYTHON,
-        "c" | "h" | "cpp" | "c++" | "cc" | "go" | "golang" | "java" | "kotlin" | "kt" | "swift" | "cs" | "csharp" | "dart" => &C_LIKE,
+        "c" | "h" | "cpp" | "c++" | "cc" | "go" | "golang" | "java" | "kotlin" | "kt" | "swift"
+        | "cs" | "csharp" | "dart" => &C_LIKE,
         "sh" | "bash" | "zsh" | "shell" => &SHELL,
         "json" | "toml" | "yaml" | "yml" => &DATA,
         _ => return None,
@@ -120,7 +219,10 @@ fn lang(name: &str) -> Option<&'static Lang> {
 /// Colour runs `(byte_len, colour)` for each line of `code`.
 pub fn highlight(code: &str, language: &str) -> Vec<Vec<(usize, Hsla)>> {
     let Some(l) = lang(language) else {
-        return code.split('\n').map(|line| vec![(line.len(), rgb(PLAIN).into())]).collect();
+        return code
+            .split('\n')
+            .map(|line| vec![(line.len(), rgb(PLAIN).into())])
+            .collect();
     };
     let mut lines = Vec::new();
     let mut in_block = false;
@@ -160,7 +262,11 @@ pub fn highlight(code: &str, language: &str) -> Vec<Vec<(usize, Hsla)>> {
             let ch = rest.chars().next().unwrap();
             if ch == '"' || ch == '\'' || ch == '`' {
                 // A Rust lifetime is no string.
-                if ch == '\'' && l.macros && !rest[1..].chars().nth(1).is_some_and(|c| c == '\'') && !rest[1..].starts_with('\\') {
+                if ch == '\''
+                    && l.macros
+                    && !rest[1..].chars().nth(1).is_some_and(|c| c == '\'')
+                    && !rest[1..].starts_with('\\')
+                {
                     push(&mut runs, 1, PLAIN);
                     i += 1;
                     continue;
@@ -176,13 +282,17 @@ pub fn highlight(code: &str, language: &str) -> Vec<Vec<(usize, Hsla)>> {
                 continue;
             }
             if ch.is_ascii_digit() {
-                let end = rest.find(|c: char| !(c.is_ascii_alphanumeric() || c == '.' || c == '_')).unwrap_or(rest.len());
+                let end = rest
+                    .find(|c: char| !(c.is_ascii_alphanumeric() || c == '.' || c == '_'))
+                    .unwrap_or(rest.len());
                 push(&mut runs, end, LITERAL);
                 i += end;
                 continue;
             }
             if ch.is_alphabetic() || ch == '_' {
-                let end = rest.find(|c: char| !(c.is_alphanumeric() || c == '_')).unwrap_or(rest.len());
+                let end = rest
+                    .find(|c: char| !(c.is_alphanumeric() || c == '_'))
+                    .unwrap_or(rest.len());
                 let word = &rest[..end];
                 let after = &rest[end..];
                 let color = if def_next {

@@ -8,8 +8,9 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use gpui::{
-    AnimationExt, AnyElement, App, Bounds, BoxShadow, Hsla, InteractiveElement, IntoElement, ParentElement, Pixels, Point,
-    SharedString, StatefulInteractiveElement, Styled, Window, canvas, div, point, prelude::FluentBuilder, px, svg,
+    AnimationExt, AnyElement, App, Bounds, BoxShadow, Hsla, InteractiveElement, IntoElement,
+    ParentElement, Pixels, Point, SharedString, StatefulInteractiveElement, Styled, Window, canvas,
+    div, point, prelude::FluentBuilder, px, svg,
 };
 use serde_json::Value;
 
@@ -178,7 +179,12 @@ impl Call {
             self.clear();
             return;
         }
-        let str_of = |k: &str| s.get(k).and_then(Value::as_str).unwrap_or_default().to_string();
+        let str_of = |k: &str| {
+            s.get(k)
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string()
+        };
         let bool_of = |k: &str| s.get(k).and_then(Value::as_bool).unwrap_or(false);
         let id = str_of("id");
         if self.id.as_deref() != Some(id.as_str()) {
@@ -243,7 +249,11 @@ impl Call {
         let u = |k: &str| st.get(k).and_then(Value::as_u64).unwrap_or(0);
         let next = Stats {
             rtt_ms: u("rtt_ms") as u32,
-            path: st.get("path").and_then(Value::as_str).unwrap_or_default().to_string(),
+            path: st
+                .get("path")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
             bitrate_kbps: u("bitrate_kbps") as u32,
             net_loss: st.get("net_loss").and_then(Value::as_f64).unwrap_or(0.) as f32,
             received: u("received"),
@@ -253,9 +263,13 @@ impl Call {
         if let Some(prev) = &self.stats
             && next.received > prev.received
         {
-            lost = 100. * next.concealed.saturating_sub(prev.concealed) as f32 / (next.received - prev.received) as f32;
+            lost = 100. * next.concealed.saturating_sub(prev.concealed) as f32
+                / (next.received - prev.received) as f32;
         }
-        self.history.push_back(Sample { rtt: next.rtt_ms as f32, lost: lost.max(0.) });
+        self.history.push_back(Sample {
+            rtt: next.rtt_ms as f32,
+            lost: lost.max(0.),
+        });
         if self.history.len() > HISTORY {
             self.history.pop_front();
         }
@@ -263,7 +277,10 @@ impl Call {
         let recent: Vec<_> = self.history.iter().rev().take(10).collect();
         let n = recent.len() as f32;
         self.quality = (n > 0.).then(|| {
-            grade(recent.iter().map(|r| r.lost).sum::<f32>() / n, recent.iter().map(|r| r.rtt).sum::<f32>() / n)
+            grade(
+                recent.iter().map(|r| r.lost).sum::<f32>() / n,
+                recent.iter().map(|r| r.rtt).sum::<f32>() / n,
+            )
         });
     }
 
@@ -278,11 +295,18 @@ impl Call {
 
     fn status(&self) -> String {
         match self.phase {
-            Some(Phase::Ringing) => if self.outgoing { "Calling…" } else { "Incoming call" }.into(),
+            Some(Phase::Ringing) => if self.outgoing {
+                "Calling…"
+            } else {
+                "Incoming call"
+            }
+            .into(),
             Some(Phase::Connecting) => "Connecting…".into(),
             Some(Phase::Active) if self.peer_away => "Waiting for them to come back…".into(),
             Some(Phase::Active) if self.stalled => "Reconnecting…".into(),
-            Some(Phase::Active) => clock(self.active_ms + self.received_at.elapsed().as_millis() as u64),
+            Some(Phase::Active) => {
+                clock(self.active_ms + self.received_at.elapsed().as_millis() as u64)
+            }
             Some(Phase::Ended) => reason_text(self.reason.as_deref()).into(),
             None => String::new(),
         }
@@ -316,7 +340,11 @@ pub fn clock(ms: u64) -> String {
     let s = ms / 1000;
     let m = s / 60;
     let h = m / 60;
-    if h > 0 { format!("{h}:{:02}:{:02}", m % 60, s % 60) } else { format!("{:02}:{:02}", m % 60, s % 60) }
+    if h > 0 {
+        format!("{h}:{:02}:{:02}", m % 60, s % 60)
+    } else {
+        format!("{:02}:{:02}", m % 60, s % 60)
+    }
 }
 
 fn lost_word(v: f32) -> String {
@@ -368,19 +396,44 @@ fn accent_mix(pct: f32) -> Hsla {
 /// The phone glyph; hung up, it turns about its own box.
 fn phone(size: f32, color: Hsla, down: bool) -> impl IntoElement {
     let s = svg().path("ui/call.svg").size(px(size)).text_color(color);
-    if down { s.with_transformation(gpui::Transformation::rotate(gpui::radians(135f32.to_radians()))) } else { s }
+    if down {
+        s.with_transformation(gpui::Transformation::rotate(gpui::radians(
+            135f32.to_radians(),
+        )))
+    } else {
+        s
+    }
 }
 
 fn round_btn(id: &'static str, size: f32) -> gpui::Stateful<gpui::Div> {
-    div().id(id).size(px(size)).flex_shrink_0().rounded_full().flex().items_center().justify_center().cursor_pointer()
+    div()
+        .id(id)
+        .size(px(size))
+        .flex_shrink_0()
+        .rounded_full()
+        .flex()
+        .items_center()
+        .justify_center()
+        .cursor_pointer()
 }
 
 /// `.call-btn`: 34px, a faint wash; on, the accent's.
 fn call_btn(id: &'static str, on_state: bool) -> gpui::Stateful<gpui::Div> {
     round_btn(id, 34.)
-        .bg(if on_state { accent_mix(0.22) } else { white_a(0.08) })
+        .bg(if on_state {
+            accent_mix(0.22)
+        } else {
+            white_a(0.08)
+        })
         .text_color(if on_state { c(ACCENT) } else { white_a(0.88) })
-        .hover(move |d| d.bg(if on_state { accent_mix(0.30) } else { white_a(0.14) }).text_color(if on_state { c(ACCENT) } else { c(0xffffff) }))
+        .hover(move |d| {
+            d.bg(if on_state {
+                accent_mix(0.30)
+            } else {
+                white_a(0.14)
+            })
+            .text_color(if on_state { c(ACCENT) } else { c(0xffffff) })
+        })
 }
 
 fn mic_btn(call: &Call, on: &OnAct) -> impl IntoElement {
@@ -389,7 +442,16 @@ fn mic_btn(call: &Call, on: &OnAct) -> impl IntoElement {
     call_btn("call-mic", off)
         .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .on_click(move |_, w, cx| o(Act::Mic, w, cx))
-        .child(svg().path(if off { "icons/mic-off.svg" } else { "icons/mic-on.svg" }).size(px(18.7)).text_color(if off { c(ACCENT) } else { white_a(0.88) }))
+        .child(
+            svg()
+                .path(if off {
+                    "icons/mic-off.svg"
+                } else {
+                    "icons/mic-on.svg"
+                })
+                .size(px(18.7))
+                .text_color(if off { c(ACCENT) } else { white_a(0.88) }),
+        )
 }
 
 fn hangup_btn(on: &OnAct) -> impl IntoElement {
@@ -420,7 +482,13 @@ fn ring(call: &Call, store: &Store, on: &OnAct) -> AnyElement {
                     let k = ease_in_out((t - 0.5) * 2.);
                     (12. * (1. - k), 0.45 * k)
                 };
-                d.shadow(vec![BoxShadow { color: accent_mix(alpha), offset: point(px(0.), px(0.)), blur_radius: px(0.), spread_radius: px(spread), inset: false }])
+                d.shadow(vec![BoxShadow {
+                    color: accent_mix(alpha),
+                    offset: point(px(0.), px(0.)),
+                    blur_radius: px(0.),
+                    spread_radius: px(spread),
+                    inset: false,
+                }])
             },
         );
     div()
@@ -447,14 +515,34 @@ fn ring(call: &Call, store: &Store, on: &OnAct) -> AnyElement {
                 .border_1()
                 .border_color(white_a(0.08))
                 .child(crate::ui::avatar(store, &call.peer, 84.))
-                .child(div().mt(px(8.)).max_w(px(400.)).truncate().text_size(px(18.)).font_weight(gpui::FontWeight::SEMIBOLD).text_color(c(0xffffff)).child(store.name(&call.peer)))
-                .child(div().text_size(px(13.)).text_color(c(0xb2b2b2)).child(if call.video_offered { "Incoming video call" } else { "Incoming call" }))
+                .child(
+                    div()
+                        .mt(px(8.))
+                        .max_w(px(400.))
+                        .truncate()
+                        .text_size(px(18.))
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .text_color(c(0xffffff))
+                        .child(store.name(&call.peer)),
+                )
+                .child(div().text_size(px(13.)).text_color(c(0xb2b2b2)).child(
+                    if call.video_offered {
+                        "Incoming video call"
+                    } else {
+                        "Incoming call"
+                    },
+                ))
                 .child(
                     div()
                         .flex()
                         .gap(px(40.))
                         .mt(px(18.))
-                        .child(round_btn("call-decline", 60.).bg(c(DANGER)).on_click(move |_, w, cx| decline(Act::Reject, w, cx)).child(phone(28., c(0xffffff), true)))
+                        .child(
+                            round_btn("call-decline", 60.)
+                                .bg(c(DANGER))
+                                .on_click(move |_, w, cx| decline(Act::Reject, w, cx))
+                                .child(phone(28., c(0xffffff), true)),
+                        )
                         .child(pulse),
                 ),
         )
@@ -479,24 +567,50 @@ fn section(title: &'static str) -> impl IntoElement {
 }
 
 fn label(text: &'static str) -> impl IntoElement {
-    div().w(px(84.)).flex_shrink_0().text_size(px(12.5)).text_color(white_a(0.8)).child(text)
+    div()
+        .w(px(84.))
+        .flex_shrink_0()
+        .text_size(px(12.5))
+        .text_color(white_a(0.8))
+        .child(text)
 }
 
 fn value(text: impl Into<SharedString>) -> gpui::Div {
     let text = text.into();
-    div().flex().items_center().gap(px(5.)).text_size(px(13.)).font_weight(gpui::FontWeight::MEDIUM).text_color(c(0xffffff)).when(!text.is_empty(), |d| d.child(text))
+    div()
+        .flex()
+        .items_center()
+        .gap(px(5.))
+        .text_size(px(13.))
+        .font_weight(gpui::FontWeight::MEDIUM)
+        .text_color(c(0xffffff))
+        .when(!text.is_empty(), |d| d.child(text))
 }
 
 fn hint(text: impl Into<SharedString>) -> impl IntoElement {
-    div().text_size(px(11.)).font_weight(gpui::FontWeight::NORMAL).text_color(c(0x8a8a8a)).child(text.into())
+    div()
+        .text_size(px(11.))
+        .font_weight(gpui::FontWeight::NORMAL)
+        .text_color(c(0x8a8a8a))
+        .child(text.into())
 }
 
 fn dot(q: Quality) -> impl IntoElement {
-    div().size(px(7.)).flex_shrink_0().rounded_full().bg(q.color())
+    div()
+        .size(px(7.))
+        .flex_shrink_0()
+        .rounded_full()
+        .bg(q.color())
 }
 
 /// The neon toggle at the panel's 0.8 scale.
-fn switch(id: &'static str, label_text: &'static str, on_state: bool, which: Switch, on: &OnAct) -> impl IntoElement {
+fn switch(
+    id: &'static str,
+    label_text: &'static str,
+    on_state: bool,
+    which: Switch,
+    on: &OnAct,
+) -> impl IntoElement {
     let o = on.clone();
     div()
         .flex()
@@ -515,7 +629,11 @@ fn switch(id: &'static str, label_text: &'static str, on_state: bool, which: Swi
                 .rounded(px(9.6))
                 .cursor_pointer()
                 .bg(if on_state {
-                    gpui::linear_gradient(90., gpui::linear_color_stop(c(0x33db98), 0.), gpui::linear_color_stop(c(0x00ff9d), 1.))
+                    gpui::linear_gradient(
+                        90.,
+                        gpui::linear_color_stop(c(0x33db98), 0.),
+                        gpui::linear_color_stop(c(0x00ff9d), 1.),
+                    )
                 } else {
                     c(0x1a1a1a).into()
                 })
@@ -535,17 +653,41 @@ fn switch(id: &'static str, label_text: &'static str, on_state: bool, which: Swi
 /// `VoiceMeter`: the gradient spans the track, the level uncovers as much as it reaches.
 fn meter(level: f32, active: bool) -> impl IntoElement {
     let level = level.clamp(0., 1.);
-    div().flex_1().h(px(8.)).rounded(px(4.)).bg(c(0x1a1a1a)).overflow_hidden().child(
-        div().h_full().w(gpui::relative(level)).overflow_hidden().rounded(px(4.)).child(
+    div()
+        .flex_1()
+        .h(px(8.))
+        .rounded(px(4.))
+        .bg(c(0x1a1a1a))
+        .overflow_hidden()
+        .child(
             div()
                 .h_full()
-                .w(gpui::relative(if level > 0. { 1. / level } else { 0. }))
-                .flex()
-                .when(!active, |d| d.opacity(0.35))
-                .child(div().h_full().w(gpui::relative(0.8)).bg(gpui::linear_gradient(90., gpui::linear_color_stop(c(0x6ed99e), 0.), gpui::linear_color_stop(c(0xf7e470), 1.))))
-                .child(div().h_full().flex_1().bg(gpui::linear_gradient(90., gpui::linear_color_stop(c(0xf7e470), 0.), gpui::linear_color_stop(c(0xea6662), 1.)))),
-        ),
-    )
+                .w(gpui::relative(level))
+                .overflow_hidden()
+                .rounded(px(4.))
+                .child(
+                    div()
+                        .h_full()
+                        .w(gpui::relative(if level > 0. { 1. / level } else { 0. }))
+                        .flex()
+                        .when(!active, |d| d.opacity(0.35))
+                        .child(
+                            div()
+                                .h_full()
+                                .w(gpui::relative(0.8))
+                                .bg(gpui::linear_gradient(
+                                    90.,
+                                    gpui::linear_color_stop(c(0x6ed99e), 0.),
+                                    gpui::linear_color_stop(c(0xf7e470), 1.),
+                                )),
+                        )
+                        .child(div().h_full().flex_1().bg(gpui::linear_gradient(
+                            90.,
+                            gpui::linear_color_stop(c(0xf7e470), 0.),
+                            gpui::linear_color_stop(c(0xea6662), 1.),
+                        ))),
+                ),
+        )
 }
 
 /// Their volume, 0 to 200%: an 8px track, the accent to the value, a 14px thumb.
@@ -620,20 +762,41 @@ fn volume_slider(call: &Call, on: &OnAct) -> impl IntoElement {
                         .h(px(8.))
                         .rounded(px(4.))
                         .bg(white_a(0.1))
-                        .child(div().h_full().rounded_l(px(4.)).bg(c(ACCENT)).w(gpui::relative(pct))),
+                        .child(
+                            div()
+                                .h_full()
+                                .rounded_l(px(4.))
+                                .bg(c(ACCENT))
+                                .w(gpui::relative(pct)),
+                        ),
                 )
                 .child(
-                    div().absolute().top(px(1.)).left(gpui::relative(pct)).child(
-                        div()
-                            .ml(px(-14. * pct))
-                            .size(px(14.))
-                            .rounded_full()
-                            .bg(c(0xffffff))
-                            .shadow(vec![BoxShadow { color: ca(0, 0, 0, 0.3), offset: point(px(0.), px(1.)), blur_radius: px(4.), spread_radius: px(0.), inset: false }]),
-                    ),
+                    div()
+                        .absolute()
+                        .top(px(1.))
+                        .left(gpui::relative(pct))
+                        .child(
+                            div()
+                                .ml(px(-14. * pct))
+                                .size(px(14.))
+                                .rounded_full()
+                                .bg(c(0xffffff))
+                                .shadow(vec![BoxShadow {
+                                    color: ca(0, 0, 0, 0.3),
+                                    offset: point(px(0.), px(1.)),
+                                    blur_radius: px(4.),
+                                    spread_radius: px(0.),
+                                    inset: false,
+                                }]),
+                        ),
                 ),
         )
-        .child(value(format!("{}%", (call.volume * 100.).round() as i32)).w(px(40.)).flex_shrink_0().justify_end())
+        .child(
+            value(format!("{}%", (call.volume * 100.).round() as i32))
+                .w(px(40.))
+                .flex_shrink_0()
+                .justify_end(),
+        )
 }
 
 const GRAPH_H: f32 = 72.;
@@ -674,14 +837,18 @@ fn graph(call: &Call, on: &OnAct) -> AnyElement {
             let mut lost = c(0xfca559);
             lost.a = 0.85;
             for (i, r) in samples.iter().enumerate() {
-                let hgt = ((r.lost / 10.) * (GRAPH_H - GRAPH_HEAD - 4.)).min(GRAPH_H - GRAPH_HEAD - 4.);
+                let hgt =
+                    ((r.lost / 10.) * (GRAPH_H - GRAPH_HEAD - 4.)).min(GRAPH_H - GRAPH_HEAD - 4.);
                 if hgt <= 0.5 {
                     continue;
                 }
                 let (x, _) = at(i, r);
                 let bw = (step - 0.5).max(1.5);
                 window.paint_quad(gpui::fill(
-                    Bounds::new(b.origin + point(px(x - step / 2.), px(GRAPH_H - 2. - hgt)), gpui::size(px(bw), px(hgt))),
+                    Bounds::new(
+                        b.origin + point(px(x - step / 2.), px(GRAPH_H - 2. - hgt)),
+                        gpui::size(px(bw), px(hgt)),
+                    ),
                     lost,
                 ));
             }
@@ -689,14 +856,27 @@ fn graph(call: &Call, on: &OnAct) -> AnyElement {
             for (i, r) in samples.iter().enumerate() {
                 let (x, y) = at(i, r);
                 let p = b.origin + point(px(x), px(y));
-                if i == 0 { path.move_to(p) } else { path.line_to(p) }
+                if i == 0 {
+                    path.move_to(p)
+                } else {
+                    path.line_to(p)
+                }
             }
             if let Ok(p) = path.build() {
                 window.paint_path(p, c(ACCENT));
             }
             if let Some(i) = hover {
                 let (x, y) = at(i, &samples[i]);
-                window.paint_quad(gpui::fill(Bounds::new(b.origin + point(px(x - 3.), px(y - 3.)), gpui::size(px(6.), px(6.))), c(0xffffff)).corner_radii(px(3.)));
+                window.paint_quad(
+                    gpui::fill(
+                        Bounds::new(
+                            b.origin + point(px(x - 3.), px(y - 3.)),
+                            gpui::size(px(6.), px(6.)),
+                        ),
+                        c(0xffffff),
+                    )
+                    .corner_radii(px(3.)),
+                );
             }
         },
     )
@@ -708,7 +888,8 @@ fn graph(call: &Call, on: &OnAct) -> AnyElement {
             let Some(b) = bounds.get() else { return };
             let step = f32::from(b.size.width) / (n - 1) as f32;
             let x = f32::from(e.position.x - b.origin.x);
-            let i = ((x / step).round() as isize - off as isize).clamp(0, len as isize - 1) as usize;
+            let i =
+                ((x / step).round() as isize - off as isize).clamp(0, len as isize - 1) as usize;
             on(Act::Hover(Some(i)), w, cx);
         }
     };
@@ -726,17 +907,48 @@ fn graph(call: &Call, on: &OnAct) -> AnyElement {
         div()
             .flex()
             .gap(px(3.))
-            .child(div().font_weight(gpui::FontWeight::SEMIBOLD).text_color(c(ACCENT)).child(format!("{} ms", r.rtt as u32)))
-            .child(format!("· {} · {}", lost_word(r.lost), if ago == 0 { "now".to_string() } else { format!("{ago}s ago") }))
+            .child(
+                div()
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_color(c(ACCENT))
+                    .child(format!("{} ms", r.rtt as u32)),
+            )
+            .child(format!(
+                "· {} · {}",
+                lost_word(r.lost),
+                if ago == 0 {
+                    "now".to_string()
+                } else {
+                    format!("{ago}s ago")
+                }
+            ))
     };
     let legend = match hover {
-        Some(i) => div().text_size(px(11.5)).text_color(c(0xf6f6f6)).child(readout(i)).into_any_element(),
+        Some(i) => div()
+            .text_size(px(11.5))
+            .text_color(c(0xf6f6f6))
+            .child(readout(i))
+            .into_any_element(),
         None => div()
             .flex()
             .justify_between()
             .w_full()
-            .child(div().flex().items_center().gap(px(5.)).child(div().w(px(10.)).h(px(3.)).rounded(px(2.)).bg(c(ACCENT))).child(format!("delay, up to {} ms", max_rtt as u32)))
-            .child(div().flex().items_center().gap(px(5.)).child(div().w(px(10.)).h(px(7.)).rounded(px(2.)).bg(c(0xfca559))).child("lost audio"))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(5.))
+                    .child(div().w(px(10.)).h(px(3.)).rounded(px(2.)).bg(c(ACCENT)))
+                    .child(format!("delay, up to {} ms", max_rtt as u32)),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(5.))
+                    .child(div().w(px(10.)).h(px(7.)).rounded(px(2.)).bg(c(0xfca559)))
+                    .child("lost audio"),
+            )
             .into_any_element(),
     };
     div()
@@ -754,7 +966,14 @@ fn graph(call: &Call, on: &OnAct) -> AnyElement {
                 .on_hover(leave)
                 .child(plot),
         )
-        .child(div().flex().min_h(px(14.)).text_size(px(10.5)).text_color(c(0x8a8a8a)).child(legend))
+        .child(
+            div()
+                .flex()
+                .min_h(px(14.))
+                .text_size(px(10.5))
+                .text_color(c(0x8a8a8a))
+                .child(legend),
+        )
         .into_any_element()
 }
 
@@ -792,16 +1011,42 @@ fn panel(call: &Call, proc_: &Processing, on: &OnAct) -> impl IntoElement {
         .cursor_default()
         .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .child(volume_slider(call, on))
-        .when(!call.muted && !call.mic_off, |d| d.child(div().flex().items_center().child(label("Your voice")).child(meter(call.levels.0, live))))
+        .when(!call.muted && !call.mic_off, |d| {
+            d.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .child(label("Your voice"))
+                    .child(meter(call.levels.0, live)),
+            )
+        })
         .child(section("Voice processing"))
         .child(
             div()
                 .flex()
                 .flex_col()
                 .gap(px(6.))
-                .child(switch("call-agc", "Automatic gain", proc_.auto_gain, Switch::AutoGain, on))
-                .child(switch("call-aec", "Echo cancellation", proc_.echo_cancel, Switch::EchoCancel, on))
-                .child(switch("call-ns", "Noise suppression", proc_.noise_suppress, Switch::NoiseSuppress, on)),
+                .child(switch(
+                    "call-agc",
+                    "Automatic gain",
+                    proc_.auto_gain,
+                    Switch::AutoGain,
+                    on,
+                ))
+                .child(switch(
+                    "call-aec",
+                    "Echo cancellation",
+                    proc_.echo_cancel,
+                    Switch::EchoCancel,
+                    on,
+                ))
+                .child(switch(
+                    "call-ns",
+                    "Noise suppression",
+                    proc_.noise_suppress,
+                    Switch::NoiseSuppress,
+                    on,
+                )),
         )
         .child(section("Connection"))
         .child(
@@ -818,12 +1063,24 @@ fn panel(call: &Call, proc_: &Processing, on: &OnAct) -> impl IntoElement {
                 ))
                 .child(row(
                     "Delay",
-                    value(stats.map(|s| format!("{} ms", s.rtt_ms)).unwrap_or_else(|| "…".into())).when(!path.is_empty(), |d| d.child(hint(path))).into_any_element(),
+                    value(
+                        stats
+                            .map(|s| format!("{} ms", s.rtt_ms))
+                            .unwrap_or_else(|| "…".into()),
+                    )
+                    .when(!path.is_empty(), |d| d.child(hint(path)))
+                    .into_any_element(),
                 ))
                 .child(row("Lost audio", value(lost_text).into_any_element()))
                 .child(row(
                     "Bitrate",
-                    value(bitrate.map(|b| format!("{b} kbit/s")).unwrap_or_else(|| "…".into())).when(!bitrate_hint.is_empty(), |d| d.child(hint(bitrate_hint))).into_any_element(),
+                    value(
+                        bitrate
+                            .map(|b| format!("{b} kbit/s"))
+                            .unwrap_or_else(|| "…".into()),
+                    )
+                    .when(!bitrate_hint.is_empty(), |d| d.child(hint(bitrate_hint)))
+                    .into_any_element(),
                 )),
         )
         .child(graph(call, on))
@@ -833,10 +1090,26 @@ fn panel(call: &Call, proc_: &Processing, on: &OnAct) -> impl IntoElement {
 fn pill(call: &Call, store: &Store, proc_: &Processing, top: f32, on: &OnAct) -> AnyElement {
     let live = call.live();
     let ended = call.phase == Some(Phase::Ended);
-    let talk = if live && !call.peer_muted { ((call.levels.1 - 0.3) / 0.55).clamp(0., 1.) } else { 0. };
+    let talk = if live && !call.peer_muted {
+        ((call.levels.1 - 0.3) / 0.55).clamp(0., 1.)
+    } else {
+        0.
+    };
     let ring = vec![
-        BoxShadow { color: accent_mix(0.12 + talk * 0.88), offset: point(px(0.), px(0.)), blur_radius: px(0.), spread_radius: px(2.), inset: false },
-        BoxShadow { color: accent_mix(talk * 0.7), offset: point(px(0.), px(0.)), blur_radius: px(talk * 12.), spread_radius: px(0.), inset: false },
+        BoxShadow {
+            color: accent_mix(0.12 + talk * 0.88),
+            offset: point(px(0.), px(0.)),
+            blur_radius: px(0.),
+            spread_radius: px(2.),
+            inset: false,
+        },
+        BoxShadow {
+            color: accent_mix(talk * 0.7),
+            offset: point(px(0.), px(0.)),
+            blur_radius: px(talk * 12.),
+            spread_radius: px(0.),
+            inset: false,
+        },
     ];
     let status = div()
         .flex()
@@ -847,12 +1120,24 @@ fn pill(call: &Call, store: &Store, proc_: &Processing, top: f32, on: &OnAct) ->
         .line_height(px(13.2))
         .text_color(c(0xb2b2b2))
         .when_some(call.quality.filter(|_| live), |d, q| d.child(dot(q)))
-        .child(div().truncate().child(format!("{}{}", call.status(), if live && call.peer_muted { " · muted" } else { "" })));
+        .child(div().truncate().child(format!(
+            "{}{}",
+            call.status(),
+            if live && call.peer_muted {
+                " · muted"
+            } else {
+                ""
+            }
+        )));
     let drag = call.drag.clone();
     let bounds = call.pill.clone();
     let down = move |e: &gpui::MouseDownEvent, _: &mut Window, _: &mut App| {
         if let Some(b) = bounds.get() {
-            drag.set(Some(Drag { start: e.position, origin: b.origin, moved: false }));
+            drag.set(Some(Drag {
+                start: e.position,
+                origin: b.origin,
+                moved: false,
+            }));
         }
     };
     let watch = {
@@ -907,14 +1192,29 @@ fn pill(call: &Call, store: &Store, proc_: &Processing, top: f32, on: &OnAct) ->
         .cursor_grab()
         .when(call.expanded, |d| d.border_b_1().border_color(c(0x333333)))
         .on_mouse_down(gpui::MouseButton::Left, down)
-        .child(div().flex().flex_shrink_0().rounded_full().shadow(ring).child(crate::ui::avatar(store, &call.peer, 30.)))
+        .child(
+            div()
+                .flex()
+                .flex_shrink_0()
+                .rounded_full()
+                .shadow(ring)
+                .child(crate::ui::avatar(store, &call.peer, 30.)),
+        )
         .child(
             div()
                 .flex()
                 .flex_col()
                 .flex_1()
                 .min_w_0()
-                .child(div().truncate().text_size(px(13.)).line_height(px(15.)).font_weight(gpui::FontWeight::SEMIBOLD).text_color(c(0xf6f6f6)).child(store.name(&call.peer)))
+                .child(
+                    div()
+                        .truncate()
+                        .text_size(px(13.))
+                        .line_height(px(15.))
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .text_color(c(0xf6f6f6))
+                        .child(store.name(&call.peer)),
+                )
                 .child(status),
         )
         .when(!ended, |d| d.child(mic_btn(call, on)).child(hangup_btn(on)));
@@ -929,7 +1229,13 @@ fn pill(call: &Call, store: &Store, proc_: &Processing, top: f32, on: &OnAct) ->
         .bg(ca(20, 20, 20, 0.95))
         .border_1()
         .border_color(c(0x333333))
-        .shadow(vec![BoxShadow { color: ca(0, 0, 0, 0.4), offset: point(px(0.), px(8.)), blur_radius: px(32.), spread_radius: px(0.), inset: false }])
+        .shadow(vec![BoxShadow {
+            color: ca(0, 0, 0, 0.4),
+            offset: point(px(0.), px(8.)),
+            blur_radius: px(32.),
+            spread_radius: px(0.),
+            inset: false,
+        }])
         .overflow_hidden()
         .occlude()
         .when(ended, |d| d.opacity(0.7))
@@ -937,37 +1243,80 @@ fn pill(call: &Call, store: &Store, proc_: &Processing, top: f32, on: &OnAct) ->
         .child(row)
         .when(call.expanded && !ended, |d| d.child(panel(call, proc_, on)));
     match call.pos {
-        Some(p) => div().absolute().left(p.x).top(p.y).child(body).into_any_element(),
-        None => div().absolute().top(px(top)).left_0().right_0().flex().justify_center().child(body).into_any_element(),
+        Some(p) => div()
+            .absolute()
+            .left(p.x)
+            .top(p.y)
+            .child(body)
+            .into_any_element(),
+        None => div()
+            .absolute()
+            .top(px(top))
+            .left_0()
+            .right_0()
+            .flex()
+            .justify_center()
+            .child(body)
+            .into_any_element(),
     }
 }
 
 /// Kept on screen for a pill of `size`: off the chrome strip and 8px from every edge.
-pub fn clamp(p: Point<Pixels>, size: gpui::Size<Pixels>, window: gpui::Size<Pixels>, chrome: f32) -> Point<Pixels> {
+pub fn clamp(
+    p: Point<Pixels>,
+    size: gpui::Size<Pixels>,
+    window: gpui::Size<Pixels>,
+    chrome: f32,
+) -> Point<Pixels> {
     let top = chrome + 8.;
-    let x = f32::from(p.x).min(f32::from(window.width - size.width) - 8.).max(8.);
-    let y = f32::from(p.y).min(f32::from(window.height - size.height) - 8.).max(top);
+    let x = f32::from(p.x)
+        .min(f32::from(window.width - size.width) - 8.)
+        .max(8.);
+    let y = f32::from(p.y)
+        .min(f32::from(window.height - size.height) - 8.)
+        .max(top);
     point(px(x), px(y))
 }
 
 impl Call {
     pub fn at(pos: Option<Point<Pixels>>) -> Self {
-        Self { pos, ..Default::default() }
+        Self {
+            pos,
+            ..Default::default()
+        }
     }
 
     pub fn pill_size(&self) -> gpui::Size<Pixels> {
-        self.pill.get().map(|b| b.size).unwrap_or(gpui::size(px(PILL_MAX_W), px(48.)))
+        self.pill
+            .get()
+            .map(|b| b.size)
+            .unwrap_or(gpui::size(px(PILL_MAX_W), px(48.)))
     }
 }
 
 /// The overlay for the call in progress, if there is one.
-pub fn render(call: &Call, store: &Store, proc_: &Processing, chrome: f32, on: &OnAct) -> Option<AnyElement> {
+pub fn render(
+    call: &Call,
+    store: &Store,
+    proc_: &Processing,
+    chrome: f32,
+    on: &OnAct,
+) -> Option<AnyElement> {
     call.id.as_ref()?;
     call.phase?;
     Some(if call.incoming() {
-        gpui::deferred(ring(call, store, on)).with_priority(15).into_any_element()
+        gpui::deferred(ring(call, store, on))
+            .with_priority(15)
+            .into_any_element()
     } else {
-        gpui::deferred(div().absolute().inset_0().child(pill(call, store, proc_, chrome + 10., on))).with_priority(7).into_any_element()
+        gpui::deferred(
+            div()
+                .absolute()
+                .inset_0()
+                .child(pill(call, store, proc_, chrome + 10., on)),
+        )
+        .with_priority(7)
+        .into_any_element()
     })
 }
 
@@ -986,8 +1335,12 @@ mod tests {
     fn lost_audio_is_concealed_over_received() {
         let mut call = Call::default();
         call.apply_state(&serde_json::json!({ "id": "a", "peer": "p", "phase": "active" }));
-        call.apply_stats(&serde_json::json!({ "id": "a", "rtt_ms": 40, "received": 100, "concealed": 0 }));
-        call.apply_stats(&serde_json::json!({ "id": "a", "rtt_ms": 40, "received": 150, "concealed": 5 }));
+        call.apply_stats(
+            &serde_json::json!({ "id": "a", "rtt_ms": 40, "received": 100, "concealed": 0 }),
+        );
+        call.apply_stats(
+            &serde_json::json!({ "id": "a", "rtt_ms": 40, "received": 150, "concealed": 5 }),
+        );
         assert!((call.history.back().unwrap().lost - 10.).abs() < 1e-4);
         assert_eq!(call.quality, Some(Quality::Poor));
         call.apply_stats(&serde_json::json!({ "id": "other", "rtt_ms": 900 }));

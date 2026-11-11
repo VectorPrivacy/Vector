@@ -5,8 +5,8 @@
 use std::collections::{HashMap, HashSet};
 
 use gpui::prelude::*;
-use gpui::{div, px, svg, AnyElement, App, Entity, FontWeight, SharedString, Window};
-use serde_json::{json, Value};
+use gpui::{AnyElement, App, Entity, FontWeight, SharedString, Window, div, px, svg};
+use serde_json::{Value, json};
 
 use crate::composer::TextInput;
 use crate::moderation::{Act as ModAct, Moderation, OnAct};
@@ -21,9 +21,27 @@ pub struct Strictness {
 }
 
 pub const STRICTNESS: [Strictness; 3] = [
-    Strictness { id: "relaxed", label: "Relaxed", mult: 0.8, first: 2, says: "Two hits in one message before it says anything, with lower confidence." },
-    Strictness { id: "balanced", label: "Balanced", mult: 1.0, first: 1, says: "One hit is enough, at this template's own confidence." },
-    Strictness { id: "strict", label: "Strict", mult: 1.1, first: 1, says: "One hit is enough, with higher confidence." },
+    Strictness {
+        id: "relaxed",
+        label: "Relaxed",
+        mult: 0.8,
+        first: 2,
+        says: "Two hits in one message before it says anything, with lower confidence.",
+    },
+    Strictness {
+        id: "balanced",
+        label: "Balanced",
+        mult: 1.0,
+        first: 1,
+        says: "One hit is enough, at this template's own confidence.",
+    },
+    Strictness {
+        id: "strict",
+        label: "Strict",
+        mult: 1.1,
+        first: 1,
+        says: "One hit is enough, with higher confidence.",
+    },
 ];
 
 pub const STRICTNESS_EXPLAINER: &str = "Sensitivity sets how much it takes to trip a rule, and how confident the result is.\n\nRelaxed: two hits in one message, with lower confidence.\n\nBalanced: one hit, at the template's own confidence.\n\nStrict: one hit, with higher confidence.";
@@ -92,19 +110,35 @@ impl Policies {
 }
 
 fn seconds(value: &str, fallback: u64) -> u64 {
-    value.trim().parse::<i64>().map(|n| n.clamp(1, 3600) as u64).unwrap_or(fallback)
+    value
+        .trim()
+        .parse::<i64>()
+        .map(|n| n.clamp(1, 3600) as u64)
+        .unwrap_or(fallback)
 }
 
 fn split(text: &str) -> Vec<String> {
-    text.split(['\n', ',']).map(str::trim).filter(|s| !s.is_empty()).map(String::from).collect()
+    text.split(['\n', ','])
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+        .collect()
 }
 
 /// `polCompose`: the dials folded into the policy document the engine evaluates.
 pub fn compose(p: &Policies, cx: &App) -> Option<Value> {
     let d = p.draft.as_ref()?;
     let mut doc = d.policy.clone();
-    let s = STRICTNESS.iter().find(|s| s.id == d.strictness).unwrap_or(&STRICTNESS[1]);
-    let text = |key: &str| d.inputs.get(key).map(|i| i.read(cx).text().to_string()).unwrap_or_default();
+    let s = STRICTNESS
+        .iter()
+        .find(|s| s.id == d.strictness)
+        .unwrap_or(&STRICTNESS[1]);
+    let text = |key: &str| {
+        d.inputs
+            .get(key)
+            .map(|i| i.read(cx).text().to_string())
+            .unwrap_or_default()
+    };
     let name = text("name");
     if !name.is_empty() {
         doc["name"] = name.chars().take(64).collect::<String>().into();
@@ -155,7 +189,12 @@ pub fn compose(p: &Policies, cx: &App) -> Option<Value> {
     for rule in doc["rules"].as_array_mut()?.iter_mut() {
         if let Some(tiers) = rule.get_mut("tiers") {
             for scope in ["per_message", "per_window"] {
-                for (i, rung) in tiers[scope].as_array_mut().into_iter().flatten().enumerate() {
+                for (i, rung) in tiers[scope]
+                    .as_array_mut()
+                    .into_iter()
+                    .flatten()
+                    .enumerate()
+                {
                     let w = rung["weight"].as_f64().unwrap_or(1.);
                     rung["weight"] = ((w * s.mult).round().clamp(1., 99.) as u64).into();
                     if i == 0 && scope == "per_message" {
@@ -165,12 +204,19 @@ pub fn compose(p: &Policies, cx: &App) -> Option<Value> {
             }
         }
         match rule["match"]["type"].as_str() {
-            Some("keyword") if !words.is_empty() => rule["match"]["patterns"] = words.clone().into(),
+            Some("keyword") if !words.is_empty() => {
+                rule["match"]["patterns"] = words.clone().into()
+            }
             Some("link") => {
                 if d.seeded {
                     rule["match"]["patterns"] = domains.clone().into();
                 } else if !domains.is_empty() {
-                    let mut all: Vec<String> = rule["match"]["patterns"].as_array().into_iter().flatten().filter_map(|v| v.as_str().map(String::from)).collect();
+                    let mut all: Vec<String> = rule["match"]["patterns"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect();
                     for x in &domains {
                         if !all.contains(x) {
                             all.push(x.clone());
@@ -179,7 +225,11 @@ pub fn compose(p: &Policies, cx: &App) -> Option<Value> {
                     rule["match"]["patterns"] = all.into();
                 }
                 if !allow.is_empty() {
-                    let mut exempt = rule.get("exempt").cloned().filter(Value::is_object).unwrap_or_else(|| json!({}));
+                    let mut exempt = rule
+                        .get("exempt")
+                        .cloned()
+                        .filter(Value::is_object)
+                        .unwrap_or_else(|| json!({}));
                     exempt["patterns"] = json!([{ "kind": "domain", "values": allow }]);
                     rule["exempt"] = exempt;
                 }
@@ -187,7 +237,11 @@ pub fn compose(p: &Policies, cx: &App) -> Option<Value> {
             _ => {}
         }
         if !chans.is_empty() {
-            let mut exempt = rule.get("exempt").cloned().filter(Value::is_object).unwrap_or_else(|| json!({}));
+            let mut exempt = rule
+                .get("exempt")
+                .cloned()
+                .filter(Value::is_object)
+                .unwrap_or_else(|| json!({}));
             exempt["channels"] = chans.clone().into();
             rule["exempt"] = exempt;
         }
@@ -202,9 +256,17 @@ pub fn readiness(p: &Policies, cx: &App) -> Result<Value, String> {
     if rules.is_empty() {
         return Err("Add at least one rule before previewing.".into());
     }
-    let bare = rules.iter().find(|r| matches!(r["match"]["type"].as_str(), Some("keyword" | "link")) && r["match"]["patterns"].as_array().is_none_or(Vec::is_empty));
+    let bare = rules.iter().find(|r| {
+        matches!(r["match"]["type"].as_str(), Some("keyword" | "link"))
+            && r["match"]["patterns"].as_array().is_none_or(Vec::is_empty)
+    });
     if let Some(r) = bare {
-        return Err(if r["match"]["type"] == "link" { "One of your rules has no domains in it." } else { "One of your rules has no words in it." }.into());
+        return Err(if r["match"]["type"] == "link" {
+            "One of your rules has no domains in it."
+        } else {
+            "One of your rules has no words in it."
+        }
+        .into());
     }
     Ok(doc)
 }
@@ -220,15 +282,28 @@ pub fn new_id(name: &str, stored: &[Value]) -> String {
         }
     }
     let base: String = base.trim_matches('-').chars().take(40).collect();
-    let base = if base.is_empty() { "policy".to_string() } else { base };
-    let taken: HashSet<&str> = stored.iter().filter_map(|p| p["policy_id"].as_str()).collect();
+    let base = if base.is_empty() {
+        "policy".to_string()
+    } else {
+        base
+    };
+    let taken: HashSet<&str> = stored
+        .iter()
+        .filter_map(|p| p["policy_id"].as_str())
+        .collect();
     if !taken.contains(base.as_str()) {
         return base;
     }
-    (2..500).map(|i| format!("{base}-{i}")).find(|id| !taken.contains(id.as_str())).unwrap_or(base)
+    (2..500)
+        .map(|i| format!("{base}-{i}"))
+        .find(|id| !taken.contains(id.as_str()))
+        .unwrap_or(base)
 }
 
-fn click(on: &OnAct, act: impl Fn() -> Act + 'static) -> impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static {
+fn click(
+    on: &OnAct,
+    act: impl Fn() -> Act + 'static,
+) -> impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static {
     let on = on.clone();
     move |_, w, cx| on(ModAct::Policy(act()), w, cx)
 }
@@ -247,14 +322,38 @@ fn list(p: &Policies, on: &OnAct) -> impl IntoElement {
             .py(px(12.))
             .rounded(px(10.))
             .border_1()
-            .when(builtin, |d| d.bg(ca(89, 252, 179, 0.045)).border_color(ca(89, 252, 179, 0.16)))
-            .when(!builtin, |d| d.bg(white_a(0.04)).border_color(white_a(0.07)))
+            .when(builtin, |d| {
+                d.bg(ca(89, 252, 179, 0.045))
+                    .border_color(ca(89, 252, 179, 0.16))
+            })
+            .when(!builtin, |d| {
+                d.bg(white_a(0.04)).border_color(white_a(0.07))
+            })
     };
-    let name = |t: String| div().font_weight(FontWeight::SEMIBOLD).text_size(px(14.)).line_height(px(24.)).text_color(c(0xf6f6f6)).child(t);
-    let sub = |t: String, tone: gpui::Hsla| div().text_size(px(12.)).line_height(px(24.)).text_color(tone).child(t);
+    let name = |t: String| {
+        div()
+            .font_weight(FontWeight::SEMIBOLD)
+            .text_size(px(14.))
+            .line_height(px(24.))
+            .text_color(c(0xf6f6f6))
+            .child(t)
+    };
+    let sub = |t: String, tone: gpui::Hsla| {
+        div()
+            .text_size(px(12.))
+            .line_height(px(24.))
+            .text_color(tone)
+            .child(t)
+    };
     let builtin = if p.using_builtin {
         row(true)
-            .child(div().flex_1().min_w_0().child(name("Vector's defaults".into())).child(sub("Watching for raid waves · running".into(), muted())))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .child(name("Vector's defaults".into()))
+                    .child(sub("Watching for raid waves · running".into(), muted())),
+            )
             .child(
                 div()
                     .id("pol-inspect")
@@ -268,61 +367,115 @@ fn list(p: &Policies, on: &OnAct) -> impl IntoElement {
                     .line_height(px(14.))
                     .text_color(ca(89, 252, 179, 0.85))
                     .cursor_pointer()
-                    .hover(|d| d.bg(ca(89, 252, 179, 0.1)).border_color(ca(89, 252, 179, 0.5)))
+                    .hover(|d| {
+                        d.bg(ca(89, 252, 179, 0.1))
+                            .border_color(ca(89, 252, 179, 0.5))
+                    })
                     .on_click(click(on, || Act::Inspect))
                     .child("See the rules"),
             )
     } else {
-        row(false).bg(white_a(0.03)).child(div().flex_1().min_w_0().child(name("Vector's defaults".into())).child(sub("Replaced by your own version below.".into(), white_a(0.4))))
+        row(false).bg(white_a(0.03)).child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .child(name("Vector's defaults".into()))
+                .child(sub(
+                    "Replaced by your own version below.".into(),
+                    white_a(0.4),
+                )),
+        )
     };
-    div().flex().flex_col().gap(px(8.)).child(builtin).children(p.stored.iter().map(|s| {
-        let id = s["policy_id"].as_str().unwrap_or("").to_string();
-        let doc: Option<Value> = s["bytes"].as_str().and_then(|b| serde_json::from_str(b).ok());
-        let title = doc.as_ref().and_then(|d| d["name"].as_str()).filter(|n| !n.is_empty()).map(String::from).unwrap_or_else(|| id.clone());
-        let rules = doc.as_ref().and_then(|d| d["rules"].as_array()).map(Vec::len).unwrap_or(0);
-        let enabled = s["enabled"].as_bool().unwrap_or(false);
-        let valid = s["valid"].as_bool().unwrap_or(true);
-        let line = if valid {
-            format!("{rules} rule{} · {}", if rules == 1 { "" } else { "s" }, if enabled { "active" } else { "paused" })
-        } else {
-            format!("Not running: {}", s["error"].as_str().unwrap_or("invalid"))
-        };
-        let (t, r) = (id.clone(), id.clone());
-        row(false)
-            .child(div().flex_1().min_w_0().child(name(title)).child(sub(line, if valid { muted() } else { c(crate::timeline::DANGER) })))
-            .child(
-                div()
-                    .id(SharedString::from(format!("pol-toggle-{id}")))
-                    .relative()
-                    .w(px(40.))
-                    .h(px(22.))
-                    .flex_shrink_0()
-                    .rounded(px(11.))
-                    .bg(if enabled { c(ACCENT) } else { white_a(0.16) })
-                    .cursor_pointer()
-                    .on_click(click(on, move || Act::Toggle(t.clone())))
-                    .child(div().absolute().top(px(3.)).left(px(if enabled { 21. } else { 3. })).size(px(16.)).rounded_full().bg(c(0xffffff))),
-            )
-            .child(
-                div()
-                    .id(SharedString::from(format!("pol-delete-{id}")))
-                    .p(px(6.))
-                    .flex_shrink_0()
-                    .rounded(px(6.))
-                    .text_size(px(14.))
-                    .line_height(px(16.))
-                    .text_color(muted())
-                    .cursor_pointer()
-                    .hover(|d| d.text_color(c(crate::timeline::DANGER)).bg(c(crate::timeline::DANGER).opacity(0.1)))
-                    .on_click(click(on, move || Act::Remove(r.clone())))
-                    .child("✕"),
-            )
-    }))
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(8.))
+        .child(builtin)
+        .children(p.stored.iter().map(|s| {
+            let id = s["policy_id"].as_str().unwrap_or("").to_string();
+            let doc: Option<Value> = s["bytes"]
+                .as_str()
+                .and_then(|b| serde_json::from_str(b).ok());
+            let title = doc
+                .as_ref()
+                .and_then(|d| d["name"].as_str())
+                .filter(|n| !n.is_empty())
+                .map(String::from)
+                .unwrap_or_else(|| id.clone());
+            let rules = doc
+                .as_ref()
+                .and_then(|d| d["rules"].as_array())
+                .map(Vec::len)
+                .unwrap_or(0);
+            let enabled = s["enabled"].as_bool().unwrap_or(false);
+            let valid = s["valid"].as_bool().unwrap_or(true);
+            let line = if valid {
+                format!(
+                    "{rules} rule{} · {}",
+                    if rules == 1 { "" } else { "s" },
+                    if enabled { "active" } else { "paused" }
+                )
+            } else {
+                format!("Not running: {}", s["error"].as_str().unwrap_or("invalid"))
+            };
+            let (t, r) = (id.clone(), id.clone());
+            row(false)
+                .child(div().flex_1().min_w_0().child(name(title)).child(sub(
+                    line,
+                    if valid {
+                        muted()
+                    } else {
+                        c(crate::timeline::DANGER)
+                    },
+                )))
+                .child(
+                    div()
+                        .id(SharedString::from(format!("pol-toggle-{id}")))
+                        .relative()
+                        .w(px(40.))
+                        .h(px(22.))
+                        .flex_shrink_0()
+                        .rounded(px(11.))
+                        .bg(if enabled { c(ACCENT) } else { white_a(0.16) })
+                        .cursor_pointer()
+                        .on_click(click(on, move || Act::Toggle(t.clone())))
+                        .child(
+                            div()
+                                .absolute()
+                                .top(px(3.))
+                                .left(px(if enabled { 21. } else { 3. }))
+                                .size(px(16.))
+                                .rounded_full()
+                                .bg(c(0xffffff)),
+                        ),
+                )
+                .child(
+                    div()
+                        .id(SharedString::from(format!("pol-delete-{id}")))
+                        .p(px(6.))
+                        .flex_shrink_0()
+                        .rounded(px(6.))
+                        .text_size(px(14.))
+                        .line_height(px(16.))
+                        .text_color(muted())
+                        .cursor_pointer()
+                        .hover(|d| {
+                            d.text_color(c(crate::timeline::DANGER))
+                                .bg(c(crate::timeline::DANGER).opacity(0.1))
+                        })
+                        .on_click(click(on, move || Act::Remove(r.clone())))
+                        .child("✕"),
+                )
+        }))
 }
 
 fn gallery(p: &Policies, width: f32, on: &OnAct) -> impl IntoElement {
     let cols = (((width + 10.) / 230.).floor() as u16).max(1);
-    let shown: Vec<&Value> = p.presets.iter().filter(|x| !matches!(x["id"].as_str(), Some("blank" | "vector_defaults"))).collect();
+    let shown: Vec<&Value> = p
+        .presets
+        .iter()
+        .filter(|x| !matches!(x["id"].as_str(), Some("blank" | "vector_defaults")))
+        .collect();
     let card = |x: &Value| {
         let id = x["id"].as_str().unwrap_or("").to_string();
         div()
@@ -338,16 +491,51 @@ fn gallery(p: &Policies, width: f32, on: &OnAct) -> impl IntoElement {
             .cursor_pointer()
             .hover(|d| d.border_color(c(ACCENT)))
             .on_click(click(on, move || Act::Open(id.clone())))
-            .child(div().mb(px(4.)).font_weight(FontWeight::SEMIBOLD).text_size(px(14.)).line_height(px(24.)).text_color(c(0xf6f6f6)).child(x["name"].as_str().unwrap_or("").to_string()))
-            .child(div().text_size(px(12.)).line_height(px(17.4)).text_color(muted()).child(x["description"].as_str().unwrap_or("").to_string()))
-            .child(div().mt(px(6.)).text_size(px(11.)).line_height(px(13.2)).italic().text_color(muted().opacity(0.85)).child(format!("Catches: {}", x["example"].as_str().unwrap_or(""))))
+            .child(
+                div()
+                    .mb(px(4.))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_size(px(14.))
+                    .line_height(px(24.))
+                    .text_color(c(0xf6f6f6))
+                    .child(x["name"].as_str().unwrap_or("").to_string()),
+            )
+            .child(
+                div()
+                    .text_size(px(12.))
+                    .line_height(px(17.4))
+                    .text_color(muted())
+                    .child(x["description"].as_str().unwrap_or("").to_string()),
+            )
+            .child(
+                div()
+                    .mt(px(6.))
+                    .text_size(px(11.))
+                    .line_height(px(13.2))
+                    .italic()
+                    .text_color(muted().opacity(0.85))
+                    .child(format!("Catches: {}", x["example"].as_str().unwrap_or(""))),
+            )
     };
     let blank = p.presets.iter().find(|x| x["id"] == "blank");
     div()
         .flex()
         .flex_col()
-        .child(crate::kit::spaced("START FROM A TEMPLATE", 0.95).mb(px(8.)).text_size(px(10.5)).line_height(px(24.)).text_color(white_a(0.38)))
-        .child(div().pb(px(4.)).grid().grid_cols(cols).gap(px(10.)).children(shown.into_iter().map(card)))
+        .child(
+            crate::kit::spaced("START FROM A TEMPLATE", 0.95)
+                .mb(px(8.))
+                .text_size(px(10.5))
+                .line_height(px(24.))
+                .text_color(white_a(0.38)),
+        )
+        .child(
+            div()
+                .pb(px(4.))
+                .grid()
+                .grid_cols(cols)
+                .gap(px(10.))
+                .children(shown.into_iter().map(card)),
+        )
         .children(blank.map(|b| {
             div().mt(px(16.)).mb(px(18.)).child(
                 div()
@@ -365,15 +553,36 @@ fn gallery(p: &Policies, width: f32, on: &OnAct) -> impl IntoElement {
                     .cursor_pointer()
                     .hover(|d| d.border_color(ca(89, 252, 179, 0.45)).bg(white_a(0.02)))
                     .on_click(click(on, || Act::Open("blank".into())))
-                    .child(div().w(px(22.)).text_center().text_size(px(19.)).line_height(px(19.)).text_color(ca(89, 252, 179, 0.8)).child("+"))
+                    .child(
+                        div()
+                            .w(px(22.))
+                            .text_center()
+                            .text_size(px(19.))
+                            .line_height(px(19.))
+                            .text_color(ca(89, 252, 179, 0.8))
+                            .child("+"),
+                    )
                     .child(
                         div()
                             .flex()
                             .flex_col()
                             .gap(px(2.))
                             .min_w_0()
-                            .child(div().font_weight(FontWeight::SEMIBOLD).text_size(px(14.)).line_height(px(24.)).text_color(c(0xf6f6f6)).child(b["name"].as_str().unwrap_or("").to_string()))
-                            .child(div().text_size(px(12.)).line_height(px(24.)).text_color(muted()).child(b["description"].as_str().unwrap_or("").to_string())),
+                            .child(
+                                div()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_size(px(14.))
+                                    .line_height(px(24.))
+                                    .text_color(c(0xf6f6f6))
+                                    .child(b["name"].as_str().unwrap_or("").to_string()),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(12.))
+                                    .line_height(px(24.))
+                                    .text_color(muted())
+                                    .child(b["description"].as_str().unwrap_or("").to_string()),
+                            ),
                     ),
             )
         }))
@@ -394,7 +603,9 @@ fn field(input: &Entity<TextInput>, multiline: bool) -> impl IntoElement {
 }
 
 fn dial(p: &Policies, mo: &Moderation, d: &Value, on: &OnAct) -> AnyElement {
-    let Some(draft) = &p.draft else { return div().into_any_element() };
+    let Some(draft) = &p.draft else {
+        return div().into_any_element();
+    };
     let kind = d["kind"].as_str().unwrap_or("");
     let key = d["key"].as_str().unwrap_or("");
     let label = div()
@@ -408,9 +619,27 @@ fn dial(p: &Policies, mo: &Moderation, d: &Value, on: &OnAct) -> AnyElement {
         .text_color(c(0xf6f6f6))
         .child(d["label"].as_str().unwrap_or("").to_string())
         .when(kind == "strictness", |l| {
-            l.child(div().id("pol-info").group("pol-info").cursor_pointer().on_click(click(on, || Act::Explain)).child(svg().path("icons/info.svg").size(px(15.)).text_color(white_a(0.4)).group_hover("pol-info", |s| s.text_color(c(0xffffff)))))
+            l.child(
+                div()
+                    .id("pol-info")
+                    .group("pol-info")
+                    .cursor_pointer()
+                    .on_click(click(on, || Act::Explain))
+                    .child(
+                        svg()
+                            .path("icons/info.svg")
+                            .size(px(15.))
+                            .text_color(white_a(0.4))
+                            .group_hover("pol-info", |s| s.text_color(c(0xffffff))),
+                    ),
+            )
         });
-    let hint = div().mb(px(6.)).text_size(px(11.5)).line_height(px(24.)).text_color(muted()).child(d["hint"].as_str().unwrap_or("").to_string());
+    let hint = div()
+        .mb(px(6.))
+        .text_size(px(11.5))
+        .line_height(px(24.))
+        .text_color(muted())
+        .child(d["hint"].as_str().unwrap_or("").to_string());
     let body: AnyElement = match kind {
         "summary" => {
             let n = draft.summary.len();
@@ -425,7 +654,11 @@ fn dial(p: &Policies, mo: &Moderation, d: &Value, on: &OnAct) -> AnyElement {
                         .py(px(9.))
                         .bg(white_a(0.03))
                         .border_l(px(2.))
-                        .border_color(if armed { white_a(0.14) } else { ca(89, 252, 179, 0.45) })
+                        .border_color(if armed {
+                            white_a(0.14)
+                        } else {
+                            ca(89, 252, 179, 0.45)
+                        })
                         .when(i == 0, |d| d.rounded_tr(px(8.)))
                         .when(i + 1 == n, |d| d.rounded_br(px(8.)))
                         .child(
@@ -439,38 +672,72 @@ fn dial(p: &Policies, mo: &Moderation, d: &Value, on: &OnAct) -> AnyElement {
                                 .line_height(px(24.))
                                 .text_color(c(0xf6f6f6))
                                 .child(r["label"].as_str().unwrap_or("").to_string())
-                                .when(armed, |d| d.child(div().font_weight(FontWeight::MEDIUM).text_size(px(10.5)).text_color(white_a(0.34)).child("only after another rule fires"))),
+                                .when(armed, |d| {
+                                    d.child(
+                                        div()
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .text_size(px(10.5))
+                                            .text_color(white_a(0.34))
+                                            .child("only after another rule fires"),
+                                    )
+                                }),
                         )
-                        .child(div().text_size(px(12.)).line_height(px(17.4)).text_color(white_a(0.46)).child(r["detail"].as_str().unwrap_or("").to_string()))
+                        .child(
+                            div()
+                                .text_size(px(12.))
+                                .line_height(px(17.4))
+                                .text_color(white_a(0.46))
+                                .child(r["detail"].as_str().unwrap_or("").to_string()),
+                        )
                 }))
                 .into_any_element()
         }
         "strictness" => {
-            let says = STRICTNESS.iter().find(|s| s.id == draft.strictness).unwrap_or(&STRICTNESS[1]).says;
+            let says = STRICTNESS
+                .iter()
+                .find(|s| s.id == draft.strictness)
+                .unwrap_or(&STRICTNESS[1])
+                .says;
             div()
-                .child(div().flex().gap(px(6.)).children(STRICTNESS.iter().map(|s| {
-                    let active = draft.strictness == s.id;
-                    let id = s.id;
+                .child(
                     div()
-                        .id(SharedString::from(format!("pol-seg-{id}")))
-                        .flex_1()
-                        .px(px(10.))
-                        .py(px(8.))
-                        .rounded(px(8.))
-                        .border_1()
-                        .border_color(if active { c(ACCENT) } else { white_a(0.1) })
-                        .bg(if active { ca(89, 252, 179, 0.08) } else { ca(0, 0, 0, 0.2) })
                         .flex()
-                        .justify_center()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_size(px(12.5))
-                        .line_height(px(15.))
-                        .text_color(if active { c(ACCENT) } else { muted() })
-                        .cursor_pointer()
-                        .on_click(click(on, move || Act::Strictness(id)))
-                        .child(s.label)
-                })))
-                .child(div().mt(px(8.)).text_size(px(12.)).line_height(px(18.)).text_color(white_a(0.42)).child(says))
+                        .gap(px(6.))
+                        .children(STRICTNESS.iter().map(|s| {
+                            let active = draft.strictness == s.id;
+                            let id = s.id;
+                            div()
+                                .id(SharedString::from(format!("pol-seg-{id}")))
+                                .flex_1()
+                                .px(px(10.))
+                                .py(px(8.))
+                                .rounded(px(8.))
+                                .border_1()
+                                .border_color(if active { c(ACCENT) } else { white_a(0.1) })
+                                .bg(if active {
+                                    ca(89, 252, 179, 0.08)
+                                } else {
+                                    ca(0, 0, 0, 0.2)
+                                })
+                                .flex()
+                                .justify_center()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_size(px(12.5))
+                                .line_height(px(15.))
+                                .text_color(if active { c(ACCENT) } else { muted() })
+                                .cursor_pointer()
+                                .on_click(click(on, move || Act::Strictness(id)))
+                                .child(s.label)
+                        })),
+                )
+                .child(
+                    div()
+                        .mt(px(8.))
+                        .text_size(px(12.))
+                        .line_height(px(18.))
+                        .text_color(white_a(0.42))
+                        .child(says),
+                )
                 .into_any_element()
         }
         "wordlist" | "domainlist" | "text" | "seconds" => match draft.inputs.get(key) {
@@ -479,7 +746,12 @@ fn dial(p: &Policies, mo: &Moderation, d: &Value, on: &OnAct) -> AnyElement {
                 .items_center()
                 .gap(px(8.))
                 .child(div().w(px(110.)).child(field(input, false)))
-                .child(div().text_size(px(12.5)).text_color(muted()).child("seconds"))
+                .child(
+                    div()
+                        .text_size(px(12.5))
+                        .text_color(muted())
+                        .child("seconds"),
+                )
                 .into_any_element(),
             Some(input) => field(input, kind != "text").into_any_element(),
             None => div().into_any_element(),
@@ -492,10 +764,23 @@ fn dial(p: &Policies, mo: &Moderation, d: &Value, on: &OnAct) -> AnyElement {
                 .and_then(|i| i["channels"].as_array())
                 .into_iter()
                 .flatten()
-                .map(|c| (c["id"].as_str().unwrap_or("").to_string(), c["name"].as_str().filter(|n| !n.is_empty()).unwrap_or("channel").to_string()))
+                .map(|c| {
+                    (
+                        c["id"].as_str().unwrap_or("").to_string(),
+                        c["name"]
+                            .as_str()
+                            .filter(|n| !n.is_empty())
+                            .unwrap_or("channel")
+                            .to_string(),
+                    )
+                })
                 .collect();
             if channels.is_empty() {
-                div().text_size(px(11.5)).text_color(muted()).child("This community has no channels.").into_any_element()
+                div()
+                    .text_size(px(11.5))
+                    .text_color(muted())
+                    .child("This community has no channels.")
+                    .into_any_element()
             } else {
                 div()
                     .flex()
@@ -523,14 +808,24 @@ fn dial(p: &Policies, mo: &Moderation, d: &Value, on: &OnAct) -> AnyElement {
         }
         _ => div().into_any_element(),
     };
-    div().flex().flex_col().child(label).child(hint).child(body).into_any_element()
+    div()
+        .flex()
+        .flex_col()
+        .child(label)
+        .child(hint)
+        .child(body)
+        .into_any_element()
 }
 
 fn rules(p: &Policies, on: &OnAct) -> AnyElement {
-    let Some(draft) = &p.draft else { return div().into_any_element() };
+    let Some(draft) = &p.draft else {
+        return div().into_any_element();
+    };
     let mut out = div().flex().flex_col().gap(px(10.));
     for (i, r) in draft.rules.iter().enumerate() {
-        let Some(kind) = p.kind(&r.kind) else { continue };
+        let Some(kind) = p.kind(&r.kind) else {
+            continue;
+        };
         let input = kind["input"].as_str().unwrap_or("none");
         out = out.child(
             div()
@@ -545,7 +840,16 @@ fn rules(p: &Policies, on: &OnAct) -> AnyElement {
                         .flex()
                         .items_center()
                         .gap(px(10.))
-                        .child(div().flex_1().min_w_0().font_weight(FontWeight::SEMIBOLD).text_size(px(13.5)).line_height(px(20.)).text_color(c(0xf6f6f6)).child(kind["label"].as_str().unwrap_or("").to_string()))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_size(px(13.5))
+                                .line_height(px(20.))
+                                .text_color(c(0xf6f6f6))
+                                .child(kind["label"].as_str().unwrap_or("").to_string()),
+                        )
                         .child(
                             div()
                                 .id(SharedString::from(format!("pol-rule-x-{i}")))
@@ -560,47 +864,107 @@ fn rules(p: &Policies, on: &OnAct) -> AnyElement {
                                 .child("✕"),
                         ),
                 )
-                .child(div().mt(px(3.)).text_size(px(12.)).line_height(px(17.4)).text_color(white_a(0.44)).child(kind["description"].as_str().unwrap_or("").to_string()))
+                .child(
+                    div()
+                        .mt(px(3.))
+                        .text_size(px(12.))
+                        .line_height(px(17.4))
+                        .text_color(white_a(0.44))
+                        .child(kind["description"].as_str().unwrap_or("").to_string()),
+                )
                 .when(input != "none", |d| {
-                    d.child(div().mt(px(9.)).mb(px(5.)).text_size(px(11.5)).line_height(px(15.)).text_color(white_a(0.36)).child(kind["input_hint"].as_str().unwrap_or("").to_string()))
-                        .child(if input == "seconds" {
-                            div().flex().items_center().gap(px(8.)).child(div().w(px(110.)).child(field(&r.input, false))).child(div().text_size(px(12.5)).text_color(muted()).child("seconds")).into_any_element()
-                        } else {
-                            field(&r.input, true).into_any_element()
-                        })
+                    d.child(
+                        div()
+                            .mt(px(9.))
+                            .mb(px(5.))
+                            .text_size(px(11.5))
+                            .line_height(px(15.))
+                            .text_color(white_a(0.36))
+                            .child(kind["input_hint"].as_str().unwrap_or("").to_string()),
+                    )
+                    .child(if input == "seconds" {
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(8.))
+                            .child(div().w(px(110.)).child(field(&r.input, false)))
+                            .child(
+                                div()
+                                    .text_size(px(12.5))
+                                    .text_color(muted())
+                                    .child("seconds"),
+                            )
+                            .into_any_element()
+                    } else {
+                        field(&r.input, true).into_any_element()
+                    })
                 }),
         );
     }
-    out.child(div().flex().flex_wrap().gap(px(7.)).children(p.kinds.iter().map(|k| {
-        let id = k["id"].as_str().unwrap_or("").to_string();
-        let key = id.clone();
+    out.child(
         div()
-            .id(SharedString::from(format!("pol-add-{id}")))
-            .px(px(11.))
-            .py(px(7.))
-            .rounded(px(8.))
-            .border_1()
-            .border_dashed()
-            .border_color(white_a(0.16))
-            .font_weight(FontWeight::SEMIBOLD)
-            .text_size(px(12.))
-            .line_height(px(14.))
-            .text_color(white_a(0.6))
-            .cursor_pointer()
-            .hover(|d| d.border_color(ca(89, 252, 179, 0.45)).text_color(c(0xffffff)))
-            .on_click(click(on, move || Act::AddRule(key.clone())))
-            .child(format!("+ {}", k["label"].as_str().unwrap_or("")))
-    })))
+            .flex()
+            .flex_wrap()
+            .gap(px(7.))
+            .children(p.kinds.iter().map(|k| {
+                let id = k["id"].as_str().unwrap_or("").to_string();
+                let key = id.clone();
+                div()
+                    .id(SharedString::from(format!("pol-add-{id}")))
+                    .px(px(11.))
+                    .py(px(7.))
+                    .rounded(px(8.))
+                    .border_1()
+                    .border_dashed()
+                    .border_color(white_a(0.16))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_size(px(12.))
+                    .line_height(px(14.))
+                    .text_color(white_a(0.6))
+                    .cursor_pointer()
+                    .hover(|d| {
+                        d.border_color(ca(89, 252, 179, 0.45))
+                            .text_color(c(0xffffff))
+                    })
+                    .on_click(click(on, move || Act::AddRule(key.clone())))
+                    .child(format!("+ {}", k["label"].as_str().unwrap_or("")))
+            })),
+    )
     .into_any_element()
 }
 
 fn preview(p: &Policies, mo: &Moderation, store: &crate::data::Store) -> AnyElement {
-    let frame = || div().p(px(14.)).rounded(px(10.)).bg(white_a(0.04)).border_1().border_color(white_a(0.07)).text_size(px(13.)).line_height(px(20.)).text_color(c(0xf6f6f6));
-    let warn = || div().mt(px(10.)).px(px(12.)).py(px(10.)).border_l(px(3.)).border_color(c(crate::timeline::DANGER)).bg(c(crate::timeline::DANGER).opacity(0.1)).rounded_r(px(8.)).text_size(px(12.5)).line_height(px(19.));
+    let frame = || {
+        div()
+            .p(px(14.))
+            .rounded(px(10.))
+            .bg(white_a(0.04))
+            .border_1()
+            .border_color(white_a(0.07))
+            .text_size(px(13.))
+            .line_height(px(20.))
+            .text_color(c(0xf6f6f6))
+    };
+    let warn = || {
+        div()
+            .mt(px(10.))
+            .px(px(12.))
+            .py(px(10.))
+            .border_l(px(3.))
+            .border_color(c(crate::timeline::DANGER))
+            .bg(c(crate::timeline::DANGER).opacity(0.1))
+            .rounded_r(px(8.))
+            .text_size(px(12.5))
+            .line_height(px(19.))
+    };
     if let Some(e) = &p.preview_error {
-        return frame().child(warn().mt_0().child(format!("Not ready: {e}"))).into_any_element();
+        return frame()
+            .child(warn().mt_0().child(format!("Not ready: {e}")))
+            .into_any_element();
     }
-    let Some(res) = &p.preview else { return div().into_any_element() };
+    let Some(res) = &p.preview else {
+        return div().into_any_element();
+    };
     let name = |npub: &str| {
         let p = store.profiles.get(npub);
         match p {
@@ -616,13 +980,32 @@ fn preview(p: &Policies, mo: &Moderation, store: &crate::data::Store) -> AnyElem
     let flagged = res["flagged"].as_array().cloned().unwrap_or_default();
     let n = flagged.len() as u64;
     let cited = res["messages_cited"].as_u64().unwrap_or(0);
-    let head = format!("Over the last 7 days this would have flagged {n} {} and cited {cited} {}.", plural(n, "member"), plural(cited, "message"));
+    let head = format!(
+        "Over the last 7 days this would have flagged {n} {} and cited {cited} {}.",
+        plural(n, "member"),
+        plural(cited, "message")
+    );
     let n_text = n.to_string();
     let c_text = cited.to_string();
-    let a = head.find(&format!(" {n_text} ")).map(|i| i + 1).unwrap_or(0);
-    let b = head.rfind(&format!(" {c_text} ")).map(|i| i + 1).unwrap_or(0);
-    let accent = gpui::HighlightStyle { color: Some(c(ACCENT)), font_weight: Some(FontWeight::BOLD), ..Default::default() };
-    let mut out = frame().child(div().mb(px(8.)).font_weight(FontWeight::SEMIBOLD).child(gpui::StyledText::new(head.clone()).with_highlights([(a..a + n_text.len(), accent), (b..b + c_text.len(), accent)])));
+    let a = head
+        .find(&format!(" {n_text} "))
+        .map(|i| i + 1)
+        .unwrap_or(0);
+    let b = head
+        .rfind(&format!(" {c_text} "))
+        .map(|i| i + 1)
+        .unwrap_or(0);
+    let accent = gpui::HighlightStyle {
+        color: Some(c(ACCENT)),
+        font_weight: Some(FontWeight::BOLD),
+        ..Default::default()
+    };
+    let mut out = frame().child(
+        div().mb(px(8.)).font_weight(FontWeight::SEMIBOLD).child(
+            gpui::StyledText::new(head.clone())
+                .with_highlights([(a..a + n_text.len(), accent), (b..b + c_text.len(), accent)]),
+        ),
+    );
     if n == 0 {
         let corpus = res["corpus"].as_u64().unwrap_or(0);
         out = out.child(div().text_size(px(11.5)).line_height(px(17.)).text_color(muted()).child(format!(
@@ -630,10 +1013,23 @@ fn preview(p: &Policies, mo: &Moderation, store: &crate::data::Store) -> AnyElem
             plural(corpus, "message")
         )));
     }
-    let shielded = res["shielded_matches"].as_array().cloned().unwrap_or_default();
+    let shielded = res["shielded_matches"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
     if !shielded.is_empty() {
         let k = shielded.len() as u64;
-        let names: Vec<String> = shielded.iter().take(4).map(|r| format!("{} ({} msgs)", name(r["npub"].as_str().unwrap_or("")), r["messages"].as_u64().unwrap_or(0))).collect();
+        let names: Vec<String> = shielded
+            .iter()
+            .take(4)
+            .map(|r| {
+                format!(
+                    "{} ({} msgs)",
+                    name(r["npub"].as_str().unwrap_or("")),
+                    r["messages"].as_u64().unwrap_or(0)
+                )
+            })
+            .collect();
         out = out.child(warn().child(format!(
             "{k} trusted {} also matched this rule and {} spared only by their standing: {}{}. If this rule is meant for raiders, it is catching ordinary conversation.",
             plural(k, "member"),
@@ -642,31 +1038,73 @@ fn preview(p: &Policies, mo: &Moderation, store: &crate::data::Store) -> AnyElem
             if k > 4 { ", …" } else { "" }
         )));
     }
-    let unevaluated: Vec<&str> = res["unevaluated"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+    let unevaluated: Vec<&str> = res["unevaluated"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect();
     if !unevaluated.is_empty() {
-        out = out.child(div().mt(px(8.)).text_size(px(11.5)).text_color(muted()).child(format!("Not checked here: {}", unevaluated.join(", "))));
+        out = out.child(
+            div()
+                .mt(px(8.))
+                .text_size(px(11.5))
+                .text_color(muted())
+                .child(format!("Not checked here: {}", unevaluated.join(", "))),
+        );
     }
     if n > 0 {
-        out = out.child(div().mt(px(10.)).flex().flex_col().gap(px(6.)).children(flagged.iter().take(30).map(|r| {
-            let proven = r["proven"].as_u64().unwrap_or(1);
-            div()
-                .flex()
-                .items_baseline()
-                .gap(px(8.))
-                .px(px(8.))
-                .py(px(6.))
-                .rounded(px(6.))
-                .bg(ca(0, 0, 0, 0.18))
-                .child(div().font_weight(FontWeight::SEMIBOLD).text_size(px(12.5)).child(name(r["npub"].as_str().unwrap_or(""))))
-                .child(div().flex_1().min_w_0().truncate().text_size(px(11.5)).text_color(muted()).child(r["reasons"][0].as_str().unwrap_or("").to_string()))
-                .child(div().text_size(px(11.)).text_color(muted()).child(format!("{}{}", r["score"].as_u64().unwrap_or(0), if proven == 0 { " · suspected" } else { " · provable" })))
-        })));
+        out = out.child(div().mt(px(10.)).flex().flex_col().gap(px(6.)).children(
+            flagged.iter().take(30).map(|r| {
+                let proven = r["proven"].as_u64().unwrap_or(1);
+                div()
+                    .flex()
+                    .items_baseline()
+                    .gap(px(8.))
+                    .px(px(8.))
+                    .py(px(6.))
+                    .rounded(px(6.))
+                    .bg(ca(0, 0, 0, 0.18))
+                    .child(
+                        div()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_size(px(12.5))
+                            .child(name(r["npub"].as_str().unwrap_or(""))),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(px(11.5))
+                            .text_color(muted())
+                            .child(r["reasons"][0].as_str().unwrap_or("").to_string()),
+                    )
+                    .child(div().text_size(px(11.)).text_color(muted()).child(format!(
+                        "{}{}",
+                        r["score"].as_u64().unwrap_or(0),
+                        if proven == 0 {
+                            " · suspected"
+                        } else {
+                            " · provable"
+                        }
+                    )))
+            }),
+        ));
     }
     out.into_any_element()
 }
 
-fn editor(p: &Policies, mo: &Moderation, store: &crate::data::Store, on: &OnAct, cx: &App) -> AnyElement {
-    let Some(draft) = &p.draft else { return div().into_any_element() };
+fn editor(
+    p: &Policies,
+    mo: &Moderation,
+    store: &crate::data::Store,
+    on: &OnAct,
+    cx: &App,
+) -> AnyElement {
+    let Some(draft) = &p.draft else {
+        return div().into_any_element();
+    };
     let ready = readiness(p, cx);
     let can_preview = !p.busy && ready.is_ok();
     let preview_btn = div()
@@ -687,8 +1125,16 @@ fn editor(p: &Policies, mo: &Moderation, store: &crate::data::Store, on: &OnAct,
         .line_height(px(16.))
         .text_color(c(0xf6f6f6))
         .when(!can_preview, |d| d.opacity(0.38))
-        .when(can_preview, |d| d.cursor_pointer().hover(|d| d.bg(white_a(0.1))).on_click(click(on, || Act::Preview)))
-        .child(if p.busy { "Checking real history…" } else { "Preview on real history" });
+        .when(can_preview, |d| {
+            d.cursor_pointer()
+                .hover(|d| d.bg(white_a(0.1)))
+                .on_click(click(on, || Act::Preview))
+        })
+        .child(if p.busy {
+            "Checking real history…"
+        } else {
+            "Preview on real history"
+        });
     let enable = div()
         .id("pol-enable")
         .min_w(px(196.))
@@ -701,9 +1147,21 @@ fn editor(p: &Policies, mo: &Moderation, store: &crate::data::Store, on: &OnAct,
         .font_weight(FontWeight::SEMIBOLD)
         .text_size(px(13.))
         .line_height(px(16.))
-        .when(p.previewed, |d| d.bg(c(ACCENT)).border_color(gpui::transparent_black()).text_color(c(0x05261a)).cursor_pointer().on_click(click(on, || Act::Save)))
-        .when(!p.previewed, |d| d.border_color(white_a(0.12)).text_color(white_a(0.32)))
-        .child(if p.previewed { "Enable this policy" } else { "Preview before Enabling" });
+        .when(p.previewed, |d| {
+            d.bg(c(ACCENT))
+                .border_color(gpui::transparent_black())
+                .text_color(c(0x05261a))
+                .cursor_pointer()
+                .on_click(click(on, || Act::Save))
+        })
+        .when(!p.previewed, |d| {
+            d.border_color(white_a(0.12)).text_color(white_a(0.32))
+        })
+        .child(if p.previewed {
+            "Enable this policy"
+        } else {
+            "Preview before Enabling"
+        });
     div()
         .flex()
         .flex_col()
@@ -727,24 +1185,89 @@ fn editor(p: &Policies, mo: &Moderation, store: &crate::data::Store, on: &OnAct,
                         .group("pol-back")
                         .hover(|d| d.bg(white_a(0.07)))
                         .on_click(click(on, || Act::Back))
-                        .child(svg().path("icons/chevron-double-left.svg").size(px(16.)).text_color(white_a(0.5)).group_hover("pol-back", |s| s.text_color(c(0xffffff)))),
+                        .child(
+                            svg()
+                                .path("icons/chevron-double-left.svg")
+                                .size(px(16.))
+                                .text_color(white_a(0.5))
+                                .group_hover("pol-back", |s| s.text_color(c(0xffffff))),
+                        ),
                 )
-                .child(div().font_weight(FontWeight::BOLD).text_size(px(16.)).line_height(px(24.)).text_color(c(0xf6f6f6)).child(draft.name.clone())),
+                .child(
+                    div()
+                        .font_weight(FontWeight::BOLD)
+                        .text_size(px(16.))
+                        .line_height(px(24.))
+                        .text_color(c(0xf6f6f6))
+                        .child(draft.name.clone()),
+                ),
         )
-        .child(div().px(px(12.)).py(px(10.)).rounded_r(px(8.)).border_l(px(3.)).border_color(ca(255, 193, 7, 0.6)).bg(ca(255, 193, 7, 0.08)).text_size(px(12.5)).line_height(px(18.75)).text_color(c(0xf6f6f6)).child(draft.caveat.clone()))
-        .child(div().flex().flex_col().gap(px(14.)).children(draft.dials.iter().map(|d| dial(p, mo, d, on))))
-        .when(p.preview_error.is_some() || p.previewed, |d| d.child(preview(p, mo, store)))
-        .child(div().py(px(13.)).border_t_1().border_color(ca(57, 57, 57, 0.5)).flex().justify_end().items_center().gap(px(10.)).child(preview_btn).child(enable))
+        .child(
+            div()
+                .px(px(12.))
+                .py(px(10.))
+                .rounded_r(px(8.))
+                .border_l(px(3.))
+                .border_color(ca(255, 193, 7, 0.6))
+                .bg(ca(255, 193, 7, 0.08))
+                .text_size(px(12.5))
+                .line_height(px(18.75))
+                .text_color(c(0xf6f6f6))
+                .child(draft.caveat.clone()),
+        )
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(14.))
+                .children(draft.dials.iter().map(|d| dial(p, mo, d, on))),
+        )
+        .when(p.preview_error.is_some() || p.previewed, |d| {
+            d.child(preview(p, mo, store))
+        })
+        .child(
+            div()
+                .py(px(13.))
+                .border_t_1()
+                .border_color(ca(57, 57, 57, 0.5))
+                .flex()
+                .justify_end()
+                .items_center()
+                .gap(px(10.))
+                .child(preview_btn)
+                .child(enable),
+        )
         .into_any_element()
 }
 
-pub fn view(p: &Policies, mo: &Moderation, store: &crate::data::Store, width: f32, on: &OnAct, cx: &App) -> AnyElement {
+pub fn view(
+    p: &Policies,
+    mo: &Moderation,
+    store: &crate::data::Store,
+    width: f32,
+    on: &OnAct,
+    cx: &App,
+) -> AnyElement {
     let body = if p.draft.is_some() {
         editor(p, mo, store, on, cx)
     } else {
-        div().flex().flex_col().gap(px(14.)).child(list(p, on)).child(gallery(p, width, on)).into_any_element()
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(14.))
+            .child(list(p, on))
+            .child(gallery(p, width, on))
+            .into_any_element()
     };
-    div().id("mod-policies").flex_1().min_h_0().overflow_y_scroll().px(px(18.)).pt(px(14.)).child(body).into_any_element()
+    div()
+        .id("mod-policies")
+        .flex_1()
+        .min_h_0()
+        .overflow_y_scroll()
+        .px(px(18.))
+        .pt(px(14.))
+        .child(body)
+        .into_any_element()
 }
 
 #[cfg(test)]
@@ -764,7 +1287,16 @@ mod tests {
     #[test]
     #[ignore]
     fn dump_presets() {
-        let Ok(path) = std::env::var("DUMP_PRESETS") else { return };
-        std::fs::write(path, vector_core::VectorCore.policy_presets().unwrap().to_string()).unwrap();
+        let Ok(path) = std::env::var("DUMP_PRESETS") else {
+            return;
+        };
+        std::fs::write(
+            path,
+            vector_core::VectorCore
+                .policy_presets()
+                .unwrap()
+                .to_string(),
+        )
+        .unwrap();
     }
 }

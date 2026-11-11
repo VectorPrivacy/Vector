@@ -8,8 +8,9 @@ use std::time::{Duration, Instant};
 
 use gpui::prelude::*;
 use gpui::{
-    AnimationExt, Bounds, Context, EventEmitter, FocusHandle, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels,
-    Point, RenderImage, ScrollDelta, ScrollEvent, Window, canvas, div, img, point, px, svg,
+    AnimationExt, Bounds, Context, EventEmitter, FocusHandle, KeyDownEvent, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, RenderImage, ScrollDelta,
+    ScrollEvent, Window, canvas, div, img, point, px, svg,
 };
 
 use image::Frame;
@@ -72,15 +73,28 @@ impl Viewer {
         if let Some(full) = open.full.clone() {
             cx.spawn(async move |this, cx| {
                 let bytes = if live {
-                    let path = full.path.as_ref().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
-                    crate::backend::run(crate::backend::attachments::bytes(full.hash, path)).await.ok().flatten()
+                    let path = full
+                        .path
+                        .as_ref()
+                        .map(|p| p.to_string_lossy().into_owned())
+                        .unwrap_or_default();
+                    crate::backend::run(crate::backend::attachments::bytes(full.hash, path))
+                        .await
+                        .ok()
+                        .flatten()
                 } else {
                     let path = full.path.clone();
-                    cx.background_executor().spawn(async move { path.and_then(|p| std::fs::read(p).ok()) }).await
+                    cx.background_executor()
+                        .spawn(async move { path.and_then(|p| std::fs::read(p).ok()) })
+                        .await
                 };
                 let Some(bytes) = bytes else { return };
                 let ext = full.ext.clone();
-                let Some((image, w, h)) = cx.background_executor().spawn(async move { crate::media::decode(&bytes, &ext, FULL_MAX) }).await else {
+                let Some((image, w, h)) = cx
+                    .background_executor()
+                    .spawn(async move { crate::media::decode(&bytes, &ext, FULL_MAX) })
+                    .await
+                else {
                     return;
                 };
                 this.update(cx, |v, cx| {
@@ -98,7 +112,9 @@ impl Viewer {
         let tip = cx.entity().downgrade();
         cx.spawn(async move |_, cx| {
             for wait in [500, 500, 2000, 300] {
-                cx.background_executor().timer(Duration::from_millis(wait)).await;
+                cx.background_executor()
+                    .timer(Duration::from_millis(wait))
+                    .await;
                 if tip.update(cx, |_, cx| cx.notify()).is_err() {
                     return;
                 }
@@ -130,7 +146,10 @@ impl Viewer {
     /// The image's box at scale 1: its natural size, no larger than 95% of the window.
     fn base(&self) -> (f32, f32) {
         let (w, h) = (self.w.max(1) as f32, self.h.max(1) as f32);
-        let (mw, mh) = (f32::from(self.area.size.width) * 0.95, f32::from(self.area.size.height) * 0.95);
+        let (mw, mh) = (
+            f32::from(self.area.size.width) * 0.95,
+            f32::from(self.area.size.height) * 0.95,
+        );
         let s = (mw / w).min(mh / h).min(1.);
         (w * s, h * s)
     }
@@ -144,12 +163,19 @@ impl Viewer {
 
     /// `updateTransform`: at rest a fitting axis centres; zoomed it only stays on screen.
     fn clamp(&mut self) {
-        let (cw, ch) = (f32::from(self.area.size.width), f32::from(self.area.size.height));
+        let (cw, ch) = (
+            f32::from(self.area.size.width),
+            f32::from(self.area.size.height),
+        );
         let (sw, sh) = self.visual();
         let rest = self.scale <= 1.;
         let axis = |t: f32, s: f32, c: f32| {
             if s <= c {
-                if rest { (c - s) / 2. } else { t.clamp(0., c - s) }
+                if rest {
+                    (c - s) / 2.
+                } else {
+                    t.clamp(0., c - s)
+                }
             } else {
                 t.clamp(c - s, 0.)
             }
@@ -158,7 +184,10 @@ impl Viewer {
     }
 
     fn local(&self, p: Point<Pixels>) -> Point<f32> {
-        point(f32::from(p.x - self.area.origin.x), f32::from(p.y - self.area.origin.y))
+        point(
+            f32::from(p.x - self.area.origin.x),
+            f32::from(p.y - self.area.origin.y),
+        )
     }
 
     fn wheel(&mut self, e: &ScrollEvent, cx: &mut Context<Self>) {
@@ -172,16 +201,23 @@ impl Viewer {
         let factor = (-dy * 0.0035).exp().clamp(0.87, 1.15);
         let scale = (self.scale * factor).clamp(MIN_SCALE, MAX_SCALE);
         let cur = self.local(e.position);
-        let at = point((cur.x - self.t.x) / self.scale, (cur.y - self.t.y) / self.scale);
+        let at = point(
+            (cur.x - self.t.x) / self.scale,
+            (cur.y - self.t.y) / self.scale,
+        );
         self.scale = scale;
         self.t = point(cur.x - at.x * scale, cur.y - at.y * scale);
         self.clamp();
         self.zoomed_at = Some(Instant::now());
         let me = cx.entity().downgrade();
         cx.spawn(async move |_, cx| {
-            cx.background_executor().timer(Duration::from_millis(1000)).await;
+            cx.background_executor()
+                .timer(Duration::from_millis(1000))
+                .await;
             me.update(cx, |_, cx| cx.notify()).ok();
-            cx.background_executor().timer(Duration::from_millis(220)).await;
+            cx.background_executor()
+                .timer(Duration::from_millis(220))
+                .await;
             me.update(cx, |_, cx| cx.notify()).ok();
         })
         .detach();
@@ -204,7 +240,11 @@ fn turned(image: &Arc<RenderImage>, turns: u8) -> Arc<RenderImage> {
     let frames: Vec<Frame> = (0..image.frame_count())
         .filter_map(|i| {
             let size = image.size(i);
-            let buf = image::RgbaImage::from_raw(size.width.0 as u32, size.height.0 as u32, image.as_bytes(i)?.to_vec())?;
+            let buf = image::RgbaImage::from_raw(
+                size.width.0 as u32,
+                size.height.0 as u32,
+                image.as_bytes(i)?.to_vec(),
+            )?;
             let buf = match turns {
                 1 => image::imageops::rotate270(&buf),
                 2 => image::imageops::rotate180(&buf),
@@ -241,7 +281,17 @@ fn pill(text: impl Into<gpui::SharedString>, opacity: f32) -> gpui::Div {
         .flex()
         .justify_center()
         .opacity(opacity)
-        .child(div().px(px(16.)).py(px(8.)).rounded(px(20.)).bg(gpui::black().opacity(0.7)).text_size(px(12.)).line_height(px(24.)).text_color(c(0xffffff)).child(text.into()))
+        .child(
+            div()
+                .px(px(16.))
+                .py(px(8.))
+                .rounded(px(20.))
+                .bg(gpui::black().opacity(0.7))
+                .text_size(px(12.))
+                .line_height(px(24.))
+                .text_color(c(0xffffff))
+                .child(text.into()),
+        )
 }
 
 fn round_button(id: &'static str) -> gpui::Stateful<gpui::Div> {
@@ -294,7 +344,11 @@ impl Render for Viewer {
             .w(px(sw))
             .h(px(sh))
             .when(!settled, |d| d.invisible())
-            .cursor(if dragging { gpui::CursorStyle::ClosedHand } else { gpui::CursorStyle::OpenHand })
+            .cursor(if dragging {
+                gpui::CursorStyle::ClosedHand
+            } else {
+                gpui::CursorStyle::OpenHand
+            })
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|v, e: &MouseDownEvent, _, cx| {
@@ -307,7 +361,16 @@ impl Render for Viewer {
             .child(img(image).size_full());
 
         let tip = shown_for(self.opened, 0.5, 3.0, 0.3);
-        let zoom = self.zoomed_at.map(|t| shown_for(t, 0., 1., 0.2).max(if t.elapsed().as_secs_f32() < 0.2 { 1. } else { 0. })).unwrap_or(0.);
+        let zoom = self
+            .zoomed_at
+            .map(|t| {
+                shown_for(t, 0., 1., 0.2).max(if t.elapsed().as_secs_f32() < 0.2 {
+                    1.
+                } else {
+                    0.
+                })
+            })
+            .unwrap_or(0.);
         let fading = tip > 0. && tip < 1. || zoom > 0. && zoom < 1.;
         if fading {
             window.request_animation_frame();
@@ -319,13 +382,30 @@ impl Render for Viewer {
             .top(px(20.))
             .right(px(20.))
             .on_click(cx.listener(|v, _, _, cx| v.close(cx)))
-            .child(svg().path("ui/viewer-close.svg").size(px(20.)).text_color(c(0xffffff)));
-        let controls = div().absolute().top(px(70.)).right(px(20.)).flex().flex_col().gap(px(10.)).child(
-            round_button("viewer-rotate")
-                .p(px(9.))
-                .on_click(cx.listener(|v, _, _, cx| v.rotate(cx)))
-                .child(svg().path("ui/viewer-rotate.svg").size_full().text_color(c(0xffffff))),
-        );
+            .child(
+                svg()
+                    .path("ui/viewer-close.svg")
+                    .size(px(20.))
+                    .text_color(c(0xffffff)),
+            );
+        let controls = div()
+            .absolute()
+            .top(px(70.))
+            .right(px(20.))
+            .flex()
+            .flex_col()
+            .gap(px(10.))
+            .child(
+                round_button("viewer-rotate")
+                    .p(px(9.))
+                    .on_click(cx.listener(|v, _, _, cx| v.rotate(cx)))
+                    .child(
+                        svg()
+                            .path("ui/viewer-rotate.svg")
+                            .size_full()
+                            .text_color(c(0xffffff)),
+                    ),
+            );
 
         div()
             .id("image-viewer")
@@ -385,12 +465,22 @@ impl Render for Viewer {
                     }
                 }),
             )
-            .child(div().absolute().inset_0().overflow_hidden().child(measure).child(picture))
+            .child(
+                div()
+                    .absolute()
+                    .inset_0()
+                    .overflow_hidden()
+                    .child(measure)
+                    .child(picture),
+            )
             .child(close)
             .child(controls)
             .child(pill(pct, zoom).bottom(px(20.)))
             .child(pill("Scroll to zoom", tip).top(px(20.)))
-            .with_animation("viewer-fade", gpui::Animation::new(Duration::from_millis(200)), |d, t| d.opacity(t))
+            .with_animation(
+                "viewer-fade",
+                gpui::Animation::new(Duration::from_millis(200)),
+                |d, t| d.opacity(t),
+            )
     }
 }
-

@@ -4,7 +4,10 @@
 use std::rc::Rc;
 
 use gpui::prelude::*;
-use gpui::{AnyElement, App, FontWeight, Hsla, MouseButton, ObjectFit, SharedString, Window, div, img, px, svg};
+use gpui::{
+    AnyElement, App, FontWeight, Hsla, MouseButton, ObjectFit, SharedString, Window, div, img, px,
+    svg,
+};
 
 use crate::data::Store;
 use crate::theme::*;
@@ -80,17 +83,30 @@ pub struct Pick {
 
 impl Edit {
     pub fn dirty(&self, cx: &App) -> bool {
-        self.removed_banner || self.avatar.is_some() || self.banner.is_some() || self.name.read(cx).text().trim() != self.snap_name || self.bio.read(cx).text().trim() != self.snap_about
+        self.removed_banner
+            || self.avatar.is_some()
+            || self.banner.is_some()
+            || self.name.read(cx).text().trim() != self.snap_name
+            || self.bio.read(cx).text().trim() != self.snap_about
     }
 }
 
 impl Screen {
     pub fn new(npub: String, back: Option<SharedString>) -> Self {
-        Self { npub, back, more_open: false, copied: None, edit: None, switcher: None, badges: Default::default() }
+        Self {
+            npub,
+            back,
+            more_open: false,
+            copied: None,
+            edit: None,
+            switcher: None,
+            badges: Default::default(),
+        }
     }
 
     fn copied(&self, which: Act) -> bool {
-        self.copied.is_some_and(|(w, t)| w == which && t.elapsed().as_millis() < 2000)
+        self.copied
+            .is_some_and(|(w, t)| w == which && t.elapsed().as_millis() < 2000)
     }
 }
 
@@ -108,7 +124,14 @@ fn click(on: &OnAct, a: Act) -> impl Fn(&gpui::ClickEvent, &mut Window, &mut App
 }
 
 /// `.profile-option`: a 74×70 tile, icon over label.
-fn option(id: &'static str, icon: &'static str, icon_size: f32, tint: u32, label: &'static str, active: bool) -> gpui::Stateful<gpui::Div> {
+fn option(
+    id: &'static str,
+    icon: &'static str,
+    icon_size: f32,
+    tint: u32,
+    label: &'static str,
+    active: bool,
+) -> gpui::Stateful<gpui::Div> {
     let inset = (30. - icon_size) / 2.;
     div()
         .id(id)
@@ -123,17 +146,40 @@ fn option(id: &'static str, icon: &'static str, icon_size: f32, tint: u32, label
         .bg(c(if active { 0x171717 } else { APP_BG }))
         .text_color(c(if active { 0xffffff } else { OPTION_TEXT }))
         .cursor_pointer()
-        .hover(|s| s.bg(c(0x171717)).border_color(c(0x959899)).text_color(c(0xffffff)))
+        .hover(|s| {
+            s.bg(c(0x171717))
+                .border_color(c(0x959899))
+                .text_color(c(0xffffff))
+        })
         .flex()
         .flex_col()
         .items_center()
         .pt(px(8. + inset))
-        .child(svg().path(icon).size(px(icon_size)).text_color(c(tint)).flex_shrink_0())
-        .child(div().mt(px(-2. + inset)).w(px(50.)).text_size(px(12.)).line_height(px(24.)).text_center().child(label))
+        .child(
+            svg()
+                .path(icon)
+                .size(px(icon_size))
+                .text_color(c(tint))
+                .flex_shrink_0(),
+        )
+        .child(
+            div()
+                .mt(px(-2. + inset))
+                .w(px(50.))
+                .text_size(px(12.))
+                .line_height(px(24.))
+                .text_center()
+                .child(label),
+        )
 }
 
 /// `.profile-share-btn`: an option tile at three quarters size, pinned to the banner.
-fn small_option(id: &'static str, icon: &'static str, label: Option<&'static str>, edit: bool) -> gpui::Stateful<gpui::Div> {
+fn small_option(
+    id: &'static str,
+    icon: &'static str,
+    label: Option<&'static str>,
+    edit: bool,
+) -> gpui::Stateful<gpui::Div> {
     let d = div()
         .id(id)
         .absolute()
@@ -144,7 +190,11 @@ fn small_option(id: &'static str, icon: &'static str, label: Option<&'static str
         .bg(c(APP_BG))
         .text_color(c(OPTION_TEXT))
         .cursor_pointer()
-        .hover(|s| s.bg(c(0x171717)).border_color(c(0x959899)).text_color(c(0xffffff)))
+        .hover(|s| {
+            s.bg(c(0x171717))
+                .border_color(c(0x959899))
+                .text_color(c(0xffffff))
+        })
         .flex()
         .flex_col()
         .items_center()
@@ -153,9 +203,24 @@ fn small_option(id: &'static str, icon: &'static str, label: Option<&'static str
         Some(label) => d
             .h(px(52.5))
             .pt(px(if edit { 8.3 } else { 6. }))
-            .child(svg().path(icon).size(px(22.5)).text_color(c(PRIMARY)).flex_shrink_0())
-            .child(div().mt(px(if edit { -1.5 } else { -1.5 })).text_size(px(9.)).line_height(px(18.)).child(label)),
-        None => d.h(px(55.5)).pt(px(7.5)).child(svg().path(icon).size(px(37.5)).text_color(c(0xffffff))),
+            .child(
+                svg()
+                    .path(icon)
+                    .size(px(22.5))
+                    .text_color(c(PRIMARY))
+                    .flex_shrink_0(),
+            )
+            .child(
+                div()
+                    .mt(px(if edit { -1.5 } else { -1.5 }))
+                    .text_size(px(9.))
+                    .line_height(px(18.))
+                    .child(label),
+            ),
+        None => d
+            .h(px(55.5))
+            .pt(px(7.5))
+            .child(svg().path(icon).size(px(37.5)).text_color(c(0xffffff))),
     }
 }
 
@@ -166,13 +231,28 @@ pub fn pane(store: &Store, s: &Screen, on: &OnAct, window: &Window, cx: &App) ->
     let mine = p.mine;
     let name = store.name(&s.npub);
     let status = p.status.title.clone();
-    let status_text = if status.is_empty() && mine { "Set a Status".to_string() } else { status.clone() };
-    let secondary = [&p.nickname, &p.name, &p.display_name].into_iter().find(|n| !n.is_empty()).cloned().unwrap_or_else(|| {
-        if mine { "Anonymous".into() } else { format!("{}…", &s.npub[..s.npub.len().min(10)]) }
-    });
+    let status_text = if status.is_empty() && mine {
+        "Set a Status".to_string()
+    } else {
+        status.clone()
+    };
+    let secondary = [&p.nickname, &p.name, &p.display_name]
+        .into_iter()
+        .find(|n| !n.is_empty())
+        .cloned()
+        .unwrap_or_else(|| {
+            if mine {
+                "Anonymous".into()
+            } else {
+                format!("{}…", &s.npub[..s.npub.len().min(10)])
+            }
+        });
     let muted = store.chat(&s.npub).is_some_and(|c| c.muted);
     let editing = s.edit.as_ref().filter(|_| mine);
-    let banner = (!p.banner_cached.is_empty() && !store.pictures_held(&p.id) && !editing.is_some_and(|e| e.removed_banner)).then(|| store.media_root.join(&p.banner_cached));
+    let banner = (!p.banner_cached.is_empty()
+        && !store.pictures_held(&p.id)
+        && !editing.is_some_and(|e| e.removed_banner))
+    .then(|| store.media_root.join(&p.banner_cached));
     let dark = mine || !p.banner.is_empty();
     let banner_h = if dark { 200. } else { 115. };
 
@@ -191,13 +271,24 @@ pub fn pane(store: &Store, s: &Screen, on: &OnAct, window: &Window, cx: &App) ->
                 .cursor_pointer()
                 .hover(|s| s.bg(white_a(0.05)))
                 .on_click(click(on, Act::Switcher))
-                .child(div().font_weight(FontWeight::BOLD).text_size(px(18.)).line_height(px(24.)).text_color(c(0xf7f4f4)).child("My Profile"))
+                .child(
+                    div()
+                        .font_weight(FontWeight::BOLD)
+                        .text_size(px(18.))
+                        .line_height(px(24.))
+                        .text_color(c(0xf7f4f4))
+                        .child("My Profile"),
+                )
                 .child(
                     svg()
                         .path("ui/switcher-chevron.svg")
                         .size(px(14.))
                         .text_color(white_a(0.7))
-                        .when(s.switcher.is_some(), |i| i.with_transformation(gpui::Transformation::rotate(gpui::radians(std::f32::consts::PI)))),
+                        .when(s.switcher.is_some(), |i| {
+                            i.with_transformation(gpui::Transformation::rotate(gpui::radians(
+                                std::f32::consts::PI,
+                            )))
+                        }),
                 )
                 .into_any_element()
         } else {
@@ -215,10 +306,26 @@ pub fn pane(store: &Store, s: &Screen, on: &OnAct, window: &Window, cx: &App) ->
                         .gap(px(6.))
                         .min_w_0()
                         .child(crate::ui::avatar(store, &s.npub, 22.))
-                        .child(div().min_w_0().truncate().font_family(RUBIK).font_weight(FontWeight::BOLD).text_size(px(18.72)).line_height(px(24.)).child(name.clone())),
+                        .child(
+                            div()
+                                .min_w_0()
+                                .truncate()
+                                .font_family(RUBIK)
+                                .font_weight(FontWeight::BOLD)
+                                .text_size(px(18.72))
+                                .line_height(px(24.))
+                                .child(name.clone()),
+                        ),
                 )
                 .when(!status.is_empty(), |d| {
-                    d.child(div().w_full().flex().justify_center().opacity(0.8).child(crate::inline::emoji_line(&status, crate::inline::Look::new(INTER, 14., 21., c(TEXT)), 15., 1.)))
+                    d.child(div().w_full().flex().justify_center().opacity(0.8).child(
+                        crate::inline::emoji_line(
+                            &status,
+                            crate::inline::Look::new(INTER, 14., 21., c(TEXT)),
+                            15.,
+                            1.,
+                        ),
+                    ))
                 })
                 .into_any_element()
         };
@@ -242,7 +349,12 @@ pub fn pane(store: &Store, s: &Screen, on: &OnAct, window: &Window, cx: &App) ->
                         .p(px(5.))
                         .cursor_pointer()
                         .on_click(click(on, Act::Back))
-                        .child(svg().path("icons/chevron-double-left.svg").size(px(30.)).text_color(c(ACCENT))),
+                        .child(
+                            svg()
+                                .path("icons/chevron-double-left.svg")
+                                .size(px(30.))
+                                .text_color(c(ACCENT)),
+                        ),
                 )
             })
             .when_some(s.switcher, |d, deleting| {
@@ -263,7 +375,9 @@ pub fn pane(store: &Store, s: &Screen, on: &OnAct, window: &Window, cx: &App) ->
                                 .path("ui/switcher-trash.svg")
                                 .size(px(24.))
                                 .text_color(if deleting { c(DANGER) } else { white_a(0.45) })
-                                .when(!deleting, |i| i.group_hover("switcher-trash", |s| s.text_color(white_a(0.75)))),
+                                .when(!deleting, |i| {
+                                    i.group_hover("switcher-trash", |s| s.text_color(white_a(0.75)))
+                                }),
                         ),
                 )
             })
@@ -272,35 +386,89 @@ pub fn pane(store: &Store, s: &Screen, on: &OnAct, window: &Window, cx: &App) ->
     };
 
     // ── banner and avatar ──
-    let mut banner_box = div().relative().w_full().h(px(banner_h)).flex_shrink_0().bg(c(if dark { 0x1b1b1b } else { 0x0a0a0a }));
+    let mut banner_box = div()
+        .relative()
+        .w_full()
+        .h(px(banner_h))
+        .flex_shrink_0()
+        .bg(c(if dark { 0x1b1b1b } else { 0x0a0a0a }));
     if let Some(pick) = editing.and_then(|e| e.banner.as_ref()) {
-        banner_box = banner_box.child(img(pick.preview.clone()).absolute().inset_0().size_full().object_fit(ObjectFit::Cover));
+        banner_box = banner_box.child(
+            img(pick.preview.clone())
+                .absolute()
+                .inset_0()
+                .size_full()
+                .object_fit(ObjectFit::Cover),
+        );
     } else if let Some(path) = banner {
-        banner_box = banner_box.child(img(path).absolute().inset_0().size_full().object_fit(ObjectFit::Cover));
+        banner_box = banner_box.child(
+            img(path)
+                .absolute()
+                .inset_0()
+                .size_full()
+                .object_fit(ObjectFit::Cover),
+        );
     }
     if editing.is_some() {
         banner_box = banner_box.child(
-            div().id("profile-banner").absolute().inset_0().cursor_pointer().hover(|s| s.bg(c(APP_BG).opacity(0.25))).on_click(click(on, Act::Pick(true))),
+            div()
+                .id("profile-banner")
+                .absolute()
+                .inset_0()
+                .cursor_pointer()
+                .hover(|s| s.bg(c(APP_BG).opacity(0.25)))
+                .on_click(click(on, Act::Pick(true))),
         );
     }
     if mine && editing.is_none() {
         banner_box = banner_box
-            .child(small_option("profile-edit-btn", "icons/edit.svg", Some("Edit"), true).left(px(18.5)).on_click(click(on, Act::Edit)))
             .child(
-                small_option("profile-share-btn", if s.copied(Act::Share) { "icons/check.svg" } else { "icons/share.svg" }, Some("Share"), false)
-                    .right(px(16.))
-                    .on_click(click(on, Act::Share)),
+                small_option("profile-edit-btn", "icons/edit.svg", Some("Edit"), true)
+                    .left(px(18.5))
+                    .on_click(click(on, Act::Edit)),
+            )
+            .child(
+                small_option(
+                    "profile-share-btn",
+                    if s.copied(Act::Share) {
+                        "icons/check.svg"
+                    } else {
+                        "icons/share.svg"
+                    },
+                    Some("Share"),
+                    false,
+                )
+                .right(px(16.))
+                .on_click(click(on, Act::Share)),
             );
     }
     if editing.is_none() {
-        banner_box = banner_box.child(small_option("profile-qr-btn", "ui/qr.svg", None, false).right(px(16.)).top(px(if mine { 68. } else { 10. })).on_click(click(on, Act::Qr)));
+        banner_box = banner_box.child(
+            small_option("profile-qr-btn", "ui/qr.svg", None, false)
+                .right(px(16.))
+                .top(px(if mine { 68. } else { 10. }))
+                .on_click(click(on, Act::Qr)),
+        );
     }
 
-    let picked = editing.and_then(|e| e.avatar.as_ref()).map(|p| p.preview.clone());
+    let picked = editing
+        .and_then(|e| e.avatar.as_ref())
+        .map(|p| p.preview.clone());
     let big_avatar = match store.avatar_path(&s.npub) {
-        _ if picked.is_some() => img(picked.unwrap()).size(px(175.)).rounded_full().object_fit(ObjectFit::Cover).into_any_element(),
-        Some(path) => img(path).size(px(175.)).rounded_full().object_fit(ObjectFit::Cover).into_any_element(),
-        None => img("icons/user-placeholder.svg").size(px(175.)).rounded_full().into_any_element(),
+        _ if picked.is_some() => img(picked.unwrap())
+            .size(px(175.))
+            .rounded_full()
+            .object_fit(ObjectFit::Cover)
+            .into_any_element(),
+        Some(path) => img(path)
+            .size(px(175.))
+            .rounded_full()
+            .object_fit(ObjectFit::Cover)
+            .into_any_element(),
+        None => img("icons/user-placeholder.svg")
+            .size(px(175.))
+            .rounded_full()
+            .into_any_element(),
     };
     let avatar = div()
         .id("profile-avatar")
@@ -312,8 +480,14 @@ pub fn pane(store: &Store, s: &Screen, on: &OnAct, window: &Window, cx: &App) ->
         .flex()
         .items_center()
         .justify_center()
-        .child(div().when(editing.is_some(), |d| d.hover(|s| s.opacity(0.75))).child(big_avatar))
-        .when(editing.is_some(), |d| d.cursor_pointer().on_click(click(on, Act::Pick(false))));
+        .child(
+            div()
+                .when(editing.is_some(), |d| d.hover(|s| s.opacity(0.75)))
+                .child(big_avatar),
+        )
+        .when(editing.is_some(), |d| {
+            d.cursor_pointer().on_click(click(on, Act::Pick(false)))
+        });
 
     if let Some(e) = editing {
         let body = div()
@@ -347,7 +521,15 @@ pub fn pane(store: &Store, s: &Screen, on: &OnAct, window: &Window, cx: &App) ->
                 .justify_center()
                 .gap(px(4.))
                 .child(secondary)
-                .when(p.bot, |d| d.child(svg().path("icons/bot.svg").size(px(18.)).mt(px(3.)).text_color(c(PRIMARY)))),
+                .when(p.bot, |d| {
+                    d.child(
+                        svg()
+                            .path("icons/bot.svg")
+                            .size(px(18.))
+                            .mt(px(3.))
+                            .text_color(c(PRIMARY)),
+                    )
+                }),
         );
     let status_line = div()
         .id("profile-secondary-status")
@@ -357,11 +539,18 @@ pub fn pane(store: &Store, s: &Screen, on: &OnAct, window: &Window, cx: &App) ->
         .text_size(px(14.))
         .line_height(px(21.))
         .opacity(0.8)
-        .when(mine, |d| d.cursor_pointer().on_click(click(on, Act::SetStatus)))
+        .when(mine, |d| {
+            d.cursor_pointer().on_click(click(on, Act::SetStatus))
+        })
         .flex()
         .justify_center()
         .when(status_text.is_empty(), |d| d.h_0())
-        .child(crate::inline::emoji_line(&status_text, crate::inline::Look::new(INTER, 14., 21., c(TEXT)), 15., 1.));
+        .child(crate::inline::emoji_line(
+            &status_text,
+            crate::inline::Look::new(INTER, 14., 21., c(TEXT)),
+            15.,
+            1.,
+        ));
     body = body.child(status_line);
     // #profile-badges
     {
@@ -379,18 +568,58 @@ pub fn pane(store: &Store, s: &Screen, on: &OnAct, window: &Window, cx: &App) ->
             div()
                 .mt(px(5.))
                 .flex()
-                .when(b.invites > 0, |d| d.child(badge("badge-inviter", "icons/vector_badge_hex_placeholder.svg".into(), true, Badge::Inviter)))
-                .when(b.fawkes, |d| d.child(badge("badge-fawkes", "icons/fawkes_mask.svg".into(), false, Badge::Fawkes)))
-                .when(b.bug > 0, |d| d.child(badge("badge-bug", format!("icons/bughunter_{}.svg", b.bug).into(), false, Badge::BugHunter)))
-                .when(b.v2026, |d| d.child(badge("badge-v2026", "icons/vforvector2026.svg".into(), false, Badge::V2026))),
+                .when(b.invites > 0, |d| {
+                    d.child(badge(
+                        "badge-inviter",
+                        "icons/vector_badge_hex_placeholder.svg".into(),
+                        true,
+                        Badge::Inviter,
+                    ))
+                })
+                .when(b.fawkes, |d| {
+                    d.child(badge(
+                        "badge-fawkes",
+                        "icons/fawkes_mask.svg".into(),
+                        false,
+                        Badge::Fawkes,
+                    ))
+                })
+                .when(b.bug > 0, |d| {
+                    d.child(badge(
+                        "badge-bug",
+                        format!("icons/bughunter_{}.svg", b.bug).into(),
+                        false,
+                        Badge::BugHunter,
+                    ))
+                })
+                .when(b.v2026, |d| {
+                    d.child(badge(
+                        "badge-v2026",
+                        "icons/vforvector2026.svg".into(),
+                        false,
+                        Badge::V2026,
+                    ))
+                }),
         );
     }
 
     if !mine {
         let more = {
-            let mut m = option("profile-option-more", "icons/dots-horizontal.svg", 33., 0xffffff, "More", s.more_open).on_click(click(on, Act::More));
+            let mut m = option(
+                "profile-option-more",
+                "icons/dots-horizontal.svg",
+                33.,
+                0xffffff,
+                "More",
+                s.more_open,
+            )
+            .on_click(click(on, Act::More));
             if s.more_open {
-                let item = |id: &'static str, label: &'static str, icon: &'static str, danger: bool, a: Act| {
+                let item = |id: &'static str,
+                            label: &'static str,
+                            icon: &'static str,
+                            danger: bool,
+                            a: Act| {
                     let tint = if danger { c(DANGER) } else { c(OPTION_TEXT) };
                     div()
                         .id(id)
@@ -406,10 +635,16 @@ pub fn pane(store: &Store, s: &Screen, on: &OnAct, window: &Window, cx: &App) ->
                         .whitespace_nowrap()
                         .cursor_pointer()
                         .when(danger, |d| d.hover(|s| s.bg(ca(255, 46, 169, 0.1))))
-                        .when(!danger, |d| d.hover(|s| s.bg(c(0x2a2a2a)).text_color(c(0xffffff))))
+                        .when(!danger, |d| {
+                            d.hover(|s| s.bg(c(0x2a2a2a)).text_color(c(0xffffff)))
+                        })
                         .on_click(click(on, a))
                         .child(label)
-                        .child(svg().path(icon).size(px(18.)).text_color(if danger { c(DANGER) } else { c(0xffffff) }))
+                        .child(svg().path(icon).size(px(18.)).text_color(if danger {
+                            c(DANGER)
+                        } else {
+                            c(0xffffff)
+                        }))
                 };
                 let close = on.clone();
                 m = m.child(
@@ -434,8 +669,20 @@ pub fn pane(store: &Store, s: &Screen, on: &OnAct, window: &Window, cx: &App) ->
                             }])
                             .on_mouse_down_out(move |_, w, cx| close(Act::More, w, cx))
                             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                            .child(item("profile-more-nickname", "Nickname", "icons/edit.svg", false, Act::Nickname))
-                            .child(item("profile-more-block", if p.is_blocked { "Unblock" } else { "Block" }, "icons/x-user.svg", true, Act::Block)),
+                            .child(item(
+                                "profile-more-nickname",
+                                "Nickname",
+                                "icons/edit.svg",
+                                false,
+                                Act::Nickname,
+                            ))
+                            .child(item(
+                                "profile-more-block",
+                                if p.is_blocked { "Unblock" } else { "Block" },
+                                "icons/x-user.svg",
+                                true,
+                                Act::Block,
+                            )),
                     )
                     .with_priority(1),
                 );
@@ -449,14 +696,46 @@ pub fn pane(store: &Store, s: &Screen, on: &OnAct, window: &Window, cx: &App) ->
                 .w_full()
                 .flex()
                 .justify_center()
-                .child(option("profile-option-message", "icons/message.svg", 30., 0xffffff, "Message", false).on_click(click(on, Act::Message)))
                 .child(
-                    option("profile-option-mute", if muted { "icons/volume-mute.svg" } else { "icons/volume-max.svg" }, 30., 0xffffff, if muted { "Unmute" } else { "Mute" }, false)
-                        .on_click(click(on, Act::ToggleMute)),
+                    option(
+                        "profile-option-message",
+                        "icons/message.svg",
+                        30.,
+                        0xffffff,
+                        "Message",
+                        false,
+                    )
+                    .on_click(click(on, Act::Message)),
                 )
                 .child(
-                    option("profile-option-share", if s.copied(Act::Share) { "icons/check.svg" } else { "icons/share.svg" }, 30., PRIMARY, "Share", false)
-                        .on_click(click(on, Act::Share)),
+                    option(
+                        "profile-option-mute",
+                        if muted {
+                            "icons/volume-mute.svg"
+                        } else {
+                            "icons/volume-max.svg"
+                        },
+                        30.,
+                        0xffffff,
+                        if muted { "Unmute" } else { "Mute" },
+                        false,
+                    )
+                    .on_click(click(on, Act::ToggleMute)),
+                )
+                .child(
+                    option(
+                        "profile-option-share",
+                        if s.copied(Act::Share) {
+                            "icons/check.svg"
+                        } else {
+                            "icons/share.svg"
+                        },
+                        30.,
+                        PRIMARY,
+                        "Share",
+                        false,
+                    )
+                    .on_click(click(on, Act::Share)),
                 )
                 .child(more),
         );
@@ -473,7 +752,11 @@ pub fn pane(store: &Store, s: &Screen, on: &OnAct, window: &Window, cx: &App) ->
                 .text_size(px(14.))
                 .line_height(px(24.))
                 .opacity(if placeholder { 0.5 } else { 0.8 })
-                .child(if placeholder { "No description yet".to_string() } else { about }),
+                .child(if placeholder {
+                    "No description yet".to_string()
+                } else {
+                    about
+                }),
         )
         .child(
             div()
@@ -485,46 +768,53 @@ pub fn pane(store: &Store, s: &Screen, on: &OnAct, window: &Window, cx: &App) ->
                 .child(if mine { "My nPub Key" } else { "nPub Key" }),
         )
         .child(
-            div()
-                .mt(px(5.))
-                .mb(px(40.))
-                .w(gpui::relative(0.85))
-                .child(div().mx(px(-6.))
-                .flex()
-                .items_center()
-                .gap(px(4.))
-                .pl(px(8.))
-                .pr(px(4.))
-                .pb(px(4.))
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .text_center()
-                        .whitespace_nowrap()
-                        .text_size(px(14.))
-                        .line_height(px(24.))
-                        .opacity(0.9)
-                        .child(format!("{}...{}", &s.npub[..16.min(s.npub.len())], &s.npub[s.npub.len().saturating_sub(16)..])),
-                )
-                .child(
-                    div()
-                        .id("profile-npub-copy")
-                        .size(px(28.))
-                        .flex_shrink_0()
-                        .rounded(px(8.))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .cursor_pointer()
-                        .on_click(click(on, Act::CopyNpub))
-                        .child(
-                            svg()
-                                .path(if s.copied(Act::CopyNpub) { "icons/check.svg" } else { "icons/copy.svg" })
-                                .size(px(20.))
-                                .text_color(c(PRIMARY)),
-                        ),
-                )),
+            div().mt(px(5.)).mb(px(40.)).w(gpui::relative(0.85)).child(
+                div()
+                    .mx(px(-6.))
+                    .flex()
+                    .items_center()
+                    .gap(px(4.))
+                    .pl(px(8.))
+                    .pr(px(4.))
+                    .pb(px(4.))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_center()
+                            .whitespace_nowrap()
+                            .text_size(px(14.))
+                            .line_height(px(24.))
+                            .opacity(0.9)
+                            .child(format!(
+                                "{}...{}",
+                                &s.npub[..16.min(s.npub.len())],
+                                &s.npub[s.npub.len().saturating_sub(16)..]
+                            )),
+                    )
+                    .child(
+                        div()
+                            .id("profile-npub-copy")
+                            .size(px(28.))
+                            .flex_shrink_0()
+                            .rounded(px(8.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .cursor_pointer()
+                            .on_click(click(on, Act::CopyNpub))
+                            .child(
+                                svg()
+                                    .path(if s.copied(Act::CopyNpub) {
+                                        "icons/check.svg"
+                                    } else {
+                                        "icons/copy.svg"
+                                    })
+                                    .size(px(20.))
+                                    .text_color(c(PRIMARY)),
+                            ),
+                    ),
+            ),
         );
 
     frame(body, header, mine)
@@ -537,14 +827,29 @@ fn frame(body: gpui::Div, header: gpui::Div, mine: bool) -> AnyElement {
         .h_full()
         .relative()
         .bg(c(APP_BG))
-        .child(div().id("profile-content").absolute().top(px(60.)).left_0().right_0().bottom(px(if mine { 0. } else { 6. })).overflow_y_scroll().child(body))
+        .child(
+            div()
+                .id("profile-content")
+                .absolute()
+                .top(px(60.))
+                .left_0()
+                .right_0()
+                .bottom(px(if mine { 0. } else { 6. }))
+                .overflow_y_scroll()
+                .child(body),
+        )
         .child(header)
         .into_any_element()
 }
 
 /// `#profile-edit-bar`: Exit, the state of the draft, Save.
 fn edit_bar(dirty: bool, on: &OnAct) -> gpui::Div {
-    let side = |id: &'static str, icon: &'static str, size: f32, tint: Hsla, label: &'static str, a: Act| {
+    let side = |id: &'static str,
+                icon: &'static str,
+                size: f32,
+                tint: Hsla,
+                label: &'static str,
+                a: Act| {
         div()
             .id(id)
             .flex()
@@ -564,7 +869,14 @@ fn edit_bar(dirty: bool, on: &OnAct) -> gpui::Div {
         .items_center()
         .justify_between()
         .bg(c(0x151515))
-        .child(side("profile-edit-cancel-btn", "icons/edit-x.svg", 14., c(DANGER), "Exit", Act::ExitEdit(true)))
+        .child(side(
+            "profile-edit-cancel-btn",
+            "icons/edit-x.svg",
+            14.,
+            c(DANGER),
+            "Exit",
+            Act::ExitEdit(true),
+        ))
         .child(
             div()
                 .absolute()
@@ -576,15 +888,44 @@ fn edit_bar(dirty: bool, on: &OnAct) -> gpui::Div {
                 .line_height(px(24.))
                 .text_color(white_a(0.6))
                 .opacity(0.8)
-                .child(if dirty { "Unsaved Changes Made" } else { "Edit Mode is Enabled" }),
+                .child(if dirty {
+                    "Unsaved Changes Made"
+                } else {
+                    "Edit Mode is Enabled"
+                }),
         )
-        .child(side("profile-edit-save-btn", "icons/save.svg", 16., c(PRIMARY), "Save", Act::ExitEdit(false)))
+        .child(side(
+            "profile-edit-save-btn",
+            "icons/save.svg",
+            16.,
+            c(PRIMARY),
+            "Save",
+            Act::ExitEdit(false),
+        ))
 }
 
 /// `ProfileEditFields`: Remove Banner, Username and Bio.
 fn edit_fields(e: &Edit, no_banner: bool, on: &OnAct) -> gpui::Div {
-    let label = |text: &'static str| div().w_full().text_center().text_size(px(11.)).line_height(px(24.)).text_color(white_a(0.4)).child(text);
-    let wrapper = || div().w_full().mt(px(8.)).px(px(14.)).py(px(6.)).rounded(px(6.)).border_1().border_color(white_a(0.12)).bg(white_a(0.05));
+    let label = |text: &'static str| {
+        div()
+            .w_full()
+            .text_center()
+            .text_size(px(11.))
+            .line_height(px(24.))
+            .text_color(white_a(0.4))
+            .child(text)
+    };
+    let wrapper = || {
+        div()
+            .w_full()
+            .mt(px(8.))
+            .px(px(14.))
+            .py(px(6.))
+            .rounded(px(6.))
+            .border_1()
+            .border_color(white_a(0.12))
+            .bg(white_a(0.05))
+    };
     div()
         .mt(px(16.))
         .w(gpui::relative(0.9))
@@ -609,5 +950,9 @@ fn edit_fields(e: &Edit, no_banner: bool, on: &OnAct) -> gpui::Div {
         .child(label("USERNAME"))
         .child(wrapper().child(div().h(px(24.)).flex().items_center().child(e.name.clone())))
         .child(div().mt(px(12.)).child(label("BIO")))
-        .child(wrapper().pb(px(12.)).child(div().min_h(px(60.)).child(e.bio.clone())))
+        .child(
+            wrapper()
+                .pb(px(12.))
+                .child(div().min_h(px(60.)).child(e.bio.clone())),
+        )
 }

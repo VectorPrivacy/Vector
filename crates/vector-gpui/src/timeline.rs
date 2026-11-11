@@ -6,16 +6,19 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
 
-use gpui::{AnyElement, App, FontWeight, IntoElement, ParentElement, SharedString, Styled, Window, div, img, prelude::*, px, svg};
+use gpui::{
+    AnyElement, App, FontWeight, IntoElement, ParentElement, SharedString, Styled, Window, div,
+    img, prelude::*, px, svg,
+};
 use pulldown_cmark::Alignment;
 use vector_core::chat::SerializableChat;
 use vector_core::types::Message;
 
 use crate::data::{self, Store};
 use crate::emoji;
-use crate::media::Linked;
 use crate::inline::{Atom, Kind, Look, OnClick, Target, inline};
 use crate::markdown::{self, Block, MONO, Para, ParaKind};
+use crate::media::Linked;
 use crate::theme::*;
 
 pub const DANGER: u32 = 0xff2ea9;
@@ -55,7 +58,6 @@ pub enum Act {
 
 pub type OnAct = Rc<dyn Fn(&str, Act, &mut Window, &mut App)>;
 
-
 /// What the rows of one chat share while drawing.
 pub struct Ctx<'a> {
     pub store: &'a Store,
@@ -89,8 +91,16 @@ pub fn base_look() -> Look {
 
 fn avatar(store: &Store, npub: &str, size: f32) -> AnyElement {
     match store.avatar_path(npub) {
-        Some(path) => img(path).size(px(size)).rounded_full().flex_shrink_0().into_any_element(),
-        None => img("icons/user-placeholder.svg").size(px(size)).rounded_full().flex_shrink_0().into_any_element(),
+        Some(path) => img(path)
+            .size(px(size))
+            .rounded_full()
+            .flex_shrink_0()
+            .into_any_element(),
+        None => img("icons/user-placeholder.svg")
+            .size(px(size))
+            .rounded_full()
+            .flex_shrink_0()
+            .into_any_element(),
     }
 }
 
@@ -98,7 +108,9 @@ fn avatar(store: &Store, npub: &str, size: f32) -> AnyElement {
 pub fn message_row(ctx: &Ctx, index: usize, first: bool, gap: f32) -> AnyElement {
     let m = &ctx.chat.messages[index];
     let author = author_of(ctx, m);
-    let quote = (!m.replied_to.is_empty()).then(|| reply_quote(ctx, m)).flatten();
+    let quote = (!m.replied_to.is_empty())
+        .then(|| reply_quote(ctx, m))
+        .flatten();
     let has_quote = quote.is_some();
     let failed = m.mine && m.failed;
     let pending = m.mine && m.pending && !failed;
@@ -111,7 +123,13 @@ pub fn message_row(ctx: &Ctx, index: usize, first: bool, gap: f32) -> AnyElement
         .w(px(56.))
         .flex_shrink_0()
         .pr(px(16.))
-        .when(first, |g| g.child(div().mt(px(if has_quote { 26. } else { 2. })).child(avatar(ctx.store, &author, 40.))))
+        .when(first, |g| {
+            g.child(
+                div()
+                    .mt(px(if has_quote { 26. } else { 2. }))
+                    .child(avatar(ctx.store, &author, 40.)),
+            )
+        })
         .when(!first, |g| {
             g.child(
                 div()
@@ -157,8 +175,18 @@ pub fn message_row(ctx: &Ctx, index: usize, first: bool, gap: f32) -> AnyElement
                         .text_color(c(0xffffff))
                         .child(ctx.store.chat_name(&author, &ctx.chat.id)),
                 )
-                .children(crate::community::author_badge(ctx.store, &ctx.chat.id, &author))
-                .child(div().flex_shrink_0().text_size(px(12.)).text_color(white_a(0.4)).child(data::clock(m.at))),
+                .children(crate::community::author_badge(
+                    ctx.store,
+                    &ctx.chat.id,
+                    &author,
+                ))
+                .child(
+                    div()
+                        .flex_shrink_0()
+                        .text_size(px(12.))
+                        .text_color(white_a(0.4))
+                        .child(data::clock(m.at)),
+                ),
         );
     }
     body = body.child(
@@ -167,12 +195,25 @@ pub fn message_row(ctx: &Ctx, index: usize, first: bool, gap: f32) -> AnyElement
             .child(content(ctx, m))
             .children(crate::attachments::attachments(ctx, m))
             .children(crate::packs::cards(ctx, m))
-            .when(!ctx.held && !m.content.is_empty(), |d| d.children(crate::newchat::invite_card_keys(&m.content).into_iter().map(|k| invite_card(ctx, m, k))))
+            .when(!ctx.held && !m.content.is_empty(), |d| {
+                d.children(
+                    crate::newchat::invite_card_keys(&m.content)
+                        .into_iter()
+                        .map(|k| invite_card(ctx, m, k)),
+                )
+            })
             .children(crate::embeds::cards(ctx, m))
             .children(crate::linkcard::card(ctx, m)),
     );
     if let Some(reason) = ctx.fail_reasons.get(&m.id).filter(|_| failed) {
-        body = body.child(div().mt(px(4.)).text_size(px(12.)).line_height(px(16.2)).text_color(c(DANGER)).child(reason.clone()));
+        body = body.child(
+            div()
+                .mt(px(4.))
+                .text_size(px(12.))
+                .line_height(px(16.2))
+                .text_color(c(DANGER))
+                .child(reason.clone()),
+        );
     }
     if let Some(r) = reactions(ctx, m) {
         body = body.child(r);
@@ -199,10 +240,14 @@ pub fn message_row(ctx: &Ctx, index: usize, first: bool, gap: f32) -> AnyElement
                 .font_family(RUBIK)
                 .hover(|s| s.bg(white_a(0.03)))
                 .when(replying, |d| d.bg(white_a(0.05)).border_color(white_a(0.5)))
-                .when(failed, |d| d.bg(ca(255, 46, 169, 0.1)).border_color(c(DANGER)))
+                .when(failed, |d| {
+                    d.bg(ca(255, 46, 169, 0.1)).border_color(c(DANGER))
+                })
                 .child(gutter)
                 .child(body)
-                .when(hovered || ctx.picker == Some(m.id.as_str()), |d| d.children(toolbar(ctx, m, first))),
+                .when(hovered || ctx.picker == Some(m.id.as_str()), |d| {
+                    d.children(toolbar(ctx, m, first))
+                }),
         )
         .into_any_element()
 }
@@ -217,11 +262,19 @@ fn author_of(ctx: &Ctx, m: &Message) -> String {
 
 /// A message's NIP-30 tags as the renderer asks for them: a web URL through the emoji cache,
 /// a fixture's path from beside its file.
-pub fn custom_emoji<'a>(store: &'a Store, media: &'a std::cell::RefCell<crate::media::Media>, tags: &'a [vector_core::types::EmojiTag]) -> Option<impl Fn(&str) -> Option<crate::media::Custom> + 'a> {
+pub fn custom_emoji<'a>(
+    store: &'a Store,
+    media: &'a std::cell::RefCell<crate::media::Media>,
+    tags: &'a [vector_core::types::EmojiTag],
+) -> Option<impl Fn(&str) -> Option<crate::media::Custom> + 'a> {
     (!tags.is_empty()).then(move || {
         move |code: &str| {
             let tag = tags.iter().find(|t| t.shortcode == code)?;
-            Some(media.borrow_mut().custom(&emoji_source(store, &tag.url), false))
+            Some(
+                media
+                    .borrow_mut()
+                    .custom(&emoji_source(store, &tag.url), false),
+            )
         }
     })
 }
@@ -254,7 +307,8 @@ fn content(ctx: &Ctx, m: &Message) -> AnyElement {
     // Emoji-only, up to six: jumbo glyphs (`.dmsg-emoji-only`).
     let headed = text.lines().any(|l| {
         let t = l.trim_start();
-        t.starts_with("-# ") || (t.starts_with('#') && t.trim_start_matches('#').starts_with([' ', '\t']))
+        t.starts_with("-# ")
+            || (t.starts_with('#') && t.trim_start_matches('#').starts_with([' ', '\t']))
     });
     if !headed && let Some(n @ 1..=6) = emoji::only_emoji_count(&text) {
         let _ = n;
@@ -264,11 +318,25 @@ fn content(ctx: &Ctx, m: &Message) -> AnyElement {
                 row = row.child(img(src).size(px(50.)).flex_shrink_0());
             }
         }
-        return div().flex().items_end().child(row).children(marks(m)).into_any_element();
+        return div()
+            .flex()
+            .items_end()
+            .child(row)
+            .children(marks(m))
+            .into_any_element();
     }
 
     let custom = custom_emoji(ctx.store, ctx.media, &m.emoji_tags);
-    let mut blocks = markdown::parse(text.trim(), &markdown::Ctx { base: base_look(), revealed, custom: custom.as_ref().map(|f| f as &dyn Fn(&str) -> Option<crate::media::Custom>) });
+    let mut blocks = markdown::parse(
+        text.trim(),
+        &markdown::Ctx {
+            base: base_look(),
+            revealed,
+            custom: custom
+                .as_ref()
+                .map(|f| f as &dyn Fn(&str) -> Option<crate::media::Custom>),
+        },
+    );
     let trail = trailing_atoms(m);
     if !trail.is_empty() {
         match blocks.last_mut() {
@@ -277,7 +345,11 @@ fn content(ctx: &Ctx, m: &Message) -> AnyElement {
                 atoms.extend(trail);
                 p.atoms = atoms.into();
             }
-            _ => blocks.push(Block::Para(Para { atoms: trail.into(), base: base_look(), kind: ParaKind::Text })),
+            _ => blocks.push(Block::Para(Para {
+                atoms: trail.into(),
+                base: base_look(),
+                kind: ParaKind::Text,
+            })),
         }
     }
     let pieces = linked_pictures(ctx, blocks);
@@ -290,20 +362,32 @@ fn content(ctx: &Ctx, m: &Message) -> AnyElement {
             Piece::Block(b, _) => b,
             Piece::Picture { image, w, h } => {
                 // `.inline-image`: its own size, no taller than 400px nor wider than the bubble.
-                let open = crate::viewer::Open { image: image.clone(), w: *w, h: *h, full: None };
+                let open = crate::viewer::Open {
+                    image: image.clone(),
+                    w: *w,
+                    h: *h,
+                    full: None,
+                };
                 let s = (400. / *h as f32).min(1.);
                 let (w, h) = (*w as f32 * s, *h as f32 * s);
                 let (on_act, mid) = (ctx.on_act.clone(), m.id.clone());
                 col = col.child(
-                    div().id(SharedString::from(format!("linked-{}-{i}", m.id))).w(px(w)).max_w_full().cursor_pointer().on_click(move |_, win, cx| {
-                        cx.stop_propagation();
-                        on_act(&mid, Act::View(open.clone()), win, cx)
-                    }).child(
-                    img(image.clone())
-                        .w_full()
-                        .aspect_ratio(w / h.max(1.))
-                        .rounded(px(8.))
-                        .hover(|s| s.opacity(0.9))),
+                    div()
+                        .id(SharedString::from(format!("linked-{}-{i}", m.id)))
+                        .w(px(w))
+                        .max_w_full()
+                        .cursor_pointer()
+                        .on_click(move |_, win, cx| {
+                            cx.stop_propagation();
+                            on_act(&mid, Act::View(open.clone()), win, cx)
+                        })
+                        .child(
+                            img(image.clone())
+                                .w_full()
+                                .aspect_ratio(w / h.max(1.))
+                                .rounded(px(8.))
+                                .hover(|s| s.opacity(0.9)),
+                        ),
                 );
                 prev_bottom = Some(0.);
                 prev_para = false;
@@ -320,7 +404,12 @@ fn content(ctx: &Ctx, m: &Message) -> AnyElement {
             Some(pb) => pb.max(top),
             None => top,
         };
-        col = col.child(div().mt(px(gap)).child(block(b, &format!("{}-{i}", m.id), &click, ctx.clock)));
+        col = col.child(div().mt(px(gap)).child(block(
+            b,
+            &format!("{}-{i}", m.id),
+            &click,
+            ctx.clock,
+        )));
         prev_bottom = Some(bottom);
         prev_para = is_para;
     }
@@ -333,7 +422,11 @@ fn content(ctx: &Ctx, m: &Message) -> AnyElement {
 enum Piece {
     /// A block, and whether it continues the paragraph a picture split.
     Block(Block, bool),
-    Picture { image: Arc<gpui::RenderImage>, w: u32, h: u32 },
+    Picture {
+        image: Arc<gpui::RenderImage>,
+        w: u32,
+        h: u32,
+    },
 }
 
 /// `isImageUrl`: the path ends in a picture's extension, or the text names one anywhere.
@@ -341,7 +434,8 @@ pub fn is_image_url(url: &str) -> bool {
     const EXTS: [&str; 8] = ["png", "jpg", "jpeg", "gif", "webp", "bmp", "ico", "svg"];
     let lower = url.to_ascii_lowercase();
     let path = lower.split(['?', '#']).next().unwrap_or("");
-    EXTS.iter().any(|e| path.ends_with(&format!(".{e}")) || lower.contains(&format!(".{e}")))
+    EXTS.iter()
+        .any(|e| path.ends_with(&format!(".{e}")) || lower.contains(&format!(".{e}")))
 }
 
 /// Links to pictures, as `processInlineImages` swaps them: a ring beside the link while it
@@ -353,19 +447,32 @@ fn linked_pictures(ctx: &Ctx, blocks: Vec<Block>) -> Vec<Piece> {
             out.push(Piece::Block(b, false));
             continue;
         };
-        if !p.atoms.iter().any(|a| matches!(a, Atom::Text { kind: Kind::Link(u), .. } if is_image_url(u))) {
+        if !p
+            .atoms
+            .iter()
+            .any(|a| matches!(a, Atom::Text { kind: Kind::Link(u), .. } if is_image_url(u)))
+        {
             out.push(Piece::Block(Block::Para(p), false));
             continue;
         }
         let (base, kind) = (p.base.clone(), p.kind.clone());
-        let para = |atoms: Vec<Atom>| Block::Para(Para { atoms: atoms.into(), base: base.clone(), kind: kind.clone() });
+        let para = |atoms: Vec<Atom>| {
+            Block::Para(Para {
+                atoms: atoms.into(),
+                base: base.clone(),
+                kind: kind.clone(),
+            })
+        };
         let mut run: Vec<Atom> = Vec::new();
         let mut cont = false;
         let atoms: Vec<Atom> = p.atoms.iter().cloned().collect();
         let mut i = 0;
         while i < atoms.len() {
             let url = match &atoms[i] {
-                Atom::Text { kind: Kind::Link(u), .. } if is_image_url(u) => u.clone(),
+                Atom::Text {
+                    kind: Kind::Link(u),
+                    ..
+                } if is_image_url(u) => u.clone(),
                 a => {
                     run.push(a.clone());
                     i += 1;
@@ -374,7 +481,9 @@ fn linked_pictures(ctx: &Ctx, blocks: Vec<Block>) -> Vec<Piece> {
             };
             // The link's text, however many runs it spans.
             let mut end = i;
-            while end < atoms.len() && matches!(&atoms[end], Atom::Text { kind: Kind::Link(u), .. } if *u == url) {
+            while end < atoms.len()
+                && matches!(&atoms[end], Atom::Text { kind: Kind::Link(u), .. } if *u == url)
+            {
                 end += 1;
             }
             match ctx.media.borrow_mut().linked(&url) {
@@ -390,7 +499,11 @@ fn linked_pictures(ctx: &Ctx, blocks: Vec<Block>) -> Vec<Piece> {
                     {
                         let rest = text.trim_start_matches(' ');
                         if !rest.is_empty() {
-                            run.push(Atom::Text { text: rest.to_string().into(), look: look.clone(), kind: kind.clone() });
+                            run.push(Atom::Text {
+                                text: rest.to_string().into(),
+                                look: look.clone(),
+                                kind: kind.clone(),
+                            });
                         }
                         end += 1;
                     }
@@ -427,13 +540,25 @@ fn margins(b: &Block, first: bool, last: bool) -> (f32, f32) {
     };
     // A heading first or last in the text drops that margin.
     let heading = matches!(b, Block::Para(p) if matches!(p.kind, ParaKind::Heading(_)));
-    (if heading && first { 0. } else { t }, if heading && last { 0. } else { bt })
+    (
+        if heading && first { 0. } else { t },
+        if heading && last { 0. } else { bt },
+    )
 }
 
 fn block(b: &Block, key: &str, click: &OnClick, clock: f32) -> AnyElement {
     match b {
-        Block::Para(p) => inline(p.atoms.clone(), p.base.clone()).id(SharedString::from(key.to_string())).on_click(click.clone()).clock(clock).into_any_element(),
-        Block::Rule => div().min_w(px(192.)).w_full().h(px(1.)).bg(white_a(0.2)).into_any_element(),
+        Block::Para(p) => inline(p.atoms.clone(), p.base.clone())
+            .id(SharedString::from(key.to_string()))
+            .on_click(click.clone())
+            .clock(clock)
+            .into_any_element(),
+        Block::Rule => div()
+            .min_w(px(192.))
+            .w_full()
+            .h(px(1.))
+            .bg(white_a(0.2))
+            .into_any_element(),
         Block::Quote(inner) => div()
             .border_l(px(3.))
             .border_color(c(ACCENT))
@@ -491,7 +616,11 @@ pub fn stack(blocks: &[Block], key: &str, click: &OnClick, clock: f32, lh: f32) 
             Some((pb, _)) => pb.max(top),
             None => 0.,
         };
-        col = col.child(div().mt(px(gap)).child(block(b, &format!("{key}-{i}"), click, clock)));
+        col = col.child(
+            div()
+                .mt(px(gap))
+                .child(block(b, &format!("{key}-{i}"), click, clock)),
+        );
         prev = Some((bottom, is_para));
     }
     col.into_any_element()
@@ -500,16 +629,28 @@ pub fn stack(blocks: &[Block], key: &str, click: &OnClick, clock: f32, lh: f32) 
 /// `.code-block-wrapper` + `pre code.hljs` (GitHub Dark).
 fn code_block(lang: &str, text: &SharedString, key: &str, click: &OnClick) -> AnyElement {
     let mut lines = div().flex().flex_col();
-    for (line, runs) in text.split('\n').zip(crate::highlight::highlight(text, lang)) {
+    for (line, runs) in text
+        .split('\n')
+        .zip(crate::highlight::highlight(text, lang))
+    {
         let font = gpui::font(MONO);
         let runs: Vec<gpui::TextRun> = runs
             .into_iter()
-            .map(|(len, color)| gpui::TextRun { len, font: font.clone(), color, background_color: None, underline: None, strikethrough: None })
+            .map(|(len, color)| gpui::TextRun {
+                len,
+                font: font.clone(),
+                color,
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            })
             .collect();
         let el: AnyElement = if line.is_empty() {
             div().child(" ").into_any_element()
         } else {
-            gpui::StyledText::new(line.to_string()).with_runs(runs).into_any_element()
+            gpui::StyledText::new(line.to_string())
+                .with_runs(runs)
+                .into_any_element()
         };
         lines = lines.child(div().h(px(19.5)).whitespace_nowrap().child(el));
     }
@@ -524,7 +665,15 @@ fn code_block(lang: &str, text: &SharedString, key: &str, click: &OnClick) -> An
         .border_color(white_a(0.1))
         .bg(c(0x0d1117))
         .overflow_hidden()
-        .child(div().p(px(13.)).font_family(MONO).text_size(px(13.)).line_height(px(19.5)).text_color(c(crate::highlight::PLAIN)).child(lines))
+        .child(
+            div()
+                .p(px(13.))
+                .font_family(MONO)
+                .text_size(px(13.))
+                .line_height(px(19.5))
+                .text_color(c(crate::highlight::PLAIN))
+                .child(lines),
+        )
         .child(
             div()
                 .id(SharedString::from(format!("{key}-copy")))
@@ -537,18 +686,34 @@ fn code_block(lang: &str, text: &SharedString, key: &str, click: &OnClick) -> An
                 .border_color(ca(89, 252, 179, 0.3))
                 .bg(ca(0, 0, 0, 0.6))
                 .opacity(0.7)
-                .hover(|s| s.opacity(1.).bg(ca(0, 0, 0, 0.8)).border_color(ca(89, 252, 179, 0.5)))
+                .hover(|s| {
+                    s.opacity(1.)
+                        .bg(ca(0, 0, 0, 0.8))
+                        .border_color(ca(89, 252, 179, 0.5))
+                })
                 .cursor_pointer()
                 .flex()
                 .items_center()
                 .justify_center()
                 .on_click(move |_, w, cx| copy(Target::Code(code.clone()), w, cx))
-                .child(svg().path("icons/copy.svg").size(px(16.)).text_color(c(ACCENT))),
+                .child(
+                    svg()
+                        .path("icons/copy.svg")
+                        .size(px(16.))
+                        .text_color(c(ACCENT)),
+                ),
         )
         .into_any_element()
 }
 
-fn table(align: &[Alignment], head: &[Para], rows: &[Vec<Para>], key: &str, click: &OnClick, clock: f32) -> AnyElement {
+fn table(
+    align: &[Alignment],
+    head: &[Para],
+    rows: &[Vec<Para>],
+    key: &str,
+    click: &OnClick,
+    clock: f32,
+) -> AnyElement {
     let cell = |p: &Para, i: usize, header: bool, k: String| {
         let mut base = p.base.clone();
         if header {
@@ -564,16 +729,34 @@ fn table(align: &[Alignment], head: &[Para], rows: &[Vec<Para>], key: &str, clic
             Some(Alignment::Center) => d.flex().justify_center(),
             _ => d,
         };
-        d.child(inline(p.atoms.clone(), base).id(SharedString::from(k)).on_click(click.clone()).clock(clock))
+        d.child(
+            inline(p.atoms.clone(), base)
+                .id(SharedString::from(k))
+                .on_click(click.clone())
+                .clock(clock),
+        )
     };
-    let mut t = div().flex().flex_col().rounded(px(8.)).border_1().border_color(white_a(0.08)).bg(white_a(0.015)).overflow_hidden();
-    let mut hrow = div().flex().bg(ca(89, 252, 179, 0.04)).border_b_1().border_color(ca(89, 252, 179, 0.18));
+    let mut t = div()
+        .flex()
+        .flex_col()
+        .rounded(px(8.))
+        .border_1()
+        .border_color(white_a(0.08))
+        .bg(white_a(0.015))
+        .overflow_hidden();
+    let mut hrow = div()
+        .flex()
+        .bg(ca(89, 252, 179, 0.04))
+        .border_b_1()
+        .border_color(ca(89, 252, 179, 0.18));
     for (i, p) in head.iter().enumerate() {
         hrow = hrow.child(cell(p, i, true, format!("{key}-h{i}")));
     }
     t = t.child(hrow);
     for (r, row) in rows.iter().enumerate() {
-        let mut d = div().flex().when(r + 1 < rows.len(), |d| d.border_b_1().border_color(white_a(0.05)));
+        let mut d = div().flex().when(r + 1 < rows.len(), |d| {
+            d.border_b_1().border_color(white_a(0.05))
+        });
         for (i, p) in row.iter().enumerate() {
             d = d.child(cell(p, i, false, format!("{key}-{r}-{i}")));
         }
@@ -586,7 +769,11 @@ fn table(align: &[Alignment], head: &[Para], rows: &[Vec<Para>], key: &str, clic
 fn trailing_atoms(m: &Message) -> Vec<Atom> {
     let mut out = Vec::new();
     if m.edited {
-        out.push(Atom::Text { text: " ".into(), look: base_look(), kind: Kind::Plain });
+        out.push(Atom::Text {
+            text: " ".into(),
+            look: base_look(),
+            kind: Kind::Plain,
+        });
         out.push(Atom::Gap(6.));
         out.push(Atom::Text {
             text: "(edited)".into(),
@@ -599,7 +786,15 @@ fn trailing_atoms(m: &Message) -> Vec<Atom> {
 
 /// Marks beside a jumbo-emoji message.
 fn marks(m: &Message) -> Option<AnyElement> {
-    m.edited.then(|| div().ml(px(6.)).pb(px(4.)).text_size(px(10.)).text_color(white_a(0.4)).child("(edited)").into_any_element())
+    m.edited.then(|| {
+        div()
+            .ml(px(6.))
+            .pb(px(4.))
+            .text_size(px(10.))
+            .text_color(white_a(0.4))
+            .child("(edited)")
+            .into_any_element()
+    })
 }
 
 /// `.dmsg-reactions`: one chip per emoji in first-seen order, then the add button.
@@ -621,18 +816,33 @@ fn reactions(ctx: &Ctx, m: &Message) -> Option<AnyElement> {
     }
     let mut row = div().flex().flex_wrap().gap(px(4.)).mt(px(4.)).mb(px(4.));
     for (emoji_str, count, mine, url) in groups {
-        let custom = url.map(|u| ctx.media.borrow_mut().custom(&emoji_source(ctx.store, u), false));
+        let custom = url.map(|u| {
+            ctx.media
+                .borrow_mut()
+                .custom(&emoji_source(ctx.store, u), false)
+        });
         let glyph: AnyElement = match (custom, emoji::twemoji(emoji_str)) {
-            (Some(crate::media::Custom::Ready(image)), _) => img(image).size(px(16.)).aspect_ratio(1.).object_fit(gpui::ObjectFit::Contain).into_any_element(),
+            (Some(crate::media::Custom::Ready(image)), _) => img(image)
+                .size(px(16.))
+                .aspect_ratio(1.)
+                .object_fit(gpui::ObjectFit::Contain)
+                .into_any_element(),
             (Some(crate::media::Custom::Pending), _) => div().size(px(16.)).into_any_element(),
             (_, Some(src)) => img(src).size(px(16.)).into_any_element(),
-            _ => div().text_size(px(12.)).child(emoji_str.to_string()).into_any_element(),
+            _ => div()
+                .text_size(px(12.))
+                .child(emoji_str.to_string())
+                .into_any_element(),
         };
         let (act, id, e) = (ctx.on_act.clone(), m.id.clone(), emoji_str.to_string());
         row = row.child(
             div()
                 .id(SharedString::from(format!("{}-r-{emoji_str}", m.id)))
-                .when(!mine, |d| d.cursor_pointer().hover(|s| s.bg(white_a(0.1)).opacity(1.)).on_click(move |_, w, cx| act(&id, Act::ReactWith(e.clone()), w, cx)))
+                .when(!mine, |d| {
+                    d.cursor_pointer()
+                        .hover(|s| s.bg(white_a(0.1)).opacity(1.))
+                        .on_click(move |_, w, cx| act(&id, Act::ReactWith(e.clone()), w, cx))
+                })
                 .flex()
                 .items_center()
                 .gap(px(4.))
@@ -641,7 +851,9 @@ fn reactions(ctx: &Ctx, m: &Message) -> Option<AnyElement> {
                 .rounded(px(6.))
                 .border_1()
                 .opacity(0.9)
-                .when(mine, |d| d.bg(ca(89, 252, 179, 0.18)).border_color(c(ACCENT)))
+                .when(mine, |d| {
+                    d.bg(ca(89, 252, 179, 0.18)).border_color(c(ACCENT))
+                })
                 .when(!mine, |d| d.bg(white_a(0.05)).border_color(white_a(0.08)))
                 .text_size(px(12.))
                 .line_height(px(12.))
@@ -665,7 +877,12 @@ fn reactions(ctx: &Ctx, m: &Message) -> Option<AnyElement> {
             .border_1()
             .border_color(white_a(0.08))
             .bg(white_a(0.04))
-            .child(svg().path("icons/smile-face.svg").size(px(14.)).text_color(white_a(0.55))),
+            .child(
+                svg()
+                    .path("icons/smile-face.svg")
+                    .size(px(14.))
+                    .text_color(white_a(0.55)),
+            ),
     );
     Some(row.into_any_element())
 }
@@ -673,25 +890,43 @@ fn reactions(ctx: &Ctx, m: &Message) -> Option<AnyElement> {
 /// `.dmsg-reply`: the quoted parent above a reply, one line, with the elbow from the avatar.
 fn reply_quote(ctx: &Ctx, m: &Message) -> Option<AnyElement> {
     let parent = ctx.chat.messages.iter().find(|p| p.id == m.replied_to);
-    let content = m.replied_to_content.clone().or_else(|| parent.map(|p| p.content.clone()));
-    let has_attachment = m.replied_to_has_attachment.unwrap_or(false) || parent.is_some_and(|p| !p.attachments.is_empty());
+    let content = m
+        .replied_to_content
+        .clone()
+        .or_else(|| parent.map(|p| p.content.clone()));
+    let has_attachment = m.replied_to_has_attachment.unwrap_or(false)
+        || parent.is_some_and(|p| !p.attachments.is_empty());
     if content.is_none() && !has_attachment {
         return None;
     }
-    let mine = parent.map(|p| p.mine).unwrap_or_else(|| m.replied_to_npub.as_deref() == Some(ctx.store.my_npub.as_str()));
+    let mine = parent
+        .map(|p| p.mine)
+        .unwrap_or_else(|| m.replied_to_npub.as_deref() == Some(ctx.store.my_npub.as_str()));
     let npub = if mine {
         ctx.store.my_npub.clone()
     } else {
-        m.replied_to_npub.clone().or_else(|| parent.and_then(|p| p.npub.clone())).unwrap_or_else(|| ctx.chat.id.clone())
+        m.replied_to_npub
+            .clone()
+            .or_else(|| parent.and_then(|p| p.npub.clone()))
+            .unwrap_or_else(|| ctx.chat.id.clone())
     };
     let snippet: AnyElement = match content.filter(|c| !c.is_empty()) {
         Some(text) => {
             let mut look = Look::new(RUBIK, 13., 16.9, white_a(0.45));
             look.weight = FontWeight::NORMAL;
             let atoms = crate::preview::reply_atoms(&text, &look);
-            div().flex_1().min_w_0().overflow_hidden().h(px(16.9)).child(inline(atoms, look)).into_any_element()
+            div()
+                .flex_1()
+                .min_w_0()
+                .overflow_hidden()
+                .h(px(16.9))
+                .child(inline(atoms, look))
+                .into_any_element()
         }
-        None => div().text_color(white_a(0.45)).child("Attachment").into_any_element(),
+        None => div()
+            .text_color(white_a(0.45))
+            .child("Attachment")
+            .into_any_element(),
     };
     let elbow = div()
         .absolute()
@@ -742,7 +977,12 @@ fn toolbar(ctx: &Ctx, m: &Message, first: bool) -> Option<AnyElement> {
     }
     if m.mine && m.failed {
         acts.push(("icons/refresh.svg", "Retry send", Act::Retry, false));
-        acts.push(("icons/trash.svg", "Delete failed message", Act::Delete, true));
+        acts.push((
+            "icons/trash.svg",
+            "Delete failed message",
+            Act::Delete,
+            true,
+        ));
     } else {
         let unique: HashSet<&str> = m.reactions.iter().map(|r| r.emoji.as_str()).collect();
         if unique.len() < 8 {
@@ -770,7 +1010,13 @@ fn toolbar(ctx: &Ctx, m: &Message, first: bool) -> Option<AnyElement> {
         .border_1()
         .border_color(white_a(0.08))
         .bg(c(0x1a1a1a))
-        .shadow(vec![gpui::BoxShadow { color: ca(0, 0, 0, 0.5), offset: gpui::point(px(0.), px(4.)), blur_radius: px(14.), spread_radius: px(0.), inset: false }])
+        .shadow(vec![gpui::BoxShadow {
+            color: ca(0, 0, 0, 0.5),
+            offset: gpui::point(px(0.), px(4.)),
+            blur_radius: px(14.),
+            spread_radius: px(0.),
+            inset: false,
+        }])
         .occlude()
         .on_hover({
             let (act, id) = (ctx.on_act.clone(), m.id.clone());
@@ -790,12 +1036,11 @@ fn toolbar(ctx: &Ctx, m: &Message, first: bool) -> Option<AnyElement> {
                 .group("tb-btn")
                 .hover(|s| s.bg(white_a(0.08)))
                 .on_click(move |_, w, cx| on(&id, act.clone(), w, cx))
-                .child(
-                    svg()
-                        .path(icon)
-                        .size(px(20.))
-                        .text_color(if danger { c(DANGER) } else { white_a(0.7) }),
-                ),
+                .child(svg().path(icon).size(px(20.)).text_color(if danger {
+                    c(DANGER)
+                } else {
+                    white_a(0.7)
+                })),
         );
     }
     let root = div().absolute().top_0().right_0().child(bar);
@@ -813,7 +1058,10 @@ fn invite_card(ctx: &Ctx, m: &Message, key: String) -> AnyElement {
     let (name, desc) = match (state, joined) {
         (_, Some(c)) => (Some(c.name.clone()), c.description.clone()),
         (Some(Preview::Ready(i)), None) => (Some(i.name.clone()), i.description.clone()),
-        (Some(Preview::Failed), _) => (Some("Invite Unavailable".to_string()), "This invite could not be loaded — it may be revoked or expired.".to_string()),
+        (Some(Preview::Failed), _) => (
+            Some("Invite Unavailable".to_string()),
+            "This invite could not be loaded — it may be revoked or expired.".to_string(),
+        ),
         _ => (None, String::new()),
     };
     let invalid = matches!(state, Some(Preview::Failed));
@@ -833,9 +1081,19 @@ fn invite_card(ctx: &Ctx, m: &Message, key: String) -> AnyElement {
             .rounded(px(8.))
             .font_weight(FontWeight::SEMIBOLD)
             .text_size(px(13.))
-            .map(|d| if joined.is_some() { d.bg(white_a(0.08)).text_color(c(0xffffff)) } else { d.bg(c(ACCENT)).text_color(c(0x0e0e0e)) })
+            .map(|d| {
+                if joined.is_some() {
+                    d.bg(white_a(0.08)).text_color(c(0xffffff))
+                } else {
+                    d.bg(c(ACCENT)).text_color(c(0x0e0e0e))
+                }
+            })
             .when(!ready, |d| d.opacity(0.55))
-            .when(ready, |d| d.cursor_pointer().hover(|d| d.opacity(0.9)).on_click(move |_, w, cx| act(&id, Act::Invite(k.clone()), w, cx)))
+            .when(ready, |d| {
+                d.cursor_pointer()
+                    .hover(|d| d.opacity(0.9))
+                    .on_click(move |_, w, cx| act(&id, Act::Invite(k.clone()), w, cx))
+            })
             .child(if joined.is_some() { "Open" } else { "Join" })
     });
     div()
@@ -849,7 +1107,13 @@ fn invite_card(ctx: &Ctx, m: &Message, key: String) -> AnyElement {
         .flex()
         .flex_col()
         .gap(px(10.))
-        .child(crate::kit::spaced("COMMUNITY INVITE", 0.9).font_weight(FontWeight::BOLD).text_size(px(10.)).line_height(px(14.)).text_color(white_a(0.45)))
+        .child(
+            crate::kit::spaced("COMMUNITY INVITE", 0.9)
+                .font_weight(FontWeight::BOLD)
+                .text_size(px(10.))
+                .line_height(px(14.))
+                .text_color(white_a(0.45)),
+        )
         .child(
             div()
                 .flex()
@@ -857,10 +1121,12 @@ fn invite_card(ctx: &Ctx, m: &Message, key: String) -> AnyElement {
                 .gap(px(10.))
                 .min_w_0()
                 .child(
-                    match joined.and_then(|c| ctx.store.icon(&c.community_id)).or_else(|| match state {
-                        Some(Preview::Ready(i)) => i.icon.clone().map(std::path::PathBuf::from),
-                        _ => None,
-                    }) {
+                    match joined
+                        .and_then(|c| ctx.store.icon(&c.community_id))
+                        .or_else(|| match state {
+                            Some(Preview::Ready(i)) => i.icon.clone().map(std::path::PathBuf::from),
+                            _ => None,
+                        }) {
                         Some(path) => img(path).object_fit(gpui::ObjectFit::Cover),
                         None => img("icons/group-placeholder.svg"),
                     }
@@ -879,8 +1145,29 @@ fn invite_card(ctx: &Ctx, m: &Message, key: String) -> AnyElement {
                         .gap(px(2.))
                         .map(|d| match name {
                             Some(name) => d
-                                .child(div().truncate().font_weight(FontWeight::SEMIBOLD).text_size(px(14.)).line_height(px(19.6)).text_color(if invalid { white_a(0.6) } else { c(0xffffff) }).child(name))
-                                .when(!desc.is_empty(), |d| d.child(div().text_size(px(11.)).line_height(px(14.85)).text_color(white_a(0.55)).line_clamp(2).child(desc))),
+                                .child(
+                                    div()
+                                        .truncate()
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_size(px(14.))
+                                        .line_height(px(19.6))
+                                        .text_color(if invalid {
+                                            white_a(0.6)
+                                        } else {
+                                            c(0xffffff)
+                                        })
+                                        .child(name),
+                                )
+                                .when(!desc.is_empty(), |d| {
+                                    d.child(
+                                        div()
+                                            .text_size(px(11.))
+                                            .line_height(px(14.85))
+                                            .text_color(white_a(0.55))
+                                            .line_clamp(2)
+                                            .child(desc),
+                                    )
+                                }),
                             None => d.child(skel(140., 14.)).child(skel(200., 10.)),
                         }),
                 )

@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use futures::stream::{self, StreamExt};
 use nostr_sdk::prelude::*;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use vector_core::community::transport::LiveTransport;
 use vector_core::community::v2::community::CommunityV2;
 use vector_core::community::v2::realtime;
@@ -14,7 +14,7 @@ use vector_core::community::v2::volley::{self, PaintTarget};
 use vector_core::community::{ChannelId, CommunityId};
 use vector_core::sending::SendCallback;
 use vector_core::simd::hex::bytes_to_hex_32;
-use vector_core::{db, Message, VectorCore, STATE};
+use vector_core::{Message, STATE, VectorCore, db};
 
 use super::messaging::Callback;
 
@@ -26,11 +26,13 @@ fn id32(hex: &str) -> Result<[u8; 32], String> {
 }
 
 fn is_held(community_id: &str) -> bool {
-    id32(community_id).is_ok_and(|b| db::community::community_held(&CommunityId(b)).unwrap_or(false))
+    id32(community_id)
+        .is_ok_and(|b| db::community::community_held(&CommunityId(b)).unwrap_or(false))
 }
 
 fn load(community_id: &str) -> Result<CommunityV2, String> {
-    db::community::load_community_v2(&CommunityId(id32(community_id)?))?.ok_or_else(|| "Community not found".to_string())
+    db::community::load_community_v2(&CommunityId(id32(community_id)?))?
+        .ok_or_else(|| "Community not found".to_string())
 }
 
 /// `list_communities`' shape, which `data::Community` reads.
@@ -100,36 +102,59 @@ pub async fn members(community_id: String) -> (Vec<String>, Vec<String>) {
 pub async fn sync_channel(channel_id: String, before_ms: Option<u64>) -> Result<bool, String> {
     use vector_core::community::cache;
     let is_older = before_ms.is_some();
-    let Some(_claim) = cache::claim_page_fetch(&channel_id, is_older) else { return Ok(false) };
-    let community_id = db::community::community_id_for_channel(&channel_id)?.ok_or("Unknown Community channel")?;
+    let Some(_claim) = cache::claim_page_fetch(&channel_id, is_older) else {
+        return Ok(false);
+    };
+    let community_id =
+        db::community::community_id_for_channel(&channel_id)?.ok_or("Unknown Community channel")?;
     if !is_held(&community_id) {
         return Ok(true);
     }
     const LIMIT: usize = 50;
     let before = before_ms.map(|m| m / 1000);
-    let count = db::scoped(VectorCore.sync_community_channel_page(&channel_id, LIMIT, before, None)).await.map(|(c, _)| c).unwrap_or_default();
-    Ok(if is_older { vector_core::community::reached_history_start(&channel_id, before, &count) } else { count.new_messages < LIMIT })
+    let count =
+        db::scoped(VectorCore.sync_community_channel_page(&channel_id, LIMIT, before, None))
+            .await
+            .map(|(c, _)| c)
+            .unwrap_or_default();
+    Ok(if is_older {
+        vector_core::community::reached_history_start(&channel_id, before, &count)
+    } else {
+        count.new_messages < LIMIT
+    })
 }
 
 /// The optimistic bubble carries the real id: the rumor is built before it shows.
 pub async fn send(channel_id: String, content: String, replied_to: String) -> Result<(), String> {
     db::scoped(async move {
         let reply = (!replied_to.is_empty()).then_some(replied_to);
-        let community_id = db::community::community_id_for_channel(&channel_id)?.ok_or("Unknown Community channel")?;
-        let (content, role_mentions) = vector_core::community::mentions::resolve_in(&community_id, &content);
+        let community_id = db::community::community_id_for_channel(&channel_id)?
+            .ok_or("Unknown Community channel")?;
+        let (content, role_mentions) =
+            vector_core::community::mentions::resolve_in(&community_id, &content);
         let (content, text_spans) = vector_core::text_spans::extract_own(&content);
-        let mut extra_tags: Vec<Tag> = vector_core::text_spans::to_nostr_tags(&text_spans).into_iter().collect();
+        let mut extra_tags: Vec<Tag> = vector_core::text_spans::to_nostr_tags(&text_spans)
+            .into_iter()
+            .collect();
         extra_tags.extend(vector_core::community::mentions::to_tags(&role_mentions));
 
         let author = vector_core::my_public_key().ok_or("Public key not set")?;
         let community = load(&community_id)?;
         let ch = ChannelId(id32(&channel_id)?);
-        let channel = community.channel(&ch).ok_or("Channel not found in Community")?;
+        let channel = community
+            .channel(&ch)
+            .ok_or("Channel not found in Community")?;
         let (_, epoch) = community.channel_secret(channel);
-        let ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as u64;
+        let ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
 
         let emoji_tags = vector_core::emoji_packs::resolve_outbound_emoji_tags(&content);
-        let emoji_pairs: Vec<(&str, &str)> = emoji_tags.iter().map(|t| (t.shortcode.as_str(), t.url.as_str())).collect();
+        let emoji_pairs: Vec<(&str, &str)> = emoji_tags
+            .iter()
+            .map(|t| (t.shortcode.as_str(), t.url.as_str()))
+            .collect();
         let reply_owned = match reply.as_deref() {
             Some(parent) => {
                 let author_hex = STATE
@@ -143,12 +168,23 @@ pub async fn send(channel_id: String, content: String, replied_to: String) -> Re
             }
             None => None,
         };
-        let reply_ref = reply_owned.as_ref().map(|(id, a)| (id.as_str(), a.as_str()));
+        let reply_ref = reply_owned
+            .as_ref()
+            .map(|(id, a)| (id.as_str(), a.as_str()));
         let expiry = vector_core::self_destruct::resolve_send_expiry(&channel_id);
         if let Some(exp) = expiry {
             extra_tags.push(Tag::expiration(Timestamp::from_secs(exp)));
         }
-        let rumor = vector_core::community::v2::chat::build_message_rumor(author, &ch, epoch, &content, reply_ref, &emoji_pairs, extra_tags.clone(), ms);
+        let rumor = vector_core::community::v2::chat::build_message_rumor(
+            author,
+            &ch,
+            epoch,
+            &content,
+            reply_ref,
+            &emoji_pairs,
+            extra_tags.clone(),
+            ms,
+        );
         let rumor = vector_core::community::v2::service::outbound_rumor(&community, &ch, rumor);
         let message_id = rumor.id.ok_or("inner rumor has no id")?.to_hex();
 
@@ -167,11 +203,24 @@ pub async fn send(channel_id: String, content: String, replied_to: String) -> Re
             ..Default::default()
         };
         let _ = db::events::populate_reply_context(&mut pending).await;
-        STATE.lock().await.add_message_to_chat(&channel_id, &pending);
+        STATE
+            .lock()
+            .await
+            .add_message_to_chat(&channel_id, &pending);
         Callback.on_pending(&channel_id, &pending);
 
         let transport = LiveTransport::with_timeout(Duration::from_secs(12));
-        let sent = vector_core::community::v2::service::send_chat_message_at(&transport, &community, &ch, &content, reply_ref, &emoji_pairs, extra_tags, ms).await;
+        let sent = vector_core::community::v2::service::send_chat_message_at(
+            &transport,
+            &community,
+            &ch,
+            &content,
+            reply_ref,
+            &emoji_pairs,
+            extra_tags,
+            ms,
+        )
+        .await;
         match sent {
             Ok(sent_id) => {
                 let row = {
@@ -180,7 +229,9 @@ pub async fn send(channel_id: String, content: String, replied_to: String) -> Re
                         state.remove_message(&message_id);
                         state.find_message(&sent_id).map(|(_, m)| m)
                     } else {
-                        state.update_message(&message_id, |m| m.set_pending(false)).map(|(_, m)| m)
+                        state
+                            .update_message(&message_id, |m| m.set_pending(false))
+                            .map(|(_, m)| m)
                     }
                 };
                 if let Some(msg) = row {
@@ -216,14 +267,26 @@ pub async fn control(channel_id: &str, target: &str, op: Control<'_>) -> Result<
     match op {
         Control::React(emoji, url) => {
             vector_core::badges::check_new_reaction_allowance(target, emoji).await?;
-            VectorCore.send_community_reaction(channel_id, target, emoji, url).await.map_err(|e| e.to_string())?;
+            VectorCore
+                .send_community_reaction(channel_id, target, emoji, url)
+                .await
+                .map_err(|e| e.to_string())?;
         }
         Control::Edit(content) => {
-            VectorCore.edit_community_message(channel_id, target, content).await.map_err(|e| e.to_string())?;
+            VectorCore
+                .edit_community_message(channel_id, target, content)
+                .await
+                .map_err(|e| e.to_string())?;
         }
         Control::Delete => {
-            VectorCore.delete_community_message_in(channel_id, target).await.map_err(|e| e.to_string())?;
-            vector_core::emit_event("message_removed", &json!({ "id": target, "chat_id": channel_id, "reason": "deleted" }));
+            VectorCore
+                .delete_community_message_in(channel_id, target)
+                .await
+                .map_err(|e| e.to_string())?;
+            vector_core::emit_event(
+                "message_removed",
+                &json!({ "id": target, "chat_id": channel_id, "reason": "deleted" }),
+            );
             return Ok(());
         }
     }
@@ -247,7 +310,10 @@ static RECONNECT_ARMED: AtomicBool = AtomicBool::new(false);
 static LAST_END_MS: AtomicU64 = AtomicU64::new(0);
 
 fn now_ms() -> u64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 /// Sweep every held channel, or queue one more behind a sweep already going: a relay that came
@@ -291,15 +357,25 @@ async fn run() {
 async fn sweep() {
     db::spawn_bound(ingest_list());
     let _ = db::community::purge_expired_pending_invites();
-    let Ok(ids) = db::community::list_community_ids() else { return };
-    let last = db::events::get_all_chats_last_messages().await.unwrap_or_default();
-    let activity = |cid: &str| last.get(cid).and_then(|v| v.first().map(|m| m.at)).unwrap_or(0);
+    let Ok(ids) = db::community::list_community_ids() else {
+        return;
+    };
+    let last = db::events::get_all_chats_last_messages()
+        .await
+        .unwrap_or_default();
+    let activity = |cid: &str| {
+        last.get(cid)
+            .and_then(|v| v.first().map(|m| m.at))
+            .unwrap_or(0)
+    };
 
     let session = db::current_session();
     let mut held: Vec<CommunityId> = Vec::new();
     let mut targets: Vec<(PaintTarget, u64)> = Vec::new();
     for id in ids {
-        let Ok(Some(c)) = db::community::load_community_v2(&id) else { continue };
+        let Ok(Some(c)) = db::community::load_community_v2(&id) else {
+            continue;
+        };
         VectorCore.register_v2_chats(&c, &session).await;
         if c.dissolved {
             continue;
@@ -308,8 +384,19 @@ async fn sweep() {
         for ch in &c.channels {
             let hex = bytes_to_hex_32(&ch.id.0);
             let at = activity(&hex);
-            let since = (at > 0).then(|| (at / 1000).saturating_sub(SINCE_SLACK_SECS).max(vector_core::history_gaps::proven(&hex).unwrap_or(0)));
-            targets.push((PaintTarget { community_id: CommunityId(id.0), channel_hex: hex, since }, at));
+            let since = (at > 0).then(|| {
+                (at / 1000)
+                    .saturating_sub(SINCE_SLACK_SECS)
+                    .max(vector_core::history_gaps::proven(&hex).unwrap_or(0))
+            });
+            targets.push((
+                PaintTarget {
+                    community_id: CommunityId(id.0),
+                    channel_hex: hex,
+                    since,
+                },
+                at,
+            ));
         }
     }
     super::emit("communities_changed", ());
@@ -336,10 +423,19 @@ async fn sweep() {
 /// Memberships joined or left on another device.
 async fn ingest_list() {
     use vector_core::community::v2::service as v2;
-    let Some(client) = vector_core::state::nostr_client() else { return };
-    let bootstrap: Vec<String> = client.relays().await.keys().map(|r| r.to_string()).collect();
+    let Some(client) = vector_core::state::nostr_client() else {
+        return;
+    };
+    let bootstrap: Vec<String> = client
+        .relays()
+        .await
+        .keys()
+        .map(|r| r.to_string())
+        .collect();
     let transport = LiveTransport::with_timeout(Duration::from_secs(12));
-    let Ok(outcome) = v2::sync_community_list(&transport, &bootstrap).await else { return };
+    let Ok(outcome) = v2::sync_community_list(&transport, &bootstrap).await else {
+        return;
+    };
     let session = db::current_session();
     for c in &outcome.joined {
         VectorCore.register_v2_chats(c, &session).await;
@@ -354,18 +450,33 @@ async fn ingest_list() {
 // ── Lifecycle and layout ────────────────────────────────────────────────────
 
 fn channel_ids(community_id: &str) -> Vec<String> {
-    load(community_id).map(|c| c.channels.iter().map(|ch| bytes_to_hex_32(&ch.id.0)).collect()).unwrap_or_default()
+    load(community_id)
+        .map(|c| {
+            c.channels
+                .iter()
+                .map(|ch| bytes_to_hex_32(&ch.id.0))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 async fn reregister(community_id: &str) {
     if let Ok(c) = load(community_id) {
-        VectorCore.register_v2_chats(&c, &db::current_session()).await;
+        VectorCore
+            .register_v2_chats(&c, &db::current_session())
+            .await;
     }
     super::emit("communities_changed", ());
 }
 
 /// The new channel's id.
-pub async fn create_channel(community_id: String, name: String, private: bool, category_id: Option<String>, voice: bool) -> Result<String, String> {
+pub async fn create_channel(
+    community_id: String,
+    name: String,
+    private: bool,
+    category_id: Option<String>,
+    voice: bool,
+) -> Result<String, String> {
     db::scoped_result(async move {
         let name = name.trim().to_string();
         if name.is_empty() {
@@ -374,10 +485,16 @@ pub async fn create_channel(community_id: String, name: String, private: bool, c
         let community = load(&community_id)?;
         let transport = LiveTransport::with_timeout(Duration::from_secs(20));
         let category = category_id.as_deref().map(id32).transpose()?;
-        let channel_id = vector_core::community::v2::service::create_channel_in(&transport, &community, &name, private, category).await?;
+        let channel_id = vector_core::community::v2::service::create_channel_in(
+            &transport, &community, &name, private, category,
+        )
+        .await?;
         let hex = bytes_to_hex_32(&channel_id.0);
         if voice {
-            VectorCore.edit_channel_details(&community_id, &hex, &name, None, "voice").await.map_err(|e| e.to_string())?;
+            VectorCore
+                .edit_channel_details(&community_id, &hex, &name, None, "voice")
+                .await
+                .map_err(|e| e.to_string())?;
         }
         reregister(&community_id).await;
         Ok(hex)
@@ -387,7 +504,10 @@ pub async fn create_channel(community_id: String, name: String, private: bool, c
 
 pub async fn create_category(community_id: String, name: String) -> Result<(), String> {
     db::scoped(async move {
-        VectorCore.create_category(&community_id, name.trim()).await.map_err(|e| e.to_string())?;
+        VectorCore
+            .create_category(&community_id, name.trim())
+            .await
+            .map_err(|e| e.to_string())?;
         reregister(&community_id).await;
         Ok(())
     })
@@ -399,7 +519,11 @@ async fn teardown_local(id: &str, channels: &[String], relays: &[String]) {
     if let Some(client) = vector_core::state::nostr_client() {
         realtime::refresh_subscription(&client).await;
     }
-    STATE.lock().await.chats.retain(|c| !channels.contains(&c.id));
+    STATE
+        .lock()
+        .await
+        .chats
+        .retain(|c| !channels.contains(&c.id));
     for ch in channels {
         let _ = db::chats::delete_chat(ch);
     }
@@ -412,11 +536,19 @@ pub async fn leave_or_delete(community_id: String, owner: bool) -> Result<(), St
         let channels = channel_ids(&community_id);
         let relays = load(&community_id).map(|c| c.relays).unwrap_or_default();
         if owner {
-            if is_held(&community_id) && !db::community::get_community_dissolved(&community_id).unwrap_or(false) {
-                VectorCore.dissolve_community(&community_id).await.map_err(|e| e.to_string())?;
+            if is_held(&community_id)
+                && !db::community::get_community_dissolved(&community_id).unwrap_or(false)
+            {
+                VectorCore
+                    .dissolve_community(&community_id)
+                    .await
+                    .map_err(|e| e.to_string())?;
             }
         } else {
-            VectorCore.leave_community_now(&community_id).await.map_err(|e| e.to_string())?;
+            VectorCore
+                .leave_community_now(&community_id)
+                .await
+                .map_err(|e| e.to_string())?;
         }
         teardown_local(&community_id, &channels, &relays).await;
         super::emit("communities_changed", ());
@@ -437,14 +569,28 @@ pub async fn mark_read(community_id: String) {
 /// A new single-channel Community on the account's relays: its id and its channel's.
 pub async fn create_community(name: String) -> Result<(String, String), String> {
     db::scoped_result(async move {
-        let relays: Vec<String> = vector_core::state::active_trusted_relays().await.iter().map(|s| s.to_string()).collect();
+        let relays: Vec<String> = vector_core::state::active_trusted_relays()
+            .await
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
         if relays.is_empty() {
             return Err("No relays available to host the Community".into());
         }
         let session = db::current_session();
         let transport = LiveTransport::with_timeout(Duration::from_secs(12));
-        let community = vector_core::community::v2::service::create_community_on_roles_v2(&transport, name.trim(), relays, None).await?;
-        let channel_id = community.channels.first().map(|ch| bytes_to_hex_32(&ch.id.0)).ok_or("created community has no channel")?;
+        let community = vector_core::community::v2::service::create_community_on_roles_v2(
+            &transport,
+            name.trim(),
+            relays,
+            None,
+        )
+        .await?;
+        let channel_id = community
+            .channels
+            .first()
+            .map(|ch| bytes_to_hex_32(&ch.id.0))
+            .ok_or("created community has no channel")?;
         VectorCore.register_v2_chats(&community, &session).await;
         if let Some(client) = vector_core::state::nostr_client() {
             realtime::refresh_subscription(&client).await;
@@ -456,8 +602,17 @@ pub async fn create_community(name: String) -> Result<(String, String), String> 
 }
 
 /// A shareable link anyone can join by.
-pub async fn create_public_invite(community_id: String, label: Option<String>) -> Result<String, String> {
-    db::scoped(async move { VectorCore.create_public_invite(&community_id, None, label).await.map_err(|e| e.to_string()) }).await
+pub async fn create_public_invite(
+    community_id: String,
+    label: Option<String>,
+) -> Result<String, String> {
+    db::scoped(async move {
+        VectorCore
+            .create_public_invite(&community_id, None, label)
+            .await
+            .map_err(|e| e.to_string())
+    })
+    .await
 }
 
 pub struct InviteLinks {
@@ -471,21 +626,38 @@ pub struct InviteLinks {
 pub async fn invite_links(community_id: String) -> InviteLinks {
     db::scoped(async move {
         let mine = db::community::list_public_invites(&community_id).unwrap_or_default();
-        let public = db::community::get_community_invite_registry(&community_id).map(|r| !r.is_empty()).unwrap_or(!mine.is_empty());
+        let public = db::community::get_community_invite_registry(&community_id)
+            .map(|r| !r.is_empty())
+            .unwrap_or(!mine.is_empty());
         let me = vector_core::my_public_key().map(|k| k.to_hex());
         let others = db::community::get_invite_link_sets(&community_id)
             .unwrap_or_default()
             .into_iter()
             .filter(|s| !s.locators.is_empty() && Some(&s.creator_hex) != me.as_ref())
-            .filter_map(|s| Some((PublicKey::from_hex(&s.creator_hex).ok()?.to_bech32().ok()?, s.locators.len())))
+            .filter_map(|s| {
+                Some((
+                    PublicKey::from_hex(&s.creator_hex).ok()?.to_bech32().ok()?,
+                    s.locators.len(),
+                ))
+            })
             .collect();
-        InviteLinks { mine, public, others }
+        InviteLinks {
+            mine,
+            public,
+            others,
+        }
     })
     .await
 }
 
 pub async fn revoke_invite(community_id: String, token: String) -> Result<(), String> {
-    db::scoped(async move { VectorCore.revoke_public_invite(&community_id, &token).await.map_err(|e| e.to_string()) }).await
+    db::scoped(async move {
+        VectorCore
+            .revoke_public_invite(&community_id, &token)
+            .await
+            .map_err(|e| e.to_string())
+    })
+    .await
 }
 
 /// Who can't be invited: the banned (as npubs).
@@ -493,12 +665,24 @@ pub fn banned(community_id: &str) -> Vec<String> {
     VectorCore
         .get_community_banned(community_id)
         .into_iter()
-        .map(|h| PublicKey::from_hex(&h).ok().and_then(|pk| pk.to_bech32().ok()).unwrap_or(h))
+        .map(|h| {
+            PublicKey::from_hex(&h)
+                .ok()
+                .and_then(|pk| pk.to_bech32().ok())
+                .unwrap_or(h)
+        })
         .collect()
 }
 
 pub async fn invite(community_id: String, npub: String) -> Result<(), String> {
-    db::scoped(async move { VectorCore.invite_to_community(&community_id, &npub).await.map(|_| ()).map_err(|e| e.to_string()) }).await
+    db::scoped(async move {
+        VectorCore
+            .invite_to_community(&community_id, &npub)
+            .await
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    })
+    .await
 }
 
 /// Invites parked for consent, newest first.
@@ -522,7 +706,10 @@ pub async fn pending_invites() -> Vec<crate::data::RawInvite> {
 
 pub async fn accept_invite(community_id: String) -> Result<(), String> {
     db::scoped(async move {
-        VectorCore.accept_pending_invite(&community_id).await.map_err(|e| e.to_string())?;
+        VectorCore
+            .accept_pending_invite(&community_id)
+            .await
+            .map_err(|e| e.to_string())?;
         super::emit("communities_changed", ());
         Ok(())
     })
@@ -530,7 +717,14 @@ pub async fn accept_invite(community_id: String) -> Result<(), String> {
 }
 
 pub async fn decline_invite(community_id: String) -> Result<(), String> {
-    db::scoped(async move { VectorCore.decline_community_invite(&community_id).await.map(|_| ()).map_err(|e| e.to_string()) }).await
+    db::scoped(async move {
+        VectorCore
+            .decline_community_invite(&community_id)
+            .await
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    })
+    .await
 }
 
 #[derive(Clone, Debug)]
@@ -547,7 +741,8 @@ pub async fn preview_invite(url: String) -> Result<InvitePreview, String> {
     db::scoped(async move {
         vector_core::community::v2::invite::parse_invite_link(&url).map_err(|e| e.to_string())?;
         let transport = LiveTransport::with_timeout(Duration::from_secs(12));
-        let bundle = vector_core::community::v2::service::fetch_public_bundle(&transport, &url).await?;
+        let bundle =
+            vector_core::community::v2::service::fetch_public_bundle(&transport, &url).await?;
         let community_id = bundle.community_id.clone();
         let logo = |c: &CommunityV2| c.icon.as_ref().map(|i| i.to_community_image());
         if let Ok(local) = load(&community_id) {
@@ -555,14 +750,25 @@ pub async fn preview_invite(url: String) -> Result<InvitePreview, String> {
                 Some(img) => super::images::community_image(&img, false).await.ok(),
                 None => None,
             };
-            return Ok(InvitePreview { community_id, name: local.name.clone(), description: local.description.clone().unwrap_or_default(), icon });
+            return Ok(InvitePreview {
+                community_id,
+                name: local.name.clone(),
+                description: local.description.clone().unwrap_or_default(),
+                icon,
+            });
         }
-        let folded = vector_core::community::v2::service::preview_bundle(&transport, &bundle).await?;
+        let folded =
+            vector_core::community::v2::service::preview_bundle(&transport, &bundle).await?;
         let icon = match logo(&folded) {
             Some(img) => super::images::community_image(&img, false).await.ok(),
             None => None,
         };
-        Ok(InvitePreview { community_id, name: folded.name.clone(), description: folded.description.clone().unwrap_or_default(), icon })
+        Ok(InvitePreview {
+            community_id,
+            name: folded.name.clone(),
+            description: folded.description.clone().unwrap_or_default(),
+            icon,
+        })
     })
     .await
 }
@@ -570,10 +776,20 @@ pub async fn preview_invite(url: String) -> Result<InvitePreview, String> {
 /// Joins by link: the Community's id.
 pub async fn join_by_link(url: String) -> Result<String, String> {
     db::scoped(async move {
-        let joined = VectorCore.join_community(&url).await.map_err(|e| e.to_string())?;
-        let id = joined.get("community_id").or_else(|| joined.get("id")).and_then(Value::as_str).ok_or("join returned no community id")?.to_string();
+        let joined = VectorCore
+            .join_community(&url)
+            .await
+            .map_err(|e| e.to_string())?;
+        let id = joined
+            .get("community_id")
+            .or_else(|| joined.get("id"))
+            .and_then(Value::as_str)
+            .ok_or("join returned no community id")?
+            .to_string();
         if let Ok(c) = load(&id) {
-            VectorCore.register_v2_chats(&c, &db::current_session()).await;
+            VectorCore
+                .register_v2_chats(&c, &db::current_session())
+                .await;
         }
         super::emit("communities_changed", ());
         Ok(id)
@@ -587,46 +803,95 @@ pub fn capabilities(community_id: &str) -> std::collections::HashSet<String> {
         .community_capabilities(community_id)
         .ok()
         .and_then(|v| v.as_object().cloned())
-        .map(|o| o.into_iter().filter(|(_, v)| v.as_bool() == Some(true)).map(|(k, _)| k).collect())
+        .map(|o| {
+            o.into_iter()
+                .filter(|(_, v)| v.as_bool() == Some(true))
+                .map(|(k, _)| k)
+                .collect()
+        })
         .unwrap_or_default()
 }
 
-pub async fn edit_metadata(community_id: String, name: Option<String>, description: Option<String>) -> Result<(), String> {
+pub async fn edit_metadata(
+    community_id: String,
+    name: Option<String>,
+    description: Option<String>,
+) -> Result<(), String> {
     db::scoped(async move {
-        VectorCore.edit_community_metadata(&community_id, name.as_deref(), description.as_deref()).await.map_err(|e| e.to_string())?;
+        VectorCore
+            .edit_community_metadata(&community_id, name.as_deref(), description.as_deref())
+            .await
+            .map_err(|e| e.to_string())?;
         super::emit("communities_changed", ());
         Ok(())
     })
     .await
 }
 
-pub async fn set_voice_relays(community_id: String, relays: Vec<String>) -> Result<Vec<String>, String> {
-    db::scoped(async move { VectorCore.set_voice_relays(&community_id, &relays).await.map_err(|e| e.to_string()) }).await
+pub async fn set_voice_relays(
+    community_id: String,
+    relays: Vec<String>,
+) -> Result<Vec<String>, String> {
+    db::scoped(async move {
+        VectorCore
+            .set_voice_relays(&community_id, &relays)
+            .await
+            .map_err(|e| e.to_string())
+    })
+    .await
 }
 
 /// A relay that can't host the Community, by name and why; else the moved list and its gaps.
-pub async fn move_relays(community_id: String, relays: Vec<String>) -> Result<(Vec<String>, Vec<String>), String> {
+pub async fn move_relays(
+    community_id: String,
+    relays: Vec<String>,
+) -> Result<(Vec<String>, Vec<String>), String> {
     db::scoped(async move {
-        let checks = VectorCore.check_community_relays(&community_id, &relays).await.map_err(|e| e.to_string())?;
+        let checks = VectorCore
+            .check_community_relays(&community_id, &relays)
+            .await
+            .map_err(|e| e.to_string())?;
         if let Some(bad) = checks.iter().find(|c| !c.ok) {
-            return Err(bad.reason.clone().unwrap_or_else(|| format!("{} can't hold this community.", bad.relay)));
+            return Err(bad
+                .reason
+                .clone()
+                .unwrap_or_else(|| format!("{} can't hold this community.", bad.relay)));
         }
-        let moved = VectorCore.move_community_relays(&community_id, &relays).await.map_err(|e| e.to_string())?;
+        let moved = VectorCore
+            .move_community_relays(&community_id, &relays)
+            .await
+            .map_err(|e| e.to_string())?;
         super::emit("communities_changed", ());
         Ok((moved.relays, moved.warnings))
     })
     .await
 }
 
-pub async fn set_banned(community_id: String, npubs: Vec<String>, banned: bool) -> Result<(), String> {
+pub async fn set_banned(
+    community_id: String,
+    npubs: Vec<String>,
+    banned: bool,
+) -> Result<(), String> {
     db::scoped(async move {
         let refs: Vec<&str> = npubs.iter().map(String::as_str).collect();
-        VectorCore.set_members_banned(&community_id, &refs, banned).await.map_err(|e| e.to_string())?;
+        VectorCore
+            .set_members_banned(&community_id, &refs, banned)
+            .await
+            .map_err(|e| e.to_string())?;
         if banned {
             VectorCore::invalidate_raid_report(&community_id);
         }
         // A ban hides messages retroactively, which the incremental unread cache can't derive.
-        for ch in load(&community_id).ok().map(|c| c.channels.iter().map(|ch| bytes_to_hex_32(&ch.id.0)).collect::<Vec<_>>()).unwrap_or_default() {
+        for ch in load(&community_id)
+            .ok()
+            .map(|c| {
+                c.channels
+                    .iter()
+                    .map(|ch| bytes_to_hex_32(&ch.id.0))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
+        {
             let count = db::events::unread_count_for_chat(&ch).await.unwrap_or(0);
             let mut state = STATE.lock().await;
             if state.unread_seeded {
@@ -647,7 +912,10 @@ pub async fn set_banned(community_id: String, npubs: Vec<String>, banned: bool) 
 /// `get_community_audit_log`: newest first, as JSON the Audit Log reads.
 pub async fn audit_log(community_id: String) -> Result<serde_json::Value, String> {
     db::scoped(async move {
-        let log = VectorCore.community_audit_log(&community_id).await.map_err(|e| e.to_string())?;
+        let log = VectorCore
+            .community_audit_log(&community_id)
+            .await
+            .map_err(|e| e.to_string())?;
         serde_json::to_value(log).map_err(|e| e.to_string())
     })
     .await
@@ -655,7 +923,9 @@ pub async fn audit_log(community_id: String) -> Result<serde_json::Value, String
 
 /// `get_community_roles_view`: everything the role editor needs, read locally.
 pub fn roles_view(community_id: &str) -> Result<serde_json::Value, String> {
-    VectorCore.community_roles_view(community_id).map_err(|e| e.to_string())
+    VectorCore
+        .community_roles_view(community_id)
+        .map_err(|e| e.to_string())
 }
 
 /// What one save of the role editor publishes: the dragged order, then the open role.
@@ -680,22 +950,61 @@ pub async fn save_roles(community_id: String, save: RoleSave) -> Result<Option<S
     db::scoped(async move {
         let id = community_id.as_str();
         if let Some(order) = save.order {
-            VectorCore.reorder_roles(id, &order).await.map_err(|e| e.to_string())?;
+            VectorCore
+                .reorder_roles(id, &order)
+                .await
+                .map_err(|e| e.to_string())?;
         }
         if let Some(perms) = save.everyone {
-            VectorCore.set_everyone_permissions(id, &perms).await.map_err(|e| e.to_string())?;
+            VectorCore
+                .set_everyone_permissions(id, &perms)
+                .await
+                .map_err(|e| e.to_string())?;
         }
         let Some(r) = save.role else { return Ok(None) };
         let role_id = match r.id {
             Some(role_id) => {
-                VectorCore.edit_role_shown(id, &role_id, &r.name, r.color, &r.permissions, r.channel_id.as_deref(), Some(r.display), Some(r.mentionable)).await.map_err(|e| e.to_string())?;
+                VectorCore
+                    .edit_role_shown(
+                        id,
+                        &role_id,
+                        &r.name,
+                        r.color,
+                        &r.permissions,
+                        r.channel_id.as_deref(),
+                        Some(r.display),
+                        Some(r.mentionable),
+                    )
+                    .await
+                    .map_err(|e| e.to_string())?;
                 role_id
             }
             None => {
-                let role_id = VectorCore.create_role(id, &r.name, r.color, &r.permissions, r.channel_id.as_deref()).await.map_err(|e| e.to_string())?;
+                let role_id = VectorCore
+                    .create_role(
+                        id,
+                        &r.name,
+                        r.color,
+                        &r.permissions,
+                        r.channel_id.as_deref(),
+                    )
+                    .await
+                    .map_err(|e| e.to_string())?;
                 // Creation takes no flags: a role made shown or mentionable gets them right after.
                 if r.display || r.mentionable {
-                    VectorCore.edit_role_shown(id, &role_id, &r.name, r.color, &r.permissions, r.channel_id.as_deref(), Some(r.display), Some(r.mentionable)).await.map_err(|e| e.to_string())?;
+                    VectorCore
+                        .edit_role_shown(
+                            id,
+                            &role_id,
+                            &r.name,
+                            r.color,
+                            &r.permissions,
+                            r.channel_id.as_deref(),
+                            Some(r.display),
+                            Some(r.mentionable),
+                        )
+                        .await
+                        .map_err(|e| e.to_string())?;
                 }
                 role_id
             }
@@ -707,20 +1016,43 @@ pub async fn save_roles(community_id: String, save: RoleSave) -> Result<Option<S
 }
 
 pub async fn delete_role(community_id: String, role_id: String) -> Result<(), String> {
-    db::scoped(async move { VectorCore.delete_role(&community_id, &role_id).await.map_err(|e| e.to_string()) }).await
+    db::scoped(async move {
+        VectorCore
+            .delete_role(&community_id, &role_id)
+            .await
+            .map_err(|e| e.to_string())
+    })
+    .await
 }
 
 pub async fn activate_roles(community_id: String, everyone: String) -> Result<(), String> {
-    db::scoped(async move { VectorCore.activate_roles_v2(&community_id, &everyone).await.map(|_| ()).map_err(|e| e.to_string()) }).await
+    db::scoped(async move {
+        VectorCore
+            .activate_roles_v2(&community_id, &everyone)
+            .await
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    })
+    .await
 }
 
 /// Give a role to `add` and take it from `remove`, each member's whole set rewritten; returns
 /// the first failure, having tried them all.
-pub async fn set_role_holders(community_id: String, role_id: String, held: Vec<(String, Vec<String>)>, add: Vec<String>, remove: Vec<String>) -> Result<(), String> {
+pub async fn set_role_holders(
+    community_id: String,
+    role_id: String,
+    held: Vec<(String, Vec<String>)>,
+    add: Vec<String>,
+    remove: Vec<String>,
+) -> Result<(), String> {
     db::scoped(async move {
         let mut first = None;
         for npub in add.iter().chain(&remove) {
-            let current = held.iter().find(|(n, _)| n == npub).map(|(_, r)| r.clone()).unwrap_or_default();
+            let current = held
+                .iter()
+                .find(|(n, _)| n == npub)
+                .map(|(_, r)| r.clone())
+                .unwrap_or_default();
             let next: Vec<String> = if add.contains(npub) {
                 let mut v = current;
                 if !v.contains(&role_id) {
@@ -750,8 +1082,18 @@ pub fn nicknames(community_id: &str) -> std::collections::HashMap<String, String
 }
 
 /// Sets `npub`'s nickname in a community; "" clears it.
-pub async fn set_nickname(community_id: String, npub: String, nickname: String) -> Result<(), String> {
-    db::scoped(async move { VectorCore.set_community_nickname(&community_id, &npub, &nickname).await.map_err(|e| e.to_string()) }).await
+pub async fn set_nickname(
+    community_id: String,
+    npub: String,
+    nickname: String,
+) -> Result<(), String> {
+    db::scoped(async move {
+        VectorCore
+            .set_community_nickname(&community_id, &npub, &nickname)
+            .await
+            .map_err(|e| e.to_string())
+    })
+    .await
 }
 
 async fn refresh_if_live() {
@@ -763,20 +1105,34 @@ async fn refresh_if_live() {
 }
 
 pub fn moderation_intel(community_id: &str) -> Result<Value, String> {
-    VectorCore.community_moderation_intel(community_id).map_err(|e| e.to_string())
+    VectorCore
+        .community_moderation_intel(community_id)
+        .map_err(|e| e.to_string())
 }
 
 /// `(detected, suspects)` for the menu's raid pip.
 pub fn check_raid(community_id: &str) -> (bool, usize) {
-    let v = VectorCore.check_community_raid(community_id).unwrap_or(Value::Null);
-    (v["detected"].as_bool().unwrap_or(false), v["suspects"].as_u64().unwrap_or(0) as usize)
+    let v = VectorCore
+        .check_community_raid(community_id)
+        .unwrap_or(Value::Null);
+    (
+        v["detected"].as_bool().unwrap_or(false),
+        v["suspects"].as_u64().unwrap_or(0) as usize,
+    )
 }
 
 /// Re-founds onto `retain`, reporting `(done, total)` of the kick sweep.
-pub async fn refound(community_id: String, retain: Vec<String>, progress: impl Fn(usize, usize) + Sync) -> Result<Value, String> {
+pub async fn refound(
+    community_id: String,
+    retain: Vec<String>,
+    progress: impl Fn(usize, usize) + Sync,
+) -> Result<Value, String> {
     db::scoped(async move {
         let refs: Vec<&str> = retain.iter().map(String::as_str).collect();
-        let summary = VectorCore.purge_and_refound(&community_id, &refs, &progress).await.map_err(|e| e.to_string())?;
+        let summary = VectorCore
+            .purge_and_refound(&community_id, &refs, &progress)
+            .await
+            .map_err(|e| e.to_string())?;
         VectorCore::invalidate_raid_report(&community_id);
         refresh_if_live().await;
         super::emit("community_refreshed", community_id);
@@ -787,7 +1143,10 @@ pub async fn refound(community_id: String, retain: Vec<String>, progress: impl F
 
 pub async fn revoke_all_invites(community_id: String) -> Result<(usize, usize), String> {
     db::scoped(async move {
-        let out = VectorCore.revoke_all_public_invites(&community_id).await.map_err(|e| e.to_string())?;
+        let out = VectorCore
+            .revoke_all_public_invites(&community_id)
+            .await
+            .map_err(|e| e.to_string())?;
         refresh_if_live().await;
         Ok(out)
     })
@@ -799,38 +1158,64 @@ pub fn policy_presets() -> Result<Value, String> {
 }
 
 pub fn policies(community_id: &str) -> Result<Value, String> {
-    VectorCore.list_community_policies(community_id).map_err(|e| e.to_string())
+    VectorCore
+        .list_community_policies(community_id)
+        .map_err(|e| e.to_string())
 }
 
 pub fn preview_policy(community_id: &str, bytes: &str) -> Result<Value, String> {
-    VectorCore.preview_community_policy(community_id, bytes).map_err(|e| e.to_string())
+    VectorCore
+        .preview_community_policy(community_id, bytes)
+        .map_err(|e| e.to_string())
 }
 
-pub fn set_policy(community_id: &str, policy_id: &str, bytes: &str, enabled: bool) -> Result<Value, String> {
-    VectorCore.set_community_policy(community_id, policy_id, bytes, enabled).map_err(|e| e.to_string())
+pub fn set_policy(
+    community_id: &str,
+    policy_id: &str,
+    bytes: &str,
+    enabled: bool,
+) -> Result<Value, String> {
+    VectorCore
+        .set_community_policy(community_id, policy_id, bytes, enabled)
+        .map_err(|e| e.to_string())
 }
 
 pub fn delete_policy(community_id: &str, policy_id: &str) -> Result<(), String> {
-    VectorCore.delete_community_policy(community_id, policy_id).map_err(|e| e.to_string())
+    VectorCore
+        .delete_community_policy(community_id, policy_id)
+        .map_err(|e| e.to_string())
 }
 
 /// A joined community's logo or banner as a local file; None when it has none.
 pub async fn image(community_id: String, banner: bool) -> Result<Option<String>, String> {
-    let Some(img) = db::community::community_image(&community_id, banner)? else { return Ok(None) };
+    let Some(img) = db::community::community_image(&community_id, banner)? else {
+        return Ok(None);
+    };
     super::images::community_image(&img, banner).await.map(Some)
 }
 
-
 /// Uploads `path` (cropped to `crop`) as the logo or banner and publishes it; `progress` gets percent.
-pub async fn set_image(community_id: String, path: std::path::PathBuf, banner: bool, crop: Option<vector_core::image_crop::CropRect>, progress: impl Fn(u8) + Send + Sync + 'static) -> Result<(), String> {
+pub async fn set_image(
+    community_id: String,
+    path: std::path::PathBuf,
+    banner: bool,
+    crop: Option<vector_core::image_crop::CropRect>,
+    progress: impl Fn(u8) + Send + Sync + 'static,
+) -> Result<(), String> {
     db::scoped(async move {
         let session = db::current_session();
         let community = load(&community_id)?;
-        let raw = tokio::fs::read(&path).await.map_err(|e| format!("read image: {e}"))?;
+        let raw = tokio::fs::read(&path)
+            .await
+            .map_err(|e| format!("read image: {e}"))?;
         if vector_core::svg::looks_like_svg(&raw) {
             return Err(vector_core::community::SVG_REFUSED.into());
         }
-        let (bytes, ext) = tokio::task::spawn_blocking(move || crate::backend::upload::prepared(raw, banner, crop)).await.map_err(|e| e.to_string())??;
+        let (bytes, ext) = tokio::task::spawn_blocking(move || {
+            crate::backend::upload::prepared(raw, banner, crop)
+        })
+        .await
+        .map_err(|e| e.to_string())??;
         let hash = vector_core::crypto::sha256_hex(&bytes);
         let params = vector_core::crypto::generate_encryption_params();
         let encrypted = vector_core::crypto::encrypt_data(&bytes, &params)?;
@@ -843,13 +1228,29 @@ pub async fn set_image(community_id: String, path: std::path::PathBuf, banner: b
             progress(pct.unwrap_or(0));
             Ok(())
         });
-        let url = vector_core::blossom::upload_blob_with_progress_and_failover(signer, servers, std::sync::Arc::new(encrypted), Some("application/octet-stream"), true, on, None, None, None)
-            .await?
-            .url;
+        let url = vector_core::blossom::upload_blob_with_progress_and_failover(
+            signer,
+            servers,
+            std::sync::Arc::new(encrypted),
+            Some("application/octet-stream"),
+            true,
+            on,
+            None,
+            None,
+            None,
+        )
+        .await?
+        .url;
         super::images::precache(&url, &bytes, banner);
         let mut extra = serde_json::Map::new();
         extra.insert("ext".into(), Value::String(ext.into()));
-        let img_ref = vector_core::community::v2::control::ImageRef { url, key: params.key, nonce: params.nonce, hash, extra };
+        let img_ref = vector_core::community::v2::control::ImageRef {
+            url,
+            key: params.key,
+            nonce: params.nonce,
+            hash,
+            extra,
+        };
         let mut meta = community.metadata();
         if banner {
             meta.banner = Some(img_ref.clone());
@@ -857,8 +1258,15 @@ pub async fn set_image(community_id: String, path: std::path::PathBuf, banner: b
             meta.icon = Some(img_ref.clone());
         }
         let transport = LiveTransport::with_timeout(Duration::from_secs(12));
-        vector_core::community::v2::service::edit_community_metadata(&transport, &community, &meta).await?;
-        if let Some(updated) = vector_core::community::v2::service::persist_community_image(community.id(), Some(img_ref), banner).await {
+        vector_core::community::v2::service::edit_community_metadata(&transport, &community, &meta)
+            .await?;
+        if let Some(updated) = vector_core::community::v2::service::persist_community_image(
+            community.id(),
+            Some(img_ref),
+            banner,
+        )
+        .await
+        {
             VectorCore.register_v2_chats(&updated, &session).await;
         }
         super::emit("community_refreshed", community_id);
@@ -869,7 +1277,10 @@ pub async fn set_image(community_id: String, path: std::path::PathBuf, banner: b
 
 pub async fn remove_image(community_id: String, banner: bool) -> Result<(), String> {
     db::scoped(async move {
-        VectorCore.remove_community_image(&community_id, banner).await.map_err(|e| e.to_string())?;
+        VectorCore
+            .remove_community_image(&community_id, banner)
+            .await
+            .map_err(|e| e.to_string())?;
         super::emit("community_refreshed", community_id);
         Ok(())
     })

@@ -8,7 +8,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use gpui::{App, RenderImage, WeakEntity};
-use image::{AnimationDecoder, DynamicImage, Frame, ImageDecoder, ImageReader, imageops::FilterType};
+use image::{
+    AnimationDecoder, DynamicImage, Frame, ImageDecoder, ImageReader, imageops::FilterType,
+};
 
 /// A bubble's picture box: `min(450/w, 350/h, 1)`.
 pub const MAX_W: f32 = 450.;
@@ -23,7 +25,11 @@ pub fn fit(w: u32, h: u32) -> (f32, f32) {
 #[derive(Clone)]
 pub enum Slot {
     Loading,
-    Ready { image: Arc<RenderImage>, w: u32, h: u32 },
+    Ready {
+        image: Arc<RenderImage>,
+        w: u32,
+        h: u32,
+    },
     Failed,
 }
 
@@ -65,7 +71,11 @@ pub enum Source {
 pub enum Linked {
     /// Fetching; the percent once its length is known.
     Loading(Option<f32>),
-    Ready { image: Arc<RenderImage>, w: u32, h: u32 },
+    Ready {
+        image: Arc<RenderImage>,
+        w: u32,
+        h: u32,
+    },
     /// Not a picture, or not reachable: the link stays a link.
     Failed,
 }
@@ -136,7 +146,10 @@ pub struct AutoDownload {
 
 impl Default for AutoDownload {
     fn default() -> Self {
-        Self { on: true, limit: 10_485_760 }
+        Self {
+            on: true,
+            limit: 10_485_760,
+        }
     }
 }
 
@@ -147,7 +160,10 @@ impl Media {
         if hash.is_empty() {
             return None;
         }
-        self.thumbs.entry((hash.to_string(), px.0, px.1)).or_insert_with(|| decode_thumbhash(hash, px).map(Arc::new)).clone()
+        self.thumbs
+            .entry((hash.to_string(), px.0, px.1))
+            .or_insert_with(|| decode_thumbhash(hash, px).map(Arc::new))
+            .clone()
     }
 
     /// An attachment's picture; the first ask queues its decode at `max` device pixels.
@@ -160,7 +176,13 @@ impl Media {
             Source::Held(h) => (Some(h), None),
             Source::File(p) => (None, Some(p)),
         };
-        self.wants.push(Want { key: key.to_string(), hash, path, ext: ext.to_ascii_lowercase(), max });
+        self.wants.push(Want {
+            key: key.to_string(),
+            hash,
+            path,
+            ext: ext.to_ascii_lowercase(),
+            max,
+        });
         Slot::Loading
     }
 }
@@ -194,26 +216,48 @@ impl Media {
 }
 
 /// Start the decodes the last render asked for; the app repaints as each lands.
-pub fn pump<V: 'static>(media: &std::rc::Rc<std::cell::RefCell<Media>>, app: WeakEntity<V>, live: bool, cx: &mut App) {
+pub fn pump<V: 'static>(
+    media: &std::rc::Rc<std::cell::RefCell<Media>>,
+    app: WeakEntity<V>,
+    live: bool,
+    cx: &mut App,
+) {
     let wants = std::mem::take(&mut media.borrow_mut().wants);
     for w in wants {
         let media = media.clone();
         let app = app.clone();
         cx.spawn(async move |cx| {
             let bytes = if live {
-                let path = w.path.as_ref().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
-                crate::backend::run(crate::backend::attachments::bytes(w.hash, path)).await.ok().flatten()
+                let path = w
+                    .path
+                    .as_ref()
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                crate::backend::run(crate::backend::attachments::bytes(w.hash, path))
+                    .await
+                    .ok()
+                    .flatten()
             } else {
                 let path = w.path.clone();
-                cx.background_executor().spawn(async move { path.and_then(|p| std::fs::read(p).ok()) }).await
+                cx.background_executor()
+                    .spawn(async move { path.and_then(|p| std::fs::read(p).ok()) })
+                    .await
             };
             let (ext, max) = (w.ext.clone(), w.max);
             let decoded = match bytes {
-                Some(b) => cx.background_executor().spawn(async move { decode(&b, &ext, max) }).await,
+                Some(b) => {
+                    cx.background_executor()
+                        .spawn(async move { decode(&b, &ext, max) })
+                        .await
+                }
                 None => None,
             };
             let slot = match decoded {
-                Some((image, w, h)) => Slot::Ready { image: Arc::new(image), w, h },
+                Some((image, w, h)) => Slot::Ready {
+                    image: Arc::new(image),
+                    w,
+                    h,
+                },
                 None => Slot::Failed,
             };
             media.borrow_mut().images.insert(w.key, slot);
@@ -225,7 +269,8 @@ pub fn pump<V: 'static>(media: &std::rc::Rc<std::cell::RefCell<Media>>, app: Wea
     for (url, icon) in custom {
         let media = media.clone();
         let app = app.clone();
-        let rx = live.then(|| crate::backend::run(crate::backend::images::emoji(url.clone(), icon)));
+        let rx =
+            live.then(|| crate::backend::run(crate::backend::images::emoji(url.clone(), icon)));
         cx.spawn(async move |cx| {
             let res = match rx {
                 Some(rx) => rx.await.unwrap_or_else(|_| Err("Cancelled".into())),
@@ -234,11 +279,21 @@ pub fn pump<V: 'static>(media: &std::rc::Rc<std::cell::RefCell<Media>>, app: Wea
             };
             let decoded = match res {
                 Ok(path) => {
-                    let bytes = cx.background_executor().spawn(async move { std::fs::read(&path).map(|b| (b, path)) }).await;
+                    let bytes = cx
+                        .background_executor()
+                        .spawn(async move { std::fs::read(&path).map(|b| (b, path)) })
+                        .await;
                     match bytes {
                         Ok((b, path)) => {
-                            let ext = std::path::Path::new(&path).extension().and_then(|e| e.to_str()).unwrap_or("png").to_ascii_lowercase();
-                            cx.background_executor().spawn(async move { decode(&b, &ext, (EMOJI_MAX, EMOJI_MAX)) }).await.ok_or_else(|| "Invalid image".to_string())
+                            let ext = std::path::Path::new(&path)
+                                .extension()
+                                .and_then(|e| e.to_str())
+                                .unwrap_or("png")
+                                .to_ascii_lowercase();
+                            cx.background_executor()
+                                .spawn(async move { decode(&b, &ext, (EMOJI_MAX, EMOJI_MAX)) })
+                                .await
+                                .ok_or_else(|| "Invalid image".to_string())
                         }
                         Err(e) => Err(e.to_string()),
                     }
@@ -260,22 +315,34 @@ pub fn pump<V: 'static>(media: &std::rc::Rc<std::cell::RefCell<Media>>, app: Wea
         let app = app.clone();
         // A fixture's pictures are files beside it.
         let local = (!live && !url.starts_with("https://")).then(|| std::path::PathBuf::from(&url));
-        let rx = local.is_none().then(|| crate::backend::run(crate::backend::inline::image(url.clone())));
+        let rx = local
+            .is_none()
+            .then(|| crate::backend::run(crate::backend::inline::image(url.clone())));
         cx.spawn(async move |cx| {
             let bytes = match (rx, local) {
                 (Some(rx), _) => rx.await.ok().flatten(),
-                (None, Some(path)) => cx.background_executor().spawn(async move { std::fs::read(path).ok() }).await,
+                (None, Some(path)) => {
+                    cx.background_executor()
+                        .spawn(async move { std::fs::read(path).ok() })
+                        .await
+                }
                 _ => None,
             };
             let decoded = match bytes {
                 Some(b) => {
                     let ext = crate::backend::inline::sniff(&b).unwrap_or("png");
-                    cx.background_executor().spawn(async move { decode(&b, ext, LINKED_MAX) }).await
+                    cx.background_executor()
+                        .spawn(async move { decode(&b, ext, LINKED_MAX) })
+                        .await
                 }
                 None => None,
             };
             let slot = match decoded {
-                Some((image, w, h)) => Linked::Ready { image: Arc::new(image), w, h },
+                Some((image, w, h)) => Linked::Ready {
+                    image: Arc::new(image),
+                    w,
+                    h,
+                },
                 None => Linked::Failed,
             };
             media.borrow_mut().linked.insert(url, slot);
@@ -296,7 +363,12 @@ pub fn decode_thumbhash(hash: &str, px: (u32, u32)) -> Option<RenderImage> {
     let bytes = fast_thumbhash::base91_decode(hash).ok()?;
     let (w, h, rgba) = fast_thumbhash::thumb_hash_to_rgba(&bytes).ok()?;
     let buf = image::RgbaImage::from_raw(w as u32, h as u32, rgba)?;
-    let buf = image::imageops::resize(&buf, px.0.clamp(1, 4096), px.1.clamp(1, 4096), FilterType::Triangle);
+    let buf = image::imageops::resize(
+        &buf,
+        px.0.clamp(1, 4096),
+        px.1.clamp(1, 4096),
+        FilterType::Triangle,
+    );
     Some(RenderImage::new(vec![Frame::new(to_bgra(buf))]))
 }
 
@@ -312,7 +384,11 @@ fn gif_frames(bytes: &[u8], to: impl Fn(u32, u32) -> (u32, u32)) -> Option<(Vec<
             f.map(|f| {
                 let delay = f.delay();
                 let buf = f.into_buffer();
-                let buf = if scale { image::imageops::resize(&buf, tw.max(1), th.max(1), FilterType::Triangle) } else { buf };
+                let buf = if scale {
+                    image::imageops::resize(&buf, tw.max(1), th.max(1), FilterType::Triangle)
+                } else {
+                    buf
+                };
                 Frame::from_parts(to_bgra(buf), 0, 0, delay)
             })
         })
@@ -334,7 +410,9 @@ pub fn decode_gif_cover(bytes: &[u8], side: u32) -> Option<RenderImage> {
 pub fn decode(bytes: &[u8], ext: &str, max: (u32, u32)) -> Option<(RenderImage, u32, u32)> {
     if ext == "gif"
         && let Some((frames, w, h)) = gif_frames(bytes, |w, h| {
-            let s = (max.0 as f32 / w.max(1) as f32).min(max.1 as f32 / h.max(1) as f32).min(1.);
+            let s = (max.0 as f32 / w.max(1) as f32)
+                .min(max.1 as f32 / h.max(1) as f32)
+                .min(1.);
             ((w as f32 * s).round() as u32, (h as f32 * s).round() as u32)
         })
         && frames.len() > 1
@@ -345,7 +423,11 @@ pub fn decode(bytes: &[u8], ext: &str, max: (u32, u32)) -> Option<(RenderImage, 
         let png = vector_core::svg::rasterize_png(bytes, 1024).ok()?;
         image::load_from_memory(&png).ok()?
     } else {
-        let mut dec = ImageReader::new(Cursor::new(bytes)).with_guessed_format().ok()?.into_decoder().ok()?;
+        let mut dec = ImageReader::new(Cursor::new(bytes))
+            .with_guessed_format()
+            .ok()?
+            .into_decoder()
+            .ok()?;
         let orientation = dec.orientation().ok();
         let mut img = DynamicImage::from_decoder(dec).ok()?;
         if let Some(o) = orientation {
@@ -354,8 +436,16 @@ pub fn decode(bytes: &[u8], ext: &str, max: (u32, u32)) -> Option<(RenderImage, 
         img
     };
     let (w, h) = (img.width(), img.height());
-    let img = if w > max.0 || h > max.1 { img.resize(max.0.max(1), max.1.max(1), FilterType::CatmullRom) } else { img };
-    Some((RenderImage::new(vec![Frame::new(to_bgra(img.into_rgba8()))]), w, h))
+    let img = if w > max.0 || h > max.1 {
+        img.resize(max.0.max(1), max.1.max(1), FilterType::CatmullRom)
+    } else {
+        img
+    };
+    Some((
+        RenderImage::new(vec![Frame::new(to_bgra(img.into_rgba8()))]),
+        w,
+        h,
+    ))
 }
 
 /// `formatBytes`: binary units, two decimals with trailing zeros dropped.
@@ -379,6 +469,10 @@ pub fn format_bytes_with(n: f64, decimals: usize, pad: bool) -> String {
         i += 1;
     }
     let s = format!("{v:.decimals$}");
-    let s = if !pad && s.contains('.') { s.trim_end_matches('0').trim_end_matches('.').to_string() } else { s };
+    let s = if !pad && s.contains('.') {
+        s.trim_end_matches('0').trim_end_matches('.').to_string()
+    } else {
+        s
+    };
     format!("{s} {}", UNITS[i])
 }

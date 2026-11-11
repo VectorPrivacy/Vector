@@ -6,10 +6,10 @@ use std::ops::Range;
 
 use gpui::{
     App, Bounds, ClipboardItem, Context, CursorStyle, ElementId, ElementInputHandler, Entity,
-    EntityInputHandler, EventEmitter, FocusHandle, Focusable, GlobalElementId, KeyBinding, LayoutId,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point,
-    ScrollHandle, SharedString, Style, TextRun, UTF16Selection, UnderlineStyle, Window, WrappedLine,
-    actions, div, fill, point, prelude::*, px, relative, size,
+    EntityInputHandler, EventEmitter, FocusHandle, Focusable, GlobalElementId, KeyBinding,
+    LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point,
+    ScrollHandle, SharedString, Style, TextRun, UTF16Selection, UnderlineStyle, Window,
+    WrappedLine, actions, div, fill, point, prelude::*, px, relative, size,
 };
 use unicode_segmentation::*;
 
@@ -98,7 +98,16 @@ pub struct Look {
 
 impl Default for Look {
     fn default() -> Self {
-        Self { family: RUBIK, weight: gpui::FontWeight::NORMAL, size: px(15.), line_height: px(21.), color: white_a(0.85), placeholder: white_a(0.38), masked: false, masked_size: None }
+        Self {
+            family: RUBIK,
+            weight: gpui::FontWeight::NORMAL,
+            size: px(15.),
+            line_height: px(21.),
+            color: white_a(0.85),
+            placeholder: white_a(0.38),
+            masked: false,
+            masked_size: None,
+        }
     }
 }
 
@@ -114,8 +123,18 @@ struct Layout {
 }
 
 impl Layout {
-    fn shape(text: SharedString, runs: &[TextRun], font_size: Pixels, wrap: Option<Pixels>, line_height: Pixels, window: &Window) -> Self {
-        let shaped = window.text_system().shape_text(text.clone(), font_size, runs, wrap, None).unwrap_or_default();
+    fn shape(
+        text: SharedString,
+        runs: &[TextRun],
+        font_size: Pixels,
+        wrap: Option<Pixels>,
+        line_height: Pixels,
+        window: &Window,
+    ) -> Self {
+        let shaped = window
+            .text_system()
+            .shape_text(text.clone(), font_size, runs, wrap, None)
+            .unwrap_or_default();
         let mut lines = Vec::with_capacity(shaped.len());
         let (mut start, mut y) = (0, px(0.));
         for line in shaped {
@@ -124,37 +143,73 @@ impl Layout {
             start += len + 1;
             y += h;
         }
-        Self { text, lines, line_height, align: None }
+        Self {
+            text,
+            lines,
+            line_height,
+            align: None,
+        }
     }
 
     /// How far a centred row sits right of the left edge.
     fn shift(&self, line: &WrappedLine, row: usize) -> Pixels {
         let Some(aw) = self.align else { return px(0.) };
-        let x = |b: &gpui::WrapBoundary| line.unwrapped_layout.runs[b.run_ix].glyphs[b.glyph_ix].position.x;
-        let start = if row == 0 { px(0.) } else { line.wrap_boundaries.get(row - 1).map(x).unwrap_or(px(0.)) };
-        let end = line.wrap_boundaries.get(row).map(x).unwrap_or(line.unwrapped_layout.width);
+        let x = |b: &gpui::WrapBoundary| {
+            line.unwrapped_layout.runs[b.run_ix].glyphs[b.glyph_ix]
+                .position
+                .x
+        };
+        let start = if row == 0 {
+            px(0.)
+        } else {
+            line.wrap_boundaries.get(row - 1).map(x).unwrap_or(px(0.))
+        };
+        let end = line
+            .wrap_boundaries
+            .get(row)
+            .map(x)
+            .unwrap_or(line.unwrapped_layout.width);
         ((aw - (end - start)) / 2.).max(px(0.))
     }
 
     fn height(&self) -> Pixels {
-        self.lines.last().map(|(_, y, l)| *y + l.size(self.line_height).height).unwrap_or(self.line_height).max(self.line_height)
+        self.lines
+            .last()
+            .map(|(_, y, l)| *y + l.size(self.line_height).height)
+            .unwrap_or(self.line_height)
+            .max(self.line_height)
     }
 
     fn line_at(&self, index: usize) -> Option<&(usize, Pixels, WrappedLine)> {
-        self.lines.iter().rev().find(|(start, _, _)| *start <= index)
+        self.lines
+            .iter()
+            .rev()
+            .find(|(start, _, _)| *start <= index)
     }
 
     /// Where `index` sits, from the text's top left.
     fn position(&self, index: usize) -> Point<Pixels> {
-        let Some((start, y, line)) = self.line_at(index) else { return point(px(0.), px(0.)) };
+        let Some((start, y, line)) = self.line_at(index) else {
+            return point(px(0.), px(0.));
+        };
         let local = index.saturating_sub(*start).min(line.len());
-        let p = line.position_for_index(local, self.line_height).unwrap_or(point(line.width(), px(0.)));
+        let p = line
+            .position_for_index(local, self.line_height)
+            .unwrap_or(point(line.width(), px(0.)));
         let row = (p.y / self.line_height).floor() as usize;
         point(p.x + self.shift(line, row), p.y + *y)
     }
 
     fn index_at(&self, p: Point<Pixels>) -> usize {
-        let Some((start, y, line)) = self.lines.iter().rev().find(|(_, y, _)| *y <= p.y).or(self.lines.first()) else { return 0 };
+        let Some((start, y, line)) = self
+            .lines
+            .iter()
+            .rev()
+            .find(|(_, y, _)| *y <= p.y)
+            .or(self.lines.first())
+        else {
+            return 0;
+        };
         let h = line.size(self.line_height).height;
         let ly = (p.y - *y).clamp(px(0.), (h - px(1.)).max(px(0.)));
         let shift = self.shift(line, (ly / self.line_height).floor() as usize);
@@ -274,7 +329,10 @@ impl TextInput {
             for entry in item.iter().flat_map(|i| i.entries()) {
                 match entry {
                     gpui::ClipboardEntry::Image(img) => {
-                        cx.emit(Pasted::Image { bytes: img.bytes.clone(), ext: img.format.extension() });
+                        cx.emit(Pasted::Image {
+                            bytes: img.bytes.clone(),
+                            ext: img.format.extension(),
+                        });
                         return;
                     }
                     gpui::ClipboardEntry::ExternalPaths(paths) => {
@@ -288,7 +346,11 @@ impl TextInput {
             }
         }
         if let Some(text) = item.and_then(|item| item.text()) {
-            let text = if self.multiline.is_some() { text.replace("\r\n", "\n") } else { text.replace('\n', " ") };
+            let text = if self.multiline.is_some() {
+                text.replace("\r\n", "\n")
+            } else {
+                text.replace('\n', " ")
+            };
             self.replace_text_in_range(None, &text, window, cx);
         }
     }
@@ -500,9 +562,13 @@ impl EntityInputHandler for TextInput {
             .unwrap_or(self.selected_range.clone());
         let new_text = match self.max_chars {
             Some(max) => {
-                let kept = self.content[..range.start].chars().count() + self.content[range.end..].chars().count();
+                let kept = self.content[..range.start].chars().count()
+                    + self.content[range.end..].chars().count();
                 let room = max.saturating_sub(kept);
-                new_text.char_indices().nth(room).map_or(new_text, |(at, _)| &new_text[..at])
+                new_text
+                    .char_indices()
+                    .nth(room)
+                    .map_or(new_text, |(at, _)| &new_text[..at])
             }
             None => new_text,
         };
@@ -571,7 +637,10 @@ impl EntityInputHandler for TextInput {
         let range = self.range_from_utf16(&range_utf16);
         let (a, b) = (layout.position(range.start), layout.position(range.end));
         let b = if b.y == a.y { b } else { point(a.x, a.y) };
-        Some(Bounds::from_corners(bounds.origin + a, bounds.origin + point(b.x, a.y + layout.line_height)))
+        Some(Bounds::from_corners(
+            bounds.origin + a,
+            bounds.origin + point(b.x, a.y + layout.line_height),
+        ))
     }
 
     fn selection_bounds_for_range(
@@ -623,7 +692,10 @@ impl TextInput {
             if let Some(size) = self.look.masked_size {
                 style.font_size = size.into();
             }
-            (BULLET.repeat(content.graphemes(true).count()).into(), style.color)
+            (
+                BULLET.repeat(content.graphemes(true).count()).into(),
+                style.color,
+            )
         } else {
             let subs = self.subs();
             if subs.is_empty() {
@@ -640,13 +712,38 @@ impl TextInput {
                 (text.into(), style.color)
             }
         };
-        let run = TextRun { len: text.len(), font: style.font(), color, background_color: None, underline: None, strikethrough: None };
-        let marked = self.marked_range.as_ref().filter(|_| !self.look.masked && !self.content.is_empty()).map(|m| self.to_display(m.start)..self.to_display(m.end));
+        let run = TextRun {
+            len: text.len(),
+            font: style.font(),
+            color,
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        };
+        let marked = self
+            .marked_range
+            .as_ref()
+            .filter(|_| !self.look.masked && !self.content.is_empty())
+            .map(|m| self.to_display(m.start)..self.to_display(m.end));
         let runs = match marked.as_ref() {
             Some(m) => [
-                TextRun { len: m.start, ..run.clone() },
-                TextRun { len: m.end - m.start, underline: Some(UnderlineStyle { color: Some(run.color), thickness: px(1.0), wavy: false }), ..run.clone() },
-                TextRun { len: text.len() - m.end, ..run },
+                TextRun {
+                    len: m.start,
+                    ..run.clone()
+                },
+                TextRun {
+                    len: m.end - m.start,
+                    underline: Some(UnderlineStyle {
+                        color: Some(run.color),
+                        thickness: px(1.0),
+                        wavy: false,
+                    }),
+                    ..run.clone()
+                },
+                TextRun {
+                    len: text.len() - m.end,
+                    ..run
+                },
             ]
             .into_iter()
             .filter(|r| r.len > 0)
@@ -714,25 +811,50 @@ impl Element for TextElement {
         let (start, end) = if input.content.is_empty() {
             (0, 0)
         } else {
-            (input.to_display(input.selected_range.start), input.to_display(input.selected_range.end))
+            (
+                input.to_display(input.selected_range.start),
+                input.to_display(input.selected_range.end),
+            )
         };
-        let caret = if input.content.is_empty() { 0 } else { input.to_display(input.cursor_offset()) };
+        let caret = if input.content.is_empty() {
+            0
+        } else {
+            input.to_display(input.cursor_offset())
+        };
         let o = bounds.origin;
         let (cursor, selections) = if start == end {
             let p = layout.position(caret);
-            (Some(fill(Bounds::new(o + p, size(px(2.), line_height)), c(ACCENT))), Vec::new())
+            (
+                Some(fill(
+                    Bounds::new(o + p, size(px(2.), line_height)),
+                    c(ACCENT),
+                )),
+                Vec::new(),
+            )
         } else {
             let (a, b) = (layout.position(start), layout.position(end));
             let tint = ca(89, 252, 179, 0.25);
             let mut rects = Vec::new();
             if a.y == b.y {
-                rects.push(Bounds::from_corners(o + a, o + point(b.x, b.y + line_height)));
+                rects.push(Bounds::from_corners(
+                    o + a,
+                    o + point(b.x, b.y + line_height),
+                ));
             } else {
-                rects.push(Bounds::from_corners(o + a, o + point(bounds.size.width, a.y + line_height)));
+                rects.push(Bounds::from_corners(
+                    o + a,
+                    o + point(bounds.size.width, a.y + line_height),
+                ));
                 if b.y > a.y + line_height {
-                    rects.push(Bounds::from_corners(o + point(px(0.), a.y + line_height), o + point(bounds.size.width, b.y)));
+                    rects.push(Bounds::from_corners(
+                        o + point(px(0.), a.y + line_height),
+                        o + point(bounds.size.width, b.y),
+                    ));
                 }
-                rects.push(Bounds::from_corners(o + point(px(0.), b.y), o + point(b.x, b.y + line_height)));
+                rects.push(Bounds::from_corners(
+                    o + point(px(0.), b.y),
+                    o + point(b.x, b.y + line_height),
+                ));
             }
             (None, rects.into_iter().map(|r| fill(r, tint)).collect())
         };
@@ -744,11 +866,21 @@ impl Element for TextElement {
                 let p = layout.position(sub.display.start);
                 let mut art = gpui::img(sub.src.clone()).size(side).into_any_element();
                 let at = o + point(p.x, p.y + (line_height - side) / 2.);
-                art.prepaint_as_root(at, size(side, side).map(gpui::AvailableSpace::Definite), window, cx);
+                art.prepaint_as_root(
+                    at,
+                    size(side, side).map(gpui::AvailableSpace::Definite),
+                    window,
+                    cx,
+                );
                 art
             })
             .collect();
-        PrepaintState { layout: Some(layout), emoji, cursor, selections }
+        PrepaintState {
+            layout: Some(layout),
+            emoji,
+            cursor,
+            selections,
+        }
     }
 
     fn paint(
@@ -762,14 +894,30 @@ impl Element for TextElement {
         cx: &mut App,
     ) {
         let focus_handle = self.input.read(cx).focus_handle.clone();
-        window.handle_input(&focus_handle, ElementInputHandler::new(bounds, self.input.clone()), cx);
+        window.handle_input(
+            &focus_handle,
+            ElementInputHandler::new(bounds, self.input.clone()),
+            cx,
+        );
         for quad in prepaint.selections.drain(..) {
             window.paint_quad(quad);
         }
         let layout = prepaint.layout.take().unwrap();
         for (_, y, line) in &layout.lines {
-            let align = if layout.align.is_some() { gpui::TextAlign::Center } else { gpui::TextAlign::Left };
-            line.paint(bounds.origin + point(px(0.), *y), layout.line_height, align, layout.align.map(|_| bounds), window, cx).ok();
+            let align = if layout.align.is_some() {
+                gpui::TextAlign::Center
+            } else {
+                gpui::TextAlign::Left
+            };
+            line.paint(
+                bounds.origin + point(px(0.), *y),
+                layout.line_height,
+                align,
+                layout.align.map(|_| bounds),
+                window,
+                cx,
+            )
+            .ok();
         }
         for art in &mut prepaint.emoji {
             art.paint(window, cx);
@@ -837,7 +985,9 @@ impl Render for TextInput {
             .on_action(cx.listener(Self::send))
             .on_action(cx.listener(Self::cancel))
             .w_full()
-            .when_some(self.multiline, |d, max| d.max_h(max).overflow_y_scroll().track_scroll(&self.scroll))
+            .when_some(self.multiline, |d, max| {
+                d.max_h(max).overflow_y_scroll().track_scroll(&self.scroll)
+            })
             .font_family(self.look.family)
             .font_weight(self.look.weight)
             .line_height(self.look.line_height)
@@ -912,7 +1062,11 @@ impl TextInput {
             for (i, g) in self.content.grapheme_indices(true) {
                 if let Some(src) = crate::emoji::twemoji(g) {
                     let start = (i as isize + shift) as usize;
-                    subs.push(Sub { content: i..i + g.len(), display: start..start + EMOJI_SLOT.len(), src });
+                    subs.push(Sub {
+                        content: i..i + g.len(),
+                        display: start..start + EMOJI_SLOT.len(),
+                        src,
+                    });
                     shift += EMOJI_SLOT.len() as isize - g.len() as isize;
                 }
             }
@@ -957,7 +1111,13 @@ impl TextInput {
 
     /// Up or down a visual line, keeping the caret's x.
     fn vertical(&mut self, dir: f32, select: bool, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(layout) = self.last_layout.as_ref().filter(|_| self.multiline.is_some()) else { return };
+        let Some(layout) = self
+            .last_layout
+            .as_ref()
+            .filter(|_| self.multiline.is_some())
+        else {
+            return;
+        };
         let p = layout.position(self.to_display(self.cursor_offset()));
         let y = p.y + layout.line_height * dir + layout.line_height / 2.;
         let target = if y < px(0.) {
@@ -1005,7 +1165,11 @@ impl TextInput {
         cx.notify();
     }
 
-    pub fn set_placeholder(&mut self, placeholder: impl Into<SharedString>, cx: &mut Context<Self>) {
+    pub fn set_placeholder(
+        &mut self,
+        placeholder: impl Into<SharedString>,
+        cx: &mut Context<Self>,
+    ) {
         self.placeholder = placeholder.into();
         cx.notify();
     }
@@ -1042,7 +1206,10 @@ impl TextInput {
             }
             return (offset as isize + shift) as usize;
         }
-        self.content[..offset.min(self.content.len())].graphemes(true).count() * BULLET.len()
+        self.content[..offset.min(self.content.len())]
+            .graphemes(true)
+            .count()
+            * BULLET.len()
     }
 
     /// An offset into what is drawn as a content offset.
@@ -1054,14 +1221,22 @@ impl TextInput {
                     break;
                 }
                 if offset < sub.display.end {
-                    return if offset - sub.display.start > sub.display.len() / 2 { sub.content.end } else { sub.content.start };
+                    return if offset - sub.display.start > sub.display.len() / 2 {
+                        sub.content.end
+                    } else {
+                        sub.content.start
+                    };
                 }
                 shift = sub.content.end as isize - sub.display.end as isize;
             }
             return (offset as isize + shift) as usize;
         }
         let n = offset / BULLET.len();
-        self.content.grapheme_indices(true).nth(n).map(|(i, _)| i).unwrap_or(self.content.len())
+        self.content
+            .grapheme_indices(true)
+            .nth(n)
+            .map(|(i, _)| i)
+            .unwrap_or(self.content.len())
     }
 
     /// Enter, as if pressed.
@@ -1093,10 +1268,42 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("right", Right, None),
         KeyBinding::new("shift-left", SelectLeft, None),
         KeyBinding::new("shift-right", SelectRight, None),
-        KeyBinding::new(if cfg!(target_os = "macos") { "cmd-a" } else { "ctrl-a" }, SelectAll, None),
-        KeyBinding::new(if cfg!(target_os = "macos") { "cmd-v" } else { "ctrl-v" }, Paste, None),
-        KeyBinding::new(if cfg!(target_os = "macos") { "cmd-c" } else { "ctrl-c" }, Copy, None),
-        KeyBinding::new(if cfg!(target_os = "macos") { "cmd-x" } else { "ctrl-x" }, Cut, None),
+        KeyBinding::new(
+            if cfg!(target_os = "macos") {
+                "cmd-a"
+            } else {
+                "ctrl-a"
+            },
+            SelectAll,
+            None,
+        ),
+        KeyBinding::new(
+            if cfg!(target_os = "macos") {
+                "cmd-v"
+            } else {
+                "ctrl-v"
+            },
+            Paste,
+            None,
+        ),
+        KeyBinding::new(
+            if cfg!(target_os = "macos") {
+                "cmd-c"
+            } else {
+                "ctrl-c"
+            },
+            Copy,
+            None,
+        ),
+        KeyBinding::new(
+            if cfg!(target_os = "macos") {
+                "cmd-x"
+            } else {
+                "ctrl-x"
+            },
+            Cut,
+            None,
+        ),
         KeyBinding::new("home", Home, None),
         KeyBinding::new("end", End, None),
         KeyBinding::new("ctrl-cmd-space", ShowCharacterPalette, None),

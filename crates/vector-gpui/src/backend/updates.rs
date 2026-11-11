@@ -3,8 +3,10 @@
 
 use std::cmp::Ordering;
 
-const STABLE_MANIFEST: &str = "https://github.com/VectorPrivacy/Vector/releases/latest/download/latest.json";
-const PREVIEW_MANIFEST: &str = "https://github.com/VectorPrivacy/Vector/releases/download/preview/latest.json";
+const STABLE_MANIFEST: &str =
+    "https://github.com/VectorPrivacy/Vector/releases/latest/download/latest.json";
+const PREVIEW_MANIFEST: &str =
+    "https://github.com/VectorPrivacy/Vector/releases/download/preview/latest.json";
 const MAX_MANIFEST: usize = 1 << 20;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -30,7 +32,10 @@ impl Version {
     }
 
     pub fn current() -> Self {
-        Self::parse(env!("CARGO_PKG_VERSION")).unwrap_or(Self { core: [0, 0, 0], preview: None })
+        Self::parse(env!("CARGO_PKG_VERSION")).unwrap_or(Self {
+            core: [0, 0, 0],
+            preview: None,
+        })
     }
 
     /// `v0.4.2` or `v0.4.2 Preview 1`: a bare `-1` reads as though it were older.
@@ -45,12 +50,14 @@ impl Version {
 
 impl Ord for Version {
     fn cmp(&self, other: &Self) -> Ordering {
-        self.core.cmp(&other.core).then_with(|| match (self.preview, other.preview) {
-            (None, None) => Ordering::Equal,
-            (None, Some(_)) => Ordering::Greater,
-            (Some(_), None) => Ordering::Less,
-            (Some(a), Some(b)) => a.cmp(&b),
-        })
+        self.core
+            .cmp(&other.core)
+            .then_with(|| match (self.preview, other.preview) {
+                (None, None) => Ordering::Equal,
+                (None, Some(_)) => Ordering::Greater,
+                (Some(_), None) => Ordering::Less,
+                (Some(a), Some(b)) => a.cmp(&b),
+            })
     }
 }
 
@@ -85,7 +92,11 @@ pub fn set_beta(on: bool) {
 
 /// The newer release on the followed channel, if there is one.
 pub async fn check(preview_channel: bool) -> Result<Option<Release>, String> {
-    let url = if preview_channel { PREVIEW_MANIFEST } else { STABLE_MANIFEST };
+    let url = if preview_channel {
+        PREVIEW_MANIFEST
+    } else {
+        STABLE_MANIFEST
+    };
     let client = vector_core::net::shared_http_client();
     let mut resp = client.get(url).send().await.map_err(|e| e.to_string())?;
     if !resp.status().is_success() {
@@ -98,14 +109,24 @@ pub async fn check(preview_channel: bool) -> Result<Option<Release>, String> {
         }
         body.extend_from_slice(&chunk);
     }
-    let manifest: serde_json::Value = serde_json::from_slice(&body).map_err(|e| format!("Invalid update manifest: {e}"))?;
-    let Some(version) = manifest.get("version").and_then(|v| v.as_str()).and_then(Version::parse) else {
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&body).map_err(|e| format!("Invalid update manifest: {e}"))?;
+    let Some(version) = manifest
+        .get("version")
+        .and_then(|v| v.as_str())
+        .and_then(Version::parse)
+    else {
         return Ok(None);
     };
     if !newer(version, Version::current(), preview_channel) {
         return Ok(None);
     }
-    let notes = manifest.get("notes").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+    let notes = manifest
+        .get("notes")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
     Ok(Some(Release { version, notes }))
 }
 

@@ -7,8 +7,8 @@ use std::sync::LazyLock;
 use std::time::Instant;
 
 use gpui::{
-    AnyElement, Bounds, FontWeight, Hsla, IntoElement, ParentElement, PathBuilder, Pixels, SharedString, Styled, canvas, div,
-    img, point, prelude::*, px, svg,
+    AnyElement, Bounds, FontWeight, Hsla, IntoElement, ParentElement, PathBuilder, Pixels,
+    SharedString, Styled, canvas, div, img, point, prelude::*, px, svg,
 };
 use vector_core::types::{Attachment, Message};
 
@@ -17,7 +17,9 @@ use crate::media::{self, Media, Slot, Source, Transfer};
 use crate::theme::*;
 use crate::timeline::{Act, Ctx, DANGER};
 
-const IMAGES: [&str; 10] = ["png", "jpeg", "jpg", "gif", "webp", "svg", "bmp", "tiff", "tif", "ico"];
+const IMAGES: [&str; 10] = [
+    "png", "jpeg", "jpg", "gif", "webp", "svg", "bmp", "tiff", "tif", "ico",
+];
 /// Pictures that wait behind their blur rather than a file box.
 const BLURRED: [&str; 8] = ["png", "jpeg", "jpg", "gif", "webp", "tiff", "tif", "ico"];
 
@@ -50,7 +52,11 @@ fn source(ctx: &Ctx, att: &Attachment) -> Source {
         }
     }
     let p = std::path::Path::new(&att.path);
-    Source::File(if p.is_absolute() { p.to_path_buf() } else { ctx.store.media_root.join(p) })
+    Source::File(if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        ctx.store.media_root.join(p)
+    })
 }
 
 /// `.dmsg-attachments`: each attachment in the state it is in.
@@ -78,7 +84,8 @@ pub fn attachments(ctx: &Ctx, m: &Message) -> Option<AnyElement> {
             media.auto_fired.insert(att.id.clone());
             media.auto_queue.push((m.id.clone(), att.id.clone()));
         }
-        let downloading = media.transfers.contains_key(&att.id) || media.started.contains(&att.id) || auto;
+        let downloading =
+            media.transfers.contains_key(&att.id) || media.started.contains(&att.id) || auto;
         let phase = if ready {
             Phase::Ready
         } else if downloading {
@@ -87,19 +94,35 @@ pub fn attachments(ctx: &Ctx, m: &Message) -> Option<AnyElement> {
             Phase::Idle
         };
         let (el, bottom) = match phase {
-            Phase::Ready if IMAGES.contains(&e.as_str()) => match picture(ctx, &mut media, m, att) {
-                Some(el) => (el, 6.),
-                None => (file_box(ctx, &media, m, att, FileState::Local, None), 6.),
-            },
+            Phase::Ready if IMAGES.contains(&e.as_str()) => {
+                match picture(ctx, &mut media, m, att) {
+                    Some(el) => (el, 6.),
+                    None => (file_box(ctx, &media, m, att, FileState::Local, None), 6.),
+                }
+            }
             Phase::Ready => (file_box(ctx, &media, m, att, FileState::Local, None), 6.),
-            _ if BLURRED.contains(&e.as_str()) && let Some(el) = blur(ctx, &mut media, m, att, phase, failed.as_deref()) => (el, 6.),
-            Phase::Downloading => (file_box(ctx, &media, m, att, FileState::Downloading, None), 6.),
+            _ if BLURRED.contains(&e.as_str())
+                && let Some(el) = blur(ctx, &mut media, m, att, phase, failed.as_deref()) =>
+            {
+                (el, 6.)
+            }
+            Phase::Downloading => (
+                file_box(ctx, &media, m, att, FileState::Downloading, None),
+                6.,
+            ),
             Phase::Idle if unsent => {
                 let label = if m.failed { "Not sent" } else { "Sending…" };
-                (file_box(ctx, &media, m, att, FileState::Remote, Some(label)), 6.)
+                (
+                    file_box(ctx, &media, m, att, FileState::Remote, Some(label)),
+                    6.,
+                )
             }
             Phase::Idle => {
-                let state = if failed.is_some() { FileState::Failed } else { FileState::Remote };
+                let state = if failed.is_some() {
+                    FileState::Failed
+                } else {
+                    FileState::Remote
+                };
                 (file_box(ctx, &media, m, att, state, None), 6.)
             }
         };
@@ -110,7 +133,11 @@ pub fn attachments(ctx: &Ctx, m: &Message) -> Option<AnyElement> {
     Some(col.child(div().h(px(prev_bottom))).into_any_element())
 }
 
-fn act(ctx: &Ctx, m: &Message, a: Act) -> impl Fn(&gpui::ClickEvent, &mut gpui::Window, &mut gpui::App) + 'static {
+fn act(
+    ctx: &Ctx,
+    m: &Message,
+    a: Act,
+) -> impl Fn(&gpui::ClickEvent, &mut gpui::Window, &mut gpui::App) + 'static {
     let (on_act, id) = (ctx.on_act.clone(), m.id.clone());
     move |_, w, cx| {
         cx.stop_propagation();
@@ -120,7 +147,10 @@ fn act(ctx: &Ctx, m: &Message, a: Act) -> impl Fn(&gpui::ClickEvent, &mut gpui::
 
 /// `ImageAttachment`: the picture at its fitted size, or its blur under a Spoiler veil.
 fn picture(ctx: &Ctx, media: &mut Media, m: &Message, att: &Attachment) -> Option<AnyElement> {
-    let meta = att.img_meta.as_ref().filter(|i| i.width > 0 && i.height > 0);
+    let meta = att
+        .img_meta
+        .as_ref()
+        .filter(|i| i.width > 0 && i.height > 0);
     let veiled = spoiler(att) && !media.revealed.contains(&att.id);
     if veiled
         && let Some(meta) = meta
@@ -145,13 +175,30 @@ fn picture(ctx: &Ctx, media: &mut Media, m: &Message, att: &Attachment) -> Optio
                         .items_center()
                         .justify_center()
                         .gap(px(4.))
-                        .child(svg().path("icons/eye-off.svg").size(px(22.)).text_color(c(0xffffff)))
-                        .child(div().text_size(px(13.)).line_height(px(18.2)).font_weight(FontWeight::MEDIUM).text_color(c(0xffffff)).child("Spoiler")),
+                        .child(
+                            svg()
+                                .path("icons/eye-off.svg")
+                                .size(px(22.))
+                                .text_color(c(0xffffff)),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(13.))
+                                .line_height(px(18.2))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(c(0xffffff))
+                                .child("Spoiler"),
+                        ),
                 )
                 .into_any_element(),
         );
     }
-    let max = |w: f32, h: f32| (((w * ctx.scale).ceil() as u32).max(1), ((h * ctx.scale).ceil() as u32).max(1));
+    let max = |w: f32, h: f32| {
+        (
+            ((w * ctx.scale).ceil() as u32).max(1),
+            ((h * ctx.scale).ceil() as u32).max(1),
+        )
+    };
     let want = match meta {
         Some(i) => {
             let (w, h) = media::fit(i.width, i.height);
@@ -168,14 +215,41 @@ fn picture(ctx: &Ctx, media: &mut Media, m: &Message, att: &Attachment) -> Optio
                 Source::Held(h) => (Some(h), None),
                 Source::File(p) => (None, Some(p)),
             };
-            let open = crate::viewer::Open { image: image.clone(), w, h, full: Some(crate::viewer::Full { hash, path, ext: ext(att) }) };
+            let open = crate::viewer::Open {
+                image: image.clone(),
+                w,
+                h,
+                full: Some(crate::viewer::Full {
+                    hash,
+                    path,
+                    ext: ext(att),
+                }),
+            };
             Some(
                 div()
                     .id(SharedString::from(format!("pic-{}", att.id)))
                     .relative()
-                    .when(!pending, |d| d.cursor_pointer().on_click(act(ctx, m, Act::View(open))))
-                    .child(img(image).w(px(fw)).h(px(fh)).rounded(px(8.)).when(pending, |i| i.opacity(0.25)))
-                    .when(pending, |d| d.child(div().absolute().inset_0().flex().items_center().justify_center().child(ring(48., upload))))
+                    .when(!pending, |d| {
+                        d.cursor_pointer().on_click(act(ctx, m, Act::View(open)))
+                    })
+                    .child(
+                        img(image)
+                            .w(px(fw))
+                            .h(px(fh))
+                            .rounded(px(8.))
+                            .when(pending, |i| i.opacity(0.25)),
+                    )
+                    .when(pending, |d| {
+                        d.child(
+                            div()
+                                .absolute()
+                                .inset_0()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .child(ring(48., upload)),
+                        )
+                    })
                     .into_any_element(),
             )
         }
@@ -195,17 +269,33 @@ fn picture(ctx: &Ctx, media: &mut Media, m: &Message, att: &Attachment) -> Optio
 fn blur_size(meta: &vector_core::types::ImageMetadata) -> (f32, f32) {
     let (w, _) = media::fit(meta.width, meta.height);
     let w = w.round();
-    (w, (w * meta.height as f32 / meta.width as f32).min(media::MAX_H))
+    (
+        w,
+        (w * meta.height as f32 / meta.width as f32).min(media::MAX_H),
+    )
 }
 
 fn device(ctx: &Ctx, w: f32, h: f32) -> (u32, u32) {
-    ((w * ctx.scale).round() as u32, (h * ctx.scale).round() as u32)
+    (
+        (w * ctx.scale).round() as u32,
+        (h * ctx.scale).round() as u32,
+    )
 }
 
 /// `ThumbhashAttachment`: the blur at the size the picture will take, under its download
 /// ring or a Download box. None when there is no blur, so the caller shows a file box.
-fn blur(ctx: &Ctx, media: &mut Media, m: &Message, att: &Attachment, phase: Phase, failed: Option<&str>) -> Option<AnyElement> {
-    let meta = att.img_meta.as_ref().filter(|i| i.width > 0 && i.height > 0)?;
+fn blur(
+    ctx: &Ctx,
+    media: &mut Media,
+    m: &Message,
+    att: &Attachment,
+    phase: Phase,
+    failed: Option<&str>,
+) -> Option<AnyElement> {
+    let meta = att
+        .img_meta
+        .as_ref()
+        .filter(|i| i.width > 0 && i.height > 0)?;
     let (w, h) = blur_size(meta);
     let thumb = media.thumb(&meta.thumbhash, device(ctx, w, h))?;
     let downloading = phase == Phase::Downloading;
@@ -219,7 +309,12 @@ fn blur(ctx: &Ctx, media: &mut Media, m: &Message, att: &Attachment, phase: Phas
         let t = media.transfers.get(&att.id).cloned().unwrap_or_default();
         let size = 48f32.min(w.min(h) * 0.7);
         let note = t.note();
-        let mut o = div().relative().flex().items_center().justify_center().child(ring(size, t.pct));
+        let mut o = div()
+            .relative()
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(ring(size, t.pct));
         if h >= 118. && w >= 120. && !note.is_empty() {
             o = o.child(
                 div()
@@ -245,16 +340,39 @@ fn blur(ctx: &Ctx, media: &mut Media, m: &Message, att: &Attachment, phase: Phas
             .w(px(w))
             .h(px(h))
             .child(img(thumb).size_full().rounded(px(8.)).opacity(opacity))
-            .child(div().absolute().inset_0().flex().items_center().justify_center().child(overlay))
+            .child(
+                div()
+                    .absolute()
+                    .inset_0()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(overlay),
+            )
             .into_any_element(),
     )
 }
 
 /// `.thumb-download`: the icon tile and two lines, or the tile alone on a small blur.
-fn download_box(ctx: &Ctx, m: &Message, att: &Attachment, w: f32, h: f32, failed: Option<&str>) -> AnyElement {
+fn download_box(
+    ctx: &Ctx,
+    m: &Message,
+    att: &Attachment,
+    w: f32,
+    h: f32,
+    failed: Option<&str>,
+) -> AnyElement {
     let compact = w < 205. || h < 76.;
-    let color = if failed.is_some() { c(DANGER) } else { c(PRIMARY) };
-    let icon = if failed.is_some() { "icons/refresh.svg" } else { "icons/download.svg" };
+    let color = if failed.is_some() {
+        c(DANGER)
+    } else {
+        c(PRIMARY)
+    };
+    let icon = if failed.is_some() {
+        "icons/refresh.svg"
+    } else {
+        "icons/download.svg"
+    };
     let tile_size = if compact { 40. } else { 44. };
     let tile = div()
         .size(px(tile_size))
@@ -263,12 +381,23 @@ fn download_box(ctx: &Ctx, m: &Message, att: &Attachment, w: f32, h: f32, failed
         .items_center()
         .justify_center()
         .border_1()
-        .border_color(if failed.is_some() { c(DANGER).opacity(0.45) } else { c(BOX_LINE_HOVER) })
+        .border_color(if failed.is_some() {
+            c(DANGER).opacity(0.45)
+        } else {
+            c(BOX_LINE_HOVER)
+        })
         .rounded(px(10.))
-        .child(svg().path(icon).size(px(tile_size * 0.64)).text_color(color));
+        .child(
+            svg()
+                .path(icon)
+                .size(px(tile_size * 0.64))
+                .text_color(color),
+        );
     let title = match failed {
         Some(_) => "Download Failed".to_string(),
-        None => format!("Download {}", att.extension.to_uppercase()).trim().to_string(),
+        None => format!("Download {}", att.extension.to_uppercase())
+            .trim()
+            .to_string(),
     };
     let sub = match failed {
         Some(e) if !e.is_empty() => e.chars().take(64).collect(),
@@ -282,7 +411,10 @@ fn download_box(ctx: &Ctx, m: &Message, att: &Attachment, w: f32, h: f32, failed
         .on_click(act(ctx, m, Act::Download(att.id.clone())));
     if compact {
         return base
-            .child(tile.bg(ca(12, 12, 12, 0.82)).hover(|s| s.bg(ca(24, 24, 24, 0.88)).border_color(c(0x4a4a4a))))
+            .child(
+                tile.bg(ca(12, 12, 12, 0.82))
+                    .hover(|s| s.bg(ca(24, 24, 24, 0.88)).border_color(c(0x4a4a4a))),
+            )
             .into_any_element();
     }
     base.max_w(px(w * 0.94))
@@ -302,8 +434,27 @@ fn download_box(ctx: &Ctx, m: &Message, att: &Attachment, w: f32, h: f32, failed
                 .pr(px(4.))
                 .flex()
                 .flex_col()
-                .child(div().text_size(px(14.)).line_height(px(17.5)).text_color(white_a(0.92)).whitespace_nowrap().overflow_hidden().text_ellipsis().child(title))
-                .child(div().mt(px(2.)).text_size(px(12.)).line_height(px(15.)).text_color(white_a(0.34)).whitespace_nowrap().overflow_hidden().text_ellipsis().child(sub)),
+                .child(
+                    div()
+                        .text_size(px(14.))
+                        .line_height(px(17.5))
+                        .text_color(white_a(0.92))
+                        .whitespace_nowrap()
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .child(title),
+                )
+                .child(
+                    div()
+                        .mt(px(2.))
+                        .text_size(px(12.))
+                        .line_height(px(15.))
+                        .text_color(white_a(0.34))
+                        .whitespace_nowrap()
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .child(sub),
+                ),
         )
         .into_any_element()
 }
@@ -311,11 +462,25 @@ fn download_box(ctx: &Ctx, m: &Message, att: &Attachment, w: f32, h: f32, failed
 /// `.miniapp-downloading-spinner`: a 4px ring filled to `pct` from the top, turning once
 /// every two seconds.
 pub fn ring(size: f32, pct: Option<f32>) -> AnyElement {
-    spinner(size, 3.5, 2., pct.unwrap_or(5.).clamp(0., 100.) / 100., white_a(0.2), c(PRIMARY))
+    spinner(
+        size,
+        3.5,
+        2.,
+        pct.unwrap_or(5.).clamp(0., 100.) / 100.,
+        white_a(0.2),
+        c(PRIMARY),
+    )
 }
 
 /// A turning ring: `fill` of it in the accent over a `track`, one turn every `period` seconds.
-pub fn spinner(size: f32, thickness: f32, period: f32, fill: f32, track: gpui::Hsla, color: gpui::Hsla) -> AnyElement {
+pub fn spinner(
+    size: f32,
+    thickness: f32,
+    period: f32,
+    fill: f32,
+    track: gpui::Hsla,
+    color: gpui::Hsla,
+) -> AnyElement {
     canvas(
         |_, _, _| {},
         move |bounds: Bounds<Pixels>, _, window, _| {
@@ -325,7 +490,8 @@ pub fn spinner(size: f32, thickness: f32, period: f32, fill: f32, track: gpui::H
             let r_in = r_out - thickness;
             let arc = |from: f32, to: f32| -> Option<gpui::Path<Pixels>> {
                 let steps = ((to - from).abs() / TAU * 96.).ceil().max(2.) as usize;
-                let at = |r: f32, a: f32| point(center.x + px(r * a.sin()), center.y - px(r * a.cos()));
+                let at =
+                    |r: f32, a: f32| point(center.x + px(r * a.sin()), center.y - px(r * a.cos()));
                 let mut pts = Vec::with_capacity(steps * 2 + 2);
                 for k in 0..=steps {
                     pts.push(at(r_out, from + (to - from) * k as f32 / steps as f32));
@@ -365,21 +531,52 @@ enum FileState {
 }
 
 /// `FileBox`: icon, name and what the file is doing; the box is the action.
-fn file_box(ctx: &Ctx, media: &Media, m: &Message, att: &Attachment, state: FileState, label: Option<&str>) -> AnyElement {
+fn file_box(
+    ctx: &Ctx,
+    media: &Media,
+    m: &Message,
+    att: &Attachment,
+    state: FileState,
+    label: Option<&str>,
+) -> AnyElement {
     let (icon, description) = data::file_type(&att.extension);
     let icon = if icon == "gift" { "gamepad" } else { icon };
-    let title: SharedString = if att.name.is_empty() { description.into() } else { att.name.clone().into() };
+    let title: SharedString = if att.name.is_empty() {
+        description.into()
+    } else {
+        att.name.clone().into()
+    };
     let e = ext(att);
-    let kind = if e.is_empty() { description.to_string() } else { format!(".{e}") };
+    let kind = if e.is_empty() {
+        description.to_string()
+    } else {
+        format!(".{e}")
+    };
     let size = (att.size > 0).then(|| media::format_bytes(att.size));
-    let glyph_color = if state == FileState::Failed { c(DANGER) } else { white_a(0.7) };
-    let title_color = if state == FileState::Local { c(PRIMARY) } else { white_a(0.92) };
+    let glyph_color = if state == FileState::Failed {
+        c(DANGER)
+    } else {
+        white_a(0.7)
+    };
+    let title_color = if state == FileState::Local {
+        c(PRIMARY)
+    } else {
+        white_a(0.92)
+    };
 
     let uploading = m.mine && m.pending && state == FileState::Local;
-    let state = if uploading { FileState::Downloading } else { state };
+    let state = if uploading {
+        FileState::Downloading
+    } else {
+        state
+    };
     let text = div().flex_1().min_w_0().flex().flex_col();
     let text = if state == FileState::Downloading {
-        let t: Transfer = media.transfers.get(if uploading { &m.id } else { &att.id }).cloned().unwrap_or_default();
+        let t: Transfer = media
+            .transfers
+            .get(if uploading { &m.id } else { &att.id })
+            .cloned()
+            .unwrap_or_default();
         let note = t.note();
         text.child(
             div()
@@ -388,7 +585,15 @@ fn file_box(ctx: &Ctx, media: &Media, m: &Message, att: &Attachment, state: File
                 .whitespace_nowrap()
                 .text_size(px(15.))
                 .line_height(px(18.75))
-                .child(div().flex_shrink(1.).min_w_0().overflow_hidden().text_ellipsis().text_color(title_color).child(title))
+                .child(
+                    div()
+                        .flex_shrink(1.)
+                        .min_w_0()
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .text_color(title_color)
+                        .child(title),
+                )
                 .child(
                     div()
                         .flex_shrink_0()
@@ -396,7 +601,11 @@ fn file_box(ctx: &Ctx, media: &Media, m: &Message, att: &Attachment, state: File
                         .text_size(px(12.75))
                         .text_color(white_a(0.34))
                         .child(size.map(|s| format!(" — {s}")).unwrap_or_default())
-                        .child(div().ml(px(4.5)).w(px(112.)).child(if note.is_empty() { String::new() } else { format!("· {note}") })),
+                        .child(div().ml(px(4.5)).w(px(112.)).child(if note.is_empty() {
+                            String::new()
+                        } else {
+                            format!("· {note}")
+                        })),
                 ),
         )
         .child(bar(t.pct))
@@ -404,8 +613,16 @@ fn file_box(ctx: &Ctx, media: &Media, m: &Message, att: &Attachment, state: File
         let sub = match (label, state) {
             (Some(l), _) => l.to_string(),
             (None, FileState::Failed) => {
-                let reason: String = media.failed.get(&att.id).map(|r| r.chars().take(64).collect()).unwrap_or_default();
-                if reason.is_empty() { "Download Failed · Tap to Retry".into() } else { format!("Failed: {reason} · Tap to Retry") }
+                let reason: String = media
+                    .failed
+                    .get(&att.id)
+                    .map(|r| r.chars().take(64).collect())
+                    .unwrap_or_default();
+                if reason.is_empty() {
+                    "Download Failed · Tap to Retry".into()
+                } else {
+                    format!("Failed: {reason} · Tap to Retry")
+                }
             }
             _ => match &size {
                 Some(s) => format!("{kind} — {s}"),
@@ -422,7 +639,15 @@ fn file_box(ctx: &Ctx, media: &Media, m: &Message, att: &Attachment, state: File
                 .text_ellipsis()
                 .child(title),
         )
-        .child(div().mt(px(3.)).text_size(px(12.)).line_height(px(15.)).text_color(white_a(0.55)).whitespace_nowrap().child(sub))
+        .child(
+            div()
+                .mt(px(3.))
+                .text_size(px(12.))
+                .line_height(px(15.))
+                .text_color(white_a(0.55))
+                .whitespace_nowrap()
+                .child(sub),
+        )
     };
 
     let button = |icon: &'static str, color: Hsla, border: Hsla, a: Act| {
@@ -444,17 +669,45 @@ fn file_box(ctx: &Ctx, media: &Media, m: &Message, att: &Attachment, state: File
     let action = match (state, label) {
         (_, Some(_)) => None,
         (FileState::Downloading, _) if uploading => {
-            let done = media.transfers.get(&m.id).and_then(|t| t.pct).is_some_and(|p| p >= 100.);
-            (!done).then(|| button("icons/x.svg", white_a(0.7), c(BOX_LINE_HOVER), Act::CancelUpload(m.id.clone())))
+            let done = media
+                .transfers
+                .get(&m.id)
+                .and_then(|t| t.pct)
+                .is_some_and(|p| p >= 100.);
+            (!done).then(|| {
+                button(
+                    "icons/x.svg",
+                    white_a(0.7),
+                    c(BOX_LINE_HOVER),
+                    Act::CancelUpload(m.id.clone()),
+                )
+            })
         }
-        (FileState::Downloading, _) => Some(button("icons/x.svg", white_a(0.7), c(BOX_LINE_HOVER), Act::CancelDownload(att.id.clone()))),
-        (FileState::Failed, _) => Some(button("icons/refresh.svg", c(DANGER), c(DANGER).opacity(0.45), Act::Download(att.id.clone()))),
-        (FileState::Remote, _) => Some(button("icons/download.svg", c(PRIMARY), c(BOX_LINE_HOVER), Act::Download(att.id.clone()))),
+        (FileState::Downloading, _) => Some(button(
+            "icons/x.svg",
+            white_a(0.7),
+            c(BOX_LINE_HOVER),
+            Act::CancelDownload(att.id.clone()),
+        )),
+        (FileState::Failed, _) => Some(button(
+            "icons/refresh.svg",
+            c(DANGER),
+            c(DANGER).opacity(0.45),
+            Act::Download(att.id.clone()),
+        )),
+        (FileState::Remote, _) => Some(button(
+            "icons/download.svg",
+            c(PRIMARY),
+            c(BOX_LINE_HOVER),
+            Act::Download(att.id.clone()),
+        )),
         (FileState::Local, _) => None,
     };
     let click = match state {
         FileState::Local => Some(Act::OpenFile(att.id.clone())),
-        FileState::Remote | FileState::Failed if label.is_none() => Some(Act::Download(att.id.clone())),
+        FileState::Remote | FileState::Failed if label.is_none() => {
+            Some(Act::Download(att.id.clone()))
+        }
         _ => None,
     };
 
@@ -471,9 +724,25 @@ fn file_box(ctx: &Ctx, media: &Media, m: &Message, att: &Attachment, state: File
         .border_color(c(BOX_LINE))
         .rounded(px(12.))
         .bg(c(BOX_BG))
-        .when(state != FileState::Downloading, |d| d.hover(|s| s.bg(c(BOX_BG_HOVER)).border_color(c(BOX_LINE_HOVER))).cursor_pointer())
+        .when(state != FileState::Downloading, |d| {
+            d.hover(|s| s.bg(c(BOX_BG_HOVER)).border_color(c(BOX_LINE_HOVER)))
+                .cursor_pointer()
+        })
         .when_some(click, |d, a| d.on_click(act(ctx, m, a)))
-        .child(div().size(px(40.)).flex_shrink_0().flex().items_center().justify_center().child(svg().path(format!("icons/{icon}.svg")).size(px(32.)).text_color(glyph_color)))
+        .child(
+            div()
+                .size(px(40.))
+                .flex_shrink_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(
+                    svg()
+                        .path(format!("icons/{icon}.svg"))
+                        .size(px(32.))
+                        .text_color(glyph_color),
+                ),
+        )
         .child(text)
         .children(action)
         .into_any_element()
@@ -489,5 +758,11 @@ fn bar(pct: Option<f32>) -> impl IntoElement {
         .rounded_full()
         .bg(white_a(0.12))
         .overflow_hidden()
-        .child(div().h_full().w(gpui::relative(fill)).rounded_full().bg(c(PRIMARY)))
+        .child(
+            div()
+                .h_full()
+                .w(gpui::relative(fill))
+                .rounded_full()
+                .bg(c(PRIMARY)),
+        )
 }

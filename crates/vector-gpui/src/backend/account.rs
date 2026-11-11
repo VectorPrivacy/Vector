@@ -5,7 +5,7 @@ use std::sync::Mutex;
 use nostr_sdk::prelude::*;
 use vector_core::db;
 use vector_core::state::{self, MNEMONIC_SEED, PENDING_NSEC};
-use vector_core::{Profile, SignerKind, MY_SECRET_KEY, STATE};
+use vector_core::{MY_SECRET_KEY, Profile, STATE, SignerKind};
 use zeroize::{Zeroize, Zeroizing};
 
 /// An account created or imported, held until its security step commits it.
@@ -42,15 +42,27 @@ pub enum Imported {
 /// An account on disk is real once its setup committed: a stored key, or a keyless signer's
 /// identity. One abandoned before that holds neither.
 fn is_committed(npub: &str) -> bool {
-    if !db::get_accounts().unwrap_or_default().iter().any(|n| n == npub) {
+    if !db::get_accounts()
+        .unwrap_or_default()
+        .iter()
+        .any(|n| n == npub)
+    {
         return false;
     }
-    let Ok(path) = db::account_dir(npub).map(|d| d.join("vector.db")) else { return false };
-    let Ok(conn) = rusqlite::Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY) else {
+    let Ok(path) = db::account_dir(npub).map(|d| d.join("vector.db")) else {
         return false;
     };
-    conn.query_row("SELECT 1 FROM settings WHERE key IN ('pkey', 'nip55_user_pubkey') LIMIT 1", [], |_| Ok(()))
-        .is_ok()
+    let Ok(conn) =
+        rusqlite::Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+    else {
+        return false;
+    };
+    conn.query_row(
+        "SELECT 1 FROM settings WHERE key IN ('pkey', 'nip55_user_pubkey') LIMIT 1",
+        [],
+        |_| Ok(()),
+    )
+    .is_ok()
 }
 
 /// Select the remembered account, or arm the welcome screen's network when there is none.
@@ -58,18 +70,24 @@ pub fn boot() -> BootInfo {
     let account = match db::get_current_account() {
         Ok(npub) => Some(npub),
         Err(_) => match db::read_active_account_file().ok().flatten() {
-            Some(npub) if is_committed(&npub) => {
-                (db::set_current_account(npub.clone()).is_ok() && db::init_database(&npub).is_ok()).then_some(npub)
-            }
+            Some(npub) if is_committed(&npub) => (db::set_current_account(npub.clone()).is_ok()
+                && db::init_database(&npub).is_ok())
+            .then_some(npub),
             Some(_) => {
                 let _ = db::clear_active_account_file();
                 None
             }
             // One committed account and no marker: it is the one.
             None => {
-                let committed: Vec<String> = db::get_accounts().unwrap_or_default().into_iter().filter(|n| is_committed(n)).collect();
+                let committed: Vec<String> = db::get_accounts()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|n| is_committed(n))
+                    .collect();
                 match committed.as_slice() {
-                    [only] => (db::set_current_account(only.clone()).is_ok() && db::init_database(only).is_ok()).then(|| only.clone()),
+                    [only] => (db::set_current_account(only.clone()).is_ok()
+                        && db::init_database(only).is_ok())
+                    .then(|| only.clone()),
                     _ => None,
                 }
             }
@@ -77,53 +95,105 @@ pub fn boot() -> BootInfo {
     };
     let Some(account) = account else {
         vector_core::transport::prelogin::apply_at_boot();
-        return BootInfo { account: None, encrypted: false, security_type: "pin".into(), signer: "local".into() };
+        return BootInfo {
+            account: None,
+            encrypted: false,
+            security_type: "pin".into(),
+            signer: "local".into(),
+        };
     };
     state::init_encryption_enabled();
     let encrypted = state::is_encryption_enabled_fast();
     let security_type = if encrypted {
-        db::get_sql_setting("security_type".into()).ok().flatten().unwrap_or_else(|| "pin".into())
+        db::get_sql_setting("security_type".into())
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| "pin".into())
     } else {
         "pin".into()
     };
     let signer = db::get_signer_type().unwrap_or_else(|_| "local".into());
-    BootInfo { account: Some(account), encrypted, security_type, signer }
+    BootInfo {
+        account: Some(account),
+        encrypted,
+        security_type,
+        signer,
+    }
 }
 
 /// Every committed account, most recently used first.
 pub fn accounts() -> Vec<Account> {
-    let mut out: Vec<Account> = db::get_accounts().unwrap_or_default().into_iter().filter(|n| is_committed(n)).map(|n| metadata(&n)).collect();
+    let mut out: Vec<Account> = db::get_accounts()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|n| is_committed(n))
+        .map(|n| metadata(&n))
+        .collect();
     out.sort_by_key(|a| std::cmp::Reverse(a.last_active));
     out
 }
 
 fn metadata(npub: &str) -> Account {
-    let mut meta = Account { npub: npub.to_string(), name: None, avatar: None, encrypted: false, last_active: 0 };
-    let Ok(path) = db::account_dir(npub).map(|d| d.join("vector.db")) else { return meta };
-    let Ok(conn) = rusqlite::Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY) else {
+    let mut meta = Account {
+        npub: npub.to_string(),
+        name: None,
+        avatar: None,
+        encrypted: false,
+        last_active: 0,
+    };
+    let Ok(path) = db::account_dir(npub).map(|d| d.join("vector.db")) else {
+        return meta;
+    };
+    let Ok(conn) =
+        rusqlite::Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+    else {
         return meta;
     };
     if let Ok((nickname, display, name, avatar_cached)) = conn.query_row(
         "SELECT nickname, display_name, name, avatar_cached FROM profiles WHERE npub = ?1",
         [npub],
-        |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?)),
+        |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+            ))
+        },
     ) {
-        meta.name = [nickname, display, name].into_iter().find(|s| !s.is_empty());
+        meta.name = [nickname, display, name]
+            .into_iter()
+            .find(|s| !s.is_empty());
         meta.avatar = (!avatar_cached.is_empty()).then_some(avatar_cached);
     }
-    let setting = |key: &str| conn.query_row("SELECT value FROM settings WHERE key = ?1", [key], |r| r.get::<_, String>(0)).ok();
-    meta.encrypted = state::resolve_encryption_enabled(setting("encryption_enabled").as_deref(), setting("security_type").as_deref());
-    meta.last_active = setting("last_active").and_then(|v| v.parse().ok()).unwrap_or(0);
+    let setting = |key: &str| {
+        conn.query_row("SELECT value FROM settings WHERE key = ?1", [key], |r| {
+            r.get::<_, String>(0)
+        })
+        .ok()
+    };
+    meta.encrypted = state::resolve_encryption_enabled(
+        setting("encryption_enabled").as_deref(),
+        setting("security_type").as_deref(),
+    );
+    meta.last_active = setting("last_active")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
     meta
 }
 
 fn touch_last_active() {
-    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
     let _ = db::set_sql_setting("last_active".into(), now.to_string());
 }
 
 fn install_client() {
-    let client = vector_core::nostr_client_builder().monitor(Monitor::new(1024)).build();
+    let client = vector_core::nostr_client_builder()
+        .monitor(Monitor::new(1024))
+        .build();
     state::set_nostr_client_if_absent(client);
 }
 
@@ -146,7 +216,8 @@ pub async fn import(mut key: String) -> Result<Imported, String> {
         parsed?
     } else {
         let phrase = Zeroizing::new(std::mem::take(&mut key));
-        Keys::from_mnemonic(phrase.trim(), Some("")).map_err(|_| "Invalid Seed Phrase".to_string())?
+        Keys::from_mnemonic(phrase.trim(), Some(""))
+            .map_err(|_| "Invalid Seed Phrase".to_string())?
     };
     *FRESH_ACCOUNT_NPUB.lock().unwrap() = None;
     let npub = keys.public_key().to_bech32().map_err(|e| e.to_string())?;
@@ -188,18 +259,29 @@ pub async fn create() -> Result<String, String> {
 }
 
 /// Commit the pending account: its key sealed under `password`, or kept plain without one.
-pub async fn commit(password: Option<Zeroizing<String>>, security_type: &str) -> Result<(), String> {
+pub async fn commit(
+    password: Option<Zeroizing<String>>,
+    security_type: &str,
+) -> Result<(), String> {
     if password.as_ref().is_some_and(|p| p.trim().is_empty()) {
         return Err("Password must not be empty.".into());
     }
-    let nsec = Zeroizing::new(PENDING_NSEC.lock().unwrap().clone().ok_or("No pending key")?);
+    let nsec = Zeroizing::new(
+        PENDING_NSEC
+            .lock()
+            .unwrap()
+            .clone()
+            .ok_or("No pending key")?,
+    );
     let seed = MNEMONIC_SEED.lock().unwrap().clone().map(Zeroizing::new);
 
     // One derivation seals the key and the seed; the vault and the flag change only once the
     // commit has landed, so a failed commit leaves nothing behind for a retry.
     let kdf = password.as_ref().map(|_| vector_core::crypto::Kdf::fresh());
     let key = match (&password, &kdf) {
-        (Some(pwd), Some(kdf)) => Some(Zeroizing::new(vector_core::crypto::derive_key(pwd.as_str(), kdf).await)),
+        (Some(pwd), Some(kdf)) => Some(Zeroizing::new(
+            vector_core::crypto::derive_key(pwd.as_str(), kdf).await,
+        )),
         _ => None,
     };
     let seal = |plain: &str| -> Result<String, String> {
@@ -218,7 +300,14 @@ pub async fn commit(password: Option<Zeroizing<String>>, security_type: &str) ->
         db::write_active_account_file(&npub)?;
     }
     let security = password.as_ref().map(|_| security_type);
-    db::settings::commit_account_setup(&stored_key, password.is_some(), security, stored_seed.as_deref(), None, kdf_row.as_deref())?;
+    db::settings::commit_account_setup(
+        &stored_key,
+        password.is_some(),
+        security,
+        stored_seed.as_deref(),
+        None,
+        kdf_row.as_deref(),
+    )?;
     if let Some(k) = &key {
         vector_core::ENCRYPTION_KEY.set(**k, &[&MY_SECRET_KEY]);
     }
@@ -240,13 +329,16 @@ pub async fn commit(password: Option<Zeroizing<String>>, security_type: &str) ->
 /// NIP-89 readers recognise it. Never for an imported or unlocked identity.
 fn stamp_fresh_account_profile() {
     let armed = FRESH_ACCOUNT_NPUB.lock().unwrap().take();
-    let Some(client) = state::nostr_client() else { return };
+    let Some(client) = state::nostr_client() else {
+        return;
+    };
     let current = vector_core::my_public_key().and_then(|pk| pk.to_bech32().ok());
     if armed.is_none() || armed != current {
         return;
     }
     db::spawn_bound(async move {
-        let builder = EventBuilder::new(Kind::Metadata, "{}").tag(Tag::custom("client", vec!["vector"]));
+        let builder =
+            EventBuilder::new(Kind::Metadata, "{}").tag(Tag::custom("client", vec!["vector"]));
         if let Ok(event) = vector_core::sign_builder(builder).await {
             let relays = state::active_trusted_relays().await;
             if let Err(e) = client.send_event(&event).to(relays).await {
@@ -274,9 +366,12 @@ pub async fn unlock(password: Option<Zeroizing<String>>) -> Result<String, Strin
         transport::set_preference(prelogin::effective(&prefs::stored_kind()));
     }
 
-    let kind = SignerKind::from_setting_str(&db::get_signer_type().unwrap_or_else(|_| "local".into()));
+    let kind =
+        SignerKind::from_setting_str(&db::get_signer_type().unwrap_or_else(|_| "local".into()));
     if !matches!(kind, SignerKind::Local) {
-        return Err("This account signs with an external signer, which this client cannot use yet.".into());
+        return Err(
+            "This account signs with an external signer, which this client cannot use yet.".into(),
+        );
     }
     let stored = db::get_pkey()?.ok_or("No private key found")?;
     let mut nsec = match &password {
@@ -284,7 +379,8 @@ pub async fn unlock(password: Option<Zeroizing<String>>) -> Result<String, Strin
             // The vault takes the key only once it has opened the stored key.
             let kdf = vector_core::crypto::Kdf::of_account()?;
             let key = Zeroizing::new(vector_core::crypto::derive_key(pwd.as_str(), &kdf).await);
-            let nsec = vector_core::crypto::decrypt_with_key(&stored, &key).map_err(|_| "Incorrect password".to_string())?;
+            let nsec = vector_core::crypto::decrypt_with_key(&stored, &key)
+                .map_err(|_| "Incorrect password".to_string())?;
             vector_core::crypto::install_unlocked_key(&key, &kdf)?;
             match db::at_rest::upgrade_after_unlock(pwd, &key).await {
                 Ok(true) => {
@@ -303,7 +399,10 @@ pub async fn unlock(password: Option<Zeroizing<String>>) -> Result<String, Strin
     drop(keys);
     install_client();
 
-    let npub = vector_core::my_public_key().ok_or("no identity")?.to_bech32().map_err(|e| e.to_string())?;
+    let npub = vector_core::my_public_key()
+        .ok_or("no identity")?
+        .to_bech32()
+        .map_err(|e| e.to_string())?;
     insert_own_profile(&npub).await;
     db::init_database(&npub)?;
     db::set_current_account(npub.clone())?;
@@ -318,7 +417,9 @@ pub async fn unlock(password: Option<Zeroizing<String>>) -> Result<String, Strin
 
 /// Add the configured and discovery relays, then connect. False if already connected.
 pub async fn connect() -> bool {
-    let Some(client) = state::nostr_client() else { return false };
+    let Some(client) = state::nostr_client() else {
+        return false;
+    };
     if !client.relays().await.is_empty() {
         return false;
     }
@@ -387,11 +488,16 @@ pub async fn delete(npub: String) -> Result<bool, String> {
     }
     let dir = db::account_dir(&npub)?;
     match std::fs::remove_dir_all(&dir) {
-        Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(format!("Failed to remove account directory: {e}")),
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+            return Err(format!("Failed to remove account directory: {e}"));
+        }
         _ => {}
     }
     // Counted on disk, not validated: a locked database must not read as no account at all.
-    if db::list_account_npubs().map(|v| v.is_empty()).unwrap_or(false) {
+    if db::list_account_npubs()
+        .map(|v| v.is_empty())
+        .unwrap_or(false)
+    {
         let _ = std::fs::remove_dir_all(db::get_download_dir());
     }
     if was_active {

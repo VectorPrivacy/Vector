@@ -6,12 +6,17 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use gpui::prelude::*;
-use gpui::{AnyElement, Context, Entity, FocusHandle, Focusable, FontWeight, KeyDownEvent, RenderImage, SharedString, Window, div, img, px, svg};
+use gpui::{
+    AnyElement, Context, Entity, FocusHandle, Focusable, FontWeight, KeyDownEvent, RenderImage,
+    SharedString, Window, div, img, px, svg,
+};
 use serde_json::Value;
 
 use crate::backend;
 use crate::composer::{InputChanged, Look, SendText, TextInput};
-use crate::security::{Event, SecurityFlow, actions, button, card, head, lead, lead_mixed, noun, overlay};
+use crate::security::{
+    Event, SecurityFlow, actions, button, card, head, lead, lead_mixed, noun, overlay,
+};
 use crate::theme::*;
 
 const CODE_LIFE: Duration = Duration::from_secs(5 * 60);
@@ -89,7 +94,9 @@ fn clean_code(text: &str) -> String {
 /// A PNG data URL, as the sender's avatar arrives.
 fn data_image(url: &str) -> Option<Arc<RenderImage>> {
     let b64 = url.split_once(";base64,")?.1;
-    let bytes = vector_core::simd::base64::STANDARD.decode_to_vec(b64).ok()?;
+    let bytes = vector_core::simd::base64::STANDARD
+        .decode_to_vec(b64)
+        .ok()?;
     let mut buf = image::load_from_memory(&bytes).ok()?.into_rgba8();
     for p in buf.chunks_exact_mut(4) {
         p.swap(0, 2);
@@ -98,7 +105,11 @@ fn data_image(url: &str) -> Option<Arc<RenderImage>> {
 }
 
 fn short(npub: &str) -> String {
-    if npub.len() > 18 { format!("{}…{}", &npub[..12], &npub[npub.len() - 6..]) } else { npub.to_string() }
+    if npub.len() > 18 {
+        format!("{}…{}", &npub[..12], &npub[npub.len() - 6..])
+    } else {
+        npub.to_string()
+    }
 }
 
 impl SecurityFlow {
@@ -108,8 +119,16 @@ impl SecurityFlow {
 
     /// Open the card. `send` only on a signed-in device the user is holding: Settings.
     pub fn open_transfer(&mut self, send: bool, cx: &mut Context<Self>) {
-        let look = Look { family: crate::markdown::MONO, weight: FontWeight::MEDIUM, ..crate::kit::field_look() };
-        let entry = cx.new(|cx| TextInput::new("7-orbit-lemon-stage", cx).with_look(look).keep_on_submit());
+        let look = Look {
+            family: crate::markdown::MONO,
+            weight: FontWeight::MEDIUM,
+            ..crate::kit::field_look()
+        };
+        let entry = cx.new(|cx| {
+            TextInput::new("7-orbit-lemon-stage", cx)
+                .with_look(look)
+                .keep_on_submit()
+        });
         cx.subscribe(&entry, |_, input, _: &InputChanged, cx| {
             let text = input.read(cx).text().to_string();
             let clean = clean_code(&text);
@@ -119,7 +138,8 @@ impl SecurityFlow {
             cx.notify();
         })
         .detach();
-        cx.subscribe(&entry, |f, _, _: &SendText, cx| f.connect(cx)).detach();
+        cx.subscribe(&entry, |f, _, _: &SendText, cx| f.connect(cx))
+            .detach();
         self.xfer = Some(Xfer {
             sender: send,
             stage: Stage::Connecting,
@@ -166,7 +186,14 @@ impl SecurityFlow {
         cx.notify();
     }
 
-    fn start(&mut self, code: Option<String>, cx: &mut Context<Self>) -> Option<(u64, futures::channel::oneshot::Receiver<Result<backend::transfer::Started, String>>)> {
+    fn start(
+        &mut self,
+        code: Option<String>,
+        cx: &mut Context<Self>,
+    ) -> Option<(
+        u64,
+        futures::channel::oneshot::Receiver<Result<backend::transfer::Started, String>>,
+    )> {
         let x = self.xfer.as_ref()?;
         let (seq, send) = (x.seq, x.sender);
         let rx = if self.live {
@@ -195,11 +222,17 @@ impl SecurityFlow {
         x.number.clear();
         x.sas.clear();
         x.finish_failed = false;
-        let Some((seq, rx)) = self.start(None, cx) else { return };
+        let Some((seq, rx)) = self.start(None, cx) else {
+            return;
+        };
         cx.spawn(async move |this, cx| {
-            let result = rx.await.unwrap_or_else(|_| Err("The transfer stopped before it began".into()));
+            let result = rx
+                .await
+                .unwrap_or_else(|_| Err("The transfer stopped before it began".into()));
             this.update(cx, |f, cx| {
-                let Some(x) = f.xfer.as_mut().filter(|x| x.seq == seq) else { return };
+                let Some(x) = f.xfer.as_mut().filter(|x| x.seq == seq) else {
+                    return;
+                };
                 match result {
                     Ok(started) => {
                         x.id = started.id;
@@ -231,7 +264,11 @@ impl SecurityFlow {
                 let going = this
                     .update(cx, |f, cx| {
                         cx.notify();
-                        f.xfer.as_ref().is_some_and(|x| x.seq == seq && x.stage == Stage::Show && Instant::now() < x.expires + Duration::from_secs(1))
+                        f.xfer.as_ref().is_some_and(|x| {
+                            x.seq == seq
+                                && x.stage == Stage::Show
+                                && Instant::now() < x.expires + Duration::from_secs(1)
+                        })
                     })
                     .unwrap_or(false);
                 if !going {
@@ -255,7 +292,13 @@ impl SecurityFlow {
     }
 
     fn connect(&mut self, cx: &mut Context<Self>) {
-        let Some(x) = self.xfer.as_ref().filter(|x| x.stage == Stage::Enter && !x.busy) else { return };
+        let Some(x) = self
+            .xfer
+            .as_ref()
+            .filter(|x| x.stage == Stage::Enter && !x.busy)
+        else {
+            return;
+        };
         let code = x.entry.read(cx).text().trim().to_string();
         if code.is_empty() {
             return;
@@ -264,11 +307,17 @@ impl SecurityFlow {
         let Some(x) = self.xfer_mut() else { return };
         x.busy = true;
         x.error.clear();
-        let Some((seq, rx)) = self.start(Some(code.clone()), cx) else { return };
+        let Some((seq, rx)) = self.start(Some(code.clone()), cx) else {
+            return;
+        };
         cx.spawn(async move |this, cx| {
-            let result = rx.await.unwrap_or_else(|_| Err("The transfer stopped before it began".into()));
+            let result = rx
+                .await
+                .unwrap_or_else(|_| Err("The transfer stopped before it began".into()));
             this.update(cx, |f, cx| {
-                let Some(x) = f.xfer.as_mut().filter(|x| x.seq == seq) else { return };
+                let Some(x) = f.xfer.as_mut().filter(|x| x.seq == seq) else {
+                    return;
+                };
                 x.busy = false;
                 match result {
                     Ok(started) => {
@@ -299,7 +348,9 @@ impl SecurityFlow {
         x.copied = Some(at);
         cx.emit(Event::Toast("Copied Code".into()));
         cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(Duration::from_millis(1500)).await;
+            cx.background_executor()
+                .timer(Duration::from_millis(1500))
+                .await;
             this.update(cx, |f, cx| {
                 if let Some(x) = f.xfer.as_mut().filter(|x| x.copied == Some(at)) {
                     x.copied = None;
@@ -322,9 +373,18 @@ impl SecurityFlow {
     }
 
     fn number_key(&mut self, e: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
-        let pasted = (e.keystroke.modifiers.platform || e.keystroke.modifiers.control) && e.keystroke.key == "v";
-        let clip = pasted.then(|| cx.read_from_clipboard().and_then(|i| i.text())).flatten();
-        let Some(x) = self.xfer.as_mut().filter(|x| x.stage == Stage::Approve && !x.busy) else { return };
+        let pasted = (e.keystroke.modifiers.platform || e.keystroke.modifiers.control)
+            && e.keystroke.key == "v";
+        let clip = pasted
+            .then(|| cx.read_from_clipboard().and_then(|i| i.text()))
+            .flatten();
+        let Some(x) = self
+            .xfer
+            .as_mut()
+            .filter(|x| x.stage == Stage::Approve && !x.busy)
+        else {
+            return;
+        };
         match e.keystroke.key.as_str() {
             "backspace" => {
                 x.number.pop();
@@ -332,7 +392,9 @@ impl SecurityFlow {
             "enter" => return self.approve(cx),
             "escape" => return self.close_transfer(cx),
             _ => {
-                let typed = clip.or_else(|| e.keystroke.key_char.clone()).unwrap_or_default();
+                let typed = clip
+                    .or_else(|| e.keystroke.key_char.clone())
+                    .unwrap_or_default();
                 for d in typed.chars().filter(char::is_ascii_digit) {
                     if x.number.len() < 6 {
                         x.number.push(d);
@@ -346,14 +408,30 @@ impl SecurityFlow {
     /// Sender: the number from the new device, then the user's proof, then the account goes.
     fn approve(&mut self, cx: &mut Context<Self>) {
         let live = self.live;
-        let Some(x) = self.xfer.as_mut().filter(|x| x.stage == Stage::Approve && !x.busy && x.number.len() == 6) else { return };
+        let Some(x) = self
+            .xfer
+            .as_mut()
+            .filter(|x| x.stage == Stage::Approve && !x.busy && x.number.len() == 6)
+        else {
+            return;
+        };
         x.busy = true;
         x.error.clear();
         let (seq, number) = (x.seq, x.number.clone());
         cx.notify();
         cx.spawn(async move |this, cx| {
-            let current = |f: &SecurityFlow| f.xfer.as_ref().is_some_and(|x| x.seq == seq && x.stage == Stage::Approve);
-            let checked = if live { backend::run(backend::transfer::check_number(number)).await.unwrap_or(Err(Err("The transfer has ended".into()))) } else { Ok(()) };
+            let current = |f: &SecurityFlow| {
+                f.xfer
+                    .as_ref()
+                    .is_some_and(|x| x.seq == seq && x.stage == Stage::Approve)
+            };
+            let checked = if live {
+                backend::run(backend::transfer::check_number(number))
+                    .await
+                    .unwrap_or(Err(Err("The transfer has ended".into())))
+            } else {
+                Ok(())
+            };
             if let Err(e) = checked {
                 this.update(cx, |f, cx| {
                     if !current(f) {
@@ -363,7 +441,10 @@ impl SecurityFlow {
                     x.busy = false;
                     x.number.clear();
                     x.error = match e {
-                        Ok(left) => format!("That isn't the number on the new device. {left} {} left.", if left == 1 { "try" } else { "tries" }),
+                        Ok(left) => format!(
+                            "That isn't the number on the new device. {left} {} left.",
+                            if left == 1 { "try" } else { "tries" }
+                        ),
                         Err(e) => e,
                     };
                     cx.notify();
@@ -371,13 +452,29 @@ impl SecurityFlow {
                 .ok();
                 return;
             }
-            let first = if live { backend::run(backend::transfer::approve(None)).await.unwrap_or_else(|_| Err("cancelled".into())) } else { Ok(()) };
+            let first = if live {
+                backend::run(backend::transfer::approve(None))
+                    .await
+                    .unwrap_or_else(|_| Err("cancelled".into()))
+            } else {
+                Ok(())
+            };
             let result = match first {
-                Err(e) if e == "CREDENTIAL_REQUIRED" && this.read_with(cx, |f, _| current(f)).unwrap_or(false) => {
+                Err(e)
+                    if e == "CREDENTIAL_REQUIRED"
+                        && this.read_with(cx, |f, _| current(f)).unwrap_or(false) =>
+                {
                     let k = crate::security::kind(&this, cx);
-                    crate::security::with_current(&this, cx, "Approve the Transfer", format!("Enter your {} to send this account to the new device.", noun(&k)), |cred| {
-                        backend::run(backend::transfer::approve(Some(cred)))
-                    })
+                    crate::security::with_current(
+                        &this,
+                        cx,
+                        "Approve the Transfer",
+                        format!(
+                            "Enter your {} to send this account to the new device.",
+                            noun(&k)
+                        ),
+                        |cred| backend::run(backend::transfer::approve(Some(cred))),
+                    )
                     .await
                 }
                 other => other.map(Some),
@@ -426,14 +523,20 @@ impl SecurityFlow {
 
     /// How signing in with the received account went.
     pub fn transfer_finished(&mut self, result: Result<(), String>, cx: &mut Context<Self>) {
-        let Some(x) = self.xfer.as_mut().filter(|x| x.stage == Stage::Finishing) else { return };
+        let Some(x) = self.xfer.as_mut().filter(|x| x.stage == Stage::Finishing) else {
+            return;
+        };
         match result {
             Ok(()) => self.xfer = None,
             Err(e) => {
                 let gone = e.contains("Nothing has arrived");
                 x.stage = Stage::Error;
                 x.finish_failed = !gone;
-                x.error = if gone { "The account that arrived has expired. Start again.".into() } else { format!("Couldn't finish signing in: {e}") };
+                x.error = if gone {
+                    "The account that arrived has expired. Start again.".into()
+                } else {
+                    format!("Couldn't finish signing in: {e}")
+                };
             }
         }
         cx.notify();
@@ -444,7 +547,11 @@ impl SecurityFlow {
         let Some(x) = self.xfer.as_mut() else { return };
         let id = p.get("id").and_then(Value::as_u64).unwrap_or(0);
         let stage = p.get("stage").and_then(Value::as_str).unwrap_or_default();
-        let ours: &[&str] = if x.sender { &["approve", "sending", "sent", "error"] } else { &["match", "received", "error"] };
+        let ours: &[&str] = if x.sender {
+            &["approve", "sending", "sent", "error"]
+        } else {
+            &["match", "received", "error"]
+        };
         if id < x.floor || !ours.contains(&stage) || x.stage == Stage::Finishing {
             return;
         }
@@ -467,7 +574,10 @@ impl SecurityFlow {
             "sending" => x.stage = Stage::Sending,
             "sent" => {
                 x.stage = Stage::Sent;
-                x.unconfirmed = p.get("unconfirmed").and_then(Value::as_bool).unwrap_or(false);
+                x.unconfirmed = p
+                    .get("unconfirmed")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
                 x.busy = false;
             }
             "received" => {
@@ -493,7 +603,11 @@ impl SecurityFlow {
 
     // ── Rendering ─────────────────────────────────────────────────────────────
 
-    pub(crate) fn xfer_card(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+    pub(crate) fn xfer_card(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
         let x = self.xfer.as_mut()?;
         if std::mem::take(&mut x.focus) {
             match x.stage {
@@ -520,9 +634,15 @@ impl SecurityFlow {
             _ if x.sender => "Sign in on another device",
             _ => "Sign in with another device",
         };
-        let close = x.closable().then(|| Box::new(on(Self::close_transfer)) as Box<dyn Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App)>);
+        let close = x.closable().then(|| {
+            Box::new(on(Self::close_transfer))
+                as Box<dyn Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App)>
+        });
         let mut body = card("xfer-card").child(head("icons/devices.svg", title.into(), close));
-        let link = |id: &'static str, text: &'static str, enabled: bool, f: fn(&mut SecurityFlow, &mut Context<SecurityFlow>)| {
+        let link = |id: &'static str,
+                    text: &'static str,
+                    enabled: bool,
+                    f: fn(&mut SecurityFlow, &mut Context<SecurityFlow>)| {
             div()
                 .id(id)
                 .self_center()
@@ -533,10 +653,21 @@ impl SecurityFlow {
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(white_a(0.55))
                 .when(!enabled, |d| d.opacity(0.4))
-                .when(enabled, |d| d.hover(|d| d.text_color(c(0xffffff))).cursor_pointer().on_click(on(f)))
+                .when(enabled, |d| {
+                    d.hover(|d| d.text_color(c(0xffffff)))
+                        .cursor_pointer()
+                        .on_click(on(f))
+                })
                 .child(text)
         };
-        let error = |text: &str| div().mt(px(-4.)).text_size(px(12.5)).line_height(px(17.5)).text_color(c(0xff7a8a)).child(SharedString::from(text.to_string()));
+        let error = |text: &str| {
+            div()
+                .mt(px(-4.))
+                .text_size(px(12.5))
+                .line_height(px(17.5))
+                .text_color(c(0xff7a8a))
+                .child(SharedString::from(text.to_string()))
+        };
         let spinner = |text: &'static str| {
             window.request_animation_frame();
             div()
@@ -548,13 +679,26 @@ impl SecurityFlow {
                 .gap(px(10.))
                 .text_size(px(14.))
                 .text_color(white_a(0.75))
-                .child(div().size(px(18.)).child(crate::attachments::spinner(18., 2., 0.8, 0.25, white_a(0.15), c(ACCENT))))
+                .child(div().size(px(18.)).child(crate::attachments::spinner(
+                    18.,
+                    2.,
+                    0.8,
+                    0.25,
+                    white_a(0.15),
+                    c(ACCENT),
+                )))
                 .child(text)
         };
         let identity = || {
             let face = match &x.avatar {
-                Some(a) => img(a.clone()).size(px(44.)).rounded_full().into_any_element(),
-                None => img("icons/user-placeholder.svg").size(px(44.)).rounded_full().into_any_element(),
+                Some(a) => img(a.clone())
+                    .size(px(44.))
+                    .rounded_full()
+                    .into_any_element(),
+                None => img("icons/user-placeholder.svg")
+                    .size(px(44.))
+                    .rounded_full()
+                    .into_any_element(),
             };
             div()
                 .flex()
@@ -573,14 +717,44 @@ impl SecurityFlow {
                         .flex_col()
                         .gap(px(3.))
                         .min_w_0()
-                        .child(div().text_size(px(16.)).font_weight(FontWeight::BOLD).child(SharedString::from(if x.name.is_empty() { "Unnamed account".to_string() } else { x.name.clone() })))
-                        .when(!x.from.is_empty(), |d| d.child(div().font_family(crate::markdown::MONO).text_size(px(12.)).text_color(white_a(0.5)).child(short(&x.from)))),
+                        .child(
+                            div()
+                                .text_size(px(16.))
+                                .font_weight(FontWeight::BOLD)
+                                .child(SharedString::from(if x.name.is_empty() {
+                                    "Unnamed account".to_string()
+                                } else {
+                                    x.name.clone()
+                                })),
+                        )
+                        .when(!x.from.is_empty(), |d| {
+                            d.child(
+                                div()
+                                    .font_family(crate::markdown::MONO)
+                                    .text_size(px(12.))
+                                    .text_color(white_a(0.5))
+                                    .child(short(&x.from)),
+                            )
+                        }),
                 )
         };
-        let field = |focused: bool| div().w_full().px(px(14.)).py(px(12.)).rounded(px(12.)).border_1().border_color(if focused { c(ACCENT) } else { c(0x2c2e2f) }).bg(c(0x161718));
+        let field = |focused: bool| {
+            div()
+                .w_full()
+                .px(px(14.))
+                .py(px(12.))
+                .rounded(px(12.))
+                .border_1()
+                .border_color(if focused { c(ACCENT) } else { c(0x2c2e2f) })
+                .bg(c(0x161718))
+        };
         match x.stage {
             Stage::Show => {
-                let left = x.expires.saturating_duration_since(Instant::now()).as_secs_f32().ceil() as u64;
+                let left = x
+                    .expires
+                    .saturating_duration_since(Instant::now())
+                    .as_secs_f32()
+                    .ceil() as u64;
                 let clock = format!("{}:{:02}", left / 60, left % 60);
                 body = body.child(lead(
                     if x.sender {
@@ -644,41 +818,90 @@ impl SecurityFlow {
                                         .hover(|d| d.border_color(c(0x3a3c3d)).bg(c(0x1c1d1e)))
                                         .cursor_pointer()
                                         .on_click(on(Self::copy_code))
-                                        .child(svg().path(if copied { "icons/check.svg" } else { "icons/copy.svg" }).size(px(18.)).text_color(c(ACCENT))),
+                                        .child(
+                                            svg()
+                                                .path(if copied {
+                                                    "icons/check.svg"
+                                                } else {
+                                                    "icons/copy.svg"
+                                                })
+                                                .size(px(18.))
+                                                .text_color(c(ACCENT)),
+                                        ),
                                 ),
                         )
                         .child(
                             div()
                                 .text_size(px(12.))
                                 .line_height(px(24.))
-                                .text_color(if left <= 30 { c(0xff7a8a) } else { white_a(0.45) })
-                                .child(if left > 0 { format!("Expires in {clock}") } else { "Expired".into() }),
+                                .text_color(if left <= 30 {
+                                    c(0xff7a8a)
+                                } else {
+                                    white_a(0.45)
+                                })
+                                .child(if left > 0 {
+                                    format!("Expires in {clock}")
+                                } else {
+                                    "Expired".into()
+                                }),
                         ),
                 );
                 let mut a = actions();
                 if left == 0 {
-                    a = a.child(button("xfer-new", "Get a New Code", false, true, on(Self::show_code)));
+                    a = a.child(button(
+                        "xfer-new",
+                        "Get a New Code",
+                        false,
+                        true,
+                        on(Self::show_code),
+                    ));
                 }
-                body = body.child(a.child(link("xfer-type", "Type the other device's code instead", true, Self::enter_code)));
+                body = body.child(a.child(link(
+                    "xfer-type",
+                    "Type the other device's code instead",
+                    true,
+                    Self::enter_code,
+                )));
             }
             Stage::Enter => {
                 let focused = x.entry.focus_handle(cx).is_focused(window);
                 let typed = !x.entry.read(cx).text().trim().is_empty();
-                body = body.child(lead("Type the code shown on your other device. It's a number and three words.", false));
-                let mut form = div().flex().flex_col().gap(px(12.)).child(field(focused).when(x.busy, |d| d.opacity(0.6)).child(x.entry.clone()));
+                body = body.child(lead(
+                    "Type the code shown on your other device. It's a number and three words.",
+                    false,
+                ));
+                let mut form = div().flex().flex_col().gap(px(12.)).child(
+                    field(focused)
+                        .when(x.busy, |d| d.opacity(0.6))
+                        .child(x.entry.clone()),
+                );
                 if !x.error.is_empty() {
                     form = form.child(error(&x.error));
                 }
                 form = form.child(
                     actions()
-                        .child(button("xfer-connect", if x.busy { "Connecting…" } else { "Connect" }, false, !x.busy && typed, on(Self::connect)))
-                        .child(link("xfer-show", "Show a code on this device instead", !x.busy, Self::show_code)),
+                        .child(button(
+                            "xfer-connect",
+                            if x.busy { "Connecting…" } else { "Connect" },
+                            false,
+                            !x.busy && typed,
+                            on(Self::connect),
+                        ))
+                        .child(link(
+                            "xfer-show",
+                            "Show a code on this device instead",
+                            !x.busy,
+                            Self::show_code,
+                        )),
                 );
                 body = body.child(form);
             }
             Stage::Connecting => body = body.child(spinner("Connecting…")),
             Stage::Match => {
-                body = body.child(div().flex().justify_center().child(lead("On your other device, type this number to approve.", false)));
+                body = body.child(div().flex().justify_center().child(lead(
+                    "On your other device, type this number to approve.",
+                    false,
+                )));
                 let digit = |d: char| {
                     div()
                         .w(px(42.))
@@ -697,26 +920,72 @@ impl SecurityFlow {
                 };
                 let split = x.sas.len().min(3);
                 let group = |s: &str| div().flex().gap(px(6.)).children(s.chars().map(digit));
-                body = body.child(div().my(px(2.)).flex().justify_center().gap(px(14.)).child(group(&x.sas[..split])).child(group(&x.sas[split..])));
+                body = body.child(
+                    div()
+                        .my(px(2.))
+                        .flex()
+                        .justify_center()
+                        .gap(px(14.))
+                        .child(group(&x.sas[..split]))
+                        .child(group(&x.sas[split..])),
+                );
                 if !x.from.is_empty() {
-                    body = body.child(div().mb(px(-8.)).flex().justify_center().text_size(px(12.)).text_color(white_a(0.45)).child("Signing in as")).child(identity());
+                    body = body
+                        .child(
+                            div()
+                                .mb(px(-8.))
+                                .flex()
+                                .justify_center()
+                                .text_size(px(12.))
+                                .text_color(white_a(0.45))
+                                .child("Signing in as"),
+                        )
+                        .child(identity());
                 }
-                body = body.child(actions().child(button("xfer-cancel", "Cancel", true, true, on(Self::close_transfer))));
+                body = body.child(actions().child(button(
+                    "xfer-cancel",
+                    "Cancel",
+                    true,
+                    true,
+                    on(Self::close_transfer),
+                )));
             }
             Stage::Approve => {
                 body = body.child(lead_mixed(&[
-                    ("You're giving full, permanent control of this account to another device. ", false),
-                    ("Only continue if you're setting up your own device right now.", true),
-                    (" Vector never asks for this to verify, unlock or join anything.", false),
+                    (
+                        "You're giving full, permanent control of this account to another device. ",
+                        false,
+                    ),
+                    (
+                        "Only continue if you're setting up your own device right now.",
+                        true,
+                    ),
+                    (
+                        " Vector never asks for this to verify, unlock or join anything.",
+                        false,
+                    ),
                 ]));
                 let focused = x.number_focus.is_focused(window);
-                let shown = if x.number.len() > 3 { format!("{} {}", &x.number[..3], &x.number[3..]) } else { x.number.clone() };
+                let shown = if x.number.len() > 3 {
+                    format!("{} {}", &x.number[..3], &x.number[3..])
+                } else {
+                    x.number.clone()
+                };
                 let empty = shown.is_empty();
                 let mut form = div()
                     .flex()
                     .flex_col()
                     .gap(px(12.))
-                    .child(div().h(px(24.)).flex().items_center().text_size(px(11.)).font_weight(FontWeight::BOLD).text_color(white_a(0.45)).child(crate::kit::spaced("NUMBER SHOWN ON THE NEW DEVICE", 0.6)))
+                    .child(
+                        div()
+                            .h(px(24.))
+                            .flex()
+                            .items_center()
+                            .text_size(px(11.))
+                            .font_weight(FontWeight::BOLD)
+                            .text_color(white_a(0.45))
+                            .child(crate::kit::spaced("NUMBER SHOWN ON THE NEW DEVICE", 0.6)),
+                    )
                     .child(
                         field(focused)
                             .id("xfer-number")
@@ -731,7 +1000,10 @@ impl SecurityFlow {
                             .font_weight(FontWeight::MEDIUM)
                             .text_size(px(16.))
                             .text_color(if empty { c(0x757575) } else { c(0xffffff) })
-                            .child(crate::kit::spaced(if empty { "000 000".to_string() } else { shown }, 2.88)),
+                            .child(crate::kit::spaced(
+                                if empty { "000 000".to_string() } else { shown },
+                                2.88,
+                            )),
                     );
                 if !x.error.is_empty() {
                     form = form.child(error(&x.error));
@@ -739,7 +1011,13 @@ impl SecurityFlow {
                 let ready = !x.busy && x.number.len() == 6;
                 form = form.child(
                     actions()
-                        .child(button("xfer-approve", "Approve", false, ready, on(Self::approve)))
+                        .child(button(
+                            "xfer-approve",
+                            "Approve",
+                            false,
+                            ready,
+                            on(Self::approve),
+                        ))
                         .child(button("xfer-deny", "Deny", true, !x.busy, on(Self::deny))),
                 );
                 body = body.child(form);
@@ -764,11 +1042,25 @@ impl SecurityFlow {
                 body = body.child(spinner("Signing in…"));
             }
             Stage::Error => {
-                body = body.child(lead(SharedString::from(x.error.clone()), false)).child(
-                    actions()
-                        .child(button("xfer-retry", "Try Again", false, true, on(Self::retry)))
-                        .child(button("xfer-close", "Close", true, true, on(Self::close_transfer))),
-                );
+                body = body
+                    .child(lead(SharedString::from(x.error.clone()), false))
+                    .child(
+                        actions()
+                            .child(button(
+                                "xfer-retry",
+                                "Try Again",
+                                false,
+                                true,
+                                on(Self::retry),
+                            ))
+                            .child(button(
+                                "xfer-close",
+                                "Close",
+                                true,
+                                true,
+                                on(Self::close_transfer),
+                            )),
+                    );
             }
         }
         Some(overlay("xfer-overlay", 11, body))
@@ -781,7 +1073,10 @@ mod tests {
 
     #[test]
     fn codes_read_as_one_dashed_lowercase_line() {
-        assert_eq!(clean_code("Vector transfer code: 7-Orbit lemon__stage"), "7-orbit-lemon-stage");
+        assert_eq!(
+            clean_code("Vector transfer code: 7-Orbit lemon__stage"),
+            "7-orbit-lemon-stage"
+        );
         assert_eq!(clean_code("  7 orbit "), "7-orbit-");
         assert_eq!(clean_code("--7"), "7");
     }

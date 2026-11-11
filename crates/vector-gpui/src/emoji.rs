@@ -6,8 +6,11 @@ use std::sync::LazyLock;
 use gpui::SharedString;
 use unicode_segmentation::UnicodeSegmentation;
 
-static NAMES: LazyLock<HashSet<String>> =
-    LazyLock::new(|| crate::assets::twemoji_names().map(|n| n.trim_end_matches(".svg").to_string()).collect());
+static NAMES: LazyLock<HashSet<String>> = LazyLock::new(|| {
+    crate::assets::twemoji_names()
+        .map(|n| n.trim_end_matches(".svg").to_string())
+        .collect()
+});
 
 /// The file twemoji names a grapheme by: its code points in hex, with U+FE0F dropped unless
 /// the sequence is joined (twemoji's `grabTheRightIcon`).
@@ -72,7 +75,9 @@ fn levenshtein(a: &str, b: &str) -> usize {
     for (i, ca) in a.chars().enumerate() {
         let mut cur = vec![i + 1; b.len() + 1];
         for (j, cb) in b.iter().enumerate() {
-            cur[j + 1] = (prev[j] + usize::from(ca != *cb)).min(prev[j + 1] + 1).min(cur[j] + 1);
+            cur[j + 1] = (prev[j] + usize::from(ca != *cb))
+                .min(prev[j + 1] + 1)
+                .min(cur[j] + 1);
         }
         prev = cur;
     }
@@ -135,7 +140,10 @@ pub fn search_scored(query: &str, used: impl Fn(&str) -> f64) -> Vec<(&'static E
                         let mut score = 0.5;
                         if wlen > qlen && word.starts_with(&q) {
                             score = 0.3;
-                        } else if wlen > qlen && word.chars().next() == q.chars().next() && word.chars().last() == q.chars().last() {
+                        } else if wlen > qlen
+                            && word.chars().next() == q.chars().next()
+                            && word.chars().last() == q.chars().last()
+                        {
                             score = 0.35;
                         }
                         consider(score + pos, word, i);
@@ -153,12 +161,22 @@ pub fn search_scored(query: &str, used: impl Fn(&str) -> f64) -> Vec<(&'static E
             }
         }
         if let Some((score, word, index)) = best {
-            hits.push(Hit { e, score: score - used(e.emoji) * USAGE_WEIGHT, word, index });
+            hits.push(Hit {
+                e,
+                score: score - used(e.emoji) * USAGE_WEIGHT,
+                word,
+                index,
+            });
         }
     }
     if hits.is_empty() {
         for e in EMOJIS.iter().filter(|e| e.name.contains(&q)) {
-            hits.push(Hit { e, score: 1.0 - used(e.emoji) * USAGE_WEIGHT, word: e.name, index: 99 });
+            hits.push(Hit {
+                e,
+                score: 1.0 - used(e.emoji) * USAGE_WEIGHT,
+                word: e.name,
+                index: 99,
+            });
         }
     }
     hits.sort_by(|a, b| {
@@ -210,12 +228,18 @@ include!(concat!(env!("OUT_DIR"), "/kaomoji_data.rs"));
 /// Each face once, as its first category lists it.
 fn kaomoji_faces() -> impl Iterator<Item = (&'static Kaomoji, &'static str)> {
     let mut seen = HashSet::new();
-    KAOMOJI.iter().flat_map(|c| c.items.iter().map(move |k| (k, c.name))).filter(move |(k, _)| seen.insert(k.face))
+    KAOMOJI
+        .iter()
+        .flat_map(|c| c.items.iter().map(move |k| (k, c.name)))
+        .filter(move |(k, _)| seen.insert(k.face))
 }
 
 /// A kaomoji by its face.
 pub fn kaomoji(face: &str) -> Option<&'static Kaomoji> {
-    KAOMOJI.iter().flat_map(|c| c.items.iter()).find(|k| k.face == face)
+    KAOMOJI
+        .iter()
+        .flat_map(|c| c.items.iter())
+        .find(|k| k.face == face)
 }
 
 /// Faces matching `query`, ranked by name, tags, category, then the face itself (`KaomojiGrid`).

@@ -35,13 +35,26 @@ pub fn invite_key(text: &str) -> Option<String> {
     let mut from = 0;
     while let Some(at) = lower[from..].find("naddr1").map(|i| i + from) {
         let body = &text[at + 6..];
-        let n = body.bytes().take_while(|b| b.is_ascii_alphanumeric()).count();
-        if n >= 20 && body[..n].bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit()) {
+        let n = body
+            .bytes()
+            .take_while(|b| b.is_ascii_alphanumeric())
+            .count();
+        if n >= 20
+            && body[..n]
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+        {
             let rest = &body[n..];
-            let hash = rest.bytes().take_while(|b| *b != b'#' && !b.is_ascii_whitespace()).count();
+            let hash = rest
+                .bytes()
+                .take_while(|b| *b != b'#' && !b.is_ascii_whitespace())
+                .count();
             if rest.as_bytes().get(hash) == Some(&b'#') {
                 let frag = &rest[hash + 1..];
-                let m = frag.bytes().take_while(|b| b.is_ascii_alphanumeric() || *b == b'_' || *b == b'-').count();
+                let m = frag
+                    .bytes()
+                    .take_while(|b| b.is_ascii_alphanumeric() || *b == b'_' || *b == b'-')
+                    .count();
                 if m >= 20 {
                     return Some(format!("naddr1{}#{}", &body[..n], &frag[..m]));
                 }
@@ -60,16 +73,24 @@ pub fn invite_links(text: &str) -> Vec<(std::ops::Range<usize>, String)> {
     let mut from = 0;
     while let Some(at) = lower[from..].find("naddr1").map(|i| i + from) {
         from = at + 6;
-        let n = lower[at + 6..].bytes().take_while(|b| b.is_ascii_alphanumeric()).count();
+        let n = lower[at + 6..]
+            .bytes()
+            .take_while(|b| b.is_ascii_alphanumeric())
+            .count();
         if n < 20 || lower.as_bytes().get(at + 6 + n) != Some(&b'#') {
             continue;
         }
         let frag_at = at + 7 + n;
-        let m = text[frag_at..].bytes().take_while(|b| b.is_ascii_alphanumeric() || *b == b'_' || *b == b'-').count();
+        let m = text[frag_at..]
+            .bytes()
+            .take_while(|b| b.is_ascii_alphanumeric() || *b == b'_' || *b == b'-')
+            .count();
         if m < 20 {
             continue;
         }
-        let token_start = lower[..at].rfind(|ch: char| ch.is_whitespace()).map_or(0, |i| i + 1);
+        let token_start = lower[..at]
+            .rfind(|ch: char| ch.is_whitespace())
+            .map_or(0, |i| i + 1);
         let token = &lower[token_start..at];
         let start = if token.ends_with("vector://invite/") {
             Some(at - "vector://invite/".len())
@@ -78,14 +99,22 @@ pub fn invite_links(text: &str) -> Vec<(std::ops::Range<usize>, String)> {
                 .iter()
                 .filter_map(|scheme| token.find(scheme))
                 .min()
-                .filter(|&i| !token[i..].contains('#') && token[i..].find("://").is_some_and(|s| token.len() - i > s + 3 + "/invite/".len()))
+                .filter(|&i| {
+                    !token[i..].contains('#')
+                        && token[i..]
+                            .find("://")
+                            .is_some_and(|s| token.len() - i > s + 3 + "/invite/".len())
+                })
                 .map(|i| token_start + i)
         } else {
             None
         };
         if let Some(start) = start {
             let end = frag_at + m;
-            out.push((start..end, format!("{}#{}", &lower[at..at + 6 + n], &text[frag_at..end])));
+            out.push((
+                start..end,
+                format!("{}#{}", &lower[at..at + 6 + n], &text[frag_at..end]),
+            ));
             from = end;
         }
     }
@@ -169,12 +198,19 @@ pub type OnAct = Rc<dyn Fn(Act, &mut Window, &mut App)>;
 /// `extractNpub`: a bare npub, or a vectorapp.io profile link to one.
 pub fn extract_npub(input: &str) -> Option<String> {
     let t = input.trim();
-    let valid = |s: &str| s.len() == 63 && s[..5].eq_ignore_ascii_case("npub1") && s[5..].bytes().all(|b| b.is_ascii_alphanumeric());
+    let valid = |s: &str| {
+        s.len() == 63
+            && s[..5].eq_ignore_ascii_case("npub1")
+            && s[5..].bytes().all(|b| b.is_ascii_alphanumeric())
+    };
     if valid(t) {
         return Some(t.to_ascii_lowercase());
     }
     let lower = t.to_ascii_lowercase();
-    for scheme in ["https://vectorapp.io/profile/", "http://vectorapp.io/profile/"] {
+    for scheme in [
+        "https://vectorapp.io/profile/",
+        "http://vectorapp.io/profile/",
+    ] {
         if let Some(rest) = lower.strip_prefix(scheme) {
             let id = &rest[..rest.len().min(63)];
             if valid(id) {
@@ -187,30 +223,58 @@ pub fn extract_npub(input: &str) -> Option<String> {
 
 fn name_of(store: &Store, npub: &str) -> Option<String> {
     let p = store.profiles.get(npub)?;
-    [&p.nickname, &p.name, &p.display_name].into_iter().find(|n| !n.is_empty()).map(|n| n.to_string())
+    [&p.nickname, &p.name, &p.display_name]
+        .into_iter()
+        .find(|n| !n.is_empty())
+        .map(|n| n.to_string())
 }
 
 fn display(store: &Store, npub: &str) -> String {
-    name_of(store, npub).unwrap_or_else(|| format!("{}...{}", &npub[..10.min(npub.len())], &npub[npub.len().saturating_sub(6)..]))
+    name_of(store, npub).unwrap_or_else(|| {
+        format!(
+            "{}...{}",
+            &npub[..10.min(npub.len())],
+            &npub[npub.len().saturating_sub(6)..]
+        )
+    })
 }
 
 /// Strangers first, then contacts: the picked one, the most recent conversation, then by name.
 fn rows(n: &NewChat, store: &Store, filter: &str) -> Vec<String> {
     let f = filter.trim().to_lowercase();
-    let mut out: Vec<String> = n.strangers.iter().filter(|s| n.picked.as_ref() == Some(*s)).cloned().collect();
+    let mut out: Vec<String> = n
+        .strangers
+        .iter()
+        .filter(|s| n.picked.as_ref() == Some(*s))
+        .cloned()
+        .collect();
     let activity = |id: &str| store.chat(id).map(crate::data::last_activity).unwrap_or(0);
     let mut contacts: Vec<&str> = store
         .profiles
         .values()
         .filter(|p| p.id != store.my_npub && !p.is_blocked)
-        .filter(|p| n.contacts.as_ref().is_none_or(|c| c.contains(p.id.as_str())))
-        .filter(|p| f.is_empty() || format!("{} {}", name_of(store, &p.id).unwrap_or_default(), p.id).to_lowercase().contains(&f))
+        .filter(|p| {
+            n.contacts
+                .as_ref()
+                .is_none_or(|c| c.contains(p.id.as_str()))
+        })
+        .filter(|p| {
+            f.is_empty()
+                || format!("{} {}", name_of(store, &p.id).unwrap_or_default(), p.id)
+                    .to_lowercase()
+                    .contains(&f)
+        })
         .map(|p| p.id.as_str())
         .filter(|id| !out.iter().any(|o| o == id))
         .collect();
     contacts.sort_by(|a, b| {
-        let (sa, sb) = (n.picked.as_deref() == Some(*a), n.picked.as_deref() == Some(*b));
-        sb.cmp(&sa).then_with(|| activity(b).cmp(&activity(a))).then_with(|| display(store, a).cmp(&display(store, b)))
+        let (sa, sb) = (
+            n.picked.as_deref() == Some(*a),
+            n.picked.as_deref() == Some(*b),
+        );
+        sb.cmp(&sa)
+            .then_with(|| activity(b).cmp(&activity(a)))
+            .then_with(|| display(store, a).cmp(&display(store, b)))
     });
     out.extend(contacts.into_iter().map(String::from));
     out
@@ -223,14 +287,28 @@ pub fn rows_for(n: &NewChat, store: &Store) -> Vec<String> {
 
 /// `.member-pick-indicator.is-single`: a radio, filled when picked.
 fn radio(on: bool) -> gpui::Div {
-    let ring = div().size(px(22.)).flex_shrink_0().rounded_full().border_2();
+    let ring = div()
+        .size(px(22.))
+        .flex_shrink_0()
+        .rounded_full()
+        .border_2();
     if !on {
         return ring.border_color(white_a(0.28));
     }
-    ring.border_color(c(PRIMARY)).bg(c(0x000000)).p(px(3.)).child(div().size_full().rounded_full().bg(c(PRIMARY)))
+    ring.border_color(c(PRIMARY))
+        .bg(c(0x000000))
+        .p(px(3.))
+        .child(div().size_full().rounded_full().bg(c(PRIMARY)))
 }
 
-pub fn view(n: &NewChat, store: &Store, width: f32, invite: Option<&Preview>, on: &OnAct, cx: &App) -> AnyElement {
+pub fn view(
+    n: &NewChat,
+    store: &Store,
+    width: f32,
+    invite: Option<&Preview>,
+    on: &OnAct,
+    cx: &App,
+) -> AnyElement {
     let gutter = crate::kit::page_gutter(width);
     let filter_text = n.filter.read(cx).text().to_string();
     let member = |id: &str| store.community(id).is_some();
@@ -240,14 +318,31 @@ pub fn view(n: &NewChat, store: &Store, width: f32, invite: Option<&Preview>, on
         move |_: &gpui::ClickEvent, w: &mut Window, cx: &mut App| on(a(), w, cx)
     };
     let body: AnyElement = if list.is_empty() {
-        let mut empty = div().pt(px(6.)).pb(px(40.)).flex().flex_col().items_center().text_size(px(14.)).text_color(white_a(0.5)).child(
-            if filter_text.trim().is_empty() { "No contacts yet. Paste an npub to invite someone." } else { "No matches." },
-        );
+        let mut empty = div()
+            .pt(px(6.))
+            .pb(px(40.))
+            .flex()
+            .flex_col()
+            .items_center()
+            .text_size(px(14.))
+            .text_color(white_a(0.5))
+            .child(if filter_text.trim().is_empty() {
+                "No contacts yet. Paste an npub to invite someone."
+            } else {
+                "No matches."
+            });
         if filter_text.trim().is_empty() {
             empty = empty.child(
                 div()
                     .flex()
-                    .child(div().id("cp-hub").cursor_pointer().text_color(c(ACCENT)).on_click(click(|| Act::Hub)).child("Explore the Vector Hub"))
+                    .child(
+                        div()
+                            .id("cp-hub")
+                            .cursor_pointer()
+                            .text_color(c(ACCENT))
+                            .on_click(click(|| Act::Hub))
+                            .child("Explore the Vector Hub"),
+                    )
                     .child("\u{a0}to discover communities to join and meet new people."),
             );
         }
@@ -268,8 +363,21 @@ pub fn view(n: &NewChat, store: &Store, width: f32, invite: Option<&Preview>, on
                     .cursor_pointer()
                     .hover(|s| s.bg(ca(255, 255, 255, 0.085)))
                     .on_click(move |_, w, cx| on(Act::Toggle(id.clone()), w, cx))
-                    .child(div().mr(px(10.)).child(crate::ui::avatar(store, &npub, 25.)))
-                    .child(div().flex_1().min_w_0().truncate().text_size(px(14.)).line_height(px(24.)).text_color(c(0xf7f4f4)).child(display(store, &npub)))
+                    .child(
+                        div()
+                            .mr(px(10.))
+                            .child(crate::ui::avatar(store, &npub, 25.)),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(px(14.))
+                            .line_height(px(24.))
+                            .text_color(c(0xf7f4f4))
+                            .child(display(store, &npub)),
+                    )
                     .child(radio(picked))
             }))
             .into_any_element()
@@ -314,10 +422,30 @@ pub fn view(n: &NewChat, store: &Store, width: f32, invite: Option<&Preview>, on
                         .font_weight(FontWeight::MEDIUM)
                         .text_size(px(24.))
                         .line_height(px(30.))
-                        .child(div().w(px(50.)).h(px(30.)).flex().justify_center().opacity(0.7).child(svg().path("icons/chats.svg").size(px(30.)).text_color(c(0xffffff))))
+                        .child(
+                            div()
+                                .w(px(50.))
+                                .h(px(30.))
+                                .flex()
+                                .justify_center()
+                                .opacity(0.7)
+                                .child(
+                                    svg()
+                                        .path("icons/chats.svg")
+                                        .size(px(30.))
+                                        .text_color(c(0xffffff)),
+                                ),
+                        )
                         .child(crate::kit::spaced("New Message", 1.)),
                 )
-                .child(div().mt(px(8.)).mx(px(40.)).h(px(1.)).flex_shrink_0().bg(c(ACCENT)))
+                .child(
+                    div()
+                        .mt(px(8.))
+                        .mx(px(40.))
+                        .h(px(1.))
+                        .flex_shrink_0()
+                        .bg(c(ACCENT)),
+                )
                 .child(
                     div()
                         .mt(px(28.))
@@ -331,57 +459,104 @@ pub fn view(n: &NewChat, store: &Store, width: f32, invite: Option<&Preview>, on
                         .rounded(px(8.))
                         .border_1()
                         .border_color(ca(57, 57, 57, 0.5))
-                        .child(svg().path("icons/search.svg").absolute().left(px(12.)).top(px(9.)).size(px(24.)).text_color(white_a(0.4)))
-                        .child(div().flex_1().min_w_0().overflow_hidden().child(n.filter.clone())),
+                        .child(
+                            svg()
+                                .path("icons/search.svg")
+                                .absolute()
+                                .left(px(12.))
+                                .top(px(9.))
+                                .size(px(24.))
+                                .text_color(white_a(0.4)),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .overflow_hidden()
+                                .child(n.filter.clone()),
+                        ),
                 )
                 .map(|d| match invite {
                     Some(p) => d.child(link_card(p, member)).child(
-                        div().mt(px(14.)).flex().justify_center().gap(px(10.)).child({
-                            let ready = matches!(p, Preview::Ready(_)) && !n.joining;
-                            let label = match p {
-                                _ if n.joining => "Joining…",
-                                Preview::Ready(i) if member(&i.community_id) => "Open Community",
-                                _ => "Join Community",
-                            };
-                            button("create-group-create-btn", label)
-                                .bg(c(0x58fcb3))
-                                .border_color(ca(90, 252, 180, 0.65))
-                                .text_color(c(0x000000))
-                                .when(!ready, |d| d.opacity(0.45))
-                                .when(ready, |d| d.cursor_pointer().hover(|s| s.opacity(0.75)).on_click(click(|| Act::Join)))
-                        })
-                        .child(button("create-group-cancel", "Cancel").border_color(white_a(0.2)).text_color(c(0xffffff)).cursor_pointer().hover(|s| s.opacity(0.75)).on_click(click(|| Act::Cancel))),
+                        div()
+                            .mt(px(14.))
+                            .flex()
+                            .justify_center()
+                            .gap(px(10.))
+                            .child({
+                                let ready = matches!(p, Preview::Ready(_)) && !n.joining;
+                                let label = match p {
+                                    _ if n.joining => "Joining…",
+                                    Preview::Ready(i) if member(&i.community_id) => {
+                                        "Open Community"
+                                    }
+                                    _ => "Join Community",
+                                };
+                                button("create-group-create-btn", label)
+                                    .bg(c(0x58fcb3))
+                                    .border_color(ca(90, 252, 180, 0.65))
+                                    .text_color(c(0x000000))
+                                    .when(!ready, |d| d.opacity(0.45))
+                                    .when(ready, |d| {
+                                        d.cursor_pointer()
+                                            .hover(|s| s.opacity(0.75))
+                                            .on_click(click(|| Act::Join))
+                                    })
+                            })
+                            .child(
+                                button("create-group-cancel", "Cancel")
+                                    .border_color(white_a(0.2))
+                                    .text_color(c(0xffffff))
+                                    .cursor_pointer()
+                                    .hover(|s| s.opacity(0.75))
+                                    .on_click(click(|| Act::Cancel)),
+                            ),
                     ),
-                    None => d.child(div().id("create-group-list").mt(px(10.)).flex_1().min_h_0().overflow_y_scroll().p(px(6.)).child(body)),
+                    None => d.child(
+                        div()
+                            .id("create-group-list")
+                            .mt(px(10.))
+                            .flex_1()
+                            .min_h_0()
+                            .overflow_y_scroll()
+                            .p(px(6.))
+                            .child(body),
+                    ),
                 }),
         )
-        .when(invite.is_none(), |d| d.child(
-            // .create-group-footer
-            div()
-                .flex_shrink_0()
-                .px(px(gutter))
-                .p(px(15.))
-                .pt(px(25.))
-                .flex()
-                .justify_center()
-                .gap(px(10.))
-                .child(
-                    button("create-group-create-btn", "Start Chat")
-                        .bg(c(0x58fcb3))
-                        .border_color(ca(90, 252, 180, 0.65))
-                        .text_color(c(0x000000))
-                        .when(!ready, |d| d.opacity(0.45))
-                        .when(ready, |d| d.cursor_pointer().hover(|s| s.opacity(0.75)).on_click(click(|| Act::Start))),
-                )
-                .child(
-                    button("create-group-cancel", "Cancel")
-                        .border_color(white_a(0.2))
-                        .text_color(c(0xffffff))
-                        .cursor_pointer()
-                        .hover(|s| s.opacity(0.75))
-                        .on_click(click(|| Act::Cancel)),
-                ),
-        ))
+        .when(invite.is_none(), |d| {
+            d.child(
+                // .create-group-footer
+                div()
+                    .flex_shrink_0()
+                    .px(px(gutter))
+                    .p(px(15.))
+                    .pt(px(25.))
+                    .flex()
+                    .justify_center()
+                    .gap(px(10.))
+                    .child(
+                        button("create-group-create-btn", "Start Chat")
+                            .bg(c(0x58fcb3))
+                            .border_color(ca(90, 252, 180, 0.65))
+                            .text_color(c(0x000000))
+                            .when(!ready, |d| d.opacity(0.45))
+                            .when(ready, |d| {
+                                d.cursor_pointer()
+                                    .hover(|s| s.opacity(0.75))
+                                    .on_click(click(|| Act::Start))
+                            }),
+                    )
+                    .child(
+                        button("create-group-cancel", "Cancel")
+                            .border_color(white_a(0.2))
+                            .text_color(c(0xffffff))
+                            .cursor_pointer()
+                            .hover(|s| s.opacity(0.75))
+                            .on_click(click(|| Act::Cancel)),
+                    ),
+            )
+        })
         .into_any_element()
 }
 
@@ -394,14 +569,57 @@ fn link_card(p: &Preview, member: impl Fn(&str) -> bool) -> impl IntoElement {
             .bg(c(0x0a0a0a))
             .p(px(pad))
             .shadow(vec![
-                gpui::BoxShadow { color: white_a(0.06), offset: gpui::point(px(0.), px(0.)), blur_radius: px(0.), spread_radius: px(1.), inset: false },
-                gpui::BoxShadow { color: ca(0, 0, 0, 0.5), offset: gpui::point(px(0.), px(10.)), blur_radius: px(28.), spread_radius: px(0.), inset: false },
+                gpui::BoxShadow {
+                    color: white_a(0.06),
+                    offset: gpui::point(px(0.), px(0.)),
+                    blur_radius: px(0.),
+                    spread_radius: px(1.),
+                    inset: false,
+                },
+                gpui::BoxShadow {
+                    color: ca(0, 0, 0, 0.5),
+                    offset: gpui::point(px(0.), px(10.)),
+                    blur_radius: px(28.),
+                    spread_radius: px(0.),
+                    inset: false,
+                },
             ])
-            .child(gpui::img(path).size_full().rounded(px(22.)).object_fit(gpui::ObjectFit::Cover))
+            .child(
+                gpui::img(path)
+                    .size_full()
+                    .rounded(px(22.))
+                    .object_fit(gpui::ObjectFit::Cover),
+            )
     };
-    let eyebrow = |t: &'static str| crate::kit::spaced(t.to_uppercase(), 1.1).mb(px(18.)).font_weight(FontWeight::SEMIBOLD).text_size(px(11.)).line_height(px(24.)).text_color(c(PRIMARY));
-    let name = |t: String| div().mt(px(16.)).max_w_full().truncate().font_weight(FontWeight::BOLD).text_size(px(22.)).line_height(px(24.)).text_color(c(0xffffff)).child(t);
-    let desc = |t: String| div().mt(px(8.)).text_center().text_size(px(14.)).line_height(px(21.)).text_color(c(0xa8a8a8)).line_clamp(4).child(t);
+    let eyebrow = |t: &'static str| {
+        crate::kit::spaced(t.to_uppercase(), 1.1)
+            .mb(px(18.))
+            .font_weight(FontWeight::SEMIBOLD)
+            .text_size(px(11.))
+            .line_height(px(24.))
+            .text_color(c(PRIMARY))
+    };
+    let name = |t: String| {
+        div()
+            .mt(px(16.))
+            .max_w_full()
+            .truncate()
+            .font_weight(FontWeight::BOLD)
+            .text_size(px(22.))
+            .line_height(px(24.))
+            .text_color(c(0xffffff))
+            .child(t)
+    };
+    let desc = |t: String| {
+        div()
+            .mt(px(8.))
+            .text_center()
+            .text_size(px(14.))
+            .line_height(px(21.))
+            .text_color(c(0xa8a8a8))
+            .line_clamp(4)
+            .child(t)
+    };
     let card = div()
         .w_full()
         .max_w(px(450.))
@@ -416,8 +634,18 @@ fn link_card(p: &Preview, member: impl Fn(&str) -> bool) -> impl IntoElement {
         .rounded(px(16.))
         .border_1()
         .border_color(c(0x262626))
-        .bg(gpui::linear_gradient(180., gpui::linear_color_stop(c(0x161616), 0.), gpui::linear_color_stop(c(0x0d0d0d), 1.)))
-        .shadow(vec![gpui::BoxShadow { color: ca(0, 0, 0, 0.45), offset: gpui::point(px(0.), px(18.)), blur_radius: px(50.), spread_radius: px(0.), inset: false }]);
+        .bg(gpui::linear_gradient(
+            180.,
+            gpui::linear_color_stop(c(0x161616), 0.),
+            gpui::linear_color_stop(c(0x0d0d0d), 1.),
+        ))
+        .shadow(vec![gpui::BoxShadow {
+            color: ca(0, 0, 0, 0.45),
+            offset: gpui::point(px(0.), px(18.)),
+            blur_radius: px(50.),
+            spread_radius: px(0.),
+            inset: false,
+        }]);
     match p {
         Preview::Loading => card
             .child(eyebrow("Community Invite"))
@@ -465,9 +693,18 @@ mod tests {
     #[test]
     fn invite_keys_from_any_wrapper() {
         let key = "naddr1qvzqqqr4gupzqmjxss3dld622uu8q#Zk3pQ9vT2xLm8RbN4cWd7YhJ";
-        assert_eq!(super::invite_key(&format!("https://vectorapp.io/invite/{key}")).as_deref(), Some(key));
-        assert_eq!(super::invite_key(&format!("look: vector://invite/{key} !")).as_deref(), Some(key));
-        assert_eq!(super::invite_key("naddr1short#Zk3pQ9vT2xLm8RbN4cWd7YhJ"), None);
+        assert_eq!(
+            super::invite_key(&format!("https://vectorapp.io/invite/{key}")).as_deref(),
+            Some(key)
+        );
+        assert_eq!(
+            super::invite_key(&format!("look: vector://invite/{key} !")).as_deref(),
+            Some(key)
+        );
+        assert_eq!(
+            super::invite_key("naddr1short#Zk3pQ9vT2xLm8RbN4cWd7YhJ"),
+            None
+        );
         assert_eq!(super::invite_key("npub1abc"), None);
     }
 
@@ -477,7 +714,10 @@ mod tests {
         let text = format!("Come  hang https://armada.buzz/invite/{key} out");
         assert_eq!(super::invite_card_keys(&text), vec![key.to_string()]);
         assert_eq!(super::replace_invite_links(&text, ""), "Come hang out");
-        assert_eq!(super::replace_invite_links(&format!("hi vector://invite/{key}"), "Community Invite"), "hi Community Invite");
+        assert_eq!(
+            super::replace_invite_links(&format!("hi vector://invite/{key}"), "Community Invite"),
+            "hi Community Invite"
+        );
         assert!(super::invite_links(&format!("bare {key}")).is_empty());
         assert!(super::invite_links(&format!("https://x.io/other/{key}")).is_empty());
     }

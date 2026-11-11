@@ -11,8 +11,9 @@ use futures::FutureExt;
 use futures::future::Shared;
 use gpui::prelude::*;
 use gpui::{
-    AnimationExt, Context, Entity, EventEmitter, FocusHandle, Focusable, FontWeight, KeyDownEvent, MouseButton, RenderImage, SharedString, Task, Window, div,
-    img, linear_color_stop, linear_gradient, px, svg,
+    AnimationExt, Context, Entity, EventEmitter, FocusHandle, Focusable, FontWeight, KeyDownEvent,
+    MouseButton, RenderImage, SharedString, Task, Window, div, img, linear_color_stop,
+    linear_gradient, px, svg,
 };
 
 use crate::composer::{CancelInput, InputChanged, SendText, TextInput};
@@ -74,7 +75,13 @@ pub struct FilePreview {
 /// A folder or a selection being zipped, then what the archive holds.
 enum Zip {
     Running(Arc<std::sync::atomic::AtomicU64>),
-    Done { tree: Node, total: u32, listed: usize, open: std::collections::HashSet<String>, label: String },
+    Done {
+        tree: Node,
+        total: u32,
+        listed: usize,
+        open: std::collections::HashSet<String>,
+        label: String,
+    },
 }
 
 #[derive(Default)]
@@ -91,8 +98,16 @@ impl Node {
         let i = match self.dirs.iter().position(|d| d.name == name) {
             Some(i) => i,
             None => {
-                let path = if self.path.is_empty() { name.to_string() } else { format!("{}/{name}", self.path) };
-                self.dirs.push(Node { name: name.to_string(), path, ..Default::default() });
+                let path = if self.path.is_empty() {
+                    name.to_string()
+                } else {
+                    format!("{}/{name}", self.path)
+                };
+                self.dirs.push(Node {
+                    name: name.to_string(),
+                    path,
+                    ..Default::default()
+                });
                 self.dirs.len() - 1
             }
         };
@@ -133,23 +148,51 @@ pub fn file_icon(ext: &str) -> &'static str {
         e if IMAGE_EXTS.contains(&e) || e == "svg" => "icons/image.svg",
         "mp4" | "webm" | "mov" | "avi" | "mkv" => "icons/film.svg",
         "mp3" | "wav" | "ogg" | "flac" | "m4a" | "aac" => "icons/volume-max.svg",
-        "zip" | "rar" | "7z" | "tar" | "gz" | "bz2" | "xz" | "zst" | "tgz" | "tbz2" => "icons/folder.svg",
+        "zip" | "rar" | "7z" | "tar" | "gz" | "bz2" | "xz" | "zst" | "tgz" | "tbz2" => {
+            "icons/folder.svg"
+        }
         _ => "icons/file.svg",
     }
 }
 
 /// Characters no filesystem takes in a name.
 fn clean_stem(s: &str) -> String {
-    s.chars().filter(|c| !matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' | '\0')).take(64).collect()
+    s.chars()
+        .filter(|c| {
+            !matches!(
+                c,
+                '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' | '\0'
+            )
+        })
+        .take(64)
+        .collect()
 }
 
 impl FilePreview {
-    pub fn new(path: PathBuf, receiver: String, reply: String, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        path: PathBuf,
+        receiver: String,
+        reply: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
-        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("file").to_string();
-        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
-        let mut stem = if ext.is_empty() { name.clone() } else { name[..name.len() - ext.len() - 1].to_string() };
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("file")
+            .to_string();
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_lowercase();
+        let mut stem = if ext.is_empty() {
+            name.clone()
+        } else {
+            name[..name.len() - ext.len() - 1].to_string()
+        };
         let spoiler = stem.to_uppercase().starts_with("SPOILER_");
         if spoiler {
             stem = stem[8..].to_string();
@@ -191,7 +234,14 @@ impl FilePreview {
             let file = path.clone();
             let e = ext.clone();
             cx.spawn(async move |this, cx| {
-                let decoded = cx.background_executor().spawn(async move { std::fs::read(&file).ok().and_then(|b| crate::media::decode(&b, &e, (1600, 1600))) }).await;
+                let decoded = cx
+                    .background_executor()
+                    .spawn(async move {
+                        std::fs::read(&file)
+                            .ok()
+                            .and_then(|b| crate::media::decode(&b, &e, (1600, 1600)))
+                    })
+                    .await;
                 this.update(cx, |p, cx| {
                     if let Some((image, w, h)) = decoded {
                         p.image = Some((Arc::new(image), w, h));
@@ -207,7 +257,10 @@ impl FilePreview {
             if ext != "gif" {
                 let file = path.clone();
                 cx.spawn(async move |this, cx| {
-                    let has = cx.background_executor().spawn(async move { crate::backend::messaging::has_metadata(&file) }).await;
+                    let has = cx
+                        .background_executor()
+                        .spawn(async move { crate::backend::messaging::has_metadata(&file) })
+                        .await;
                     this.update(cx, |p, cx| {
                         p.metadata_offered = has;
                         cx.notify();
@@ -244,15 +297,23 @@ impl FilePreview {
     }
 
     /// A folder, or several items, zipped into one archive that sends under its name.
-    pub fn zipped(paths: Vec<PathBuf>, receiver: String, reply: String, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn zipped(
+        paths: Vec<PathBuf>,
+        receiver: String,
+        reply: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
         let percent = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let cancel = Arc::new(AtomicBool::new(false));
         let (flag, pct) = (cancel.clone(), percent.clone());
         let stem = crate::backend::archive::archive_name(&paths);
-        let work = cx.background_executor().spawn(async move { crate::backend::archive::zip_paths(&paths, &flag, &pct) });
-                cx.spawn(async move |this, cx| {
+        let work = cx
+            .background_executor()
+            .spawn(async move { crate::backend::archive::zip_paths(&paths, &flag, &pct) });
+        cx.spawn(async move |this, cx| {
             let mut work = std::pin::pin!(work.fuse());
             loop {
                 let timer = cx.background_executor().timer(Duration::from_millis(100));
@@ -295,11 +356,20 @@ impl FilePreview {
         }
     }
 
-    fn zipped_done(&mut self, done: Result<crate::backend::archive::Zipped, String>, cx: &mut Context<Self>) {
+    fn zipped_done(
+        &mut self,
+        done: Result<crate::backend::archive::Zipped, String>,
+        cx: &mut Context<Self>,
+    ) {
         match done {
             Ok(z) => {
-                let plural = |n: u32, one: &str| format!("{n} {one}{}", if n == 1 { "" } else { "s" });
-                let mut label = format!("{} ({}", crate::media::format_bytes(z.size), plural(z.file_count, "file"));
+                let plural =
+                    |n: u32, one: &str| format!("{n} {one}{}", if n == 1 { "" } else { "s" });
+                let mut label = format!(
+                    "{} ({}",
+                    crate::media::format_bytes(z.size),
+                    plural(z.file_count, "file")
+                );
                 if z.dir_count > 0 {
                     label.push_str(&format!(", {}", plural(z.dir_count, "folder")));
                 }
@@ -308,7 +378,13 @@ impl FilePreview {
                 let open = tree.dirs.iter().map(|d| d.path.clone()).collect();
                 self.path = z.path;
                 self.size = z.size;
-                self.zip = Some(Zip::Done { tree, total: z.file_count + z.dir_count, listed: z.entries.len(), open, label });
+                self.zip = Some(Zip::Done {
+                    tree,
+                    total: z.file_count + z.dir_count,
+                    listed: z.entries.len(),
+                    open,
+                    label,
+                });
             }
             Err(e) => {
                 if !self.cancel.load(Ordering::Relaxed) {
@@ -324,7 +400,9 @@ impl FilePreview {
         if self.blur.is_some() {
             return;
         }
-        let Some((image, _, _)) = self.image.clone() else { return };
+        let Some((image, _, _)) = self.image.clone() else {
+            return;
+        };
         cx.spawn(async move |this, cx| {
             let blur = cx
                 .background_executor()
@@ -332,7 +410,9 @@ impl FilePreview {
                     let size = image.size(0);
                     let (w, h) = (size.width.0 as u32, size.height.0 as u32);
                     let rgba = image::RgbaImage::from_raw(w, h, image.as_bytes(0)?.to_vec())?;
-                    let hash = crate::util::generate_thumbhash_from_image(&image::DynamicImage::ImageRgba8(rgba))?;
+                    let hash = crate::util::generate_thumbhash_from_image(
+                        &image::DynamicImage::ImageRgba8(rgba),
+                    )?;
                     crate::media::decode_thumbhash(&hash, (w.min(900), h.min(900)))
                 })
                 .await;
@@ -356,7 +436,10 @@ impl FilePreview {
         };
         let stem = self.stem.clone();
         let input = cx.new(|cx| {
-            let mut i = TextInput::new("", cx).with_look(look).centered().keep_on_submit();
+            let mut i = TextInput::new("", cx)
+                .with_look(look)
+                .centered()
+                .keep_on_submit();
             i.set_text(&stem, cx);
             i
         });
@@ -369,15 +452,23 @@ impl FilePreview {
             let _ = p;
         })
         .detach();
-        cx.subscribe_in(&input, window, |p, _, _: &SendText, window, cx| p.end_rename(true, window, cx)).detach();
-        cx.subscribe_in(&input, window, |p, _, _: &CancelInput, window, cx| p.end_rename(false, window, cx)).detach();
+        cx.subscribe_in(&input, window, |p, _, _: &SendText, window, cx| {
+            p.end_rename(true, window, cx)
+        })
+        .detach();
+        cx.subscribe_in(&input, window, |p, _, _: &CancelInput, window, cx| {
+            p.end_rename(false, window, cx)
+        })
+        .detach();
         window.focus(&input.focus_handle(cx), cx);
         self.rename = Some(input);
         cx.notify();
     }
 
     fn end_rename(&mut self, save: bool, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(input) = self.rename.take() else { return };
+        let Some(input) = self.rename.take() else {
+            return;
+        };
         let name = input.read(cx).text().trim().to_string();
         if save && !name.is_empty() {
             self.stem = name;
@@ -399,10 +490,22 @@ impl FilePreview {
         if self.rename.is_some() {
             self.end_rename(true, window, cx);
         }
-        let ext = if self.ext.is_empty() { String::new() } else { format!(".{}", self.ext) };
+        let ext = if self.ext.is_empty() {
+            String::new()
+        } else {
+            format!(".{}", self.ext)
+        };
         let name = if self.spoiler {
-            let stem = if self.stem.is_empty() { "image" } else { &self.stem };
-            let stem = if stem.to_uppercase().starts_with("SPOILER_") { stem.to_string() } else { format!("SPOILER_{stem}") };
+            let stem = if self.stem.is_empty() {
+                "image"
+            } else {
+                &self.stem
+            };
+            let stem = if stem.to_uppercase().starts_with("SPOILER_") {
+                stem.to_string()
+            } else {
+                format!("SPOILER_{stem}")
+            };
             format!("{stem}{ext}")
         } else if self.edited {
             format!("{}{ext}", self.stem)
@@ -433,11 +536,34 @@ pub fn neon_toggle(on: bool) -> gpui::Div {
         .w(px(50.))
         .h(px(24.))
         .rounded(px(12.))
-        .map(|d| if on { d.bg(linear_gradient(90., linear_color_stop(c(0x33db98), 0.), linear_color_stop(c(0x00ff9d), 1.))) } else { d.bg(c(0x1a1a1a)) })
-        .child(div().absolute().top(px(2.)).left(px(if on { 28. } else { 2. })).size(px(20.)).rounded_full().bg(c(if on { 0xffffff } else { 0x333333 })))
+        .map(|d| {
+            if on {
+                d.bg(linear_gradient(
+                    90.,
+                    linear_color_stop(c(0x33db98), 0.),
+                    linear_color_stop(c(0x00ff9d), 1.),
+                ))
+            } else {
+                d.bg(c(0x1a1a1a))
+            }
+        })
+        .child(
+            div()
+                .absolute()
+                .top(px(2.))
+                .left(px(if on { 28. } else { 2. }))
+                .size(px(20.))
+                .rounded_full()
+                .bg(c(if on { 0xffffff } else { 0x333333 })),
+        )
 }
 
-fn option(id: &'static str, label: gpui::AnyElement, sublabel: impl Into<SharedString>, on: bool) -> gpui::Stateful<gpui::Div> {
+fn option(
+    id: &'static str,
+    label: gpui::AnyElement,
+    sublabel: impl Into<SharedString>,
+    on: bool,
+) -> gpui::Stateful<gpui::Div> {
     div()
         .id(id)
         .flex()
@@ -452,8 +578,21 @@ fn option(id: &'static str, label: gpui::AnyElement, sublabel: impl Into<SharedS
         .cursor_pointer()
         .child(
             div()
-                .child(div().text_size(px(14.)).line_height(px(16.)).text_color(white_a(0.9)).child(label))
-                .child(div().mt(px(2.)).text_size(px(12.)).line_height(px(16.)).text_color(white_a(0.5)).child(sublabel.into())),
+                .child(
+                    div()
+                        .text_size(px(14.))
+                        .line_height(px(16.))
+                        .text_color(white_a(0.9))
+                        .child(label),
+                )
+                .child(
+                    div()
+                        .mt(px(2.))
+                        .text_size(px(12.))
+                        .line_height(px(16.))
+                        .text_color(white_a(0.5))
+                        .child(sublabel.into()),
+                ),
         )
         .child(neon_toggle(on))
 }
@@ -469,11 +608,38 @@ impl Render for FilePreview {
                     .flex_col()
                     .items_center()
                     .gap(px(12.))
-                    .child(div().size(px(120.)).mb(px(8.)).rounded(px(16.)).bg(c(0x59fcb3).opacity(0.1)).border_1().border_color(c(0x59fcb3).opacity(0.2)).flex().items_center().justify_center().child(crate::attachments::ring(48., Some(p as f32))))
-                    .child(div().text_size(px(13.)).text_color(white_a(0.6)).child(if p > 0 { format!("Compressing... {p}%") } else { "Compressing...".into() }))
+                    .child(
+                        div()
+                            .size(px(120.))
+                            .mb(px(8.))
+                            .rounded(px(16.))
+                            .bg(c(0x59fcb3).opacity(0.1))
+                            .border_1()
+                            .border_color(c(0x59fcb3).opacity(0.2))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(crate::attachments::ring(48., Some(p as f32))),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(13.))
+                            .text_color(white_a(0.6))
+                            .child(if p > 0 {
+                                format!("Compressing... {p}%")
+                            } else {
+                                "Compressing...".into()
+                            }),
+                    )
                     .into_any_element()
             }
-            Some(Zip::Done { tree, total, listed, open, .. }) => {
+            Some(Zip::Done {
+                tree,
+                total,
+                listed,
+                open,
+                ..
+            }) => {
                 let mut rows = Vec::new();
                 tree_rows(tree, 0, open, &mut rows, cx);
                 div()
@@ -482,7 +648,24 @@ impl Render for FilePreview {
                     .flex_col()
                     .items_center()
                     .gap(px(12.))
-                    .child(div().size(px(120.)).mb(px(8.)).rounded(px(16.)).bg(c(0x59fcb3).opacity(0.1)).border_1().border_color(c(0x59fcb3).opacity(0.2)).flex().items_center().justify_center().child(svg().path("icons/folder.svg").size(px(64.)).text_color(c(0x59fcb3))))
+                    .child(
+                        div()
+                            .size(px(120.))
+                            .mb(px(8.))
+                            .rounded(px(16.))
+                            .bg(c(0x59fcb3).opacity(0.1))
+                            .border_1()
+                            .border_color(c(0x59fcb3).opacity(0.2))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(
+                                svg()
+                                    .path("icons/folder.svg")
+                                    .size(px(64.))
+                                    .text_color(c(0x59fcb3)),
+                            ),
+                    )
                     .child(
                         div()
                             .id("zip-list")
@@ -497,76 +680,110 @@ impl Render for FilePreview {
                             .pl(px(4.))
                             .children(rows)
                             .when(*total as usize > *listed, |d| {
-                                d.child(div().pt(px(8.)).pb(px(4.)).text_center().text_size(px(12.)).text_color(white_a(0.4)).child(format!("...and {} more", *total as usize - listed)))
+                                d.child(
+                                    div()
+                                        .pt(px(8.))
+                                        .pb(px(4.))
+                                        .text_center()
+                                        .text_size(px(12.))
+                                        .text_color(white_a(0.4))
+                                        .child(format!("...and {} more", *total as usize - listed)),
+                                )
                             }),
                     )
                     .into_any_element()
             }
             None => match &self.image {
-            Some((image, w, h)) => {
-                let (w, h) = (*w as f32, *h as f32);
-                let s = (450. / w).min(max_h / h).min(1.);
-                let (dw, dh) = (w * s, h * s);
-                let shown = if self.spoiler { self.blur.clone().unwrap_or(image.clone()) } else { image.clone() };
-                div()
-                    .relative()
-                    .w(px(dw))
-                    .h(px(dh))
-                    .rounded(px(8.))
-                    .overflow_hidden()
-                    .child(img(shown).size_full().rounded(px(8.)))
-                    .when(self.spoiler && dw >= 80. && dh >= 60., |d| {
-                        d.child(
+                Some((image, w, h)) => {
+                    let (w, h) = (*w as f32, *h as f32);
+                    let s = (450. / w).min(max_h / h).min(1.);
+                    let (dw, dh) = (w * s, h * s);
+                    let shown = if self.spoiler {
+                        self.blur.clone().unwrap_or(image.clone())
+                    } else {
+                        image.clone()
+                    };
+                    div()
+                        .relative()
+                        .w(px(dw))
+                        .h(px(dh))
+                        .rounded(px(8.))
+                        .overflow_hidden()
+                        .child(img(shown).size_full().rounded(px(8.)))
+                        .when(self.spoiler && dw >= 80. && dh >= 60., |d| {
+                            d.child(
+                                div()
+                                    .absolute()
+                                    .inset_0()
+                                    .flex()
+                                    .flex_col()
+                                    .items_center()
+                                    .justify_center()
+                                    .gap(px(4.))
+                                    .child(
+                                        svg()
+                                            .path("icons/eye-off.svg")
+                                            .size(px(22.))
+                                            .text_color(c(0xffffff)),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_size(px(13.))
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .text_color(c(0xffffff))
+                                            .child("Spoiler"),
+                                    ),
+                            )
+                        })
+                        .child(
                             div()
+                                .id("spoiler-toggle")
                                 .absolute()
-                                .inset_0()
+                                .bottom(px(8.))
+                                .right(px(8.))
+                                .size(px(32.))
+                                .rounded(px(8.))
+                                .bg(gpui::black().opacity(0.55))
+                                .hover(|s| s.bg(gpui::black().opacity(0.75)))
                                 .flex()
-                                .flex_col()
                                 .items_center()
                                 .justify_center()
-                                .gap(px(4.))
-                                .child(svg().path("icons/eye-off.svg").size(px(22.)).text_color(c(0xffffff)))
-                                .child(div().text_size(px(13.)).font_weight(FontWeight::MEDIUM).text_color(c(0xffffff)).child("Spoiler")),
+                                .cursor_pointer()
+                                .on_click(cx.listener(|p, _, _, cx| {
+                                    p.spoiler = !p.spoiler;
+                                    if p.spoiler {
+                                        p.make_blur(cx);
+                                    }
+                                    cx.notify();
+                                }))
+                                .child(
+                                    svg()
+                                        .path(if self.spoiler {
+                                            "icons/eye-off.svg"
+                                        } else {
+                                            "icons/eye.svg"
+                                        })
+                                        .size(px(18.))
+                                        .text_color(c(0xffffff)),
+                                ),
                         )
-                    })
-                    .child(
-                        div()
-                            .id("spoiler-toggle")
-                            .absolute()
-                            .bottom(px(8.))
-                            .right(px(8.))
-                            .size(px(32.))
-                            .rounded(px(8.))
-                            .bg(gpui::black().opacity(0.55))
-                            .hover(|s| s.bg(gpui::black().opacity(0.75)))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .cursor_pointer()
-                            .on_click(cx.listener(|p, _, _, cx| {
-                                p.spoiler = !p.spoiler;
-                                if p.spoiler {
-                                    p.make_blur(cx);
-                                }
-                                cx.notify();
-                            }))
-                            .child(svg().path(if self.spoiler { "icons/eye-off.svg" } else { "icons/eye.svg" }).size(px(18.)).text_color(c(0xffffff))),
-                    )
-                    .into_any_element()
-            }
-            None if IMAGE_EXTS.contains(&self.ext.as_str()) => div().h(px(100.)).into_any_element(),
-            None => div()
-                .size(px(120.))
-                .mb(px(8.))
-                .rounded(px(16.))
-                .bg(c(0x59fcb3).opacity(0.1))
-                .border_1()
-                .border_color(c(0x59fcb3).opacity(0.2))
-                .flex()
-                .items_center()
-                .justify_center()
-                .child(svg().path(self.icon).size(px(64.)).text_color(c(0x59fcb3)))
-                .into_any_element(),
+                        .into_any_element()
+                }
+                None if IMAGE_EXTS.contains(&self.ext.as_str()) => {
+                    div().h(px(100.)).into_any_element()
+                }
+                None => div()
+                    .size(px(120.))
+                    .mb(px(8.))
+                    .rounded(px(16.))
+                    .bg(c(0x59fcb3).opacity(0.1))
+                    .border_1()
+                    .border_color(c(0x59fcb3).opacity(0.2))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(svg().path(self.icon).size(px(64.)).text_color(c(0x59fcb3)))
+                    .into_any_element(),
             },
         };
 
@@ -624,11 +841,17 @@ impl Render for FilePreview {
                         )
                     }),
             )
-            .child(div().text_size(px(14.)).line_height(px(24.)).text_color(white_a(0.6)).child(match &self.zip {
-                Some(Zip::Running(_)) => "Compressing...".to_string(),
-                Some(Zip::Done { label, .. }) => label.clone(),
-                None => crate::media::format_bytes(self.size),
-            }));
+            .child(
+                div()
+                    .text_size(px(14.))
+                    .line_height(px(24.))
+                    .text_color(white_a(0.6))
+                    .child(match &self.zip {
+                        Some(Zip::Running(_)) => "Compressing...".to_string(),
+                        Some(Zip::Done { label, .. }) => label.clone(),
+                        None => crate::media::format_bytes(self.size),
+                    }),
+            );
 
         let options = div()
             .flex_shrink_0()
@@ -639,7 +862,13 @@ impl Render for FilePreview {
             .gap(px(12.))
             .when(self.compress_offered, |d| {
                 d.child(
-                    option("fp-compress", "Compress Image".into_any_element(), self.compress_info.clone(), self.compress).on_click(cx.listener(|p, _, _, cx| {
+                    option(
+                        "fp-compress",
+                        "Compress Image".into_any_element(),
+                        self.compress_info.clone(),
+                        self.compress,
+                    )
+                    .on_click(cx.listener(|p, _, _, cx| {
                         p.compress = !p.compress;
                         cx.notify();
                     })),
@@ -650,17 +879,36 @@ impl Render for FilePreview {
                     .flex()
                     .items_center()
                     .child("Keep Metadata")
-                    .when(self.keep_metadata, |d| d.child(img("icons/warning.svg").ml(px(4.)).size(px(14.))))
+                    .when(self.keep_metadata, |d| {
+                        d.child(img("icons/warning.svg").ml(px(4.)).size(px(14.)))
+                    })
                     .into_any_element();
-                d.child(option("fp-metadata", label, "Includes location, camera & date", self.keep_metadata).on_click(cx.listener(|p, _, _, cx| {
-                    p.keep_metadata = !p.keep_metadata;
-                    cx.notify();
-                })))
+                d.child(
+                    option(
+                        "fp-metadata",
+                        label,
+                        "Includes location, camera & date",
+                        self.keep_metadata,
+                    )
+                    .on_click(cx.listener(|p, _, _, cx| {
+                        p.keep_metadata = !p.keep_metadata;
+                        cx.notify();
+                    })),
+                )
             });
 
         let zipping = matches!(self.zip, Some(Zip::Running(_)));
         let button = |id: &'static str, label: &'static str| {
-            div().id(id).px(px(32.)).py(px(12.)).rounded(px(8.)).text_size(px(14.)).line_height(px(17.)).font_weight(FontWeight::MEDIUM).cursor_pointer().child(label)
+            div()
+                .id(id)
+                .px(px(32.))
+                .py(px(12.))
+                .rounded(px(8.))
+                .text_size(px(14.))
+                .line_height(px(17.))
+                .font_weight(FontWeight::MEDIUM)
+                .cursor_pointer()
+                .child(label)
         };
         let buttons = div()
             .flex_shrink_0()
@@ -677,7 +925,11 @@ impl Render for FilePreview {
             .child(
                 button("fp-send", if zipping { "Compressing..." } else { "Send" })
                     .when(zipping, |d| d.opacity(0.5).cursor_default())
-                    .bg(linear_gradient(90., linear_color_stop(c(0x33db98), 0.), linear_color_stop(c(0x00ff9d), 1.)))
+                    .bg(linear_gradient(
+                        90.,
+                        linear_color_stop(c(0x33db98), 0.),
+                        linear_color_stop(c(0x00ff9d), 1.),
+                    ))
                     .hover(|s| s.opacity(0.9))
                     .text_color(c(0x000000))
                     .on_click(cx.listener(|p, _, window, cx| p.send(window, cx))),
@@ -710,7 +962,15 @@ impl Render for FilePreview {
                     .items_center()
                     .justify_center()
                     .gap(px(16.))
-                    .child(div().w_full().flex().flex_col().items_center().gap(px(12.)).child(content))
+                    .child(
+                        div()
+                            .w_full()
+                            .flex()
+                            .flex_col()
+                            .items_center()
+                            .gap(px(12.))
+                            .child(content),
+                    )
                     .child(info)
                     .child(options),
             )
@@ -739,15 +999,33 @@ impl Render for FilePreview {
             }))
             .on_mouse_down(MouseButton::Left, cx.listener(|p, _, _, cx| p.close(cx)))
             .child(card)
-            .with_animation("fp-fade", gpui::Animation::new(Duration::from_millis(200)), |d, t| d.opacity(t))
+            .with_animation(
+                "fp-fade",
+                gpui::Animation::new(Duration::from_millis(200)),
+                |d, t| d.opacity(t),
+            )
     }
 }
 
-
 /// `renderTreeNode`: folders first, each toggling open, then files with their sizes.
-fn tree_rows(node: &Node, depth: usize, open: &std::collections::HashSet<String>, rows: &mut Vec<gpui::AnyElement>, cx: &mut Context<FilePreview>) {
+fn tree_rows(
+    node: &Node,
+    depth: usize,
+    open: &std::collections::HashSet<String>,
+    rows: &mut Vec<gpui::AnyElement>,
+    cx: &mut Context<FilePreview>,
+) {
     if depth > 50 {
-        rows.push(div().pt(px(8.)).pb(px(4.)).text_center().text_size(px(12.)).text_color(white_a(0.4)).child("Deeply nested...").into_any_element());
+        rows.push(
+            div()
+                .pt(px(8.))
+                .pb(px(4.))
+                .text_center()
+                .text_size(px(12.))
+                .text_color(white_a(0.4))
+                .child("Deeply nested...")
+                .into_any_element(),
+        );
         return;
     }
     for d in &node.dirs {
@@ -767,14 +1045,16 @@ fn tree_rows(node: &Node, depth: usize, open: &std::collections::HashSet<String>
                 .text_size(px(12.))
                 .text_color(white_a(0.8))
                 .when(has, |r| {
-                    r.cursor_pointer().hover(|s| s.bg(white_a(0.05))).on_click(cx.listener(move |p, _, _, cx| {
-                        if let Some(Zip::Done { open, .. }) = p.zip.as_mut()
-                            && !open.remove(&path)
-                        {
-                            open.insert(path.clone());
-                        }
-                        cx.notify();
-                    }))
+                    r.cursor_pointer()
+                        .hover(|s| s.bg(white_a(0.05)))
+                        .on_click(cx.listener(move |p, _, _, cx| {
+                            if let Some(Zip::Done { open, .. }) = p.zip.as_mut()
+                                && !open.remove(&path)
+                            {
+                                open.insert(path.clone());
+                            }
+                            cx.notify();
+                        }))
                 })
                 .child(
                     svg()
@@ -782,10 +1062,30 @@ fn tree_rows(node: &Node, depth: usize, open: &std::collections::HashSet<String>
                         .size(px(12.))
                         .flex_shrink_0()
                         .text_color(white_a(0.35))
-                        .with_transformation(gpui::Transformation::rotate(gpui::radians(if is_open { 0. } else { -std::f32::consts::FRAC_PI_2 }))),
+                        .with_transformation(gpui::Transformation::rotate(gpui::radians(
+                            if is_open {
+                                0.
+                            } else {
+                                -std::f32::consts::FRAC_PI_2
+                            },
+                        ))),
                 )
-                .child(svg().path("icons/folder.svg").size(px(14.)).flex_shrink_0().text_color(white_a(0.5)))
-                .child(div().flex_1().min_w_0().overflow_hidden().text_ellipsis().whitespace_nowrap().child(d.name.clone()))
+                .child(
+                    svg()
+                        .path("icons/folder.svg")
+                        .size(px(14.))
+                        .flex_shrink_0()
+                        .text_color(white_a(0.5)),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .whitespace_nowrap()
+                        .child(d.name.clone()),
+                )
                 .into_any_element(),
         );
         if is_open {
@@ -803,9 +1103,29 @@ fn tree_rows(node: &Node, depth: usize, open: &std::collections::HashSet<String>
                 .gap(px(6.))
                 .text_size(px(12.))
                 .text_color(white_a(0.7))
-                .child(svg().path("icons/file.svg").size(px(14.)).flex_shrink_0().text_color(white_a(0.5)))
-                .child(div().flex_1().min_w_0().overflow_hidden().text_ellipsis().whitespace_nowrap().child(name.clone()))
-                .child(div().flex_shrink_0().text_size(px(11.)).text_color(white_a(0.4)).child(crate::media::format_bytes(*size)))
+                .child(
+                    svg()
+                        .path("icons/file.svg")
+                        .size(px(14.))
+                        .flex_shrink_0()
+                        .text_color(white_a(0.5)),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .whitespace_nowrap()
+                        .child(name.clone()),
+                )
+                .child(
+                    div()
+                        .flex_shrink_0()
+                        .text_size(px(11.))
+                        .text_color(white_a(0.4))
+                        .child(crate::media::format_bytes(*size)),
+                )
                 .into_any_element(),
         );
     }

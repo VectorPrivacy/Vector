@@ -7,10 +7,10 @@ use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use nostr_sdk::prelude::*;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use vector_core::inbox_relays::normalize_relay_url;
 use vector_core::state::{self, TRUSTED_RELAYS as DEFAULT_RELAYS};
-use vector_core::{db, ClientRelayExt};
+use vector_core::{ClientRelayExt, db};
 
 // Relays
 // ============================================================================
@@ -61,11 +61,18 @@ fn log_key(url: &str) -> String {
 }
 
 fn now_secs() -> u64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs()
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }
 
 fn add_relay_log(url: &str, level: &str, message: &str) {
-    let log = RelayLog { timestamp: now_secs(), level: level.to_string(), message: message.to_string() };
+    let log = RelayLog {
+        timestamp: now_secs(),
+        level: level.to_string(),
+        message: message.to_string(),
+    };
     if let Ok(mut logs) = relay_logs().write() {
         let entries = logs.entry(log_key(url)).or_default();
         entries.push_front(log);
@@ -81,7 +88,9 @@ fn update_relay_metrics(url: &str, f: impl FnOnce(&mut RelayMetrics)) {
 
 pub fn is_default_relay(url: &str) -> bool {
     let normalized = url.trim().trim_end_matches('/');
-    DEFAULT_RELAYS.iter().any(|r| r.eq_ignore_ascii_case(normalized))
+    DEFAULT_RELAYS
+        .iter()
+        .any(|r| r.eq_ignore_ascii_case(normalized))
 }
 
 fn validate_relay_url(url: &str) -> Result<String, String> {
@@ -115,7 +124,9 @@ fn load_json_setting<T: serde::de::DeserializeOwned + Default>(key: &str) -> Res
         return Ok(T::default());
     }
     match db::get_sql_setting(key.to_string())? {
-        Some(json) => serde_json::from_str(&json).map_err(|e| format!("Failed to parse {key}: {e}")),
+        Some(json) => {
+            serde_json::from_str(&json).map_err(|e| format!("Failed to parse {key}: {e}"))
+        }
         None => Ok(T::default()),
     }
 }
@@ -124,7 +135,8 @@ fn save_json_setting<T: serde::Serialize + ?Sized>(key: &str, value: &T) -> Resu
     if db::get_current_account().is_err() {
         return Err("No account selected".to_string());
     }
-    let json = serde_json::to_string(value).map_err(|e| format!("Failed to serialize {key}: {e}"))?;
+    let json =
+        serde_json::to_string(value).map_err(|e| format!("Failed to serialize {key}: {e}"))?;
     db::set_sql_setting(key.to_string(), json)
 }
 
@@ -152,18 +164,30 @@ fn desired_enabled_relays() -> Vec<(String, String)> {
         .filter(|d| !disabled.iter().any(|x| x.eq_ignore_ascii_case(d)))
         .map(|d| (d.to_string(), default_relay_mode()))
         .collect();
-    out.extend(load_custom_relays().unwrap_or_default().into_iter().filter(|c| c.enabled).map(|c| (c.url, c.mode)));
+    out.extend(
+        load_custom_relays()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|c| c.enabled)
+            .map(|c| (c.url, c.mode)),
+    );
     out
 }
 
 /// Add to the pool and connect. An already-pooled url (a community or
 /// discovery relay) is promoted in place to READ+WRITE, keeping its socket.
 async fn add_relay(client: &Client, url: &str, caps: RelayCapabilities) -> Result<(), String> {
-    let newly_added = client.add_managed_relay(url).capabilities(caps).await.map_err(|e| e.to_string())?;
+    let newly_added = client
+        .add_managed_relay(url)
+        .capabilities(caps)
+        .await
+        .map_err(|e| e.to_string())?;
     if !newly_added {
         if let Ok(parsed) = RelayUrl::parse(url) {
             if let Some(relay) = client.relays().all().await.get(&parsed) {
-                relay.capabilities().add(RelayCapabilities::READ | RelayCapabilities::WRITE);
+                relay
+                    .capabilities()
+                    .add(RelayCapabilities::READ | RelayCapabilities::WRITE);
             }
         }
     }
@@ -180,7 +204,12 @@ async fn restore_discovery_role(client: &Client, url: &str) {
     if !state::discovery_relay_iter().any(|d| normalize_relay_url(d) == norm) {
         return;
     }
-    if client.add_managed_relay(url).capabilities(vector_core::discovery_relay_capabilities()).await.is_ok() {
+    if client
+        .add_managed_relay(url)
+        .capabilities(vector_core::discovery_relay_capabilities())
+        .await
+        .is_ok()
+    {
         let _ = client.connect_relay(url).await;
     }
 }
@@ -192,7 +221,11 @@ pub async fn get_relays() -> Result<Value, String> {
     let pool = client.relays().await;
     let status_of = |url: &str| {
         pool.iter()
-            .find(|(u, _)| u.as_str().trim_end_matches('/').eq_ignore_ascii_case(url.trim_end_matches('/')))
+            .find(|(u, _)| {
+                u.as_str()
+                    .trim_end_matches('/')
+                    .eq_ignore_ascii_case(url.trim_end_matches('/'))
+            })
             .map(|(_, r)| status_label(r.status()))
             .unwrap_or("disabled")
     };
@@ -256,13 +289,20 @@ pub async fn add_custom_relay(url: String, mode: Option<String>) -> Result<Custo
         return Err("Invalid mode. Must be 'read', 'write', or 'both'".to_string());
     }
     let mut relays = load_custom_relays()?;
-    if relays.iter().any(|r| r.url.eq_ignore_ascii_case(&normalized)) {
+    if relays
+        .iter()
+        .any(|r| r.url.eq_ignore_ascii_case(&normalized))
+    {
         return Err("Relay already exists".to_string());
     }
     if is_default_relay(&normalized) {
         return Err("Cannot add default relay as custom relay".to_string());
     }
-    let relay = CustomRelay { url: normalized, enabled: true, mode };
+    let relay = CustomRelay {
+        url: normalized,
+        enabled: true,
+        mode,
+    };
     relays.push(relay.clone());
     save_custom_relays(&relays)?;
 
@@ -296,7 +336,10 @@ pub async fn remove_custom_relay(url: String) -> Result<bool, String> {
 
 pub async fn toggle_custom_relay(url: String, enabled: bool) -> Result<bool, String> {
     let mut relays = load_custom_relays()?;
-    let relay = relays.iter_mut().find(|r| r.url.eq_ignore_ascii_case(&url)).ok_or("Relay not found")?;
+    let relay = relays
+        .iter_mut()
+        .find(|r| r.url.eq_ignore_ascii_case(&url))
+        .ok_or("Relay not found")?;
     relay.enabled = enabled;
     let mode = relay.mode.clone();
     save_custom_relays(&relays)?;
@@ -319,7 +362,10 @@ pub async fn update_relay_mode(url: String, mode: String) -> Result<bool, String
         return Err("Invalid mode. Must be 'read', 'write', or 'both'".to_string());
     }
     let mut relays = load_custom_relays()?;
-    let relay = relays.iter_mut().find(|r| r.url.eq_ignore_ascii_case(&url)).ok_or("Relay not found")?;
+    let relay = relays
+        .iter_mut()
+        .find(|r| r.url.eq_ignore_ascii_case(&url))
+        .ok_or("Relay not found")?;
     relay.mode = mode.clone();
     let enabled = relay.enabled;
     save_custom_relays(&relays)?;
@@ -341,12 +387,19 @@ pub async fn update_relay_mode(url: String, mode: String) -> Result<bool, String
 /// the Discovery Relays, then connect.
 pub async fn add_configured_relays(client: &Client) {
     let disabled = disabled_default_relays().unwrap_or_default();
-    for url in DEFAULT_RELAYS.iter().filter(|d| disabled.iter().any(|x| x.eq_ignore_ascii_case(d))) {
+    for url in DEFAULT_RELAYS
+        .iter()
+        .filter(|d| disabled.iter().any(|x| x.eq_ignore_ascii_case(d)))
+    {
         add_relay_log(url, "info", "Skipped (disabled by user)");
     }
     let wanted = desired_enabled_relays();
     for (url, mode) in &wanted {
-        match client.add_managed_relay(url.as_str()).capabilities(capabilities_for_mode(mode)).await {
+        match client
+            .add_managed_relay(url.as_str())
+            .capabilities(capabilities_for_mode(mode))
+            .await
+        {
             Ok(_) => add_relay_log(url, "info", &format!("Added to relay pool (mode: {mode})")),
             Err(e) => {
                 vector_core::log_warn!("[Relay] add {url} failed: {e}");
@@ -360,7 +413,10 @@ pub async fn add_configured_relays(client: &Client) {
         if wanted.iter().any(|(u, _)| normalize_relay_url(u) == norm) {
             continue;
         }
-        let _ = client.add_managed_relay(url).capabilities(vector_core::discovery_relay_capabilities()).await;
+        let _ = client
+            .add_managed_relay(url)
+            .capabilities(vector_core::discovery_relay_capabilities())
+            .await;
     }
     client.connect().await;
 }
@@ -368,7 +424,9 @@ pub async fn add_configured_relays(client: &Client) {
 /// The Relays tab IS the kind 10050 list: apply a newer published copy
 /// locally, then merge-publish any outbound diff.
 pub async fn reconcile_dm_relay_list() {
-    let Some(client) = state::nostr_client() else { return };
+    let Some(client) = state::nostr_client() else {
+        return;
+    };
     let fetched = match vector_core::inbox_relays::fetch_own_inbox_list(&client).await {
         Ok(f) => f,
         Err(e) => {
@@ -391,7 +449,8 @@ pub async fn reconcile_dm_relay_list() {
             .collect();
         vector_core::inbox_relays::note_contributed(&shared);
 
-        let plan = vector_core::inbox_relays::plan_inbound_reconcile(&remote, remote_ts, &ours, &declined);
+        let plan =
+            vector_core::inbox_relays::plan_inbound_reconcile(&remote, remote_ts, &ours, &declined);
         if plan.adopt.is_empty() && plan.revive.is_empty() && plan.retire.is_empty() {
             vector_core::inbox_relays::note_list_seen(remote_ts);
         } else {
@@ -402,7 +461,10 @@ pub async fn reconcile_dm_relay_list() {
     // Publish the stored list, not pool state: the pool can hold a DM
     // recipient's relays and miss an adoptee whose connect failed.
     let (ours_now, _) = local_relay_view();
-    if let Err(e) = vector_core::inbox_relays::publish_inbox_relays_synced(&client, fetched, Some(ours_now)).await {
+    if let Err(e) =
+        vector_core::inbox_relays::publish_inbox_relays_synced(&client, fetched, Some(ours_now))
+            .await
+    {
         vector_core::log_warn!("[Relay] Failed to publish inbox relays: {e}");
     }
 }
@@ -429,7 +491,11 @@ fn local_relay_view() -> (Vec<String>, Vec<String>) {
 /// Mutate the stores in one load-mutate-save pass, reconcile the pool, then
 /// record only what was applied as our contribution: retire fires solely for
 /// contributed entries, so over-claiming would resurrect a dropped relay.
-async fn apply_inbound_reconcile(client: &Client, plan: vector_core::inbox_relays::InboundReconcile, remote_ts: u64) {
+async fn apply_inbound_reconcile(
+    client: &Client,
+    plan: vector_core::inbox_relays::InboundReconcile,
+    remote_ts: u64,
+) {
     let norm = normalize_relay_url;
     let mut customs = load_custom_relays().unwrap_or_default();
     let mut disabled = disabled_default_relays().unwrap_or_default();
@@ -440,7 +506,11 @@ async fn apply_inbound_reconcile(client: &Client, plan: vector_core::inbox_relay
         if customs.iter().any(|c| norm(&c.url) == norm(&url)) {
             continue;
         }
-        customs.push(CustomRelay { url: url.clone(), enabled: true, mode: default_relay_mode() });
+        customs.push(CustomRelay {
+            url: url.clone(),
+            enabled: true,
+            mode: default_relay_mode(),
+        });
         customs_dirty = true;
         adopted.push(url);
     }
@@ -484,13 +554,21 @@ async fn apply_inbound_reconcile(client: &Client, plan: vector_core::inbox_relay
         add_relay_log(url, "info", "Adopted from your DM relay list");
     }
     for url in &revived {
-        let mode = customs.iter().find(|c| norm(&c.url) == norm(url)).map(|c| c.mode.clone()).unwrap_or_else(default_relay_mode);
+        let mode = customs
+            .iter()
+            .find(|c| norm(&c.url) == norm(url))
+            .map(|c| c.mode.clone())
+            .unwrap_or_else(default_relay_mode);
         let _ = add_relay(client, url, capabilities_for_mode(&mode)).await;
     }
     for url in &retired {
         let _ = client.remove_relay(url.as_str()).await;
         restore_discovery_role(client, url).await;
-        add_relay_log(url, "info", "Disabled (removed from your DM relay list elsewhere)");
+        add_relay_log(
+            url,
+            "info",
+            "Disabled (removed from your DM relay list elsewhere)",
+        );
     }
 
     adopted.extend(revived);
@@ -502,7 +580,10 @@ async fn apply_inbound_reconcile(client: &Client, plan: vector_core::inbox_relay
 /// Status events, logs, ping metrics and the pool reconcile loop for this
 /// session. Catch-up and zombie probing are `listen()`'s.
 pub fn start_relay_monitor(client: &Client) {
-    if db::current_session().scoped::<MonitorStarted, AtomicBool>().swap(true, Ordering::SeqCst) {
+    if db::current_session()
+        .scoped::<MonitorStarted, AtomicBool>()
+        .swap(true, Ordering::SeqCst)
+    {
         return;
     }
     vector_core::live_subs::set_catch_up(super::sync::catch_up);
@@ -510,15 +591,23 @@ pub fn start_relay_monitor(client: &Client) {
     if let Some(monitor) = client.monitor() {
         let mut rx = monitor.subscribe();
         db::spawn_bound(async move {
-            while let Ok(MonitorNotification::StatusChanged { relay_url, status }) = rx.recv().await {
+            while let Ok(MonitorNotification::StatusChanged { relay_url, status }) = rx.recv().await
+            {
                 let url = relay_url.to_string();
                 let level = match status {
                     RelayStatus::Disconnected | RelayStatus::Terminated => "warn",
                     RelayStatus::Banned => "error",
                     _ => "info",
                 };
-                add_relay_log(&url, level, &format!("Status changed to {}", status_label(status)));
-                vector_core::emit_event("relay_status_change", &json!({ "url": url, "status": status_label(status) }));
+                add_relay_log(
+                    &url,
+                    level,
+                    &format!("Status changed to {}", status_label(status)),
+                );
+                vector_core::emit_event(
+                    "relay_status_change",
+                    &json!({ "url": url, "status": status_label(status) }),
+                );
 
                 // A reconnected socket carries no live subscriptions: Vector owns reconnects.
                 if status == RelayStatus::Connected {
@@ -543,7 +632,10 @@ pub fn start_relay_monitor(client: &Client) {
                         continue;
                     }
                     let received = relay.stats().bytes_received();
-                    if heard.insert(url.clone(), received).is_some_and(|before| received > before) {
+                    if heard
+                        .insert(url.clone(), received)
+                        .is_some_and(|before| received > before)
+                    {
                         update_relay_metrics(url.as_str(), |m| m.last_check = Some(now_secs()));
                         continue;
                     }
@@ -553,7 +645,9 @@ pub fn start_relay_monitor(client: &Client) {
                     let budget = vector_core::relay_request_timeout(Duration::from_secs(8));
                     let probe = vector_core::rt::time::timeout(
                         budget + Duration::from_secs(2),
-                        client.fetch_events(ReqTarget::single(url.to_string(), [probe_filter])).timeout(budget),
+                        client
+                            .fetch_events(ReqTarget::single(url.to_string(), [probe_filter]))
+                            .timeout(budget),
                     )
                     .await;
                     heard.insert(url.clone(), relay.stats().bytes_received());
@@ -566,7 +660,10 @@ pub fn start_relay_monitor(client: &Client) {
                     } else {
                         add_relay_log(url.as_str(), "warn", "Health check failed; reconnecting");
                         relay.disconnect();
-                        let _ = relay.try_connect().timeout(vector_core::relay_connect_timeout(Duration::from_secs(8))).await;
+                        let _ = relay
+                            .try_connect()
+                            .timeout(vector_core::relay_connect_timeout(Duration::from_secs(8)))
+                            .await;
                     }
                 }
             }
@@ -582,14 +679,27 @@ pub fn start_relay_monitor(client: &Client) {
         vector_core::rt::time::sleep(Duration::from_secs(8)).await;
         while !db::session_stopped() {
             if let Some(client) = state::nostr_client() {
-                let pooled: Vec<String> = client.relays().await.keys().map(|k| norm(k.as_str())).collect();
+                let pooled: Vec<String> = client
+                    .relays()
+                    .await
+                    .keys()
+                    .map(|k| norm(k.as_str()))
+                    .collect();
                 for (url, mode) in desired_enabled_relays() {
                     if pooled.contains(&norm(&url))
-                        || client.add_managed_relay(url.as_str()).capabilities(capabilities_for_mode(&mode)).await.is_err()
+                        || client
+                            .add_managed_relay(url.as_str())
+                            .capabilities(capabilities_for_mode(&mode))
+                            .await
+                            .is_err()
                     {
                         continue;
                     }
-                    add_relay_log(&url, "info", "Reconcile: re-added missing relay; connecting...");
+                    add_relay_log(
+                        &url,
+                        "info",
+                        "Reconcile: re-added missing relay; connecting...",
+                    );
                     if let Ok(Some(relay)) = client.relay(url.as_str()).await {
                         let _ = relay.try_connect().timeout(Duration::from_secs(8)).await;
                     }
@@ -605,7 +715,9 @@ pub fn start_relay_monitor(client: &Client) {
                         pending_since.remove(&key);
                         continue;
                     }
-                    let since = *pending_since.entry(key.clone()).or_insert_with(std::time::Instant::now);
+                    let since = *pending_since
+                        .entry(key.clone())
+                        .or_insert_with(std::time::Instant::now);
                     if since.elapsed() >= Duration::from_secs(15) {
                         add_relay_log(url.as_str(), "warn", "Wedged in Pending; forcing reconnect");
                         relay.disconnect();
@@ -615,7 +727,10 @@ pub fn start_relay_monitor(client: &Client) {
                 }
 
                 for (_, relay) in client.relays().await {
-                    if matches!(relay.status(), RelayStatus::Terminated | RelayStatus::Sleeping) {
+                    if matches!(
+                        relay.status(),
+                        RelayStatus::Terminated | RelayStatus::Sleeping
+                    ) {
                         let _ = relay.try_connect().timeout(Duration::from_secs(5)).await;
                     }
                 }
@@ -648,7 +763,11 @@ pub async fn relay_rows() -> Vec<RelayRow> {
     };
     let status_of = |url: &str| {
         pool.iter()
-            .find(|(u, _)| u.as_str().trim_end_matches('/').eq_ignore_ascii_case(url.trim_end_matches('/')))
+            .find(|(u, _)| {
+                u.as_str()
+                    .trim_end_matches('/')
+                    .eq_ignore_ascii_case(url.trim_end_matches('/'))
+            })
             .map(|(_, r)| status_label(r.status()))
             .unwrap_or("disconnected")
     };
@@ -656,19 +775,43 @@ pub async fn relay_rows() -> Vec<RelayRow> {
         .iter()
         .map(|url| {
             let enabled = !disabled.iter().any(|d| d.eq_ignore_ascii_case(url));
-            RelayRow { url: url.to_string(), status: if enabled { status_of(url) } else { "disabled" }, is_default: true, enabled, mode: "both".into() }
+            RelayRow {
+                url: url.to_string(),
+                status: if enabled { status_of(url) } else { "disabled" },
+                is_default: true,
+                enabled,
+                mode: "both".into(),
+            }
         })
         .collect();
-    out.extend(customs.into_iter().map(|c| RelayRow { status: if c.enabled { status_of(&c.url) } else { "disabled" }, url: c.url, is_default: false, enabled: c.enabled, mode: c.mode }));
+    out.extend(customs.into_iter().map(|c| RelayRow {
+        status: if c.enabled {
+            status_of(&c.url)
+        } else {
+            "disabled"
+        },
+        url: c.url,
+        is_default: false,
+        enabled: c.enabled,
+        mode: c.mode,
+    }));
     out
 }
 
 pub fn relay_metrics_of(url: &str) -> RelayMetrics {
-    relay_metrics().read().ok().and_then(|m| m.get(&log_key(url)).cloned()).unwrap_or_default()
+    relay_metrics()
+        .read()
+        .ok()
+        .and_then(|m| m.get(&log_key(url)).cloned())
+        .unwrap_or_default()
 }
 
 pub fn relay_logs_of(url: &str) -> Vec<RelayLog> {
-    relay_logs().read().ok().and_then(|l| l.get(&log_key(url)).map(|l| l.iter().cloned().collect())).unwrap_or_default()
+    relay_logs()
+        .read()
+        .ok()
+        .and_then(|l| l.get(&log_key(url)).map(|l| l.iter().cloned().collect()))
+        .unwrap_or_default()
 }
 
 // Media servers
@@ -681,8 +824,17 @@ fn probe_server(url: String) {
         if state::nostr_client().is_none() {
             return;
         }
-        let Ok(signer) = vector_core::signer::active_signer() else { return };
-        if vector_core::blossom_info::refresh_all(signer.clone(), vec![url.clone()], Duration::from_secs(60)).await > 0 {
+        let Ok(signer) = vector_core::signer::active_signer() else {
+            return;
+        };
+        if vector_core::blossom_info::refresh_all(
+            signer.clone(),
+            vec![url.clone()],
+            Duration::from_secs(60),
+        )
+        .await
+            > 0
+        {
             vector_core::traits::emit_event("blossom_info_updated", &());
         }
         if let Ok(n) = vector_core::blossom::probe_servers_for_octet_stream(signer, vec![url]).await
@@ -705,10 +857,16 @@ pub async fn add_server(url: String) -> Result<(), String> {
         }
         let key = normalized.to_lowercase();
         let mut customs = bs::load_custom_blossom_servers()?;
-        if customs.iter().any(|c| c.url.trim_end_matches('/').to_lowercase() == key) {
+        if customs
+            .iter()
+            .any(|c| c.url.trim_end_matches('/').to_lowercase() == key)
+        {
             return Err("Server already exists".to_string());
         }
-        customs.push(bs::CustomBlossomServer { url: normalized.clone(), enabled: true });
+        customs.push(bs::CustomBlossomServer {
+            url: normalized.clone(),
+            enabled: true,
+        });
         bs::save_custom_blossom_servers(&customs)?;
         bs::refresh_cache();
         bs::republish_blossom_servers_debounced();
@@ -744,13 +902,20 @@ pub async fn toggle_server(url: String, enabled: bool) -> Result<(), String> {
             let mut disabled = bs::load_disabled_default_blossom_servers()?;
             if enabled {
                 disabled.retain(|d| d.trim_end_matches('/').to_lowercase() != key);
-            } else if !disabled.iter().any(|d| d.trim_end_matches('/').to_lowercase() == key) {
+            } else if !disabled
+                .iter()
+                .any(|d| d.trim_end_matches('/').to_lowercase() == key)
+            {
                 disabled.push(key);
             }
             bs::save_disabled_default_blossom_servers(&disabled)?;
         } else {
             let mut customs = bs::load_custom_blossom_servers()?;
-            customs.iter_mut().find(|c| c.url.trim_end_matches('/').to_lowercase() == key).ok_or("Server not found")?.enabled = enabled;
+            customs
+                .iter_mut()
+                .find(|c| c.url.trim_end_matches('/').to_lowercase() == key)
+                .ok_or("Server not found")?
+                .enabled = enabled;
             bs::save_custom_blossom_servers(&customs)?;
         }
         bs::refresh_cache();

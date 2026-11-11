@@ -1,14 +1,14 @@
 //! Boot hydration, history catch-up, the live subscription and profile persistence.
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use vector_core::dm_catchup::{self, Opts, Report};
-use vector_core::event_handler::{commit_prepared_event, BatchingPersist};
-use vector_core::{db, state, CatchUp, SlimProfile, VectorCore, STATE};
+use vector_core::event_handler::{BatchingPersist, commit_prepared_event};
+use vector_core::{CatchUp, STATE, SlimProfile, VectorCore, db, state};
 
-use super::{events::Handler, Boot, UiEvent};
+use super::{Boot, UiEvent, events::Handler};
 
 pub struct ProfileHandler;
 
@@ -31,7 +31,9 @@ impl vector_core::ProfileSyncHandler for ProfileHandler {
 
 /// Load chats and profiles from the database into state, then hand them to the UI.
 async fn hydrate() {
-    let Ok(npub) = db::get_current_account() else { return };
+    let Ok(npub) = db::get_current_account() else {
+        return;
+    };
     let mut state = STATE.lock().await;
     if !state.db_loaded {
         if let Ok(profiles) = db::profiles::get_all_profiles() {
@@ -40,9 +42,12 @@ async fn hydrate() {
         // Before the first paint, so a blocked profile's pictures never show.
         let (slims, images) = state.forget_blocked_imagery();
         vector_core::profile::sync::persist_forgotten_imagery(&ProfileHandler, slims, images);
-        let mut last_messages = db::events::get_all_chats_last_messages().await.unwrap_or_default();
+        let mut last_messages = db::events::get_all_chats_last_messages()
+            .await
+            .unwrap_or_default();
         if let Ok(slim_chats) = db::chats::get_all_chats() {
-            let mut known: std::collections::HashSet<u16> = state.profiles.iter().map(|p| p.id).collect();
+            let mut known: std::collections::HashSet<u16> =
+                state.profiles.iter().map(|p| p.id).collect();
             for slim in slim_chats {
                 let mut chat = slim.to_chat(&mut state.interner);
                 let chat_id = chat.id().to_string();
@@ -69,16 +74,30 @@ async fn hydrate() {
                 }
                 state.chats.push(chat);
             }
-            state.chats.sort_by_key(|c| std::cmp::Reverse(c.last_message_time()));
+            state
+                .chats
+                .sort_by_key(|c| std::cmp::Reverse(c.last_message_time()));
         }
         state.shrink_after_load();
         state.db_loaded = true;
         let _ = db::id_cache::preload_id_caches();
     }
-    let chats = state.chats.iter().map(|c| c.to_serializable(&state.interner)).collect();
-    let profiles = state.profiles.iter().map(|p| SlimProfile::from_profile(p, &state.interner)).collect();
+    let chats = state
+        .chats
+        .iter()
+        .map(|c| c.to_serializable(&state.interner))
+        .collect();
+    let profiles = state
+        .profiles
+        .iter()
+        .map(|p| SlimProfile::from_profile(p, &state.interner))
+        .collect();
     drop(state);
-    super::send(UiEvent::Booted(Boot { npub, chats, profiles }));
+    super::send(UiEvent::Booted(Boot {
+        npub,
+        chats,
+        profiles,
+    }));
     db::spawn_bound(super::images::cache_all_profile_images());
 }
 
@@ -103,13 +122,18 @@ pub async fn fetch_messages(init: bool) {
 /// The account's published media servers (kind 10063), merged in after the first sync.
 async fn merge_media_servers() {
     use vector_core::{blossom, blossom_info, blossom_servers};
-    let (Some(client), Some(me)) = (state::nostr_client(), vector_core::my_public_key()) else { return };
+    let (Some(client), Some(me)) = (state::nostr_client(), vector_core::my_public_key()) else {
+        return;
+    };
     if let Err(e) = blossom_servers::fetch_and_merge_own_list(&client, me).await {
         vector_core::log_warn!("[BlossomServers] list fetch failed: {e}");
     }
-    let Ok(signer) = vector_core::signer::active_signer() else { return };
+    let Ok(signer) = vector_core::signer::active_signer() else {
+        return;
+    };
     let servers = state::get_blossom_servers();
-    if blossom_info::refresh_all(signer.clone(), servers.clone(), Duration::from_secs(60)).await > 0 {
+    if blossom_info::refresh_all(signer.clone(), servers.clone(), Duration::from_secs(60)).await > 0
+    {
         vector_core::emit_event("blossom_info_updated", &());
     }
     if let Ok(n) = blossom::probe_servers_for_octet_stream(signer, servers).await {
@@ -122,7 +146,10 @@ async fn merge_media_servers() {
 /// Start the live DM subscription. Runs for the session's life.
 pub fn notifs() {
     db::spawn_bound(async {
-        if let Err(e) = VectorCore.listen_with(Arc::new(Handler), CatchUp::External).await {
+        if let Err(e) = VectorCore
+            .listen_with(Arc::new(Handler), CatchUp::External)
+            .await
+        {
             vector_core::log_warn!("[GPUI] live subscription ended: {e}");
         }
     });
@@ -136,12 +163,17 @@ static RECONNECT_ARMED: AtomicBool = AtomicBool::new(false);
 static LAST_END_MS: AtomicU64 = AtomicU64::new(0);
 
 fn now_ms() -> u64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 /// A burst of relay reconnects becomes one catch-up once it settles.
 pub fn after_reconnect() {
-    if !vector_core::community::v2::realtime::subscription_ready() || RECONNECT_ARMED.swap(true, Ordering::SeqCst) {
+    if !vector_core::community::v2::realtime::subscription_ready()
+        || RECONNECT_ARMED.swap(true, Ordering::SeqCst)
+    {
         return;
     }
     db::spawn_bound(async {
@@ -175,33 +207,56 @@ struct Bootstrapping;
 /// Catch up on DMs: each read relay's window since its cursor, retried behind it until held.
 /// A relay with no cursor yet then reconciles its whole history once, in the background.
 pub async fn dms(is_new: bool) -> Report {
-    let report = dm_pass(Opts { is_new, only: None, bootstrap: false }).await;
+    let report = dm_pass(Opts {
+        is_new,
+        only: None,
+        bootstrap: false,
+    })
+    .await;
     if !report.complete() {
         let first = report.clone();
         db::spawn_bound(async move {
             dm_catchup::retry_incomplete(&first, |relays| {
-                dm_pass(Opts { is_new, only: (!relays.is_empty()).then_some(relays), bootstrap: false })
+                dm_pass(Opts {
+                    is_new,
+                    only: (!relays.is_empty()).then_some(relays),
+                    bootstrap: false,
+                })
             })
             .await;
         });
     }
     bootstrap_cursorless().await;
-    dm_catchup::start_safety_net(|| dm_pass(Opts { is_new: true, only: None, bootstrap: false }));
+    dm_catchup::start_safety_net(|| {
+        dm_pass(Opts {
+            is_new: true,
+            only: None,
+            bootstrap: false,
+        })
+    });
     report
 }
 
 async fn dm_pass(opts: Opts) -> Report {
     let batcher = BatchingPersist::new(&Handler);
-    dm_catchup::catch_up(&opts, &batcher, |prepared, is_new| commit_prepared_event(prepared, is_new, &batcher)).await
+    dm_catchup::catch_up(&opts, &batcher, |prepared, is_new| {
+        commit_prepared_event(prepared, is_new, &batcher)
+    })
+    .await
 }
 
 async fn bootstrap_cursorless() {
-    let Some(client) = state::nostr_client() else { return };
+    let Some(client) = state::nostr_client() else {
+        return;
+    };
     let fresh: Vec<String> = client
         .relays()
         .await
         .into_iter()
-        .filter(|(url, relay)| relay.capabilities().has_read() && vector_core::negentropy::reconcile_cursor(url.as_str()).is_none())
+        .filter(|(url, relay)| {
+            relay.capabilities().has_read()
+                && vector_core::negentropy::reconcile_cursor(url.as_str()).is_none()
+        })
         .map(|(url, _)| url.to_string())
         .collect();
     let busy = db::current_session().scoped::<Bootstrapping, AtomicBool>();
@@ -209,7 +264,12 @@ async fn bootstrap_cursorless() {
         return;
     }
     db::spawn_bound(async move {
-        dm_pass(Opts { is_new: false, only: Some(fresh), bootstrap: true }).await;
+        dm_pass(Opts {
+            is_new: false,
+            only: Some(fresh),
+            bootstrap: true,
+        })
+        .await;
         busy.store(false, Ordering::SeqCst);
     });
 }

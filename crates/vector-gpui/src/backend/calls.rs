@@ -5,7 +5,9 @@ use crate::calls::session;
 /// Ring `npub`; the rest arrives as `call_state` events. A refused microphone still places it, muted.
 pub async fn start(npub: String) -> Result<(), String> {
     crate::mic_access::ask().await;
-    vector_core::db::scoped(session::start(npub, false)).await.map(|_| ())
+    vector_core::db::scoped(session::start(npub, false))
+        .await
+        .map(|_| ())
 }
 
 pub async fn accept() -> Result<(), String> {

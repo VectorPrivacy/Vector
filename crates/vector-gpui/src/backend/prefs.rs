@@ -10,14 +10,19 @@ use vector_core::synced_prefs::{self, IdList, NicknameMap, Pref};
 /// Publish `pref`'s projection behind the caller: the UI has already moved.
 pub fn publish_projection(pref: Pref) {
     db::spawn_bound(async move {
-        let Some(client) = vector_core::state::nostr_client() else { return };
+        let Some(client) = vector_core::state::nostr_client() else {
+            return;
+        };
         // Never publish a list not yet reconciled with the relay copy.
         if !synced_prefs::is_hydrated(pref) {
             return;
         }
         if pref == Pref::Settings {
             match synced_prefs::publish_settings(&client, true).await {
-                Ok(Some(json)) => super::emit("synced_settings_updated", synced_prefs::SyncedSettings::from_json(&json).view()),
+                Ok(Some(json)) => super::emit(
+                    "synced_settings_updated",
+                    synced_prefs::SyncedSettings::from_json(&json).view(),
+                ),
                 Ok(None) => {}
                 Err(e) => eprintln!("[SyncedPrefs] publishing {} failed: {e}", pref.d_tag()),
             }
@@ -35,7 +40,11 @@ pub fn publish_projection(pref: Pref) {
                 // The same predicate `apply_mutes` reads with, so an inherited mute stays inherited.
                 let mut l = IdList::default();
                 let state = STATE.lock().await;
-                for c in state.chats.iter().filter(|c| notify::legacy_muted_for_chat(c)) {
+                for c in state
+                    .chats
+                    .iter()
+                    .filter(|c| notify::legacy_muted_for_chat(c))
+                {
                     let _ = l.add(&c.id);
                 }
                 drop(state);
@@ -80,7 +89,11 @@ async fn reconcile_mirror() {
         let mut moved: Vec<(String, bool)> = Vec::new();
         let mut rows = Vec::with_capacity(state.chats.len());
         for i in 0..state.chats.len() {
-            let want = notify::resolve(&state.chats[i].id, state.chats[i].metadata.community_id(), now);
+            let want = notify::resolve(
+                &state.chats[i].id,
+                state.chats[i].metadata.community_id(),
+                now,
+            );
             if state.chats[i].muted != want.muted {
                 state.chats[i].muted = want.muted;
                 moved.push((state.chats[i].id.clone(), want.muted));
@@ -105,7 +118,10 @@ async fn reconcile_mirror() {
         let _ = db::chats::save_slim_chat(&slim);
     }
     for (chat_id, muted) in &changed {
-        vector_core::traits::emit_event_json("chat_muted", json!({ "chat_id": chat_id, "value": muted }));
+        vector_core::traits::emit_event_json(
+            "chat_muted",
+            json!({ "chat_id": chat_id, "value": muted }),
+        );
     }
     vector_core::traits::emit_event_json("notify_prefs_changed", json!({ "chats": resolved }));
 }
@@ -130,7 +146,11 @@ pub async fn toggle_mute(chat_id: String) -> Option<bool> {
         }
         let now = notify::now_ms();
         let muted = !notify::prefs(&chat_id).muted_at(now);
-        let until = if muted { notify::MUTE_FOREVER } else { notify::MUTE_OFF };
+        let until = if muted {
+            notify::MUTE_FOREVER
+        } else {
+            notify::MUTE_OFF
+        };
         notify::set_mute(&chat_id, until).ok()?;
         reconcile_mirror().await;
         reseed_unread().await;
@@ -173,7 +193,12 @@ pub fn notify_views(community_id: Option<String>, scopes: Vec<String>) -> Vec<No
         }
     };
     let mut out: Vec<NotifyView> = cid.map(|id| view(id, None)).into_iter().collect();
-    out.extend(scopes.iter().filter(|s| Some(s.as_str()) != cid).map(|s| view(s, cid)));
+    out.extend(
+        scopes
+            .iter()
+            .filter(|s| Some(s.as_str()) != cid)
+            .map(|s| view(s, cid)),
+    );
     out
 }
 
@@ -188,7 +213,9 @@ async fn reconcile_notify() {
 pub async fn set_notify_level(scope_id: String, level: Option<&'static str>) -> Result<(), String> {
     let parsed = match level {
         None => None,
-        Some(s) => Some(notify::NotifyLevel::from_label(s).ok_or_else(|| format!("unknown level: {s}"))?),
+        Some(s) => {
+            Some(notify::NotifyLevel::from_label(s).ok_or_else(|| format!("unknown level: {s}"))?)
+        }
     };
     db::scoped(async move {
         notify::set_level(&scope_id, parsed)?;
@@ -214,7 +241,10 @@ pub async fn set_notify_mute(scope_id: String, duration_ms: i64) -> Result<(), S
     .await
 }
 
-pub async fn set_suppress_everyone(community_id: String, suppress: Option<bool>) -> Result<(), String> {
+pub async fn set_suppress_everyone(
+    community_id: String,
+    suppress: Option<bool>,
+) -> Result<(), String> {
     db::scoped(async move {
         notify::set_suppress_everyone(&community_id, suppress)?;
         reconcile_notify().await;
@@ -242,7 +272,8 @@ pub async fn unblock(npub: String) -> bool {
 }
 
 pub async fn set_nickname(npub: String, nickname: String) -> bool {
-    let ok = vector_core::profile::sync::set_nickname(npub, nickname, &super::sync::ProfileHandler).await;
+    let ok = vector_core::profile::sync::set_nickname(npub, nickname, &super::sync::ProfileHandler)
+        .await;
     if ok {
         publish_projection(Pref::Nicknames);
     }
@@ -267,10 +298,12 @@ pub async fn request_mutuals() -> Vec<String> {
 /// The account's boolean settings, each with its default when never set.
 pub fn sql_bools(keys: &[(&'static str, bool)]) -> Vec<bool> {
     keys.iter()
-        .map(|(key, default)| match vector_core::db::settings::get_sql_setting(key.to_string()) {
-            Ok(Some(v)) => v == "true" || v == "1",
-            _ => *default,
-        })
+        .map(
+            |(key, default)| match vector_core::db::settings::get_sql_setting(key.to_string()) {
+                Ok(Some(v)) => v == "true" || v == "1",
+                _ => *default,
+            },
+        )
         .collect()
 }
 
@@ -279,7 +312,9 @@ pub fn set_sql(key: &'static str, value: String) {
 }
 
 pub fn sql(key: &'static str) -> Option<String> {
-    vector_core::db::settings::get_sql_setting(key.to_string()).ok().flatten()
+    vector_core::db::settings::get_sql_setting(key.to_string())
+        .ok()
+        .flatten()
 }
 
 pub fn synced_settings() -> synced_prefs::SyncedSettings {
@@ -287,7 +322,9 @@ pub fn synced_settings() -> synced_prefs::SyncedSettings {
 }
 
 /// One synced-settings edit, published behind the caller.
-pub fn edit_synced(edit: impl FnOnce() -> Result<synced_prefs::SyncedSettings, String>) -> Result<synced_prefs::SyncedSettings, String> {
+pub fn edit_synced(
+    edit: impl FnOnce() -> Result<synced_prefs::SyncedSettings, String>,
+) -> Result<synced_prefs::SyncedSettings, String> {
     let settings = edit()?;
     publish_projection(Pref::Settings);
     Ok(settings)

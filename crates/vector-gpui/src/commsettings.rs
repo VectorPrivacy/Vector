@@ -6,11 +6,13 @@ use std::collections::HashSet;
 use std::rc::Rc;
 
 use gpui::prelude::*;
-use gpui::{div, img, px, svg, AnyElement, App, Entity, FontWeight, ScrollHandle, SharedString, Window};
+use gpui::{
+    AnyElement, App, Entity, FontWeight, ScrollHandle, SharedString, Window, div, img, px, svg,
+};
 
 use crate::composer::TextInput;
 use crate::data::Store;
-use crate::settings::{anchor, Anchor, Category, NavOn};
+use crate::settings::{Anchor, Category, NavOn, anchor};
 use crate::theme::*;
 
 pub const NAME_MAX: usize = 32;
@@ -120,7 +122,10 @@ pub enum Act {
 
 pub type OnAct = Rc<dyn Fn(Act, &mut Window, &mut App)>;
 
-pub(crate) fn click(on: &OnAct, act: impl Fn() -> Act + 'static) -> impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static {
+pub(crate) fn click(
+    on: &OnAct,
+    act: impl Fn() -> Act + 'static,
+) -> impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static {
     let on = on.clone();
     move |_, w, cx| on(act(), w, cx)
 }
@@ -144,41 +149,97 @@ impl CommSettings {
     }
 
     pub fn dirty(&self, cx: &App) -> bool {
-        self.overview_dirty(cx) || self.relays != self.saved.relays || self.voice != self.saved.voice || self.roles_dirty(cx)
+        self.overview_dirty(cx)
+            || self.relays != self.saved.relays
+            || self.voice != self.saved.voice
+            || self.roles_dirty(cx)
     }
 
     pub fn warn(&self) -> bool {
-        self.warn_until.is_some_and(|t| std::time::Instant::now() < t)
+        self.warn_until
+            .is_some_and(|t| std::time::Instant::now() < t)
     }
 
     pub fn sections(&self) -> Vec<Category> {
-        let section = |id, label, icon, anchors: Vec<Anchor>| Category { id, label, icon, danger: false, anchors };
+        let section = |id, label, icon, anchors: Vec<Anchor>| Category {
+            id,
+            label,
+            icon,
+            danger: false,
+            anchors,
+        };
         let mut out = vec![
             section(
                 "overview",
                 "Overview",
                 "info",
                 vec![
-                    anchor("identity", "Icon & Name", "icon avatar logo picture image name title rename"),
-                    anchor("banner", "Banner", "banner cover header art background picture image"),
-                    anchor("description", "Description", "description about bio summary"),
+                    anchor(
+                        "identity",
+                        "Icon & Name",
+                        "icon avatar logo picture image name title rename",
+                    ),
+                    anchor(
+                        "banner",
+                        "Banner",
+                        "banner cover header art background picture image",
+                    ),
+                    anchor(
+                        "description",
+                        "Description",
+                        "description about bio summary",
+                    ),
                 ],
             ),
             section(
                 "relays",
                 "Relays",
                 "globe",
-                vec![anchor("relay-list", "Hosting Relays", "relays servers hosting network nostr"), anchor("voice-relays", "Voice Relays", "voice relays iroh calls audio")],
+                vec![
+                    anchor(
+                        "relay-list",
+                        "Hosting Relays",
+                        "relays servers hosting network nostr",
+                    ),
+                    anchor(
+                        "voice-relays",
+                        "Voice Relays",
+                        "voice relays iroh calls audio",
+                    ),
+                ],
             ),
         ];
         if self.can("manage_roles") {
-            out.push(section("roles", "Roles", "shield-filled", crate::roles::anchors(&self.roles)));
+            out.push(section(
+                "roles",
+                "Roles",
+                "shield-filled",
+                crate::roles::anchors(&self.roles),
+            ));
         }
         if self.can("ban") {
-            out.push(section("bans", "Bans", "x-user", vec![anchor("ban-list", "Banned Members", "bans banned unban blocked removed")]));
+            out.push(section(
+                "bans",
+                "Bans",
+                "x-user",
+                vec![anchor(
+                    "ban-list",
+                    "Banned Members",
+                    "bans banned unban blocked removed",
+                )],
+            ));
         }
         if self.can("view_audit_log") {
-            out.push(section("audit", "Audit Log", "clock", vec![anchor("audit-list", "Audit Log", "audit log history changes actions who when record")]));
+            out.push(section(
+                "audit",
+                "Audit Log",
+                "clock",
+                vec![anchor(
+                    "audit-list",
+                    "Audit Log",
+                    "audit log history changes actions who when record",
+                )],
+            ));
         }
         out
     }
@@ -194,7 +255,11 @@ pub fn relay_address(raw: &str, list: &[String], except: Option<usize>) -> Resul
         text = format!("wss://{text}");
     }
     let (scheme, rest) = text.split_once("://").unwrap_or(("", ""));
-    let host = rest.split(['/', ':', '?', '#']).next().unwrap_or("").to_ascii_lowercase();
+    let host = rest
+        .split(['/', ':', '?', '#'])
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
     if host.is_empty() || host.contains(char::is_whitespace) {
         return Err("That isn't a relay address.".into());
     }
@@ -205,7 +270,11 @@ pub fn relay_address(raw: &str, list: &[String], except: Option<usize>) -> Resul
     }
     let address = text.trim_end_matches('/').to_string();
     let same = |a: &String| a.trim_end_matches('/').eq_ignore_ascii_case(&address);
-    if list.iter().enumerate().any(|(i, r)| Some(i) != except && same(r)) {
+    if list
+        .iter()
+        .enumerate()
+        .any(|(i, r)| Some(i) != except && same(r))
+    {
         return Err("That relay is already listed.".into());
     }
     Ok(address)
@@ -238,29 +307,69 @@ pub fn voice_address(raw: &str, list: &[String]) -> Result<String, String> {
 }
 
 pub(crate) fn heading(text: &'static str) -> impl IntoElement {
-    div().mb(px(20.)).text_size(px(24.)).line_height(px(28.)).font_weight(FontWeight::BOLD).text_color(c(0xffffff)).child(text)
+    div()
+        .mb(px(20.))
+        .text_size(px(24.))
+        .line_height(px(28.))
+        .font_weight(FontWeight::BOLD)
+        .text_color(c(0xffffff))
+        .child(text)
 }
 
 pub(crate) fn lede(text: &'static str) -> impl IntoElement {
-    div().mt(px(-8.)).mb(px(18.)).text_size(px(14.)).line_height(px(21.)).text_color(c(0x9a9a9a)).child(text)
+    div()
+        .mt(px(-8.))
+        .mb(px(18.))
+        .text_size(px(14.))
+        .line_height(px(21.))
+        .text_color(c(0x9a9a9a))
+        .child(text)
 }
 
 pub(crate) fn hint(text: impl Into<SharedString>) -> gpui::Div {
-    div().text_size(px(12.5)).line_height(px(18.125)).text_color(c(0x7a7a7a)).child(text.into())
+    div()
+        .text_size(px(12.5))
+        .line_height(px(18.125))
+        .text_color(c(0x7a7a7a))
+        .child(text.into())
 }
 
 pub(crate) fn block(first: bool, body: impl IntoElement) -> impl IntoElement {
-    div().pt(px(30.)).pb(px(34.)).when(!first, |d| d.border_t_1().border_color(c(0x262626))).child(body)
+    div()
+        .pt(px(30.))
+        .pb(px(34.))
+        .when(!first, |d| d.border_t_1().border_color(c(0x262626)))
+        .child(body)
 }
 
-pub(crate) fn field_head(label: &'static str, count: Option<(usize, usize, bool)>) -> impl IntoElement {
+pub(crate) fn field_head(
+    label: &'static str,
+    count: Option<(usize, usize, bool)>,
+) -> impl IntoElement {
     div()
         .mb(px(8.))
         .flex()
         .items_center()
         .justify_between()
-        .child(div().font_weight(FontWeight::MEDIUM).text_size(px(13.)).line_height(px(24.)).text_color(c(0xcfcfcf)).child(label))
-        .children(count.map(|(n, max, warn)| div().text_size(px(12.)).line_height(px(24.)).text_color(if warn { c(crate::timeline::DANGER) } else { c(0x6f6f6f) }).child(format!("{n}/{max}"))))
+        .child(
+            div()
+                .font_weight(FontWeight::MEDIUM)
+                .text_size(px(13.))
+                .line_height(px(24.))
+                .text_color(c(0xcfcfcf))
+                .child(label),
+        )
+        .children(count.map(|(n, max, warn)| {
+            div()
+                .text_size(px(12.))
+                .line_height(px(24.))
+                .text_color(if warn {
+                    c(crate::timeline::DANGER)
+                } else {
+                    c(0x6f6f6f)
+                })
+                .child(format!("{n}/{max}"))
+        }))
 }
 
 pub(crate) fn input_box(input: &Entity<TextInput>, h: f32, editable: bool) -> gpui::Div {
@@ -278,7 +387,12 @@ pub(crate) fn input_box(input: &Entity<TextInput>, h: f32, editable: bool) -> gp
         .child(div().flex_1().min_w_0().child(input.clone()))
 }
 
-pub(crate) fn save_btn(id: impl Into<gpui::ElementId>, label: impl Into<SharedString>, live: bool, on: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static) -> impl IntoElement {
+pub(crate) fn save_btn(
+    id: impl Into<gpui::ElementId>,
+    label: impl Into<SharedString>,
+    live: bool,
+    on: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
     div()
         .id(id.into())
         .h(px(34.))
@@ -293,7 +407,9 @@ pub(crate) fn save_btn(id: impl Into<gpui::ElementId>, label: impl Into<SharedSt
         .text_size(px(14.))
         .text_color(c(0x000000))
         .when(!live, |d| d.opacity(0.45))
-        .when(live, |d| d.cursor_pointer().hover(|d| d.opacity(0.9)).on_click(on))
+        .when(live, |d| {
+            d.cursor_pointer().hover(|d| d.opacity(0.9)).on_click(on)
+        })
         .child(label.into())
 }
 
@@ -306,15 +422,46 @@ fn edit_veil() -> gpui::Div {
         .justify_center()
         .bg(ca(0, 0, 0, 0.55))
         .invisible()
-        .child(svg().path("icons/edit.svg").size(px(22.)).text_color(c(0xffffff)))
+        .child(
+            svg()
+                .path("icons/edit.svg")
+                .size(px(22.))
+                .text_color(c(0xffffff)),
+        )
 }
 
 fn new_tag() -> gpui::Div {
-    div().absolute().right(px(6.)).bottom(px(6.)).px(px(7.)).py(px(1.)).rounded(px(8.)).bg(c(PRIMARY)).text_color(c(0x000000)).font_weight(FontWeight::BOLD).text_size(px(10.)).line_height(px(16.)).child("New")
+    div()
+        .absolute()
+        .right(px(6.))
+        .bottom(px(6.))
+        .px(px(7.))
+        .py(px(1.))
+        .rounded(px(8.))
+        .bg(c(PRIMARY))
+        .text_color(c(0x000000))
+        .font_weight(FontWeight::BOLD)
+        .text_size(px(10.))
+        .line_height(px(16.))
+        .child("New")
 }
 
-fn remove_btn(id: &'static str, label: &'static str, on: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static) -> impl IntoElement {
-    div().id(id).px(px(6.)).py(px(2.)).text_size(px(12.5)).line_height(px(24.)).text_color(c(0x8a8a8a)).cursor_pointer().hover(|d| d.text_color(c(crate::timeline::DANGER))).on_click(on).child(label)
+fn remove_btn(
+    id: &'static str,
+    label: &'static str,
+    on: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    div()
+        .id(id)
+        .px(px(6.))
+        .py(px(2.))
+        .text_size(px(12.5))
+        .line_height(px(24.))
+        .text_color(c(0x8a8a8a))
+        .cursor_pointer()
+        .hover(|d| d.text_color(c(crate::timeline::DANGER)))
+        .on_click(on)
+        .child(label)
 }
 
 /// A pick's crop, drawn at `width` like `.banner-art` with a rect.
@@ -335,7 +482,14 @@ fn cut(p: &Pick, width: f32, height: f32, radius: f32) -> AnyElement {
         .overflow_hidden()
         .rounded(px(radius))
         .bg(c(0x484848))
-        .child(img(p.preview.clone()).absolute().left(px(-x * k)).top(px(-y * k)).w(px(nw * k)).h(px(nh * k)))
+        .child(
+            img(p.preview.clone())
+                .absolute()
+                .left(px(-x * k))
+                .top(px(-y * k))
+                .w(px(nw * k))
+                .h(px(nh * k)),
+        )
         .into_any_element()
 }
 
@@ -343,18 +497,31 @@ fn overview(m: &CommSettings, store: &Store, on: &OnAct, cx: &App) -> AnyElement
     let editable = m.can("manage_metadata");
     let name_len = m.name.read(cx).text().chars().count();
     let desc_len = m.description.read(cx).text().chars().count();
-    let saved_icon = (!m.icon_removed).then(|| store.icon(&m.community)).flatten();
+    let saved_icon = (!m.icon_removed)
+        .then(|| store.icon(&m.community))
+        .flatten();
     let has_icon = m.icon_pick.is_some() || saved_icon.is_some();
     let icon: AnyElement = match (&m.icon_pick, saved_icon) {
         (Some(p), _) => cut(p, 88., 88., 24.),
-        (None, Some(path)) => img(path).size_full().rounded(px(24.)).object_fit(gpui::ObjectFit::Cover).into_any_element(),
-        (None, None) => img("icons/group-placeholder.svg").size_full().rounded(px(24.)).into_any_element(),
+        (None, Some(path)) => img(path)
+            .size_full()
+            .rounded(px(24.))
+            .object_fit(gpui::ObjectFit::Cover)
+            .into_any_element(),
+        (None, None) => img("icons/group-placeholder.svg")
+            .size_full()
+            .rounded(px(24.))
+            .into_any_element(),
     };
-    let saved_banner = (!m.banner_removed).then(|| store.banner(&m.community)).flatten();
+    let saved_banner = (!m.banner_removed)
+        .then(|| store.banner(&m.community))
+        .flatten();
     let has_banner = m.banner_pick.is_some() || saved_banner.is_some();
     let banner: AnyElement = match (&m.banner_pick, saved_banner) {
         (Some(p), _) => cut(p, 238., 70., 12.),
-        (None, Some(path)) => crate::community::banner_art(path, 238.).rounded(px(12.)).into_any_element(),
+        (None, Some(path)) => crate::community::banner_art(path, 238.)
+            .rounded(px(12.))
+            .into_any_element(),
         (None, None) => div()
             .w(px(238.))
             .h(px(70.))
@@ -367,15 +534,41 @@ fn overview(m: &CommSettings, store: &Store, on: &OnAct, cx: &App) -> AnyElement
             .justify_center()
             .gap(px(10.))
             .text_color(white_a(0.45))
-            .when(editable, |d| d.group_hover("cs-banner", |d| d.border_color(c(0x555555)).text_color(white_a(0.7))))
-            .child(svg().path("icons/image.svg").size(px(24.)).text_color(white_a(0.45)))
+            .when(editable, |d| {
+                d.group_hover("cs-banner", |d| {
+                    d.border_color(c(0x555555)).text_color(white_a(0.7))
+                })
+            })
+            .child(
+                svg()
+                    .path("icons/image.svg")
+                    .size(px(24.))
+                    .text_color(white_a(0.45)),
+            )
             .child(
                 div()
                     .flex()
                     .flex_col()
                     .gap(px(2.))
-                    .child(div().text_size(px(12.5)).line_height(px(15.)).child(if editable { "Add a banner" } else { "No banner" }))
-                    .when(editable, |d| d.child(div().text_size(px(11.)).line_height(px(13.2)).opacity(0.7).child("(952 × 280)"))),
+                    .child(
+                        div()
+                            .text_size(px(12.5))
+                            .line_height(px(15.))
+                            .child(if editable {
+                                "Add a banner"
+                            } else {
+                                "No banner"
+                            }),
+                    )
+                    .when(editable, |d| {
+                        d.child(
+                            div()
+                                .text_size(px(11.))
+                                .line_height(px(13.2))
+                                .opacity(0.7)
+                                .child("(952 × 280)"),
+                        )
+                    }),
             )
             .into_any_element(),
     };
@@ -468,7 +661,13 @@ fn overview(m: &CommSettings, store: &Store, on: &OnAct, cx: &App) -> AnyElement
         .into_any_element()
 }
 
-fn relay_row(first: bool, icon: &'static str, url: &str, editing: Option<&Entity<TextInput>>, actions: Vec<AnyElement>) -> impl IntoElement {
+fn relay_row(
+    first: bool,
+    icon: &'static str,
+    url: &str,
+    editing: Option<&Entity<TextInput>>,
+    actions: Vec<AnyElement>,
+) -> impl IntoElement {
     let (scheme, rest) = match url.find("://") {
         Some(i) => (&url[..i + 3], url[i + 3..].trim_end_matches('/')),
         None => ("", url),
@@ -481,24 +680,58 @@ fn relay_row(first: bool, icon: &'static str, url: &str, editing: Option<&Entity
         .gap(px(12.))
         .bg(c(0x0c0c0c))
         .when(!first, |d| d.border_t_1().border_color(c(0x1e1e1e)))
-        .child(svg().path(icon).size(px(16.)).flex_shrink_0().text_color(c(0x7a7a7a)))
+        .child(
+            svg()
+                .path(icon)
+                .size(px(16.))
+                .flex_shrink_0()
+                .text_color(c(0x7a7a7a)),
+        )
         .when_some(editing, |d, input| {
-            d.child(div().flex_1().min_w_0().h(px(30.)).px(px(8.)).flex().items_center().rounded(px(6.)).border_1().border_color(c(ACCENT)).bg(c(0x050505)).overflow_hidden().child(input.clone()))
+            d.child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .h(px(30.))
+                    .px(px(8.))
+                    .flex()
+                    .items_center()
+                    .rounded(px(6.))
+                    .border_1()
+                    .border_color(c(ACCENT))
+                    .bg(c(0x050505))
+                    .overflow_hidden()
+                    .child(input.clone()),
+            )
         })
-        .when(editing.is_none(), |d| d.child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .truncate()
-                .text_size(px(14.))
-                .line_height(px(24.))
-                .text_color(c(0xe8e8e8))
-                .child(gpui::StyledText::new(format!("{scheme}{rest}")).with_highlights([(0..scheme.len(), gpui::HighlightStyle { color: Some(c(0x6a6a6a)), ..Default::default() })])),
-        ))
+        .when(editing.is_none(), |d| {
+            d.child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_size(px(14.))
+                    .line_height(px(24.))
+                    .text_color(c(0xe8e8e8))
+                    .child(
+                        gpui::StyledText::new(format!("{scheme}{rest}")).with_highlights([(
+                            0..scheme.len(),
+                            gpui::HighlightStyle {
+                                color: Some(c(0x6a6a6a)),
+                                ..Default::default()
+                            },
+                        )]),
+                    ),
+            )
+        })
         .children(actions)
 }
 
-fn relay_action(id: SharedString, icon: &'static str, on: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static) -> AnyElement {
+fn relay_action(
+    id: SharedString,
+    icon: &'static str,
+    on: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
+) -> AnyElement {
     div()
         .id(id)
         .size(px(26.))
@@ -514,47 +747,95 @@ fn relay_action(id: SharedString, icon: &'static str, on: impl Fn(&gpui::ClickEv
         .into_any_element()
 }
 
-fn add_row(id: &'static str, input: &Entity<TextInput>, full: bool, live: bool, on: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static) -> impl IntoElement {
-    div().mt(px(12.)).flex().gap(px(8.)).child(input_box(input, 35., !full).px(px(12.)).flex_1()).child(save_btn(id, "Add", live && !full, on).into_any_element())
+fn add_row(
+    id: &'static str,
+    input: &Entity<TextInput>,
+    full: bool,
+    live: bool,
+    on: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    div()
+        .mt(px(12.))
+        .flex()
+        .gap(px(8.))
+        .child(input_box(input, 35., !full).px(px(12.)).flex_1())
+        .child(save_btn(id, "Add", live && !full, on).into_any_element())
 }
 
 fn relays(m: &CommSettings, on: &OnAct, cx: &App) -> AnyElement {
     let editable = m.can("manage_metadata");
     let many = m.relays.len() > 1;
-    let list = div().rounded(px(12.)).border_1().border_color(c(0x262626)).overflow_hidden().children(m.relays.iter().enumerate().map(|(i, url)| {
-        let editing = m.relay_edit.as_ref().filter(|(at, _)| *at == i).map(|(_, input)| input);
-        let mut actions = Vec::new();
-        if editable && editing.is_none() {
-            actions.push(relay_action(SharedString::from(format!("cs-relay-e-{i}")), "icons/edit.svg", click(on, move || Act::EditRelay(i))));
-            if many {
-                actions.push(relay_action(SharedString::from(format!("cs-relay-x-{i}")), "icons/x.svg", click(on, move || Act::RemoveRelay(i))));
+    let list = div()
+        .rounded(px(12.))
+        .border_1()
+        .border_color(c(0x262626))
+        .overflow_hidden()
+        .children(m.relays.iter().enumerate().map(|(i, url)| {
+            let editing = m
+                .relay_edit
+                .as_ref()
+                .filter(|(at, _)| *at == i)
+                .map(|(_, input)| input);
+            let mut actions = Vec::new();
+            if editable && editing.is_none() {
+                actions.push(relay_action(
+                    SharedString::from(format!("cs-relay-e-{i}")),
+                    "icons/edit.svg",
+                    click(on, move || Act::EditRelay(i)),
+                ));
+                if many {
+                    actions.push(relay_action(
+                        SharedString::from(format!("cs-relay-x-{i}")),
+                        "icons/x.svg",
+                        click(on, move || Act::RemoveRelay(i)),
+                    ));
+                }
             }
-        }
-        relay_row(i == 0, "icons/globe.svg", url, editing, actions)
-    }));
-    let voice = div().rounded(px(12.)).border_1().border_color(c(0x262626)).overflow_hidden().map(|d| {
-        if m.voice.is_empty() {
-            d.child(
-                div().mx(px(16.)).my(px(14.)).flex().items_center().gap(px(4.)).child(hint("Using iroh's public relays, run by n0.")).child(
+            relay_row(i == 0, "icons/globe.svg", url, editing, actions)
+        }));
+    let voice = div()
+        .rounded(px(12.))
+        .border_1()
+        .border_color(c(0x262626))
+        .overflow_hidden()
+        .map(|d| {
+            if m.voice.is_empty() {
+                d.child(
                     div()
-                        .id("cs-iroh")
-                        .cursor_pointer()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_size(px(12.5))
-                        .line_height(px(18.125))
-                        .text_color(c(ACCENT))
-                        .hover(|d| d.underline())
-                        .on_click(click(on, || Act::Learn))
-                        .child("Learn more"),
-                ),
-            )
-        } else {
-            d.children(m.voice.iter().enumerate().map(|(i, url)| {
-                let actions = if editable { vec![relay_action(SharedString::from(format!("cs-voice-x-{i}")), "icons/x.svg", click(on, move || Act::RemoveVoice(i)))] } else { Vec::new() };
-                relay_row(i == 0, "icons/volume-max.svg", url, None, actions)
-            }))
-        }
-    });
+                        .mx(px(16.))
+                        .my(px(14.))
+                        .flex()
+                        .items_center()
+                        .gap(px(4.))
+                        .child(hint("Using iroh's public relays, run by n0."))
+                        .child(
+                            div()
+                                .id("cs-iroh")
+                                .cursor_pointer()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_size(px(12.5))
+                                .line_height(px(18.125))
+                                .text_color(c(ACCENT))
+                                .hover(|d| d.underline())
+                                .on_click(click(on, || Act::Learn))
+                                .child("Learn more"),
+                        ),
+                )
+            } else {
+                d.children(m.voice.iter().enumerate().map(|(i, url)| {
+                    let actions = if editable {
+                        vec![relay_action(
+                            SharedString::from(format!("cs-voice-x-{i}")),
+                            "icons/x.svg",
+                            click(on, move || Act::RemoveVoice(i)),
+                        )]
+                    } else {
+                        Vec::new()
+                    };
+                    relay_row(i == 0, "icons/volume-max.svg", url, None, actions)
+                }))
+            }
+        });
     let relay_text = !m.relay_input.read(cx).text().trim().is_empty();
     let voice_text = !m.voice_input.read(cx).text().trim().is_empty();
     div()
@@ -585,9 +866,21 @@ fn relays(m: &CommSettings, on: &OnAct, cx: &App) -> AnyElement {
 }
 
 /// `MemberRow`: avatar, name and key hint, with `trailing` at the end.
-pub(crate) fn member_row(store: &Store, npub: &str, prefix: &str, trailing: AnyElement, on_click: Option<Box<dyn Fn(&gpui::ClickEvent, &mut Window, &mut App)>>) -> gpui::Stateful<gpui::Div> {
-    let named = store.profiles.get(npub).is_some_and(|p| !p.name.is_empty() || !p.display_name.is_empty() || !p.nickname.is_empty());
-    let name = if named { store.name(npub) } else { short_npub(npub) };
+pub(crate) fn member_row(
+    store: &Store,
+    npub: &str,
+    prefix: &str,
+    trailing: AnyElement,
+    on_click: Option<Box<dyn Fn(&gpui::ClickEvent, &mut Window, &mut App)>>,
+) -> gpui::Stateful<gpui::Div> {
+    let named = store.profiles.get(npub).is_some_and(|p| {
+        !p.name.is_empty() || !p.display_name.is_empty() || !p.nickname.is_empty()
+    });
+    let name = if named {
+        store.name(npub)
+    } else {
+        short_npub(npub)
+    };
     div()
         .id(SharedString::from(format!("{prefix}-{npub}")))
         .group(SharedString::from(format!("{prefix}-{npub}")))
@@ -606,8 +899,24 @@ pub(crate) fn member_row(store: &Store, npub: &str, prefix: &str, trailing: AnyE
                 .flex()
                 .items_center()
                 .gap(px(12.))
-                .child(div().truncate().text_size(px(14.)).line_height(px(24.)).text_color(c(0xf7f4f4)).child(name))
-                .when(named, |d| d.child(div().flex_shrink_0().text_size(px(11.5)).line_height(px(24.)).text_color(c(0x6a6a6a)).child(short_npub(npub)))),
+                .child(
+                    div()
+                        .truncate()
+                        .text_size(px(14.))
+                        .line_height(px(24.))
+                        .text_color(c(0xf7f4f4))
+                        .child(name),
+                )
+                .when(named, |d| {
+                    d.child(
+                        div()
+                            .flex_shrink_0()
+                            .text_size(px(11.5))
+                            .line_height(px(24.))
+                            .text_color(c(0x6a6a6a))
+                            .child(short_npub(npub)),
+                    )
+                }),
         )
         .child(trailing)
 }
@@ -626,12 +935,32 @@ pub(crate) fn indicator(on: bool) -> impl IntoElement {
         .rounded(px(4.))
         .border_2()
         .border_color(if on { c(PRIMARY) } else { white_a(0.28) })
-        .when(on, |d| d.bg(c(PRIMARY)).flex().items_center().justify_center().child(svg().path("icons/check.svg").size(px(14.)).text_color(c(0x000000))))
+        .when(on, |d| {
+            d.bg(c(PRIMARY))
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(
+                    svg()
+                        .path("icons/check.svg")
+                        .size(px(14.))
+                        .text_color(c(0x000000)),
+                )
+        })
 }
 
 pub fn ban_rows(m: &CommSettings, store: &Store, cx: &App) -> Vec<String> {
     let q = m.ban_query.read(cx).text().trim().to_lowercase();
-    m.bans.iter().filter(|n| q.is_empty() || format!("{} {}", store.name(n), n).to_lowercase().contains(&q)).cloned().collect()
+    m.bans
+        .iter()
+        .filter(|n| {
+            q.is_empty()
+                || format!("{} {}", store.name(n), n)
+                    .to_lowercase()
+                    .contains(&q)
+        })
+        .cloned()
+        .collect()
 }
 
 fn bans(m: &CommSettings, store: &Store, on: &OnAct, cx: &App) -> AnyElement {
@@ -646,7 +975,11 @@ fn bans(m: &CommSettings, store: &Store, on: &OnAct, cx: &App) -> AnyElement {
             .text_size(px(12.5))
             .line_height(px(18.))
             .text_color(white_a(0.4))
-            .child(if querying { "No matches." } else { "Nobody is banned from this community." })
+            .child(if querying {
+                "No matches."
+            } else {
+                "Nobody is banned from this community."
+            })
             .into_any_element()
     } else {
         div()
@@ -667,14 +1000,25 @@ fn bans(m: &CommSettings, store: &Store, on: &OnAct, cx: &App) -> AnyElement {
                             .text_size(px(13.))
                             .line_height(px(24.))
                             .text_color(c(0x9a9a9a))
-                            .child(format!("{} {} ({})", if all { "Deselect" } else { "Select" }, if querying { "matches" } else { "all" }, rows.len())),
+                            .child(format!(
+                                "{} {} ({})",
+                                if all { "Deselect" } else { "Select" },
+                                if querying { "matches" } else { "all" },
+                                rows.len()
+                            )),
                     )
                     .child(indicator(all)),
             )
             .children(rows.into_iter().map(|npub| {
                 let picked = m.ban_sel.contains(&npub);
                 let id = npub.clone();
-                member_row(store, &npub, "cs-ban", indicator(picked).into_any_element(), Some(Box::new(click(on, move || Act::Ban(id.clone())))))
+                member_row(
+                    store,
+                    &npub,
+                    "cs-ban",
+                    indicator(picked).into_any_element(),
+                    Some(Box::new(click(on, move || Act::Ban(id.clone())))),
+                )
             }))
             .into_any_element()
     };
@@ -710,13 +1054,21 @@ pub fn audit_rows<'a>(m: &'a CommSettings, store: &Store, cx: &App) -> Vec<&'a s
     m.audit
         .entries
         .iter()
-        .filter(|e| m.audit.action == "all" || crate::audit::family_of(e["action"].as_str().unwrap_or("")) == m.audit.action)
-        .filter(|e| q.is_empty() || crate::audit::plain_text(e, &member).to_lowercase().contains(&q))
+        .filter(|e| {
+            m.audit.action == "all"
+                || crate::audit::family_of(e["action"].as_str().unwrap_or("")) == m.audit.action
+        })
+        .filter(|e| {
+            q.is_empty()
+                || crate::audit::plain_text(e, &member)
+                    .to_lowercase()
+                    .contains(&q)
+        })
         .collect()
 }
 
 fn audit(m: &CommSettings, store: &Store, on: &OnAct, cx: &App) -> AnyElement {
-    use crate::audit::{details, sentence, tone_of, when, Tone};
+    use crate::audit::{Tone, details, sentence, tone_of, when};
     let a = &m.audit;
     let member = audit_member(store);
     let rows = audit_rows(m, store, cx);
@@ -727,11 +1079,25 @@ fn audit(m: &CommSettings, store: &Store, on: &OnAct, cx: &App) -> AnyElement {
     let list: AnyElement = if a.loading && a.entries.is_empty() {
         audit_empty("Reading this community's history…").into_any_element()
     } else if let Some(e) = a.error.clone().filter(|_| a.entries.is_empty()) {
-        hint(e).my(px(18.)).text_center().text_color(c(crate::timeline::DANGER)).into_any_element()
+        hint(e)
+            .my(px(18.))
+            .text_center()
+            .text_color(c(crate::timeline::DANGER))
+            .into_any_element()
     } else {
-        let mut list = div().mt(px(6.)).mb(px(12.)).flex().flex_col().gap(px(2.)).when(a.loading, |d| d.opacity(0.55));
+        let mut list = div()
+            .mt(px(6.))
+            .mb(px(12.))
+            .flex()
+            .flex_col()
+            .gap(px(2.))
+            .when(a.loading, |d| d.opacity(0.55));
         if rows.is_empty() {
-            list = list.child(audit_empty(if querying { "No matches." } else { "Nothing has happened here yet." }));
+            list = list.child(audit_empty(if querying {
+                "No matches."
+            } else {
+                "Nothing has happened here yet."
+            }));
         }
         for e in rows.iter().take(a.shown) {
             let id = e["id"].as_str().unwrap_or("").to_string();
@@ -747,7 +1113,14 @@ fn audit(m: &CommSettings, store: &Store, on: &OnAct, cx: &App) -> AnyElement {
             let mut bold = Vec::new();
             for (part, b) in sentence(e, &member) {
                 if b {
-                    bold.push((text.len()..text.len() + part.len(), gpui::HighlightStyle { color: Some(c(0xffffff)), font_weight: Some(FontWeight::SEMIBOLD), ..Default::default() }));
+                    bold.push((
+                        text.len()..text.len() + part.len(),
+                        gpui::HighlightStyle {
+                            color: Some(c(0xffffff)),
+                            font_weight: Some(FontWeight::SEMIBOLD),
+                            ..Default::default()
+                        },
+                    ));
                 }
                 text.push_str(&part);
             }
@@ -764,7 +1137,11 @@ fn audit(m: &CommSettings, store: &Store, on: &OnAct, cx: &App) -> AnyElement {
                     .py(px(10.))
                     .rounded(px(8.))
                     .when(open, |d| d.bg(white_a(0.04)))
-                    .when(openable, |d| d.cursor_pointer().hover(|d| d.bg(white_a(0.04))).on_click(move |_, w, cx| on(Act::AuditToggle(key.clone()), w, cx)))
+                    .when(openable, |d| {
+                        d.cursor_pointer()
+                            .hover(|d| d.bg(white_a(0.04)))
+                            .on_click(move |_, w, cx| on(Act::AuditToggle(key.clone()), w, cx))
+                    })
                     .child(
                         div()
                             .relative()
@@ -772,24 +1149,62 @@ fn audit(m: &CommSettings, store: &Store, on: &OnAct, cx: &App) -> AnyElement {
                             .flex_shrink_0()
                             .child(match actor {
                                 Some(n) => crate::ui::avatar(store, n, 32.),
-                                None => img("icons/group-placeholder.svg").size(px(32.)).rounded_full().into_any_element(),
+                                None => img("icons/group-placeholder.svg")
+                                    .size(px(32.))
+                                    .rounded_full()
+                                    .into_any_element(),
                             })
-                            .child(div().absolute().right(px(-2.)).bottom(px(-2.)).size(px(14.)).rounded_full().border_2().border_color(c(0x050505)).bg(badge)),
+                            .child(
+                                div()
+                                    .absolute()
+                                    .right(px(-2.))
+                                    .bottom(px(-2.))
+                                    .size(px(14.))
+                                    .rounded_full()
+                                    .border_2()
+                                    .border_color(c(0x050505))
+                                    .bg(badge),
+                            ),
                     )
                     .child(
                         div()
                             .flex_1()
                             .min_w_0()
-                            .child(div().text_size(px(14.)).line_height(px(19.6)).text_color(white_a(0.7)).child(gpui::StyledText::new(text).with_highlights(bold)))
-                            .child(div().mt(px(2.)).text_size(px(12.)).line_height(px(24.)).text_color(white_a(0.38)).child(when(e["at"].as_u64().unwrap_or(0), now))),
+                            .child(
+                                div()
+                                    .text_size(px(14.))
+                                    .line_height(px(19.6))
+                                    .text_color(white_a(0.7))
+                                    .child(gpui::StyledText::new(text).with_highlights(bold)),
+                            )
+                            .child(
+                                div()
+                                    .mt(px(2.))
+                                    .text_size(px(12.))
+                                    .line_height(px(24.))
+                                    .text_color(white_a(0.38))
+                                    .child(when(e["at"].as_u64().unwrap_or(0), now)),
+                            ),
                     )
                     .when(openable, |d| {
                         d.child(
-                            div().size(px(18.)).flex_shrink_0().flex().items_center().justify_center().child(svg()
-                                .path("icons/chevron-down.svg")
-                                .size(px(10.))
-                                .text_color(white_a(0.38))
-                                .when(open, |s| s.with_transformation(gpui::Transformation::rotate(gpui::radians(std::f32::consts::PI))))),
+                            div()
+                                .size(px(18.))
+                                .flex_shrink_0()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .child(
+                                    svg()
+                                        .path("icons/chevron-down.svg")
+                                        .size(px(10.))
+                                        .text_color(white_a(0.38))
+                                        .when(open, |s| {
+                                            s.with_transformation(gpui::Transformation::rotate(
+                                                gpui::radians(std::f32::consts::PI),
+                                            ))
+                                        }),
+                                ),
                         )
                     }),
             );
@@ -837,10 +1252,24 @@ fn audit(m: &CommSettings, store: &Store, on: &OnAct, cx: &App) -> AnyElement {
                     .items_center()
                     .justify_between()
                     .gap(px(12.))
-                    .child(div().text_size(px(24.)).line_height(px(28.)).font_weight(FontWeight::BOLD).text_color(c(0xffffff)).child("Audit Log"))
-                    .child(text_btn("audit-refresh", "Refresh", !a.loading, click(on, || Act::AuditRefresh))),
+                    .child(
+                        div()
+                            .text_size(px(24.))
+                            .line_height(px(28.))
+                            .font_weight(FontWeight::BOLD)
+                            .text_color(c(0xffffff))
+                            .child("Audit Log"),
+                    )
+                    .child(text_btn(
+                        "audit-refresh",
+                        "Refresh",
+                        !a.loading,
+                        click(on, || Act::AuditRefresh),
+                    )),
             )
-            .child(lede("Every change to this community, signed by whoever made it."))
+            .child(lede(
+                "Every change to this community, signed by whoever made it.",
+            ))
             .child(
                 div()
                     .flex()
@@ -855,7 +1284,13 @@ fn audit(m: &CommSettings, store: &Store, on: &OnAct, cx: &App) -> AnyElement {
 }
 
 fn audit_empty(text: &'static str) -> impl IntoElement {
-    div().my(px(18.)).text_center().text_size(px(12.5)).line_height(px(18.)).text_color(white_a(0.4)).child(text)
+    div()
+        .my(px(18.))
+        .text_center()
+        .text_size(px(12.5))
+        .line_height(px(18.))
+        .text_color(white_a(0.4))
+        .child(text)
 }
 
 pub(crate) fn search_box(input: &Entity<TextInput>) -> impl IntoElement {
@@ -871,10 +1306,17 @@ pub(crate) fn search_box(input: &Entity<TextInput>) -> impl IntoElement {
         .border_1()
         .border_color(ca(57, 57, 57, 0.5))
         .overflow_hidden()
-        .child(svg().path("icons/search.svg").absolute().left(px(12.)).top(px(8.)).size(px(24.)).text_color(white_a(0.4)))
+        .child(
+            svg()
+                .path("icons/search.svg")
+                .absolute()
+                .left(px(12.))
+                .top(px(8.))
+                .size(px(24.))
+                .text_color(white_a(0.4)),
+        )
         .child(div().flex_1().min_w_0().child(input.clone()))
 }
-
 
 fn save_bar(m: &CommSettings, on: &OnAct, cx: &App) -> Option<AnyElement> {
     let dirty = m.dirty(cx);
@@ -885,22 +1327,51 @@ fn save_bar(m: &CommSettings, on: &OnAct, cx: &App) -> Option<AnyElement> {
     }
     let n = m.ban_sel.len();
     let (text, actions): (String, Vec<AnyElement>) = if unban {
-        let label = if n == m.bans.len() && n > 1 { "Unban All".to_string() } else { format!("Unban {n}") };
+        let label = if n == m.bans.len() && n > 1 {
+            "Unban All".to_string()
+        } else {
+            format!("Unban {n}")
+        };
         (
-            if m.unbanning { format!("Unbanning {n}...") } else { format!("{n} {} selected", if n == 1 { "member" } else { "members" }) },
-            vec![text_btn("cs-clear-bans", "Clear", !m.unbanning, click(on, || Act::ClearBans)), save_btn("cs-unban", label, !m.unbanning, click(on, || Act::Unban)).into_any_element()],
+            if m.unbanning {
+                format!("Unbanning {n}...")
+            } else {
+                format!("{n} {} selected", if n == 1 { "member" } else { "members" })
+            },
+            vec![
+                text_btn(
+                    "cs-clear-bans",
+                    "Clear",
+                    !m.unbanning,
+                    click(on, || Act::ClearBans),
+                ),
+                save_btn("cs-unban", label, !m.unbanning, click(on, || Act::Unban))
+                    .into_any_element(),
+            ],
         )
     } else {
         let name_empty = m.name.read(cx).text().trim().is_empty();
         (
             if m.saving {
-                m.progress.map(|p| format!("Saving {p}%")).unwrap_or_else(|| "Saving...".into()).into()
+                m.progress
+                    .map(|p| format!("Saving {p}%"))
+                    .unwrap_or_else(|| "Saving...".into())
+                    .into()
             } else if warn {
                 "Save or reset your changes before closing".into()
             } else {
                 "You have unsaved changes".into()
             },
-            vec![text_btn("cs-reset", "Reset", !m.saving, click(on, || Act::Reset)), save_btn("cs-save", "Save Changes", !m.saving && !name_empty, click(on, || Act::Save)).into_any_element()],
+            vec![
+                text_btn("cs-reset", "Reset", !m.saving, click(on, || Act::Reset)),
+                save_btn(
+                    "cs-save",
+                    "Save Changes",
+                    !m.saving && !name_empty,
+                    click(on, || Act::Save),
+                )
+                .into_any_element(),
+            ],
         )
     };
     Some(
@@ -924,17 +1395,44 @@ fn save_bar(m: &CommSettings, on: &OnAct, cx: &App) -> Option<AnyElement> {
                     .py(px(10.))
                     .rounded(px(12.))
                     .border_1()
-                    .border_color(if warn { c(crate::timeline::DANGER) } else { c(0x2c2c2c) })
+                    .border_color(if warn {
+                        c(crate::timeline::DANGER)
+                    } else {
+                        c(0x2c2c2c)
+                    })
                     .bg(c(0x151515))
-                    .shadow(vec![gpui::BoxShadow { color: ca(0, 0, 0, 0.55), offset: gpui::point(px(0.), px(10.)), blur_radius: px(30.), spread_radius: px(0.), inset: false }])
-                    .child(div().flex_1().min_w_0().text_size(px(14.)).line_height(px(24.)).text_color(if warn { c(crate::timeline::DANGER) } else { c(0xe6e6e6) }).child(text))
+                    .shadow(vec![gpui::BoxShadow {
+                        color: ca(0, 0, 0, 0.55),
+                        offset: gpui::point(px(0.), px(10.)),
+                        blur_radius: px(30.),
+                        spread_radius: px(0.),
+                        inset: false,
+                    }])
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_size(px(14.))
+                            .line_height(px(24.))
+                            .text_color(if warn {
+                                c(crate::timeline::DANGER)
+                            } else {
+                                c(0xe6e6e6)
+                            })
+                            .child(text),
+                    )
                     .child(div().flex().gap(px(6.)).children(actions)),
             )
             .into_any_element(),
     )
 }
 
-pub(crate) fn text_btn(id: &'static str, label: &'static str, live: bool, on: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static) -> AnyElement {
+pub(crate) fn text_btn(
+    id: &'static str,
+    label: &'static str,
+    live: bool,
+    on: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
+) -> AnyElement {
     div()
         .id(id)
         .h(px(34.))
@@ -946,16 +1444,30 @@ pub(crate) fn text_btn(id: &'static str, label: &'static str, live: bool, on: im
         .text_size(px(14.))
         .text_color(c(0xcfcfcf))
         .when(!live, |d| d.opacity(0.45))
-        .when(live, |d| d.cursor_pointer().hover(|d| d.bg(white_a(0.06)).text_color(c(0xffffff))).on_click(on))
+        .when(live, |d| {
+            d.cursor_pointer()
+                .hover(|d| d.bg(white_a(0.06)).text_color(c(0xffffff)))
+                .on_click(on)
+        })
         .child(label)
         .into_any_element()
 }
 
 pub fn view(m: &CommSettings, store: &Store, on: &OnAct, cx: &App) -> impl IntoElement + use<> {
     let sections = m.sections();
-    let section = sections.iter().find(|s| s.id == m.section).unwrap_or(&sections[0]);
-    let active = m.anchor.filter(|a| section.anchors.iter().any(|x| x.id == *a)).unwrap_or(section.anchors[0].id);
-    let name = store.community(&m.community).map(|c| c.name.clone()).filter(|n| !n.is_empty()).unwrap_or_else(|| "Community".into());
+    let section = sections
+        .iter()
+        .find(|s| s.id == m.section)
+        .unwrap_or(&sections[0]);
+    let active = m
+        .anchor
+        .filter(|a| section.anchors.iter().any(|x| x.id == *a))
+        .unwrap_or(section.anchors[0].id);
+    let name = store
+        .community(&m.community)
+        .map(|c| c.name.clone())
+        .filter(|n| !n.is_empty())
+        .unwrap_or_else(|| "Community".into());
     let head = div()
         .mx(px(10.))
         .mb(px(17.))
@@ -966,7 +1478,16 @@ pub fn view(m: &CommSettings, store: &Store, on: &OnAct, cx: &App) -> impl IntoE
         .items_center()
         .gap(px(8.))
         .child(crate::community::logo(store, &m.community, 28., 8.))
-        .child(div().min_w_0().truncate().font_weight(FontWeight::BOLD).text_size(px(14.)).line_height(px(17.)).text_color(c(0xffffff)).child(name))
+        .child(
+            div()
+                .min_w_0()
+                .truncate()
+                .font_weight(FontWeight::BOLD)
+                .text_size(px(14.))
+                .line_height(px(17.))
+                .text_color(c(0xffffff))
+                .child(name),
+        )
         .into_any_element();
     let (a, b, d) = (on.clone(), on.clone(), on.clone());
     let nav_on = NavOn {
@@ -974,7 +1495,19 @@ pub fn view(m: &CommSettings, store: &Store, on: &OnAct, cx: &App) -> impl IntoE
         anchor: Rc::new(move |(s, x), w, cx| b(Act::Anchor(s, x), w, cx)),
         clear: Rc::new(move |_, w, cx| d(Act::ClearSearch, w, cx)),
     };
-    let nav = crate::settings::section_nav(&sections, section.id, &[], active, &m.search, head, None, 249., 0x0b0b0b, &nav_on, cx);
+    let nav = crate::settings::section_nav(
+        &sections,
+        section.id,
+        &[],
+        active,
+        &m.search,
+        head,
+        None,
+        249.,
+        0x0b0b0b,
+        &nav_on,
+        cx,
+    );
     let body = match section.id {
         "overview" => overview(m, store, on, cx),
         "relays" => relays(m, on, cx),
@@ -1001,7 +1534,13 @@ pub fn view(m: &CommSettings, store: &Store, on: &OnAct, cx: &App) -> impl IntoE
                 .justify_between()
                 .border_b_1()
                 .border_color(c(0x171717))
-                .child(div().text_size(px(16.)).line_height(px(19.)).text_color(c(0xffffff)).child(section.label))
+                .child(
+                    div()
+                        .text_size(px(16.))
+                        .line_height(px(19.))
+                        .text_color(c(0xffffff))
+                        .child(section.label),
+                )
                 .child(
                     div()
                         .id("cs-close")
@@ -1025,10 +1564,19 @@ pub fn view(m: &CommSettings, store: &Store, on: &OnAct, cx: &App) -> impl IntoE
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .text_size(px(12.))
                                 .text_color(c(0x9a9a9a))
-                                .group_hover("cs-close", |d| d.text_color(c(0xffffff)).border_color(c(0x6a6a6a)))
+                                .group_hover("cs-close", |d| {
+                                    d.text_color(c(0xffffff)).border_color(c(0x6a6a6a))
+                                })
                                 .child("✕"),
                         )
-                        .child(div().font_weight(FontWeight::SEMIBOLD).text_size(px(9.)).line_height(px(10.)).text_color(c(0x9a9a9a)).child("ESC")),
+                        .child(
+                            div()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_size(px(9.))
+                                .line_height(px(10.))
+                                .text_color(c(0x9a9a9a))
+                                .child("ESC"),
+                        ),
                 ),
         )
         .child(
@@ -1038,7 +1586,16 @@ pub fn view(m: &CommSettings, store: &Store, on: &OnAct, cx: &App) -> impl IntoE
                 .min_h_0()
                 .overflow_y_scroll()
                 .track_scroll(&m.scroll)
-                .child(div().w_full().max_w(px(720.)).mx_auto().px(px(62.)).pt(px(12.)).pb(px(140.)).child(body)),
+                .child(
+                    div()
+                        .w_full()
+                        .max_w(px(720.))
+                        .mx_auto()
+                        .px(px(62.))
+                        .pt(px(12.))
+                        .pb(px(140.))
+                        .child(body),
+                ),
         )
         .children(save_bar(m, on, cx));
     let card = div()
@@ -1083,11 +1640,23 @@ mod tests {
     #[test]
     fn relay_addresses() {
         let list = vec!["wss://a.example".to_string()];
-        assert_eq!(relay_address("relay.example.com/", &list, None).as_deref(), Ok("wss://relay.example.com"));
+        assert_eq!(
+            relay_address("relay.example.com/", &list, None).as_deref(),
+            Ok("wss://relay.example.com")
+        );
         assert!(relay_address("ws://plain.example", &list, None).is_err());
-        assert_eq!(relay_address("ws://abc.onion", &list, None).as_deref(), Ok("ws://abc.onion"));
-        assert_eq!(relay_address("WSS://A.example/", &list, None), Err("That relay is already listed.".into()));
-        assert_eq!(voice_address("relay.example.com", &[]).as_deref(), Ok("https://relay.example.com/"));
+        assert_eq!(
+            relay_address("ws://abc.onion", &list, None).as_deref(),
+            Ok("ws://abc.onion")
+        );
+        assert_eq!(
+            relay_address("WSS://A.example/", &list, None),
+            Err("That relay is already listed.".into())
+        );
+        assert_eq!(
+            voice_address("relay.example.com", &[]).as_deref(),
+            Ok("https://relay.example.com/")
+        );
         assert!(voice_address("http://relay.example.com", &[]).is_err());
     }
 }

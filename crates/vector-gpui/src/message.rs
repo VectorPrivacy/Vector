@@ -36,7 +36,10 @@ pub mod video_compression {
     }
 
     pub fn renamed(name: &str, ext: &str) -> String {
-        let stem = std::path::Path::new(name).file_stem().and_then(|s| s.to_str()).unwrap_or(name);
+        let stem = std::path::Path::new(name)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or(name);
         format!("{stem}.{ext}")
     }
 }

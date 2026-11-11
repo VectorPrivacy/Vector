@@ -41,7 +41,9 @@ impl AssetSource for Assets {
 
     fn list(&self, path: &str) -> Result<Vec<SharedString>> {
         let names: Vec<SharedString> = if path.starts_with("icons") {
-            SharedIcons::iter().map(|p| format!("icons/{p}").into()).collect()
+            SharedIcons::iter()
+                .map(|p| format!("icons/{p}").into())
+                .collect()
         } else {
             UiIcons::iter().map(|p| format!("ui/{p}").into()).collect()
         };
@@ -50,7 +52,9 @@ impl AssetSource for Assets {
 }
 
 pub fn fonts() -> Vec<Cow<'static, [u8]>> {
-    Fonts::iter().filter_map(|name| Fonts::get(&name).map(|f| f.data)).collect()
+    Fonts::iter()
+        .filter_map(|name| Fonts::get(&name).map(|f| f.data))
+        .collect()
 }
 
 pub fn twemoji_names() -> impl Iterator<Item = Cow<'static, str>> {

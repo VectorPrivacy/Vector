@@ -13,7 +13,13 @@ pub fn c(hex: u32) -> Hsla {
 
 /// `rgba(r, g, b, a)` from CSS.
 pub fn ca(r: u8, g: u8, b: u8, a: f32) -> Hsla {
-    Rgba { r: r as f32 / 255., g: g as f32 / 255., b: b as f32 / 255., a }.into()
+    Rgba {
+        r: r as f32 / 255.,
+        g: g as f32 / 255.,
+        b: b as f32 / 255.,
+        a,
+    }
+    .into()
 }
 
 pub fn white_a(a: f32) -> Hsla {

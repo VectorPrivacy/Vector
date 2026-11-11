@@ -6,8 +6,9 @@ use std::time::Duration;
 
 use gpui::prelude::*;
 use gpui::{
-    AnimationExt, Bounds, Context, EventEmitter, FocusHandle, Hsla, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathBuilder,
-    Pixels, Point, RenderImage, SharedString, Window, canvas, div, img, point, px,
+    AnimationExt, Bounds, Context, EventEmitter, FocusHandle, Hsla, KeyDownEvent, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathBuilder, Pixels, Point, RenderImage,
+    SharedString, Window, canvas, div, img, point, px,
 };
 use vector_core::image_crop::CropRect;
 
@@ -106,9 +107,19 @@ impl Cropper {
         let (nw, nh) = (self.natural.0.max(1) as f32, self.natural.1.max(1) as f32);
         let scale = ((sw - INSET * 2.) / nw).min((sh - INSET * 2.) / nh);
         let (w, h) = ((nw * scale).round(), (nh * scale).round());
-        self.img = Rect { x: ((sw - w) / 2.).round(), y: ((sh - h) / 2.).round(), w, h };
+        self.img = Rect {
+            x: ((sw - w) / 2.).round(),
+            y: ((sh - h) / 2.).round(),
+            w,
+            h,
+        };
         let (bw, bh) = (self.max_w(), self.max_w() / self.aspect);
-        self.crop = Rect { x: self.img.x + (w - bw) / 2., y: self.img.y + (h - bh) / 2., w: bw, h: bh };
+        self.crop = Rect {
+            x: self.img.x + (w - bw) / 2.,
+            y: self.img.y + (h - bh) / 2.,
+            w: bw,
+            h: bh,
+        };
     }
 
     /// The box in the picture's pixels.
@@ -131,11 +142,17 @@ impl Cropper {
     }
 
     fn local(&self, p: Point<Pixels>) -> Point<f32> {
-        point(f32::from(p.x - self.stage.origin.x), f32::from(p.y - self.stage.origin.y))
+        point(
+            f32::from(p.x - self.stage.origin.x),
+            f32::from(p.y - self.stage.origin.y),
+        )
     }
 
     fn inside_img(&self, p: Point<f32>) -> bool {
-        p.x >= self.img.x && p.x <= self.img.x + self.img.w && p.y >= self.img.y && p.y <= self.img.y + self.img.h
+        p.x >= self.img.x
+            && p.x <= self.img.x + self.img.w
+            && p.y >= self.img.y
+            && p.y <= self.img.y + self.img.h
     }
 
     fn drag(&mut self, p: Point<f32>) {
@@ -151,11 +168,26 @@ impl Cropper {
                 let room_w = if right { i.x + i.w - a.x } else { a.x - i.x };
                 let room_h = if down { i.y + i.h - a.y } else { a.y - i.y };
                 let k = self.aspect;
-                let w = (p.x - a.x).abs().max((p.y - a.y).abs() * k).min(room_w).min(room_h * k).max(self.min_w());
-                self.crop = Rect { x: if right { a.x } else { a.x - w }, y: if down { a.y } else { a.y - w / k }, w, h: w / k };
+                let w = (p.x - a.x)
+                    .abs()
+                    .max((p.y - a.y).abs() * k)
+                    .min(room_w)
+                    .min(room_h * k)
+                    .max(self.min_w());
+                self.crop = Rect {
+                    x: if right { a.x } else { a.x - w },
+                    y: if down { a.y } else { a.y - w / k },
+                    w,
+                    h: w / k,
+                };
                 let w = self.crop.w.clamp(self.min_w(), self.max_w());
                 let h = w / k;
-                self.crop = Rect { x: self.crop.x.clamp(i.x, i.x + i.w - w), y: self.crop.y.clamp(i.y, i.y + i.h - h), w, h };
+                self.crop = Rect {
+                    x: self.crop.x.clamp(i.x, i.x + i.w - w),
+                    y: self.crop.y.clamp(i.y, i.y + i.h - h),
+                    w,
+                    h,
+                };
             }
             None => {}
         }
@@ -171,22 +203,65 @@ impl Cropper {
 }
 
 /// `area` filled with `color` everywhere but `hole` (a circle, or a square when not `round`).
-fn surround(area: Bounds<Pixels>, hole: Bounds<Pixels>, round: bool, color: Hsla, window: &mut Window) {
+fn surround(
+    area: Bounds<Pixels>,
+    hole: Bounds<Pixels>,
+    round: bool,
+    color: Hsla,
+    window: &mut Window,
+) {
     let mut b = PathBuilder::fill();
     let (o, s) = (area.origin, area.size);
-    b.add_polygon(&[o, point(o.x + s.width, o.y), point(o.x + s.width, o.y + s.height), point(o.x, o.y + s.height)], true);
-    let (x, y, w, h) = (hole.origin.x, hole.origin.y, hole.size.width, hole.size.height);
+    b.add_polygon(
+        &[
+            o,
+            point(o.x + s.width, o.y),
+            point(o.x + s.width, o.y + s.height),
+            point(o.x, o.y + s.height),
+        ],
+        true,
+    );
+    let (x, y, w, h) = (
+        hole.origin.x,
+        hole.origin.y,
+        hole.size.width,
+        hole.size.height,
+    );
     if round {
         let (cx, cy, r) = (x + w / 2., y + h / 2., w / 2.);
         let k = r * 0.552_284_8;
         b.move_to(point(cx + r, cy));
-        b.cubic_bezier_to(point(cx, cy + r), point(cx + r, cy + k), point(cx + k, cy + r));
-        b.cubic_bezier_to(point(cx - r, cy), point(cx - k, cy + r), point(cx - r, cy + k));
-        b.cubic_bezier_to(point(cx, cy - r), point(cx - r, cy - k), point(cx - k, cy - r));
-        b.cubic_bezier_to(point(cx + r, cy), point(cx + k, cy - r), point(cx + r, cy - k));
+        b.cubic_bezier_to(
+            point(cx, cy + r),
+            point(cx + r, cy + k),
+            point(cx + k, cy + r),
+        );
+        b.cubic_bezier_to(
+            point(cx - r, cy),
+            point(cx - k, cy + r),
+            point(cx - r, cy + k),
+        );
+        b.cubic_bezier_to(
+            point(cx, cy - r),
+            point(cx - r, cy - k),
+            point(cx - k, cy - r),
+        );
+        b.cubic_bezier_to(
+            point(cx + r, cy),
+            point(cx + k, cy - r),
+            point(cx + r, cy - k),
+        );
         b.close();
     } else {
-        b.add_polygon(&[point(x, y), point(x + w, y), point(x + w, y + h), point(x, y + h)], true);
+        b.add_polygon(
+            &[
+                point(x, y),
+                point(x + w, y),
+                point(x + w, y + h),
+                point(x, y + h),
+            ],
+            true,
+        );
     }
     if let Ok(path) = b.build() {
         window.paint_path(path, color);
@@ -206,7 +281,10 @@ fn button(id: &'static str, label: &'static str, primary: bool) -> gpui::Statefu
         .cursor_pointer()
         .map(|d| {
             if primary {
-                d.bg(c(0x59fcb3).opacity(0.18)).border_color(c(PRIMARY)).text_color(c(PRIMARY)).hover(|s| s.bg(c(0x59fcb3).opacity(0.3)))
+                d.bg(c(0x59fcb3).opacity(0.18))
+                    .border_color(c(PRIMARY))
+                    .text_color(c(PRIMARY))
+                    .hover(|s| s.bg(c(0x59fcb3).opacity(0.3)))
             } else {
                 d.bg(c(0x141414).opacity(0.85))
                     .border_color(gpui::white().opacity(0.14))
@@ -237,7 +315,10 @@ impl Render for Cropper {
             },
             move |bounds, _, window, _| {
                 if ready {
-                    let hole = Bounds::new(bounds.origin + point(px(b.x), px(b.y)), gpui::size(px(b.w), px(b.h)));
+                    let hole = Bounds::new(
+                        bounds.origin + point(px(b.x), px(b.y)),
+                        gpui::size(px(b.w), px(b.h)),
+                    );
                     surround(bounds, hole, round, gpui::black().opacity(0.6), window);
                 }
             },
@@ -256,13 +337,20 @@ impl Render for Cropper {
                 .child(div().size_full().rounded_full().bg(c(0xffffff)))
                 .map(|d| if x { d.right(px(-9.)) } else { d.left(px(-9.)) })
                 .map(|d| if y { d.bottom(px(-9.)) } else { d.top(px(-9.)) })
-                .cursor(if x == y { gpui::CursorStyle::ResizeUpLeftDownRight } else { gpui::CursorStyle::ResizeUpRightDownLeft })
+                .cursor(if x == y {
+                    gpui::CursorStyle::ResizeUpLeftDownRight
+                } else {
+                    gpui::CursorStyle::ResizeUpRightDownLeft
+                })
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(move |v, _: &MouseDownEvent, _, cx| {
                         cx.stop_propagation();
                         let c = v.crop;
-                        v.gesture = Some(Gesture::Resize(point(if x { c.x } else { c.x + c.w }, if y { c.y } else { c.y + c.h })));
+                        v.gesture = Some(Gesture::Resize(point(
+                            if x { c.x } else { c.x + c.w },
+                            if y { c.y } else { c.y + c.h },
+                        )));
                     }),
                 )
         };
@@ -311,7 +399,16 @@ impl Render for Cropper {
                     }
                 }),
             )
-            .when(ready, |d| d.child(img(self.image.clone()).absolute().left(px(i.x)).top(px(i.y)).w(px(i.w)).h(px(i.h))))
+            .when(ready, |d| {
+                d.child(
+                    img(self.image.clone())
+                        .absolute()
+                        .left(px(i.x))
+                        .top(px(i.y))
+                        .w(px(i.w))
+                        .h(px(i.h)),
+                )
+            })
             .child(measure)
             .when(ready, |d| d.child(crop_box));
 
@@ -327,12 +424,26 @@ impl Render for Cropper {
                 .rounded(px(6.))
                 .bg(c(0x050505))
                 .when(ready, |d| {
-                    d.child(img(self.image.clone()).absolute().left(px((i.x - b.x) * k)).top(px((i.y - b.y) * k)).w(px(i.w * k)).h(px(i.h * k)))
-                        .when(round, |d| {
-                            d.child(
-                                canvas(|_, _, _| {}, |bounds, _, window, _| surround(bounds, bounds, true, c(CARD_BG), window)).absolute().inset_0(),
+                    d.child(
+                        img(self.image.clone())
+                            .absolute()
+                            .left(px((i.x - b.x) * k))
+                            .top(px((i.y - b.y) * k))
+                            .w(px(i.w * k))
+                            .h(px(i.h * k)),
+                    )
+                    .when(round, |d| {
+                        d.child(
+                            canvas(
+                                |_, _, _| {},
+                                |bounds, _, window, _| {
+                                    surround(bounds, bounds, true, c(CARD_BG), window)
+                                },
                             )
-                        })
+                            .absolute()
+                            .inset_0(),
+                        )
+                    })
                 })
         };
 
@@ -341,8 +452,25 @@ impl Render for Cropper {
             .flex_col()
             .gap(px(8.))
             .flex_none()
-            .child(div().text_size(px(11.)).line_height(px(24.)).font_weight(gpui::FontWeight::SEMIBOLD).text_color(gpui::white().opacity(0.4)).child("PREVIEW"))
-            .child(div().flex().flex_col().items_center().gap(px(12.)).w(px(120.)).child(chip(96.)).child(chip(48.)).when(aspect <= 1., |d| d.child(chip(24.))));
+            .child(
+                div()
+                    .text_size(px(11.))
+                    .line_height(px(24.))
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_color(gpui::white().opacity(0.4))
+                    .child("PREVIEW"),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .gap(px(12.))
+                    .w(px(120.))
+                    .child(chip(96.))
+                    .child(chip(48.))
+                    .when(aspect <= 1., |d| d.child(chip(24.))),
+            );
 
         let card = div()
             .id("crop-card")
@@ -360,9 +488,23 @@ impl Render for Cropper {
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .child(
                 div()
-                    .child(div().text_size(px(17.)).line_height(px(24.)).font_weight(gpui::FontWeight::SEMIBOLD).text_color(c(0xffffff)).child(self.title.clone()))
+                    .child(
+                        div()
+                            .text_size(px(17.))
+                            .line_height(px(24.))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(c(0xffffff))
+                            .child(self.title.clone()),
+                    )
                     .when(!self.hint.is_empty(), |d| {
-                        d.child(div().mt(px(4.)).text_size(px(12.5)).line_height(px(24.)).text_color(gpui::white().opacity(0.5)).child(self.hint.clone()))
+                        d.child(
+                            div()
+                                .mt(px(4.))
+                                .text_size(px(12.5))
+                                .line_height(px(24.))
+                                .text_color(gpui::white().opacity(0.5))
+                                .child(self.hint.clone()),
+                        )
                     }),
             )
             .child(div().flex().gap(px(16.)).child(stage).child(preview))
@@ -371,10 +513,22 @@ impl Render for Cropper {
                     .flex()
                     .justify_end()
                     .gap(px(10.))
-                    .child(button("crop-cancel", "Cancel", false).on_click(cx.listener(|v, _, _, cx| v.answer(false, cx))))
-                    .child(button("crop-confirm", "Crop", true).when(!ready, |d| d.opacity(0.5)).on_click(cx.listener(|v, _, _, cx| v.answer(true, cx)))),
+                    .child(
+                        button("crop-cancel", "Cancel", false)
+                            .on_click(cx.listener(|v, _, _, cx| v.answer(false, cx))),
+                    )
+                    .child(
+                        button("crop-confirm", "Crop", true)
+                            .when(!ready, |d| d.opacity(0.5))
+                            .on_click(cx.listener(|v, _, _, cx| v.answer(true, cx))),
+                    ),
             )
-            .with_animation("crop-pop", gpui::Animation::new(Duration::from_millis(160)).with_easing(gpui::ease_out_quint()), |d, t| d.opacity(t));
+            .with_animation(
+                "crop-pop",
+                gpui::Animation::new(Duration::from_millis(160))
+                    .with_easing(gpui::ease_out_quint()),
+                |d, t| d.opacity(t),
+            );
 
         div()
             .id("crop-overlay")
@@ -394,7 +548,10 @@ impl Render for Cropper {
                 }
                 cx.stop_propagation();
             }))
-            .on_mouse_down(MouseButton::Left, cx.listener(|v, _, _, cx| v.answer(false, cx)))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|v, _, _, cx| v.answer(false, cx)),
+            )
             .on_mouse_move(cx.listener(|v, e: &MouseMoveEvent, _, cx| {
                 if v.gesture.is_some() {
                     let p = v.local(e.position);
@@ -402,8 +559,14 @@ impl Render for Cropper {
                     cx.notify();
                 }
             }))
-            .on_mouse_up(MouseButton::Left, cx.listener(|v, _: &MouseUpEvent, _, _| v.gesture = None))
-            .on_mouse_up_out(MouseButton::Left, cx.listener(|v, _: &MouseUpEvent, _, _| v.gesture = None))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|v, _: &MouseUpEvent, _, _| v.gesture = None),
+            )
+            .on_mouse_up_out(
+                MouseButton::Left,
+                cx.listener(|v, _: &MouseUpEvent, _, _| v.gesture = None),
+            )
             .child(card)
     }
 }

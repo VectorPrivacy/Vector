@@ -31,13 +31,21 @@ impl Drop for Migrating {
 
 /// A swap mid-sweep would pull the connection out from under its transaction.
 pub fn refuse_if_migrating() -> Result<(), String> {
-    if MIGRATING.load(Ordering::Acquire) { Err("Wait for the encryption change to finish".into()) } else { Ok(()) }
+    if MIGRATING.load(Ordering::Acquire) {
+        Err("Wait for the encryption change to finish".into())
+    } else {
+        Ok(())
+    }
 }
 
 /// Whether the account is encrypted, and with a `pin` or a `password`.
 pub fn status() -> (bool, String) {
     let on = state::is_encryption_enabled_fast();
-    let kind = if on { db::get_sql_setting("security_type".into()).ok().flatten() } else { None };
+    let kind = if on {
+        db::get_sql_setting("security_type".into()).ok().flatten()
+    } else {
+        None
+    };
     (on, kind.unwrap_or_else(|| "pin".into()))
 }
 
@@ -50,7 +58,9 @@ async fn prove(credential: Option<Zeroizing<String>>) -> Result<Zeroizing<[u8; 3
     if !state::is_encryption_enabled_fast() {
         return Err("Local Encryption is not enabled".into());
     }
-    let credential = credential.filter(|c| !c.is_empty()).ok_or(at_rest::CREDENTIAL_REQUIRED)?;
+    let credential = credential
+        .filter(|c| !c.is_empty())
+        .ok_or(at_rest::CREDENTIAL_REQUIRED)?;
     at_rest::prove_credential(&credential).await
 }
 
@@ -62,7 +72,11 @@ fn sweep<T>(run: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
     result
 }
 
-pub async fn enable(credential: Zeroizing<String>, kind: String, progress: impl Fn(MigrationProgress)) -> Result<(), String> {
+pub async fn enable(
+    credential: Zeroizing<String>,
+    kind: String,
+    progress: impl Fn(MigrationProgress),
+) -> Result<(), String> {
     if state::is_encryption_enabled_fast() {
         return Err("Encryption is already enabled".into());
     }
@@ -80,7 +94,10 @@ pub async fn enable(credential: Zeroizing<String>, kind: String, progress: impl 
     sweep(|| at_rest::enable(&key, &kdf, &kind, None, None, &progress))
 }
 
-pub async fn disable(credential: Option<Zeroizing<String>>, progress: impl Fn(MigrationProgress)) -> Result<(), String> {
+pub async fn disable(
+    credential: Option<Zeroizing<String>>,
+    progress: impl Fn(MigrationProgress),
+) -> Result<(), String> {
     let session = db::current_session();
     let key = prove(credential).await?;
     let _one = Migrating::enter()?;
@@ -91,7 +108,12 @@ pub async fn disable(credential: Option<Zeroizing<String>>, progress: impl Fn(Mi
 }
 
 /// Re-seal everything under a new credential, all in one transaction.
-pub async fn rekey(old: Zeroizing<String>, new: Zeroizing<String>, kind: String, progress: impl Fn(MigrationProgress)) -> Result<(), String> {
+pub async fn rekey(
+    old: Zeroizing<String>,
+    new: Zeroizing<String>,
+    kind: String,
+    progress: impl Fn(MigrationProgress),
+) -> Result<(), String> {
     let session = db::current_session();
     let _one = Migrating::enter()?;
     let old_key = at_rest::prove_credential(&old).await?;
@@ -107,12 +129,18 @@ pub async fn rekey(old: Zeroizing<String>, new: Zeroizing<String>, kind: String,
 
 /// The account's nsec and seed phrase. An encrypted account opens them with a key from the
 /// user's proof, so the live session alone can't read them out.
-pub async fn export(credential: Option<Zeroizing<String>>) -> Result<(Zeroizing<String>, Option<Zeroizing<String>>), String> {
+pub async fn export(
+    credential: Option<Zeroizing<String>>,
+) -> Result<(Zeroizing<String>, Option<Zeroizing<String>>), String> {
     if vector_core::is_keyless() {
         return Err("This is an external signer account. Your identity key lives on your signer app, never on this device, so there's nothing to export here.".into());
     }
     let session = db::current_session();
-    let key = if state::is_encryption_enabled_fast() { Some(prove(credential).await?) } else { None };
+    let key = if state::is_encryption_enabled_fast() {
+        Some(prove(credential).await?)
+    } else {
+        None
+    };
     let secrets = at_rest::open_identity_secrets(key.as_deref())?;
     if !session.is_live() {
         return Err("The account changed, so nothing was exported".into());

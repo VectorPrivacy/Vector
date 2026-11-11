@@ -8,7 +8,10 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use gpui::{AnyElement, FontWeight, IntoElement, ParentElement, RenderImage, SharedString, Styled, div, img, prelude::*, px, svg};
+use gpui::{
+    AnyElement, FontWeight, IntoElement, ParentElement, RenderImage, SharedString, Styled, div,
+    img, prelude::*, px, svg,
+};
 use serde::Deserialize;
 use vector_core::types::Message;
 
@@ -63,7 +66,9 @@ pub struct Embed {
 
 impl Embed {
     pub fn from_core(e: vector_core::nostr_embed::Embed) -> Result<Self, String> {
-        serde_json::to_value(e).and_then(serde_json::from_value).map_err(|e| e.to_string())
+        serde_json::to_value(e)
+            .and_then(serde_json::from_value)
+            .map_err(|e| e.to_string())
     }
 }
 
@@ -144,8 +149,13 @@ fn bech_char(b: u8) -> bool {
 /// The length of an entity starting at `s`, when one does (`(note|nevent|naddr)1` + 20 or more).
 fn entity_len(s: &[u8]) -> Option<usize> {
     let lower = |n: usize| s.get(..n).map(|p| p.to_ascii_lowercase());
-    let head = ["note1", "nevent1", "naddr1"].iter().find(|h| lower(h.len()).as_deref() == Some(h.as_bytes()))?;
-    let body = s[head.len()..].iter().take_while(|b| bech_char(**b)).count();
+    let head = ["note1", "nevent1", "naddr1"]
+        .iter()
+        .find(|h| lower(h.len()).as_deref() == Some(h.as_bytes()))?;
+    let body = s[head.len()..]
+        .iter()
+        .take_while(|b| bech_char(**b))
+        .count();
     (body >= 20).then_some(head.len() + body)
 }
 
@@ -158,8 +168,16 @@ fn entity_from_url(url: &str) -> Option<String> {
     let path = url.get(8..)?.split(['?', '#']).next()?;
     let (_, path) = path.split_once('/')?;
     let last = path.trim_end_matches('/').rsplit('/').next()?;
-    let last = if last.len() > 5 && last[last.len() - 5..].eq_ignore_ascii_case(".html") { &last[..last.len() - 5] } else { last };
-    let last = if last.len() > 6 && last[..6].eq_ignore_ascii_case("nostr:") { &last[6..] } else { last };
+    let last = if last.len() > 5 && last[last.len() - 5..].eq_ignore_ascii_case(".html") {
+        &last[..last.len() - 5]
+    } else {
+        last
+    };
+    let last = if last.len() > 6 && last[..6].eq_ignore_ascii_case("nostr:") {
+        &last[6..]
+    } else {
+        last
+    };
     entity_only(last).then(|| last.to_string())
 }
 
@@ -173,7 +191,9 @@ fn without_code(text: &str) -> Vec<u8> {
     let mut out = b.to_vec();
     let mut i = 0;
     while i < b.len() {
-        let fence = [b"```", b"~~~"].into_iter().find(|f| b[i..].starts_with(*f));
+        let fence = [b"```", b"~~~"]
+            .into_iter()
+            .find(|f| b[i..].starts_with(*f));
         if let Some(f) = fence {
             if let Some(end) = memchr::memmem::find(&b[i + 3..], f) {
                 let to = i + 3 + end + 3;
@@ -214,7 +234,12 @@ fn scan(text: &str) -> Vec<Ref> {
         // `<https://…>` is the no-preview form.
         let quiet = i > 0 && code[i - 1] == b'<' && code.get(end) == Some(&b'>');
         if !quiet && let Some(entity) = entity_from_url(url) {
-            found.push(Ref { entity, url: Some(url.to_string()), start: i, end: i });
+            found.push(Ref {
+                entity,
+                url: Some(url.to_string()),
+                start: i,
+                end: i,
+            });
         }
         blank(&mut code, i, end);
         i = end;
@@ -228,7 +253,11 @@ fn scan(text: &str) -> Vec<Ref> {
             continue;
         }
         let start = i;
-        let prefix = if code[i..].len() >= 6 && code[i..i + 6].eq_ignore_ascii_case(b"nostr:") { 6 } else { 0 };
+        let prefix = if code[i..].len() >= 6 && code[i..i + 6].eq_ignore_ascii_case(b"nostr:") {
+            6
+        } else {
+            0
+        };
         let Some(len) = entity_len(&code[i + prefix..]) else {
             i += 1;
             continue;
@@ -243,7 +272,12 @@ fn scan(text: &str) -> Vec<Ref> {
         let target = start >= 2 && code[start - 1] == b'(' && code[start - 2] == b']';
         let label = next == Some(b']') && code.get(end + 1) == Some(&b'(');
         if !target && !label {
-            found.push(Ref { entity: text[i + prefix..end].to_string(), url: None, start, end });
+            found.push(Ref {
+                entity: text[i + prefix..end].to_string(),
+                url: None,
+                start,
+                end,
+            });
         }
         i = end;
     }
@@ -268,7 +302,9 @@ fn scan(text: &str) -> Vec<Ref> {
 fn names_entity(text: &str) -> bool {
     let b = text.as_bytes();
     memchr::memchr_iter(b'1', b).any(|i| {
-        ["note", "nevent", "naddr"].iter().any(|h| i >= h.len() && b[i - h.len()..i].eq_ignore_ascii_case(h.as_bytes()))
+        ["note", "nevent", "naddr"]
+            .iter()
+            .any(|h| i >= h.len() && b[i - h.len()..i].eq_ignore_ascii_case(h.as_bytes()))
     })
 }
 
@@ -349,7 +385,9 @@ pub fn tidy(out: &str) -> String {
 fn ref_kind(entity: &str) -> Option<u16> {
     match vector_core::nostr_embed::EmbedRef::parse(entity)? {
         vector_core::nostr_embed::EmbedRef::Event { kind, .. } => kind,
-        vector_core::nostr_embed::EmbedRef::Address { coordinate, .. } => Some(coordinate.kind.as_u16()),
+        vector_core::nostr_embed::EmbedRef::Address { coordinate, .. } => {
+            Some(coordinate.kind.as_u16())
+        }
     }
 }
 
@@ -426,7 +464,15 @@ enum Pic {
 
 /// A picture the card shows: a web one through the linked cache, a fixture one from disk.
 fn pic(env: &Env, url: &str) -> Pic {
-    let key = if url.starts_with("https://") { url.to_string() } else { env.store.media_root.join(url).to_string_lossy().into_owned() };
+    let key = if url.starts_with("https://") {
+        url.to_string()
+    } else {
+        env.store
+            .media_root
+            .join(url)
+            .to_string_lossy()
+            .into_owned()
+    };
     match env.media.borrow_mut().linked(&key) {
         Linked::Ready { image, w, h } => Pic::Ready(image, w, h),
         Linked::Loading(_) => Pic::Loading,
@@ -438,7 +484,12 @@ fn skel() -> gpui::Div {
     div().rounded(px(4.)).bg(white_a(0.06))
 }
 
-fn btn(id: String, label: impl Into<SharedString>, primary: bool, on: impl Fn(&mut gpui::Window, &mut gpui::App) + 'static) -> AnyElement {
+fn btn(
+    id: String,
+    label: impl Into<SharedString>,
+    primary: bool,
+    on: impl Fn(&mut gpui::Window, &mut gpui::App) + 'static,
+) -> AnyElement {
     div()
         .id(SharedString::from(id))
         .px(px(12.))
@@ -452,9 +503,15 @@ fn btn(id: String, label: impl Into<SharedString>, primary: bool, on: impl Fn(&m
         .cursor_pointer()
         .map(|d| {
             if primary {
-                d.border_color(gpui::transparent_black()).bg(c(ACCENT)).text_color(c(0x0e0e0e)).hover(|s| s.opacity(0.92))
+                d.border_color(gpui::transparent_black())
+                    .bg(c(ACCENT))
+                    .text_color(c(0x0e0e0e))
+                    .hover(|s| s.opacity(0.92))
             } else {
-                d.border_color(white_a(0.12)).bg(white_a(0.06)).text_color(c(0xffffff)).hover(|s| s.bg(white_a(0.12)).border_color(white_a(0.2)))
+                d.border_color(white_a(0.12))
+                    .bg(white_a(0.06))
+                    .text_color(c(0xffffff))
+                    .hover(|s| s.bg(white_a(0.12)).border_color(white_a(0.2)))
             }
         })
         .on_click(move |_, w, cx| {
@@ -478,16 +535,27 @@ fn card(ctx: &Ctx, m: &Message, r: &Ref) -> AnyElement {
     let key = format!("ne-{}-{}", m.id, r.entity);
     let send = {
         let (act, id) = (ctx.on_act.clone(), m.id.clone());
-        let f: Send = Rc::new(move |a: Act, w: &mut gpui::Window, cx: &mut gpui::App| act(&id, RowAct::Embed(a), w, cx));
+        let f: Send = Rc::new(move |a: Act, w: &mut gpui::Window, cx: &mut gpui::App| {
+            act(&id, RowAct::Embed(a), w, cx)
+        });
         f
     };
-    let env = Env { store: ctx.store, media: ctx.media, clock: ctx.clock, send: send.clone(), modal: false };
+    let env = Env {
+        store: ctx.store,
+        media: ctx.media,
+        clock: ctx.clock,
+        send: send.clone(),
+        modal: false,
+    };
     let e = match &state {
         State::Ready(e) => Some(e.clone()),
         _ => None,
     };
     let eyebrow = match &e {
-        Some(e) if e.reposted_by.is_some() => format!("Reposted by {}", ctx.store.name(e.reposted_by.as_deref().unwrap_or_default())),
+        Some(e) if e.reposted_by.is_some() => format!(
+            "Reposted by {}",
+            ctx.store.name(e.reposted_by.as_deref().unwrap_or_default())
+        ),
         Some(e) if e.kind == 1111 => "Nostr Comment".into(),
         Some(e) => match e.class.as_str() {
             "post" => "Nostr Post",
@@ -512,25 +580,70 @@ fn card(ctx: &Ctx, m: &Message, r: &Ref) -> AnyElement {
         .flex()
         .flex_col()
         .gap(px(8.))
-        .child(crate::kit::spaced(eyebrow.to_uppercase(), 0.9).font_weight(FontWeight::BOLD).text_size(px(10.)).line_height(px(14.)).text_color(white_a(0.45)));
+        .child(
+            crate::kit::spaced(eyebrow.to_uppercase(), 0.9)
+                .font_weight(FontWeight::BOLD)
+                .text_size(px(10.))
+                .line_height(px(14.))
+                .text_color(white_a(0.45)),
+        );
 
     let Some(e) = e else {
         return match state {
             State::Failed(err, _) => {
                 let (entity, label) = (r.entity.clone(), ref_label(&r.entity));
                 let s = send.clone();
-                let copy = btn(format!("{key}-copy"), format!("Copy {label}"), false, move |w, cx| s(Act::Copy(entity.clone(), format!("The {label}")), w, cx));
+                let copy = btn(
+                    format!("{key}-copy"),
+                    format!("Copy {label}"),
+                    false,
+                    move |w, cx| s(Act::Copy(entity.clone(), format!("The {label}")), w, cx),
+                );
                 let open = r.url.clone().map(|u| {
                     let s = send.clone();
-                    btn(format!("{key}-ext"), "Open Externally", false, move |w, cx| s(Act::OpenUrl(u.clone()), w, cx))
+                    btn(
+                        format!("{key}-ext"),
+                        "Open Externally",
+                        false,
+                        move |w, cx| s(Act::OpenUrl(u.clone()), w, cx),
+                    )
                 });
-                col.child(div().font_weight(FontWeight::SEMIBOLD).text_size(px(14.)).line_height(px(19.6)).text_color(white_a(0.6)).child("This post couldn't be loaded"))
-                    .child(div().text_size(px(11.)).line_height(px(15.4)).text_color(white_a(0.45)).child(err))
-                    .child(div().flex().flex_wrap().justify_end().gap(px(8.)).child(copy).children(open))
-                    .into_any_element()
+                col.child(
+                    div()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_size(px(14.))
+                        .line_height(px(19.6))
+                        .text_color(white_a(0.6))
+                        .child("This post couldn't be loaded"),
+                )
+                .child(
+                    div()
+                        .text_size(px(11.))
+                        .line_height(px(15.4))
+                        .text_color(white_a(0.45))
+                        .child(err),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_wrap()
+                        .justify_end()
+                        .gap(px(8.))
+                        .child(copy)
+                        .children(open),
+                )
+                .into_any_element()
             }
             _ => col
-                .child(div().h(px(22.)).flex().items_center().gap(px(8.)).child(skel().size(px(22.)).rounded_full()).child(skel().w(px(CARD_W * 0.4)).h(px(12.))))
+                .child(
+                    div()
+                        .h(px(22.))
+                        .flex()
+                        .items_center()
+                        .gap(px(8.))
+                        .child(skel().size(px(22.)).rounded_full())
+                        .child(skel().w(px(CARD_W * 0.4)).h(px(12.))),
+                )
                 .child(skel().w(px(CARD_W * 0.9)).h(px(12.)))
                 .child(skel().w(px(CARD_W * 0.6)).h(px(12.)))
                 .into_any_element(),
@@ -542,7 +655,8 @@ fn card(ctx: &Ctx, m: &Message, r: &Ref) -> AnyElement {
         col = col.child(reply_to(reply, &key, &send));
     }
     let reveal_key = format!("{}:{}", m.id, r.entity.to_ascii_lowercase());
-    let veiled = e.content_warning.is_some() && !ctx.media.borrow().embeds.revealed.contains(&reveal_key);
+    let veiled =
+        e.content_warning.is_some() && !ctx.media.borrow().embeds.revealed.contains(&reveal_key);
     if veiled {
         let s = send.clone();
         let warn = e.content_warning.clone().filter(|w| !w.is_empty());
@@ -571,14 +685,23 @@ fn card(ctx: &Ctx, m: &Message, r: &Ref) -> AnyElement {
                         Some(w) => format!("Content warning: {w}"),
                         None => "Content warning".into(),
                     }))
-                    .child(div().flex_shrink_0().font_weight(FontWeight::SEMIBOLD).text_color(c(ACCENT)).child("Show")),
+                    .child(
+                        div()
+                            .flex_shrink_0()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(c(ACCENT))
+                            .child("Show"),
+                    ),
             )
             .into_any_element();
     }
 
     let expand = {
         let (s, entity, url) = (send.clone(), r.entity.clone(), r.url.clone());
-        let f: Rc<dyn Fn(&mut gpui::Window, &mut gpui::App)> = Rc::new(move |w: &mut gpui::Window, cx: &mut gpui::App| s(Act::Expand(entity.clone(), url.clone()), w, cx));
+        let f: Rc<dyn Fn(&mut gpui::Window, &mut gpui::App)> =
+            Rc::new(move |w: &mut gpui::Window, cx: &mut gpui::App| {
+                s(Act::Expand(entity.clone(), url.clone()), w, cx)
+            });
         f
     };
     let mut clamped = false;
@@ -588,9 +711,19 @@ fn card(ctx: &Ctx, m: &Message, r: &Ref) -> AnyElement {
             Pic::Ready(image, w, h) => {
                 let natural = CARD_W * h as f32 / w.max(1) as f32;
                 let h = natural.min(200.);
-                img(image).w_full().h(px(h)).aspect_ratio(CARD_W / h).object_fit(gpui::ObjectFit::Cover).rounded(px(8.)).into_any_element()
+                img(image)
+                    .w_full()
+                    .h(px(h))
+                    .aspect_ratio(CARD_W / h)
+                    .object_fit(gpui::ObjectFit::Cover)
+                    .rounded(px(8.))
+                    .into_any_element()
             }
-            Pic::Loading => skel().w_full().h(px(140.)).rounded(px(8.)).into_any_element(),
+            Pic::Loading => skel()
+                .w_full()
+                .h(px(140.))
+                .rounded(px(8.))
+                .into_any_element(),
             Pic::Gone => div().into_any_element(),
         });
         col = col.child(
@@ -606,7 +739,14 @@ fn card(ctx: &Ctx, m: &Message, r: &Ref) -> AnyElement {
                 })
                 .children(cover)
                 .children(e.title.clone().map(|t| title(t)))
-                .children(e.summary.clone().map(|s| div().text_size(px(12.)).line_height(px(16.8)).text_color(white_a(0.6)).line_clamp(3).child(s))),
+                .children(e.summary.clone().map(|s| {
+                    div()
+                        .text_size(px(12.))
+                        .line_height(px(16.8))
+                        .text_color(white_a(0.6))
+                        .line_clamp(3)
+                        .child(s)
+                })),
         );
     } else {
         if let Some(link) = e.link.clone().filter(|_| e.video.is_none()) {
@@ -630,24 +770,52 @@ fn card(ctx: &Ctx, m: &Message, r: &Ref) -> AnyElement {
     if article || clamped || r.url.is_some() {
         let primary = if article {
             let ex = expand.clone();
-            Some(btn(format!("{key}-read"), "Read Article", true, move |w, cx| ex(w, cx)))
+            Some(btn(
+                format!("{key}-read"),
+                "Read Article",
+                true,
+                move |w, cx| ex(w, cx),
+            ))
         } else if clamped {
             let ex = expand.clone();
-            Some(btn(format!("{key}-more"), "Show More", false, move |w, cx| ex(w, cx)))
+            Some(btn(
+                format!("{key}-more"),
+                "Show More",
+                false,
+                move |w, cx| ex(w, cx),
+            ))
         } else {
             None
         };
         let ext = r.url.clone().map(|u| {
             let s = send.clone();
-            btn(format!("{key}-ext"), "Open Externally", false, move |w, cx| s(Act::OpenUrl(u.clone()), w, cx))
+            btn(
+                format!("{key}-ext"),
+                "Open Externally",
+                false,
+                move |w, cx| s(Act::OpenUrl(u.clone()), w, cx),
+            )
         });
-        col = col.child(div().flex().flex_wrap().justify_end().gap(px(8.)).children(primary).children(ext));
+        col = col.child(
+            div()
+                .flex()
+                .flex_wrap()
+                .justify_end()
+                .gap(px(8.))
+                .children(primary)
+                .children(ext),
+        );
     }
     col.into_any_element()
 }
 
 fn title(t: String) -> gpui::Div {
-    div().font_weight(FontWeight::BOLD).text_size(px(15.)).line_height(px(19.5)).text_color(c(0xffffff)).child(t)
+    div()
+        .font_weight(FontWeight::BOLD)
+        .text_size(px(15.))
+        .line_height(px(19.5))
+        .text_color(c(0xffffff))
+        .child(t)
 }
 
 pub type Send = Rc<dyn Fn(Act, &mut gpui::Window, &mut gpui::App)>;
@@ -679,9 +847,27 @@ fn author(env: &Env, e: &Embed, key: &str, send: &Send) -> AnyElement {
                     s(Act::Profile(npub.clone()), w, cx)
                 })
                 .child(avatar.size(px(22.)).rounded_full().flex_shrink_0())
-                .child(div().min_w_0().truncate().font_weight(FontWeight::SEMIBOLD).text_size(px(13.)).line_height(px(if env.modal { 24. } else { 18.2 })).text_color(c(0xffffff)).child(env.store.name(&e.author))),
+                .child(
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_size(px(13.))
+                        .line_height(px(if env.modal { 24. } else { 18.2 }))
+                        .text_color(c(0xffffff))
+                        .child(env.store.name(&e.author)),
+                ),
         )
-        .when(at > 0, |d| d.child(div().flex_shrink_0().text_size(px(11.)).line_height(px(if env.modal { 24. } else { 15.4 })).text_color(white_a(0.45)).child(crate::data::time_ago(env.store.now_ms(), at * 1000))))
+        .when(at > 0, |d| {
+            d.child(
+                div()
+                    .flex_shrink_0()
+                    .text_size(px(11.))
+                    .line_height(px(if env.modal { 24. } else { 15.4 }))
+                    .text_color(white_a(0.45))
+                    .child(crate::data::time_ago(env.store.now_ms(), at * 1000)),
+            )
+        })
         .into_any_element()
 }
 
@@ -698,18 +884,31 @@ fn reply_to(reply: &ReplyTo, key: &str, send: &Send) -> AnyElement {
         Some(34550) => "a community",
         _ => "a Nostr event",
     };
-    let web = reply.external.clone().filter(|x| x.to_ascii_lowercase().starts_with("http://") || x.to_ascii_lowercase().starts_with("https://"));
+    let web = reply.external.clone().filter(|x| {
+        x.to_ascii_lowercase().starts_with("http://")
+            || x.to_ascii_lowercase().starts_with("https://")
+    });
     let size = 12.75;
     let tail: AnyElement = match (&reply.entity, web) {
         (Some(entity), _) => {
             let (s, entity) = (send.clone(), entity.clone());
-            chip(format!("{key}-reply"), noun.to_string(), size, move |w, cx| s(Act::Ref(entity.clone()), w, cx))
+            chip(
+                format!("{key}-reply"),
+                noun.to_string(),
+                size,
+                move |w, cx| s(Act::Ref(entity.clone()), w, cx),
+            )
         }
         (None, Some(url)) => {
             let s = send.clone();
-            chip(format!("{key}-reply"), host(&url), size, move |w, cx| s(Act::OpenUrl(url.clone()), w, cx))
+            chip(format!("{key}-reply"), host(&url), size, move |w, cx| {
+                s(Act::OpenUrl(url.clone()), w, cx)
+            })
         }
-        _ => div().text_color(white_a(0.75)).child(reply.external.clone().unwrap_or(noun.to_string())).into_any_element(),
+        _ => div()
+            .text_color(white_a(0.75))
+            .child(reply.external.clone().unwrap_or(noun.to_string()))
+            .into_any_element(),
     };
     div()
         .mt(px(2.))
@@ -727,12 +926,20 @@ fn reply_to(reply: &ReplyTo, key: &str, send: &Send) -> AnyElement {
 }
 
 /// `.ne-chip`: a reference that opens when asked.
-fn chip(id: String, label: String, size: f32, on: impl Fn(&mut gpui::Window, &mut gpui::App) + 'static) -> AnyElement {
+fn chip(
+    id: String,
+    label: String,
+    size: f32,
+    on: impl Fn(&mut gpui::Window, &mut gpui::App) + 'static,
+) -> AnyElement {
     div()
         .id(SharedString::from(id))
         .px(px(8.))
         .rounded(px(10.))
-        .bg(gpui::Hsla { a: 0.14, ..c(ACCENT) })
+        .bg(gpui::Hsla {
+            a: 0.14,
+            ..c(ACCENT)
+        })
         .text_color(c(ACCENT))
         .text_size(px(size * 0.9))
         .line_height(px(size * 0.9 * 1.6))
@@ -750,42 +957,85 @@ fn chip(id: String, label: String, size: f32, on: impl Fn(&mut gpui::Window, &mu
 /// A rough line count for the clamp: the text's width over the card's.
 fn lines(text: &str, size: f32) -> usize {
     let per_line = (CARD_W / (size * 0.52)).max(1.) as usize;
-    text.lines().map(|l| l.chars().count().div_ceil(per_line).max(1)).sum()
+    text.lines()
+        .map(|l| l.chars().count().div_ceil(per_line).max(1))
+        .sum()
 }
 
 /// `.ne-text`: a post's text rendered like a message, clamped to eight lines (three when small).
-fn body(env: &Env, e: &Embed, key: &str, _send: &Send, expand: &Rc<dyn Fn(&mut gpui::Window, &mut gpui::App)>) -> (AnyElement, bool) {
+fn body(
+    env: &Env,
+    e: &Embed,
+    key: &str,
+    _send: &Send,
+    expand: &Rc<dyn Fn(&mut gpui::Window, &mut gpui::App)>,
+) -> (AnyElement, bool) {
     let small = e.class != "post";
-    let (size, lh, color, max) = if small { (12., 16.8, white_a(0.65), 3) } else { (14., 19.6, white_a(0.88), 8) };
+    let (size, lh, color, max) = if small {
+        (12., 16.8, white_a(0.65), 3)
+    } else {
+        (14., 19.6, white_a(0.88), 8)
+    };
     let text: String = e.text.chars().take(4000).collect();
     let clamped = lines(&text, size) > max;
     let ex = expand.clone();
     let fade = clamped.then(|| {
-        div().absolute().left_0().right_0().bottom_0().h(px(lh * max as f32 * 0.35)).bg(gpui::linear_gradient(
-            180.,
-            gpui::linear_color_stop(ca(9, 9, 9, 0.), 0.),
-            gpui::linear_color_stop(c(0x090909), 1.),
-        ))
+        div()
+            .absolute()
+            .left_0()
+            .right_0()
+            .bottom_0()
+            .h(px(lh * max as f32 * 0.35))
+            .bg(gpui::linear_gradient(
+                180.,
+                gpui::linear_color_stop(ca(9, 9, 9, 0.), 0.),
+                gpui::linear_color_stop(c(0x090909), 1.),
+            ))
     });
     let el = div()
         .id(SharedString::from(format!("{key}-text")))
         .relative()
         .max_h(px(lh * max as f32))
         .overflow_hidden()
-        .when(clamped, |d| d.cursor_pointer().on_click(move |_, w, cx| ex(w, cx)))
-        .child(rich(env, &text, &e.emoji, key, Look::new(RUBIK, size, lh, color), None))
+        .when(clamped, |d| {
+            d.cursor_pointer().on_click(move |_, w, cx| ex(w, cx))
+        })
+        .child(rich(
+            env,
+            &text,
+            &e.emoji,
+            key,
+            Look::new(RUBIK, size, lh, color),
+            None,
+        ))
         .children(fade)
         .into_any_element();
     (el, clamped)
 }
 
 /// Text rendered like a message: markdown, links and mentions.
-fn rich(env: &Env, text: &str, emoji: &[vector_core::types::EmojiTag], key: &str, mut look: Look, para_gap: Option<f32>) -> AnyElement {
+fn rich(
+    env: &Env,
+    text: &str,
+    emoji: &[vector_core::types::EmojiTag],
+    key: &str,
+    mut look: Look,
+    para_gap: Option<f32>,
+) -> AnyElement {
     let empty = HashSet::new();
     look.family = env.family().into();
     let lh = para_gap.unwrap_or(look.line_height);
     let custom = crate::timeline::custom_emoji(env.store, env.media, emoji);
-    let blocks = crate::markdown::parse(text.trim(), &crate::markdown::Ctx { base: look, revealed: &empty, custom: custom.as_ref().map(|f| f as &dyn Fn(&str) -> Option<crate::media::Custom>) });
+    let blocks = crate::markdown::parse(
+        text.trim(),
+        &crate::markdown::Ctx {
+            base: look,
+            revealed: &empty,
+            custom: custom
+                .as_ref()
+                .map(|f| f as &dyn Fn(&str) -> Option<crate::media::Custom>),
+        },
+    );
     let s = env.send.clone();
     let click: OnClick = Rc::new(move |t, w, cx| match t {
         crate::inline::Target::Link(u) => s(Act::OpenUrl(u.to_string()), w, cx),
@@ -798,11 +1048,25 @@ fn rich(env: &Env, text: &str, emoji: &[vector_core::types::EmojiTag], key: &str
 /// `.ne-video`: a poster with its play button; the clip or page opens outside the app.
 fn poster(env: &Env, e: &Embed, key: &str, open: Option<String>, send: &Send) -> AnyElement {
     let short = e.class == "short";
-    let art = e.image.as_deref().or(e.video.as_ref().and_then(|v| v.poster.as_deref())).map(|u| match pic(env, u) {
-        Pic::Ready(image, ..) => img(image).absolute().inset_0().size_full().object_fit(gpui::ObjectFit::Cover).into_any_element(),
-        Pic::Loading => skel().absolute().inset_0().size_full().rounded(px(0.)).into_any_element(),
-        Pic::Gone => div().into_any_element(),
-    });
+    let art = e
+        .image
+        .as_deref()
+        .or(e.video.as_ref().and_then(|v| v.poster.as_deref()))
+        .map(|u| match pic(env, u) {
+            Pic::Ready(image, ..) => img(image)
+                .absolute()
+                .inset_0()
+                .size_full()
+                .object_fit(gpui::ObjectFit::Cover)
+                .into_any_element(),
+            Pic::Loading => skel()
+                .absolute()
+                .inset_0()
+                .size_full()
+                .rounded(px(0.))
+                .into_any_element(),
+            Pic::Gone => div().into_any_element(),
+        });
     let badge = open.as_deref().filter(|_| e.video.is_none()).map(host);
     let s = send.clone();
     let frame = div()
@@ -816,7 +1080,13 @@ fn poster(env: &Env, e: &Embed, key: &str, open: Option<String>, send: &Send) ->
         .items_center()
         .justify_center()
         .cursor_pointer()
-        .map(|d| if short { d.h(px(360.)).w(px(202.5)).mx_auto() } else { d.w_full().h(px(CARD_W * 9. / 16.)) })
+        .map(|d| {
+            if short {
+                d.h(px(360.)).w(px(202.5)).mx_auto()
+            } else {
+                d.w_full().h(px(CARD_W * 9. / 16.))
+            }
+        })
         .when_some(open, |d, u| {
             d.on_click(move |_, w, cx| {
                 cx.stop_propagation();
@@ -835,7 +1105,12 @@ fn poster(env: &Env, e: &Embed, key: &str, open: Option<String>, send: &Send) ->
                 .flex()
                 .items_center()
                 .justify_center()
-                .child(svg().path("icons/play.svg").size(px(26.)).text_color(c(0xffffff))),
+                .child(
+                    svg()
+                        .path("icons/play.svg")
+                        .size(px(26.))
+                        .text_color(c(0xffffff)),
+                ),
         )
         .children(badge.map(|b| {
             div()
@@ -861,7 +1136,11 @@ fn media(env: &Env, all: &[Media], key: &str) -> AnyElement {
     let grid = shown.len() > 1;
     let side = (CARD_W - 4.) / 2.;
     let tiles = shown.iter().enumerate().map(|(i, m)| {
-        let url = if m.is_video { m.poster.as_deref() } else { Some(m.url.as_str()) };
+        let url = if m.is_video {
+            m.poster.as_deref()
+        } else {
+            Some(m.url.as_str())
+        };
         let ratio = match (m.width, m.height) {
             (Some(w), Some(h)) if w > 0 && h > 0 => Some(w as f32 / h as f32),
             _ => None,
@@ -876,10 +1155,19 @@ fn media(env: &Env, all: &[Media], key: &str) -> AnyElement {
         };
         match url.map(|u| pic(env, u)) {
             Some(Pic::Ready(image, w, h)) => {
-                let open = crate::viewer::Open { image: image.clone(), w, h, full: None };
+                let open = crate::viewer::Open {
+                    image: image.clone(),
+                    w,
+                    h,
+                    full: None,
+                };
                 let send = env.send.clone();
                 let natural = Some(w as f32 / h.max(1) as f32);
-                let (tw, th) = if grid { (side, side) } else { (CARD_W, (CARD_W * h as f32 / w.max(1) as f32).min(320.)) };
+                let (tw, th) = if grid {
+                    (side, side)
+                } else {
+                    (CARD_W, (CARD_W * h as f32 / w.max(1) as f32).min(320.))
+                };
                 size(div(), natural)
                     .id(SharedString::from(format!("{key}-m{i}")))
                     .cursor_pointer()
@@ -887,10 +1175,20 @@ fn media(env: &Env, all: &[Media], key: &str) -> AnyElement {
                         cx.stop_propagation();
                         send(Act::View(open.clone()), win, cx)
                     })
-                    .child(img(image).w(px(tw)).h(px(th)).aspect_ratio(tw / th).object_fit(gpui::ObjectFit::Cover).rounded(px(8.)))
+                    .child(
+                        img(image)
+                            .w(px(tw))
+                            .h(px(th))
+                            .aspect_ratio(tw / th)
+                            .object_fit(gpui::ObjectFit::Cover)
+                            .rounded(px(8.)),
+                    )
                     .into_any_element()
             }
-            Some(Pic::Loading) => size(skel(), None).h(px(if grid { side } else { 96. })).rounded(px(8.)).into_any_element(),
+            Some(Pic::Loading) => size(skel(), None)
+                .h(px(if grid { side } else { 96. }))
+                .rounded(px(8.))
+                .into_any_element(),
             _ => div().into_any_element(),
         }
     });
@@ -933,7 +1231,11 @@ pub struct Modal {
     pub scroll: gpui::ScrollHandle,
 }
 
-fn round_btn(id: &'static str, icon: &'static str, on: impl Fn(&mut gpui::Window, &mut gpui::App) + 'static) -> gpui::Stateful<gpui::Div> {
+fn round_btn(
+    id: &'static str,
+    icon: &'static str,
+    on: impl Fn(&mut gpui::Window, &mut gpui::App) + 'static,
+) -> gpui::Stateful<gpui::Div> {
     div()
         .id(id)
         .absolute()
@@ -956,7 +1258,9 @@ fn round_btn(id: &'static str, icon: &'static str, on: impl Fn(&mut gpui::Window
 }
 
 pub fn modal(m: &Modal, env: &Env, viewport_h: f32) -> AnyElement {
-    let Some(v) = m.stack.last() else { return div().into_any_element() };
+    let Some(v) = m.stack.last() else {
+        return div().into_any_element();
+    };
     let e = &v.embed;
     let back = m.stack.len() > 1;
     let article = e.class == "article";
@@ -966,10 +1270,24 @@ pub fn modal(m: &Modal, env: &Env, viewport_h: f32) -> AnyElement {
     let veiled = e.content_warning.is_some() && !v.revealed;
     let pad_first = |d: gpui::Div| if back { d.pl(px(36.)) } else { d };
 
-    let mut col = div().flex().flex_col().gap(px(12.)).px(px(20.)).pt(px(20.)).pb(px(12.));
+    let mut col = div()
+        .flex()
+        .flex_col()
+        .gap(px(12.))
+        .px(px(20.))
+        .pt(px(20.))
+        .pb(px(12.));
     let mut first = true;
     if let Some(name) = reposter {
-        col = col.child(pad_first(div()).child(crate::kit::spaced(format!("REPOSTED BY {}", name.to_uppercase()), 0.9).font_weight(FontWeight::BOLD).text_size(px(10.)).line_height(px(14.)).text_color(white_a(0.45))));
+        col = col.child(
+            pad_first(div()).child(
+                crate::kit::spaced(format!("REPOSTED BY {}", name.to_uppercase()), 0.9)
+                    .font_weight(FontWeight::BOLD)
+                    .text_size(px(10.))
+                    .line_height(px(14.))
+                    .text_color(white_a(0.45)),
+            ),
+        );
         first = false;
     }
     let author_row = |first: bool| {
@@ -995,11 +1313,19 @@ pub fn modal(m: &Modal, env: &Env, viewport_h: f32) -> AnyElement {
                 .line_height(px(16.8))
                 .cursor_pointer()
                 .on_click(move |_, w, cx| s(Act::Reveal(String::new()), w, cx))
-                .child(div().min_w_0().text_color(c(0xffffff)).child(match e.content_warning.as_deref().filter(|w| !w.is_empty()) {
-                    Some(w) => format!("Content warning: {w}"),
-                    None => "Content warning".into(),
-                }))
-                .child(div().flex_shrink_0().font_weight(FontWeight::SEMIBOLD).text_color(c(ACCENT)).child("Show")),
+                .child(div().min_w_0().text_color(c(0xffffff)).child(
+                    match e.content_warning.as_deref().filter(|w| !w.is_empty()) {
+                        Some(w) => format!("Content warning: {w}"),
+                        None => "Content warning".into(),
+                    },
+                ))
+                .child(
+                    div()
+                        .flex_shrink_0()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(c(ACCENT))
+                        .child("Show"),
+                ),
         );
     } else {
         let width = if article { 720. } else { 560. };
@@ -1007,9 +1333,22 @@ pub fn modal(m: &Modal, env: &Env, viewport_h: f32) -> AnyElement {
             let cover = match pic(env, u) {
                 Pic::Ready(image, w, h) => {
                     let h = (width * h as f32 / w.max(1) as f32).min(280.);
-                    Some(img(image).w(px(width)).h(px(h)).aspect_ratio(width / h).object_fit(gpui::ObjectFit::Cover).into_any_element())
+                    Some(
+                        img(image)
+                            .w(px(width))
+                            .h(px(h))
+                            .aspect_ratio(width / h)
+                            .object_fit(gpui::ObjectFit::Cover)
+                            .into_any_element(),
+                    )
                 }
-                Pic::Loading => Some(skel().w(px(width)).h(px(180.)).rounded(px(0.)).into_any_element()),
+                Pic::Loading => Some(
+                    skel()
+                        .w(px(width))
+                        .h(px(180.))
+                        .rounded(px(0.))
+                        .into_any_element(),
+                ),
                 Pic::Gone => None,
             };
             if let Some(cover) = cover {
@@ -1021,10 +1360,23 @@ pub fn modal(m: &Modal, env: &Env, viewport_h: f32) -> AnyElement {
             col = col.child(reply_to(r, &key, &send));
         }
         if let Some(t) = &e.title {
-            col = col.child(div().font_weight(FontWeight::BOLD).text_size(px(22.)).line_height(px(27.5)).text_color(c(0xffffff)).child(t.clone()));
+            col = col.child(
+                div()
+                    .font_weight(FontWeight::BOLD)
+                    .text_size(px(22.))
+                    .line_height(px(27.5))
+                    .text_color(c(0xffffff))
+                    .child(t.clone()),
+            );
         }
         if let Some(s) = e.summary.clone().filter(|_| article) {
-            col = col.child(div().text_size(px(14.)).line_height(px(20.3)).text_color(white_a(0.6)).child(s));
+            col = col.child(
+                div()
+                    .text_size(px(14.))
+                    .line_height(px(20.3))
+                    .text_color(white_a(0.6))
+                    .child(s),
+            );
         }
         if let Some(v) = e.video.clone() {
             col = col.child(poster(env, e, &key, Some(v.url), &send));
@@ -1035,7 +1387,14 @@ pub fn modal(m: &Modal, env: &Env, viewport_h: f32) -> AnyElement {
         if !e.text.is_empty() {
             // An article's paragraphs keep `.markdown-paragraph`'s 0.8em under them.
             let gap = article.then_some(23.25 * 2. + 12.);
-            col = col.child(div().when(article, |d| d.pb(px(12.))).child(rich(env, &strip(&e.text), &e.emoji, &key, Look::new(RUBIK, 15., 23.25, white_a(0.9)), gap)));
+            col = col.child(div().when(article, |d| d.pb(px(12.))).child(rich(
+                env,
+                &strip(&e.text),
+                &e.emoji,
+                &key,
+                Look::new(RUBIK, 15., 23.25, white_a(0.9)),
+                gap,
+            )));
         }
         if !e.media.is_empty() {
             col = col.child(media(env, &e.media, &key));
@@ -1045,15 +1404,37 @@ pub fn modal(m: &Modal, env: &Env, viewport_h: f32) -> AnyElement {
         }
     }
 
-    let label = if e.bech32.starts_with("naddr") { "naddr" } else { "nevent" };
+    let label = if e.bech32.starts_with("naddr") {
+        "naddr"
+    } else {
+        "nevent"
+    };
     let actions = {
         let (s, bech, lbl) = (send.clone(), e.bech32.clone(), format!("The {label}"));
-        let copy = btn("nem-copy".into(), format!("Copy {label}"), false, move |w, cx| s(Act::Copy(bech.clone(), lbl.clone()), w, cx));
+        let copy = btn(
+            "nem-copy".into(),
+            format!("Copy {label}"),
+            false,
+            move |w, cx| s(Act::Copy(bech.clone(), lbl.clone()), w, cx),
+        );
         let ext = v.url.clone().map(|u| {
             let s = send.clone();
-            btn("nem-ext".into(), "Open Externally", false, move |w, cx| s(Act::OpenUrl(u.clone()), w, cx))
+            btn("nem-ext".into(), "Open Externally", false, move |w, cx| {
+                s(Act::OpenUrl(u.clone()), w, cx)
+            })
         });
-        div().flex().flex_wrap().justify_end().gap(px(8.)).px(px(20.)).pt(px(12.)).pb(px(16.)).border_t_1().border_color(white_a(0.06)).child(copy).children(ext)
+        div()
+            .flex()
+            .flex_wrap()
+            .justify_end()
+            .gap(px(8.))
+            .px(px(20.))
+            .pt(px(12.))
+            .pb(px(16.))
+            .border_t_1()
+            .border_color(white_a(0.06))
+            .child(copy)
+            .children(ext)
     };
     let (s1, s2, s3) = (send.clone(), send.clone(), send.clone());
     let card = div()
@@ -1067,16 +1448,42 @@ pub fn modal(m: &Modal, env: &Env, viewport_h: f32) -> AnyElement {
         .border_1()
         .border_color(white_a(0.08))
         .rounded(px(18.))
-        .shadow(vec![gpui::BoxShadow { color: ca(0, 0, 0, 0.6), offset: gpui::point(px(0.), px(24.)), blur_radius: px(60.), spread_radius: px(0.), inset: false }])
+        .shadow(vec![gpui::BoxShadow {
+            color: ca(0, 0, 0, 0.6),
+            offset: gpui::point(px(0.), px(24.)),
+            blur_radius: px(60.),
+            spread_radius: px(0.),
+            inset: false,
+        }])
         .overflow_hidden()
         .flex()
         .flex_col()
         .occlude()
         .on_click(|_, _, cx| cx.stop_propagation())
-        .child(div().id("nem-scroll").flex_1().min_h_0().overflow_y_scroll().track_scroll(&m.scroll).child(col))
+        .child(
+            div()
+                .id("nem-scroll")
+                .flex_1()
+                .min_h_0()
+                .overflow_y_scroll()
+                .track_scroll(&m.scroll)
+                .child(col),
+        )
         .child(actions)
-        .when(back, |d| d.child(round_btn("nem-back", "icons/chevron-left.svg", move |w, cx| s1(Act::Back, w, cx)).left(px(12.))))
-        .child(round_btn("nem-close", "icons/x.svg", move |w, cx| s2(Act::Close, w, cx)).right(px(12.)));
+        .when(back, |d| {
+            d.child(
+                round_btn("nem-back", "icons/chevron-left.svg", move |w, cx| {
+                    s1(Act::Back, w, cx)
+                })
+                .left(px(12.)),
+            )
+        })
+        .child(
+            round_btn("nem-close", "icons/x.svg", move |w, cx| {
+                s2(Act::Close, w, cx)
+            })
+            .right(px(12.)),
+        );
     gpui::deferred(
         div()
             .id("nem-overlay")
@@ -1128,34 +1535,95 @@ fn quote(env: &Env, r: &Ref, key: &str) -> AnyElement {
         .border_color(white_a(0.1))
         .bg(white_a(0.03))
         .min_w_0()
-        .child(crate::kit::spaced(label.to_uppercase(), 0.9).font_weight(FontWeight::BOLD).text_size(px(10.)).line_height(px(24.)).text_color(white_a(0.45)));
+        .child(
+            crate::kit::spaced(label.to_uppercase(), 0.9)
+                .font_weight(FontWeight::BOLD)
+                .text_size(px(10.))
+                .line_height(px(24.))
+                .text_color(white_a(0.45)),
+        );
     match (&state, e) {
-        (State::Failed(err, _), _) => col = col.child(div().text_size(px(11.)).line_height(px(15.4)).text_color(white_a(0.45)).child(err.clone())),
+        (State::Failed(err, _), _) => {
+            col = col.child(
+                div()
+                    .text_size(px(11.))
+                    .line_height(px(15.4))
+                    .text_color(white_a(0.45))
+                    .child(err.clone()),
+            )
+        }
         (_, Some(e)) => {
             let veiled = e.content_warning.is_some();
             let thumb = (!veiled)
-                .then(|| e.image.clone().or_else(|| e.media.iter().find(|m| !m.is_video).map(|m| m.url.clone())).or_else(|| e.media.iter().find_map(|m| m.poster.clone())))
+                .then(|| {
+                    e.image
+                        .clone()
+                        .or_else(|| e.media.iter().find(|m| !m.is_video).map(|m| m.url.clone()))
+                        .or_else(|| e.media.iter().find_map(|m| m.poster.clone()))
+                })
                 .flatten()
                 .and_then(|u| match pic(env, &u) {
-                    Pic::Ready(image, ..) => Some(img(image).size(px(56.)).aspect_ratio(1.).flex_shrink_0().object_fit(gpui::ObjectFit::Cover).rounded(px(6.)).into_any_element()),
-                    Pic::Loading => Some(skel().size(px(56.)).flex_shrink_0().rounded(px(6.)).into_any_element()),
+                    Pic::Ready(image, ..) => Some(
+                        img(image)
+                            .size(px(56.))
+                            .aspect_ratio(1.)
+                            .flex_shrink_0()
+                            .object_fit(gpui::ObjectFit::Cover)
+                            .rounded(px(6.))
+                            .into_any_element(),
+                    ),
+                    Pic::Loading => Some(
+                        skel()
+                            .size(px(56.))
+                            .flex_shrink_0()
+                            .rounded(px(6.))
+                            .into_any_element(),
+                    ),
                     Pic::Gone => None,
                 });
             let text = if veiled {
-                Some(div().italic().text_size(px(13.)).line_height(px(18.2)).text_color(white_a(0.5)).child(match e.content_warning.as_deref().filter(|w| !w.is_empty()) {
-                    Some(w) => format!("Content warning: {w}"),
-                    None => "Content warning".into(),
-                }).into_any_element())
+                Some(
+                    div()
+                        .italic()
+                        .text_size(px(13.))
+                        .line_height(px(18.2))
+                        .text_color(white_a(0.5))
+                        .child(
+                            match e.content_warning.as_deref().filter(|w| !w.is_empty()) {
+                                Some(w) => format!("Content warning: {w}"),
+                                None => "Content warning".into(),
+                            },
+                        )
+                        .into_any_element(),
+                )
             } else if !e.text.is_empty() {
                 let t: String = e.text.chars().take(600).collect();
-                Some(div().max_h(px(18.2 * 3.)).overflow_hidden().child(rich(env, &t, &e.emoji, &format!("{key}-qt"), Look::new(RUBIK, 13., 18.2, white_a(0.75)), None)).into_any_element())
+                Some(
+                    div()
+                        .max_h(px(18.2 * 3.))
+                        .overflow_hidden()
+                        .child(rich(
+                            env,
+                            &t,
+                            &e.emoji,
+                            &format!("{key}-qt"),
+                            Look::new(RUBIK, 13., 18.2, white_a(0.75)),
+                            None,
+                        ))
+                        .into_any_element(),
+                )
             } else {
                 None
             };
             let (s, entity, url) = (env.send.clone(), r.entity.clone(), r.url.clone());
             col = col
                 .cursor_pointer()
-                .hover(|d| d.border_color(gpui::Hsla { a: 0.45, ..c(ACCENT) }))
+                .hover(|d| {
+                    d.border_color(gpui::Hsla {
+                        a: 0.45,
+                        ..c(ACCENT)
+                    })
+                })
                 .on_click(move |_, w, cx| {
                     cx.stop_propagation();
                     s(Act::Push(entity.clone(), url.clone()), w, cx)
@@ -1170,7 +1638,13 @@ fn quote(env: &Env, r: &Ref, key: &str) -> AnyElement {
                             div()
                                 .flex_1()
                                 .min_w_0()
-                                .children(e.title.clone().map(|t| div().font_weight(FontWeight::BOLD).text_size(px(13.)).text_color(c(0xffffff)).child(t)))
+                                .children(e.title.clone().map(|t| {
+                                    div()
+                                        .font_weight(FontWeight::BOLD)
+                                        .text_size(px(13.))
+                                        .text_color(c(0xffffff))
+                                        .child(t)
+                                }))
                                 .children(text),
                         )
                         .children(thumb),
@@ -1178,7 +1652,15 @@ fn quote(env: &Env, r: &Ref, key: &str) -> AnyElement {
         }
         _ => {
             col = col
-                .child(div().h(px(22.)).flex().items_center().gap(px(8.)).child(skel().size(px(22.)).rounded_full()).child(skel().w(px(160.)).h(px(12.))))
+                .child(
+                    div()
+                        .h(px(22.))
+                        .flex()
+                        .items_center()
+                        .gap(px(8.))
+                        .child(skel().size(px(22.)).rounded_full())
+                        .child(skel().w(px(160.)).h(px(12.))),
+                )
                 .child(skel().w(px(300.)).h(px(12.)));
         }
     }
@@ -1204,7 +1686,10 @@ mod tests {
         let text = format!("Great https://njump.me/{NADDR}.");
         let r = refs(&text);
         assert_eq!(r.len(), 1);
-        assert_eq!(r[0].url.as_deref(), Some(format!("https://njump.me/{NADDR}").as_str()));
+        assert_eq!(
+            r[0].url.as_deref(),
+            Some(format!("https://njump.me/{NADDR}").as_str())
+        );
         assert_eq!(strip(&text), text);
     }
 
@@ -1223,6 +1708,9 @@ mod tests {
 
     #[test]
     fn previews_name_what_they_point_at() {
-        assert_eq!(for_preview(&format!("look nostr:{NADDR}")), "look Nostr Article");
+        assert_eq!(
+            for_preview(&format!("look nostr:{NADDR}")),
+            "look Nostr Article"
+        );
     }
 }

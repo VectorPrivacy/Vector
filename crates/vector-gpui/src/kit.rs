@@ -2,8 +2,8 @@
 //! dropdown, the popup dialog and Vector's buttons.
 
 use gpui::{
-    AnyElement, App, ElementId, FontWeight, Hsla, IntoElement, ParentElement, SharedString, Styled, Window, div, img,
-    prelude::*, px,
+    AnyElement, App, ElementId, FontWeight, Hsla, IntoElement, ParentElement, SharedString, Styled,
+    Window, div, img, prelude::*, px,
 };
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -15,14 +15,24 @@ pub fn spaced(text: impl AsRef<str>, spacing: f32) -> gpui::Div {
     let mut row = div().flex().flex_row().flex_shrink_0();
     for g in text.as_ref().graphemes(true) {
         let g = if g == " " { "\u{00a0}" } else { g };
-        row = row.child(div().mr(px(spacing)).child(SharedString::from(g.to_string())));
+        row = row.child(
+            div()
+                .mr(px(spacing))
+                .child(SharedString::from(g.to_string())),
+        );
     }
     row
 }
 
 fn mix(a: Hsla, b: Hsla, t: f32) -> Hsla {
     let (a, b) = (a.to_rgb(), b.to_rgb());
-    gpui::Rgba { r: a.r + (b.r - a.r) * t, g: a.g + (b.g - a.g) * t, b: a.b + (b.b - a.b) * t, a: a.a + (b.a - a.a) * t }.into()
+    gpui::Rgba {
+        r: a.r + (b.r - a.r) * t,
+        g: a.g + (b.g - a.g) * t,
+        b: a.b + (b.b - a.b) * t,
+        a: a.a + (b.a - a.a) * t,
+    }
+    .into()
 }
 
 /// `.startup-subtext-gradient`: a `linear-gradient(to right, #2b976c 13.87%, #59fcb3 60%)` at
@@ -40,7 +50,12 @@ pub fn gradient_text(text: &str, spacing: f32, phase: f32) -> gpui::Div {
         let p = swing * 0.5 + x * 0.5;
         let t = ((p - 0.1387) / (0.60 - 0.1387)).clamp(0., 1.);
         let g = if g == " " { "\u{00a0}" } else { g };
-        row = row.child(div().mr(px(spacing)).text_color(mix(from, to, t)).child(SharedString::from(g.to_string())));
+        row = row.child(
+            div()
+                .mr(px(spacing))
+                .text_color(mix(from, to, t))
+                .child(SharedString::from(g.to_string())),
+        );
     }
     row
 }
@@ -61,7 +76,17 @@ pub fn select(
     on_toggle: impl Fn(&mut Window, &mut App) + 'static,
     on_pick: impl Fn(&'static str, &mut Window, &mut App) + 'static + Clone,
 ) -> AnyElement {
-    select_with(id, width, 14., choices, &[], value, open, on_toggle, on_pick)
+    select_with(
+        id,
+        width,
+        14.,
+        choices,
+        &[],
+        value,
+        open,
+        on_toggle,
+        on_pick,
+    )
 }
 
 /// [`select`] at a font size, with some choices `disabled`.
@@ -77,18 +102,22 @@ pub fn select_with(
     on_toggle: impl Fn(&mut Window, &mut App) + 'static,
     on_pick: impl Fn(&'static str, &mut Window, &mut App) + 'static + Clone,
 ) -> AnyElement {
-    let label = choices.iter().find(|c| c.value == value).map(|c| c.label).unwrap_or("");
-    let caret = div()
-        .w(px(10.))
-        .h(px(6.))
-        .flex_shrink_0()
-        .child(
-            gpui::svg()
-                .path("ui/caret-down.svg")
-                .size_full()
-                .text_color(c(0x888888))
-                .when(open, |s| s.with_transformation(gpui::Transformation::rotate(gpui::radians(std::f32::consts::PI)))),
-        );
+    let label = choices
+        .iter()
+        .find(|c| c.value == value)
+        .map(|c| c.label)
+        .unwrap_or("");
+    let caret = div().w(px(10.)).h(px(6.)).flex_shrink_0().child(
+        gpui::svg()
+            .path("ui/caret-down.svg")
+            .size_full()
+            .text_color(c(0x888888))
+            .when(open, |s| {
+                s.with_transformation(gpui::Transformation::rotate(gpui::radians(
+                    std::f32::consts::PI,
+                )))
+            }),
+    );
     let button = div()
         .id(id.into())
         .flex()
@@ -107,7 +136,15 @@ pub fn select_with(
         .text_color(c(0xffffff))
         .cursor_pointer()
         .on_click(move |_, w, cx| on_toggle(w, cx))
-        .child(div().flex_1().min_w_0().overflow_hidden().text_ellipsis().whitespace_nowrap().child(label))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .overflow_hidden()
+                .text_ellipsis()
+                .whitespace_nowrap()
+                .child(label),
+        )
         .child(caret);
     let mut root = div().relative().w(px(width)).flex_shrink_0().child(button);
     if open {
@@ -147,9 +184,20 @@ pub fn select_with(
                     .text_color(c(if selected { 0xffffff } else { 0xcfcfcf }))
                     .when(selected, |s| s.bg(c(0x1f1f1f)))
                     .when(off, |s| s.opacity(0.4))
-                    .when(!off, |s| s.hover(|s| s.bg(c(0x1f1f1f)).text_color(c(0xffffff))).cursor_pointer().on_click(move |_, w, cx| pick(v, w, cx)))
+                    .when(!off, |s| {
+                        s.hover(|s| s.bg(c(0x1f1f1f)).text_color(c(0xffffff)))
+                            .cursor_pointer()
+                            .on_click(move |_, w, cx| pick(v, w, cx))
+                    })
                     .child(div().flex_1().min_w_0().child(choice.label))
-                    .when(selected, |s| s.child(gpui::svg().path("icons/check.svg").size(px(14.)).text_color(c(PRIMARY)))),
+                    .when(selected, |s| {
+                        s.child(
+                            gpui::svg()
+                                .path("icons/check.svg")
+                                .size(px(14.))
+                                .text_color(c(PRIMARY)),
+                        )
+                    }),
             );
         }
         root = root.child(gpui::deferred(list).with_priority(1));
@@ -172,26 +220,63 @@ pub struct Popup {
 
 impl Popup {
     pub fn notice(title: impl Into<SharedString>) -> Self {
-        Self { title: title.into(), text: None, icon: Some("icons/vector_warning.svg"), confirm: "Okay".into(), cancel: None, input: None }
+        Self {
+            title: title.into(),
+            text: None,
+            icon: Some("icons/vector_warning.svg"),
+            confirm: "Okay".into(),
+            cancel: None,
+            input: None,
+        }
     }
 }
 
 /// `#popup-container.active` and its `.popup`. `answer(true)` confirms.
-pub fn popup(p: &Popup, answer: impl Fn(bool, &mut Window, &mut App) + 'static + Clone) -> AnyElement {
+pub fn popup(
+    p: &Popup,
+    answer: impl Fn(bool, &mut Window, &mut App) + 'static + Clone,
+) -> AnyElement {
     let ok = answer.clone();
     let mut content = div().flex().flex_col().items_center().p(px(5.)).mb(px(10.));
     if let Some(icon) = p.icon {
         content = content.child(img(icon).h(px(100.)).w(px(100.)).mb(px(26.)));
     }
     content = content.child(
-        div().font_weight(FontWeight::BOLD).text_size(px(24.)).line_height(px(24.)).text_center().my(px(20.)).child(p.title.clone()),
+        div()
+            .font_weight(FontWeight::BOLD)
+            .text_size(px(24.))
+            .line_height(px(24.))
+            .text_center()
+            .my(px(20.))
+            .child(p.title.clone()),
     );
     if let Some(text) = &p.text {
-        let body: AnyElement = if text.contains('<') || text.contains('&') { rich(text).into_any_element() } else { text.clone().into_any_element() };
-        content = content.child(div().text_center().text_color(c(TEXT)).mb(px(16.)).when(p.icon.is_some(), |d| d.max_w(px(420.))).child(body));
+        let body: AnyElement = if text.contains('<') || text.contains('&') {
+            rich(text).into_any_element()
+        } else {
+            text.clone().into_any_element()
+        };
+        content = content.child(
+            div()
+                .text_center()
+                .text_color(c(TEXT))
+                .mb(px(16.))
+                .when(p.icon.is_some(), |d| d.max_w(px(420.)))
+                .child(body),
+        );
     }
     if let Some(input) = &p.input {
-        content = content.child(div().w_full().h(px(41.2)).px(px(19.2)).rounded(px(8.)).bg(c(DIVIDER)).flex().items_center().child(input.clone()));
+        content = content.child(
+            div()
+                .w_full()
+                .h(px(41.2))
+                .px(px(19.2))
+                .rounded(px(8.))
+                .bg(c(DIVIDER))
+                .flex()
+                .items_center()
+                .child(input.clone()),
+        );
     }
     let mut buttons = div().flex().justify_center().gap(px(10.)).child(
         div()
@@ -240,7 +325,7 @@ pub fn popup(p: &Popup, answer: impl Fn(bool, &mut Window, &mut App) + 'static +
             offset: gpui::point(px(0.), px(0.)),
             blur_radius: px(15.),
             spread_radius: px(0.),
-                inset: false,
+            inset: false,
         }])
         .font_family(INTER)
         .text_color(c(TEXT))
@@ -266,7 +351,11 @@ pub fn popup(p: &Popup, answer: impl Fn(bool, &mut Window, &mut App) + 'static +
 pub struct Tip(gpui::SharedString);
 
 impl gpui::Render for Tip {
-    fn render(&mut self, _: &mut gpui::Window, _: &mut gpui::Context<Self>) -> impl gpui::IntoElement {
+    fn render(
+        &mut self,
+        _: &mut gpui::Window,
+        _: &mut gpui::Context<Self>,
+    ) -> impl gpui::IntoElement {
         use gpui::{ParentElement, Styled};
         gpui::div()
             .px(gpui::px(8.))
@@ -282,7 +371,9 @@ impl gpui::Render for Tip {
     }
 }
 
-pub fn tooltip(text: impl Into<gpui::SharedString>) -> impl Fn(&mut gpui::Window, &mut gpui::App) -> gpui::AnyView + 'static {
+pub fn tooltip(
+    text: impl Into<gpui::SharedString>,
+) -> impl Fn(&mut gpui::Window, &mut gpui::App) -> gpui::AnyView + 'static {
     let text = text.into();
     move |_, cx| cx.new(|_| Tip(text.clone())).into()
 }
@@ -318,7 +409,9 @@ pub fn sharp_svg(path: impl Into<SharedString>, size: f32, window: &Window, cx: 
                 let renderer = cx.svg_renderer();
                 let parsed = renderer.parse_svg(&bytes).ok()?;
                 let d = gpui::DevicePixels(device as i32);
-                renderer.render_parsed(&parsed, gpui::SvgSize::Size(gpui::size(d, d))).ok()
+                renderer
+                    .render_parsed(&parsed, gpui::SvgSize::Size(gpui::size(d, d)))
+                    .ok()
             })
             .clone()
     });
@@ -336,8 +429,12 @@ pub fn page_gutter(width: f32) -> f32 {
 
 /// CSS `cubic-bezier(x1, y1, x2, y2)` as an easing: solve x for t by Newton, then read y.
 pub fn bezier(x1: f32, y1: f32, x2: f32, y2: f32) -> impl Fn(f32) -> f32 {
-    let at = |a: f32, b: f32, t: f32| 3. * a * (1. - t) * (1. - t) * t + 3. * b * (1. - t) * t * t + t * t * t;
-    let slope = |a: f32, b: f32, t: f32| 3. * a * (1. - t) * (1. - t) + 6. * (b - a) * (1. - t) * t + 3. * (1. - b) * t * t;
+    let at = |a: f32, b: f32, t: f32| {
+        3. * a * (1. - t) * (1. - t) * t + 3. * b * (1. - t) * t * t + t * t * t
+    };
+    let slope = |a: f32, b: f32, t: f32| {
+        3. * a * (1. - t) * (1. - t) + 6. * (b - a) * (1. - t) * t + 3. * (1. - b) * t * t
+    };
     move |x| {
         let mut t = x;
         for _ in 0..8 {
@@ -369,7 +466,16 @@ pub fn rich(html: &str) -> gpui::StyledText {
         } else if let Some(r) = rest.strip_prefix("<br>") {
             text.push('\n');
             rest = r;
-        } else if let Some((ent, ch)) = [("&nbsp;", '\u{a0}'), ("&amp;", '&'), ("&lt;", '<'), ("&gt;", '>'), ("&quot;", '"')].iter().find(|(e, _)| rest.starts_with(e)) {
+        } else if let Some((ent, ch)) = [
+            ("&nbsp;", '\u{a0}'),
+            ("&amp;", '&'),
+            ("&lt;", '<'),
+            ("&gt;", '>'),
+            ("&quot;", '"'),
+        ]
+        .iter()
+        .find(|(e, _)| rest.starts_with(e))
+        {
             text.push(*ch);
             rest = &rest[ent.len()..];
         } else {
@@ -378,7 +484,10 @@ pub fn rich(html: &str) -> gpui::StyledText {
             rest = &rest[ch.len_utf8()..];
         }
     }
-    let strong = gpui::HighlightStyle { font_weight: Some(FontWeight::BOLD), ..Default::default() };
+    let strong = gpui::HighlightStyle {
+        font_weight: Some(FontWeight::BOLD),
+        ..Default::default()
+    };
     gpui::StyledText::new(text).with_highlights(bold.into_iter().map(|r| (r, strong)))
 }
 
@@ -410,16 +519,31 @@ pub enum MenuKind {
 
 impl MenuItem {
     pub fn new(label: impl Into<SharedString>, icon: &str) -> Self {
-        Self { label: label.into(), icon: (!icon.is_empty()).then(|| SharedString::from(format!("icons/{icon}.svg"))), ..Default::default() }
+        Self {
+            label: label.into(),
+            icon: (!icon.is_empty()).then(|| SharedString::from(format!("icons/{icon}.svg"))),
+            ..Default::default()
+        }
     }
     pub fn divider() -> Self {
-        Self { kind: MenuKind::Divider, ..Default::default() }
+        Self {
+            kind: MenuKind::Divider,
+            ..Default::default()
+        }
     }
     pub fn header(label: impl Into<SharedString>) -> Self {
-        Self { label: label.into(), kind: MenuKind::Header, ..Default::default() }
+        Self {
+            label: label.into(),
+            kind: MenuKind::Header,
+            ..Default::default()
+        }
     }
     pub fn back(label: impl Into<SharedString>) -> Self {
-        Self { label: label.into(), kind: MenuKind::Back, ..Default::default() }
+        Self {
+            label: label.into(),
+            kind: MenuKind::Back,
+            ..Default::default()
+        }
     }
     pub fn sub(mut self) -> Self {
         self.kind = MenuKind::Sub;
@@ -460,7 +584,13 @@ pub fn context_menu(
         .border_color(c(0x393b3c))
         .rounded(px(10.))
         .overflow_hidden()
-        .shadow(vec![gpui::BoxShadow { color: ca(0, 0, 0, 0.5), offset: gpui::point(px(0.), px(4.)), blur_radius: px(18.), spread_radius: px(0.), inset: false }])
+        .shadow(vec![gpui::BoxShadow {
+            color: ca(0, 0, 0, 0.5),
+            offset: gpui::point(px(0.), px(4.)),
+            blur_radius: px(18.),
+            spread_radius: px(0.),
+            inset: false,
+        }])
         .occlude()
         .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .on_mouse_down(gpui::MouseButton::Right, |_, _, cx| cx.stop_propagation());
@@ -472,7 +602,15 @@ pub fn context_menu(
             }
             MenuKind::Header => {
                 list = list.child(
-                    div().pt(px(9.)).pb(px(4.)).px(px(14.)).text_size(px(11.)).font_weight(gpui::FontWeight::SEMIBOLD).text_color(c(0x6f6f6f)).whitespace_nowrap().child(spaced(item.label.to_uppercase(), 0.66)),
+                    div()
+                        .pt(px(9.))
+                        .pb(px(4.))
+                        .px(px(14.))
+                        .text_size(px(11.))
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .text_color(c(0x6f6f6f))
+                        .whitespace_nowrap()
+                        .child(spaced(item.label.to_uppercase(), 0.66)),
                 );
                 continue;
             }
@@ -486,7 +624,13 @@ pub fn context_menu(
             _ if item.checked => Some(SharedString::from("icons/check.svg")),
             _ => item.icon.clone(),
         };
-        let ink = if item.danger { danger } else if back { c(0x8b8b8b) } else { c(0xb2b2b2) };
+        let ink = if item.danger {
+            danger
+        } else if back {
+            c(0x8b8b8b)
+        } else {
+            c(0xb2b2b2)
+        };
         let live = !item.disabled;
         let label = div()
             .min_w_0()
@@ -495,7 +639,11 @@ pub fn context_menu(
             .flex()
             .items_baseline()
             .child(item.label.clone())
-            .children(item.hint.clone().map(|h| div().ml(px(6.)).opacity(0.5).text_size(px(11.9)).child(h)));
+            .children(
+                item.hint
+                    .clone()
+                    .map(|h| div().ml(px(6.)).opacity(0.5).text_size(px(11.9)).child(h)),
+            );
         list = list.child(
             div()
                 .id(("ctx", ix))
@@ -511,15 +659,35 @@ pub fn context_menu(
                 .text_color(ink)
                 .when(!live, |d| d.opacity(0.45))
                 .when(live, |d| d.cursor_pointer())
-                .when(live && item.danger, |d| d.hover(move |d| d.bg(danger.opacity(0.1))))
-                .when(live && !item.danger, |d| d.hover(|d| d.bg(c(0x2a2a2a)).text_color(c(0xffffff))))
+                .when(live && item.danger, |d| {
+                    d.hover(move |d| d.bg(danger.opacity(0.1)))
+                })
+                .when(live && !item.danger, |d| {
+                    d.hover(|d| d.bg(c(0x2a2a2a)).text_color(c(0xffffff)))
+                })
                 .when(live, |d| d.on_click(move |_, w, cx| pick(ix, w, cx)))
-                .when(back, |d| d.child(gpui::svg().path("icons/chevron-left.svg").size(px(20.)).flex_shrink_0().text_color(ink)))
+                .when(back, |d| {
+                    d.child(
+                        gpui::svg()
+                            .path("icons/chevron-left.svg")
+                            .size(px(20.))
+                            .flex_shrink_0()
+                            .text_color(ink),
+                    )
+                })
                 .child(label)
                 .when(!back, |d| {
                     d.children(icon.map(|i| {
-                        let color = if item.checked && item.kind != MenuKind::Sub { c(crate::theme::PRIMARY) } else { ink };
-                        gpui::svg().path(i).size(px(20.)).flex_shrink_0().text_color(color)
+                        let color = if item.checked && item.kind != MenuKind::Sub {
+                            c(crate::theme::PRIMARY)
+                        } else {
+                            ink
+                        };
+                        gpui::svg()
+                            .path(i)
+                            .size(px(20.))
+                            .flex_shrink_0()
+                            .text_color(color)
                     }))
                 }),
         );
@@ -532,7 +700,12 @@ pub fn context_menu(
             .inset_0()
             .on_mouse_down(gpui::MouseButton::Left, move |_, w, cx| c1(w, cx))
             .on_mouse_down(gpui::MouseButton::Right, move |_, w, cx| c2(w, cx))
-            .child(gpui::anchored().position(at).snap_to_window_with_margin(px(8.)).child(list)),
+            .child(
+                gpui::anchored()
+                    .position(at)
+                    .snap_to_window_with_margin(px(8.))
+                    .child(list),
+            ),
     )
     .with_priority(20)
     .into_any_element()

@@ -6,17 +6,20 @@ use std::sync::{Arc, LazyLock, Mutex};
 
 use serde_json::json;
 use vector_core::sending::{SendCallback, SendConfig};
-use vector_core::{db, Message, STATE};
+use vector_core::{Message, STATE, db};
 
 /// Cancel flags for uploads in flight, by pending id.
-static UPLOAD_CANCEL: LazyLock<Mutex<HashMap<String, Arc<AtomicBool>>>> = LazyLock::new(Default::default);
+static UPLOAD_CANCEL: LazyLock<Mutex<HashMap<String, Arc<AtomicBool>>>> =
+    LazyLock::new(Default::default);
 /// A failure's reason, from `on_failed_reason` to the `on_failed` that follows it.
 static FAIL_REASONS: LazyLock<Mutex<HashMap<String, String>>> = LazyLock::new(Default::default);
 
 /// Stop every running upload and forget the failures: the account they belong to is leaving.
 pub fn cancel_all_uploads() {
     let mut uploads = UPLOAD_CANCEL.lock().unwrap();
-    uploads.values().for_each(|flag| flag.store(true, std::sync::atomic::Ordering::Release));
+    uploads
+        .values()
+        .for_each(|flag| flag.store(true, std::sync::atomic::Ordering::Release));
     uploads.clear();
     FAIL_REASONS.lock().unwrap().clear();
 }
@@ -34,7 +37,10 @@ pub struct Callback;
 impl SendCallback for Callback {
     fn on_pending(&self, chat_id: &str, msg: &Message) {
         if !msg.attachments.is_empty() {
-            UPLOAD_CANCEL.lock().unwrap().insert(msg.id.clone(), Arc::new(AtomicBool::new(false)));
+            UPLOAD_CANCEL
+                .lock()
+                .unwrap()
+                .insert(msg.id.clone(), Arc::new(AtomicBool::new(false)));
         }
         vector_core::traits::emit_message_new(chat_id, msg);
     }
@@ -43,16 +49,30 @@ impl SendCallback for Callback {
         UPLOAD_CANCEL.lock().unwrap().get(pending_id).cloned()
     }
 
-    fn on_upload_progress(&self, pending_id: &str, percentage: u8, bytes_sent: u64) -> Result<(), String> {
-        if self.cancel_token(pending_id).is_some_and(|f| f.load(Ordering::Relaxed)) {
+    fn on_upload_progress(
+        &self,
+        pending_id: &str,
+        percentage: u8,
+        bytes_sent: u64,
+    ) -> Result<(), String> {
+        if self
+            .cancel_token(pending_id)
+            .is_some_and(|f| f.load(Ordering::Relaxed))
+        {
             return Err("Upload cancelled".into());
         }
-        vector_core::emit_event("attachment_upload_progress", &json!({ "id": pending_id, "progress": percentage, "bytesSent": bytes_sent }));
+        vector_core::emit_event(
+            "attachment_upload_progress",
+            &json!({ "id": pending_id, "progress": percentage, "bytesSent": bytes_sent }),
+        );
         Ok(())
     }
 
     fn on_upload_stage(&self, pending_id: &str, stage: &str, pct: Option<u8>) {
-        vector_core::emit_event("attachment_upload_stage", &json!({ "id": pending_id, "stage": stage, "progress": pct }));
+        vector_core::emit_event(
+            "attachment_upload_stage",
+            &json!({ "id": pending_id, "stage": stage, "progress": pct }),
+        );
     }
 
     fn on_upload_complete(&self, chat_id: &str, pending_id: &str, attachment_id: &str, url: &str) {
@@ -74,13 +94,19 @@ impl SendCallback for Callback {
     }
 
     fn on_failed_reason(&self, _chat_id: &str, old_id: &str, reason: &str) {
-        FAIL_REASONS.lock().unwrap().insert(old_id.to_string(), reason.to_string());
+        FAIL_REASONS
+            .lock()
+            .unwrap()
+            .insert(old_id.to_string(), reason.to_string());
     }
 
     fn on_failed(&self, chat_id: &str, old_id: &str, msg: &Message) {
         UPLOAD_CANCEL.lock().unwrap().remove(old_id);
         let reason = FAIL_REASONS.lock().unwrap().remove(old_id);
-        vector_core::emit_event("message_update", &json!({ "old_id": old_id, "message": msg, "chat_id": chat_id, "reason": reason }));
+        vector_core::emit_event(
+            "message_update",
+            &json!({ "old_id": old_id, "message": msg, "chat_id": chat_id, "reason": reason }),
+        );
     }
 
     fn on_persist(&self, chat_id: &str, msg: &Message) {
@@ -96,19 +122,30 @@ pub async fn send(receiver: String, content: String, replied_to: String) -> Resu
     if !receiver.starts_with("npub1") {
         return super::community::send(receiver, content, replied_to).await;
     }
-    let config = SendConfig { expiration: vector_core::self_destruct::resolve_send_expiry(&receiver), ..SendConfig::gui() };
+    let config = SendConfig {
+        expiration: vector_core::self_destruct::resolve_send_expiry(&receiver),
+        ..SendConfig::gui()
+    };
     let reply = (!replied_to.is_empty()).then_some(replied_to.as_str());
-    vector_core::sending::send_dm(&receiver, &content, reply, &config, Arc::new(Callback)).await.map(|_| ())
+    vector_core::sending::send_dm(&receiver, &content, reply, &config, Arc::new(Callback))
+        .await
+        .map(|_| ())
 }
 
 /// A page of a chat's messages, newest first, as the timeline renders them.
-pub async fn message_views(chat_id: String, limit: usize, offset: usize) -> Result<Vec<Message>, String> {
+pub async fn message_views(
+    chat_id: String,
+    limit: usize,
+    offset: usize,
+) -> Result<Vec<Message>, String> {
     let id = db::id_cache::get_chat_id_by_identifier(&chat_id)?;
     db::events::get_message_views(id, limit, offset).await
 }
 
 pub fn message_count(chat_id: &str) -> usize {
-    db::id_cache::get_chat_id_by_identifier(chat_id).and_then(db::events::get_chat_message_count).unwrap_or(0)
+    db::id_cache::get_chat_id_by_identifier(chat_id)
+        .and_then(db::events::get_chat_message_count)
+        .unwrap_or(0)
 }
 
 /// The chat the user has open: what arrives there is read on arrival.
@@ -119,7 +156,9 @@ pub fn set_active_chat(chat_id: Option<String>) {
 pub async fn mark_as_read(chat_id: String, message_id: Option<String>) -> bool {
     let slim = {
         let mut state = STATE.lock().await;
-        let Some(idx) = state.chats.iter().position(|c| c.id == chat_id) else { return false };
+        let Some(idx) = state.chats.iter().position(|c| c.id == chat_id) else {
+            return false;
+        };
         let changed = match &message_id {
             Some(id) => {
                 state.chats[idx].mark_read_at(vector_core::compact::encode_message_id(id));
@@ -155,13 +194,18 @@ pub async fn unread_counts() -> HashMap<String, u32> {
 /// A chat as state holds it, for one the UI hasn't seen yet.
 pub async fn chat_snapshot(chat_id: String) -> Option<vector_core::SerializableChat> {
     let state = STATE.lock().await;
-    state.get_chat(&chat_id).map(|c| c.to_serializable(&state.interner))
+    state
+        .get_chat(&chat_id)
+        .map(|c| c.to_serializable(&state.interner))
 }
 
 /// A file DM's settings: the chat's self-destruct lifespan rides along and is stamped once
 /// the upload is done, so the clock starts at publish.
 fn file_send_config(receiver: &str) -> SendConfig {
-    SendConfig { self_destruct_secs: vector_core::self_destruct::chat_duration_secs(receiver), ..SendConfig::gui() }
+    SendConfig {
+        self_destruct_secs: vector_core::self_destruct::chat_duration_secs(receiver),
+        ..SendConfig::gui()
+    }
 }
 
 const IMAGE_EXTS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp", "tiff", "tif", "ico"];
@@ -182,8 +226,16 @@ pub async fn send_file(
     }
     let reply = (!replied_to.is_empty()).then_some(replied_to.as_str());
     let config = file_send_config(&receiver);
-    let extension = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
-    let mut name = path.file_name().and_then(|n| n.to_str()).unwrap_or("").to_string();
+    let extension = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    let mut name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("")
+        .to_string();
     if !name_override.is_empty() {
         let clean = vector_core::crypto::sanitize_filename(&name_override);
         if !clean.is_empty() {
@@ -197,14 +249,31 @@ pub async fn send_file(
             Err(e) => return Err(format!("Failed to read file metadata: {e}")),
         }
         let source = vector_core::sending::FileSource::Path(path);
-        return vector_core::sending::send_file_dm_from(&receiver, source, &name, &extension, None, None, reply, &config, Arc::new(Callback))
-            .await
-            .map(|_| ());
+        return vector_core::sending::send_file_dm_from(
+            &receiver,
+            source,
+            &name,
+            &extension,
+            None,
+            None,
+            reply,
+            &config,
+            Arc::new(Callback),
+        )
+        .await
+        .map(|_| ());
     }
     let (ext, file) = (extension.clone(), path.clone());
     let processed = tokio::task::spawn_blocking(move || {
-        let bytes = Arc::new(std::fs::read(&file).map_err(|e| format!("Couldn't read the file: {e}"))?);
-        let out = crate::message::compression::process_image_for_send(bytes, &ext, compress, keep_metadata, precompressed);
+        let bytes =
+            Arc::new(std::fs::read(&file).map_err(|e| format!("Couldn't read the file: {e}"))?);
+        let out = crate::message::compression::process_image_for_send(
+            bytes,
+            &ext,
+            compress,
+            keep_metadata,
+            precompressed,
+        );
         crate::message::compression::forget_fitted();
         out
     })
@@ -230,15 +299,24 @@ pub async fn send_file(
 }
 
 /// The preview's background compression of a picked image.
-pub fn precompress(path: &std::path::Path) -> Result<crate::message::types::CachedCompressedImage, String> {
+pub fn precompress(
+    path: &std::path::Path,
+) -> Result<crate::message::types::CachedCompressedImage, String> {
     crate::message::precompress(path)
 }
 
 /// Whether a picked image carries strip-worthy metadata (location, camera, date).
 pub fn has_metadata(path: &std::path::Path) -> bool {
-    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
     if matches!(ext.as_str(), "jpg" | "jpeg" | "png") {
-        return std::fs::File::open(path).ok().and_then(|mut f| crate::shared::image::header_has_metadata(&mut f, &ext)).unwrap_or(false);
+        return std::fs::File::open(path)
+            .ok()
+            .and_then(|mut f| crate::shared::image::header_has_metadata(&mut f, &ext))
+            .unwrap_or(false);
     }
     std::fs::read(path).is_ok_and(|b| crate::shared::image::image_bytes_have_metadata(&b, &ext))
 }

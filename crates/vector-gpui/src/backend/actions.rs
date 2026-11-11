@@ -7,7 +7,7 @@ use std::sync::Arc;
 use nostr_sdk::prelude::{EventId, PublicKey};
 use serde_json::json;
 use vector_core::sending::{SendCallback, SendConfig};
-use vector_core::{db, VectorCore, STATE};
+use vector_core::{STATE, VectorCore, db};
 
 use super::messaging::Callback;
 
@@ -16,25 +16,53 @@ fn is_dm(chat_id: &str) -> bool {
 }
 
 fn emit_removed(id: &str, chat_id: &str) {
-    vector_core::emit_event("message_removed", &json!({ "id": id, "chat_id": chat_id, "reason": "deleted" }));
+    vector_core::emit_event(
+        "message_removed",
+        &json!({ "id": id, "chat_id": chat_id, "reason": "deleted" }),
+    );
 }
 
-pub async fn react(chat_id: String, reference: String, emoji: String, url: Option<String>) -> Result<(), String> {
+pub async fn react(
+    chat_id: String,
+    reference: String,
+    emoji: String,
+    url: Option<String>,
+) -> Result<(), String> {
     if !is_dm(&chat_id) {
-        return super::community::control(&chat_id, &reference, super::community::Control::React(&emoji, url.as_deref())).await;
+        return super::community::control(
+            &chat_id,
+            &reference,
+            super::community::Control::React(&emoji, url.as_deref()),
+        )
+        .await;
     }
-    VectorCore.send_reaction(&chat_id, &reference, &emoji, url.as_deref()).await.map(|_| ()).map_err(|e| e.to_string())
+    VectorCore
+        .send_reaction(&chat_id, &reference, &emoji, url.as_deref())
+        .await
+        .map(|_| ())
+        .map_err(|e| e.to_string())
 }
 
 pub async fn edit(chat_id: String, message_id: String, content: String) -> Result<(), String> {
     if !is_dm(&chat_id) {
-        return super::community::control(&chat_id, &message_id, super::community::Control::Edit(&content)).await;
+        return super::community::control(
+            &chat_id,
+            &message_id,
+            super::community::Control::Edit(&content),
+        )
+        .await;
     }
-    VectorCore.edit_dm(&chat_id, &message_id, &content).await.map(|_| ()).map_err(|e| e.to_string())
+    VectorCore
+        .edit_dm(&chat_id, &message_id, &content)
+        .await
+        .map(|_| ())
+        .map_err(|e| e.to_string())
 }
 
 async fn reconcile_unread(chat_id: &str) {
-    let count = db::events::unread_count_for_chat(chat_id).await.unwrap_or(0);
+    let count = db::events::unread_count_for_chat(chat_id)
+        .await
+        .unwrap_or(0);
     {
         let mut state = STATE.lock().await;
         if state.unread_seeded {
@@ -46,11 +74,16 @@ async fn reconcile_unread(chat_id: &str) {
 
 /// Deletes a DM from the relays (ours by our key, theirs by asking their clients).
 pub async fn delete(message_id: String) -> Result<(), String> {
-    let (chat_id, msg) = VectorCore.get_message(&message_id).await.ok_or_else(|| format!("Message not found (id: {message_id})"))?;
+    let (chat_id, msg) = VectorCore
+        .get_message(&message_id)
+        .await
+        .ok_or_else(|| format!("Message not found (id: {message_id})"))?;
     if !is_dm(&chat_id) {
-        return super::community::control(&chat_id, &message_id, super::community::Control::Delete).await;
+        return super::community::control(&chat_id, &message_id, super::community::Control::Delete)
+            .await;
     }
-    let rumor_id = EventId::from_hex(&message_id).map_err(|e| format!("Invalid message id: {e}"))?;
+    let rumor_id =
+        EventId::from_hex(&message_id).map_err(|e| format!("Invalid message id: {e}"))?;
     if msg.mine {
         vector_core::delete_own_dm(&rumor_id).await?;
     } else {
@@ -91,7 +124,11 @@ pub async fn delete_failed(message_id: String) -> Result<(), String> {
             let _ = tokio::fs::remove_file(&att.path).await;
         }
     }
-    let urls: Vec<String> = msg.attachments.iter().flat_map(|a| a.all_urls().map(str::to_string)).collect();
+    let urls: Vec<String> = msg
+        .attachments
+        .iter()
+        .flat_map(|a| a.all_urls().map(str::to_string))
+        .collect();
     let urls = db::attachments::urls_unreferenced_elsewhere(&urls, &message_id).unwrap_or_default();
     if !urls.is_empty() {
         if let Ok(signer) = vector_core::signer::active_signer() {
@@ -104,39 +141,59 @@ pub async fn delete_failed(message_id: String) -> Result<(), String> {
 }
 
 pub async fn retry(receiver: String, message_id: String) -> Result<bool, String> {
-    let failed = VectorCore.get_message(&message_id).await.is_some_and(|(_, m)| m.failed);
+    let failed = VectorCore
+        .get_message(&message_id)
+        .await
+        .is_some_and(|(_, m)| m.failed);
     if !failed {
         return Err("Message is not failed or does not exist".into());
     }
     let callback: Arc<dyn SendCallback> = Arc::new(Callback);
-    vector_core::sending::resend_failed_dm(&receiver, &message_id, &SendConfig::gui(), callback).await
+    vector_core::sending::resend_failed_dm(&receiver, &message_id, &SendConfig::gui(), callback)
+        .await
 }
 
 /// Takes back one of our reactions.
 pub async fn unreact(reaction_id: String) -> Result<(), String> {
     let found = STATE.lock().await.find_reaction(&reaction_id);
-    let (chat_id, message_id, author, is_community) = found.ok_or_else(|| format!("Reaction not found (id: {reaction_id})"))?;
+    let (chat_id, message_id, author, is_community) =
+        found.ok_or_else(|| format!("Reaction not found (id: {reaction_id})"))?;
     if author != db::get_current_account()? {
         return Err("Cannot revoke a reaction that isn't yours".into());
     }
     if is_community {
         return Err("Community reactions aren't available in this client yet".into());
     }
-    let updated = STATE.lock().await.remove_reaction_from_message(&message_id, &reaction_id);
+    let updated = STATE
+        .lock()
+        .await
+        .remove_reaction_from_message(&message_id, &reaction_id);
     let _ = db::events::delete_event(&reaction_id).await;
     if let Some((_, message)) = updated {
-        vector_core::emit_event("message_update", &json!({ "old_id": message_id, "message": message, "chat_id": chat_id }));
+        vector_core::emit_event(
+            "message_update",
+            &json!({ "old_id": message_id, "message": message, "chat_id": chat_id }),
+        );
     }
     let rid = EventId::from_hex(&reaction_id).map_err(|e| format!("Invalid reaction id: {e}"))?;
-    let recipient = PublicKey::parse(&chat_id).map_err(|e| format!("Invalid DM counterpart: {e}"))?;
-    vector_core::deletion::delete_own_reaction(&rid, recipient).await.map(|_| ())
+    let recipient =
+        PublicKey::parse(&chat_id).map_err(|e| format!("Invalid DM counterpart: {e}"))?;
+    vector_core::deletion::delete_own_reaction(&rid, recipient)
+        .await
+        .map(|_| ())
 }
 
 /// The account's stock emoji by decayed use, for the picker's recents.
 pub fn emoji_usage() -> std::collections::HashMap<String, f64> {
     vector_core::emoji_usage::ranked(Some(256))
         .into_iter()
-        .map(|u| if u.kind == "custom" { (format!(":{}:", u.id), u.score) } else { (u.id, u.score) })
+        .map(|u| {
+            if u.kind == "custom" {
+                (format!(":{}:", u.id), u.score)
+            } else {
+                (u.id, u.score)
+            }
+        })
         .collect()
 }
 
@@ -151,7 +208,11 @@ pub fn bump_emoji(emoji: &str) {
 const KAOMOJI_RECENTS: &str = "kaomoji_recents";
 
 pub fn kaomoji_recents() -> Vec<String> {
-    vector_core::db::settings::get_sql_setting(KAOMOJI_RECENTS.into()).ok().flatten().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default()
+    vector_core::db::settings::get_sql_setting(KAOMOJI_RECENTS.into())
+        .ok()
+        .flatten()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
 }
 
 pub fn set_kaomoji_recents(recents: Vec<String>) {
@@ -165,8 +226,16 @@ pub fn bump_emoji_batch(emoji: Vec<String>, custom: Vec<(String, String)>) {
     use vector_core::emoji_usage::EmojiUse;
     let uses: Vec<_> = emoji
         .into_iter()
-        .map(|id| EmojiUse { kind: "unicode".into(), id, url: None })
-        .chain(custom.into_iter().map(|(id, url)| EmojiUse { kind: "custom".into(), id, url: Some(url) }))
+        .map(|id| EmojiUse {
+            kind: "unicode".into(),
+            id,
+            url: None,
+        })
+        .chain(custom.into_iter().map(|(id, url)| EmojiUse {
+            kind: "custom".into(),
+            id,
+            url: Some(url),
+        }))
         .collect();
     let _ = vector_core::emoji_usage::bump_batch(&uses);
 }
