@@ -16,6 +16,7 @@ mod linkcard;
 mod login;
 mod markdown;
 mod media;
+mod newchat;
 #[allow(dead_code, clippy::all)]
 mod message;
 mod picker;

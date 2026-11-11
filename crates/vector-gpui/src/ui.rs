@@ -90,6 +90,7 @@ pub struct VectorApp {
     qr: Option<(std::sync::Arc<gpui::RenderImage>, gpui::FocusHandle)>,
     switcher: Option<crate::switcher::Switcher>,
     badge_card: Option<crate::badgecard::Card>,
+    new_chat: Option<crate::newchat::NewChat>,
     /// Add Profile is showing the login screen over this account: the account Back returns to,
     /// and whether the old session was already torn down for the new one.
     adding: Option<(String, bool)>,
@@ -176,6 +177,7 @@ impl VectorApp {
             qr: None,
             switcher: None,
             badge_card: None,
+            new_chat: None,
             adding: None,
         }
     }
@@ -204,6 +206,21 @@ impl VectorApp {
                 .collect();
             if let Some(w) = held.get(n.saturating_sub(1)) {
                 app.on_profile(crate::profile::Act::Badge(*w), window, cx);
+            }
+        }
+        if let Ok(pick) = std::env::var("VECTOR_NEW_CHAT") {
+            app.open_new_chat(window, cx);
+            if let Ok(n) = pick.parse::<usize>()
+                && n > 0
+            {
+                let first = {
+                    let nc = app.new_chat.as_ref().unwrap();
+                    let store = app.store.borrow();
+                    crate::newchat::rows_for(nc, &store).get(n - 1).cloned()
+                };
+                if let Some(npub) = first {
+                    app.on_new_chat(crate::newchat::Act::Toggle(npub), window, cx);
+                }
             }
         }
         if let Ok(mode) = std::env::var("VECTOR_SWITCHER") {
@@ -534,6 +551,7 @@ impl VectorApp {
 
     fn open_chat(&mut self, id: SharedString, window: &mut Window, cx: &mut Context<Self>) {
         self.profile = None;
+        self.new_chat = None;
         self.read_anchor = self.store.borrow().chat(&id).map(|c| c.last_read.clone());
         self.open = Some(id.clone());
         let count = self.rebuild_rows();
@@ -1009,6 +1027,14 @@ impl Render for VectorApp {
                 }))
                 .child(chat_list(&self.store, &store, self.open.clone(), cx))
                 .child(match (&self.profile, self.open.clone()) {
+                    _ if self.new_chat.is_some() => {
+                        let app = cx.entity().downgrade();
+                        let on: crate::newchat::OnAct = Rc::new(move |act, window, cx| {
+                            app.update(cx, |app, cx| app.on_new_chat(act, window, cx)).ok();
+                        });
+                        let width = f32::from(window.viewport_size().width) - RAIL_W - LIST_W;
+                        div().flex_1().min_w_0().h_full().child(crate::newchat::view(self.new_chat.as_ref().unwrap(), &store, width, &on, cx)).into_any_element()
+                    }
                     (Some(p), _) => {
                         let app = cx.entity().downgrade();
                         let on: crate::profile::OnAct = Rc::new(move |act, window, cx| {
@@ -1387,6 +1413,7 @@ fn chat_list(shared: &Shared, store: &Store, open: Option<SharedString>, cx: &mu
                 .child(div().font_weight(FontWeight::SEMIBOLD).text_color(c(0xffffff)).child("Chats"))
                 .child(
                     div()
+                        .id("chatlist-new")
                         .size(px(32.))
                         .rounded(px(8.))
                         .border_1()
@@ -1394,6 +1421,8 @@ fn chat_list(shared: &Shared, store: &Store, open: Option<SharedString>, cx: &mu
                         .flex()
                         .items_center()
                         .justify_center()
+                        .cursor_pointer()
+                        .on_click(cx.listener(|app, _, window, cx| app.open_new_chat(window, cx)))
                         .child(svg().path("ui/plus-thin.svg").size(px(16.)).text_color(c(ICON_MUTED))),
                 ),
         )
@@ -2115,6 +2144,7 @@ impl VectorApp {
 impl VectorApp {
     fn open_profile(&mut self, npub: String, cx: &mut Context<Self>) {
         let back = self.open.take();
+        self.new_chat = None;
         if self.live {
             backend::prefs::refresh(npub.clone());
         }
@@ -2365,6 +2395,87 @@ impl VectorApp {
             .ok();
         })
         .detach();
+    }
+
+    fn open_new_chat(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let filter = cx.new(|cx| {
+            TextInput::new("Search (paste npub, invite link, etc.)", cx).with_look(crate::composer::Look { placeholder: white_a(0.35), ..kit::field_look() })
+        });
+        cx.subscribe_in(&filter, window, |app, input, _: &crate::composer::InputChanged, _, cx| {
+            let text = input.read(cx).text().to_string();
+            app.pasted_npub(&text, cx);
+            cx.notify();
+        })
+        .detach();
+        window.focus(&filter.focus_handle(cx), cx);
+        let dm: Option<HashSet<String>> = if self.live {
+            None
+        } else {
+            Some(self.store.borrow().chats.iter().filter(|c| matches!(c.chat_type, vector_core::ChatType::DirectMessage)).map(|c| c.id.clone()).collect())
+        };
+        self.profile = None;
+        self.switcher = None;
+        self.new_chat = Some(crate::newchat::NewChat { filter, picked: None, strangers: Vec::new(), contacts: dm });
+        if self.live {
+            let rx = backend::run(async { vector_core::db::events::get_dm_contact_npubs().unwrap_or_default() });
+            cx.spawn(async move |this, cx| {
+                let Ok(list) = rx.await else { return };
+                this.update(cx, |this, cx| {
+                    if let Some(n) = this.new_chat.as_mut() {
+                        n.contacts = Some(list.into_iter().collect());
+                        cx.notify();
+                    }
+                })
+                .ok();
+            })
+            .detach();
+        }
+        cx.notify();
+    }
+
+    /// A pasted npub is picked: a known profile directly, anyone else as a stranger whose
+    /// profile is fetched.
+    fn pasted_npub(&mut self, text: &str, cx: &mut Context<Self>) {
+        let Some(npub) = crate::newchat::extract_npub(text) else { return };
+        let Some(n) = self.new_chat.as_mut() else { return };
+        let store = self.store.borrow();
+        if npub == store.my_npub {
+            return;
+        }
+        let known = store.profiles.contains_key(&npub);
+        drop(store);
+        n.picked = Some(npub.clone());
+        if known || n.strangers.contains(&npub) {
+            return;
+        }
+        n.strangers.push(npub.clone());
+        if self.live {
+            let _ = backend::run(async move { vector_core::profile::sync::load_profile(npub, &sync::ProfileHandler).await });
+        }
+        cx.notify();
+    }
+
+    fn on_new_chat(&mut self, act: crate::newchat::Act, window: &mut Window, cx: &mut Context<Self>) {
+        use crate::newchat::Act;
+        let Some(n) = self.new_chat.as_mut() else { return };
+        match act {
+            Act::Toggle(npub) => {
+                n.picked = if n.picked.as_ref() == Some(&npub) { None } else { Some(npub) };
+                cx.notify();
+            }
+            Act::Start => {
+                let Some(npub) = n.picked.clone() else { return };
+                self.new_chat = None;
+                self.store.borrow_mut().ensure_dm(&npub);
+                self.open_chat(npub.into(), window, cx);
+            }
+            Act::Cancel => {
+                self.new_chat = None;
+                self.open = None;
+                cx.notify();
+            }
+            Act::Hub => cx.open_url("https://vectorapp.io/hub"),
+        }
     }
 
     /// Fixtures: ourselves and the first two contacts by name, as the reference mock lists them.

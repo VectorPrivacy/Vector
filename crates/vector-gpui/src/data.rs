@@ -98,6 +98,16 @@ impl Store {
         self.chats.iter().find(|c| c.id == id)
     }
 
+    /// A DM opens before its first message: an empty chat until one lands.
+    pub fn ensure_dm(&mut self, npub: &str) {
+        if self.chat(npub).is_none() {
+            let mut interner = vector_core::compact::NpubInterner::new();
+            let chat = vector_core::chat::Chat::new_dm(npub.to_string(), &mut interner);
+            self.chats.push(chat.to_serializable(&interner));
+            self.resort();
+        }
+    }
+
     pub fn chat_mut(&mut self, id: &str) -> Option<&mut SerializableChat> {
         self.chats.iter_mut().find(|c| c.id == id)
     }

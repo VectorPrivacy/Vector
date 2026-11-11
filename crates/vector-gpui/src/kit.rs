@@ -310,3 +310,9 @@ pub fn sharp_svg(path: impl Into<SharedString>, size: f32, window: &Window, cx: 
         None => gpui::img(path).size(px(size)),
     }
 }
+
+/// `--page-gutter` for a pane `width` wide: a share of the pane that gives way first as it
+/// narrows, holding the content at 584px, then falls to 18px.
+pub fn page_gutter(width: f32) -> f32 {
+    (width * 0.18).min((width - 584.) / 2.).max(18.)
+}
