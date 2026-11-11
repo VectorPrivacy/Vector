@@ -47,6 +47,8 @@ pub enum Act {
     View(crate::viewer::Open),
     /// An invite card's button: join its Community, or open it once joined.
     Invite(String),
+    /// A Nostr card's controls.
+    Embed(crate::embeds::Act),
 }
 
 pub type OnAct = Rc<dyn Fn(&str, Act, &mut Window, &mut App)>;
@@ -163,6 +165,7 @@ pub fn message_row(ctx: &Ctx, index: usize, first: bool, gap: f32) -> AnyElement
             .child(content(ctx, m))
             .children(crate::attachments::attachments(ctx, m))
             .when(!ctx.held && !m.content.is_empty(), |d| d.children(crate::newchat::invite_card_keys(&m.content).into_iter().map(|k| invite_card(ctx, m, k))))
+            .children(crate::embeds::cards(ctx, m))
             .children(crate::linkcard::card(ctx, m)),
     );
     if let Some(reason) = ctx.fail_reasons.get(&m.id).filter(|_| failed) {
@@ -216,7 +219,12 @@ fn content(ctx: &Ctx, m: &Message) -> AnyElement {
     let id = m.id.clone();
     let act = ctx.on_act.clone();
     let click: OnClick = Rc::new(move |t, w, cx| act(&id, Act::Text(t), w, cx));
-    let text = crate::newchat::replace_invite_links(&m.content, "");
+    let mut text = crate::newchat::replace_invite_links(&m.content, "");
+    if !ctx.held && !ctx.media.borrow().web_previews_off {
+        if let std::borrow::Cow::Owned(s) = crate::embeds::strip(&text) {
+            text = s.into();
+        }
+    }
 
     // Emoji-only, up to six: jumbo glyphs (`.dmsg-emoji-only`).
     let headed = text.lines().any(|l| {
@@ -404,7 +412,7 @@ fn block(b: &Block, key: &str, click: &OnClick, clock: f32) -> AnyElement {
             .border_l(px(3.))
             .border_color(c(ACCENT))
             .pl(px(12.))
-            .child(stack(inner, key, click, clock))
+            .child(stack(inner, key, click, clock, TEXT_LH))
             .into_any_element(),
         Block::List { start, items } => {
             let mut col = div().flex().flex_col().pl(px(24.));
@@ -435,7 +443,7 @@ fn block(b: &Block, key: &str, click: &OnClick, clock: f32) -> AnyElement {
                         .relative()
                         .when(i > 0, |d| d.mt(px(4.)))
                         .child(marker)
-                        .child(stack(item, &format!("{key}-{i}"), click, clock)),
+                        .child(stack(item, &format!("{key}-{i}"), click, clock, TEXT_LH)),
                 );
             }
             col.into_any_element()
@@ -446,14 +454,14 @@ fn block(b: &Block, key: &str, click: &OnClick, clock: f32) -> AnyElement {
 }
 
 /// Blocks inside a quote or list item, spaced as at the top level.
-fn stack(blocks: &[Block], key: &str, click: &OnClick, clock: f32) -> AnyElement {
+pub fn stack(blocks: &[Block], key: &str, click: &OnClick, clock: f32, lh: f32) -> AnyElement {
     let mut col = div().flex().flex_col();
     let mut prev: Option<(f32, bool)> = None;
     for (i, b) in blocks.iter().enumerate() {
         let (top, bottom) = margins(b, i == 0, i + 1 == blocks.len());
         let is_para = matches!(b, Block::Para(p) if p.kind == ParaKind::Text);
         let gap = match prev {
-            Some((_, true)) if is_para => TEXT_LH,
+            Some((_, true)) if is_para => lh,
             Some((pb, _)) => pb.max(top),
             None => 0.,
         };

@@ -14,6 +14,7 @@ mod composer;
 mod crop;
 mod cropper;
 mod data;
+mod embeds;
 mod emoji;
 mod filepreview;
 mod highlight;

@@ -53,13 +53,14 @@ pub fn logo(store: &Store, id: &str, size: f32, radius: f32) -> gpui::Img {
         None => img("icons/group-placeholder.svg"),
     }
     .size(px(size))
+    .aspect_ratio(1.)
     .rounded(px(radius))
     .flex_shrink_0()
 }
 
 /// `.banner-art`: a banner cut to the 238 x 70 template at `width`, grey until it paints.
 pub fn banner_art(path: std::path::PathBuf, width: f32) -> gpui::Img {
-    img(path).w(px(width)).h(px(width * 70. / 238.)).bg(c(0x484848)).object_fit(gpui::ObjectFit::Cover)
+    img(path).w(px(width)).h(px(width * 70. / 238.)).aspect_ratio(238. / 70.).bg(c(0x484848)).object_fit(gpui::ObjectFit::Cover)
 }
 
 fn click(on: &OnAct, act: impl Fn() -> Act + 'static) -> impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static {

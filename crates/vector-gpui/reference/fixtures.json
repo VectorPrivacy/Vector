@@ -1348,6 +1348,48 @@
      "edited": false
     },
     {
+     "id": "e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0",
+     "content": "Have you seen this? nostr:note1wg33qsaurqr7da6qkg67kag3ajeny4dx5d65x433r9k732t4p49sk04fpd",
+     "replied_to": "",
+     "preview_metadata": null,
+     "attachments": [],
+     "reactions": [],
+     "at": 1790903820000,
+     "pending": false,
+     "failed": false,
+     "mine": false,
+     "npub": "npub1qk3nrfl57xffl2k29zdxd7vdtgzm8p7ee045lrpdmqsy56cz8g2qqxdt9s",
+     "edited": false
+    },
+    {
+     "id": "e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1",
+     "content": "Great write-up https://njump.me/naddr1qqx8yetvv9uj6er9wd5kwmszyq4aspkf0u8qptc6rlpn9ra8vw5jd9ererdcltz0jwhhrkccd4hfqqcyqqq823cyhyg2k",
+     "replied_to": "",
+     "preview_metadata": null,
+     "attachments": [],
+     "reactions": [],
+     "at": 1790903880000,
+     "pending": false,
+     "failed": false,
+     "mine": true,
+     "npub": "npub1yazve5gvw5em6um2mzg0nh2u4v4dkfas04gqh9yn72wdcssvktsqfmmmv4",
+     "edited": false
+    },
+    {
+     "id": "e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2",
+     "content": "nostr:nevent1qqsqe2cujct5qna09vjwyg0p3899j3vp8c2d8amxx3dsnjsnh03gllqzyzqmvd7clnfvdknrt8nfvvgn5ytsmeu4ujmjtwzdrc95elv7ckxwjqcyqqqgtwc9z4mnx and this one nostr:nevent1qqs0lf34s006vurtslfgfwrtp45n59s7fpq245k9ea446f7rh93p7lgrqsqqqqqpguxfpx",
+     "replied_to": "",
+     "preview_metadata": null,
+     "attachments": [],
+     "reactions": [],
+     "at": 1790903940000,
+     "pending": false,
+     "failed": false,
+     "mine": false,
+     "npub": "npub1qk3nrfl57xffl2k29zdxd7vdtgzm8p7ee045lrpdmqsy56cz8g2qqxdt9s",
+     "edited": false
+    },
+    {
      "id": "c33c8607c4f223f4233f68b92e7fef6b309201b87fb34d1bdfa18e4e13752e76",
      "content": "See you on Saturday",
      "replied_to": "",
@@ -2640,5 +2682,92 @@
     }
    }
   ]
+ },
+ "embeds": {
+  "note1wg33qsaurqr7da6qkg67kag3ajeny4dx5d65x433r9k732t4p49sk04fpd": {
+   "published_at": null,
+   "title": null,
+   "summary": null,
+   "image": null,
+   "media": [
+    {
+     "url": "media/photo.png",
+     "is_video": false,
+     "mime": "image/png",
+     "width": 640,
+     "height": 480,
+     "size": null,
+     "duration": null,
+     "poster": null,
+     "sha256": null,
+     "fallbacks": []
+    },
+    {
+     "url": "media/portrait.png",
+     "is_video": false,
+     "mime": "image/png",
+     "width": 480,
+     "height": 640,
+     "size": null,
+     "duration": null,
+     "poster": null,
+     "sha256": null,
+     "fallbacks": []
+    }
+   ],
+   "video": null,
+   "link": null,
+   "content_warning": null,
+   "emoji": [],
+   "reposted_by": null,
+   "reply_to": null,
+   "class": "post",
+   "kind": 1,
+   "id": "7272727272727272727272727272727272727272727272727272727272727272",
+   "author": "npub190vqdjtlpcq27xslcveglfmr4ynfwg7gmw86cnun4acakxrdd6gqnp929a",
+   "created_at": 1794355200,
+   "text": "Shipped the new relay picker today. **Tor routing** is on by default for every new account, and it is *so* much faster than I expected 🚀",
+   "bech32": "note1wg33qsaurqr7da6qkg67kag3ajeny4dx5d65x433r9k732t4p49sk04fpd"
+  },
+  "naddr1qqx8yetvv9uj6er9wd5kwmszyq4aspkf0u8qptc6rlpn9ra8vw5jd9ererdcltz0jwhhrkccd4hfqqcyqqq823cyhyg2k": {
+   "published_at": 1794190000,
+   "title": "Designing relays for privacy first",
+   "summary": "Why every connection in Vector goes through one transport layer, and what failing closed buys you when a network is hostile.",
+   "image": "media/devs-banner.png",
+   "media": [],
+   "video": null,
+   "link": null,
+   "content_warning": null,
+   "emoji": [],
+   "reposted_by": null,
+   "reply_to": null,
+   "class": "article",
+   "kind": 30023,
+   "id": "abababababababababababababababababababababababababababababababab",
+   "author": "npub190vqdjtlpcq27xslcveglfmr4ynfwg7gmw86cnun4acakxrdd6gqnp929a",
+   "created_at": 1794200000,
+   "text": "# Designing relays\n\nLong body.",
+   "bech32": "naddr1qqx8yetvv9uj6er9wd5kwmszyq4aspkf0u8qptc6rlpn9ra8vw5jd9ererdcltz0jwhhrkccd4hfqqcyqqq823cyhyg2k"
+  },
+  "nevent1qqsqe2cujct5qna09vjwyg0p3899j3vp8c2d8amxx3dsnjsnh03gllqzyzqmvd7clnfvdknrt8nfvvgn5ytsmeu4ujmjtwzdrc95elv7ckxwjqcyqqqgtwc9z4mnx": {
+   "published_at": null,
+   "title": "Vector in five minutes",
+   "summary": null,
+   "image": "media/photo.png",
+   "media": [],
+   "video": null,
+   "link": "https://www.youtube.com/watch?v=aqz-KE-bpKQ",
+   "content_warning": null,
+   "emoji": [],
+   "reposted_by": null,
+   "reply_to": null,
+   "class": "video",
+   "kind": 34235,
+   "id": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+   "author": "npub1sxmr0k8u6trd5c6eu6trzyapzux7090ykujmsng7pdx0m8k93n5sd02fwn",
+   "created_at": 1794300000,
+   "text": "A quick tour of private messaging on Nostr: accounts, Communities and calls.",
+   "bech32": "nevent1qqsqe2cujct5qna09vjwyg0p3899j3vp8c2d8amxx3dsnjsnh03gllqzyzqmvd7clnfvdknrt8nfvvgn5ytsmeu4ujmjtwzdrc95elv7ckxwjqcyqqqgtwc9z4mnx"
+  }
  }
 }

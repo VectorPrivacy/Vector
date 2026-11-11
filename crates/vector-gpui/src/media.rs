@@ -105,6 +105,10 @@ pub struct Media {
     pub meta_queue: Vec<(String, String)>,
     /// What fetches on sight: on, up to a size.
     pub auto_download: AutoDownload,
+    /// Nostr cards, by the references messages carry.
+    pub embeds: crate::embeds::Cache,
+    /// "Display Web Previews" turned off: no link or Nostr cards.
+    pub web_previews_off: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -194,9 +198,15 @@ pub fn pump<V: 'static>(media: &std::rc::Rc<std::cell::RefCell<Media>>, app: Wea
     for url in linked {
         let media = media.clone();
         let app = app.clone();
-        let rx = crate::backend::run(crate::backend::inline::image(url.clone()));
+        // A fixture's pictures are files beside it.
+        let local = (!live && !url.starts_with("https://")).then(|| std::path::PathBuf::from(&url));
+        let rx = local.is_none().then(|| crate::backend::run(crate::backend::inline::image(url.clone())));
         cx.spawn(async move |cx| {
-            let bytes = rx.await.ok().flatten();
+            let bytes = match (rx, local) {
+                (Some(rx), _) => rx.await.ok().flatten(),
+                (None, Some(path)) => cx.background_executor().spawn(async move { std::fs::read(path).ok() }).await,
+                _ => None,
+            };
             let decoded = match bytes {
                 Some(b) => {
                     let ext = crate::backend::inline::sniff(&b).unwrap_or("png");

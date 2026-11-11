@@ -1138,10 +1138,15 @@ impl VectorApp {
             sync::fetch_messages(true).await;
             sync::notifs();
         });
-        let rx = backend::run(async { backend::storage::auto_download() });
+        let rx = backend::run(async { (backend::storage::auto_download(), backend::prefs::sql_bools(&[("web_previews", true)])[0]) });
         cx.spawn(async move |this, cx| {
-            let Ok((on, limit)) = rx.await else { return };
-            this.update(cx, |this, _| this.media.borrow_mut().auto_download = crate::media::AutoDownload { on, limit }).ok();
+            let Ok(((on, limit), previews)) = rx.await else { return };
+            this.update(cx, |this, _| {
+                let mut media = this.media.borrow_mut();
+                media.auto_download = crate::media::AutoDownload { on, limit };
+                media.web_previews_off = !previews;
+            })
+            .ok();
         })
         .detach();
         cx.notify();
@@ -1429,6 +1434,7 @@ impl VectorApp {
                 }
             }
             Act::Text(t) => self.on_text(id, t, cx),
+            Act::Embed(a) => self.on_embed(a, window, cx),
             Act::Hover(true) => {
                 self.hover_gen += 1;
                 if self.hovered.as_deref() != Some(id.as_str()) {
@@ -2720,7 +2726,7 @@ fn preview_line(chat: &SerializableChat, color: gpui::Hsla) -> AnyElement {
         if !prefix.is_empty() {
             v.push(crate::inline::Atom::Text { text: prefix.into(), look: look.clone(), kind: crate::inline::Kind::Plain });
         }
-        v.extend(crate::preview::atoms(&m.content, usize::MAX, &look));
+        v.extend(crate::preview::atoms(&crate::embeds::for_preview(&m.content), usize::MAX, &look));
         v
     };
     crate::inline::inline(atoms, look).single_line().into_any_element()
@@ -2975,6 +2981,13 @@ impl VectorApp {
             // `.chat-rows > *:last-child`: clear of the typing strip.
             let el = if i + 1 == rows.len() { div().pb(px(33.)).child(el).into_any_element() } else { el };
             crate::media::pump(&media, app_media.clone(), live, cx);
+            let embeds = std::mem::take(&mut media.borrow_mut().embeds.queue);
+            if !embeds.is_empty() {
+                let app = app_media.clone();
+                cx.defer(move |cx| {
+                    app.update(cx, |app, cx| app.fetch_embeds(embeds, cx)).ok();
+                });
+            }
             let metas = std::mem::take(&mut media.borrow_mut().meta_queue);
             if live {
                 for (chat, msg) in metas {
@@ -5056,6 +5069,62 @@ impl VectorApp {
     }
 
     /// Looks up the invite links in the open chat, once per change to it.
+    fn fetch_embeds(&mut self, entities: Vec<String>, cx: &mut Context<Self>) {
+        for entity in entities {
+            if !self.live {
+                let fix = self.store.borrow().fixture_embeds.get(&entity).cloned();
+                let res = fix.ok_or_else(|| "Not found on any relay".to_string()).and_then(|v| serde_json::from_value(v).map_err(|e| e.to_string()));
+                self.media.borrow_mut().embeds.settle(&entity, res);
+                cx.notify();
+                continue;
+            }
+            let reference = entity.clone();
+            let rx = backend::run(async move { vector_core::nostr_embed::fetch(&reference).await });
+            cx.spawn(async move |this, cx| {
+                let res = match rx.await {
+                    Ok(r) => r.and_then(crate::embeds::Embed::from_core),
+                    Err(_) => return,
+                };
+                this.update(cx, |this, cx| {
+                    if let Ok(e) = &res {
+                        let store = this.store.borrow();
+                        let unknown: Vec<String> = [Some(&e.author), e.reposted_by.as_ref()].into_iter().flatten().filter(|n| !store.profiles.contains_key(*n)).cloned().collect();
+                        drop(store);
+                        for npub in unknown {
+                            let _ = backend::run(async move {
+                                vector_core::profile::sync::queue_profile_sync(npub, vector_core::profile::sync::SyncPriority::High, false)
+                            });
+                        }
+                    }
+                    this.media.borrow_mut().embeds.settle(&entity, res);
+                    cx.notify();
+                })
+                .ok();
+            })
+            .detach();
+        }
+    }
+
+    fn on_embed(&mut self, act: crate::embeds::Act, _window: &mut Window, cx: &mut Context<Self>) {
+        use crate::embeds::Act;
+        match act {
+            Act::OpenUrl(url) => cx.open_url(&url),
+            Act::Copy(text, label) => {
+                cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+                self.toast = Some((format!("{label} copied").into(), std::time::Instant::now()));
+            }
+            Act::Reveal(key) => {
+                self.media.borrow_mut().embeds.revealed.insert(key);
+            }
+            Act::Profile(npub) => self.open_profile(npub, cx),
+            Act::Ref(entity) | Act::Expand(entity) => {
+                let url = format!("https://njump.me/{entity}");
+                cx.open_url(&url);
+            }
+        }
+        cx.notify();
+    }
+
     fn scan_invites(&mut self, cx: &mut Context<Self>) {
         let keys = {
             let store = self.store.borrow();
@@ -6374,6 +6443,9 @@ impl VectorApp {
                 let Some(t) = crate::settings::toggle_of(key) else { return };
                 if key == "auto_download_enabled" {
                     self.media.borrow_mut().auto_download.on = value;
+                }
+                if key == "web_previews" {
+                    self.media.borrow_mut().web_previews_off = !value;
                 }
                 if key == "notif_global_mute" && value {
                     backend::sound::purge();
