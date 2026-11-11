@@ -497,3 +497,35 @@ pub fn banned(community_id: &str) -> Vec<String> {
 pub async fn invite(community_id: String, npub: String) -> Result<(), String> {
     db::scoped(async move { VectorCore.invite_to_community(&community_id, &npub).await.map(|_| ()).map_err(|e| e.to_string()) }).await
 }
+
+/// Invites parked for consent, newest first.
+pub async fn pending_invites() -> Vec<crate::data::RawInvite> {
+    db::scoped(async move {
+        db::community::list_pending_invites()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|i| crate::data::RawInvite {
+                community_id: i.community_id,
+                bundle_json: i.bundle_json,
+                inviter_npub: i.inviter_npub,
+                received_at: i.received_at,
+                sent_at: i.sent_at,
+                ends_at: i.ends_at,
+            })
+            .collect()
+    })
+    .await
+}
+
+pub async fn accept_invite(community_id: String) -> Result<(), String> {
+    db::scoped(async move {
+        VectorCore.accept_pending_invite(&community_id).await.map_err(|e| e.to_string())?;
+        super::emit("communities_changed", ());
+        Ok(())
+    })
+    .await
+}
+
+pub async fn decline_invite(community_id: String) -> Result<(), String> {
+    db::scoped(async move { VectorCore.decline_community_invite(&community_id).await.map(|_| ()).map_err(|e| e.to_string()) }).await
+}

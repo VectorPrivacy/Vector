@@ -1748,5 +1748,15 @@
     "npub1fsndjp6vylvfahjeyuxq4s2tw8s8rv2j89ge7a28fvhnhf35s86sg3uctf"
    ]
   }
+ ],
+ "invites": [
+  {
+   "community_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+   "inviter_npub": "npub1v84qsqlcs56j8dmh6s22eccnpn2d87fdutxhl7rftseh67wzamhqfv9ft6",
+   "bundle_json": "{\"name\": \"Night Owls\", \"channels\": [{\"id\": \"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\", \"name\": \"general\"}], \"relays\": [\"wss://jskitty.com/nostr\"]}",
+   "received_at": 1794358800,
+   "sent_at": 1794358700,
+   "ends_at": 1794880800
+  }
  ]
 }

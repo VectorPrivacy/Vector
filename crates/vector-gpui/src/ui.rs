@@ -95,6 +95,8 @@ pub struct VectorApp {
     new_chat: Option<crate::newchat::NewChat>,
     create_community: Option<crate::createcommunity::CreateCommunity>,
     invite: Option<crate::invite::Invite>,
+    /// The pending invite whose details show.
+    invite_details: Option<String>,
     /// Add Profile is showing the login screen over this account: the account Back returns to,
     /// and whether the old session was already torn down for the new one.
     adding: Option<(String, bool)>,
@@ -266,6 +268,7 @@ impl VectorApp {
             new_chat: None,
             create_community: None,
             invite: None,
+            invite_details: None,
             adding: None,
             requests_tab: false,
             tab_slid: false,
@@ -372,6 +375,14 @@ impl VectorApp {
                 f.open_transfer(send, cx);
                 f.transfer_state(&payload, cx);
             });
+        }
+        // Fixtures: VECTOR_INVITES=1 shows the Requests tab with its invites; =details opens the first.
+        if let Ok(v) = std::env::var("VECTOR_INVITES") {
+            app.requests_tab = true;
+            app.tab_slid = true;
+            if v == "details" {
+                app.invite_details = app.store.borrow().invites.first().map(|i| i.community_id.clone());
+            }
         }
         // Fixtures: VECTOR_CREATE_COMMUNITY=1|2|public|private, the step to show.
         if let Ok(step) = std::env::var("VECTOR_CREATE_COMMUNITY") {
@@ -1101,6 +1112,7 @@ impl VectorApp {
                 }
                 self.refresh_unread(cx);
                 self.reload_communities(cx);
+                self.reload_invites(cx);
             }
             UiEvent::Core(name, payload) => self.on_core_event(&name, payload, window, cx),
         }
@@ -1112,6 +1124,7 @@ impl VectorApp {
         let chat_id = payload.get("chat_id").and_then(Value::as_str).unwrap_or_default().to_string();
         match name {
             "communities_changed" | "community_refreshed" | "community_kicked" | "community_surfaced" => self.reload_communities(cx),
+            "community_invite_received" | "community_invites_purged" => self.reload_invites(cx),
             "transfer_state" => self.security.update(cx, |f, cx| f.transfer_state(&payload, cx)),
             "mic_level" => {
                 if let Some(a) = self.settings.as_mut().and_then(|s| s.audio.as_mut()).filter(|a| a.testing) {
@@ -1974,6 +1987,19 @@ impl Render for VectorApp {
             let proc_ = crate::call::Processing { auto_gain: a.auto_gain, echo_cancel: a.echo_cancel, noise_suppress: a.noise_suppress };
             crate::call::render(&self.call, &self.store.borrow(), &proc_, CHROME_H, &on)
         })
+        .children(self.invite_details.as_ref().and_then(|id| store.invites.iter().find(|i| &i.community_id == id)).map(|inv| {
+            let (a, b) = (inv.community_id.clone(), inv.community_id.clone());
+            crate::community::invite_details(
+                &store,
+                inv,
+                Box::new(cx.listener(|app, _, _, cx| {
+                    app.invite_details = None;
+                    cx.notify();
+                })),
+                Box::new(cx.listener(move |app, _, window, cx| app.answer_invite(a.clone(), true, window, cx))),
+                Box::new(cx.listener(move |app, _, window, cx| app.answer_invite(b.clone(), false, window, cx))),
+            )
+        }))
         .children(self.invite.as_ref().map(|m| {
             let app = cx.entity().downgrade();
             let on: crate::invite::OnAct = Rc::new(move |act, window, cx| {
@@ -2401,7 +2427,27 @@ fn chat_list(shared: &Shared, store: &Store, open: Option<SharedString>, (reques
     } else {
         bar.left(px(to)).into_any_element()
     };
-    let empty = if !ids.is_empty() {
+    let invites: Vec<AnyElement> = if requests {
+        store
+            .invites
+            .iter()
+            .filter(|i| !store.profiles.get(i.inviter.as_str()).is_some_and(|p| p.is_blocked))
+            .map(|inv| {
+                let id = inv.community_id.clone();
+                let (a, b, d) = (id.clone(), id.clone(), id);
+                crate::community::invite_row(
+                    inv,
+                    Box::new(cx.listener(move |app, _, window, cx| app.open_invite_details(d.clone(), window, cx))),
+                    Box::new(cx.listener(move |app, _, window, cx| app.answer_invite(a.clone(), true, window, cx))),
+                    Box::new(cx.listener(move |app, _, window, cx| app.answer_invite(b.clone(), false, window, cx))),
+                )
+                .into_any_element()
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let empty = if !ids.is_empty() || !invites.is_empty() {
         None
     } else if requests {
         // .cc-empty
@@ -2472,6 +2518,7 @@ fn chat_list(shared: &Shared, store: &Store, open: Option<SharedString>, (reques
                 .child(bar),
         )
         .children(empty)
+        .when(!invites.is_empty(), |d| d.child(div().pt(px(6.)).flex().flex_col().children(invites)))
         .child(
             div().flex_1().min_h_0().pt(px(6.)).child(
                 uniform_list("chatlist", count, move |range, _, _| {
@@ -3970,6 +4017,74 @@ impl VectorApp {
             }
         }
         cx.notify();
+    }
+
+    fn open_invite_details(&mut self, community: String, _window: &mut Window, cx: &mut Context<Self>) {
+        self.invite_details = Some(community);
+        cx.notify();
+    }
+
+    fn reload_invites(&mut self, cx: &mut Context<Self>) {
+        if !self.live {
+            return;
+        }
+        let rx = backend::run(backend::community::pending_invites());
+        cx.spawn(async move |this, cx| {
+            let Ok(list) = rx.await else { return };
+            this.update(cx, |this, cx| {
+                this.store.borrow_mut().invites = list.into_iter().map(data::Invite::from).collect();
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn answer_invite(&mut self, community: String, accept: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let _ = window;
+        self.invite_details = None;
+        let name = {
+            let mut store = self.store.borrow_mut();
+            let name = store.invites.iter().find(|i| i.community_id == community).map(|i| i.name.clone()).unwrap_or_default();
+            store.invites.retain(|i| i.community_id != community);
+            name
+        };
+        cx.notify();
+        if !self.live {
+            return;
+        }
+        if !accept {
+            let _ = backend::run(backend::community::decline_invite(community));
+            return;
+        }
+        self.toast = Some((format!("Joining {name}…").into(), std::time::Instant::now()));
+        let rx = backend::run(backend::community::accept_invite(community.clone()));
+        cx.spawn_in(window, async move |this, cx| {
+            let res = rx.await;
+            this.update_in(cx, |this, window, cx| match res {
+                Ok(Ok(())) => {
+                    let rx = backend::run(async { backend::community::list() });
+                    cx.spawn_in(window, async move |this, cx| {
+                        let Ok(list) = rx.await else { return };
+                        let list: Vec<data::Community> = list.into_iter().filter_map(|v| serde_json::from_value(v).ok()).collect();
+                        this.update_in(cx, |this, window, cx| {
+                            this.store.borrow_mut().communities = list;
+                            this.open_community(community, window, cx);
+                            cx.notify();
+                        })
+                        .ok();
+                    })
+                    .detach();
+                }
+                Ok(Err(e)) => {
+                    this.notice("Couldn't Join", e, cx);
+                    this.reload_invites(cx);
+                }
+                Err(_) => {}
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// Back to Messages: the chat list returns in place of the channels.

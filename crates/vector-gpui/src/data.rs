@@ -18,6 +18,57 @@ struct Fixtures {
     chats: Vec<SerializableChat>,
     #[serde(default)]
     communities: Vec<Community>,
+    #[serde(default)]
+    invites: Vec<RawInvite>,
+}
+
+/// `list_community_invites`' row: the bundle still as its JSON.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct RawInvite {
+    pub community_id: String,
+    pub bundle_json: String,
+    pub inviter_npub: String,
+    pub received_at: i64,
+    pub sent_at: i64,
+    pub ends_at: i64,
+}
+
+/// A Community invite waiting on Accept or Decline.
+#[derive(Clone, Debug, Default)]
+pub struct Invite {
+    pub community_id: String,
+    pub name: String,
+    pub inviter: String,
+    /// The owner's hex key, as the bundle carries it.
+    pub owner: Option<String>,
+    pub relays: Vec<String>,
+    pub received_at: i64,
+    pub sent_at: i64,
+    pub ends_at: i64,
+}
+
+impl From<RawInvite> for Invite {
+    fn from(r: RawInvite) -> Self {
+        #[derive(Deserialize, Default)]
+        #[serde(default)]
+        struct Bundle {
+            name: String,
+            owner: Option<String>,
+            relays: Vec<String>,
+        }
+        let b: Bundle = serde_json::from_str(&r.bundle_json).unwrap_or_default();
+        Self {
+            community_id: r.community_id,
+            name: if b.name.is_empty() { "Community".into() } else { b.name },
+            inviter: r.inviter_npub,
+            owner: b.owner,
+            relays: b.relays,
+            received_at: r.received_at,
+            sent_at: r.sent_at,
+            ends_at: r.ends_at,
+        }
+    }
 }
 
 /// One Community as `list_communities` summarises it.
@@ -95,6 +146,7 @@ pub struct Store {
     /// Request senders a Community we hold counts as a member: their pictures show.
     pub mutuals: std::collections::HashSet<String>,
     pub communities: Vec<Community>,
+    pub invites: Vec<Invite>,
 }
 
 impl Store {
@@ -117,6 +169,7 @@ impl Store {
             unread: None,
             mutuals: Default::default(),
             communities: f.communities,
+            invites: f.invites.into_iter().map(Invite::from).collect(),
         })
     }
 
@@ -131,6 +184,7 @@ impl Store {
             unread: Some(HashMap::new()),
             mutuals: Default::default(),
             communities: Vec::new(),
+            invites: Vec::new(),
         }
     }
 

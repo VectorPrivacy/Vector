@@ -464,3 +464,172 @@ pub fn author_badge(store: &Store, chat_id: &str, npub: &str) -> Option<AnyEleme
             .into_any_element()
     })
 }
+
+type Click = Box<dyn Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static>;
+
+/// `InviteRow.svelte`: a pending invite, shaped like the Community row it becomes.
+pub fn invite_row(inv: &crate::data::Invite, open: Click, accept: Click, decline: Click) -> impl IntoElement {
+    let button = |id: String, icon_path: &'static str, ink: gpui::Hsla, on: Click| {
+        div()
+            .id(SharedString::from(id))
+            .size(px(28.))
+            .flex_shrink_0()
+            .rounded_full()
+            .border_2()
+            .border_color(ink)
+            .flex()
+            .items_center()
+            .justify_center()
+            .cursor_pointer()
+            .hover(|d| d.bg(white_a(0.04)))
+            .on_click(move |e, w, cx| {
+                cx.stop_propagation();
+                on(e, w, cx)
+            })
+            .child(svg().path(icon_path).size(px(16.)).text_color(ink))
+    };
+    div()
+        .id(SharedString::from(format!("community-invite-{}", inv.community_id)))
+        .mx(px(7.))
+        .mb(px(4.))
+        .h(px(50.))
+        .flex_shrink_0()
+        .bg(white_a(0.05))
+        .flex()
+        .items_center()
+        .pl(px(5.))
+        .pr(px(15.))
+        .cursor_pointer()
+        .on_click(open)
+        .child(gpui::img("icons/group-placeholder.svg").size(px(40.)).rounded(px(7.56)).flex_shrink_0())
+        .child(
+            div()
+                .w(px(99.))
+                .flex_shrink_0()
+                .pl(px(10.))
+                .flex()
+                .flex_col()
+                .font_family(RUBIK)
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(6.))
+                        .child(div().min_w_0().truncate().text_size(px(15.)).line_height(px(20.)).text_color(c(0xffffff)).child(inv.name.clone()))
+                        .child(svg().path("icons/users-multi.svg").size(px(14.)).flex_shrink_0().text_color(white_a(0.55))),
+                )
+                .child(div().mt(px(-4.)).truncate().text_size(px(13.)).line_height(px(18.)).text_color(white_a(0.85)).child("Community invite")),
+        )
+        .child(
+            div()
+                .ml_auto()
+                .flex()
+                .gap(px(8.))
+                .child(button(format!("invite-accept-{}", inv.community_id), "icons/check.svg", c(ACCENT), accept))
+                .child(button(format!("invite-decline-{}", inv.community_id), "icons/x.svg", c(crate::timeline::DANGER), decline)),
+        )
+}
+
+/// `InviteDetails.svelte`: who sent a pending invite, when, and until when.
+pub fn invite_details(store: &Store, inv: &crate::data::Invite, close: Click, accept: Click, decline: Click) -> impl IntoElement {
+    let now = (store.now_ms() / 1000) as i64;
+    let person = |npub: &String| {
+        div()
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .min_w_0()
+            .child(crate::ui::avatar(store, npub, 22.))
+            .child(div().truncate().child(store.name(npub)))
+    };
+    let owner = inv
+        .owner
+        .as_deref()
+        .and_then(|h| nostr_sdk::prelude::PublicKey::from_hex(h).ok())
+        .and_then(|k| nostr_sdk::prelude::ToBech32::to_bech32(&k).ok())
+        .filter(|o| *o != inv.inviter);
+    let sent = if inv.sent_at > 0 { ("Sent", inv.sent_at) } else { ("Received", inv.received_at) };
+    let row = |first: bool, label: &'static str, value: AnyElement| {
+        div()
+            .h(px(42.))
+            .px(px(14.))
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap(px(12.))
+            .when(!first, |d| d.h(px(43.)).border_t_1().border_color(c(0x1e1e1e)))
+            .text_size(px(14.))
+            .line_height(px(24.))
+            .text_color(c(0xe8e8e8))
+            .child(div().flex_shrink_0().text_color(white_a(0.5)).child(label))
+            .child(value)
+    };
+    let button = |id: &'static str, label: &'static str, primary: bool, on: Click| {
+        div()
+            .id(id)
+            .flex_1()
+            .h(px(42.))
+            .rounded(px(8.))
+            .border_1()
+            .flex()
+            .items_center()
+            .justify_center()
+            .font_weight(FontWeight::SEMIBOLD)
+            .text_size(px(16.))
+            .cursor_pointer()
+            .hover(|d| d.opacity(0.85))
+            .map(|d| if primary { d.border_color(gpui::transparent_black()).bg(c(ACCENT)).text_color(c(0x000000)) } else { d.border_color(c(crate::timeline::DANGER)).text_color(c(0xffffff)) })
+            .on_click(on)
+            .child(label)
+    };
+    let card = div()
+        .id("invite-details")
+        .w(px(422.))
+        .p(px(21.))
+        .rounded(px(16.))
+        .border_1()
+        .border_color(c(0x262626))
+        .bg(ca(20, 20, 20, 0.95))
+        .shadow(vec![gpui::BoxShadow { color: ca(0, 0, 0, 0.4), offset: gpui::point(px(0.), px(8.)), blur_radius: px(32.), spread_radius: px(0.), inset: false }])
+        .occlude()
+        .on_click(|_, _, cx| cx.stop_propagation())
+        .flex()
+        .flex_col()
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .items_center()
+                .child(img("icons/group-placeholder.svg").size(px(72.)).rounded_full())
+                .child(div().mt(px(12.)).max_w_full().truncate().font_weight(FontWeight::BOLD).text_size(px(20.)).line_height(px(24.)).text_color(c(0xffffff)).child(inv.name.clone()))
+                .child(div().mt(px(4.)).text_size(px(13.)).line_height(px(24.)).text_color(white_a(0.5)).child("Community invite")),
+        )
+        .child(
+            div()
+                .mt(px(15.))
+                .rounded(px(12.))
+                .border_1()
+                .border_color(c(0x262626))
+                .flex()
+                .flex_col()
+                .child(row(true, "From", person(&inv.inviter).into_any_element()))
+                .children(owner.map(|o| row(false, "Owner", person(&o).into_any_element())))
+                .child(row(false, sent.0, div().child(crate::util::relative_time(sent.1, now)).into_any_element()))
+                .child(row(false, "Expires", div().child(crate::util::relative_time(inv.ends_at, now)).into_any_element())),
+        )
+        .child(div().mt(px(25.)).flex().gap(px(10.)).child(button("invite-decline", "Decline", false, decline)).child(button("invite-accept", "Accept", true, accept)));
+    gpui::deferred(
+        div()
+            .id("invite-details-overlay")
+            .absolute()
+            .inset_0()
+            .bg(ca(0, 0, 0, 0.85))
+            .flex()
+            .items_center()
+            .justify_center()
+            .occlude()
+            .on_click(close)
+            .child(card),
+    )
+    .with_priority(13)
+}
