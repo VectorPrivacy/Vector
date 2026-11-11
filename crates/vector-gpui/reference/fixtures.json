@@ -1832,9 +1832,37 @@
      "mine": false,
      "npub": "npub1yn2tjm6cmfk54pgjxyam6q4z36lse22aa3hyeph00r887q083zkq7g4t6h",
      "edited": false
+    },
+    {
+     "id": "5b1e0c3a9d7f4e2b8a6c1d0e9f8a7b6c5d4e3f2a1b0c9d8e7f6a5b4c3d2e1f00",
+     "content": "this one is on repeat",
+     "replied_to": "",
+     "preview_metadata": null,
+     "attachments": [
+      {
+       "id": "a7d2c9e14b3f58e06c1a2b3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f6a7b",
+       "key": "",
+       "nonce": "",
+       "extension": "mp3",
+       "name": "golden-hour.mp3",
+       "url": "https://example.invalid/golden",
+       "path": "media/golden-hour.mp3",
+       "size": 42473,
+       "img_meta": null,
+       "downloading": false,
+       "downloaded": true
+      }
+     ],
+     "reactions": [],
+     "at": 1787881500000,
+     "pending": false,
+     "failed": false,
+     "mine": false,
+     "npub": "npub1yn2tjm6cmfk54pgjxyam6q4z36lse22aa3hyeph00r887q083zkq7g4t6h",
+     "edited": false
     }
    ],
-   "last_read": "29f486453349e2b4b77608d08f98d9adb8df9e0c1e4b5c3e62fd8e3d34d0b4cd",
+   "last_read": "5b1e0c3a9d7f4e2b8a6c1d0e9f8a7b6c5d4e3f2a1b0c9d8e7f6a5b4c3d2e1f00",
    "unread_from": "",
    "created_at": 1787796000,
    "metadata": {

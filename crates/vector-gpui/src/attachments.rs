@@ -100,13 +100,18 @@ pub fn attachments(ctx: &Ctx, m: &Message) -> Option<AnyElement> {
                     Source::File(p) => crate::audio::AudioInputSpec::File(p),
                 };
                 media.audio.want_probe(&att.id, &input);
+                if !att.name.is_empty() {
+                    media.audio.want_tags(&att.id, &input);
+                }
                 let duration = media.audio.duration(&att.id);
+                let tags = media.audio.tags(&att.id).cloned();
                 let (on_act, msg, aid) = (ctx.on_act.clone(), m.id.clone(), att.id.clone());
                 (
                     crate::audio::view(
                         att,
                         media.audio.player(&att.id),
                         duration,
+                        tags.as_deref(),
                         std::rc::Rc::new(move |a, w, cx| on_act(&msg, Act::Audio(aid.clone(), a), w, cx)),
                     ),
                     6.,

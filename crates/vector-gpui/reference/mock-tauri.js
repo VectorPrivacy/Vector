@@ -9,7 +9,10 @@
     };
     const msgs = (id) => (FIX.chats.find((c) => c.id === id)?.messages || []).slice().sort((a, b) => a.at - b.at);
     const fns = {
-        audio_probe: ({ path }) => (String(path).includes("loop") ? 12000 : 7400),
+        audio_probe: ({ path }) => (String(path).includes("loop") ? 12000 : String(path).includes("golden") ? 9000 : 7400),
+        get_audio_metadata: ({ path }) => (String(path).includes("golden")
+            ? { title: "Golden Hour", artist: "Mira Vale", album: "Coastlines", cover_art: "/__ref/media/cover.png", lyrics: null, year: null, chapters: [] }
+            : null),
         get_chat_message_count: ({ chatId }) => msgs(chatId).length,
         get_message_views: ({ chatId, limit = 50, offset = 0 }) => msgs(chatId).reverse().slice(offset, offset + limit),
         get_messages_around: ({ chatId, anchorId, before = 0, after = 0 }) => {

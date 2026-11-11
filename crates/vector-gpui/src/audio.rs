@@ -4,14 +4,14 @@
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
 use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 use gpui::{
     AnyElement, App, Bounds, Corners, CursorStyle, HitboxBehavior, InteractiveElement,
     IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement,
-    Pixels, SharedString, StatefulInteractiveElement, Styled, Window, canvas, div, fill, point,
+    Pixels, RenderImage, SharedString, StatefulInteractiveElement, Styled, Window, canvas, div, fill, point,
     prelude::*, px, size, svg,
 };
 use vector_media::audio_engine::{AudioEngine, AudioInput};
@@ -146,6 +146,24 @@ pub struct Audio {
     active: Option<String>,
     /// Work a draw asked for, for the app to run.
     pub queue: Vec<Work>,
+    /// A named file's tags: None once read and found empty.
+    tags: HashMap<String, Option<Arc<Tags>>>,
+    reading: HashSet<String>,
+}
+
+/// What a file's tags give the card.
+pub struct Tags {
+    pub title: Option<String>,
+    pub artist: Option<String>,
+    pub album: Option<String>,
+    pub year: Option<u16>,
+    pub cover: Option<Arc<RenderImage>>,
+    /// The art shrunk to a few pixels: scaled up, it is the card's blurred glow.
+    pub glow: Option<Arc<RenderImage>>,
+    /// The art's own colour for the controls; white where the art has none.
+    pub accent: Option<gpui::Hsla>,
+    pub lyrics: Option<vector_media::lyrics::Lyrics>,
+    pub chapters: Vec<vector_media::chapters::Chapter>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -159,6 +177,7 @@ pub enum Act {
 pub enum Work {
     Probe(String, AudioInputSpec),
     Load(String, AudioInputSpec),
+    Tags(String, AudioInputSpec),
 }
 
 impl Audio {
@@ -169,6 +188,22 @@ impl Audio {
             .filter(|d| *d > 0)
             .or_else(|| self.probed.get(att).copied())
             .unwrap_or(0)
+    }
+
+    /// A read of a named file's tags, once per file.
+    pub fn want_tags(&mut self, att: &str, input: &AudioInputSpec) {
+        if !self.tags.contains_key(att) && self.reading.insert(att.to_string()) {
+            self.queue.push(Work::Tags(att.to_string(), input.clone()));
+        }
+    }
+
+    pub fn tags(&self, att: &str) -> Option<&Arc<Tags>> {
+        self.tags.get(att).and_then(|t| t.as_ref())
+    }
+
+    pub fn read_tags(&mut self, att: String, tags: Option<Tags>) {
+        self.reading.remove(&att);
+        self.tags.insert(att, tags.map(Arc::new));
     }
 
     /// A probe for the header's duration, once per file.
@@ -443,6 +478,15 @@ pub fn run(work: Work) -> futures::channel::oneshot::Receiver<WorkDone> {
                     .and_then(|i| engine()?.load_from_file(&i))
                     .map(|r| (r.id, r.duration_ms)),
             ),
+            Work::Tags(att, input) => WorkDone::Tags(
+                att,
+                input
+                    .open()
+                    .and_then(|i| vector_media::tags::read(&i))
+                    .ok()
+                    .flatten()
+                    .map(tags_from),
+            ),
         };
         let _ = tx.send(done);
     });
@@ -452,6 +496,114 @@ pub fn run(work: Work) -> futures::channel::oneshot::Receiver<WorkDone> {
 pub enum WorkDone {
     Probed(String, u64),
     Loaded(String, Result<(u32, u64), String>),
+    Tags(String, Option<Tags>),
+}
+
+fn tags_from(m: vector_media::tags::Meta) -> Tags {
+    let art = m.cover.as_deref().and_then(|b| image::load_from_memory(b).ok());
+    let cover = art.as_ref().map(|a| {
+        let a = a.resize_to_fill(256, 256, image::imageops::FilterType::CatmullRom);
+        Arc::new(RenderImage::new(vec![image::Frame::new(crate::media::to_bgra(a.into_rgba8()))]))
+    });
+    let small = art.as_ref().map(|a| a.resize_exact(24, 24, image::imageops::FilterType::Triangle).into_rgba8());
+    // `.audio-art-glow` covers 160% of a 500x150 card, so the card sees this band of the art.
+    let glow = art.as_ref().map(|a| {
+        let a = a.resize_exact(256, 256, image::imageops::FilterType::Triangle).into_rgba8();
+        let band = image::imageops::crop_imm(&a, 48, 104, 160, 48).to_image();
+        let small = image::imageops::resize(&band, 100, 30, image::imageops::FilterType::Triangle);
+        let mut g = image::imageops::blur(&small, 8.);
+        for px in g.pixels_mut() {
+            saturate(px, 1.4);
+        }
+        Arc::new(RenderImage::new(vec![image::Frame::new(crate::media::to_bgra(g))]))
+    });
+    let accent = cover
+        .as_ref()
+        .map(|_| small.as_ref().and_then(art_accent).unwrap_or(gpui::hsla(0., 0., 0.949, 1.)));
+    Tags {
+        title: m.title.filter(|t| !t.is_empty()),
+        artist: m.artist.filter(|t| !t.is_empty()),
+        album: m.album.filter(|t| !t.is_empty()),
+        year: m.year,
+        cover,
+        glow,
+        accent,
+        lyrics: m.lyrics,
+        chapters: m.chapters,
+    }
+}
+
+fn saturate(px: &mut image::Rgba<u8>, k: f32) {
+    let [r, g, b, _] = px.0.map(|v| v as f32);
+    let l = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+    for (i, v) in [r, g, b].into_iter().enumerate() {
+        px.0[i] = (l + (v - l) * k).clamp(0., 255.) as u8;
+    }
+}
+
+/// `artAccent`: the weightiest hue among the art's saturated mid-tones, lifted to 68% light.
+fn art_accent(px: &image::RgbaImage) -> Option<gpui::Hsla> {
+    let mut bins = [(0f32, 0f32, 0f32, 0f32); 12];
+    let mut total = 0f32;
+    for p in px.pixels() {
+        let [r, g, b] = [p[0], p[1], p[2]].map(|v| v as f32 / 255.);
+        let (max, min) = (r.max(g).max(b), r.min(g).min(b));
+        let l = (max + min) / 2.;
+        let sat = if max == min { 0. } else { (max - min) / (1. - (2. * l - 1.).abs()) };
+        let w = sat * sat * (1. - (2. * l - 1.).abs());
+        total += 1.;
+        if w < 0.02 {
+            continue;
+        }
+        let d = max - min;
+        let hue = if max == r {
+            ((g - b) / d) % 6.
+        } else if max == g {
+            (b - r) / d + 2.
+        } else {
+            (r - g) / d + 4.
+        };
+        let bin = &mut bins[(((hue * 60. + 360.) % 360.) / 30.) as usize % 12];
+        bin.0 += w;
+        bin.1 += p[0] as f32 * w;
+        bin.2 += p[1] as f32 * w;
+        bin.3 += p[2] as f32 * w;
+    }
+    let top = bins.iter().copied().fold((0., 0., 0., 0.), |a, b| if b.0 > a.0 { b } else { a });
+    if total == 0. || top.0 / total < 0.03 {
+        return None;
+    }
+    let (r, g, b) = (top.1 / top.0 / 255., top.2 / top.0 / 255., top.3 / top.0 / 255.);
+    let (max, min) = (r.max(g).max(b), r.min(g).min(b));
+    let (l, d) = ((max + min) / 2., max - min);
+    if d == 0. {
+        return None;
+    }
+    let s = d / (1. - (2. * l - 1.).abs());
+    let h = if max == r {
+        ((g - b) / d + 6.) % 6.
+    } else if max == g {
+        (b - r) / d + 2.
+    } else {
+        (r - g) / d + 4.
+    };
+    Some(gpui::hsla(h * 60. / 360., s.clamp(0.45, 0.85), 0.68, 1.))
+}
+
+/// `splitTitle`: an edition note ("Remastered 2011", "Live") set apart from the title.
+pub fn split_title(t: &str) -> (String, String) {
+    static RE: OnceLock<regex::Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| {
+        regex::Regex::new(r"(?i)\s*(?:\(([^()]*\b(?:remaster(?:ed)?|remix|live|mono|stereo|edit|version|demo|acoustic|deluxe|bonus)\b[^()]*)\)|-\s*((?:\d{4}\s*)?remaster(?:ed)?(?:\s*\d{4})?|live|radio edit))\s*$").unwrap()
+    });
+    match re.captures(t) {
+        Some(c) => {
+            let at = c.get(0).unwrap().start();
+            let note = c.get(1).or(c.get(2)).map_or("", |m| m.as_str()).trim();
+            (t[..at].trim().to_string(), note.to_string())
+        }
+        None => (t.to_string(), String::new()),
+    }
 }
 
 pub fn format_time(ms: u64) -> String {
@@ -464,6 +616,8 @@ fn waveform(
     id: SharedString,
     p: Option<&Player>,
     duration: u64,
+    accent: gpui::Hsla,
+    tall: f32,
     on_seek: Rc<dyn Fn(f32, bool, &mut Window, &mut App)>,
 ) -> impl IntoElement {
     let look = p.map_or(Look::Fresh, |p| p.look);
@@ -478,7 +632,7 @@ fn waveform(
         .id(id)
         .group("audio-waveform")
         .flex_1()
-        .h(px(30.))
+        .h(px(tall))
         .mx(px(8.))
         .child(
             canvas(
@@ -519,9 +673,9 @@ fn waveform(
                         let y = if y.abs() > 0.5 { y } else { 0. };
                         let h = 20. * scale;
                         let x = f32::from(bounds.origin.x) + i as f32 * (bw + gap);
-                        let bottom = f32::from(bounds.origin.y) + 25. + y;
+                        let bottom = f32::from(bounds.origin.y) + tall / 2. + 10. + y;
                         let rect = Bounds::new(point(px(x), px(bottom - h)), size(px(bw), px(h)));
-                        let color = c(PRIMARY);
+                        let color = accent;
                         if glow > 0. {
                             let r = glow * 8.;
                             window.paint_quad(
@@ -586,8 +740,11 @@ pub fn view(
     att: &vector_core::Attachment,
     p: Option<&Player>,
     duration: u64,
+    tags: Option<&Tags>,
     on: Rc<dyn Fn(Act, &mut Window, &mut App)>,
 ) -> AnyElement {
+    let accent = tags.and_then(|t| t.accent).unwrap_or(c(PRIMARY));
+    let art = tags.and_then(|t| t.cover.clone());
     let playing = p.is_some_and(|p| p.playing);
     let loading = p.is_some_and(|p| p.loading);
     let pos = p.map_or(0, |p| p.position()).min(duration.max(1));
@@ -608,7 +765,7 @@ pub fn view(
         .size(px(40.))
         .flex_shrink_0()
         .rounded_full()
-        .bg(c(PRIMARY))
+        .bg(accent)
         .flex()
         .items_center()
         .justify_center()
@@ -629,9 +786,19 @@ pub fn view(
         SharedString::from(format!("audio-wave-{id}")),
         p,
         duration,
+        accent,
+        if att.name.is_empty() || art.is_some() { 30. } else { 20. },
         seek,
     );
-    let middle = if att.name.is_empty() {
+    // `artist — track`, else the file's name.
+    let title = match tags.and_then(|t| t.title.as_deref()) {
+        Some(track) => match tags.and_then(|t| t.artist.as_deref()) {
+            Some(artist) => format!("{artist} \u{2014} {track}"),
+            None => track.to_string(),
+        },
+        None => att.name.clone(),
+    };
+    let middle = if att.name.is_empty() || art.is_some() {
         bars.into_any_element()
     } else {
         div()
@@ -643,13 +810,13 @@ pub fn view(
             .mx(px(8.))
             .child(
                 div()
-                    .text_size(px(12.8))
-                    .line_height(px(16.))
+                    .text_size(px(12.))
+                    .line_height(px(15.))
                     .text_color(white_a(0.92))
                     .overflow_hidden()
                     .text_ellipsis()
                     .whitespace_nowrap()
-                    .child(att.name.clone()),
+                    .child(title),
             )
             .child(div().flex().mx(px(-8.)).child(bars))
             .into_any_element()
@@ -659,7 +826,8 @@ pub fn view(
         .flex()
         .justify_end()
         .whitespace_nowrap()
-        .text_size(px(11.52))
+        .text_size(px(10.8))
+        .line_height(px(15.12))
         .text_color(white_a(0.55))
         .child(
             div()
@@ -668,8 +836,85 @@ pub fn view(
         )
         .child(div().mx(px(4.)).text_color(white_a(0.34)).child("/"))
         .child(format_time(duration));
+    let controls = div()
+        .flex()
+        .items_center()
+        .child(button)
+        .child(middle)
+        .child(time);
+    let body = match (tags, art) {
+        (Some(t), Some(art)) => {
+            let track = t.title.clone().unwrap_or_else(|| att.name.clone());
+            let byline = [
+                t.artist.clone(),
+                t.album.clone().filter(|a| Some(a) != t.title.as_ref()),
+            ]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join(" \u{b7} ");
+            let line = |d: gpui::Div| d.overflow_hidden().text_ellipsis().whitespace_nowrap();
+            div()
+                .relative()
+                .flex()
+                .gap(px(14.))
+                .child(
+                    div()
+                        .size(px(128.))
+                        .flex_shrink_0()
+                        .rounded(px(10.))
+                        .overflow_hidden()
+                        .bg(c(0x262626))
+                        .shadow(vec![gpui::BoxShadow {
+                            color: ca(0, 0, 0, 0.35),
+                            offset: point(px(0.), px(4.)),
+                            blur_radius: px(14.),
+                            spread_radius: px(0.),
+                            inset: false,
+                        }])
+                        .child(gpui::img(art).size_full().rounded(px(10.))),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .child(
+                            div()
+                                .flex_1()
+                                .flex()
+                                .flex_col()
+                                .justify_center()
+                                .gap(px(2.))
+                                .child(
+                                    line(div())
+                                        .text_size(px(15.75))
+                                        .line_height(px(19.7))
+                                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                                        .text_color(white_a(0.92))
+                                        .child(track),
+                                )
+                                .when(!byline.is_empty(), |d| {
+                                    d.child(
+                                        line(div())
+                                            .text_size(px(12.))
+                                            .line_height(px(15.))
+                                            .text_color(white_a(0.55))
+                                            .child(byline),
+                                    )
+                                }),
+                        )
+                        .child(controls),
+                )
+                .into_any_element()
+        }
+        _ => controls.into_any_element(),
+    };
     div()
         .id(SharedString::from(format!("audio-{id}")))
+        .relative()
+        .overflow_hidden()
         .w(px(500.))
         .max_w_full()
         .min_w(px(240.))
@@ -680,13 +925,16 @@ pub fn view(
         .border_color(c(0x262626))
         .rounded(px(12.))
         .hover(|s| s.bg(c(0x1d1d1d)).border_color(c(0x363636)))
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .child(button)
-                .child(middle)
-                .child(time),
-        )
+        .when_some(tags.and_then(|t| t.glow.clone()), |d, glow| {
+            d.child(
+                div().absolute().inset_0().opacity(0.22).child(
+                    gpui::img(glow)
+                        .size_full()
+                        .rounded(px(11.))
+                        .object_fit(gpui::ObjectFit::Fill),
+                ),
+            )
+        })
+        .child(body)
         .into_any_element()
 }

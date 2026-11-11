@@ -19,6 +19,13 @@ pub mod audio_engine;
 pub mod awake;
 #[allow(dead_code, unused_imports, clippy::all)]
 pub mod calls;
+#[path = "../../../../src-tauri/src/chapters.rs"]
+#[allow(dead_code)]
+pub mod chapters;
+#[path = "../../../../src-tauri/src/lyrics.rs"]
+#[allow(dead_code)]
+pub mod lyrics;
+pub mod tags;
 #[path = "../../../../src-tauri/src/mic_access.rs"]
 #[allow(dead_code)]
 pub mod mic_access;

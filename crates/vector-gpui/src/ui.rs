@@ -2875,6 +2875,7 @@ impl VectorApp {
                     match done {
                         crate::audio::WorkDone::Probed(att, ms) => media.audio.probed(att, ms),
                         crate::audio::WorkDone::Loaded(att, res) => media.audio.loaded(&att, res),
+                        crate::audio::WorkDone::Tags(att, tags) => media.audio.read_tags(att, tags),
                     }
                     drop(media);
                     cx.notify();

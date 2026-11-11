@@ -23,6 +23,7 @@ rustfft = "6.2"
 rand = "0.8"
 bytes = "1"
 async-trait = "0.1"
+lofty = "0.24"
 iroh = { version = "1.3", default-features = false, features = ["tls-ring", "fast-apple-datapath"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]

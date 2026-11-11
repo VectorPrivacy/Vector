@@ -354,7 +354,7 @@ pub fn pump<V: 'static>(
     }
 }
 
-fn to_bgra(mut buf: image::RgbaImage) -> image::RgbaImage {
+pub fn to_bgra(mut buf: image::RgbaImage) -> image::RgbaImage {
     for px in buf.chunks_exact_mut(4) {
         px.swap(0, 2);
     }
