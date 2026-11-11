@@ -13079,8 +13079,10 @@ select:disabled:hover {
   padding: 5px;
 }
 
-.nav-menu-btn .icon-dots-horizontal {
-  background-color: #b2b2b2;
+/* The pin and these dots share one drawn height (18px); each box is sized to its glyph's ink. */
+.nav-menu-btn svg {
+  width: 28px;
+  height: 28px;
 }
 
 /* ── Pinned Messages (Concord v2) ─────────────────────────────────────────── */
@@ -13106,8 +13108,8 @@ select:disabled:hover {
 }
 
 .pins-header-btn svg {
-  width: 22px;
-  height: 22px;
+  width: 20.5px;
+  height: 20.5px;
 }
 
 /* The drawer slides open directly under the fixed 60px chat header, laying

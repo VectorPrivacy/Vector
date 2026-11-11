@@ -2682,9 +2682,11 @@ body.ws #chat > .chat-header .details-toggle {
   outline-offset: 1px;
 }
 
+/* 16px drawn with a 1.75px line: a wide, partly filled shape reads as large as the
+   header's 18px pin and dots (styles.css, .nav-menu-btn) at this size. */
 .details-toggle svg {
-  width: 20px;
-  height: 20px;
+  width: 22.8px;
+  height: 22.8px;
 }
 
 .details-toggle .fill {
