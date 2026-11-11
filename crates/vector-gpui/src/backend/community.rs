@@ -453,8 +453,45 @@ pub async fn create_community(name: String) -> Result<(String, String), String> 
 }
 
 /// A shareable link anyone can join by.
-pub async fn create_public_invite(community_id: String) -> Result<String, String> {
-    db::scoped(async move { VectorCore.create_public_invite(&community_id, None, None).await.map_err(|e| e.to_string()) }).await
+pub async fn create_public_invite(community_id: String, label: Option<String>) -> Result<String, String> {
+    db::scoped(async move { VectorCore.create_public_invite(&community_id, None, label).await.map_err(|e| e.to_string()) }).await
+}
+
+pub struct InviteLinks {
+    pub mine: Vec<db::community::PublicInviteRecord>,
+    /// Anyone's link keeps the Community joinable, not only ours.
+    pub public: bool,
+    /// Other creators and how many live links each holds.
+    pub others: Vec<(String, usize)>,
+}
+
+pub async fn invite_links(community_id: String) -> InviteLinks {
+    db::scoped(async move {
+        let mine = db::community::list_public_invites(&community_id).unwrap_or_default();
+        let public = db::community::get_community_invite_registry(&community_id).map(|r| !r.is_empty()).unwrap_or(!mine.is_empty());
+        let me = vector_core::my_public_key().map(|k| k.to_hex());
+        let others = db::community::get_invite_link_sets(&community_id)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|s| !s.locators.is_empty() && Some(&s.creator_hex) != me.as_ref())
+            .filter_map(|s| Some((PublicKey::from_hex(&s.creator_hex).ok()?.to_bech32().ok()?, s.locators.len())))
+            .collect();
+        InviteLinks { mine, public, others }
+    })
+    .await
+}
+
+pub async fn revoke_invite(community_id: String, token: String) -> Result<(), String> {
+    db::scoped(async move { VectorCore.revoke_public_invite(&community_id, &token).await.map_err(|e| e.to_string()) }).await
+}
+
+/// Who can't be invited: the banned (as npubs).
+pub fn banned(community_id: &str) -> Vec<String> {
+    VectorCore
+        .get_community_banned(community_id)
+        .into_iter()
+        .map(|h| PublicKey::from_hex(&h).ok().and_then(|pk| pk.to_bech32().ok()).unwrap_or(h))
+        .collect()
 }
 
 pub async fn invite(community_id: String, npub: String) -> Result<(), String> {

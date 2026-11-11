@@ -25,6 +25,8 @@ pub enum Act {
     /// A Category's "+": a new channel inside it.
     AddChannel(String),
     Create,
+    /// Invite People, for the open Community.
+    Invite,
 }
 
 pub type OnAct = Rc<dyn Fn(Act, &mut Window, &mut App)>;
@@ -100,8 +102,16 @@ fn channel_row(store: &Store, ch: &Channel, open: bool, owner: bool, on: &OnAct)
     let group = SharedString::from(format!("ch-{}", ch.channel_id));
     let unread = !open && channel_unread(store, ch) > 0;
     let ink = if open || unread { c(0xffffff) } else { white_a(0.55) };
-    let action = |path: &'static str, shown: bool| {
+    let action = |path: &'static str, shown: bool, act: Option<fn() -> Act>| {
         div()
+            .id(path)
+            .when_some(act, |d, act| {
+                let on = on.clone();
+                d.on_click(move |_, w, cx| {
+                    cx.stop_propagation();
+                    on(act(), w, cx)
+                })
+            })
             .size(px(18.))
             .flex()
             .items_center()
@@ -133,8 +143,8 @@ fn channel_row(store: &Store, ch: &Channel, open: bool, owner: bool, on: &OnAct)
         })
         .child(icon(channel_glyph(ch), 18., ink))
         .child(div().flex_1().min_w_0().truncate().text_size(px(15.)).line_height(px(24.)).when(unread, |d| d.font_weight(FontWeight::MEDIUM)).child(ch.name.clone()))
-        .when(ch.is_voice(), |d| d.child(action("icons/chat-bubble.svg", false)))
-        .when(!ch.is_voice() && owner, |d| d.gap(px(8.)).child(action("icons/add-user.svg", open)).child(action("icons/settings.svg", open)))
+        .when(ch.is_voice(), |d| d.child(action("icons/chat-bubble.svg", false, None)))
+        .when(!ch.is_voice() && owner, |d| d.gap(px(8.)).child(action("icons/add-user.svg", open, Some(|| Act::Invite))).child(action("icons/settings.svg", open, None)))
 }
 
 /// `#chats` over a Community: its head, then its channels by Category.

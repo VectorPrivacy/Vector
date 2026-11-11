@@ -37,6 +37,9 @@
         get_community_join_order: () => [],
         create_community: ({ name }) => ({ community_id: 'f'.repeat(64), channel_id: 'e'.repeat(64), channel_name: 'general', owner_npub: FIX.npub, name }),
         create_public_invite: () => 'https://vectorapp.io/invite/' + 'Ab3'.repeat(20),
+        list_public_invites: () => [{ url: 'https://vectorapp.io/invite/' + 'Ab3'.repeat(20), token: 'tok1', label: 'Reddit', join_count: 3 }, { url: 'https://vectorapp.io/invite/' + 'Zx9'.repeat(20), token: 'tok2', label: null, join_count: 0 }],
+        get_community_invite_summary: () => ({ is_public: true, creators: [{ npub: FIX.npub, count: 2 }] }),
+        list_community_invites: () => [],
         get_notify_prefs: ({ communityId, scopeIds }) => [...new Set([communityId, ...(scopeIds || [])].filter(Boolean))].map((scope_id) => ({ scope_id, level: null, effective_level: scope_id === communityId ? 'mentions' : 'mentions', muted: false, mute_until: 0, suppress_everyone: false, everyone_muted_globally: false })), get_emoji_usage: () => [],
         cache_android_file: ({ filePath }) => {
             const name = filePath.split('/').pop();

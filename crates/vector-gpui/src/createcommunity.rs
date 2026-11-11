@@ -273,21 +273,8 @@ fn share(m: &CreateCommunity, on: &OnAct) -> impl IntoElement {
 }
 
 fn invite_list(m: &CreateCommunity, store: &Store, on: &OnAct, cx: &App) -> impl IntoElement {
-    let filter = m.filter.read(cx).text().trim().to_lowercase();
-    let mut people: Vec<&str> = store
-        .profiles
-        .values()
-        .filter(|p| p.id != store.my_npub && !p.is_blocked)
-        .filter(|p| m.contacts.as_ref().is_none_or(|c| c.contains(p.id.as_str())))
-        .filter(|p| filter.is_empty() || format!("{} {}", store.name(&p.id), p.id).to_lowercase().contains(&filter))
-        .map(|p| p.id.as_str())
-        .collect();
-    let pasted = crate::newchat::extract_npub(&filter).filter(|n| *n != store.my_npub && !people.contains(&n.as_str()));
-    let activity = |id: &str| store.chat(id).map(crate::data::last_activity).unwrap_or(0);
-    people.sort_by(|a, b| activity(b).cmp(&activity(a)).then_with(|| store.name(a).cmp(&store.name(b))));
-    if let Some(n) = pasted.as_deref() {
-        people.insert(0, n);
-    }
+    let filter = m.filter.read(cx).text().to_string();
+    let people = listed(store, m.contacts.as_ref(), &filter, &m.picked, |_| false);
     div()
         .flex_1()
         .min_h_0()
@@ -310,30 +297,59 @@ fn invite_list(m: &CreateCommunity, store: &Store, on: &OnAct, cx: &App) -> impl
                 .child(div().flex_1().min_w_0().child(m.filter.clone())),
         )
         .child(div().id("cg-invite-list").mt(px(10.)).flex_1().min_h_0().overflow_y_scroll().p(px(6.)).children(people.into_iter().map(|npub| {
-            let picked = m.picked.contains(npub);
-            let id = npub.to_string();
-            div()
-                .id(SharedString::from(format!("cg-pick-{npub}")))
-                .h(px(35.))
-                .px(px(10.))
-                .flex()
-                .items_center()
-                .rounded(px(6.))
-                .cursor_pointer()
-                .hover(|s| s.bg(ca(255, 255, 255, 0.085)))
-                .on_click(click(on, move || Act::Toggle(id.clone())))
-                .child(div().mr(px(10.)).child(crate::ui::avatar(store, npub, 25.)))
-                .child(div().flex_1().min_w_0().truncate().text_size(px(14.)).line_height(px(24.)).text_color(c(0xf7f4f4)).child(store.name(npub)))
-                .child(
-                    div()
-                        .size(px(22.))
-                        .mr(px(10.))
-                        .rounded(px(4.))
-                        .border_2()
-                        .border_color(c(PRIMARY))
-                        .when(picked, |d| d.bg(c(PRIMARY)).flex().items_center().justify_center().child(svg().path("icons/check.svg").size(px(14.)).text_color(c(0x000000)))),
-                )
+            let id = npub.clone();
+            pick_row(store, &npub, m.picked.contains(&npub), false, click(on, move || Act::Toggle(id.clone())))
         })))
+}
+
+/// Who a multi-pick list shows, most recently talked to first: contacts matching `filter`, a
+/// pasted npub, and anyone already picked from outside the contacts.
+pub fn listed(store: &Store, contacts: Option<&HashSet<String>>, filter: &str, picked: &HashSet<String>, skip: impl Fn(&str) -> bool) -> Vec<String> {
+    let filter = filter.trim().to_lowercase();
+    let matches = |id: &str| filter.is_empty() || format!("{} {}", store.name(id), id).to_lowercase().contains(&filter);
+    let mut people: Vec<String> = store
+        .profiles
+        .values()
+        .filter(|p| p.id != store.my_npub && !p.is_blocked && !skip(&p.id))
+        .filter(|p| contacts.is_none_or(|c| c.contains(p.id.as_str())))
+        .filter(|p| matches(&p.id))
+        .map(|p| p.id.to_string())
+        .collect();
+    let activity = |id: &str| store.chat(id).map(crate::data::last_activity).unwrap_or(0);
+    people.sort_by(|a, b| activity(b).cmp(&activity(a)).then_with(|| store.name(a).cmp(&store.name(b))));
+    let mut extra: Vec<String> = picked.iter().filter(|n| !people.contains(n) && matches(n)).cloned().collect();
+    extra.sort();
+    if let Some(n) = crate::newchat::extract_npub(&filter).filter(|n| *n != store.my_npub && !skip(n) && !people.contains(n) && !extra.contains(n)) {
+        extra.insert(0, n);
+    }
+    extra.extend(people);
+    extra
+}
+
+/// One contact in a multi-pick list. `quiet` keeps an unpicked box grey, as Invite People does.
+pub fn pick_row<F: Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static>(store: &Store, npub: &str, picked: bool, quiet: bool, on: F) -> impl IntoElement + use<F> {
+    div()
+        .id(SharedString::from(format!("pick-{npub}")))
+        .h(px(35.))
+        .flex_shrink_0()
+        .px(px(10.))
+        .flex()
+        .items_center()
+        .rounded(px(6.))
+        .cursor_pointer()
+        .hover(|s| s.bg(ca(255, 255, 255, 0.085)))
+        .on_click(on)
+        .child(div().mr(px(10.)).child(crate::ui::avatar(store, npub, 25.)))
+        .child(div().flex_1().min_w_0().truncate().text_size(px(14.)).line_height(px(24.)).text_color(c(0xf7f4f4)).child(store.name(npub)))
+        .child(
+            div()
+                .size(px(22.))
+                .mr(px(10.))
+                .rounded(px(4.))
+                .border_2()
+                .border_color(if quiet && !picked { white_a(0.28) } else { c(PRIMARY) })
+                .when(picked, |d| d.bg(c(PRIMARY)).flex().items_center().justify_center().child(svg().path("icons/check.svg").size(px(14.)).text_color(c(0x000000)))),
+        )
 }
 
 fn button(id: &'static str, label: String, primary: bool, live: bool, act: Option<Act>, on: &OnAct) -> impl IntoElement {

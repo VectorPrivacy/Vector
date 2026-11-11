@@ -16,6 +16,7 @@ mod emoji;
 mod filepreview;
 mod highlight;
 mod inline;
+mod invite;
 mod kit;
 mod linkcard;
 mod login;

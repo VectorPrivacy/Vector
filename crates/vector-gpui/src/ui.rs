@@ -94,6 +94,7 @@ pub struct VectorApp {
     badge_card: Option<crate::badgecard::Card>,
     new_chat: Option<crate::newchat::NewChat>,
     create_community: Option<crate::createcommunity::CreateCommunity>,
+    invite: Option<crate::invite::Invite>,
     /// Add Profile is showing the login screen over this account: the account Back returns to,
     /// and whether the old session was already torn down for the new one.
     adding: Option<(String, bool)>,
@@ -150,6 +151,7 @@ enum MenuAct {
     CommunityRead(String),
     CreateChannel { community: String, category: Option<String> },
     CreateCategory(String),
+    InvitePeople(String),
     LeaveCommunity { id: String, name: String, owner: bool },
     Copy(String),
     NotifyLevel(String, Option<&'static str>),
@@ -171,6 +173,11 @@ enum PopupAct {
     Logout,
     ClearStorage,
     LeaveCommunity { id: String, name: String, owner: bool },
+    /// The first link anywhere makes the Community public: then ask for its label.
+    InvitePublic,
+    InviteLabel,
+    /// Revoking the last link anywhere makes it private again.
+    InvitePrivate { token: String },
     AddServer,
     DisableRelay { url: String },
     RemoveRelay { url: String },
@@ -258,6 +265,7 @@ impl VectorApp {
             badge_card: None,
             new_chat: None,
             create_community: None,
+            invite: None,
             adding: None,
             requests_tab: false,
             tab_slid: false,
@@ -334,6 +342,7 @@ impl VectorApp {
                 match std::env::var("VECTOR_CREATE").as_deref() {
                     Ok("channel") => app.open_create_channel(id.clone(), None, false, window, cx),
                     Ok("category") => app.open_create_channel(id.clone(), None, true, window, cx),
+                    Ok("invite") => app.open_invite(id.clone(), window, cx),
                     _ => {}
                 }
             }
@@ -560,6 +569,7 @@ impl VectorApp {
             }
             MenuAct::CreateChannel { community, category } => self.open_create_channel(community, category, false, window, cx),
             MenuAct::CreateCategory(community) => self.open_create_channel(community, None, true, window, cx),
+            MenuAct::InvitePeople(community) => self.open_invite(community, window, cx),
             MenuAct::LeaveCommunity { id, name, owner } => self.ask_leave_community(id, name, owner, window, cx),
             MenuAct::Copy(text) => {
                 cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
@@ -1633,6 +1643,12 @@ impl VectorApp {
                 })
                 .detach();
             }
+            PopupAct::InvitePublic => self.ask_invite_label(window, cx),
+            PopupAct::InviteLabel => {
+                let label = popup.input.as_ref().map(|i| i.read(cx).text().trim().to_string()).filter(|l| !l.is_empty());
+                self.create_invite_link(label, cx);
+            }
+            PopupAct::InvitePrivate { token } => self.revoke_invite_link(token, true, cx),
             PopupAct::Block { npub } => self.set_blocked(npub, true, cx),
             PopupAct::BlockRequest { npub } => {
                 if self.open.as_deref() == Some(npub.as_str()) {
@@ -1958,6 +1974,14 @@ impl Render for VectorApp {
             let proc_ = crate::call::Processing { auto_gain: a.auto_gain, echo_cancel: a.echo_cancel, noise_suppress: a.noise_suppress };
             crate::call::render(&self.call, &self.store.borrow(), &proc_, CHROME_H, &on)
         })
+        .children(self.invite.as_ref().map(|m| {
+            let app = cx.entity().downgrade();
+            let on: crate::invite::OnAct = Rc::new(move |act, window, cx| {
+                app.update(cx, |app, cx| app.on_invite(act, window, cx)).ok();
+            });
+            let filter = m.filter.read(cx).text().to_string();
+            crate::invite::view(m, &store, &filter, &on)
+        }))
         .children(self.create_channel.as_ref().map(|m| {
             let app = cx.entity().downgrade();
             let on: crate::createchannel::OnAct = Rc::new(move |act, window, cx| {
@@ -3432,6 +3456,11 @@ impl VectorApp {
                 }
             }
             Act::Create => self.open_create_community(window, cx),
+            Act::Invite => {
+                if let Some(id) = self.community.as_ref().map(|v| v.id.clone()) {
+                    self.open_invite(id, window, cx);
+                }
+            }
             Act::AddChannel(category) => {
                 if let Some(id) = self.community.as_ref().map(|v| v.id.clone()) {
                     self.open_create_channel(id, Some(category), false, window, cx);
@@ -3524,6 +3553,7 @@ impl VectorApp {
             rows.push((kit::MenuItem::new("Mark as Read", "check"), MenuAct::CommunityRead(id.clone())));
             rows.push((kit::MenuItem::divider(), MenuAct::Nothing));
         }
+        rows.push((kit::MenuItem::new("Invite People", "add-user"), MenuAct::InvitePeople(id.clone())));
         rows.push((kit::MenuItem::new("Create Channel", "channel-hash"), MenuAct::CreateChannel { community: id.clone(), category: None }));
         rows.push((kit::MenuItem::new("Create Category", "plus"), MenuAct::CreateCategory(id.clone())));
         rows.push((kit::MenuItem::divider(), MenuAct::Nothing));
@@ -3647,6 +3677,298 @@ impl VectorApp {
             popup.text = Some(format!("Leave \"<b>{name}</b>\"? You'll need a new invite to rejoin.").into());
         }
         self.popup = Some((popup, PopupAct::LeaveCommunity { id, name, owner }));
+        cx.notify();
+    }
+
+    fn open_invite(&mut self, community: String, window: &mut Window, cx: &mut Context<Self>) {
+        let (name, mut excluded, owner) = {
+            let store = self.store.borrow();
+            let Some(com) = store.community(&community) else { return };
+            (com.name.clone(), com.members.iter().cloned().collect::<HashSet<String>>(), com.owner_npub.clone())
+        };
+        excluded.extend(owner);
+        if let Some(v) = self.community.as_ref().filter(|v| v.id == community) {
+            excluded.extend(v.members.iter().cloned());
+            excluded.extend(v.admins.iter().cloned());
+        }
+        let filter = cx.new(|cx| TextInput::new("Search", cx).with_look(crate::composer::Look { weight: FontWeight::MEDIUM, placeholder: white_a(0.35), ..kit::field_look() }));
+        cx.subscribe(&filter, |_, _, _: &crate::composer::InputChanged, cx| cx.notify()).detach();
+        cx.subscribe_in(&filter, window, |app, _, _: &CancelInput, window, cx| app.on_invite(crate::invite::Act::Close, window, cx)).detach();
+        let contacts: Option<HashSet<String>> = if self.live {
+            None
+        } else {
+            Some(self.store.borrow().chats.iter().filter(|c| matches!(c.chat_type, vector_core::ChatType::DirectMessage)).map(|c| c.id.clone()).collect())
+        };
+        self.invite = Some(crate::invite::Invite {
+            community: community.clone(),
+            name,
+            links: Vec::new(),
+            public: false,
+            others: Vec::new(),
+            expanded: false,
+            copied: None,
+            revoking: None,
+            creating: false,
+            busy: false,
+            status: None,
+            filter,
+            picked: HashSet::new(),
+            contacts,
+            excluded,
+        });
+        if !self.live {
+            if let Some(m) = self.invite.as_mut() {
+                let link = |t: &str, label: Option<&str>, joins| crate::invite::Link { url: format!("https://vectorapp.io/invite/{}", t.repeat(20)), token: format!("tok{}", if label.is_some() { 1 } else { 2 }), label: label.map(String::from), joins };
+                m.links = vec![link("Ab3", Some("Reddit"), 3), link("Zx9", None, 0)];
+                m.public = true;
+            }
+        } else {
+            self.reload_invite_links(cx);
+            let id = community.clone();
+            let rx = backend::run(async move {
+                let banned = backend::community::banned(&id);
+                let (members, admins) = backend::community::members(id).await;
+                let contacts = vector_core::db::events::get_dm_contact_npubs().unwrap_or_default();
+                (banned, members, admins, contacts)
+            });
+            cx.spawn(async move |this, cx| {
+                let Ok((banned, members, admins, contacts)) = rx.await else { return };
+                this.update(cx, |this, cx| {
+                    if let Some(m) = this.invite.as_mut().filter(|m| m.community == community) {
+                        m.excluded.extend(banned.into_iter().chain(members).chain(admins));
+                        m.contacts = Some(contacts.into_iter().collect());
+                        cx.notify();
+                    }
+                })
+                .ok();
+            })
+            .detach();
+        }
+        window.focus(&self.invite.as_ref().unwrap().filter.focus_handle(cx), cx);
+        cx.notify();
+    }
+
+    fn reload_invite_links(&mut self, cx: &mut Context<Self>) {
+        let Some(id) = self.invite.as_ref().map(|m| m.community.clone()) else { return };
+        let rx = backend::run(backend::community::invite_links(id.clone()));
+        cx.spawn(async move |this, cx| {
+            let Ok(got) = rx.await else { return };
+            this.update(cx, |this, cx| {
+                let Some(m) = this.invite.as_mut().filter(|m| m.community == id) else { return };
+                m.links = got.mine.into_iter().map(|r| crate::invite::Link { url: r.url, token: r.token, label: r.label, joins: r.join_count }).collect();
+                m.public = got.public;
+                m.others = got.others;
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn ask_invite_label(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let mut popup = kit::Popup::notice("Label this link");
+        popup.icon = None;
+        popup.text = Some("Optional. A label lets you see which link people join through (e.g. \"Reddit\", \"Twitter\"). Leave blank to skip.".into());
+        popup.confirm = "Create link".into();
+        popup.cancel = Some("Cancel".into());
+        let input = cx.new(|cx| TextInput::new("Label (optional)", cx).with_look(kit::field_look()).keep_on_submit().submit_empty());
+        cx.subscribe_in(&input, window, |app, _, _: &SendText, window, cx| app.answer_popup(true, window, cx)).detach();
+        cx.subscribe_in(&input, window, |app, _, _: &CancelInput, window, cx| app.answer_popup(false, window, cx)).detach();
+        window.focus(&input.focus_handle(cx), cx);
+        popup.input = Some(input);
+        self.popup = Some((popup, PopupAct::InviteLabel));
+        cx.notify();
+    }
+
+    fn create_invite_link(&mut self, label: Option<String>, cx: &mut Context<Self>) {
+        let Some(m) = self.invite.as_mut() else { return };
+        m.busy = true;
+        m.creating = true;
+        m.status = Some(("Creating link...".into(), false));
+        if !self.live {
+            m.busy = false;
+            m.creating = false;
+            m.status = None;
+            return cx.notify();
+        }
+        let rx = backend::run(backend::community::create_public_invite(m.community.clone(), label));
+        cx.spawn(async move |this, cx| {
+            let res = rx.await;
+            this.update(cx, |this, cx| {
+                if let Some(m) = this.invite.as_mut() {
+                    m.busy = false;
+                    m.creating = false;
+                    m.status = match res {
+                        Ok(Err(e)) => Some((e, true)),
+                        _ => None,
+                    };
+                }
+                this.reload_invite_links(cx);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn revoke_invite_link(&mut self, token: String, privatize: bool, cx: &mut Context<Self>) {
+        let Some(m) = self.invite.as_mut() else { return };
+        m.busy = true;
+        m.revoking = Some(token.clone());
+        m.status = Some((if privatize { "Making community private…" } else { "Revoking…" }.into(), false));
+        if !self.live {
+            m.links.retain(|l| l.token != token);
+            m.public = !m.links.is_empty();
+            m.busy = false;
+            m.revoking = None;
+            m.status = None;
+            return cx.notify();
+        }
+        let rx = backend::run(backend::community::revoke_invite(m.community.clone(), token));
+        cx.spawn(async move |this, cx| {
+            let res = rx.await;
+            this.update(cx, |this, cx| {
+                if let Some(m) = this.invite.as_mut() {
+                    m.busy = false;
+                    m.revoking = None;
+                    m.status = None;
+                    if let Ok(Err(e)) = res {
+                        if privatize {
+                            this.notice("Couldn't make private", e, cx);
+                        } else if let Some(m) = this.invite.as_mut() {
+                            m.status = Some((e, true));
+                        }
+                    }
+                }
+                this.reload_invite_links(cx);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn on_invite(&mut self, act: crate::invite::Act, window: &mut Window, cx: &mut Context<Self>) {
+        use crate::invite::Act;
+        let Some(m) = self.invite.as_mut() else { return };
+        match act {
+            Act::Close => {
+                if !m.busy {
+                    self.invite = None;
+                }
+            }
+            Act::Expand => m.expanded = true,
+            Act::Copy(token) => {
+                let Some(url) = m.links.iter().find(|l| l.token == token).map(|l| l.url.clone()) else { return };
+                cx.write_to_clipboard(gpui::ClipboardItem::new_string(url));
+                m.copied = Some(token.clone());
+                cx.spawn(async move |this, cx| {
+                    cx.background_executor().timer(std::time::Duration::from_millis(1200)).await;
+                    this.update(cx, |this, cx| {
+                        if let Some(m) = this.invite.as_mut().filter(|m| m.copied.as_deref() == Some(token.as_str())) {
+                            m.copied = None;
+                            cx.notify();
+                        }
+                    })
+                    .ok();
+                })
+                .detach();
+            }
+            Act::Create => {
+                if m.busy {
+                    return;
+                }
+                if m.public {
+                    self.ask_invite_label(window, cx);
+                } else {
+                    let mut popup = kit::Popup::notice("Make community public?");
+                    popup.text = Some("Creating an invite link makes this community <b>public</b>: anyone with the link can join. You can make it private again later by revoking every link.".into());
+                    popup.confirm = "Make public".into();
+                    popup.cancel = Some("Cancel".into());
+                    self.popup = Some((popup, PopupAct::InvitePublic));
+                }
+            }
+            Act::Revoke(token) => {
+                if m.busy {
+                    return;
+                }
+                let others: usize = m.others.iter().map(|o| o.1).sum();
+                if m.links.len() == 1 && others == 0 {
+                    let mut popup = kit::Popup::notice("Make community private?");
+                    popup.text = Some("Revoking the last invite link makes this community <b>private</b> again. This can take a few seconds.".into());
+                    popup.confirm = "Make private".into();
+                    popup.cancel = Some("Cancel".into());
+                    self.popup = Some((popup, PopupAct::InvitePrivate { token }));
+                } else {
+                    self.revoke_invite_link(token, false, cx);
+                }
+            }
+            Act::Toggle(npub) => {
+                if !m.busy && !m.picked.remove(&npub) {
+                    if self.live && !self.store.borrow().profiles.contains_key(npub.as_str()) {
+                        let n = npub.clone();
+                        let _ = backend::run(async move { vector_core::profile::sync::load_profile(n, &sync::ProfileHandler).await });
+                    }
+                    m.picked.insert(npub);
+                }
+            }
+            Act::Cta => {
+                if m.busy {
+                    return;
+                }
+                if m.picked.is_empty() {
+                    self.invite = None;
+                    return cx.notify();
+                }
+                let targets: Vec<String> = m.picked.iter().cloned().collect();
+                let count = targets.len();
+                let people = |n: usize| if n == 1 { "person" } else { "people" };
+                m.busy = true;
+                m.status = Some((format!("Inviting {count} {}…", people(count)), false));
+                let id = m.community.clone();
+                let live = self.live;
+                let rx = backend::run(async move {
+                    let mut ok = 0usize;
+                    for npub in targets {
+                        if !live || backend::community::invite(id.clone(), npub).await.is_ok() {
+                            ok += 1;
+                        }
+                    }
+                    ok
+                });
+                cx.spawn(async move |this, cx| {
+                    let Ok(ok) = rx.await else { return };
+                    this.update(cx, |this, cx| {
+                        let Some(m) = this.invite.as_mut() else { return };
+                        m.busy = false;
+                        let fail = count - ok;
+                        if fail == 0 {
+                            m.status = Some((format!("Invited {ok} {}!", people(ok)), false));
+                            m.picked.clear();
+                            m.filter.update(cx, |t, cx| t.set_text("", cx));
+                            cx.spawn(async move |this, cx| {
+                                cx.background_executor().timer(std::time::Duration::from_secs(3)).await;
+                                this.update(cx, |this, cx| {
+                                    if let Some(m) = this.invite.as_mut().filter(|m| m.status.as_ref().is_some_and(|s| !s.1 && s.0.starts_with("Invited"))) {
+                                        m.status = None;
+                                        cx.notify();
+                                    }
+                                })
+                                .ok();
+                            })
+                            .detach();
+                        } else {
+                            m.status = Some((format!("Invited {ok}, {fail} failed."), ok == 0));
+                        }
+                        cx.notify();
+                    })
+                    .ok();
+                })
+                .detach();
+            }
+        }
         cx.notify();
     }
 
@@ -5186,7 +5508,7 @@ impl VectorApp {
         m.link_error = None;
         m.progress = Some(("Making your link".into(), 0.5));
         let side = (114. * window.scale_factor()).round() as u32;
-        let rx = backend::run(backend::community::create_public_invite(id));
+        let rx = backend::run(backend::community::create_public_invite(id, None));
         cx.spawn(async move |this, cx| {
             let Ok(res) = rx.await else { return };
             this.update(cx, |this, cx| {
