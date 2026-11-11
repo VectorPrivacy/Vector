@@ -4,7 +4,7 @@
 
 use super::codec::Decoder;
 use super::jitter::{Jitter, Pop, MAX_PLC_RUN};
-use super::media::{capture_thread, level_of, now_ms, MediaStats, Outbound, FLAG_MUTED, FLAG_SHARE, PLAY_AHEAD_MS};
+use super::media::{capture_thread, level_of, now_ms, MediaStats, Outbound, FLAG_MUTED, FLAG_SHARE, play_ahead};
 use super::resample::Resampler;
 use super::ring::SpscRing;
 use super::transport::unpack;
@@ -225,7 +225,6 @@ struct Voicing {
 
 fn playout_thread(link: Arc<LiveLink>, out_rate: u32, peers: Arc<Mutex<HashMap<[u8; 32], Peer>>>, stop: Arc<AtomicBool>, deafened: Arc<AtomicBool>) {
     let mut rs = Resampler::new(ENGINE_RATE, out_rate);
-    let ahead = (out_rate * PLAY_AHEAD_MS / 1000) as usize;
     let mut decoders: HashMap<[u8; 32], Voicing> = HashMap::new();
     let mut pcm = [0i16; FRAME];
     let mut mix = [0i32; FRAME];
@@ -237,7 +236,7 @@ fn playout_thread(link: Arc<LiveLink>, out_rate: u32, peers: Arc<Mutex<HashMap<[
     let mut priority_heard: Option<std::time::Instant> = None;
 
     while !stop.load(Ordering::Relaxed) {
-        if link.play.len() >= ahead {
+        if link.play.len() >= play_ahead(out_rate) {
             std::thread::sleep(Duration::from_millis(5));
             continue;
         }

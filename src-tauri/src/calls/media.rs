@@ -42,10 +42,17 @@ pub(crate) const FLAG_SHARE: u16 = 2;
 /// 1:1 call starts.
 const VOICE_MAX_KBPS: u32 = START_KBPS;
 
-/// How far ahead of the speaker the decoder keeps the play ring. Small on purpose:
+/// The least the decoder keeps in the play ring ahead of the speaker. Small on purpose:
 /// the jitter buffer holds the margin, the ring only covers the callback's stride.
-// pub(crate) const PLAY_AHEAD_MS: u32 = 30;
-pub(crate) const PLAY_AHEAD_MS: u32 = 60;
+const PLAY_AHEAD_MS: u32 = 30;
+
+/// The play ring's target in frames at `out_rate`: the device's largest callback plus one
+/// decoded frame, since Linux devices often ask for more than `PLAY_AHEAD_MS` at a time.
+pub(crate) fn play_ahead(out_rate: u32) -> usize {
+    let frame = out_rate * FRAME_MS / 1000;
+    let most = out_rate / 2;
+    (out_rate * PLAY_AHEAD_MS / 1000).max(crate::audio_engine::output_stride() + frame).min(most) as usize
+}
 
 /// Where captured frames go: one call's peer, or everyone in a voice Channel's call.
 #[derive(Clone)]
@@ -856,7 +863,6 @@ fn share_playout_thread(
     };
     let mut rs_l = Resampler::new(ENGINE_RATE, out_rate);
     let mut rs_r = Resampler::new(ENGINE_RATE, out_rate);
-    let ahead = (out_rate * PLAY_AHEAD_MS / 1000) as usize * 2;
     let mut pcm = [0i16; FRAME * 2];
     let (mut l, mut r) = ([0f32; FRAME], [0f32; FRAME]);
     let (mut out_l, mut out_r) = (Vec::with_capacity(4096), Vec::with_capacity(4096));
@@ -864,7 +870,7 @@ fn share_playout_thread(
     let mut plc_run = 0u32;
 
     while !stop.load(Ordering::Relaxed) {
-        if link.share_play.len() >= ahead {
+        if link.share_play.len() >= play_ahead(out_rate) * 2 {
             std::thread::sleep(Duration::from_millis(5));
             continue;
         }
@@ -934,14 +940,13 @@ fn playout_thread(
         }
     };
     let mut rs = Resampler::new(ENGINE_RATE, out_rate);
-    let ahead = (out_rate * PLAY_AHEAD_MS / 1000) as usize;
     let mut pcm = [0i16; FRAME];
     let mut pcm_f32 = [0f32; FRAME];
     let mut resampled = Vec::with_capacity(4096);
     let mut plc_run = 0u32;
 
     while !stop.load(Ordering::Relaxed) {
-        if link.play.len() >= ahead {
+        if link.play.len() >= play_ahead(out_rate) {
             std::thread::sleep(Duration::from_millis(5));
             continue;
         }
