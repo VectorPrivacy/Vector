@@ -166,7 +166,7 @@ pub fn pane(store: &Store, s: &Screen, on: &OnAct) -> AnyElement {
                         .child(div().min_w_0().truncate().font_family(RUBIK).font_weight(FontWeight::BOLD).text_size(px(18.72)).line_height(px(24.)).child(name.clone())),
                 )
                 .when(!status.is_empty(), |d| {
-                    d.child(div().w_full().truncate().text_center().text_size(px(14.)).line_height(px(21.)).opacity(0.8).child(status.clone()))
+                    d.child(div().w_full().flex().justify_center().opacity(0.8).child(crate::inline::emoji_line(&status, crate::inline::Look::new(INTER, 14., 21., c(TEXT)), 15., 1.)))
                 })
                 .into_any_element()
         };
@@ -248,10 +248,11 @@ pub fn pane(store: &Store, s: &Screen, on: &OnAct) -> AnyElement {
         .text_size(px(14.))
         .line_height(px(21.))
         .opacity(0.8)
-        .line_clamp(3)
         .when(mine, |d| d.cursor_pointer().on_click(click(on, Act::SetStatus)))
+        .flex()
+        .justify_center()
         .when(status_text.is_empty(), |d| d.h_0())
-        .child(status_text);
+        .child(crate::inline::emoji_line(&status_text, crate::inline::Look::new(INTER, 14., 21., c(TEXT)), 15., 1.));
     body = body.child(status_line);
 
     if !mine {

@@ -76,6 +76,8 @@ pub struct VectorApp {
     /// The expanded profile, shown in place of the chat.
     profile: Option<crate::profile::Screen>,
     toast: Option<(SharedString, std::time::Instant)>,
+    /// The Status dialog's field, while it is open.
+    status: Option<Entity<TextInput>>,
 }
 
 #[derive(Clone, PartialEq)]
@@ -148,6 +150,7 @@ impl VectorApp {
             viewer: None,
             profile: None,
             toast: None,
+            status: None,
         }
     }
 
@@ -848,6 +851,7 @@ impl Render for VectorApp {
                     (None, None) => empty_pane().into_any_element(),
                 }),
         )
+        .children(self.status_view(&store, cx))
         .children(self.toast_view(window))
         .children(self.viewer.clone().map(|v| gpui::deferred(div().absolute().inset_0().child(v)).with_priority(10)))
     }
@@ -1752,7 +1756,8 @@ impl VectorApp {
                     cx.notify();
                 }
             }
-            Act::Edit | Act::SetStatus | Act::Switcher | Act::Qr => {}
+            Act::SetStatus => self.open_status(window, cx),
+            Act::Edit | Act::Switcher | Act::Qr => {}
         }
     }
 
@@ -1853,6 +1858,256 @@ impl VectorApp {
                     ),
             )
             .with_priority(20)
+            .into_any_element(),
+        )
+    }
+}
+
+// ── #status-dialog ──────────────────────────────────────────────────────────────────────
+
+/// A status is one line of at most this many characters.
+const STATUS_MAX: usize = 120;
+
+impl VectorApp {
+    fn open_status(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let current = self.store.borrow().me().map(|p| p.status.title.clone()).unwrap_or_default();
+        let look = crate::composer::Look {
+            family: RUBIK,
+            size: px(14.5),
+            line_height: px(20.),
+            color: c(0xffffff),
+            placeholder: white_a(0.3),
+            ..Default::default()
+        };
+        let input = cx.new(|cx| {
+            let mut i = TextInput::new("What's happening?", cx).with_look(look).twemoji().keep_on_submit().submit_empty();
+            i.set_text(&current, cx);
+            i
+        });
+        cx.subscribe(&input, |app, _, _: &SendText, cx| app.save_status(None, cx)).detach();
+        cx.subscribe(&input, |app, _, _: &CancelInput, cx| {
+            app.status = None;
+            cx.notify();
+        })
+        .detach();
+        cx.subscribe(&input, |_, input, _: &crate::composer::InputChanged, cx| {
+            let text = input.read(cx).text().to_string();
+            let clean: String = text.replace('\n', " ").chars().take(STATUS_MAX).collect();
+            if clean != text {
+                input.update(cx, |i, cx| i.set_text(&clean, cx));
+            }
+            cx.notify();
+        })
+        .detach();
+        window.focus(&input.focus_handle(cx), cx);
+        self.status = Some(input);
+        cx.notify();
+    }
+
+    /// Publish the status (`Some("")` clears it), echoing it at once and rolling back on failure.
+    fn save_status(&mut self, text: Option<String>, cx: &mut Context<Self>) {
+        let Some(input) = self.status.take() else { return };
+        let status = text.unwrap_or_else(|| input.read(cx).text().trim().to_string());
+        let me = self.store.borrow().my_npub.clone();
+        let old = self.store.borrow_mut().profiles.get_mut(&me).map(|p| std::mem::replace(&mut p.status.title, status.clone()));
+        cx.notify();
+        if !self.live {
+            return;
+        }
+        let rx = backend::run(vector_core::profile::sync::update_status(status));
+        cx.spawn(async move |this, cx| {
+            if let Ok(true) = rx.await {
+                return;
+            }
+            this.update(cx, |this, cx| {
+                if let (Some(old), Some(p)) = (old, this.store.borrow_mut().profiles.get_mut(&me)) {
+                    p.status.title = old;
+                }
+                let mut popup = kit::Popup::notice("Status Update Failed!");
+                popup.text = Some("Failed to broadcast status update to the network.".into());
+                this.popup = Some((popup, PopupAct::Notice));
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn status_view(&self, store: &Store, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let input = self.status.clone()?;
+        let raw = input.read(cx).text().to_string();
+        let text = raw.trim().to_string();
+        let empty = text.is_empty();
+        let remaining = STATUS_MAX as i64 - raw.chars().count() as i64;
+        let had = store.me().is_some_and(|p| !p.status.title.is_empty());
+        let card = div()
+            .id("status-dialog-card")
+            .w(px(380.))
+            .flex()
+            .flex_col()
+            .pt(px(14.))
+            .px(px(16.))
+            .pb(px(12.))
+            .rounded(px(18.))
+            .border_1()
+            .border_color(c(0x2c2e2f))
+            .bg(c(0x101010))
+            .shadow(vec![gpui::BoxShadow { color: ca(0, 0, 0, 0.55), offset: gpui::point(px(0.), px(18.)), blur_radius: px(60.), spread_radius: px(0.), inset: false }])
+            .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .child(
+                div()
+                    .h(px(24.))
+                    .mb(px(12.))
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(div().text_size(px(11.)).font_weight(FontWeight::BOLD).text_color(white_a(0.45)).child("STATUS"))
+                    .child(
+                        div()
+                            .id("status-dialog-x")
+                            .px(px(6.))
+                            .py(px(4.))
+                            .text_size(px(14.))
+                            .line_height(px(14.))
+                            .text_color(white_a(0.4))
+                            .hover(|s| s.text_color(c(0xffffff)))
+                            .cursor_pointer()
+                            .on_click(cx.listener(|app, _, _, cx| {
+                                app.status = None;
+                                cx.notify();
+                            }))
+                            .child("✕"),
+                    ),
+            )
+            .child(
+                div()
+                    .mb(px(12.))
+                    .flex()
+                    .items_center()
+                    .gap(px(10.))
+                    .min_w_0()
+                    .child(div().size(px(34.)).flex_shrink_0().rounded_full().bg(c(0x1a1a1a)).child(avatar(store, &store.my_npub, 34.)))
+                    .child(
+                        div()
+                            .min_w_0()
+                            .flex()
+                            .items_center()
+                            .gap(px(8.))
+                            .px(px(14.))
+                            .py(px(7.))
+                            .rounded_full()
+                            .bg(c(0x1a1a1a))
+                            .border_1()
+                            .border_color(c(0x262626))
+                            .when(empty, |d| d.opacity(0.45))
+                            .child(
+                                div()
+                                    .size(px(8.))
+                                    .flex_shrink_0()
+                                    .rounded_full()
+                                    .bg(c(if empty { 0x555555 } else { ACCENT }))
+                                    .when(!empty, |d| {
+                                        d.shadow(vec![gpui::BoxShadow { color: ca(89, 252, 179, 0.6), offset: gpui::point(px(0.), px(0.)), blur_radius: px(6.), spread_radius: px(0.), inset: false }])
+                                    }),
+                            )
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_size(px(13.5))
+                                    .line_height(px(24.))
+                                    .text_color(c(0xffffff))
+                                    .child(crate::inline::emoji_line(if empty { "No status" } else { &text }, crate::inline::Look::new(INTER, 13.5, 24., c(0xffffff)), 16., 3.)),
+                            ),
+                    ),
+            )
+            .child(
+                div()
+                    .w_full()
+                    .flex()
+                    .items_center()
+                    .p(px(2.))
+                    .pl(px(14.))
+                    .rounded(px(12.))
+                    .bg(c(0x1a1a1a))
+                    .border_1()
+                    .border_color(c(0x3d4040))
+                    .child(div().flex_1().min_w_0().py(px(9.)).px(px(4.)).child(input))
+                    .child(
+                        div()
+                            .min_w(px(22.))
+                            .text_right()
+                            .text_size(px(11.))
+                            .text_color(if remaining <= 10 { c(0xffb347) } else { white_a(0.35) })
+                            .when(remaining <= 30, |d| d.child(remaining.to_string())),
+                    )
+                    .child(
+                        div()
+                            .ml(px(2.))
+                            .size(px(40.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .opacity(0.7)
+                            .child(svg().path("icons/smile-face.svg").size(px(20.)).text_color(c(0xffffff))),
+                    ),
+            )
+            .child(
+                div()
+                    .mt(px(12.))
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(
+                        div()
+                            .id("status-btn-clear")
+                            .px(px(2.))
+                            .py(px(6.))
+                            .text_size(px(12.5))
+                            .text_color(white_a(0.4))
+                            .hover(|s| s.text_color(c(0xffffff)))
+                            .cursor_pointer()
+                            .when(!had, |d| d.invisible())
+                            .on_click(cx.listener(|app, _, _, cx| app.save_status(Some(String::new()), cx)))
+                            .child("Clear Status"),
+                    )
+                    .child(
+                        div()
+                            .id("status-btn-save")
+                            .px(px(26.))
+                            .py(px(9.))
+                            .rounded(px(10.))
+                            .bg(c(ACCENT))
+                            .text_color(c(0x06130d))
+                            .text_size(px(14.))
+                            .line_height(px(17.))
+                            .font_weight(FontWeight::BOLD)
+                            .cursor_pointer()
+                            .on_click(cx.listener(|app, _, _, cx| app.save_status(None, cx)))
+                            .child("Save"),
+                    ),
+            );
+        Some(
+            gpui::deferred(
+                div()
+                    .id("status-dialog")
+                    .absolute()
+                    .inset_0()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .bg(ca(0, 0, 0, 0.72))
+                    .occlude()
+                    .on_mouse_down(
+                        gpui::MouseButton::Left,
+                        cx.listener(|app, _, _, cx| {
+                            app.status = None;
+                            cx.notify();
+                        }),
+                    )
+                    .child(card),
+            )
+            .with_priority(10)
             .into_any_element(),
         )
     }

@@ -741,3 +741,24 @@ fn mix(a: Hsla, b: Hsla, t: f32) -> Hsla {
     let (a, b) = (a.to_rgb(), b.to_rgb());
     gpui::Rgba { r: a.r + (b.r - a.r) * t, g: a.g + (b.g - a.g) * t, b: a.b + (b.b - a.b) * t, a: 1. }.into()
 }
+
+/// Plain text with its emoji drawn as twemoji at `emoji` px, on one line cut with `…`.
+pub fn emoji_line(text: &str, look: Look, emoji: f32, drop: f32) -> Inline {
+    let mut atoms = Vec::new();
+    let mut run = String::new();
+    for g in unicode_segmentation::UnicodeSegmentation::graphemes(text, true) {
+        match crate::emoji::twemoji(g) {
+            Some(src) => {
+                if !run.is_empty() {
+                    atoms.push(Atom::Text { text: std::mem::take(&mut run).into(), look: look.clone(), kind: Kind::Plain });
+                }
+                atoms.push(Atom::Image { src, size: emoji, drop });
+            }
+            None => run.push_str(g),
+        }
+    }
+    if !run.is_empty() {
+        atoms.push(Atom::Text { text: run.into(), look: look.clone(), kind: Kind::Plain });
+    }
+    inline(atoms, look).single_line()
+}
