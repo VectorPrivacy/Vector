@@ -86,7 +86,7 @@ enum PopupAct {
 
 impl VectorApp {
     fn base(store: Store, live: bool, cx: &mut Context<Self>) -> Self {
-        let input = cx.new(|cx| TextInput::new("Enter message...", cx));
+        let input = cx.new(|cx| TextInput::new("Enter message...", cx).multiline(px(126.)));
         cx.subscribe(&input, |app, _, SendText(text), cx| app.send(text.clone(), cx)).detach();
         cx.subscribe(&input, |app, _, _: &CancelInput, cx| app.cancel_mode(cx)).detach();
         Self {
@@ -1406,7 +1406,8 @@ fn composer(input: Entity<TextInput>, mode: &Mode, cx: &mut Context<VectorApp>) 
     let icon = |path: &'static str| {
         div()
             .w(px(38.))
-            .h_full()
+            .h(px(45.))
+            .flex_shrink_0()
             .flex()
             .items_center()
             .justify_center()
@@ -1471,14 +1472,15 @@ fn composer(input: Entity<TextInput>, mode: &Mode, cx: &mut Context<VectorApp>) 
         );
     }
     boxed.child(
+        // The buttons keep to the last line as the text grows upward.
         div()
-            .h(px(45.))
+            .min_h(px(45.))
             .rounded(px(10.))
             .bg(c(APP_BG))
             .flex()
-            .items_center()
-            .child(if editing { cancel("edit-cancel", 23., cx).w(px(38.)).h_full().into_any_element() } else { icon("icons/plus.svg").into_any_element() })
-            .child(div().flex_1().min_w_0().child(input))
+            .items_end()
+            .child(if editing { cancel("edit-cancel", 23., cx).w(px(38.)).h(px(45.)).into_any_element() } else { icon("icons/plus.svg").into_any_element() })
+            .child(div().flex_1().min_w_0().py(px(12.)).pr(px(10.)).child(input))
             .child(icon("icons/smile-face.svg"))
             .child(icon("icons/mic-on.svg")),
     )
