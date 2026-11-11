@@ -615,3 +615,12 @@ pub async fn set_banned(community_id: String, npubs: Vec<String>, banned: bool) 
     })
     .await
 }
+
+/// `get_community_audit_log`: newest first, as JSON the Audit Log reads.
+pub async fn audit_log(community_id: String) -> Result<serde_json::Value, String> {
+    db::scoped(async move {
+        let log = VectorCore.community_audit_log(&community_id).await.map_err(|e| e.to_string())?;
+        serde_json::to_value(log).map_err(|e| e.to_string())
+    })
+    .await
+}

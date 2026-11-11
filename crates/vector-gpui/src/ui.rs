@@ -3956,7 +3956,7 @@ impl VectorApp {
                 t
             })
         };
-        let search = cx.new(|cx| TextInput::new("Search", cx).with_look(crate::composer::Look { weight: FontWeight::MEDIUM, placeholder: white_a(0.35), ..kit::field_look() }));
+        let search = cx.new(|cx| TextInput::new("Search", cx).with_look(crate::composer::Look { size: px(14.), line_height: px(17.), weight: FontWeight::NORMAL, placeholder: c(0xb2b2b2), ..kit::field_look() }));
         let name_in = field("Community name", &name, crate::commsettings::NAME_MAX, cx);
         let description_in = cx.new(|cx| {
             let mut t = TextInput::new("Tell people what brings everyone here", cx)
@@ -3969,8 +3969,9 @@ impl VectorApp {
         let add_look = || crate::composer::Look { size: px(14.), line_height: px(17.), weight: FontWeight::MEDIUM, placeholder: c(0x5c5c5c), ..kit::field_look() };
         let relay_in = cx.new(|cx| TextInput::new("wss://relay.example.com", cx).with_look(add_look()).max_chars(256).keep_on_submit());
         let voice_in = cx.new(|cx| TextInput::new("https://relay.example.com", cx).with_look(add_look()).max_chars(256).keep_on_submit());
+        let audit_query = cx.new(|cx| TextInput::new("Search", cx).with_look(crate::composer::Look { size: px(16.), line_height: px(19.), weight: FontWeight::MEDIUM, placeholder: white_a(0.6), ..kit::field_look() }));
         let ban_query = cx.new(|cx| TextInput::new("Search", cx).with_look(crate::composer::Look { size: px(16.), line_height: px(19.), weight: FontWeight::MEDIUM, placeholder: white_a(0.6), ..kit::field_look() }));
-        for input in [&search, &name_in, &description_in, &relay_in, &voice_in, &ban_query] {
+        for input in [&search, &name_in, &description_in, &relay_in, &voice_in, &ban_query, &audit_query] {
             cx.subscribe(input, |app, _, _: &crate::composer::InputChanged, cx| {
                 if let Some(m) = app.comm_settings.as_mut() {
                     m.relay_error = None;
@@ -4009,10 +4010,50 @@ impl VectorApp {
             ban_query,
             ban_sel: HashSet::new(),
             unbanning: false,
+            audit: crate::commsettings::Audit { action: "all", shown: crate::commsettings::AUDIT_PAGE, ..Default::default() },
+            audit_query,
             saving: false,
             warn_until: None,
         });
+        if section == "audit" {
+            self.load_audit(cx);
+        }
         cx.notify();
+    }
+
+    fn load_audit(&mut self, cx: &mut Context<Self>) {
+        let Some(m) = self.comm_settings.as_mut() else { return };
+        if m.audit.loading {
+            return;
+        }
+        m.audit.loaded = true;
+        if !self.live {
+            let log = self.store.borrow().fixture_audit.clone().unwrap_or_default();
+            m.audit.entries = log["entries"].as_array().cloned().unwrap_or_default();
+            m.audit.compacted = log["compacted"].as_bool().unwrap_or(false);
+            return;
+        }
+        m.audit.loading = true;
+        let id = m.community.clone();
+        let rx = backend::run(backend::community::audit_log(id.clone()));
+        cx.spawn(async move |this, cx| {
+            let res = rx.await.unwrap_or_else(|_| Err("The audit log couldn't be read.".into()));
+            this.update(cx, |this, cx| {
+                let Some(m) = this.comm_settings.as_mut().filter(|m| m.community == id) else { return };
+                m.audit.loading = false;
+                match res {
+                    Ok(log) => {
+                        m.audit.entries = log["entries"].as_array().cloned().unwrap_or_default();
+                        m.audit.compacted = log["compacted"].as_bool().unwrap_or(false);
+                        m.audit.error = None;
+                    }
+                    Err(e) => m.audit.error = Some(e),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     fn on_comm_settings(&mut self, act: crate::commsettings::Act, window: &mut Window, cx: &mut Context<Self>) {
@@ -4190,6 +4231,22 @@ impl VectorApp {
             }
             Act::Save => self.save_comm_settings(cx),
             Act::Learn => cx.open_url("https://docs.iroh.computer/concepts/relays"),
+            Act::AuditRefresh => self.load_audit(cx),
+            Act::AuditToggle(id) => {
+                if !m.audit.open.remove(&id) {
+                    m.audit.open.insert(id);
+                }
+            }
+            Act::AuditMore => m.audit.shown += crate::commsettings::AUDIT_PAGE,
+            Act::AuditFilter => m.audit.filter_open = !m.audit.filter_open,
+            Act::AuditPick(v) => {
+                m.audit.action = v;
+                m.audit.filter_open = false;
+                m.audit.shown = crate::commsettings::AUDIT_PAGE;
+            }
+        }
+        if self.comm_settings.as_ref().is_some_and(|m| m.section == "audit" && !m.audit.loaded) {
+            self.load_audit(cx);
         }
         let _ = window;
         cx.notify();

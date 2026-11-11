@@ -1759,5 +1759,132 @@
    "sent_at": 1794358700,
    "ends_at": 1794880800
   }
- ]
+ ],
+ "audit": {
+  "entries": [
+   {
+    "id": "a1",
+    "at": 1794362280000,
+    "actor": "npub1yazve5gvw5em6um2mzg0nh2u4v4dkfas04gqh9yn72wdcssvktsqfmmmv4",
+    "action": "member_ban",
+    "target": {
+     "kind": "member",
+     "npub": "npub1wajx7kj0x9nxxa38405e3eapgu87wtvtgv8svld04p3x8u0j872qnta00x"
+    }
+   },
+   {
+    "id": "a2",
+    "at": 1794351600000,
+    "actor": "npub190vqdjtlpcq27xslcveglfmr4ynfwg7gmw86cnun4acakxrdd6gqnp929a",
+    "action": "channel_create",
+    "target": {
+     "kind": "channel",
+     "name": "design",
+     "view": "chat"
+    },
+    "changes": [
+     {
+      "field": "view",
+      "new": "chat"
+     },
+     {
+      "field": "private",
+      "new": true
+     }
+    ]
+   },
+   {
+    "id": "a3",
+    "at": 1794268800000,
+    "actor": "npub1yazve5gvw5em6um2mzg0nh2u4v4dkfas04gqh9yn72wdcssvktsqfmmmv4",
+    "action": "community_update",
+    "changes": [
+     {
+      "field": "description",
+      "old": "",
+      "new": "Where Vector gets built, in the open."
+     },
+     {
+      "field": "relays",
+      "added": [
+       "wss://asia.vectorapp.io/nostr"
+      ],
+      "removed": []
+     }
+    ]
+   },
+   {
+    "id": "a4",
+    "at": 1794016800000,
+    "actor": "npub1yazve5gvw5em6um2mzg0nh2u4v4dkfas04gqh9yn72wdcssvktsqfmmmv4",
+    "action": "role_create",
+    "target": {
+     "kind": "role",
+     "name": "Mods"
+    },
+    "changes": [
+     {
+      "field": "name",
+      "new": "Mods"
+     },
+     {
+      "field": "permissions",
+      "added": [
+       3,
+       4,
+       5
+      ],
+      "removed": []
+     }
+    ]
+   },
+   {
+    "id": "a5",
+    "at": 1793844000000,
+    "actor": "npub190vqdjtlpcq27xslcveglfmr4ynfwg7gmw86cnun4acakxrdd6gqnp929a",
+    "action": "invite_create",
+    "changes": [
+     {
+      "field": "count",
+      "new": 2
+     }
+    ]
+   },
+   {
+    "id": "a6",
+    "at": 1793584800000,
+    "actor": "npub1yazve5gvw5em6um2mzg0nh2u4v4dkfas04gqh9yn72wdcssvktsqfmmmv4",
+    "action": "member_roles_update",
+    "target": {
+     "kind": "member",
+     "npub": "npub190vqdjtlpcq27xslcveglfmr4ynfwg7gmw86cnun4acakxrdd6gqnp929a"
+    },
+    "changes": [
+     {
+      "field": "roles",
+      "added": [
+       {
+        "kind": "role",
+        "name": "Mods"
+       }
+      ],
+      "removed": []
+     }
+    ]
+   },
+   {
+    "id": "a7",
+    "at": 1793325600000,
+    "actor": "npub1yazve5gvw5em6um2mzg0nh2u4v4dkfas04gqh9yn72wdcssvktsqfmmmv4",
+    "action": "community_create",
+    "changes": [
+     {
+      "field": "name",
+      "new": "Vector Devs"
+     }
+    ]
+   }
+  ],
+  "compacted": false
+ }
 }

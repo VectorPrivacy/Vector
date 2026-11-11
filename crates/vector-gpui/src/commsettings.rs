@@ -26,6 +26,21 @@ pub struct Saved {
     pub voice: Vec<String>,
 }
 
+#[derive(Default)]
+pub struct Audit {
+    pub loaded: bool,
+    pub loading: bool,
+    pub error: Option<String>,
+    pub entries: Vec<serde_json::Value>,
+    pub compacted: bool,
+    pub action: &'static str,
+    pub open: HashSet<String>,
+    pub shown: usize,
+    pub filter_open: bool,
+}
+
+pub const AUDIT_PAGE: usize = 50;
+
 pub struct CommSettings {
     pub community: String,
     pub section: &'static str,
@@ -47,6 +62,8 @@ pub struct CommSettings {
     pub ban_query: Entity<TextInput>,
     pub ban_sel: HashSet<String>,
     pub unbanning: bool,
+    pub audit: Audit,
+    pub audit_query: Entity<TextInput>,
     pub saving: bool,
     /// A refused close: the bar says why until this passes.
     pub warn_until: Option<std::time::Instant>,
@@ -71,6 +88,11 @@ pub enum Act {
     Reset,
     Save,
     Learn,
+    AuditRefresh,
+    AuditToggle(String),
+    AuditMore,
+    AuditFilter,
+    AuditPick(&'static str),
 }
 
 pub type OnAct = Rc<dyn Fn(Act, &mut Window, &mut App)>;
@@ -532,27 +554,191 @@ fn bans(m: &CommSettings, store: &Store, on: &OnAct, cx: &App) -> AnyElement {
                     .flex()
                     .items_center()
                     .gap(px(14.))
-                    .child(
-                        div()
-                            .flex_1()
-                            .h(px(41.))
-                            .relative()
-                            .flex()
-                            .items_center()
-                            .pl(px(44.))
-                            .pr(px(12.))
-                            .rounded(px(8.))
-                            .border_1()
-                            .border_color(ca(57, 57, 57, 0.5))
-                            .overflow_hidden()
-                            .child(svg().path("icons/search.svg").absolute().left(px(12.)).top(px(8.)).size(px(24.)).text_color(white_a(0.4)))
-                            .child(div().flex_1().min_w_0().child(m.ban_query.clone())),
-                    )
+                    .child(search_box(&m.ban_query))
                     .child(div().text_size(px(12.)).line_height(px(24.)).text_color(if m.bans.len() >= BANS_MAX { c(crate::timeline::DANGER) } else { c(0x6f6f6f) }).child(format!("{} of {BANS_MAX}", m.bans.len()))),
             )
             .child(div().mt(px(8.)).when(m.unbanning, |d| d.opacity(0.5)).child(list)),
     )
     .into_any_element()
+}
+
+fn audit_member(store: &Store) -> impl Fn(Option<&str>) -> String + '_ {
+    move |npub| match npub {
+        None => "someone".into(),
+        Some(n) if store.profiles.contains_key(n) => store.name(n),
+        Some(n) => short_npub(n),
+    }
+}
+
+pub fn audit_rows<'a>(m: &'a CommSettings, store: &Store, cx: &App) -> Vec<&'a serde_json::Value> {
+    let q = m.audit_query.read(cx).text().trim().to_lowercase();
+    let member = audit_member(store);
+    m.audit
+        .entries
+        .iter()
+        .filter(|e| m.audit.action == "all" || crate::audit::family_of(e["action"].as_str().unwrap_or("")) == m.audit.action)
+        .filter(|e| q.is_empty() || crate::audit::plain_text(e, &member).to_lowercase().contains(&q))
+        .collect()
+}
+
+fn audit(m: &CommSettings, store: &Store, on: &OnAct, cx: &App) -> AnyElement {
+    use crate::audit::{details, sentence, tone_of, when, Tone};
+    let a = &m.audit;
+    let member = audit_member(store);
+    let rows = audit_rows(m, store, cx);
+    let querying = !m.audit_query.read(cx).text().trim().is_empty() || a.action != "all";
+    let now = store.now_ms();
+    let pick = on.clone();
+    let toggle = on.clone();
+    let list: AnyElement = if a.loading && a.entries.is_empty() {
+        audit_empty("Reading this community's history…").into_any_element()
+    } else if let Some(e) = a.error.clone().filter(|_| a.entries.is_empty()) {
+        hint(e).my(px(18.)).text_center().text_color(c(crate::timeline::DANGER)).into_any_element()
+    } else {
+        let mut list = div().mt(px(6.)).mb(px(12.)).flex().flex_col().gap(px(2.)).when(a.loading, |d| d.opacity(0.55));
+        if rows.is_empty() {
+            list = list.child(audit_empty(if querying { "No matches." } else { "Nothing has happened here yet." }));
+        }
+        for e in rows.iter().take(a.shown) {
+            let id = e["id"].as_str().unwrap_or("").to_string();
+            let lines = details(e, &member);
+            let open = a.open.contains(&id);
+            let badge = match tone_of(e["action"].as_str().unwrap_or("")) {
+                Tone::Add => c(ACCENT),
+                Tone::Remove => c(crate::timeline::DANGER),
+                Tone::Change => c(0xfbbf24),
+            };
+            let actor = e["actor"].as_str();
+            let mut text = String::new();
+            let mut bold = Vec::new();
+            for (part, b) in sentence(e, &member) {
+                if b {
+                    bold.push((text.len()..text.len() + part.len(), gpui::HighlightStyle { color: Some(c(0xffffff)), font_weight: Some(FontWeight::SEMIBOLD), ..Default::default() }));
+                }
+                text.push_str(&part);
+            }
+            let openable = !lines.is_empty();
+            let on = on.clone();
+            let key = id.clone();
+            list = list.child(
+                div()
+                    .id(SharedString::from(format!("audit-{id}")))
+                    .flex()
+                    .items_center()
+                    .gap(px(12.))
+                    .px(px(12.))
+                    .py(px(10.))
+                    .rounded(px(8.))
+                    .when(open, |d| d.bg(white_a(0.04)))
+                    .when(openable, |d| d.cursor_pointer().hover(|d| d.bg(white_a(0.04))).on_click(move |_, w, cx| on(Act::AuditToggle(key.clone()), w, cx)))
+                    .child(
+                        div()
+                            .relative()
+                            .size(px(32.))
+                            .flex_shrink_0()
+                            .child(match actor {
+                                Some(n) => crate::ui::avatar(store, n, 32.),
+                                None => img("icons/group-placeholder.svg").size(px(32.)).rounded_full().into_any_element(),
+                            })
+                            .child(div().absolute().right(px(-2.)).bottom(px(-2.)).size(px(14.)).rounded_full().border_2().border_color(c(0x050505)).bg(badge)),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .child(div().text_size(px(14.)).line_height(px(19.6)).text_color(white_a(0.7)).child(gpui::StyledText::new(text).with_highlights(bold)))
+                            .child(div().mt(px(2.)).text_size(px(12.)).line_height(px(24.)).text_color(white_a(0.38)).child(when(e["at"].as_u64().unwrap_or(0), now))),
+                    )
+                    .when(openable, |d| {
+                        d.child(
+                            div().size(px(18.)).flex_shrink_0().flex().items_center().justify_center().child(svg()
+                                .path("icons/chevron-down.svg")
+                                .size(px(10.))
+                                .text_color(white_a(0.38))
+                                .when(open, |s| s.with_transformation(gpui::Transformation::rotate(gpui::radians(std::f32::consts::PI))))),
+                        )
+                    }),
+            );
+            if open && openable {
+                list = list.child(
+                    div()
+                        .ml(px(56.))
+                        .mb(px(6.))
+                        .pt(px(2.))
+                        .pr(px(12.))
+                        .pb(px(8.))
+                        .flex()
+                        .flex_col()
+                        .gap(px(4.))
+                        .text_size(px(13.))
+                        .line_height(px(18.2))
+                        .text_color(white_a(0.6))
+                        .children(lines.into_iter().map(|l| div().child(l))),
+                );
+            }
+        }
+        let more = rows.len() > a.shown;
+        div()
+            .child(list)
+            .when(more, |d| d.child(div().flex().justify_center().mb(px(12.)).child(text_btn("audit-more", "Show more", true, click(on, || Act::AuditMore)))))
+            .when(a.compacted, |d| d.child(hint("Some history from before a key rotation this device didn't live through can't be read back.")))
+            .into_any_element()
+    };
+    let filter = crate::kit::select(
+        "audit-filter",
+        170.,
+        crate::audit::FAMILIES,
+        a.action,
+        a.filter_open,
+        move |w, cx| toggle(Act::AuditFilter, w, cx),
+        move |v, w, cx| pick(Act::AuditPick(v), w, cx),
+    );
+    block(
+        true,
+        div()
+            .child(
+                div()
+                    .mb(px(20.))
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(12.))
+                    .child(div().text_size(px(24.)).line_height(px(28.)).font_weight(FontWeight::BOLD).text_color(c(0xffffff)).child("Audit Log"))
+                    .child(text_btn("audit-refresh", "Refresh", !a.loading, click(on, || Act::AuditRefresh))),
+            )
+            .child(lede("Every change to this community, signed by whoever made it."))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(14.))
+                    .child(search_box(&m.audit_query))
+                    .child(div().w(px(170.)).flex_shrink_0().child(filter)),
+            )
+            .child(div().mt(px(8.)).child(list)),
+    )
+    .into_any_element()
+}
+
+fn audit_empty(text: &'static str) -> impl IntoElement {
+    div().my(px(18.)).text_center().text_size(px(12.5)).line_height(px(18.)).text_color(white_a(0.4)).child(text)
+}
+
+fn search_box(input: &Entity<TextInput>) -> impl IntoElement {
+    div()
+        .flex_1()
+        .h(px(41.))
+        .relative()
+        .flex()
+        .items_center()
+        .pl(px(44.))
+        .pr(px(12.))
+        .rounded(px(8.))
+        .border_1()
+        .border_color(ca(57, 57, 57, 0.5))
+        .overflow_hidden()
+        .child(svg().path("icons/search.svg").absolute().left(px(12.)).top(px(8.)).size(px(24.)).text_color(white_a(0.4)))
+        .child(div().flex_1().min_w_0().child(input.clone()))
 }
 
 fn placeholder_section(title: &'static str, text: &'static str) -> AnyElement {
@@ -663,7 +849,7 @@ pub fn view(m: &CommSettings, store: &Store, on: &OnAct, cx: &App) -> impl IntoE
         "relays" => relays(m, on, cx),
         "bans" => bans(m, store, on, cx),
         "roles" => placeholder_section("Role List", "Roles are coming to this client soon."),
-        _ => placeholder_section("Audit Log", "The audit log is coming to this client soon."),
+        _ => audit(m, store, on, cx),
     };
     let close = on.clone();
     let main = div()

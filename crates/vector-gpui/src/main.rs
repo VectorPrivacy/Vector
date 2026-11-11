@@ -1,6 +1,7 @@
 mod assets;
 use vector_media::{audio_devices, calls, mic_access};
 mod attachments;
+mod audit;
 mod backend;
 mod badgecard;
 mod call;

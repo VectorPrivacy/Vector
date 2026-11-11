@@ -35,6 +35,7 @@
         get_channel_pins: () => [], sync_community_channel: () => ({ new_messages: 0, reached_start: true, oldest_ms: null }), fill_community_gap: () => 0,
         get_community_timeouts: () => ({}), get_community_mentions: () => ({ anyone: true, pingers: [], roles: [] }), get_community_admins: () => [], get_community_role_graph: () => ({ roles: [], grants: [], activated: false, readers: {} }), get_community_banlist: () => (FIX.profiles || []).filter((p) => p.name === 'frank' || p.name === 'heidi').map((p) => p.id), get_channel_send_denied: () => [], check_community_raid: () => ({ raid: false }),
         get_community_join_order: () => [],
+        get_community_audit_log: () => FIX.audit || { entries: [], compacted: false },
         create_community: ({ name }) => ({ community_id: 'f'.repeat(64), channel_id: 'e'.repeat(64), channel_name: 'general', owner_npub: FIX.npub, name }),
         create_public_invite: () => 'https://vectorapp.io/invite/' + 'Ab3'.repeat(20),
         list_public_invites: () => [{ url: 'https://vectorapp.io/invite/' + 'Ab3'.repeat(20), token: 'tok1', label: 'Reddit', join_count: 3 }, { url: 'https://vectorapp.io/invite/' + 'Zx9'.repeat(20), token: 'tok2', label: null, join_count: 0 }],
