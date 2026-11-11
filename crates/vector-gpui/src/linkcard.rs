@@ -138,6 +138,9 @@ pub fn card(ctx: &Ctx, m: &Message) -> Option<AnyElement> {
         let u = u.trim_start_matches("https://").trim_start_matches("http://").trim_start_matches("www.");
         u.starts_with("vectorapp.io/emojis/pack/") || u.starts_with("vectorapp.io/invite")
     };
+    if ctx.held {
+        return None;
+    }
     let Some(meta) = &m.preview_metadata else {
         // Links a Nostr card covers, invites and pack shares are not pages to preview.
         let previewable = urls(&m.content).any(|u| {

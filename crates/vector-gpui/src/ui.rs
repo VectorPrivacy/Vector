@@ -7,6 +7,7 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
 
+use gpui::AnimationExt;
 use gpui::{
     AnyElement, Context, Entity, Focusable, FontWeight, IntoElement, ListAlignment, ListState, MouseButton,
     ParentElement, Render, SharedString, Styled, Window, WindowControlArea, div, img, linear_color_stop,
@@ -94,6 +95,13 @@ pub struct VectorApp {
     /// Add Profile is showing the login screen over this account: the account Back returns to,
     /// and whether the old session was already torn down for the new one.
     adding: Option<(String, bool)>,
+    /// The list shows Requests rather than Messages; `tab_slid` once a pick moved the bar.
+    requests_tab: bool,
+    tab_slid: bool,
+    /// The request senders last asked about for shared Communities.
+    mutuals_asked: Vec<String>,
+    /// Viktor, while the Messages list is empty.
+    viktor: Option<Entity<crate::viktor::Viktor>>,
 }
 
 #[derive(Clone, PartialEq)]
@@ -109,6 +117,8 @@ enum PopupAct {
     Notice,
     Delete { id: String, failed: bool },
     Block { npub: String },
+    /// Block from a request's bar, which also closes the chat.
+    BlockRequest { npub: String },
     Nickname { npub: String },
     RemoveAccount { npub: String },
 }
@@ -179,6 +189,10 @@ impl VectorApp {
             badge_card: None,
             new_chat: None,
             adding: None,
+            requests_tab: false,
+            tab_slid: false,
+            mutuals_asked: Vec::new(),
+            viktor: None,
         }
     }
 
@@ -399,6 +413,7 @@ impl VectorApp {
             }
             UiEvent::Core(name, payload) => self.on_core_event(&name, payload, window, cx),
         }
+        self.sync_request_mutuals(cx);
         cx.notify();
     }
 
@@ -896,6 +911,12 @@ impl VectorApp {
         match act {
             PopupAct::Notice => {}
             PopupAct::Block { npub } => self.set_blocked(npub, true, cx),
+            PopupAct::BlockRequest { npub } => {
+                if self.open.as_deref() == Some(npub.as_str()) {
+                    self.open = None;
+                }
+                self.set_blocked(npub, true, cx);
+            }
             PopupAct::RemoveAccount { npub } => self.remove_account(npub, window, cx),
             PopupAct::Nickname { npub } => {
                 if let Some(input) = popup.input {
@@ -1000,6 +1021,14 @@ impl Render for VectorApp {
         }
         let store = self.store.clone();
         let store = store.borrow();
+        let no_messages = !store.chats.iter().any(|c| store.listed(c) && !store.is_request(c));
+        if no_messages != self.viktor.is_some() {
+            self.viktor = no_messages.then(|| {
+                static GREETED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+                let greet = !GREETED.swap(true, std::sync::atomic::Ordering::Relaxed);
+                cx.new(|cx| crate::viktor::Viktor::new(146., greet, cx))
+            });
+        }
         let popup = self.popup.as_ref().map(|(p, _)| {
             let app = cx.entity().downgrade();
             kit::popup(p, move |yes, window, cx| {
@@ -1025,7 +1054,7 @@ impl Render for VectorApp {
                         .ok();
                     }
                 }))
-                .child(chat_list(&self.store, &store, self.open.clone(), cx))
+                .child(chat_list(&self.store, &store, self.open.clone(), (self.requests_tab, self.tab_slid, no_messages), cx))
                 .child(match (&self.profile, self.open.clone()) {
                     _ if self.new_chat.is_some() => {
                         let app = cx.entity().downgrade();
@@ -1043,7 +1072,7 @@ impl Render for VectorApp {
                         crate::profile::pane(&store, p, &on, window, cx)
                     }
                     (None, Some(id)) => self.chat_pane(&store, id, cx).into_any_element(),
-                    (None, None) => empty_pane().into_any_element(),
+                    (None, None) => empty_pane(self.viktor.clone()).into_any_element(),
                 }),
         )
         .children(self.switcher.as_ref().filter(|_| self.profile.is_some()).map(|s| {
@@ -1186,9 +1215,9 @@ fn rail(store: &Store, open: Option<&SharedString>, on_me: impl Fn(&gpui::ClickE
     let unread: Vec<&SerializableChat> = store
         .chats
         .iter()
-        .filter(|c| store.unread_count(c) > 0 && open.is_none_or(|o| *o != c.id))
+        .filter(|c| store.listed(c) && store.unread_count(c) > 0 && open.is_none_or(|o| *o != c.id) && !store.is_request(c))
         .collect();
-    let any_unread = store.chats.iter().any(|c| store.unread_count(c) > 0);
+    let any_unread = store.chats.iter().any(|c| store.listed(c) && store.unread_count(c) > 0);
 
     // .ws-rail-messages.is-home
     let messages = div().pt(px(16.)).px(px(8.)).child(
@@ -1373,9 +1402,36 @@ fn rail(store: &Store, open: Option<&SharedString>, on_me: impl Fn(&gpui::ClickE
 
 // ── #chats ──────────────────────────────────────────────────────────────────────────────
 
-fn chat_list(shared: &Shared, store: &Store, open: Option<SharedString>, cx: &mut Context<VectorApp>) -> impl IntoElement {
-    let tab = |label: &'static str, active: bool| {
+fn chat_list(shared: &Shared, store: &Store, open: Option<SharedString>, (requests, slid, no_messages): (bool, bool, bool), cx: &mut Context<VectorApp>) -> impl IntoElement {
+    let (mut dot_messages, mut dot_requests) = (false, false);
+    let mut ids: Vec<usize> = Vec::new();
+    for (i, chat) in store.chats.iter().enumerate() {
+        if !store.listed(chat) {
+            continue;
+        }
+        let request = store.is_request(chat);
+        if store.unread_count(chat) > 0 {
+            if request {
+                dot_requests = true;
+            } else {
+                dot_messages = true;
+            }
+        }
+        if request == requests {
+            ids.push(i);
+        }
+    }
+    fn pick(to_requests: bool, cx: &mut Context<VectorApp>) -> impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static {
+        cx.listener(move |app, _: &gpui::ClickEvent, _, cx| {
+            app.requests_tab = to_requests;
+            app.tab_slid = true;
+            cx.notify();
+        })
+    }
+    let (to_messages, to_requests) = (pick(false, cx), pick(true, cx));
+    let tab = |label: &'static str, on: bool, dot: bool, click| {
         div()
+            .id(label)
             .flex_1()
             .h(px(40.))
             .flex()
@@ -1383,12 +1439,51 @@ fn chat_list(shared: &Shared, store: &Store, open: Option<SharedString>, cx: &mu
             .justify_center()
             .font_family(RUBIK)
             .text_size(px(14.))
-            .font_weight(if active { FontWeight::BOLD } else { FontWeight::MEDIUM })
-            .text_color(if active { c(0xffffff) } else { white_a(0.38) })
-            .when(active, |d| d.border_b_2().border_color(c(PRIMARY)))
-            .child(label)
+            .font_weight(if on { FontWeight::BOLD } else { FontWeight::MEDIUM })
+            .text_color(if on { c(0xffffff) } else { white_a(0.38) })
+            .when(!on, |d| {
+                d.cursor_pointer().hover(|s| s.text_color(white_a(0.75))).on_click(click)
+            })
+            .child(
+                div().relative().child(label).when(dot && !on, |d| {
+                    d.child(div().absolute().top(px(-1.)).right(px(-9.)).size(px(8.)).rounded_full().bg(c(ACCENT)))
+                }),
+            )
     };
-    let count = store.chats.len();
+    // .cc-tab-bar: slides between the halves, but never on the first paint.
+    let half = (LIST_W - 23.) / 2.;
+    let to = if requests { half } else { 0. };
+    let bar = div().absolute().bottom(px(-1.)).w(px(half)).h(px(2.)).bg(c(PRIMARY));
+    let bar = if slid {
+        bar.with_animation(
+            SharedString::from(format!("cc-tab-bar-{requests}")),
+            gpui::Animation::new(std::time::Duration::from_millis(240)).with_easing(crate::kit::bezier(0.2, 0.8, 0.2, 1.)),
+            move |d, t| d.left(px(half - to + (2. * to - half) * t)),
+        )
+        .into_any_element()
+    } else {
+        bar.left(px(to)).into_any_element()
+    };
+    let empty = if !ids.is_empty() {
+        None
+    } else if requests {
+        // .cc-empty
+        Some(
+            div()
+                .mx(px(24.))
+                .my(px(28.))
+                .text_size(px(14.))
+                .line_height(px(20.))
+                .text_center()
+                .text_color(white_a(0.45))
+                .child("New people who message you show up here.")
+                .into_any_element(),
+        )
+    } else {
+        no_messages.then(|| get_started(cx).into_any_element())
+    };
+    let count = ids.len();
+    let ids = Rc::new(ids);
     let store = shared.clone();
     let view = cx.entity().downgrade();
     div()
@@ -1434,16 +1529,19 @@ fn chat_list(shared: &Shared, store: &Store, open: Option<SharedString>, cx: &mu
                 .flex()
                 .border_b_1()
                 .border_color(white_a(0.2))
-                .child(tab("Messages", true))
-                .child(tab("Requests", false)),
+                .relative()
+                .child(tab("Messages", !requests, dot_messages, to_messages))
+                .child(tab("Requests", requests, dot_requests, to_requests))
+                .child(bar),
         )
+        .children(empty)
         .child(
             div().flex_1().min_h_0().pt(px(6.)).child(
                 uniform_list("chatlist", count, move |range, _, _| {
                     let store = store.borrow();
                     range
-                        .map(|i| {
-                            let chat = &store.chats[i];
+                        .filter_map(|i| ids.get(i).and_then(|&i| store.chats.get(i)))
+                        .map(|chat| {
                             let active = open.as_ref().is_some_and(|o| *o == chat.id);
                             let id: SharedString = chat.id.clone().into();
                             let view = view.clone();
@@ -1461,6 +1559,58 @@ fn chat_list(shared: &Shared, store: &Store, open: Option<SharedString>, cx: &mu
                 .size_full(),
             ),
         )
+}
+
+/// `.chatlist-get-started`: the empty list's first step, which rides the New Chat button.
+fn get_started(cx: &mut Context<VectorApp>) -> impl IntoElement {
+    div().pt(px(6.)).px(px(7.)).child(
+        div()
+            .id("chatlist-get-started")
+            .relative()
+            .overflow_hidden()
+            .h(px(50.))
+            .flex()
+            .items_center()
+            .gap(px(10.))
+            .rounded_full()
+            .border_1()
+            .border_color(ca(89, 252, 179, 0.5))
+            .bg(c(0x000000))
+            .cursor_pointer()
+            .on_click(cx.listener(|app, _, window, cx| app.open_new_chat(window, cx)))
+            .child(
+                div().absolute().top_0().bottom_0().left(gpui::relative(0.35)).right_0().rounded_r_full().bg(gpui::linear_gradient(
+                    90.,
+                    gpui::linear_color_stop(ca(89, 252, 179, 0.), 0.),
+                    gpui::linear_color_stop(ca(89, 252, 179, 0.3), 1.),
+                )),
+            )
+            .child(
+                div()
+                    .ml(px(5.))
+                    .size(px(38.))
+                    .flex_shrink_0()
+                    .rounded_full()
+                    .border_1()
+                    .border_color(c(0x191919))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(svg().path("icons/add-user.svg").size(px(17.)).text_color(c(ACCENT))),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .pr(px(12.))
+                    .truncate()
+                    .text_size(px(15.))
+                    .line_height(px(18.))
+                    .font_weight(FontWeight::BOLD)
+                    .text_color(c(0xf7f4f4))
+                    .child("Get Started"),
+            ),
+    )
 }
 
 /// `.chatlist-contact` (ChatlistRow.svelte).
@@ -1568,7 +1718,10 @@ fn chat_row(store: &Store, chat: &SerializableChat, active: bool) -> gpui::State
 
 // ── .chat ───────────────────────────────────────────────────────────────────────────────
 
-fn empty_pane() -> impl IntoElement {
+fn empty_pane(viktor: Option<Entity<crate::viktor::Viktor>>) -> AnyElement {
+    if let Some(viktor) = viktor {
+        return div().flex_1().h_full().flex().items_center().justify_center().child(intro(viktor)).into_any_element();
+    }
     div()
         .flex_1()
         .h_full()
@@ -1578,6 +1731,36 @@ fn empty_pane() -> impl IntoElement {
         .justify_center()
         .child(img("ui/logo-mark.svg").w(px(48.)).h(px(80.)).opacity(0.25))
         .child(div().mt(px(12.)).text_size(px(14.)).text_color(white_a(0.35)).child("Pick a conversation to get started"))
+        .into_any_element()
+}
+
+/// `.chatlist-intro` in the empty conversation pane: Viktor's welcome, pointing at the Hub.
+fn intro(viktor: Entity<crate::viktor::Viktor>) -> impl IntoElement {
+    const TEXT_P: &str = "Feel free to join the public community to learn more about Vector, discuss privacy, and make some new friends.";
+    let link = 13..13 + "join the public community".len();
+    let accent = gpui::HighlightStyle { color: Some(c(ACCENT)), ..Default::default() };
+    let words = gpui::InteractiveText::new("intro-text", gpui::StyledText::new(TEXT_P).with_highlights([(link.clone(), accent)]))
+        .on_click(vec![link], |_, _, cx| cx.open_url("https://vectorapp.io/hub"));
+    div()
+        .max_w(px(448.))
+        .px(px(24.))
+        .flex()
+        .flex_col()
+        .items_center()
+        .gap(px(18.))
+        .text_center()
+        .child(viktor)
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .items_center()
+                .child(div().mb(px(10.)).text_size(px(24.)).line_height(px(29.)).font_weight(FontWeight::BOLD).text_color(c(0xf7f4f4)).child("Welcome to Vector!"))
+                .child(div().text_size(px(15.)).line_height(px(15. * 1.55)).text_color(white_a(0.55)).child(words)),
+        )
+        .with_animation("intro-in", gpui::Animation::new(std::time::Duration::from_millis(400)).with_easing(kit::bezier(0.22, 1., 0.36, 1.)), |d, t| {
+            d.opacity(t).mt(px(8. * (1. - t)))
+        })
 }
 
 impl VectorApp {
@@ -1677,6 +1860,7 @@ impl VectorApp {
                 fail_reasons: &fail_reasons,
                 media: &media,
                 scale: window.scale_factor(),
+                held: rows_store.is_request(chat),
             };
             // A divider's 10px margins stand in for the row's own above it.
             let after_message = i > 0 && matches!(rows[i - 1], Row::Message { .. });
@@ -1706,6 +1890,7 @@ impl VectorApp {
         })
         .size_full();
 
+        let request = store.chat(&id).is_some_and(|chat| store.is_request(chat)).then(|| request_bar(id.to_string(), store.pictures_held(&id), cx));
         div()
             .flex_1()
             .h_full()
@@ -1720,8 +1905,9 @@ impl VectorApp {
                     .flex_1()
                     .min_h_0()
                     .bg(c(MESSAGES_BG))
-                    .pt(px(12.))
+                    .pt(px(if request.is_some() { 12. + 56. } else { 12. }))
                     .child(messages)
+                    .children(request)
                     // `.fadeout-bottom-msgs`: rows dim into the composer.
                     .child(
                         div()
@@ -1739,6 +1925,73 @@ impl VectorApp {
             )
             .child(composer(self.input.clone(), &self.mode, (self.picker_open && !self.picker_status).then(|| (self.emoji_picker.clone(), self.picker.is_none())), self.attach, cx))
     }
+}
+
+/// `.request-bar`: under the header of a DM from someone new, Block or Accept.
+fn request_bar(npub: String, pictures: bool, cx: &mut Context<VectorApp>) -> impl IntoElement {
+    let button = |id: &'static str, label: &'static str| {
+        div()
+            .id(id)
+            .flex_shrink_0()
+            .h(px(34.))
+            .px(px(12.))
+            .flex()
+            .items_center()
+            .rounded(px(9.))
+            .border_1()
+            .cursor_pointer()
+            .text_size(px(14.))
+            .font_weight(FontWeight::SEMIBOLD)
+            .child(label)
+    };
+    let (block, accept) = (npub.clone(), npub);
+    div()
+        .id("request-bar")
+        .occlude()
+        .absolute()
+        .top_0()
+        .left_0()
+        .right_0()
+        .h(px(56.))
+        .flex()
+        .items_center()
+        .gap(px(8.))
+        .pl(px(12.))
+        .pr(px(10.))
+        .bg(c(0x0d0d0d))
+        .border_b_1()
+        .border_color(white_a(0.12))
+        .child(svg().path("ui/request-shield.svg").size(px(22.)).flex_shrink_0().text_color(c(ACCENT)))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .gap(px(1.))
+                .child(div().text_size(px(14.)).font_weight(FontWeight::SEMIBOLD).line_height(px(17.)).text_color(c(0xffffff)).child("Message request"))
+                .child(
+                    div()
+                        .truncate()
+                        .text_size(px(13.))
+                        .line_height(px(16.))
+                        .text_color(white_a(0.7))
+                        .child(if pictures { "Accept to load media & profile" } else { "Accept to load media" }),
+                ),
+        )
+        .child(
+            button("request-block", "Block")
+                .border_color(c(timeline::DANGER).opacity(0.6))
+                .text_color(c(timeline::DANGER))
+                .on_click(cx.listener(move |app, _, _, cx| app.confirm_block_request(block.clone(), cx))),
+        )
+        .child(
+            button("request-accept", "Accept")
+                .bg(c(PRIMARY))
+                .border_color(gpui::transparent_black())
+                .text_color(c(0x000000))
+                .on_click(cx.listener(move |app, _, _, cx| app.accept_request(accept.clone(), cx))),
+        )
 }
 
 /// A short chat sits at the top, as the Tauri list does; a long one opens at its end and
@@ -2705,6 +2958,67 @@ impl VectorApp {
                     me.banner_cached = prev;
                 }
                 this.notice(&format!("{label} Upload Failed!"), err, cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn confirm_block_request(&mut self, npub: String, cx: &mut Context<Self>) {
+        let mut popup = kit::Popup::notice("Block User");
+        popup.text = Some("Are you sure you want to block this user? You will no longer receive DMs from them.".into());
+        popup.confirm = "Confirm".into();
+        popup.cancel = Some("Cancel".into());
+        self.popup = Some((popup, PopupAct::BlockRequest { npub }));
+        cx.notify();
+    }
+
+    /// Accept lets what they sent load as the settings allow, and moves the chat to Messages.
+    fn accept_request(&mut self, npub: String, cx: &mut Context<Self>) {
+        let lift = |this: &mut Self, npub: &str, cx: &mut Context<Self>| {
+            if let Some(chat) = this.store.borrow_mut().chat_mut(npub) {
+                chat.metadata.insert(vector_core::chat::ACCEPTED_KEY, "true".into());
+            }
+            this.media.borrow_mut().meta_asked.clear();
+            cx.notify();
+        };
+        if !self.live {
+            lift(self, &npub, cx);
+            return;
+        }
+        let rx = backend::run(backend::prefs::accept(npub.clone()));
+        cx.spawn(async move |this, cx| {
+            let ok = matches!(rx.await, Ok(Ok(())));
+            this.update(cx, |this, cx| if ok { lift(this, &npub, cx) } else { this.show_toast("Failed to accept", cx) }).ok();
+        })
+        .detach();
+    }
+
+    /// Re-ask which request senders share a Community with us when the requests change.
+    fn sync_request_mutuals(&mut self, cx: &mut Context<Self>) {
+        if !self.live {
+            return;
+        }
+        let asking: Vec<String> = {
+            let store = self.store.borrow();
+            store.chats.iter().filter(|c| store.is_request(c)).map(|c| c.id.clone()).collect()
+        };
+        if asking == self.mutuals_asked {
+            return;
+        }
+        self.mutuals_asked = asking.clone();
+        if asking.is_empty() {
+            self.store.borrow_mut().mutuals.clear();
+            return;
+        }
+        let rx = backend::run(backend::prefs::request_mutuals());
+        cx.spawn(async move |this, cx| {
+            let Ok(next) = rx.await else { return };
+            this.update(cx, |this, cx| {
+                if this.mutuals_asked == asking {
+                    this.store.borrow_mut().mutuals = next.into_iter().collect();
+                    cx.notify();
+                }
             })
             .ok();
         })

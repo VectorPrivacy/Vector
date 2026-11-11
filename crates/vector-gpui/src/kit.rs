@@ -316,3 +316,20 @@ pub fn sharp_svg(path: impl Into<SharedString>, size: f32, window: &Window, cx: 
 pub fn page_gutter(width: f32) -> f32 {
     (width * 0.18).min((width - 584.) / 2.).max(18.)
 }
+
+/// CSS `cubic-bezier(x1, y1, x2, y2)` as an easing: solve x for t by Newton, then read y.
+pub fn bezier(x1: f32, y1: f32, x2: f32, y2: f32) -> impl Fn(f32) -> f32 {
+    let at = |a: f32, b: f32, t: f32| 3. * a * (1. - t) * (1. - t) * t + 3. * b * (1. - t) * t * t + t * t * t;
+    let slope = |a: f32, b: f32, t: f32| 3. * a * (1. - t) * (1. - t) + 6. * (b - a) * (1. - t) * t + 3. * (1. - b) * t * t;
+    move |x| {
+        let mut t = x;
+        for _ in 0..8 {
+            let d = slope(x1, x2, t);
+            if d.abs() < 1e-6 {
+                break;
+            }
+            t = (t - (at(x1, x2, t) - x) / d).clamp(0., 1.);
+        }
+        at(y1, y2, t)
+    }
+}

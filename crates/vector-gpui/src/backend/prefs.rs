@@ -163,3 +163,13 @@ pub async fn set_nickname(npub: String, nickname: String) -> bool {
 pub fn refresh(npub: String) {
     vector_core::profile::sync::refresh_profile_now(npub);
 }
+
+/// Let a DM request in without answering it.
+pub async fn accept(npub: String) -> Result<(), String> {
+    vector_core::profile::sync::accept_chat(npub).await
+}
+
+/// The request senders whose pictures show anyway: a Community we hold counts them.
+pub async fn request_mutuals() -> Vec<String> {
+    vector_core::requests::request_mutuals().await
+}

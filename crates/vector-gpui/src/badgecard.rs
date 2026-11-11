@@ -3,7 +3,7 @@
 
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, App, FontWeight, HighlightStyle, MouseButton, Pixels, Point, SharedString, StyledText, Window, div, img,
+    AnyElement, App, FontWeight, HighlightStyle, MouseButton, Pixels, Point, SharedString, StyledText, Window, div,
     linear_color_stop, linear_gradient, point, px, svg,
 };
 

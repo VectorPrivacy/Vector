@@ -21,6 +21,9 @@ const server = createServer((req, res) => {
 }).listen(0);
 const port = server.address().port;
 const fixtures = JSON.parse(readFileSync(join(HERE, 'fixtures.json'), 'utf8'));
+// REQUESTS=<n>: the last n chats lose our side, so they wait under Requests.
+const requests = +process.env.REQUESTS || 0;
+if (requests) for (const chat of fixtures.chats.slice(-requests)) chat.messages = chat.messages.filter((m) => !m.mine);
 
 const browser = await chromium.launch();
 const page = await browser.newPage({ viewport: { width: +W, height: +H }, deviceScaleFactor: 1 });

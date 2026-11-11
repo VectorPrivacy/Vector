@@ -30,12 +30,20 @@ pub struct Store {
     /// Unread counts from the database (a live account holds only each chat's last message);
     /// `None` counts from the messages held.
     pub unread: Option<HashMap<String, u32>>,
+    /// Request senders a Community we hold counts as a member: their pictures show.
+    pub mutuals: std::collections::HashSet<String>,
 }
 
 impl Store {
     pub fn from_fixtures(path: &Path) -> anyhow::Result<Self> {
         let f: Fixtures = serde_json::from_slice(&std::fs::read(path)?)?;
         let mut chats = f.chats;
+        // VECTOR_REQUESTS=<n>: the last n chats lose our side, so they wait under Requests.
+        let requests = std::env::var("VECTOR_REQUESTS").ok().and_then(|n| n.parse::<usize>().ok()).unwrap_or(0);
+        let from = chats.len().saturating_sub(requests);
+        for chat in &mut chats[from..] {
+            chat.messages.retain(|m| !m.mine);
+        }
         chats.sort_by_key(|c| std::cmp::Reverse(last_activity(c)));
         Ok(Self {
             my_npub: f.npub,
@@ -44,6 +52,7 @@ impl Store {
             media_root: path.parent().unwrap_or(Path::new(".")).to_path_buf(),
             frozen_now_ms: Some(f.now),
             unread: None,
+            mutuals: Default::default(),
         })
     }
 
@@ -56,6 +65,7 @@ impl Store {
             media_root: PathBuf::from("/"),
             frozen_now_ms: None,
             unread: Some(HashMap::new()),
+            mutuals: Default::default(),
         }
     }
 
@@ -130,7 +140,31 @@ impl Store {
         }
     }
 
+    /// A DM neither answered nor accepted: it waits under Requests, its media unloaded.
+    pub fn is_request(&self, chat: &SerializableChat) -> bool {
+        chat.chat_type == vector_core::ChatType::DirectMessage
+            && chat.id != self.my_npub
+            && !chat.replied
+            && !chat.metadata.contains_key(vector_core::chat::ACCEPTED_KEY)
+            && !chat.messages.is_empty()
+            && !chat.messages.iter().any(|m| m.mine)
+    }
+
+    /// Whether the chat gets a row: a DM once it has content and its sender isn't blocked.
+    pub fn listed(&self, chat: &SerializableChat) -> bool {
+        chat.chat_type != vector_core::ChatType::DirectMessage
+            || (!chat.messages.is_empty() && !self.profiles.get(&chat.id).is_some_and(|p| p.is_blocked))
+    }
+
+    /// A stranger whose request waits shows no pictures until it's accepted.
+    pub fn pictures_held(&self, npub: &str) -> bool {
+        self.chat(npub).is_some_and(|c| self.is_request(c)) && !self.mutuals.contains(npub)
+    }
+
     pub fn avatar_path(&self, npub: &str) -> Option<PathBuf> {
+        if self.pictures_held(npub) {
+            return None;
+        }
         let p = self.profiles.get(npub)?;
         (!p.avatar_cached.is_empty()).then(|| self.media_root.join(&p.avatar_cached))
     }

@@ -68,6 +68,7 @@ pub fn attachments(ctx: &Ctx, m: &Message) -> Option<AnyElement> {
         let ready = att.downloaded || att.resident;
         let failed = media.failed.get(&att.id).cloned();
         let auto = !ready
+            && !ctx.held
             && !unsent
             && failed.is_none()
             && !media.auto_fired.contains(&att.id)

@@ -71,6 +71,8 @@ pub struct Ctx<'a> {
     pub media: &'a std::cell::RefCell<crate::media::Media>,
     /// Device pixels per pixel, for decoding pictures at the size they draw.
     pub scale: f32,
+    /// A DM request: what its sender sent stays unloaded.
+    pub held: bool,
 }
 
 pub fn base_look() -> Look {

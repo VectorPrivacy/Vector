@@ -172,7 +172,7 @@ pub fn pane(store: &Store, s: &Screen, on: &OnAct, window: &Window, cx: &App) ->
     });
     let muted = store.chat(&s.npub).is_some_and(|c| c.muted);
     let editing = s.edit.as_ref().filter(|_| mine);
-    let banner = (!p.banner_cached.is_empty() && !editing.is_some_and(|e| e.removed_banner)).then(|| store.media_root.join(&p.banner_cached));
+    let banner = (!p.banner_cached.is_empty() && !store.pictures_held(&p.id) && !editing.is_some_and(|e| e.removed_banner)).then(|| store.media_root.join(&p.banner_cached));
     let dark = mine || !p.banner.is_empty();
     let banner_h = if dark { 200. } else { 115. };
 
