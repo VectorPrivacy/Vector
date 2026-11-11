@@ -4,6 +4,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
+use std::sync::Arc;
 
 use gpui::{AnyElement, App, FontWeight, IntoElement, ParentElement, SharedString, Styled, Window, div, img, prelude::*, px, svg};
 use pulldown_cmark::Alignment;
@@ -12,6 +13,7 @@ use vector_core::types::Message;
 
 use crate::data::{self, Store};
 use crate::emoji;
+use crate::media::Linked;
 use crate::inline::{Atom, Kind, Look, OnClick, Target, inline};
 use crate::markdown::{self, Block, MONO, Para, ParaKind};
 use crate::theme::*;
@@ -230,14 +232,37 @@ fn content(ctx: &Ctx, m: &Message) -> AnyElement {
             _ => blocks.push(Block::Para(Para { atoms: trail.into(), base: base_look(), kind: ParaKind::Text })),
         }
     }
+    let pieces = linked_pictures(ctx, blocks);
     let mut col = div().flex().flex_col();
     let mut prev_bottom: Option<f32> = None;
     let mut prev_para = false;
-    let count = blocks.len();
-    for (i, b) in blocks.iter().enumerate() {
+    let count = pieces.len();
+    for (i, piece) in pieces.iter().enumerate() {
+        let b = match piece {
+            Piece::Block(b, _) => b,
+            Piece::Picture { image, w, h } => {
+                // `.inline-image`: its own size, no taller than 400px nor wider than the bubble.
+                let s = (400. / *h as f32).min(1.);
+                let (w, h) = (*w as f32 * s, *h as f32 * s);
+                col = col.child(
+                    img(image.clone())
+                        .w(px(w))
+                        .max_w_full()
+                        .aspect_ratio(w / h.max(1.))
+                        .rounded(px(8.))
+                        .cursor_pointer()
+                        .hover(|s| s.opacity(0.9)),
+                );
+                prev_bottom = Some(0.);
+                prev_para = false;
+                continue;
+            }
+        };
+        let cont = matches!(piece, Piece::Block(_, true));
         let (top, bottom) = margins(b, i == 0, i + 1 == count);
         let is_para = matches!(b, Block::Para(p) if p.kind == ParaKind::Text);
         let gap = match prev_bottom {
+            Some(_) if cont => 0.,
             // Consecutive paragraphs sit a blank line apart (`<br><br>`).
             Some(_) if is_para && prev_para => TEXT_LH,
             Some(pb) => pb.max(top),
@@ -251,6 +276,90 @@ fn content(ctx: &Ctx, m: &Message) -> AnyElement {
         col = col.child(div().h(px(pb)));
     }
     col.into_any_element()
+}
+
+enum Piece {
+    /// A block, and whether it continues the paragraph a picture split.
+    Block(Block, bool),
+    Picture { image: Arc<gpui::RenderImage>, w: u32, h: u32 },
+}
+
+/// `isImageUrl`: the path ends in a picture's extension, or the text names one anywhere.
+fn is_image_url(url: &str) -> bool {
+    const EXTS: [&str; 8] = ["png", "jpg", "jpeg", "gif", "webp", "bmp", "ico", "svg"];
+    let lower = url.to_ascii_lowercase();
+    let path = lower.split(['?', '#']).next().unwrap_or("");
+    EXTS.iter().any(|e| path.ends_with(&format!(".{e}")) || lower.contains(&format!(".{e}")))
+}
+
+/// Links to pictures, as `processInlineImages` swaps them: a ring beside the link while it
+/// fetches, then the picture in its place, splitting the paragraph around it.
+fn linked_pictures(ctx: &Ctx, blocks: Vec<Block>) -> Vec<Piece> {
+    let mut out = Vec::with_capacity(blocks.len());
+    for b in blocks {
+        let Block::Para(p) = b else {
+            out.push(Piece::Block(b, false));
+            continue;
+        };
+        if !p.atoms.iter().any(|a| matches!(a, Atom::Text { kind: Kind::Link(u), .. } if is_image_url(u))) {
+            out.push(Piece::Block(Block::Para(p), false));
+            continue;
+        }
+        let (base, kind) = (p.base.clone(), p.kind.clone());
+        let para = |atoms: Vec<Atom>| Block::Para(Para { atoms: atoms.into(), base: base.clone(), kind: kind.clone() });
+        let mut run: Vec<Atom> = Vec::new();
+        let mut cont = false;
+        let atoms: Vec<Atom> = p.atoms.iter().cloned().collect();
+        let mut i = 0;
+        while i < atoms.len() {
+            let url = match &atoms[i] {
+                Atom::Text { kind: Kind::Link(u), .. } if is_image_url(u) => u.clone(),
+                a => {
+                    run.push(a.clone());
+                    i += 1;
+                    continue;
+                }
+            };
+            // The link's text, however many runs it spans.
+            let mut end = i;
+            while end < atoms.len() && matches!(&atoms[end], Atom::Text { kind: Kind::Link(u), .. } if *u == url) {
+                end += 1;
+            }
+            match ctx.media.borrow_mut().linked(&url) {
+                Linked::Ready { image, w, h } => {
+                    if !run.is_empty() {
+                        out.push(Piece::Block(para(std::mem::take(&mut run)), cont));
+                    }
+                    out.push(Piece::Picture { image, w, h });
+                    cont = true;
+                    // A space the link was set off by goes with it.
+                    if let Some(Atom::Text { text, look, kind }) = atoms.get(end)
+                        && text.starts_with(' ')
+                    {
+                        let rest = text.trim_start_matches(' ');
+                        if !rest.is_empty() {
+                            run.push(Atom::Text { text: rest.to_string().into(), look: look.clone(), kind: kind.clone() });
+                        }
+                        end += 1;
+                    }
+                }
+                Linked::Loading(pct) => {
+                    run.extend(atoms[i..end].iter().cloned());
+                    run.push(Atom::Ring(pct));
+                }
+                Linked::Failed => run.extend(atoms[i..end].iter().cloned()),
+            }
+            i = end;
+        }
+        // Text left after a picture, less the break that led to it.
+        while matches!(run.first(), Some(Atom::Break)) && cont {
+            run.remove(0);
+        }
+        if !run.is_empty() {
+            out.push(Piece::Block(para(run), cont));
+        }
+    }
+    out
 }
 
 /// The space a block keeps above and below it, by its CSS margins.

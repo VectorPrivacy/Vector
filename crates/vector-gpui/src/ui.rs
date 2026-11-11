@@ -319,6 +319,12 @@ impl VectorApp {
                 }
                 t.bps = payload.get("bytesPerSec").and_then(Value::as_f64);
             }
+            "inline_image_progress" => {
+                let (Some(url), Some(p)) = (payload.get("url").and_then(Value::as_str), payload.get("progress").and_then(Value::as_f64)) else { return };
+                if p >= 0. {
+                    self.media.borrow_mut().linked_progress(url, p as f32);
+                }
+            }
             "attachment_download_stage" => {
                 let Some(id) = payload.get("id").and_then(Value::as_str) else { return };
                 let stage = payload.get("stage").and_then(Value::as_str).map(str::to_string);

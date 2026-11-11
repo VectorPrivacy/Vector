@@ -467,7 +467,7 @@ impl EmojiPicker {
                             .items_center()
                             .justify_center()
                             .children(thumb.map(|t| img(t).absolute().inset_0().size_full().object_fit(gpui::ObjectFit::Cover)))
-                            .child(crate::attachments::spinner(24., 2., 0.8, 0.25, white_a(0.1)))
+                            .child(crate::attachments::spinner(24., 2., 0.8, 0.25, white_a(0.1), c(PRIMARY)))
                             .into_any_element(),
                     };
                     let id = gif.id.clone();

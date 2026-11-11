@@ -59,6 +59,11 @@ impl Look {
     }
 }
 
+const RING: f32 = 16.;
+const RING_GAP: f32 = 6.;
+/// `vertical-align: middle` for a 16px box beside 15px text.
+const RING_DROP: f32 = 4.5;
+
 /// What a run is, beyond its look: what clicking it does and the box drawn behind it.
 #[derive(Clone, PartialEq)]
 pub enum Kind {
@@ -102,6 +107,8 @@ pub enum Atom {
     Image { src: SharedString, size: f32, drop: f32 },
     /// Fixed space that never breaks from what follows (an inline box's margin).
     Gap(f32),
+    /// A linked picture's fetch (`.inline-image-loading`): 6px off the text, a 16px ring.
+    Ring(Option<f32>),
     /// A forced line break.
     Break,
 }
@@ -237,6 +244,12 @@ fn segments(atoms: &[Atom], window: &Window) -> Vec<Seg> {
                     last.brk = true;
                 }
                 segs.push(Seg { atom: i, range: 0..0, width: *size, hang: 0., lead: 0., tail: 0., brk: true, hard: false });
+            }
+            Atom::Ring(_) => {
+                if let Some(last) = segs.last_mut() {
+                    last.brk = true;
+                }
+                segs.push(Seg { atom: i, range: 0..0, width: RING + RING_GAP, hang: 0., lead: 0., tail: 0., brk: true, hard: false });
             }
             Atom::Text { text, look, kind } => {
                 if text.is_empty() {
@@ -398,6 +411,10 @@ fn layout(atoms: &[Atom], base: &Look, width: f32, window: &Window) -> Laid {
                 Atom::Image { size, drop, .. } => {
                     above = above.max(size - drop);
                     below = below.max(*drop);
+                }
+                Atom::Ring(_) => {
+                    above = above.max(RING - RING_DROP);
+                    below = below.max(RING_DROP);
                 }
                 _ => {}
             }
@@ -569,6 +586,13 @@ impl Element for Inline {
                         let mut el = img(src.clone()).size(px(*sz)).into_any_element();
                         let origin = bounds.origin + point(px(p.x), px(line.baseline + drop - sz));
                         el.prepaint_as_root(origin, size(px(*sz), px(*sz)).map(Into::into), window, cx);
+                        images.push(el);
+                    }
+                    Atom::Ring(pct) => {
+                        let fill = pct.unwrap_or(5.).max(5.) / 100.;
+                        let mut el = crate::attachments::spinner(RING, 2., 2., fill, white_a(0.25), white_a(0.85));
+                        let origin = bounds.origin + point(px(p.x + RING_GAP), px(line.baseline + RING_DROP - RING));
+                        el.prepaint_as_root(origin, size(px(RING), px(RING)).map(Into::into), window, cx);
                         images.push(el);
                     }
                     Atom::Break | Atom::Gap(_) => {}

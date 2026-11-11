@@ -303,11 +303,11 @@ fn download_box(ctx: &Ctx, m: &Message, att: &Attachment, w: f32, h: f32, failed
 /// `.miniapp-downloading-spinner`: a 4px ring filled to `pct` from the top, turning once
 /// every two seconds.
 pub fn ring(size: f32, pct: Option<f32>) -> AnyElement {
-    spinner(size, 3.5, 2., pct.unwrap_or(5.).clamp(0., 100.) / 100., white_a(0.2))
+    spinner(size, 3.5, 2., pct.unwrap_or(5.).clamp(0., 100.) / 100., white_a(0.2), c(PRIMARY))
 }
 
 /// A turning ring: `fill` of it in the accent over a `track`, one turn every `period` seconds.
-pub fn spinner(size: f32, thickness: f32, period: f32, fill: f32, track: gpui::Hsla) -> AnyElement {
+pub fn spinner(size: f32, thickness: f32, period: f32, fill: f32, track: gpui::Hsla, color: gpui::Hsla) -> AnyElement {
     canvas(
         |_, _, _| {},
         move |bounds: Bounds<Pixels>, _, window, _| {
@@ -338,7 +338,7 @@ pub fn spinner(size: f32, thickness: f32, period: f32, fill: f32, track: gpui::H
             if fill > 0.
                 && let Some(p) = arc(turn, split)
             {
-                window.paint_path(p, c(PRIMARY));
+                window.paint_path(p, color);
             }
             window.request_animation_frame();
         },

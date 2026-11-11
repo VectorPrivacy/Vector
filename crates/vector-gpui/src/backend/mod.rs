@@ -7,6 +7,7 @@ pub mod attachments;
 pub mod events;
 pub mod gifs;
 pub mod images;
+pub mod inline;
 pub mod messaging;
 pub mod network;
 pub mod sync;

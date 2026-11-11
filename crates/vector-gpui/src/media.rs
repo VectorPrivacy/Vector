@@ -60,6 +60,19 @@ pub enum Source {
     File(PathBuf),
 }
 
+/// A picture a message links to.
+#[derive(Clone)]
+pub enum Linked {
+    /// Fetching; the percent once its length is known.
+    Loading(Option<f32>),
+    Ready { image: Arc<RenderImage>, w: u32, h: u32 },
+    /// Not a picture, or not reachable: the link stays a link.
+    Failed,
+}
+
+/// The longest side a linked picture is decoded to, in device pixels.
+const LINKED_MAX: (u32, u32) = (2048, 2048);
+
 struct Want {
     key: String,
     hash: Option<[u8; 32]>,
@@ -85,6 +98,8 @@ pub struct Media {
     wants: Vec<Want>,
     /// Downloads the renderer asks the app to start: (msg id, attachment id).
     pub auto_queue: Vec<(String, String)>,
+    linked: HashMap<String, Linked>,
+    linked_wants: Vec<String>,
 }
 
 impl Media {
@@ -112,6 +127,24 @@ impl Media {
     }
 }
 
+impl Media {
+    /// A linked picture; the first ask fetches it.
+    pub fn linked(&mut self, url: &str) -> Linked {
+        if let Some(l) = self.linked.get(url) {
+            return l.clone();
+        }
+        self.linked.insert(url.to_string(), Linked::Loading(None));
+        self.linked_wants.push(url.to_string());
+        Linked::Loading(None)
+    }
+
+    pub fn linked_progress(&mut self, url: &str, pct: f32) {
+        if let Some(Linked::Loading(p)) = self.linked.get_mut(url) {
+            *p = Some(pct);
+        }
+    }
+}
+
 /// Start the decodes the last render asked for; the app repaints as each lands.
 pub fn pump<V: 'static>(media: &std::rc::Rc<std::cell::RefCell<Media>>, app: WeakEntity<V>, live: bool, cx: &mut App) {
     let wants = std::mem::take(&mut media.borrow_mut().wants);
@@ -136,6 +169,29 @@ pub fn pump<V: 'static>(media: &std::rc::Rc<std::cell::RefCell<Media>>, app: Wea
                 None => Slot::Failed,
             };
             media.borrow_mut().images.insert(w.key, slot);
+            app.update(cx, |_, cx| cx.notify()).ok();
+        })
+        .detach();
+    }
+    let linked = std::mem::take(&mut media.borrow_mut().linked_wants);
+    for url in linked {
+        let media = media.clone();
+        let app = app.clone();
+        let rx = crate::backend::run(crate::backend::inline::image(url.clone()));
+        cx.spawn(async move |cx| {
+            let bytes = rx.await.ok().flatten();
+            let decoded = match bytes {
+                Some(b) => {
+                    let ext = crate::backend::inline::sniff(&b).unwrap_or("png");
+                    cx.background_executor().spawn(async move { decode(&b, ext, LINKED_MAX) }).await
+                }
+                None => None,
+            };
+            let slot = match decoded {
+                Some((image, w, h)) => Linked::Ready { image: Arc::new(image), w, h },
+                None => Linked::Failed,
+            };
+            media.borrow_mut().linked.insert(url, slot);
             app.update(cx, |_, cx| cx.notify()).ok();
         })
         .detach();
