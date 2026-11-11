@@ -186,6 +186,8 @@ enum PopupAct {
     InviteLabel,
     /// Revoking the last link anywhere makes it private again.
     InvitePrivate { token: String },
+    DeleteRole(String),
+    ActivateRoles,
     AddServer,
     DisableRelay { url: String },
     RemoveRelay { url: String },
@@ -360,6 +362,11 @@ impl VectorApp {
                 if let Ok(section) = std::env::var("VECTOR_COMMUNITY_SETTINGS") {
                     let section = ["overview", "relays", "roles", "bans", "audit"].into_iter().find(|s| *s == section).unwrap_or("overview");
                     app.open_comm_settings(id.clone(), section, window, cx);
+                    // VECTOR_ROLE=<name> opens that role in the editor.
+                    if let Ok(name) = std::env::var("VECTOR_ROLE") {
+                        let role = app.comm_settings.as_ref().and_then(|m| m.roles.rows().iter().find(|r| r["name"].as_str() == Some(name.as_str())).and_then(|r| r["role_id"].as_str().map(String::from)));
+                        app.edit_role(role.or(Some(name)), cx);
+                    }
                 }
             }
         }
@@ -1690,6 +1697,8 @@ impl VectorApp {
                 self.create_invite_link(label, cx);
             }
             PopupAct::InvitePrivate { token } => self.revoke_invite_link(token, true, cx),
+            PopupAct::DeleteRole(role_id) => self.role_op(true, role_id, cx),
+            PopupAct::ActivateRoles => self.role_op(false, String::new(), cx),
             PopupAct::Block { npub } => self.set_blocked(npub, true, cx),
             PopupAct::BlockRequest { npub } => {
                 if self.open.as_deref() == Some(npub.as_str()) {
@@ -3971,7 +3980,9 @@ impl VectorApp {
         let voice_in = cx.new(|cx| TextInput::new("https://relay.example.com", cx).with_look(add_look()).max_chars(256).keep_on_submit());
         let audit_query = cx.new(|cx| TextInput::new("Search", cx).with_look(crate::composer::Look { size: px(16.), line_height: px(19.), weight: FontWeight::MEDIUM, placeholder: white_a(0.6), ..kit::field_look() }));
         let ban_query = cx.new(|cx| TextInput::new("Search", cx).with_look(crate::composer::Look { size: px(16.), line_height: px(19.), weight: FontWeight::MEDIUM, placeholder: white_a(0.6), ..kit::field_look() }));
-        for input in [&search, &name_in, &description_in, &relay_in, &voice_in, &ban_query, &audit_query] {
+        let role_name = field("new role", "", crate::roles::NAME_MAX, cx);
+        let role_query = cx.new(|cx| TextInput::new("Search", cx).with_look(crate::composer::Look { size: px(16.), line_height: px(19.), weight: FontWeight::MEDIUM, placeholder: white_a(0.6), ..kit::field_look() }));
+        for input in [&search, &name_in, &description_in, &relay_in, &voice_in, &ban_query, &audit_query, &role_name, &role_query] {
             cx.subscribe(input, |app, _, _: &crate::composer::InputChanged, cx| {
                 if let Some(m) = app.comm_settings.as_mut() {
                     m.relay_error = None;
@@ -4012,13 +4023,377 @@ impl VectorApp {
             unbanning: false,
             audit: crate::commsettings::Audit { action: "all", shown: crate::commsettings::AUDIT_PAGE, ..Default::default() },
             audit_query,
+            roles: Default::default(),
+            role_name,
+            role_query,
+            role_hex: None,
             saving: false,
             warn_until: None,
         });
         if section == "audit" {
             self.load_audit(cx);
         }
+        if section == "roles" {
+            self.load_roles(None, cx);
+        }
         cx.notify();
+    }
+
+    /// The roles view, and the members the editor can hand a role to; `reopen` reopens that
+    /// role (or `everyone`) once the fresh view lands.
+    fn load_roles(&mut self, reopen: Option<String>, cx: &mut Context<Self>) {
+        let Some(m) = self.comm_settings.as_mut() else { return };
+        m.roles.loaded = true;
+        let id = m.community.clone();
+        let (view, members) = if self.live {
+            (backend::community::roles_view(&id).ok(), None)
+        } else {
+            let store = self.store.borrow();
+            (store.fixture_roles.clone(), store.community(&id).map(|c| c.members.clone()))
+        };
+        if let Some(view) = view {
+            m.roles.view = Some(view);
+        }
+        m.roles.order = None;
+        if let Some(members) = members {
+            m.roles.members = members;
+        }
+        if let Some(key) = reopen {
+            if m.roles.edit.is_some() {
+                self.edit_role(Some(key), cx);
+            }
+        }
+        if self.live {
+            let rx = backend::run(async move { backend::community::members(id.clone()).await });
+            cx.spawn(async move |this, cx| {
+                let Ok((members, admins)) = rx.await else { return };
+                this.update(cx, |this, cx| {
+                    if let Some(m) = this.comm_settings.as_mut() {
+                        let mut all = admins;
+                        all.extend(members.into_iter().filter(|n| !all.contains(n)).collect::<Vec<_>>());
+                        m.roles.members = all;
+                        cx.notify();
+                    }
+                })
+                .ok();
+            })
+            .detach();
+        }
+    }
+
+    /// Opens a role in the editor: an id, `everyone`, None for a new role, or closes it.
+    fn edit_role(&mut self, key: Option<String>, cx: &mut Context<Self>) {
+        use crate::roles::{role_of, Draft, Edit};
+        let Some(m) = self.comm_settings.as_mut() else { return };
+        let edit = match key.as_deref() {
+            Some("everyone") => {
+                let perms = m.roles.view.as_ref().map(|v| crate::roles::num(&v["everyone"])).unwrap_or(0);
+                let d = Draft { permissions: perms, ..Default::default() };
+                Some(Edit { id: Some("everyone".into()), everyone: true, draft: d.clone(), base: d })
+            }
+            Some(id) => m.roles.find(id).map(|r| {
+                let d = role_of(r);
+                Edit { id: Some(id.to_string()), everyone: false, draft: d.clone(), base: d }
+            }),
+            None => {
+                let d = Draft { name: "new role".into(), ..Default::default() };
+                Some(Edit { id: None, everyone: false, draft: d.clone(), base: Draft::default() })
+            }
+        };
+        let name = edit.as_ref().map(|e| e.draft.name.clone()).unwrap_or_default();
+        m.role_name.update(cx, |t, cx| t.set_text(&name, cx));
+        m.role_query.update(cx, |t, cx| t.set_text("", cx));
+        m.roles.edit = edit;
+        m.roles.adding = false;
+        m.roles.pick.clear();
+        m.roles.custom = false;
+        m.roles.access_open = false;
+        m.role_hex = None;
+        m.anchor = None;
+        m.scroll.set_offset(gpui::point(px(0.), px(0.)));
+    }
+
+    fn on_role(&mut self, act: crate::roles::Act, window: &mut Window, cx: &mut Context<Self>) {
+        use crate::roles::Act;
+        let Some(m) = self.comm_settings.as_mut() else { return };
+        match act {
+            Act::Open(id) => self.edit_role(Some(id), cx),
+            Act::New => self.edit_role(None, cx),
+            Act::Everyone => self.edit_role(Some("everyone".into()), cx),
+            Act::Back => {
+                if m.roles_dirty(cx) && m.roles.edit.is_some() {
+                    m.warn_until = Some(std::time::Instant::now() + std::time::Duration::from_millis(2600));
+                } else {
+                    self.edit_role(Some(String::new()), cx);
+                }
+            }
+            Act::Color(color) => {
+                if let Some(e) = m.roles.edit.as_mut() {
+                    e.draft.color = color;
+                }
+            }
+            Act::Custom => {
+                m.roles.custom = !m.roles.custom;
+                if m.roles.custom && m.role_hex.is_none() {
+                    let color = m.roles.edit.as_ref().map(|e| e.draft.color).filter(|c| *c != 0).unwrap_or(0x99aab5);
+                    let input = cx.new(|cx| {
+                        let mut t = TextInput::new("#99aab5", cx).with_look(crate::composer::Look { size: px(14.), line_height: px(17.), weight: FontWeight::MEDIUM, placeholder: c(0x5c5c5c), ..kit::field_look() }).max_chars(7).keep_on_submit();
+                        t.set_text(&format!("#{color:06x}"), cx);
+                        t
+                    });
+                    cx.subscribe(&input, |app, input, _: &crate::composer::InputChanged, cx| {
+                        let Some(color) = crate::roles::parse_hex(input.read(cx).text()) else { return };
+                        if let Some(e) = app.comm_settings.as_mut().and_then(|m| m.roles.edit.as_mut()) {
+                            e.draft.color = color;
+                        }
+                        cx.notify();
+                    })
+                    .detach();
+                    window.focus(&input.focus_handle(cx), cx);
+                    m.role_hex = Some(input);
+                }
+            }
+            Act::Perm(bit) => {
+                let mask = 1u64 << bit;
+                if m.roles.can_toggle(mask) {
+                    if let Some(e) = m.roles.edit.as_mut() {
+                        e.draft.permissions ^= mask;
+                    }
+                }
+            }
+            Act::Display => {
+                if m.roles.editable() {
+                    if let Some(e) = m.roles.edit.as_mut() {
+                        e.draft.display = !e.draft.display;
+                    }
+                }
+            }
+            Act::Mentionable => {
+                if m.roles.editable() {
+                    if let Some(e) = m.roles.edit.as_mut() {
+                        e.draft.mentionable = !e.draft.mentionable;
+                    }
+                }
+            }
+            Act::Move { id, to, before } => {
+                let mut ids: Vec<String> = m.roles.rows().iter().filter_map(|r| r["role_id"].as_str().map(String::from)).filter(|r| *r != id).collect();
+                if let Some(mut at) = ids.iter().position(|r| *r == to) {
+                    if !before {
+                        at += 1;
+                    }
+                    ids.insert(at, id);
+                    m.roles.order = (ids != m.roles.published_order()).then_some(ids);
+                }
+            }
+            Act::Adding(on) => {
+                m.roles.adding = on;
+                m.roles.pick.clear();
+                m.role_query.update(cx, |t, cx| t.set_text("", cx));
+            }
+            Act::Pick(npub) => {
+                if !m.roles.pick.remove(&npub) {
+                    m.roles.pick.insert(npub);
+                }
+            }
+            Act::AddPicked => {
+                let add: Vec<String> = m.roles.pick.iter().cloned().collect();
+                self.set_role_holders(add, Vec::new(), cx);
+            }
+            Act::Remove(npub) => self.set_role_holders(Vec::new(), vec![npub], cx),
+            Act::Delete => {
+                let Some(role) = m.roles.edit.as_ref().and_then(|e| e.id.clone()).and_then(|id| m.roles.find(&id).cloned()) else { return };
+                let name = role["name"].as_str().filter(|n| !n.is_empty()).unwrap_or("this role").to_string();
+                let held = role["holders"].as_array().map(Vec::len).unwrap_or(0);
+                let lost = match held {
+                    0 => String::new(),
+                    1 => " The member who holds it loses its permissions.".into(),
+                    n => format!(" The {n} members who hold it lose its permissions."),
+                };
+                let mut popup = kit::Popup::notice("Delete role");
+                popup.text = Some(format!("Delete {name}?{lost} This can't be undone.").into());
+                popup.confirm = "Delete".into();
+                popup.cancel = Some("Cancel".into());
+                self.popup = Some((popup, PopupAct::DeleteRole(role["role_id"].as_str().unwrap_or("").to_string())));
+            }
+            Act::Activate => {
+                let mut popup = kit::Popup::notice("Switch to the new roles");
+                popup.text = Some("Adds @everyone, channel permissions and role deletion. Every role carries over. Members on an older Vector keep the roles from before the switch and won't see later changes until they update.".into());
+                popup.confirm = "Switch".into();
+                popup.cancel = Some("Cancel".into());
+                self.popup = Some((popup, PopupAct::ActivateRoles));
+            }
+            Act::AccessOpen => m.roles.access_open = !m.roles.access_open,
+            Act::Access(v) => {
+                m.roles.access_open = false;
+                if let Some(e) = m.roles.edit.as_mut() {
+                    e.draft.channel_id = (!v.is_empty()).then(|| v.to_string());
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    fn save_roles(&mut self, cx: &mut Context<Self>) {
+        use backend::community::{RoleSave, RoleWrite};
+        let Some(m) = self.comm_settings.as_mut() else { return };
+        let name = m.role_name.read(cx).text().trim().to_string();
+        let edit_dirty = m.roles.edit_dirty(&name);
+        let mut save = RoleSave { order: m.roles.order.clone(), everyone: None, role: None };
+        let mut reopen = None;
+        if let Some(e) = m.roles.edit.as_ref().filter(|_| edit_dirty) {
+            if e.everyone {
+                save.everyone = Some(e.draft.permissions.to_string());
+                reopen = Some("everyone".to_string());
+            } else {
+                if name.is_empty() {
+                    self.show_toast("A role needs a name", cx);
+                    return;
+                }
+                save.role = Some(RoleWrite { id: e.id.clone(), name: name.clone(), color: e.draft.color, permissions: e.draft.permissions.to_string(), channel_id: e.draft.channel_id.clone(), display: e.draft.display, mentionable: e.draft.mentionable });
+            }
+        } else {
+            reopen = m.roles.edit.as_ref().and_then(|e| e.id.clone());
+        }
+        if !self.live {
+            if let Some(view) = m.roles.view.as_mut() {
+                if let Some(order) = &save.order {
+                    let mut roles = view["roles"].as_array().cloned().unwrap_or_default();
+                    roles.sort_by_key(|r| order.iter().position(|id| r["role_id"].as_str() == Some(id)).unwrap_or(usize::MAX));
+                    view["roles"] = roles.into();
+                }
+                if let Some(p) = &save.everyone {
+                    view["everyone"] = p.clone().into();
+                }
+                if let Some(w) = &save.role {
+                    let id = w.id.clone().unwrap_or_else(|| format!("{:064x}", view["roles"].as_array().map(Vec::len).unwrap_or(0) + 10));
+                    let fresh = serde_json::json!({"role_id": id, "name": w.name, "color": w.color, "permissions": w.permissions, "channel_id": w.channel_id, "display": w.display, "mentionable": w.mentionable, "manageable": true, "holders": []});
+                    let roles = view["roles"].as_array_mut().unwrap();
+                    match roles.iter_mut().find(|r| r["role_id"].as_str() == Some(id.as_str())) {
+                        Some(r) => {
+                            let holders = r["holders"].take();
+                            *r = fresh;
+                            r["holders"] = holders;
+                        }
+                        None => roles.push(fresh),
+                    }
+                    reopen = Some(id);
+                }
+            }
+            m.roles.order = None;
+            if let Some(key) = reopen {
+                self.edit_role(Some(key), cx);
+            }
+            return;
+        }
+        m.saving = true;
+        let id = m.community.clone();
+        let rx = backend::run(backend::community::save_roles(id.clone(), save));
+        cx.spawn(async move |this, cx| {
+            let res = rx.await.unwrap_or_else(|_| Err("Save failed".into()));
+            this.update(cx, |this, cx| {
+                if let Some(m) = this.comm_settings.as_mut().filter(|m| m.community == id) {
+                    m.saving = false;
+                }
+                match res {
+                    Ok(made) => this.load_roles(made.or(reopen), cx),
+                    Err(e) => this.show_toast(&e, cx),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Deletes `role_id`, or (`delete` false) moves the community to the new roles.
+    fn role_op(&mut self, delete: bool, role_id: String, cx: &mut Context<Self>) {
+        let Some(m) = self.comm_settings.as_mut() else { return };
+        if !self.live {
+            if let Some(view) = m.roles.view.as_mut() {
+                if delete {
+                    view["roles"].as_array_mut().map(|a| a.retain(|r| r["role_id"].as_str() != Some(role_id.as_str())));
+                } else {
+                    view["activated"] = true.into();
+                }
+            }
+            if delete {
+                self.edit_role(Some(String::new()), cx);
+            }
+            cx.notify();
+            return;
+        }
+        m.roles.busy = true;
+        let id = m.community.clone();
+        let everyone = m.roles.view.as_ref().map(|v| crate::roles::num(&v["everyone_default"]).to_string()).unwrap_or_else(|| "0".into());
+        let rx = if delete { backend::run(backend::community::delete_role(id.clone(), role_id)) } else { backend::run(backend::community::activate_roles(id.clone(), everyone)) };
+        cx.spawn(async move |this, cx| {
+            let res = rx.await.unwrap_or_else(|_| Err("The roles couldn't be changed".into()));
+            this.update(cx, |this, cx| {
+                if let Some(m) = this.comm_settings.as_mut().filter(|m| m.community == id) {
+                    m.roles.busy = false;
+                }
+                match res {
+                    Ok(()) => {
+                        if delete {
+                            this.edit_role(Some(String::new()), cx);
+                        }
+                        this.load_roles(None, cx);
+                    }
+                    Err(e) => this.show_toast(&e, cx),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn set_role_holders(&mut self, add: Vec<String>, remove: Vec<String>, cx: &mut Context<Self>) {
+        let Some(m) = self.comm_settings.as_mut() else { return };
+        let Some(role_id) = m.roles.edit.as_ref().and_then(|e| e.id.clone()) else { return };
+        if m.roles.busy || (add.is_empty() && remove.is_empty()) {
+            return;
+        }
+        if !self.live {
+            if let Some(view) = m.roles.view.as_mut() {
+                for r in view["roles"].as_array_mut().into_iter().flatten().filter(|r| r["role_id"].as_str() == Some(role_id.as_str())) {
+                    let holders = r["holders"].as_array_mut().unwrap();
+                    holders.retain(|h| !remove.iter().any(|n| h.as_str() == Some(n)));
+                    holders.extend(add.iter().map(|n| serde_json::Value::from(n.clone())));
+                }
+            }
+            m.roles.adding = false;
+            m.roles.pick.clear();
+            return;
+        }
+        let held: Vec<(String, Vec<String>)> = add
+            .iter()
+            .chain(&remove)
+            .map(|n| {
+                let roles = m.roles.view.as_ref().and_then(|v| v["roles"].as_array()).into_iter().flatten().filter(|r| r["holders"].as_array().is_some_and(|h| h.iter().any(|h| h.as_str() == Some(n)))).filter_map(|r| r["role_id"].as_str().map(String::from)).collect();
+                (n.clone(), roles)
+            })
+            .collect();
+        m.roles.busy = true;
+        let id = m.community.clone();
+        let rx = backend::run(backend::community::set_role_holders(id.clone(), role_id.clone(), held, add, remove));
+        cx.spawn(async move |this, cx| {
+            let res = rx.await.unwrap_or_else(|_| Err("Couldn't change who holds this role".into()));
+            this.update(cx, |this, cx| {
+                if let Some(m) = this.comm_settings.as_mut().filter(|m| m.community == id) {
+                    m.roles.busy = false;
+                    m.roles.adding = false;
+                    m.roles.pick.clear();
+                }
+                if let Err(e) = res {
+                    this.show_toast(&e, cx);
+                }
+                this.load_roles(Some(role_id), cx);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     fn load_audit(&mut self, cx: &mut Context<Self>) {
@@ -4225,6 +4600,14 @@ impl VectorApp {
                 m.relays = m.saved.relays.clone();
                 m.voice = m.saved.voice.clone();
                 m.relay_edit = None;
+                m.roles.order = None;
+                if let Some(e) = m.roles.edit.as_mut() {
+                    e.draft = if e.id.is_none() { crate::roles::Draft { name: "new role".into(), ..Default::default() } } else { e.base.clone() };
+                    let name = e.draft.name.clone();
+                    m.role_name.update(cx, |t, cx| t.set_text(&name, cx));
+                }
+                m.roles.custom = false;
+                m.role_hex = None;
                 m.relay_error = None;
                 m.voice_error = None;
                 m.warn_until = None;
@@ -4232,6 +4615,7 @@ impl VectorApp {
             Act::Save => self.save_comm_settings(cx),
             Act::Learn => cx.open_url("https://docs.iroh.computer/concepts/relays"),
             Act::AuditRefresh => self.load_audit(cx),
+            Act::Role(a) => return self.on_role(a, window, cx),
             Act::AuditToggle(id) => {
                 if !m.audit.open.remove(&id) {
                     m.audit.open.insert(id);
@@ -4248,6 +4632,9 @@ impl VectorApp {
         if self.comm_settings.as_ref().is_some_and(|m| m.section == "audit" && !m.audit.loaded) {
             self.load_audit(cx);
         }
+        if self.comm_settings.as_ref().is_some_and(|m| m.section == "roles" && !m.roles.loaded) {
+            self.load_roles(None, cx);
+        }
         let _ = window;
         cx.notify();
     }
@@ -4257,6 +4644,14 @@ impl VectorApp {
         if m.saving || !m.dirty(cx) {
             return;
         }
+        if m.roles_dirty(cx) {
+            self.save_roles(cx);
+            let Some(m) = self.comm_settings.as_ref() else { return };
+            if !(m.overview_dirty(cx) || m.relays != m.saved.relays || m.voice != m.saved.voice) {
+                return;
+            }
+        }
+        let Some(m) = self.comm_settings.as_mut() else { return };
         let name = m.name.read(cx).text().trim().to_string();
         if name.is_empty() {
             return;

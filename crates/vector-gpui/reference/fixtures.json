@@ -1886,5 +1886,82 @@
    }
   ],
   "compacted": false
+ },
+ "roles_view": {
+  "is_owner": true,
+  "can_manage": true,
+  "rank": 0,
+  "grantable": "939518847",
+  "activated": true,
+  "everyone": "541057024",
+  "everyone_editable": true,
+  "everyone_default": "541057024",
+  "roles": [
+   {
+    "role_id": "1111111111111111111111111111111111111111111111111111111111111111",
+    "name": "Mods",
+    "position": 1,
+    "color": 5897395,
+    "permissions": "67111224",
+    "channel_id": null,
+    "holders": [
+     "npub190vqdjtlpcq27xslcveglfmr4ynfwg7gmw86cnun4acakxrdd6gqnp929a"
+    ],
+    "display": true,
+    "mentionable": true,
+    "manageable": true
+   },
+   {
+    "role_id": "2222222222222222222222222222222222222222222222222222222222222222",
+    "name": "Helpers",
+    "position": 2,
+    "color": 3718648,
+    "permissions": "2112",
+    "channel_id": null,
+    "holders": [
+     "npub1sxmr0k8u6trd5c6eu6trzyapzux7090ykujmsng7pdx0m8k93n5sd02fwn",
+     "npub1fsndjp6vylvfahjeyuxq4s2tw8s8rv2j89ge7a28fvhnhf35s86sg3uctf"
+    ],
+    "display": false,
+    "mentionable": false,
+    "manageable": true
+   },
+   {
+    "role_id": "3333333333333333333333333333333333333333333333333333333333333333",
+    "name": "Designers",
+    "position": 3,
+    "color": 0,
+    "permissions": "65536",
+    "channel_id": null,
+    "holders": [],
+    "display": false,
+    "mentionable": false,
+    "manageable": true
+   }
+  ],
+  "channels": [
+   {
+    "channel_id": "a0f367a05f629b3bb09ee8f1561bf03267962217d9ff6fc7ce3b235235702bc1",
+    "name": "general",
+    "private": false
+   },
+   {
+    "channel_id": "d961d1281aed7b3ad2f6964aa7e59d427d8b921a8f7dd8c4c0f0a0e1422a17d1",
+    "name": "dev",
+    "private": false
+   },
+   {
+    "channel_id": "451269113943deb53e912b83f5e397cd38bdc2460928a14dbc4f766181425977",
+    "name": "design",
+    "private": false
+   },
+   {
+    "channel_id": "58e6267876fd6c4acb7fbc37091bb920e4f325e24df4887b8048d0ccf7137f2f",
+    "name": "Lounge",
+    "private": false
+   }
+  ],
+  "max_roles": 100,
+  "max_per_member": 64
  }
 }

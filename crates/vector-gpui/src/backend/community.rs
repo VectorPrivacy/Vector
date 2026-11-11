@@ -624,3 +624,90 @@ pub async fn audit_log(community_id: String) -> Result<serde_json::Value, String
     })
     .await
 }
+
+/// `get_community_roles_view`: everything the role editor needs, read locally.
+pub fn roles_view(community_id: &str) -> Result<serde_json::Value, String> {
+    VectorCore.community_roles_view(community_id).map_err(|e| e.to_string())
+}
+
+/// What one save of the role editor publishes: the dragged order, then the open role.
+pub struct RoleSave {
+    pub order: Option<Vec<String>>,
+    pub everyone: Option<String>,
+    pub role: Option<RoleWrite>,
+}
+
+pub struct RoleWrite {
+    pub id: Option<String>,
+    pub name: String,
+    pub color: u32,
+    pub permissions: String,
+    pub channel_id: Option<String>,
+    pub display: bool,
+    pub mentionable: bool,
+}
+
+/// Publishes `save`; returns the role to reopen (a role created here, by its new id).
+pub async fn save_roles(community_id: String, save: RoleSave) -> Result<Option<String>, String> {
+    db::scoped(async move {
+        let id = community_id.as_str();
+        if let Some(order) = save.order {
+            VectorCore.reorder_roles(id, &order).await.map_err(|e| e.to_string())?;
+        }
+        if let Some(perms) = save.everyone {
+            VectorCore.set_everyone_permissions(id, &perms).await.map_err(|e| e.to_string())?;
+        }
+        let Some(r) = save.role else { return Ok(None) };
+        let role_id = match r.id {
+            Some(role_id) => {
+                VectorCore.edit_role_shown(id, &role_id, &r.name, r.color, &r.permissions, r.channel_id.as_deref(), Some(r.display), Some(r.mentionable)).await.map_err(|e| e.to_string())?;
+                role_id
+            }
+            None => {
+                let role_id = VectorCore.create_role(id, &r.name, r.color, &r.permissions, r.channel_id.as_deref()).await.map_err(|e| e.to_string())?;
+                // Creation takes no flags: a role made shown or mentionable gets them right after.
+                if r.display || r.mentionable {
+                    VectorCore.edit_role_shown(id, &role_id, &r.name, r.color, &r.permissions, r.channel_id.as_deref(), Some(r.display), Some(r.mentionable)).await.map_err(|e| e.to_string())?;
+                }
+                role_id
+            }
+        };
+        super::emit("community_refreshed", community_id.clone());
+        Ok(Some(role_id))
+    })
+    .await
+}
+
+pub async fn delete_role(community_id: String, role_id: String) -> Result<(), String> {
+    db::scoped(async move { VectorCore.delete_role(&community_id, &role_id).await.map_err(|e| e.to_string()) }).await
+}
+
+pub async fn activate_roles(community_id: String, everyone: String) -> Result<(), String> {
+    db::scoped(async move { VectorCore.activate_roles_v2(&community_id, &everyone).await.map(|_| ()).map_err(|e| e.to_string()) }).await
+}
+
+/// Give a role to `add` and take it from `remove`, each member's whole set rewritten; returns
+/// the first failure, having tried them all.
+pub async fn set_role_holders(community_id: String, role_id: String, held: Vec<(String, Vec<String>)>, add: Vec<String>, remove: Vec<String>) -> Result<(), String> {
+    db::scoped(async move {
+        let mut first = None;
+        for npub in add.iter().chain(&remove) {
+            let current = held.iter().find(|(n, _)| n == npub).map(|(_, r)| r.clone()).unwrap_or_default();
+            let next: Vec<String> = if add.contains(npub) {
+                let mut v = current;
+                if !v.contains(&role_id) {
+                    v.push(role_id.clone());
+                }
+                v
+            } else {
+                current.into_iter().filter(|r| *r != role_id).collect()
+            };
+            if let Err(e) = VectorCore.set_member_roles(&community_id, npub, next).await {
+                first.get_or_insert(e.to_string());
+            }
+        }
+        super::emit("community_refreshed", community_id.clone());
+        first.map_or(Ok(()), Err)
+    })
+    .await
+}

@@ -63,6 +63,10 @@ pub struct CommSettings {
     pub ban_sel: HashSet<String>,
     pub unbanning: bool,
     pub audit: Audit,
+    pub roles: crate::roles::Roles,
+    pub role_name: Entity<TextInput>,
+    pub role_query: Entity<TextInput>,
+    pub role_hex: Option<Entity<TextInput>>,
     pub audit_query: Entity<TextInput>,
     pub saving: bool,
     /// A refused close: the bar says why until this passes.
@@ -93,11 +97,12 @@ pub enum Act {
     AuditMore,
     AuditFilter,
     AuditPick(&'static str),
+    Role(crate::roles::Act),
 }
 
 pub type OnAct = Rc<dyn Fn(Act, &mut Window, &mut App)>;
 
-fn click(on: &OnAct, act: impl Fn() -> Act + 'static) -> impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static {
+pub(crate) fn click(on: &OnAct, act: impl Fn() -> Act + 'static) -> impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static {
     let on = on.clone();
     move |_, w, cx| on(act(), w, cx)
 }
@@ -111,8 +116,12 @@ impl CommSettings {
         self.name.read(cx).text() != self.saved.name || self.description.read(cx).text() != self.saved.description
     }
 
+    pub fn roles_dirty(&self, cx: &App) -> bool {
+        self.roles.order.is_some() || self.roles.edit_dirty(self.role_name.read(cx).text())
+    }
+
     pub fn dirty(&self, cx: &App) -> bool {
-        self.overview_dirty(cx) || self.relays != self.saved.relays || self.voice != self.saved.voice
+        self.overview_dirty(cx) || self.relays != self.saved.relays || self.voice != self.saved.voice || self.roles_dirty(cx)
     }
 
     pub fn warn(&self) -> bool {
@@ -140,7 +149,7 @@ impl CommSettings {
             ),
         ];
         if self.can("manage_roles") {
-            out.push(section("roles", "Roles", "shield-filled", vec![anchor("role-list", "Role List", "roles role list order rank create permissions")]));
+            out.push(section("roles", "Roles", "shield-filled", crate::roles::anchors(&self.roles)));
         }
         if self.can("ban") {
             out.push(section("bans", "Bans", "x-user", vec![anchor("ban-list", "Banned Members", "bans banned unban blocked removed")]));
@@ -205,23 +214,23 @@ pub fn voice_address(raw: &str, list: &[String]) -> Result<String, String> {
     Ok(normal)
 }
 
-fn heading(text: &'static str) -> impl IntoElement {
+pub(crate) fn heading(text: &'static str) -> impl IntoElement {
     div().mb(px(20.)).text_size(px(24.)).line_height(px(28.)).font_weight(FontWeight::BOLD).text_color(c(0xffffff)).child(text)
 }
 
-fn lede(text: &'static str) -> impl IntoElement {
+pub(crate) fn lede(text: &'static str) -> impl IntoElement {
     div().mt(px(-8.)).mb(px(18.)).text_size(px(14.)).line_height(px(21.)).text_color(c(0x9a9a9a)).child(text)
 }
 
-fn hint(text: impl Into<SharedString>) -> gpui::Div {
+pub(crate) fn hint(text: impl Into<SharedString>) -> gpui::Div {
     div().text_size(px(12.5)).line_height(px(18.125)).text_color(c(0x7a7a7a)).child(text.into())
 }
 
-fn block(first: bool, body: impl IntoElement) -> impl IntoElement {
+pub(crate) fn block(first: bool, body: impl IntoElement) -> impl IntoElement {
     div().pt(px(30.)).pb(px(34.)).when(!first, |d| d.border_t_1().border_color(c(0x262626))).child(body)
 }
 
-fn field_head(label: &'static str, count: Option<(usize, usize, bool)>) -> impl IntoElement {
+pub(crate) fn field_head(label: &'static str, count: Option<(usize, usize, bool)>) -> impl IntoElement {
     div()
         .mb(px(8.))
         .flex()
@@ -231,7 +240,7 @@ fn field_head(label: &'static str, count: Option<(usize, usize, bool)>) -> impl 
         .children(count.map(|(n, max, warn)| div().text_size(px(12.)).line_height(px(24.)).text_color(if warn { c(crate::timeline::DANGER) } else { c(0x6f6f6f) }).child(format!("{n}/{max}"))))
 }
 
-fn input_box(input: &Entity<TextInput>, h: f32, editable: bool) -> gpui::Div {
+pub(crate) fn input_box(input: &Entity<TextInput>, h: f32, editable: bool) -> gpui::Div {
     div()
         .h(px(h))
         .px(px(13.))
@@ -246,7 +255,7 @@ fn input_box(input: &Entity<TextInput>, h: f32, editable: bool) -> gpui::Div {
         .child(div().flex_1().min_w_0().child(input.clone()))
 }
 
-fn save_btn(id: impl Into<gpui::ElementId>, label: impl Into<SharedString>, live: bool, on: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static) -> impl IntoElement {
+pub(crate) fn save_btn(id: impl Into<gpui::ElementId>, label: impl Into<SharedString>, live: bool, on: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static) -> impl IntoElement {
     div()
         .id(id.into())
         .h(px(34.))
@@ -455,14 +464,42 @@ fn relays(m: &CommSettings, on: &OnAct, cx: &App) -> AnyElement {
         .into_any_element()
 }
 
-fn short_npub(npub: &str) -> String {
+/// `MemberRow`: avatar, name and key hint, with `trailing` at the end.
+pub(crate) fn member_row(store: &Store, npub: &str, prefix: &str, trailing: AnyElement, on_click: Option<Box<dyn Fn(&gpui::ClickEvent, &mut Window, &mut App)>>) -> gpui::Stateful<gpui::Div> {
+    let named = store.profiles.get(npub).is_some_and(|p| !p.name.is_empty() || !p.display_name.is_empty() || !p.nickname.is_empty());
+    let name = if named { store.name(npub) } else { short_npub(npub) };
+    div()
+        .id(SharedString::from(format!("{prefix}-{npub}")))
+        .group(SharedString::from(format!("{prefix}-{npub}")))
+        .h(px(35.))
+        .px(px(10.))
+        .flex()
+        .items_center()
+        .rounded(px(6.))
+        .hover(|d| d.bg(ca(255, 255, 255, 0.085)))
+        .when_some(on_click, |d, f| d.cursor_pointer().on_click(f))
+        .child(div().mr(px(10.)).child(crate::ui::avatar(store, npub, 25.)))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .items_center()
+                .gap(px(12.))
+                .child(div().truncate().text_size(px(14.)).line_height(px(24.)).text_color(c(0xf7f4f4)).child(name))
+                .when(named, |d| d.child(div().flex_shrink_0().text_size(px(11.5)).line_height(px(24.)).text_color(c(0x6a6a6a)).child(short_npub(npub)))),
+        )
+        .child(trailing)
+}
+
+pub(crate) fn short_npub(npub: &str) -> String {
     if npub.len() < 20 {
         return npub.to_string();
     }
     format!("{}…{}", &npub[..12], &npub[npub.len() - 6..])
 }
 
-fn indicator(on: bool) -> impl IntoElement {
+pub(crate) fn indicator(on: bool) -> impl IntoElement {
     div()
         .size(px(22.))
         .flex_shrink_0()
@@ -516,31 +553,8 @@ fn bans(m: &CommSettings, store: &Store, on: &OnAct, cx: &App) -> AnyElement {
             )
             .children(rows.into_iter().map(|npub| {
                 let picked = m.ban_sel.contains(&npub);
-                let name = crate::newchat::extract_npub(&npub).map(|_| store.name(&npub)).unwrap_or_else(|| npub.clone());
-                let named = store.profiles.get(npub.as_str()).is_some_and(|p| !p.name.is_empty() || !p.display_name.is_empty() || !p.nickname.is_empty());
                 let id = npub.clone();
-                div()
-                    .id(SharedString::from(format!("cs-ban-{npub}")))
-                    .h(px(35.))
-                    .px(px(10.))
-                    .flex()
-                    .items_center()
-                    .rounded(px(6.))
-                    .cursor_pointer()
-                    .hover(|d| d.bg(ca(255, 255, 255, 0.085)))
-                    .on_click(click(on, move || Act::Ban(id.clone())))
-                    .child(div().mr(px(10.)).child(crate::ui::avatar(store, &npub, 25.)))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .flex()
-                            .items_center()
-                            .gap(px(12.))
-                            .child(div().truncate().text_size(px(14.)).line_height(px(24.)).text_color(c(0xf7f4f4)).child(if named { name } else { short_npub(&npub) }))
-                            .when(named, |d| d.child(div().flex_shrink_0().text_size(px(11.5)).line_height(px(24.)).text_color(c(0x6a6a6a)).child(short_npub(&npub)))),
-                    )
-                    .child(indicator(picked))
+                member_row(store, &npub, "cs-ban", indicator(picked).into_any_element(), Some(Box::new(click(on, move || Act::Ban(id.clone())))))
             }))
             .into_any_element()
     };
@@ -724,7 +738,7 @@ fn audit_empty(text: &'static str) -> impl IntoElement {
     div().my(px(18.)).text_center().text_size(px(12.5)).line_height(px(18.)).text_color(white_a(0.4)).child(text)
 }
 
-fn search_box(input: &Entity<TextInput>) -> impl IntoElement {
+pub(crate) fn search_box(input: &Entity<TextInput>) -> impl IntoElement {
     div()
         .flex_1()
         .h(px(41.))
@@ -741,9 +755,6 @@ fn search_box(input: &Entity<TextInput>) -> impl IntoElement {
         .child(div().flex_1().min_w_0().child(input.clone()))
 }
 
-fn placeholder_section(title: &'static str, text: &'static str) -> AnyElement {
-    block(true, div().child(heading(title)).child(hint(text))).into_any_element()
-}
 
 fn save_bar(m: &CommSettings, on: &OnAct, cx: &App) -> Option<AnyElement> {
     let dirty = m.dirty(cx);
@@ -803,7 +814,7 @@ fn save_bar(m: &CommSettings, on: &OnAct, cx: &App) -> Option<AnyElement> {
     )
 }
 
-fn text_btn(id: &'static str, label: &'static str, live: bool, on: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static) -> AnyElement {
+pub(crate) fn text_btn(id: &'static str, label: &'static str, live: bool, on: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static) -> AnyElement {
     div()
         .id(id)
         .h(px(34.))
@@ -848,7 +859,7 @@ pub fn view(m: &CommSettings, store: &Store, on: &OnAct, cx: &App) -> impl IntoE
         "overview" => overview(m, cx),
         "relays" => relays(m, on, cx),
         "bans" => bans(m, store, on, cx),
-        "roles" => placeholder_section("Role List", "Roles are coming to this client soon."),
+        "roles" => crate::roles::view(m, store, on, cx),
         _ => audit(m, store, on, cx),
     };
     let close = on.clone();

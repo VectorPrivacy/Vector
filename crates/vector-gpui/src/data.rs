@@ -22,6 +22,8 @@ struct Fixtures {
     invites: Vec<RawInvite>,
     #[serde(default)]
     audit: Option<serde_json::Value>,
+    #[serde(default)]
+    roles_view: Option<serde_json::Value>,
 }
 
 /// `list_community_invites`' row: the bundle still as its JSON.
@@ -153,6 +155,7 @@ pub struct Store {
     pub invites: Vec<Invite>,
     /// The fixtures' Audit Log, as `get_community_audit_log` answers.
     pub fixture_audit: Option<serde_json::Value>,
+    pub fixture_roles: Option<serde_json::Value>,
 }
 
 impl Store {
@@ -177,6 +180,7 @@ impl Store {
             communities: f.communities,
             invites: f.invites.into_iter().map(Invite::from).collect(),
             fixture_audit: f.audit,
+            fixture_roles: f.roles_view,
         })
     }
 
@@ -193,6 +197,7 @@ impl Store {
             communities: Vec::new(),
             invites: Vec::new(),
             fixture_audit: None,
+            fixture_roles: None,
         }
     }
 
