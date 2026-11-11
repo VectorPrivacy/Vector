@@ -903,6 +903,20 @@
      "edited": false
     },
     {
+     "id": "f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0",
+     "content": "Grab this pack https://vectorapp.io/emojis/pack/naddr1qqzkymr0vfesygypkcma3lxjcmdxxk0xjcc38gghphnete9hykuy68stfn7ea3vvaypsgqqqw48qsh6h7r",
+     "replied_to": "",
+     "preview_metadata": null,
+     "attachments": [],
+     "reactions": [],
+     "at": 1794349020000,
+     "pending": false,
+     "failed": false,
+     "mine": true,
+     "npub": "npub1yazve5gvw5em6um2mzg0nh2u4v4dkfas04gqh9yn72wdcssvktsqfmmmv4",
+     "edited": false
+    },
+    {
      "id": "fc9be69f77ac6387b476bf18eecac0d49e846462bf151d098b956d642c9257c4",
      "content": "haha yes exactly",
      "replied_to": "",
@@ -2782,6 +2796,101 @@
    "created_at": 1794300000,
    "text": "A quick tour of private messaging on Nostr: accounts, Communities and calls.",
    "bech32": "nevent1qqsqe2cujct5qna09vjwyg0p3899j3vp8c2d8amxx3dsnjsnh03gllqzyzqmvd7clnfvdknrt8nfvvgn5ytsmeu4ujmjtwzdrc95elv7ckxwjqcyqqqgtwc9z4mnx"
+  }
+ },
+ "packs": {
+  "naddr1qqzkymr0vfesygypkcma3lxjcmdxxk0xjcc38gghphnete9hykuy68stfn7ea3vvaypsgqqqw48qsh6h7r": {
+   "id": "naddr1qqzkymr0vfesygypkcma3lxjcmdxxk0xjcc38gghphnete9hykuy68stfn7ea3vvaypsgqqqw48qsh6h7r",
+   "pubkey": "0000000000000000000000000000000000000000000000000000000000000000",
+   "identifier": "blobs",
+   "title": "Blob Friends",
+   "image_url": "https://ref.invalid/media/pack/icon.png",
+   "description": "Sixteen round friends for every mood.",
+   "emojis": [
+    {
+     "shortcode": "blob0",
+     "url": "https://ref.invalid/media/pack/e0.png",
+     "sha256": null
+    },
+    {
+     "shortcode": "blob1",
+     "url": "https://ref.invalid/media/pack/e1.png",
+     "sha256": null
+    },
+    {
+     "shortcode": "blob2",
+     "url": "https://ref.invalid/media/pack/e2.png",
+     "sha256": null
+    },
+    {
+     "shortcode": "blob3",
+     "url": "https://ref.invalid/media/pack/e3.png",
+     "sha256": null
+    },
+    {
+     "shortcode": "blob4",
+     "url": "https://ref.invalid/media/pack/e4.png",
+     "sha256": null
+    },
+    {
+     "shortcode": "blob5",
+     "url": "https://ref.invalid/media/pack/e5.png",
+     "sha256": null
+    },
+    {
+     "shortcode": "blob6",
+     "url": "https://ref.invalid/media/pack/e6.png",
+     "sha256": null
+    },
+    {
+     "shortcode": "blob7",
+     "url": "https://ref.invalid/media/pack/e7.png",
+     "sha256": null
+    },
+    {
+     "shortcode": "blob8",
+     "url": "https://ref.invalid/media/pack/e8.png",
+     "sha256": null
+    },
+    {
+     "shortcode": "blob9",
+     "url": "https://ref.invalid/media/pack/e9.png",
+     "sha256": null
+    },
+    {
+     "shortcode": "blob10",
+     "url": "https://ref.invalid/media/pack/e10.png",
+     "sha256": null
+    },
+    {
+     "shortcode": "blob11",
+     "url": "https://ref.invalid/media/pack/e11.png",
+     "sha256": null
+    },
+    {
+     "shortcode": "blob12",
+     "url": "https://ref.invalid/media/pack/e12.png",
+     "sha256": null
+    },
+    {
+     "shortcode": "blob13",
+     "url": "https://ref.invalid/media/pack/e13.png",
+     "sha256": null
+    },
+    {
+     "shortcode": "blob14",
+     "url": "https://ref.invalid/media/pack/e14.png",
+     "sha256": null
+    },
+    {
+     "shortcode": "blob15",
+     "url": "https://ref.invalid/media/pack/e15.png",
+     "sha256": null
+    }
+   ],
+   "is_own": false,
+   "updated_at": 1794300000,
+   "status": 0
   }
  }
 }

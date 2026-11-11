@@ -49,6 +49,8 @@ pub enum Act {
     Invite(String),
     /// A Nostr card's controls.
     Embed(crate::embeds::Act),
+    /// An emoji pack card's controls.
+    Pack(crate::packs::Act),
 }
 
 pub type OnAct = Rc<dyn Fn(&str, Act, &mut Window, &mut App)>;
@@ -164,6 +166,7 @@ pub fn message_row(ctx: &Ctx, index: usize, first: bool, gap: f32) -> AnyElement
             .when(pending || failed, |d| d.opacity(0.6))
             .child(content(ctx, m))
             .children(crate::attachments::attachments(ctx, m))
+            .children(crate::packs::cards(ctx, m))
             .when(!ctx.held && !m.content.is_empty(), |d| d.children(crate::newchat::invite_card_keys(&m.content).into_iter().map(|k| invite_card(ctx, m, k))))
             .children(crate::embeds::cards(ctx, m))
             .children(crate::linkcard::card(ctx, m)),
@@ -239,6 +242,9 @@ fn content(ctx: &Ctx, m: &Message) -> AnyElement {
     let act = ctx.on_act.clone();
     let click: OnClick = Rc::new(move |t, w, cx| act(&id, Act::Text(t), w, cx));
     let mut text = crate::newchat::replace_invite_links(&m.content, "");
+    if let std::borrow::Cow::Owned(s) = crate::packs::strip(&text) {
+        text = s.into();
+    }
     if !ctx.held && !ctx.media.borrow().web_previews_off {
         if let std::borrow::Cow::Owned(s) = crate::embeds::strip(&text) {
             text = s.into();

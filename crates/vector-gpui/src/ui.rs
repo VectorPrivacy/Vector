@@ -1168,6 +1168,7 @@ impl VectorApp {
             .ok();
         })
         .detach();
+        self.reload_subscribed_packs(cx);
         cx.notify();
     }
 
@@ -1219,6 +1220,7 @@ impl VectorApp {
                 self.reload_communities(cx);
             }
             "community_invite_received" | "community_invites_purged" => self.reload_invites(cx),
+            "emoji_packs_updated" => self.reload_subscribed_packs(cx),
             "transfer_state" => self.security.update(cx, |f, cx| f.transfer_state(&payload, cx)),
             "mic_level" => {
                 if let Some(a) = self.settings.as_mut().and_then(|s| s.audio.as_mut()).filter(|a| a.testing) {
@@ -1455,6 +1457,7 @@ impl VectorApp {
             }
             Act::Text(t) => self.on_text(id, t, cx),
             Act::Embed(a) => self.on_embed(a, window, cx),
+            Act::Pack(a) => self.on_pack(a, cx),
             Act::Hover(true) => {
                 self.hover_gen += 1;
                 if self.hovered.as_deref() != Some(id.as_str()) {
@@ -3025,6 +3028,13 @@ impl VectorApp {
             // `.chat-rows > *:last-child`: clear of the typing strip.
             let el = if i + 1 == rows.len() { div().pb(px(33.)).child(el).into_any_element() } else { el };
             crate::media::pump(&media, app_media.clone(), live, cx);
+            let packs = std::mem::take(&mut media.borrow_mut().packs.queue);
+            if !packs.is_empty() {
+                let app = app_media.clone();
+                cx.defer(move |cx| {
+                    app.update(cx, |app, cx| app.fetch_packs(packs, cx)).ok();
+                });
+            }
             let embeds = std::mem::take(&mut media.borrow_mut().embeds.queue);
             if !embeds.is_empty() {
                 let app = app_media.clone();
@@ -5113,6 +5123,111 @@ impl VectorApp {
     }
 
     /// Looks up the invite links in the open chat, once per change to it.
+    fn fetch_packs(&mut self, naddrs: Vec<String>, cx: &mut Context<Self>) {
+        for naddr in naddrs {
+            if !self.live {
+                let res = self.store.borrow().fixture_packs.get(&naddr).cloned().ok_or_else(|| "Pack not found on any relay".to_string());
+                self.media.borrow_mut().packs.settle(&naddr, res);
+                cx.notify();
+                continue;
+            }
+            let n = naddr.clone();
+            let rx = backend::run(async move { vector_core::emoji_packs::fetch_pack_by_naddr(&n).await });
+            cx.spawn(async move |this, cx| {
+                let Ok(res) = rx.await else { return };
+                this.update(cx, |this, cx| {
+                    this.media.borrow_mut().packs.settle(&naddr, res);
+                    cx.notify();
+                })
+                .ok();
+            })
+            .detach();
+        }
+    }
+
+    /// Equipped packs, as their ids.
+    fn reload_subscribed_packs(&mut self, cx: &mut Context<Self>) {
+        if !self.live {
+            return;
+        }
+        let rx = backend::run(async {
+            vector_core::emoji_packs::load_subscriptions().unwrap_or_default().iter().filter_map(|a| vector_core::emoji_packs::naddr_from_addr(a).ok()).collect::<std::collections::HashSet<_>>()
+        });
+        cx.spawn(async move |this, cx| {
+            let Ok(ids) = rx.await else { return };
+            this.update(cx, |this, cx| {
+                this.media.borrow_mut().packs.subscribed = ids;
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn on_pack(&mut self, act: crate::packs::Act, cx: &mut Context<Self>) {
+        use crate::packs::{Act, State};
+        match act {
+            Act::Copy(naddr) => {
+                let n = naddr.clone();
+                let rx = self.live.then(|| backend::run(async move { vector_core::emoji_packs::share_naddr(&n).await.unwrap_or(n) }));
+                cx.spawn(async move |this, cx| {
+                    let share = match rx {
+                        Some(rx) => rx.await.unwrap_or_else(|_| naddr.clone()),
+                        None => naddr.clone(),
+                    };
+                    this.update(cx, |this, cx| {
+                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(format!("https://vectorapp.io/emojis/pack/{share}")));
+                        this.media.borrow_mut().packs.copied = Some((naddr, std::time::Instant::now()));
+                        cx.notify();
+                    })
+                    .ok();
+                    cx.background_executor().timer(std::time::Duration::from_millis(1600)).await;
+                    this.update(cx, |_, cx| cx.notify()).ok();
+                })
+                .detach();
+            }
+            Act::Toggle(naddr) => {
+                let State::Ready(pack) = self.media.borrow_mut().packs.get(&naddr) else { return };
+                let id = pack.id.clone();
+                let subscribed = self.media.borrow().packs.subscribed.contains(&id);
+                self.media.borrow_mut().packs.busy.insert(id.clone());
+                cx.notify();
+                let live = self.live;
+                let (n, i) = (naddr.clone(), id.clone());
+                let rx = backend::run(async move {
+                    if !live {
+                        return Ok(());
+                    }
+                    if subscribed { vector_core::emoji_packs::unsubscribe_pack(&i).await } else { vector_core::emoji_packs::subscribe_pack(&n).await.map(|_| ()) }
+                });
+                cx.spawn(async move |this, cx| {
+                    // The label stays a beat: a local toggle lands in milliseconds.
+                    cx.background_executor().timer(std::time::Duration::from_millis(350)).await;
+                    let res = rx.await.unwrap_or_else(|_| Err("Cancelled".into()));
+                    this.update(cx, |this, cx| {
+                        let mut media = this.media.borrow_mut();
+                        media.packs.busy.remove(&id);
+                        match res {
+                            Ok(()) if subscribed => {
+                                media.packs.subscribed.remove(&id);
+                            }
+                            Ok(()) => {
+                                media.packs.subscribed.insert(id);
+                            }
+                            Err(e) => {
+                                drop(media);
+                                this.notice(if subscribed { "Couldn't Remove Pack" } else { "Couldn't Add Pack" }, e, cx);
+                            }
+                        }
+                        cx.notify();
+                    })
+                    .ok();
+                })
+                .detach();
+            }
+        }
+    }
+
     /// A reference the expanded view was waiting on.
     fn embed_settled(&mut self, entity: &str, cx: &mut Context<Self>) {
         if self.embed_wanted.as_ref().is_some_and(|(e, _)| e == entity) {

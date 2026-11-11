@@ -110,6 +110,8 @@ pub struct Media {
     pub auto_download: AutoDownload,
     /// Nostr cards, by the references messages carry.
     pub embeds: crate::embeds::Cache,
+    /// Emoji packs shared in messages.
+    pub packs: crate::packs::Cache,
     /// "Display Web Previews" turned off: no link or Nostr cards.
     pub web_previews_off: bool,
     /// Custom emoji and pack icons on disk, by URL, and those asked for since the last pump.

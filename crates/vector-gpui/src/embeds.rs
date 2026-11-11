@@ -309,6 +309,11 @@ pub fn strip(text: &str) -> std::borrow::Cow<'_, str> {
         at = r.end;
     }
     out.push_str(&text[at..]);
+    tidy(&out).into()
+}
+
+/// Runs of blanks to one space, three or more breaks to two, then trimmed.
+pub fn tidy(out: &str) -> String {
     let mut tidy = String::with_capacity(out.len());
     let (mut blanks, mut breaks) = (0, 0);
     for ch in out.chars() {
@@ -337,7 +342,7 @@ pub fn strip(text: &str) -> std::borrow::Cow<'_, str> {
             }
         }
     }
-    tidy.trim().to_string().into()
+    tidy.trim().to_string()
 }
 
 /// The event kind a nevent or naddr names (its TLV 3), when it names one.

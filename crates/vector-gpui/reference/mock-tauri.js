@@ -36,7 +36,7 @@
         get_community_timeouts: () => ({}), get_community_mentions: () => ({ anyone: true, pingers: [], roles: [] }), get_community_admins: () => [], get_community_role_graph: () => ({ roles: [], grants: [], activated: false, readers: {} }), get_community_banlist: () => (FIX.profiles || []).filter((p) => p.name === 'frank' || p.name === 'heidi').map((p) => p.id), get_channel_send_denied: () => [], check_community_raid: () => ({ detected: !!FIX.moderation, suspects: FIX.moderation ? FIX.moderation.report.suspects : 0 }),
         get_community_join_order: () => [],
         get_moderation_intel: () => FIX.moderation,
-        fetch_nostr_embed: ({ reference }) => { const e = (FIX.embeds || {})[reference]; if (!e) throw 'Not found on any relay'; return e; }, cache_url_image: ({ url }) => url, get_or_cache_image: ({ url }) => url.replace('https://ref.invalid/', ''),
+        fetch_nostr_embed: ({ reference }) => { const e = (FIX.embeds || {})[reference]; if (!e) throw 'Not found on any relay'; return e; }, cache_url_image: ({ url }) => url, fetch_emoji_pack_by_naddr: ({ naddr }) => { const p = (FIX.packs || {})[naddr]; if (!p) throw 'Pack not found'; return p; }, get_or_cache_image: ({ url }) => url.replace('https://ref.invalid/', ''),
         policy_presets: () => FIX.policy_presets, list_community_policies: () => ({ policies: [], using_builtin: true }),
         get_community_roles_view: () => FIX.roles_view,
         get_community_audit_log: () => FIX.audit || { entries: [], compacted: false },
