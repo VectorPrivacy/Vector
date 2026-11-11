@@ -2,6 +2,7 @@
 //! through [`UiEvent`]s and awaits each call's result through a one-shot channel.
 
 pub mod account;
+pub mod actions;
 pub mod events;
 pub mod images;
 pub mod messaging;

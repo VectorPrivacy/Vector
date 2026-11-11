@@ -20,8 +20,26 @@ pub const DANGER: u32 = 0xff2ea9;
 const TEXT_SIZE: f32 = 15.;
 const TEXT_LH: f32 = 21.;
 
-/// What a click on a message's text asks of the app.
-pub type OnText = Rc<dyn Fn(&str, Target, &mut Window, &mut App)>;
+/// What the user did to a message.
+#[derive(Clone)]
+pub enum Act {
+    Text(Target),
+    Hover(bool),
+    React,
+    /// A reaction chip, or a quick pick: react with this emoji.
+    ReactWith(String),
+    Reply,
+    Edit,
+    Retry,
+    Delete,
+    /// A click outside the open reaction menu.
+    Dismiss,
+}
+
+pub type OnAct = Rc<dyn Fn(&str, Act, &mut Window, &mut App)>;
+
+/// Picks the quick reaction menu offers until the full picker lands.
+pub const QUICK_REACTIONS: [&str; 8] = ["👍", "❤️", "😂", "😮", "😢", "🔥", "🎉", "👀"];
 
 /// What the rows of one chat share while drawing.
 pub struct Ctx<'a> {
@@ -31,9 +49,15 @@ pub struct Ctx<'a> {
     pub revealed: &'a HashMap<String, HashSet<u32>>,
     /// Seconds, for animated pieces.
     pub clock: f32,
-    pub on_text: OnText,
-    /// The newest message of mine: the one whose status shows.
-    pub last_mine: Option<&'a str>,
+    pub on_act: OnAct,
+    /// The row under the pointer, which carries the toolbar.
+    pub hovered: Option<&'a str>,
+    /// The message the composer is replying to.
+    pub replying: Option<&'a str>,
+    /// The message whose reaction menu is open.
+    pub picker: Option<&'a str>,
+    /// Why a send failed, by message.
+    pub fail_reasons: &'a HashMap<String, String>,
 }
 
 pub fn base_look() -> Look {
@@ -56,6 +80,8 @@ pub fn message_row(ctx: &Ctx, index: usize, first: bool, gap: f32) -> AnyElement
     let failed = m.mine && m.failed;
     let pending = m.mine && m.pending && !failed;
     let group: SharedString = format!("dmsg-{}", m.id).into();
+    let replying = ctx.replying == Some(m.id.as_str());
+    let hovered = ctx.hovered == Some(m.id.as_str());
 
     let gutter = div()
         .relative()
@@ -112,6 +138,9 @@ pub fn message_row(ctx: &Ctx, index: usize, first: bool, gap: f32) -> AnyElement
         );
     }
     body = body.child(div().when(pending || failed, |d| d.opacity(0.6)).child(content(ctx, m)));
+    if let Some(reason) = ctx.fail_reasons.get(&m.id).filter(|_| failed) {
+        body = body.child(div().mt(px(4.)).text_size(px(12.)).line_height(px(16.2)).text_color(c(DANGER)).child(reason.clone()));
+    }
     if let Some(r) = reactions(ctx, m) {
         body = body.child(r);
     }
@@ -122,6 +151,11 @@ pub fn message_row(ctx: &Ctx, index: usize, first: bool, gap: f32) -> AnyElement
             div()
                 .id(SharedString::from(m.id.clone()))
                 .group(group)
+                .relative()
+                .on_hover({
+                    let (act, id) = (ctx.on_act.clone(), m.id.clone());
+                    move |h, w, cx| act(&id, Act::Hover(*h), w, cx)
+                })
                 .flex()
                 .items_start()
                 .pl(px(12.))
@@ -131,9 +165,11 @@ pub fn message_row(ctx: &Ctx, index: usize, first: bool, gap: f32) -> AnyElement
                 .border_color(gpui::transparent_black())
                 .font_family(RUBIK)
                 .hover(|s| s.bg(white_a(0.03)))
+                .when(replying, |d| d.bg(white_a(0.05)).border_color(white_a(0.5)))
                 .when(failed, |d| d.bg(ca(255, 46, 169, 0.1)).border_color(c(DANGER)))
                 .child(gutter)
-                .child(body),
+                .child(body)
+                .when(hovered || ctx.picker == Some(m.id.as_str()), |d| d.children(toolbar(ctx, m, first))),
         )
         .into_any_element()
 }
@@ -151,8 +187,8 @@ fn content(ctx: &Ctx, m: &Message) -> AnyElement {
     let empty = HashSet::new();
     let revealed = ctx.revealed.get(&m.id).unwrap_or(&empty);
     let id = m.id.clone();
-    let on_text = ctx.on_text.clone();
-    let click: OnClick = Rc::new(move |t, w, cx| on_text(&id, t, w, cx));
+    let act = ctx.on_act.clone();
+    let click: OnClick = Rc::new(move |t, w, cx| act(&id, Act::Text(t), w, cx));
 
     // Emoji-only, up to six: jumbo glyphs (`.dmsg-emoji-only`).
     let headed = m.content.lines().any(|l| {
@@ -415,8 +451,11 @@ fn reactions(ctx: &Ctx, m: &Message) -> Option<AnyElement> {
             Some(src) => img(src).size(px(16.)).into_any_element(),
             None => div().text_size(px(12.)).child(emoji_str.to_string()).into_any_element(),
         };
+        let (act, id, e) = (ctx.on_act.clone(), m.id.clone(), emoji_str.to_string());
         row = row.child(
             div()
+                .id(SharedString::from(format!("{}-r-{emoji_str}", m.id)))
+                .when(!mine, |d| d.cursor_pointer().hover(|s| s.bg(white_a(0.1)).opacity(1.)).on_click(move |_, w, cx| act(&id, Act::ReactWith(e.clone()), w, cx)))
                 .flex()
                 .items_center()
                 .gap(px(4.))
@@ -434,8 +473,13 @@ fn reactions(ctx: &Ctx, m: &Message) -> Option<AnyElement> {
                 .child(count.to_string()),
         );
     }
+    let (act, id) = (ctx.on_act.clone(), m.id.clone());
     row = row.child(
         div()
+            .id(SharedString::from(format!("{}-r-add", m.id)))
+            .cursor_pointer()
+            .hover(|s| s.bg(white_a(0.1)).border_color(white_a(0.15)))
+            .on_click(move |_, w, cx| act(&id, Act::React, w, cx))
             .flex()
             .items_center()
             .px(px(6.))
@@ -511,4 +555,109 @@ fn reply_quote(ctx: &Ctx, m: &Message) -> Option<AnyElement> {
             .child(snippet)
             .into_any_element(),
     )
+}
+
+/// `#dmsg-toolbar`: the hover actions at the row's top right (`_dmsgToolbarView`).
+fn toolbar(ctx: &Ctx, m: &Message, first: bool) -> Option<AnyElement> {
+    let mut acts: Vec<(&'static str, &'static str, Act, bool)> = Vec::new();
+    if m.mine && m.pending && !m.failed {
+        return None;
+    }
+    if m.mine && m.failed {
+        acts.push(("icons/refresh.svg", "Retry send", Act::Retry, false));
+        acts.push(("icons/trash.svg", "Delete failed message", Act::Delete, true));
+    } else {
+        let unique: HashSet<&str> = m.reactions.iter().map(|r| r.emoji.as_str()).collect();
+        if unique.len() < 8 {
+            acts.push(("icons/smile-face.svg", "Add reaction", Act::React, false));
+        }
+        acts.push(("icons/reply.svg", "Reply", Act::Reply, false));
+        if m.mine && !m.content.is_empty() && m.attachments.is_empty() {
+            acts.push(("icons/edit.svg", "Edit", Act::Edit, false));
+        }
+        if ctx.chat.id.starts_with("npub1") || m.mine {
+            acts.push(("icons/trash.svg", "Delete message", Act::Delete, true));
+        }
+    }
+    // A continuation's text starts at its top edge: lift the bar clear of it.
+    let lift = if first { 16. } else { 32. };
+    let mut bar = div()
+        .id(SharedString::from(format!("{}-toolbar", m.id)))
+        .absolute()
+        .top(px(-lift))
+        .right(px(8.))
+        .flex()
+        .gap(px(2.))
+        .p(px(4.))
+        .rounded(px(8.))
+        .border_1()
+        .border_color(white_a(0.08))
+        .bg(c(0x1a1a1a))
+        .shadow(vec![gpui::BoxShadow { color: ca(0, 0, 0, 0.5), offset: gpui::point(px(0.), px(4.)), blur_radius: px(14.), spread_radius: px(0.), inset: false }])
+        .occlude()
+        .on_hover({
+            let (act, id) = (ctx.on_act.clone(), m.id.clone());
+            move |h, w, cx| act(&id, Act::Hover(*h), w, cx)
+        });
+    for (i, (icon, _label, act, danger)) in acts.into_iter().enumerate() {
+        let (on, id) = (ctx.on_act.clone(), m.id.clone());
+        bar = bar.child(
+            div()
+                .id(i)
+                .size(px(26.))
+                .rounded(px(4.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .cursor_pointer()
+                .group("tb-btn")
+                .hover(|s| s.bg(white_a(0.08)))
+                .on_click(move |_, w, cx| on(&id, act.clone(), w, cx))
+                .child(
+                    svg()
+                        .path(icon)
+                        .size(px(20.))
+                        .text_color(if danger { c(DANGER) } else { white_a(0.7) }),
+                ),
+        );
+    }
+    let mut root = div().absolute().top_0().right_0().child(bar);
+    if ctx.picker == Some(m.id.as_str()) {
+        let mut menu = div()
+            .id(SharedString::from(format!("{}-quick", m.id)))
+            .absolute()
+            .top(px(-lift + 40.))
+            .right(px(8.))
+            .flex()
+            .gap(px(2.))
+            .p(px(4.))
+            .rounded(px(8.))
+            .border_1()
+            .border_color(white_a(0.08))
+            .bg(c(0x1a1a1a))
+            .occlude()
+            .on_mouse_down_out({
+                let (act, id) = (ctx.on_act.clone(), m.id.clone());
+                move |_, w, cx| act(&id, Act::Dismiss, w, cx)
+            });
+        for e in QUICK_REACTIONS {
+            let (on, id) = (ctx.on_act.clone(), m.id.clone());
+            let Some(src) = emoji::twemoji(e) else { continue };
+            menu = menu.child(
+                div()
+                    .id(SharedString::from(e))
+                    .size(px(32.))
+                    .rounded(px(4.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .cursor_pointer()
+                    .hover(|s| s.bg(white_a(0.08)))
+                    .on_click(move |_, w, cx| on(&id, Act::ReactWith(e.to_string()), w, cx))
+                    .child(img(src).size(px(22.))),
+            );
+        }
+        root = root.child(gpui::deferred(menu).with_priority(2));
+    }
+    Some(root.into_any_element())
 }

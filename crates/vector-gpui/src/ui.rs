@@ -20,7 +20,8 @@ use serde_json::Value;
 use vector_core::profile::SlimProfile;
 
 use crate::backend::{self, UiEvent, account, messaging, sync};
-use crate::composer::{SendText, TextInput};
+use crate::composer::{CancelInput, SendText, TextInput};
+use crate::kit;
 use crate::login::{LoggedIn, LoginView};
 use crate::data::{self, Row, Store};
 use crate::theme::*;
@@ -56,12 +57,37 @@ pub struct VectorApp {
     /// Spoilers revealed, by message.
     revealed: Rc<RefCell<HashMap<String, HashSet<u32>>>>,
     started: std::time::Instant,
+    /// What the composer is doing beyond a fresh message.
+    mode: Mode,
+    /// The row carrying the hover toolbar.
+    hovered: Option<String>,
+    /// The message whose reaction menu is open.
+    picker: Option<String>,
+    popup: Option<(kit::Popup, PopupAct)>,
+    fail_reasons: Rc<RefCell<HashMap<String, String>>>,
+    /// Bumped by each hover, so a stale leave doesn't hide the toolbar.
+    hover_gen: u64,
+}
+
+#[derive(Clone, PartialEq)]
+enum Mode {
+    Normal,
+    Reply { id: String, name: String, snippet: String },
+    Edit { id: String },
+}
+
+/// What a popup's confirm does.
+#[derive(Clone)]
+enum PopupAct {
+    Notice,
+    Delete { id: String, failed: bool },
 }
 
 impl VectorApp {
     fn base(store: Store, live: bool, cx: &mut Context<Self>) -> Self {
         let input = cx.new(|cx| TextInput::new("Enter message...", cx));
         cx.subscribe(&input, |app, _, SendText(text), cx| app.send(text.clone(), cx)).detach();
+        cx.subscribe(&input, |app, _, _: &CancelInput, cx| app.cancel_mode(cx)).detach();
         Self {
             screen: Screen::Main,
             live,
@@ -74,6 +100,12 @@ impl VectorApp {
             syncing: false,
             revealed: Rc::default(),
             started: std::time::Instant::now(),
+            mode: Mode::Normal,
+            hovered: None,
+            picker: None,
+            popup: None,
+            fail_reasons: Rc::default(),
+            hover_gen: 0,
         }
     }
 
@@ -184,7 +216,26 @@ impl VectorApp {
     fn on_core_event(&mut self, name: &str, payload: Value, _window: &mut Window, cx: &mut Context<Self>) {
         let chat_id = payload.get("chat_id").and_then(Value::as_str).unwrap_or_default().to_string();
         match name {
+            "message_removed" => {
+                let id = payload.get("id").and_then(Value::as_str).unwrap_or_default().to_string();
+                if let Some(chat) = self.store.borrow_mut().chat_mut(&chat_id) {
+                    chat.messages.retain(|m| m.id != id);
+                }
+                if matches!(&self.mode, Mode::Reply { id: r, .. } | Mode::Edit { id: r } if *r == id) {
+                    self.mode = Mode::Normal;
+                }
+                self.store.borrow_mut().resort();
+                if self.open.as_deref() == Some(chat_id.as_str()) {
+                    self.refresh_rows(false);
+                }
+            }
             "message_new" | "message_update" => {
+                if let (Some(reason), Some(id)) = (
+                    payload.get("reason").and_then(Value::as_str),
+                    payload.pointer("/message/id").and_then(Value::as_str),
+                ) {
+                    self.fail_reasons.borrow_mut().insert(id.to_string(), reason.to_string());
+                }
                 let Some(msg) = payload.get("message").cloned().and_then(|m| serde_json::from_value::<Message>(m).ok()) else { return };
                 let known = if name == "message_new" {
                     self.store.borrow_mut().insert_message(&chat_id, msg)
@@ -312,11 +363,181 @@ impl VectorApp {
         }
     }
 
+    fn message(&self, id: &str) -> Option<Message> {
+        let store = self.store.borrow();
+        store.chat(self.open.as_deref()?)?.messages.iter().find(|m| m.id == id).cloned()
+    }
+
+    fn on_act(&mut self, id: String, act: timeline::Act, window: &mut Window, cx: &mut Context<Self>) {
+        use timeline::Act;
+        match act {
+            Act::Text(t) => self.on_text(id, t, cx),
+            Act::Hover(true) => {
+                self.hover_gen += 1;
+                if self.hovered.as_deref() != Some(id.as_str()) {
+                    self.hovered = Some(id);
+                    cx.notify();
+                }
+            }
+            Act::Hover(false) => {
+                if self.hovered.as_deref() == Some(id.as_str()) && self.picker.as_deref() != Some(id.as_str()) {
+                    // The toolbar overhangs the row: give the pointer a moment to reach it.
+                    let gen_id = id.clone();
+                    let generation = self.hover_gen;
+                    cx.spawn(async move |this, cx| {
+                        cx.background_executor().timer(std::time::Duration::from_millis(100)).await;
+                        this.update(cx, |this, cx| {
+                            if this.hovered.as_deref() == Some(gen_id.as_str()) && this.hover_gen == generation {
+                                this.hovered = None;
+                                cx.notify();
+                            }
+                        })
+                        .ok();
+                    })
+                    .detach();
+                }
+            }
+            Act::Dismiss => {
+                if self.picker.as_deref() == Some(id.as_str()) {
+                    self.picker = None;
+                    cx.notify();
+                }
+            }
+            Act::React => {
+                self.picker = if self.picker.as_deref() == Some(id.as_str()) { None } else { Some(id) };
+                cx.notify();
+            }
+            Act::ReactWith(emoji) => {
+                self.picker = None;
+                let Some(chat) = self.open.clone() else { return };
+                if self.live {
+                    let rx = backend::run(backend::actions::react(chat.to_string(), id, emoji));
+                    self.report(rx, "Reaction Failed", cx);
+                } else {
+                    let me = self.store.borrow().my_npub.clone();
+                    if let Some(m) = self.store.borrow_mut().chat_mut(&chat).and_then(|c| c.messages.iter_mut().find(|m| m.id == id)) {
+                        m.reactions.push(vector_core::types::Reaction { id: format!("local-{}", m.reactions.len()), reference_id: id.clone(), author_id: me, emoji, emoji_url: None });
+                    }
+                }
+                cx.notify();
+            }
+            Act::Reply => {
+                let Some(m) = self.message(&id) else { return };
+                let author = if m.mine { self.store.borrow().my_npub.clone() } else { m.npub.clone().unwrap_or_else(|| self.open.as_deref().unwrap_or_default().to_string()) };
+                let name = self.store.borrow().name(&author);
+                let snippet = if !m.content.is_empty() {
+                    m.content.clone()
+                } else if let Some(a) = m.attachments.first() {
+                    data::file_type(&a.extension).1.to_string()
+                } else {
+                    String::new()
+                };
+                self.mode = Mode::Reply { id, name, snippet };
+                window.focus(&self.input.read(cx).focus_handle(cx), cx);
+                cx.notify();
+            }
+            Act::Edit => {
+                let Some(m) = self.message(&id) else { return };
+                self.mode = Mode::Edit { id };
+                self.input.update(cx, |input, cx| input.set_text(&m.content, cx));
+                window.focus(&self.input.read(cx).focus_handle(cx), cx);
+                cx.notify();
+            }
+            Act::Retry => {
+                let Some(chat) = self.open.clone() else { return };
+                if self.live {
+                    let rx = backend::run(backend::actions::retry(chat.to_string(), id));
+                    cx.spawn(async move |this, cx| {
+                        if let Ok(Err(e)) = rx.await {
+                            this.update(cx, |this, cx| this.notice("Retry Failed", e, cx)).ok();
+                        }
+                    })
+                    .detach();
+                }
+            }
+            Act::Delete => {
+                let failed = self.message(&id).is_some_and(|m| m.mine && m.failed);
+                let mut p = kit::Popup::notice("Delete this message?");
+                p.text = Some("Are you sure you want to delete this message?".into());
+                p.confirm = "Confirm".into();
+                p.cancel = Some("Cancel".into());
+                self.popup = Some((p, PopupAct::Delete { id, failed }));
+                cx.notify();
+            }
+        }
+    }
+
+    /// A backend result whose failure the user should see.
+    fn report(&self, rx: futures::channel::oneshot::Receiver<Result<(), String>>, title: &'static str, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            if let Ok(Err(e)) = rx.await {
+                this.update(cx, |this, cx| this.notice(title, e, cx)).ok();
+            }
+        })
+        .detach();
+    }
+
+    fn notice(&mut self, title: &str, text: String, cx: &mut Context<Self>) {
+        let mut p = kit::Popup::notice(title.to_string());
+        p.text = Some(text.into());
+        self.popup = Some((p, PopupAct::Notice));
+        cx.notify();
+    }
+
+    fn answer_popup(&mut self, yes: bool, cx: &mut Context<Self>) {
+        let Some((_, act)) = self.popup.take() else { return };
+        cx.notify();
+        if !yes {
+            return;
+        }
+        match act {
+            PopupAct::Notice => {}
+            PopupAct::Delete { id, failed } => {
+                if !self.live {
+                    let open = self.open.clone();
+                    if let Some(chat) = open.and_then(|o| self.store.borrow_mut().chat_mut(&o).map(|c| c.messages.retain(|m| m.id != id))) {
+                        let _ = chat;
+                    }
+                    self.refresh_rows(false);
+                    return;
+                }
+                let rx = if failed { backend::run(backend::actions::delete_failed(id)) } else { backend::run(backend::actions::delete(id)) };
+                self.report(rx, "Delete Failed", cx);
+            }
+        }
+    }
+
+    fn cancel_mode(&mut self, cx: &mut Context<Self>) {
+        if matches!(self.mode, Mode::Edit { .. }) {
+            self.input.update(cx, |input, cx| input.set_text("", cx));
+        }
+        self.mode = Mode::Normal;
+        self.picker = None;
+        cx.notify();
+    }
+
     fn send(&mut self, text: String, cx: &mut Context<Self>) {
         let Some(id) = self.open.clone() else { return };
+        let mode = std::mem::replace(&mut self.mode, Mode::Normal);
+        if let Mode::Edit { id: msg_id } = &mode {
+            if self.live {
+                let rx = backend::run(backend::actions::edit(id.to_string(), msg_id.clone(), text));
+                self.report(rx, "Edit Failed", cx);
+            } else if let Some(m) = self.store.borrow_mut().chat_mut(&id).and_then(|c| c.messages.iter_mut().find(|m| m.id == *msg_id)) {
+                m.content = text;
+                m.edited = true;
+            }
+            self.refresh_rows(false);
+            cx.notify();
+            return;
+        }
+        let reply = match &mode {
+            Mode::Reply { id, .. } => id.clone(),
+            _ => String::new(),
+        };
         if self.live {
             let receiver = id.to_string();
-            let rx = backend::run(messaging::send(receiver, text, String::new()));
+            let rx = backend::run(messaging::send(receiver, text, reply));
             cx.spawn(async move |this, cx| {
                 if let Ok(Err(e)) = rx.await {
                     log::warn!("send failed: {e}");
@@ -332,7 +553,7 @@ impl VectorApp {
             let now = store.now_ms();
             let me = store.my_npub.clone();
             let Some(chat) = store.chat_mut(&id) else { return };
-            let msg = Message { id: format!("local-{now}-{}", chat.messages.len()), content: text, at: now, mine: true, npub: Some(me), ..Default::default() };
+            let msg = Message { id: format!("local-{now}-{}", chat.messages.len()), content: text, replied_to: reply, at: now, mine: true, npub: Some(me), ..Default::default() };
             chat.last_read = msg.id.clone();
             chat.messages.push(msg);
             store.resort();
@@ -364,7 +585,13 @@ impl Render for VectorApp {
         }
         let store = self.store.clone();
         let store = store.borrow();
-        root.child(chrome(window, false)).child(
+        let popup = self.popup.as_ref().map(|(p, _)| {
+            let app = cx.entity().downgrade();
+            kit::popup(p, move |yes, _, cx| {
+                app.update(cx, |app, cx| app.answer_popup(yes, cx)).ok();
+            })
+        });
+        root.children(popup).child(chrome(window, false)).child(
             div()
                 .flex()
                 .flex_row()
@@ -919,18 +1146,35 @@ impl VectorApp {
         let revealed = self.revealed.clone();
         let clock = self.started.elapsed().as_secs_f32();
         let app = cx.entity().downgrade();
-        let on_text: timeline::OnText = Rc::new(move |msg_id, target, _window, cx| {
+        let on_act: timeline::OnAct = Rc::new(move |msg_id, act, window, cx| {
             let msg_id = msg_id.to_string();
-            app.update(cx, |app, cx| app.on_text(msg_id, target, cx)).ok();
+            app.update(cx, |app, cx| app.on_act(msg_id, act, window, cx)).ok();
         });
+        let hovered = self.hovered.clone();
+        let picker = self.picker.clone();
+        let replying = match &self.mode {
+            Mode::Reply { id, .. } => Some(id.clone()),
+            _ => None,
+        };
+        let fail_reasons = self.fail_reasons.clone();
         let messages = list(self.timeline.clone(), move |i, _, _| {
             let rows_store = rows_store.borrow();
             let (Some(chat), Some(row)) = (rows_store.chat(&rows_id), rows.get(i)) else {
                 return div().into_any_element();
             };
             let revealed = revealed.borrow();
-            let last_mine = chat.messages.iter().rev().find(|m| m.mine).map(|m| m.id.as_str());
-            let ctx = timeline::Ctx { store: &rows_store, chat, revealed: &revealed, clock, on_text: on_text.clone(), last_mine };
+            let fail_reasons = fail_reasons.borrow();
+            let ctx = timeline::Ctx {
+                store: &rows_store,
+                chat,
+                revealed: &revealed,
+                clock,
+                on_act: on_act.clone(),
+                hovered: hovered.as_deref(),
+                replying: replying.as_deref(),
+                picker: picker.as_deref(),
+                fail_reasons: &fail_reasons,
+            };
             // A divider's 10px margins stand in for the row's own above it.
             let after_message = i > 0 && matches!(rows[i - 1], Row::Message { .. });
             timeline_row(&ctx, row, after_message)
@@ -946,7 +1190,7 @@ impl VectorApp {
             .bg(c(CHAT_BG))
             .child(header)
             .child(div().flex_1().min_h_0().bg(c(MESSAGES_BG)).pt(px(12.)).child(messages))
-            .child(composer(self.input.clone()))
+            .child(composer(self.input.clone(), &self.mode, cx))
     }
 }
 
@@ -1010,8 +1254,9 @@ fn divider(label: impl IntoElement, line: gpui::Hsla, opacity: f32) -> AnyElemen
         .into_any_element()
 }
 
-/// `#chat-box.input-box`: the gradient frame around the composer.
-fn composer(input: Entity<TextInput>) -> impl IntoElement {
+/// `#chat-box.input-box`: the gradient frame around the composer, with the reply bar
+/// tucked behind its top while replying, and edit's cancel in place of attach.
+fn composer(input: Entity<TextInput>, mode: &Mode, cx: &mut Context<VectorApp>) -> impl IntoElement {
     let icon = |path: &'static str| {
         div()
             .w(px(38.))
@@ -1021,27 +1266,74 @@ fn composer(input: Entity<TextInput>) -> impl IntoElement {
             .justify_center()
             .child(svg().path(path).size(px(23.)).text_color(c(ICON_MUTED)))
     };
-    div()
-        .h(px(55.))
+    let cancel = |id: &'static str, size: f32, cx: &mut Context<VectorApp>| {
+        div()
+            .id(id)
+            .cursor_pointer()
+            .flex()
+            .items_center()
+            .justify_center()
+            .on_click(cx.listener(|app, _, _, cx| app.cancel_mode(cx)))
+            .child(svg().path("icons/cancel.svg").size(px(size)).text_color(c(timeline::DANGER)))
+    };
+    let replying = matches!(mode, Mode::Reply { .. });
+    let editing = matches!(mode, Mode::Edit { .. });
+    let mut boxed = div()
+        .relative()
         .flex_shrink_0()
         .px(px(8.))
-        .pt(px(5.))
+        .pt(px(if replying { 39. } else { 5. }))
         .pb(px(5.))
         .bg(linear_gradient(
             90.,
             linear_color_stop(c(ACCENT), 0.),
             linear_color_stop(c(ACCENT_DEEP), 1.),
-        ))
-        .child(
+        ));
+    if let Mode::Reply { name, snippet, .. } = mode {
+        let look = crate::inline::Look::new(INTER, 13., 18., white_a(0.45));
+        let atoms = crate::preview::reply_atoms(snippet, &look);
+        boxed = boxed.child(
             div()
-                .size_full()
-                .rounded(px(10.))
-                .bg(c(APP_BG))
+                .absolute()
+                .top(px(5.))
+                .left(px(8.))
+                .right(px(8.))
+                .h(px(46.))
+                .pl(px(12.))
+                .pr(px(44.))
+                .pb(px(12.))
+                .rounded_t(px(10.))
+                .bg(c(0x0b1510))
                 .flex()
                 .items_center()
-                .child(icon("icons/plus.svg"))
-                .child(div().flex_1().min_w_0().child(input))
-                .child(icon("icons/smile-face.svg"))
-                .child(icon("icons/mic-on.svg")),
-        )
+                .gap(px(8.))
+                .child(div().w(px(3.)).h(px(16.)).rounded(px(2.)).bg(c(ACCENT)).flex_shrink_0())
+                .child(
+                    div()
+                        .flex()
+                        .flex_shrink_0()
+                        .max_w(gpui::relative(0.5))
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_size(px(13.5))
+                        .text_color(white_a(0.85))
+                        .child("Replying to\u{a0}")
+                        .child(div().font_weight(FontWeight::SEMIBOLD).text_color(c(ACCENT)).child(name.clone())),
+                )
+                .child(div().flex_1().min_w_0().overflow_hidden().child(crate::inline::inline(atoms, look).single_line()))
+                .child(div().absolute().right(px(10.5)).top(px(5.)).size(px(24.)).p(px(3.)).child(cancel("reply-cancel", 18., cx))),
+        );
+    }
+    boxed.child(
+        div()
+            .h(px(45.))
+            .rounded(px(10.))
+            .bg(c(APP_BG))
+            .flex()
+            .items_center()
+            .child(if editing { cancel("edit-cancel", 23., cx).w(px(38.)).h_full().into_any_element() } else { icon("icons/plus.svg").into_any_element() })
+            .child(div().flex_1().min_w_0().child(input))
+            .child(icon("icons/smile-face.svg"))
+            .child(icon("icons/mic-on.svg")),
+    )
 }

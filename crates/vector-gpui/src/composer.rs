@@ -33,6 +33,7 @@ actions!(
         Cut,
         Copy,
         Send,
+        Cancel,
     ]
 );
 
@@ -691,6 +692,7 @@ impl Render for TextInput {
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
             .on_action(cx.listener(Self::send))
+            .on_action(cx.listener(Self::cancel))
             .w_full()
             .font_family(RUBIK)
             .line_height(self.look.line_height)
@@ -707,8 +709,11 @@ impl Focusable for TextInput {
 }
 
 pub struct SendText(pub String);
+/// Escape in the field.
+pub struct CancelInput;
 
 impl EventEmitter<SendText> for TextInput {}
+impl EventEmitter<CancelInput> for TextInput {}
 
 impl TextInput {
     pub fn new(placeholder: impl Into<SharedString>, cx: &mut Context<Self>) -> Self {
@@ -755,6 +760,18 @@ impl TextInput {
 
     pub fn clear(&mut self, window: &Window, cx: &mut Context<Self>) {
         self.reset(window, cx);
+    }
+
+    /// Replaces the text, caret at the end.
+    pub fn set_text(&mut self, text: &str, cx: &mut Context<Self>) {
+        self.content = text.to_string().into();
+        self.selected_range = self.content.len()..self.content.len();
+        self.marked_range = None;
+        cx.notify();
+    }
+
+    fn cancel(&mut self, _: &Cancel, _: &mut Window, cx: &mut Context<Self>) {
+        cx.emit(CancelInput);
     }
 
     /// A content offset as an offset into what is drawn.
@@ -806,5 +823,6 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("end", End, None),
         KeyBinding::new("ctrl-cmd-space", ShowCharacterPalette, None),
         KeyBinding::new("enter", Send, Some("TextInput")),
+        KeyBinding::new("escape", Cancel, Some("TextInput")),
     ]);
 }
