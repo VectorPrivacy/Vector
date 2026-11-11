@@ -362,6 +362,7 @@ pub async fn reset() {
 
 /// Switch to another account on this device: the next boot opens it.
 pub async fn switch(npub: String) -> Result<(), String> {
+    super::security::refuse_if_migrating()?;
     if !accounts().iter().any(|a| a.npub == npub) {
         return Err(format!("Unknown account: {npub}"));
     }
@@ -373,6 +374,7 @@ pub async fn switch(npub: String) -> Result<(), String> {
 /// Remove an account and everything it keeps on this device. True when it was the live one;
 /// the marker then points at the most recent account left, if any.
 pub async fn delete(npub: String) -> Result<bool, String> {
+    super::security::refuse_if_migrating()?;
     if !accounts().iter().any(|a| a.npub == npub) {
         return Err(format!("Unknown account: {npub}"));
     }

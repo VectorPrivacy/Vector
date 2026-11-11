@@ -19,6 +19,7 @@ pub mod badges;
 pub mod device;
 pub mod sound;
 pub mod storage;
+pub mod security;
 
 use std::future::Future;
 use std::path::PathBuf;

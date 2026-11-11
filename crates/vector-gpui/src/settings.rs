@@ -195,6 +195,8 @@ pub fn help(key: &str) -> Option<(&'static str, String)> {
         "videoQuality" => ("Video Quality", "How much Vector shrinks the videos you send. Smaller videos send faster and play smoothly on older phones.<br><br><b>Small</b> fits 540p, <b>Balanced</b> and <b>High</b> fit 720p, all at up to 30 fps. A video that is already small enough is sent as it is.<br><br><b>Original</b> never compresses, and the Compress option no longer shows."),
         "clearStorage" => ("Clear Storage", "Deletes the downloaded and sent files Vector has cached on this device, to free up space.<br><br>Your messages stay. Attachments can be downloaded again later if they are still available from their sender."),
         "encryption" => ("Local Encryption", "Protects your messages and keys if your device is lost or stolen.<br><br>Disabling speeds up app launch but stores data in plain text."),
+        "changePin" => ("Change PIN", "Your PIN encrypts all local data including messages, keys, and secrets stored on your device. Resetting it will re-encrypt everything with your new PIN."),
+        "changePassword" => ("Change Password", "Your password encrypts all local data including messages, keys, and secrets stored on your device. Resetting it will re-encrypt everything with your new password."),
         "exportAccount" => ("Private Keys", "Shows your private key and seed phrase. You only need these to back up your account offline or to use it in another Nostr app. To use Vector on another device, use Sign in on Another Device instead."),
         "transfer" => ("Sign in on Another Device", "Bring this account to a phone, computer or browser by scanning a code or typing it in. Both devices check a number together and you approve on this device, so your keys never leave it in a form anyone else can read. This device stays signed in."),
         "streamerMode" => ("Streamer Mode", "Hides the names, pictures and keys of anyone who has not allowed streams, so you can share your screen."),
@@ -271,6 +273,10 @@ pub struct Settings {
     pub servers: Option<Vec<vector_core::blossom_servers::BlossomServerInfo>>,
     pub clock: Option<vector_core::clock::Status>,
     pub dialog: Option<crate::netdialog::NetDialog>,
+    /// The credential Local Encryption uses: `pin` or `password`.
+    pub sec_kind: String,
+    /// The fold over Private Keys.
+    pub sec_advanced: bool,
     /// Blocked users, once loaded.
     pub blocked: Option<Vec<Blocked>>,
     /// Anchors whose NEW pill has been seen.
@@ -319,6 +325,10 @@ pub enum Act {
     PreviewSound,
     PickSound,
     ClearSound,
+    ChangeCredential,
+    ShowKeys,
+    Transfer,
+    SecAdvanced,
     Link(&'static str),
     ClearSearch,
     /// The reader scrolled the page: the spy takes over from a jump.
@@ -1432,8 +1442,55 @@ fn clock_block(s: &Settings, on: &OnAct) -> AnyElement {
         .into_any_element()
 }
 
+/// `.sec-advanced-toggle`: the fold that keeps the raw keys out of the way.
+fn advanced_fold(open: bool, on: &OnAct) -> AnyElement {
+    div()
+        .id("sec-advanced")
+        .w_full()
+        .h(px(33.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .gap(px(6.))
+        .text_size(px(14.))
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(c(0xb2b2b2))
+        .hover(|d| d.text_color(c(0xffffff)))
+        .cursor_pointer()
+        .on_click(click(on, || Act::SecAdvanced))
+        .child(
+            svg()
+                .path("icons/chevron-down.svg")
+                .size(px(14.))
+                .text_color(c(0xb2b2b2))
+                .when(open, |d| d.with_transformation(gpui::Transformation::rotate(gpui::radians(std::f32::consts::PI)))),
+        )
+        .child("Advanced")
+        .into_any_element()
+}
+
+fn security_block(s: &Settings, on: &OnAct) -> AnyElement {
+    let enabled = s.on.get("encryption").copied().unwrap_or(false);
+    let switch = toggle("tg-encryption", enabled, s.flipped.contains("encryption"), click(on, move || Act::Toggle("encryption", !enabled)));
+    let mut col = div()
+        .flex()
+        .flex_col()
+        .child(toggle_row("encryption", "Local Encryption", Some(Box::new(click(on, || Act::Help("encryption")))), switch, false));
+    if enabled {
+        let (label, help) = if s.sec_kind == "password" { ("Change Password", "changePassword") } else { ("Change PIN", "changePin") };
+        col = col.child(st_row("change-cred", label, help, st_btn("change-cred-btn", "Change", || Act::ChangeCredential, on), on));
+    }
+    col = col.child(st_row("transfer", "Sign in on Another Device", "transfer", st_btn("transfer-btn", "Start", || Act::Transfer, on), on));
+    col = col.child(advanced_fold(s.sec_advanced, on));
+    if s.sec_advanced {
+        col = col.child(st_row("keys", "Private Keys", "exportAccount", st_btn("keys-btn", "Show", || Act::ShowKeys, on), on));
+    }
+    col.into_any_element()
+}
+
 fn block(id: &str, s: &Settings, on: &OnAct) -> Option<AnyElement> {
     Some(match id {
+        "security" => security_block(s, on),
         "display" => display_block(s, on),
         "privacy" => privacy_block(s, on),
         "notifications" => notifications_block(s, on),

@@ -26,7 +26,7 @@ const BOX_BG_HOVER: u32 = 0x1d1d1d;
 const BOX_LINE: u32 = 0x262626;
 const BOX_LINE_HOVER: u32 = 0x363636;
 
-static EPOCH: LazyLock<Instant> = LazyLock::new(Instant::now);
+pub static EPOCH: LazyLock<Instant> = LazyLock::new(Instant::now);
 
 #[derive(Clone, Copy, PartialEq)]
 enum Phase {

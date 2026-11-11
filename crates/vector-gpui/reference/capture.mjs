@@ -38,7 +38,7 @@ await page.addInitScript(`window.__MOCK_MODE__ = ${JSON.stringify(process.env.MO
 await page.addInitScript({ path: join(HERE, 'mock-tauri.js') });
 await page.goto(`http://localhost:${port}/`);
 await page.waitForTimeout(2500);
-if (after) { await page.evaluate(readFileSync(after, 'utf8')); await page.waitForTimeout(1500); }
+if (after) { await page.evaluate(readFileSync(after, 'utf8')); await page.waitForTimeout(+(process.env.WAIT || 1500)); }
 await page.screenshot({ path: `${out}.png` });
 const boxes = await page.evaluate(() => {
     const pick = [...document.querySelectorAll('body *')].filter((e) => { const r = e.getBoundingClientRect(); const s = getComputedStyle(e); return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none' && r.bottom > 0 && r.top < innerHeight; });

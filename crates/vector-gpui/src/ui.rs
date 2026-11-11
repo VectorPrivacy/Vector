@@ -103,6 +103,7 @@ pub struct VectorApp {
     /// Viktor, while the Messages list is empty.
     viktor: Option<Entity<crate::viktor::Viktor>>,
     settings: Option<crate::settings::Settings>,
+    security: Entity<crate::security::SecurityFlow>,
 }
 
 #[derive(Clone, PartialEq)]
@@ -166,6 +167,8 @@ impl VectorApp {
             }
         })
         .detach();
+        let security = cx.new(|cx| crate::security::SecurityFlow::new(live, window, cx));
+        cx.subscribe(&security, |app, _, e: &crate::security::Event, cx| app.on_security(e, cx)).detach();
         Self {
             screen: Screen::Main,
             live,
@@ -206,6 +209,7 @@ impl VectorApp {
             mutuals_asked: Vec::new(),
             viktor: None,
             settings: None,
+            security,
         }
     }
 
@@ -1123,7 +1127,7 @@ impl Render for VectorApp {
         let root = root.on_drop(cx.listener(|app, paths: &gpui::ExternalPaths, window, cx| {
             app.open_paths_preview(paths.paths().to_vec(), window, cx);
         }));
-        root.children(net_dialog).children(popup).child(chrome(window, false)).child(
+        root.children(net_dialog).children(popup).child(self.security.clone()).child(chrome(window, false)).child(
             div()
                 .flex()
                 .flex_row()
@@ -2756,6 +2760,7 @@ impl VectorApp {
             .collect();
         let sql = if self.live { backend::prefs::sql_bools(&sql_keys) } else { sql_keys.iter().map(|(_, d)| *d).collect() };
         let mut on: HashMap<&'static str, bool> = sql_keys.iter().map(|(k, _)| *k).zip(sql).collect();
+        on.insert("encryption", self.security.update(cx, |f, _| f.sync()));
         for t in crate::settings::toggles() {
             if let Home::Device(yes, no, default) = t.home {
                 on.insert(t.key, match backend::device::get(t.key) {
@@ -2792,6 +2797,8 @@ impl VectorApp {
             servers: None,
             clock: None,
             dialog: None,
+            sec_kind: self.security.read(cx).kind().to_string(),
+            sec_advanced: false,
             donut: Default::default(),
             auto_limit: if self.live { backend::prefs::sql("max_auto_download_bytes").and_then(|v| v.parse().ok()).filter(|v: &u64| *v > 0) } else { None }.unwrap_or(10_485_760),
             clearing: false,
@@ -3274,6 +3281,29 @@ impl VectorApp {
             }
             Act::Scrolled => s.jumped = None,
             Act::Toggle("keep_media", value) => self.toggle_keep_media(value, cx),
+            Act::Toggle("encryption", value) => {
+                s.on.insert("encryption", value);
+                s.flipped.insert("encryption");
+                self.security.update(cx, |f, cx| f.toggle(value, cx));
+            }
+            Act::Toggle("clock_decentralised", value) => {
+                s.on.insert("clock_decentralised", value);
+                s.flipped.insert("clock_decentralised");
+                if self.live {
+                    let rx = backend::run(async move { vector_core::db::scoped(async move { vector_core::clock::set_decentralised(value).map(|_| vector_core::clock::status()) }).await });
+                    cx.spawn(async move |this, cx| {
+                        let Ok(Ok(status)) = rx.await else { return };
+                        this.update(cx, |this, cx| {
+                            if let Some(s) = this.settings.as_mut() {
+                                s.clock = Some(status);
+                                cx.notify();
+                            }
+                        })
+                        .ok();
+                    })
+                    .detach();
+                }
+            }
             Act::Toggle(key, value) => {
                 let Some(t) = crate::settings::toggle_of(key) else { return };
                 if key == "auto_download_enabled" {
@@ -3416,24 +3446,6 @@ impl VectorApp {
                 let Some(info) = s.servers.iter().flatten().find(|r| r.url == url).cloned() else { return };
                 s.dialog = Some(crate::netdialog::NetDialog::Server { info });
             }
-            Act::Toggle("clock_decentralised", value) => {
-                s.on.insert("clock_decentralised", value);
-                s.flipped.insert("clock_decentralised");
-                if self.live {
-                    let rx = backend::run(async move { vector_core::db::scoped(async move { vector_core::clock::set_decentralised(value).map(|_| vector_core::clock::status()) }).await });
-                    cx.spawn(async move |this, cx| {
-                        let Ok(Ok(status)) = rx.await else { return };
-                        this.update(cx, |this, cx| {
-                            if let Some(s) = this.settings.as_mut() {
-                                s.clock = Some(status);
-                                cx.notify();
-                            }
-                        })
-                        .ok();
-                    })
-                    .detach();
-                }
-            }
             Act::DonutHover(at) => s.donut.hover = at,
             Act::DonutPick(i) => s.donut.picked = if s.donut.picked == Some(i) { None } else { Some(i) },
             Act::DonutDelete => self.confirm_storage_delete(),
@@ -3449,6 +3461,10 @@ impl VectorApp {
             }
             Act::PreviewSound => backend::sound::play(backend::sound::Sound::parse(&s.notif_sound)),
             Act::PickSound => self.pick_sound(cx),
+            Act::ChangeCredential => self.security.update(cx, |f, cx| f.change(cx)),
+            Act::ShowKeys => self.security.update(cx, |f, cx| f.show_keys(cx)),
+            Act::Transfer => self.show_toast("Sign in on Another Device is coming soon", cx),
+            Act::SecAdvanced => s.sec_advanced = !s.sec_advanced,
             Act::ClearSound => {
                 s.sound_custom = false;
                 s.notif_sound = "default".into();
@@ -3913,6 +3929,20 @@ impl VectorApp {
     }
 
     /// `showToast`: one line over a bottom gradient, for 1.5s plus 40ms a character.
+    fn on_security(&mut self, e: &crate::security::Event, cx: &mut Context<Self>) {
+        match e {
+            crate::security::Event::State { enabled, kind } => {
+                if let Some(s) = self.settings.as_mut() {
+                    s.on.insert("encryption", *enabled);
+                    s.sec_kind = kind.clone();
+                }
+                cx.notify();
+            }
+            crate::security::Event::Toast(text) => self.show_toast(text, cx),
+            crate::security::Event::Transfer => self.show_toast("Sign in on Another Device is coming soon", cx),
+        }
+    }
+
     fn show_toast(&mut self, text: &str, cx: &mut Context<Self>) {
         let at = std::time::Instant::now();
         self.toast = Some((text.to_string().into(), at));
