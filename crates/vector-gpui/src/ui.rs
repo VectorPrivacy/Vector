@@ -110,6 +110,8 @@ pub struct VectorApp {
     /// A volume change waits on its throttle.
     audio_save_pending: bool,
     start: Option<crate::startmenu::StartMenu>,
+    /// The context menu open: where, its rows, and what each does.
+    menu: Option<(gpui::Point<gpui::Pixels>, Vec<kit::MenuItem>, Vec<MenuAct>)>,
 }
 
 #[derive(Clone, PartialEq)]
@@ -121,8 +123,19 @@ enum Mode {
 
 /// What a popup's confirm does.
 #[derive(Clone)]
+/// What a context menu row does.
+enum MenuAct {
+    StartFolder(String),
+    StartRename(String),
+    StartUngroup(String),
+    StartMoveOut(String),
+    StartUnpin(String),
+    Device(&'static str, Option<String>, backend::mic::DevicePrefs),
+}
+
 enum PopupAct {
     Notice,
+    RenameFolder { id: String },
     Delete { id: String, failed: bool },
     Block { npub: String },
     /// Block from a request's bar, which also closes the chat.
@@ -220,6 +233,7 @@ impl VectorApp {
             update_url: None,
             audio_save_pending: false,
             start: None,
+            menu: None,
         }
     }
 
@@ -409,32 +423,75 @@ impl VectorApp {
         cx.notify();
     }
 
-    /// Escape steps back one layer: the query, Add Pin, Accounts, a folder, then the menu.
-    fn start_escape(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(sm) = self.start.as_mut() else { return };
-        if !sm.search.read(cx).text().is_empty() {
-            let search = sm.search.clone();
-            search.update(cx, |i, cx| i.clear(window, cx));
-        } else if sm.adding || sm.picking {
-            sm.adding = false;
-            sm.picking = false;
-        } else if sm.folder.is_some() {
-            sm.folder = None;
-        } else {
-            self.start = None;
-        }
+    fn on_menu(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((_, _, mut acts)) = self.menu.take() else { return };
         cx.notify();
+        if ix >= acts.len() {
+            return;
+        }
+        match acts.swap_remove(ix) {
+            MenuAct::StartFolder(id) => {
+                if let Some(sm) = self.start.as_mut() {
+                    sm.folder = Some(id);
+                }
+            }
+            MenuAct::StartRename(id) => {
+                let current = self.start.as_ref().and_then(|sm| {
+                    sm.layout.nodes.iter().find_map(|n| match n {
+                        vector_core::rail_layout::RailNode::Folder { id: f, name, .. } if *f == id => Some(name.clone()),
+                        _ => None,
+                    })
+                });
+                let input = cx.new(|cx| TextInput::new("Folder", cx).with_look(kit::field_look()).keep_on_submit().submit_empty());
+                if let Some(name) = current {
+                    input.update(cx, |i, cx| i.set_text(&name, cx));
+                }
+                cx.subscribe_in(&input, window, |app, _, _: &SendText, window, cx| app.answer_popup(true, window, cx)).detach();
+                cx.subscribe_in(&input, window, |app, _, _: &CancelInput, window, cx| app.answer_popup(false, window, cx)).detach();
+                window.focus(&input.focus_handle(cx), cx);
+                let mut popup = kit::Popup::notice("Rename Folder");
+                popup.icon = None;
+                popup.confirm = "Rename".into();
+                popup.cancel = Some("Cancel".into());
+                popup.input = Some(input);
+                self.popup = Some((popup, PopupAct::RenameFolder { id }));
+            }
+            MenuAct::StartUngroup(id) => self.start_edit(move |l| l.dissolve_folder(&id), cx),
+            MenuAct::StartMoveOut(key) => self.start_edit(
+                move |l| {
+                    use vector_core::rail_layout::{RailDrag, RailDrop};
+                    l.apply_drop(&RailDrag::Item { key: key.clone() }, &RailDrop::End, &vector_core::rail_layout::new_folder_id())
+                },
+                cx,
+            ),
+            MenuAct::StartUnpin(key) => self.start_edit(
+                move |l| {
+                    vector_core::start_menu::unpin(l, &key);
+                    Ok(())
+                },
+                cx,
+            ),
+            MenuAct::Device(kind, name, mut prefs) => {
+                if kind == "input" {
+                    prefs.input = name;
+                } else {
+                    prefs.output = name;
+                }
+                if self.live {
+                    let rx = backend::run(async move { vector_core::db::scoped(async move { tokio::task::spawn_blocking(move || backend::mic::set_devices(prefs)).await.map_err(|e| e.to_string())? }).await });
+                    self.toast_err(rx, cx);
+                }
+            }
+        }
     }
 
-    /// Pins edit only once the relay copy is read: an earlier edit could flatten pins arranged elsewhere.
-    fn start_pin(&mut self, key: String, cx: &mut Context<Self>) {
-        let Some(sm) = self.start.as_mut() else { return };
-        let pinned = sm.pinned(&key);
+    /// One edit to the pins, through the synced layout once its relay copy is read.
+    fn start_edit(&mut self, f: impl FnOnce(&mut vector_core::rail_layout::RailLayout) -> Result<(), String> + Send + 'static, cx: &mut Context<Self>) {
         if !self.live {
-            if pinned {
-                vector_core::start_menu::unpin(&mut sm.layout, &key);
-            } else {
-                let _ = vector_core::start_menu::pin(&mut sm.layout, &key);
+            if let Some(sm) = self.start.as_mut() {
+                if let Err(e) = f(&mut sm.layout) {
+                    self.show_toast(&e, cx);
+                }
             }
             cx.notify();
             return;
@@ -445,15 +502,7 @@ impl VectorApp {
                 if !synced_prefs::is_hydrated(Pref::Start) {
                     return Err("Still syncing your pins, try again in a moment".to_string());
                 }
-                synced_prefs::edit_layout(Pref::Start, |l| {
-                    if pinned {
-                        vector_core::start_menu::unpin(l, &key);
-                        Ok(())
-                    } else {
-                        vector_core::start_menu::pin(l, &key).map(drop)
-                    }
-                })
-                .map(|(layout, _)| layout)
+                synced_prefs::edit_layout(Pref::Start, f).map(|(layout, _)| layout)
             })
             .await
         });
@@ -473,6 +522,39 @@ impl VectorApp {
             .ok();
         })
         .detach();
+    }
+
+    /// Escape steps back one layer: the query, Add Pin, Accounts, a folder, then the menu.
+    fn start_escape(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(sm) = self.start.as_mut() else { return };
+        if !sm.search.read(cx).text().is_empty() {
+            let search = sm.search.clone();
+            search.update(cx, |i, cx| i.clear(window, cx));
+        } else if sm.adding || sm.picking {
+            sm.adding = false;
+            sm.picking = false;
+        } else if sm.folder.is_some() {
+            sm.folder = None;
+        } else {
+            self.start = None;
+        }
+        cx.notify();
+    }
+
+    fn start_pin(&mut self, key: String, cx: &mut Context<Self>) {
+        let Some(sm) = self.start.as_ref() else { return };
+        let pinned = sm.pinned(&key);
+        self.start_edit(
+            move |l| {
+                if pinned {
+                    vector_core::start_menu::unpin(l, &key);
+                    Ok(())
+                } else {
+                    vector_core::start_menu::pin(l, &key).map(drop)
+                }
+            },
+            cx,
+        );
     }
 
     fn on_start(&mut self, act: crate::startmenu::Act, window: &mut Window, cx: &mut Context<Self>) {
@@ -499,9 +581,52 @@ impl VectorApp {
                     backend::run(async move { vector_core::db::scoped(async move { vector_core::calls::settings::remember_mic(next) }).await });
                 }
             }
-            Act::Devices => {
-                self.start = None;
-                self.open_settings("audio", window, cx);
+            Act::Devices(kind, at) => {
+                let devices = if self.live {
+                    backend::mic::devices()
+                } else {
+                    backend::mic::DeviceList {
+                        inputs: vec!["Built-in Microphone".into(), "USB Headset".into()],
+                        outputs: vec!["Built-in Speakers".into(), "USB Headset".into()],
+                        default_input: "Built-in Microphone".into(),
+                        default_output: "Built-in Speakers".into(),
+                        prefs: Default::default(),
+                    }
+                };
+                let (names, fallback, current) = if kind == "input" {
+                    (devices.inputs, devices.default_input, devices.prefs.input.clone())
+                } else {
+                    (devices.outputs, devices.default_output, devices.prefs.output.clone())
+                };
+                let mut items = vec![kit::MenuItem { label: if fallback.is_empty() { "System Default".into() } else { format!("System Default ({fallback})").into() }, icon: None, danger: false, checked: current.is_none() }];
+                let mut acts = vec![MenuAct::Device(kind, None, devices.prefs.clone())];
+                for name in names {
+                    items.push(kit::MenuItem { label: name.clone().into(), icon: None, danger: false, checked: current.as_ref() == Some(&name) });
+                    acts.push(MenuAct::Device(kind, Some(name), devices.prefs.clone()));
+                }
+                self.menu = Some((at, items, acts));
+            }
+            Act::Menu(at, key, folder) => {
+                let in_folder = sm.folder.clone();
+                let (items, acts): (Vec<_>, Vec<_>) = match (key, folder) {
+                    (_, Some(id)) => vec![
+                        (kit::MenuItem::new("Open", "folder"), MenuAct::StartFolder(id.clone())),
+                        (kit::MenuItem::new("Rename", "edit"), MenuAct::StartRename(id.clone())),
+                        (kit::MenuItem::new("Ungroup", "grid-fill"), MenuAct::StartUngroup(id)),
+                    ]
+                    .into_iter()
+                    .unzip(),
+                    (Some(key), None) => {
+                        let mut rows = Vec::new();
+                        if in_folder.is_some() {
+                            rows.push((kit::MenuItem::new("Move out of Folder", "chevron-left"), MenuAct::StartMoveOut(key.clone())));
+                        }
+                        rows.push((kit::MenuItem::new("Unpin", "pin").danger(), MenuAct::StartUnpin(key)));
+                        rows.into_iter().unzip()
+                    }
+                    _ => return,
+                };
+                self.menu = Some((at, items, acts));
             }
             Act::AddPin => {
                 sm.adding = true;
@@ -1375,6 +1500,12 @@ impl VectorApp {
                 self.settings = None;
                 self.remove_account(me, window, cx);
             }
+            PopupAct::RenameFolder { id } => {
+                if let Some(input) = popup.input {
+                    let name = input.read(cx).text().trim().to_string();
+                    self.start_edit(move |l| l.rename_folder(&id, &name), cx);
+                }
+            }
             PopupAct::Nickname { npub } => {
                 if let Some(input) = popup.input {
                     let nick = input.read(cx).text().trim().to_string();
@@ -1599,6 +1730,24 @@ impl Render for VectorApp {
                 app.update(cx, |app, cx| app.on_start(act, window, cx)).ok();
             });
             gpui::deferred(div().absolute().inset_0().child(crate::startmenu::render(sm, &self.store.borrow(), window, &on, cx))).with_priority(8)
+        }))
+        .children(self.menu.as_ref().map(|(at, items, _)| {
+            let pick = cx.entity().downgrade();
+            let close = pick.clone();
+            kit::context_menu(
+                *at,
+                items,
+                move |ix, window, cx| {
+                    pick.update(cx, |app, cx| app.on_menu(ix, window, cx)).ok();
+                },
+                move |_, cx| {
+                    close.update(cx, |app, cx| {
+                        app.menu = None;
+                        cx.notify();
+                    })
+                    .ok();
+                },
+            )
         }))
     }
 }

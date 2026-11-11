@@ -1,6 +1,6 @@
 mod assets;
 #[path = "../../../src-tauri/src/audio_devices.rs"]
-#[allow(dead_code)]
+#[allow(dead_code, unused_imports)]
 mod audio_devices;
 #[path = "../../../src-tauri/src/mic_access.rs"]
 #[allow(dead_code)]

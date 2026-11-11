@@ -57,7 +57,22 @@ pub enum Act {
     AddAccount,
     Mute,
     Deafen,
-    Devices,
+    /// `output` or `input`, at the chevron.
+    Devices(&'static str, gpui::Point<gpui::Pixels>),
+    /// A pin's or folder's own menu; the key, or the folder id.
+    Menu(gpui::Point<gpui::Pixels>, Option<String>, Option<String>),
+}
+
+/// Right-click opens the tile's own menu.
+fn with_menu(el: AnyElement, key: Option<String>, folder: Option<String>, on: &OnAct) -> AnyElement {
+    let on = on.clone();
+    div()
+        .on_mouse_down(gpui::MouseButton::Right, move |e, w, cx| {
+            cx.stop_propagation();
+            on(Act::Menu(e.position, key.clone(), folder.clone()), w, cx);
+        })
+        .child(el)
+        .into_any_element()
 }
 
 pub type OnAct = Rc<dyn Fn(Act, &mut Window, &mut App)>;
@@ -413,7 +428,7 @@ fn nav_item(id: &'static str, label: &'static str, icon: &'static str, dot: bool
         .when(dot, |d| d.child(div().absolute().left(px(30.)).top(px(8.)).size(px(8.)).rounded_full().bg(c(PRIMARY))))
 }
 
-fn audio(id: &'static str, icon: &'static str, off: bool, toggle: Act, on: &OnAct) -> impl IntoElement {
+fn audio(id: &'static str, kind: &'static str, icon: &'static str, off: bool, toggle: Act, on: &OnAct) -> impl IntoElement {
     let toggle = Rc::new(std::cell::RefCell::new(Some(toggle)));
     let on2 = on.clone();
     div()
@@ -442,7 +457,10 @@ fn audio(id: &'static str, icon: &'static str, off: bool, toggle: Act, on: &OnAc
                 .py(px(7.))
                 .rounded(px(10.))
                 .cursor_pointer()
-                .on_click(click(on, || Act::Devices))
+                .on_click({
+                    let on = on.clone();
+                    move |e, w, cx| on(Act::Devices(kind, e.position()), w, cx)
+                })
                 .child(svg().path("icons/chevron-down.svg").size(px(14.)).text_color(c(0x888888))),
         )
 }
@@ -556,13 +574,15 @@ pub fn render(sm: &StartMenu, store: &Store, window: &Window, on: &OnAct, cx: &A
                 let r = resolve(key, store);
                 let plate = matches!(r.glyph, Glyph::Icon(_));
                 let k = key.clone();
-                tiles.push(tile(SharedString::from(format!("stm-pin-{ix}")), r.label, Some(r.sub.as_str()).filter(|s| !s.is_empty()), glyph(&r.glyph, if list { 28. } else if plate { 40. } else { 65. }), plate, r.missing, list, click(on, move || Act::Open(k.clone()))));
+                let t = tile(SharedString::from(format!("stm-pin-{ix}")), r.label, Some(r.sub.as_str()).filter(|s| !s.is_empty()), glyph(&r.glyph, if list { 28. } else if plate { 40. } else { 65. }), plate, r.missing, list, click(on, move || Act::Open(k.clone())));
+                tiles.push(with_menu(t, Some(key.clone()), None, on));
             }
             RailNode::Folder { id, name, keys, .. } => {
                 let mini = keys.iter().take(4).map(|k| glyph(&resolve(k, store).glyph, if list { 12. } else { 22. }));
                 let grid = div().w(px(if list { 28. } else { 50. })).flex().flex_wrap().gap(px(if list { 4. } else { 6. })).justify_center().children(mini);
                 let fid = id.clone();
-                tiles.push(tile(SharedString::from(format!("stm-folder-{ix}")), if name.is_empty() { "Folder".into() } else { name.clone() }, Some("Folder"), grid.into_any_element(), true, false, list, click(on, move || Act::Folder(Some(fid.clone())))));
+                let t = tile(SharedString::from(format!("stm-folder-{ix}")), if name.is_empty() { "Folder".into() } else { name.clone() }, Some("Folder"), grid.into_any_element(), true, false, list, click(on, move || Act::Folder(Some(fid.clone()))));
+                tiles.push(with_menu(t, None, Some(id.clone()), on));
             }
         }
     }
@@ -660,8 +680,8 @@ pub fn render(sm: &StartMenu, store: &Store, window: &Window, on: &OnAct, cx: &A
                 ),
         )
         .child(div().flex_1())
-        .child(audio("stm-deafen", if deaf { "icons/headphones-off.svg" } else { "icons/headphones.svg" }, deaf, Act::Deafen, on))
-        .child(audio("stm-mute", if muted { "icons/mic-off.svg" } else { "icons/mic-on.svg" }, muted, Act::Mute, on));
+        .child(audio("stm-deafen", "output", if deaf { "icons/headphones-off.svg" } else { "icons/headphones.svg" }, deaf, Act::Deafen, on))
+        .child(audio("stm-mute", "input", if muted { "icons/mic-off.svg" } else { "icons/mic-on.svg" }, muted, Act::Mute, on));
 
     let grow = gpui::Animation::new(std::time::Duration::from_millis(280)).with_easing(crate::kit::bezier(0.2, 0.9, 0.25, 1.));
     let menu = div()

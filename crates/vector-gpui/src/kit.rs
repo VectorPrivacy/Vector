@@ -381,3 +381,89 @@ pub fn rich(html: &str) -> gpui::StyledText {
     let strong = gpui::HighlightStyle { font_weight: Some(FontWeight::BOLD), ..Default::default() };
     gpui::StyledText::new(text).with_highlights(bold.into_iter().map(|r| (r, strong)))
 }
+
+/// One row of a `.context-menu`.
+#[derive(Clone)]
+pub struct MenuItem {
+    pub label: SharedString,
+    pub icon: Option<SharedString>,
+    pub danger: bool,
+    pub checked: bool,
+}
+
+impl MenuItem {
+    pub fn new(label: impl Into<SharedString>, icon: &str) -> Self {
+        Self { label: label.into(), icon: Some(SharedString::from(format!("icons/{icon}.svg"))), danger: false, checked: false }
+    }
+    pub fn danger(mut self) -> Self {
+        self.danger = true;
+        self
+    }
+    pub fn checked(mut self, on: bool) -> Self {
+        self.checked = on;
+        self
+    }
+}
+
+/// `ContextMenu.svelte`: rows at the press, kept inside the window. A press elsewhere closes it.
+pub fn context_menu(
+    at: gpui::Point<gpui::Pixels>,
+    items: &[MenuItem],
+    on_pick: impl Fn(usize, &mut Window, &mut App) + 'static,
+    on_close: impl Fn(&mut Window, &mut App) + 'static,
+) -> AnyElement {
+    let on_pick = std::rc::Rc::new(on_pick);
+    let mut list = div()
+        .id("context-menu")
+        .min_w(px(160.))
+        .max_w(px(320.))
+        .bg(c(0x1e1e1e))
+        .border_1()
+        .border_color(c(0x393b3c))
+        .rounded(px(10.))
+        .overflow_hidden()
+        .shadow(vec![gpui::BoxShadow { color: ca(0, 0, 0, 0.5), offset: gpui::point(px(0.), px(4.)), blur_radius: px(18.), spread_radius: px(0.), inset: false }])
+        .occlude()
+        .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .on_mouse_down(gpui::MouseButton::Right, |_, _, cx| cx.stop_propagation());
+    for (ix, item) in items.iter().enumerate() {
+        let pick = on_pick.clone();
+        let danger = c(crate::timeline::DANGER);
+        let icon = if item.checked { Some(SharedString::from("icons/check.svg")) } else { item.icon.clone() };
+        list = list.child(
+            div()
+                .id(("ctx", ix))
+                .flex()
+                .items_center()
+                .justify_between()
+                .gap(px(12.))
+                .px(px(14.))
+                .py(px(10.))
+                .text_size(px(14.))
+                .line_height(px(20.))
+                .whitespace_nowrap()
+                .cursor_pointer()
+                .text_color(if item.danger { danger } else { c(0xb2b2b2) })
+                .when(item.danger, |d| d.hover(move |d| d.bg(danger.opacity(0.1))))
+                .when(!item.danger, |d| d.hover(|d| d.bg(c(0x2a2a2a)).text_color(c(0xffffff))))
+                .on_click(move |_, w, cx| pick(ix, w, cx))
+                .child(div().min_w_0().overflow_hidden().text_ellipsis().child(item.label.clone()))
+                .children(icon.map(|i| {
+                    let color = if item.checked { c(crate::theme::PRIMARY) } else if item.danger { danger } else { c(0xb2b2b2) };
+                    gpui::svg().path(i).size(px(20.)).flex_shrink_0().text_color(color)
+                })),
+        );
+    }
+    let close = std::rc::Rc::new(on_close);
+    let (c1, c2) = (close.clone(), close);
+    gpui::deferred(
+        div()
+            .absolute()
+            .inset_0()
+            .on_mouse_down(gpui::MouseButton::Left, move |_, w, cx| c1(w, cx))
+            .on_mouse_down(gpui::MouseButton::Right, move |_, w, cx| c2(w, cx))
+            .child(gpui::anchored().position(at).snap_to_window_with_margin(px(8.)).child(list)),
+    )
+    .with_priority(20)
+    .into_any_element()
+}
