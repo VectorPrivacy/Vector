@@ -848,7 +848,7 @@ impl Render for VectorApp {
                         let on: crate::profile::OnAct = Rc::new(move |act, window, cx| {
                             app.update(cx, |app, cx| app.on_profile(act, window, cx)).ok();
                         });
-                        crate::profile::pane(&store, p, &on)
+                        crate::profile::pane(&store, p, &on, cx)
                     }
                     (None, Some(id)) => self.chat_pane(&store, id, cx).into_any_element(),
                     (None, None) => empty_pane().into_any_element(),
@@ -1770,7 +1770,73 @@ impl VectorApp {
                     cx.notify();
                 }
             }
-            Act::Edit | Act::Switcher => {}
+            Act::Edit => {
+                let Some(me) = self.store.borrow().me().cloned() else { return };
+                let look = crate::composer::Look { line_height: px(20.), color: c(TEXT), ..kit::field_look() };
+                let name = cx.new(|cx| {
+                    let mut i = TextInput::new("", cx).with_look(look.clone()).centered().keep_on_submit();
+                    i.set_text(&me.name, cx);
+                    i
+                });
+                let bio = cx.new(|cx| {
+                    let mut i = TextInput::new("", cx).with_look(look).centered().multiline(px(100000.)).keep_on_submit();
+                    i.set_text(&me.about, cx);
+                    i
+                });
+                for input in [&name, &bio] {
+                    cx.subscribe(input, |_, _, _: &crate::composer::InputChanged, cx| cx.notify()).detach();
+                }
+                window.focus(&name.focus_handle(cx), cx);
+                p.edit = Some(crate::profile::Edit { name, bio, removed_banner: false, snap_name: me.name.trim().to_string(), snap_about: me.about.trim().to_string() });
+                cx.notify();
+            }
+            Act::RemoveBanner => {
+                if let Some(e) = p.edit.as_mut() {
+                    e.removed_banner = true;
+                }
+                cx.notify();
+            }
+            Act::ExitEdit(cancel) => {
+                let Some(e) = p.edit.take() else { return };
+                cx.notify();
+                if cancel {
+                    return;
+                }
+                let name = e.name.read(cx).text().trim().to_string();
+                let about = e.bio.read(cx).text().trim().to_string();
+                let (name_changed, about_changed) = (name != e.snap_name, about != e.snap_about);
+                if let Some(me) = self.store.borrow_mut().profiles.get_mut(&npub) {
+                    me.name = name.clone();
+                    me.about = about.clone();
+                    if e.removed_banner {
+                        me.banner.clear();
+                        me.banner_cached.clear();
+                    }
+                }
+                self.show_toast("Profile Saved", cx);
+                if !self.live || !(name_changed || about_changed || e.removed_banner) {
+                    return;
+                }
+                // Empty leaves a field as it is; a blank clears it.
+                let name = if name_changed { name } else { String::new() };
+                let banner = if e.removed_banner { " ".to_string() } else { String::new() };
+                let about = if about_changed { if about.is_empty() { " ".to_string() } else { about } } else { String::new() };
+                let rx = backend::run(vector_core::profile::sync::update_profile(name, String::new(), banner, about, &sync::ProfileHandler));
+                cx.spawn(async move |this, cx| {
+                    if let Ok(true) = rx.await {
+                        return;
+                    }
+                    this.update(cx, |this, cx| {
+                        let mut popup = kit::Popup::notice("Profile Update Failed!");
+                        popup.text = Some("Failed to broadcast profile update to the network.".into());
+                        this.popup = Some((popup, PopupAct::Notice));
+                        cx.notify();
+                    })
+                    .ok();
+                })
+                .detach();
+            }
+            Act::Switcher => {}
         }
     }
 

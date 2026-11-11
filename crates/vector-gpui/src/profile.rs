@@ -4,7 +4,7 @@
 use std::rc::Rc;
 
 use gpui::prelude::*;
-use gpui::{AnyElement, App, FontWeight, MouseButton, ObjectFit, SharedString, Window, div, img, px, svg};
+use gpui::{AnyElement, App, FontWeight, Hsla, MouseButton, ObjectFit, SharedString, Window, div, img, px, svg};
 
 use crate::data::Store;
 use crate::theme::*;
@@ -25,6 +25,9 @@ pub enum Act {
     Edit,
     SetStatus,
     Switcher,
+    /// Leave Edit Mode: save, or (true) cancel.
+    ExitEdit(bool),
+    RemoveBanner,
 }
 
 pub type OnAct = Rc<dyn Fn(Act, &mut Window, &mut App)>;
@@ -37,11 +40,27 @@ pub struct Screen {
     pub more_open: bool,
     /// Copy feedback: (which, when).
     pub copied: Option<(Act, std::time::Instant)>,
+    pub edit: Option<Edit>,
+}
+
+/// Edit Mode's draft of our own profile.
+pub struct Edit {
+    pub name: gpui::Entity<crate::composer::TextInput>,
+    pub bio: gpui::Entity<crate::composer::TextInput>,
+    pub removed_banner: bool,
+    pub snap_name: String,
+    pub snap_about: String,
+}
+
+impl Edit {
+    pub fn dirty(&self, cx: &App) -> bool {
+        self.removed_banner || self.name.read(cx).text().trim() != self.snap_name || self.bio.read(cx).text().trim() != self.snap_about
+    }
 }
 
 impl Screen {
     pub fn new(npub: String, back: Option<SharedString>) -> Self {
-        Self { npub, back, more_open: false, copied: None }
+        Self { npub, back, more_open: false, copied: None, edit: None }
     }
 
     fn copied(&self, which: Act) -> bool {
@@ -114,7 +133,7 @@ fn small_option(id: &'static str, icon: &'static str, label: Option<&'static str
     }
 }
 
-pub fn pane(store: &Store, s: &Screen, on: &OnAct) -> AnyElement {
+pub fn pane(store: &Store, s: &Screen, on: &OnAct, cx: &App) -> AnyElement {
     let Some(p) = store.profiles.get(&s.npub) else {
         return div().flex_1().h_full().bg(c(APP_BG)).into_any_element();
     };
@@ -126,7 +145,8 @@ pub fn pane(store: &Store, s: &Screen, on: &OnAct) -> AnyElement {
         if mine { "Anonymous".into() } else { format!("{}…", &s.npub[..s.npub.len().min(10)]) }
     });
     let muted = store.chat(&s.npub).is_some_and(|c| c.muted);
-    let banner = (!p.banner_cached.is_empty()).then(|| store.media_root.join(&p.banner_cached));
+    let editing = s.edit.as_ref().filter(|_| mine);
+    let banner = (!p.banner_cached.is_empty() && !editing.is_some_and(|e| e.removed_banner)).then(|| store.media_root.join(&p.banner_cached));
     let dark = mine || !p.banner.is_empty();
     let banner_h = if dark { 200. } else { 115. };
 
@@ -194,6 +214,7 @@ pub fn pane(store: &Store, s: &Screen, on: &OnAct) -> AnyElement {
                 )
             })
             .child(info)
+            .when_some(editing, |d, e| d.child(edit_bar(e.dirty(cx), on)))
     };
 
     // ── banner and avatar ──
@@ -201,7 +222,7 @@ pub fn pane(store: &Store, s: &Screen, on: &OnAct) -> AnyElement {
     if let Some(path) = banner {
         banner_box = banner_box.child(img(path).absolute().inset_0().size_full().object_fit(ObjectFit::Cover));
     }
-    if mine {
+    if mine && editing.is_none() {
         banner_box = banner_box
             .child(small_option("profile-edit-btn", "icons/edit.svg", Some("Edit"), true).left(px(18.5)).on_click(click(on, Act::Edit)))
             .child(
@@ -210,13 +231,27 @@ pub fn pane(store: &Store, s: &Screen, on: &OnAct) -> AnyElement {
                     .on_click(click(on, Act::Share)),
             );
     }
-    banner_box = banner_box.child(small_option("profile-qr-btn", "ui/qr.svg", None, false).right(px(16.)).top(px(if mine { 68. } else { 10. })).on_click(click(on, Act::Qr)));
+    if editing.is_none() {
+        banner_box = banner_box.child(small_option("profile-qr-btn", "ui/qr.svg", None, false).right(px(16.)).top(px(if mine { 68. } else { 10. })).on_click(click(on, Act::Qr)));
+    }
 
     let big_avatar = match store.avatar_path(&s.npub) {
         Some(path) => img(path).size(px(175.)).rounded_full().object_fit(ObjectFit::Cover).into_any_element(),
         None => img("icons/user-placeholder.svg").size(px(175.)).rounded_full().into_any_element(),
     };
     let avatar = div().mt(px(-87.)).size(px(191.)).flex_shrink_0().rounded_full().bg(c(APP_BG)).flex().items_center().justify_center().child(big_avatar);
+
+    if let Some(e) = editing {
+        let body = div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .items_center()
+            .child(banner_box)
+            .child(avatar)
+            .child(edit_fields(e, p.banner.trim().is_empty(), on));
+        return frame(body, header, true);
+    }
 
     // ── names, status, options ──
     let mut body = div()
@@ -396,6 +431,10 @@ pub fn pane(store: &Store, s: &Screen, on: &OnAct) -> AnyElement {
                 )),
         );
 
+    frame(body, header, mine)
+}
+
+fn frame(body: gpui::Div, header: gpui::Div, mine: bool) -> AnyElement {
     div()
         .flex_1()
         .min_w_0()
@@ -405,4 +444,74 @@ pub fn pane(store: &Store, s: &Screen, on: &OnAct) -> AnyElement {
         .child(div().id("profile-content").absolute().top(px(60.)).left_0().right_0().bottom(px(if mine { 0. } else { 6. })).overflow_y_scroll().child(body))
         .child(header)
         .into_any_element()
+}
+
+/// `#profile-edit-bar`: Exit, the state of the draft, Save.
+fn edit_bar(dirty: bool, on: &OnAct) -> gpui::Div {
+    let side = |id: &'static str, icon: &'static str, size: f32, tint: Hsla, label: &'static str, a: Act| {
+        div()
+            .id(id)
+            .flex()
+            .items_center()
+            .gap(px(6.))
+            .cursor_pointer()
+            .hover(|s| s.opacity(0.75))
+            .on_click(click(on, a))
+            .child(svg().path(icon).size(px(size)).text_color(tint))
+            .child(div().text_size(px(16.)).line_height(px(24.)).child(label))
+    };
+    div()
+        .absolute()
+        .inset_0()
+        .px(px(20.))
+        .flex()
+        .items_center()
+        .justify_between()
+        .bg(c(0x151515))
+        .child(side("profile-edit-cancel-btn", "icons/edit-x.svg", 14., c(DANGER), "Exit", Act::ExitEdit(true)))
+        .child(
+            div()
+                .absolute()
+                .left_0()
+                .right_0()
+                .flex()
+                .justify_center()
+                .text_size(px(12.))
+                .line_height(px(24.))
+                .text_color(white_a(0.6))
+                .opacity(0.8)
+                .child(if dirty { "Unsaved Changes Made" } else { "Edit Mode is Enabled" }),
+        )
+        .child(side("profile-edit-save-btn", "icons/save.svg", 16., c(PRIMARY), "Save", Act::ExitEdit(false)))
+}
+
+/// `ProfileEditFields`: Remove Banner, Username and Bio.
+fn edit_fields(e: &Edit, no_banner: bool, on: &OnAct) -> gpui::Div {
+    let label = |text: &'static str| div().w_full().text_center().text_size(px(11.)).line_height(px(24.)).text_color(white_a(0.4)).child(text);
+    let wrapper = || div().w_full().mt(px(8.)).px(px(14.)).py(px(6.)).rounded(px(6.)).border_1().border_color(white_a(0.12)).bg(white_a(0.05));
+    div()
+        .mt(px(16.))
+        .w(gpui::relative(0.9))
+        .flex()
+        .flex_col()
+        .when(!no_banner && !e.removed_banner, |d| {
+            d.child(
+                div()
+                    .id("profile-remove-banner")
+                    .self_center()
+                    .mb(px(12.))
+                    .px(px(6.))
+                    .py(px(2.))
+                    .text_size(px(12.5))
+                    .text_color(c(0x8a8a8a))
+                    .hover(|s| s.text_color(c(DANGER)))
+                    .cursor_pointer()
+                    .on_click(click(on, Act::RemoveBanner))
+                    .child("Remove Banner"),
+            )
+        })
+        .child(label("USERNAME"))
+        .child(wrapper().child(div().h(px(24.)).flex().items_center().child(e.name.clone())))
+        .child(div().mt(px(12.)).child(label("BIO")))
+        .child(wrapper().pb(px(12.)).child(div().min_h(px(60.)).child(e.bio.clone())))
 }

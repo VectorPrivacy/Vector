@@ -54,6 +54,7 @@ pub struct TextInput {
     last_bounds: Option<Bounds<Pixels>>,
     /// Wraps and takes newlines, scrolling past this height.
     multiline: Option<Pixels>,
+    center: bool,
     scroll: ScrollHandle,
     /// The caret moved: scroll it into view on the next paint.
     reveal: bool,
@@ -106,6 +107,8 @@ struct Layout {
     text: SharedString,
     lines: Vec<(usize, Pixels, WrappedLine)>,
     line_height: Pixels,
+    /// Centred within this width, each visual row on its own.
+    align: Option<Pixels>,
 }
 
 impl Layout {
@@ -119,7 +122,16 @@ impl Layout {
             start += len + 1;
             y += h;
         }
-        Self { text, lines, line_height }
+        Self { text, lines, line_height, align: None }
+    }
+
+    /// How far a centred row sits right of the left edge.
+    fn shift(&self, line: &WrappedLine, row: usize) -> Pixels {
+        let Some(aw) = self.align else { return px(0.) };
+        let x = |b: &gpui::WrapBoundary| line.unwrapped_layout.runs[b.run_ix].glyphs[b.glyph_ix].position.x;
+        let start = if row == 0 { px(0.) } else { line.wrap_boundaries.get(row - 1).map(x).unwrap_or(px(0.)) };
+        let end = line.wrap_boundaries.get(row).map(x).unwrap_or(line.unwrapped_layout.width);
+        ((aw - (end - start)) / 2.).max(px(0.))
     }
 
     fn height(&self) -> Pixels {
@@ -135,13 +147,16 @@ impl Layout {
         let Some((start, y, line)) = self.line_at(index) else { return point(px(0.), px(0.)) };
         let local = index.saturating_sub(*start).min(line.len());
         let p = line.position_for_index(local, self.line_height).unwrap_or(point(line.width(), px(0.)));
-        point(p.x, p.y + *y)
+        let row = (p.y / self.line_height).floor() as usize;
+        point(p.x + self.shift(line, row), p.y + *y)
     }
 
     fn index_at(&self, p: Point<Pixels>) -> usize {
         let Some((start, y, line)) = self.lines.iter().rev().find(|(_, y, _)| *y <= p.y).or(self.lines.first()) else { return 0 };
         let h = line.size(self.line_height).height;
-        let local = point(p.x.max(px(0.)), (p.y - *y).clamp(px(0.), (h - px(1.)).max(px(0.))));
+        let ly = (p.y - *y).clamp(px(0.), (h - px(1.)).max(px(0.)));
+        let shift = self.shift(line, (ly / self.line_height).floor() as usize);
+        let local = point((p.x - shift).max(px(0.)), ly);
         let i = match line.closest_index_for_position(local, self.line_height) {
             Ok(i) | Err(i) => i,
         };
@@ -666,7 +681,8 @@ impl Element for TextElement {
         let (text, runs, font_size) = input.display(window);
         let line_height = window.line_height();
         let wrap = input.multiline.map(|_| bounds.size.width);
-        let layout = Layout::shape(text, &runs, font_size, wrap, line_height, window);
+        let mut layout = Layout::shape(text, &runs, font_size, wrap, line_height, window);
+        layout.align = input.center.then_some(bounds.size.width);
         let (start, end) = if input.content.is_empty() {
             (0, 0)
         } else {
@@ -724,7 +740,8 @@ impl Element for TextElement {
         }
         let layout = prepaint.layout.take().unwrap();
         for (_, y, line) in &layout.lines {
-            line.paint(bounds.origin + point(px(0.), *y), layout.line_height, gpui::TextAlign::Left, None, window, cx).ok();
+            let align = if layout.align.is_some() { gpui::TextAlign::Center } else { gpui::TextAlign::Left };
+            line.paint(bounds.origin + point(px(0.), *y), layout.line_height, align, layout.align.map(|_| bounds), window, cx).ok();
         }
         for art in &mut prepaint.emoji {
             art.paint(window, cx);
@@ -830,6 +847,7 @@ impl TextInput {
             last_layout: None,
             last_bounds: None,
             multiline: None,
+            center: false,
             scroll: ScrollHandle::new(),
             reveal: false,
             is_selecting: false,
@@ -868,6 +886,12 @@ impl TextInput {
     }
 
     /// Wraps, takes Shift+Enter, and scrolls once taller than `max_height`.
+    /// `text-align: center`.
+    pub fn centered(mut self) -> Self {
+        self.center = true;
+        self
+    }
+
     pub fn multiline(mut self, max_height: Pixels) -> Self {
         self.multiline = Some(max_height);
         self
