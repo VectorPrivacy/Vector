@@ -236,6 +236,11 @@ impl VectorApp {
         let emoji_picker = cx.new(crate::picker::EmojiPicker::new);
         cx.subscribe_in(&emoji_picker, window, |app, _, crate::picker::Picked(emoji, shift), window, cx| app.picked(emoji.clone(), *shift, window, cx)).detach();
         cx.subscribe_in(&emoji_picker, window, |app, _, _: &crate::picker::Dismissed, window, cx| app.close_picker(window, cx)).detach();
+        cx.subscribe_in(&emoji_picker, window, |app, _, crate::picker::PickedCustom(code, url, shift), window, cx| {
+            app.picked_custom(code.clone(), url.clone(), *shift, window, cx)
+        })
+        .detach();
+        cx.subscribe(&emoji_picker, |app, _, crate::picker::RemovePack(id), cx| app.remove_pack(id.clone(), cx)).detach();
         // A GIF alone in the draft sends at once; beside text it waits for the user's Enter.
         cx.subscribe_in(&emoji_picker, window, |app, _, crate::picker::PickedGif(url), window, cx| {
             let was_empty = app.input.read(cx).text().trim().is_empty();
@@ -329,6 +334,7 @@ impl VectorApp {
     /// Fixture data, offline: what the parity renders compare.
     pub fn fixtures(store: Store, open: Option<String>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let mut app = Self::base(store, false, window, cx);
+        app.reload_picker_packs(cx);
         if let Some(id) = open {
             app.open_chat(id.into(), window, cx);
         }
@@ -1516,19 +1522,9 @@ impl VectorApp {
             }
             Act::React => self.toggle_picker(Some(id), window, cx),
             Act::ReactWith(emoji) => {
-                let Some(chat) = self.open.clone() else { return };
                 // Joining a custom reaction sends the picture it was made with.
                 let url = self.message(&id).and_then(|m| m.reactions.iter().find(|r| r.emoji == emoji).and_then(|r| r.emoji_url.clone()));
-                if self.live {
-                    let rx = backend::run(backend::actions::react(chat.to_string(), id, emoji, url));
-                    self.report(rx, "Reaction Failed", cx);
-                } else {
-                    let me = self.store.borrow().my_npub.clone();
-                    if let Some(m) = self.store.borrow_mut().chat_mut(&chat).and_then(|c| c.messages.iter_mut().find(|m| m.id == id)) {
-                        m.reactions.push(vector_core::types::Reaction { id: format!("local-{}", m.reactions.len()), reference_id: id.clone(), author_id: me, emoji, emoji_url: url });
-                    }
-                }
-                cx.notify();
+                self.react(id, emoji, url, cx);
             }
             Act::Reply => {
                 let Some(m) = self.message(&id) else { return };
@@ -1602,6 +1598,14 @@ impl VectorApp {
             p.prefetch_gifs(cx);
         });
         if self.live {
+            let packs = backend::run(vector_core::emoji_packs::refresh_subscribed_packs());
+            let p = picker.clone();
+            cx.spawn(async move |_, cx| {
+                let Ok(Ok(packs)) = packs.await else { return };
+                let packs = crate::picker::packs_from_core(packs, str::to_string);
+                p.update(cx, |p, cx| p.set_packs(packs, cx));
+            })
+            .detach();
             let rx = backend::run(async { (backend::actions::emoji_usage(), backend::actions::kaomoji_recents()) });
             cx.spawn(async move |_, cx| {
                 let Ok((used, kaomoji)) = rx.await else { return };
@@ -1639,6 +1643,52 @@ impl VectorApp {
         let field = if std::mem::take(&mut self.picker_status) { self.status.clone() } else { None };
         window.focus(&field.unwrap_or_else(|| self.input.clone()).read(cx).focus_handle(cx), cx);
         cx.notify();
+    }
+
+    fn react(&mut self, id: String, emoji: String, url: Option<String>, cx: &mut Context<Self>) {
+        let Some(chat) = self.open.clone() else { return };
+        if self.live {
+            let rx = backend::run(backend::actions::react(chat.to_string(), id, emoji, url));
+            self.report(rx, "Reaction Failed", cx);
+        } else {
+            let me = self.store.borrow().my_npub.clone();
+            if let Some(m) = self.store.borrow_mut().chat_mut(&chat).and_then(|c| c.messages.iter_mut().find(|m| m.id == id)) {
+                m.reactions.push(vector_core::types::Reaction { id: format!("local-{}", m.reactions.len()), reference_id: id.clone(), author_id: me, emoji, emoji_url: url });
+            }
+        }
+        cx.notify();
+    }
+
+    /// A custom emoji: `:code:` into the draft, or a reaction carrying its picture.
+    fn picked_custom(&mut self, code: String, url: String, shift: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let literal = format!(":{code}:");
+        self.emoji_picker.update(cx, |p, _| p.bump(&literal));
+        if self.live {
+            let (c, u) = (code.clone(), url.clone());
+            let _ = backend::run(async move { backend::actions::bump_custom_emoji(&c, &u) });
+        }
+        if self.picker_status {
+            if let Some(field) = self.status.clone() {
+                field.update(cx, |input, cx| input.insert_spaced(&literal, window, cx));
+            }
+            if !shift {
+                self.close_picker(window, cx);
+            }
+            return;
+        }
+        match self.picker.clone() {
+            Some(id) => {
+                let me = self.store.borrow().my_npub.clone();
+                let already = self.message(&id).is_some_and(|m| m.reactions.iter().any(|r| r.author_id == me && r.emoji == literal));
+                if !already {
+                    self.react(id, literal, Some(url), cx);
+                }
+            }
+            None => self.input.update(cx, |input, cx| input.insert_spaced(&literal, window, cx)),
+        }
+        if !shift {
+            self.close_picker(window, cx);
+        }
     }
 
     fn picked(&mut self, emoji: String, shift: bool, window: &mut Window, cx: &mut Context<Self>) {
@@ -1903,8 +1953,9 @@ impl VectorApp {
         if self.live {
             let receiver = id.to_string();
             let used = crate::emoji::in_text(&text);
-            if !used.is_empty() {
-                let _ = backend::run(async move { backend::actions::bump_emoji_batch(used) });
+            let custom = self.emoji_picker.read(cx).customs_in(&text);
+            if !used.is_empty() || !custom.is_empty() {
+                let _ = backend::run(async move { backend::actions::bump_emoji_batch(used, custom) });
             }
             let rx = backend::run(messaging::send(receiver, text, reply));
             cx.spawn(async move |this, cx| {
@@ -5146,7 +5197,52 @@ impl VectorApp {
     }
 
     /// Equipped packs, as their ids.
+    /// The picker's equipped packs: the account's, or every fixture pack.
+    fn reload_picker_packs(&mut self, cx: &mut Context<Self>) {
+        let picker = self.emoji_picker.clone();
+        let live = self.live;
+        picker.update(cx, |p, _| p.set_media(self.media.clone(), live));
+        if !live {
+            let store = self.store.borrow();
+            let mut packs: Vec<_> = store.fixture_packs.values().cloned().collect();
+            packs.sort_by(|a, b| a.title.cmp(&b.title));
+            let packs = crate::picker::packs_from_core(packs, |u| timeline::emoji_source(&store, u));
+            drop(store);
+            picker.update(cx, |p, cx| p.set_packs(packs, cx));
+            return;
+        }
+        let rx = backend::run(async { vector_core::emoji_packs::load_all_packs().unwrap_or_default() });
+        cx.spawn(async move |_, cx| {
+            let Ok(packs) = rx.await else { return };
+            let packs = crate::picker::packs_from_core(packs, str::to_string);
+            picker.update(cx, |p, cx| p.set_packs(packs, cx));
+        })
+        .detach();
+    }
+
+    /// A dead pack's Remove Pack, from the picker.
+    fn remove_pack(&mut self, id: String, cx: &mut Context<Self>) {
+        if !self.live {
+            return;
+        }
+        let i = id.clone();
+        let rx = backend::run(async move { vector_core::emoji_packs::unsubscribe_pack(&i).await });
+        cx.spawn(async move |this, cx| {
+            let res = rx.await.unwrap_or_else(|_| Err("Cancelled".into()));
+            this.update(cx, |this, cx| match res {
+                Ok(()) => {
+                    this.media.borrow_mut().packs.subscribed.remove(&id);
+                    this.reload_picker_packs(cx);
+                }
+                Err(e) => this.notice("Couldn't Remove Pack", e, cx),
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     fn reload_subscribed_packs(&mut self, cx: &mut Context<Self>) {
+        self.reload_picker_packs(cx);
         if !self.live {
             return;
         }

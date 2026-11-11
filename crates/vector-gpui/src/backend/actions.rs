@@ -134,7 +134,14 @@ pub async fn unreact(reaction_id: String) -> Result<(), String> {
 
 /// The account's stock emoji by decayed use, for the picker's recents.
 pub fn emoji_usage() -> std::collections::HashMap<String, f64> {
-    vector_core::emoji_usage::ranked(Some(256)).into_iter().filter(|u| u.kind == "unicode").map(|u| (u.id, u.score)).collect()
+    vector_core::emoji_usage::ranked(Some(256))
+        .into_iter()
+        .map(|u| if u.kind == "custom" { (format!(":{}:", u.id), u.score) } else { (u.id, u.score) })
+        .collect()
+}
+
+pub fn bump_custom_emoji(code: &str, url: &str) {
+    let _ = vector_core::emoji_usage::bump("custom", code, Some(url));
 }
 
 pub fn bump_emoji(emoji: &str) {
@@ -154,7 +161,12 @@ pub fn set_kaomoji_recents(recents: Vec<String>) {
 }
 
 /// A sent message's distinct emoji, in one record.
-pub fn bump_emoji_batch(emoji: Vec<String>) {
-    let uses: Vec<_> = emoji.into_iter().map(|id| vector_core::emoji_usage::EmojiUse { kind: "unicode".into(), id, url: None }).collect();
+pub fn bump_emoji_batch(emoji: Vec<String>, custom: Vec<(String, String)>) {
+    use vector_core::emoji_usage::EmojiUse;
+    let uses: Vec<_> = emoji
+        .into_iter()
+        .map(|id| EmojiUse { kind: "unicode".into(), id, url: None })
+        .chain(custom.into_iter().map(|(id, url)| EmojiUse { kind: "custom".into(), id, url: Some(url) }))
+        .collect();
     let _ = vector_core::emoji_usage::bump_batch(&uses);
 }

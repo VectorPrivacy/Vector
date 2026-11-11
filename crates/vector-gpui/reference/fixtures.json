@@ -2891,6 +2891,59 @@
    "is_own": false,
    "updated_at": 1794300000,
    "status": 0
+  },
+  "naddr1doodles": {
+   "id": "naddr1doodles",
+   "pubkey": "",
+   "identifier": "doodles",
+   "title": "My Doodles",
+   "image_url": "",
+   "description": "",
+   "emojis": [
+    {
+     "shortcode": "doodle0",
+     "url": "https://ref.invalid/media/pack/e15.png",
+     "sha256": null
+    },
+    {
+     "shortcode": "doodle1",
+     "url": "https://ref.invalid/media/pack/e14.png",
+     "sha256": null
+    },
+    {
+     "shortcode": "doodle2",
+     "url": "https://ref.invalid/media/pack/e13.png",
+     "sha256": null
+    },
+    {
+     "shortcode": "doodle3",
+     "url": "https://ref.invalid/media/pack/e12.png",
+     "sha256": null
+    },
+    {
+     "shortcode": "doodle4",
+     "url": "https://ref.invalid/media/pack/e11.png",
+     "sha256": null
+    },
+    {
+     "shortcode": "doodle5",
+     "url": "https://ref.invalid/media/pack/e10.png",
+     "sha256": null
+    },
+    {
+     "shortcode": "doodle6",
+     "url": "https://ref.invalid/media/pack/e9.png",
+     "sha256": null
+    },
+    {
+     "shortcode": "doodle7",
+     "url": "https://ref.invalid/media/pack/e8.png",
+     "sha256": null
+    }
+   ],
+   "is_own": true,
+   "updated_at": 1794300000,
+   "status": 0
   }
  }
 }

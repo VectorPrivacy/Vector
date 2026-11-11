@@ -64,7 +64,7 @@ pub struct Emoji {
 include!(concat!(env!("OUT_DIR"), "/emoji_data.rs"));
 
 /// `searchEmojis`'s per-pick score reduction.
-const USAGE_WEIGHT: f64 = 0.5;
+pub const USAGE_WEIGHT: f64 = 0.5;
 
 fn levenshtein(a: &str, b: &str) -> usize {
     let b: Vec<char> = b.chars().collect();
@@ -79,8 +79,9 @@ fn levenshtein(a: &str, b: &str) -> usize {
     prev[b.len()]
 }
 
-/// `searchEmojis`: shortcode, display and word matches with typo tolerance, then personal use.
-pub fn search(query: &str, used: impl Fn(&str) -> f64) -> Vec<&'static Emoji> {
+/// `searchEmojis`: shortcode, display and word matches with typo tolerance, then personal use;
+/// each hit carries its score so custom emoji can merge in.
+pub fn search_scored(query: &str, used: impl Fn(&str) -> f64) -> Vec<(&'static Emoji, f64)> {
     let q = query.to_lowercase();
     if q.is_empty() {
         return Vec::new();
@@ -171,7 +172,7 @@ pub fn search(query: &str, used: impl Fn(&str) -> f64) -> Vec<&'static Emoji> {
             .then(a.e.name.len().cmp(&b.e.name.len()))
             .then(a.word.cmp(b.word))
     });
-    hits.into_iter().map(|h| h.e).collect()
+    hits.into_iter().map(|h| (h.e, h.score)).collect()
 }
 
 /// The 24 most used, the dataset's order breaking ties (`getMostUsedEmojis`).

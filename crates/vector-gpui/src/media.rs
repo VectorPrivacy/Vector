@@ -115,7 +115,7 @@ pub struct Media {
     /// "Display Web Previews" turned off: no link or Nostr cards.
     pub web_previews_off: bool,
     /// Custom emoji and pack icons on disk, by URL, and those asked for since the last pump.
-    custom: HashMap<String, Custom>,
+    pub custom: HashMap<String, Custom>,
     custom_wants: Vec<(String, bool)>,
 }
 
