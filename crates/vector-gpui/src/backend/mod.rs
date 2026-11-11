@@ -17,6 +17,7 @@ pub mod sync;
 pub mod upload;
 pub mod archive;
 pub mod badges;
+pub mod calls;
 pub mod device;
 pub mod sound;
 pub mod storage;
@@ -100,6 +101,12 @@ pub fn start(data_dir: PathBuf) -> mpsc::UnboundedReceiver<UiEvent> {
             .build()
             .expect("tokio runtime")
     });
+    tauri::async_runtime::set(rt.handle().clone());
+    let _ = vector_media::TAURI_APP.set(tauri::AppHandle::new(|event, payload| emit(event, payload)));
+    {
+        let _guard = rt.enter();
+        crate::calls::session::install();
+    }
     // spawn-detached: the processor serves whichever account is live, as on desktop.
     rt.spawn(vector_core::profile::sync::start_profile_sync_processor(Arc::new(sync::ProfileHandler)));
     rx

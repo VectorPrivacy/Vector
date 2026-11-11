@@ -1,13 +1,9 @@
 mod assets;
-#[path = "../../../src-tauri/src/audio_devices.rs"]
-#[allow(dead_code, unused_imports)]
-mod audio_devices;
-#[path = "../../../src-tauri/src/mic_access.rs"]
-#[allow(dead_code)]
-mod mic_access;
+use vector_media::{audio_devices, calls, mic_access};
 mod attachments;
 mod backend;
 mod badgecard;
+mod call;
 mod composer;
 #[allow(dead_code, clippy::all)]
 mod crop;
@@ -48,6 +44,7 @@ mod util;
 mod viewer;
 
 use std::path::PathBuf;
+
 
 use gpui::{App, Bounds, WindowBounds, WindowDecorations, WindowOptions, prelude::*, px, size};
 

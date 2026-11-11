@@ -13,7 +13,7 @@ path = "src/main.rs"
 [dependencies]
 gpui = { git = "https://github.com/zed-industries/zed", rev = "f8cfc7ed9e57503def9479138894f3139f5400cc" }
 gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "f8cfc7ed9e57503def9479138894f3139f5400cc", default-features = false, features = ["x11", "wayland"] }
-vector-core = { path = "../vector-core", features = ["calls"] }
+vector-core = { path = "../vector-core", features = ["calls", "xdc"] }
 anyhow = "1"
 unicode-segmentation = "1"
 serde = { version = "1", features = ["derive"] }
@@ -51,6 +51,9 @@ flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"] }
 # Notification sounds: decode, resample, play.
 cpal = "0.16"
 symphonia = { version = "0.5.5", default-features = false, features = ["mp3", "wav", "flac", "pcm", "aac", "isomp4", "ogg", "vorbis", "opt-simd"] }
+# Calls, devices and the audio engine: the desktop client's own modules (media/).
+vector-media = { package = "vector-gpui-media", path = "media" }
+tauri = { package = "vector-tauri-shim", path = "tauri-shim" }
 
 # Its own workspace: GPUI pins dependency versions the main client must not inherit.
 [workspace]
@@ -78,12 +81,6 @@ async-task = { git = "https://github.com/zed-industries/async-task.git", rev = "
 calloop = { git = "https://github.com/zed-industries/calloop", rev = "3759371fee14c40066d64777e2a36b6ffcc22590" }
 khronos-egl = { git = "https://github.com/zed-industries/khronos-egl", rev = "42214b36347b108fd9630ca6254b96dde59e04fe" }
 
-# The shared microphone-access and device modules read CoreAudio and AVFoundation directly.
-[target.'cfg(target_os = "macos")'.dependencies]
-objc2 = "0.6"
-objc2-foundation = { version = "0.3", features = ["NSString"] }
-objc2-core-foundation = "0.3.2"
-block2 = "0.6"
 
 [dev-dependencies]
 # The shared simd module checks its quantiser against this reference.

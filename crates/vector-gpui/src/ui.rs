@@ -109,6 +109,10 @@ pub struct VectorApp {
     update_url: Option<String>,
     /// A volume change waits on its throttle.
     audio_save_pending: bool,
+    call: crate::call::Call,
+    /// The processing switches the call panel shows, read when a call first appears.
+    call_audio: Option<vector_core::calls::settings::AudioSettings>,
+    call_ticking: bool,
     start: Option<crate::startmenu::StartMenu>,
     /// The context menu open: where, its rows, and what each does.
     menu: Option<(gpui::Point<gpui::Pixels>, Vec<kit::MenuItem>, Vec<MenuAct>)>,
@@ -153,6 +157,15 @@ enum PopupAct {
     DeleteSlice { category: &'static str, exts: Vec<String> },
     /// Turn Keep Files off, deleting what it kept.
     StopKeeping,
+    /// Agree to connect outside the chosen network, then go on with the call.
+    Realtime(CallGo),
+}
+
+/// A call step that waits on consent to connect outside the network.
+#[derive(Clone)]
+enum CallGo {
+    Start(String),
+    Accept,
 }
 
 impl VectorApp {
@@ -232,6 +245,9 @@ impl VectorApp {
             updates: crate::settings::Updates { beta: backend::updates::beta(), ..Default::default() },
             update_url: None,
             audio_save_pending: false,
+            call: crate::call::Call::at(Self::saved_pill_pos()),
+            call_audio: None,
+            call_ticking: false,
             start: None,
             menu: None,
         }
@@ -268,6 +284,10 @@ impl VectorApp {
             let cats = crate::settings::categories(&crate::settings::Offers { voice: false, routing: true, updates: true });
             let id = cats.iter().find(|c| c.id == cat).map(|c| c.id).unwrap_or("appearance");
             app.open_settings(id, window, cx);
+        }
+        // Fixtures: VECTOR_CALL=ringing|calling|active|open shows a call with alice in that state.
+        if let Ok(state) = std::env::var("VECTOR_CALL") {
+            app.fixture_call(&state, cx);
         }
         // Fixtures: VECTOR_START opens the Main Menu.
         if std::env::var("VECTOR_START").is_ok() {
@@ -931,6 +951,10 @@ impl VectorApp {
     fn on_event(&mut self, ev: UiEvent, window: &mut Window, cx: &mut Context<Self>) {
         match ev {
             UiEvent::Booted(boot) => {
+                if let Some(state) = backend::calls::status() {
+                    self.call.apply_state(&state);
+                    self.call_started(cx);
+                }
                 {
                     let mut store = self.store.borrow_mut();
                     store.my_npub = boot.npub;
@@ -950,6 +974,18 @@ impl VectorApp {
         let chat_id = payload.get("chat_id").and_then(Value::as_str).unwrap_or_default().to_string();
         match name {
             "transfer_state" => self.security.update(cx, |f, cx| f.transfer_state(&payload, cx)),
+            "mic_level" => {
+                if let Some(a) = self.settings.as_mut().and_then(|s| s.audio.as_mut()).filter(|a| a.testing) {
+                    a.level = payload.get("mic").and_then(Value::as_f64).unwrap_or(0.) as f32;
+                }
+            }
+            "call_state" => {
+                self.call.apply_state(&payload);
+                self.call_started(cx);
+            }
+            "call_level" => self.call.apply_level(&payload),
+            "call_stats" => self.call.apply_stats(&payload),
+            "audio_devices_changed" => self.reload_devices(cx),
             "message_removed" => {
                 let id = payload.get("id").and_then(Value::as_str).unwrap_or_default().to_string();
                 if let Some(chat) = self.store.borrow_mut().chat_mut(&chat_id) {
@@ -1496,6 +1532,10 @@ impl VectorApp {
             PopupAct::RemoveRelay { url } => self.net_change(backend::run(async move { backend::network::remove_custom_relay(url).await.map(|_| ()) }), true, cx),
             PopupAct::RemoveServer { url } => self.net_change(backend::run(async move { backend::network::remove_server(url).await.map(|_| ()) }), true, cx),
             PopupAct::StopKeeping => self.set_keep_media(false, cx),
+            PopupAct::Realtime(then) => {
+                backend::calls::allow_realtime();
+                self.call_go(then, cx);
+            }
             PopupAct::Logout => {
                 let me = self.store.borrow().my_npub.clone();
                 self.settings = None;
@@ -1725,6 +1765,15 @@ impl Render for VectorApp {
         .children(self.viewer.clone().map(|v| gpui::deferred(div().absolute().inset_0().child(v)).with_priority(10)))
         .children(self.file_preview.clone().map(|v| gpui::deferred(div().absolute().inset_0().child(v)).with_priority(9)))
         .children(self.cropper.as_ref().map(|(v, _)| gpui::deferred(div().absolute().inset_0().child(v.clone())).with_priority(11)))
+        .children({
+            let app = cx.entity().downgrade();
+            let on: crate::call::OnAct = Rc::new(move |act, window, cx| {
+                app.update(cx, |app, cx| app.on_call(act, window, cx)).ok();
+            });
+            let a = self.call_audio.unwrap_or_default();
+            let proc_ = crate::call::Processing { auto_gain: a.auto_gain, echo_cancel: a.echo_cancel, noise_suppress: a.noise_suppress };
+            crate::call::render(&self.call, &self.store.borrow(), &proc_, CHROME_H, &on)
+        })
         .children(self.start.as_ref().map(|sm| {
             let app = cx.entity().downgrade();
             let on: crate::startmenu::OnAct = Rc::new(move |act, window, cx| {
@@ -2461,14 +2510,20 @@ impl VectorApp {
                     .right(px(10.))
                     .top(px(10.))
                     .flex()
-                    .child(
-                        div()
-                            .size(px(40.))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .child(svg().path("ui/call.svg").size(px(22.)).text_color(c(ICON_MUTED))),
-                    )
+                    .when(store.my_npub.as_str() != id.as_ref(), |d| {
+                        let peer = id.to_string();
+                        d.child(
+                            div()
+                                .id("chat-call")
+                                .size(px(40.))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .cursor_pointer()
+                                .on_click(cx.listener(move |app, _, _, cx| app.with_realtime_consent(CallGo::Start(peer.clone()), cx)))
+                                .child(svg().path("ui/call.svg").size(px(22.)).text_color(c(ICON_MUTED))),
+                        )
+                    })
                     .child(
                         div()
                             .size(px(40.))
@@ -3649,6 +3704,169 @@ impl VectorApp {
         .detach();
     }
 
+    fn saved_pill_pos() -> Option<gpui::Point<gpui::Pixels>> {
+        let v: Value = serde_json::from_str(&backend::device::get("call_pill_pos")?).ok()?;
+        Some(gpui::point(px(v.get("x")?.as_f64()? as f32), px(v.get("y")?.as_f64()? as f32)))
+    }
+
+    fn fixture_call(&mut self, state: &str, cx: &mut Context<Self>) {
+        let alice = "npub190vqdjtlpcq27xslcveglfmr4ynfwg7gmw86cnun4acakxrdd6gqnp929a";
+        let (phase, outgoing) = match state {
+            "ringing" => ("ringing", false),
+            "calling" => ("ringing", true),
+            _ => ("active", true),
+        };
+        self.call.apply_state(&serde_json::json!({ "id": "fixture", "peer": alice, "outgoing": outgoing, "phase": phase, "active_ms": 83_000, "volume": 1.0 }));
+        if phase == "active" {
+            for (i, rtt) in [62, 58, 64, 71, 66, 60, 59, 63, 120, 95, 70, 64, 61, 60, 58, 62, 66, 63, 61, 60].iter().enumerate() {
+                let concealed = if i == 9 { 3 } else { 0 } + if i > 9 { 3 } else { 0 };
+                self.call.apply_stats(&serde_json::json!({ "id": "fixture", "rtt_ms": rtt, "path": "relay", "bitrate_kbps": 64, "received": (i + 1) * 50, "concealed": concealed }));
+            }
+            self.call.apply_level(&serde_json::json!({ "id": "fixture", "mic": 0.62, "peer": 0.7 }));
+            self.call.expanded = state == "open";
+        }
+        cx.notify();
+    }
+
+    /// A call appeared or changed: the panel's switches are read once, and the clock ticks while it lasts.
+    fn call_started(&mut self, cx: &mut Context<Self>) {
+        if self.call.id.is_some() && self.call_audio.is_none() && self.live {
+            self.call_audio = Some(backend::mic::audio_settings());
+        }
+        if self.call_ticking || self.call.id.is_none() {
+            return;
+        }
+        self.call_ticking = true;
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(std::time::Duration::from_millis(500)).await;
+                let going = this
+                    .update(cx, |this, cx| {
+                        this.call.expire();
+                        cx.notify();
+                        if this.call.id.is_none() {
+                            this.call_ticking = false;
+                            this.call_audio = None;
+                        }
+                        this.call_ticking
+                    })
+                    .unwrap_or(false);
+                if !going {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// Off Clearnet, a call connects only once the account agrees for this session.
+    fn with_realtime_consent(&mut self, then: CallGo, cx: &mut Context<Self>) {
+        if self.live
+            && vector_core::transport::realtime::check().is_err_and(|e| e == vector_core::transport::realtime::CONSENT_REQUIRED)
+        {
+            let label = backend::calls::off_clearnet_label().unwrap_or_else(|| "the network in use".into());
+            let mut p = kit::Popup::notice(format!("Connect outside {label}?"));
+            p.icon = None;
+            p.text = Some("Calls and multiplayer Mini Apps connect directly.<br>The people you connect with and the iroh relay can see your IP address.<br>Allowed until you close Vector, switch accounts or change networks.".into());
+            p.confirm = "Connect".into();
+            p.cancel = Some("Cancel".into());
+            self.popup = Some((p, PopupAct::Realtime(then)));
+            cx.notify();
+            return;
+        }
+        self.call_go(then, cx);
+    }
+
+    fn call_go(&mut self, then: CallGo, cx: &mut Context<Self>) {
+        if !self.live {
+            return;
+        }
+        let rx = match then {
+            CallGo::Start(npub) => backend::run(backend::calls::start(npub)),
+            CallGo::Accept => backend::run(backend::calls::accept()),
+        };
+        self.toast_err(rx, cx);
+    }
+
+    fn on_call(&mut self, act: crate::call::Act, window: &mut Window, cx: &mut Context<Self>) {
+        use crate::call::{Act, Switch};
+        match act {
+            Act::Accept => self.with_realtime_consent(CallGo::Accept, cx),
+            Act::Reject => self.call_cmd(backend::calls::reject(), cx),
+            Act::Hangup => {
+                if !self.live {
+                    self.call.clear();
+                }
+                self.call_cmd(backend::calls::hangup(), cx);
+            }
+            Act::Mic if self.call.mic_off => {
+                let where_ = if cfg!(target_os = "macos") {
+                    "System Settings → Privacy & Security → Microphone"
+                } else if cfg!(windows) {
+                    "Settings → Privacy → Microphone"
+                } else {
+                    "your device's app settings"
+                };
+                self.notice("Microphone Access", format!("Vector doesn't have access to your microphone. Allow it in {where_}, then try again."), cx);
+            }
+            Act::Mic => {
+                let on = !self.call.muted;
+                self.call.muted = on;
+                self.call_cmd(backend::calls::set_muted(on), cx);
+            }
+            Act::Toggle => {
+                self.call.expanded = !self.call.expanded;
+                self.call.hover = None;
+                if let Some(p) = self.call.pos {
+                    let size = gpui::size(px(if self.call.expanded { 300. } else { f32::from(self.call.pill_size().width) }), self.call.pill_size().height);
+                    self.call.pos = Some(crate::call::clamp(p, size, window.viewport_size(), CHROME_H));
+                }
+            }
+            Act::Move(p) => self.call.pos = Some(crate::call::clamp(p, self.call.pill_size(), window.viewport_size(), CHROME_H)),
+            Act::Moved => {
+                if let Some(p) = self.call.pos {
+                    backend::device::set("call_pill_pos", serde_json::json!({ "x": f32::from(p.x), "y": f32::from(p.y) }).to_string());
+                }
+            }
+            Act::Volume(v) => {
+                if (v - self.call.volume).abs() > f32::EPSILON {
+                    self.call.volume = v;
+                    self.call_cmd(backend::calls::set_volume(v), cx);
+                }
+            }
+            Act::Audio(which, on) => {
+                let mut a = self.call_audio.unwrap_or_default();
+                match which {
+                    Switch::AutoGain => a.auto_gain = on,
+                    Switch::EchoCancel => a.echo_cancel = on,
+                    Switch::NoiseSuppress => a.noise_suppress = on,
+                }
+                self.call_audio = Some(a);
+                if let Some(v) = self.settings.as_mut().and_then(|s| s.audio.as_mut()) {
+                    v.settings = a;
+                }
+                if self.live {
+                    let rx = backend::run(async move { vector_core::db::scoped(async move { backend::mic::set_audio_settings(a) }).await });
+                    self.toast_err(rx, cx);
+                }
+            }
+            Act::Hover(i) => {
+                if self.call.hover == i {
+                    return;
+                }
+                self.call.hover = i;
+            }
+        }
+        cx.notify();
+    }
+
+    fn call_cmd(&self, fut: impl std::future::Future<Output = Result<(), String>> + Send + 'static, cx: &mut Context<Self>) {
+        if self.live {
+            let rx = backend::run(fut);
+            self.toast_err(rx, cx);
+        }
+    }
+
     /// A drag moves the slider every frame; the store hears it a few times a second.
     fn save_audio(&mut self, now: bool, cx: &mut Context<Self>) {
         if !self.live || (!now && self.audio_save_pending) {
@@ -3692,7 +3910,7 @@ impl VectorApp {
         if !self.live {
             return;
         }
-        let rx = backend::run(async { vector_core::db::scoped(async { tokio::task::spawn_blocking(backend::mic::test_start).await.map_err(|e| e.to_string())? }).await });
+        let rx = backend::run(backend::mic::test_start());
         cx.spawn(async move |this, cx| {
             let started = rx.await.unwrap_or_else(|_| Err("The microphone test stopped".into()));
             let ok = this
@@ -3717,17 +3935,7 @@ impl VectorApp {
             loop {
                 cx.background_executor().timer(std::time::Duration::from_millis(100)).await;
                 let going = this
-                    .update(cx, |this, cx| {
-                        let a = this.settings.as_mut().filter(|s| s.cat == "audio").and_then(|s| s.audio.as_mut()).filter(|a| a.testing);
-                        match a {
-                            Some(a) => {
-                                a.level = backend::mic::level();
-                                cx.notify();
-                                true
-                            }
-                            None => false,
-                        }
-                    })
+                    .update(cx, |this, _| this.settings.as_ref().filter(|s| s.cat == "audio").and_then(|s| s.audio.as_ref()).is_some_and(|a| a.testing))
                     .unwrap_or(false);
                 if !going {
                     backend::mic::test_stop();
