@@ -102,13 +102,6 @@ impl Cache {
         };
         self.states.insert(entity.to_ascii_lowercase(), state);
     }
-
-    pub fn ready(&self, entity: &str) -> Option<Arc<Embed>> {
-        match self.states.get(&entity.to_ascii_lowercase()) {
-            Some(State::Ready(e)) => Some(e.clone()),
-            _ => None,
-        }
-    }
 }
 
 /// What a card's controls ask of the app.
@@ -120,7 +113,12 @@ pub enum Act {
     Profile(String),
     /// A reference inside a card, or a comment's parent.
     Ref(String),
-    Expand(String),
+    Expand(String, Option<String>),
+    View(crate::viewer::Open),
+    /// The expanded view: back a step, close, or open a quote in it.
+    Back,
+    Close,
+    Push(String, Option<String>),
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -397,6 +395,22 @@ fn host(url: &str) -> String {
     host.strip_prefix("www.").unwrap_or(host).to_string()
 }
 
+/// What a card's pieces draw from, in a message or the expanded view.
+pub struct Env<'a> {
+    pub store: &'a crate::data::Store,
+    pub media: &'a RefCell<crate::media::Media>,
+    pub clock: f32,
+    pub send: Send,
+    /// The expanded view: Inter on the 24px rhythm it inherits.
+    pub modal: bool,
+}
+
+impl Env<'_> {
+    fn family(&self) -> &'static str {
+        if self.modal { INTER } else { RUBIK }
+    }
+}
+
 enum Pic {
     Ready(Arc<RenderImage>, u32, u32),
     Loading,
@@ -404,9 +418,9 @@ enum Pic {
 }
 
 /// A picture the card shows: a web one through the linked cache, a fixture one from disk.
-fn pic(ctx: &Ctx, url: &str) -> Pic {
-    let key = if url.starts_with("https://") { url.to_string() } else { ctx.store.media_root.join(url).to_string_lossy().into_owned() };
-    match ctx.media.borrow_mut().linked(&key) {
+fn pic(env: &Env, url: &str) -> Pic {
+    let key = if url.starts_with("https://") { url.to_string() } else { env.store.media_root.join(url).to_string_lossy().into_owned() };
+    match env.media.borrow_mut().linked(&key) {
         Linked::Ready { image, w, h } => Pic::Ready(image, w, h),
         Linked::Loading(_) => Pic::Loading,
         Linked::Failed => Pic::Gone,
@@ -460,6 +474,7 @@ fn card(ctx: &Ctx, m: &Message, r: &Ref) -> AnyElement {
         let f: Send = Rc::new(move |a: Act, w: &mut gpui::Window, cx: &mut gpui::App| act(&id, RowAct::Embed(a), w, cx));
         f
     };
+    let env = Env { store: ctx.store, media: ctx.media, clock: ctx.clock, send: send.clone(), modal: false };
     let e = match &state {
         State::Ready(e) => Some(e.clone()),
         _ => None,
@@ -515,7 +530,7 @@ fn card(ctx: &Ctx, m: &Message, r: &Ref) -> AnyElement {
         };
     };
 
-    col = col.child(author(ctx, &e, &key, &send));
+    col = col.child(author(&env, &e, &key, &send));
     if let Some(reply) = &e.reply_to {
         col = col.child(reply_to(reply, &key, &send));
     }
@@ -555,14 +570,14 @@ fn card(ctx: &Ctx, m: &Message, r: &Ref) -> AnyElement {
     }
 
     let expand = {
-        let (s, entity) = (send.clone(), r.entity.clone());
-        let f: Rc<dyn Fn(&mut gpui::Window, &mut gpui::App)> = Rc::new(move |w: &mut gpui::Window, cx: &mut gpui::App| s(Act::Expand(entity.clone()), w, cx));
+        let (s, entity, url) = (send.clone(), r.entity.clone(), r.url.clone());
+        let f: Rc<dyn Fn(&mut gpui::Window, &mut gpui::App)> = Rc::new(move |w: &mut gpui::Window, cx: &mut gpui::App| s(Act::Expand(entity.clone(), url.clone()), w, cx));
         f
     };
     let mut clamped = false;
     if e.class == "article" {
         let ex = expand.clone();
-        let cover = e.image.as_deref().map(|u| match pic(ctx, u) {
+        let cover = e.image.as_deref().map(|u| match pic(&env, u) {
             Pic::Ready(image, w, h) => {
                 let natural = CARD_W * h as f32 / w.max(1) as f32;
                 let h = natural.min(200.);
@@ -588,20 +603,20 @@ fn card(ctx: &Ctx, m: &Message, r: &Ref) -> AnyElement {
         );
     } else {
         if let Some(link) = e.link.clone().filter(|_| e.video.is_none()) {
-            col = col.child(poster(ctx, &e, &key, Some(link), &send));
+            col = col.child(poster(&env, &e, &key, Some(link), &send));
         } else if let Some(v) = e.video.clone() {
-            col = col.child(poster(ctx, &e, &key, Some(v.url), &send));
+            col = col.child(poster(&env, &e, &key, Some(v.url), &send));
         }
         if let Some(t) = e.title.clone().filter(|_| e.class != "post") {
             col = col.child(title(t));
         }
         if !e.text.is_empty() {
-            let (text, c2) = body(ctx, &e, &key, &send, &expand);
+            let (text, c2) = body(&env, &e, &key, &send, &expand);
             clamped = c2;
             col = col.child(text);
         }
         if !e.media.is_empty() {
-            col = col.child(media(ctx, &e.media, &key));
+            col = col.child(media(&env, &e.media, &key));
         }
     }
     let article = e.class == "article";
@@ -628,18 +643,18 @@ fn title(t: String) -> gpui::Div {
     div().font_weight(FontWeight::BOLD).text_size(px(15.)).line_height(px(19.5)).text_color(c(0xffffff)).child(t)
 }
 
-type Send = Rc<dyn Fn(Act, &mut gpui::Window, &mut gpui::App)>;
+pub type Send = Rc<dyn Fn(Act, &mut gpui::Window, &mut gpui::App)>;
 
 /// `EmbedAuthor.svelte`: avatar and name open their profile; then how long ago.
-fn author(ctx: &Ctx, e: &Embed, key: &str, send: &Send) -> AnyElement {
-    let avatar = match ctx.store.avatar_path(&e.author) {
+fn author(env: &Env, e: &Embed, key: &str, send: &Send) -> AnyElement {
+    let avatar = match env.store.avatar_path(&e.author) {
         Some(p) => img(p),
         None => img("icons/user-placeholder.svg"),
     };
     let (s, npub) = (send.clone(), e.author.clone());
     let at = e.published_at.unwrap_or(e.created_at);
     div()
-        .h(px(22.))
+        .h(px(if env.modal { 24. } else { 22. }))
         .flex()
         .items_center()
         .gap(px(8.))
@@ -657,9 +672,9 @@ fn author(ctx: &Ctx, e: &Embed, key: &str, send: &Send) -> AnyElement {
                     s(Act::Profile(npub.clone()), w, cx)
                 })
                 .child(avatar.size(px(22.)).rounded_full().flex_shrink_0())
-                .child(div().min_w_0().truncate().font_weight(FontWeight::SEMIBOLD).text_size(px(13.)).line_height(px(18.2)).text_color(c(0xffffff)).child(ctx.store.name(&e.author))),
+                .child(div().min_w_0().truncate().font_weight(FontWeight::SEMIBOLD).text_size(px(13.)).line_height(px(if env.modal { 24. } else { 18.2 })).text_color(c(0xffffff)).child(env.store.name(&e.author))),
         )
-        .when(at > 0, |d| d.child(div().flex_shrink_0().text_size(px(11.)).line_height(px(15.4)).text_color(white_a(0.45)).child(crate::data::time_ago(ctx.store.now_ms(), at * 1000))))
+        .when(at > 0, |d| d.child(div().flex_shrink_0().text_size(px(11.)).line_height(px(if env.modal { 24. } else { 15.4 })).text_color(white_a(0.45)).child(crate::data::time_ago(env.store.now_ms(), at * 1000))))
         .into_any_element()
 }
 
@@ -732,19 +747,11 @@ fn lines(text: &str, size: f32) -> usize {
 }
 
 /// `.ne-text`: a post's text rendered like a message, clamped to eight lines (three when small).
-fn body(ctx: &Ctx, e: &Embed, key: &str, send: &Send, expand: &Rc<dyn Fn(&mut gpui::Window, &mut gpui::App)>) -> (AnyElement, bool) {
+fn body(env: &Env, e: &Embed, key: &str, _send: &Send, expand: &Rc<dyn Fn(&mut gpui::Window, &mut gpui::App)>) -> (AnyElement, bool) {
     let small = e.class != "post";
     let (size, lh, color, max) = if small { (12., 16.8, white_a(0.65), 3) } else { (14., 19.6, white_a(0.88), 8) };
     let text: String = e.text.chars().take(4000).collect();
     let clamped = lines(&text, size) > max;
-    let empty = HashSet::new();
-    let blocks = crate::markdown::parse(text.trim(), &crate::markdown::Ctx { base: Look::new(RUBIK, size, lh, color), revealed: &empty });
-    let s = send.clone();
-    let click: OnClick = Rc::new(move |t, w, cx| match t {
-        crate::inline::Target::Link(u) => s(Act::OpenUrl(u.to_string()), w, cx),
-        crate::inline::Target::Mention(npub) => s(Act::Profile(npub.to_string()), w, cx),
-        _ => {}
-    });
     let ex = expand.clone();
     let fade = clamped.then(|| {
         div().absolute().left_0().right_0().bottom_0().h(px(lh * max as f32 * 0.35)).bg(gpui::linear_gradient(
@@ -759,16 +766,31 @@ fn body(ctx: &Ctx, e: &Embed, key: &str, send: &Send, expand: &Rc<dyn Fn(&mut gp
         .max_h(px(lh * max as f32))
         .overflow_hidden()
         .when(clamped, |d| d.cursor_pointer().on_click(move |_, w, cx| ex(w, cx)))
-        .child(crate::timeline::stack(&blocks, key, &click, ctx.clock, lh))
+        .child(rich(env, &text, key, Look::new(RUBIK, size, lh, color), None))
         .children(fade)
         .into_any_element();
     (el, clamped)
 }
 
+/// Text rendered like a message: markdown, links and mentions.
+fn rich(env: &Env, text: &str, key: &str, mut look: Look, para_gap: Option<f32>) -> AnyElement {
+    let empty = HashSet::new();
+    look.family = env.family().into();
+    let lh = para_gap.unwrap_or(look.line_height);
+    let blocks = crate::markdown::parse(text.trim(), &crate::markdown::Ctx { base: look, revealed: &empty });
+    let s = env.send.clone();
+    let click: OnClick = Rc::new(move |t, w, cx| match t {
+        crate::inline::Target::Link(u) => s(Act::OpenUrl(u.to_string()), w, cx),
+        crate::inline::Target::Mention(npub) => s(Act::Profile(npub.to_string()), w, cx),
+        _ => {}
+    });
+    crate::timeline::stack(&blocks, key, &click, env.clock, lh)
+}
+
 /// `.ne-video`: a poster with its play button; the clip or page opens outside the app.
-fn poster(ctx: &Ctx, e: &Embed, key: &str, open: Option<String>, send: &Send) -> AnyElement {
+fn poster(env: &Env, e: &Embed, key: &str, open: Option<String>, send: &Send) -> AnyElement {
     let short = e.class == "short";
-    let art = e.image.as_deref().or(e.video.as_ref().and_then(|v| v.poster.as_deref())).map(|u| match pic(ctx, u) {
+    let art = e.image.as_deref().or(e.video.as_ref().and_then(|v| v.poster.as_deref())).map(|u| match pic(env, u) {
         Pic::Ready(image, ..) => img(image).absolute().inset_0().size_full().object_fit(gpui::ObjectFit::Cover).into_any_element(),
         Pic::Loading => skel().absolute().inset_0().size_full().rounded(px(0.)).into_any_element(),
         Pic::Gone => div().into_any_element(),
@@ -826,7 +848,7 @@ fn poster(ctx: &Ctx, e: &Embed, key: &str, open: Option<String>, send: &Send) ->
 }
 
 /// `EmbedMedia.svelte`: up to four pictures, two across when there are several.
-fn media(ctx: &Ctx, all: &[Media], key: &str) -> AnyElement {
+fn media(env: &Env, all: &[Media], key: &str) -> AnyElement {
     let shown = &all[..all.len().min(MEDIA_SHOWN)];
     let grid = shown.len() > 1;
     let side = (CARD_W - 4.) / 2.;
@@ -844,10 +866,10 @@ fn media(ctx: &Ctx, all: &[Media], key: &str) -> AnyElement {
                 d.w_full().h(px((CARD_W / r).min(320.)))
             }
         };
-        match url.map(|u| pic(ctx, u)) {
+        match url.map(|u| pic(env, u)) {
             Some(Pic::Ready(image, w, h)) => {
                 let open = crate::viewer::Open { image: image.clone(), w, h, full: None };
-                let act = ctx.on_act.clone();
+                let send = env.send.clone();
                 let natural = Some(w as f32 / h.max(1) as f32);
                 let (tw, th) = if grid { (side, side) } else { (CARD_W, (CARD_W * h as f32 / w.max(1) as f32).min(320.)) };
                 size(div(), natural)
@@ -855,7 +877,7 @@ fn media(ctx: &Ctx, all: &[Media], key: &str) -> AnyElement {
                     .cursor_pointer()
                     .on_click(move |_, win, cx| {
                         cx.stop_propagation();
-                        act("", RowAct::View(open.clone()), win, cx)
+                        send(Act::View(open.clone()), win, cx)
                     })
                     .child(img(image).w(px(tw)).h(px(th)).aspect_ratio(tw / th).object_fit(gpui::ObjectFit::Cover).rounded(px(8.)))
                     .into_any_element()
@@ -886,6 +908,273 @@ fn media(ctx: &Ctx, all: &[Media], key: &str) -> AnyElement {
         .children(tiles)
         .children(more)
         .into_any_element()
+}
+
+// ---------------------------------------------------------------------------------------------
+// The expanded view (`NostrEmbedModal.svelte`).
+
+/// One post the expanded view shows; Back returns to the one under it.
+pub struct View {
+    pub embed: Arc<Embed>,
+    pub url: Option<String>,
+    pub revealed: bool,
+}
+
+pub struct Modal {
+    pub stack: Vec<View>,
+    pub scroll: gpui::ScrollHandle,
+}
+
+fn round_btn(id: &'static str, icon: &'static str, on: impl Fn(&mut gpui::Window, &mut gpui::App) + 'static) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(id)
+        .absolute()
+        .top(px(12.))
+        .size(px(30.))
+        .rounded_full()
+        .bg(white_a(0.06))
+        .border_1()
+        .border_color(white_a(0.08))
+        .flex()
+        .items_center()
+        .justify_center()
+        .cursor_pointer()
+        .hover(|s| s.bg(white_a(0.12)).border_color(white_a(0.18)))
+        .on_click(move |_, w, cx| {
+            cx.stop_propagation();
+            on(w, cx)
+        })
+        .child(svg().path(icon).size(px(14.)).text_color(c(0xffffff)))
+}
+
+pub fn modal(m: &Modal, env: &Env, viewport_h: f32) -> AnyElement {
+    let Some(v) = m.stack.last() else { return div().into_any_element() };
+    let e = &v.embed;
+    let back = m.stack.len() > 1;
+    let article = e.class == "article";
+    let key = format!("nem-{}", m.stack.len());
+    let send = env.send.clone();
+    let reposter = e.reposted_by.as_deref().map(|n| env.store.name(n));
+    let veiled = e.content_warning.is_some() && !v.revealed;
+    let pad_first = |d: gpui::Div| if back { d.pl(px(36.)) } else { d };
+
+    let mut col = div().flex().flex_col().gap(px(12.)).px(px(20.)).pt(px(20.)).pb(px(12.));
+    let mut first = true;
+    if let Some(name) = reposter {
+        col = col.child(pad_first(div()).child(crate::kit::spaced(format!("REPOSTED BY {}", name.to_uppercase()), 0.9).font_weight(FontWeight::BOLD).text_size(px(10.)).line_height(px(14.)).text_color(white_a(0.45))));
+        first = false;
+    }
+    let author_row = |first: bool| {
+        let row = div().pr(px(36.)).child(author(env, e, &key, &send));
+        if first && back { row.pl(px(36.)) } else { row }
+    };
+    if veiled {
+        let s = send.clone();
+        col = col.child(author_row(first)).child(
+            div()
+                .id("nem-veil")
+                .flex()
+                .items_center()
+                .justify_between()
+                .gap(px(10.))
+                .p(px(14.))
+                .border_1()
+                .border_dashed()
+                .border_color(white_a(0.18))
+                .rounded(px(8.))
+                .bg(white_a(0.03))
+                .text_size(px(12.))
+                .line_height(px(16.8))
+                .cursor_pointer()
+                .on_click(move |_, w, cx| s(Act::Reveal(String::new()), w, cx))
+                .child(div().min_w_0().text_color(c(0xffffff)).child(match e.content_warning.as_deref().filter(|w| !w.is_empty()) {
+                    Some(w) => format!("Content warning: {w}"),
+                    None => "Content warning".into(),
+                }))
+                .child(div().flex_shrink_0().font_weight(FontWeight::SEMIBOLD).text_color(c(ACCENT)).child("Show")),
+        );
+    } else {
+        let width = if article { 720. } else { 560. };
+        if article && let Some(u) = e.image.as_deref() {
+            let cover = match pic(env, u) {
+                Pic::Ready(image, w, h) => {
+                    let h = (width * h as f32 / w.max(1) as f32).min(280.);
+                    Some(img(image).w(px(width)).h(px(h)).aspect_ratio(width / h).object_fit(gpui::ObjectFit::Cover).into_any_element())
+                }
+                Pic::Loading => Some(skel().w(px(width)).h(px(180.)).rounded(px(0.)).into_any_element()),
+                Pic::Gone => None,
+            };
+            if let Some(cover) = cover {
+                col = col.child(div().mx(px(-20.)).mt(px(-20.)).child(cover));
+            }
+        }
+        col = col.child(author_row(first && !(article && e.image.is_some())));
+        if let Some(r) = &e.reply_to {
+            col = col.child(reply_to(r, &key, &send));
+        }
+        if let Some(t) = &e.title {
+            col = col.child(div().font_weight(FontWeight::BOLD).text_size(px(22.)).line_height(px(27.5)).text_color(c(0xffffff)).child(t.clone()));
+        }
+        if let Some(s) = e.summary.clone().filter(|_| article) {
+            col = col.child(div().text_size(px(14.)).line_height(px(20.3)).text_color(white_a(0.6)).child(s));
+        }
+        if let Some(v) = e.video.clone() {
+            col = col.child(poster(env, e, &key, Some(v.url), &send));
+        } else if let Some(link) = e.link.clone() {
+            col = col.child(poster(env, e, &key, Some(link), &send));
+        }
+        let quotes = refs(&e.text);
+        if !e.text.is_empty() {
+            // An article's paragraphs keep `.markdown-paragraph`'s 0.8em under them.
+            let gap = article.then_some(23.25 * 2. + 12.);
+            col = col.child(div().when(article, |d| d.pb(px(12.))).child(rich(env, &strip(&e.text), &key, Look::new(RUBIK, 15., 23.25, white_a(0.9)), gap)));
+        }
+        if !e.media.is_empty() {
+            col = col.child(media(env, &e.media, &key));
+        }
+        for q in quotes.iter() {
+            col = col.child(quote(env, q, &key));
+        }
+    }
+
+    let label = if e.bech32.starts_with("naddr") { "naddr" } else { "nevent" };
+    let actions = {
+        let (s, bech, lbl) = (send.clone(), e.bech32.clone(), format!("The {label}"));
+        let copy = btn("nem-copy".into(), format!("Copy {label}"), false, move |w, cx| s(Act::Copy(bech.clone(), lbl.clone()), w, cx));
+        let ext = v.url.clone().map(|u| {
+            let s = send.clone();
+            btn("nem-ext".into(), "Open Externally", false, move |w, cx| s(Act::OpenUrl(u.clone()), w, cx))
+        });
+        div().flex().flex_wrap().justify_end().gap(px(8.)).px(px(20.)).pt(px(12.)).pb(px(16.)).border_t_1().border_color(white_a(0.06)).child(copy).children(ext)
+    };
+    let (s1, s2, s3) = (send.clone(), send.clone(), send.clone());
+    let card = div()
+        .id("nem-card")
+        .font_family(INTER)
+        .relative()
+        .w_full()
+        .max_w(px(if article { 720. } else { 560. }))
+        .max_h(px(viewport_h - 48.))
+        .bg(c(0x141414))
+        .border_1()
+        .border_color(white_a(0.08))
+        .rounded(px(18.))
+        .shadow(vec![gpui::BoxShadow { color: ca(0, 0, 0, 0.6), offset: gpui::point(px(0.), px(24.)), blur_radius: px(60.), spread_radius: px(0.), inset: false }])
+        .overflow_hidden()
+        .flex()
+        .flex_col()
+        .occlude()
+        .on_click(|_, _, cx| cx.stop_propagation())
+        .child(div().id("nem-scroll").flex_1().min_h_0().overflow_y_scroll().track_scroll(&m.scroll).child(col))
+        .child(actions)
+        .when(back, |d| d.child(round_btn("nem-back", "icons/chevron-left.svg", move |w, cx| s1(Act::Back, w, cx)).left(px(12.))))
+        .child(round_btn("nem-close", "icons/x.svg", move |w, cx| s2(Act::Close, w, cx)).right(px(12.)));
+    gpui::deferred(
+        div()
+            .id("nem-overlay")
+            .absolute()
+            .inset_0()
+            .p(px(24.))
+            .bg(ca(0, 0, 0, 0.78))
+            .flex()
+            .items_center()
+            .justify_center()
+            .occlude()
+            .on_click(move |_, w, cx| s3(Act::Close, w, cx))
+            .child(card),
+    )
+    .with_priority(13)
+    .into_any_element()
+}
+
+/// `QuoteCard.svelte`: a post the expanded one quotes. Opening it moves the view there; what
+/// it quotes in turn waits to be asked for.
+fn quote(env: &Env, r: &Ref, key: &str) -> AnyElement {
+    let state = env.media.borrow_mut().embeds.get(&r.entity);
+    let id = SharedString::from(format!("{key}-q-{}", r.entity));
+    let e = match &state {
+        State::Ready(e) => Some(e.clone()),
+        _ => None,
+    };
+    let label = match &e {
+        Some(e) if e.reposted_by.is_some() => "Quoted Repost",
+        Some(e) if e.kind == 1111 => "Quoted Comment",
+        Some(e) => match e.class.as_str() {
+            "post" => "Quoted Post",
+            "article" => "Quoted Article",
+            "video" => "Quoted Video",
+            "short" => "Quoted Short",
+            _ => "Quote",
+        },
+        None => "Quote",
+    };
+    let mut col = div()
+        .id(id)
+        .flex()
+        .flex_col()
+        .gap(px(6.))
+        .px(px(12.))
+        .py(px(10.))
+        .rounded(px(10.))
+        .border_1()
+        .border_color(white_a(0.1))
+        .bg(white_a(0.03))
+        .min_w_0()
+        .child(crate::kit::spaced(label.to_uppercase(), 0.9).font_weight(FontWeight::BOLD).text_size(px(10.)).line_height(px(24.)).text_color(white_a(0.45)));
+    match (&state, e) {
+        (State::Failed(err, _), _) => col = col.child(div().text_size(px(11.)).line_height(px(15.4)).text_color(white_a(0.45)).child(err.clone())),
+        (_, Some(e)) => {
+            let veiled = e.content_warning.is_some();
+            let thumb = (!veiled)
+                .then(|| e.image.clone().or_else(|| e.media.iter().find(|m| !m.is_video).map(|m| m.url.clone())).or_else(|| e.media.iter().find_map(|m| m.poster.clone())))
+                .flatten()
+                .and_then(|u| match pic(env, &u) {
+                    Pic::Ready(image, ..) => Some(img(image).size(px(56.)).aspect_ratio(1.).flex_shrink_0().object_fit(gpui::ObjectFit::Cover).rounded(px(6.)).into_any_element()),
+                    Pic::Loading => Some(skel().size(px(56.)).flex_shrink_0().rounded(px(6.)).into_any_element()),
+                    Pic::Gone => None,
+                });
+            let text = if veiled {
+                Some(div().italic().text_size(px(13.)).line_height(px(18.2)).text_color(white_a(0.5)).child(match e.content_warning.as_deref().filter(|w| !w.is_empty()) {
+                    Some(w) => format!("Content warning: {w}"),
+                    None => "Content warning".into(),
+                }).into_any_element())
+            } else if !e.text.is_empty() {
+                let t: String = e.text.chars().take(600).collect();
+                Some(div().max_h(px(18.2 * 3.)).overflow_hidden().child(rich(env, &t, &format!("{key}-qt"), Look::new(RUBIK, 13., 18.2, white_a(0.75)), None)).into_any_element())
+            } else {
+                None
+            };
+            let (s, entity, url) = (env.send.clone(), r.entity.clone(), r.url.clone());
+            col = col
+                .cursor_pointer()
+                .hover(|d| d.border_color(gpui::Hsla { a: 0.45, ..c(ACCENT) }))
+                .on_click(move |_, w, cx| {
+                    cx.stop_propagation();
+                    s(Act::Push(entity.clone(), url.clone()), w, cx)
+                })
+                .child(author(env, &e, key, &env.send))
+                .child(
+                    div()
+                        .flex()
+                        .gap(px(10.))
+                        .min_w_0()
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .children(e.title.clone().map(|t| div().font_weight(FontWeight::BOLD).text_size(px(13.)).text_color(c(0xffffff)).child(t)))
+                                .children(text),
+                        )
+                        .children(thumb),
+                );
+        }
+        _ => {
+            col = col
+                .child(div().h(px(22.)).flex().items_center().gap(px(8.)).child(skel().size(px(22.)).rounded_full()).child(skel().w(px(160.)).h(px(12.))))
+                .child(skel().w(px(300.)).h(px(12.)));
+        }
+    }
+    col.into_any_element()
 }
 
 #[cfg(test)]

@@ -2746,7 +2746,7 @@
    "id": "abababababababababababababababababababababababababababababababab",
    "author": "npub190vqdjtlpcq27xslcveglfmr4ynfwg7gmw86cnun4acakxrdd6gqnp929a",
    "created_at": 1794200000,
-   "text": "# Designing relays\n\nLong body.",
+   "text": "Every connection Vector makes goes through **one transport layer**. It decides each egress: direct, a bridge into Tor, or a refusal with no socket and no DNS.\n\nNothing falls back to direct. A preference not loaded yet refuses, and a kind that is still starting refuses too.\n\nnostr:note1wg33qsaurqr7da6qkg67kag3ajeny4dx5d65x433r9k732t4p49sk04fpd",
    "bech32": "naddr1qqx8yetvv9uj6er9wd5kwmszyq4aspkf0u8qptc6rlpn9ra8vw5jd9ererdcltz0jwhhrkccd4hfqqcyqqq823cyhyg2k"
   },
   "nevent1qqsqe2cujct5qna09vjwyg0p3899j3vp8c2d8amxx3dsnjsnh03gllqzyzqmvd7clnfvdknrt8nfvvgn5ytsmeu4ujmjtwzdrc95elv7ckxwjqcyqqqgtwc9z4mnx": {

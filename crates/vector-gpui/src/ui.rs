@@ -101,6 +101,9 @@ pub struct VectorApp {
     moderation: Option<crate::moderation::Moderation>,
     /// Each community's last raid check: `(detected, suspects)`.
     raid: HashMap<String, (bool, usize)>,
+    /// The expanded Nostr post, and a reference it waits on.
+    embed_modal: Option<crate::embeds::Modal>,
+    embed_wanted: Option<(String, Option<String>)>,
     /// The pending invite whose details show.
     invite_details: Option<String>,
     /// Invite links looked up, by invite key.
@@ -297,6 +300,8 @@ impl VectorApp {
             comm_crop: None,
             moderation: None,
             raid: HashMap::new(),
+            embed_modal: None,
+            embed_wanted: None,
             invite_details: None,
             invite_previews: HashMap::new(),
             invite_scan: None,
@@ -426,6 +431,20 @@ impl VectorApp {
                 f.open_transfer(send, cx);
                 f.transfer_state(&payload, cx);
             });
+        }
+        // Fixtures: VECTOR_EMBED=post|article|video expands that fixture embed.
+        if let Ok(class) = std::env::var("VECTOR_EMBED") {
+            let found = {
+                let store = app.store.borrow();
+                let entity = store.fixture_embeds.iter().find(|(_, v)| v["class"] == class.as_str()).map(|(k, _)| k.clone());
+                entity.map(|e| {
+                    let url = store.chats.iter().flat_map(|c| &c.messages).flat_map(|m| crate::embeds::refs(&m.content).to_vec()).find(|r| r.entity == e).and_then(|r| r.url);
+                    (e, url)
+                })
+            };
+            if let Some((entity, url)) = found {
+                app.push_embed(entity, url, cx);
+            }
         }
         // Fixtures: VECTOR_INVITES=1 shows the Requests tab with its invites; =details opens the first.
         if let Ok(v) = std::env::var("VECTOR_INVITES") {
@@ -1363,6 +1382,7 @@ impl VectorApp {
             self.community = None;
         }
         self.profile = None;
+        self.embed_modal = None;
         self.new_chat = None;
         self.read_anchor = self.store.borrow().chat(&id).map(|c| c.last_read.clone());
         self.open = Some(id.clone());
@@ -1912,6 +1932,12 @@ impl Render for VectorApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.scan_invites(cx);
         let root = div()
+            .capture_key_down(cx.listener(|app, e: &gpui::KeyDownEvent, _, cx| {
+                if e.keystroke.key == "escape" && app.escape_overlay() {
+                    cx.stop_propagation();
+                    cx.notify();
+                }
+            }))
             .size_full()
             .relative()
             .flex()
@@ -2096,6 +2122,22 @@ impl Render for VectorApp {
                 Box::new(cx.listener(move |app, _, window, cx| app.answer_invite(a.clone(), true, window, cx))),
                 Box::new(cx.listener(move |app, _, window, cx| app.answer_invite(b.clone(), false, window, cx))),
             )
+        }))
+        .children(self.embed_modal.as_ref().map(|m| {
+            let app = cx.entity().downgrade();
+            let send: crate::embeds::Send = Rc::new(move |act, window, cx| {
+                app.update(cx, |app, cx| app.on_embed(act, window, cx)).ok();
+            });
+            let env = crate::embeds::Env { store: &store, media: &self.media, clock: self.started.elapsed().as_secs_f32(), send, modal: true };
+            let el = crate::embeds::modal(m, &env, f32::from(window.viewport_size().height));
+            let quoted = std::mem::take(&mut self.media.borrow_mut().embeds.queue);
+            if !quoted.is_empty() {
+                let app = cx.entity().downgrade();
+                cx.defer(move |cx| {
+                    app.update(cx, |app, cx| app.fetch_embeds(quoted, cx)).ok();
+                });
+            }
+            el
         }))
         .children(self.invite.as_ref().map(|m| {
             let app = cx.entity().downgrade();
@@ -5069,12 +5111,21 @@ impl VectorApp {
     }
 
     /// Looks up the invite links in the open chat, once per change to it.
+    /// A reference the expanded view was waiting on.
+    fn embed_settled(&mut self, entity: &str, cx: &mut Context<Self>) {
+        if self.embed_wanted.as_ref().is_some_and(|(e, _)| e == entity) {
+            let (entity, url) = self.embed_wanted.take().unwrap_or_default();
+            self.push_embed(entity, url, cx);
+        }
+    }
+
     fn fetch_embeds(&mut self, entities: Vec<String>, cx: &mut Context<Self>) {
         for entity in entities {
             if !self.live {
                 let fix = self.store.borrow().fixture_embeds.get(&entity).cloned();
                 let res = fix.ok_or_else(|| "Not found on any relay".to_string()).and_then(|v| serde_json::from_value(v).map_err(|e| e.to_string()));
                 self.media.borrow_mut().embeds.settle(&entity, res);
+                self.embed_settled(&entity, cx);
                 cx.notify();
                 continue;
             }
@@ -5097,12 +5148,48 @@ impl VectorApp {
                         }
                     }
                     this.media.borrow_mut().embeds.settle(&entity, res);
+                    this.embed_settled(&entity, cx);
                     cx.notify();
                 })
                 .ok();
             })
             .detach();
         }
+    }
+
+    /// Escape closes the topmost light overlay; true when it did.
+    fn escape_overlay(&mut self) -> bool {
+        if self.viewer.is_some() {
+            return false;
+        }
+        if self.menu.take().is_some() || self.embed_modal.take().is_some() || self.invite_details.take().is_some() {
+            return true;
+        }
+        self.create_channel.take().is_some() || self.invite.take().is_some()
+    }
+
+    /// Show `entity` in the expanded view, over whatever it shows now, once it resolves.
+    fn push_embed(&mut self, entity: String, url: Option<String>, cx: &mut Context<Self>) {
+        let state = self.media.borrow_mut().embeds.get(&entity);
+        match state {
+            crate::embeds::State::Ready(embed) => {
+                let view = crate::embeds::View { embed, url, revealed: false };
+                match self.embed_modal.as_mut() {
+                    Some(m) => {
+                        m.stack.push(view);
+                        m.scroll.set_offset(gpui::point(px(0.), px(0.)));
+                    }
+                    None => self.embed_modal = Some(crate::embeds::Modal { stack: vec![view], scroll: gpui::ScrollHandle::new() }),
+                }
+            }
+            crate::embeds::State::Failed(err, _) => self.toast = Some((err.into(), std::time::Instant::now())),
+            crate::embeds::State::Loading => {
+                self.embed_wanted = Some((entity, url));
+                let queued = std::mem::take(&mut self.media.borrow_mut().embeds.queue);
+                self.fetch_embeds(queued, cx);
+            }
+        }
+        cx.notify();
     }
 
     fn on_embed(&mut self, act: crate::embeds::Act, _window: &mut Window, cx: &mut Context<Self>) {
@@ -5114,13 +5201,31 @@ impl VectorApp {
                 self.toast = Some((format!("{label} copied").into(), std::time::Instant::now()));
             }
             Act::Reveal(key) => {
-                self.media.borrow_mut().embeds.revealed.insert(key);
+                if key.is_empty() {
+                    if let Some(v) = self.embed_modal.as_mut().and_then(|m| m.stack.last_mut()) {
+                        v.revealed = true;
+                    }
+                } else {
+                    self.media.borrow_mut().embeds.revealed.insert(key);
+                }
             }
             Act::Profile(npub) => self.open_profile(npub, cx),
-            Act::Ref(entity) | Act::Expand(entity) => {
-                let url = format!("https://njump.me/{entity}");
-                cx.open_url(&url);
+            Act::View(open) => return self.on_act(String::new(), timeline::Act::View(open), _window, cx),
+            Act::Expand(entity, url) => {
+                self.embed_modal = None;
+                self.push_embed(entity, url, cx);
             }
+            Act::Ref(entity) => self.push_embed(entity, None, cx),
+            Act::Push(entity, url) => self.push_embed(entity, url, cx),
+            Act::Back => {
+                if let Some(m) = self.embed_modal.as_mut() {
+                    m.stack.pop();
+                    if m.stack.is_empty() {
+                        self.embed_modal = None;
+                    }
+                }
+            }
+            Act::Close => self.embed_modal = None,
         }
         cx.notify();
     }
