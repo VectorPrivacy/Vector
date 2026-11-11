@@ -6,7 +6,7 @@ OUT=$1; SIZE=${2:-1200x760}; shift 2 || true
 W0=${SIZE%x*}; H0=${SIZE#*x}
 cd "$(dirname "$0")/.."
 export DISPLAY=${DISPLAY:-:99} XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-/tmp/xdg}; mkdir -p -m 700 "$XDG_RUNTIME_DIR"
-pgrep -x Xvfb >/dev/null || { Xvfb "$DISPLAY" -screen 0 1920x1200x24 >/tmp/xvfb.log 2>&1 & sleep 1; }
+pgrep -x Xvfb >/dev/null || { Xvfb "$DISPLAY" -screen 0 2400x1800x24 >/tmp/xvfb.log 2>&1 & sleep 1; }
 cargo build -q ${PROFILE:+--profile $PROFILE} 2>&1 | grep -E "^error" -A20 && exit 1 || true
 BIN=target/${PROFILE:-debug}/vector-gpui; [ "$PROFILE" = dev ] && BIN=target/debug/vector-gpui
 TZ=UTC "$BIN" --size "$SIZE" "$@" >/tmp/vector-gpui.log 2>&1 & PID=$!

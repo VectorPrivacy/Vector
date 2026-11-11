@@ -745,6 +745,29 @@ fn chat_list(shared: &Shared, store: &Store, open: Option<SharedString>, cx: &mu
 }
 
 /// `.chatlist-contact` (ChatlistRow.svelte).
+/// The chat list's last-message line (`chatPreviewText`).
+fn preview_line(chat: &SerializableChat, color: gpui::Hsla) -> AnyElement {
+    let look = crate::inline::Look::new(RUBIK, 13., 18., color);
+    let Some(m) = chat.messages.last() else {
+        return crate::inline::inline(Vec::new(), look).into_any_element();
+    };
+    let prefix = if m.mine { "You: " } else { "" };
+    let atoms = if m.pending {
+        vec![crate::inline::Atom::Text { text: "Sending...".into(), look: look.clone(), kind: crate::inline::Kind::Plain }]
+    } else if m.content.is_empty() && !m.attachments.is_empty() {
+        let text = format!("{prefix}Sent a {}", data::file_type(&m.attachments[0].extension).1);
+        vec![crate::inline::Atom::Text { text: text.into(), look: look.clone(), kind: crate::inline::Kind::Plain }]
+    } else {
+        let mut v = Vec::new();
+        if !prefix.is_empty() {
+            v.push(crate::inline::Atom::Text { text: prefix.into(), look: look.clone(), kind: crate::inline::Kind::Plain });
+        }
+        v.extend(crate::preview::atoms(&m.content, usize::MAX, &look));
+        v
+    };
+    crate::inline::inline(atoms, look).single_line().into_any_element()
+}
+
 fn chat_row(store: &Store, chat: &SerializableChat, active: bool) -> gpui::Stateful<gpui::Div> {
     let unread = store.unread_count(chat) > 0 && !active;
     let (name_color, name_weight) = match (unread, active) {
@@ -800,7 +823,7 @@ fn chat_row(store: &Store, chat: &SerializableChat, active: bool) -> gpui::State
                             div()
                                 .mt(px(-4.))
                                 .h(px(24.))
-                                .pr(px(15.))
+                                .pr(px(10.))
                                 .flex()
                                 .items_center()
                                 .child(
@@ -809,12 +832,8 @@ fn chat_row(store: &Store, chat: &SerializableChat, active: bool) -> gpui::State
                                         .min_w_0()
                                         .ml(px(10.))
                                         .mr(px(8.))
-                                        .truncate()
-                                        .font_family(RUBIK)
-                                        .text_size(px(13.))
-                                        .line_height(px(18.))
-                                        .text_color(preview_color)
-                                        .child(data::preview_text(chat)),
+                                        .overflow_hidden()
+                                        .child(preview_line(chat, preview_color)),
                                 )
                                 .child(
                                     div()

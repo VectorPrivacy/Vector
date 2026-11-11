@@ -124,10 +124,12 @@ pub struct Inline {
     base: Look,
     on_click: Option<OnClick>,
     clock: f32,
+    /// One line, cut with `…` (`white-space: nowrap; text-overflow: ellipsis`).
+    ellipsis: bool,
 }
 
 pub fn inline(atoms: impl Into<Rc<[Atom]>>, base: Look) -> Inline {
-    Inline { id: None, atoms: atoms.into(), base, on_click: None, clock: 0. }
+    Inline { id: None, atoms: atoms.into(), base, on_click: None, clock: 0., ellipsis: false }
 }
 
 impl Inline {
@@ -138,6 +140,11 @@ impl Inline {
 
     pub fn on_click(mut self, f: OnClick) -> Self {
         self.on_click = Some(f);
+        self
+    }
+
+    pub fn single_line(mut self) -> Self {
+        self.ellipsis = true;
         self
     }
 
@@ -171,6 +178,8 @@ struct Line {
 pub struct Laid {
     width: Option<f32>,
     lines: Vec<Line>,
+    /// Where a cut line's `…` goes, in which atom's look.
+    ellipsis: Option<(f32, usize)>,
     size: Size<Pixels>,
 }
 
@@ -399,7 +408,64 @@ fn layout(atoms: &[Atom], base: &Look, width: f32, window: &Window) -> Laid {
         out.push(Line { top, height, baseline: top + above, items });
         top += height;
     }
-    Laid { width: Some(width), lines: out, size: size(px(widest.min(width).ceil()), px(top)) }
+    Laid { width: Some(width), lines: out, ellipsis: None, size: size(px(widest.min(width).ceil()), px(top)) }
+}
+
+/// One line at most `width` wide, cut at a grapheme with `…` after.
+fn layout_cut(atoms: &[Atom], base: &Look, width: f32, window: &Window) -> Laid {
+    let mut laid = layout(atoms, base, f32::INFINITY, window);
+    laid.lines.truncate(1);
+    let Some(line) = laid.lines.first_mut() else { return laid };
+    let end = line.items.last().map(|p| p.x + p.lead + p.width + p.tail).unwrap_or(0.);
+    if end <= width {
+        laid.width = Some(width);
+        laid.size.width = px(end.min(width).ceil());
+        return laid;
+    }
+    let look_of = |i: usize| match &atoms[i] {
+        Atom::Text { look, .. } => look.clone(),
+        _ => base.clone(),
+    };
+    let mut keep = Vec::new();
+    let mut cut_at = None;
+    for p in line.items.drain(..) {
+        let look = look_of(p.atom);
+        let ell = f32::from(shape("…", &look, look.color, window).width);
+        let room = width - ell;
+        if p.x + p.lead + p.width + p.tail <= room {
+            keep.push(p);
+            continue;
+        }
+        if let Atom::Text { text, .. } = &atoms[p.atom] {
+            let line = shape(text, &look, look.color, window);
+            let base_x = f32::from(line.x_for_index(p.range.start));
+            let mut end = p.range.start;
+            for (off, g) in text[p.range.clone()].grapheme_indices(true) {
+                let e = p.range.start + off + g.len();
+                if p.x + p.lead + f32::from(line.x_for_index(e)) - base_x > room {
+                    break;
+                }
+                end = e;
+            }
+            let trimmed = text[p.range.start..end].trim_end().len() + p.range.start;
+            if trimmed > p.range.start {
+                let w = f32::from(line.x_for_index(trimmed)) - base_x;
+                let x = p.x;
+                let lead = p.lead;
+                keep.push(Placed { atom: p.atom, range: p.range.start..trimmed, x, width: w, lead, tail: 0. });
+                cut_at = Some((x + lead + w, p.atom));
+                break;
+            }
+        }
+        cut_at = Some((p.x, p.atom));
+        break;
+    }
+    let cut = cut_at.unwrap_or((keep.last().map(|p| p.x + p.lead + p.width + p.tail).unwrap_or(0.), 0));
+    line.items = keep;
+    laid.ellipsis = Some(cut);
+    laid.width = Some(width);
+    laid.size.width = px(width);
+    laid
 }
 
 fn place(lines: &mut [Vec<Placed>], x: &mut f32, s: &Seg, atoms: &[Atom]) {
@@ -436,7 +502,7 @@ impl Element for Inline {
         _: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
         let laid: Rc<RefCell<Laid>> = Rc::default();
-        let (atoms, base, state) = (self.atoms.clone(), self.base.clone(), laid.clone());
+        let (atoms, base, state, cut) = (self.atoms.clone(), self.base.clone(), laid.clone(), self.ellipsis);
         let id = window.request_measured_layout(Style::default(), move |known, available, window, _| {
             let width = known.width.map(f32::from).unwrap_or(match available.width {
                 gpui::AvailableSpace::Definite(w) => w.into(),
@@ -445,7 +511,7 @@ impl Element for Inline {
             });
             let mut s = state.borrow_mut();
             if s.width != Some(width) {
-                *s = layout(&atoms, &base, width, window);
+                *s = if cut { layout_cut(&atoms, &base, width, window) } else { layout(&atoms, &base, width, window) };
             }
             s.size
         });
@@ -464,8 +530,8 @@ impl Element for Inline {
         {
             let w = f32::from(bounds.size.width);
             let mut s = laid.borrow_mut();
-            if s.width.is_none_or(|lw| (lw - w).abs() > 0.5 && f32::from(s.size.width) > w) {
-                *s = layout(&self.atoms, &self.base, w, window);
+            if s.width.is_none_or(|lw| (lw - w).abs() > 0.5 && (self.ellipsis || f32::from(s.size.width) > w)) {
+                *s = if self.ellipsis { layout_cut(&self.atoms, &self.base, w, window) } else { layout(&self.atoms, &self.base, w, window) };
             }
         }
         let s = laid.borrow();
@@ -595,6 +661,15 @@ impl Element for Inline {
                     }
                 }
             }
+        }
+        if let (Some((x, atom)), Some(line)) = (s.ellipsis, s.lines.first()) {
+            let look = match &self.atoms[atom] {
+                Atom::Text { look, .. } => look.clone(),
+                _ => self.base.clone(),
+            };
+            let m = metrics(&look, window);
+            let top = line.baseline - m.ascent - (look.line_height - (m.ascent + m.descent)) / 2.;
+            let _ = shape("…", &look, look.color, window).paint(bounds.origin + point(px(x), px(top)), px(look.line_height), TextAlign::Left, None, window, cx);
         }
         for el in &mut pre.images {
             el.paint(window, cx);
