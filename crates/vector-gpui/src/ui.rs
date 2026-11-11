@@ -177,8 +177,8 @@ impl VectorApp {
             let npub = if who == "me" { app.store.borrow().my_npub.clone() } else { who };
             app.open_profile(npub, cx);
         }
-        if let Ok(file) = std::env::var("VECTOR_SEND") {
-            app.open_file_preview(file.into(), window, cx);
+        if let Ok(files) = std::env::var("VECTOR_SEND") {
+            app.open_paths_preview(files.split(':').map(Into::into).collect(), window, cx);
         }
         if let Ok(file) = std::env::var("VECTOR_CROP")
             && app.profile.is_some()
@@ -868,9 +868,7 @@ impl Render for VectorApp {
             })
         });
         let root = root.on_drop(cx.listener(|app, paths: &gpui::ExternalPaths, window, cx| {
-            if let Some(path) = paths.paths().first().filter(|p| p.is_file()) {
-                app.open_file_preview(path.clone(), window, cx);
-            }
+            app.open_paths_preview(paths.paths().to_vec(), window, cx);
         }));
         root.children(popup).child(chrome(window, false)).child(
             div()
@@ -1717,18 +1715,6 @@ fn composer(
     })
 }
 
-/// Where pasted pictures wait while they preview and send.
-fn paste_root() -> std::path::PathBuf {
-    std::env::temp_dir().join("vector-gpui-paste")
-}
-
-/// A pasted picture's copy goes once it has sent or been dismissed.
-fn forget_paste(path: &std::path::Path) {
-    if let Some(dir) = path.parent().filter(|d| d.starts_with(paste_root())) {
-        let _ = std::fs::remove_dir_all(dir);
-    }
-}
-
 /// `#chat-input-file`: the plus, turned to a cross while the panel is open.
 fn attach_button(open: bool, cx: &mut Context<VectorApp>) -> impl IntoElement {
     use gpui::AnimationExt as _;
@@ -1823,7 +1809,7 @@ fn attachment_panel(opened: std::time::Instant, cx: &mut Context<VectorApp>) -> 
                 .gap(px(12.))
                 .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .child(item(0, "attach-file", "icons/file.svg", 26., "File").on_click(cx.listener(|app, _, window, cx| app.pick_file(window, cx))))
-                .child(item(1, "attach-folder", "icons/folder.svg", 27., "Folder"))
+                .child(item(1, "attach-folder", "icons/folder.svg", 27., "Folder").on_click(cx.listener(|app, _, window, cx| app.pick_folder(window, cx))))
                 .child(item(2, "attach-commands", "ui/slash.svg", 22.5, "Commands"))
                 .child(item(3, "attach-miniapps", "icons/grid-outline.svg", 22., "Mini Apps")),
         )
@@ -1862,11 +1848,11 @@ impl VectorApp {
     /// A pasted picture is written out first, so it previews and sends as any picked file does.
     fn on_paste(&mut self, pasted: &crate::composer::Pasted, window: &mut Window, cx: &mut Context<Self>) {
         let path = match pasted {
-            crate::composer::Pasted::Path(p) => p.clone(),
+            crate::composer::Pasted::Paths(p) => return self.open_paths_preview(p.clone(), window, cx),
             crate::composer::Pasted::Image { bytes, ext } => {
-                let dir = paste_root().join(format!("{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos()));
+                let Ok(dir) = backend::archive::work_slot() else { return };
                 let path = dir.join(format!("pasted_image.{ext}"));
-                if std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(&path, bytes)).is_err() {
+                if std::fs::write(&path, bytes).is_err() {
                     return;
                 }
                 path
@@ -1875,20 +1861,55 @@ impl VectorApp {
         self.open_file_preview(path, window, cx);
     }
 
+    /// One file previews as itself; a folder, or several items, as one zip.
+    fn pick_folder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.attach = None;
+        cx.notify();
+        let rx = cx.prompt_for_paths(gpui::PathPromptOptions { files: false, directories: true, multiple: false, prompt: None });
+        let window = window.window_handle();
+        cx.spawn(async move |this, cx| {
+            let Ok(Ok(Some(paths))) = rx.await else { return };
+            window
+                .update(cx, |_, window, cx| {
+                    this.update(cx, |this, cx| this.open_paths_preview(paths, window, cx)).ok();
+                })
+                .ok();
+        })
+        .detach();
+    }
+
+    fn open_paths_preview(&mut self, mut paths: Vec<std::path::PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
+        match paths.len() {
+            0 => {}
+            1 if paths[0].is_file() => self.open_file_preview(paths.remove(0), window, cx),
+            _ => self.open_preview(window, cx, move |chat, reply, window, cx| crate::filepreview::FilePreview::zipped(paths, chat, reply, window, cx)),
+        }
+    }
+
     fn open_file_preview(&mut self, path: std::path::PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_preview(window, cx, move |chat, reply, window, cx| crate::filepreview::FilePreview::new(path, chat, reply, window, cx));
+    }
+
+    fn open_preview(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        make: impl FnOnce(String, String, &mut Window, &mut Context<crate::filepreview::FilePreview>) -> crate::filepreview::FilePreview,
+    ) {
         let Some(chat) = self.open.clone() else { return };
         let reply = match &self.mode {
             Mode::Reply { id, .. } => id.clone(),
             _ => String::new(),
         };
-        let preview = cx.new(|cx| crate::filepreview::FilePreview::new(path, chat.to_string(), reply, window, cx));
+        let preview = cx.new(|cx| make(chat.to_string(), reply, window, cx));
         cx.subscribe_in(&preview, window, |this, _, e: &crate::filepreview::Event, window, cx| {
             this.file_preview = None;
             window.focus(&this.input.focus_handle(cx), cx);
             cx.notify();
             match e {
                 crate::filepreview::Event::Send(send) => this.send_file(send, cx),
-                crate::filepreview::Event::Close(path) => forget_paste(path),
+                crate::filepreview::Event::Close(path) => backend::archive::forget(path),
+                crate::filepreview::Event::Failed(err) => this.notice("Compression Failed", err.clone(), cx),
             }
         })
         .detach();
@@ -1901,7 +1922,7 @@ impl VectorApp {
             self.mode = Mode::Normal;
         }
         if !self.live {
-            forget_paste(&send.path);
+            backend::archive::forget(&send.path);
             return;
         }
         let crate::filepreview::Send { path, receiver, reply, name, compress, keep_metadata, compressed } = send;
@@ -1915,7 +1936,7 @@ impl VectorApp {
             };
             let rx = backend::run(messaging::send_file(receiver, reply, path.clone(), name, compress, keep_metadata, precompressed));
             let done = rx.await;
-            forget_paste(&path);
+            backend::archive::forget(&path);
             let err = match done {
                 Ok(Ok(())) => return,
                 Ok(Err(e)) => e,

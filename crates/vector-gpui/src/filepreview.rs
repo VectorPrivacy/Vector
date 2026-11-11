@@ -38,6 +38,8 @@ pub struct Send {
 
 pub enum Event {
     Send(Send),
+    /// The archive couldn't be made.
+    Failed(String),
     /// Dismissed: the file it showed.
     Close(PathBuf),
 }
@@ -66,6 +68,63 @@ pub struct FilePreview {
     metadata_offered: bool,
     keep_metadata: bool,
     rename: Option<Entity<TextInput>>,
+    zip: Option<Zip>,
+}
+
+/// A folder or a selection being zipped, then what the archive holds.
+enum Zip {
+    Running(Arc<std::sync::atomic::AtomicU64>),
+    Done { tree: Node, total: u32, listed: usize, open: std::collections::HashSet<String>, label: String },
+}
+
+#[derive(Default)]
+struct Node {
+    name: String,
+    /// The folder's path inside the archive.
+    path: String,
+    dirs: Vec<Node>,
+    files: Vec<(String, u64)>,
+}
+
+impl Node {
+    fn child(&mut self, name: &str) -> &mut Node {
+        let i = match self.dirs.iter().position(|d| d.name == name) {
+            Some(i) => i,
+            None => {
+                let path = if self.path.is_empty() { name.to_string() } else { format!("{}/{name}", self.path) };
+                self.dirs.push(Node { name: name.to_string(), path, ..Default::default() });
+                self.dirs.len() - 1
+            }
+        };
+        &mut self.dirs[i]
+    }
+
+    /// `buildFileTree`, sorted as `renderTreeNode` sorts.
+    fn build(entries: &[crate::backend::archive::Entry]) -> Node {
+        let mut root = Node::default();
+        for e in entries {
+            let clean = e.path.trim_end_matches('/');
+            let mut parts: Vec<&str> = clean.split('/').collect();
+            let file = if e.is_dir { None } else { parts.pop() };
+            let mut node = &mut root;
+            for part in parts {
+                node = node.child(part);
+            }
+            if let Some(f) = file {
+                node.files.push((f.to_string(), e.size));
+            }
+        }
+        root.sort();
+        root
+    }
+
+    fn sort(&mut self) {
+        self.dirs.sort_by(|a, b| a.name.cmp(&b.name));
+        self.files.sort_by(|a, b| a.0.cmp(&b.0));
+        for d in &mut self.dirs {
+            d.sort();
+        }
+    }
 }
 
 /// `getFileIcon`: the glyph a file without a picture shows.
@@ -180,7 +239,84 @@ impl FilePreview {
             metadata_offered: false,
             keep_metadata: false,
             rename: None,
+            zip: None,
         }
+    }
+
+    /// A folder, or several items, zipped into one archive that sends under its name.
+    pub fn zipped(paths: Vec<PathBuf>, receiver: String, reply: String, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let focus = cx.focus_handle();
+        window.focus(&focus, cx);
+        let percent = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let cancel = Arc::new(AtomicBool::new(false));
+        let (flag, pct) = (cancel.clone(), percent.clone());
+        let stem = crate::backend::archive::archive_name(&paths);
+        let work = cx.background_executor().spawn(async move { crate::backend::archive::zip_paths(&paths, &flag, &pct) });
+                cx.spawn(async move |this, cx| {
+            let mut work = std::pin::pin!(work.fuse());
+            loop {
+                let timer = cx.background_executor().timer(Duration::from_millis(100));
+                futures::select_biased! {
+                    done = work.as_mut() => {
+                        this.update(cx, |p, cx| p.zipped_done(done, cx)).ok();
+                        return;
+                    }
+                    _ = timer.fuse() => {
+                        if this.update(cx, |_, cx| cx.notify()).is_err() {
+                            return;
+                        }
+                    }
+                }
+            }
+        })
+        .detach();
+        Self {
+            focus,
+            path: PathBuf::new(),
+            receiver,
+            reply,
+            stem,
+            edited: true,
+            ext: "zip".into(),
+            size: 0,
+            image: None,
+            icon: "icons/folder.svg",
+            spoiler: false,
+            blur: None,
+            compress_offered: false,
+            compress: false,
+            compress_info: SharedString::default(),
+            compressed: None,
+            cancel,
+            metadata_offered: false,
+            keep_metadata: false,
+            rename: None,
+            zip: Some(Zip::Running(percent)),
+        }
+    }
+
+    fn zipped_done(&mut self, done: Result<crate::backend::archive::Zipped, String>, cx: &mut Context<Self>) {
+        match done {
+            Ok(z) => {
+                let plural = |n: u32, one: &str| format!("{n} {one}{}", if n == 1 { "" } else { "s" });
+                let mut label = format!("{} ({}", crate::media::format_bytes(z.size), plural(z.file_count, "file"));
+                if z.dir_count > 0 {
+                    label.push_str(&format!(", {}", plural(z.dir_count, "folder")));
+                }
+                label.push(')');
+                let tree = Node::build(&z.entries);
+                let open = tree.dirs.iter().map(|d| d.path.clone()).collect();
+                self.path = z.path;
+                self.size = z.size;
+                self.zip = Some(Zip::Done { tree, total: z.file_count + z.dir_count, listed: z.entries.len(), open, label });
+            }
+            Err(e) => {
+                if !self.cancel.load(Ordering::Relaxed) {
+                    cx.emit(Event::Failed(e));
+                }
+            }
+        }
+        cx.notify();
     }
 
     /// The thumbhash blur a spoiler shows in the picture's place.
@@ -257,6 +393,9 @@ impl FilePreview {
     }
 
     fn send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if matches!(self.zip, Some(Zip::Running(_))) {
+            return;
+        }
         if self.rename.is_some() {
             self.end_rename(true, window, cx);
         }
@@ -322,7 +461,48 @@ fn option(id: &'static str, label: gpui::AnyElement, sublabel: impl Into<SharedS
 impl Render for FilePreview {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let max_h = f32::from(window.viewport_size().height) * 0.4;
-        let content = match &self.image {
+        let content = match &self.zip {
+            Some(Zip::Running(pct)) => {
+                let p = pct.load(Ordering::Relaxed);
+                div()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .gap(px(12.))
+                    .child(div().size(px(120.)).mb(px(8.)).rounded(px(16.)).bg(c(0x59fcb3).opacity(0.1)).border_1().border_color(c(0x59fcb3).opacity(0.2)).flex().items_center().justify_center().child(crate::attachments::ring(48., Some(p as f32))))
+                    .child(div().text_size(px(13.)).text_color(white_a(0.6)).child(if p > 0 { format!("Compressing... {p}%") } else { "Compressing...".into() }))
+                    .into_any_element()
+            }
+            Some(Zip::Done { tree, total, listed, open, .. }) => {
+                let mut rows = Vec::new();
+                tree_rows(tree, 0, open, &mut rows, cx);
+                div()
+                    .w_full()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .gap(px(12.))
+                    .child(div().size(px(120.)).mb(px(8.)).rounded(px(16.)).bg(c(0x59fcb3).opacity(0.1)).border_1().border_color(c(0x59fcb3).opacity(0.2)).flex().items_center().justify_center().child(svg().path("icons/folder.svg").size(px(64.)).text_color(c(0x59fcb3))))
+                    .child(
+                        div()
+                            .id("zip-list")
+                            .w_full()
+                            .max_h(px(max_h * 0.75))
+                            .overflow_y_scroll()
+                            .rounded(px(8.))
+                            .bg(white_a(0.03))
+                            .pt(px(8.))
+                            .pr(px(8.))
+                            .pb(px(8.))
+                            .pl(px(4.))
+                            .children(rows)
+                            .when(*total as usize > *listed, |d| {
+                                d.child(div().pt(px(8.)).pb(px(4.)).text_center().text_size(px(12.)).text_color(white_a(0.4)).child(format!("...and {} more", *total as usize - listed)))
+                            }),
+                    )
+                    .into_any_element()
+            }
+            None => match &self.image {
             Some((image, w, h)) => {
                 let (w, h) = (*w as f32, *h as f32);
                 let s = (450. / w).min(max_h / h).min(1.);
@@ -387,6 +567,7 @@ impl Render for FilePreview {
                 .justify_center()
                 .child(svg().path(self.icon).size(px(64.)).text_color(c(0x59fcb3)))
                 .into_any_element(),
+            },
         };
 
         let name = match &self.rename {
@@ -443,7 +624,11 @@ impl Render for FilePreview {
                         )
                     }),
             )
-            .child(div().text_size(px(14.)).line_height(px(24.)).text_color(white_a(0.6)).child(crate::media::format_bytes(self.size)));
+            .child(div().text_size(px(14.)).line_height(px(24.)).text_color(white_a(0.6)).child(match &self.zip {
+                Some(Zip::Running(_)) => "Compressing...".to_string(),
+                Some(Zip::Done { label, .. }) => label.clone(),
+                None => crate::media::format_bytes(self.size),
+            }));
 
         let options = div()
             .flex_shrink_0()
@@ -473,6 +658,7 @@ impl Render for FilePreview {
                 })))
             });
 
+        let zipping = matches!(self.zip, Some(Zip::Running(_)));
         let button = |id: &'static str, label: &'static str| {
             div().id(id).px(px(32.)).py(px(12.)).rounded(px(8.)).text_size(px(14.)).line_height(px(17.)).font_weight(FontWeight::MEDIUM).cursor_pointer().child(label)
         };
@@ -489,7 +675,8 @@ impl Render for FilePreview {
                     .on_click(cx.listener(|p, _, _, cx| p.close(cx))),
             )
             .child(
-                button("fp-send", "Send")
+                button("fp-send", if zipping { "Compressing..." } else { "Send" })
+                    .when(zipping, |d| d.opacity(0.5).cursor_default())
                     .bg(linear_gradient(90., linear_color_stop(c(0x33db98), 0.), linear_color_stop(c(0x00ff9d), 1.)))
                     .hover(|s| s.opacity(0.9))
                     .text_color(c(0x000000))
@@ -553,5 +740,73 @@ impl Render for FilePreview {
             .on_mouse_down(MouseButton::Left, cx.listener(|p, _, _, cx| p.close(cx)))
             .child(card)
             .with_animation("fp-fade", gpui::Animation::new(Duration::from_millis(200)), |d, t| d.opacity(t))
+    }
+}
+
+
+/// `renderTreeNode`: folders first, each toggling open, then files with their sizes.
+fn tree_rows(node: &Node, depth: usize, open: &std::collections::HashSet<String>, rows: &mut Vec<gpui::AnyElement>, cx: &mut Context<FilePreview>) {
+    if depth > 50 {
+        rows.push(div().pt(px(8.)).pb(px(4.)).text_center().text_size(px(12.)).text_color(white_a(0.4)).child("Deeply nested...").into_any_element());
+        return;
+    }
+    for d in &node.dirs {
+        let has = !d.dirs.is_empty() || !d.files.is_empty();
+        let is_open = open.contains(&d.path);
+        let path = d.path.clone();
+        rows.push(
+            div()
+                .id(SharedString::from(format!("zip-dir-{}", d.path)))
+                .ml(px(depth as f32 * 16.))
+                .flex()
+                .items_center()
+                .gap(px(6.))
+                .px(px(4.))
+                .py(px(3.))
+                .rounded(px(4.))
+                .text_size(px(12.))
+                .text_color(white_a(0.8))
+                .when(has, |r| {
+                    r.cursor_pointer().hover(|s| s.bg(white_a(0.05))).on_click(cx.listener(move |p, _, _, cx| {
+                        if let Some(Zip::Done { open, .. }) = p.zip.as_mut()
+                            && !open.remove(&path)
+                        {
+                            open.insert(path.clone());
+                        }
+                        cx.notify();
+                    }))
+                })
+                .child(
+                    svg()
+                        .path("icons/chevron-down.svg")
+                        .size(px(12.))
+                        .flex_shrink_0()
+                        .text_color(white_a(0.35))
+                        .with_transformation(gpui::Transformation::rotate(gpui::radians(if is_open { 0. } else { -std::f32::consts::FRAC_PI_2 }))),
+                )
+                .child(svg().path("icons/folder.svg").size(px(14.)).flex_shrink_0().text_color(white_a(0.5)))
+                .child(div().flex_1().min_w_0().overflow_hidden().text_ellipsis().whitespace_nowrap().child(d.name.clone()))
+                .into_any_element(),
+        );
+        if is_open {
+            tree_rows(d, depth + 1, open, rows, cx);
+        }
+    }
+    for (name, size) in &node.files {
+        rows.push(
+            div()
+                .pl(px(depth as f32 * 16. + 22. + 4.))
+                .pr(px(4.))
+                .py(px(3.))
+                .flex()
+                .items_center()
+                .gap(px(6.))
+                .text_size(px(12.))
+                .text_color(white_a(0.7))
+                .child(svg().path("icons/file.svg").size(px(14.)).flex_shrink_0().text_color(white_a(0.5)))
+                .child(div().flex_1().min_w_0().overflow_hidden().text_ellipsis().whitespace_nowrap().child(name.clone()))
+                .child(div().flex_shrink_0().text_size(px(11.)).text_color(white_a(0.4)).child(crate::media::format_bytes(*size)))
+                .into_any_element(),
+        );
     }
 }

@@ -276,8 +276,8 @@ impl TextInput {
                         return;
                     }
                     gpui::ClipboardEntry::ExternalPaths(paths) => {
-                        if let Some(p) = paths.paths().iter().find(|p| p.is_file()) {
-                            cx.emit(Pasted::Path(p.clone()));
+                        if !paths.paths().is_empty() {
+                            cx.emit(Pasted::Paths(paths.paths().to_vec()));
                             return;
                         }
                     }
@@ -853,7 +853,7 @@ pub struct CancelInput;
 /// A paste that carried no text but a picture or a file.
 pub enum Pasted {
     Image { bytes: Vec<u8>, ext: &'static str },
-    Path(std::path::PathBuf),
+    Paths(Vec<std::path::PathBuf>),
 }
 
 impl EventEmitter<SendText> for TextInput {}
