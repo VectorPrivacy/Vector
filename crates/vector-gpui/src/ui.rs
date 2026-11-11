@@ -70,6 +70,8 @@ pub struct VectorApp {
     emoji_picker: Entity<crate::picker::EmojiPicker>,
     /// The emoji picker is showing (for `picker`'s message, else the composer).
     picker_open: bool,
+    /// The picker serves the status dialog's field.
+    picker_status: bool,
     picker_closed: std::time::Instant,
     /// Bumped by each hover, so a stale leave doesn't hide the toolbar.
     hover_gen: u64,
@@ -128,7 +130,8 @@ impl VectorApp {
                 let recents = recents.clone();
                 let _ = backend::run(async move { backend::actions::set_kaomoji_recents(recents) });
             }
-            app.input.update(cx, |input, cx| input.insert_spaced(face, window, cx));
+            let field = if app.picker_status { app.status.clone() } else { None }.unwrap_or_else(|| app.input.clone());
+            field.update(cx, |input, cx| input.insert_spaced(face, window, cx));
             if !*shift {
                 app.close_picker(window, cx);
             }
@@ -154,6 +157,7 @@ impl VectorApp {
             media: Rc::default(),
             emoji_picker,
             picker_open: false,
+            picker_status: false,
             picker_closed: std::time::Instant::now(),
             hover_gen: 0,
             viewer: None,
@@ -176,6 +180,9 @@ impl VectorApp {
         if let Ok(who) = std::env::var("VECTOR_PROFILE") {
             let npub = if who == "me" { app.store.borrow().my_npub.clone() } else { who };
             app.open_profile(npub, cx);
+        }
+        if std::env::var("VECTOR_STATUS").is_ok() {
+            app.open_status(window, cx);
         }
         if let Ok(files) = std::env::var("VECTOR_SEND") {
             app.open_paths_preview(files.split(':').map(Into::into).collect(), window, cx);
@@ -655,6 +662,20 @@ impl VectorApp {
         cx.notify();
     }
 
+    /// The status dialog's emoji button: the picker without GIFs, the dialog yielding the bottom.
+    fn toggle_status_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.picker_open {
+            self.close_picker(window, cx);
+            return;
+        }
+        self.toggle_picker(None, window, cx);
+        self.picker_status = true;
+        self.emoji_picker.update(cx, |p, cx| {
+            p.no_gifs = true;
+            cx.notify();
+        });
+    }
+
     fn close_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.picker_open {
             return;
@@ -662,7 +683,8 @@ impl VectorApp {
         self.picker_open = false;
         self.picker = None;
         self.picker_closed = std::time::Instant::now();
-        window.focus(&self.input.read(cx).focus_handle(cx), cx);
+        let field = if std::mem::take(&mut self.picker_status) { self.status.clone() } else { None };
+        window.focus(&field.unwrap_or_else(|| self.input.clone()).read(cx).focus_handle(cx), cx);
         cx.notify();
     }
 
@@ -671,6 +693,15 @@ impl VectorApp {
         if self.live {
             let e = emoji.clone();
             let _ = backend::run(async move { backend::actions::bump_emoji(&e) });
+        }
+        if self.picker_status {
+            if let Some(field) = self.status.clone() {
+                field.update(cx, |input, cx| input.insert_spaced(&emoji, window, cx));
+            }
+            if !shift {
+                self.close_picker(window, cx);
+            }
+            return;
         }
         match self.picker.clone() {
             Some(id) => {
@@ -899,7 +930,7 @@ impl Render for VectorApp {
                     (None, None) => empty_pane().into_any_element(),
                 }),
         )
-        .children(self.status_view(&store, cx))
+        .children(self.status_view(&store, window, cx))
         .children(self.qr_view(cx))
         .children(self.toast_view(window))
         .children(self.viewer.clone().map(|v| gpui::deferred(div().absolute().inset_0().child(v)).with_priority(10)))
@@ -1549,7 +1580,7 @@ impl VectorApp {
                             )),
                     ),
             )
-            .child(composer(self.input.clone(), &self.mode, self.picker_open.then(|| (self.emoji_picker.clone(), self.picker.is_none())), self.attach, cx))
+            .child(composer(self.input.clone(), &self.mode, (self.picker_open && !self.picker_status).then(|| (self.emoji_picker.clone(), self.picker.is_none())), self.attach, cx))
     }
 }
 
@@ -2372,7 +2403,11 @@ impl VectorApp {
             i
         });
         cx.subscribe(&input, |app, _, _: &SendText, cx| app.save_status(None, cx)).detach();
-        cx.subscribe(&input, |app, _, _: &CancelInput, cx| {
+        cx.subscribe_in(&input, window, |app, _, _: &CancelInput, window, cx| {
+            if app.picker_open && app.picker_status {
+                app.close_picker(window, cx);
+                return;
+            }
             app.status = None;
             cx.notify();
         })
@@ -2394,6 +2429,10 @@ impl VectorApp {
     /// Publish the status (`Some("")` clears it), echoing it at once and rolling back on failure.
     fn save_status(&mut self, text: Option<String>, cx: &mut Context<Self>) {
         let Some(input) = self.status.take() else { return };
+        if self.picker_status {
+            self.picker_open = false;
+            self.picker_status = false;
+        }
         let status = text.unwrap_or_else(|| input.read(cx).text().trim().to_string());
         let me = self.store.borrow().my_npub.clone();
         let old = self.store.borrow_mut().profiles.get_mut(&me).map(|p| std::mem::replace(&mut p.status.title, status.clone()));
@@ -2420,8 +2459,9 @@ impl VectorApp {
         .detach();
     }
 
-    fn status_view(&self, store: &Store, cx: &mut Context<Self>) -> Option<AnyElement> {
+    fn status_view(&self, store: &Store, window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         let input = self.status.clone()?;
+        let panel = self.picker_open && self.picker_status;
         let raw = input.read(cx).text().to_string();
         let text = raw.trim().to_string();
         let empty = text.is_empty();
@@ -2530,13 +2570,18 @@ impl VectorApp {
                     )
                     .child(
                         div()
+                            .id("status-emoji-btn")
                             .ml(px(2.))
                             .size(px(40.))
                             .flex()
                             .items_center()
                             .justify_center()
                             .opacity(0.7)
-                            .child(svg().path("icons/smile-face.svg").size(px(20.)).text_color(c(0xffffff))),
+                            .hover(|s| s.opacity(1.))
+                            .cursor_pointer()
+                            .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                            .on_click(cx.listener(|app, _, window, cx| app.toggle_status_picker(window, cx)))
+                            .child(svg().path(if self.picker_open && self.picker_status { "icons/wink-face.svg" } else { "icons/smile-face.svg" }).size(px(20.)).text_color(c(0xffffff))),
                     ),
             )
             .child(
@@ -2581,18 +2626,35 @@ impl VectorApp {
                     .absolute()
                     .inset_0()
                     .flex()
-                    .items_center()
                     .justify_center()
+                    .map(|d| if panel { d.items_start().pt(px(24f32.max(f32::from(window.viewport_size().height) * 0.07))) } else { d.items_center() })
                     .bg(ca(0, 0, 0, 0.72))
                     .occlude()
                     .on_mouse_down(
                         gpui::MouseButton::Left,
-                        cx.listener(|app, _, _, cx| {
+                        cx.listener(|app, _, window, cx| {
+                            // The first outside press dismisses the panel; the next, the dialog.
+                            if app.picker_open && app.picker_status {
+                                app.close_picker(window, cx);
+                                return;
+                            }
                             app.status = None;
                             cx.notify();
                         }),
                     )
-                    .child(card),
+                    .child(card)
+                    .when(panel, |d| {
+                        d.child(
+                            div()
+                                .absolute()
+                                .left_0()
+                                .right_0()
+                                .bottom(px(10.))
+                                .flex()
+                                .justify_center()
+                                .child(div().on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation()).child(self.emoji_picker.clone())),
+                        )
+                    }),
             )
             .with_priority(10)
             .into_any_element(),

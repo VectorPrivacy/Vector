@@ -137,6 +137,8 @@ pub struct EmojiPicker {
     pub mode: Mode,
     /// Reactions take one emoji: no kaomoji.
     pub reaction: bool,
+    /// The status dialog's panel: emoji and kaomoji only.
+    pub no_gifs: bool,
     kaomoji_list: ScrollHandle,
     kaomoji_strip: ScrollHandle,
     /// The category the kaomoji list is scrolled to.
@@ -191,6 +193,7 @@ impl EmojiPicker {
             collapsed: HashSet::new(),
             mode: Mode::Emoji,
             reaction: false,
+            no_gifs: false,
             kaomoji_list: ScrollHandle::new(),
             kaomoji_strip: ScrollHandle::new(),
             kaomoji_at: 0,
@@ -204,6 +207,7 @@ impl EmojiPicker {
     /// Opened afresh: an empty search, the top of the list, and the account's usage.
     pub fn reset(&mut self, reaction: bool, used: HashMap<String, f64>, window: &mut Window, cx: &mut Context<Self>) {
         self.reaction = reaction;
+        self.no_gifs = false;
         self.set_mode(Mode::Emoji, cx);
         self.used = Rc::new(used);
         self.search.update(cx, |s, cx| s.clear(window, cx));
@@ -858,7 +862,7 @@ impl Render for EmojiPicker {
                     .flex()
                     .gap(px(4.))
                     .child(mode_btn("Emoji", Mode::Emoji, cx))
-                    .child(mode_btn("GIF", Mode::Gif, cx))
+                    .when(!self.no_gifs, |d| d.child(mode_btn("GIF", Mode::Gif, cx)))
                     .when(!self.reaction, |d| d.child(mode_btn("(◕‿◕)", Mode::Kaomoji, cx))),
             );
 
