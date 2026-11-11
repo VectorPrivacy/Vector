@@ -87,6 +87,14 @@ pub struct VectorApp {
     pack_details: Option<crate::packdetails::Details>,
     /// A link that arrived before an account was open.
     pending_link: Option<vector_core::deep_link::DeepLinkAction>,
+    /// The message a jump landed on, flashing.
+    jumped: Option<(String, std::time::Instant)>,
+    /// Older history is on its way.
+    paging: bool,
+    /// A jump asked for while the chat's first page loads.
+    opening: Option<Option<String>>,
+    /// Chats whose first message is loaded.
+    history_done: HashSet<String>,
     pack_crop: Option<(
         Entity<crate::cropper::Cropper>,
         futures::channel::oneshot::Sender<Option<vector_core::image_crop::CropRect>>,
@@ -495,6 +503,10 @@ impl VectorApp {
             media: Rc::default(),
             pack_details: None,
             pending_link: None,
+            jumped: None,
+            paging: false,
+            opening: None,
+            history_done: HashSet::new(),
             pack_crop: None,
             emoji_picker,
             picker_open: false,
@@ -2069,7 +2081,9 @@ impl VectorApp {
         self.read_anchor = self.store.borrow().chat(&id).map(|c| c.last_read.clone());
         self.open = Some(id.clone());
         let count = self.rebuild_rows();
-        self.timeline = timeline_state(count);
+        self.timeline = timeline_state(count, cx.entity().downgrade());
+        self.jumped = None;
+        self.opening = self.live.then_some(None);
         window.focus(&self.input.read(cx).focus_handle(cx), cx);
         if !self.live {
             return;
@@ -2083,12 +2097,16 @@ impl VectorApp {
             views
         });
         cx.spawn(async move |this, cx| {
-            let Ok(Ok(mut views)) = rx.await else { return };
-            views.reverse();
+            let res = rx.await;
             this.update(cx, |this, cx| {
                 if this.open.as_ref() != Some(&id) {
                     return;
                 }
+                let Ok(Ok(mut views)) = res else {
+                    this.opening = None;
+                    return;
+                };
+                views.reverse();
                 if let Some(chat) = this.store.borrow_mut().chat_mut(&id) {
                     // Anything newer that landed meanwhile stays.
                     let newest = views.last().map(|m| m.at).unwrap_or(0);
@@ -2101,13 +2119,176 @@ impl VectorApp {
                     chat.messages.extend(later);
                 }
                 let count = this.rebuild_rows();
-                this.timeline = timeline_state(count);
+                this.timeline = timeline_state(count, cx.entity().downgrade());
                 this.timeline.scroll_to_end();
+                if let Some(Some(jump)) = this.opening.take() {
+                    this.jump_to_message(jump, cx);
+                }
                 cx.notify();
             })
             .ok();
         })
         .detach();
+    }
+
+    /// The open chat's rows re-laid with the row at the top staying put.
+    fn relayout_keeping_top(&mut self) {
+        let top = self.timeline.logical_scroll_top();
+        let store = self.store.borrow();
+        let chat = self.open.as_ref().and_then(|id| store.chat(id));
+        let held = chat.and_then(|c| {
+            self.rows.get(top.item_ix..)?.iter().find_map(|r| match r {
+                Row::Message { index, .. } => c.messages.get(*index).map(|m| m.id.clone()),
+                _ => None,
+            })
+        });
+        drop(store);
+        let old = self.timeline.item_count();
+        let new = self.rebuild_rows();
+        self.timeline.splice(0..old, new);
+        if let Some(ix) = held.and_then(|id| self.row_of(&id)) {
+            self.timeline.scroll_to(gpui::ListOffset {
+                item_ix: ix,
+                offset_in_item: top.offset_in_item,
+            });
+        }
+    }
+
+    /// The timeline row of a message in the open chat.
+    fn row_of(&self, id: &str) -> Option<usize> {
+        let store = self.store.borrow();
+        let chat = store.chat(self.open.as_deref()?)?;
+        self.rows.iter().position(|r| matches!(r, Row::Message { index, .. } if chat.messages.get(*index).is_some_and(|m| m.id == id)))
+    }
+
+    /// Messages from the database folded into the open chat, in order; how many were new.
+    fn merge_messages(&mut self, chat: &str, views: Vec<Message>) -> usize {
+        let mut store = self.store.borrow_mut();
+        let Some(c) = store.chat_mut(chat) else {
+            return 0;
+        };
+        let have: HashSet<String> = c.messages.iter().map(|m| m.id.clone()).collect();
+        let fresh: Vec<Message> = views
+            .into_iter()
+            .filter(|m| !have.contains(&m.id))
+            .collect();
+        let n = fresh.len();
+        if n > 0 {
+            c.messages.extend(fresh);
+            c.messages.sort_by_key(|m| m.at);
+        }
+        n
+    }
+
+    /// The page of history before the oldest message held.
+    fn load_older(&mut self, cx: &mut Context<Self>) {
+        let Some(id) = self.open.clone() else { return };
+        if !self.live || self.paging || self.history_done.contains(id.as_ref()) {
+            return;
+        }
+        let Some(anchor) = self
+            .store
+            .borrow()
+            .chat(&id)
+            .and_then(|c| c.messages.first())
+            .map(|m| m.id.clone())
+        else {
+            return;
+        };
+        self.paging = true;
+        let chat_id = id.to_string();
+        let rx = backend::run(messaging::messages_around(chat_id, anchor, 101, 0));
+        cx.spawn(async move |this, cx| {
+            let res = rx.await;
+            this.update(cx, |this, cx| {
+                this.paging = false;
+                if this.open.as_ref() != Some(&id) {
+                    return;
+                }
+                let views = match res {
+                    Ok(Ok(v)) => v,
+                    _ => return,
+                };
+                if this.merge_messages(&id, views) == 0 {
+                    this.history_done.insert(id.to_string());
+                    return;
+                }
+                this.relayout_keeping_top();
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// `jumpToMessage`: centre the open chat on a message and flash it, loading it first if needed.
+    fn jump_to_message(&mut self, id: String, cx: &mut Context<Self>) {
+        if let Some(wait) = self.opening.as_mut() {
+            *wait = Some(id);
+            return;
+        }
+        if let Some(ix) = self.row_of(&id) {
+            self.land_on(ix, id, cx);
+            return;
+        }
+        let Some(chat) = self.open.clone() else {
+            return;
+        };
+        if !self.live {
+            return;
+        }
+        let rx = backend::run(messaging::messages_around(
+            chat.to_string(),
+            id.clone(),
+            51,
+            5000,
+        ));
+        cx.spawn(async move |this, cx| {
+            let Ok(Ok(views)) = rx.await else { return };
+            this.update(cx, |this, cx| {
+                if this.open.as_ref() != Some(&chat) || views.is_empty() {
+                    return;
+                }
+                this.merge_messages(&chat, views);
+                this.history_done.remove(chat.as_ref());
+                this.relayout_keeping_top();
+                if let Some(ix) = this.row_of(&id) {
+                    this.land_on(ix, id, cx);
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn land_on(&mut self, ix: usize, id: String, cx: &mut Context<Self>) {
+        self.timeline.pause_following_tail();
+        self.timeline.scroll_to(gpui::ListOffset {
+            item_ix: ix,
+            offset_in_item: px(0.),
+        });
+        // Centred once a layout has measured the rows above it.
+        let list = self.timeline.clone();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(32))
+                .await;
+            let h = list.viewport_bounds().size.height;
+            let row = list.bounds_for_item(ix).map_or(px(0.), |b| b.size.height);
+            if list.logical_scroll_top().item_ix == ix {
+                list.scroll_by(-((h - row) / 2.).max(px(0.)));
+            }
+            this.update(cx, |_, cx| cx.notify()).ok();
+        })
+        .detach();
+        if self
+            .jumped
+            .as_ref()
+            .is_none_or(|(j, at)| *j != id || at.elapsed().as_secs_f32() >= 1.5)
+        {
+            self.jumped = Some((id, std::time::Instant::now()));
+        }
+        cx.notify();
     }
 
     /// A click on a message's text.
@@ -2167,6 +2348,7 @@ impl VectorApp {
                 }
             }
             Act::Text(t) => self.on_text(id, t, window, cx),
+            Act::Jump(target) => self.jump_to_message(target, cx),
             Act::Embed(a) => self.on_embed(a, window, cx),
             Act::Pack(a) => self.on_pack(a, cx),
             Act::Hover(true) => {
@@ -4396,6 +4578,10 @@ impl VectorApp {
         let media = self.media.clone();
         let live = self.live;
         let invites = Rc::new(self.invite_previews.clone());
+        let jumped = self
+            .jumped
+            .clone()
+            .filter(|(_, t)| t.elapsed().as_secs_f32() < 1.5);
         let messages = list(self.timeline.clone(), move |i, window, cx| {
             let rows_store = rows_store.borrow();
             let (Some(chat), Some(row)) = (rows_store.chat(&rows_id), rows.get(i)) else {
@@ -4417,7 +4603,20 @@ impl VectorApp {
                 scale: window.scale_factor(),
                 held: rows_store.is_request(chat),
                 invites: &invites,
+                jumped: jumped
+                    .as_ref()
+                    .map(|(id, t)| (id.as_str(), t.elapsed().as_secs_f32())),
             };
+            if ctx.jumped.is_some_and(|(id, _)| {
+                chat.messages
+                    .get(match row {
+                        Row::Message { index, .. } => *index,
+                        _ => usize::MAX,
+                    })
+                    .is_some_and(|m| m.id == id)
+            }) {
+                window.request_animation_frame();
+            }
             // A divider's 10px margins stand in for the row's own above it.
             let after_message = i > 0 && matches!(rows[i - 1], Row::Message { .. });
             let el = timeline_row(&ctx, row, after_message);
@@ -4599,9 +4798,18 @@ fn request_bar(npub: String, pictures: bool, cx: &mut Context<VectorApp>) -> imp
 
 /// A short chat sits at the top, as the Tauri list does; a long one opens at its end and
 /// follows new messages while scrolled there.
-fn timeline_state(count: usize) -> ListState {
+fn timeline_state(count: usize, app: gpui::WeakEntity<VectorApp>) -> ListState {
     let state = ListState::new(count, ListAlignment::Top, px(600.));
     state.set_follow_mode(gpui::FollowMode::Tail);
+    // Near the top, the next page of history.
+    state.set_scroll_handler(move |ev, _, cx| {
+        if ev.visible_range.start < 4 && ev.count > 0 {
+            let app = app.clone();
+            cx.defer(move |cx| {
+                app.update(cx, |app, cx| app.load_older(cx)).ok();
+            });
+        }
+    });
     state
 }
 
@@ -7624,6 +7832,9 @@ impl VectorApp {
                 if self.open.as_deref() != Some(a.target.as_str()) {
                     self.open_chat(a.target.into(), window, cx);
                 }
+                if let Some(m) = a.message {
+                    self.jump_to_message(m, cx);
+                }
             }
             "emoji_pack" => self.open_pack_details(a.target, cx),
             "community_invite" => self.preview_invite_link(a.target, window, cx),
@@ -7832,11 +8043,12 @@ impl VectorApp {
             let Ok(at) = rx.await else { return };
             this.update_in(cx, |this, window, cx| {
                 match (at.chat, room) {
-                    (Some(chat), Some(room)) if chat == room => {}
+                    (Some(chat), Some(room)) if chat == room => this.jump_to_message(message, cx),
                     (Some(chat), None) => {
                         if this.open.as_deref() != Some(chat.as_str()) {
                             this.open_chat(chat.into(), window, cx);
                         }
+                        this.jump_to_message(message, cx);
                     }
                     (_, room) if at.deleted => {
                         let _ = room;

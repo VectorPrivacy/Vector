@@ -54,6 +54,8 @@ pub enum Act {
     Embed(crate::embeds::Act),
     /// An emoji pack card's controls.
     Pack(crate::packs::Act),
+    /// A reply's quote: go to the message it answers.
+    Jump(String),
 }
 
 pub type OnAct = Rc<dyn Fn(&str, Act, &mut Window, &mut App)>;
@@ -83,6 +85,21 @@ pub struct Ctx<'a> {
     pub held: bool,
     /// Invite links looked up, by invite key.
     pub invites: &'a HashMap<String, crate::newchat::Preview>,
+    /// The message a jump landed on, and seconds since.
+    pub jumped: Option<(&'a str, f32)>,
+}
+
+/// `highlightMessage`: in to 20%, held to 80%, out, over 1.5s eased out.
+pub fn jump_flash(t: f32) -> f32 {
+    let p = 1. - (1. - (t / 1.5).clamp(0., 1.)).powi(2);
+    let a = if p < 0.2 {
+        p / 0.2
+    } else if p < 0.8 {
+        1.
+    } else {
+        (1. - p) / 0.2
+    };
+    0.18 * a
 }
 
 pub fn base_look() -> Look {
@@ -240,6 +257,9 @@ pub fn message_row(ctx: &Ctx, index: usize, first: bool, gap: f32) -> AnyElement
                 .font_family(RUBIK)
                 .hover(|s| s.bg(white_a(0.03)))
                 .when(replying, |d| d.bg(white_a(0.05)).border_color(white_a(0.5)))
+                .when_some(ctx.jumped.filter(|(id, _)| *id == m.id), |d, (_, t)| {
+                    d.bg(ca(90, 252, 180, jump_flash(t)))
+                })
                 .when(failed, |d| {
                     d.bg(ca(255, 46, 169, 0.1)).border_color(c(DANGER))
                 })
@@ -938,8 +958,13 @@ fn reply_quote(ctx: &Ctx, m: &Message) -> Option<AnyElement> {
         .border_t(px(2.))
         .border_color(white_a(0.25))
         .rounded_tl(px(8.));
+    let (on, id, parent_id) = (ctx.on_act.clone(), m.id.clone(), m.replied_to.clone());
+    let (on_name, name_id, name_npub) = (ctx.on_act.clone(), m.id.clone(), npub.clone());
     Some(
         div()
+            .id(SharedString::from(format!("r-{}", m.id)))
+            .cursor_pointer()
+            .on_click(move |_, w, cx| on(&id, Act::Jump(parent_id.clone()), w, cx))
             .relative()
             .flex()
             .items_center()
@@ -962,6 +987,17 @@ fn reply_quote(ctx: &Ctx, m: &Message) -> Option<AnyElement> {
                     .whitespace_nowrap()
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(white_a(0.7))
+                    .id("reply-name")
+                    .hover(|s| s.underline())
+                    .on_click(move |_, w, cx| {
+                        cx.stop_propagation();
+                        on_name(
+                            &name_id,
+                            Act::Text(crate::inline::Target::Mention(name_npub.clone().into())),
+                            w,
+                            cx,
+                        )
+                    })
                     .child(ctx.store.chat_name(&npub, &ctx.chat.id)),
             )
             .child(snippet)

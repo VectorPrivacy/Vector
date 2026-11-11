@@ -320,3 +320,14 @@ pub fn has_metadata(path: &std::path::Path) -> bool {
     }
     std::fs::read(path).is_ok_and(|b| crate::shared::image::image_bytes_have_metadata(&b, &ext))
 }
+
+/// `before` messages up to and including `anchor`, then `after` past it, oldest first.
+pub async fn messages_around(
+    chat_id: String,
+    anchor: String,
+    before: usize,
+    after: usize,
+) -> Result<Vec<Message>, String> {
+    let id = db::id_cache::get_chat_id_by_identifier(&chat_id)?;
+    db::events::get_messages_around(id, &anchor, before, after).await
+}
