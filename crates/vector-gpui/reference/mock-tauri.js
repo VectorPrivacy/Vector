@@ -5,7 +5,7 @@
     const answers = {
         get_platform_features: { transcription: false, notification_sounds: false, os: 'linux', is_mobile: false, debug_mode: true, media_url: null, self_update: false, share_audio: false, players: false },
         debug_hot_reload_sync: { success: true, npub: FIX.npub, profiles: FIX.profiles, chats: FIX.chats, pinned: [] },
-        get_theme: 'vector', get_encryption_status: { enabled: false }, get_archived_chats: [], list_emoji_packs: [], get_relays: [], get_accounts: [{ npub: FIX.npub }], get_current_account: FIX.npub,
+        get_theme: 'vector', transport_get_state: { supported: ['clearnet'], prelogin: 'clearnet', kind: 'clearnet' }, get_encryption_status: { enabled: false }, get_archived_chats: [], list_emoji_packs: [], get_relays: [], get_accounts: [{ npub: FIX.npub }], get_current_account: FIX.npub,
     };
     const msgs = (id) => (FIX.chats.find((c) => c.id === id)?.messages || []).slice().sort((a, b) => a.at - b.at);
     const fns = {
@@ -21,10 +21,22 @@
             return [c.id, c.messages.slice(i + 1).filter((m) => !m.mine).length];
         })),
         mark_as_read: ({ chatId, messageId }) => { const c = FIX.chats.find((x) => x.id === chatId); if (c && messageId) c.last_read = messageId; return null; },
+        create_account: () => ({ public: FIX.npub, existing: false }), login: () => { throw 'Invalid nsec'; },
         get_system_events: () => [], pivx_get_chat_payments: () => [], get_message_delete_meta_bulk: () => [],
         get_chat_commands: () => [], list_communities: () => [], get_hidden_banners: () => [],
         get_community_join_order: () => [], get_my_badges: () => [], get_emoji_usage: () => [],
     };
+    // MOCK_MODE: 'app' (signed in), 'login' (no account) or 'unlock' (a PIN-locked account).
+    const MODE = window.__MOCK_MODE__ || 'app';
+    if (MODE !== 'app') {
+        delete answers.debug_hot_reload_sync;
+        fns.debug_hot_reload_sync = () => { throw 'Backend not initialized - perform normal login'; };
+        answers.get_encryption_and_key = MODE === 'login'
+            ? { account_exists: false, enabled: false, security_type: 'pin', signer_type: 'local' }
+            : { account_exists: true, enabled: true, security_type: 'pin', signer_type: 'local' };
+        answers.get_accounts = MODE === 'login' ? [] : [{ npub: FIX.npub }];
+        answers.get_current_account = MODE === 'login' ? null : FIX.npub;
+    }
     const seen = new Set();
     window.__mockMissed = [];
     const invoke = async (cmd, args) => {

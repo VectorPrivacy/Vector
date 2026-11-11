@@ -27,6 +27,9 @@ pub struct Store {
     pub media_root: PathBuf,
     /// A frozen clock for reproducible renders; `None` follows the wall clock.
     pub frozen_now_ms: Option<u64>,
+    /// Unread counts from the database (a live account holds only each chat's last message);
+    /// `None` counts from the messages held.
+    pub unread: Option<HashMap<String, u32>>,
 }
 
 impl Store {
@@ -40,7 +43,51 @@ impl Store {
             chats,
             media_root: path.parent().unwrap_or(Path::new(".")).to_path_buf(),
             frozen_now_ms: Some(f.now),
+            unread: None,
         })
+    }
+
+    /// A live account's store, filled as its events arrive.
+    pub fn live() -> Self {
+        Self {
+            my_npub: String::new(),
+            profiles: HashMap::new(),
+            chats: Vec::new(),
+            media_root: PathBuf::from("/"),
+            frozen_now_ms: None,
+            unread: Some(HashMap::new()),
+        }
+    }
+
+    pub fn unread_count(&self, chat: &SerializableChat) -> usize {
+        match &self.unread {
+            Some(counts) => counts.get(&chat.id).copied().unwrap_or(0) as usize,
+            None => unread_count(chat),
+        }
+    }
+
+    /// A message arrived or was sent: appended, or put in place by time.
+    pub fn insert_message(&mut self, chat_id: &str, msg: vector_core::types::Message) -> bool {
+        let Some(chat) = self.chat_mut(chat_id) else { return false };
+        if chat.messages.iter().any(|m| m.id == msg.id) {
+            return true;
+        }
+        let at = chat.messages.partition_point(|m| m.at <= msg.at);
+        chat.messages.insert(at, msg);
+        self.resort();
+        true
+    }
+
+    /// A message changed (sent, failed, edited, reacted to): `old_id` is the one it replaces.
+    pub fn replace_message(&mut self, chat_id: &str, old_id: &str, msg: vector_core::types::Message) {
+        let Some(chat) = self.chat_mut(chat_id) else { return };
+        match chat.messages.iter().position(|m| m.id == old_id || m.id == msg.id) {
+            Some(i) => chat.messages[i] = msg,
+            None => {
+                let at = chat.messages.partition_point(|m| m.at <= msg.at);
+                chat.messages.insert(at, msg);
+            }
+        }
     }
 
     pub fn now_ms(&self) -> u64 {

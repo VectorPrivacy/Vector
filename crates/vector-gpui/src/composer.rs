@@ -12,6 +12,8 @@ use gpui::{
 };
 use unicode_segmentation::*;
 
+use gpui::Hsla;
+
 use crate::theme::*;
 
 actions!(
@@ -44,7 +46,32 @@ pub struct TextInput {
     last_layout: Option<ShapedLine>,
     last_bounds: Option<Bounds<Pixels>>,
     is_selecting: bool,
+    look: Look,
+    /// Enter keeps the text (a login field's caller reads and clears it).
+    clear_on_submit: bool,
+    submit_empty: bool,
 }
+
+/// How a field draws: the composer's, or a login field's.
+#[derive(Clone)]
+pub struct Look {
+    pub size: Pixels,
+    pub line_height: Pixels,
+    pub color: Hsla,
+    pub placeholder: Hsla,
+    /// Shows a bullet per character, as a password field does.
+    pub masked: bool,
+    /// The size bullets take once something is typed.
+    pub masked_size: Option<Pixels>,
+}
+
+impl Default for Look {
+    fn default() -> Self {
+        Self { size: px(15.), line_height: px(21.), color: white_a(0.85), placeholder: white_a(0.38), masked: false, masked_size: None }
+    }
+}
+
+const BULLET: &str = "\u{2022}";
 
 impl TextInput {
     fn left(&mut self, _: &Left, window: &mut Window, cx: &mut Context<Self>) {
@@ -200,7 +227,7 @@ impl TextInput {
         if position.y > bounds.bottom() {
             return self.content.len();
         }
-        line.closest_index_for_x(position.x - bounds.left())
+        self.from_display(line.closest_index_for_x(position.x - bounds.left()))
     }
 
     fn select_to(&mut self, offset: usize, window: &Window, cx: &mut Context<Self>) {
@@ -413,7 +440,7 @@ impl EntityInputHandler for TextInput {
         _cx: &mut Context<Self>,
     ) -> Option<Bounds<Pixels>> {
         let last_layout = self.last_layout.as_ref()?;
-        if last_layout.text != self.content {
+        if self.look.masked || last_layout.text != self.content {
             return None;
         }
         let range = self.range_from_utf16(&range_utf16);
@@ -504,12 +531,17 @@ impl Element for TextElement {
     ) -> Self::PrepaintState {
         let input = self.input.read(cx);
         let content = input.content.clone();
-        let selected_range = input.selected_range.clone();
-        let cursor = input.cursor_offset();
-        let style = window.text_style();
+        let selected_range = input.to_display(input.selected_range.start)..input.to_display(input.selected_range.end);
+        let cursor = input.to_display(input.cursor_offset());
+        let mut style = window.text_style();
 
         let (display_text, text_color) = if content.is_empty() {
-            (input.placeholder.clone(), white_a(0.38))
+            (input.placeholder.clone(), input.look.placeholder)
+        } else if input.look.masked {
+            if let Some(size) = input.look.masked_size {
+                style.font_size = size.into();
+            }
+            (BULLET.repeat(content.graphemes(true).count()).into(), style.color)
         } else {
             (content, style.color)
         };
@@ -522,7 +554,7 @@ impl Element for TextElement {
             underline: None,
             strikethrough: None,
         };
-        let runs = if let Some(marked_range) = input.marked_range.as_ref() {
+        let runs = if let Some(marked_range) = input.marked_range.as_ref().filter(|_| !input.look.masked) {
             vec![
                 TextRun {
                     len: marked_range.start,
@@ -661,9 +693,9 @@ impl Render for TextInput {
             .on_action(cx.listener(Self::send))
             .w_full()
             .font_family(RUBIK)
-            .line_height(px(21.))
-            .text_size(px(15.))
-            .text_color(white_a(0.85))
+            .line_height(self.look.line_height)
+            .text_size(self.look.size)
+            .text_color(self.look.color)
             .child(TextElement { input: cx.entity() })
     }
 }
@@ -690,7 +722,56 @@ impl TextInput {
             last_layout: None,
             last_bounds: None,
             is_selecting: false,
+            look: Look::default(),
+            clear_on_submit: true,
+            submit_empty: false,
         }
+    }
+
+    pub fn keep_on_submit(mut self) -> Self {
+        self.clear_on_submit = false;
+        self.submit_empty = true;
+        self
+    }
+
+    pub fn with_look(mut self, look: Look) -> Self {
+        self.look = look;
+        self
+    }
+
+    pub fn text(&self) -> &str {
+        &self.content
+    }
+
+    pub fn set_masked(&mut self, masked: bool, cx: &mut Context<Self>) {
+        self.look.masked = masked;
+        cx.notify();
+    }
+
+    pub fn set_placeholder(&mut self, placeholder: impl Into<SharedString>, cx: &mut Context<Self>) {
+        self.placeholder = placeholder.into();
+        cx.notify();
+    }
+
+    pub fn clear(&mut self, window: &Window, cx: &mut Context<Self>) {
+        self.reset(window, cx);
+    }
+
+    /// A content offset as an offset into what is drawn.
+    fn to_display(&self, offset: usize) -> usize {
+        if !self.look.masked {
+            return offset;
+        }
+        self.content[..offset.min(self.content.len())].graphemes(true).count() * BULLET.len()
+    }
+
+    /// An offset into what is drawn as a content offset.
+    fn from_display(&self, offset: usize) -> usize {
+        if !self.look.masked {
+            return offset;
+        }
+        let n = offset / BULLET.len();
+        self.content.grapheme_indices(true).nth(n).map(|(i, _)| i).unwrap_or(self.content.len())
     }
 
     fn send(&mut self, _: &Send, window: &mut Window, cx: &mut Context<Self>) {
@@ -699,10 +780,12 @@ impl TextInput {
             return;
         }
         let text = self.content.trim().to_string();
-        if text.is_empty() {
+        if text.is_empty() && !self.submit_empty {
             return;
         }
-        self.reset(window, cx);
+        if self.clear_on_submit {
+            self.reset(window, cx);
+        }
         cx.emit(SendText(text));
     }
 }

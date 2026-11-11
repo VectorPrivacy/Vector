@@ -7222,16 +7222,24 @@ name = "vector-gpui"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bip39",
  "chrono",
+ "dirs",
  "env_logger",
+ "futures",
  "gpui",
  "gpui_platform",
  "log",
+ "nostr-sdk",
+ "reqwest",
+ "rusqlite",
  "rust-embed",
  "serde",
  "serde_json",
+ "tokio",
  "unicode-segmentation",
  "vector-core",
+ "zeroize",
 ]
 
 [[package]]

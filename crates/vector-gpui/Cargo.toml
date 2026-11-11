@@ -22,6 +22,15 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "std"
 rust-embed = { version = "8", features = ["interpolate-folder-path"] }
 log = "0.4"
 env_logger = "0.11"
+# The live account: core's runtime and the crates its API speaks in.
+tokio = { version = "1.49.0", features = ["rt-multi-thread", "sync", "time", "macros", "fs"] }
+futures = "0.3"
+nostr-sdk = "=0.45.4"
+bip39 = "2.2.2"
+zeroize = "1.8"
+rusqlite = { version = "0.38", features = ["bundled"] }
+reqwest = { version = "0.13", default-features = false }
+dirs = "6"
 
 # Its own workspace: GPUI pins dependency versions the main client must not inherit.
 [workspace]

@@ -13,7 +13,14 @@ use gpui::{
 use vector_core::chat::SerializableChat;
 use vector_core::types::Message;
 
+use futures::StreamExt;
+use futures::channel::mpsc::UnboundedReceiver;
+use serde_json::Value;
+use vector_core::profile::SlimProfile;
+
+use crate::backend::{self, UiEvent, account, messaging, sync};
 use crate::composer::{SendText, TextInput};
+use crate::login::{LoggedIn, LoginView};
 use crate::data::{self, Row, Store};
 use crate::theme::*;
 
@@ -24,7 +31,17 @@ const ROW_PITCH: f32 = 54.;
 
 type Shared = Rc<RefCell<Store>>;
 
+enum Screen {
+    /// Finding the account on disk.
+    Booting,
+    Login(Entity<LoginView>),
+    Main,
+}
+
 pub struct VectorApp {
+    screen: Screen,
+    /// Backed by a live account (else fixtures, for parity renders).
+    live: bool,
     store: Shared,
     open: Option<SharedString>,
     timeline: ListState,
@@ -32,24 +49,182 @@ pub struct VectorApp {
     rows: Rc<Vec<Row>>,
     read_anchor: Option<String>,
     input: Entity<TextInput>,
+    syncing: bool,
 }
 
 impl VectorApp {
-    pub fn new(store: Store, open: Option<String>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    fn base(store: Store, live: bool, cx: &mut Context<Self>) -> Self {
         let input = cx.new(|cx| TextInput::new("Enter message...", cx));
         cx.subscribe(&input, |app, _, SendText(text), cx| app.send(text.clone(), cx)).detach();
-        let mut app = Self {
+        Self {
+            screen: Screen::Main,
+            live,
             store: Rc::new(RefCell::new(store)),
             open: None,
             timeline: ListState::new(0, ListAlignment::Top, px(600.)),
             rows: Rc::default(),
             read_anchor: None,
             input,
-        };
+            syncing: false,
+        }
+    }
+
+    /// Fixture data, offline: what the parity renders compare.
+    pub fn fixtures(store: Store, open: Option<String>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let mut app = Self::base(store, false, cx);
         if let Some(id) = open {
             app.open_chat(id.into(), window, cx);
         }
         app
+    }
+
+    /// A live account: login or unlock, then the app as its events arrive.
+    pub fn live(mut events: UnboundedReceiver<UiEvent>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let mut app = Self::base(Store::live(), true, cx);
+        app.screen = Screen::Booting;
+        cx.spawn_in(window, async move |this, cx| {
+            while let Some(ev) = events.next().await {
+                if this.update_in(cx, |this, window, cx| this.on_event(ev, window, cx)).is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
+        let probe = backend::run(async { account::boot() });
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(info) = probe.await else { return };
+            this.update_in(cx, |this, window, cx| match (&info.account, info.encrypted) {
+                (Some(_), false) => this.unlock_plain(window, cx),
+                (Some(_), true) => this.show_login(Some(info.security_type.as_str()), window, cx),
+                (None, _) => this.show_login(None, window, cx),
+            })
+            .ok();
+        })
+        .detach();
+        app
+    }
+
+    fn show_login(&mut self, unlock: Option<&str>, window: &mut Window, cx: &mut Context<Self>) {
+        let view = cx.new(|cx| LoginView::new(unlock, window, cx));
+        cx.subscribe_in(&view, window, |this, _, e: &LoggedIn, window, cx| this.logged_in(e.npub.clone(), window, cx)).detach();
+        self.screen = Screen::Login(view);
+        cx.notify();
+    }
+
+    /// An account kept without encryption opens straight away.
+    fn unlock_plain(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let rx = backend::run(async {
+            let npub = account::unlock(None).await?;
+            account::connect().await;
+            Ok::<_, String>(npub)
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let result = rx.await.unwrap_or_else(|_| Err("Backend stopped".into()));
+            this.update_in(cx, |this, window, cx| match result {
+                Ok(npub) => this.logged_in(npub, window, cx),
+                Err(e) => {
+                    log::error!("unlock failed: {e}");
+                    this.show_login(None, window, cx);
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn logged_in(&mut self, npub: String, _window: &mut Window, cx: &mut Context<Self>) {
+        self.store.borrow_mut().my_npub = npub;
+        self.screen = Screen::Main;
+        self.syncing = true;
+        let _ = backend::run(async {
+            sync::fetch_messages(true).await;
+            sync::notifs();
+        });
+        cx.notify();
+    }
+
+    fn refresh_unread(&mut self, cx: &mut Context<Self>) {
+        let rx = backend::run(messaging::unread_counts());
+        cx.spawn(async move |this, cx| {
+            let Ok(counts) = rx.await else { return };
+            this.update(cx, |this, cx| {
+                this.store.borrow_mut().unread = Some(counts);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn on_event(&mut self, ev: UiEvent, window: &mut Window, cx: &mut Context<Self>) {
+        match ev {
+            UiEvent::Booted(boot) => {
+                {
+                    let mut store = self.store.borrow_mut();
+                    store.my_npub = boot.npub;
+                    store.profiles = boot.profiles.into_iter().map(|p| (p.id.clone(), p)).collect();
+                    store.chats = boot.chats;
+                    store.resort();
+                }
+                self.refresh_unread(cx);
+            }
+            UiEvent::Core(name, payload) => self.on_core_event(&name, payload, window, cx),
+        }
+        cx.notify();
+    }
+
+    fn on_core_event(&mut self, name: &str, payload: Value, _window: &mut Window, cx: &mut Context<Self>) {
+        let chat_id = payload.get("chat_id").and_then(Value::as_str).unwrap_or_default().to_string();
+        match name {
+            "message_new" | "message_update" => {
+                let Some(msg) = payload.get("message").cloned().and_then(|m| serde_json::from_value::<Message>(m).ok()) else { return };
+                let known = if name == "message_new" {
+                    self.store.borrow_mut().insert_message(&chat_id, msg)
+                } else {
+                    let old = payload.get("old_id").and_then(Value::as_str).unwrap_or(&msg.id).to_string();
+                    self.store.borrow_mut().replace_message(&chat_id, &old, msg);
+                    true
+                };
+                if !known {
+                    let id = chat_id.clone();
+                    let rx = backend::run(messaging::chat_snapshot(id));
+                    cx.spawn(async move |this, cx| {
+                        let Ok(Some(chat)) = rx.await else { return };
+                        this.update(cx, |this, cx| {
+                            let mut store = this.store.borrow_mut();
+                            if store.chat(&chat.id).is_none() {
+                                store.chats.push(chat);
+                                store.resort();
+                            }
+                            cx.notify();
+                        })
+                        .ok();
+                    })
+                    .detach();
+                }
+                if self.open.as_deref() == Some(chat_id.as_str()) {
+                    self.refresh_rows(true);
+                }
+            }
+            "profile_update" => {
+                if let Ok(p) = serde_json::from_value::<SlimProfile>(payload) {
+                    self.store.borrow_mut().profiles.insert(p.id.clone(), p);
+                }
+            }
+            "chat_mark_read" => {
+                let last = payload.get("last_read").and_then(Value::as_str).unwrap_or_default().to_string();
+                if let Some(chat) = self.store.borrow_mut().chat_mut(&chat_id) {
+                    chat.last_read = last;
+                }
+            }
+            "unread_counts_stale" => self.refresh_unread(cx),
+            "sync_progress" => self.syncing = true,
+            "sync_finished" => {
+                self.syncing = false;
+                self.refresh_unread(cx);
+            }
+            _ => {}
+        }
     }
 
     fn rebuild_rows(&mut self) -> usize {
@@ -64,17 +239,73 @@ impl VectorApp {
         self.rows.len()
     }
 
-    fn open_chat(&mut self, id: SharedString, window: &mut Window, cx: &mut Context<Self>) {
-        self.read_anchor = self.store.borrow().chat(&id).map(|c| c.last_read.clone());
-        self.open = Some(id);
-        let count = self.rebuild_rows();
-        self.timeline = ListState::new(count, ListAlignment::Top, px(600.));
-        window.focus(&self.input.read(cx).focus_handle(cx), cx);
+    /// The open chat's rows changed: re-laid, following the end when `follow`.
+    fn refresh_rows(&mut self, follow: bool) {
+        let at_end = self.timeline.logical_scroll_top().item_ix + 12 >= self.timeline.item_count();
+        let old = self.timeline.item_count();
+        let new = self.rebuild_rows();
+        self.timeline.splice(0..old, new);
+        if follow && at_end {
+            self.timeline.scroll_to_end();
+        }
     }
 
-    /// A local echo only: the send pipeline (vector-core `send_dm`) lands with the live account.
+    fn open_chat(&mut self, id: SharedString, window: &mut Window, cx: &mut Context<Self>) {
+        self.read_anchor = self.store.borrow().chat(&id).map(|c| c.last_read.clone());
+        self.open = Some(id.clone());
+        let count = self.rebuild_rows();
+        self.timeline = ListState::new(count, ListAlignment::Bottom, px(600.));
+        window.focus(&self.input.read(cx).focus_handle(cx), cx);
+        if !self.live {
+            return;
+        }
+        // History beyond the boot's last message comes from the database.
+        let chat_id = id.to_string();
+        messaging::set_active_chat(Some(chat_id.clone()));
+        let rx = backend::run(async move {
+            let views = messaging::message_views(chat_id.clone(), 200, 0).await;
+            messaging::mark_as_read(chat_id, None).await;
+            views
+        });
+        cx.spawn(async move |this, cx| {
+            let Ok(Ok(mut views)) = rx.await else { return };
+            views.reverse();
+            this.update(cx, |this, cx| {
+                if this.open.as_ref() != Some(&id) {
+                    return;
+                }
+                if let Some(chat) = this.store.borrow_mut().chat_mut(&id) {
+                    // Anything newer that landed meanwhile stays.
+                    let newest = views.last().map(|m| m.at).unwrap_or(0);
+                    let later: Vec<Message> = chat.messages.drain(..).filter(|m| m.at > newest && !views.iter().any(|v| v.id == m.id)).collect();
+                    chat.messages = views;
+                    chat.messages.extend(later);
+                }
+                let count = this.rebuild_rows();
+                this.timeline = ListState::new(count, ListAlignment::Bottom, px(600.));
+                this.timeline.scroll_to_end();
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     fn send(&mut self, text: String, cx: &mut Context<Self>) {
         let Some(id) = self.open.clone() else { return };
+        if self.live {
+            let receiver = id.to_string();
+            let rx = backend::run(messaging::send(receiver, text, String::new()));
+            cx.spawn(async move |this, cx| {
+                if let Ok(Err(e)) = rx.await {
+                    log::warn!("send failed: {e}");
+                    this.update(cx, |_, cx| cx.notify()).ok();
+                }
+            })
+            .detach();
+            return;
+        }
+        // Fixtures: a local echo.
         {
             let mut store = self.store.borrow_mut();
             let now = store.now_ms();
@@ -85,9 +316,7 @@ impl VectorApp {
             chat.messages.push(msg);
             store.resort();
         }
-        let old = self.timeline.item_count();
-        let new = self.rebuild_rows();
-        self.timeline.splice(old..old, new - old);
+        self.refresh_rows(false);
         self.timeline.scroll_to_end();
         cx.notify();
     }
@@ -95,37 +324,45 @@ impl VectorApp {
 
 impl Render for VectorApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let store = self.store.clone();
-        let store = store.borrow();
-        div()
+        let root = div()
             .size_full()
+            .relative()
             .flex()
             .flex_col()
             .bg(c(APP_BG))
             .font_family(INTER)
             .text_color(c(TEXT))
             .text_size(px(16.))
-            .line_height(px(24.))
-            .child(chrome(window))
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .flex_1()
-                    .min_h_0()
-                    .child(rail(&store, self.open.as_ref()))
-                    .child(chat_list(&self.store, &store, self.open.clone(), cx))
-                    .child(match self.open.clone() {
-                        Some(id) => self.chat_pane(&store, id, cx).into_any_element(),
-                        None => empty_pane().into_any_element(),
-                    }),
-            )
+            .line_height(px(24.));
+        match &self.screen {
+            Screen::Booting => return root.child(div().absolute().inset_0().child(chrome(window, true))),
+            Screen::Login(view) => {
+                return root.child(div().absolute().inset_0().child(view.clone())).child(div().absolute().top_0().left_0().right_0().child(chrome(window, true)));
+            }
+            Screen::Main => {}
+        }
+        let store = self.store.clone();
+        let store = store.borrow();
+        root.child(chrome(window, false)).child(
+            div()
+                .flex()
+                .flex_row()
+                .flex_1()
+                .min_h_0()
+                .child(rail(&store, self.open.as_ref()))
+                .child(chat_list(&self.store, &store, self.open.clone(), cx))
+                .child(match self.open.clone() {
+                    Some(id) => self.chat_pane(&store, id, cx).into_any_element(),
+                    None => empty_pane().into_any_element(),
+                }),
+        )
     }
 }
 
 // ── #window-chrome ──────────────────────────────────────────────────────────────────────
 
-fn chrome(window: &Window) -> impl IntoElement {
+/// The title strip; over the login screens it is only its controls, on the same art.
+fn chrome(window: &Window, login: bool) -> impl IntoElement {
     let maximized = window.is_maximized();
     let ctl = |id: &'static str, icon: &'static str, area: WindowControlArea, hover: u32| {
         div()
@@ -145,9 +382,7 @@ fn chrome(window: &Window) -> impl IntoElement {
         .flex_shrink_0()
         .flex()
         .items_center()
-        .bg(c(CHROME_BG))
-        .border_b_1()
-        .border_color(c(DIVIDER))
+        .when(!login, |d| d.bg(c(CHROME_BG)).border_b_1().border_color(c(DIVIDER)))
         .child(
             div()
                 .id("chrome-drag")
@@ -161,12 +396,12 @@ fn chrome(window: &Window) -> impl IntoElement {
                         window.start_window_move();
                     }
                 })
-                .child(
+                .when(!login, |d| d.child(
                     div()
                         .relative()
                         .child(img("ui/logo-mark.svg").absolute().left(px(12.)).top(px(5.5)).w(px(12.)).h(px(20.)))
                         .child(img("ui/logo-typeface.svg").absolute().left(px(32.)).top(px(9.5)).w(px(92.)).h(px(12.))),
-                ),
+                )),
         )
         .child(
             div()
@@ -217,9 +452,9 @@ fn rail(store: &Store, open: Option<&SharedString>) -> impl IntoElement {
     let unread: Vec<&SerializableChat> = store
         .chats
         .iter()
-        .filter(|c| data::unread_count(c) > 0 && open.is_none_or(|o| *o != c.id))
+        .filter(|c| store.unread_count(c) > 0 && open.is_none_or(|o| *o != c.id))
         .collect();
-    let any_unread = store.chats.iter().any(|c| data::unread_count(c) > 0);
+    let any_unread = store.chats.iter().any(|c| store.unread_count(c) > 0);
 
     // .ws-rail-messages.is-home
     let messages = div().pt(px(16.)).px(px(8.)).child(
@@ -490,7 +725,7 @@ fn chat_list(shared: &Shared, store: &Store, open: Option<SharedString>, cx: &mu
 
 /// `.chatlist-contact` (ChatlistRow.svelte).
 fn chat_row(store: &Store, chat: &SerializableChat, active: bool) -> gpui::Stateful<gpui::Div> {
-    let unread = data::unread_count(chat) > 0 && !active;
+    let unread = store.unread_count(chat) > 0 && !active;
     let (name_color, name_weight) = match (unread, active) {
         (true, _) => (c(0xffffff), FontWeight::BOLD),
         (false, true) => (c(0xffffff), FontWeight::NORMAL),
