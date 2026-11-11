@@ -23,6 +23,14 @@ pub struct LoggedIn {
 
 impl EventEmitter<LoggedIn> for LoginView {}
 
+/// Add Profile's milestones: the live account torn down for the new one, or the user backing out.
+pub enum AddProfile {
+    Committed,
+    Back,
+}
+
+impl EventEmitter<AddProfile> for LoginView {}
+
 #[derive(Clone, Copy, PartialEq)]
 enum Step {
     Start,
@@ -66,6 +74,8 @@ pub struct LoginView {
     bg_hidden: bool,
     popup: Option<Popup>,
     born: Instant,
+    /// Adding a profile over a live account: whether that account was already torn down.
+    adding: Option<bool>,
 }
 
 const DECRYPTING: &str = "Decrypting your keys...";
@@ -106,6 +116,7 @@ impl LoginView {
             bg_hidden: false,
             popup: None,
             born: Instant::now(),
+            adding: None,
         };
         if let Some(security) = unlock {
             view.unlock = true;
@@ -113,6 +124,23 @@ impl LoginView {
             view.start_credential(if security == "password" { Cred::Password } else { Cred::Pin }, window, cx);
         }
         view
+    }
+
+    /// The welcome screen over a live account, which stays until Create or Login commits.
+    pub fn adding(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let mut view = Self::new(None, window, cx);
+        view.adding = Some(false);
+        view
+    }
+
+    /// Commit Add Profile: true when the live account must be torn down first.
+    fn commit_adding(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.adding != Some(false) {
+            return false;
+        }
+        self.adding = Some(true);
+        cx.emit(AddProfile::Committed);
+        true
     }
 
     fn show_error(&mut self, title: impl Into<SharedString>, cx: &mut Context<Self>) {
@@ -128,7 +156,11 @@ impl LoginView {
     }
 
     fn create_account(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
-        let rx = backend::run(async {
+        let reset = self.commit_adding(cx);
+        let rx = backend::run(async move {
+            if reset {
+                account::reset().await;
+            }
             let npub = account::create().await?;
             account::connect().await;
             Ok::<_, String>(npub)
@@ -150,7 +182,11 @@ impl LoginView {
             return;
         }
         self.key.update(cx, |k, cx| k.clear(window, cx));
+        let reset = self.commit_adding(cx);
         let rx = backend::run(async move {
+            if reset {
+                account::reset().await;
+            }
             let imported = account::import(key).await?;
             if matches!(imported, account::Imported::Staged(_)) {
                 account::connect().await;
@@ -523,6 +559,10 @@ impl LoginView {
                     let _ = w;
                     cx.notify();
                 })))
+                .when(self.adding.is_some(), |d| {
+                    let view = cx.entity();
+                    d.child(lg_back("Changed your mind?\u{a0}", "Go Back", move |_, cx| view.update(cx, |_, cx| cx.emit(AddProfile::Back))))
+                })
                 .into_any_element(),
             Step::Import => {
                 let back = cx.entity();

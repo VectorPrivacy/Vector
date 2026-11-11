@@ -25,6 +25,7 @@ mod qr;
 mod shared;
 #[allow(dead_code, unused_imports, unsafe_op_in_unsafe_fn, clippy::all)]
 mod simd;
+mod switcher;
 mod theme;
 mod timeline;
 mod ui;

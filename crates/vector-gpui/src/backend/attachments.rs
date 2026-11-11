@@ -36,6 +36,11 @@ impl Drop for Active {
     }
 }
 
+/// Stop every running download: the account they belong to is leaving.
+pub fn cancel_all() {
+    ACTIVE.lock().unwrap().values_mut().for_each(|stop| *stop = true);
+}
+
 /// Stop a download at its next chunk. True when one was running, so its outcome event is owed.
 pub fn cancel(attachment_id: &str) -> bool {
     match ACTIVE.lock().unwrap().get_mut(&attachment_id.to_ascii_lowercase()) {

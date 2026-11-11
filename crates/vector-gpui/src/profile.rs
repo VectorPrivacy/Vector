@@ -25,6 +25,8 @@ pub enum Act {
     Edit,
     SetStatus,
     Switcher,
+    /// The open switcher's delete mode.
+    SwitcherEdit,
     /// Leave Edit Mode: save, or (true) cancel.
     ExitEdit(bool),
     RemoveBanner,
@@ -43,6 +45,8 @@ pub struct Screen {
     /// Copy feedback: (which, when).
     pub copied: Option<(Act, std::time::Instant)>,
     pub edit: Option<Edit>,
+    /// The account switcher hung from this header: open, and whether in delete mode.
+    pub switcher: Option<bool>,
 }
 
 /// Edit Mode's draft of our own profile.
@@ -71,7 +75,7 @@ impl Edit {
 
 impl Screen {
     pub fn new(npub: String, back: Option<SharedString>) -> Self {
-        Self { npub, back, more_open: false, copied: None, edit: None }
+        Self { npub, back, more_open: false, copied: None, edit: None, switcher: None }
     }
 
     fn copied(&self, which: Act) -> bool {
@@ -177,7 +181,13 @@ pub fn pane(store: &Store, s: &Screen, on: &OnAct, cx: &App) -> AnyElement {
                 .hover(|s| s.bg(white_a(0.05)))
                 .on_click(click(on, Act::Switcher))
                 .child(div().font_weight(FontWeight::BOLD).text_size(px(18.)).line_height(px(24.)).text_color(c(0xf7f4f4)).child("My Profile"))
-                .child(svg().path("ui/switcher-chevron.svg").size(px(14.)).text_color(white_a(0.7)))
+                .child(
+                    svg()
+                        .path("ui/switcher-chevron.svg")
+                        .size(px(14.))
+                        .text_color(white_a(0.7))
+                        .when(s.switcher.is_some(), |i| i.with_transformation(gpui::Transformation::rotate(gpui::radians(std::f32::consts::PI)))),
+                )
                 .into_any_element()
         } else {
             div()
@@ -222,6 +232,28 @@ pub fn pane(store: &Store, s: &Screen, on: &OnAct, cx: &App) -> AnyElement {
                         .cursor_pointer()
                         .on_click(click(on, Act::Back))
                         .child(svg().path("icons/chevron-double-left.svg").size(px(30.)).text_color(c(ACCENT))),
+                )
+            })
+            .when_some(s.switcher, |d, deleting| {
+                // .profile-switcher-trash-toggle
+                d.child(
+                    div()
+                        .id("profile-switcher-trash-toggle")
+                        .absolute()
+                        .left(px(10.))
+                        .top(px(13.))
+                        .p(px(5.))
+                        .rounded(px(4.))
+                        .cursor_pointer()
+                        .group("switcher-trash")
+                        .on_click(click(on, Act::SwitcherEdit))
+                        .child(
+                            svg()
+                                .path("ui/switcher-trash.svg")
+                                .size(px(24.))
+                                .text_color(if deleting { c(DANGER) } else { white_a(0.45) })
+                                .when(!deleting, |i| i.group_hover("switcher-trash", |s| s.text_color(white_a(0.75)))),
+                        ),
                 )
             })
             .child(info)

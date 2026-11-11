@@ -335,3 +335,69 @@ pub async fn connect() -> bool {
 pub fn set_active(npub: &str) -> Result<(), String> {
     db::write_active_account_file(npub)
 }
+
+/// How many accounts this device may add up to: the soft cap of its highest tier.
+pub fn account_cap() -> usize {
+    [3, 6, 9, usize::MAX][vector_core::badges::max_account_tier().min(3) as usize]
+}
+
+static RESET_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Tear the live account down to a fresh boot: its client, database, keys and transfers.
+pub async fn reset() {
+    let _serial = RESET_LOCK.lock().await;
+    super::attachments::cancel_all();
+    super::messaging::cancel_all_uploads();
+    vector_core::VectorCore.swap_session().await;
+    if let Some(bunker) = vector_core::drain_bunker_state() {
+        let _ = bunker.shutdown().await;
+    }
+    state::clear_pending_bunker_setup();
+    vector_core::transport::prelogin::cancel_start();
+    db::clear_current_account_in_memory();
+    abandon_pending();
+    state::set_encryption_enabled(false);
+    state::open_processing_gate();
+}
+
+/// Switch to another account on this device: the next boot opens it.
+pub async fn switch(npub: String) -> Result<(), String> {
+    if !accounts().iter().any(|a| a.npub == npub) {
+        return Err(format!("Unknown account: {npub}"));
+    }
+    set_active(&npub)?;
+    reset().await;
+    Ok(())
+}
+
+/// Remove an account and everything it keeps on this device. True when it was the live one;
+/// the marker then points at the most recent account left, if any.
+pub async fn delete(npub: String) -> Result<bool, String> {
+    if !accounts().iter().any(|a| a.npub == npub) {
+        return Err(format!("Unknown account: {npub}"));
+    }
+    let was_active = db::get_current_account().is_ok_and(|a| a == npub);
+    if was_active {
+        let _ = db::clear_active_account_file();
+        reset().await;
+    } else if db::read_active_account_file()?.is_some_and(|m| m == npub) {
+        let _ = db::clear_active_account_file();
+    }
+    let dir = db::account_dir(&npub)?;
+    match std::fs::remove_dir_all(&dir) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(format!("Failed to remove account directory: {e}")),
+        _ => {}
+    }
+    // Counted on disk, not validated: a locked database must not read as no account at all.
+    if db::list_account_npubs().map(|v| v.is_empty()).unwrap_or(false) {
+        let _ = std::fs::remove_dir_all(db::get_download_dir());
+    }
+    if was_active {
+        for next in accounts() {
+            if set_active(&next.npub).is_ok() {
+                break;
+            }
+        }
+    }
+    Ok(was_active)
+}

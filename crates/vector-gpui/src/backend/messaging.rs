@@ -13,6 +13,14 @@ static UPLOAD_CANCEL: LazyLock<Mutex<HashMap<String, Arc<AtomicBool>>>> = LazyLo
 /// A failure's reason, from `on_failed_reason` to the `on_failed` that follows it.
 static FAIL_REASONS: LazyLock<Mutex<HashMap<String, String>>> = LazyLock::new(Default::default);
 
+/// Stop every running upload and forget the failures: the account they belong to is leaving.
+pub fn cancel_all_uploads() {
+    let mut uploads = UPLOAD_CANCEL.lock().unwrap();
+    uploads.values().for_each(|flag| flag.store(true, std::sync::atomic::Ordering::Release));
+    uploads.clear();
+    FAIL_REASONS.lock().unwrap().clear();
+}
+
 pub fn cancel_upload(pending_id: &str) {
     if let Some(flag) = UPLOAD_CANCEL.lock().unwrap().get(pending_id) {
         flag.store(true, Ordering::Relaxed);

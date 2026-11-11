@@ -38,6 +38,11 @@
         blossom_upload_verdict: () => ({ likely: true, reasons: [] }),
         get_compression_status: () => window.__COMPRESSION__ || null,
         file_has_metadata: () => false,
+        list_accounts_with_metadata: () => FIX.profiles.slice(0, 3).map((p, i) => ({
+            npub: p.id, display_name: p.nickname || p.display_name || p.name || null,
+            avatar_url: null, avatar_cached: p.avatar_cached || null, has_encryption: false, last_active: 100 - i,
+        })),
+        get_max_account_tier: () => window.__ACCOUNT_TIER__ ?? 1,
     };
     // MOCK_MODE: 'app' (signed in), 'login' (no account) or 'unlock' (a PIN-locked account).
     const MODE = window.__MOCK_MODE__ || 'app';

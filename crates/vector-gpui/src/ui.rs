@@ -88,6 +88,10 @@ pub struct VectorApp {
     status: Option<Entity<TextInput>>,
     /// The QR overlay's code, and what holds focus while it shows.
     qr: Option<(std::sync::Arc<gpui::RenderImage>, gpui::FocusHandle)>,
+    switcher: Option<crate::switcher::Switcher>,
+    /// Add Profile is showing the login screen over this account: the account Back returns to,
+    /// and whether the old session was already torn down for the new one.
+    adding: Option<(String, bool)>,
 }
 
 #[derive(Clone, PartialEq)]
@@ -104,6 +108,7 @@ enum PopupAct {
     Delete { id: String, failed: bool },
     Block { npub: String },
     Nickname { npub: String },
+    RemoveAccount { npub: String },
 }
 
 impl VectorApp {
@@ -168,6 +173,8 @@ impl VectorApp {
             toast: None,
             status: None,
             qr: None,
+            switcher: None,
+            adding: None,
         }
     }
 
@@ -180,6 +187,12 @@ impl VectorApp {
         if let Ok(who) = std::env::var("VECTOR_PROFILE") {
             let npub = if who == "me" { app.store.borrow().my_npub.clone() } else { who };
             app.open_profile(npub, cx);
+        }
+        if let Ok(mode) = std::env::var("VECTOR_SWITCHER") {
+            app.on_profile(crate::profile::Act::Switcher, window, cx);
+            if mode == "edit" {
+                app.on_profile(crate::profile::Act::SwitcherEdit, window, cx);
+            }
         }
         if std::env::var("VECTOR_STATUS").is_ok() {
             app.open_status(window, cx);
@@ -213,6 +226,12 @@ impl VectorApp {
             }
         })
         .detach();
+        app.probe(window, cx);
+        app
+    }
+
+    /// Find the account on disk and open it, or ask how to.
+    fn probe(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let probe = backend::run(async { account::boot() });
         cx.spawn_in(window, async move |this, cx| {
             let Ok(info) = probe.await else { return };
@@ -224,12 +243,34 @@ impl VectorApp {
             .ok();
         })
         .detach();
-        app
+    }
+
+    /// Start over on whichever account boot now finds, as a fresh launch would.
+    fn reboot(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let mut fresh = Self::base(Store::live(), true, window, cx);
+        fresh.screen = Screen::Booting;
+        *self = fresh;
+        self.probe(window, cx);
+        cx.notify();
     }
 
     fn show_login(&mut self, unlock: Option<&str>, window: &mut Window, cx: &mut Context<Self>) {
         let view = cx.new(|cx| LoginView::new(unlock, window, cx));
-        cx.subscribe_in(&view, window, |this, _, e: &LoggedIn, window, cx| this.logged_in(e.npub.clone(), window, cx)).detach();
+        self.attach_login(view, cx, window);
+    }
+
+    fn attach_login(&mut self, view: Entity<LoginView>, cx: &mut Context<Self>, window: &mut Window) {
+        cx.subscribe_in(&view, window, |this, _, e: &LoggedIn, window, cx| {
+            // A profile added over another account starts on a clean slate.
+            if this.adding.take().is_some() {
+                let mut fresh = Self::base(Store::live(), true, window, cx);
+                fresh.screen = Screen::Booting;
+                *this = fresh;
+            }
+            this.logged_in(e.npub.clone(), window, cx)
+        })
+        .detach();
+        cx.subscribe_in(&view, window, |this, _, e: &crate::login::AddProfile, window, cx| this.on_add_profile(e, window, cx)).detach();
         self.screen = Screen::Login(view);
         cx.notify();
     }
@@ -780,7 +821,7 @@ impl VectorApp {
         cx.notify();
     }
 
-    fn answer_popup(&mut self, yes: bool, cx: &mut Context<Self>) {
+    fn answer_popup(&mut self, yes: bool, window: &mut Window, cx: &mut Context<Self>) {
         let Some((popup, act)) = self.popup.take() else { return };
         cx.notify();
         if !yes {
@@ -789,6 +830,7 @@ impl VectorApp {
         match act {
             PopupAct::Notice => {}
             PopupAct::Block { npub } => self.set_blocked(npub, true, cx),
+            PopupAct::RemoveAccount { npub } => self.remove_account(npub, window, cx),
             PopupAct::Nickname { npub } => {
                 if let Some(input) = popup.input {
                     let nick = input.read(cx).text().trim().to_string();
@@ -894,8 +936,8 @@ impl Render for VectorApp {
         let store = store.borrow();
         let popup = self.popup.as_ref().map(|(p, _)| {
             let app = cx.entity().downgrade();
-            kit::popup(p, move |yes, _, cx| {
-                app.update(cx, |app, cx| app.answer_popup(yes, cx)).ok();
+            kit::popup(p, move |yes, window, cx| {
+                app.update(cx, |app, cx| app.answer_popup(yes, window, cx)).ok();
             })
         });
         let root = root.on_drop(cx.listener(|app, paths: &gpui::ExternalPaths, window, cx| {
@@ -930,6 +972,13 @@ impl Render for VectorApp {
                     (None, None) => empty_pane().into_any_element(),
                 }),
         )
+        .children(self.switcher.as_ref().filter(|_| self.profile.is_some()).map(|s| {
+            let app = cx.entity().downgrade();
+            let on: crate::switcher::OnAct = Rc::new(move |act, window, cx| {
+                app.update(cx, |app, cx| app.on_switcher(act, window, cx)).ok();
+            });
+            crate::switcher::view(s, CHROME_H + 60., RAIL_W + LIST_W, f32::from(window.viewport_size().height), &on)
+        }))
         .children(self.status_view(&store, window, cx))
         .children(self.qr_view(cx))
         .children(self.toast_view(window))
@@ -2051,8 +2100,8 @@ impl VectorApp {
             Act::Nickname => {
                 p.more_open = false;
                 let input = cx.new(|cx| TextInput::new("Nickname", cx).with_look(kit::field_look()).keep_on_submit().submit_empty());
-                cx.subscribe(&input, |app, _, _: &SendText, cx| app.answer_popup(true, cx)).detach();
-                cx.subscribe(&input, |app, _, _: &CancelInput, cx| app.answer_popup(false, cx)).detach();
+                cx.subscribe_in(&input, window, |app, _, _: &SendText, window, cx| app.answer_popup(true, window, cx)).detach();
+                cx.subscribe_in(&input, window, |app, _, _: &CancelInput, window, cx| app.answer_popup(false, window, cx)).detach();
                 window.focus(&input.focus_handle(cx), cx);
                 let mut popup = kit::Popup::notice("Choose a Nickname");
                 popup.icon = None;
@@ -2166,7 +2215,166 @@ impl VectorApp {
                 })
                 .detach();
             }
-            Act::Switcher => {}
+            Act::Switcher => {
+                if self.switcher.is_some() {
+                    self.close_switcher(cx);
+                } else {
+                    self.open_switcher(cx);
+                }
+            }
+            Act::SwitcherEdit => {
+                if let Some(s) = self.switcher.as_mut() {
+                    s.editing = !s.editing;
+                    let editing = s.editing;
+                    if let Some(p) = self.profile.as_mut() {
+                        p.switcher = Some(editing);
+                    }
+                    cx.notify();
+                }
+            }
+        }
+    }
+
+    fn open_switcher(&mut self, cx: &mut Context<Self>) {
+        let active = self.store.borrow().my_npub.clone();
+        if !self.live {
+            // Fixtures: ourselves and the first two contacts by name, as the reference mock lists them.
+            let store = self.store.borrow();
+            let mut others: Vec<&vector_core::SlimProfile> = store.profiles.values().filter(|p| p.id != active).collect();
+            others.sort_by_key(|p| p.name.to_lowercase());
+            let rows = std::iter::once(store.profiles.get(&active))
+                .flatten()
+                .chain(others.into_iter().take(2))
+                .map(|p| crate::switcher::Row {
+                    npub: p.id.to_string(),
+                    name: [&p.nickname, &p.display_name, &p.name].into_iter().find(|n| !n.is_empty()).map(|n| n.to_string()),
+                    avatar: store.avatar_path(&p.id),
+                })
+                .collect();
+            drop(store);
+            self.show_switcher(rows, active, false, cx);
+            return;
+        }
+        let rx = backend::run(async { (account::accounts(), account::account_cap()) });
+        cx.spawn(async move |this, cx| {
+            let Ok((accounts, cap)) = rx.await else { return };
+            this.update(cx, |this, cx| {
+                let at_cap = accounts.len() >= cap;
+                let rows = accounts
+                    .into_iter()
+                    .map(|a| crate::switcher::Row { npub: a.npub, name: a.name, avatar: a.avatar.map(Into::into) })
+                    .collect();
+                this.show_switcher(rows, active, at_cap, cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn show_switcher(&mut self, rows: Vec<crate::switcher::Row>, active: String, at_cap: bool, cx: &mut Context<Self>) {
+        let Some(p) = self.profile.as_mut() else { return };
+        // A refresh after a removal keeps delete mode.
+        let editing = self.switcher.as_ref().is_some_and(|s| s.editing);
+        p.switcher = Some(editing);
+        self.switcher = Some(crate::switcher::Switcher { rows, active, editing, at_cap });
+        cx.notify();
+    }
+
+    fn close_switcher(&mut self, cx: &mut Context<Self>) {
+        self.switcher = None;
+        if let Some(p) = self.profile.as_mut() {
+            p.switcher = None;
+        }
+        cx.notify();
+    }
+
+    fn on_switcher(&mut self, act: crate::switcher::Act, window: &mut Window, cx: &mut Context<Self>) {
+        use crate::switcher::Act;
+        match act {
+            Act::Close => self.close_switcher(cx),
+            Act::Pick(npub) => {
+                self.close_switcher(cx);
+                if !self.live {
+                    return;
+                }
+                let rx = backend::run(account::switch(npub));
+                cx.spawn_in(window, async move |this, cx| {
+                    let result = rx.await.unwrap_or_else(|_| Err("Backend stopped".into()));
+                    this.update_in(cx, |this, window, cx| match result {
+                        Ok(()) => this.reboot(window, cx),
+                        Err(e) => this.notice("Switch failed", e.into(), cx),
+                    })
+                    .ok();
+                })
+                .detach();
+            }
+            Act::Delete(npub) => {
+                let Some(s) = self.switcher.as_ref() else { return };
+                let row = s.rows.iter().find(|r| r.npub == npub);
+                let label = row.and_then(|r| r.name.clone()).unwrap_or_else(|| "This account".into());
+                let last = s.rows.len() == 1;
+                let mut text = format!(
+                    "{label} will be permanently removed from this device, with the files it keeps in Vector. Make sure you have the seed phrase or nsec backed up if you want to recover it later, and save any files you want to keep."
+                );
+                if last {
+                    text.push_str("\n\nThis is your only Vector account on this device. All downloaded attachments will also be removed. Copy any files you want to keep before continuing.");
+                }
+                let mut popup = kit::Popup::notice("Remove Profile?");
+                popup.text = Some(text.into());
+                popup.confirm = "Confirm".into();
+                popup.cancel = Some("Cancel".into());
+                self.popup = Some((popup, PopupAct::RemoveAccount { npub }));
+                cx.notify();
+            }
+            Act::Add => {
+                self.close_switcher(cx);
+                if !self.live {
+                    return;
+                }
+                let me = self.store.borrow().my_npub.clone();
+                self.adding = Some((me, false));
+                let view = cx.new(|cx| LoginView::adding(window, cx));
+                self.attach_login(view, cx, window);
+            }
+        }
+    }
+
+    fn remove_account(&mut self, npub: String, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.live {
+            if let Some(s) = self.switcher.as_mut() {
+                s.rows.retain(|r| r.npub != npub);
+            }
+            return;
+        }
+        let rx = backend::run(account::delete(npub));
+        cx.spawn_in(window, async move |this, cx| {
+            let result = rx.await.unwrap_or_else(|_| Err("Backend stopped".into()));
+            this.update_in(cx, |this, window, cx| match result {
+                Ok(true) => this.reboot(window, cx),
+                Ok(false) => this.open_switcher(cx),
+                Err(e) => this.notice("Delete failed", e, cx),
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn on_add_profile(&mut self, e: &crate::login::AddProfile, window: &mut Window, cx: &mut Context<Self>) {
+        use crate::login::AddProfile;
+        let Some((back, committed)) = self.adding.as_mut() else { return };
+        match e {
+            AddProfile::Committed => *committed = true,
+            AddProfile::Back if !*committed => {
+                self.adding = None;
+                self.screen = Screen::Main;
+                cx.notify();
+            }
+            AddProfile::Back => {
+                let back = back.clone();
+                self.adding = None;
+                let _ = account::set_active(&back);
+                self.reboot(window, cx);
+            }
         }
     }
 
