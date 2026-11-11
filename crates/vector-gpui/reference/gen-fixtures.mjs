@@ -41,7 +41,11 @@ const profiles = [profile({ id: me, name: 'jskitty', display_name: 'JSKitty', mi
 const chats = [];
 for (const [seed, name, last, minsAgo, unread] of people) {
     const id = npub(seed);
-    profiles.push(profile({ id, name: seed, display_name: name, avatar: `https://example.invalid/${seed}.png`, avatar_cached: `avatars/${seed}.png` }));
+    const extra = seed === 'bob'
+        ? { about: 'Building on Nostr since 2021.\nCoffee first, relays second ⚡', status: { title: 'Shipping v0.6 🚀', purpose: 'general', url: '' },
+            banner: 'https://example.invalid/bob-banner.png', banner_cached: 'media/photo.png' }
+        : {};
+    profiles.push(profile({ id, name: seed, display_name: name, avatar: `https://example.invalid/${seed}.png`, avatar_cached: `avatars/${seed}.png`, ...extra }));
     const at = NOW - minsAgo * 60_000;
     const convo = [
         [false, `Hey! It's ${name.split(' ')[0]}`, 50],

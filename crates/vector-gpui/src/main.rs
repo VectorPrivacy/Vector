@@ -13,6 +13,7 @@ mod markdown;
 mod media;
 mod picker;
 mod preview;
+mod profile;
 mod theme;
 mod timeline;
 mod ui;

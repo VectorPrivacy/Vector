@@ -150,11 +150,13 @@ pub struct Popup {
     pub confirm: SharedString,
     /// None for a notice (Okay only).
     pub cancel: Option<SharedString>,
+    /// A text field, for a popup that asks for a value.
+    pub input: Option<gpui::Entity<crate::composer::TextInput>>,
 }
 
 impl Popup {
     pub fn notice(title: impl Into<SharedString>) -> Self {
-        Self { title: title.into(), text: None, icon: Some("icons/vector_warning.svg"), confirm: "Okay".into(), cancel: None }
+        Self { title: title.into(), text: None, icon: Some("icons/vector_warning.svg"), confirm: "Okay".into(), cancel: None, input: None }
     }
 }
 
@@ -171,16 +173,21 @@ pub fn popup(p: &Popup, answer: impl Fn(bool, &mut Window, &mut App) + 'static +
     if let Some(text) = &p.text {
         content = content.child(div().text_center().text_color(c(TEXT)).mb(px(16.)).max_w(px(420.)).child(text.clone()));
     }
+    if let Some(input) = &p.input {
+        content = content.child(div().w_full().h(px(41.2)).px(px(19.2)).rounded(px(8.)).bg(c(DIVIDER)).flex().items_center().child(input.clone()));
+    }
     let mut buttons = div().flex().justify_center().gap(px(10.)).child(
         div()
             .id("popup-confirm")
             .px(px(20.))
             .py(px(10.))
             .rounded(px(8.))
+            .border_1()
+            .border_color(gpui::transparent_black())
             .bg(c(0x58fcb3))
             .text_color(c(0x000000))
             .font_weight(FontWeight::SEMIBOLD)
-            .line_height(px(19.))
+            .line_height(px(19.2))
             .cursor_pointer()
             .on_click(move |_, w, cx| ok(true, w, cx))
             .child(p.confirm.clone()),
@@ -193,9 +200,10 @@ pub fn popup(p: &Popup, answer: impl Fn(bool, &mut Window, &mut App) + 'static +
                 .px(px(20.))
                 .py(px(10.))
                 .rounded(px(8.))
-                .bg(white_a(0.1))
+                .border_1()
+                .border_color(white_a(0.2))
                 .font_weight(FontWeight::SEMIBOLD)
-                .line_height(px(19.))
+                .line_height(px(19.2))
                 .cursor_pointer()
                 .on_click(move |_, w, cx| no(false, w, cx))
                 .child(cancel.clone()),
@@ -260,4 +268,17 @@ impl gpui::Render for Tip {
 pub fn tooltip(text: impl Into<gpui::SharedString>) -> impl Fn(&mut gpui::Window, &mut gpui::App) -> gpui::AnyView + 'static {
     let text = text.into();
     move |_, cx| cx.new(|_| Tip(text.clone())).into()
+}
+
+/// A plain `<input>`: Inter 500 16px, Chromium's placeholder grey.
+pub fn field_look() -> crate::composer::Look {
+    crate::composer::Look {
+        family: INTER,
+        weight: FontWeight::MEDIUM,
+        size: px(16.),
+        line_height: px(19.2),
+        color: c(0xffffff),
+        placeholder: c(0x757575),
+        ..Default::default()
+    }
 }

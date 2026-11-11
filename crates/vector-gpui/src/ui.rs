@@ -73,6 +73,9 @@ pub struct VectorApp {
     /// Bumped by each hover, so a stale leave doesn't hide the toolbar.
     hover_gen: u64,
     viewer: Option<Entity<crate::viewer::Viewer>>,
+    /// The expanded profile, shown in place of the chat.
+    profile: Option<crate::profile::Screen>,
+    toast: Option<(SharedString, std::time::Instant)>,
 }
 
 #[derive(Clone, PartialEq)]
@@ -87,6 +90,8 @@ enum Mode {
 enum PopupAct {
     Notice,
     Delete { id: String, failed: bool },
+    Block { npub: String },
+    Nickname { npub: String },
 }
 
 impl VectorApp {
@@ -141,6 +146,8 @@ impl VectorApp {
             picker_closed: std::time::Instant::now(),
             hover_gen: 0,
             viewer: None,
+            profile: None,
+            toast: None,
         }
     }
 
@@ -149,6 +156,10 @@ impl VectorApp {
         let mut app = Self::base(store, false, window, cx);
         if let Some(id) = open {
             app.open_chat(id.into(), window, cx);
+        }
+        if let Ok(who) = std::env::var("VECTOR_PROFILE") {
+            let npub = if who == "me" { app.store.borrow().my_npub.clone() } else { who };
+            app.open_profile(npub, cx);
         }
         app
     }
@@ -383,6 +394,7 @@ impl VectorApp {
     }
 
     fn open_chat(&mut self, id: SharedString, window: &mut Window, cx: &mut Context<Self>) {
+        self.profile = None;
         self.read_anchor = self.store.borrow().chat(&id).map(|c| c.last_read.clone());
         self.open = Some(id.clone());
         let count = self.rebuild_rows();
@@ -690,13 +702,20 @@ impl VectorApp {
     }
 
     fn answer_popup(&mut self, yes: bool, cx: &mut Context<Self>) {
-        let Some((_, act)) = self.popup.take() else { return };
+        let Some((popup, act)) = self.popup.take() else { return };
         cx.notify();
         if !yes {
             return;
         }
         match act {
             PopupAct::Notice => {}
+            PopupAct::Block { npub } => self.set_blocked(npub, true, cx),
+            PopupAct::Nickname { npub } => {
+                if let Some(input) = popup.input {
+                    let nick = input.read(cx).text().trim().to_string();
+                    self.set_nickname(npub, nick, cx);
+                }
+            }
             PopupAct::Delete { id, failed } => {
                 if !self.live {
                     let open = self.open.clone();
@@ -806,13 +825,30 @@ impl Render for VectorApp {
                 .flex_row()
                 .flex_1()
                 .min_h_0()
-                .child(rail(&store, self.open.as_ref()))
+                .child(rail(&store, self.open.as_ref(), {
+                    let app = cx.entity().downgrade();
+                    move |_: &gpui::ClickEvent, _: &mut Window, cx: &mut gpui::App| {
+                        app.update(cx, |app, cx| {
+                            let me = app.store.borrow().my_npub.clone();
+                            app.open_profile(me, cx);
+                        })
+                        .ok();
+                    }
+                }))
                 .child(chat_list(&self.store, &store, self.open.clone(), cx))
-                .child(match self.open.clone() {
-                    Some(id) => self.chat_pane(&store, id, cx).into_any_element(),
-                    None => empty_pane().into_any_element(),
+                .child(match (&self.profile, self.open.clone()) {
+                    (Some(p), _) => {
+                        let app = cx.entity().downgrade();
+                        let on: crate::profile::OnAct = Rc::new(move |act, window, cx| {
+                            app.update(cx, |app, cx| app.on_profile(act, window, cx)).ok();
+                        });
+                        crate::profile::pane(&store, p, &on)
+                    }
+                    (None, Some(id)) => self.chat_pane(&store, id, cx).into_any_element(),
+                    (None, None) => empty_pane().into_any_element(),
                 }),
         )
+        .children(self.toast_view(window))
         .children(self.viewer.clone().map(|v| gpui::deferred(div().absolute().inset_0().child(v)).with_priority(10)))
     }
 }
@@ -888,7 +924,7 @@ fn chrome(window: &Window, login: bool) -> impl IntoElement {
 
 // ── #navbar (widescreen rail) ────────────────────────────────────────────────────────────
 
-fn avatar(store: &Store, npub: &str, size: f32) -> AnyElement {
+pub(crate) fn avatar(store: &Store, npub: &str, size: f32) -> AnyElement {
     match store.avatar_path(npub) {
         Some(path) => img(path).size(px(size)).rounded_full().flex_shrink_0().into_any_element(),
         None => img("icons/user-placeholder.svg").size(px(size)).rounded_full().flex_shrink_0().into_any_element(),
@@ -906,7 +942,7 @@ fn rail_label(text: &'static str) -> impl IntoElement {
         .child(text)
 }
 
-fn rail(store: &Store, open: Option<&SharedString>) -> impl IntoElement {
+fn rail(store: &Store, open: Option<&SharedString>, on_me: impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static) -> impl IntoElement {
     let unread: Vec<&SerializableChat> = store
         .chats
         .iter()
@@ -1055,6 +1091,9 @@ fn rail(store: &Store, open: Option<&SharedString>) -> impl IntoElement {
             // #ws-rail-account .account
             div().p(px(8.)).pt(px(8.)).child(
                 div()
+                    .id("ws-rail-account")
+                    .cursor_pointer()
+                    .on_click(on_me)
                     .h(px(54.))
                     .rounded(px(12.))
                     .bg(c(RAIL_TILE))
@@ -1312,6 +1351,12 @@ impl VectorApp {
             .justify_center()
             .child(
                 div()
+                    .id("chat-header-info")
+                    .cursor_pointer()
+                    .on_click({
+                        let id = id.to_string();
+                        cx.listener(move |app, _, _, cx| app.open_profile(id.clone(), cx))
+                    })
                     .mt(px(5.))
                     .flex()
                     .items_center()
@@ -1611,4 +1656,204 @@ fn composer(
     .when_some(picker, |d, (p, _)| {
         d.child(gpui::deferred(div().absolute().bottom(gpui::relative(1.)).right(px(16.)).pb(px(10.)).child(p)).with_priority(3))
     })
+}
+
+// ── profile ─────────────────────────────────────────────────────────────────────────────
+
+impl VectorApp {
+    fn open_profile(&mut self, npub: String, cx: &mut Context<Self>) {
+        let back = self.open.take();
+        if self.live {
+            backend::prefs::refresh(npub.clone());
+        }
+        self.profile = Some(crate::profile::Screen::new(npub, back));
+        cx.notify();
+    }
+
+    fn on_profile(&mut self, act: crate::profile::Act, window: &mut Window, cx: &mut Context<Self>) {
+        use crate::profile::Act;
+        let Some(p) = self.profile.as_mut() else { return };
+        let npub = p.npub.clone();
+        match act {
+            Act::Back => {
+                let back = p.back.clone();
+                self.profile = None;
+                match back {
+                    Some(id) => self.open_chat(id, window, cx),
+                    None => cx.notify(),
+                }
+            }
+            Act::Message => self.open_chat(npub.into(), window, cx),
+            Act::ToggleMute => {
+                if !self.live {
+                    if let Some(chat) = self.store.borrow_mut().chat_mut(&npub) {
+                        chat.muted = !chat.muted;
+                    }
+                    cx.notify();
+                    return;
+                }
+                let rx = backend::run(backend::prefs::toggle_mute(npub.clone()));
+                cx.spawn(async move |this, cx| {
+                    let Ok(Some(muted)) = rx.await else { return };
+                    this.update(cx, |this, cx| {
+                        if let Some(chat) = this.store.borrow_mut().chat_mut(&npub) {
+                            chat.muted = muted;
+                        }
+                        cx.notify();
+                    })
+                    .ok();
+                })
+                .detach();
+            }
+            Act::Share | Act::CopyNpub => {
+                let (text, done) = if act == Act::Share {
+                    (format!("https://vectorapp.io/profile/{npub}"), "Profile Link Copied")
+                } else {
+                    (npub.clone(), "Copied npub")
+                };
+                cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+                p.copied = Some((act, std::time::Instant::now()));
+                self.show_toast(done, cx);
+                cx.spawn(async move |this, cx| {
+                    cx.background_executor().timer(std::time::Duration::from_millis(2010)).await;
+                    this.update(cx, |_, cx| cx.notify()).ok();
+                })
+                .detach();
+            }
+            Act::More => {
+                p.more_open = !p.more_open;
+                cx.notify();
+            }
+            Act::Nickname => {
+                p.more_open = false;
+                let input = cx.new(|cx| TextInput::new("Nickname", cx).with_look(kit::field_look()).keep_on_submit().submit_empty());
+                cx.subscribe(&input, |app, _, _: &SendText, cx| app.answer_popup(true, cx)).detach();
+                cx.subscribe(&input, |app, _, _: &CancelInput, cx| app.answer_popup(false, cx)).detach();
+                window.focus(&input.focus_handle(cx), cx);
+                let mut popup = kit::Popup::notice("Choose a Nickname");
+                popup.icon = None;
+                popup.confirm = "Confirm".into();
+                popup.cancel = Some("Cancel".into());
+                popup.input = Some(input);
+                self.popup = Some((popup, PopupAct::Nickname { npub }));
+                cx.notify();
+            }
+            Act::Block => {
+                p.more_open = false;
+                let blocked = self.store.borrow().profiles.get(&npub).is_some_and(|p| p.is_blocked);
+                if blocked {
+                    self.set_blocked(npub, false, cx);
+                } else {
+                    let mut popup = kit::Popup::notice("Block User");
+                    popup.text = Some("Are you sure you want to block this user? You will no longer receive DMs from them.".into());
+                    popup.confirm = "Confirm".into();
+                    popup.cancel = Some("Cancel".into());
+                    self.popup = Some((popup, PopupAct::Block { npub }));
+                    cx.notify();
+                }
+            }
+            Act::Edit | Act::SetStatus | Act::Switcher | Act::Qr => {}
+        }
+    }
+
+    fn set_blocked(&mut self, npub: String, block: bool, cx: &mut Context<Self>) {
+        let done = if block { "User Blocked" } else { "User Unblocked" };
+        if !self.live {
+            if let Some(p) = self.store.borrow_mut().profiles.get_mut(&npub) {
+                p.is_blocked = block;
+            }
+            self.show_toast(done, cx);
+            return;
+        }
+        let rx = if block { backend::run(backend::prefs::block(npub.clone())) } else { backend::run(backend::prefs::unblock(npub.clone())) };
+        cx.spawn(async move |this, cx| {
+            let Ok(true) = rx.await else { return };
+            this.update(cx, |this, cx| {
+                if let Some(p) = this.store.borrow_mut().profiles.get_mut(&npub) {
+                    p.is_blocked = block;
+                }
+                this.show_toast(done, cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn set_nickname(&mut self, npub: String, nick: String, cx: &mut Context<Self>) {
+        if nick.chars().count() >= 30 {
+            let mut popup = kit::Popup::notice("Woah woah!");
+            popup.text = Some(format!("A {}-character nickname seems excessive!", nick.chars().count()).into());
+            self.popup = Some((popup, PopupAct::Notice));
+            cx.notify();
+            return;
+        }
+        if let Some(p) = self.store.borrow_mut().profiles.get_mut(&npub) {
+            p.nickname = nick.clone();
+        }
+        cx.notify();
+        if self.live {
+            let _ = backend::run(backend::prefs::set_nickname(npub, nick));
+        }
+    }
+
+    /// `showToast`: one line over a bottom gradient, for 1.5s plus 40ms a character.
+    fn show_toast(&mut self, text: &str, cx: &mut Context<Self>) {
+        let at = std::time::Instant::now();
+        self.toast = Some((text.to_string().into(), at));
+        let hold = (1500 + text.chars().count() as u64 * 40).min(6000);
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(std::time::Duration::from_millis(hold)).await;
+            this.update(cx, |_, cx| cx.notify()).ok();
+            cx.background_executor().timer(std::time::Duration::from_millis(320)).await;
+            this.update(cx, |this, cx| {
+                if this.toast.as_ref().is_some_and(|(_, t)| *t == at) {
+                    this.toast = None;
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn toast_view(&self, window: &mut Window) -> Option<AnyElement> {
+        let (text, at) = self.toast.as_ref()?;
+        let hold = (1500 + text.chars().count() as u64 * 40).min(6000) as f32 / 1000.;
+        let e = at.elapsed().as_secs_f32();
+        let opacity = if e < 0.3 { e / 0.3 } else if e < hold { 1. } else { (1. - (e - hold) / 0.3).max(0.) };
+        if opacity < 1. && opacity > 0. {
+            window.request_animation_frame();
+        }
+        Some(
+            gpui::deferred(
+                div()
+                    .absolute()
+                    .inset_0()
+                    .opacity(opacity)
+                    .child(div().absolute().inset_0().bg(gpui::linear_gradient(
+                        180.,
+                        gpui::linear_color_stop(ca(0, 0, 0, 0.), 0.5),
+                        gpui::linear_color_stop(ca(0, 0, 0, 0.8), 1.),
+                    )))
+                    .child(
+                        div().absolute().left_0().right_0().bottom(px(80.)).flex().justify_center().child(
+                            div()
+                                .px(px(24.))
+                                .py(px(12.))
+                                .rounded(px(8.))
+                                .border_1()
+                                .border_color(c(PRIMARY))
+                                .bg(ca(0, 0, 0, 0.8))
+                                .text_size(px(14.))
+                                .line_height(px(24.))
+                                .text_color(c(0xffffff))
+                                .child(text.clone()),
+                        ),
+                    ),
+            )
+            .with_priority(20)
+            .into_any_element(),
+        )
+    }
 }

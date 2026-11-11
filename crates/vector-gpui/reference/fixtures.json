@@ -59,14 +59,14 @@
    "nickname": "",
    "lud06": "",
    "lud16": "",
-   "banner": "",
+   "banner": "https://example.invalid/bob-banner.png",
    "avatar": "https://example.invalid/bob.png",
-   "about": "",
+   "about": "Building on Nostr since 2021.\nCoffee first, relays second ⚡",
    "website": "",
    "nip05": "",
    "status": {
-    "title": "",
-    "purpose": "",
+    "title": "Shipping v0.6 🚀",
+    "purpose": "general",
     "url": ""
    },
    "last_updated": 1794362400,
@@ -74,7 +74,7 @@
    "bot": false,
    "is_blocked": false,
    "avatar_cached": "avatars/bob.png",
-   "banner_cached": "",
+   "banner_cached": "media/photo.png",
    "stream_consent": false
   },
   {

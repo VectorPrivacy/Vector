@@ -10,6 +10,7 @@ pub mod images;
 pub mod inline;
 pub mod messaging;
 pub mod network;
+pub mod prefs;
 pub mod unfurl;
 pub mod sync;
 
