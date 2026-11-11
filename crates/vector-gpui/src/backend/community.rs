@@ -537,6 +537,8 @@ pub struct InvitePreview {
     pub community_id: String,
     pub name: String,
     pub description: String,
+    /// The logo as a local file, when it has one that loads.
+    pub icon: Option<String>,
 }
 
 /// What an invite link leads to, read off its bundle (or our copy, once joined).
@@ -546,11 +548,20 @@ pub async fn preview_invite(url: String) -> Result<InvitePreview, String> {
         let transport = LiveTransport::with_timeout(Duration::from_secs(12));
         let bundle = vector_core::community::v2::service::fetch_public_bundle(&transport, &url).await?;
         let community_id = bundle.community_id.clone();
+        let logo = |c: &CommunityV2| c.icon.as_ref().map(|i| i.to_community_image());
         if let Ok(local) = load(&community_id) {
-            return Ok(InvitePreview { community_id, name: local.name.clone(), description: local.description.clone().unwrap_or_default() });
+            let icon = match logo(&local) {
+                Some(img) => super::images::community_image(&img, false).await.ok(),
+                None => None,
+            };
+            return Ok(InvitePreview { community_id, name: local.name.clone(), description: local.description.clone().unwrap_or_default(), icon });
         }
         let folded = vector_core::community::v2::service::preview_bundle(&transport, &bundle).await?;
-        Ok(InvitePreview { community_id, name: folded.name.clone(), description: folded.description.clone().unwrap_or_default() })
+        let icon = match logo(&folded) {
+            Some(img) => super::images::community_image(&img, false).await.ok(),
+            None => None,
+        };
+        Ok(InvitePreview { community_id, name: folded.name.clone(), description: folded.description.clone().unwrap_or_default(), icon })
     })
     .await
 }
@@ -800,4 +811,74 @@ pub fn set_policy(community_id: &str, policy_id: &str, bytes: &str, enabled: boo
 
 pub fn delete_policy(community_id: &str, policy_id: &str) -> Result<(), String> {
     VectorCore.delete_community_policy(community_id, policy_id).map_err(|e| e.to_string())
+}
+
+/// A joined community's logo or banner as a local file; None when it has none.
+pub async fn image(community_id: String, banner: bool) -> Result<Option<String>, String> {
+    let Some(img) = db::community::community_image(&community_id, banner)? else { return Ok(None) };
+    super::images::community_image(&img, banner).await.map(Some)
+}
+
+
+/// Uploads `path` (cropped to `crop`) as the logo or banner and publishes it; `progress` gets percent.
+pub async fn set_image(community_id: String, path: std::path::PathBuf, banner: bool, crop: Option<vector_core::image_crop::CropRect>, progress: impl Fn(u8) + Send + Sync + 'static) -> Result<(), String> {
+    db::scoped(async move {
+        let session = db::current_session();
+        let community = load(&community_id)?;
+        let raw = tokio::fs::read(&path).await.map_err(|e| format!("read image: {e}"))?;
+        if vector_core::svg::looks_like_svg(&raw) {
+            return Err(vector_core::community::SVG_REFUSED.into());
+        }
+        let (bytes, ext) = tokio::task::spawn_blocking(move || crate::backend::upload::prepared(raw, banner, crop)).await.map_err(|e| e.to_string())??;
+        let hash = vector_core::crypto::sha256_hex(&bytes);
+        let params = vector_core::crypto::generate_encryption_params();
+        let encrypted = vector_core::crypto::encrypt_data(&bytes, &params)?;
+        let signer = vector_core::signer::active_signer().map_err(|e| format!("signer: {e}"))?;
+        let servers = vector_core::state::get_blossom_servers();
+        if servers.is_empty() {
+            return Err("No Blossom servers configured.".into());
+        }
+        let on: vector_core::blossom::ProgressCallback = std::sync::Arc::new(move |pct, _| {
+            progress(pct.unwrap_or(0));
+            Ok(())
+        });
+        let url = vector_core::blossom::upload_blob_with_progress_and_failover(signer, servers, std::sync::Arc::new(encrypted), Some("application/octet-stream"), true, on, None, None, None)
+            .await?
+            .url;
+        super::images::precache(&url, &bytes, banner);
+        let mut extra = serde_json::Map::new();
+        extra.insert("ext".into(), Value::String(ext.into()));
+        let img_ref = vector_core::community::v2::control::ImageRef { url, key: params.key, nonce: params.nonce, hash, extra };
+        let mut meta = community.metadata();
+        if banner {
+            meta.banner = Some(img_ref.clone());
+        } else {
+            meta.icon = Some(img_ref.clone());
+        }
+        let transport = LiveTransport::with_timeout(Duration::from_secs(12));
+        vector_core::community::v2::service::edit_community_metadata(&transport, &community, &meta).await?;
+        if let Some(updated) = vector_core::community::v2::service::persist_community_image(community.id(), Some(img_ref), banner).await {
+            VectorCore.register_v2_chats(&updated, &session).await;
+        }
+        super::emit("community_refreshed", community_id);
+        Ok(())
+    })
+    .await
+}
+
+pub async fn remove_image(community_id: String, banner: bool) -> Result<(), String> {
+    db::scoped(async move {
+        VectorCore.remove_community_image(&community_id, banner).await.map_err(|e| e.to_string())?;
+        super::emit("community_refreshed", community_id);
+        Ok(())
+    })
+    .await
+}
+
+pub fn hidden_banners() -> Vec<String> {
+    vector_core::synced_prefs::load_hidden_banners().ids
+}
+
+pub fn set_banner_hidden(community_id: &str, hidden: bool) -> Result<Vec<String>, String> {
+    vector_core::synced_prefs::set_banner_hidden(community_id, hidden).map(|l| l.ids)
 }

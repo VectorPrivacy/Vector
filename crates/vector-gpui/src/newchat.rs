@@ -387,7 +387,7 @@ pub fn view(n: &NewChat, store: &Store, width: f32, invite: Option<&Preview>, on
 
 /// `.cg-link`: the pasted invite's Community, or why it can't be shown.
 fn link_card(p: &Preview, member: impl Fn(&str) -> bool) -> impl IntoElement {
-    let icon = |path: &'static str, pad: f32| {
+    let icon = |path: gpui::ImageSource, pad: f32| {
         div()
             .size(px(88.))
             .rounded(px(22.))
@@ -397,7 +397,7 @@ fn link_card(p: &Preview, member: impl Fn(&str) -> bool) -> impl IntoElement {
                 gpui::BoxShadow { color: white_a(0.06), offset: gpui::point(px(0.), px(0.)), blur_radius: px(0.), spread_radius: px(1.), inset: false },
                 gpui::BoxShadow { color: ca(0, 0, 0, 0.5), offset: gpui::point(px(0.), px(10.)), blur_radius: px(28.), spread_radius: px(0.), inset: false },
             ])
-            .child(gpui::img(path).size_full().rounded(px(22.)))
+            .child(gpui::img(path).size_full().rounded(px(22.)).object_fit(gpui::ObjectFit::Cover))
     };
     let eyebrow = |t: &'static str| crate::kit::spaced(t.to_uppercase(), 1.1).mb(px(18.)).font_weight(FontWeight::SEMIBOLD).text_size(px(11.)).line_height(px(24.)).text_color(c(PRIMARY));
     let name = |t: String| div().mt(px(16.)).max_w_full().truncate().font_weight(FontWeight::BOLD).text_size(px(22.)).line_height(px(24.)).text_color(c(0xffffff)).child(t);
@@ -428,13 +428,13 @@ fn link_card(p: &Preview, member: impl Fn(&str) -> bool) -> impl IntoElement {
             .child(div().mt(px(18.)).text_size(px(13.)).text_color(white_a(0.55)).child("Loading invite...")),
         Preview::Failed => card
             .child(eyebrow("Community Invite"))
-            .child(icon("icons/vector_warning.svg", 18.))
+            .child(icon("icons/vector_warning.svg".into(), 18.))
             .child(name("Invite Unavailable".into()))
             .child(desc("This invite couldn't be loaded. It may have been revoked or expired, or its relays are unreachable.".into())),
         Preview::Ready(info) => {
             let joined = member(&info.community_id);
             card.child(eyebrow(if joined { "Your Community" } else { "You've been invited to join" }))
-                .child(icon("icons/group-placeholder.svg", 0.))
+                .child(icon(info.icon.clone().map(|p| std::path::PathBuf::from(p).into()).unwrap_or_else(|| "icons/group-placeholder.svg".into()), 0.))
                 .child(name(info.name.clone()))
                 .when(!info.description.is_empty(), |d| d.child(desc(info.description.clone())))
                 .when(joined, |d| {

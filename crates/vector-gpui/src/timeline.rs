@@ -818,7 +818,20 @@ fn invite_card(ctx: &Ctx, m: &Message, key: String) -> AnyElement {
                 .items_center()
                 .gap(px(10.))
                 .min_w_0()
-                .child(img("icons/group-placeholder.svg").size(px(42.)).flex_shrink_0().rounded_full().bg(white_a(0.05)).when(invalid, |d| d.opacity(0.5)))
+                .child(
+                    match joined.and_then(|c| ctx.store.icon(&c.community_id)).or_else(|| match state {
+                        Some(Preview::Ready(i)) => i.icon.clone().map(std::path::PathBuf::from),
+                        _ => None,
+                    }) {
+                        Some(path) => img(path).object_fit(gpui::ObjectFit::Cover),
+                        None => img("icons/group-placeholder.svg"),
+                    }
+                    .size(px(42.))
+                    .flex_shrink_0()
+                    .rounded_full()
+                    .bg(white_a(0.05))
+                    .when(invalid, |d| d.opacity(0.5)),
+                )
                 .child(
                     div()
                         .flex_1()

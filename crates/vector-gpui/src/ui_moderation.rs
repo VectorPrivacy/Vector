@@ -463,4 +463,57 @@ impl VectorApp {
         }
         cx.notify();
     }
+
+    pub(super) fn set_banner_hidden(&mut self, community: String, hidden: bool, cx: &mut Context<Self>) {
+        let list = if self.live {
+            match backend::community::set_banner_hidden(&community, hidden) {
+                Ok(list) => list,
+                Err(e) => return self.show_toast(&e, cx),
+            }
+        } else {
+            let mut list = self.store.borrow().hidden_banners.clone();
+            list.retain(|h| *h != community);
+            if hidden {
+                list.push(community);
+            }
+            list
+        };
+        self.store.borrow_mut().hidden_banners = list;
+        cx.notify();
+    }
+
+    /// Resolves each community's logo and banner to local files, in turn; `force` refetches `only`.
+    pub(super) fn resolve_art(&mut self, only: Option<String>, cx: &mut Context<Self>) {
+        if !self.live {
+            return;
+        }
+        let ids: Vec<String> = match only {
+            Some(id) => vec![id],
+            None => {
+                let store = self.store.borrow();
+                store.communities.iter().filter(|c| !store.art.contains_key(&c.community_id)).map(|c| c.community_id.clone()).collect()
+            }
+        };
+        if ids.is_empty() {
+            return;
+        }
+        let rx = backend::run(async move {
+            let mut out = Vec::new();
+            for id in ids {
+                let icon = backend::community::image(id.clone(), false).await.ok().flatten();
+                let banner = backend::community::image(id.clone(), true).await.ok().flatten();
+                out.push((id, crate::data::Art { icon, banner }));
+            }
+            out
+        });
+        cx.spawn(async move |this, cx| {
+            let Ok(art) = rx.await else { return };
+            this.update(cx, |app, cx| {
+                app.store.borrow_mut().art.extend(art);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
 }

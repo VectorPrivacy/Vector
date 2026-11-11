@@ -1673,7 +1673,7 @@
    "name": "Vector Devs",
    "description": "Where Vector gets built, in the open.",
    "is_owner": true,
-   "has_icon": false,
+   "has_icon": true,
    "channels": [
     {
      "channel_id": "a0f367a05f629b3bb09ee8f1561bf03267962217d9ff6fc7ce3b235235702bc1",
@@ -1747,7 +1747,9 @@
     "npub190vqdjtlpcq27xslcveglfmr4ynfwg7gmw86cnun4acakxrdd6gqnp929a",
     "npub1sxmr0k8u6trd5c6eu6trzyapzux7090ykujmsng7pdx0m8k93n5sd02fwn",
     "npub1fsndjp6vylvfahjeyuxq4s2tw8s8rv2j89ge7a28fvhnhf35s86sg3uctf"
-   ]
+   ],
+   "icon": "media/devs-icon.png",
+   "banner": "media/devs-banner.png"
   }
  ],
  "invites": [

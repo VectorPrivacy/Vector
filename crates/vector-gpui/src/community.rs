@@ -22,6 +22,7 @@ pub enum Act {
     Panel,
     /// The Community's own menu, hung off its header.
     HeadMenu,
+    BannerMenu(gpui::Point<gpui::Pixels>),
     ChannelMenu(String, gpui::Point<gpui::Pixels>),
     /// A Category's "+": a new channel inside it.
     AddChannel(String),
@@ -45,8 +46,20 @@ pub struct View {
 const OWNER: u32 = 0xfce459;
 const LABEL: u32 = 0x8a8a8a;
 
-fn tile(size: f32, radius: f32) -> gpui::Img {
-    img("icons/group-placeholder.svg").size(px(size)).rounded(px(radius)).flex_shrink_0()
+/// The community's logo, or the group placeholder until it has one.
+pub fn logo(store: &Store, id: &str, size: f32, radius: f32) -> gpui::Img {
+    match store.icon(id) {
+        Some(path) => img(path).object_fit(gpui::ObjectFit::Cover),
+        None => img("icons/group-placeholder.svg"),
+    }
+    .size(px(size))
+    .rounded(px(radius))
+    .flex_shrink_0()
+}
+
+/// `.banner-art`: a banner cut to the 238 x 70 template at `width`, grey until it paints.
+pub fn banner_art(path: std::path::PathBuf, width: f32) -> gpui::Img {
+    img(path).w(px(width)).h(px(width * 70. / 238.)).bg(c(0x484848)).object_fit(gpui::ObjectFit::Cover)
 }
 
 fn click(on: &OnAct, act: impl Fn() -> Act + 'static) -> impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static {
@@ -75,7 +88,7 @@ pub fn rail_rows(store: &Store, active: Option<&str>, on: &OnAct) -> impl IntoEl
             .on_click(click(on, move || Act::Open(id.clone())))
             .when(open, |d| d.child(div().absolute().left(px(-8.)).top(px(3.)).w(px(4.)).h(px(25.)).rounded_r(px(4.)).bg(c(PRIMARY))))
             .when(unread, |d| d.child(div().absolute().left(px(-8.)).top(px(10.5)).w(px(4.)).h(px(10.)).rounded_r(px(4.)).bg(c(ICON_MUTED))))
-            .child(tile(26., 4.9))
+            .child(logo(store, &com.community_id, 26., 4.9))
             .child(div().flex_1().min_w_0().truncate().font_family(RUBIK).text_size(px(14.)).text_color(c(0xffffff)).child(com.name.clone()))
     }))
 }
@@ -186,7 +199,7 @@ pub fn sidebar(store: &Store, view: &View, com: &Community, open: Option<&str>, 
             let on = on.clone();
             move |_, w, cx| on(Act::HeadMenu, w, cx)
         })
-        .child(tile(36., 11.))
+        .child(logo(store, &com.community_id, 36., 11.))
         .child(
             div()
                 .flex_1()
@@ -212,6 +225,20 @@ pub fn sidebar(store: &Store, view: &View, com: &Community, open: Option<&str>, 
         )
         .when(raid, |d| d.child(raid_pip()))
         .child(div().size(px(30.)).flex().items_center().justify_center().child(icon("icons/chevron-down.svg", 19.5, white_a(0.4))));
+
+    let banner = store.banner(&com.community_id).filter(|_| !store.hidden_banners.contains(&com.community_id)).map(|path| {
+        div()
+            .id("ws-banner")
+            .flex_none()
+            .border_b_1()
+            .border_color(c(0x1f1f1f))
+            .on_mouse_down(gpui::MouseButton::Right, {
+                let on = on.clone();
+                move |e, w, cx| on(Act::BannerMenu(e.position), w, cx)
+            })
+            .child(banner_art(path, f32::from(crate::ui::LIST_W)))
+    });
+    let head = div().flex_none().flex().flex_col().child(head).children(banner);
 
     let owner = com.is_owner;
     let loose: Vec<&Channel> = com.channels.iter().filter(|ch| ch.category_id.is_none()).collect();

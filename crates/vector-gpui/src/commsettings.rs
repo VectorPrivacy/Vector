@@ -41,6 +41,14 @@ pub struct Audit {
 
 pub const AUDIT_PAGE: usize = 50;
 
+/// A picked image awaiting Save: the file, the part to upload, and what shows meanwhile.
+pub struct Pick {
+    pub path: std::path::PathBuf,
+    pub crop: Option<vector_core::image_crop::CropRect>,
+    pub preview: std::sync::Arc<gpui::RenderImage>,
+    pub natural: (u32, u32),
+}
+
 pub struct CommSettings {
     pub community: String,
     pub section: &'static str,
@@ -69,11 +77,21 @@ pub struct CommSettings {
     pub role_hex: Option<Entity<TextInput>>,
     pub audit_query: Entity<TextInput>,
     pub saving: bool,
+    /// Upload percent while an image saves.
+    pub progress: Option<u8>,
+    pub icon_pick: Option<Pick>,
+    pub icon_removed: bool,
+    pub banner_pick: Option<Pick>,
+    pub banner_removed: bool,
     /// A refused close: the bar says why until this passes.
     pub warn_until: Option<std::time::Instant>,
 }
 
 pub enum Act {
+    PickIcon,
+    PickBanner,
+    RemoveIcon,
+    RemoveBanner,
     Close,
     Section(&'static str),
     Anchor(&'static str, &'static str),
@@ -113,7 +131,12 @@ impl CommSettings {
     }
 
     pub fn overview_dirty(&self, cx: &App) -> bool {
-        self.name.read(cx).text() != self.saved.name || self.description.read(cx).text() != self.saved.description
+        self.name.read(cx).text() != self.saved.name
+            || self.description.read(cx).text() != self.saved.description
+            || self.icon_pick.is_some()
+            || self.banner_pick.is_some()
+            || self.icon_removed
+            || self.banner_removed
     }
 
     pub fn roles_dirty(&self, cx: &App) -> bool {
@@ -274,10 +297,88 @@ pub(crate) fn save_btn(id: impl Into<gpui::ElementId>, label: impl Into<SharedSt
         .child(label.into())
 }
 
-fn overview(m: &CommSettings, cx: &App) -> AnyElement {
+fn edit_veil() -> gpui::Div {
+    div()
+        .absolute()
+        .inset_0()
+        .flex()
+        .items_center()
+        .justify_center()
+        .bg(ca(0, 0, 0, 0.55))
+        .invisible()
+        .child(svg().path("icons/edit.svg").size(px(22.)).text_color(c(0xffffff)))
+}
+
+fn new_tag() -> gpui::Div {
+    div().absolute().right(px(6.)).bottom(px(6.)).px(px(7.)).py(px(1.)).rounded(px(8.)).bg(c(PRIMARY)).text_color(c(0x000000)).font_weight(FontWeight::BOLD).text_size(px(10.)).line_height(px(16.)).child("New")
+}
+
+fn remove_btn(id: &'static str, label: &'static str, on: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static) -> impl IntoElement {
+    div().id(id).px(px(6.)).py(px(2.)).text_size(px(12.5)).line_height(px(24.)).text_color(c(0x8a8a8a)).cursor_pointer().hover(|d| d.text_color(c(crate::timeline::DANGER))).on_click(on).child(label)
+}
+
+/// A pick's crop, drawn at `width` like `.banner-art` with a rect.
+fn cut(p: &Pick, width: f32, height: f32, radius: f32) -> AnyElement {
+    let (nw, nh) = (p.natural.0.max(1) as f32, p.natural.1.max(1) as f32);
+    let (x, y, w) = match p.crop {
+        Some(r) => (r.x as f32, r.y as f32, r.w.max(1) as f32),
+        None => {
+            let w = nw.min(nh * width / height);
+            ((nw - w) / 2., (nh - w * height / width) / 2., w)
+        }
+    };
+    let k = width / w;
+    div()
+        .relative()
+        .w(px(width))
+        .h(px(height))
+        .overflow_hidden()
+        .rounded(px(radius))
+        .bg(c(0x484848))
+        .child(img(p.preview.clone()).absolute().left(px(-x * k)).top(px(-y * k)).w(px(nw * k)).h(px(nh * k)))
+        .into_any_element()
+}
+
+fn overview(m: &CommSettings, store: &Store, on: &OnAct, cx: &App) -> AnyElement {
     let editable = m.can("manage_metadata");
     let name_len = m.name.read(cx).text().chars().count();
     let desc_len = m.description.read(cx).text().chars().count();
+    let saved_icon = (!m.icon_removed).then(|| store.icon(&m.community)).flatten();
+    let has_icon = m.icon_pick.is_some() || saved_icon.is_some();
+    let icon: AnyElement = match (&m.icon_pick, saved_icon) {
+        (Some(p), _) => cut(p, 88., 88., 24.),
+        (None, Some(path)) => img(path).size_full().rounded(px(24.)).object_fit(gpui::ObjectFit::Cover).into_any_element(),
+        (None, None) => img("icons/group-placeholder.svg").size_full().rounded(px(24.)).into_any_element(),
+    };
+    let saved_banner = (!m.banner_removed).then(|| store.banner(&m.community)).flatten();
+    let has_banner = m.banner_pick.is_some() || saved_banner.is_some();
+    let banner: AnyElement = match (&m.banner_pick, saved_banner) {
+        (Some(p), _) => cut(p, 238., 70., 12.),
+        (None, Some(path)) => crate::community::banner_art(path, 238.).rounded(px(12.)).into_any_element(),
+        (None, None) => div()
+            .w(px(238.))
+            .h(px(70.))
+            .rounded(px(12.))
+            .border_1()
+            .border_dashed()
+            .border_color(c(0x333333))
+            .flex()
+            .items_center()
+            .justify_center()
+            .gap(px(10.))
+            .text_color(white_a(0.45))
+            .when(editable, |d| d.group_hover("cs-banner", |d| d.border_color(c(0x555555)).text_color(white_a(0.7))))
+            .child(svg().path("icons/image.svg").size(px(24.)).text_color(white_a(0.45)))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.))
+                    .child(div().text_size(px(12.5)).line_height(px(15.)).child(if editable { "Add a banner" } else { "No banner" }))
+                    .when(editable, |d| d.child(div().text_size(px(11.)).line_height(px(13.2)).opacity(0.7).child("(952 × 280)"))),
+            )
+            .into_any_element(),
+    };
     div()
         .child(block(
             true,
@@ -286,7 +387,28 @@ fn overview(m: &CommSettings, cx: &App) -> AnyElement {
                     .flex()
                     .items_start()
                     .gap(px(22.))
-                    .child(div().size(px(88.)).flex_shrink_0().rounded(px(24.)).overflow_hidden().bg(c(0x161616)).child(img("icons/group-placeholder.svg").size_full()))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .items_center()
+                            .gap(px(6.))
+                            .flex_shrink_0()
+                            .child(
+                                div()
+                                    .id("cs-icon")
+                                    .group("cs-icon")
+                                    .relative()
+                                    .size(px(88.))
+                                    .rounded(px(24.))
+                                    .overflow_hidden()
+                                    .bg(c(0x161616))
+                                    .child(icon)
+                                    .when(editable, |d| d.cursor_pointer().on_click(click(on, || Act::PickIcon)).child(edit_veil().group_hover("cs-icon", |d| d.visible())))
+                                    .when(m.icon_pick.is_some(), |d| d.child(new_tag())),
+                            )
+                            .when(editable && has_icon, |d| d.child(remove_btn("cs-icon-x", "Remove", click(on, || Act::RemoveIcon)))),
+                    )
                     .child(
                         div()
                             .flex_1()
@@ -303,27 +425,25 @@ fn overview(m: &CommSettings, cx: &App) -> AnyElement {
             false,
             div().child(heading("Banner")).child(
                 div()
-                    .w(px(238.))
-                    .h(px(70.))
-                    .rounded(px(12.))
-                    .bg(c(0x161616))
-                    .border_1()
-                    .border_dashed()
-                    .border_color(c(0x333333))
                     .flex()
-                    .items_center()
-                    .justify_center()
+                    .flex_col()
+                    .items_start()
                     .gap(px(10.))
-                    .text_color(white_a(0.45))
-                    .child(svg().path("icons/image.svg").size(px(24.)).text_color(white_a(0.45)))
                     .child(
                         div()
-                            .flex()
-                            .flex_col()
-                            .gap(px(2.))
-                            .child(div().text_size(px(12.5)).line_height(px(15.)).child(if editable { "Add a banner" } else { "No banner" }))
-                            .when(editable, |d| d.child(div().text_size(px(11.)).line_height(px(13.2)).opacity(0.7).child("(952 × 280)"))),
-                    ),
+                            .id("cs-banner")
+                            .group("cs-banner")
+                            .relative()
+                            .w(px(238.))
+                            .rounded(px(12.))
+                            .overflow_hidden()
+                            .bg(c(0x161616))
+                            .child(banner)
+                            .when(editable, |d| d.cursor_pointer().on_click(click(on, || Act::PickBanner)))
+                            .when(editable && has_banner, |d| d.child(edit_veil().group_hover("cs-banner", |d| d.visible())))
+                            .when(m.banner_pick.is_some(), |d| d.child(new_tag())),
+                    )
+                    .when(editable && has_banner, |d| d.child(remove_btn("cs-banner-x", "Remove Banner", click(on, || Act::RemoveBanner)))),
             ),
         ))
         .child(block(
@@ -774,7 +894,7 @@ fn save_bar(m: &CommSettings, on: &OnAct, cx: &App) -> Option<AnyElement> {
         let name_empty = m.name.read(cx).text().trim().is_empty();
         (
             if m.saving {
-                "Saving...".into()
+                m.progress.map(|p| format!("Saving {p}%")).unwrap_or_else(|| "Saving...".into()).into()
             } else if warn {
                 "Save or reset your changes before closing".into()
             } else {
@@ -845,7 +965,7 @@ pub fn view(m: &CommSettings, store: &Store, on: &OnAct, cx: &App) -> impl IntoE
         .flex()
         .items_center()
         .gap(px(8.))
-        .child(img("icons/group-placeholder.svg").size(px(28.)).rounded_full().flex_shrink_0())
+        .child(crate::community::logo(store, &m.community, 28., 8.))
         .child(div().min_w_0().truncate().font_weight(FontWeight::BOLD).text_size(px(14.)).line_height(px(17.)).text_color(c(0xffffff)).child(name))
         .into_any_element();
     let (a, b, d) = (on.clone(), on.clone(), on.clone());
@@ -856,7 +976,7 @@ pub fn view(m: &CommSettings, store: &Store, on: &OnAct, cx: &App) -> impl IntoE
     };
     let nav = crate::settings::section_nav(&sections, section.id, &[], active, &m.search, head, None, 249., 0x0b0b0b, &nav_on, cx);
     let body = match section.id {
-        "overview" => overview(m, cx),
+        "overview" => overview(m, store, on, cx),
         "relays" => relays(m, on, cx),
         "bans" => bans(m, store, on, cx),
         "roles" => crate::roles::view(m, store, on, cx),

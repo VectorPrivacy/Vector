@@ -62,7 +62,7 @@ fn cached(url: &str, kind: Kind) -> Option<String> {
     ["jpg", "png", "webp", "gif"].iter().map(|ext| dir.join(format!("{key}.{ext}"))).find(|p| p.is_file()).map(|p| p.to_string_lossy().into_owned())
 }
 
-async fn fetch(url: &str) -> Result<Vec<u8>, String> {
+async fn fetch(url: &str, max: usize) -> Result<Vec<u8>, String> {
     let client = vector_core::net::shared_http_client();
     let mut resp = vector_core::net::proxied_request(&client, reqwest::Method::GET, url).await.send().await.map_err(|e| e.to_string())?;
     if !resp.status().is_success() {
@@ -70,7 +70,7 @@ async fn fetch(url: &str) -> Result<Vec<u8>, String> {
     }
     let mut out = Vec::new();
     while let Some(chunk) = resp.chunk().await.map_err(|e| e.to_string())? {
-        if out.len() + chunk.len() > MAX_BYTES {
+        if out.len() + chunk.len() > max {
             return Err("Image too large".into());
         }
         out.extend_from_slice(&chunk);
@@ -84,7 +84,7 @@ async fn cache(url: &str, kind: Kind) -> Result<String, String> {
     }
     let _permit = DOWNLOADS.acquire().await.map_err(|e| e.to_string())?;
     vector_core::net::validate_url_not_private(url)?;
-    let bytes = fetch(url).await?;
+    let bytes = fetch(url, MAX_BYTES).await?;
     let mut ext = sniff(&bytes).ok_or("Invalid image")?;
     // An SVG is kept as the pixels it draws.
     let bytes = if ext == "svg" {
@@ -168,4 +168,27 @@ pub fn precache(url: &str, bytes: &[u8], banner: bool) {
         (bytes, ext)
     };
     let _ = std::fs::write(dir.join(format!("{}.{ext}", cache_key(url))), bytes);
+}
+
+/// A community's logo or banner: downloaded, decrypted and checked against its committed hash.
+pub async fn community_image(image: &vector_core::community::CommunityImage, banner: bool) -> Result<String, String> {
+    let kind = if banner { Kind::Banner } else { Kind::Avatar };
+    if let Some(path) = cached(&image.url, kind) {
+        return Ok(path);
+    }
+    let _permit = DOWNLOADS.acquire().await.map_err(|e| e.to_string())?;
+    vector_core::net::validate_url_not_private(&image.url)?;
+    // Other clients upload banner crops uncompressed.
+    let encrypted = fetch(&image.url, if banner { 16 * 1024 * 1024 } else { MAX_BYTES }).await?;
+    let plain = vector_core::crypto::decrypt_data_owned(encrypted, &image.key, &image.nonce)?;
+    if !vector_core::crypto::sha256_hex(&plain).eq_ignore_ascii_case(&image.hash) {
+        return Err("community image failed integrity check".into());
+    }
+    if vector_core::svg::looks_like_svg(&plain) {
+        return Err(vector_core::community::SVG_REFUSED.into());
+    }
+    let ext = sniff(&plain).filter(|e| *e != "svg").ok_or("Invalid image")?;
+    let path = cache_dir(kind).ok_or("No cache directory")?.join(format!("{}.{ext}", cache_key(&image.url)));
+    tokio::fs::write(&path, &plain).await.map_err(|e| e.to_string())?;
+    Ok(path.to_string_lossy().into_owned())
 }

@@ -32,6 +32,12 @@ struct Fixtures {
     policy_presets: Option<serde_json::Value>,
 }
 
+#[derive(Clone, Debug, Default)]
+pub struct Art {
+    pub icon: Option<String>,
+    pub banner: Option<String>,
+}
+
 /// `list_community_invites`' row: the bundle still as its JSON.
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(default)]
@@ -99,6 +105,9 @@ pub struct Community {
     pub members: Vec<String>,
     pub relays: Vec<String>,
     pub voice_relays: Vec<String>,
+    /// Fixtures name local files; a live community's resolve into `Store::art`.
+    pub icon: Option<String>,
+    pub banner: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -167,6 +176,9 @@ pub struct Store {
     pub fixture_presets: Option<serde_json::Value>,
     /// Each community's nicknames, npub → name.
     pub nicknames: HashMap<String, HashMap<String, String>>,
+    /// Each community's logo and banner as local files, once resolved.
+    pub art: HashMap<String, Art>,
+    pub hidden_banners: Vec<String>,
 }
 
 impl Store {
@@ -195,6 +207,8 @@ impl Store {
             fixture_moderation: f.moderation,
             fixture_presets: f.policy_presets,
             nicknames: f.nicknames,
+            art: HashMap::new(),
+            hidden_banners: Vec::new(),
         })
     }
 
@@ -215,6 +229,8 @@ impl Store {
             fixture_moderation: None,
             fixture_presets: None,
             nicknames: HashMap::new(),
+            art: HashMap::new(),
+            hidden_banners: Vec::new(),
         }
     }
 
@@ -311,6 +327,17 @@ impl Store {
         chat.chat_type == vector_core::ChatType::DirectMessage
             && !chat.messages.is_empty()
             && !self.profiles.get(&chat.id).is_some_and(|p| p.is_blocked)
+    }
+
+    pub fn icon(&self, id: &str) -> Option<PathBuf> {
+        let p = self.art.get(id).and_then(|a| a.icon.as_deref()).or_else(|| self.community(id).and_then(|c| c.icon.as_deref()))?;
+        Some(self.media_root.join(p))
+    }
+
+    /// The banner the community pane shows: none once hidden.
+    pub fn banner(&self, id: &str) -> Option<PathBuf> {
+        let p = self.art.get(id).and_then(|a| a.banner.as_deref()).or_else(|| self.community(id).and_then(|c| c.banner.as_deref()))?;
+        Some(self.media_root.join(p))
     }
 
     pub fn community(&self, id: &str) -> Option<&Community> {

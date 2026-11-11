@@ -1,4 +1,4 @@
-//! `Cropper`: a square cut of a picture, moved, resized from a corner or drawn afresh, with the
+//! `Cropper`: a square (or fixed-aspect) cut of a picture, moved, resized from a corner or drawn afresh, with the
 //! picture shown where it will live. It answers with a rectangle in the picture's own pixels.
 
 use std::sync::Arc;
@@ -49,6 +49,8 @@ pub struct Cropper {
     title: SharedString,
     hint: SharedString,
     round: bool,
+    /// Width over height of the cut.
+    aspect: f32,
     stage: Bounds<Pixels>,
     /// The fitted picture and the box, in stage px.
     img: Rect,
@@ -75,6 +77,7 @@ impl Cropper {
             title: title.into(),
             hint: hint.into(),
             round,
+            aspect: 1.,
             stage: Bounds::default(),
             img: Rect::default(),
             crop: Rect::default(),
@@ -82,12 +85,19 @@ impl Cropper {
         }
     }
 
+    /// A cut of this width over height instead of a square; never round.
+    pub fn aspect(mut self, aspect: f32) -> Self {
+        self.aspect = aspect.max(0.05);
+        self.round = false;
+        self
+    }
+
     fn max_w(&self) -> f32 {
-        self.img.w.min(self.img.h)
+        self.img.w.min(self.img.h * self.aspect)
     }
 
     fn min_w(&self) -> f32 {
-        self.max_w().min(MIN_EDGE)
+        self.max_w().min(MIN_EDGE * self.aspect.max(1.))
     }
 
     fn lay_out(&mut self, stage: Bounds<Pixels>) {
@@ -97,8 +107,8 @@ impl Cropper {
         let scale = ((sw - INSET * 2.) / nw).min((sh - INSET * 2.) / nh);
         let (w, h) = ((nw * scale).round(), (nh * scale).round());
         self.img = Rect { x: ((sw - w) / 2.).round(), y: ((sh - h) / 2.).round(), w, h };
-        let side = self.max_w();
-        self.crop = Rect { x: self.img.x + (w - side) / 2., y: self.img.y + (h - side) / 2., w: side, h: side };
+        let (bw, bh) = (self.max_w(), self.max_w() / self.aspect);
+        self.crop = Rect { x: self.img.x + (w - bw) / 2., y: self.img.y + (h - bh) / 2., w: bw, h: bh };
     }
 
     /// The box in the picture's pixels.
@@ -108,12 +118,13 @@ impl Cropper {
         }
         let (nw, nh) = self.natural;
         let k = nw as f32 / self.img.w;
-        let w = ((self.crop.w * k).round() as u32).min(nw).min(nh).max(1);
+        let w = ((self.crop.w * k).round() as u32).min(nw).max(1);
+        let h = ((self.crop.h * k).round() as u32).min(nh).max(1);
         Some(CropRect {
             x: (((self.crop.x - self.img.x) * k).round().max(0.) as u32).min(nw - w),
-            y: (((self.crop.y - self.img.y) * k).round().max(0.) as u32).min(nh - w),
+            y: (((self.crop.y - self.img.y) * k).round().max(0.) as u32).min(nh - h),
             w,
-            h: w,
+            h,
             sw: Some(nw),
             sh: Some(nh),
         })
@@ -139,10 +150,12 @@ impl Cropper {
                 // The anchor stays put; the box grows toward the pointer only as far as the picture allows.
                 let room_w = if right { i.x + i.w - a.x } else { a.x - i.x };
                 let room_h = if down { i.y + i.h - a.y } else { a.y - i.y };
-                let w = (p.x - a.x).abs().max((p.y - a.y).abs()).min(room_w).min(room_h).max(self.min_w());
-                self.crop = Rect { x: if right { a.x } else { a.x - w }, y: if down { a.y } else { a.y - w }, w, h: w };
+                let k = self.aspect;
+                let w = (p.x - a.x).abs().max((p.y - a.y).abs() * k).min(room_w).min(room_h * k).max(self.min_w());
+                self.crop = Rect { x: if right { a.x } else { a.x - w }, y: if down { a.y } else { a.y - w / k }, w, h: w / k };
                 let w = self.crop.w.clamp(self.min_w(), self.max_w());
-                self.crop = Rect { x: self.crop.x.clamp(i.x, i.x + i.w - w), y: self.crop.y.clamp(i.y, i.y + i.h - w), w, h: w };
+                let h = w / k;
+                self.crop = Rect { x: self.crop.x.clamp(i.x, i.x + i.w - w), y: self.crop.y.clamp(i.y, i.y + i.h - h), w, h };
             }
             None => {}
         }
@@ -259,7 +272,8 @@ impl Render for Cropper {
             .absolute()
             .left(px(b.x))
             .top(px(b.y))
-            .size(px(b.w))
+            .w(px(b.w))
+            .h(px(b.h))
             .border_2()
             .border_color(c(0xffffff))
             .when(round, |d| d.rounded_full())
@@ -301,11 +315,14 @@ impl Render for Cropper {
             .child(measure)
             .when(ready, |d| d.child(crop_box));
 
+        let aspect = self.aspect;
         let chip = |size: f32| {
+            let size = if aspect > 1. { size * 1.25 } else { size };
             let k = if b.w > 0. { size / b.w } else { 0. };
             div()
                 .relative()
-                .size(px(size))
+                .w(px(size))
+                .h(px(size / aspect))
                 .overflow_hidden()
                 .rounded(px(6.))
                 .bg(c(0x050505))
@@ -325,7 +342,7 @@ impl Render for Cropper {
             .gap(px(8.))
             .flex_none()
             .child(div().text_size(px(11.)).line_height(px(24.)).font_weight(gpui::FontWeight::SEMIBOLD).text_color(gpui::white().opacity(0.4)).child("PREVIEW"))
-            .child(div().flex().flex_col().items_center().gap(px(12.)).w(px(120.)).child(chip(96.)).child(chip(48.)).child(chip(24.)));
+            .child(div().flex().flex_col().items_center().gap(px(12.)).w(px(120.)).child(chip(96.)).child(chip(48.)).when(aspect <= 1., |d| d.child(chip(24.))));
 
         let card = div()
             .id("crop-card")

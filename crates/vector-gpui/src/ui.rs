@@ -96,6 +96,8 @@ pub struct VectorApp {
     create_community: Option<crate::createcommunity::CreateCommunity>,
     invite: Option<crate::invite::Invite>,
     comm_settings: Option<crate::commsettings::CommSettings>,
+    /// The cropper over Community Settings, and the pick it is cutting (`true` for a banner).
+    comm_crop: Option<(Entity<crate::cropper::Cropper>, bool, crate::commsettings::Pick)>,
     moderation: Option<crate::moderation::Moderation>,
     /// Each community's last raid check: `(detected, suspects)`.
     raid: HashMap<String, (bool, usize)>,
@@ -147,6 +149,7 @@ enum Mode {
 #[derive(Clone)]
 /// What a context menu row does.
 enum MenuAct {
+    BannerHidden(String, bool),
     StartFolder(String),
     StartRename(String),
     StartUngroup(String),
@@ -218,6 +221,8 @@ enum CallGo {
 
 #[path = "ui_moderation.rs"]
 mod moderation_ops;
+#[path = "ui_art.rs"]
+mod art_ops;
 
 impl VectorApp {
     fn base(store: Store, live: bool, window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -289,6 +294,7 @@ impl VectorApp {
             create_community: None,
             invite: None,
             comm_settings: None,
+            comm_crop: None,
             moderation: None,
             raid: HashMap::new(),
             invite_details: None,
@@ -633,6 +639,7 @@ impl VectorApp {
             MenuAct::CreateCategory(community) => self.open_create_channel(community, None, true, window, cx),
             MenuAct::InvitePeople(community) => self.open_invite(community, window, cx),
             MenuAct::CommunitySettings(community) => self.open_comm_settings(community, "overview", window, cx),
+            MenuAct::BannerHidden(community, hidden) => self.set_banner_hidden(community, hidden, cx),
             MenuAct::CommunityNickname(community) => {
                 let me = self.store.borrow().my_npub.clone();
                 self.ask_community_nickname(community, me, window, cx);
@@ -1180,7 +1187,13 @@ impl VectorApp {
     fn on_core_event(&mut self, name: &str, payload: Value, _window: &mut Window, cx: &mut Context<Self>) {
         let chat_id = payload.get("chat_id").and_then(Value::as_str).unwrap_or_default().to_string();
         match name {
-            "communities_changed" | "community_refreshed" | "community_kicked" | "community_surfaced" => self.reload_communities(cx),
+            "communities_changed" | "community_refreshed" | "community_kicked" | "community_surfaced" => {
+                let id = payload.as_str().or_else(|| payload.get("community_id").and_then(Value::as_str)).map(String::from);
+                if name == "community_refreshed" && id.is_some() {
+                    self.resolve_art(id, cx);
+                }
+                self.reload_communities(cx);
+            }
             "community_invite_received" | "community_invites_purged" => self.reload_invites(cx),
             "transfer_state" => self.security.update(cx, |f, cx| f.transfer_state(&payload, cx)),
             "mic_level" => {
@@ -2055,6 +2068,7 @@ impl Render for VectorApp {
         .children(self.viewer.clone().map(|v| gpui::deferred(div().absolute().inset_0().child(v)).with_priority(10)))
         .children(self.file_preview.clone().map(|v| gpui::deferred(div().absolute().inset_0().child(v)).with_priority(9)))
         .children(self.cropper.as_ref().map(|(v, _)| gpui::deferred(div().absolute().inset_0().child(v.clone())).with_priority(11)))
+        .children(self.comm_crop.as_ref().map(|(v, _, _)| gpui::deferred(div().absolute().inset_0().child(v.clone())).with_priority(14)))
         .children({
             let app = cx.entity().downgrade();
             let on: crate::call::OnAct = Rc::new(move |act, window, cx| {
@@ -3593,6 +3607,11 @@ impl VectorApp {
                     self.community_menu(id, gpui::point(px(RAIL_W - 1.), px(CHROME_H + 61. + 4.)), cx);
                 }
             }
+            Act::BannerMenu(at) => {
+                if let Some(id) = self.community.as_ref().map(|v| v.id.clone()) {
+                    self.show_menu(at, vec![(kit::MenuItem::new("Hide Banner", "eye-off"), MenuAct::BannerHidden(id, true))], cx);
+                }
+            }
             Act::ChannelMenu(channel, at) => {
                 if let Some(id) = self.community.as_ref().map(|v| v.id.clone()) {
                     self.channel_menu(id, channel, at, cx);
@@ -3710,6 +3729,9 @@ impl VectorApp {
         }
         rows.push((kit::MenuItem::divider(), MenuAct::Nothing));
         rows.extend(self.notify_rows(&id, Some(&id)));
+        if self.store.borrow().banner(&id).is_some() && self.store.borrow().hidden_banners.contains(&id) {
+            rows.push((kit::MenuItem::new("Show Banner", "eye"), MenuAct::BannerHidden(id.clone(), false)));
+        }
         if caps.contains("ban") {
             let raid = self.raid.get(&id).filter(|r| r.0);
             let mut item = kit::MenuItem::new("Moderation", "warning");
@@ -4088,6 +4110,11 @@ impl VectorApp {
             role_query,
             role_hex: None,
             saving: false,
+            progress: None,
+            icon_pick: None,
+            icon_removed: false,
+            banner_pick: None,
+            banner_removed: false,
             warn_until: None,
         });
         if section == "audit" {
@@ -4495,6 +4522,16 @@ impl VectorApp {
         use crate::commsettings::{relay_address, voice_address, Act, RELAYS_MAX};
         let Some(m) = self.comm_settings.as_mut() else { return };
         match act {
+            Act::PickIcon => self.pick_comm_image(false, window, cx),
+            Act::PickBanner => self.pick_comm_image(true, window, cx),
+            Act::RemoveIcon => {
+                m.icon_pick = None;
+                m.icon_removed = self.store.borrow().icon(&m.community).is_some();
+            }
+            Act::RemoveBanner => {
+                m.banner_pick = None;
+                m.banner_removed = self.store.borrow().banner(&m.community).is_some();
+            }
             Act::Close => {
                 if m.saving || m.unbanning {
                     return;
@@ -4723,11 +4760,20 @@ impl VectorApp {
         let relays = (m.relays != m.saved.relays).then(|| m.relays.clone());
         let id = m.community.clone();
         m.warn_until = None;
+        let icon = m.icon_pick.as_ref().map(|p| (p.path.clone(), p.crop.clone()));
+        let banner = m.banner_pick.as_ref().map(|p| (p.path.clone(), p.crop.clone()));
+        let (icon_removed, banner_removed) = (m.icon_removed, m.banner_removed);
         if !self.live {
             m.saved = crate::commsettings::Saved { name, description, relays: m.relays.clone(), voice: m.voice.clone() };
+            m.icon_pick = None;
+            m.banner_pick = None;
+            m.icon_removed = false;
+            m.banner_removed = false;
             return;
         }
         m.saving = true;
+        m.progress = None;
+        let (tx, mut progress) = futures::channel::mpsc::unbounded::<u8>();
         let rx = backend::run({
             let id = id.clone();
             async move {
@@ -4735,6 +4781,23 @@ impl VectorApp {
                 if name_change.is_some() || description_change.is_some() {
                     backend::community::edit_metadata(id.clone(), name_change, description_change).await?;
                 }
+                if icon_removed {
+                    backend::community::remove_image(id.clone(), false).await?;
+                }
+                if banner_removed {
+                    backend::community::remove_image(id.clone(), true).await?;
+                }
+                for (banner, pick) in [(false, icon), (true, banner)] {
+                    if let Some((path, crop)) = pick {
+                        let tx = tx.clone();
+                        let _ = tx.unbounded_send(0);
+                        backend::community::set_image(id.clone(), path, banner, crop, move |p| {
+                            let _ = tx.unbounded_send(p);
+                        })
+                        .await?;
+                    }
+                }
+                drop(tx);
                 let voice = match voice {
                     Some(v) => Some(backend::community::set_voice_relays(id.clone(), v).await?),
                     None => None,
@@ -4751,13 +4814,36 @@ impl VectorApp {
             }
         });
         cx.spawn(async move |this, cx| {
+            use futures::StreamExt;
+            while let Some(p) = progress.next().await {
+                let ok = this
+                    .update(cx, |this, cx| {
+                        if let Some(m) = this.comm_settings.as_mut() {
+                            m.progress = Some(p);
+                        }
+                        cx.notify();
+                    })
+                    .is_ok();
+                if !ok {
+                    break;
+                }
+            }
             let res = rx.await.unwrap_or_else(|_| Err("Save failed".into()));
             this.update(cx, |this, cx| {
+                let art = this.comm_settings.as_ref().is_some_and(|m| m.icon_pick.is_some() || m.banner_pick.is_some() || m.icon_removed || m.banner_removed);
+                if art {
+                    this.resolve_art(Some(id.clone()), cx);
+                }
                 let live = this.comm_settings.as_mut().filter(|m| m.community == id);
                 match res {
                     Ok((voice, relays, warnings)) => {
                         if let Some(m) = live {
                             m.saving = false;
+                            m.progress = None;
+                            m.icon_pick = None;
+                            m.banner_pick = None;
+                            m.icon_removed = false;
+                            m.banner_removed = false;
                             if let Some(v) = voice {
                                 m.voice = v;
                             }
@@ -4774,6 +4860,7 @@ impl VectorApp {
                     Err(e) => {
                         if let Some(m) = live {
                             m.saving = false;
+                            m.progress = None;
                         }
                         this.show_toast(&e, cx);
                     }
@@ -4998,6 +5085,7 @@ impl VectorApp {
                 community_id: "c".repeat(64),
                 name,
                 description: "Late-night builders, ships and shenanigans.".into(),
+                icon: None,
             });
             self.invite_previews.insert(key, preview.map_or(crate::newchat::Preview::Failed, crate::newchat::Preview::Ready));
             return;
@@ -5141,13 +5229,15 @@ impl VectorApp {
                 let n = backend::community::nicknames(&id);
                 (id, n)
             });
-            (backend::community::list(), named)
+            (backend::community::list(), named, backend::community::hidden_banners())
         });
         cx.spawn(async move |this, cx| {
-            let Ok((list, named)) = rx.await else { return };
+            let Ok((list, named, hidden)) = rx.await else { return };
             let list: Vec<data::Community> = list.into_iter().filter_map(|v| serde_json::from_value(v).ok()).collect();
             this.update(cx, |this, cx| {
                 this.store.borrow_mut().communities = list;
+                this.store.borrow_mut().hidden_banners = hidden;
+                this.resolve_art(None, cx);
                 if let Some((id, n)) = named {
                     this.store.borrow_mut().nicknames.insert(id, n);
                 }

@@ -29,7 +29,7 @@
             return FIX.thumbs[hash];
         },
         get_system_events: () => [], pivx_get_chat_payments: () => [], get_message_delete_meta_bulk: () => [],
-        get_chat_commands: () => [], list_communities: () => FIX.communities || [], get_community: ({ communityId }) => (FIX.communities || []).find((c) => c.community_id === communityId), get_hidden_banners: () => [],
+        get_chat_commands: () => [], list_communities: () => FIX.communities || [], get_community: ({ communityId }) => (FIX.communities || []).find((c) => c.community_id === communityId), get_hidden_banners: () => [], cache_community_image: ({ communityId, isBanner }) => { const c = (FIX.communities || []).find((x) => x.community_id === communityId); return (isBanner ? c?.banner : c?.icon) || null; },
         get_community_capabilities: () => Object.fromEntries(['manage_metadata','manage_channels','create_invite','kick','ban','manage_messages','manage_roles','manage_admin_role','pin_messages','control_write','moderate_members','view_audit_log','manage_nicknames','change_nickname'].map((k) => [k, true])),
         get_community_members: ({ communityId }) => ((FIX.communities || []).find((c) => c.community_id === communityId)?.members || []).map((npub, i) => ({ npub, last_active: 1794275880 - i * 600 })),
         get_channel_pins: () => [], sync_community_channel: () => ({ new_messages: 0, reached_start: true, oldest_ms: null }), fill_community_gap: () => 0,
