@@ -17,6 +17,8 @@ pub mod upload;
 pub mod archive;
 pub mod badges;
 pub mod device;
+pub mod sound;
+pub mod storage;
 
 use std::future::Future;
 use std::path::PathBuf;

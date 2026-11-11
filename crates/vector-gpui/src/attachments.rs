@@ -20,7 +20,6 @@ use crate::timeline::{Act, Ctx, DANGER};
 const IMAGES: [&str; 10] = ["png", "jpeg", "jpg", "gif", "webp", "svg", "bmp", "tiff", "tif", "ico"];
 /// Pictures that wait behind their blur rather than a file box.
 const BLURRED: [&str; 8] = ["png", "jpeg", "jpg", "gif", "webp", "tiff", "tif", "ico"];
-const AUTO_DOWNLOAD_MAX: u64 = 10_485_760;
 
 const BOX_BG: u32 = 0x161616;
 const BOX_BG_HOVER: u32 = 0x1d1d1d;
@@ -67,13 +66,14 @@ pub fn attachments(ctx: &Ctx, m: &Message) -> Option<AnyElement> {
         let unsent = m.mine && att.url.is_empty();
         let ready = att.downloaded || att.resident;
         let failed = media.failed.get(&att.id).cloned();
-        let auto = !ready
+        let auto = media.auto_download.on
+            && !ready
             && !ctx.held
             && !unsent
             && failed.is_none()
             && !media.auto_fired.contains(&att.id)
             && att.size > 0
-            && att.size <= AUTO_DOWNLOAD_MAX;
+            && att.size <= media.auto_download.limit;
         if auto {
             media.auto_fired.insert(att.id.clone());
             media.auto_queue.push((m.id.clone(), att.id.clone()));

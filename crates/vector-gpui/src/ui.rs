@@ -124,6 +124,11 @@ enum PopupAct {
     RemoveAccount { npub: String },
     Unblock { npub: String },
     Logout,
+    ClearStorage,
+    /// Delete one slice of the storage chart: its category and the extensions it counted.
+    DeleteSlice { category: &'static str, exts: Vec<String> },
+    /// Turn Keep Files off, deleting what it kept.
+    StopKeeping,
 }
 
 impl VectorApp {
@@ -393,6 +398,12 @@ impl VectorApp {
             sync::fetch_messages(true).await;
             sync::notifs();
         });
+        let rx = backend::run(async { backend::storage::auto_download() });
+        cx.spawn(async move |this, cx| {
+            let Ok((on, limit)) = rx.await else { return };
+            this.update(cx, |this, _| this.media.borrow_mut().auto_download = crate::media::AutoDownload { on, limit }).ok();
+        })
+        .detach();
         cx.notify();
     }
 
@@ -936,6 +947,21 @@ impl VectorApp {
                 }
                 self.set_blocked(npub, false, cx);
             }
+            PopupAct::ClearStorage => {
+                if let Some(s) = self.settings.as_mut() {
+                    s.clearing = true;
+                }
+                let rx = backend::run(backend::storage::clear_all());
+                self.after_storage_clear(rx, false, cx);
+            }
+            PopupAct::DeleteSlice { category, exts } => {
+                if let Some(s) = self.settings.as_mut() {
+                    s.donut.busy = true;
+                }
+                let rx = backend::run(backend::storage::clear_category(category, exts));
+                self.after_storage_clear(rx, true, cx);
+            }
+            PopupAct::StopKeeping => self.set_keep_media(false, cx),
             PopupAct::Logout => {
                 let me = self.store.borrow().my_npub.clone();
                 self.settings = None;
@@ -2725,13 +2751,193 @@ impl VectorApp {
             flipped: HashSet::new(),
             streamer_notif: synced.map(|s| s.streamer.notif).unwrap_or_else(|| "none".into()),
             notif_privacy,
+            storage: None,
+            donut: Default::default(),
+            auto_limit: if self.live { backend::prefs::sql("max_auto_download_bytes").and_then(|v| v.parse().ok()).filter(|v: &u64| *v > 0) } else { None }.unwrap_or(10_485_760),
+            clearing: false,
+            notif_sound: if self.live { backend::prefs::sql("notif_sound") } else { None }.unwrap_or_else(|| "default".into()),
+            sound_custom: false,
             blocked: None,
             seen: seen.into_iter().collect(),
             jumped: None,
         });
         self.load_blocked(cx);
+        self.load_storage(cx);
         self.mark_settings_seen(None);
         cx.notify();
+    }
+
+    /// Refresh the storage chart; a fresh report drops the chart's selection.
+    fn load_storage(&mut self, cx: &mut Context<Self>) {
+        if !self.live {
+            if let Some(s) = self.settings.as_mut() {
+                // Fixtures: `VECTOR_STORAGE=ext:bytes,...` stands in for a disk report.
+                let dist = std::env::var("VECTOR_STORAGE").unwrap_or_default();
+                s.storage = Some(dist.split(',').filter_map(|kv| kv.split_once(':')).filter_map(|(k, v)| Some((k.to_string(), v.parse().ok()?))).collect());
+            }
+            return;
+        }
+        let rx = backend::run(async { vector_core::db::scoped(async { backend::storage::distribution() }).await });
+        cx.spawn(async move |this, cx| {
+            let Ok(dist) = rx.await else { return };
+            this.update(cx, |this, cx| {
+                if let Some(s) = this.settings.as_mut() {
+                    s.storage = Some(dist);
+                    s.donut.hover = None;
+                    s.donut.picked = None;
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn confirm_storage_delete(&mut self) {
+        let Some(s) = self.settings.as_ref() else { return };
+        let Some(dist) = s.storage.as_ref() else { return };
+        let segs = crate::settings::segments(dist);
+        let Some(seg) = s.donut.picked.and_then(|i| segs.get(i)) else { return };
+        let cat = &crate::settings::STORE_CATS[seg.cat];
+        let size = crate::media::format_bytes(seg.size);
+        let text = match cat.key {
+            Some("/ai_models") => format!("This will delete {size} of downloaded AI models from this device.<br><br>Voice transcription will download a model again when needed."),
+            Some(_) => format!("This will delete {size} of cached avatars, banners and images.<br><br>Vector rebuilds this cache automatically over time."),
+            None => format!("This will delete {size} of {} from this device.<br><br>You can download them again from their chats later, if they are still available.", cat.noun),
+        };
+        let category = match cat.key {
+            Some("/ai_models") => "ai",
+            Some(_) => "cache",
+            None => "files",
+        };
+        let exts = crate::settings::slice_exts(seg.cat, dist);
+        let mut popup = kit::Popup::notice(cat.title);
+        popup.icon = Some("icons/vector_warning.svg");
+        popup.text = Some(text.into());
+        popup.confirm = "Confirm".into();
+        popup.cancel = Some("Cancel".into());
+        self.popup = Some((popup, PopupAct::DeleteSlice { category, exts }));
+    }
+
+    fn after_storage_clear(&mut self, rx: futures::channel::oneshot::Receiver<Result<u64, String>>, slice: bool, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            let result = rx.await.unwrap_or_else(|_| Err("cancelled".into()));
+            this.update(cx, |this, cx| {
+                if let Some(s) = this.settings.as_mut() {
+                    s.clearing = false;
+                    s.donut.busy = false;
+                }
+                match result {
+                    Ok(freed) if slice => this.show_toast(&format!("Freed {}", vector_core::crypto::format_bytes(freed)), cx),
+                    Ok(_) => {}
+                    Err(e) => {
+                        let mut popup = kit::Popup::notice(if slice { "Delete Failed" } else { "Clear Failed" });
+                        popup.icon = Some("icons/vector_warning.svg");
+                        popup.text = Some(if slice { format!("Could not delete: {e}") } else { format!("Could not clear storage: {e}") }.into());
+                        this.popup = Some((popup, PopupAct::Notice));
+                    }
+                }
+                this.load_storage(cx);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Keep Files on or off; the switch goes back if the change doesn't happen.
+    fn set_keep_media(&mut self, on: bool, cx: &mut Context<Self>) {
+        if let Some(s) = self.settings.as_mut() {
+            s.on.insert("keep_media", on);
+            s.flipped.insert("keep_media");
+        }
+        if !self.live {
+            return;
+        }
+        let rx = backend::run(backend::storage::set_keep_media(on));
+        cx.spawn(async move |this, cx| {
+            let result = rx.await.unwrap_or_else(|_| Err("cancelled".into()));
+            this.update(cx, |this, cx| {
+                if let Err(e) = result {
+                    if let Some(s) = this.settings.as_mut() {
+                        s.on.insert("keep_media", !on);
+                    }
+                    let mut popup = kit::Popup::notice("Keep Files");
+                    popup.icon = Some("icons/vector_warning.svg");
+                    popup.text = Some(e.into());
+                    this.popup = Some((popup, PopupAct::Notice));
+                } else if !on {
+                    this.load_storage(cx);
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Turning Keep Files off asks first when it has kept anything.
+    fn toggle_keep_media(&mut self, on: bool, cx: &mut Context<Self>) {
+        if on || !self.live {
+            return self.set_keep_media(on, cx);
+        }
+        let rx = backend::run(async { vector_core::db::scoped(backend::storage::kept_summary()).await });
+        cx.spawn(async move |this, cx| {
+            let (files, bytes) = rx.await.unwrap_or((0, 0));
+            this.update(cx, |this, cx| {
+                if files == 0 {
+                    return this.set_keep_media(false, cx);
+                }
+                let mut popup = kit::Popup::notice("Stop keeping files?");
+                popup.icon = Some("icons/vector_warning.svg");
+                popup.text = Some(
+                    format!("{files} kept {} ({}) will be deleted from this device. They load again when you open them.", if files == 1 { "file" } else { "files" }, crate::media::format_bytes(bytes)).into(),
+                );
+                popup.confirm = "Confirm".into();
+                popup.cancel = Some("Cancel".into());
+                this.popup = Some((popup, PopupAct::StopKeeping));
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Pick, check and store a custom notification sound.
+    fn pick_sound(&mut self, cx: &mut Context<Self>) {
+        let rx = cx.prompt_for_paths(gpui::PathPromptOptions { files: true, directories: false, multiple: false, prompt: None });
+        let dir = backend::default_data_dir().join("cache").join("sounds");
+        cx.spawn(async move |this, cx| {
+            let Ok(Ok(Some(paths))) = rx.await else { return };
+            let Some(path) = paths.into_iter().next() else { return };
+            let imported = cx.background_executor().spawn(async move { backend::sound::import(&path, &dir) }).await;
+            this.update(cx, |this, cx| {
+                cx.notify();
+                let stored = match imported {
+                    Ok(p) => p,
+                    Err(e) => {
+                        let (title, text) = match e.as_str() {
+                            "FILE_TOO_LARGE" => ("File Too Large", "Notification sounds must be under 1MB. Please choose a shorter audio clip."),
+                            "AUDIO_TOO_LONG" => ("Audio Too Long", "Notification sounds must be 10 seconds or less."),
+                            _ => return log::warn!("custom sound: {e}"),
+                        };
+                        let mut popup = kit::Popup::notice(title);
+                        popup.text = Some(text.into());
+                        this.popup = Some((popup, PopupAct::Notice));
+                        return;
+                    }
+                };
+                let Some(s) = this.settings.as_mut() else { return };
+                s.sound_custom = false;
+                s.notif_sound = format!("custom:{}", stored.display());
+                backend::sound::purge();
+                if this.live {
+                    backend::prefs::set_sql("notif_sound", s.notif_sound.clone());
+                }
+            })
+            .ok();
+        })
+        .detach();
     }
 
     fn load_blocked(&mut self, cx: &mut Context<Self>) {
@@ -2810,8 +3016,15 @@ impl VectorApp {
                 self.mark_settings_seen(Some(anchor));
             }
             Act::Scrolled => s.jumped = None,
+            Act::Toggle("keep_media", value) => self.toggle_keep_media(value, cx),
             Act::Toggle(key, value) => {
                 let Some(t) = crate::settings::toggle_of(key) else { return };
+                if key == "auto_download_enabled" {
+                    self.media.borrow_mut().auto_download.on = value;
+                }
+                if key == "notif_global_mute" && value {
+                    backend::sound::purge();
+                }
                 s.on.insert(key, value);
                 s.flipped.insert(key);
                 match t.home {
@@ -2865,6 +3078,29 @@ impl VectorApp {
                             backend::prefs::set_sql("theme", value.to_string());
                         }
                     }
+                    "notif-privacy" => {
+                        s.notif_privacy = value.to_string();
+                        if self.live {
+                            backend::prefs::set_sql("notif_content_privacy", value.to_string());
+                        }
+                    }
+                    "auto-limit" => {
+                        let bytes: u64 = value.parse().unwrap_or(10_485_760);
+                        s.auto_limit = bytes;
+                        self.media.borrow_mut().auto_download.limit = bytes;
+                        if self.live {
+                            backend::prefs::set_sql("max_auto_download_bytes", value.to_string());
+                        }
+                    }
+                    "notif-sound" if value == "custom" => s.sound_custom = true,
+                    "notif-sound" => {
+                        s.sound_custom = false;
+                        s.notif_sound = value.to_string();
+                        backend::sound::purge();
+                        if self.live {
+                            backend::prefs::set_sql("notif_sound", value.to_string());
+                        }
+                    }
                     "streamer-notif" => {
                         s.streamer_notif = value.to_string();
                         if self.live {
@@ -2891,6 +3127,29 @@ impl VectorApp {
                         self.show_toast(&format!("Copied {lines} log entries to clipboard"), cx);
                     }
                     None => self.show_toast("No logs to copy!", cx),
+                }
+            }
+            Act::DonutHover(at) => s.donut.hover = at,
+            Act::DonutPick(i) => s.donut.picked = if s.donut.picked == Some(i) { None } else { Some(i) },
+            Act::DonutDelete => self.confirm_storage_delete(),
+            Act::ClearStorage => {
+                if !s.clearing {
+                    let mut popup = kit::Popup::notice("Clear Storage?");
+                    popup.icon = Some("icons/vector_warning.svg".into());
+                    popup.text = Some("Deletes this account's files, plus the cache. This can't be undone.".into());
+                    popup.confirm = "Confirm".into();
+                    popup.cancel = Some("Cancel".into());
+                    self.popup = Some((popup, PopupAct::ClearStorage));
+                }
+            }
+            Act::PreviewSound => backend::sound::play(backend::sound::Sound::parse(&s.notif_sound)),
+            Act::PickSound => self.pick_sound(cx),
+            Act::ClearSound => {
+                s.sound_custom = false;
+                s.notif_sound = "default".into();
+                backend::sound::purge();
+                if self.live {
+                    backend::prefs::set_sql("notif_sound", "default".into());
                 }
             }
             Act::Logout => {

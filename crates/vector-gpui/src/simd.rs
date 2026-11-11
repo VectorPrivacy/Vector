@@ -9,3 +9,6 @@ pub mod jpeg;
 pub mod neuquant;
 #[path = "../../../src-tauri/src/simd/png.rs"]
 pub mod png;
+#[path = "../../../src-tauri/src/simd/audio.rs"]
+#[allow(dead_code)]
+pub mod audio;

@@ -103,6 +103,20 @@ pub struct Media {
     /// Messages whose link card was asked for, and those asks waiting to go: (chat, message).
     pub meta_asked: HashSet<String>,
     pub meta_queue: Vec<(String, String)>,
+    /// What fetches on sight: on, up to a size.
+    pub auto_download: AutoDownload,
+}
+
+#[derive(Clone, Copy)]
+pub struct AutoDownload {
+    pub on: bool,
+    pub limit: u64,
+}
+
+impl Default for AutoDownload {
+    fn default() -> Self {
+        Self { on: true, limit: 10_485_760 }
+    }
 }
 
 impl Media {
@@ -284,7 +298,7 @@ fn format_bytes_rate(bps: f64) -> String {
     format_bytes_with(bps, if bps >= 1048576. { 2 } else { 0 }, true)
 }
 
-fn format_bytes_with(n: f64, decimals: usize, pad: bool) -> String {
+pub fn format_bytes_with(n: f64, decimals: usize, pad: bool) -> String {
     const UNITS: [&str; 5] = ["Bytes", "KB", "MB", "GB", "TB"];
     if n == 0. {
         return "0 Bytes".into();

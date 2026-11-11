@@ -48,12 +48,19 @@ simd-adler32 = "0.3"
 memchr = "2"
 zip = { version = "2.4", default-features = false, features = ["deflate-flate2", "flate2"] }
 flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"] }
+# Notification sounds: decode, resample, play.
+cpal = "0.16"
+symphonia = { version = "0.5.5", default-features = false, features = ["mp3", "wav", "flac", "pcm", "aac", "isomp4", "ogg", "vorbis", "opt-simd"] }
 
 # Its own workspace: GPUI pins dependency versions the main client must not inherit.
 [workspace]
 
+[profile.dev]
+debug = "line-tables-only"
+
 [profile.dev.package."*"]
 opt-level = 3
+debug = false
 
 [profile.release]
 lto = "fat"

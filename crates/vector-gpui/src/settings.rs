@@ -1,12 +1,13 @@
 //! Settings (`settings/Settings.svelte` in widescreen): a `SectionNav` in the list column,
 //! and the chosen category's headed blocks beside it.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::f32::consts::TAU;
 use std::rc::Rc;
 
 use gpui::prelude::*;
 use gpui::AnimationExt;
-use gpui::{AnyElement, App, Entity, FontWeight, ScrollHandle, SharedString, Window, div, img, px, svg};
+use gpui::{AnyElement, App, Entity, FontWeight, PathBuilder, ScrollHandle, SharedString, Window, canvas, div, img, px, svg};
 
 use crate::composer::TextInput;
 use crate::theme::*;
@@ -147,8 +148,18 @@ pub const OTHER: [Toggle; 4] = [
     t("advanced", "Advanced Mode", "advancedMode", Home::Synced, ""),
 ];
 
+pub const NOTIFY: [Toggle; 2] = [
+    t("notif_global_mute", "Mute All Notification Sounds", "mute", Home::Sql(false), ""),
+    t("notif_mute_everyone", "Mute @Everyone Pings", "everyone", Home::Sql(false), ""),
+];
+
+pub const STORAGE: [Toggle; 2] = [
+    t("auto_download_enabled", "Auto-Download Media", "autoDownload", Home::Sql(true), ""),
+    t("keep_media", "Keep Files on This Device", "keepMedia", Home::Sql(false), ""),
+];
+
 pub fn toggles() -> impl Iterator<Item = &'static Toggle> {
-    DISPLAY.iter().chain(PRIVACY.iter()).chain(OTHER.iter())
+    DISPLAY.iter().chain(PRIVACY.iter()).chain(NOTIFY.iter()).chain(STORAGE.iter()).chain(OTHER.iter())
 }
 
 pub fn toggle_of(key: &str) -> Option<&'static Toggle> {
@@ -166,6 +177,9 @@ pub fn help(key: &str) -> Option<(&'static str, String)> {
         "autocorrect" => ("Autocorrect", "When enabled, your device corrects typos as you type in the chat box, using your system's autocorrect.<br><br>Turn it off if your system keeps \"fixing\" words you meant to type."),
         "sendOnEnter" => ("Send on Enter", "When enabled, <b>Enter</b> sends your message, and <b>Shift + Enter</b> starts a new line.<br><br>Turn it off to have Enter always start a new line; send with the Send button, or <b>Ctrl + Enter</b> (<b>Cmd + Enter</b> on a Mac).<br><br>On by default on computers and off on phones. This applies to this device only."),
         "floatingPlayer" => ("Floating Player", "When enabled, <b>audio and video keep playing</b> when you leave their chat, in a small player you can move and resize anywhere.<br><br>Runs of voice messages play through, and a video can shrink to sound only.<br><br>Turn it off to stop media when you leave its chat."),
+        "mute" => ("Mute Notification Sounds", "When enabled, Vector will <b>not play any notification sounds</b> for incoming messages.<br><br>You will still receive visual notifications and badges."),
+        "everyone" => ("Mute @everyone Pings", "When enabled, <b>@everyone</b> mentions from group admins will <b>not bypass</b> your group mute setting.<br><br>By default, @everyone pings from admins will notify you even if the group is muted."),
+        "notifPrivacy" => ("Notification Content Privacy", "Controls how much of a message shows in OS notifications (lock screen, banners).<br><br><b>Show sender and message</b>: full preview.<br><b>Hide message</b>: shows who messaged you, not what.<br><b>Hide sender</b>: shows the message, not who sent it.<br><b>Hide sender and message</b>: a generic \"You received a message\", revealing nothing."),
         "clock" => ("Decentralised Clock", "When enabled, Vector keeps time by your Nostr relays instead of this device. It asks up to eight of them for the time every hour, and uses their time only when at least three agree; otherwise it keeps this device’s.<br><br>A device whose clock has drifted otherwise sends messages that look minutes old or from the future, sees others’ messages the same way, and gets turned away by media servers that check the time.<br><br>Off: Vector uses this device’s clock as it is."),
         "keepMedia" => ("Keep Files on This Device", "<b>When enabled:</b> every file you receive is kept on this device, encrypted, so it opens instantly and never downloads twice.<br><br><b>When disabled:</b> files stay in memory while Vector is open, and load again after it closes. One too large to hold waits for a tap, then is kept. Turning it off deletes what it kept."),
         "stripTracking" => ("Strip Tracking Markers", "When enabled, Vector will <b>automatically remove tracking markers</b> from URLs before displaying or sending them.<br><br>This helps reduce your footprint and enhances your privacy with no loss in functionality, only disable if you know what you're doing."),
@@ -239,12 +253,32 @@ pub struct Settings {
     /// What notifications also hide while streaming, and the base privacy that already hides.
     pub streamer_notif: String,
     pub notif_privacy: String,
+    /// `notif_sound` as stored: default, techno, none, or `custom:<path>`.
+    pub notif_sound: String,
+    /// Custom is chosen but no file is picked yet.
+    pub sound_custom: bool,
+    /// Bytes by type, once reported.
+    pub storage: Option<HashMap<String, u64>>,
+    pub donut: Donut,
+    /// The auto-download size limit, in bytes.
+    pub auto_limit: u64,
+    pub clearing: bool,
     /// Blocked users, once loaded.
     pub blocked: Option<Vec<Blocked>>,
     /// Anchors whose NEW pill has been seen.
     pub seen: HashSet<String>,
     /// The anchor a nav click scrolled to, until the reader scrolls.
     pub jumped: Option<&'static str>,
+}
+
+/// The chart's pointer state: a slice previewed, one picked, a Delete running.
+#[derive(Default)]
+pub struct Donut {
+    pub hover: Option<usize>,
+    pub picked: Option<usize>,
+    pub busy: bool,
+    /// Where it last painted, for hit-testing by angle.
+    pub bounds: Rc<std::cell::Cell<Option<gpui::Bounds<gpui::Pixels>>>>,
 }
 
 pub struct Blocked {
@@ -266,6 +300,13 @@ pub enum Act {
     Unblock(String),
     CopyLogs,
     Logout,
+    DonutHover(Option<usize>),
+    DonutPick(usize),
+    DonutDelete,
+    ClearStorage,
+    PreviewSound,
+    PickSound,
+    ClearSound,
     Link(&'static str),
     ClearSearch,
     /// The reader scrolled the page: the spy takes over from a jump.
@@ -706,10 +747,496 @@ fn danger_button(on: &OnAct) -> AnyElement {
         .into_any_element()
 }
 
+const NOTIF_PRIVACY: [crate::kit::Choice; 4] = [
+    crate::kit::Choice { value: "full", label: "Show sender and message" },
+    crate::kit::Choice { value: "hide_content", label: "Hide message" },
+    crate::kit::Choice { value: "hide_sender", label: "Hide sender" },
+    crate::kit::Choice { value: "hide_all", label: "Hide sender and message" },
+];
+
+const SOUNDS: [crate::kit::Choice; 4] = [
+    crate::kit::Choice { value: "default", label: "Prélude" },
+    crate::kit::Choice { value: "techno", label: "Techno" },
+    crate::kit::Choice { value: "none", label: "None" },
+    crate::kit::Choice { value: "custom", label: "Custom..." },
+];
+
+impl Settings {
+    /// The sound dropdown's value: Custom while a file is still being picked.
+    pub fn sound_choice(&self) -> &'static str {
+        match self.notif_sound.as_str() {
+            _ if self.sound_custom => "custom",
+            "techno" => "techno",
+            "none" => "none",
+            s if s.starts_with("custom:") => "custom",
+            _ => "default",
+        }
+    }
+}
+
+fn dropdown(id: &'static str, choices: &'static [crate::kit::Choice], value: &str, s: &Settings, on: &OnAct) -> AnyElement {
+    crate::kit::select_with(
+        id,
+        230.,
+        12.,
+        choices,
+        &[],
+        value,
+        s.open_select == Some(id),
+        {
+            let on = on.clone();
+            move |w, cx| on(Act::Select(id), w, cx)
+        },
+        {
+            let on = on.clone();
+            move |v, w, cx| on(Act::Pick(id, v), w, cx)
+        },
+    )
+}
+
+fn notifications_block(s: &Settings, on: &OnAct) -> AnyElement {
+    let privacy = dropdown("notif-privacy", &NOTIF_PRIVACY, &s.notif_privacy, s, on);
+    let choice = s.sound_choice();
+    let preview = div()
+        .id("notif-preview")
+        .w(px(28.))
+        .h(px(36.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .opacity(0.75)
+        .hover(|d| d.opacity(1.))
+        .cursor_pointer()
+        .on_click(click(on, || Act::PreviewSound))
+        .child(svg().path("icons/speaker_volume.svg").size(px(18.)).text_color(c(0xffffff)));
+    let mut col = div()
+        .flex()
+        .flex_col()
+        .children(NOTIFY.iter().map(|t| row(s, t.key, on, false)))
+        .child(
+            // `#notif-privacy-group` keeps the form group's 15px.
+            div()
+                .min_h(px(36.))
+                .mb(px(15.))
+                .flex()
+                .items_center()
+                .justify_between()
+                .gap(px(10.))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(6.))
+                        .text_size(px(16.))
+                        .line_height(px(19.))
+                        .text_color(c(0xffffff))
+                        .child("Content Privacy")
+                        .child(info("notif-privacy-info", click(on, || Act::Help("notifPrivacy")))),
+                )
+                .child(privacy),
+        )
+        .child(
+            div()
+                .min_h(px(36.))
+                .mb(px(15.))
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .child(div().flex_1().text_size(px(16.)).line_height(px(24.)).text_color(c(0xffffff)).child("Notification Sound"))
+                .child(preview)
+                .child(dropdown("notif-sound", &SOUNDS, choice, s, on)),
+        );
+    if choice == "custom" {
+        let name = s
+            .notif_sound
+            .strip_prefix("custom:")
+            .map(|p| {
+                let file = std::path::Path::new(p).file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_else(|| "Unknown file".into());
+                // `name_48000.raw` is the cache form; show the name as picked.
+                match file.strip_suffix(".raw").and_then(|f| f.rsplit_once('_')).filter(|(_, rate)| rate.bytes().all(|b| b.is_ascii_digit())) {
+                    Some((stem, _)) => stem.to_string(),
+                    None => file,
+                }
+            })
+            .unwrap_or_else(|| "No file selected".into());
+        // `.notif-custom-container`: its 20px top margin swallows the row's 15.
+        col = col.child(
+            div()
+                .id("notif-sound-chip")
+                .mt(px(5.))
+                .mb(px(15.))
+                .flex()
+                .items_center()
+                .gap(px(10.))
+                .py(px(12.))
+                .pl(px(15.))
+                .pr(px(12.))
+                .rounded(px(25.))
+                .border_1()
+                .border_color(white_a(0.12))
+                .bg(white_a(0.08))
+                .hover(|d| d.bg(white_a(0.12)).border_color(white_a(0.2)))
+                .cursor_pointer()
+                .on_click(click(on, || Act::PickSound))
+                .child(div().flex_shrink_0().text_size(px(20.)).opacity(0.7).text_color(c(0xffffff)).child("♪"))
+                .child(div().flex_1().min_w_0().truncate().text_size(px(14.)).text_color(white_a(0.85)).child(name))
+                .child(
+                    div()
+                        .id("notif-sound-clear")
+                        .size(px(20.))
+                        .flex_shrink_0()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded_full()
+                        .bg(white_a(0.15))
+                        .text_size(px(14.))
+                        .text_color(white_a(0.7))
+                        .hover(|d| d.bg(c(crate::timeline::DANGER).opacity(0.1)).text_color(c(crate::timeline::DANGER)))
+                        .on_click({
+                            let on = on.clone();
+                            move |_, w, cx| {
+                                cx.stop_propagation();
+                                on(Act::ClearSound, w, cx)
+                            }
+                        })
+                        .child("×"),
+                ),
+        );
+    }
+    col.into_any_element()
+}
+
+pub struct StoreCat {
+    pub name: &'static str,
+    pub exts: &'static [&'static str],
+    /// A synthetic bucket: `/cache` or `/ai_models`.
+    pub key: Option<&'static str>,
+    pub title: &'static str,
+    pub noun: &'static str,
+}
+
+pub const STORE_CATS: [StoreCat; 7] = [
+    StoreCat { name: "Images", exts: &["jpg", "jpeg", "png", "gif", "bmp", "webp", "svg", "avif", "heic", "heif", "tif", "tiff", "ico"], key: None, title: "Delete all Images?", noun: "downloaded images" },
+    StoreCat { name: "Video", exts: &["mp4", "mov", "avi", "mkv", "flv", "wmv", "3gp", "webm", "m4v", "mpeg", "mpg"], key: None, title: "Delete all Videos?", noun: "downloaded videos" },
+    StoreCat { name: "Audio", exts: &["mp3", "wav", "ogg", "oga", "opus", "flac", "m4a", "aac", "weba", "wma", "aiff"], key: None, title: "Delete all Audio?", noun: "downloaded audio and voice messages" },
+    StoreCat { name: "Apps", exts: &["xdc", "jsdos"], key: None, title: "Delete all Mini Apps?", noun: "downloaded Mini Apps" },
+    StoreCat { name: "AI", exts: &[], key: Some("/ai_models"), title: "Delete AI Models?", noun: "" },
+    StoreCat { name: "Cache", exts: &[], key: Some("/cache"), title: "Clear the Cache?", noun: "" },
+    StoreCat { name: "Files", exts: &[], key: None, title: "Delete all Files?", noun: "downloaded files" },
+];
+
+/// Slice colours rank by size: the largest is always purple.
+const RAMP: [u32; 7] = [0x9d5df9, 0x5ec4f7, 0x4ad99d, 0xfba35b, 0xfbc85b, 0xfc595c, 0xb2b2b2];
+const R_OUT: f32 = 96.;
+const R_IN: f32 = 57.;
+const GAP: f32 = 5.;
+/// Slivers keep this floor so they stay visible, paid for by the largest slice.
+const MIN_SWEEP: f32 = 0.13;
+
+pub struct Segment {
+    pub cat: usize,
+    pub size: u64,
+    pub color: u32,
+    pub a0: f32,
+    pub a1: f32,
+    pub pct: f32,
+}
+
+fn owner(key: &str) -> usize {
+    STORE_CATS
+        .iter()
+        .position(|c| c.key == Some(key) || c.exts.contains(&key))
+        .unwrap_or(STORE_CATS.len() - 1)
+}
+
+pub fn segments(dist: &HashMap<String, u64>) -> Vec<Segment> {
+    let mut sizes = [0u64; 7];
+    for (k, b) in dist {
+        sizes[owner(k)] += b;
+    }
+    let mut segs: Vec<(usize, u64)> = sizes.iter().enumerate().filter(|(_, s)| **s > 0).map(|(i, s)| (i, *s)).collect();
+    segs.sort_by(|a, b| b.1.cmp(&a.1));
+    let total: u64 = segs.iter().map(|s| s.1).sum();
+    let mut stolen = 0.;
+    let mut sweeps: Vec<f32> = segs
+        .iter()
+        .map(|(_, s)| {
+            let a = TAU * (*s as f32 / total as f32);
+            if a < MIN_SWEEP {
+                stolen += MIN_SWEEP - a;
+                MIN_SWEEP
+            } else {
+                a
+            }
+        })
+        .collect();
+    if let Some(first) = sweeps.first_mut() {
+        *first -= stolen;
+    }
+    let mut angle = 0.;
+    segs.iter()
+        .enumerate()
+        .map(|(i, (cat, size))| {
+            let a0 = angle;
+            angle += sweeps[i];
+            Segment { cat: *cat, size: *size, color: RAMP[i.min(RAMP.len() - 1)], a0, a1: angle, pct: *size as f32 / total as f32 * 100. }
+        })
+        .collect()
+}
+
+/// The extensions a slice clears: its own, or for the rest bucket, exactly those it counted.
+pub fn slice_exts(cat: usize, dist: &HashMap<String, u64>) -> Vec<String> {
+    let c = &STORE_CATS[cat];
+    if !c.exts.is_empty() {
+        return c.exts.iter().map(|e| e.to_string()).collect();
+    }
+    dist.keys().filter(|k| owner(k) == cat).cloned().collect()
+}
+
+/// The slice under a window point, by angle, so a gap belongs to its neighbour.
+pub fn slice_at(bounds: gpui::Bounds<gpui::Pixels>, at: gpui::Point<gpui::Pixels>, segs: &[Segment]) -> Option<usize> {
+    let scale = 200. / f32::from(bounds.size.width).max(1.);
+    let vx = f32::from(at.x - bounds.origin.x) * scale - 100.;
+    let vy = f32::from(at.y - bounds.origin.y) * scale - 100.;
+    let dist = vx.hypot(vy);
+    if dist < R_IN - 2. || dist > R_OUT + 6. || segs.is_empty() {
+        return None;
+    }
+    let mut a = vx.atan2(-vy);
+    if a < 0. {
+        a += TAU;
+    }
+    Some(segs.iter().rposition(|s| a >= s.a0).unwrap_or(0))
+}
+
+/// Binary units, with three whole digits trimmed to none after the point: the ring is full.
+fn ring_size(n: u64) -> String {
+    let s = crate::media::format_bytes(n);
+    if s.split(' ').next().and_then(|v| v.parse::<f32>().ok()).is_some_and(|v| v >= 100.) {
+        crate::media::format_bytes_with(n as f64, 0, false)
+    } else {
+        s
+    }
+}
+
+fn donut(s: &Settings, on: &OnAct) -> AnyElement {
+    let dist = s.storage.clone().unwrap_or_default();
+    let segs = segments(&dist);
+    let total: u64 = segs.iter().map(|g| g.size).sum();
+    let view = s.donut.hover.or(s.donut.picked).filter(|i| *i < segs.len());
+    let delete = s.donut.picked.is_some() && view == s.donut.picked;
+    let (value, label) = match view {
+        Some(i) => {
+            let g = &segs[i];
+            let pct = if g.pct < 1. { "<1".to_string() } else { format!("{}", g.pct.round() as u32) };
+            (ring_size(g.size), format!("{} · {pct}%", STORE_CATS[g.cat].name))
+        }
+        None => (ring_size(total), "Total".into()),
+    };
+    let paint: Vec<(f32, f32, u32, bool, bool)> = segs.iter().enumerate().map(|(i, g)| (g.a0, g.a1, g.color, view == Some(i), view.is_some() && view != Some(i))).collect();
+    let loaded = s.storage.is_some();
+    let cell = s.donut.bounds.clone();
+    let chart = canvas(
+        move |bounds, _, _| cell.set(Some(bounds)),
+        move |bounds: gpui::Bounds<gpui::Pixels>, _, window, _| {
+            let k = f32::from(bounds.size.width) / 200.;
+            let o = bounds.origin;
+            let ring = |a0: f32, a1: f32, gap: bool, pop: f32| -> Option<gpui::Path<gpui::Pixels>> {
+                let (g_out, g_in) = if gap { (GAP / 2. / R_OUT, GAP / 2. / R_IN) } else { (0., 0.) };
+                let at = |r: f32, a: f32| gpui::point(o.x + px((100. + r * pop * a.sin()) * k), o.y + px((100. - r * pop * a.cos()) * k));
+                let arc = |r: f32, from: f32, to: f32| -> Vec<gpui::Point<gpui::Pixels>> {
+                    let steps = (((to - from).abs() / TAU) * 128.).ceil().max(2.) as usize;
+                    (0..=steps).map(|j| at(r, from + (to - from) * j as f32 / steps as f32)).collect()
+                };
+                let mut pts = arc(R_OUT, a0 + g_out, a1 - g_out);
+                let mut inner = arc(R_IN, a0 + g_in, a1 - g_in);
+                inner.reverse();
+                pts.extend(inner);
+                let mut b = PathBuilder::fill();
+                b.add_polygon(&pts, true);
+                b.build().ok()
+            };
+            if !loaded {
+                return;
+            }
+            if paint.is_empty() {
+                if let Some(p) = ring(0., TAU, false, 1.) {
+                    window.paint_path(p, white_a(0.07));
+                }
+                return;
+            }
+            let lone = paint.len() == 1;
+            for (a0, a1, color, pop, dim) in &paint {
+                let pop_k = if *pop { 1.05 } else { 1. };
+                let mut col = c(*color);
+                if *pop {
+                    col.l = (col.l * 1.12).min(1.);
+                }
+                if *dim {
+                    col = col.opacity(0.35);
+                }
+                if let Some(p) = ring(*a0, if lone { TAU } else { *a1 }, !lone, pop_k) {
+                    window.paint_path(p, col);
+                }
+            }
+        },
+    )
+    .size_full();
+    let hovering = view.is_some() && s.donut.hover.is_some();
+    let hover = s.donut.hover;
+    let bounds = s.donut.bounds.clone();
+    let seg_angles: Vec<Segment> = segments(&dist);
+    let seg_click: Vec<Segment> = segments(&dist);
+    let ring_el = div()
+        .id("storage-donut")
+        .size(px(220.))
+        .flex_shrink_0()
+        .relative()
+        .when(hovering, |d| d.cursor_pointer())
+        .on_mouse_move({
+            let on = on.clone();
+            let bounds = bounds.clone();
+            move |e: &gpui::MouseMoveEvent, w, cx| {
+                let at = bounds.get().and_then(|b| slice_at(b, e.position, &seg_angles));
+                if at != hover {
+                    on(Act::DonutHover(at), w, cx);
+                }
+            }
+        })
+        .on_hover({
+            let on = on.clone();
+            move |inside: &bool, w, cx| {
+                if !*inside {
+                    on(Act::DonutHover(None), w, cx)
+                }
+            }
+        })
+        .on_click({
+            let on = on.clone();
+            move |e: &gpui::ClickEvent, w, cx| {
+                if let Some(i) = bounds.get().and_then(|b| slice_at(b, e.position(), &seg_click)) {
+                    on(Act::DonutPick(i), w, cx)
+                }
+            }
+        })
+        .child(chart)
+        .child(
+            div()
+                .absolute()
+                .inset_0()
+                .flex()
+                .flex_col()
+                .items_center()
+                .justify_center()
+                .child(div().text_size(px(24.)).line_height(px(28.)).font_weight(FontWeight::BOLD).text_color(c(0xffffff)).child(value))
+                .when(!delete, |d| d.child(div().mt(px(1.)).max_w(px(100.)).text_size(px(12.)).line_height(px(14.)).text_color(c(0x5b6060)).child(label)))
+                .when(delete, |d| {
+                    let danger = c(crate::timeline::DANGER);
+                    d.child(
+                        div()
+                            .id("storage-donut-delete")
+                            .mt(px(5.))
+                            .px(px(14.))
+                            .py(px(4.))
+                            .rounded_full()
+                            .border_1()
+                            .border_color(danger.opacity(0.55))
+                            .bg(danger.opacity(0.18))
+                            .hover(|h| h.bg(danger.opacity(0.4)).border_color(danger))
+                            .text_size(px(12.))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(c(0xffffff))
+                            .when(s.donut.busy, |b| b.opacity(0.5))
+                            .when(!s.donut.busy, |b| b.cursor_pointer().on_click(click(on, || Act::DonutDelete)))
+                            .child(if s.donut.busy { "Deleting..." } else { "Delete" }),
+                    )
+                }),
+        );
+    // Four rows a column, filled top to bottom.
+    let legend = div().flex().gap(px(40.)).children(segs.chunks(4).enumerate().map(|(col, chunk)| {
+        div().flex().flex_col().gap(px(14.)).children(chunk.iter().enumerate().map(|(row, g)| {
+            let i = col * 4 + row;
+            let on_enter = on.clone();
+            div()
+                .id(SharedString::from(format!("legend-{i}")))
+                .h(px(24.))
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .cursor_pointer()
+                .text_size(px(16.))
+                .text_color(c(0xffffff))
+                .when(view.is_some() && view != Some(i), |d| d.opacity(0.4))
+                .on_hover(move |inside: &bool, w, cx| on_enter(Act::DonutHover(if *inside { Some(i) } else { None }), w, cx))
+                .on_click(click(on, move || Act::DonutPick(i)))
+                .child(div().size(px(14.)).rounded(px(4.)).flex_shrink_0().bg(c(g.color)))
+                .child(STORE_CATS[g.cat].name)
+        }))
+    }));
+    div()
+        .mb(px(20.))
+        .pb(px(28.))
+        .border_b_1()
+        .border_color(c(0x262626))
+        .flex()
+        .items_center()
+        .justify_between()
+        .gap(px(48.))
+        .child(ring_el)
+        .child(legend)
+        .into_any_element()
+}
+
+/// The auto-download limits on offer.
+const LIMITS: [crate::kit::Choice; 6] = [
+    crate::kit::Choice { value: "1048576", label: "1 MB" },
+    crate::kit::Choice { value: "5242880", label: "5 MB" },
+    crate::kit::Choice { value: "10485760", label: "10 MB" },
+    crate::kit::Choice { value: "26214400", label: "25 MB" },
+    crate::kit::Choice { value: "52428800", label: "50 MB" },
+    crate::kit::Choice { value: "104857600", label: "100 MB" },
+];
+
+fn storage_block(s: &Settings, on: &OnAct) -> AnyElement {
+    let auto = s.on.get("auto_download_enabled").copied().unwrap_or(true);
+    let limit = s.auto_limit.to_string();
+    let select = crate::kit::select_with(
+        "auto-limit",
+        120.,
+        12.,
+        &LIMITS,
+        &[],
+        &limit,
+        auto && s.open_select == Some("auto-limit"),
+        {
+            let on = on.clone();
+            move |w, cx| on(Act::Select("auto-limit"), w, cx)
+        },
+        {
+            let on = on.clone();
+            move |v, w, cx| on(Act::Pick("auto-limit", v), w, cx)
+        },
+    );
+    let clear = small_button("clear-storage", if s.clearing { "Clearing..." } else { "Clear" }, || Act::ClearStorage, on);
+    div()
+        .flex()
+        .flex_col()
+        .child(donut(s, on))
+        .child(row(s, "auto_download_enabled", on, false))
+        .child(div().when(!auto, |d| d.opacity(0.45).block_mouse_except_scroll()).child(line("auto-limit", "Auto-Download Limit", Some("autoDownloadLimit"), select, on)))
+        // The next group's 15px top margin outweighs the line's 10.
+        .child(div().mt(px(5.)).child(row(s, "keep_media", on, false)))
+        .child(line("clear", "Clear Storage", Some("clearStorage"), clear, on))
+        .into_any_element()
+}
+
 fn block(id: &str, s: &Settings, on: &OnAct) -> Option<AnyElement> {
     Some(match id {
         "display" => display_block(s, on),
         "privacy" => privacy_block(s, on),
+        "notifications" => notifications_block(s, on),
+        "storage" => storage_block(s, on),
         "streamer" => streamer_block(s, on),
         "blocked" => blocked_block(s, on),
         "advanced" => row(s, "advanced", on, false),

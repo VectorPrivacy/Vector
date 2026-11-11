@@ -3,9 +3,9 @@
 (() => {
     const FIX = window.__VECTOR_FIXTURES__;
     const answers = {
-        get_platform_features: { transcription: false, notification_sounds: false, os: 'linux', is_mobile: false, debug_mode: true, media_url: null, self_update: false, share_audio: false, players: false },
+        get_platform_features: { transcription: false, notification_sounds: true, os: 'linux', is_mobile: false, debug_mode: true, media_url: null, self_update: false, share_audio: false, players: false },
         debug_hot_reload_sync: { success: true, npub: FIX.npub, profiles: FIX.profiles, chats: FIX.chats, pinned: [] },
-        get_theme: 'vector', transport_get_state: { supported: ['clearnet'], prelogin: 'clearnet', kind: 'clearnet' }, get_encryption_status: { enabled: false }, get_archived_chats: [], list_emoji_packs: [], get_relays: [], get_accounts: [{ npub: FIX.npub }], get_current_account: FIX.npub,
+        get_storage_info: { total_bytes: 41300000, type_distribution: { jpg: 9200000, png: 3100000, mp4: 21000000, mp3: 1400000, '/cache': 4100000, pdf: 2500000 } }, get_theme: 'vector', get_notification_settings: { global_mute: false, sound: { type: 'Default' }, mute_everyone: false }, transport_get_state: { supported: ['clearnet'], prelogin: 'clearnet', kind: 'clearnet' }, get_encryption_status: { enabled: false }, get_archived_chats: [], list_emoji_packs: [], get_relays: [], get_accounts: [{ npub: FIX.npub }], get_current_account: FIX.npub,
     };
     const msgs = (id) => (FIX.chats.find((c) => c.id === id)?.messages || []).slice().sort((a, b) => a.at - b.at);
     const fns = {
