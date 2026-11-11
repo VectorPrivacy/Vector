@@ -374,9 +374,11 @@ fn file_box(ctx: &Ctx, media: &Media, m: &Message, att: &Attachment, state: File
     let glyph_color = if state == FileState::Failed { c(DANGER) } else { white_a(0.7) };
     let title_color = if state == FileState::Local { c(PRIMARY) } else { white_a(0.92) };
 
+    let uploading = m.mine && m.pending && state == FileState::Local;
+    let state = if uploading { FileState::Downloading } else { state };
     let text = div().flex_1().min_w_0().flex().flex_col();
     let text = if state == FileState::Downloading {
-        let t: Transfer = media.transfers.get(&att.id).cloned().unwrap_or_default();
+        let t: Transfer = media.transfers.get(if uploading { &m.id } else { &att.id }).cloned().unwrap_or_default();
         let note = t.note();
         text.child(
             div()
@@ -440,6 +442,10 @@ fn file_box(ctx: &Ctx, media: &Media, m: &Message, att: &Attachment, state: File
     };
     let action = match (state, label) {
         (_, Some(_)) => None,
+        (FileState::Downloading, _) if uploading => {
+            let done = media.transfers.get(&m.id).and_then(|t| t.pct).is_some_and(|p| p >= 100.);
+            (!done).then(|| button("icons/x.svg", white_a(0.7), c(BOX_LINE_HOVER), Act::CancelUpload(m.id.clone())))
+        }
         (FileState::Downloading, _) => Some(button("icons/x.svg", white_a(0.7), c(BOX_LINE_HOVER), Act::CancelDownload(att.id.clone()))),
         (FileState::Failed, _) => Some(button("icons/refresh.svg", c(DANGER), c(DANGER).opacity(0.45), Act::Download(att.id.clone()))),
         (FileState::Remote, _) => Some(button("icons/download.svg", c(PRIMARY), c(BOX_LINE_HOVER), Act::Download(att.id.clone()))),

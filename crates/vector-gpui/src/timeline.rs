@@ -37,6 +37,8 @@ pub enum Act {
     /// Fetch this attachment (or retry it).
     Download(String),
     CancelDownload(String),
+    /// Stop an upload still sending, by its pending message.
+    CancelUpload(String),
     /// Tap a spoiler picture open.
     RevealMedia(String),
     /// A file on this device: show it, or save a held one.

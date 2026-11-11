@@ -7,6 +7,7 @@ mod crop;
 mod cropper;
 mod data;
 mod emoji;
+mod filepreview;
 mod highlight;
 mod inline;
 mod kit;
@@ -14,6 +15,8 @@ mod linkcard;
 mod login;
 mod markdown;
 mod media;
+#[allow(dead_code, clippy::all)]
+mod message;
 mod picker;
 mod preview;
 mod profile;

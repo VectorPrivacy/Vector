@@ -74,6 +74,9 @@ pub struct VectorApp {
     /// Bumped by each hover, so a stale leave doesn't hide the toolbar.
     hover_gen: u64,
     viewer: Option<Entity<crate::viewer::Viewer>>,
+    /// The attachment panel is open, and since when (its items fade in from then).
+    attach: Option<std::time::Instant>,
+    file_preview: Option<Entity<crate::filepreview::FilePreview>>,
     /// The avatar cropper, and the picked file it cuts.
     cropper: Option<(Entity<crate::cropper::Cropper>, std::path::PathBuf)>,
     /// The expanded profile, shown in place of the chat.
@@ -154,6 +157,8 @@ impl VectorApp {
             hover_gen: 0,
             viewer: None,
             cropper: None,
+            attach: None,
+            file_preview: None,
             profile: None,
             toast: None,
             status: None,
@@ -170,6 +175,9 @@ impl VectorApp {
         if let Ok(who) = std::env::var("VECTOR_PROFILE") {
             let npub = if who == "me" { app.store.borrow().my_npub.clone() } else { who };
             app.open_profile(npub, cx);
+        }
+        if let Ok(file) = std::env::var("VECTOR_SEND") {
+            app.open_file_preview(file.into(), window, cx);
         }
         if let Ok(file) = std::env::var("VECTOR_CROP")
             && app.profile.is_some()
@@ -359,6 +367,19 @@ impl VectorApp {
                     self.media.borrow_mut().linked_progress(url, p as f32);
                 }
             }
+            "attachment_upload_progress" => {
+                let Some(id) = payload.get("id").and_then(Value::as_str) else { return };
+                let p = payload.get("progress").and_then(Value::as_f64).unwrap_or(0.);
+                let mut media = self.media.borrow_mut();
+                let t = media.transfers.entry(id.to_string()).or_default();
+                t.pct = Some(p as f32);
+                t.stage = None;
+            }
+            "attachment_upload_stage" => {
+                let Some(id) = payload.get("id").and_then(Value::as_str) else { return };
+                let stage = payload.get("stage").and_then(Value::as_str).map(str::to_string);
+                self.media.borrow_mut().transfers.entry(id.to_string()).or_default().stage = stage;
+            }
             "attachment_download_stage" => {
                 let Some(id) = payload.get("id").and_then(Value::as_str) else { return };
                 let stage = payload.get("stage").and_then(Value::as_str).map(str::to_string);
@@ -504,6 +525,11 @@ impl VectorApp {
                 }
             }
             Act::Download(att) => self.start_download(id, att, false, cx),
+            Act::CancelUpload(pending) => {
+                if self.live {
+                    messaging::cancel_upload(&pending);
+                }
+            }
             Act::CancelDownload(att) => {
                 if self.live {
                     backend::attachments::cancel(&att);
@@ -840,6 +866,11 @@ impl Render for VectorApp {
                 app.update(cx, |app, cx| app.answer_popup(yes, cx)).ok();
             })
         });
+        let root = root.on_drop(cx.listener(|app, paths: &gpui::ExternalPaths, window, cx| {
+            if let Some(path) = paths.paths().first().filter(|p| p.is_file()) {
+                app.open_file_preview(path.clone(), window, cx);
+            }
+        }));
         root.children(popup).child(chrome(window, false)).child(
             div()
                 .flex()
@@ -873,6 +904,7 @@ impl Render for VectorApp {
         .children(self.qr_view(cx))
         .children(self.toast_view(window))
         .children(self.viewer.clone().map(|v| gpui::deferred(div().absolute().inset_0().child(v)).with_priority(10)))
+        .children(self.file_preview.clone().map(|v| gpui::deferred(div().absolute().inset_0().child(v)).with_priority(9)))
         .children(self.cropper.as_ref().map(|(v, _)| gpui::deferred(div().absolute().inset_0().child(v.clone())).with_priority(11)))
     }
 }
@@ -1518,7 +1550,7 @@ impl VectorApp {
                             )),
                     ),
             )
-            .child(composer(self.input.clone(), &self.mode, self.picker_open.then(|| (self.emoji_picker.clone(), self.picker.is_none())), cx))
+            .child(composer(self.input.clone(), &self.mode, self.picker_open.then(|| (self.emoji_picker.clone(), self.picker.is_none())), self.attach, cx))
     }
 }
 
@@ -1588,6 +1620,7 @@ fn composer(
     input: Entity<TextInput>,
     mode: &Mode,
     picker: Option<(Entity<crate::picker::EmojiPicker>, bool)>,
+    attach: Option<std::time::Instant>,
     cx: &mut Context<VectorApp>,
 ) -> impl IntoElement {
     let icon = |path: &'static str| {
@@ -1666,7 +1699,7 @@ fn composer(
             .bg(c(APP_BG))
             .flex()
             .items_end()
-            .child(if editing { cancel("edit-cancel", 23., cx).w(px(38.)).h(px(45.)).into_any_element() } else { icon("icons/plus.svg").into_any_element() })
+            .child(if editing { cancel("edit-cancel", 23., cx).w(px(38.)).h(px(45.)).into_any_element() } else { attach_button(attach.is_some(), cx).into_any_element() })
             .child(div().flex_1().min_w_0().py(px(12.)).pr(px(10.)).child(input))
             .child(
                 icon(if picker.as_ref().is_some_and(|p| p.1) { "icons/wink-face.svg" } else { "icons/smile-face.svg" })
@@ -1676,10 +1709,192 @@ fn composer(
             )
             .child(icon("icons/mic-on.svg")),
     )
+    .when_some(attach.filter(|_| !editing), |d, opened| d.child(attachment_panel(opened, cx)))
     // `.emoji-picker`: 10px above the composer, 16px from the right edge.
     .when_some(picker, |d, (p, _)| {
         d.child(gpui::deferred(div().absolute().bottom(gpui::relative(1.)).right(px(16.)).pb(px(10.)).child(p)).with_priority(3))
     })
+}
+
+/// `#chat-input-file`: the plus, turned to a cross while the panel is open.
+fn attach_button(open: bool, cx: &mut Context<VectorApp>) -> impl IntoElement {
+    use gpui::AnimationExt as _;
+    let turn = move |t: f32| {
+        // cubic-bezier(0.34, 1.56, 0.64, 1): an overshoot, eased back.
+        let k = 1. - (1. - t).powi(3) + 0.35 * (std::f32::consts::PI * t).sin() * (1. - t);
+        if open { k } else { 1. - k }
+    };
+    div()
+        .id("chat-input-file")
+        .w(px(38.))
+        .h(px(45.))
+        .flex_shrink_0()
+        .flex()
+        .items_center()
+        .justify_center()
+        .cursor_pointer()
+        .on_click(cx.listener(|app, _, _, cx| app.toggle_attach(cx)))
+        .child(
+            svg()
+                .path("icons/plus.svg")
+                .size(px(23.))
+                .text_color(c(ICON_MUTED))
+                .with_animation(if open { "attach-open" } else { "attach-close" }, gpui::Animation::new(std::time::Duration::from_millis(400)), move |s, t| {
+                    s.with_transformation(gpui::Transformation::rotate(gpui::radians(turn(t) * std::f32::consts::FRAC_PI_4)))
+                }),
+        )
+}
+
+/// `.attachment-panel`: File, Folder, Commands and Mini Apps, risen from behind the composer.
+fn attachment_panel(opened: std::time::Instant, cx: &mut Context<VectorApp>) -> impl IntoElement {
+    const H: f32 = 107.;
+    let t = (opened.elapsed().as_secs_f32() / 0.3).min(1.);
+    // cubic-bezier(0.4, 0, 0.2, 1)
+    let e = 1. - (1. - t).powi(3);
+    let item = |i: usize, id: &'static str, icon: &'static str, size: f32, label: &'static str| {
+        let it = ((opened.elapsed().as_secs_f32() - i as f32 * 0.08) / 0.3).clamp(0., 1.);
+        div()
+            .id(id)
+            .relative()
+            .left(px(-10. * (1. - it)))
+            .opacity(it)
+            .flex()
+            .flex_col()
+            .items_center()
+            .gap(px(4.))
+            .cursor_pointer()
+            .group(id)
+            .child(
+                div()
+                    .size(px(58.))
+                    .rounded(px(12.))
+                    .bg(white_a(0.1))
+                    .border_1()
+                    .border_color(gpui::transparent_black())
+                    .group_hover(id, |s| s.bg(white_a(0.18)).border_color(c(PRIMARY)))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(svg().path(icon).size(px(size)).text_color(white_a(0.7))),
+            )
+            .child(div().text_size(px(11.)).line_height(px(11.)).font_weight(FontWeight::MEDIUM).text_color(white_a(0.7)).whitespace_nowrap().child(label))
+    };
+    if t < 1. || opened.elapsed().as_secs_f32() < 0.6 {
+        let me = cx.entity().downgrade();
+        cx.defer(move |cx| {
+            me.update(cx, |_, cx| cx.notify()).ok();
+        });
+    }
+    div()
+        .absolute()
+        .left(px(8.))
+        .right(px(8.))
+        .bottom(gpui::relative(1.))
+        .h(px(H + 10.))
+        .overflow_hidden()
+        .child(
+            div()
+                .id("attachment-panel")
+                .absolute()
+                .left_0()
+                .right_0()
+                .top(px((H + 10.) * (1. - e)))
+                .h(px(H))
+                .opacity(e)
+                .p(px(16.))
+                .bg(c(0x0c0c0c))
+                .border_1()
+                .border_color(c(DIVIDER))
+                .rounded(px(12.))
+                .flex()
+                .gap(px(12.))
+                .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .child(item(0, "attach-file", "icons/file.svg", 26., "File").on_click(cx.listener(|app, _, window, cx| app.pick_file(window, cx))))
+                .child(item(1, "attach-folder", "icons/folder.svg", 27., "Folder"))
+                .child(item(2, "attach-commands", "ui/slash.svg", 22.5, "Commands"))
+                .child(item(3, "attach-miniapps", "icons/grid-outline.svg", 22., "Mini Apps")),
+        )
+}
+
+impl VectorApp {
+    fn toggle_attach(&mut self, cx: &mut Context<Self>) {
+        self.attach = match self.attach {
+            Some(_) => None,
+            None => {
+                self.picker_open = false;
+                Some(std::time::Instant::now())
+            }
+        };
+        cx.notify();
+    }
+
+    /// Pick a file for the open chat and preview it before it sends.
+    fn pick_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.attach = None;
+        cx.notify();
+        let rx = cx.prompt_for_paths(gpui::PathPromptOptions { files: true, directories: false, multiple: false, prompt: None });
+        let window = window.window_handle();
+        cx.spawn(async move |this, cx| {
+            let Ok(Ok(Some(paths))) = rx.await else { return };
+            let Some(path) = paths.into_iter().next() else { return };
+            window
+                .update(cx, |_, window, cx| {
+                    this.update(cx, |this, cx| this.open_file_preview(path, window, cx)).ok();
+                })
+                .ok();
+        })
+        .detach();
+    }
+
+    fn open_file_preview(&mut self, path: std::path::PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(chat) = self.open.clone() else { return };
+        let reply = match &self.mode {
+            Mode::Reply { id, .. } => id.clone(),
+            _ => String::new(),
+        };
+        let preview = cx.new(|cx| crate::filepreview::FilePreview::new(path, chat.to_string(), reply, window, cx));
+        cx.subscribe_in(&preview, window, |this, _, e: &crate::filepreview::Event, window, cx| {
+            this.file_preview = None;
+            window.focus(&this.input.focus_handle(cx), cx);
+            cx.notify();
+            if let crate::filepreview::Event::Send(send) = e {
+                this.send_file(send, cx);
+            }
+        })
+        .detach();
+        self.file_preview = Some(preview);
+        cx.notify();
+    }
+
+    fn send_file(&mut self, send: &crate::filepreview::Send, cx: &mut Context<Self>) {
+        if matches!(self.mode, Mode::Reply { .. }) {
+            self.mode = Mode::Normal;
+        }
+        if !self.live {
+            return;
+        }
+        let crate::filepreview::Send { path, receiver, reply, name, compress, keep_metadata, compressed } = send;
+        let (path, receiver, reply, name, compress, keep_metadata) = (path.clone(), receiver.clone(), reply.clone(), name.clone(), *compress, *keep_metadata);
+        // The preview's own compression serves only the default strip-and-compress send.
+        let wait = compressed.clone().filter(|_| compress && !keep_metadata);
+        cx.spawn(async move |this, cx| {
+            let precompressed = match wait {
+                Some(w) => w.await,
+                None => None,
+            };
+            let rx = backend::run(messaging::send_file(receiver, reply, path, name, compress, keep_metadata, precompressed));
+            let err = match rx.await {
+                Ok(Ok(())) => return,
+                Ok(Err(e)) => e,
+                Err(e) => e.to_string(),
+            };
+            if err.contains("Upload cancelled") {
+                return;
+            }
+            this.update(cx, |this, cx| this.notice("Upload Failed", err, cx)).ok();
+        })
+        .detach();
+    }
 }
 
 // ── profile ─────────────────────────────────────────────────────────────────────────────

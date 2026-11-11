@@ -149,3 +149,88 @@ pub async fn chat_snapshot(chat_id: String) -> Option<vector_core::SerializableC
     let state = STATE.lock().await;
     state.get_chat(&chat_id).map(|c| c.to_serializable(&state.interner))
 }
+
+/// A file DM's settings: the chat's self-destruct lifespan rides along and is stamped once
+/// the upload is done, so the clock starts at publish.
+fn file_send_config(receiver: &str) -> SendConfig {
+    SendConfig { self_destruct_secs: vector_core::self_destruct::chat_duration_secs(receiver), ..SendConfig::gui() }
+}
+
+const IMAGE_EXTS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp", "tiff", "tif", "ico"];
+
+/// Send a picked file to a DM. An image is compressed (reusing `precompressed`, the preview's
+/// own run, when it fits the choice) or stripped of metadata; anything else streams from disk.
+pub async fn send_file(
+    receiver: String,
+    replied_to: String,
+    path: std::path::PathBuf,
+    name_override: String,
+    compress: bool,
+    keep_metadata: bool,
+    precompressed: Option<crate::message::types::CachedCompressedImage>,
+) -> Result<(), String> {
+    if !receiver.starts_with("npub1") {
+        return Err("Communities can't be written to from this client yet".into());
+    }
+    let reply = (!replied_to.is_empty()).then_some(replied_to.as_str());
+    let config = file_send_config(&receiver);
+    let extension = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+    let mut name = path.file_name().and_then(|n| n.to_str()).unwrap_or("").to_string();
+    if !name_override.is_empty() {
+        let clean = vector_core::crypto::sanitize_filename(&name_override);
+        if !clean.is_empty() {
+            name = clean;
+        }
+    }
+    if !IMAGE_EXTS.contains(&extension.as_str()) {
+        match std::fs::metadata(&path) {
+            Ok(m) if m.len() > 0 => {}
+            Ok(_) => return Err("File is empty (0 bytes)".into()),
+            Err(e) => return Err(format!("Failed to read file metadata: {e}")),
+        }
+        let source = vector_core::sending::FileSource::Path(path);
+        return vector_core::sending::send_file_dm_from(&receiver, source, &name, &extension, None, None, reply, &config, Arc::new(Callback))
+            .await
+            .map(|_| ());
+    }
+    let (ext, file) = (extension.clone(), path.clone());
+    let processed = tokio::task::spawn_blocking(move || {
+        let bytes = Arc::new(std::fs::read(&file).map_err(|e| format!("Couldn't read the file: {e}"))?);
+        let out = crate::message::compression::process_image_for_send(bytes, &ext, compress, keep_metadata, precompressed);
+        crate::message::compression::forget_fitted();
+        out
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    // A compressed file's name follows its new format, so the receiver opens it as one.
+    if processed.extension != extension {
+        name = crate::message::video_compression::renamed(&name, &processed.extension);
+    }
+    vector_core::sending::send_file_dm_with_meta(
+        &receiver,
+        processed.bytes,
+        &name,
+        &processed.extension,
+        processed.img_meta,
+        None,
+        reply,
+        &config,
+        Arc::new(Callback),
+    )
+    .await
+    .map(|_| ())
+}
+
+/// The preview's background compression of a picked image.
+pub fn precompress(path: &std::path::Path) -> Result<crate::message::types::CachedCompressedImage, String> {
+    crate::message::precompress(path)
+}
+
+/// Whether a picked image carries strip-worthy metadata (location, camera, date).
+pub fn has_metadata(path: &std::path::Path) -> bool {
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+    if matches!(ext.as_str(), "jpg" | "jpeg" | "png") {
+        return std::fs::File::open(path).ok().and_then(|mut f| crate::shared::image::header_has_metadata(&mut f, &ext)).unwrap_or(false);
+    }
+    std::fs::read(path).is_ok_and(|b| crate::shared::image::image_bytes_have_metadata(&b, &ext))
+}
