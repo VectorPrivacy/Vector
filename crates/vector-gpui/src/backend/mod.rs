@@ -13,6 +13,7 @@ pub mod network;
 pub mod prefs;
 pub mod unfurl;
 pub mod sync;
+pub mod upload;
 
 use std::future::Future;
 use std::path::PathBuf;

@@ -5,6 +5,7 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
+use std::sync::Arc;
 
 use gpui::{
     AnyElement, Context, Entity, Focusable, FontWeight, IntoElement, ListAlignment, ListState, MouseButton,
@@ -73,6 +74,8 @@ pub struct VectorApp {
     /// Bumped by each hover, so a stale leave doesn't hide the toolbar.
     hover_gen: u64,
     viewer: Option<Entity<crate::viewer::Viewer>>,
+    /// The avatar cropper, and the picked file it cuts.
+    cropper: Option<(Entity<crate::cropper::Cropper>, std::path::PathBuf)>,
     /// The expanded profile, shown in place of the chat.
     profile: Option<crate::profile::Screen>,
     toast: Option<(SharedString, std::time::Instant)>,
@@ -150,6 +153,7 @@ impl VectorApp {
             picker_closed: std::time::Instant::now(),
             hover_gen: 0,
             viewer: None,
+            cropper: None,
             profile: None,
             toast: None,
             status: None,
@@ -166,6 +170,17 @@ impl VectorApp {
         if let Ok(who) = std::env::var("VECTOR_PROFILE") {
             let npub = if who == "me" { app.store.borrow().my_npub.clone() } else { who };
             app.open_profile(npub, cx);
+        }
+        if let Ok(file) = std::env::var("VECTOR_CROP")
+            && app.profile.is_some()
+            && { app.on_profile(crate::profile::Act::Edit, window, cx); true }
+            && let Some((image, w, h)) = std::fs::read(&file).ok().and_then(|b| crate::media::decode(&b, "png", (2048, 2048)))
+        {
+            let cropper = cx.new(|cx| {
+                crate::cropper::Cropper::new(Arc::new(image), (w, h), "Crop Profile Picture", "Drag to move, or drag a corner to resize.", true, window, cx)
+            });
+            cx.subscribe_in(&cropper, window, |this, _, answer: &crate::cropper::Answer, window, cx| this.on_crop(answer, window, cx)).detach();
+            app.cropper = Some((cropper, file.into()));
         }
         app
     }
@@ -858,6 +873,7 @@ impl Render for VectorApp {
         .children(self.qr_view(cx))
         .children(self.toast_view(window))
         .children(self.viewer.clone().map(|v| gpui::deferred(div().absolute().inset_0().child(v)).with_priority(10)))
+        .children(self.cropper.as_ref().map(|(v, _)| gpui::deferred(div().absolute().inset_0().child(v.clone())).with_priority(11)))
     }
 }
 
@@ -1787,7 +1803,15 @@ impl VectorApp {
                     cx.subscribe(input, |_, _, _: &crate::composer::InputChanged, cx| cx.notify()).detach();
                 }
                 window.focus(&name.focus_handle(cx), cx);
-                p.edit = Some(crate::profile::Edit { name, bio, removed_banner: false, snap_name: me.name.trim().to_string(), snap_about: me.about.trim().to_string() });
+                p.edit = Some(crate::profile::Edit {
+                    name,
+                    bio,
+                    removed_banner: false,
+                    snap_name: me.name.trim().to_string(),
+                    snap_about: me.about.trim().to_string(),
+                    avatar: None,
+                    banner: None,
+                });
                 cx.notify();
             }
             Act::RemoveBanner => {
@@ -1796,11 +1820,17 @@ impl VectorApp {
                 }
                 cx.notify();
             }
+            Act::Pick(banner) => self.pick_picture(banner, window, cx),
             Act::ExitEdit(cancel) => {
-                let Some(e) = p.edit.take() else { return };
+                let Some(mut e) = p.edit.take() else { return };
                 cx.notify();
                 if cancel {
                     return;
+                }
+                for (pick, banner) in [(e.avatar.take(), false), (e.banner.take(), true)] {
+                    if let Some(pick) = pick {
+                        self.save_picture(&npub, pick, banner, cx);
+                    }
                 }
                 let name = e.name.read(cx).text().trim().to_string();
                 let about = e.bio.read(cx).text().trim().to_string();
@@ -1838,6 +1868,115 @@ impl VectorApp {
             }
             Act::Switcher => {}
         }
+    }
+
+    /// Pick a new banner or avatar in Edit Mode; an avatar is cropped square first.
+    fn pick_picture(&mut self, banner: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let rx = cx.prompt_for_paths(gpui::PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some(if banner { "Choose Banner Image" } else { "Choose Profile Picture" }.into()),
+        });
+        let window = window.window_handle();
+        cx.spawn(async move |this, cx| {
+            let Ok(Ok(Some(paths))) = rx.await else { return };
+            let Some(path) = paths.into_iter().next() else { return };
+            let Some(ext) = backend::upload::picture_ext(&path) else {
+                this.update(cx, |this, cx| this.notice("Unsupported File", "Only PNG, JPEG, GIF and WebP images can be used.".into(), cx)).ok();
+                return;
+            };
+            let file = path.clone();
+            let decoded = cx
+                .background_executor()
+                .spawn(async move { std::fs::read(&file).ok().and_then(|b| crate::media::decode(&b, &ext, (2048, 2048))) })
+                .await;
+            let Some((image, w, h)) = decoded else {
+                this.update(cx, |this, cx| this.notice("Image Unreadable", "That picture couldn't be opened.".into(), cx)).ok();
+                return;
+            };
+            let image = Arc::new(image);
+            window
+                .update(cx, |_, window, cx| {
+                    this.update(cx, |this, cx| {
+                        let Some(edit) = this.profile.as_mut().and_then(|p| p.edit.as_mut()) else { return };
+                        if banner {
+                            edit.banner = Some(crate::profile::Pick { path, crop: None, preview: image });
+                            cx.notify();
+                            return;
+                        }
+                        let cropper = cx.new(|cx| {
+                            crate::cropper::Cropper::new(image, (w, h), "Crop Profile Picture", "Drag to move, or drag a corner to resize.", true, window, cx)
+                        });
+                        cx.subscribe_in(&cropper, window, |this, _, answer: &crate::cropper::Answer, window, cx| this.on_crop(answer, window, cx)).detach();
+                        this.cropper = Some((cropper, path));
+                        cx.notify();
+                    })
+                    .ok();
+                })
+                .ok();
+        })
+        .detach();
+    }
+
+    /// The avatar as it will upload, previewed in place.
+    fn on_crop(&mut self, answer: &crate::cropper::Answer, _: &mut Window, cx: &mut Context<Self>) {
+        let Some((_, path)) = self.cropper.take() else { return };
+        cx.notify();
+        let crate::cropper::Answer::Crop(crop) = answer else { return };
+        let crop = crop.clone();
+        cx.spawn(async move |this, cx| {
+            let file = path.clone();
+            let c2 = crop.clone();
+            let preview = cx
+                .background_executor()
+                .spawn(async move {
+                    let bytes = std::fs::read(&file).map_err(|e| e.to_string())?;
+                    let (out, ext) = backend::upload::prepared(bytes, false, Some(c2))?;
+                    crate::media::decode(&out, ext, (512, 512)).map(|(i, _, _)| i).ok_or_else(|| "Couldn't read the image".to_string())
+                })
+                .await;
+            this.update(cx, |this, cx| match preview {
+                Ok(image) => {
+                    if let Some(edit) = this.profile.as_mut().and_then(|p| p.edit.as_mut()) {
+                        edit.avatar = Some(crate::profile::Pick { path, crop: Some(crop), preview: Arc::new(image) });
+                        cx.notify();
+                    }
+                }
+                Err(e) => this.notice("Crop Failed", e, cx),
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Upload a picked picture and publish it; an uncropped banner shows as picked meanwhile.
+    fn save_picture(&mut self, npub: &str, pick: crate::profile::Pick, banner: bool, cx: &mut Context<Self>) {
+        let label = if banner { "Banner" } else { "Avatar" };
+        let prev = self.store.borrow().profiles.get(npub).map(|p| p.banner_cached.clone());
+        if banner && let Some(me) = self.store.borrow_mut().profiles.get_mut(npub) {
+            me.banner_cached = pick.path.to_string_lossy().into_owned();
+        }
+        if !self.live {
+            return;
+        }
+        let rx = backend::run(backend::upload::picture(pick.path, banner, pick.crop));
+        let npub = npub.to_string();
+        cx.spawn(async move |this, cx| {
+            let err = match rx.await {
+                Ok(Ok(_)) => return,
+                Ok(Err(e)) => e,
+                Err(e) => e.to_string(),
+            };
+            this.update(cx, |this, cx| {
+                if banner && let (Some(me), Some(prev)) = (this.store.borrow_mut().profiles.get_mut(&npub), prev) {
+                    me.banner_cached = prev;
+                }
+                this.notice(&format!("{label} Upload Failed!"), err, cx);
+            })
+            .ok();
+        })
+        .detach();
     }
 
     fn set_blocked(&mut self, npub: String, block: bool, cx: &mut Context<Self>) {

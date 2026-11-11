@@ -1921,6 +1921,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5243a22cce29dff488db8ef03d8e0e54dd06cd3e6d98475160dff390fa414de2"
 
 [[package]]
+name = "fast_image_resize"
+version = "5.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fbc7fe45cf92b43817ff62a3723e862b85bd1d06288f63007f7645d1d2f7a060"
+dependencies = [
+ "cfg-if",
+ "document-features",
+ "num-traits",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "faster-hex"
 version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3667,6 +3679,16 @@ dependencies = [
  "cc",
  "pkg-config",
  "vcpkg",
+]
+
+[[package]]
+name = "libwebp-sys"
+version = "0.9.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "54cd30df7c7165ce74a456e4ca9732c603e8dc5e60784558c1c6dc047f876733"
+dependencies = [
+ "cc",
+ "glob",
 ]
 
 [[package]]
@@ -7241,22 +7263,30 @@ dependencies = [
  "anyhow",
  "bip39",
  "chrono",
+ "crc32fast",
  "dirs",
  "env_logger",
  "fast-thumbhash",
+ "fast_image_resize",
+ "flate2",
  "futures",
+ "gif",
  "gpui",
  "gpui_platform",
  "image",
+ "libwebp-sys",
  "log",
+ "memchr",
  "nostr-sdk",
  "pulldown-cmark",
  "qrcodegen",
+ "rayon",
  "reqwest",
  "rusqlite",
  "rust-embed",
  "serde",
  "serde_json",
+ "simd-adler32",
  "tokio",
  "unicode-linebreak",
  "unicode-segmentation",

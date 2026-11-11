@@ -38,6 +38,15 @@ unicode-linebreak = "0.1"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "tiff", "ico"] }
 fast-thumbhash = "0.2"
 qrcodegen = "1.8"
+# The desktop client's image codecs, compiled from its sources (src/simd.rs, src/shared.rs).
+gif = "0.14"
+libwebp-sys = "0.9"
+rayon = "1.11.0"
+fast_image_resize = "5.5"
+crc32fast = "1.5"
+simd-adler32 = "0.3"
+memchr = "2"
+flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"] }
 
 # Its own workspace: GPUI pins dependency versions the main client must not inherit.
 [workspace]

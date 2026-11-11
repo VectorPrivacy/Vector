@@ -28,6 +28,8 @@ pub enum Act {
     /// Leave Edit Mode: save, or (true) cancel.
     ExitEdit(bool),
     RemoveBanner,
+    /// Pick a new picture: the banner, or (false) the avatar.
+    Pick(bool),
 }
 
 pub type OnAct = Rc<dyn Fn(Act, &mut Window, &mut App)>;
@@ -50,11 +52,20 @@ pub struct Edit {
     pub removed_banner: bool,
     pub snap_name: String,
     pub snap_about: String,
+    pub avatar: Option<Pick>,
+    pub banner: Option<Pick>,
+}
+
+/// A picture picked in Edit Mode, shown in place until it uploads on save.
+pub struct Pick {
+    pub path: std::path::PathBuf,
+    pub crop: Option<vector_core::image_crop::CropRect>,
+    pub preview: std::sync::Arc<gpui::RenderImage>,
 }
 
 impl Edit {
     pub fn dirty(&self, cx: &App) -> bool {
-        self.removed_banner || self.name.read(cx).text().trim() != self.snap_name || self.bio.read(cx).text().trim() != self.snap_about
+        self.removed_banner || self.avatar.is_some() || self.banner.is_some() || self.name.read(cx).text().trim() != self.snap_name || self.bio.read(cx).text().trim() != self.snap_about
     }
 }
 
@@ -219,8 +230,15 @@ pub fn pane(store: &Store, s: &Screen, on: &OnAct, cx: &App) -> AnyElement {
 
     // ── banner and avatar ──
     let mut banner_box = div().relative().w_full().h(px(banner_h)).flex_shrink_0().bg(c(if dark { 0x1b1b1b } else { 0x0a0a0a }));
-    if let Some(path) = banner {
+    if let Some(pick) = editing.and_then(|e| e.banner.as_ref()) {
+        banner_box = banner_box.child(img(pick.preview.clone()).absolute().inset_0().size_full().object_fit(ObjectFit::Cover));
+    } else if let Some(path) = banner {
         banner_box = banner_box.child(img(path).absolute().inset_0().size_full().object_fit(ObjectFit::Cover));
+    }
+    if editing.is_some() {
+        banner_box = banner_box.child(
+            div().id("profile-banner").absolute().inset_0().cursor_pointer().hover(|s| s.bg(c(APP_BG).opacity(0.25))).on_click(click(on, Act::Pick(true))),
+        );
     }
     if mine && editing.is_none() {
         banner_box = banner_box
@@ -235,11 +253,24 @@ pub fn pane(store: &Store, s: &Screen, on: &OnAct, cx: &App) -> AnyElement {
         banner_box = banner_box.child(small_option("profile-qr-btn", "ui/qr.svg", None, false).right(px(16.)).top(px(if mine { 68. } else { 10. })).on_click(click(on, Act::Qr)));
     }
 
+    let picked = editing.and_then(|e| e.avatar.as_ref()).map(|p| p.preview.clone());
     let big_avatar = match store.avatar_path(&s.npub) {
+        _ if picked.is_some() => img(picked.unwrap()).size(px(175.)).rounded_full().object_fit(ObjectFit::Cover).into_any_element(),
         Some(path) => img(path).size(px(175.)).rounded_full().object_fit(ObjectFit::Cover).into_any_element(),
         None => img("icons/user-placeholder.svg").size(px(175.)).rounded_full().into_any_element(),
     };
-    let avatar = div().mt(px(-87.)).size(px(191.)).flex_shrink_0().rounded_full().bg(c(APP_BG)).flex().items_center().justify_center().child(big_avatar);
+    let avatar = div()
+        .id("profile-avatar")
+        .mt(px(-87.))
+        .size(px(191.))
+        .flex_shrink_0()
+        .rounded_full()
+        .bg(c(APP_BG))
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(div().when(editing.is_some(), |d| d.hover(|s| s.opacity(0.75))).child(big_avatar))
+        .when(editing.is_some(), |d| d.cursor_pointer().on_click(click(on, Act::Pick(false))));
 
     if let Some(e) = editing {
         let body = div()

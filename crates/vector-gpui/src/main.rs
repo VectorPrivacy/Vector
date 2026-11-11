@@ -2,6 +2,9 @@ mod assets;
 mod attachments;
 mod backend;
 mod composer;
+#[allow(dead_code, clippy::all)]
+mod crop;
+mod cropper;
 mod data;
 mod emoji;
 mod highlight;
@@ -15,9 +18,15 @@ mod picker;
 mod preview;
 mod profile;
 mod qr;
+#[allow(dead_code, unused_imports, unsafe_op_in_unsafe_fn, clippy::all)]
+mod shared;
+#[allow(dead_code, unused_imports, unsafe_op_in_unsafe_fn, clippy::all)]
+mod simd;
 mod theme;
 mod timeline;
 mod ui;
+#[allow(dead_code)]
+mod util;
 mod viewer;
 
 use std::path::PathBuf;

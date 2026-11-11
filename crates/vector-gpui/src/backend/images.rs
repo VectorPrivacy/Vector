@@ -151,3 +151,21 @@ pub async fn cache_all_profile_images() {
         cache_profile_images(&npub, &avatar, &banner).await;
     }
 }
+
+/// Keep bytes we already hold (our own upload) under `url`, so it shows without a download.
+pub fn precache(url: &str, bytes: &[u8], banner: bool) {
+    let kind = if banner { Kind::Banner } else { Kind::Avatar };
+    if cached(url, kind).is_some() {
+        return;
+    }
+    let (Some(ext), Some(dir)) = (sniff(bytes), cache_dir(kind)) else { return };
+    let rendered;
+    let (bytes, ext) = if ext == "svg" {
+        let Ok(png) = vector_core::svg::rasterize_png(bytes, kind.svg_dim()) else { return };
+        rendered = png;
+        (&rendered[..], "png")
+    } else {
+        (bytes, ext)
+    };
+    let _ = std::fs::write(dir.join(format!("{}.{ext}", cache_key(url))), bytes);
+}
