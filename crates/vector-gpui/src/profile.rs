@@ -32,6 +32,16 @@ pub enum Act {
     RemoveBanner,
     /// Pick a new picture: the banner, or (false) the avatar.
     Pick(bool),
+    /// Open a badge's card.
+    Badge(Badge),
+}
+
+#[derive(Clone, Copy, PartialEq)]
+pub enum Badge {
+    Inviter,
+    Fawkes,
+    BugHunter,
+    V2026,
 }
 
 pub type OnAct = Rc<dyn Fn(Act, &mut Window, &mut App)>;
@@ -47,6 +57,7 @@ pub struct Screen {
     pub edit: Option<Edit>,
     /// The account switcher hung from this header: open, and whether in delete mode.
     pub switcher: Option<bool>,
+    pub badges: crate::backend::badges::Badges,
 }
 
 /// Edit Mode's draft of our own profile.
@@ -75,7 +86,7 @@ impl Edit {
 
 impl Screen {
     pub fn new(npub: String, back: Option<SharedString>) -> Self {
-        Self { npub, back, more_open: false, copied: None, edit: None, switcher: None }
+        Self { npub, back, more_open: false, copied: None, edit: None, switcher: None, badges: Default::default() }
     }
 
     fn copied(&self, which: Act) -> bool {
@@ -148,7 +159,7 @@ fn small_option(id: &'static str, icon: &'static str, label: Option<&'static str
     }
 }
 
-pub fn pane(store: &Store, s: &Screen, on: &OnAct, cx: &App) -> AnyElement {
+pub fn pane(store: &Store, s: &Screen, on: &OnAct, window: &Window, cx: &App) -> AnyElement {
     let Some(p) = store.profiles.get(&s.npub) else {
         return div().flex_1().h_full().bg(c(APP_BG)).into_any_element();
     };
@@ -352,6 +363,28 @@ pub fn pane(store: &Store, s: &Screen, on: &OnAct, cx: &App) -> AnyElement {
         .when(status_text.is_empty(), |d| d.h_0())
         .child(crate::inline::emoji_line(&status_text, crate::inline::Look::new(INTER, 14., 21., c(TEXT)), 15., 1.));
     body = body.child(status_line);
+    // #profile-badges
+    {
+        let b = s.badges;
+        let badge = |id: &'static str, src: SharedString, first: bool, which: Badge| {
+            div()
+                .id(id)
+                .size(px(30.))
+                .when(!first, |d| d.ml(px(5.)))
+                .cursor_pointer()
+                .on_click(click(on, Act::Badge(which)))
+                .child(crate::kit::sharp_svg(src, 30., window, cx))
+        };
+        body = body.child(
+            div()
+                .mt(px(5.))
+                .flex()
+                .when(b.invites > 0, |d| d.child(badge("badge-inviter", "icons/vector_badge_hex_placeholder.svg".into(), true, Badge::Inviter)))
+                .when(b.fawkes, |d| d.child(badge("badge-fawkes", "icons/fawkes_mask.svg".into(), false, Badge::Fawkes)))
+                .when(b.bug > 0, |d| d.child(badge("badge-bug", format!("icons/bughunter_{}.svg", b.bug).into(), false, Badge::BugHunter)))
+                .when(b.v2026, |d| d.child(badge("badge-v2026", "icons/vforvector2026.svg".into(), false, Badge::V2026))),
+        );
+    }
 
     if !mine {
         let more = {

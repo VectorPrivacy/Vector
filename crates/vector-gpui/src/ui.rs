@@ -89,6 +89,7 @@ pub struct VectorApp {
     /// The QR overlay's code, and what holds focus while it shows.
     qr: Option<(std::sync::Arc<gpui::RenderImage>, gpui::FocusHandle)>,
     switcher: Option<crate::switcher::Switcher>,
+    badge_card: Option<crate::badgecard::Card>,
     /// Add Profile is showing the login screen over this account: the account Back returns to,
     /// and whether the old session was already torn down for the new one.
     adding: Option<(String, bool)>,
@@ -174,6 +175,7 @@ impl VectorApp {
             status: None,
             qr: None,
             switcher: None,
+            badge_card: None,
             adding: None,
         }
     }
@@ -190,6 +192,19 @@ impl VectorApp {
         }
         if let Ok(mode) = std::env::var("VECTOR_LOGIN") {
             app.show_login((mode != "welcome").then_some("pin"), window, cx);
+        }
+        if let Ok(n) = std::env::var("VECTOR_BADGE_CARD").map(|v| v.parse::<usize>().unwrap_or(1))
+            && let Some(p) = app.profile.as_ref()
+        {
+            use crate::profile::Badge;
+            let b = p.badges;
+            let held: Vec<Badge> = [(b.invites > 0, Badge::Inviter), (b.fawkes, Badge::Fawkes), (b.bug > 0, Badge::BugHunter), (b.v2026, Badge::V2026)]
+                .into_iter()
+                .filter_map(|(on, w)| on.then_some(w))
+                .collect();
+            if let Some(w) = held.get(n.saturating_sub(1)) {
+                app.on_profile(crate::profile::Act::Badge(*w), window, cx);
+            }
         }
         if let Ok(mode) = std::env::var("VECTOR_SWITCHER") {
             app.on_profile(crate::profile::Act::Switcher, window, cx);
@@ -999,7 +1014,7 @@ impl Render for VectorApp {
                         let on: crate::profile::OnAct = Rc::new(move |act, window, cx| {
                             app.update(cx, |app, cx| app.on_profile(act, window, cx)).ok();
                         });
-                        crate::profile::pane(&store, p, &on, cx)
+                        crate::profile::pane(&store, p, &on, window, cx)
                     }
                     (None, Some(id)) => self.chat_pane(&store, id, cx).into_any_element(),
                     (None, None) => empty_pane().into_any_element(),
@@ -1014,6 +1029,37 @@ impl Render for VectorApp {
         }))
         .children(self.status_view(&store, window, cx))
         .children(self.qr_view(cx))
+        .children(self.badge_card.as_ref().map(|card| {
+            if card.opened.elapsed().as_secs_f32() < 0.45 {
+                window.request_animation_frame();
+            }
+            let app = cx.entity().downgrade();
+            let size = window.viewport_size();
+            gpui::deferred(crate::badgecard::view(card, window, cx, move |ev, window, cx| {
+                app.update(cx, |app, cx| {
+                    use crate::badgecard::Ev;
+                    match ev {
+                        Ev::Close => app.badge_card = None,
+                        Ev::Pointer(p) => {
+                            if let Some(card) = app.badge_card.as_mut() {
+                                let x = (f32::from(p.x) - f32::from(size.width) / 2.) / 179.;
+                                let y = (f32::from(p.y) - f32::from(size.height) / 2.) / 230.;
+                                card.tilt = gpui::point(x.clamp(-1., 1.), y.clamp(-1., 1.));
+                            }
+                        }
+                        Ev::Leave => {
+                            if let Some(card) = app.badge_card.as_mut() {
+                                card.tilt = gpui::Point::default();
+                            }
+                        }
+                    }
+                    let _ = window;
+                    cx.notify();
+                })
+                .ok();
+            }))
+            .with_priority(12)
+        }))
         .children(self.toast_view(window))
         .children(self.viewer.clone().map(|v| gpui::deferred(div().absolute().inset_0().child(v)).with_priority(10)))
         .children(self.file_preview.clone().map(|v| gpui::deferred(div().absolute().inset_0().child(v)).with_priority(9)))
@@ -2072,8 +2118,34 @@ impl VectorApp {
         if self.live {
             backend::prefs::refresh(npub.clone());
         }
-        self.profile = Some(crate::profile::Screen::new(npub, back));
+        self.profile = Some(crate::profile::Screen::new(npub.clone(), back));
         cx.notify();
+        if !self.live {
+            // Fixtures: VECTOR_BADGES=invites,fawkes,bug,v2026 (counts; 0 for none) on our own profile.
+            if let Ok(spec) = std::env::var("VECTOR_BADGES")
+                && npub == self.store.borrow().my_npub
+            {
+                let n: Vec<u32> = spec.split(',').map(|v| v.trim().parse().unwrap_or(0)).collect();
+                let at = |i: usize| n.get(i).copied().unwrap_or(0);
+                if let Some(p) = self.profile.as_mut() {
+                    p.badges = backend::badges::Badges { invites: at(0), fawkes: at(1) > 0, bug: at(2) as u8, v2026: at(3) > 0 };
+                }
+            }
+            return;
+        }
+        let mine = npub == self.store.borrow().my_npub;
+        let rx = backend::run(backend::badges::of(npub.clone(), mine));
+        cx.spawn(async move |this, cx| {
+            let Ok(badges) = rx.await else { return };
+            this.update(cx, |this, cx| {
+                if let Some(p) = this.profile.as_mut().filter(|p| p.npub == npub) {
+                    p.badges = badges;
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
     }
 
     fn on_profile(&mut self, act: crate::profile::Act, window: &mut Window, cx: &mut Context<Self>) {
@@ -2254,6 +2326,10 @@ impl VectorApp {
                 } else {
                     self.open_switcher(cx);
                 }
+            }
+            Act::Badge(which) => {
+                self.badge_card = Some(crate::badgecard::Card::of(which, p.badges));
+                cx.notify();
             }
             Act::SwitcherEdit => {
                 if let Some(s) = self.switcher.as_mut() {

@@ -282,3 +282,31 @@ pub fn field_look() -> crate::composer::Look {
         ..Default::default()
     }
 }
+
+thread_local! {
+    static SHARP: std::cell::RefCell<std::collections::HashMap<(SharedString, u32), Option<std::sync::Arc<gpui::RenderImage>>>> = Default::default();
+}
+
+/// An SVG asset rasterized at the size it shows: `img` rasterizes at the file's own size, which
+/// aliases when a large drawing shows small.
+pub fn sharp_svg(path: impl Into<SharedString>, size: f32, window: &Window, cx: &App) -> gpui::Img {
+    let path = path.into();
+    let device = (size * window.scale_factor()).ceil() as u32;
+    let image = SHARP.with(|cache| {
+        cache
+            .borrow_mut()
+            .entry((path.clone(), device))
+            .or_insert_with(|| {
+                let bytes = cx.asset_source().load(&path).ok().flatten()?;
+                let renderer = cx.svg_renderer();
+                let parsed = renderer.parse_svg(&bytes).ok()?;
+                let d = gpui::DevicePixels(device as i32);
+                renderer.render_parsed(&parsed, gpui::SvgSize::Size(gpui::size(d, d))).ok()
+            })
+            .clone()
+    });
+    match image {
+        Some(image) => gpui::img(image).size(px(size)),
+        None => gpui::img(path).size(px(size)),
+    }
+}

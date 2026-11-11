@@ -15,6 +15,7 @@ pub mod unfurl;
 pub mod sync;
 pub mod upload;
 pub mod archive;
+pub mod badges;
 
 use std::future::Future;
 use std::path::PathBuf;

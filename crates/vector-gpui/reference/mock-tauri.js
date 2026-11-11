@@ -30,7 +30,7 @@
         },
         get_system_events: () => [], pivx_get_chat_payments: () => [], get_message_delete_meta_bulk: () => [],
         get_chat_commands: () => [], list_communities: () => [], get_hidden_banners: () => [],
-        get_community_join_order: () => [], get_my_badges: () => [], get_emoji_usage: () => [],
+        get_community_join_order: () => [], get_emoji_usage: () => [],
         cache_android_file: ({ filePath }) => {
             const name = filePath.split('/').pop();
             return { size: (window.__FILE_SIZES__ || {})[name] || 0, name, extension: name.split('.').pop() };
@@ -43,6 +43,11 @@
             avatar_url: null, avatar_cached: p.avatar_cached || null, has_encryption: false, last_active: 100 - i,
         })),
         get_max_account_tier: () => window.__ACCOUNT_TIER__ ?? 1,
+        get_my_badges: () => window.__BADGES__ || { vector: false, vector_2026: false, tier: 0, bug_hunter: 0 },
+        get_invited_users: () => window.__BADGES__?.invites || 0,
+        check_fawkes_badge: () => !!window.__BADGES__?.vector,
+        check_vector_2026_badge: () => !!window.__BADGES__?.vector_2026,
+        get_bug_hunter_tier: () => window.__BADGES__?.bug_hunter || 0,
     };
     // MOCK_MODE: 'app' (signed in), 'login' (no account) or 'unlock' (a PIN-locked account).
     const MODE = window.__MOCK_MODE__ || 'app';

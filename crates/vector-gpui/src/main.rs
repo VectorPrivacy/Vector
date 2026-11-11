@@ -1,6 +1,7 @@
 mod assets;
 mod attachments;
 mod backend;
+mod badgecard;
 mod composer;
 #[allow(dead_code, clippy::all)]
 mod crop;
