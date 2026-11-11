@@ -16688,65 +16688,6 @@ button.popout-thumb {
     user-select: none;
 }
 
-/* Right-aligned moderation handle on a member row: a "\22EF" that opens the same menu as
-   right-click. Always visible by default (so it works on touch, which has no hover). On
-   pointer devices it stays out of the way until the row is hovered, keeping the list
-   scannable while the tools are one hover away. */
-.member-pick-actions {
-    margin-left: auto;
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    flex-shrink: 0;
-}
-@media (hover: hover) {
-    /* pointer-events, not just opacity: an invisible element still hit-tests, so a
-       pointer crossing the hidden handle lit its :hover and the reveal then faded a
-       BRIGHT icon in, which dimmed again as the pointer moved on. Appearing without
-       a transition is the rest of it — the handle is a hint, and a hint that ramps
-       is a hint you watch. */
-    .member-pick-actions {
-        opacity: 0;
-        pointer-events: none;
-    }
-    .member-pick-row:hover .member-pick-actions,
-    .member-pick-actions:focus-within {
-        opacity: 1;
-        pointer-events: auto;
-    }
-}
-
-/* `.icon` is absolutely positioned to fill its nearest positioned ancestor, so the handle
-   has to BE that box rather than inheriting the row's. Mask icons tint via background. */
-.member-pick-more {
-    position: relative;
-    width: 24px;
-    height: 24px;
-    border-radius: 6px;
-    flex-shrink: 0;
-    z-index: 1;
-    cursor: pointer;
-    transition: background-color 0.12s ease;
-}
-
-/* Rests dim and only brightens under the pointer — the handle is a hint, not a
-   third thing competing with the name and avatar for attention. */
-.member-pick-more .icon {
-    background-color: rgba(255, 255, 255, 0.4);
-    transition: background-color 0.12s ease;
-}
-
-/* Safe to brighten the glyph again now the hidden handle is pointer-events: none —
-   :hover can only fire on one that is actually on screen, so this can't run during
-   the reveal. Eased rather than snapped, in step with the plate behind it. */
-.member-pick-more:hover {
-    background-color: rgba(255, 255, 255, 0.09);
-}
-
-.member-pick-more:hover .icon {
-    background-color: #fff;
-}
-
 .member-pick-row .member-pick-hover {
     position: absolute;
     top: 0;
@@ -16874,22 +16815,21 @@ button.popout-thumb {
   user-select: none;
 }
 
+/* Type and colour come from .section-label. */
 .member-section-label {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-family: 'Rubik', Inter, Avenir, Helvetica, Arial, sans-serif;
-  font-size: 15px;
-  color: rgba(255, 255, 255, 0.38);
   transition: color 0.12s ease;
 }
 
 .member-section-count {
   flex-shrink: 0;
-  font-size: 12px;
+  font-size: 11px;
+  font-weight: 600;
   font-variant-numeric: tabular-nums;
-  color: rgba(255, 255, 255, 0.24);
+  color: rgba(255, 255, 255, 0.32);
 }
 
 .member-section-head:hover .member-section-label {
@@ -16932,6 +16872,8 @@ button.popout-thumb {
 }
 .member-roster-window .member-section-head {
   height: 36px;
+  align-items: flex-end;
+  padding-bottom: 8px;
 }
 .member-roster-window .member-section-head.is-closed .member-section-caret .icon {
   transform: rotate(-90deg);
@@ -16974,11 +16916,15 @@ button.popout-thumb {
     background-color: var(--icon-color-primary);
 }
 
-/* An action in flight pins its own indicator visible: the spinner is the ONLY signal that a
-   kick/ban/role change is still running, and the hover-reveal above would otherwise hide it the
-   moment the pointer leaves the row — reading as though nothing had happened. Must stay after the
-   hover rules; both sides carry equal specificity, so source order decides. */
-.member-pick-row.is-acting .member-pick-actions { opacity: 1; }
+/* One pick at a time reads as a radio, not a checkbox. */
+.member-pick-indicator.is-single {
+    border-radius: 50%;
+}
+
+.member-pick-indicator.is-single.selected {
+    background-color: transparent;
+    box-shadow: inset 0 0 0 3px #000, inset 0 0 0 9px var(--icon-color-primary);
+}
 
 /* Group Overview Edit Controls */
 .group-editable {

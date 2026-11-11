@@ -9,10 +9,11 @@
     // re-read the settled truth → patch state; nothing is re-rendered by hand.
     import MemberRow from '../people/MemberRow.svelte';
     import { untrack } from 'svelte';
-    import { profileVersion } from '../lib/signals.svelte.js';
+    import { profileVersion, openChatId, chatVersion } from '../lib/signals.svelte.js';
     import { advancedState } from '../lib/advanced.svelte.js';
     import { communityNickname } from '../lib/nicknames.svelte.js';
     import { timedOutUntil } from '../lib/timeouts.svelte.js';
+    import { shellState } from '../lib/shell.svelte.js';
 
     let {
         communityId,
@@ -178,6 +179,13 @@
 
     const f = $derived(filter.trim().toLowerCase());
 
+    // Who has posted in the open channel's loaded history: they lead the Members group.
+    const posters = $derived.by(() => {
+        const id = openChatId();
+        if (id) chatVersion(id);
+        return h.channelPosters?.(communityId) || null;
+    });
+
     // Who may read the scoped Private Channel: the owner, and holders of a role scoped
     // to it (CORD-04 §2, the roles scoped to a channel ARE its access list). Unscoped
     // until the graph lands, so a slow read shows everyone rather than a false empty.
@@ -204,16 +212,19 @@
             const isOwner = m.npub === ownerNpub;
             const isAdmin = adminSet.has(m.npub);
             const veiled = h.streamHidden(m.npub);
+            const named = !!(nameOf(profile) || communityNickname(communityId, m.npub));
             vms.push({
                 npub: m.npub,
                 profile,
                 display,
                 veiled,
-                hasName: !veiled && !!(nameOf(profile) || communityNickname(communityId, m.npub)),
+                hasName: !veiled && named,
+                // Members order: posted here, then named, then a bare key.
+                relevance: posters?.has(m.npub) ? 0 : named ? 1 : 2,
                 src: profile ? h.getProfileAvatarSrc(profile) || null : null,
                 isOwner,
                 isAdmin,
-                rank: isOwner ? 'owner' : isAdmin ? 'admin' : null,
+                unnamed: !named && !veiled,
                 rankLabel: heldBy.get(m.npub)?.name || null,
                 nameColor: hex(colorBy.get(m.npub)?.color),
                 timeoutUntil: timedOutUntil(communityId, m.npub),
@@ -232,6 +243,8 @@
             const id = heldBy.get(vm.npub)?.role_id || (vm.isOwner || vm.isAdmin ? 'admin' : 'members');
             (buckets.get(id) || buckets.get('members')).push(vm);
         }
+        // Stable sort: A→Z within each relevance tier is kept from the sort above.
+        buckets.get('members').sort((a, b) => a.tier - b.tier || a.relevance - b.relevance);
         return sectionOrder
             .map((s) => ({ ...s, rows: buckets.get(s.id), counted: buckets.get(s.id).filter((vm) => !vm.unlisted).length }))
             .filter((s) => s.rows.length);
@@ -245,7 +258,10 @@
     // the visible items placed absolutely inside it. Scrolling swaps which items are
     // mounted; nothing else moves. Section collapse lives here (it is a property of
     // the layout now, not of a section element) and is remembered per community.
-    const ROW_H = 46, HEAD_H = 36, SECTION_GAP = 12, OVERSCAN_PX = 300;
+    const HEAD_H = 36, SECTION_GAP = 12, OVERSCAN_PX = 300;
+    // Matches the row heights in styles.css / widescreen.css.
+    const shell = shellState();
+    const ROW_H = $derived(shell.ws ? 40 : 46);
     // svelte-ignore state_referenced_locally
     let closedIds = $state(new Set());
     $effect.pre(() => {
@@ -294,20 +310,32 @@
         return out;
     });
     // Tracks the nearest scrolling ancestor: its scroll position and its height.
+    // The overflow read at mount is only a first guess: tiling.js hides a scroller's overflow
+    // for a frame as its content crosses 2048px. Whatever scrolls with the list in it is the one.
     function windowOn(node) {
         let sc = node.parentElement;
         while (sc && !/auto|scroll/.test(getComputedStyle(sc).overflowY)) sc = sc.parentElement;
-        if (!sc) { viewH = window.innerHeight; return; }
         const read = () => {
+            if (!sc) { viewH = window.innerHeight; return; }
             scrollTop = sc.scrollTop;
             viewH = sc.clientHeight;
             listTop = node.getBoundingClientRect().top - sc.getBoundingClientRect().top + sc.scrollTop;
         };
-        read();
-        sc.addEventListener('scroll', read, { passive: true });
         const ro = new ResizeObserver(read);
-        ro.observe(sc);
-        return { destroy() { sc.removeEventListener('scroll', read); ro.disconnect(); } };
+        if (sc) ro.observe(sc);
+        const onScroll = (e) => {
+            const t = e.target;
+            if (t !== sc) {
+                if (!(t instanceof Element) || !t.contains(node)) return;
+                if (sc) ro.unobserve(sc);
+                sc = t;
+                ro.observe(sc);
+            }
+            read();
+        };
+        read();
+        document.addEventListener('scroll', onScroll, { capture: true, passive: true });
+        return { destroy() { document.removeEventListener('scroll', onScroll, { capture: true }); ro.disconnect(); } };
     }
 
     // ── actions ──
@@ -319,9 +347,8 @@
         acting = next;
     }
 
-    // Roles and moderation live on the row menu (right-click / long-press), with a "⋯"
-    // handle on hover so it is discoverable without welding destructive buttons onto every row.
-    // The same menu opens on a member's name in chat (js/member-roles.js).
+    // Roles and moderation live on the row menu (right-click / long-press). The same menu
+    // opens on a member's name in chat (js/member-roles.js).
     function rowItems(vm) {
         return h.memberMenuItems(communityId, vm.npub, {
             onBusy: (npub, on) => setActing(npub, on),
@@ -354,12 +381,6 @@
         h.showContextMenu({ x: e.clientX, y: e.clientY, items });
     }
 
-    function openMenu(vm, e) {
-        e.stopPropagation();
-        const r = e.currentTarget.getBoundingClientRect();
-        showRowMenu(vm, r.left, r.bottom + 4);
-    }
-
     // Row → mini-profile. stopPropagation so the opening click doesn't reach the
     // document-level outside-click handler that would dismiss the just-opened popup.
     function openProfile(npub, e) {
@@ -383,13 +404,13 @@
                      onclick={() => toggleSection(it.section.id)}
                      oncontextmenu={(e) => headMenu(it.section, e)}
                      onkeydown={(e) => (e.key === 'Enter' || e.key === ' ') && (e.preventDefault(), toggleSection(it.section.id))}>
-                    <span class="member-section-label">{it.section.label}</span>
+                    <span class="member-section-label section-label">{it.section.label}</span>
                     <span class="member-section-count">{it.section.counted}</span>
                     <span class="member-section-caret"><span class="icon icon-chevron-down"></span></span>
                 </div>
             {:else}
                 {@const vm = it.vm}
-                <div class="member-roster-slot" style:top="{it.top}px" use:rowMenu={vm}>
+                <div class="member-roster-slot" class:is-unnamed={vm.unnamed && !vm.nameColor} style:top="{it.top}px" use:rowMenu={vm}>
                     <MemberRow
                         npub={vm.npub}
                         profile={vm.profile}
@@ -398,7 +419,7 @@
                         hasName={vm.hasName}
                         withStatus
                         veiled={vm.veiled}
-                        rank={vm.rank}
+                        rank={vm.isOwner ? 'owner' : null /* the group heading and name colour mark the rest */}
                         rankLabel={vm.rankLabel}
                         nameColor={vm.nameColor}
                         timeoutUntil={vm.timeoutUntil}
@@ -408,20 +429,7 @@
                         acting={acting.has(vm.npub)}
                         onactivate={(e) => openProfile(vm.npub, e)}
                         {ui}
-                    >
-                        {#snippet trailing()}
-                            {#if vm.canModerate || vm.canRole || vm.canNick}
-                                <div class="member-pick-actions">
-                                    <div class="member-pick-more" title="More" role="button" tabindex="0"
-                                        onclick={(e) => openMenu(vm, e)}
-                                        onkeydown={(e) => (e.key === 'Enter' || e.key === ' ') && (e.preventDefault(), openMenu(vm, e))}
-                                    >
-                                        <span class="icon icon-dots-horizontal"></span>
-                                    </div>
-                                </div>
-                            {/if}
-                        {/snippet}
-                    </MemberRow>
+                    />
                 </div>
             {/if}
         {/each}

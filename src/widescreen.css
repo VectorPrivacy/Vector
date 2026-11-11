@@ -1225,8 +1225,7 @@ body.ws #group-overview-members {
      !important reaches it. */
   border: none !important;
   border-radius: 0 !important;
-  /* Matches the search container's inset, so field and rows share one edge. */
-  padding: 0 10px !important;
+  padding: 0 8px !important;
 }
 
 /* Its action row is Invite + Leave, both of which now live in the community's
@@ -2697,14 +2696,42 @@ body.ws #chat > .chat-header .details-toggle {
   opacity: 1;
 }
 
-/* The avatar carries the taller row rather than floating in it. */
+/* The avatar carries the taller row rather than floating in it. Min/max too: the
+   placeholder carries its 25px box inline, which a width alone can't lift. */
 body.ws #group-overview .member-pick-avatar {
-  width: 29px !important;
-  height: 29px !important;
+  width: 32px !important;
+  height: 32px !important;
+  min-width: 32px !important;
+  min-height: 32px !important;
+  max-width: 32px !important;
+  max-height: 32px !important;
+  margin-right: 12px;
 }
 
 body.ws #group-overview .compact-member-name {
-  font-size: 15px;
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 18px;
+}
+
+body.ws #group-overview .member-pick-status {
+  font-size: 11.5px;
+}
+
+/* A bare key, no name set: listed, but the eye can pass over it. */
+body.ws #group-overview .member-roster-slot.is-unnamed .compact-member-name {
+  color: rgba(255, 255, 255, 0.42);
+  font-weight: 500;
+}
+
+body.ws #group-overview .member-section-head {
+  padding-left: 8px;
+  padding-right: 8px;
+}
+
+body.ws #group-overview .member-roster-window .member-roster-slot,
+body.ws #group-overview .member-roster-window .member-pick-row {
+  height: 40px;
 }
 
 /* ── Search: a slim pill, not a boxed field ───────────────────────────── */
@@ -2729,9 +2756,9 @@ body.ws #group-overview > .chat-header .ws-member-search .emoji-search-icon {
    person reads as broken alignment rather than as extra information. A member
    with nothing to say simply centres in the same box. */
 body.ws #group-overview .member-pick-row {
-  padding: 3px 10px;
+  padding: 3px 8px;
   gap: 0;
-  min-height: 46px;
+  min-height: 40px;
   box-sizing: border-box;
 }
 
