@@ -7,6 +7,7 @@ mod emoji;
 mod highlight;
 mod inline;
 mod kit;
+mod linkcard;
 mod login;
 mod markdown;
 mod media;

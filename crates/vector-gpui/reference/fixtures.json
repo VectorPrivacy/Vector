@@ -276,6 +276,31 @@
    "avatar_cached": "avatars/grace.png",
    "banner_cached": "",
    "stream_consent": false
+  },
+  {
+   "id": "npub19ayt3q02wpelr3hsswefdgmqh4xfeag7m2kt58xecdxc4c7ejnkq92s7dr",
+   "name": "lin",
+   "display_name": "Lin",
+   "nickname": "",
+   "lud06": "",
+   "lud16": "",
+   "banner": "",
+   "avatar": "https://example.invalid/bob.png",
+   "about": "",
+   "website": "",
+   "nip05": "",
+   "status": {
+    "title": "",
+    "purpose": "",
+    "url": ""
+   },
+   "last_updated": 1794362400,
+   "mine": false,
+   "bot": false,
+   "is_blocked": false,
+   "avatar_cached": "avatars/bob.png",
+   "banner_cached": "",
+   "stream_consent": false
   }
  ],
  "chats": [
@@ -1340,6 +1365,97 @@
    "last_read": "c33c8607c4f223f4233f68b92e7fef6b309201b87fb34d1bdfa18e4e13752e76",
    "unread_from": "",
    "created_at": 1790902800,
+   "metadata": {
+    "custom_fields": {}
+   },
+   "muted": false,
+   "notify": 2,
+   "everyone_pings": true,
+   "community_muted": false
+  },
+  {
+   "id": "npub19ayt3q02wpelr3hsswefdgmqh4xfeag7m2kt58xecdxc4c7ejnkq92s7dr",
+   "chat_type": "DirectMessage",
+   "participants": [
+    "npub19ayt3q02wpelr3hsswefdgmqh4xfeag7m2kt58xecdxc4c7ejnkq92s7dr"
+   ],
+   "messages": [
+    {
+     "id": "53b8cc19da5f56354d0281c9daa68f89304c11dc11942342d0b4553b88aefa8c",
+     "content": "Have a read: https://example.invalid/posts/private-by-default",
+     "replied_to": "",
+     "preview_metadata": {
+      "domain": "https://example.invalid/",
+      "og_title": "Private by default",
+      "og_description": "Why every message you send should be sealed before it leaves your device.\nA look at gift wraps, relays and what they can never learn.<br>Part one of three.",
+      "og_image": "https://example.invalid/og.png",
+      "og_url": "https://example.invalid/posts/private-by-default",
+      "og_type": null,
+      "title": null,
+      "description": null,
+      "favicon": "https://example.invalid/favicon.ico"
+     },
+     "attachments": [],
+     "reactions": [],
+     "at": 1794101400000,
+     "pending": false,
+     "failed": false,
+     "mine": false,
+     "npub": "npub19ayt3q02wpelr3hsswefdgmqh4xfeag7m2kt58xecdxc4c7ejnkq92s7dr",
+     "edited": false
+    },
+    {
+     "id": "eecc0a5093579f0de707c656ea2289edffb6ea722dca762b7bcfe2414090846d",
+     "content": "https://example.invalid/docs",
+     "replied_to": "",
+     "preview_metadata": {
+      "domain": "https://example.invalid/",
+      "og_title": null,
+      "og_description": null,
+      "og_image": null,
+      "og_url": null,
+      "og_type": null,
+      "title": "Docs",
+      "description": "Short and to the point.",
+      "favicon": "https://example.invalid/favicon.ico"
+     },
+     "attachments": [],
+     "reactions": [],
+     "at": 1794102000000,
+     "pending": false,
+     "failed": false,
+     "mine": true,
+     "npub": "npub1yazve5gvw5em6um2mzg0nh2u4v4dkfas04gqh9yn72wdcssvktsqfmmmv4",
+     "edited": false
+    },
+    {
+     "id": "97a55d29a973a83f670c1f48c92336dd35248f3f744445bd1de09275ca189bdf",
+     "content": "Watch this https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+     "replied_to": "",
+     "preview_metadata": {
+      "domain": "https://www.youtube.com/",
+      "og_title": "A video worth watching",
+      "og_description": "Uploaded by somebody.",
+      "og_image": "https://i.ytimg.com/vi/dQw4w9WgXcQ/hqdefault.jpg",
+      "og_url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+      "og_type": null,
+      "title": null,
+      "description": null,
+      "favicon": "https://example.invalid/favicon.ico"
+     },
+     "attachments": [],
+     "reactions": [],
+     "at": 1794102600000,
+     "pending": false,
+     "failed": false,
+     "mine": false,
+     "npub": "npub19ayt3q02wpelr3hsswefdgmqh4xfeag7m2kt58xecdxc4c7ejnkq92s7dr",
+     "edited": false
+    }
+   ],
+   "last_read": "97a55d29a973a83f670c1f48c92336dd35248f3f744445bd1de09275ca189bdf",
+   "unread_from": "",
+   "created_at": 1794016800,
    "metadata": {
     "custom_fields": {}
    },

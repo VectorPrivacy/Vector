@@ -19,8 +19,8 @@ use crate::markdown::{self, Block, MONO, Para, ParaKind};
 use crate::theme::*;
 
 pub const DANGER: u32 = 0xff2ea9;
-const TEXT_SIZE: f32 = 15.;
-const TEXT_LH: f32 = 21.;
+pub const TEXT_SIZE: f32 = 15.;
+pub const TEXT_LH: f32 = 21.;
 
 /// What the user did to a message.
 #[derive(Clone)]
@@ -150,7 +150,8 @@ pub fn message_row(ctx: &Ctx, index: usize, first: bool, gap: f32) -> AnyElement
         div()
             .when(pending || failed, |d| d.opacity(0.6))
             .child(content(ctx, m))
-            .children(crate::attachments::attachments(ctx, m)),
+            .children(crate::attachments::attachments(ctx, m))
+            .children(crate::linkcard::card(ctx, m)),
     );
     if let Some(reason) = ctx.fail_reasons.get(&m.id).filter(|_| failed) {
         body = body.child(div().mt(px(4.)).text_size(px(12.)).line_height(px(16.2)).text_color(c(DANGER)).child(reason.clone()));
@@ -285,7 +286,7 @@ enum Piece {
 }
 
 /// `isImageUrl`: the path ends in a picture's extension, or the text names one anywhere.
-fn is_image_url(url: &str) -> bool {
+pub fn is_image_url(url: &str) -> bool {
     const EXTS: [&str; 8] = ["png", "jpg", "jpeg", "gif", "webp", "bmp", "ico", "svg"];
     let lower = url.to_ascii_lowercase();
     let path = lower.split(['?', '#']).next().unwrap_or("");

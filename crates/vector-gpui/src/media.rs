@@ -100,6 +100,9 @@ pub struct Media {
     pub auto_queue: Vec<(String, String)>,
     linked: HashMap<String, Linked>,
     linked_wants: Vec<String>,
+    /// Messages whose link card was asked for, and those asks waiting to go: (chat, message).
+    pub meta_asked: HashSet<String>,
+    pub meta_queue: Vec<(String, String)>,
 }
 
 impl Media {

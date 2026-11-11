@@ -122,5 +122,34 @@ const thumbs = {};
         muted: false, notify: 2, everyone_pings: true, community_muted: false,
     });
 }
+// Link preview cards: a page with a picture, one with only text, and a YouTube video.
+{
+    const id = npub('lin');
+    profiles.push(profile({ id, name: 'lin', display_name: 'Lin', avatar: 'https://example.invalid/bob.png', avatar_cached: 'avatars/bob.png' }));
+    const at = NOW - 86400_000 * 3;
+    const meta = (o) => ({ domain: 'https://example.invalid/', og_title: null, og_description: null, og_image: null, og_url: null, og_type: null,
+        title: null, description: null, favicon: 'https://example.invalid/favicon.ico', ...o });
+    const m = (i, mine, content, back, preview_metadata = null) => ({
+        id: hex(`lin-${i}`), content, replied_to: '', preview_metadata, attachments: [], reactions: [],
+        at: at - back * 60_000, pending: false, failed: false, mine, npub: mine ? me : id, edited: false,
+    });
+    const messages = [
+        m(0, false, 'Have a read: https://example.invalid/posts/private-by-default', 30, meta({
+            og_title: 'Private by default', og_url: 'https://example.invalid/posts/private-by-default',
+            og_description: 'Why every message you send should be sealed before it leaves your device.\nA look at gift wraps, relays and what they can never learn.<br>Part one of three.',
+            og_image: 'https://example.invalid/og.png',
+        })),
+        m(1, true, 'https://example.invalid/docs', 20, meta({ title: 'Docs', description: 'Short and to the point.' })),
+        m(2, false, 'Watch this https://www.youtube.com/watch?v=dQw4w9WgXcQ', 10, meta({
+            domain: 'https://www.youtube.com/', og_title: 'A video worth watching', og_url: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ',
+            og_image: 'https://i.ytimg.com/vi/dQw4w9WgXcQ/hqdefault.jpg', og_description: 'Uploaded by somebody.',
+        })),
+    ];
+    chats.push({
+        id, chat_type: 'DirectMessage', participants: [id], messages, last_read: messages[messages.length - 1].id,
+        unread_from: '', created_at: Math.floor((at - 86400_000) / 1000), metadata: { custom_fields: {} },
+        muted: false, notify: 2, everyone_pings: true, community_muted: false,
+    });
+}
 writeFileSync(new URL('./fixtures.json', import.meta.url), JSON.stringify({ now: NOW, npub: me, profiles, chats, thumbs }, null, 1));
 console.log(`${chats.length} chats, ${profiles.length} profiles`);

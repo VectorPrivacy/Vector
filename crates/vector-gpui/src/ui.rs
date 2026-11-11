@@ -1381,6 +1381,12 @@ impl VectorApp {
             // `.chat-rows > *:last-child`: clear of the typing strip.
             let el = if i + 1 == rows.len() { div().pb(px(33.)).child(el).into_any_element() } else { el };
             crate::media::pump(&media, app_media.clone(), live, cx);
+            let metas = std::mem::take(&mut media.borrow_mut().meta_queue);
+            if live {
+                for (chat, msg) in metas {
+                    let _ = backend::run(backend::unfurl::fetch_msg_metadata(chat, msg));
+                }
+            }
             let autos = std::mem::take(&mut media.borrow_mut().auto_queue);
             if !autos.is_empty() {
                 let app = app_media.clone();
