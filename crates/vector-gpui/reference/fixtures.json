@@ -1739,7 +1739,8 @@
    "dissolved": false,
    "voice_relays": [],
    "relays": [
-    "wss://jskitty.com/nostr"
+    "wss://jskitty.com/nostr",
+    "wss://asia.vectorapp.io/nostr"
    ],
    "members": [
     "npub1yazve5gvw5em6um2mzg0nh2u4v4dkfas04gqh9yn72wdcssvktsqfmmmv4",

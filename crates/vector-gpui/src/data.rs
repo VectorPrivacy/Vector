@@ -87,6 +87,8 @@ pub struct Community {
     pub dissolved: bool,
     /// Fixtures carry the roster; a live account asks for it on open.
     pub members: Vec<String>,
+    pub relays: Vec<String>,
+    pub voice_relays: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]

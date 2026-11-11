@@ -95,6 +95,7 @@ pub struct VectorApp {
     new_chat: Option<crate::newchat::NewChat>,
     create_community: Option<crate::createcommunity::CreateCommunity>,
     invite: Option<crate::invite::Invite>,
+    comm_settings: Option<crate::commsettings::CommSettings>,
     /// The pending invite whose details show.
     invite_details: Option<String>,
     /// Invite links looked up, by invite key.
@@ -158,6 +159,7 @@ enum MenuAct {
     CreateChannel { community: String, category: Option<String> },
     CreateCategory(String),
     InvitePeople(String),
+    CommunitySettings(String),
     LeaveCommunity { id: String, name: String, owner: bool },
     Copy(String),
     NotifyLevel(String, Option<&'static str>),
@@ -272,6 +274,7 @@ impl VectorApp {
             new_chat: None,
             create_community: None,
             invite: None,
+            comm_settings: None,
             invite_details: None,
             invite_previews: HashMap::new(),
             invite_scan: None,
@@ -353,6 +356,10 @@ impl VectorApp {
                     Ok("category") => app.open_create_channel(id.clone(), None, true, window, cx),
                     Ok("invite") => app.open_invite(id.clone(), window, cx),
                     _ => {}
+                }
+                if let Ok(section) = std::env::var("VECTOR_COMMUNITY_SETTINGS") {
+                    let section = ["overview", "relays", "roles", "bans", "audit"].into_iter().find(|s| *s == section).unwrap_or("overview");
+                    app.open_comm_settings(id.clone(), section, window, cx);
                 }
             }
         }
@@ -593,6 +600,7 @@ impl VectorApp {
             MenuAct::CreateChannel { community, category } => self.open_create_channel(community, category, false, window, cx),
             MenuAct::CreateCategory(community) => self.open_create_channel(community, None, true, window, cx),
             MenuAct::InvitePeople(community) => self.open_invite(community, window, cx),
+            MenuAct::CommunitySettings(community) => self.open_comm_settings(community, "overview", window, cx),
             MenuAct::LeaveCommunity { id, name, owner } => self.ask_leave_community(id, name, owner, window, cx),
             MenuAct::Copy(text) => {
                 cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
@@ -2030,6 +2038,13 @@ impl Render for VectorApp {
             });
             let filter = m.filter.read(cx).text().to_string();
             crate::invite::view(m, &store, &filter, &on)
+        }))
+        .children(self.comm_settings.as_ref().map(|m| {
+            let app = cx.entity().downgrade();
+            let on: crate::commsettings::OnAct = Rc::new(move |act, window, cx| {
+                app.update(cx, |app, cx| app.on_comm_settings(act, window, cx)).ok();
+            });
+            crate::commsettings::view(m, &store, &on, cx)
         }))
         .children(self.create_channel.as_ref().map(|m| {
             let app = cx.entity().downgrade();
@@ -3626,6 +3641,10 @@ impl VectorApp {
             rows.push((kit::MenuItem::divider(), MenuAct::Nothing));
         }
         rows.push((kit::MenuItem::new("Invite People", "add-user"), MenuAct::InvitePeople(id.clone())));
+        let caps = if self.live { backend::community::capabilities(&id) } else { ["manage_metadata", "ban", "manage_roles", "view_audit_log"].map(String::from).into() };
+        if ["manage_metadata", "ban", "manage_roles", "view_audit_log"].iter().any(|c| caps.contains(*c)) {
+            rows.push((kit::MenuItem::new("Community Settings", "settings"), MenuAct::CommunitySettings(id.clone())));
+        }
         rows.push((kit::MenuItem::new("Create Channel", "channel-hash"), MenuAct::CreateChannel { community: id.clone(), category: None }));
         rows.push((kit::MenuItem::new("Create Category", "plus"), MenuAct::CreateCategory(id.clone())));
         rows.push((kit::MenuItem::divider(), MenuAct::Nothing));
@@ -3920,6 +3939,338 @@ impl VectorApp {
         })
         .detach();
         cx.notify();
+    }
+
+    fn open_comm_settings(&mut self, community: String, section: &'static str, window: &mut Window, cx: &mut Context<Self>) {
+        let (name, description, relays, voice) = {
+            let store = self.store.borrow();
+            let Some(com) = store.community(&community) else { return };
+            (com.name.clone(), com.description.clone(), com.relays.clone(), com.voice_relays.clone())
+        };
+        let caps: HashSet<String> = if self.live { backend::community::capabilities(&community) } else { ["manage_metadata", "ban", "manage_roles", "view_audit_log"].map(String::from).into() };
+        let look = || crate::composer::Look { size: px(15.), line_height: px(18.), weight: FontWeight::MEDIUM, ..kit::field_look() };
+        let field = |placeholder: &str, text: &str, max: usize, cx: &mut Context<Self>| {
+            cx.new(|cx| {
+                let mut t = TextInput::new(placeholder.to_string(), cx).with_look(look()).max_chars(max).keep_on_submit();
+                t.set_text(text, cx);
+                t
+            })
+        };
+        let search = cx.new(|cx| TextInput::new("Search", cx).with_look(crate::composer::Look { weight: FontWeight::MEDIUM, placeholder: white_a(0.35), ..kit::field_look() }));
+        let name_in = field("Community name", &name, crate::commsettings::NAME_MAX, cx);
+        let description_in = cx.new(|cx| {
+            let mut t = TextInput::new("Tell people what brings everyone here", cx)
+                .with_look(crate::composer::Look { size: px(15.), line_height: px(22.5), weight: FontWeight::NORMAL, ..kit::field_look() })
+                .multiline(px(114.))
+                .max_chars(crate::commsettings::DESCRIPTION_MAX);
+            t.set_text(&description, cx);
+            t
+        });
+        let add_look = || crate::composer::Look { size: px(14.), line_height: px(17.), weight: FontWeight::MEDIUM, placeholder: c(0x5c5c5c), ..kit::field_look() };
+        let relay_in = cx.new(|cx| TextInput::new("wss://relay.example.com", cx).with_look(add_look()).max_chars(256).keep_on_submit());
+        let voice_in = cx.new(|cx| TextInput::new("https://relay.example.com", cx).with_look(add_look()).max_chars(256).keep_on_submit());
+        let ban_query = cx.new(|cx| TextInput::new("Search", cx).with_look(crate::composer::Look { size: px(16.), line_height: px(19.), weight: FontWeight::MEDIUM, placeholder: white_a(0.6), ..kit::field_look() }));
+        for input in [&search, &name_in, &description_in, &relay_in, &voice_in, &ban_query] {
+            cx.subscribe(input, |app, _, _: &crate::composer::InputChanged, cx| {
+                if let Some(m) = app.comm_settings.as_mut() {
+                    m.relay_error = None;
+                    m.voice_error = None;
+                }
+                cx.notify()
+            })
+            .detach();
+            cx.subscribe_in(input, window, |app, _, _: &CancelInput, window, cx| app.on_comm_settings(crate::commsettings::Act::Close, window, cx)).detach();
+        }
+        cx.subscribe_in(&relay_in, window, |app, _, _: &SendText, window, cx| app.on_comm_settings(crate::commsettings::Act::AddRelay, window, cx)).detach();
+        cx.subscribe_in(&voice_in, window, |app, _, _: &SendText, window, cx| app.on_comm_settings(crate::commsettings::Act::AddVoice, window, cx)).detach();
+        let bans = if self.live {
+            backend::community::banned(&community)
+        } else {
+            self.store.borrow().profiles.values().filter(|p| &*p.name == "frank" || &*p.name == "heidi").map(|p| p.id.to_string()).collect()
+        };
+        self.comm_settings = Some(crate::commsettings::CommSettings {
+            community,
+            section,
+            anchor: None,
+            search,
+            scroll: gpui::ScrollHandle::new(),
+            caps,
+            saved: crate::commsettings::Saved { name, description, relays: relays.clone(), voice: voice.clone() },
+            name: name_in,
+            description: description_in,
+            relays,
+            voice,
+            relay_input: relay_in,
+            voice_input: voice_in,
+            relay_edit: None,
+            relay_error: None,
+            voice_error: None,
+            bans,
+            ban_query,
+            ban_sel: HashSet::new(),
+            unbanning: false,
+            saving: false,
+            warn_until: None,
+        });
+        cx.notify();
+    }
+
+    fn on_comm_settings(&mut self, act: crate::commsettings::Act, window: &mut Window, cx: &mut Context<Self>) {
+        use crate::commsettings::{relay_address, voice_address, Act, RELAYS_MAX};
+        let Some(m) = self.comm_settings.as_mut() else { return };
+        match act {
+            Act::Close => {
+                if m.saving || m.unbanning {
+                    return;
+                }
+                if m.dirty(cx) {
+                    m.warn_until = Some(std::time::Instant::now() + std::time::Duration::from_millis(2600));
+                    cx.spawn(async move |this, cx| {
+                        cx.background_executor().timer(std::time::Duration::from_millis(2700)).await;
+                        this.update(cx, |_, cx| cx.notify()).ok();
+                    })
+                    .detach();
+                } else {
+                    self.comm_settings = None;
+                }
+            }
+            Act::Section(id) => {
+                if m.section != id {
+                    m.section = id;
+                    m.anchor = None;
+                    m.ban_sel.clear();
+                    m.scroll.set_offset(gpui::point(px(0.), px(0.)));
+                }
+            }
+            Act::Anchor(section, anchor) => {
+                if m.section != section {
+                    m.section = section;
+                    m.ban_sel.clear();
+                }
+                m.anchor = Some(anchor);
+                let ix = m.sections().iter().find(|s| s.id == section).and_then(|s| s.anchors.iter().position(|a| a.id == anchor)).unwrap_or(0);
+                if ix == 0 {
+                    m.scroll.set_offset(gpui::point(px(0.), px(0.)));
+                } else {
+                    m.scroll.scroll_to_item(0);
+                }
+            }
+            Act::ClearSearch => m.search.update(cx, |t, cx| t.set_text("", cx)),
+            Act::AddRelay => {
+                let raw = m.relay_input.read(cx).text().to_string();
+                if m.relays.len() >= RELAYS_MAX {
+                    m.relay_error = Some(format!("At most {RELAYS_MAX} relays."));
+                } else {
+                    match relay_address(&raw, &m.relays, None) {
+                        Ok(url) => {
+                            m.relays.push(url);
+                            m.relay_input.update(cx, |t, cx| t.set_text("", cx));
+                            m.relay_error = None;
+                        }
+                        Err(e) => m.relay_error = (!e.is_empty()).then_some(e),
+                    }
+                }
+            }
+            Act::EditRelay(i) => {
+                let Some(url) = m.relays.get(i).cloned() else { return };
+                let input = cx.new(|cx| {
+                    let mut t = TextInput::new("", cx).with_look(crate::composer::Look { size: px(14.), line_height: px(17.), weight: FontWeight::NORMAL, ..kit::field_look() }).keep_on_submit();
+                    t.set_text(&url, cx);
+                    t
+                });
+                cx.subscribe_in(&input, window, |app, _, _: &SendText, window, cx| app.on_comm_settings(crate::commsettings::Act::CommitEdit, window, cx)).detach();
+                cx.subscribe_in(&input, window, |app, _, _: &CancelInput, window, cx| app.on_comm_settings(crate::commsettings::Act::CancelEdit, window, cx)).detach();
+                cx.subscribe(&input, |app, _, _: &crate::composer::InputChanged, cx| {
+                    if let Some(m) = app.comm_settings.as_mut() {
+                        m.relay_error = None;
+                    }
+                    cx.notify()
+                })
+                .detach();
+                window.focus(&input.focus_handle(cx), cx);
+                m.relay_edit = Some((i, input));
+                m.relay_error = None;
+            }
+            Act::CommitEdit => {
+                let Some((i, input)) = m.relay_edit.take() else { return };
+                let raw = input.read(cx).text().to_string();
+                match relay_address(&raw, &m.relays, Some(i)) {
+                    Ok(url) => {
+                        if let Some(slot) = m.relays.get_mut(i) {
+                            *slot = url;
+                        }
+                    }
+                    Err(e) if e.is_empty() => {}
+                    Err(e) => {
+                        m.relay_error = Some(e);
+                        m.relay_edit = Some((i, input));
+                    }
+                }
+            }
+            Act::CancelEdit => m.relay_edit = None,
+            Act::RemoveRelay(i) => {
+                if m.relays.len() > 1 && i < m.relays.len() {
+                    m.relays.remove(i);
+                }
+            }
+            Act::AddVoice => {
+                let raw = m.voice_input.read(cx).text().to_string();
+                match voice_address(&raw, &m.voice) {
+                    Ok(url) => {
+                        m.voice.push(url);
+                        m.voice_input.update(cx, |t, cx| t.set_text("", cx));
+                        m.voice_error = None;
+                    }
+                    Err(e) => m.voice_error = (!e.is_empty()).then_some(e),
+                }
+            }
+            Act::RemoveVoice(i) => {
+                if i < m.voice.len() {
+                    m.voice.remove(i);
+                }
+            }
+            Act::Ban(npub) => {
+                if !m.ban_sel.remove(&npub) {
+                    m.ban_sel.insert(npub);
+                }
+            }
+            Act::BanAll => {
+                let rows = crate::commsettings::ban_rows(m, &self.store.borrow(), cx);
+                if rows.iter().all(|n| m.ban_sel.contains(n)) {
+                    for n in &rows {
+                        m.ban_sel.remove(n);
+                    }
+                } else {
+                    m.ban_sel.extend(rows);
+                }
+            }
+            Act::ClearBans => m.ban_sel.clear(),
+            Act::Unban => {
+                if m.unbanning || m.ban_sel.is_empty() {
+                    return;
+                }
+                let npubs: Vec<String> = m.ban_sel.iter().cloned().collect();
+                if !self.live {
+                    m.bans.retain(|n| !m.ban_sel.contains(n));
+                    m.ban_sel.clear();
+                } else {
+                    m.unbanning = true;
+                    let id = m.community.clone();
+                    let rx = backend::run(backend::community::set_banned(id.clone(), npubs.clone(), false));
+                    cx.spawn(async move |this, cx| {
+                        let res = rx.await.unwrap_or_else(|_| Err("Unban failed".into()));
+                        this.update(cx, |this, cx| {
+                            if let Some(m) = this.comm_settings.as_mut().filter(|m| m.community == id) {
+                                m.unbanning = false;
+                                if res.is_ok() {
+                                    m.bans.retain(|n| !npubs.contains(n));
+                                    m.ban_sel.clear();
+                                }
+                            }
+                            if let Err(e) = res {
+                                this.show_toast(&e, cx);
+                            }
+                            cx.notify();
+                        })
+                        .ok();
+                    })
+                    .detach();
+                }
+            }
+            Act::Reset => {
+                let (name, description) = (m.saved.name.clone(), m.saved.description.clone());
+                m.name.update(cx, |t, cx| t.set_text(&name, cx));
+                m.description.update(cx, |t, cx| t.set_text(&description, cx));
+                m.relays = m.saved.relays.clone();
+                m.voice = m.saved.voice.clone();
+                m.relay_edit = None;
+                m.relay_error = None;
+                m.voice_error = None;
+                m.warn_until = None;
+            }
+            Act::Save => self.save_comm_settings(cx),
+            Act::Learn => cx.open_url("https://docs.iroh.computer/concepts/relays"),
+        }
+        let _ = window;
+        cx.notify();
+    }
+
+    fn save_comm_settings(&mut self, cx: &mut Context<Self>) {
+        let Some(m) = self.comm_settings.as_mut() else { return };
+        if m.saving || !m.dirty(cx) {
+            return;
+        }
+        let name = m.name.read(cx).text().trim().to_string();
+        if name.is_empty() {
+            return;
+        }
+        let description = m.description.read(cx).text().trim().to_string();
+        let name_change = (name != m.saved.name).then(|| name.clone());
+        let description_change = (description != m.saved.description).then(|| description.clone());
+        let voice = (m.voice != m.saved.voice).then(|| m.voice.clone());
+        let relays = (m.relays != m.saved.relays).then(|| m.relays.clone());
+        let id = m.community.clone();
+        m.warn_until = None;
+        if !self.live {
+            m.saved = crate::commsettings::Saved { name, description, relays: m.relays.clone(), voice: m.voice.clone() };
+            return;
+        }
+        m.saving = true;
+        let rx = backend::run({
+            let id = id.clone();
+            async move {
+                let mut warnings = Vec::new();
+                if name_change.is_some() || description_change.is_some() {
+                    backend::community::edit_metadata(id.clone(), name_change, description_change).await?;
+                }
+                let voice = match voice {
+                    Some(v) => Some(backend::community::set_voice_relays(id.clone(), v).await?),
+                    None => None,
+                };
+                let relays = match relays {
+                    Some(r) => {
+                        let (moved, warn) = backend::community::move_relays(id.clone(), r).await?;
+                        warnings = warn;
+                        Some(moved)
+                    }
+                    None => None,
+                };
+                Ok::<_, String>((voice, relays, warnings))
+            }
+        });
+        cx.spawn(async move |this, cx| {
+            let res = rx.await.unwrap_or_else(|_| Err("Save failed".into()));
+            this.update(cx, |this, cx| {
+                let live = this.comm_settings.as_mut().filter(|m| m.community == id);
+                match res {
+                    Ok((voice, relays, warnings)) => {
+                        if let Some(m) = live {
+                            m.saving = false;
+                            if let Some(v) = voice {
+                                m.voice = v;
+                            }
+                            if let Some(r) = relays {
+                                m.relays = r;
+                            }
+                            m.saved = crate::commsettings::Saved { name: m.name.read(cx).text().trim().to_string(), description: m.description.read(cx).text().trim().to_string(), relays: m.relays.clone(), voice: m.voice.clone() };
+                        }
+                        if let Some(w) = warnings.first() {
+                            this.show_toast(w, cx);
+                        }
+                        this.reload_communities(cx);
+                    }
+                    Err(e) => {
+                        if let Some(m) = live {
+                            m.saving = false;
+                        }
+                        this.show_toast(&e, cx);
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     fn on_invite(&mut self, act: crate::invite::Act, window: &mut Window, cx: &mut Context<Self>) {

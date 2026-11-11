@@ -15,7 +15,7 @@ use crate::theme::*;
 pub struct Anchor {
     pub id: &'static str,
     pub label: &'static str,
-    keys: &'static str,
+    pub keys: &'static str,
     /// The release line it arrived in, for its NEW pill.
     since: Option<&'static str>,
 }
@@ -24,11 +24,11 @@ pub struct Category {
     pub id: &'static str,
     pub label: &'static str,
     pub icon: &'static str,
-    danger: bool,
+    pub danger: bool,
     pub anchors: Vec<Anchor>,
 }
 
-const fn anchor(id: &'static str, label: &'static str, keys: &'static str) -> Anchor {
+pub const fn anchor(id: &'static str, label: &'static str, keys: &'static str) -> Anchor {
     Anchor { id, label, keys, since: None }
 }
 
@@ -1989,8 +1989,18 @@ fn badge_new() -> impl IntoElement {
 }
 
 /// `SectionNav`: the search, the title, each section with its anchors, the footer links.
-fn nav(s: &Settings, cats: &[Category], fresh: &[&'static str], active: &'static str, on: &OnAct, cx: &App) -> AnyElement {
-    let query = s.search.read(cx).text().trim().to_lowercase();
+pub type NavFn<T> = Rc<dyn Fn(T, &mut Window, &mut App)>;
+
+/// What a sectioned settings nav acts on: its section, an anchor inside it, the cleared search.
+pub struct NavOn {
+    pub section: NavFn<&'static str>,
+    pub anchor: NavFn<(&'static str, &'static str)>,
+    pub clear: NavFn<()>,
+}
+
+/// `.cs-nav`: the search, a head, each section with its timeline of anchors, and a footer.
+pub fn section_nav(cats: &[Category], current: &str, fresh: &[&'static str], active: &'static str, search: &Entity<crate::composer::TextInput>, head: AnyElement, footer: Option<AnyElement>, width: f32, bg: u32, on: &NavOn, cx: &App) -> AnyElement {
+    let query = search.read(cx).text().trim().to_lowercase();
     let mut list = div().flex().flex_col();
     let mut any = false;
     for cat in cats {
@@ -2003,8 +2013,8 @@ fn nav(s: &Settings, cats: &[Category], fresh: &[&'static str], active: &'static
             continue;
         }
         any = true;
-        let selected = query.is_empty() && cat.id == s.cat;
-        let open = if query.is_empty() { cat.id == s.cat } else { true };
+        let selected = query.is_empty() && cat.id == current;
+        let open = if query.is_empty() { cat.id == current } else { true };
         let flag = !open && cat.anchors.iter().any(|a| fresh.contains(&a.id));
         let id = cat.id;
         let color = if cat.danger {
@@ -2021,6 +2031,7 @@ fn nav(s: &Settings, cats: &[Category], fresh: &[&'static str], active: &'static
         } else {
             c(0x5b6060)
         };
+        let pick = on.section.clone();
         list = list.child(
             div()
                 .id(SharedString::from(format!("cs-section-{id}")))
@@ -2039,7 +2050,7 @@ fn nav(s: &Settings, cats: &[Category], fresh: &[&'static str], active: &'static
                 .when(selected, |d| d.bg(c(0x1b1b1b)))
                 .when(!selected, |d| d.hover(|d| d.bg(c(0x151515)).text_color(if cat.danger { c(crate::timeline::DANGER) } else { c(0xffffff) })))
                 .cursor_pointer()
-                .on_click(click(on, move || Act::Category(id)))
+                .on_click(move |_, w, cx| pick(id, w, cx))
                 .child(
                     svg()
                         .path(SharedString::from(format!("icons/{}.svg", if cat.icon == "warning" { "vector_warning" } else { cat.icon })))
@@ -2064,6 +2075,7 @@ fn nav(s: &Settings, cats: &[Category], fresh: &[&'static str], active: &'static
             for a in shown {
                 let on_it = selected && a.id == active;
                 let (cid, aid) = (cat.id, a.id);
+                let jump = on.anchor.clone();
                 anchors = anchors.child(
                     div()
                         .id(SharedString::from(format!("cs-anchor-{aid}")))
@@ -2079,7 +2091,7 @@ fn nav(s: &Settings, cats: &[Category], fresh: &[&'static str], active: &'static
                         .text_color(if on_it { c(0xffffff) } else { c(0xb2b2b2) })
                         .hover(|d| d.text_color(if on_it { c(0xffffff) } else { c(0xe6e6e6) }))
                         .cursor_pointer()
-                        .on_click(click(on, move || Act::Anchor(cid, aid)))
+                        .on_click(move |_, w, cx| jump((cid, aid), w, cx))
                         .child(div().min_w_0().truncate().child(a.label))
                         .when(fresh.contains(&a.id), |d| d.child(badge_new())),
                 );
@@ -2090,25 +2102,15 @@ fn nav(s: &Settings, cats: &[Category], fresh: &[&'static str], active: &'static
     if !any {
         list = list.child(div().mx(px(10.)).my(px(12.)).text_size(px(13.)).text_color(c(0x6f6f6f)).child("No matches"));
     }
-    let link = |label: &'static str, key: &'static str| {
-        div()
-            .id(key)
-            .text_size(px(12.))
-            .line_height(px(14.))
-            .text_color(c(0x5b6060))
-            .hover(|d| d.text_color(c(0xffffff)))
-            .cursor_pointer()
-            .on_click(click(on, move || Act::Link(key)))
-            .child(label)
-    };
     let has_query = !query.is_empty();
+    let clear = on.clear.clone();
     div()
-        .w(px(crate::ui::LIST_W))
+        .w(px(width))
         .h_full()
         .flex_shrink_0()
         .flex()
         .flex_col()
-        .bg(c(LIST_BG))
+        .bg(c(bg))
         .border_r_1()
         .border_color(c(DIVIDER))
         .child(
@@ -2132,7 +2134,7 @@ fn nav(s: &Settings, cats: &[Category], fresh: &[&'static str], active: &'static
                         .pr(px(if has_query { 38. } else { 12. }))
                         .flex()
                         .items_center()
-                        .child(div().flex_1().min_w_0().child(s.search.clone())),
+                        .child(div().flex_1().min_w_0().child(search.clone())),
                 )
                 .child(svg().path("icons/search.svg").absolute().left(px(20.5)).top(px(16.5)).size(px(17.)).text_color(c(0xb2b2b2)))
                 .when(has_query, |d| {
@@ -2145,7 +2147,7 @@ fn nav(s: &Settings, cats: &[Category], fresh: &[&'static str], active: &'static
                             .size(px(18.))
                             .cursor_pointer()
                             .group("cs-clear")
-                            .on_click(click(on, || Act::ClearSearch))
+                            .on_click(move |_, w, cx| clear((), w, cx))
                             .child(svg().path("ui/search-clear.svg").size_full().text_color(c(0xb2b2b2)).group_hover("cs-clear", |d| d.text_color(c(0xffffff)))),
                     )
                 }),
@@ -2159,37 +2161,58 @@ fn nav(s: &Settings, cats: &[Category], fresh: &[&'static str], active: &'static
                 .pt(px(18.))
                 .px(px(10.))
                 .pb(px(24.))
-                .child(
-                    div()
-                        .mx(px(10.))
-                        .mb(px(17.))
-                        .pb(px(16.))
-                        .border_b_1()
-                        .border_color(c(0x262626))
-                        .text_size(px(20.))
-                        .line_height(px(24.))
-                        .font_weight(FontWeight::BOLD)
-                        .text_color(c(0xffffff))
-                        .child("Settings"),
-                )
+                .child(head)
                 .child(list)
-                .child(
-                    div()
-                        .mt(px(12.))
-                        .pt(px(16.))
-                        .px(px(8.))
-                        .border_t_1()
-                        .border_color(c(0x262626))
-                        .flex()
-                        .flex_wrap()
-                        .gap_x(px(16.))
-                        .gap_y(px(6.))
-                        .child(link("Donate", "donate"))
-                        .child(link("Docs", "gitbook"))
-                        .child(link("Privacy Policy", "privacy")),
-                ),
+                .children(footer),
         )
         .into_any_element()
+}
+
+fn nav(s: &Settings, cats: &[Category], fresh: &[&'static str], active: &'static str, on: &OnAct, cx: &App) -> AnyElement {
+    let link = |label: &'static str, key: &'static str| {
+        div()
+            .id(key)
+            .text_size(px(12.))
+            .line_height(px(14.))
+            .text_color(c(0x5b6060))
+            .hover(|d| d.text_color(c(0xffffff)))
+            .cursor_pointer()
+            .on_click(click(on, move || Act::Link(key)))
+            .child(label)
+    };
+    let head = div()
+        .mx(px(10.))
+        .mb(px(17.))
+        .pb(px(16.))
+        .border_b_1()
+        .border_color(c(0x262626))
+        .text_size(px(20.))
+        .line_height(px(24.))
+        .font_weight(FontWeight::BOLD)
+        .text_color(c(0xffffff))
+        .child("Settings")
+        .into_any_element();
+    let footer = div()
+        .mt(px(12.))
+        .pt(px(16.))
+        .px(px(8.))
+        .border_t_1()
+        .border_color(c(0x262626))
+        .flex()
+        .flex_wrap()
+        .gap_x(px(16.))
+        .gap_y(px(6.))
+        .child(link("Donate", "donate"))
+        .child(link("Docs", "gitbook"))
+        .child(link("Privacy Policy", "privacy"))
+        .into_any_element();
+    let (a, b, c_) = (on.clone(), on.clone(), on.clone());
+    let nav_on = NavOn {
+        section: Rc::new(move |id, w, cx| a(Act::Category(id), w, cx)),
+        anchor: Rc::new(move |(cat, anchor), w, cx| b(Act::Anchor(cat, anchor), w, cx)),
+        clear: Rc::new(move |_, w, cx| c_(Act::ClearSearch, w, cx)),
+    };
+    section_nav(cats, s.cat, fresh, active, &s.search, head, Some(footer), crate::ui::LIST_W, LIST_BG, &nav_on, cx)
 }
 
 /// The whole screen: the nav in the list column and the page beside it, `width` wide.

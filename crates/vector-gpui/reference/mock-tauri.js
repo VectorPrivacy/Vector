@@ -33,7 +33,7 @@
         get_community_capabilities: () => Object.fromEntries(['manage_metadata','manage_channels','create_invite','kick','ban','manage_messages','manage_roles','manage_admin_role','pin_messages','control_write','moderate_members','view_audit_log','manage_nicknames','change_nickname'].map((k) => [k, true])),
         get_community_members: ({ communityId }) => ((FIX.communities || []).find((c) => c.community_id === communityId)?.members || []).map((npub, i) => ({ npub, last_active: 1794275880 - i * 600 })),
         get_channel_pins: () => [], sync_community_channel: () => ({ new_messages: 0, reached_start: true, oldest_ms: null }), fill_community_gap: () => 0,
-        get_community_timeouts: () => ({}), get_community_mentions: () => ({ anyone: true, pingers: [], roles: [] }), get_community_admins: () => [], get_community_role_graph: () => ({ roles: [], grants: [], activated: false, readers: {} }), get_community_banlist: () => [], get_channel_send_denied: () => [], check_community_raid: () => ({ raid: false }),
+        get_community_timeouts: () => ({}), get_community_mentions: () => ({ anyone: true, pingers: [], roles: [] }), get_community_admins: () => [], get_community_role_graph: () => ({ roles: [], grants: [], activated: false, readers: {} }), get_community_banlist: () => (FIX.profiles || []).filter((p) => p.name === 'frank' || p.name === 'heidi').map((p) => p.id), get_channel_send_denied: () => [], check_community_raid: () => ({ raid: false }),
         get_community_join_order: () => [],
         create_community: ({ name }) => ({ community_id: 'f'.repeat(64), channel_id: 'e'.repeat(64), channel_name: 'general', owner_npub: FIX.npub, name }),
         create_public_invite: () => 'https://vectorapp.io/invite/' + 'Ab3'.repeat(20),

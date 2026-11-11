@@ -41,7 +41,7 @@ pub fn summarize(c: &CommunityV2) -> Value {
     json!({
         "community_id": bytes_to_hex_32(&c.identity.community_id.0),
         "name": c.name,
-        "description": c.description,
+        "description": c.description.clone().unwrap_or_default(),
         "is_owner": matches!((me, owner), (Some(m), Some(o)) if m == o),
         "has_icon": c.icon.is_some(),
         "channels": c.layout().1.into_iter().map(|(ch, cat)| json!({
@@ -60,6 +60,8 @@ pub fn summarize(c: &CommunityV2) -> Value {
         "primary_channel": c.primary_channel().map(|ch| bytes_to_hex_32(&ch.id.0)),
         "owner_npub": owner.and_then(|pk| pk.to_bech32().ok()),
         "dissolved": c.dissolved,
+        "relays": c.relays,
+        "voice_relays": c.voice_relays(),
     })
 }
 
@@ -563,6 +565,53 @@ pub async fn join_by_link(url: String) -> Result<String, String> {
         }
         super::emit("communities_changed", ());
         Ok(id)
+    })
+    .await
+}
+
+/// What this account may do here: `get_community_capabilities`' flags.
+pub fn capabilities(community_id: &str) -> std::collections::HashSet<String> {
+    VectorCore
+        .community_capabilities(community_id)
+        .ok()
+        .and_then(|v| v.as_object().cloned())
+        .map(|o| o.into_iter().filter(|(_, v)| v.as_bool() == Some(true)).map(|(k, _)| k).collect())
+        .unwrap_or_default()
+}
+
+pub async fn edit_metadata(community_id: String, name: Option<String>, description: Option<String>) -> Result<(), String> {
+    db::scoped(async move {
+        VectorCore.edit_community_metadata(&community_id, name.as_deref(), description.as_deref()).await.map_err(|e| e.to_string())?;
+        super::emit("communities_changed", ());
+        Ok(())
+    })
+    .await
+}
+
+pub async fn set_voice_relays(community_id: String, relays: Vec<String>) -> Result<Vec<String>, String> {
+    db::scoped(async move { VectorCore.set_voice_relays(&community_id, &relays).await.map_err(|e| e.to_string()) }).await
+}
+
+/// A relay that can't host the Community, by name and why; else the moved list and its gaps.
+pub async fn move_relays(community_id: String, relays: Vec<String>) -> Result<(Vec<String>, Vec<String>), String> {
+    db::scoped(async move {
+        let checks = VectorCore.check_community_relays(&community_id, &relays).await.map_err(|e| e.to_string())?;
+        if let Some(bad) = checks.iter().find(|c| !c.ok) {
+            return Err(bad.reason.clone().unwrap_or_else(|| format!("{} can't hold this community.", bad.relay)));
+        }
+        let moved = VectorCore.move_community_relays(&community_id, &relays).await.map_err(|e| e.to_string())?;
+        super::emit("communities_changed", ());
+        Ok((moved.relays, moved.warnings))
+    })
+    .await
+}
+
+pub async fn set_banned(community_id: String, npubs: Vec<String>, banned: bool) -> Result<(), String> {
+    db::scoped(async move {
+        let refs: Vec<&str> = npubs.iter().map(String::as_str).collect();
+        VectorCore.set_members_banned(&community_id, &refs, banned).await.map_err(|e| e.to_string())?;
+        super::emit("community_refreshed", community_id);
+        Ok(())
     })
     .await
 }
