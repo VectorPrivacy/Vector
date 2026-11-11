@@ -149,6 +149,7 @@ pub fn message_row(ctx: &Ctx, index: usize, first: bool, gap: f32) -> AnyElement
                         .text_color(c(0xffffff))
                         .child(ctx.store.name(&author)),
                 )
+                .children(crate::community::author_badge(ctx.store, &ctx.chat.id, &author))
                 .child(div().flex_shrink_0().text_size(px(12.)).text_color(white_a(0.4)).child(data::clock(m.at))),
         );
     }

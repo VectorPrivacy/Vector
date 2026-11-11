@@ -21,14 +21,14 @@ fn emit_removed(id: &str, chat_id: &str) {
 
 pub async fn react(chat_id: String, reference: String, emoji: String) -> Result<(), String> {
     if !is_dm(&chat_id) {
-        return Err("Reactions in Community channels are not yet supported".into());
+        return super::community::control(&chat_id, &reference, super::community::Control::React(&emoji)).await;
     }
     VectorCore.send_reaction(&chat_id, &reference, &emoji, None).await.map(|_| ()).map_err(|e| e.to_string())
 }
 
 pub async fn edit(chat_id: String, message_id: String, content: String) -> Result<(), String> {
     if !is_dm(&chat_id) {
-        return Err("Editing Community messages isn't available in this client yet".into());
+        return super::community::control(&chat_id, &message_id, super::community::Control::Edit(&content)).await;
     }
     VectorCore.edit_dm(&chat_id, &message_id, &content).await.map(|_| ()).map_err(|e| e.to_string())
 }
@@ -48,7 +48,7 @@ async fn reconcile_unread(chat_id: &str) {
 pub async fn delete(message_id: String) -> Result<(), String> {
     let (chat_id, msg) = VectorCore.get_message(&message_id).await.ok_or_else(|| format!("Message not found (id: {message_id})"))?;
     if !is_dm(&chat_id) {
-        return Err("Community channel messages are deleted via the Community service".into());
+        return super::community::control(&chat_id, &message_id, super::community::Control::Delete).await;
     }
     let rumor_id = EventId::from_hex(&message_id).map_err(|e| format!("Invalid message id: {e}"))?;
     if msg.mine {

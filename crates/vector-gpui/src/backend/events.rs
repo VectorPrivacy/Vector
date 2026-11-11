@@ -97,4 +97,24 @@ impl InboundEventHandler for Handler {
     fn on_community_dissolved(&self, community_id: &str) {
         vector_core::emit_event("community_refreshed", &json!({ "community_id": community_id }));
     }
+
+    fn on_subscription_ready(&self, _communities: usize) {
+        super::community::request();
+    }
+
+    fn on_community_refreshed(&self, community_id: &str) {
+        let session = db::current_session();
+        let community_id = community_id.to_string();
+        db::spawn_bound(async move {
+            let id = vector_core::community::CommunityId(vector_core::simd::hex::hex_to_bytes_32(&community_id));
+            if let Ok(Some(c)) = db::community::load_community_v2(&id) {
+                vector_core::VectorCore.register_v2_chats(&c, &session).await;
+            }
+            vector_core::emit_event("community_refreshed", &json!({ "community_id": community_id }));
+        });
+    }
+
+    fn on_community_self_removed(&self, community_id: &str) {
+        vector_core::emit_event("community_kicked", &json!({ "community_id": community_id }));
+    }
 }

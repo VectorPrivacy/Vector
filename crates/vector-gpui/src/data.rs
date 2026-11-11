@@ -16,6 +16,68 @@ struct Fixtures {
     npub: String,
     profiles: Vec<SlimProfile>,
     chats: Vec<SerializableChat>,
+    #[serde(default)]
+    communities: Vec<Community>,
+}
+
+/// One Community as `list_communities` summarises it.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct Community {
+    pub community_id: String,
+    pub name: String,
+    pub description: String,
+    pub is_owner: bool,
+    pub has_icon: bool,
+    pub channels: Vec<Channel>,
+    pub categories: Vec<Category>,
+    pub primary_channel: Option<String>,
+    pub owner_npub: Option<String>,
+    pub dissolved: bool,
+    /// Fixtures carry the roster; a live account asks for it on open.
+    pub members: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct Channel {
+    pub channel_id: String,
+    pub name: String,
+    pub private: bool,
+    pub readable: bool,
+    pub category_id: Option<String>,
+    pub topic: Option<String>,
+    /// `chat` or `voice`.
+    pub view: String,
+    pub restricted: bool,
+    pub can_post: bool,
+}
+
+impl Channel {
+    pub fn is_voice(&self) -> bool {
+        self.view == "voice"
+    }
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct Category {
+    pub category_id: String,
+    pub name: String,
+}
+
+impl Community {
+    pub fn channel(&self, id: &str) -> Option<&Channel> {
+        self.channels.iter().find(|c| c.channel_id == id)
+    }
+
+    /// The channel a Community opens on: its primary, else its first readable text channel.
+    pub fn landing(&self) -> Option<&Channel> {
+        self.primary_channel
+            .as_deref()
+            .and_then(|id| self.channel(id))
+            .or_else(|| self.channels.iter().find(|c| !c.is_voice() && c.readable))
+    }
 }
 
 pub struct Store {
@@ -32,6 +94,7 @@ pub struct Store {
     pub unread: Option<HashMap<String, u32>>,
     /// Request senders a Community we hold counts as a member: their pictures show.
     pub mutuals: std::collections::HashSet<String>,
+    pub communities: Vec<Community>,
 }
 
 impl Store {
@@ -53,6 +116,7 @@ impl Store {
             frozen_now_ms: Some(f.now),
             unread: None,
             mutuals: Default::default(),
+            communities: f.communities,
         })
     }
 
@@ -66,6 +130,7 @@ impl Store {
             frozen_now_ms: None,
             unread: Some(HashMap::new()),
             mutuals: Default::default(),
+            communities: Vec::new(),
         }
     }
 
@@ -152,8 +217,18 @@ impl Store {
 
     /// Whether the chat gets a row: a DM once it has content and its sender isn't blocked.
     pub fn listed(&self, chat: &SerializableChat) -> bool {
-        chat.chat_type != vector_core::ChatType::DirectMessage
-            || (!chat.messages.is_empty() && !self.profiles.get(&chat.id).is_some_and(|p| p.is_blocked))
+        chat.chat_type == vector_core::ChatType::DirectMessage
+            && !chat.messages.is_empty()
+            && !self.profiles.get(&chat.id).is_some_and(|p| p.is_blocked)
+    }
+
+    pub fn community(&self, id: &str) -> Option<&Community> {
+        self.communities.iter().find(|c| c.community_id == id)
+    }
+
+    /// The Community a channel chat belongs to.
+    pub fn community_of(&self, channel_id: &str) -> Option<&Community> {
+        self.communities.iter().find(|c| c.channel(channel_id).is_some())
     }
 
     /// A stranger whose request waits shows no pictures until it's accepted.

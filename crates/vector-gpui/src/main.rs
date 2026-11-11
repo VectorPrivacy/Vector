@@ -4,6 +4,7 @@ mod attachments;
 mod backend;
 mod badgecard;
 mod call;
+mod community;
 mod composer;
 #[allow(dead_code, clippy::all)]
 mod crop;

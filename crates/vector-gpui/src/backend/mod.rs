@@ -18,6 +18,7 @@ pub mod upload;
 pub mod archive;
 pub mod badges;
 pub mod calls;
+pub mod community;
 pub mod device;
 pub mod sound;
 pub mod storage;

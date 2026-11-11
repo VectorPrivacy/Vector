@@ -113,6 +113,8 @@ pub struct VectorApp {
     /// The processing switches the call panel shows, read when a call first appears.
     call_audio: Option<vector_core::calls::settings::AudioSettings>,
     call_ticking: bool,
+    /// The open Community, whose channels replace the chat list.
+    community: Option<crate::community::View>,
     start: Option<crate::startmenu::StartMenu>,
     /// The context menu open: where, its rows, and what each does.
     menu: Option<(gpui::Point<gpui::Pixels>, Vec<kit::MenuItem>, Vec<MenuAct>)>,
@@ -248,6 +250,7 @@ impl VectorApp {
             call: crate::call::Call::at(Self::saved_pill_pos()),
             call_audio: None,
             call_ticking: false,
+            community: None,
             start: None,
             menu: None,
         }
@@ -288,6 +291,20 @@ impl VectorApp {
         // Fixtures: VECTOR_CALL=ringing|calling|active|open shows a call with alice in that state.
         if let Ok(state) = std::env::var("VECTOR_CALL") {
             app.fixture_call(&state, cx);
+        }
+        // Fixtures: VECTOR_COMMUNITY=<name> opens that Community; VECTOR_CHANNEL=<name> a channel in it.
+        if let Ok(name) = std::env::var("VECTOR_COMMUNITY") {
+            let found = app.store.borrow().communities.iter().find(|c| c.name == name).map(|c| c.community_id.clone());
+            if let Some(id) = found {
+                app.open_community(id, window, cx);
+                let channel = std::env::var("VECTOR_CHANNEL").ok().and_then(|n| {
+                    let store = app.store.borrow();
+                    store.community_of(app.open.as_deref()?)?.channels.iter().find(|c| c.name == n).map(|c| c.channel_id.clone())
+                });
+                if let Some(ch) = channel {
+                    app.open_channel(ch, window, cx);
+                }
+            }
         }
         // Fixtures: VECTOR_START opens the Main Menu.
         if std::env::var("VECTOR_START").is_ok() {
@@ -598,7 +615,7 @@ impl VectorApp {
                 };
                 if self.live {
                     let next = sm.mic;
-                    backend::run(async move { vector_core::db::scoped(async move { vector_core::calls::settings::remember_mic(next) }).await });
+                    let _ = backend::run(async move { vector_core::db::scoped(async move { vector_core::calls::settings::remember_mic(next) }).await });
                 }
             }
             Act::Devices(kind, at) => {
@@ -963,6 +980,7 @@ impl VectorApp {
                     store.resort();
                 }
                 self.refresh_unread(cx);
+                self.reload_communities(cx);
             }
             UiEvent::Core(name, payload) => self.on_core_event(&name, payload, window, cx),
         }
@@ -973,6 +991,7 @@ impl VectorApp {
     fn on_core_event(&mut self, name: &str, payload: Value, _window: &mut Window, cx: &mut Context<Self>) {
         let chat_id = payload.get("chat_id").and_then(Value::as_str).unwrap_or_default().to_string();
         match name {
+            "communities_changed" | "community_refreshed" | "community_kicked" | "community_surfaced" => self.reload_communities(cx),
             "transfer_state" => self.security.update(cx, |f, cx| f.transfer_state(&payload, cx)),
             "mic_level" => {
                 if let Some(a) = self.settings.as_mut().and_then(|s| s.audio.as_mut()).filter(|a| a.testing) {
@@ -1131,6 +1150,10 @@ impl VectorApp {
     }
 
     fn open_chat(&mut self, id: SharedString, window: &mut Window, cx: &mut Context<Self>) {
+        let elsewhere = self.community.as_ref().is_some_and(|v| self.store.borrow().community_of(&id).is_none_or(|c| c.community_id != v.id));
+        if elsewhere {
+            self.community = None;
+        }
         self.profile = None;
         self.new_chat = None;
         self.read_anchor = self.store.borrow().chat(&id).map(|c| c.last_read.clone());
@@ -1674,6 +1697,12 @@ impl Render for VectorApp {
                 app.update(cx, |app, cx| app.answer_popup(yes, window, cx)).ok();
             })
         });
+        let on_community: crate::community::OnAct = {
+            let app = cx.entity().downgrade();
+            Rc::new(move |act, window, cx| {
+                app.update(cx, |app, cx| app.on_community(act, window, cx)).ok();
+            })
+        };
         let root = root.on_drop(cx.listener(|app, paths: &gpui::ExternalPaths, window, cx| {
             app.open_paths_preview(paths.paths().to_vec(), window, cx);
         }));
@@ -1683,7 +1712,7 @@ impl Render for VectorApp {
                 .flex_row()
                 .flex_1()
                 .min_h_0()
-                .child(rail(&store, self.open.as_ref(), {
+                .child(rail(&store, self.open.as_ref(), self.community.as_ref().map(|v| v.id.as_str()), &on_community, {
                     let app = cx.entity().downgrade();
                     move |_: &gpui::ClickEvent, window: &mut Window, cx: &mut gpui::App| {
                         app.update(cx, |app, cx| {
@@ -1700,7 +1729,10 @@ impl Render for VectorApp {
                     let width = f32::from(window.viewport_size().width) - RAIL_W;
                     row.child(div().flex_1().min_w_0().h_full().child(crate::settings::view(settings, width, &on, cx)))
                 })
-                .when(self.settings.is_none(), |row| row.child(chat_list(&self.store, &store, self.open.clone(), (self.requests_tab, self.tab_slid, no_messages), cx)))
+                .when(self.settings.is_none(), |row| match self.community.as_ref().and_then(|v| Some((v, store.community(&v.id)?))) {
+                    Some((view, com)) => row.child(crate::community::sidebar(&store, view, com, self.open.as_deref(), &on_community)),
+                    None => row.child(chat_list(&self.store, &store, self.open.clone(), (self.requests_tab, self.tab_slid, no_messages), cx)),
+                })
                 .when(self.settings.is_none(), |row| row.child(match (&self.profile, self.open.clone()) {
                     _ if self.new_chat.is_some() => {
                         let app = cx.entity().downgrade();
@@ -1717,7 +1749,17 @@ impl Render for VectorApp {
                         });
                         crate::profile::pane(&store, p, &on, window, cx)
                     }
-                    (None, Some(id)) => self.chat_pane(&store, id, cx).into_any_element(),
+                    (None, Some(id)) => match self.community.as_ref().filter(|v| v.panel).and_then(|v| Some((v, store.community(&v.id)?))) {
+                        Some((view, com)) => div()
+                            .flex_1()
+                            .min_w_0()
+                            .h_full()
+                            .flex()
+                            .child(self.chat_pane(&store, id, &on_community, cx))
+                            .child(crate::community::members_panel(&store, view, com, &on_community, cx))
+                            .into_any_element(),
+                        None => self.chat_pane(&store, id, &on_community, cx).into_any_element(),
+                    },
                     (None, None) => empty_pane(self.viktor.clone()).into_any_element(),
                 })),
         )
@@ -1918,7 +1960,7 @@ fn rail_label(text: &'static str) -> impl IntoElement {
         .child(text)
 }
 
-fn rail(store: &Store, open: Option<&SharedString>, on_me: impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static) -> impl IntoElement {
+fn rail(store: &Store, open: Option<&SharedString>, active: Option<&str>, on_c: &crate::community::OnAct, on_me: impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static) -> impl IntoElement {
     let unread: Vec<&SerializableChat> = store
         .chats
         .iter()
@@ -1927,11 +1969,18 @@ fn rail(store: &Store, open: Option<&SharedString>, on_me: impl Fn(&gpui::ClickE
     let any_unread = store.chats.iter().any(|c| store.listed(c) && store.unread_count(c) > 0);
 
     // .ws-rail-messages.is-home
+    let home = active.is_none();
     let messages = div().pt(px(16.)).px(px(8.)).child(
         div()
+            .id("ws-rail-messages")
             .h(px(40.))
             .rounded(px(6.))
-            .bg(c(RAIL_TILE))
+            .when(home, |d| d.bg(c(RAIL_TILE)))
+            .when(!home, |d| d.cursor_pointer().hover(|d| d.bg(white_a(0.045))))
+            .on_click({
+                let on = on_c.clone();
+                move |_, window, cx| on(crate::community::Act::Home, window, cx)
+            })
             .flex()
             .items_center()
             .justify_center()
@@ -1984,6 +2033,7 @@ fn rail(store: &Store, open: Option<&SharedString>, on_me: impl Fn(&gpui::ClickE
         .pt(px(6.))
         .child(div().mx(px(16.)).h(px(1.)).bg(c(DIVIDER)))
         .child(div().pt(px(16.)).child(rail_label("Communities")))
+        .child(crate::community::rail_rows(store, active, on_c))
         .child(
             div()
                 .mx(px(8.))
@@ -2471,8 +2521,9 @@ fn intro(viktor: Entity<crate::viktor::Viktor>) -> impl IntoElement {
 }
 
 impl VectorApp {
-    fn chat_pane(&self, store: &Store, id: SharedString, cx: &mut Context<Self>) -> impl IntoElement {
-        let header = div()
+    fn dm_header(&self, store: &Store, id: &SharedString, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let id = id.clone();
+        div()
             .h(px(61.))
             .flex_shrink_0()
             .relative()
@@ -2532,8 +2583,17 @@ impl VectorApp {
                             .justify_center()
                             .child(svg().path("ui/menu-dots.svg").size(px(28.)).text_color(c(ICON_MUTED))),
                     ),
-            );
+            )
+    }
 
+    fn chat_pane(&self, store: &Store, id: SharedString, on_community: &crate::community::OnAct, cx: &mut Context<Self>) -> impl IntoElement {
+        let channel = store.community_of(&id).and_then(|com| com.channel(&id));
+        let panel = self.community.as_ref().is_some_and(|v| v.panel);
+        let header = if let Some(ch) = channel {
+            crate::community::header(ch, panel, on_community).into_any_element()
+        } else {
+            self.dm_header(store, &id, cx).into_any_element()
+        };
         let rows_store = self.store.clone();
         let rows_id = id.clone();
         let rows = self.rows.clone();
@@ -3108,6 +3168,138 @@ impl VectorApp {
 // ── profile ─────────────────────────────────────────────────────────────────────────────
 
 impl VectorApp {
+    /// A Community opens on the channel it was last left on, else its landing channel.
+    fn open_community(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
+        let (landing, members) = {
+            let store = self.store.borrow();
+            let Some(com) = store.community(&id) else { return };
+            (com.landing().map(|c| c.channel_id.clone()), com.members.clone())
+        };
+        if self.community.as_ref().is_none_or(|v| v.id != id) {
+            let search = cx.new(|cx| {
+                TextInput::new("Search Members...", cx).with_look(crate::composer::Look {
+                    family: INTER,
+                    weight: FontWeight::MEDIUM,
+                    size: px(13.),
+                    line_height: px(16.),
+                    color: c(0xffffff),
+                    placeholder: c(0x757575),
+                    ..Default::default()
+                })
+            });
+            cx.subscribe(&search, |_, _, _: &crate::composer::InputChanged, cx| cx.notify()).detach();
+            self.community = Some(crate::community::View { id: id.clone(), members, admins: Vec::new(), panel: true, search, folded: HashSet::new() });
+            if self.live {
+                let rx = backend::run(backend::community::members(id.clone()));
+                cx.spawn(async move |this, cx| {
+                    let Ok((members, admins)) = rx.await else { return };
+                    this.update(cx, |this, cx| {
+                        if let Some(v) = this.community.as_mut().filter(|v| v.id == id) {
+                            v.members = members;
+                            v.admins = admins;
+                        }
+                        cx.notify();
+                    })
+                    .ok();
+                })
+                .detach();
+            }
+        }
+        self.settings = None;
+        self.profile = None;
+        self.new_chat = None;
+        self.start = None;
+        match landing {
+            Some(ch) => self.open_channel(ch, window, cx),
+            None => {
+                self.open = None;
+                cx.notify();
+            }
+        }
+    }
+
+    fn open_channel(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
+        if self.store.borrow().chat(&id).is_none() {
+            let rx = backend::run(messaging::chat_snapshot(id.clone()));
+            let want = id.clone();
+            cx.spawn_in(window, async move |this, cx| {
+                let Ok(Some(chat)) = rx.await else { return };
+                this.update_in(cx, |this, window, cx| {
+                    {
+                        let mut store = this.store.borrow_mut();
+                        if store.chat(&chat.id).is_none() {
+                            store.chats.push(chat);
+                            store.resort();
+                        }
+                    }
+                    if this.open.as_deref() == Some(want.as_str()) {
+                        this.open_chat(want.into(), window, cx);
+                    }
+                })
+                .ok();
+            })
+            .detach();
+        }
+        self.open_chat(id.clone().into(), window, cx);
+        if self.live {
+            let _ = backend::run(backend::community::sync_channel(id, None));
+        }
+        cx.notify();
+    }
+
+    fn on_community(&mut self, act: crate::community::Act, window: &mut Window, cx: &mut Context<Self>) {
+        use crate::community::Act;
+        match act {
+            Act::Open(id) => self.open_community(id, window, cx),
+            Act::Home => self.leave_community(),
+            Act::Channel(id) => self.open_channel(id, window, cx),
+            Act::Fold(key) => {
+                if let Some(v) = self.community.as_mut()
+                    && !v.folded.remove(&key)
+                {
+                    v.folded.insert(key);
+                }
+            }
+            Act::Panel => {
+                if let Some(v) = self.community.as_mut() {
+                    v.panel = !v.panel;
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    /// Back to Messages: the chat list returns in place of the channels.
+    fn leave_community(&mut self) {
+        if self.community.take().is_some() {
+            self.open = None;
+            if self.live {
+                messaging::set_active_chat(None);
+            }
+        }
+    }
+
+    fn reload_communities(&mut self, cx: &mut Context<Self>) {
+        if !self.live {
+            return;
+        }
+        let rx = backend::run(async { backend::community::list() });
+        cx.spawn(async move |this, cx| {
+            let Ok(list) = rx.await else { return };
+            let list: Vec<data::Community> = list.into_iter().filter_map(|v| serde_json::from_value(v).ok()).collect();
+            this.update(cx, |this, cx| {
+                this.store.borrow_mut().communities = list;
+                let gone = this.community.as_ref().is_some_and(|v| this.store.borrow().community(&v.id).is_none());
+                if gone {
+                    this.leave_community();
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     fn open_profile(&mut self, npub: String, cx: &mut Context<Self>) {
         let back = self.open.take();
         self.new_chat = None;

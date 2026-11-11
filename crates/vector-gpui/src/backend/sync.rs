@@ -148,6 +148,7 @@ pub fn after_reconnect() {
         let cooling = (LAST_END_MS.load(Ordering::SeqCst) + COOLDOWN_MS).saturating_sub(now_ms());
         tokio::time::sleep(Duration::from_millis(cooling.max(1500))).await;
         RECONNECT_ARMED.store(false, Ordering::SeqCst);
+        super::community::request();
         dms(true).await;
         LAST_END_MS.store(now_ms(), Ordering::SeqCst);
     });
@@ -161,6 +162,7 @@ pub fn catch_up(what: vector_core::live_subs::CatchUp) {
     match what {
         vector_core::live_subs::CatchUp::Relay(_) => after_reconnect(),
         vector_core::live_subs::CatchUp::All { .. } => {
+            super::community::request();
             db::spawn_bound(async {
                 dms(true).await;
             });

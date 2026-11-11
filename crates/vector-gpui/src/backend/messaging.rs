@@ -94,7 +94,7 @@ impl SendCallback for Callback {
 /// Send `content` to a DM; `replied_to` quotes a message when not empty.
 pub async fn send(receiver: String, content: String, replied_to: String) -> Result<(), String> {
     if !receiver.starts_with("npub1") {
-        return Err("Communities can't be written to from this client yet".into());
+        return super::community::send(receiver, content, replied_to).await;
     }
     let config = SendConfig { expiration: vector_core::self_destruct::resolve_send_expiry(&receiver), ..SendConfig::gui() };
     let reply = (!replied_to.is_empty()).then_some(replied_to.as_str());
@@ -178,7 +178,7 @@ pub async fn send_file(
     precompressed: Option<crate::message::types::CachedCompressedImage>,
 ) -> Result<(), String> {
     if !receiver.starts_with("npub1") {
-        return Err("Communities can't be written to from this client yet".into());
+        return Err("Files can't be sent to a Community channel from this client yet".into());
     }
     let reply = (!replied_to.is_empty()).then_some(replied_to.as_str());
     let config = file_send_config(&receiver);
