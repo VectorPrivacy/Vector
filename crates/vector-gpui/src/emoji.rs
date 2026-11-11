@@ -192,3 +192,53 @@ pub fn in_text(text: &str) -> Vec<String> {
     }
     seen
 }
+
+pub struct Category {
+    pub name: &'static str,
+    pub items: &'static [Kaomoji],
+}
+
+pub struct Kaomoji {
+    pub face: &'static str,
+    pub name: &'static str,
+    pub tags: &'static str,
+}
+
+include!(concat!(env!("OUT_DIR"), "/kaomoji_data.rs"));
+
+/// Each face once, as its first category lists it.
+fn kaomoji_faces() -> impl Iterator<Item = (&'static Kaomoji, &'static str)> {
+    let mut seen = HashSet::new();
+    KAOMOJI.iter().flat_map(|c| c.items.iter().map(move |k| (k, c.name))).filter(move |(k, _)| seen.insert(k.face))
+}
+
+/// A kaomoji by its face.
+pub fn kaomoji(face: &str) -> Option<&'static Kaomoji> {
+    KAOMOJI.iter().flat_map(|c| c.items.iter()).find(|k| k.face == face)
+}
+
+/// Faces matching `query`, ranked by name, tags, category, then the face itself (`KaomojiGrid`).
+pub fn search_kaomoji(query: &str) -> Vec<&'static Kaomoji> {
+    let q = query.trim().to_lowercase();
+    let mut hits: Vec<(u8, &Kaomoji)> = kaomoji_faces()
+        .filter_map(|(k, cat)| {
+            let name = k.name.to_lowercase();
+            let rank = if name.starts_with(&q) {
+                0
+            } else if k.tags.split(' ').any(|t| t.starts_with(&q)) {
+                1
+            } else if name.contains(&q) {
+                2
+            } else if cat.to_lowercase().starts_with(&q) {
+                3
+            } else if k.face.contains(&q) {
+                4
+            } else {
+                return None;
+            };
+            Some((rank, k))
+        })
+        .collect();
+    hits.sort_by_key(|(r, _)| *r);
+    hits.into_iter().map(|(_, k)| k).collect()
+}

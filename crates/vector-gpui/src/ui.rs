@@ -96,6 +96,17 @@ impl VectorApp {
         let emoji_picker = cx.new(crate::picker::EmojiPicker::new);
         cx.subscribe_in(&emoji_picker, window, |app, _, crate::picker::Picked(emoji, shift), window, cx| app.picked(emoji.clone(), *shift, window, cx)).detach();
         cx.subscribe_in(&emoji_picker, window, |app, _, _: &crate::picker::Dismissed, window, cx| app.close_picker(window, cx)).detach();
+        cx.subscribe_in(&emoji_picker, window, |app, _, crate::picker::PickedText(face, shift, recents), window, cx| {
+            if app.live {
+                let recents = recents.clone();
+                let _ = backend::run(async move { backend::actions::set_kaomoji_recents(recents) });
+            }
+            app.input.update(cx, |input, cx| input.insert_spaced(face, window, cx));
+            if !*shift {
+                app.close_picker(window, cx);
+            }
+        })
+        .detach();
         Self {
             screen: Screen::Main,
             live,
@@ -538,10 +549,13 @@ impl VectorApp {
         let reaction = target.is_some();
         picker.update(cx, |p, cx| p.reset(reaction, std::collections::HashMap::new(), window, cx));
         if self.live {
-            let rx = backend::run(async { backend::actions::emoji_usage() });
+            let rx = backend::run(async { (backend::actions::emoji_usage(), backend::actions::kaomoji_recents()) });
             cx.spawn(async move |_, cx| {
-                let Ok(used) = rx.await else { return };
-                picker.update(cx, |p, cx| p.set_usage(used, cx));
+                let Ok((used, kaomoji)) = rx.await else { return };
+                picker.update(cx, |p, cx| {
+                    p.set_usage(used, cx);
+                    p.set_kaomoji_recents(kaomoji, cx);
+                });
             })
             .detach();
         }

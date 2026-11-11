@@ -236,3 +236,28 @@ pub fn popup(p: &Popup, answer: impl Fn(bool, &mut Window, &mut App) + 'static +
     .with_priority(10)
     .into_any_element()
 }
+
+/// A hover label, where the web client sets a `title`.
+pub struct Tip(gpui::SharedString);
+
+impl gpui::Render for Tip {
+    fn render(&mut self, _: &mut gpui::Window, _: &mut gpui::Context<Self>) -> impl gpui::IntoElement {
+        use gpui::{ParentElement, Styled};
+        gpui::div()
+            .px(gpui::px(8.))
+            .py(gpui::px(4.))
+            .rounded(gpui::px(6.))
+            .bg(crate::theme::c(0x1c1c1c))
+            .border_1()
+            .border_color(crate::theme::white_a(0.1))
+            .font_family(crate::theme::INTER)
+            .text_size(gpui::px(12.))
+            .text_color(crate::theme::white_a(0.9))
+            .child(self.0.clone())
+    }
+}
+
+pub fn tooltip(text: impl Into<gpui::SharedString>) -> impl Fn(&mut gpui::Window, &mut gpui::App) -> gpui::AnyView + 'static {
+    let text = text.into();
+    move |_, cx| cx.new(|_| Tip(text.clone())).into()
+}

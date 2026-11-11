@@ -914,6 +914,12 @@ impl TextInput {
         }
     }
 
+    /// Enter submits an empty field too.
+    pub fn submit_empty(mut self) -> Self {
+        self.submit_empty = true;
+        self
+    }
+
     pub fn keep_on_submit(mut self) -> Self {
         self.clear_on_submit = false;
         self.submit_empty = true;

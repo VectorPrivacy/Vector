@@ -1,22 +1,23 @@
 //! The emoji picker (`PickerPanel.svelte`): search, the mode toggle, the section rail, and the
 //! sections (search results, recently used, every emoji) as one virtual list, so the ~1,900
-//! cells cost only the rows on screen.
+//! cells cost only the rows on screen. Kaomoji mode is `KaomojiGrid.svelte`.
 
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use gpui::{
     AnyElement, App, Context, Entity, EventEmitter, FocusHandle, Focusable, FontWeight, IntoElement, ListAlignment, ListOffset,
-    ListState, ParentElement, Render, SharedString, Styled, Window, div, img, list, prelude::*, px, svg,
+    ListState, ParentElement, Render, ScrollHandle, SharedString, Styled, Window, div, img, list, prelude::*, px, svg,
 };
 
-use crate::composer::{CancelInput, InputChanged, Look, TextInput};
-use crate::emoji::{self, Emoji};
+use crate::composer::{CancelInput, InputChanged, Look, SendText, TextInput};
+use crate::emoji::{self, Emoji, Kaomoji};
 use crate::theme::*;
 
 const COLS: usize = 6;
 const CELL: f32 = 42.;
 const GAP: f32 = 4.;
+const KAOMOJI_RECENTS: usize = 18;
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 enum Section {
@@ -57,6 +58,8 @@ pub enum Mode {
 
 /// A pick: the emoji, and whether Shift kept the panel open.
 pub struct Picked(pub String, pub bool);
+/// A kaomoji, typed as text; Shift keeps the panel open. Carries the new recents to keep.
+pub struct PickedText(pub String, pub bool, pub Vec<String>);
 pub struct Dismissed;
 
 pub struct EmojiPicker {
@@ -70,9 +73,15 @@ pub struct EmojiPicker {
     pub mode: Mode,
     /// Reactions take one emoji: no kaomoji.
     pub reaction: bool,
+    kaomoji_list: ScrollHandle,
+    kaomoji_strip: ScrollHandle,
+    /// The category the kaomoji list is scrolled to.
+    kaomoji_at: usize,
+    kaomoji_recents: Vec<String>,
 }
 
 impl EventEmitter<Picked> for EmojiPicker {}
+impl EventEmitter<PickedText> for EmojiPicker {}
 impl EventEmitter<Dismissed> for EmojiPicker {}
 
 impl Focusable for EmojiPicker {
@@ -92,7 +101,7 @@ impl EmojiPicker {
             placeholder: c(0x757575),
             ..Default::default()
         };
-        let search = cx.new(|cx| TextInput::new("Search Emojis...", cx).with_look(look));
+        let search = cx.new(|cx| TextInput::new("Search Emojis...", cx).with_look(look).keep_on_submit().submit_empty());
         cx.subscribe(&search, |this, input, _: &InputChanged, cx| {
             this.query = input.read(cx).text().trim().to_string();
             this.rebuild();
@@ -100,6 +109,7 @@ impl EmojiPicker {
         })
         .detach();
         cx.subscribe(&search, |_, _, _: &CancelInput, cx| cx.emit(Dismissed)).detach();
+        cx.subscribe(&search, |this, _, _: &SendText, cx| this.pick_first(cx)).detach();
         let mut this = Self {
             search,
             query: String::new(),
@@ -110,6 +120,10 @@ impl EmojiPicker {
             collapsed: HashSet::new(),
             mode: Mode::Emoji,
             reaction: false,
+            kaomoji_list: ScrollHandle::new(),
+            kaomoji_strip: ScrollHandle::new(),
+            kaomoji_at: 0,
+            kaomoji_recents: Vec::new(),
         };
         this.rebuild();
         this
@@ -118,7 +132,7 @@ impl EmojiPicker {
     /// Opened afresh: an empty search, the top of the list, and the account's usage.
     pub fn reset(&mut self, reaction: bool, used: HashMap<String, f64>, window: &mut Window, cx: &mut Context<Self>) {
         self.reaction = reaction;
-        self.mode = Mode::Emoji;
+        self.set_mode(Mode::Emoji, cx);
         self.used = Rc::new(used);
         self.search.update(cx, |s, cx| s.clear(window, cx));
         self.query.clear();
@@ -131,6 +145,193 @@ impl EmojiPicker {
         self.used = Rc::new(used);
         self.rebuild();
         cx.notify();
+    }
+
+    pub fn set_kaomoji_recents(&mut self, recents: Vec<String>, cx: &mut Context<Self>) {
+        self.kaomoji_recents = recents.into_iter().filter(|f| emoji::kaomoji(f).is_some()).take(KAOMOJI_RECENTS).collect();
+        cx.notify();
+    }
+
+    fn set_mode(&mut self, mode: Mode, cx: &mut Context<Self>) {
+        self.mode = mode;
+        let placeholder = match mode {
+            Mode::Emoji => "Search Emojis...",
+            Mode::Gif => "Search GIFs...",
+            Mode::Kaomoji => "Search Kaomoji...",
+        };
+        self.search.update(cx, |s, cx| s.set_placeholder(placeholder, cx));
+        cx.notify();
+    }
+
+    fn pick_kaomoji(&mut self, face: &'static str, shift: bool, cx: &mut Context<Self>) {
+        self.kaomoji_recents.retain(|f| f != face);
+        self.kaomoji_recents.insert(0, face.to_string());
+        self.kaomoji_recents.truncate(KAOMOJI_RECENTS);
+        cx.emit(PickedText(face.to_string(), shift, self.kaomoji_recents.clone()));
+        cx.notify();
+    }
+
+    /// Enter in the search: the first result, or the first recent.
+    fn pick_first(&mut self, cx: &mut Context<Self>) {
+        match self.mode {
+            Mode::Emoji => {
+                let first = self.items.iter().find_map(|i| match i {
+                    Item::Row { cells, .. } => cells.first().map(|e| e.emoji),
+                    Item::Header(_) => None,
+                });
+                if let Some(e) = first {
+                    cx.emit(Picked(e.to_string(), false));
+                }
+            }
+            Mode::Kaomoji => {
+                let first = if self.query.is_empty() {
+                    self.kaomoji_recents.first().and_then(|f| emoji::kaomoji(f)).or_else(|| emoji::KAOMOJI.first().and_then(|c| c.items.first()))
+                } else {
+                    emoji::search_kaomoji(&self.query).into_iter().next()
+                };
+                if let Some(k) = first {
+                    self.pick_kaomoji(k.face, false, cx);
+                }
+            }
+            Mode::Gif => {}
+        }
+    }
+
+    fn kaomoji_item(&self, k: &'static Kaomoji, cx: &mut Context<Self>) -> AnyElement {
+        div()
+            .id(SharedString::from(format!("kao-{}", k.face)))
+            .px(px(10.))
+            .py(px(6.))
+            .rounded(px(8.))
+            .max_w_full()
+            .overflow_hidden()
+            .bg(white_a(0.05))
+            .hover(|s| s.bg(white_a(0.12)))
+            .active(|s| s.bg(white_a(0.2)))
+            .cursor_pointer()
+            .text_color(white_a(0.9))
+            .whitespace_nowrap()
+            .text_ellipsis()
+            .tooltip(crate::kit::tooltip(k.name))
+            .on_click(cx.listener(move |this, ev: &gpui::ClickEvent, _, cx| this.pick_kaomoji(k.face, ev.modifiers().shift, cx)))
+            .child(k.face)
+            .into_any_element()
+    }
+
+    fn kaomoji_body(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let items = |this: &Self, faces: Vec<&'static Kaomoji>, cx: &mut Context<Self>| {
+            div().flex().flex_wrap().gap(px(6.)).children(faces.into_iter().map(|k| this.kaomoji_item(k, cx)))
+        };
+        let header = |icon: Option<&'static str>, title: &'static str| {
+            div()
+                .pt(px(8.))
+                .pb(px(4.))
+                .flex()
+                .items_center()
+                .font_family(INTER)
+                .text_size(px(14.))
+                .line_height(px(24.))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(c(0xffffff))
+                .children(icon.map(|i| svg().path(i).size(px(18.)).mr(px(8.)).text_color(c(0xffffff))))
+                .child(title)
+        };
+        let mut list = div()
+            .id("kaomoji-list")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .track_scroll(&self.kaomoji_list)
+            .px(px(8.))
+            .pb(px(8.))
+            .font_family(".SystemUIFont")
+            .font_weight(FontWeight::SEMIBOLD)
+            .text_size(px(14.))
+            .line_height(px(14. * 1.3));
+        let recents: Vec<_> = self.kaomoji_recents.iter().filter_map(|f| emoji::kaomoji(f)).collect();
+        let mut strip = None;
+        if !self.query.is_empty() {
+            let hits = emoji::search_kaomoji(&self.query);
+            list = list.child(if hits.is_empty() {
+                div()
+                    .py(px(24.))
+                    .px(px(8.))
+                    .flex()
+                    .justify_center()
+                    .font_family(INTER)
+                    .text_size(px(13.))
+                    .text_color(white_a(0.5))
+                    .child(format!("No kaomoji for “{}”", self.query))
+            } else {
+                items(self, hits, cx)
+            });
+        } else {
+            let shift = usize::from(!recents.is_empty());
+            if !recents.is_empty() {
+                list = list.child(div().child(header(Some("icons/clock.svg"), "Recently Used")).child(items(self, recents, cx)));
+            }
+            for cat in emoji::KAOMOJI {
+                list = list.child(div().child(header(None, cat.name)).child(items(self, cat.items.iter().collect(), cx)));
+            }
+            // The strip follows the list: the category under the top edge lights up.
+            let at = self.kaomoji_list.top_item().saturating_sub(shift);
+            if at != self.kaomoji_at {
+                self.kaomoji_at = at;
+                self.kaomoji_strip.scroll_to_item(at);
+            }
+            let pills = emoji::KAOMOJI.iter().enumerate().map(|(i, cat)| {
+                let on = i == self.kaomoji_at;
+                div()
+                    .id(SharedString::from(format!("kao-cat-{i}")))
+                    .flex_shrink_0()
+                    .px(px(9.))
+                    .py(px(3.))
+                    .rounded_full()
+                    .cursor_pointer()
+                    .font_family(INTER)
+                    .text_size(px(11.))
+                    .line_height(px(14.))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .bg(white_a(if on { 0.16 } else { 0.06 }))
+                    .text_color(if on { c(0xffffff) } else { white_a(0.65) })
+                    .hover(|s| s.bg(white_a(0.12)).text_color(c(0xffffff)))
+                    .active(|s| s.bg(white_a(0.2)))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.kaomoji_list.scroll_to_top_of_item(i + shift);
+                        cx.notify();
+                    }))
+                    .child(cat.name)
+            });
+            let max = self.kaomoji_strip.max_offset().x;
+            let x = -self.kaomoji_strip.offset().x;
+            let fade = |left: bool| {
+                let (from, to) = if left { (1., 0.) } else { (0., 1.) };
+                div().absolute().top_0().bottom(px(6.)).w(px(48.)).when(left, |d| d.left_0()).when(!left, |d| d.right_0()).bg(gpui::linear_gradient(
+                    90.,
+                    gpui::linear_color_stop(ca(10, 10, 10, from), 0.),
+                    gpui::linear_color_stop(ca(10, 10, 10, to), 1.),
+                ))
+            };
+            strip = Some(
+                div()
+                    .relative()
+                    .flex_shrink_0()
+                    .child(
+                        div()
+                            .id("kaomoji-cats")
+                            .flex()
+                            .gap(px(4.))
+                            .px(px(8.))
+                            .pb(px(6.))
+                            .overflow_x_scroll()
+                            .track_scroll(&self.kaomoji_strip)
+                            .children(pills),
+                    )
+                    .when(x > px(1.), |d| d.child(fade(true)))
+                    .when(x < max - px(1.), |d| d.child(fade(false))),
+            );
+        }
+        div().flex_1().min_h_0().flex().flex_col().bg(c(0x0a0a0a)).children(strip).child(list).into_any_element()
     }
 
     /// A pick counts toward the recents before the next open reloads them.
@@ -271,10 +472,7 @@ impl Render for EmojiPicker {
                 .font_weight(FontWeight::SEMIBOLD)
                 .when(active, |d| d.bg(c(PRIMARY)).text_color(c(0x000000)))
                 .when(!active, |d| d.text_color(white_a(0.5)).hover(|s| s.text_color(white_a(0.8))))
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.mode = mode;
-                    cx.notify();
-                }))
+                .on_click(cx.listener(move |this, _, _, cx| this.set_mode(mode, cx)))
                 .child(label)
         };
         let search = div()
@@ -366,7 +564,8 @@ impl Render for EmojiPicker {
                 .child(rail)
                 .child(div().flex_1().h(px(280.)).pt(px(8.)).pl(px(8.)).pr(px(5.)).child(grid))
                 .into_any_element(),
-            _ => div().flex_1().bg(c(0x0a0a0a)).into_any_element(),
+            Mode::Kaomoji => self.kaomoji_body(cx),
+            Mode::Gif => div().flex_1().bg(c(0x0a0a0a)).into_any_element(),
         };
 
         div()

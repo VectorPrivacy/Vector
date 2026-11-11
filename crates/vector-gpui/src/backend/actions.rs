@@ -141,6 +141,18 @@ pub fn bump_emoji(emoji: &str) {
     let _ = vector_core::emoji_usage::bump("unicode", emoji, None);
 }
 
+const KAOMOJI_RECENTS: &str = "kaomoji_recents";
+
+pub fn kaomoji_recents() -> Vec<String> {
+    vector_core::db::settings::get_sql_setting(KAOMOJI_RECENTS.into()).ok().flatten().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default()
+}
+
+pub fn set_kaomoji_recents(recents: Vec<String>) {
+    if let Ok(json) = serde_json::to_string(&recents) {
+        let _ = vector_core::db::settings::set_sql_setting(KAOMOJI_RECENTS.into(), json);
+    }
+}
+
 /// A sent message's distinct emoji, in one record.
 pub fn bump_emoji_batch(emoji: Vec<String>) {
     let uses: Vec<_> = emoji.into_iter().map(|id| vector_core::emoji_usage::EmojiUse { kind: "unicode".into(), id, url: None }).collect();
