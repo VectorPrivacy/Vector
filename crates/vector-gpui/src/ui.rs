@@ -107,6 +107,8 @@ pub struct VectorApp {
     /// The release check, and where its find is installed from.
     updates: crate::settings::Updates,
     update_url: Option<String>,
+    /// A volume change waits on its throttle.
+    audio_save_pending: bool,
 }
 
 #[derive(Clone, PartialEq)]
@@ -215,6 +217,7 @@ impl VectorApp {
             security,
             updates: crate::settings::Updates { beta: backend::updates::beta(), ..Default::default() },
             update_url: None,
+            audio_save_pending: false,
         }
     }
 
@@ -2937,6 +2940,9 @@ impl VectorApp {
             sec_kind: self.security.read(cx).kind().to_string(),
             sec_advanced: false,
             updates: self.updates.clone(),
+            audio: None,
+            sliders: Default::default(),
+            dragging: Default::default(),
             donut: Default::default(),
             auto_limit: if self.live { backend::prefs::sql("max_auto_download_bytes").and_then(|v| v.parse().ok()).filter(|v: &u64| *v > 0) } else { None }.unwrap_or(10_485_760),
             clearing: false,
@@ -2947,6 +2953,7 @@ impl VectorApp {
             jumped: None,
         });
         self.load_blocked(cx);
+        self.load_audio(cx);
         self.load_storage(cx);
         self.load_network(cx);
         self.mark_settings_seen(None);
@@ -3162,6 +3169,154 @@ impl VectorApp {
     }
 
     /// Refresh the storage chart; a fresh report drops the chart's selection.
+    fn load_audio(&mut self, cx: &mut Context<Self>) {
+        use crate::settings::AudioView;
+        if !self.live {
+            if let Some(s) = self.settings.as_mut() {
+                let named = |v: &[&str]| v.iter().map(|n| n.to_string()).collect::<Vec<_>>();
+                s.audio = Some(AudioView {
+                    settings: vector_core::calls::settings::AudioSettings { noise_suppress: false, mic_volume: 0.8, ..Default::default() },
+                    devices: backend::mic::DeviceList {
+                        inputs: named(&["Built-in Microphone", "USB Headset"]),
+                        outputs: named(&["Built-in Speakers", "USB Headset"]),
+                        default_input: "Built-in Microphone".into(),
+                        default_output: "Built-in Speakers".into(),
+                        prefs: Default::default(),
+                    },
+                    direct: false,
+                    testing: false,
+                    level: 0.,
+                });
+            }
+            return;
+        }
+        let rx = backend::run(async {
+            vector_core::db::scoped(async {
+                let settings = backend::mic::audio_settings();
+                let direct = backend::mic::direct();
+                let devices = tokio::task::spawn_blocking(backend::mic::devices).await.unwrap_or_default();
+                (settings, devices, direct)
+            })
+            .await
+        });
+        cx.spawn(async move |this, cx| {
+            let Ok((settings, devices, direct)) = rx.await else { return };
+            this.update(cx, |this, cx| {
+                if let Some(s) = this.settings.as_mut() {
+                    let testing = s.audio.as_ref().is_some_and(|a| a.testing);
+                    s.audio = Some(AudioView { settings, devices, direct, testing, level: 0. });
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn reload_devices(&mut self, cx: &mut Context<Self>) {
+        let rx = backend::run(async { vector_core::db::scoped(async { tokio::task::spawn_blocking(backend::mic::devices).await.unwrap_or_default() }).await });
+        cx.spawn(async move |this, cx| {
+            let Ok(devices) = rx.await else { return };
+            this.update(cx, |this, cx| {
+                if let Some(a) = this.settings.as_mut().and_then(|s| s.audio.as_mut()) {
+                    a.devices = devices;
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// A drag moves the slider every frame; the store hears it a few times a second.
+    fn save_audio(&mut self, now: bool, cx: &mut Context<Self>) {
+        if !self.live || (!now && self.audio_save_pending) {
+            return;
+        }
+        self.audio_save_pending = true;
+        cx.spawn(async move |this, cx| {
+            if !now {
+                cx.background_executor().timer(std::time::Duration::from_millis(80)).await;
+            }
+            this.update(cx, |this, cx| {
+                this.audio_save_pending = false;
+                let Some(settings) = this.settings.as_ref().and_then(|s| s.audio.as_ref()).map(|a| a.settings) else { return };
+                let rx = backend::run(async move { vector_core::db::scoped(async move { backend::mic::set_audio_settings(settings) }).await });
+                this.toast_err(rx, cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Reports a failed backend step as a toast.
+    fn toast_err(&self, rx: futures::channel::oneshot::Receiver<Result<(), String>>, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            if let Ok(Err(e)) = rx.await {
+                this.update(cx, |this, cx| this.show_toast(&e, cx)).ok();
+            }
+        })
+        .detach();
+    }
+
+    /// The test runs while Calls is on screen: leaving it stops the microphone.
+    fn mic_test(&mut self, cx: &mut Context<Self>) {
+        let Some(a) = self.settings.as_mut().and_then(|s| s.audio.as_mut()) else { return };
+        if a.testing {
+            a.testing = false;
+            a.level = 0.;
+            backend::mic::test_stop();
+            return;
+        }
+        if !self.live {
+            return;
+        }
+        let rx = backend::run(async { vector_core::db::scoped(async { tokio::task::spawn_blocking(backend::mic::test_start).await.map_err(|e| e.to_string())? }).await });
+        cx.spawn(async move |this, cx| {
+            let started = rx.await.unwrap_or_else(|_| Err("The microphone test stopped".into()));
+            let ok = this
+                .update(cx, |this, cx| match started {
+                    Ok(()) => {
+                        if let Some(a) = this.settings.as_mut().and_then(|s| s.audio.as_mut()) {
+                            a.testing = true;
+                        }
+                        this.reload_devices(cx);
+                        cx.notify();
+                        true
+                    }
+                    Err(e) => {
+                        this.show_toast(&e, cx);
+                        false
+                    }
+                })
+                .unwrap_or(false);
+            if !ok {
+                return;
+            }
+            loop {
+                cx.background_executor().timer(std::time::Duration::from_millis(100)).await;
+                let going = this
+                    .update(cx, |this, cx| {
+                        let a = this.settings.as_mut().filter(|s| s.cat == "audio").and_then(|s| s.audio.as_mut()).filter(|a| a.testing);
+                        match a {
+                            Some(a) => {
+                                a.level = backend::mic::level();
+                                cx.notify();
+                                true
+                            }
+                            None => false,
+                        }
+                    })
+                    .unwrap_or(false);
+                if !going {
+                    backend::mic::test_stop();
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
     fn load_storage(&mut self, cx: &mut Context<Self>) {
         if !self.live {
             if let Some(s) = self.settings.as_mut() {
@@ -3610,6 +3765,63 @@ impl VectorApp {
                     }
                 } else if self.live {
                     self.check_updates(false, cx);
+                }
+            }
+            Act::Volume(key, v) => {
+                if let Some(a) = s.audio.as_mut() {
+                    if key == "mic" {
+                        a.settings.mic_volume = v;
+                    } else {
+                        a.settings.speaker_volume = v;
+                    }
+                    self.save_audio(false, cx);
+                }
+            }
+            Act::AudioSwitch(key, v) => {
+                s.flipped.insert(key);
+                if let Some(a) = s.audio.as_mut() {
+                    match key {
+                        "autoGain" => a.settings.auto_gain = v,
+                        "echoCancel" => a.settings.echo_cancel = v,
+                        _ => a.settings.noise_suppress = v,
+                    }
+                    self.save_audio(true, cx);
+                }
+            }
+            Act::Direct(on) => {
+                s.flipped.insert("direct");
+                if let Some(a) = s.audio.as_mut() {
+                    a.direct = on;
+                }
+                if self.live {
+                    let rx = backend::run(async move { vector_core::db::scoped(backend::mic::set_direct(on)).await });
+                    self.toast_err(rx, cx);
+                }
+            }
+            Act::MicTest => self.mic_test(cx),
+            Act::Device(kind, name) => {
+                s.open_select = None;
+                let Some(a) = s.audio.as_mut() else { return };
+                let mut prefs = a.devices.prefs.clone();
+                if kind == "input" {
+                    prefs.input = name;
+                } else {
+                    prefs.output = name;
+                }
+                a.devices.prefs = prefs.clone();
+                if self.live {
+                    let rx = backend::run(async move { vector_core::db::scoped(async move { tokio::task::spawn_blocking(move || backend::mic::set_devices(prefs)).await.map_err(|e| e.to_string())? }).await });
+                    cx.spawn(async move |this, cx| {
+                        let result = rx.await.unwrap_or(Ok(()));
+                        this.update(cx, |this, cx| {
+                            if let Err(e) = result {
+                                this.show_toast(&e, cx);
+                            }
+                            this.reload_devices(cx);
+                        })
+                        .ok();
+                    })
+                    .detach();
                 }
             }
             Act::Beta(on) => {

@@ -9,6 +9,7 @@ pub mod gifs;
 pub mod images;
 pub mod inline;
 pub mod messaging;
+pub mod mic;
 pub mod network;
 pub mod prefs;
 pub mod unfurl;

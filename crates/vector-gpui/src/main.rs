@@ -1,4 +1,10 @@
 mod assets;
+#[path = "../../../src-tauri/src/audio_devices.rs"]
+#[allow(dead_code)]
+mod audio_devices;
+#[path = "../../../src-tauri/src/mic_access.rs"]
+#[allow(dead_code)]
+mod mic_access;
 mod attachments;
 mod backend;
 mod badgecard;

@@ -201,6 +201,10 @@ pub fn help(key: &str) -> Option<(&'static str, String)> {
         "transfer" => ("Sign in on Another Device", "Bring this account to a phone, computer or browser by scanning a code or typing it in. Both devices check a number together and you approve on this device, so your keys never leave it in a form anyone else can read. This device stays signed in."),
         "updates" => ("Updates", "This copy of Vector checks for new releases by itself: Check for Updates finds the newest one, then Download Update takes you to it.<br><br>We recommend always running the latest version: every release carries security, privacy and stability fixes."),
         "beta" => ("Beta Updates", "Beta builds are <b>release candidates of the next Vector version</b>, offered here before the official release.<br><br>They carry the newest fixes and features with a little less polish, and you'll be moved onto the official build the moment it releases.<br><br>Turning this off on a beta parks you on your current build until the next official release, then you ride stable from there."),
+        "autoGain" => ("Automatic Gain", "Lifts a quiet microphone so nobody has to shout, and eases off a loud one."),
+        "echoCancel" => ("Echo Cancellation", "Keeps your speakers out of your microphone, so the other side never hears themselves back."),
+        "noiseSuppress" => ("Noise Suppression", "Takes down fans, keyboards and hum while you talk."),
+        "direct" => ("Direct Connection", "Off, calls and Mini Apps reach people through a relay, so they never learn your IP address. On, you connect straight to them for lower latency, and they can see your IP address."),
         "streamerMode" => ("Streamer Mode", "Hides the names, pictures and keys of anyone who has not allowed streams, so you can share your screen."),
         "streamConsent" => ("Show me on streams", "Lets people using Streamer Mode show your name and picture on their streams."),
         "streamerWallpapers" => ("Hide chat wallpapers", "Shows a plain background in chats while you stream, since a wallpaper can give away who you are talking to."),
@@ -281,6 +285,11 @@ pub struct Settings {
     pub sec_advanced: bool,
     /// The release check, mirrored from the app's own.
     pub updates: Updates,
+    /// Calls: the devices and switches once read, the test's state.
+    pub audio: Option<AudioView>,
+    /// Each slider's track, from its last paint, and the one being dragged.
+    pub sliders: Rc<std::cell::RefCell<HashMap<&'static str, gpui::Bounds<gpui::Pixels>>>>,
+    pub dragging: Rc<std::cell::Cell<Option<&'static str>>>,
     /// Blocked users, once loaded.
     pub blocked: Option<Vec<Blocked>>,
     /// Anchors whose NEW pill has been seen.
@@ -335,6 +344,14 @@ pub enum Act {
     SecAdvanced,
     CheckUpdates,
     Beta(bool),
+    /// `mic` or `speaker`, 0..1, while a slider moves.
+    Volume(&'static str, f32),
+    /// A voice processing switch: `autoGain`, `echoCancel` or `noiseSuppress`.
+    AudioSwitch(&'static str, bool),
+    Direct(bool),
+    MicTest,
+    /// `input` or `output`; None is the system default.
+    Device(&'static str, Option<String>),
     Link(&'static str),
     ClearSearch,
     /// The reader scrolled the page: the spy takes over from a jump.
@@ -1659,10 +1676,283 @@ fn updates_block(s: &Settings, on: &OnAct) -> AnyElement {
     col.into_any_element()
 }
 
+pub struct AudioView {
+    pub settings: vector_core::calls::settings::AudioSettings,
+    pub devices: crate::backend::mic::DeviceList,
+    pub direct: bool,
+    pub testing: bool,
+    pub level: f32,
+}
+
+/// `.vselect-tag`: the pill that marks the system default.
+fn vselect_tag() -> impl IntoElement {
+    div()
+        .flex_shrink_0()
+        .px(px(6.))
+        .py(px(1.))
+        .border_1()
+        .border_color(c(0x3a3a3a))
+        .rounded_full()
+        .text_size(px(10.))
+        .line_height(px(13.))
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(c(0x9a9a9a))
+        .child("Default")
+}
+
+/// A device `.vselect-fill`: the system default first, named for what it is now.
+fn device_select(id: &'static str, kind: &'static str, icon: &'static str, names: &[String], default: &str, chosen: Option<&String>, s: &Settings, on: &OnAct) -> AnyElement {
+    let open = s.open_select == Some(id);
+    let mut rows: Vec<(Option<String>, String, bool)> = vec![(None, if default.is_empty() { "System Default".into() } else { default.to_string() }, !default.is_empty())];
+    rows.extend(names.iter().map(|n| (Some(n.clone()), n.clone(), false)));
+    let current = rows.iter().find(|r| r.0.as_ref() == chosen).unwrap_or(&rows[0]).clone();
+    let lead = || svg().path(icon).size(px(18.)).flex_shrink_0().text_color(c(0xb2b2b2));
+    let caret = div().w(px(10.)).h(px(6.)).flex_shrink_0().ml_auto().child(
+        svg()
+            .path("ui/caret-down.svg")
+            .size_full()
+            .text_color(c(0x888888))
+            .when(open, |d| d.with_transformation(gpui::Transformation::rotate(gpui::radians(std::f32::consts::PI)))),
+    );
+    let button = div()
+        .id(id)
+        .flex()
+        .items_center()
+        .gap(px(8.))
+        .w_full()
+        .h(px(36.))
+        .px(px(12.))
+        .border_1()
+        .border_color(c(if open { 0x474747 } else { 0x333333 }))
+        .hover(|d| d.border_color(c(0x474747)))
+        .rounded(px(6.))
+        .bg(c(0x0a0a0a))
+        .text_size(px(12.))
+        .line_height(px(14.))
+        .text_color(c(0xffffff))
+        .cursor_pointer()
+        .on_click(click(on, move || Act::Select(id)))
+        .child(lead())
+        .child(div().min_w_0().overflow_hidden().text_ellipsis().whitespace_nowrap().child(current.1.clone()))
+        .when(current.2, |d| d.child(vselect_tag()))
+        .child(caret);
+    let mut root = div().relative().w_full().child(button);
+    if open {
+        let mut list = div()
+            .absolute()
+            .top(px(42.))
+            .left_0()
+            .right_0()
+            .p(px(4.))
+            .border_1()
+            .border_color(c(0x2a2a2a))
+            .rounded(px(8.))
+            .bg(c(0x111111))
+            .shadow(vec![gpui::BoxShadow { color: ca(0, 0, 0, 0.55), offset: gpui::point(px(0.), px(12.)), blur_radius: px(32.), spread_radius: px(0.), inset: false }])
+            .occlude();
+        for (ix, (value, label, tag)) in rows.into_iter().enumerate() {
+            let selected = value.as_ref() == current.0.as_ref();
+            let pick = value.clone();
+            list = list.child(
+                div()
+                    .id(SharedString::from(format!("{id}-{ix}")))
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .h(px(34.))
+                    .px(px(8.))
+                    .rounded(px(6.))
+                    .text_size(px(12.))
+                    .text_color(c(if selected { 0xffffff } else { 0xcfcfcf }))
+                    .when(selected, |d| d.bg(c(0x1f1f1f)))
+                    .hover(|d| d.bg(c(0x1f1f1f)).text_color(c(0xffffff)))
+                    .cursor_pointer()
+                    .on_click(click(on, move || Act::Device(kind, pick.clone())))
+                    .child(lead())
+                    .child(div().flex_1().min_w_0().overflow_hidden().text_ellipsis().whitespace_nowrap().child(label))
+                    .when(tag, |d| d.child(vselect_tag()))
+                    .when(selected, |d| d.child(svg().path("icons/check.svg").size(px(14.)).flex_shrink_0().text_color(c(PRIMARY)))),
+            );
+        }
+        root = root.child(gpui::deferred(list).with_priority(1));
+    }
+    root.into_any_element()
+}
+
+/// `.st-slider`: a thin track filled to the value, a round white handle; a press or a drag sets it.
+fn slider(key: &'static str, value: f32, s: &Settings, on: &OnAct) -> AnyElement {
+    let value = value.clamp(0., 1.);
+    let bounds = s.sliders.clone();
+    let dragging = s.dragging.clone();
+    let at = |b: gpui::Bounds<gpui::Pixels>, x: gpui::Pixels| ((x - b.origin.x - px(10.)) / (b.size.width - px(20.)).max(px(1.))).clamp(0., 1.);
+    let down = {
+        let (on, bounds, dragging) = (on.clone(), bounds.clone(), dragging.clone());
+        move |e: &gpui::MouseDownEvent, w: &mut Window, cx: &mut App| {
+            let Some(b) = bounds.borrow().get(key).copied() else { return };
+            dragging.set(Some(key));
+            on(Act::Volume(key, at(b, e.position.x)), w, cx);
+        }
+    };
+    let track = {
+        let (on, bounds, dragging) = (on.clone(), bounds.clone(), dragging.clone());
+        let record = bounds.clone();
+        gpui::canvas(
+            move |b, _, _| {
+                record.borrow_mut().insert(key, b);
+            },
+            move |_, _, window, _| {
+                if dragging.get() != Some(key) {
+                    return;
+                }
+                let (on, bounds, d) = (on.clone(), bounds.clone(), dragging.clone());
+                window.on_mouse_event(move |e: &gpui::MouseMoveEvent, phase, w, cx| {
+                    if phase != gpui::DispatchPhase::Bubble || d.get() != Some(key) {
+                        return;
+                    }
+                    if !e.dragging() {
+                        d.set(None);
+                        return;
+                    }
+                    if let Some(b) = bounds.borrow().get(key).copied() {
+                        on(Act::Volume(key, at(b, e.position.x)), w, cx);
+                    }
+                });
+                let d = dragging.clone();
+                window.on_mouse_event(move |_: &gpui::MouseUpEvent, _, _, _| d.set(None));
+            },
+        )
+        .absolute()
+        .inset_0()
+    };
+    div()
+        .id(key)
+        .relative()
+        .w_full()
+        .h(px(22.))
+        .cursor_pointer()
+        .on_mouse_down(gpui::MouseButton::Left, down)
+        .child(track)
+        .child(
+            div()
+                .absolute()
+                .left_0()
+                .right_0()
+                .top(px(8.))
+                .h(px(6.))
+                .rounded(px(3.))
+                .bg(c(0x1a1a1a))
+                .child(div().h_full().rounded(px(3.)).bg(c(0x6dd89d)).w(gpui::relative(value))),
+        )
+        .child(
+            div().absolute().top(px(1.)).left(gpui::relative(value)).child(
+                div()
+                    .ml(px(-20. * value))
+                    .size(px(20.))
+                    .rounded_full()
+                    .bg(c(0xffffff))
+                    .shadow(vec![gpui::BoxShadow { color: ca(0, 0, 0, 0.35), offset: gpui::point(px(0.), px(1.)), blur_radius: px(4.), spread_radius: px(0.), inset: false }]),
+            ),
+        )
+        .into_any_element()
+}
+
+/// `VoiceMeter`: the gradient spans the track, the level uncovers as much as it reaches.
+pub fn voice_meter(level: f32, active: bool) -> impl IntoElement {
+    let level = level.clamp(0., 1.);
+    div().flex_1().h(px(6.)).rounded(px(3.)).bg(c(0x1a1a1a)).overflow_hidden().child(
+        div().h_full().w(gpui::relative(level)).overflow_hidden().rounded(px(3.)).child(
+            div()
+                .h_full()
+                .w(gpui::relative(if level > 0. { 1. / level } else { 0. }))
+                .flex()
+                .when(!active, |d| d.opacity(0.35))
+                .child(div().h_full().w(gpui::relative(0.8)).bg(gpui::linear_gradient(90., gpui::linear_color_stop(c(0x6ed99e), 0.), gpui::linear_color_stop(c(0xf7e470), 1.))))
+                .child(div().h_full().flex_1().bg(gpui::linear_gradient(90., gpui::linear_color_stop(c(0xf7e470), 0.), gpui::linear_color_stop(c(0xea6662), 1.)))),
+        ),
+    )
+}
+
+fn calls_field(label: &'static str, control: AnyElement) -> impl IntoElement {
+    div()
+        .flex_1()
+        .min_w_0()
+        .flex()
+        .flex_col()
+        .gap(px(10.))
+        .child(div().text_size(px(14.)).line_height(px(17.)).text_color(c(0xb2b2b2)).child(label))
+        .child(control)
+}
+
+/// `Calls.svelte`: devices and volumes, the microphone test, then the processing switches.
+fn calls_block(s: &Settings, on: &OnAct) -> AnyElement {
+    let Some(a) = s.audio.as_ref() else { return div().into_any_element() };
+    let d = &a.devices;
+    let mut col = div().flex().flex_col();
+    if !d.inputs.is_empty() || !d.outputs.is_empty() {
+        col = col.child(
+            div()
+                .flex()
+                .gap(px(20.))
+                .mb(px(28.))
+                .child(calls_field("Microphone", device_select("dev-input", "input", "icons/mic-on.svg", &d.inputs, &d.default_input, d.prefs.input.as_ref(), s, on)))
+                .child(calls_field("Speaker", device_select("dev-output", "output", "icons/volume-max.svg", &d.outputs, &d.default_output, d.prefs.output.as_ref(), s, on))),
+        );
+    }
+    col = col.child(
+        div()
+            .flex()
+            .gap(px(20.))
+            .mb(px(28.))
+            .child(calls_field("Microphone Volume", slider("mic", a.settings.mic_volume, s, on)))
+            .child(calls_field("Speaker Volume", slider("speaker", a.settings.speaker_volume, s, on))),
+    );
+    col = col.child(
+        div()
+            .flex()
+            .items_center()
+            .gap(px(22.))
+            .mb(px(16.))
+            .child(
+                div()
+                    .id("mic-test")
+                    .w(px(86.))
+                    .h(px(32.))
+                    .flex_shrink_0()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(6.))
+                    .bg(c(0x333333))
+                    .hover(|d| d.bg(c(0x3d3d3d)))
+                    .text_size(px(12.))
+                    .text_color(c(0xffffff))
+                    .cursor_pointer()
+                    .on_click(click(on, || Act::MicTest))
+                    .child(if a.testing { "Stop Test" } else { "Test Mic" }),
+            )
+            .child(voice_meter(a.level, a.testing)),
+    );
+    // `.st-group`'s 36px margin swallows the bench's 16.
+    col = col.child(div().mt(px(20.)).child(group_label("Microphone", true)));
+    for (key, label, on_) in [
+        ("autoGain", "Automatic Gain", a.settings.auto_gain),
+        ("echoCancel", "Echo Cancellation", a.settings.echo_cancel),
+        ("noiseSuppress", "Noise Suppression", a.settings.noise_suppress),
+    ] {
+        let switch = toggle(SharedString::from(format!("tg-{key}")), on_, s.flipped.contains(key), click(on, move || Act::AudioSwitch(key, !on_)));
+        col = col.child(toggle_row(key, label, Some(Box::new(click(on, move || Act::Help(key)))), switch, true));
+    }
+    col = col.child(group_label("Connection", false));
+    let direct = a.direct;
+    let switch = toggle("tg-direct", direct, s.flipped.contains("direct"), click(on, move || Act::Direct(!direct)));
+    col.child(toggle_row("direct", "Direct Connection", Some(Box::new(click(on, || Act::Help("direct")))), switch, true)).into_any_element()
+}
+
 fn block(id: &str, s: &Settings, on: &OnAct) -> Option<AnyElement> {
     Some(match id {
         "security" => security_block(s, on),
         "updates" => updates_block(s, on),
+        "calls" => calls_block(s, on),
         "display" => display_block(s, on),
         "privacy" => privacy_block(s, on),
         "notifications" => notifications_block(s, on),
