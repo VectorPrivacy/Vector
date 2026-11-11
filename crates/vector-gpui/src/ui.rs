@@ -1514,13 +1514,15 @@ impl VectorApp {
             Act::React => self.toggle_picker(Some(id), window, cx),
             Act::ReactWith(emoji) => {
                 let Some(chat) = self.open.clone() else { return };
+                // Joining a custom reaction sends the picture it was made with.
+                let url = self.message(&id).and_then(|m| m.reactions.iter().find(|r| r.emoji == emoji).and_then(|r| r.emoji_url.clone()));
                 if self.live {
-                    let rx = backend::run(backend::actions::react(chat.to_string(), id, emoji));
+                    let rx = backend::run(backend::actions::react(chat.to_string(), id, emoji, url));
                     self.report(rx, "Reaction Failed", cx);
                 } else {
                     let me = self.store.borrow().my_npub.clone();
                     if let Some(m) = self.store.borrow_mut().chat_mut(&chat).and_then(|c| c.messages.iter_mut().find(|m| m.id == id)) {
-                        m.reactions.push(vector_core::types::Reaction { id: format!("local-{}", m.reactions.len()), reference_id: id.clone(), author_id: me, emoji, emoji_url: None });
+                        m.reactions.push(vector_core::types::Reaction { id: format!("local-{}", m.reactions.len()), reference_id: id.clone(), author_id: me, emoji, emoji_url: url });
                     }
                 }
                 cx.notify();

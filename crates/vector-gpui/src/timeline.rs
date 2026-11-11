@@ -212,6 +212,25 @@ fn author_of(ctx: &Ctx, m: &Message) -> String {
     }
 }
 
+/// A message's NIP-30 tags as the renderer asks for them: a web URL through the emoji cache,
+/// a fixture's path from beside its file.
+pub fn custom_emoji<'a>(store: &'a Store, media: &'a std::cell::RefCell<crate::media::Media>, tags: &'a [vector_core::types::EmojiTag]) -> Option<impl Fn(&str) -> Option<crate::media::Custom> + 'a> {
+    (!tags.is_empty()).then(move || {
+        move |code: &str| {
+            let tag = tags.iter().find(|t| t.shortcode == code)?;
+            Some(media.borrow_mut().custom(&emoji_source(store, &tag.url), false))
+        }
+    })
+}
+
+pub fn emoji_source(store: &Store, url: &str) -> String {
+    // Fixtures name their pictures under a reserved host, beside the fixture file.
+    match url.strip_prefix("https://ref.invalid/") {
+        Some(path) => store.media_root.join(path).to_string_lossy().into_owned(),
+        None => url.to_string(),
+    }
+}
+
 /// `.dmsg-content`: the text, then its trailing marks.
 fn content(ctx: &Ctx, m: &Message) -> AnyElement {
     let empty = HashSet::new();
@@ -242,7 +261,8 @@ fn content(ctx: &Ctx, m: &Message) -> AnyElement {
         return div().flex().items_end().child(row).children(marks(m)).into_any_element();
     }
 
-    let mut blocks = markdown::parse(text.trim(), &markdown::Ctx { base: base_look(), revealed });
+    let custom = custom_emoji(ctx.store, ctx.media, &m.emoji_tags);
+    let mut blocks = markdown::parse(text.trim(), &markdown::Ctx { base: base_look(), revealed, custom: custom.as_ref().map(|f| f as &dyn Fn(&str) -> Option<crate::media::Custom>) });
     let trail = trailing_atoms(m);
     if !trail.is_empty() {
         match blocks.last_mut() {
@@ -581,22 +601,26 @@ fn reactions(ctx: &Ctx, m: &Message) -> Option<AnyElement> {
     if m.reactions.is_empty() {
         return None;
     }
-    let mut groups: Vec<(&str, usize, bool)> = Vec::new();
+    let mut groups: Vec<(&str, usize, bool, Option<&str>)> = Vec::new();
     for r in &m.reactions {
         let mine = r.author_id == ctx.store.my_npub;
         match groups.iter_mut().find(|g| g.0 == r.emoji) {
             Some(g) => {
                 g.1 += 1;
                 g.2 |= mine;
+                g.3 = g.3.or(r.emoji_url.as_deref());
             }
-            None => groups.push((&r.emoji, 1, mine)),
+            None => groups.push((&r.emoji, 1, mine, r.emoji_url.as_deref())),
         }
     }
     let mut row = div().flex().flex_wrap().gap(px(4.)).mt(px(4.)).mb(px(4.));
-    for (emoji_str, count, mine) in groups {
-        let glyph: AnyElement = match emoji::twemoji(emoji_str) {
-            Some(src) => img(src).size(px(16.)).into_any_element(),
-            None => div().text_size(px(12.)).child(emoji_str.to_string()).into_any_element(),
+    for (emoji_str, count, mine, url) in groups {
+        let custom = url.map(|u| ctx.media.borrow_mut().custom(&emoji_source(ctx.store, u), false));
+        let glyph: AnyElement = match (custom, emoji::twemoji(emoji_str)) {
+            (Some(crate::media::Custom::Ready(image)), _) => img(image).size(px(16.)).aspect_ratio(1.).object_fit(gpui::ObjectFit::Contain).into_any_element(),
+            (Some(crate::media::Custom::Pending), _) => div().size(px(16.)).into_any_element(),
+            (_, Some(src)) => img(src).size(px(16.)).into_any_element(),
+            _ => div().text_size(px(12.)).child(emoji_str.to_string()).into_any_element(),
         };
         let (act, id, e) = (ctx.on_act.clone(), m.id.clone(), emoji_str.to_string());
         row = row.child(

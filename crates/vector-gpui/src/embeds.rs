@@ -54,6 +54,8 @@ pub struct Embed {
     pub video: Option<Media>,
     pub link: Option<String>,
     pub content_warning: Option<String>,
+    #[serde(default)]
+    pub emoji: Vec<vector_core::types::EmojiTag>,
     pub bech32: String,
     pub reposted_by: Option<String>,
     pub reply_to: Option<ReplyTo>,
@@ -766,18 +768,19 @@ fn body(env: &Env, e: &Embed, key: &str, _send: &Send, expand: &Rc<dyn Fn(&mut g
         .max_h(px(lh * max as f32))
         .overflow_hidden()
         .when(clamped, |d| d.cursor_pointer().on_click(move |_, w, cx| ex(w, cx)))
-        .child(rich(env, &text, key, Look::new(RUBIK, size, lh, color), None))
+        .child(rich(env, &text, &e.emoji, key, Look::new(RUBIK, size, lh, color), None))
         .children(fade)
         .into_any_element();
     (el, clamped)
 }
 
 /// Text rendered like a message: markdown, links and mentions.
-fn rich(env: &Env, text: &str, key: &str, mut look: Look, para_gap: Option<f32>) -> AnyElement {
+fn rich(env: &Env, text: &str, emoji: &[vector_core::types::EmojiTag], key: &str, mut look: Look, para_gap: Option<f32>) -> AnyElement {
     let empty = HashSet::new();
     look.family = env.family().into();
     let lh = para_gap.unwrap_or(look.line_height);
-    let blocks = crate::markdown::parse(text.trim(), &crate::markdown::Ctx { base: look, revealed: &empty });
+    let custom = crate::timeline::custom_emoji(env.store, env.media, emoji);
+    let blocks = crate::markdown::parse(text.trim(), &crate::markdown::Ctx { base: look, revealed: &empty, custom: custom.as_ref().map(|f| f as &dyn Fn(&str) -> Option<crate::media::Custom>) });
     let s = env.send.clone();
     let click: OnClick = Rc::new(move |t, w, cx| match t {
         crate::inline::Target::Link(u) => s(Act::OpenUrl(u.to_string()), w, cx),
@@ -1027,7 +1030,7 @@ pub fn modal(m: &Modal, env: &Env, viewport_h: f32) -> AnyElement {
         if !e.text.is_empty() {
             // An article's paragraphs keep `.markdown-paragraph`'s 0.8em under them.
             let gap = article.then_some(23.25 * 2. + 12.);
-            col = col.child(div().when(article, |d| d.pb(px(12.))).child(rich(env, &strip(&e.text), &key, Look::new(RUBIK, 15., 23.25, white_a(0.9)), gap)));
+            col = col.child(div().when(article, |d| d.pb(px(12.))).child(rich(env, &strip(&e.text), &e.emoji, &key, Look::new(RUBIK, 15., 23.25, white_a(0.9)), gap)));
         }
         if !e.media.is_empty() {
             col = col.child(media(env, &e.media, &key));
@@ -1140,7 +1143,7 @@ fn quote(env: &Env, r: &Ref, key: &str) -> AnyElement {
                 }).into_any_element())
             } else if !e.text.is_empty() {
                 let t: String = e.text.chars().take(600).collect();
-                Some(div().max_h(px(18.2 * 3.)).overflow_hidden().child(rich(env, &t, &format!("{key}-qt"), Look::new(RUBIK, 13., 18.2, white_a(0.75)), None)).into_any_element())
+                Some(div().max_h(px(18.2 * 3.)).overflow_hidden().child(rich(env, &t, &e.emoji, &format!("{key}-qt"), Look::new(RUBIK, 13., 18.2, white_a(0.75)), None)).into_any_element())
             } else {
                 None
             };

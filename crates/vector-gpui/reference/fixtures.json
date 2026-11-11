@@ -1349,17 +1349,31 @@
     },
     {
      "id": "e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0",
-     "content": "Have you seen this? nostr:note1wg33qsaurqr7da6qkg67kag3ajeny4dx5d65x433r9k732t4p49sk04fpd",
+     "content": "Have you seen this? :grin: nostr:note1wg33qsaurqr7da6qkg67kag3ajeny4dx5d65x433r9k732t4p49sk04fpd",
      "replied_to": "",
      "preview_metadata": null,
      "attachments": [],
-     "reactions": [],
+     "reactions": [
+      {
+       "id": "r1",
+       "reference_id": "e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0",
+       "author_id": "npub1yazve5gvw5em6um2mzg0nh2u4v4dkfas04gqh9yn72wdcssvktsqfmmmv4",
+       "emoji": ":grin:",
+       "emoji_url": "https://ref.invalid/media/emoji-grin.png"
+      }
+     ],
      "at": 1790903820000,
      "pending": false,
      "failed": false,
      "mine": false,
      "npub": "npub1qk3nrfl57xffl2k29zdxd7vdtgzm8p7ee045lrpdmqsy56cz8g2qqxdt9s",
-     "edited": false
+     "edited": false,
+     "emoji_tags": [
+      {
+       "shortcode": "grin",
+       "url": "https://ref.invalid/media/emoji-grin.png"
+      }
+     ]
     },
     {
      "id": "e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1",

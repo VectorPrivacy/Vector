@@ -104,7 +104,7 @@ impl Kind {
 pub enum Atom {
     Text { text: SharedString, look: Look, kind: Kind },
     /// A square image (a twemoji or custom emoji), `vertical-align` below the baseline by `drop`.
-    Image { src: SharedString, size: f32, drop: f32 },
+    Image { src: gpui::ImageSource, size: f32, drop: f32 },
     /// Fixed space that never breaks from what follows (an inline box's margin).
     Gap(f32),
     /// A linked picture's fetch (`.inline-image-loading`): 6px off the text, a 16px ring.
@@ -583,7 +583,7 @@ impl Element for Inline {
                         continue;
                     }
                     Atom::Image { src, size: sz, drop } => {
-                        let mut el = img(src.clone()).size(px(*sz)).into_any_element();
+                        let mut el = gpui::StyledImage::object_fit(img(src.clone()).size(px(*sz)).aspect_ratio(1.), gpui::ObjectFit::Contain).into_any_element();
                         let origin = bounds.origin + point(px(p.x), px(line.baseline + drop - sz));
                         el.prepaint_as_root(origin, size(px(*sz), px(*sz)).map(Into::into), window, cx);
                         images.push(el);
@@ -752,7 +752,7 @@ pub fn emoji_line(text: &str, look: Look, emoji: f32, drop: f32) -> Inline {
                 if !run.is_empty() {
                     atoms.push(Atom::Text { text: std::mem::take(&mut run).into(), look: look.clone(), kind: Kind::Plain });
                 }
-                atoms.push(Atom::Image { src, size: emoji, drop });
+                atoms.push(Atom::Image { src: src.into(), size: emoji, drop });
             }
             None => run.push_str(g),
         }

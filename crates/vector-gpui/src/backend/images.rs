@@ -12,6 +12,8 @@ static DOWNLOADS: LazyLock<tokio::sync::Semaphore> = LazyLock::new(|| tokio::syn
 enum Kind {
     Avatar,
     Banner,
+    Emoji,
+    PackIcon,
 }
 
 impl Kind {
@@ -19,6 +21,15 @@ impl Kind {
         match self {
             Kind::Avatar => "avatars",
             Kind::Banner => "banners",
+            Kind::Emoji => "emojis",
+            Kind::PackIcon => "emoji_pack_icons",
+        }
+    }
+
+    fn max_bytes(self) -> usize {
+        match self {
+            Kind::Emoji | Kind::PackIcon => 1024 * 1024,
+            _ => MAX_BYTES,
         }
     }
 
@@ -26,6 +37,7 @@ impl Kind {
         match self {
             Kind::Avatar => 512,
             Kind::Banner => 2048,
+            Kind::Emoji | Kind::PackIcon => 256,
         }
     }
 }
@@ -84,7 +96,7 @@ async fn cache(url: &str, kind: Kind) -> Result<String, String> {
     }
     let _permit = DOWNLOADS.acquire().await.map_err(|e| e.to_string())?;
     vector_core::net::validate_url_not_private(url)?;
-    let bytes = fetch(url, MAX_BYTES).await?;
+    let bytes = fetch(url, kind.max_bytes()).await?;
     let mut ext = sniff(&bytes).ok_or("Invalid image")?;
     // An SVG is kept as the pixels it draws.
     let bytes = if ext == "svg" {
@@ -97,6 +109,14 @@ async fn cache(url: &str, kind: Kind) -> Result<String, String> {
     let path = cache_dir(kind).ok_or("No cache directory")?.join(format!("{}.{ext}", cache_key(url)));
     tokio::fs::write(&path, &bytes).await.map_err(|e| e.to_string())?;
     Ok(path.to_string_lossy().into_owned())
+}
+
+/// A custom emoji (or a pack's icon) on disk, or why it can't be.
+pub async fn emoji(url: String, icon: bool) -> Result<String, String> {
+    if !url.starts_with("https://") {
+        return Err("Invalid emoji URL".into());
+    }
+    cache(&url, if icon { Kind::PackIcon } else { Kind::Emoji }).await
 }
 
 pub async fn cache_profile_images(npub: &str, avatar_url: &str, banner_url: &str) {

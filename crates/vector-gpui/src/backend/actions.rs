@@ -19,11 +19,11 @@ fn emit_removed(id: &str, chat_id: &str) {
     vector_core::emit_event("message_removed", &json!({ "id": id, "chat_id": chat_id, "reason": "deleted" }));
 }
 
-pub async fn react(chat_id: String, reference: String, emoji: String) -> Result<(), String> {
+pub async fn react(chat_id: String, reference: String, emoji: String, url: Option<String>) -> Result<(), String> {
     if !is_dm(&chat_id) {
-        return super::community::control(&chat_id, &reference, super::community::Control::React(&emoji)).await;
+        return super::community::control(&chat_id, &reference, super::community::Control::React(&emoji, url.as_deref())).await;
     }
-    VectorCore.send_reaction(&chat_id, &reference, &emoji, None).await.map(|_| ()).map_err(|e| e.to_string())
+    VectorCore.send_reaction(&chat_id, &reference, &emoji, url.as_deref()).await.map(|_| ()).map_err(|e| e.to_string())
 }
 
 pub async fn edit(chat_id: String, message_id: String, content: String) -> Result<(), String> {

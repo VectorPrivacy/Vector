@@ -51,6 +51,8 @@ pub enum Block {
 pub struct Ctx<'a> {
     pub base: Look,
     pub revealed: &'a HashSet<u32>,
+    /// NIP-30 custom emoji: what a `:shortcode:` draws as, when the message names it.
+    pub custom: Option<&'a dyn Fn(&str) -> Option<crate::media::Custom>>,
 }
 
 enum Swap {
@@ -386,14 +388,38 @@ impl Builder<'_> {
         self.emoji_text(&t[last..], Kind::Plain);
     }
 
-    /// Text with its emoji swapped for twemoji images.
+    /// Text with its `:shortcode:`s swapped for the custom emoji the message carries.
     fn emoji_text(&mut self, t: &str, kind: Kind) {
+        let Some(custom) = self.ctx.custom else { return self.twemoji_text(t, kind) };
+        let mut last = 0;
+        for (start, end) in shortcodes(t) {
+            let code = &t[start + 1..end - 1];
+            let Some(c) = custom(code) else { continue };
+            let size = self.look().size;
+            match c {
+                crate::media::Custom::Missing(_) => continue,
+                crate::media::Custom::Ready(image) => {
+                    self.twemoji_text(&t[last..start], kind.clone());
+                    self.atoms.push(Atom::Image { src: image.into(), size: size * 1.15, drop: size * 0.2 });
+                }
+                crate::media::Custom::Pending => {
+                    self.twemoji_text(&t[last..start], kind.clone());
+                    self.atoms.push(Atom::Gap(size * 1.15));
+                }
+            }
+            last = end;
+        }
+        self.twemoji_text(&t[last..], kind);
+    }
+
+    /// Text with its emoji swapped for twemoji images.
+    fn twemoji_text(&mut self, t: &str, kind: Kind) {
         let mut run_start = 0;
         for (i, g) in t.grapheme_indices(true) {
             if let Some(src) = emoji::twemoji(g) {
                 self.styled(&t[run_start..i], kind.clone());
                 let size = self.look().size;
-                self.atoms.push(Atom::Image { src, size: size * 1.15, drop: size * 0.2 });
+                self.atoms.push(Atom::Image { src: src.into(), size: size * 1.15, drop: size * 0.2 });
                 run_start = i + g.len();
             }
         }
@@ -693,6 +719,35 @@ pub fn find_urls(t: &str) -> Vec<(usize, usize)> {
 }
 
 /// Parses a message's text into blocks.
+/// Where `:shortcode:`s sit in `t` (`~` is the disambiguation separator); a clock's
+/// `21:20:30` is not one.
+pub fn shortcodes(t: &str) -> Vec<(usize, usize)> {
+    let b = t.as_bytes();
+    let ok = |c: u8| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'~' | b'-');
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] != b':' {
+            i += 1;
+            continue;
+        }
+        let len = b[i + 1..].iter().take_while(|c| ok(**c)).count();
+        let end = i + 1 + len;
+        if len == 0 || b.get(end) != Some(&b':') {
+            i += 1;
+            continue;
+        }
+        let digits = b[i + 1..end].iter().all(u8::is_ascii_digit);
+        if digits && i > 0 && b[i - 1].is_ascii_digit() {
+            i += 1;
+            continue;
+        }
+        out.push((i, end + 1));
+        i = end + 1;
+    }
+    out
+}
+
 pub fn parse(src: &str, ctx: &Ctx) -> Vec<Block> {
     let mut swaps = Vec::new();
     let chunks = prepare(src, &mut swaps);
@@ -779,4 +834,21 @@ pub fn flatten(src: &str) -> String {
 #[allow(dead_code)]
 pub fn base_color(l: &Look) -> Hsla {
     l.color
+}
+
+#[cfg(test)]
+mod custom_tests {
+    use super::*;
+
+    #[test]
+    fn shortcodes_become_images() {
+        let revealed = HashSet::new();
+        let pic = std::sync::Arc::new(gpui::RenderImage::new(Vec::new()));
+        let f = |c: &str| (c == "grin").then(|| crate::media::Custom::Ready(pic.clone()));
+        let ctx = Ctx { base: Look::new("Rubik", 15., 21., gpui::white()), revealed: &revealed, custom: Some(&f) };
+        let blocks = parse("Have you seen this? :grin: and 21:20:30", &ctx);
+        let Block::Para(p) = &blocks[0] else { panic!() };
+        assert!(p.atoms.iter().any(|a| matches!(a, Atom::Image { src: gpui::ImageSource::Render(_), .. })));
+        assert_eq!(shortcodes("21:20:30"), vec![]);
+    }
 }

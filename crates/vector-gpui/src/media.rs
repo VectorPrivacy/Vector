@@ -70,6 +70,9 @@ pub enum Linked {
     Failed,
 }
 
+/// A custom emoji's longest side, in device pixels: its largest display at 3x.
+const EMOJI_MAX: u32 = 160;
+
 /// The longest side a linked picture is decoded to, in device pixels.
 const LINKED_MAX: (u32, u32) = (2048, 2048);
 
@@ -109,6 +112,18 @@ pub struct Media {
     pub embeds: crate::embeds::Cache,
     /// "Display Web Previews" turned off: no link or Nostr cards.
     pub web_previews_off: bool,
+    /// Custom emoji and pack icons on disk, by URL, and those asked for since the last pump.
+    custom: HashMap<String, Custom>,
+    custom_wants: Vec<(String, bool)>,
+}
+
+/// A custom emoji as a message draws it.
+#[derive(Clone)]
+pub enum Custom {
+    Ready(Arc<RenderImage>),
+    Pending,
+    /// Not loadable, and why: the shortcode stays as text.
+    Missing(String),
 }
 
 #[derive(Clone, Copy)]
@@ -159,6 +174,16 @@ impl Media {
         Linked::Loading(None)
     }
 
+    /// A custom emoji (`icon`: a pack's logo); the first ask fetches it.
+    pub fn custom(&mut self, url: &str, icon: bool) -> Custom {
+        if let Some(c) = self.custom.get(url) {
+            return c.clone();
+        }
+        self.custom.insert(url.to_string(), Custom::Pending);
+        self.custom_wants.push((url.to_string(), icon));
+        Custom::Pending
+    }
+
     pub fn linked_progress(&mut self, url: &str, pct: f32) {
         if let Some(Linked::Loading(p)) = self.linked.get_mut(url) {
             *p = Some(pct);
@@ -190,6 +215,39 @@ pub fn pump<V: 'static>(media: &std::rc::Rc<std::cell::RefCell<Media>>, app: Wea
                 None => Slot::Failed,
             };
             media.borrow_mut().images.insert(w.key, slot);
+            app.update(cx, |_, cx| cx.notify()).ok();
+        })
+        .detach();
+    }
+    let custom = std::mem::take(&mut media.borrow_mut().custom_wants);
+    for (url, icon) in custom {
+        let media = media.clone();
+        let app = app.clone();
+        let rx = live.then(|| crate::backend::run(crate::backend::images::emoji(url.clone(), icon)));
+        cx.spawn(async move |cx| {
+            let res = match rx {
+                Some(rx) => rx.await.unwrap_or_else(|_| Err("Cancelled".into())),
+                None if std::path::Path::new(&url).is_file() => Ok(url.clone()),
+                None => Err("Not found".into()),
+            };
+            let decoded = match res {
+                Ok(path) => {
+                    let bytes = cx.background_executor().spawn(async move { std::fs::read(&path).map(|b| (b, path)) }).await;
+                    match bytes {
+                        Ok((b, path)) => {
+                            let ext = std::path::Path::new(&path).extension().and_then(|e| e.to_str()).unwrap_or("png").to_ascii_lowercase();
+                            cx.background_executor().spawn(async move { decode(&b, &ext, (EMOJI_MAX, EMOJI_MAX)) }).await.ok_or_else(|| "Invalid image".to_string())
+                        }
+                        Err(e) => Err(e.to_string()),
+                    }
+                }
+                Err(e) => Err(e),
+            };
+            let state = match decoded {
+                Ok((image, ..)) => Custom::Ready(Arc::new(image)),
+                Err(e) => Custom::Missing(e),
+            };
+            media.borrow_mut().custom.insert(url, state);
             app.update(cx, |_, cx| cx.notify()).ok();
         })
         .detach();

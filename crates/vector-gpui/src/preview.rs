@@ -200,7 +200,7 @@ pub fn atoms(content: &str, max: usize, look: &Look) -> Vec<Atom> {
                 if i > start {
                     out.push(Atom::Text { text: buf[start..i].to_string().into(), look: l.clone(), kind: kind.clone() });
                 }
-                out.push(Atom::Image { src, size: l.size * 1.15, drop: l.size * 0.2 });
+                out.push(Atom::Image { src: src.into(), size: l.size * 1.15, drop: l.size * 0.2 });
                 start = i + g.len();
             }
         }

@@ -205,7 +205,8 @@ pub async fn send(channel_id: String, content: String, replied_to: String) -> Re
 }
 
 pub enum Control<'a> {
-    React(&'a str),
+    /// An emoji, and its picture when it is a custom one.
+    React(&'a str, Option<&'a str>),
     Edit(&'a str),
     Delete,
 }
@@ -213,9 +214,9 @@ pub enum Control<'a> {
 /// Reactions, edits and deletes. The service's echo is silent, so the UI hears it here.
 pub async fn control(channel_id: &str, target: &str, op: Control<'_>) -> Result<(), String> {
     match op {
-        Control::React(emoji) => {
+        Control::React(emoji, url) => {
             vector_core::badges::check_new_reaction_allowance(target, emoji).await?;
-            VectorCore.send_community_reaction(channel_id, target, emoji, None).await.map_err(|e| e.to_string())?;
+            VectorCore.send_community_reaction(channel_id, target, emoji, url).await.map_err(|e| e.to_string())?;
         }
         Control::Edit(content) => {
             VectorCore.edit_community_message(channel_id, target, content).await.map_err(|e| e.to_string())?;
