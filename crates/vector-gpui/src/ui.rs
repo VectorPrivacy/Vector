@@ -66,6 +66,10 @@ pub struct VectorApp {
     popup: Option<(kit::Popup, PopupAct)>,
     fail_reasons: Rc<RefCell<HashMap<String, String>>>,
     media: Rc<RefCell<crate::media::Media>>,
+    emoji_picker: Entity<crate::picker::EmojiPicker>,
+    /// The emoji picker is showing (for `picker`'s message, else the composer).
+    picker_open: bool,
+    picker_closed: std::time::Instant,
     /// Bumped by each hover, so a stale leave doesn't hide the toolbar.
     hover_gen: u64,
 }
@@ -85,10 +89,13 @@ enum PopupAct {
 }
 
 impl VectorApp {
-    fn base(store: Store, live: bool, cx: &mut Context<Self>) -> Self {
-        let input = cx.new(|cx| TextInput::new("Enter message...", cx).multiline(px(126.)));
+    fn base(store: Store, live: bool, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let input = cx.new(|cx| TextInput::new("Enter message...", cx).multiline(px(126.)).twemoji());
         cx.subscribe(&input, |app, _, SendText(text), cx| app.send(text.clone(), cx)).detach();
         cx.subscribe(&input, |app, _, _: &CancelInput, cx| app.cancel_mode(cx)).detach();
+        let emoji_picker = cx.new(crate::picker::EmojiPicker::new);
+        cx.subscribe_in(&emoji_picker, window, |app, _, crate::picker::Picked(emoji, shift), window, cx| app.picked(emoji.clone(), *shift, window, cx)).detach();
+        cx.subscribe_in(&emoji_picker, window, |app, _, _: &crate::picker::Dismissed, window, cx| app.close_picker(window, cx)).detach();
         Self {
             screen: Screen::Main,
             live,
@@ -107,13 +114,16 @@ impl VectorApp {
             popup: None,
             fail_reasons: Rc::default(),
             media: Rc::default(),
+            emoji_picker,
+            picker_open: false,
+            picker_closed: std::time::Instant::now(),
             hover_gen: 0,
         }
     }
 
     /// Fixture data, offline: what the parity renders compare.
     pub fn fixtures(store: Store, open: Option<String>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let mut app = Self::base(store, false, cx);
+        let mut app = Self::base(store, false, window, cx);
         if let Some(id) = open {
             app.open_chat(id.into(), window, cx);
         }
@@ -122,7 +132,7 @@ impl VectorApp {
 
     /// A live account: login or unlock, then the app as its events arrive.
     pub fn live(mut events: UnboundedReceiver<UiEvent>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let mut app = Self::base(Store::live(), true, cx);
+        let mut app = Self::base(Store::live(), true, window, cx);
         app.screen = Screen::Booting;
         cx.spawn_in(window, async move |this, cx| {
             while let Some(ev) = events.next().await {
@@ -445,18 +455,8 @@ impl VectorApp {
                 cx.notify();
             }
             Act::OpenFile(att) => self.open_file(id, att, cx),
-            Act::Dismiss => {
-                if self.picker.as_deref() == Some(id.as_str()) {
-                    self.picker = None;
-                    cx.notify();
-                }
-            }
-            Act::React => {
-                self.picker = if self.picker.as_deref() == Some(id.as_str()) { None } else { Some(id) };
-                cx.notify();
-            }
+            Act::React => self.toggle_picker(Some(id), window, cx),
             Act::ReactWith(emoji) => {
-                self.picker = None;
                 let Some(chat) = self.open.clone() else { return };
                 if self.live {
                     let rx = backend::run(backend::actions::react(chat.to_string(), id, emoji));
@@ -523,6 +523,61 @@ impl VectorApp {
             }
         })
         .detach();
+    }
+
+    /// Open the emoji picker for a reaction to `target`, or for the composer; again closes it.
+    fn toggle_picker(&mut self, target: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+        // The press that dismissed it by landing outside is the same one that would reopen it.
+        if self.picker_open || self.picker_closed.elapsed() < std::time::Duration::from_millis(200) {
+            self.close_picker(window, cx);
+            return;
+        }
+        self.picker_open = true;
+        self.picker = target.clone();
+        let picker = self.emoji_picker.clone();
+        let reaction = target.is_some();
+        picker.update(cx, |p, cx| p.reset(reaction, std::collections::HashMap::new(), window, cx));
+        if self.live {
+            let rx = backend::run(async { backend::actions::emoji_usage() });
+            cx.spawn(async move |_, cx| {
+                let Ok(used) = rx.await else { return };
+                picker.update(cx, |p, cx| p.set_usage(used, cx));
+            })
+            .detach();
+        }
+        cx.notify();
+    }
+
+    fn close_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.picker_open {
+            return;
+        }
+        self.picker_open = false;
+        self.picker = None;
+        self.picker_closed = std::time::Instant::now();
+        window.focus(&self.input.read(cx).focus_handle(cx), cx);
+        cx.notify();
+    }
+
+    fn picked(&mut self, emoji: String, shift: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.emoji_picker.update(cx, |p, _| p.bump(&emoji));
+        if self.live {
+            let e = emoji.clone();
+            let _ = backend::run(async move { backend::actions::bump_emoji(&e) });
+        }
+        match self.picker.clone() {
+            Some(id) => {
+                let me = self.store.borrow().my_npub.clone();
+                let already = self.message(&id).is_some_and(|m| m.reactions.iter().any(|r| r.author_id == me && r.emoji == emoji));
+                if !already {
+                    self.on_act(id, timeline::Act::ReactWith(emoji), window, cx);
+                }
+            }
+            None => self.input.update(cx, |input, cx| input.insert_spaced(&emoji, window, cx)),
+        }
+        if !shift {
+            self.close_picker(window, cx);
+        }
     }
 
     /// Fetch an attachment; its events paint the progress and the result.
@@ -640,6 +695,10 @@ impl VectorApp {
         };
         if self.live {
             let receiver = id.to_string();
+            let used = crate::emoji::in_text(&text);
+            if !used.is_empty() {
+                let _ = backend::run(async move { backend::actions::bump_emoji_batch(used) });
+            }
             let rx = backend::run(messaging::send(receiver, text, reply));
             cx.spawn(async move |this, cx| {
                 if let Ok(Err(e)) = rx.await {
@@ -1336,7 +1395,7 @@ impl VectorApp {
                             )),
                     ),
             )
-            .child(composer(self.input.clone(), &self.mode, cx))
+            .child(composer(self.input.clone(), &self.mode, self.picker_open.then(|| (self.emoji_picker.clone(), self.picker.is_none())), cx))
     }
 }
 
@@ -1402,7 +1461,12 @@ fn divider(label: impl IntoElement, line: gpui::Hsla, opacity: f32) -> AnyElemen
 
 /// `#chat-box.input-box`: the gradient frame around the composer, with the reply bar
 /// tucked behind its top while replying, and edit's cancel in place of attach.
-fn composer(input: Entity<TextInput>, mode: &Mode, cx: &mut Context<VectorApp>) -> impl IntoElement {
+fn composer(
+    input: Entity<TextInput>,
+    mode: &Mode,
+    picker: Option<(Entity<crate::picker::EmojiPicker>, bool)>,
+    cx: &mut Context<VectorApp>,
+) -> impl IntoElement {
     let icon = |path: &'static str| {
         div()
             .w(px(38.))
@@ -1481,7 +1545,16 @@ fn composer(input: Entity<TextInput>, mode: &Mode, cx: &mut Context<VectorApp>) 
             .items_end()
             .child(if editing { cancel("edit-cancel", 23., cx).w(px(38.)).h(px(45.)).into_any_element() } else { icon("icons/plus.svg").into_any_element() })
             .child(div().flex_1().min_w_0().py(px(12.)).pr(px(10.)).child(input))
-            .child(icon("icons/smile-face.svg"))
+            .child(
+                icon(if picker.as_ref().is_some_and(|p| p.1) { "icons/wink-face.svg" } else { "icons/smile-face.svg" })
+                    .id("composer-emoji")
+                    .cursor_pointer()
+                    .on_click(cx.listener(|app, _, window, cx| app.toggle_picker(None, window, cx))),
+            )
             .child(icon("icons/mic-on.svg")),
     )
+    // `.emoji-picker`: 10px above the composer, 16px from the right edge.
+    .when_some(picker, |d, (p, _)| {
+        d.child(gpui::deferred(div().absolute().bottom(gpui::relative(1.)).right(px(16.)).pb(px(10.)).child(p)).with_priority(3))
+    })
 }

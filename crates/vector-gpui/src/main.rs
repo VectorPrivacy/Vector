@@ -10,6 +10,7 @@ mod kit;
 mod login;
 mod markdown;
 mod media;
+mod picker;
 mod preview;
 mod theme;
 mod timeline;

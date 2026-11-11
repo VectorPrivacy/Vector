@@ -32,8 +32,6 @@ pub enum Act {
     Edit,
     Retry,
     Delete,
-    /// A click outside the open reaction menu.
-    Dismiss,
     /// Fetch this attachment (or retry it).
     Download(String),
     CancelDownload(String),
@@ -45,8 +43,6 @@ pub enum Act {
 
 pub type OnAct = Rc<dyn Fn(&str, Act, &mut Window, &mut App)>;
 
-/// Picks the quick reaction menu offers until the full picker lands.
-pub const QUICK_REACTIONS: [&str; 8] = ["👍", "❤️", "😂", "😮", "😢", "🔥", "🎉", "👀"];
 
 /// What the rows of one chat share while drawing.
 pub struct Ctx<'a> {
@@ -637,43 +633,6 @@ fn toolbar(ctx: &Ctx, m: &Message, first: bool) -> Option<AnyElement> {
                 ),
         );
     }
-    let mut root = div().absolute().top_0().right_0().child(bar);
-    if ctx.picker == Some(m.id.as_str()) {
-        let mut menu = div()
-            .id(SharedString::from(format!("{}-quick", m.id)))
-            .absolute()
-            .top(px(-lift + 40.))
-            .right(px(8.))
-            .flex()
-            .gap(px(2.))
-            .p(px(4.))
-            .rounded(px(8.))
-            .border_1()
-            .border_color(white_a(0.08))
-            .bg(c(0x1a1a1a))
-            .occlude()
-            .on_mouse_down_out({
-                let (act, id) = (ctx.on_act.clone(), m.id.clone());
-                move |_, w, cx| act(&id, Act::Dismiss, w, cx)
-            });
-        for e in QUICK_REACTIONS {
-            let (on, id) = (ctx.on_act.clone(), m.id.clone());
-            let Some(src) = emoji::twemoji(e) else { continue };
-            menu = menu.child(
-                div()
-                    .id(SharedString::from(e))
-                    .size(px(32.))
-                    .rounded(px(4.))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .cursor_pointer()
-                    .hover(|s| s.bg(white_a(0.08)))
-                    .on_click(move |_, w, cx| on(&id, Act::ReactWith(e.to_string()), w, cx))
-                    .child(img(src).size(px(22.))),
-            );
-        }
-        root = root.child(gpui::deferred(menu).with_priority(2));
-    }
+    let root = div().absolute().top_0().right_0().child(bar);
     Some(root.into_any_element())
 }

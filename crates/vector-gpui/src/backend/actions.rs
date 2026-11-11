@@ -131,3 +131,18 @@ pub async fn unreact(reaction_id: String) -> Result<(), String> {
     let recipient = PublicKey::parse(&chat_id).map_err(|e| format!("Invalid DM counterpart: {e}"))?;
     vector_core::deletion::delete_own_reaction(&rid, recipient).await.map(|_| ())
 }
+
+/// The account's stock emoji by decayed use, for the picker's recents.
+pub fn emoji_usage() -> std::collections::HashMap<String, f64> {
+    vector_core::emoji_usage::ranked(Some(256)).into_iter().filter(|u| u.kind == "unicode").map(|u| (u.id, u.score)).collect()
+}
+
+pub fn bump_emoji(emoji: &str) {
+    let _ = vector_core::emoji_usage::bump("unicode", emoji, None);
+}
+
+/// A sent message's distinct emoji, in one record.
+pub fn bump_emoji_batch(emoji: Vec<String>) {
+    let uses: Vec<_> = emoji.into_iter().map(|id| vector_core::emoji_usage::EmojiUse { kind: "unicode".into(), id, url: None }).collect();
+    let _ = vector_core::emoji_usage::bump_batch(&uses);
+}

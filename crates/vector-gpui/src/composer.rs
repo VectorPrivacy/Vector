@@ -62,11 +62,27 @@ pub struct TextInput {
     /// Enter keeps the text (a login field's caller reads and clears it).
     clear_on_submit: bool,
     submit_empty: bool,
+    /// Draws stock emoji as Twemoji art, as the rich composer does.
+    twemoji: bool,
+    /// The emoji drawn as art, for the content they were found in.
+    subs: std::cell::RefCell<(SharedString, std::rc::Rc<[Sub]>)>,
 }
+
+/// An emoji drawn as art: its content bytes, and the placeholder holding its place in what is drawn.
+struct Sub {
+    content: Range<usize>,
+    display: Range<usize>,
+    src: SharedString,
+}
+
+/// What an emoji's art occupies in the drawn text: 1.25em (`.cmp-twemoji`), an em space and a quarter-em.
+const EMOJI_SLOT: &str = "\u{2003}\u{2005}";
 
 /// How a field draws: the composer's, or a login field's.
 #[derive(Clone)]
 pub struct Look {
+    pub family: &'static str,
+    pub weight: gpui::FontWeight,
     pub size: Pixels,
     pub line_height: Pixels,
     pub color: Hsla,
@@ -79,7 +95,7 @@ pub struct Look {
 
 impl Default for Look {
     fn default() -> Self {
-        Self { size: px(15.), line_height: px(21.), color: white_a(0.85), placeholder: white_a(0.38), masked: false, masked_size: None }
+        Self { family: RUBIK, weight: gpui::FontWeight::NORMAL, size: px(15.), line_height: px(21.), color: white_a(0.85), placeholder: white_a(0.38), masked: false, masked_size: None }
     }
 }
 
@@ -369,6 +385,7 @@ impl TextInput {
         self.last_bounds = None;
         self.is_selecting = false;
         window.notify_text_input_changed(&self.focus_handle);
+        cx.emit(InputChanged);
         cx.notify();
     }
 }
@@ -455,6 +472,7 @@ impl EntityInputHandler for TextInput {
         self.marked_range.take();
         self.reveal = true;
         window.notify_text_input_changed(&self.focus_handle);
+        cx.emit(InputChanged);
         cx.notify();
     }
 
@@ -546,6 +564,7 @@ struct TextElement {
 
 struct PrepaintState {
     layout: Option<Layout>,
+    emoji: Vec<gpui::AnyElement>,
     cursor: Option<PaintQuad>,
     selections: Vec<PaintQuad>,
 }
@@ -563,10 +582,24 @@ impl TextInput {
             }
             (BULLET.repeat(content.graphemes(true).count()).into(), style.color)
         } else {
-            (content, style.color)
+            let subs = self.subs();
+            if subs.is_empty() {
+                (content, style.color)
+            } else {
+                let mut text = String::with_capacity(content.len());
+                let mut at = 0;
+                for sub in subs.iter() {
+                    text.push_str(&content[at..sub.content.start]);
+                    text.push_str(EMOJI_SLOT);
+                    at = sub.content.end;
+                }
+                text.push_str(&content[at..]);
+                (text.into(), style.color)
+            }
         };
         let run = TextRun { len: text.len(), font: style.font(), color, background_color: None, underline: None, strikethrough: None };
-        let runs = match self.marked_range.as_ref().filter(|_| !self.look.masked && !self.content.is_empty()) {
+        let marked = self.marked_range.as_ref().filter(|_| !self.look.masked && !self.content.is_empty()).map(|m| self.to_display(m.start)..self.to_display(m.end));
+        let runs = match marked.as_ref() {
             Some(m) => [
                 TextRun { len: m.start, ..run.clone() },
                 TextRun { len: m.end - m.start, underline: Some(UnderlineStyle { color: Some(run.color), thickness: px(1.0), wavy: false }), ..run.clone() },
@@ -659,7 +692,19 @@ impl Element for TextElement {
             }
             (None, rects.into_iter().map(|r| fill(r, tint)).collect())
         };
-        PrepaintState { layout: Some(layout), cursor, selections }
+        let side = font_size * 1.25;
+        let emoji = input
+            .subs()
+            .iter()
+            .map(|sub| {
+                let p = layout.position(sub.display.start);
+                let mut art = gpui::img(sub.src.clone()).size(side).into_any_element();
+                let at = o + point(p.x, p.y + (line_height - side) / 2.);
+                art.prepaint_as_root(at, size(side, side).map(gpui::AvailableSpace::Definite), window, cx);
+                art
+            })
+            .collect();
+        PrepaintState { layout: Some(layout), emoji, cursor, selections }
     }
 
     fn paint(
@@ -680,6 +725,9 @@ impl Element for TextElement {
         let layout = prepaint.layout.take().unwrap();
         for (_, y, line) in &layout.lines {
             line.paint(bounds.origin + point(px(0.), *y), layout.line_height, gpui::TextAlign::Left, None, window, cx).ok();
+        }
+        for art in &mut prepaint.emoji {
+            art.paint(window, cx);
         }
         let caret = prepaint.cursor.take();
         let focused = focus_handle.is_focused(window);
@@ -745,7 +793,8 @@ impl Render for TextInput {
             .on_action(cx.listener(Self::cancel))
             .w_full()
             .when_some(self.multiline, |d, max| d.max_h(max).overflow_y_scroll().track_scroll(&self.scroll))
-            .font_family(RUBIK)
+            .font_family(self.look.family)
+            .font_weight(self.look.weight)
             .line_height(self.look.line_height)
             .text_size(self.look.size)
             .text_color(self.look.color)
@@ -760,6 +809,9 @@ impl Focusable for TextInput {
 }
 
 pub struct SendText(pub String);
+/// The text changed.
+pub struct InputChanged;
+impl EventEmitter<InputChanged> for TextInput {}
 /// Escape in the field.
 pub struct CancelInput;
 
@@ -784,13 +836,57 @@ impl TextInput {
             look: Look::default(),
             clear_on_submit: true,
             submit_empty: false,
+            twemoji: false,
+            subs: Default::default(),
         }
+    }
+
+    /// Draws stock emoji as Twemoji art.
+    pub fn twemoji(mut self) -> Self {
+        self.twemoji = true;
+        self
+    }
+
+    fn subs(&self) -> std::rc::Rc<[Sub]> {
+        if !self.twemoji || self.look.masked {
+            return std::rc::Rc::from([]);
+        }
+        let mut cache = self.subs.borrow_mut();
+        if cache.0 != self.content {
+            let mut subs = Vec::new();
+            let mut shift = 0isize;
+            for (i, g) in self.content.grapheme_indices(true) {
+                if let Some(src) = crate::emoji::twemoji(g) {
+                    let start = (i as isize + shift) as usize;
+                    subs.push(Sub { content: i..i + g.len(), display: start..start + EMOJI_SLOT.len(), src });
+                    shift += EMOJI_SLOT.len() as isize - g.len() as isize;
+                }
+            }
+            *cache = (self.content.clone(), subs.into());
+        }
+        cache.1.clone()
     }
 
     /// Wraps, takes Shift+Enter, and scrolls once taller than `max_height`.
     pub fn multiline(mut self, max_height: Pixels) -> Self {
         self.multiline = Some(max_height);
         self
+    }
+
+    /// Types `text` at the caret, spaced from the words either side (`insertAtCursor`).
+    pub fn insert_spaced(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let (start, end) = (self.selected_range.start, self.selected_range.end);
+        let before = self.content[..start].chars().next_back();
+        let after = self.content[end..].chars().next();
+        let mut t = String::new();
+        if before.is_some_and(|c| !c.is_whitespace()) {
+            t.push(' ');
+        }
+        t.push_str(text);
+        if after.is_some_and(|c| !c.is_whitespace()) {
+            t.push(' ');
+        }
+        self.replace_text_in_range(None, &t, window, cx);
     }
 
     fn newline(&mut self, _: &Newline, window: &mut Window, cx: &mut Context<Self>) {
@@ -863,7 +959,17 @@ impl TextInput {
     /// A content offset as an offset into what is drawn.
     fn to_display(&self, offset: usize) -> usize {
         if !self.look.masked {
-            return offset;
+            let mut shift = 0isize;
+            for sub in self.subs().iter() {
+                if offset <= sub.content.start {
+                    break;
+                }
+                if offset < sub.content.end {
+                    return sub.display.start;
+                }
+                shift = sub.display.end as isize - sub.content.end as isize;
+            }
+            return (offset as isize + shift) as usize;
         }
         self.content[..offset.min(self.content.len())].graphemes(true).count() * BULLET.len()
     }
@@ -871,7 +977,17 @@ impl TextInput {
     /// An offset into what is drawn as a content offset.
     fn from_display(&self, offset: usize) -> usize {
         if !self.look.masked {
-            return offset;
+            let mut shift = 0isize;
+            for sub in self.subs().iter() {
+                if offset <= sub.display.start {
+                    break;
+                }
+                if offset < sub.display.end {
+                    return if offset - sub.display.start > sub.display.len() / 2 { sub.content.end } else { sub.content.start };
+                }
+                shift = sub.content.end as isize - sub.display.end as isize;
+            }
+            return (offset as isize + shift) as usize;
         }
         let n = offset / BULLET.len();
         self.content.grapheme_indices(true).nth(n).map(|(i, _)| i).unwrap_or(self.content.len())

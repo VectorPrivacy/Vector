@@ -49,3 +49,146 @@ pub fn only_emoji_count(text: &str) -> Option<usize> {
     }
     Some(n)
 }
+
+/// One stock emoji, as the Tauri dataset lists it.
+pub struct Emoji {
+    pub emoji: &'static str,
+    /// Lowercase search words.
+    pub name: &'static str,
+    pub display: &'static str,
+    pub shortcode: &'static str,
+    /// Unicode popularity rank; 99 unranked.
+    pub freq: u8,
+}
+
+include!(concat!(env!("OUT_DIR"), "/emoji_data.rs"));
+
+/// `searchEmojis`'s per-pick score reduction.
+const USAGE_WEIGHT: f64 = 0.5;
+
+fn levenshtein(a: &str, b: &str) -> usize {
+    let b: Vec<char> = b.chars().collect();
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    for (i, ca) in a.chars().enumerate() {
+        let mut cur = vec![i + 1; b.len() + 1];
+        for (j, cb) in b.iter().enumerate() {
+            cur[j + 1] = (prev[j] + usize::from(ca != *cb)).min(prev[j + 1] + 1).min(cur[j] + 1);
+        }
+        prev = cur;
+    }
+    prev[b.len()]
+}
+
+/// `searchEmojis`: shortcode, display and word matches with typo tolerance, then personal use.
+pub fn search(query: &str, used: impl Fn(&str) -> f64) -> Vec<&'static Emoji> {
+    let q = query.to_lowercase();
+    if q.is_empty() {
+        return Vec::new();
+    }
+    let qlen = q.chars().count();
+    let qchars: HashSet<char> = q.chars().collect();
+    struct Hit {
+        e: &'static Emoji,
+        score: f64,
+        word: &'static str,
+        index: usize,
+    }
+    let mut hits: Vec<Hit> = Vec::new();
+    for e in EMOJIS {
+        let mut best: Option<(f64, &'static str, usize)> = None;
+        let mut consider = |score: f64, word: &'static str, i: usize| {
+            if best.is_none_or(|b| score < b.0) {
+                best = Some((score, word, i));
+            }
+        };
+        let sc = e.shortcode;
+        if !sc.is_empty() {
+            if sc == q || sc.replace('_', " ") == q {
+                consider(-2.0, sc, 0);
+            } else if sc.starts_with(&format!("{q}_")) || sc.starts_with(&format!("{q} ")) {
+                consider(-1.5, sc, 0);
+            }
+        }
+        let display = e.display;
+        let dl = display.to_lowercase();
+        if dl == q {
+            consider(-1.0, display, 0);
+        } else if dl.starts_with(&format!("{q} ")) {
+            consider(-0.5, display, 0);
+        }
+        for (i, word) in e.name.split(' ').enumerate() {
+            let pos = i as f64 * 0.02;
+            if word == q {
+                consider(pos, word, i);
+                continue;
+            }
+            let wlen = word.chars().count();
+            if word.starts_with(&q) && qlen >= 2 {
+                consider(0.1 + pos, word, i);
+            }
+            if qlen >= 3 {
+                let diff = wlen.abs_diff(qlen);
+                if diff <= 1 && levenshtein(word, &q) == 1 {
+                    let common = qchars.iter().filter(|c| word.contains(**c)).count();
+                    if common + 1 >= qlen {
+                        let mut score = 0.5;
+                        if wlen > qlen && word.starts_with(&q) {
+                            score = 0.3;
+                        } else if wlen > qlen && word.chars().next() == q.chars().next() && word.chars().last() == q.chars().last() {
+                            score = 0.35;
+                        }
+                        consider(score + pos, word, i);
+                    }
+                }
+                if wlen > qlen && diff <= 3 {
+                    let start: String = word.chars().take(qlen).collect();
+                    if levenshtein(&start, &q) == 1 {
+                        consider(0.6 + pos, word, i);
+                    }
+                }
+            }
+            if qlen >= 5 && levenshtein(word, &q) == 2 && wlen.abs_diff(qlen) <= 1 {
+                consider(0.8 + pos, word, i);
+            }
+        }
+        if let Some((score, word, index)) = best {
+            hits.push(Hit { e, score: score - used(e.emoji) * USAGE_WEIGHT, word, index });
+        }
+    }
+    if hits.is_empty() {
+        for e in EMOJIS.iter().filter(|e| e.name.contains(&q)) {
+            hits.push(Hit { e, score: 1.0 - used(e.emoji) * USAGE_WEIGHT, word: e.name, index: 99 });
+        }
+    }
+    hits.sort_by(|a, b| {
+        if (a.score - b.score).abs() > 0.01 {
+            return a.score.total_cmp(&b.score);
+        }
+        a.index
+            .cmp(&b.index)
+            .then(a.e.freq.cmp(&b.e.freq))
+            .then(a.word.len().cmp(&b.word.len()))
+            .then(a.e.name.len().cmp(&b.e.name.len()))
+            .then(a.word.cmp(b.word))
+    });
+    hits.into_iter().map(|h| h.e).collect()
+}
+
+/// The 24 most used, the dataset's order breaking ties (`getMostUsedEmojis`).
+pub fn most_used(used: impl Fn(&str) -> f64) -> Vec<&'static Emoji> {
+    let mut all: Vec<&'static Emoji> = EMOJIS.iter().collect();
+    all.sort_by(|a, b| used(b.emoji).total_cmp(&used(a.emoji)));
+    all.truncate(24);
+    all
+}
+
+/// The distinct emoji in a message, for its usage record.
+pub fn in_text(text: &str) -> Vec<String> {
+    let mut seen = Vec::new();
+    for g in text.graphemes(true) {
+        if twemoji(g).is_some() && !seen.iter().any(|s: &String| s == g) {
+            seen.push(g.to_string());
+        }
+    }
+    seen
+}

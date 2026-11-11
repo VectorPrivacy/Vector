@@ -81,6 +81,7 @@ impl LoginView {
             placeholder: c(ICON_MUTED),
             masked: true,
             masked_size: Some(px(20.)),
+            ..Default::default()
         };
         let key = cx.new(|cx| TextInput::new("Enter nsec or Seed Phrase...", cx).with_look(field.clone()).keep_on_submit());
         let password = cx.new(|cx| TextInput::new("Enter Password...", cx).with_look(field).keep_on_submit());
