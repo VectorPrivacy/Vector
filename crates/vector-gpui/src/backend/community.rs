@@ -430,3 +430,33 @@ pub async fn mark_read(community_id: String) {
     }
     vector_core::emit_event("unread_counts_stale", &json!({ "chats": [] }));
 }
+
+/// A new single-channel Community on the account's relays: its id and its channel's.
+pub async fn create_community(name: String) -> Result<(String, String), String> {
+    db::scoped_result(async move {
+        let relays: Vec<String> = vector_core::state::active_trusted_relays().await.iter().map(|s| s.to_string()).collect();
+        if relays.is_empty() {
+            return Err("No relays available to host the Community".into());
+        }
+        let session = db::current_session();
+        let transport = LiveTransport::with_timeout(Duration::from_secs(12));
+        let community = vector_core::community::v2::service::create_community_on_roles_v2(&transport, name.trim(), relays, None).await?;
+        let channel_id = community.channels.first().map(|ch| bytes_to_hex_32(&ch.id.0)).ok_or("created community has no channel")?;
+        VectorCore.register_v2_chats(&community, &session).await;
+        if let Some(client) = vector_core::state::nostr_client() {
+            realtime::refresh_subscription(&client).await;
+        }
+        super::emit("communities_changed", ());
+        Ok((bytes_to_hex_32(&community.id().0), channel_id))
+    })
+    .await
+}
+
+/// A shareable link anyone can join by.
+pub async fn create_public_invite(community_id: String) -> Result<String, String> {
+    db::scoped(async move { VectorCore.create_public_invite(&community_id, None, None).await.map_err(|e| e.to_string()) }).await
+}
+
+pub async fn invite(community_id: String, npub: String) -> Result<(), String> {
+    db::scoped(async move { VectorCore.invite_to_community(&community_id, &npub).await.map(|_| ()).map_err(|e| e.to_string()) }).await
+}

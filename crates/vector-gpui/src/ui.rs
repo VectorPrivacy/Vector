@@ -93,6 +93,7 @@ pub struct VectorApp {
     switcher: Option<crate::switcher::Switcher>,
     badge_card: Option<crate::badgecard::Card>,
     new_chat: Option<crate::newchat::NewChat>,
+    create_community: Option<crate::createcommunity::CreateCommunity>,
     /// Add Profile is showing the login screen over this account: the account Back returns to,
     /// and whether the old session was already torn down for the new one.
     adding: Option<(String, bool)>,
@@ -256,6 +257,7 @@ impl VectorApp {
             switcher: None,
             badge_card: None,
             new_chat: None,
+            create_community: None,
             adding: None,
             requests_tab: false,
             tab_slid: false,
@@ -361,6 +363,27 @@ impl VectorApp {
                 f.open_transfer(send, cx);
                 f.transfer_state(&payload, cx);
             });
+        }
+        // Fixtures: VECTOR_CREATE_COMMUNITY=1|2|public|private, the step to show.
+        if let Ok(step) = std::env::var("VECTOR_CREATE_COMMUNITY") {
+            app.open_create_community(window, cx);
+            if let Some(m) = app.create_community.as_mut() {
+                m.name.update(cx, |t, cx| t.set_text("Cool Kids", cx));
+                match step.as_str() {
+                    "2" => m.step = 2,
+                    "public" | "private" => {
+                        m.step = 3;
+                        m.public = step == "public";
+                        m.created = Some(("fixture".into(), "fixture".into()));
+                        if m.public {
+                            let link = "https://vectorapp.io/c/ncommunity1qvzqqqr4gupzq3jw0e7vhm9a4h2kq6l8fmd3ss8xn2dpz5v7ya0xu3wk6lqcr9eq".to_string();
+                            m.link_qr = crate::qr::image(&link, (114. * window.scale_factor()).round() as u32);
+                            m.link = Some(link);
+                        }
+                    }
+                    _ => {}
+                }
+            }
         }
         if let Ok(pick) = std::env::var("VECTOR_NEW_CHAT") {
             app.open_new_chat(window, cx);
@@ -1845,6 +1868,14 @@ impl Render for VectorApp {
                     None => row.child(chat_list(&self.store, &store, self.open.clone(), (self.requests_tab, self.tab_slid, no_messages), cx)),
                 })
                 .when(self.settings.is_none(), |row| row.child(match (&self.profile, self.open.clone()) {
+                    _ if self.create_community.is_some() => {
+                        let app = cx.entity().downgrade();
+                        let on: crate::createcommunity::OnAct = Rc::new(move |act, window, cx| {
+                            app.update(cx, |app, cx| app.on_create_community(act, window, cx)).ok();
+                        });
+                        let width = f32::from(window.viewport_size().width) - RAIL_W - LIST_W;
+                        div().flex_1().min_w_0().h_full().child(crate::createcommunity::view(self.create_community.as_ref().unwrap(), &store, width, &on, cx)).into_any_element()
+                    }
                     _ if self.new_chat.is_some() => {
                         let app = cx.entity().downgrade();
                         let on: crate::newchat::OnAct = Rc::new(move |act, window, cx| {
@@ -2154,6 +2185,13 @@ fn rail(store: &Store, open: Option<&SharedString>, active: Option<&str>, on_c: 
         .child(crate::community::rail_rows(store, active, on_c))
         .child(
             div()
+                .id("rail-create-community")
+                .cursor_pointer()
+                .hover(|d| d.bg(white_a(0.04)))
+                .on_click({
+                    let on = on_c.clone();
+                    move |_, w, cx| on(crate::community::Act::Create, w, cx)
+                })
                 .mx(px(8.))
                 .h(px(31.))
                 .rounded(px(10.))
@@ -3393,6 +3431,7 @@ impl VectorApp {
                     self.channel_menu(id, channel, at, cx);
                 }
             }
+            Act::Create => self.open_create_community(window, cx),
             Act::AddChannel(category) => {
                 if let Some(id) = self.community.as_ref().map(|v| v.id.clone()) {
                     self.open_create_channel(id, Some(category), false, window, cx);
@@ -3461,7 +3500,7 @@ impl VectorApp {
             let today = chrono::Local::now().date_naive();
             at.map(|t| if t.date_naive() == today { format!("until {}", t.format("%H:%M")) } else { format!("until {}", t.format("%a %H:%M")) }).unwrap_or_default()
         });
-        let sub = |label: &str, icon: &str, rows: Vec<(kit::MenuItem, MenuAct)>| {
+        let sub = |label: &str, _icon: &str, rows: Vec<(kit::MenuItem, MenuAct)>| {
             let (items, acts): (Vec<_>, Vec<_>) = rows.into_iter().unzip();
             MenuAct::Sub(SharedString::from(label.to_string()), items, acts)
         };
@@ -5078,6 +5117,232 @@ impl VectorApp {
                 .ok();
             })
             .detach();
+        }
+        cx.notify();
+    }
+
+    fn open_create_community(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let name = cx.new(|cx| {
+            TextInput::new("Community Name", cx).max_chars(crate::createcommunity::NAME_MAX).keep_on_submit().with_look(crate::composer::Look {
+                weight: FontWeight::MEDIUM,
+                size: px(16.),
+                line_height: px(24.),
+                color: c(0xffffff),
+                placeholder: white_a(0.35),
+                ..kit::field_look()
+            })
+        });
+        cx.subscribe(&name, |_, _, _: &crate::composer::InputChanged, cx| cx.notify()).detach();
+        cx.subscribe_in(&name, window, |app, _, _: &crate::composer::SendText, window, cx| app.on_create_community(crate::createcommunity::Act::Next, window, cx)).detach();
+        let filter = cx.new(|cx| TextInput::new("Search friends, or paste an npub", cx).with_look(crate::composer::Look { placeholder: white_a(0.35), ..kit::field_look() }));
+        cx.subscribe(&filter, |_, _, _: &crate::composer::InputChanged, cx| cx.notify()).detach();
+        window.focus(&name.focus_handle(cx), cx);
+        let contacts: Option<HashSet<String>> = if self.live {
+            None
+        } else {
+            Some(self.store.borrow().chats.iter().filter(|c| matches!(c.chat_type, vector_core::ChatType::DirectMessage)).map(|c| c.id.clone()).collect())
+        };
+        self.leave_community();
+        self.profile = None;
+        self.settings = None;
+        self.new_chat = None;
+        self.open = None;
+        self.create_community = Some(crate::createcommunity::CreateCommunity {
+            step: 1,
+            name,
+            public: false,
+            busy: false,
+            progress: None,
+            error: None,
+            created: None,
+            link: None,
+            link_qr: None,
+            link_error: None,
+            copied: false,
+            filter,
+            picked: HashSet::new(),
+            contacts,
+        });
+        if self.live {
+            let rx = backend::run(async { vector_core::db::events::get_dm_contact_npubs().unwrap_or_default() });
+            cx.spawn(async move |this, cx| {
+                let Ok(list) = rx.await else { return };
+                this.update(cx, |this, cx| {
+                    if let Some(m) = this.create_community.as_mut() {
+                        m.contacts = Some(list.into_iter().collect());
+                        cx.notify();
+                    }
+                })
+                .ok();
+            })
+            .detach();
+        }
+        cx.notify();
+    }
+
+    fn make_invite_link(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(m) = self.create_community.as_mut() else { return };
+        let Some((id, _)) = m.created.clone() else { return };
+        m.link_error = None;
+        m.progress = Some(("Making your link".into(), 0.5));
+        let side = (114. * window.scale_factor()).round() as u32;
+        let rx = backend::run(backend::community::create_public_invite(id));
+        cx.spawn(async move |this, cx| {
+            let Ok(res) = rx.await else { return };
+            this.update(cx, |this, cx| {
+                let Some(m) = this.create_community.as_mut() else { return };
+                m.progress = None;
+                match res {
+                    Ok(link) => {
+                        m.link_qr = crate::qr::image(&link, side);
+                        m.link = Some(link);
+                    }
+                    Err(e) => m.link_error = Some(e),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn on_create_community(&mut self, act: crate::createcommunity::Act, window: &mut Window, cx: &mut Context<Self>) {
+        use crate::createcommunity::Act;
+        let Some(m) = self.create_community.as_mut() else { return };
+        match act {
+            Act::Next => {
+                if m.step == 1 && !m.name.read(cx).text().trim().is_empty() {
+                    m.step = 2;
+                }
+            }
+            Act::Back => {
+                if !m.busy && m.step == 2 {
+                    m.step = 1;
+                    window.focus(&m.name.focus_handle(cx), cx);
+                }
+            }
+            Act::Public(public) => m.public = public,
+            Act::Create => {
+                if m.busy {
+                    return;
+                }
+                let name = m.name.read(cx).text().trim().to_string();
+                if !self.live {
+                    m.created = Some(("fixture".into(), "fixture".into()));
+                    m.step = 3;
+                    cx.notify();
+                    return;
+                }
+                m.busy = true;
+                m.error = None;
+                m.progress = Some(("Creating your community".into(), 0.1));
+                let rx = backend::run(backend::community::create_community(name));
+                cx.spawn_in(window, async move |this, cx| {
+                    let Ok(res) = rx.await else { return };
+                    this.update_in(cx, |this, window, cx| {
+                        let Some(m) = this.create_community.as_mut() else { return };
+                        m.busy = false;
+                        m.progress = None;
+                        match res {
+                            Ok(ids) => {
+                                m.created = Some(ids);
+                                m.step = 3;
+                                let public = m.public;
+                                if public {
+                                    this.make_invite_link(window, cx);
+                                } else if let Some(m) = this.create_community.as_ref() {
+                                    window.focus(&m.filter.focus_handle(cx), cx);
+                                }
+                                this.reload_communities(cx);
+                            }
+                            Err(e) => m.error = Some(e),
+                        }
+                        cx.notify();
+                    })
+                    .ok();
+                })
+                .detach();
+            }
+            Act::RetryLink => self.make_invite_link(window, cx),
+            Act::Copy => {
+                if let Some(link) = m.link.clone() {
+                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(link));
+                    m.copied = true;
+                    cx.spawn(async move |this, cx| {
+                        cx.background_executor().timer(std::time::Duration::from_millis(1600)).await;
+                        this.update(cx, |this, cx| {
+                            if let Some(m) = this.create_community.as_mut() {
+                                m.copied = false;
+                                cx.notify();
+                            }
+                        })
+                        .ok();
+                    })
+                    .detach();
+                }
+            }
+            Act::ShowQr => {
+                let Some(link) = m.link.clone() else { return };
+                let side = (288. * window.scale_factor()).round() as u32;
+                if let Some(image) = crate::qr::image(&link, side) {
+                    let focus = cx.focus_handle();
+                    window.focus(&focus, cx);
+                    self.qr = Some((image, focus));
+                }
+            }
+            Act::Toggle(npub) => {
+                if !m.picked.remove(&npub) {
+                    m.picked.insert(npub);
+                }
+            }
+            Act::Invite => {
+                let (Some((id, _)), false) = (m.created.clone(), m.busy || m.picked.is_empty()) else { return };
+                if !self.live {
+                    return self.on_create_community(Act::Finish, window, cx);
+                }
+                let picked: Vec<String> = m.picked.iter().cloned().collect();
+                m.busy = true;
+                m.error = None;
+                m.progress = Some((format!("Inviting {}", picked.len()), 0.));
+                let rx = backend::run(async move {
+                    let mut failed = 0usize;
+                    for npub in picked {
+                        if backend::community::invite(id.clone(), npub).await.is_err() {
+                            failed += 1;
+                        }
+                    }
+                    failed
+                });
+                cx.spawn_in(window, async move |this, cx| {
+                    let Ok(failed) = rx.await else { return };
+                    this.update_in(cx, |this, window, cx| {
+                        let Some(m) = this.create_community.as_mut() else { return };
+                        m.busy = false;
+                        m.progress = None;
+                        if failed == 0 {
+                            this.on_create_community(Act::Finish, window, cx);
+                        } else {
+                            m.error = Some(format!("{failed} invite{} didn't send. Try again, or invite them later.", if failed == 1 { "" } else { "s" }));
+                            cx.notify();
+                        }
+                    })
+                    .ok();
+                })
+                .detach();
+            }
+            Act::Finish => {
+                let id = m.created.as_ref().map(|c| c.0.clone());
+                self.create_community = None;
+                if let Some(id) = id.filter(|_| self.live) {
+                    self.open_community(id, window, cx);
+                }
+            }
+            Act::Cancel => {
+                if m.busy {
+                    return;
+                }
+                self.create_community = None;
+            }
         }
         cx.notify();
     }

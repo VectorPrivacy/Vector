@@ -35,6 +35,8 @@
         get_channel_pins: () => [], sync_community_channel: () => ({ new_messages: 0, reached_start: true, oldest_ms: null }), fill_community_gap: () => 0,
         get_community_timeouts: () => ({}), get_community_mentions: () => ({ anyone: true, pingers: [], roles: [] }), get_community_admins: () => [], get_community_role_graph: () => ({ roles: [], grants: [], activated: false, readers: {} }), get_community_banlist: () => [], get_channel_send_denied: () => [], check_community_raid: () => ({ raid: false }),
         get_community_join_order: () => [],
+        create_community: ({ name }) => ({ community_id: 'f'.repeat(64), channel_id: 'e'.repeat(64), channel_name: 'general', owner_npub: FIX.npub, name }),
+        create_public_invite: () => 'https://vectorapp.io/invite/' + 'Ab3'.repeat(20),
         get_notify_prefs: ({ communityId, scopeIds }) => [...new Set([communityId, ...(scopeIds || [])].filter(Boolean))].map((scope_id) => ({ scope_id, level: null, effective_level: scope_id === communityId ? 'mentions' : 'mentions', muted: false, mute_until: 0, suppress_everyone: false, everyone_muted_globally: false })), get_emoji_usage: () => [],
         cache_android_file: ({ filePath }) => {
             const name = filePath.split('/').pop();

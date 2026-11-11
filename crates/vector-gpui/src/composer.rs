@@ -65,6 +65,8 @@ pub struct TextInput {
     submit_empty: bool,
     /// Draws stock emoji as Twemoji art, as the rich composer does.
     twemoji: bool,
+    /// Typing and pasting stop at this many characters.
+    max_chars: Option<usize>,
     /// The emoji drawn as art, for the content they were found in.
     subs: std::cell::RefCell<(SharedString, std::rc::Rc<[Sub]>)>,
 }
@@ -496,6 +498,14 @@ impl EntityInputHandler for TextInput {
             .map(|range_utf16| self.range_from_utf16(range_utf16))
             .or(self.marked_range.clone())
             .unwrap_or(self.selected_range.clone());
+        let new_text = match self.max_chars {
+            Some(max) => {
+                let kept = self.content[..range.start].chars().count() + self.content[range.end..].chars().count();
+                let room = max.saturating_sub(kept);
+                new_text.char_indices().nth(room).map_or(new_text, |(at, _)| &new_text[..at])
+            }
+            None => new_text,
+        };
 
         self.content =
             (self.content[0..range.start].to_owned() + new_text + &self.content[range.end..])
@@ -880,6 +890,7 @@ impl TextInput {
             clear_on_submit: true,
             submit_empty: false,
             twemoji: false,
+            max_chars: None,
             subs: Default::default(),
         }
     }
@@ -972,6 +983,11 @@ impl TextInput {
     pub fn keep_on_submit(mut self) -> Self {
         self.clear_on_submit = false;
         self.submit_empty = true;
+        self
+    }
+
+    pub fn max_chars(mut self, n: usize) -> Self {
+        self.max_chars = Some(n);
         self
     }
 

@@ -24,6 +24,7 @@ pub enum Act {
     ChannelMenu(String, gpui::Point<gpui::Pixels>),
     /// A Category's "+": a new channel inside it.
     AddChannel(String),
+    Create,
 }
 
 pub type OnAct = Rc<dyn Fn(Act, &mut Window, &mut App)>;

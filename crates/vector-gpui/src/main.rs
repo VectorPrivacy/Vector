@@ -6,6 +6,7 @@ mod badgecard;
 mod call;
 mod community;
 mod createchannel;
+mod createcommunity;
 mod composer;
 #[allow(dead_code, clippy::all)]
 mod crop;
