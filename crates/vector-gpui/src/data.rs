@@ -290,7 +290,6 @@ pub fn file_type(extension: &str) -> (&'static str, &'static str) {
         "vob" => ("film", "DVD Video"),
         "ogv" => ("film", "Ogg Video"),
         "mxf" => ("film", "Material Exchange Format"),
-        "ts" => ("film", "MPEG Transport Stream"),
         "m2ts" => ("film", "Blu-ray Video"),
         "pdf" => ("file", "PDF Document"),
         "doc" => ("file", "Word Document"),

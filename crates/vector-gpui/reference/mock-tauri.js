@@ -22,6 +22,12 @@
         })),
         mark_as_read: ({ chatId, messageId }) => { const c = FIX.chats.find((x) => x.id === chatId); if (c && messageId) c.last_read = messageId; return null; },
         create_account: () => ({ public: FIX.npub, existing: false }), login: () => { throw 'Invalid nsec'; },
+        generate_thumbhash_preview: ({ npub, msgId }) => {
+            const m = msgs(npub).find((x) => x.id === msgId);
+            const hash = m?.attachments?.find((a) => a.img_meta)?.img_meta?.thumbhash;
+            if (!hash || !FIX.thumbs?.[hash]) throw 'No thumbhash';
+            return FIX.thumbs[hash];
+        },
         get_system_events: () => [], pivx_get_chat_payments: () => [], get_message_delete_meta_bulk: () => [],
         get_chat_commands: () => [], list_communities: () => [], get_hidden_banners: () => [],
         get_community_join_order: () => [], get_my_badges: () => [], get_emoji_usage: () => [],

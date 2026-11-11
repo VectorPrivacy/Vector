@@ -65,6 +65,7 @@ pub struct VectorApp {
     picker: Option<String>,
     popup: Option<(kit::Popup, PopupAct)>,
     fail_reasons: Rc<RefCell<HashMap<String, String>>>,
+    media: Rc<RefCell<crate::media::Media>>,
     /// Bumped by each hover, so a stale leave doesn't hide the toolbar.
     hover_gen: u64,
 }
@@ -105,6 +106,7 @@ impl VectorApp {
             picker: None,
             popup: None,
             fail_reasons: Rc::default(),
+            media: Rc::default(),
             hover_gen: 0,
         }
     }
@@ -276,6 +278,38 @@ impl VectorApp {
                     chat.last_read = last;
                 }
             }
+            "attachment_download_progress" => {
+                let Some(id) = payload.get("id").and_then(Value::as_str) else { return };
+                let mut media = self.media.borrow_mut();
+                let t = media.transfers.entry(id.to_string()).or_default();
+                if let Some(p) = payload.get("progress").and_then(Value::as_f64).filter(|&p| p >= 0.) {
+                    t.pct = Some(p as f32);
+                    t.stage = None;
+                }
+                t.bps = payload.get("bytesPerSec").and_then(Value::as_f64);
+            }
+            "attachment_download_stage" => {
+                let Some(id) = payload.get("id").and_then(Value::as_str) else { return };
+                let stage = payload.get("stage").and_then(Value::as_str).map(str::to_string);
+                self.media.borrow_mut().transfers.entry(id.to_string()).or_default().stage = stage;
+            }
+            "attachment_download_result" => {
+                let id = payload.get("id").and_then(Value::as_str).unwrap_or_default().to_string();
+                let matched = payload.get("old_id").and_then(Value::as_str).map(str::to_string).unwrap_or_else(|| id.clone());
+                let success = payload.get("success").and_then(Value::as_bool).unwrap_or(false);
+                let cancelled = payload.get("cancelled").and_then(Value::as_bool).unwrap_or(false);
+                let mut media = self.media.borrow_mut();
+                for k in [&id, &matched] {
+                    media.transfers.remove(k);
+                    media.started.remove(k);
+                }
+                if !success && !cancelled {
+                    let reason = payload.get("result").and_then(Value::as_str).unwrap_or_default().to_string();
+                    media.failed.insert(matched, reason);
+                } else {
+                    media.failed.remove(&matched);
+                }
+            }
             "unread_counts_stale" => self.refresh_unread(cx),
             "sync_progress" => self.syncing = true,
             "sync_finished" => {
@@ -397,6 +431,20 @@ impl VectorApp {
                     .detach();
                 }
             }
+            Act::Download(att) => self.start_download(id, att, false, cx),
+            Act::CancelDownload(att) => {
+                if self.live {
+                    backend::attachments::cancel(&att);
+                } else {
+                    self.media.borrow_mut().started.remove(&att);
+                }
+                cx.notify();
+            }
+            Act::RevealMedia(att) => {
+                self.media.borrow_mut().revealed.insert(att);
+                cx.notify();
+            }
+            Act::OpenFile(att) => self.open_file(id, att, cx),
             Act::Dismiss => {
                 if self.picker.as_deref() == Some(id.as_str()) {
                     self.picker = None;
@@ -472,6 +520,61 @@ impl VectorApp {
         cx.spawn(async move |this, cx| {
             if let Ok(Err(e)) = rx.await {
                 this.update(cx, |this, cx| this.notice(title, e, cx)).ok();
+            }
+        })
+        .detach();
+    }
+
+    /// Fetch an attachment; its events paint the progress and the result.
+    pub fn start_download(&mut self, msg_id: String, att_id: String, auto: bool, cx: &mut Context<Self>) {
+        let Some(chat) = self.open.clone() else { return };
+        {
+            let mut media = self.media.borrow_mut();
+            if !media.started.insert(att_id.clone()) {
+                return;
+            }
+            media.failed.remove(&att_id);
+        }
+        cx.notify();
+        if !self.live {
+            return;
+        }
+        let rx = backend::run(backend::attachments::download(chat.to_string(), msg_id, att_id.clone(), auto));
+        cx.spawn(async move |this, cx| {
+            let _ = rx.await;
+            this.update(cx, |this, cx| {
+                this.media.borrow_mut().started.remove(&att_id);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// A file on this device: shown in its folder, or a held one saved where the user picks.
+    fn open_file(&mut self, msg_id: String, att_id: String, cx: &mut Context<Self>) {
+        let Some(att) = self.message(&msg_id).and_then(|m| m.attachments.into_iter().find(|a| a.id == att_id)) else { return };
+        if !att.resident && !att.path.is_empty() {
+            let path = std::path::PathBuf::from(&att.path);
+            let path = if path.is_absolute() { path } else { self.store.borrow().media_root.join(path) };
+            cx.reveal_path(&path);
+            return;
+        }
+        if !self.live {
+            return;
+        }
+        let Some(hash) = vector_core::simd::hex::hex_to_bytes_32_checked(&att.id) else { return };
+        let dir = dirs::download_dir().unwrap_or_else(std::env::temp_dir);
+        let name = if att.name.is_empty() { format!("{}.{}", &att.id[..16.min(att.id.len())], att.extension) } else { att.name.clone() };
+        let pick = cx.prompt_for_new_path(&dir, Some(&name));
+        cx.spawn(async move |this, cx| {
+            let Ok(Ok(Some(dest))) = pick.await else { return };
+            let rx = backend::run(async move {
+                let bytes = backend::attachments::bytes(Some(hash), String::new()).await.ok_or("This file isn't on this device any more")?;
+                tokio::fs::write(&dest, bytes).await.map_err(|e| e.to_string())
+            });
+            if let Ok(Err(e)) = rx.await {
+                this.update(cx, |this, cx| this.notice("Save Failed", e.to_string(), cx)).ok();
             }
         })
         .detach();
@@ -1146,6 +1249,7 @@ impl VectorApp {
         let revealed = self.revealed.clone();
         let clock = self.started.elapsed().as_secs_f32();
         let app = cx.entity().downgrade();
+        let app_media = app.clone();
         let on_act: timeline::OnAct = Rc::new(move |msg_id, act, window, cx| {
             let msg_id = msg_id.to_string();
             app.update(cx, |app, cx| app.on_act(msg_id, act, window, cx)).ok();
@@ -1157,7 +1261,9 @@ impl VectorApp {
             _ => None,
         };
         let fail_reasons = self.fail_reasons.clone();
-        let messages = list(self.timeline.clone(), move |i, _, _| {
+        let media = self.media.clone();
+        let live = self.live;
+        let messages = list(self.timeline.clone(), move |i, window, cx| {
             let rows_store = rows_store.borrow();
             let (Some(chat), Some(row)) = (rows_store.chat(&rows_id), rows.get(i)) else {
                 return div().into_any_element();
@@ -1174,10 +1280,28 @@ impl VectorApp {
                 replying: replying.as_deref(),
                 picker: picker.as_deref(),
                 fail_reasons: &fail_reasons,
+                media: &media,
+                scale: window.scale_factor(),
             };
             // A divider's 10px margins stand in for the row's own above it.
             let after_message = i > 0 && matches!(rows[i - 1], Row::Message { .. });
-            timeline_row(&ctx, row, after_message)
+            let el = timeline_row(&ctx, row, after_message);
+            // `.chat-rows > *:last-child`: clear of the typing strip.
+            let el = if i + 1 == rows.len() { div().pb(px(33.)).child(el).into_any_element() } else { el };
+            crate::media::pump(&media, app_media.clone(), live, cx);
+            let autos = std::mem::take(&mut media.borrow_mut().auto_queue);
+            if !autos.is_empty() {
+                let app = app_media.clone();
+                cx.defer(move |cx| {
+                    app.update(cx, |app, cx| {
+                        for (msg, att) in autos {
+                            app.start_download(msg, att, true, cx);
+                        }
+                    })
+                    .ok();
+                });
+            }
+            el
         })
         .size_full();
 
@@ -1189,7 +1313,29 @@ impl VectorApp {
             .flex_col()
             .bg(c(CHAT_BG))
             .child(header)
-            .child(div().flex_1().min_h_0().bg(c(MESSAGES_BG)).pt(px(12.)).child(messages))
+            .child(
+                div()
+                    .relative()
+                    .flex_1()
+                    .min_h_0()
+                    .bg(c(MESSAGES_BG))
+                    .pt(px(12.))
+                    .child(messages)
+                    // `.fadeout-bottom-msgs`: rows dim into the composer.
+                    .child(
+                        div()
+                            .absolute()
+                            .bottom_0()
+                            .left_0()
+                            .right_0()
+                            .h(px(40.))
+                            .bg(gpui::linear_gradient(
+                                180.,
+                                gpui::linear_color_stop(ca(3, 3, 3, 0.), 0.8),
+                                gpui::linear_color_stop(ca(3, 3, 3, 0.5), 1.),
+                            )),
+                    ),
+            )
             .child(composer(self.input.clone(), &self.mode, cx))
     }
 }

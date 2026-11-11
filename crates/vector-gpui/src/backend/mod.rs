@@ -3,6 +3,7 @@
 
 pub mod account;
 pub mod actions;
+pub mod attachments;
 pub mod events;
 pub mod images;
 pub mod messaging;

@@ -34,6 +34,13 @@ pub enum Act {
     Delete,
     /// A click outside the open reaction menu.
     Dismiss,
+    /// Fetch this attachment (or retry it).
+    Download(String),
+    CancelDownload(String),
+    /// Tap a spoiler picture open.
+    RevealMedia(String),
+    /// A file on this device: show it, or save a held one.
+    OpenFile(String),
 }
 
 pub type OnAct = Rc<dyn Fn(&str, Act, &mut Window, &mut App)>;
@@ -58,6 +65,10 @@ pub struct Ctx<'a> {
     pub picker: Option<&'a str>,
     /// Why a send failed, by message.
     pub fail_reasons: &'a HashMap<String, String>,
+    /// Attachment pictures, blurs and transfers.
+    pub media: &'a std::cell::RefCell<crate::media::Media>,
+    /// Device pixels per pixel, for decoding pictures at the size they draw.
+    pub scale: f32,
 }
 
 pub fn base_look() -> Look {
@@ -137,7 +148,12 @@ pub fn message_row(ctx: &Ctx, index: usize, first: bool, gap: f32) -> AnyElement
                 .child(div().flex_shrink_0().text_size(px(12.)).text_color(white_a(0.4)).child(data::clock(m.at))),
         );
     }
-    body = body.child(div().when(pending || failed, |d| d.opacity(0.6)).child(content(ctx, m)));
+    body = body.child(
+        div()
+            .when(pending || failed, |d| d.opacity(0.6))
+            .child(content(ctx, m))
+            .children(crate::attachments::attachments(ctx, m)),
+    );
     if let Some(reason) = ctx.fail_reasons.get(&m.id).filter(|_| failed) {
         body = body.child(div().mt(px(4.)).text_size(px(12.)).line_height(px(16.2)).text_color(c(DANGER)).child(reason.clone()));
     }

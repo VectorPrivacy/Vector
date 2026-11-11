@@ -1,5 +1,5 @@
 // Deterministic fixture data, shared by the Tauri reference render and vector-gpui.
-import { writeFileSync } from 'fs';
+import { writeFileSync, readFileSync } from 'fs';
 import { createHash } from 'crypto';
 
 const NOW = Date.parse('2026-11-11T02:00:00Z');
@@ -91,5 +91,36 @@ for (const [seed, name, last, minsAgo, unread] of people) {
         muted: false, notify: 2, everyone_pings: true, community_muted: false,
     });
 }
-writeFileSync(new URL('./fixtures.json', import.meta.url), JSON.stringify({ now: NOW, npub: me, profiles, chats }, null, 1));
+// Attachments in each state a bubble draws: on this device, a blur waiting on a download
+// (too large to auto-download), one auto-downloading, a veiled spoiler, and file boxes.
+const thumbs = {};
+{
+    const tsv = readFileSync(new URL('./media/thumbs.tsv', import.meta.url), 'utf8').trim().split('\n');
+    const meta = Object.fromEntries(tsv.map((l) => { const [file, w, h, hash, url] = l.split('\t'); thumbs[hash] = url; return [file, { thumbhash: hash, width: +w, height: +h }]; }));
+    const id = npub('mo');
+    profiles.push(profile({ id, name: 'mo', display_name: 'Mo', avatar: 'https://example.invalid/grace.png', avatar_cached: 'avatars/grace.png' }));
+    const at = NOW - 120_000;
+    const att = (seed, o) => ({ id: hex(`att-${seed}`), key: '', nonce: '', extension: 'png', name: '', url: `https://example.invalid/${seed}`,
+        path: '', size: 0, img_meta: null, downloading: false, downloaded: false, ...o });
+    const m = (i, mine, content, back, attachments) => ({
+        id: hex(`mo-${i}`), content, replied_to: '', preview_metadata: null, attachments, reactions: [],
+        at: at - back * 60_000, pending: false, failed: false, mine, npub: mine ? me : id, edited: false,
+    });
+    const messages = [
+        m(0, false, 'Look at this sunset', 50, [att('photo', { path: 'media/photo.png', downloaded: true, size: 170552, img_meta: meta['photo.png'] })]),
+        m(1, true, '', 40, [att('portrait', { size: 24_117_248, img_meta: meta['portrait.png'] })]),
+        m(2, false, '', 30, [att('sticker', { name: 'SPOILER_sticker.png', path: 'media/sticker.png', downloaded: true, size: 15319, img_meta: meta['sticker.png'] })]),
+        m(3, false, 'The spec, and the build', 20, [
+            att('spec', { extension: 'pdf', name: 'Vector Protocol Spec.pdf', size: 13_002_342 }),
+            att('build', { extension: 'zip', name: 'vector-0.5.1-linux.zip', path: 'media/sticker.png', downloaded: true, size: 48_234_496 }),
+        ]),
+        m(4, true, 'Thanks!', 5, []),
+    ];
+    chats.unshift({
+        id, chat_type: 'DirectMessage', participants: [id], messages, last_read: messages[messages.length - 1].id,
+        unread_from: '', created_at: Math.floor((at - 86400_000) / 1000), metadata: { custom_fields: {} },
+        muted: false, notify: 2, everyone_pings: true, community_muted: false,
+    });
+}
+writeFileSync(new URL('./fixtures.json', import.meta.url), JSON.stringify({ now: NOW, npub: me, profiles, chats, thumbs }, null, 1));
 console.log(`${chats.length} chats, ${profiles.length} profiles`);

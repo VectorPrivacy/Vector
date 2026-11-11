@@ -30,6 +30,7 @@ const logs = [];
 page.on('console', (m) => { if (m.type() === 'error' || m.type() === 'warning') logs.push(`[${m.type()}] ${m.text()}`); });
 page.on('pageerror', (e) => logs.push(`[pageerror] ${e.message}`));
 await page.addInitScript(`window.__VECTOR_FIXTURES__ = ${JSON.stringify(fixtures)};`);
+await page.addInitScript(`window.__OPEN_NAME__ = ${JSON.stringify(process.env.OPEN || '')};`);
 await page.addInitScript(`window.__MOCK_MODE__ = ${JSON.stringify(process.env.MOCK_MODE || 'app')};`);
 await page.addInitScript({ path: join(HERE, 'mock-tauri.js') });
 await page.goto(`http://localhost:${port}/`);

@@ -1,4 +1,5 @@
 mod assets;
+mod attachments;
 mod backend;
 mod composer;
 mod data;
@@ -8,6 +9,7 @@ mod inline;
 mod kit;
 mod login;
 mod markdown;
+mod media;
 mod preview;
 mod theme;
 mod timeline;
