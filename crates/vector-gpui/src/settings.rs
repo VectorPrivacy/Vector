@@ -158,8 +158,10 @@ pub const STORAGE: [Toggle; 2] = [
     t("keep_media", "Keep Files on This Device", "keepMedia", Home::Sql(false), ""),
 ];
 
+pub const CLOCK: Toggle = t("clock_decentralised", "Decentralised Clock", "clock", Home::Sql(true), "");
+
 pub fn toggles() -> impl Iterator<Item = &'static Toggle> {
-    DISPLAY.iter().chain(PRIVACY.iter()).chain(NOTIFY.iter()).chain(STORAGE.iter()).chain(OTHER.iter())
+    DISPLAY.iter().chain(PRIVACY.iter()).chain(NOTIFY.iter()).chain(STORAGE.iter()).chain(OTHER.iter()).chain(std::iter::once(&CLOCK))
 }
 
 pub fn toggle_of(key: &str) -> Option<&'static Toggle> {
@@ -177,6 +179,8 @@ pub fn help(key: &str) -> Option<(&'static str, String)> {
         "autocorrect" => ("Autocorrect", "When enabled, your device corrects typos as you type in the chat box, using your system's autocorrect.<br><br>Turn it off if your system keeps \"fixing\" words you meant to type."),
         "sendOnEnter" => ("Send on Enter", "When enabled, <b>Enter</b> sends your message, and <b>Shift + Enter</b> starts a new line.<br><br>Turn it off to have Enter always start a new line; send with the Send button, or <b>Ctrl + Enter</b> (<b>Cmd + Enter</b> on a Mac).<br><br>On by default on computers and off on phones. This applies to this device only."),
         "floatingPlayer" => ("Floating Player", "When enabled, <b>audio and video keep playing</b> when you leave their chat, in a small player you can move and resize anywhere.<br><br>Runs of voice messages play through, and a video can shrink to sound only.<br><br>Turn it off to stop media when you leave its chat."),
+        "relays" => ("Nostr Relays", "Nostr Relays are <b>decentralized servers that store and relay your messages</b> across the Nostr network.<br><br>Vector connects to multiple relays simultaneously to ensure your messages are delivered reliably and are censorship-resistant."),
+        "servers" => ("Media Servers", "Media Servers are <b>Blossom-compatible servers that store your files</b> (images, videos, documents) for sharing in messages and for storage in an encrypted cloud.<br><br>Your server list syncs automatically across your devices."),
         "mute" => ("Mute Notification Sounds", "When enabled, Vector will <b>not play any notification sounds</b> for incoming messages.<br><br>You will still receive visual notifications and badges."),
         "everyone" => ("Mute @everyone Pings", "When enabled, <b>@everyone</b> mentions from group admins will <b>not bypass</b> your group mute setting.<br><br>By default, @everyone pings from admins will notify you even if the group is muted."),
         "notifPrivacy" => ("Notification Content Privacy", "Controls how much of a message shows in OS notifications (lock screen, banners).<br><br><b>Show sender and message</b>: full preview.<br><b>Hide message</b>: shows who messaged you, not what.<br><b>Hide sender</b>: shows the message, not who sent it.<br><b>Hide sender and message</b>: a generic \"You received a message\", revealing nothing."),
@@ -263,6 +267,10 @@ pub struct Settings {
     /// The auto-download size limit, in bytes.
     pub auto_limit: u64,
     pub clearing: bool,
+    pub relays: Option<Vec<crate::backend::network::RelayRow>>,
+    pub servers: Option<Vec<vector_core::blossom_servers::BlossomServerInfo>>,
+    pub clock: Option<vector_core::clock::Status>,
+    pub dialog: Option<crate::netdialog::NetDialog>,
     /// Blocked users, once loaded.
     pub blocked: Option<Vec<Blocked>>,
     /// Anchors whose NEW pill has been seen.
@@ -300,6 +308,10 @@ pub enum Act {
     Unblock(String),
     CopyLogs,
     Logout,
+    AddRelay,
+    AddServer,
+    OpenRelay(String),
+    OpenServer(String),
     DonutHover(Option<usize>),
     DonutPick(usize),
     DonutDelete,
@@ -1231,12 +1243,204 @@ fn storage_block(s: &Settings, on: &OnAct) -> AnyElement {
         .into_any_element()
 }
 
+/// `.st-btn`: the small grey button.
+fn st_btn(id: &'static str, label: &'static str, act: impl Fn() -> Act + 'static, on: &OnAct) -> AnyElement {
+    small_button(id, label, act, on)
+}
+
+/// `.st-row`: a label with its explainer, an action flush right.
+fn st_row(id: &'static str, label: &'static str, help: &'static str, action: AnyElement, on: &OnAct) -> AnyElement {
+    div()
+        .min_h(px(36.))
+        .mb(px(10.))
+        .flex()
+        .items_center()
+        .justify_between()
+        .gap(px(12.))
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(6.))
+                .text_size(px(16.))
+                .line_height(px(24.))
+                .text_color(c(0xffffff))
+                .child(label)
+                .child(info(SharedString::from(format!("{id}-info")), click(on, move || Act::Help(help)))),
+        )
+        .child(action)
+        .into_any_element()
+}
+
+/// A connection's state in words, with its icon: `.st-page .relay-status`.
+pub fn relay_status(tone: &str, text: impl Into<SharedString>) -> AnyElement {
+    let (color, icon) = match tone {
+        "connected" => (c(ACCENT), "icons/check-circle.svg"),
+        "disconnected" | "terminated" | "banned" => (c(crate::timeline::DANGER), "icons/cancel.svg"),
+        "disabled" => (c(0xb2b2b2), "icons/disable.svg"),
+        "connecting" => (c(0xffc107), "icons/clock.svg"),
+        "pending" => (c(0x9c27b0), "icons/clock.svg"),
+        "sleeping" => (c(0x6495ed), "icons/clock.svg"),
+        _ => (c(0x808080), "icons/clock.svg"),
+    };
+    div()
+        .flex()
+        .flex_shrink_0()
+        .items_center()
+        .gap(px(6.))
+        .text_size(px(16.))
+        .line_height(px(19.))
+        .text_color(color)
+        .child(svg().path(icon).size(px(16.)).flex_shrink_0().text_color(color))
+        .child(text.into())
+        .into_any_element()
+}
+
+/// The relay list's word for a socket state.
+pub fn said(status: &str) -> String {
+    if status == "disconnected" {
+        return "Not Connected".into();
+    }
+    let mut ch = status.chars();
+    ch.next().map(|f| f.to_uppercase().collect::<String>() + ch.as_str()).unwrap_or_default()
+}
+
+/// Where a row came from: `default` outlined, `custom` filled.
+fn origin_pill(default: bool) -> impl IntoElement {
+    div()
+        .min_w(px(64.))
+        .h(px(32.))
+        .px(px(10.))
+        .flex()
+        .flex_shrink_0()
+        .items_center()
+        .justify_center()
+        .rounded_full()
+        .border_1()
+        .when(default, |d| d.border_color(c(0x474747)))
+        .when(!default, |d| d.border_color(c(0x333333)).bg(c(0x333333)))
+        .text_size(px(12.))
+        .text_color(c(0xb2b2b2))
+        .child(if default { "Default" } else { "Custom" })
+}
+
+pub fn host(url: &str) -> String {
+    let rest = url.split_once("://").map(|(_, r)| r).unwrap_or(url);
+    rest.trim_end_matches('/').to_string()
+}
+
+/// `.st-page .relay-item`: flat, full width past the column's edges, lit on hover.
+fn net_row(id: SharedString, enabled: bool, act: impl Fn() -> Act + 'static, on: &OnAct) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(id)
+        .mx(px(-8.))
+        .mb(px(2.))
+        .h(px(44.))
+        .px(px(8.))
+        .flex()
+        .items_center()
+        .justify_between()
+        .rounded(px(6.))
+        .cursor_pointer()
+        .hover(|d| d.bg(c(0x171717)))
+        .when(!enabled, |d| d.opacity(0.55))
+        .on_click(click(on, act))
+}
+
+fn relays_block(s: &Settings, on: &OnAct) -> AnyElement {
+    let mut col = div().flex().flex_col().child(st_row("relays", "Add Custom Relay", "relays", st_btn("add-relay", "Add Relay", || Act::AddRelay, on), on));
+    for r in s.relays.iter().flatten() {
+        let mut content = div().flex_1().min_w_0().flex().items_center().gap(px(12.));
+        if !r.is_default && r.mode != "both" {
+            content = content.child(
+                div()
+                    .px(px(6.))
+                    .h(px(28.))
+                    .flex()
+                    .items_center()
+                    .rounded(px(4.))
+                    .bg(ca(139, 92, 246, 0.2))
+                    .text_size(px(10.))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(c(0x8b5cf6))
+                    .child(if r.mode == "read" { "R" } else { "W" }),
+            );
+        }
+        content = content
+            .child(origin_pill(r.is_default))
+            .child(div().size(px(22.)).flex_shrink_0().flex().items_center().justify_center().child(svg().path("icons/globe.svg").size(px(16.)).text_color(c(0x7a7a7a))))
+            .child(div().flex_1().min_w_0().truncate().mr(px(15.)).text_size(px(16.)).line_height(px(24.)).text_color(c(0xffffff)).child(host(&r.url)));
+        col = col.child(
+            net_row(SharedString::from(format!("relay-{}", r.url)), r.enabled, { let u = r.url.clone(); move || Act::OpenRelay(u.clone()) }, on)
+                .child(content)
+                .child(div().ml(px(10.)).child(relay_status(r.status, said(r.status)))),
+        );
+    }
+    col.into_any_element()
+}
+
+fn servers_block(s: &Settings, on: &OnAct) -> AnyElement {
+    let mut col = div().flex().flex_col().child(st_row("servers", "Add Custom Server", "servers", st_btn("add-server", "Add Server", || Act::AddServer, on), on));
+    for sv in s.servers.iter().flatten() {
+        let content = div()
+            .flex_1()
+            .min_w_0()
+            .flex()
+            .items_center()
+            .gap(px(12.))
+            .child(origin_pill(sv.is_default))
+            .child(div().flex_1().min_w_0().truncate().mr(px(15.)).text_size(px(16.)).line_height(px(24.)).text_color(c(0xffffff)).child(host(&sv.url)));
+        let mut right = div().flex().items_center();
+        if let Some(ms) = sv.status.latency_ms.filter(|_| sv.enabled) {
+            right = right.child(div().mr(px(8.)).text_size(px(11.)).line_height(px(24.)).opacity(0.45).text_color(c(0xffffff)).child(format!("{ms} ms")));
+        }
+        right = right.child(relay_status(sv.status.tone, sv.status.label));
+        col = col.child(net_row(SharedString::from(format!("server-{}", sv.url)), sv.enabled, { let u = sv.url.clone(); move || Act::OpenServer(u.clone()) }, on).child(content).child(right));
+    }
+    col.into_any_element()
+}
+
+fn span(ms: i64) -> String {
+    let s = (ms.unsigned_abs() as f64 / 1000.).round() as u64;
+    let (n, unit) = if s < 90 {
+        (s, "second")
+    } else if s < 5400 {
+        ((s as f64 / 60.).round() as u64, "minute")
+    } else {
+        ((s as f64 / 3600.).round() as u64, "hour")
+    };
+    format!("{n} {unit}{}", if n == 1 { "" } else { "s" })
+}
+
+fn clock_block(s: &Settings, on: &OnAct) -> AnyElement {
+    let note = match &s.clock {
+        Some(c) if c.checked_at == 0 => "Checking the time with your relays…".to_string(),
+        None => "Checking the time with your relays…".to_string(),
+        Some(c) if c.agreeing < 3 => "Fewer than three of your relays agreed on the time, so this device’s clock is in use.".into(),
+        Some(c) if c.measured_offset_ms == 0 => "This device’s clock matches your relays.".into(),
+        Some(c) => {
+            let apart = format!("{} {}", span(c.measured_offset_ms), if c.measured_offset_ms > 0 { "slow" } else { "fast" });
+            if c.decentralised { format!("This device’s clock is {apart}. Vector is using your relays’ time.") } else { format!("Your relays say this device’s clock is {apart}.") }
+        }
+    };
+    div()
+        .flex()
+        .flex_col()
+        .child(row(s, "clock_decentralised", on, false))
+        // `.notif-note`: its -4px pulls it under the row's margin.
+        .child(div().mt(px(-4.)).mb(px(14.)).text_size(px(13.)).line_height(px(17.)).text_color(c(0x8a8a8a)).child(note))
+        .into_any_element()
+}
+
 fn block(id: &str, s: &Settings, on: &OnAct) -> Option<AnyElement> {
     Some(match id {
         "display" => display_block(s, on),
         "privacy" => privacy_block(s, on),
         "notifications" => notifications_block(s, on),
         "storage" => storage_block(s, on),
+        "relays" => relays_block(s, on),
+        "servers" => servers_block(s, on),
+        "clock" => clock_block(s, on),
         "streamer" => streamer_block(s, on),
         "blocked" => blocked_block(s, on),
         "advanced" => row(s, "advanced", on, false),

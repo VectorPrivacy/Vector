@@ -17,19 +17,19 @@ use vector_core::{db, ClientRelayExt};
 
 #[derive(serde::Serialize, Clone, Default)]
 pub struct RelayMetrics {
-    ping_ms: Option<u64>,
+    pub ping_ms: Option<u64>,
     bytes_up: u64,
     bytes_down: u64,
-    last_check: Option<u64>,
+    pub last_check: Option<u64>,
     events_received: u64,
     events_sent: u64,
 }
 
 #[derive(serde::Serialize, Clone)]
 pub struct RelayLog {
-    timestamp: u64,
-    level: String,
-    message: String,
+    pub timestamp: u64,
+    pub level: String,
+    pub message: String,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone)]
@@ -79,7 +79,7 @@ fn update_relay_metrics(url: &str, f: impl FnOnce(&mut RelayMetrics)) {
     }
 }
 
-fn is_default_relay(url: &str) -> bool {
+pub fn is_default_relay(url: &str) -> bool {
     let normalized = url.trim().trim_end_matches('/');
     DEFAULT_RELAYS.iter().any(|r| r.eq_ignore_ascii_case(normalized))
 }
@@ -223,7 +223,7 @@ pub async fn get_relays() -> Result<Value, String> {
     Ok(Value::Array(infos))
 }
 
-async fn toggle_default_relay(url: String, enabled: bool) -> Result<bool, String> {
+pub async fn toggle_default_relay(url: String, enabled: bool) -> Result<bool, String> {
     if !is_default_relay(&url) {
         return Err("Not a default relay".to_string());
     }
@@ -249,7 +249,7 @@ async fn toggle_default_relay(url: String, enabled: bool) -> Result<bool, String
     Ok(true)
 }
 
-async fn add_custom_relay(url: String, mode: Option<String>) -> Result<CustomRelay, String> {
+pub async fn add_custom_relay(url: String, mode: Option<String>) -> Result<CustomRelay, String> {
     let normalized = validate_relay_url(&url)?;
     let mode = mode.unwrap_or_else(default_relay_mode);
     if !["read", "write", "both"].contains(&mode.as_str()) {
@@ -277,7 +277,7 @@ async fn add_custom_relay(url: String, mode: Option<String>) -> Result<CustomRel
     Ok(relay)
 }
 
-async fn remove_custom_relay(url: String) -> Result<bool, String> {
+pub async fn remove_custom_relay(url: String) -> Result<bool, String> {
     let mut relays = load_custom_relays()?;
     let before = relays.len();
     relays.retain(|r| !r.url.eq_ignore_ascii_case(&url));
@@ -294,7 +294,7 @@ async fn remove_custom_relay(url: String) -> Result<bool, String> {
     Ok(true)
 }
 
-async fn toggle_custom_relay(url: String, enabled: bool) -> Result<bool, String> {
+pub async fn toggle_custom_relay(url: String, enabled: bool) -> Result<bool, String> {
     let mut relays = load_custom_relays()?;
     let relay = relays.iter_mut().find(|r| r.url.eq_ignore_ascii_case(&url)).ok_or("Relay not found")?;
     relay.enabled = enabled;
@@ -314,7 +314,7 @@ async fn toggle_custom_relay(url: String, enabled: bool) -> Result<bool, String>
     Ok(true)
 }
 
-async fn update_relay_mode(url: String, mode: String) -> Result<bool, String> {
+pub async fn update_relay_mode(url: String, mode: String) -> Result<bool, String> {
     if !["read", "write", "both"].contains(&mode.as_str()) {
         return Err("Invalid mode. Must be 'read', 'write', or 'both'".to_string());
     }
@@ -628,3 +628,139 @@ pub fn start_relay_monitor(client: &Client) {
 // ============================================================================
 // Blossom
 // ============================================================================
+
+/// A relay as the Network list shows it.
+#[derive(Clone)]
+pub struct RelayRow {
+    pub url: String,
+    pub status: &'static str,
+    pub is_default: bool,
+    pub enabled: bool,
+    pub mode: String,
+}
+
+pub async fn relay_rows() -> Vec<RelayRow> {
+    let customs = load_custom_relays().unwrap_or_default();
+    let disabled = disabled_default_relays().unwrap_or_default();
+    let pool = match state::nostr_client() {
+        Some(c) => c.relays().await,
+        None => Default::default(),
+    };
+    let status_of = |url: &str| {
+        pool.iter()
+            .find(|(u, _)| u.as_str().trim_end_matches('/').eq_ignore_ascii_case(url.trim_end_matches('/')))
+            .map(|(_, r)| status_label(r.status()))
+            .unwrap_or("disconnected")
+    };
+    let mut out: Vec<RelayRow> = DEFAULT_RELAYS
+        .iter()
+        .map(|url| {
+            let enabled = !disabled.iter().any(|d| d.eq_ignore_ascii_case(url));
+            RelayRow { url: url.to_string(), status: if enabled { status_of(url) } else { "disabled" }, is_default: true, enabled, mode: "both".into() }
+        })
+        .collect();
+    out.extend(customs.into_iter().map(|c| RelayRow { status: if c.enabled { status_of(&c.url) } else { "disabled" }, url: c.url, is_default: false, enabled: c.enabled, mode: c.mode }));
+    out
+}
+
+pub fn relay_metrics_of(url: &str) -> RelayMetrics {
+    relay_metrics().read().ok().and_then(|m| m.get(&log_key(url)).cloned()).unwrap_or_default()
+}
+
+pub fn relay_logs_of(url: &str) -> Vec<RelayLog> {
+    relay_logs().read().ok().and_then(|l| l.get(&log_key(url)).map(|l| l.iter().cloned().collect())).unwrap_or_default()
+}
+
+// Media servers
+// ============================================================================
+
+use vector_core::blossom_servers as bs;
+
+fn probe_server(url: String) {
+    db::spawn_bound(async move {
+        if state::nostr_client().is_none() {
+            return;
+        }
+        let Ok(signer) = vector_core::signer::active_signer() else { return };
+        if vector_core::blossom_info::refresh_all(signer.clone(), vec![url.clone()], Duration::from_secs(60)).await > 0 {
+            vector_core::traits::emit_event("blossom_info_updated", &());
+        }
+        if let Ok(n) = vector_core::blossom::probe_servers_for_octet_stream(signer, vec![url]).await
+            && n > 0
+        {
+            vector_core::traits::emit_event("blossom_capabilities_updated", &());
+        }
+    });
+}
+
+pub fn server_rows() -> Vec<bs::BlossomServerInfo> {
+    bs::list_all_servers()
+}
+
+pub async fn add_server(url: String) -> Result<(), String> {
+    db::scoped(async move {
+        let normalized = bs::validate_url(&url)?;
+        if bs::is_default_server(&normalized) {
+            return Err("Cannot add a default server as custom".to_string());
+        }
+        let key = normalized.to_lowercase();
+        let mut customs = bs::load_custom_blossom_servers()?;
+        if customs.iter().any(|c| c.url.trim_end_matches('/').to_lowercase() == key) {
+            return Err("Server already exists".to_string());
+        }
+        customs.push(bs::CustomBlossomServer { url: normalized.clone(), enabled: true });
+        bs::save_custom_blossom_servers(&customs)?;
+        bs::refresh_cache();
+        bs::republish_blossom_servers_debounced();
+        probe_server(normalized);
+        Ok(())
+    })
+    .await
+}
+
+pub async fn remove_server(url: String) -> Result<bool, String> {
+    db::scoped(async move {
+        let target = url.trim().trim_end_matches('/').to_lowercase();
+        let mut customs = bs::load_custom_blossom_servers()?;
+        let before = customs.len();
+        customs.retain(|c| c.url.trim_end_matches('/').to_lowercase() != target);
+        if customs.len() == before {
+            return Ok(false);
+        }
+        bs::save_custom_blossom_servers(&customs)?;
+        let _ = vector_core::blossom_capabilities::purge_server(&url);
+        bs::refresh_cache();
+        bs::republish_blossom_servers_debounced();
+        Ok(true)
+    })
+    .await
+}
+
+/// Enable or disable a server, default or custom; re-enabling probes it afresh.
+pub async fn toggle_server(url: String, enabled: bool) -> Result<(), String> {
+    db::scoped(async move {
+        let key = url.trim().trim_end_matches('/').to_lowercase();
+        if bs::is_default_server(&url) {
+            let mut disabled = bs::load_disabled_default_blossom_servers()?;
+            if enabled {
+                disabled.retain(|d| d.trim_end_matches('/').to_lowercase() != key);
+            } else if !disabled.iter().any(|d| d.trim_end_matches('/').to_lowercase() == key) {
+                disabled.push(key);
+            }
+            bs::save_disabled_default_blossom_servers(&disabled)?;
+        } else {
+            let mut customs = bs::load_custom_blossom_servers()?;
+            customs.iter_mut().find(|c| c.url.trim_end_matches('/').to_lowercase() == key).ok_or("Server not found")?.enabled = enabled;
+            bs::save_custom_blossom_servers(&customs)?;
+        }
+        bs::refresh_cache();
+        bs::republish_blossom_servers_debounced();
+        if enabled {
+            probe_server(url);
+        } else {
+            let _ = vector_core::blossom_capabilities::purge_server(&url);
+        }
+        Ok(())
+    })
+    .await
+}

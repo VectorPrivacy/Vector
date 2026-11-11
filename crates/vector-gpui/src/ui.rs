@@ -125,6 +125,10 @@ enum PopupAct {
     Unblock { npub: String },
     Logout,
     ClearStorage,
+    AddServer,
+    DisableRelay { url: String },
+    RemoveRelay { url: String },
+    RemoveServer { url: String },
     /// Delete one slice of the storage chart: its category and the extensions it counted.
     DeleteSlice { category: &'static str, exts: Vec<String> },
     /// Turn Keep Files off, deleting what it kept.
@@ -961,6 +965,31 @@ impl VectorApp {
                 let rx = backend::run(backend::storage::clear_category(category, exts));
                 self.after_storage_clear(rx, true, cx);
             }
+            PopupAct::AddServer => {
+                let Some(input) = popup.input else { return };
+                let url = input.read(cx).text().trim().to_string();
+                if url.is_empty() {
+                    return;
+                }
+                let rx = backend::run(backend::network::add_server(url));
+                cx.spawn(async move |this, cx| {
+                    let result = rx.await.unwrap_or_else(|_| Err("cancelled".into()));
+                    this.update(cx, |this, cx| {
+                        if let Err(e) = result {
+                            let mut popup = kit::Popup::notice("Failed to Add Server");
+                            popup.text = Some(e.into());
+                            this.popup = Some((popup, PopupAct::Notice));
+                        }
+                        this.load_network(cx);
+                        cx.notify();
+                    })
+                    .ok();
+                })
+                .detach();
+            }
+            PopupAct::DisableRelay { url } => self.net_change(backend::run(async move { backend::network::toggle_default_relay(url, false).await.map(|_| ()) }), true, cx),
+            PopupAct::RemoveRelay { url } => self.net_change(backend::run(async move { backend::network::remove_custom_relay(url).await.map(|_| ()) }), true, cx),
+            PopupAct::RemoveServer { url } => self.net_change(backend::run(async move { backend::network::remove_server(url).await.map(|_| ()) }), true, cx),
             PopupAct::StopKeeping => self.set_keep_media(false, cx),
             PopupAct::Logout => {
                 let me = self.store.borrow().my_npub.clone();
@@ -1078,6 +1107,13 @@ impl Render for VectorApp {
                 cx.new(|cx| crate::viktor::Viktor::new(146., greet, cx))
             });
         }
+        let net_dialog = self.settings.as_ref().and_then(|s| s.dialog.as_ref()).map(|d| {
+            let app = cx.entity().downgrade();
+            let on: crate::netdialog::OnAct = std::rc::Rc::new(move |act, window, cx| {
+                app.update(cx, |app, cx| app.on_net(act, window, cx)).ok();
+            });
+            crate::netdialog::view(d, &on, cx)
+        });
         let popup = self.popup.as_ref().map(|(p, _)| {
             let app = cx.entity().downgrade();
             kit::popup(p, move |yes, window, cx| {
@@ -1087,7 +1123,7 @@ impl Render for VectorApp {
         let root = root.on_drop(cx.listener(|app, paths: &gpui::ExternalPaths, window, cx| {
             app.open_paths_preview(paths.paths().to_vec(), window, cx);
         }));
-        root.children(popup).child(chrome(window, false)).child(
+        root.children(net_dialog).children(popup).child(chrome(window, false)).child(
             div()
                 .flex()
                 .flex_row()
@@ -2752,6 +2788,10 @@ impl VectorApp {
             streamer_notif: synced.map(|s| s.streamer.notif).unwrap_or_else(|| "none".into()),
             notif_privacy,
             storage: None,
+            relays: None,
+            servers: None,
+            clock: None,
+            dialog: None,
             donut: Default::default(),
             auto_limit: if self.live { backend::prefs::sql("max_auto_download_bytes").and_then(|v| v.parse().ok()).filter(|v: &u64| *v > 0) } else { None }.unwrap_or(10_485_760),
             clearing: false,
@@ -2763,8 +2803,217 @@ impl VectorApp {
         });
         self.load_blocked(cx);
         self.load_storage(cx);
+        self.load_network(cx);
         self.mark_settings_seen(None);
         cx.notify();
+    }
+
+    fn on_net(&mut self, act: crate::netdialog::Act, _window: &mut Window, cx: &mut Context<Self>) {
+        use crate::netdialog::{Act, NetDialog};
+        let Some(s) = self.settings.as_mut() else { return };
+        let Some(d) = s.dialog.as_mut() else { return };
+        cx.notify();
+        match (act, d) {
+            (Act::Close, _) => s.dialog = None,
+            (Act::Mode(m), NetDialog::AddRelay { mode, .. }) => *mode = m,
+            (Act::Add, NetDialog::AddRelay { input, mode }) => {
+                let typed = input.read(cx).text().trim().to_string();
+                if typed.is_empty() {
+                    let mut popup = kit::Popup::notice("Invalid URL");
+                    popup.text = Some("Please enter a relay URL.".into());
+                    self.popup = Some((popup, PopupAct::Notice));
+                    return;
+                }
+                // Plain ws:// only for .i2p and .onion hosts, where the network encrypts end to end.
+                let lower = typed.to_lowercase();
+                let tls = lower.starts_with("wss://");
+                let bare = typed.get(if tls { 6 } else if lower.starts_with("ws://") { 5 } else { 0 }..).unwrap_or("").to_string();
+                let host = bare.split(['/', ':', '?', '#']).next().unwrap_or("").to_lowercase();
+                let native = host.ends_with(".i2p") || host.ends_with(".onion");
+                let url = format!("{}{bare}", if native && !tls { "ws://" } else { "wss://" });
+                let mode = mode.to_string();
+                let rx = backend::run(async move { backend::network::add_custom_relay(url, Some(mode)).await.map(|_| ()) });
+                cx.spawn(async move |this, cx| {
+                    let result = rx.await.unwrap_or_else(|_| Err("cancelled".into()));
+                    this.update(cx, |this, cx| {
+                        match result {
+                            Ok(()) => {
+                                if let Some(s) = this.settings.as_mut() {
+                                    s.dialog = None;
+                                }
+                            }
+                            Err(e) => {
+                                let mut popup = kit::Popup::notice("Failed to Add Relay");
+                                popup.text = Some(e.into());
+                                this.popup = Some((popup, PopupAct::Notice));
+                            }
+                        }
+                        this.load_network(cx);
+                        cx.notify();
+                    })
+                    .ok();
+                })
+                .detach();
+            }
+            (Act::ToggleModeList, NetDialog::Relay { mode_open, .. }) => *mode_open = !*mode_open,
+            (Act::RelayMode(m), NetDialog::Relay { row, mode_open, .. }) => {
+                *mode_open = false;
+                if row.is_default || row.mode == m {
+                    return;
+                }
+                row.mode = m.to_string();
+                let (url, mode) = (row.url.clone(), m.to_string());
+                self.net_change(backend::run(async move { backend::network::update_relay_mode(url, mode).await.map(|_| ()) }), false, cx);
+            }
+            (Act::CopyLogs, NetDialog::Relay { row, logs, copied, .. }) => {
+                let text = logs
+                    .iter()
+                    .map(|l| {
+                        let at = chrono::DateTime::from_timestamp(l.timestamp as i64, 0).map(|t| t.with_timezone(&chrono::Local).format("%-I:%M:%S %p").to_string()).unwrap_or_default();
+                        format!("[{at}] {}: {}", l.level.to_uppercase(), l.message)
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                cx.write_to_clipboard(gpui::ClipboardItem::new_string(format!("Relay: {}\n\n{text}", row.url)));
+                *copied = true;
+            }
+            (Act::RelayAction, NetDialog::Relay { row, .. }) => {
+                let url = row.url.clone();
+                if row.is_default && row.enabled {
+                    let mut popup = kit::Popup::notice("Disable Default Relay?");
+                    popup.text = Some("This is a <b>default relay</b>. Disabling it may affect message delivery and sync reliability.<br><br>Are you sure you want to disable it?".into());
+                    popup.confirm = "Confirm".into();
+                    popup.cancel = Some("Cancel".into());
+                    self.popup = Some((popup, PopupAct::DisableRelay { url }));
+                } else if row.is_default {
+                    self.net_change(backend::run(async move { backend::network::toggle_default_relay(url, true).await.map(|_| ()) }), true, cx);
+                } else {
+                    let mut popup = kit::Popup::notice("Remove Relay?");
+                    popup.text = Some(format!("Are you sure you want to remove <b>{}</b>?", crate::settings::host(&url)).into());
+                    popup.confirm = "Confirm".into();
+                    popup.cancel = Some("Cancel".into());
+                    self.popup = Some((popup, PopupAct::RemoveRelay { url }));
+                }
+            }
+            (Act::ServerAction, NetDialog::Server { info }) => {
+                let url = info.url.clone();
+                if info.is_custom {
+                    let mut popup = kit::Popup::notice("Remove media server?");
+                    popup.text = Some(format!("<b>{url}</b> will be removed from your list. Existing uploads on that server remain accessible.").into());
+                    popup.confirm = "Confirm".into();
+                    popup.cancel = Some("Cancel".into());
+                    self.popup = Some((popup, PopupAct::RemoveServer { url }));
+                } else {
+                    let enabled = !info.enabled;
+                    info.enabled = enabled;
+                    self.net_change(backend::run(async move { backend::network::toggle_server(url, enabled).await }), false, cx);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Apply a relay or server change, then reread the lists; `close` ends the dialog on success.
+    fn net_change(&mut self, rx: futures::channel::oneshot::Receiver<Result<(), String>>, close: bool, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            let result = rx.await.unwrap_or_else(|_| Err("cancelled".into()));
+            this.update(cx, |this, cx| {
+                match result {
+                    Ok(()) if close => {
+                        if let Some(s) = this.settings.as_mut() {
+                            s.dialog = None;
+                        }
+                    }
+                    Ok(()) => {}
+                    Err(e) => {
+                        let mut popup = kit::Popup::notice("Error");
+                        popup.text = Some(e.into());
+                        this.popup = Some((popup, PopupAct::Notice));
+                    }
+                }
+                this.load_network(cx);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// The relay dialog's status, ping and log, every second while it is open.
+    fn refresh_relay_dialog(&mut self, cx: &mut Context<Self>) {
+        use crate::netdialog::NetDialog;
+        let Some(NetDialog::Relay { row, .. }) = self.settings.as_ref().and_then(|s| s.dialog.as_ref()) else { return };
+        if !self.live {
+            return;
+        }
+        let url = row.url.clone();
+        let rx = backend::run(async move {
+            vector_core::db::scoped(async move {
+                let row = backend::network::relay_rows().await.into_iter().find(|r| r.url.eq_ignore_ascii_case(&url));
+                (row, backend::network::relay_metrics_of(&url), backend::network::relay_logs_of(&url))
+            })
+            .await
+        });
+        cx.spawn(async move |this, cx| {
+            let Ok((fresh, m, l)) = rx.await else { return };
+            let open = this
+                .update(cx, |this, cx| {
+                    let Some(Some(NetDialog::Relay { row, metrics, logs, .. })) = this.settings.as_mut().map(|s| s.dialog.as_mut()) else { return false };
+                    if let Some(f) = fresh {
+                        row.status = f.status;
+                        row.enabled = f.enabled;
+                    }
+                    *metrics = m;
+                    *logs = l;
+                    cx.notify();
+                    true
+                })
+                .unwrap_or(false);
+            if open {
+                cx.background_executor().timer(std::time::Duration::from_secs(1)).await;
+                this.update(cx, |this, cx| this.refresh_relay_dialog(cx)).ok();
+            }
+        })
+        .detach();
+    }
+
+    /// Read the relay and server lists and the clock, and keep them fresh while Network shows.
+    fn load_network(&mut self, cx: &mut Context<Self>) {
+        if !self.live {
+            if let Some(s) = self.settings.as_mut() {
+                let (relays, servers) = fixture_network();
+                s.relays = Some(relays);
+                s.servers = Some(servers);
+                s.clock = Some(vector_core::clock::Status { decentralised: true, measured_offset_ms: 0, offset_ms: 0, answered: 0, agreeing: 0, checked_at: 0 });
+            }
+            return;
+        }
+        let rx = backend::run(async {
+            vector_core::db::scoped(async { (backend::network::relay_rows().await, backend::network::server_rows(), vector_core::clock::status()) }).await
+        });
+        cx.spawn(async move |this, cx| {
+            let Ok((relays, servers, clock)) = rx.await else { return };
+            let again = this
+                .update(cx, |this, cx| {
+                    let Some(s) = this.settings.as_mut() else { return false };
+                    s.relays = Some(relays);
+                    s.servers = Some(servers);
+                    s.clock = Some(clock);
+                    cx.notify();
+                    s.cat == "network"
+                })
+                .unwrap_or(false);
+            if again {
+                cx.background_executor().timer(std::time::Duration::from_secs(2)).await;
+                this.update(cx, |this, cx| {
+                    if this.settings.as_ref().is_some_and(|s| s.cat == "network") {
+                        this.load_network(cx);
+                    }
+                })
+                .ok();
+            }
+        })
+        .detach();
     }
 
     /// Refresh the storage chart; a fresh report drops the chart's selection.
@@ -2989,6 +3238,14 @@ impl VectorApp {
     }
 
     fn on_settings(&mut self, act: crate::settings::Act, window: &mut Window, cx: &mut Context<Self>) {
+        let into_network = matches!(act, crate::settings::Act::Category("network") | crate::settings::Act::Anchor("network", _)) && self.settings.as_ref().is_some_and(|s| s.cat != "network");
+        self.settings_act(act, window, cx);
+        if into_network {
+            self.load_network(cx);
+        }
+    }
+
+    fn settings_act(&mut self, act: crate::settings::Act, window: &mut Window, cx: &mut Context<Self>) {
         use crate::settings::{Act, Home};
         let Some(s) = self.settings.as_mut() else { return };
         cx.notify();
@@ -3127,6 +3384,54 @@ impl VectorApp {
                         self.show_toast(&format!("Copied {lines} log entries to clipboard"), cx);
                     }
                     None => self.show_toast("No logs to copy!", cx),
+                }
+            }
+            Act::AddServer => {
+                let input = cx.new(|cx| TextInput::new("blossom.primal.net", cx).with_look(kit::field_look()).keep_on_submit());
+                cx.subscribe_in(&input, window, |app, _, _: &SendText, window, cx| app.answer_popup(true, window, cx)).detach();
+                cx.subscribe_in(&input, window, |app, _, _: &CancelInput, window, cx| app.answer_popup(false, window, cx)).detach();
+                window.focus(&input.focus_handle(cx), cx);
+                let mut popup = kit::Popup::notice("Add Media Server");
+                popup.icon = None;
+                popup.text = Some("Enter the address of a Blossom-compatible server. A bare domain like <b>blossom.primal.net</b> works. Vector adds <b>https://</b> automatically.".into());
+                popup.confirm = "Confirm".into();
+                popup.cancel = Some("Cancel".into());
+                popup.input = Some(input);
+                self.popup = Some((popup, PopupAct::AddServer));
+            }
+            Act::AddRelay => {
+                let input = cx.new(|cx| TextInput::new("relay.example.com", cx).with_look(kit::field_look()).keep_on_submit());
+                cx.subscribe_in(&input, window, |app, _, _: &SendText, window, cx| app.on_net(crate::netdialog::Act::Add, window, cx)).detach();
+                cx.subscribe_in(&input, window, |app, _, _: &CancelInput, window, cx| app.on_net(crate::netdialog::Act::Close, window, cx)).detach();
+                cx.observe(&input, |_, _, cx| cx.notify()).detach();
+                window.focus(&input.focus_handle(cx), cx);
+                s.dialog = Some(crate::netdialog::NetDialog::AddRelay { input, mode: "both" });
+            }
+            Act::OpenRelay(url) => {
+                let Some(row) = s.relays.iter().flatten().find(|r| r.url == url).cloned() else { return };
+                s.dialog = Some(crate::netdialog::NetDialog::Relay { row, metrics: Default::default(), logs: Vec::new(), mode_open: false, copied: false });
+                self.refresh_relay_dialog(cx);
+            }
+            Act::OpenServer(url) => {
+                let Some(info) = s.servers.iter().flatten().find(|r| r.url == url).cloned() else { return };
+                s.dialog = Some(crate::netdialog::NetDialog::Server { info });
+            }
+            Act::Toggle("clock_decentralised", value) => {
+                s.on.insert("clock_decentralised", value);
+                s.flipped.insert("clock_decentralised");
+                if self.live {
+                    let rx = backend::run(async move { vector_core::db::scoped(async move { vector_core::clock::set_decentralised(value).map(|_| vector_core::clock::status()) }).await });
+                    cx.spawn(async move |this, cx| {
+                        let Ok(Ok(status)) = rx.await else { return };
+                        this.update(cx, |this, cx| {
+                            if let Some(s) = this.settings.as_mut() {
+                                s.clock = Some(status);
+                                cx.notify();
+                            }
+                        })
+                        .ok();
+                    })
+                    .detach();
                 }
             }
             Act::DonutHover(at) => s.donut.hover = at,
@@ -4011,4 +4316,31 @@ impl VectorApp {
             .into_any_element(),
         )
     }
+}
+
+/// Fixtures: the reference's relay and server rows.
+fn fixture_network() -> (Vec<backend::network::RelayRow>, Vec<vector_core::blossom_servers::BlossomServerInfo>) {
+    use backend::network::RelayRow;
+    use vector_core::blossom_stats::ServerStatus;
+    let relay = |url: &str, status: &'static str, is_default: bool, enabled: bool, mode: &str| RelayRow { url: url.into(), status, is_default, enabled, mode: mode.into() };
+    let relays = vec![
+        relay("wss://jskitty.com/nostr", "connected", true, true, "both"),
+        relay("wss://asia.vectorapp.io/nostr", "connected", true, true, "both"),
+        relay("wss://nostr.computingcache.com", "connecting", true, true, "both"),
+        relay("wss://relay.ditto.pub", "disabled", true, false, "both"),
+        relay("wss://relay.example.org", "disconnected", false, true, "read"),
+    ];
+    let server = |url: &str, enabled: bool, state: &'static str, label: &'static str, tone: &'static str, latency_ms: Option<u32>| vector_core::blossom_servers::BlossomServerInfo {
+        url: url.into(),
+        is_default: true,
+        is_custom: false,
+        enabled,
+        status: ServerStatus { state, label, tone, latency_ms },
+    };
+    let servers = vec![
+        server("https://magnitude.vectorapp.io", true, "online", "Online", "connected", Some(84)),
+        server("https://blossom.ditto.pub", true, "untested", "Untested", "disabled", None),
+        server("https://blossom.primal.net", false, "disabled", "Disabled", "disabled", None),
+    ];
+    (relays, servers)
 }
