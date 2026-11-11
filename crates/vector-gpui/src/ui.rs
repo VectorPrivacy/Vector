@@ -72,6 +72,7 @@ pub struct VectorApp {
     picker_closed: std::time::Instant,
     /// Bumped by each hover, so a stale leave doesn't hide the toolbar.
     hover_gen: u64,
+    viewer: Option<Entity<crate::viewer::Viewer>>,
 }
 
 #[derive(Clone, PartialEq)]
@@ -139,6 +140,7 @@ impl VectorApp {
             picker_open: false,
             picker_closed: std::time::Instant::now(),
             hover_gen: 0,
+            viewer: None,
         }
     }
 
@@ -482,6 +484,18 @@ impl VectorApp {
                 cx.notify();
             }
             Act::OpenFile(att) => self.open_file(id, att, cx),
+            Act::View(open) => {
+                let live = self.live;
+                let viewer = cx.new(|cx| crate::viewer::Viewer::new(open, live, window, cx));
+                cx.subscribe_in(&viewer, window, |app, _, _: &crate::viewer::Closed, window, cx| {
+                    app.viewer = None;
+                    window.focus(&app.input.focus_handle(cx), cx);
+                    cx.notify();
+                })
+                .detach();
+                self.viewer = Some(viewer);
+                cx.notify();
+            }
             Act::React => self.toggle_picker(Some(id), window, cx),
             Act::ReactWith(emoji) => {
                 let Some(chat) = self.open.clone() else { return };
@@ -799,6 +813,7 @@ impl Render for VectorApp {
                     None => empty_pane().into_any_element(),
                 }),
         )
+        .children(self.viewer.clone().map(|v| gpui::deferred(div().absolute().inset_0().child(v)).with_priority(10)))
     }
 }
 

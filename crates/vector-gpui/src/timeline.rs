@@ -41,6 +41,8 @@ pub enum Act {
     RevealMedia(String),
     /// A file on this device: show it, or save a held one.
     OpenFile(String),
+    /// Open a picture full screen.
+    View(crate::viewer::Open),
 }
 
 pub type OnAct = Rc<dyn Fn(&str, Act, &mut Window, &mut App)>;
@@ -243,16 +245,20 @@ fn content(ctx: &Ctx, m: &Message) -> AnyElement {
             Piece::Block(b, _) => b,
             Piece::Picture { image, w, h } => {
                 // `.inline-image`: its own size, no taller than 400px nor wider than the bubble.
+                let open = crate::viewer::Open { image: image.clone(), w: *w, h: *h, full: None };
                 let s = (400. / *h as f32).min(1.);
                 let (w, h) = (*w as f32 * s, *h as f32 * s);
+                let (on_act, mid) = (ctx.on_act.clone(), m.id.clone());
                 col = col.child(
+                    div().id(SharedString::from(format!("linked-{}-{i}", m.id))).w(px(w)).max_w_full().cursor_pointer().on_click(move |_, win, cx| {
+                        cx.stop_propagation();
+                        on_act(&mid, Act::View(open.clone()), win, cx)
+                    }).child(
                     img(image.clone())
-                        .w(px(w))
-                        .max_w_full()
+                        .w_full()
                         .aspect_ratio(w / h.max(1.))
                         .rounded(px(8.))
-                        .cursor_pointer()
-                        .hover(|s| s.opacity(0.9)),
+                        .hover(|s| s.opacity(0.9))),
                 );
                 prev_bottom = Some(0.);
                 prev_para = false;

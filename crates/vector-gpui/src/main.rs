@@ -16,6 +16,7 @@ mod preview;
 mod theme;
 mod timeline;
 mod ui;
+mod viewer;
 
 use std::path::PathBuf;
 

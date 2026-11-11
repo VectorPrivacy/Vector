@@ -163,9 +163,16 @@ fn picture(ctx: &Ctx, media: &mut Media, m: &Message, att: &Attachment) -> Optio
     match media.image(&att.id, source(ctx, att), &ext(att), want) {
         Slot::Ready { image, w, h } => {
             let (fw, fh) = media::fit(w, h);
+            let (hash, path) = match source(ctx, att) {
+                Source::Held(h) => (Some(h), None),
+                Source::File(p) => (None, Some(p)),
+            };
+            let open = crate::viewer::Open { image: image.clone(), w, h, full: Some(crate::viewer::Full { hash, path, ext: ext(att) }) };
             Some(
                 div()
+                    .id(SharedString::from(format!("pic-{}", att.id)))
                     .relative()
+                    .when(!pending, |d| d.cursor_pointer().on_click(act(ctx, m, Act::View(open))))
                     .child(img(image).w(px(fw)).h(px(fh)).rounded(px(8.)).when(pending, |i| i.opacity(0.25)))
                     .when(pending, |d| d.child(div().absolute().inset_0().flex().items_center().justify_center().child(ring(48., upload))))
                     .into_any_element(),
