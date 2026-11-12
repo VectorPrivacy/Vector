@@ -1257,6 +1257,12 @@ pub fn i2p_get_config() -> I2pConfigView {
     i2p_config::view_of(&cfg.downcast_ref::<i2p_config::I2pConfig>().cloned().unwrap_or_default())
 }
 
+/// Save the router's port and SAM credentials (`None` keeps the saved ones, `Some(None)` clears
+/// them); a running I2P moves onto that router.
+pub async fn i2p_set_router(port: i64, auth: Option<Option<(String, String)>>) -> Result<TransportStateView, String> {
+    vector_core::db::scoped_result(set_i2p_router(port, auth)).await
+}
+
 /// Ask whatever answers on `port` for a SAM HELLO. Without credentials given, the saved ones,
 /// but only for the saved router's port: they never go to whatever else listens.
 pub async fn i2p_test_router(port: i64, user: Option<String>, password: Option<String>) -> Result<RouterTestView, String> {

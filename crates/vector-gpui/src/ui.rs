@@ -51,6 +51,14 @@ enum Screen {
 
 pub struct VectorApp {
     screen: Screen,
+    /// The transport's view, as the backend last reported it.
+    net_view: Option<Value>,
+    net_seq: Option<u64>,
+    net_polling: bool,
+    /// A new I2P address was asked for: its toast waits until it is in use.
+    net_renewed: Option<std::time::Instant>,
+    /// The Tor or I2P explainer, while open.
+    net_info: Option<&'static str>,
     /// Backed by a live account (else fixtures, for parity renders).
     live: bool,
     store: Shared,
@@ -461,6 +469,13 @@ enum PopupAct {
     StopKeeping,
     /// Agree to connect outside the chosen network, then go on with the call.
     Realtime(CallGo),
+    /// Switch networks though the router check failed.
+    NetUse(String),
+    /// Keep (yes) or end (no) the Mini App session across a switch.
+    NetKeepRealtime(String),
+    NetI2pOnly,
+    NetOpRemove(usize),
+    NetOpReset,
 }
 
 /// A call step that waits on consent to connect outside the network.
@@ -500,6 +515,8 @@ mod miniprofile_ops;
 mod members_ops;
 #[path = "ui_scrollbar.rs"]
 mod ui_scrollbar;
+#[path = "ui_routing.rs"]
+mod ui_routing;
 #[path = "ui_pins.rs"]
 mod pins_ops;
 #[path = "ui_msgmenu.rs"]
@@ -745,6 +762,11 @@ impl VectorApp {
         }
         Self {
             screen: Screen::Main,
+            net_view: None,
+            net_seq: None,
+            net_polling: false,
+            net_renewed: None,
+            net_info: None,
             live,
             store,
             open: None,
@@ -2596,6 +2618,7 @@ impl VectorApp {
             "unread_counts_stale" => self.refresh_unread(cx),
             "chat_commands_updated" => self.on_commands_updated(&payload, cx),
             "sync_progress" => self.syncing = true,
+            "transport_state" => self.on_transport_view(payload, cx),
             "sync_finished" => {
                 self.syncing = false;
                 self.refresh_unread(cx);
@@ -3855,11 +3878,20 @@ impl VectorApp {
             return;
         };
         cx.notify();
+        if let PopupAct::NetKeepRealtime(kind) = act {
+            self.use_network(kind, Some(yes), true, cx);
+            return;
+        }
         if !yes {
             return;
         }
         match act {
             PopupAct::Notice => {}
+            PopupAct::NetKeepRealtime(_) => {}
+            PopupAct::NetUse(kind) => self.use_network(kind, None, true, cx),
+            PopupAct::NetI2pOnly => self.set_i2p_only(true, cx),
+            PopupAct::NetOpRemove(i) => self.remove_outproxy(i, cx),
+            PopupAct::NetOpReset => self.save_outproxies(None, false, cx),
             PopupAct::OpenWeb(url) => cx.open_url(&url),
             PopupAct::DeleteChannel { community, channel, category } => {
                 self.delete_channel(community, channel, category, cx)
@@ -4325,7 +4357,25 @@ impl Render for VectorApp {
         let root = root.on_drop(cx.listener(|app, paths: &gpui::ExternalPaths, window, cx| {
             app.open_paths_preview(paths.paths().to_vec(), window, cx);
         }));
+        let net_info = self.net_info.map(|kind| {
+            let (a, b) = (cx.entity().downgrade(), cx.entity().downgrade());
+            crate::netinfo::modal(
+                kind,
+                true,
+                move |_, cx| {
+                    a.update(cx, |app, cx| {
+                        app.net_info = None;
+                        cx.notify();
+                    })
+                    .ok();
+                },
+                move |key, w, cx| {
+                    b.update(cx, |app, cx| app.net_act(crate::routing::NetAct::Link(key), w, cx)).ok();
+                },
+            )
+        });
         root.children(net_dialog)
+            .children(net_info.map(|p| gpui::deferred(p).with_priority(14)))
             .children(popup.map(|p| gpui::deferred(p).with_priority(15)))
             .child(self.security.clone())
             .child(chrome(window, false, rail_mode.collapsed).children(self.update_banner(cx)))
@@ -11112,6 +11162,7 @@ impl VectorApp {
             return false;
         }
         if self.menu.take().is_some()
+            || self.net_info.take().is_some()
             || self.mini_profile.take().is_some()
             || self.edit_history.take().is_some()
             || self.reaction_details.take().is_some()
@@ -11937,7 +11988,9 @@ impl VectorApp {
             voice: None,
             seen: seen.into_iter().collect(),
             jumped: None,
+            net: Default::default(),
         });
+        self.load_routing(window, cx);
         self.load_blocked(cx);
         self.load_audio(cx);
         self.load_voice(cx);
@@ -13225,6 +13278,7 @@ impl VectorApp {
                     _ => {}
                 }
             }
+            Act::Net(a) => self.net_act(a, window, cx),
             Act::Help(key) => {
                 if let Some((title, text)) = crate::settings::help(key) {
                     let mut popup = kit::Popup::notice(title);

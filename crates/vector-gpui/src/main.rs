@@ -51,6 +51,8 @@ mod message;
 mod moderation;
 mod netdialog;
 mod netglyph;
+mod netinfo;
+mod routing;
 mod newchat;
 mod nexus;
 mod packdetails;

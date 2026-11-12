@@ -482,6 +482,46 @@ pub fn help(key: &str) -> Option<(&'static str, String)> {
             "Proxy Previews & Media",
             "Fetches link previews and every download (avatars, banners, custom emoji, GIFs, pictures posted as links, attachments, wallpapers, community logos, mini apps) through your Magnitude server instead of from this device. Only your Nostr relays and Vector's own servers are reached directly.<br><br>A file loaded directly is a request from <b>your</b> address to whoever hosts it; through Magnitude, they see the server instead. Needs a Magnitude server in your Blossom list that offers it.<br><br>On Tor or I2P, a link preview with no Magnitude server to fetch it loads through that network instead.<br><br>Off: everything loads directly from its source.",
         ),
+        "torMultiCircuit" => (
+            "Multi-Circuit",
+            "Each relay and media server gets its own Tor circuit. No single exit sees every server you use, and a slow circuit only slows the one connection riding it.<br><br>Turn this off to send everything over one shared circuit, like a VPN: fewer circuits to build, and one exit for all your traffic.",
+        ),
+        "torExternal" => (
+            "Use Running Tor",
+            "Vector connects through a Tor that's already running on this device instead of starting its own: <b>Tor Browser</b> (port 9150), or <b>tor</b> or <b>Orbot</b> (port 9050). It starts instantly and shares that Tor's bridges.<br><br>Vector trusts whatever answers on this port. Leave the port empty to find it.",
+        ),
+        "torBridges" => (
+            "Use Bridges",
+            "Bridges are private Tor relays that aren't listed publicly, so a network that blocks Tor can't block them as easily.<br><br>Turn this on if Tor fails to connect where you are, then paste bridge lines from <b>bridges.torproject.org</b>. You can set them up before switching to Tor.",
+        ),
+        "i2pRouter" => (
+            "I2P Router",
+            "Vector uses the I2P router already running on this device, through its SAM bridge.<br><br>In i2pd, set <b>[sam] enabled = true</b>. In Java I2P, start the <b>SAM application bridge</b>. On Android, turn on <b>SAM</b> in the i2pd app, where it starts off.<br><br>For a router on another machine, forward its SAM port to this one, for example over SSH.<br><br>Vector trusts whatever answers on this port. Other apps that can reach your router can use Vector's I2P address.",
+        ),
+        "i2pAuth" => (
+            "SAM Password",
+            "Only needed if your router asks for one.",
+        ),
+        "i2pIdentity" => (
+            "New Address",
+            "Vector gets fresh I2P addresses for this account and reconnects.<br><br>Your relays and other servers see different addresses, both shown under Connection. Servers see the new ones from then on.",
+        ),
+        "i2pOnly" => (
+            "I2P-Only",
+            "Vector reaches only I2P relays and servers, plus the I2P addresses you added.<br><br>Other relays and servers stay unreachable while this is on.",
+        ),
+        "i2pOutproxy" => (
+            "Outproxies",
+            "Relays and servers outside I2P are reached through an outproxy, tried in this order.<br><br>An outproxy sees which servers you use, and everyone using it shares its IP address.<br><br>It can link everything you reach through it.",
+        ),
+        "onionAlias" => (
+            "Onion Address",
+            "A server can also be reachable as a Tor onion service. Vector connects there instead of through a Tor exit.<br><br>Your connection stays encrypted to the server itself.",
+        ),
+        "i2pAlias" => (
+            "I2P Address",
+            "A server can also be reachable inside I2P. Vector connects there instead of through an outproxy.<br><br>Your connection stays encrypted to the server itself.",
+        ),
         "transport" => (
             "Routing",
             "Choose how Vector reaches relays and servers.<br><br><b>Tor</b> and <b>I2P</b> hide your IP address. Calls and multiplayer Mini Apps ask before connecting outside them.",
@@ -719,6 +759,7 @@ pub struct Settings {
     pub seen: HashSet<String>,
     /// The anchor a nav click scrolled to, until the reader scrolls.
     pub jumped: Option<&'static str>,
+    pub net: crate::routing::Routing,
 }
 
 /// The chart's pointer state: a slice previewed, one picked, a Delete running.
@@ -783,6 +824,7 @@ pub enum Act {
     ClearSearch,
     /// The reader scrolled the page: the spy takes over from a jump.
     Scrolled,
+    Net(crate::routing::NetAct),
 }
 
 pub type OnAct = Rc<dyn Fn(Act, &mut Window, &mut App)>;
@@ -3564,6 +3606,7 @@ fn block(id: &str, s: &Settings, on: &OnAct) -> Option<AnyElement> {
         "servers" => servers_block(s, on),
         "clock" => clock_block(s, on),
         "streamer" => streamer_block(s, on),
+        "routing" => crate::routing::block(&s.net, on),
         "blocked" => blocked_block(s, on),
         "advanced" => row(s, "advanced", on, false),
         "logs" => line(

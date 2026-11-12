@@ -62,6 +62,9 @@ struct Fixtures {
     pins_demo: HashMap<String, serde_json::Value>,
     #[serde(default)]
     server_demo: HashMap<String, serde_json::Value>,
+    /// Transport states by name, which VECTOR_NET=<name> shows; `i2p_config` is I2P's settings.
+    #[serde(default)]
+    net_demo: serde_json::Value,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -217,6 +220,9 @@ pub struct Store {
     pub fixture_pins: HashMap<String, serde_json::Value>,
     /// Media servers' dialogs, by URL: `info`, `stats`, `status` and `caps`.
     pub fixture_servers: HashMap<String, serde_json::Value>,
+    /// The transport state VECTOR_NET picks, and I2P's settings.
+    pub fixture_net: Option<serde_json::Value>,
+    pub fixture_i2p: Option<serde_json::Value>,
     pub fixture_presets: Option<serde_json::Value>,
     /// `fetch_nostr_embed`'s answers, by reference.
     pub fixture_embeds: HashMap<String, serde_json::Value>,
@@ -363,6 +369,8 @@ impl Store {
             }),
             fixture_pins: if std::env::var_os("VECTOR_PINS").is_some() { f.pins_demo } else { HashMap::new() },
             fixture_servers: f.server_demo,
+            fixture_net: std::env::var("VECTOR_NET").ok().and_then(|n| f.net_demo.get(&n).cloned()),
+            fixture_i2p: f.net_demo.get("i2p_config").cloned(),
             fixture_presets: f.policy_presets,
             fixture_embeds: f.embeds,
             fixture_packs: f.packs,
@@ -412,6 +420,8 @@ impl Store {
             fixture_voice: None,
             fixture_pins: HashMap::new(),
             fixture_servers: HashMap::new(),
+            fixture_net: None,
+            fixture_i2p: None,
             fixture_presets: None,
             fixture_embeds: HashMap::new(),
             fixture_packs: HashMap::new(),
