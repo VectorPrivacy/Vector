@@ -63,6 +63,9 @@ pub struct Recorder {
     paused_at: u64,
     /// Bumped when the composer's controls come back, for their fade.
     pub fade: u64,
+    /// The chosen Whisper model is here, so the preview offers dictation.
+    pub can_dictate: bool,
+    pub dictating: bool,
 }
 
 impl Default for Recorder {
@@ -88,6 +91,8 @@ impl Default for Recorder {
             play_started: None,
             paused_at: 0,
             fade: 0,
+            can_dictate: false,
+            dictating: false,
         }
     }
 }
@@ -318,6 +323,7 @@ pub enum Ui {
     Delete,
     PlayPause,
     Seek(f32),
+    Dictate,
 }
 
 fn pulse(t: f32) -> f32 {
@@ -590,6 +596,7 @@ pub fn preview(r: &Recorder, on: On) -> AnyElement {
             )
     };
     let seek = on.clone();
+    let dictate_on = on.clone();
     let bar = div()
         .flex_1()
         .h(px(10.))
@@ -685,6 +692,39 @@ pub fn preview(r: &Recorder, on: On) -> AnyElement {
                         .child(crate::audio::format_time(pos)),
                 ),
         )
+        .when(r.can_dictate, |d| d.child(dictate(r.dictating, dictate_on)))
+        .into_any_element()
+}
+
+/// `.voice-preview-dictate`: the recording as text in the composer; it spins while that runs.
+fn dictate(busy: bool, on: On) -> AnyElement {
+    let glyph = svg()
+        .path(if busy { "icons/loading.svg" } else { "icons/align-left.svg" })
+        .size(px(29.3))
+        .text_color(gpui::white())
+        .group_hover("voice-preview-dictate", |s| s.opacity(if busy { 1. } else { 0.7 }));
+    div()
+        .id("voice-preview-dictate")
+        .size(px(45.))
+        .flex_shrink_0()
+        .rounded_full()
+        .flex()
+        .items_center()
+        .justify_center()
+        .group("voice-preview-dictate")
+        .when(!busy, |d| d.cursor_pointer().on_click(move |_, w, cx| on(Ui::Dictate, w, cx)))
+        .child(if busy {
+            use gpui::AnimationExt as _;
+            glyph
+                .with_animation(
+                    "dictate-spin",
+                    gpui::Animation::new(std::time::Duration::from_secs(1)).repeat(),
+                    |s, t| s.with_transformation(gpui::Transformation::rotate(gpui::percentage(t))),
+                )
+                .into_any_element()
+        } else {
+            glyph.into_any_element()
+        })
         .into_any_element()
 }
 

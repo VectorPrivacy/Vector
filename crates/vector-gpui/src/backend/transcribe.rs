@@ -103,6 +103,20 @@ pub async fn transcribe(input: vector_media::audio_engine::AudioInput) -> Result
     whisper::transcribe(&app, &model, translate, audio).await.map_err(|e| e.to_string())
 }
 
+/// Dictation: the recording held for the preview, as one line of text.
+pub async fn transcribe_recording() -> Result<String, String> {
+    let r = match fixture() {
+        Some(r) => r,
+        None => {
+            let app = app()?;
+            let (model, _) = choice();
+            let audio = vector_media::voice::AudioRecorder::global().pending_for_whisper()?;
+            whisper::transcribe(&app, &model, false, audio).await.map_err(|e| e.to_string())?
+        }
+    };
+    Ok(r.sections.iter().map(|s| s.text.trim()).filter(|t| !t.is_empty()).collect::<Vec<_>>().join(" "))
+}
+
 /// `VECTOR_TRANSCRIPT`: a canned transcript for reference renders, which have no model.
 fn fixture() -> Option<whisper::TranscriptionResult> {
     std::env::var_os("VECTOR_TRANSCRIPT")?;

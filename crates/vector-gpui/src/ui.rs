@@ -688,6 +688,7 @@ impl VectorApp {
         // Fixtures: VECTOR_REC=recording|locked|preview holds the voice recorder in that state.
         if let Ok(state) = std::env::var("VECTOR_REC") {
             app.rec.fixture(&state);
+            app.rec.can_dictate = std::env::var_os("VECTOR_TRANSCRIPT").is_some();
         }
         // Fixtures: VECTOR_CALL=ringing|calling|active|open shows a call with alice in that state.
         if let Ok(state) = std::env::var("VECTOR_CALL") {
@@ -5345,6 +5346,7 @@ fn composer(
                         (send.0 || previewing, send.1),
                         rec.state == R::Pending,
                         previewing,
+                        rec.dictating,
                         on_rec.clone(),
                         cx,
                     ))
@@ -5380,6 +5382,7 @@ fn send_or_mic(
     (send, flips): (bool, usize),
     pending: bool,
     voice_send: bool,
+    dictating: bool,
     on_rec: crate::recorder::On,
     cx: &mut Context<VectorApp>,
 ) -> impl IntoElement {
@@ -5442,8 +5445,13 @@ fn send_or_mic(
         .cursor_pointer()
         .when(voice_send, |d| {
             d.on_mouse_down(gpui::MouseButton::Left, |_, w, _| w.prevent_default())
-                .on_click(cx.listener(|app, _, _, cx| app.send_voice(cx)))
+                .on_click(cx.listener(|app, _, _, cx| {
+                    if !app.rec.dictating {
+                        app.send_voice(cx)
+                    }
+                }))
         })
+        .when(voice_send && dictating, |d| d.opacity(0.35).cursor_default())
         .when(send && !voice_send, |d| {
             d.on_mouse_down(gpui::MouseButton::Left, |_, w, _| w.prevent_default())
                 .on_click(cx.listener(|app, _, window, cx| {
@@ -13082,6 +13090,46 @@ impl VectorApp {
                     }
                 }
             }
+            Ui::Dictate => {
+                if self.rec.state != crate::recorder::State::Preview || self.rec.dictating {
+                    return;
+                }
+                self.rec.dictating = true;
+                let source = self.rec.source;
+                let rx = rec_thread(|| tauri::async_runtime::block_on(backend::transcribe::transcribe_recording()));
+                cx.spawn(async move |this, cx| {
+                    let res = rx.await.unwrap_or_else(|e| Err(e.to_string()));
+                    this.update_in(cx, |app, window, cx| {
+                        // Deleted meanwhile: the words go with it.
+                        if app.rec.source != source || app.rec.state != crate::recorder::State::Preview {
+                            return;
+                        }
+                        app.rec.dictating = false;
+                        let text = match res {
+                            Ok(t) if !t.is_empty() => t,
+                            Ok(_) => return app.show_toast("No words heard in that recording", cx),
+                            Err(_) => return app.show_toast("Couldn't turn that into text", cx),
+                        };
+                        if let Some(id) = app.rec.source {
+                            let _ = crate::audio::engine().map(|e| e.stop(id));
+                        }
+                        app.rec.idle();
+                        if matches!(app.mode, Mode::Edit { .. }) {
+                            app.mode = Mode::Normal;
+                            app.input.update(cx, |i, cx| i.set_text("", cx));
+                        }
+                        app.input.update(cx, |i, cx| {
+                            let now = i.text().trim().to_string();
+                            let joined = if now.is_empty() { text } else { format!("{} {text}", i.text()) };
+                            i.set_text(&joined, cx)
+                        });
+                        window.focus(&app.input.read(cx).focus_handle(cx), cx);
+                        cx.notify();
+                    })
+                    .ok();
+                })
+                .detach();
+            }
             Ui::Seek(f) => {
                 let Some(id) = self.rec.source else { return };
                 let ms = (f.clamp(0., 1.) * self.rec.duration as f32) as u64;
@@ -13132,7 +13180,13 @@ impl VectorApp {
             let done = rx.await.unwrap_or_else(|e| Err(e.to_string()));
             this.update(cx, |app, cx| {
                 match done {
-                    Ok(r) => app.rec.preview(r.id, r.duration_ms),
+                    Ok(r) => {
+                        app.rec.preview(r.id, r.duration_ms);
+                        app.rec.can_dictate = {
+                            let model = backend::transcribe::choice().0;
+                            backend::transcribe::downloaded(&model)
+                        };
+                    }
                     Err(e) => {
                         app.rec.idle();
                         app.notice("Recording Failed", e, cx);
