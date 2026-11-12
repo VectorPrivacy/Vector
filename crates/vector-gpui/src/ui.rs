@@ -7827,7 +7827,7 @@ impl VectorApp {
                 self.input.clone(),
                 &self.mode,
                 (self.picker_open && !self.picker_status)
-                    .then(|| (self.emoji_picker.clone(), self.picker.is_none())),
+                    .then(|| (self.emoji_picker.clone(), self.picker.is_none(), f32::from(window.viewport_size().width) < 700.)),
                 self.attach.map(|o| (o, self.pivx_wallet_view(cx).or_else(|| self.miniapps_view(cx)))),
                 self.command_popup(cx).or_else(|| self.time_popup(cx)).or_else(|| self.mention
                     .as_ref()
@@ -8132,7 +8132,7 @@ fn divider(label: impl IntoElement, line: gpui::Hsla, opacity: f32) -> AnyElemen
 fn composer(
     input: Entity<TextInput>,
     mode: &Mode,
-    picker: Option<(Entity<crate::picker::EmojiPicker>, bool)>,
+    picker: Option<(Entity<crate::picker::EmojiPicker>, bool, bool)>,
     attach: Option<(std::time::Instant, Option<AnyElement>)>,
     popup: Option<AnyElement>,
     measure: Rc<std::cell::Cell<Option<gpui::Bounds<gpui::Pixels>>>>,
@@ -8383,13 +8383,14 @@ fn composer(
             d.child(attachment_panel(opened, mini, cx))
         })
         // `.emoji-picker`: 10px above the composer, 16px from the right edge.
-        .when_some(picker, |d, (p, _)| {
+        // Under 700px it centres on the window instead.
+        .when_some(picker, |d, (p, _, centre)| {
             d.child(
                 gpui::deferred(
                     div()
                         .absolute()
                         .bottom(gpui::relative(1.))
-                        .right(px(16.))
+                        .map(|d| if centre { d.left_0().right_0().flex().justify_center() } else { d.right(px(16.)) })
                         .pb(px(10.))
                         .child(p),
                 )

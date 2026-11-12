@@ -357,6 +357,8 @@ pub struct PickedGif(pub String);
 pub struct Dismissed;
 
 pub struct EmojiPicker {
+    /// `.emoji-grid`'s columns: five on a phone of 380px or less.
+    cols: usize,
     search: Entity<TextInput>,
     query: String,
     used: Rc<HashMap<String, f64>>,
@@ -449,6 +451,7 @@ impl EmojiPicker {
             mode: Mode::Emoji,
             reaction: false,
             no_gifs: false,
+            cols: COLS,
             kaomoji_list: ScrollHandle::new(),
             kaomoji_strip: ScrollHandle::new(),
             kaomoji_at: 0,
@@ -1268,6 +1271,7 @@ impl EmojiPicker {
     }
 
     fn rebuild(&mut self) {
+        let cols = self.cols;
         let mut items = Vec::new();
         let mut starts = Vec::new();
         let section = |items: &mut Vec<Item>,
@@ -1280,7 +1284,7 @@ impl EmojiPicker {
             if collapsed {
                 return;
             }
-            let rows: Vec<_> = cells.chunks(COLS).map(|c| c.to_vec()).collect();
+            let rows: Vec<_> = cells.chunks(cols).map(|c| c.to_vec()).collect();
             let n = rows.len();
             for (i, cells) in rows.into_iter().enumerate() {
                 items.push(Item::Row {
@@ -1320,7 +1324,7 @@ impl EmojiPicker {
                     .filter(|e| !self.failed(e))
                     .cloned()
                     .collect();
-                let rows: Vec<_> = cells.chunks(COLS).map(|c| c.to_vec()).collect();
+                let rows: Vec<_> = cells.chunks(cols).map(|c| c.to_vec()).collect();
                 let n = rows.len().max(1);
                 if rows.is_empty() {
                     items.push(Item::PackRow {
@@ -1657,6 +1661,7 @@ impl EmojiPicker {
 
     fn pack_row(
         cells: &[Rc<PackEmoji>],
+        cols: usize,
         last: bool,
         media: &MediaRef,
         picker: gpui::WeakEntity<Self>,
@@ -1710,7 +1715,7 @@ impl EmojiPicker {
                     ),
             );
         }
-        for _ in cells.len()..COLS {
+        for _ in cells.len()..cols {
             row = row.child(div().flex_1());
         }
         row.into_any_element()
@@ -1718,6 +1723,7 @@ impl EmojiPicker {
 
     fn row(
         cells: &[Cell],
+        cols: usize,
         last: bool,
         media: &MediaRef,
         picker: gpui::WeakEntity<Self>,
@@ -1798,7 +1804,7 @@ impl EmojiPicker {
                 ),
             );
         }
-        for _ in cells.len()..COLS {
+        for _ in cells.len()..cols {
             row = row.child(div().flex_1());
         }
         row.into_any_element()
@@ -1828,12 +1834,19 @@ fn thumb_of(state: Option<crate::media::Custom>, size: f32) -> AnyElement {
 impl Render for EmojiPicker {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.rail_tick(window, cx);
+        let vw = f32::from(window.viewport_size().width);
+        let cols = if vw <= 380. { 5 } else { COLS };
+        if cols != self.cols {
+            self.cols = cols;
+            self.rebuild();
+        }
+        let tight = vw <= 480.;
         let mode_btn = |label: &'static str, mode: Mode, cx: &mut Context<Self>| {
             let active = self.mode == mode;
             div()
                 .id(label)
                 .h(px(27.))
-                .px(px(12.))
+                .px(px(if tight { 8. } else { 12. }))
                 .flex()
                 .items_center()
                 .rounded(px(6.))
@@ -1879,9 +1892,10 @@ impl Render for EmojiPicker {
             )
             .child(
                 div()
-                    .ml(px(16.))
+                    .ml(px(if tight { 14. } else { 16. }))
                     .flex()
-                    .gap(px(4.))
+                    .flex_shrink_0()
+                    .gap(px(if tight { 2. } else { 4. }))
                     .child(mode_btn("Emoji", Mode::Emoji, cx))
                     .when(!self.no_gifs, |d| d.child(mode_btn("GIF", Mode::Gif, cx)))
                     .when(!self.reaction, |d| {
@@ -2068,6 +2082,7 @@ impl Render for EmojiPicker {
             );
 
         let items = self.items.clone();
+        let cols = self.cols;
         let me = cx.entity().downgrade();
         let media = self.media.clone();
         let dead_of = cx.entity().downgrade();
@@ -2079,9 +2094,9 @@ impl Render for EmojiPicker {
                     .update(cx, |this, cx| this.header(s, cx))
                     .unwrap_or_else(|_| div().into_any_element())
             }
-            Item::Row { cells, last } => Self::row(cells, *last, &media, me.clone()),
+            Item::Row { cells, last } => Self::row(cells, cols, *last, &media, me.clone()),
             Item::PackRow { cells, last } => {
-                let row = Self::pack_row(cells, *last, &media, me.clone());
+                let row = Self::pack_row(cells, cols, *last, &media, me.clone());
                 if let Some((m, live)) = &media {
                     crate::media::pump(m, me.clone(), *live, cx);
                 }
@@ -2133,7 +2148,7 @@ impl Render for EmojiPicker {
             .id("emoji-picker")
             .relative()
             .occlude()
-            .w(px(402.))
+            .w(px(if vw < 700. { (vw * 0.9).min(400.) + 2. } else { 402. }))
             .h(px(352.))
             .flex()
             .flex_col()
