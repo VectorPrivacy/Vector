@@ -100,6 +100,8 @@ pub enum Kind {
     Tag(Option<u32>),
     /// `.vt-time`: a time in the reader's zone, never broken across lines; its hover hint.
     Time(SharedString),
+    /// Quiet text that does something when clicked, brightening under the pointer.
+    Action(SharedString),
 }
 
 /// What hovering an atom says.
@@ -148,6 +150,7 @@ impl Kind {
             } => Some(Target::Spoiler(*id)),
             Kind::Spoiler { .. } => None,
             Kind::Mention(npub) => Some(Target::Mention(npub.clone())),
+            Kind::Action(a) => Some(Target::Action(a.clone())),
         }
     }
 }
@@ -182,6 +185,7 @@ pub enum Target {
     Code(SharedString),
     Spoiler(u32),
     Mention(SharedString),
+    Action(SharedString),
 }
 
 pub type OnClick = Rc<dyn Fn(Target, &mut Window, &mut App)>;
@@ -920,6 +924,7 @@ impl Element for Inline {
         for el in &mut pre.under {
             el.paint(window, cx);
         }
+        let action_hot = pre.hits.iter().any(|(h, t)| matches!(t, Target::Action(_)) && h.is_hovered(window));
         for line in &s.lines {
             // Boxes first, so text paints over them.
             let mut k = 0;
@@ -1024,6 +1029,10 @@ impl Element for Inline {
                                 cx,
                             );
                         }
+                    }
+                    Kind::Action(_) if action_hot => {
+                        let line = shape(piece, look, white_a(0.7), window);
+                        let _ = line.paint(origin, px(lh), TextAlign::Left, None, window, cx);
                     }
                     _ => {
                         let line = shape(piece, look, look.color, window);

@@ -1068,10 +1068,11 @@ fn trailing_atoms(m: &Message) -> Vec<Atom> {
             kind: Kind::Plain,
         });
         out.push(Atom::Gap(6.));
+        let history = m.edit_history.as_ref().is_some_and(|h| !h.is_empty());
         out.push(Atom::Text {
             text: "(edited)".into(),
             look: Look::new(RUBIK, 10., 14., white_a(0.4)),
-            kind: Kind::Plain,
+            kind: if history { Kind::Action("edited".into()) } else { Kind::Plain },
         });
     }
     // `.dmsg-selfdestruct`: the message dissolves at its NIP-40 expiry; after any attachment, a

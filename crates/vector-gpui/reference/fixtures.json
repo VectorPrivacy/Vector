@@ -593,7 +593,21 @@
      "failed": false,
      "mine": false,
      "npub": "npub15387nevpzd0u700y2t24ym9l0zxe8fsxx2w7qn47ysn6mndn9gvqqmlahu",
-     "edited": true
+     "edited": true,
+     "edit_history": [
+      {
+       "content": "Nice! That one has a secret inside",
+       "edited_at": 1794360540000
+      },
+      {
+       "content": "Nice! That one has a ||secret spoiler|| inside \ud83c\udf89",
+       "edited_at": 1794360660000
+      },
+      {
+       "content": "Nice! That one has a ||secret spoiler|| inside, and a [link](https://vectorapp.io).",
+       "edited_at": 1794360840000
+      }
+     ]
     },
     {
      "id": "f20c550ac443c1caf754848c6e70ebf4c46375e864ed7b1595b10f86f3ece07a",

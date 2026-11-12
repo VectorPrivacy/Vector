@@ -14,6 +14,7 @@ mod rail;
 mod voice;
 mod miniprofile;
 mod pins;
+mod edithistory;
 mod cmdform;
 mod commands;
 mod composer;

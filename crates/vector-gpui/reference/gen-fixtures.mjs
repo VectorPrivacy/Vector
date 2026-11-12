@@ -82,7 +82,11 @@ for (const [seed, name, last, minsAgo, unread] of people) {
         m(1, false, 'Lists too:\n- one\n- two\n- three', 60 * 26 - 1),
         m(2, true, '> quoting you here\nand replying below the quote', 60 * 26 - 3, { reactions: [react(2, id, '❤️'), react(2, me, '❤️'), react(2, id, '😂')] }),
         m(3, true, '```rust\nfn main() {\n    println!("hello");\n}\n```', 60 * 26 - 4),
-        m(4, false, 'Nice! That one has a ||secret spoiler|| inside, and a [link](https://vectorapp.io).', 30, { edited: true }),
+        m(4, false, 'Nice! That one has a ||secret spoiler|| inside, and a [link](https://vectorapp.io).', 30, { edited: true, edit_history: [
+            { content: 'Nice! That one has a secret inside', edited_at: at - 30 * 60_000 },
+            { content: 'Nice! That one has a ||secret spoiler|| inside 🎉', edited_at: at - 28 * 60_000 },
+            { content: 'Nice! That one has a ||secret spoiler|| inside, and a [link](https://vectorapp.io).', edited_at: at - 25 * 60_000 },
+        ] }),
         m(5, false, '# A heading\n-# and some subtext', 29),
         m(6, true, 'Replying to that heading', 10, { replied_to: hex('vee-5'), replied_to_content: '# A heading\n-# and some subtext', replied_to_npub: id }),
         m(7, true, 'This one is still sending', 2, { pending: true }),

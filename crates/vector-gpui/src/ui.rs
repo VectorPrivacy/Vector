@@ -236,6 +236,7 @@ pub struct VectorApp {
     voice_ticking: bool,
     mini_profile: Option<crate::miniprofile::Mini>,
     pins: crate::pins::Pins,
+    edit_history: Option<crate::edithistory::EditHistory>,
     anchors: kit::Anchors,
     /// The role a member's change is under way for.
     role_busy: Option<String>,
@@ -844,6 +845,7 @@ impl VectorApp {
             voice_ticking: false,
             mini_profile: None,
             pins: Default::default(),
+            edit_history: None,
             anchors: Default::default(),
             role_busy: None,
         }
@@ -2672,6 +2674,7 @@ impl VectorApp {
         self.profile = None;
         self.embed_modal = None;
         self.new_chat = None;
+        self.edit_history = None;
         if self.open.as_ref() != Some(&id) && self.rec.state != crate::recorder::State::Idle {
             if let Some(src) = self.rec.source {
                 let _ = crate::audio::engine().map(|e| e.stop(src));
@@ -2949,7 +2952,40 @@ impl VectorApp {
                 let at = gpui::Bounds::new(window.mouse_position(), gpui::size(px(0.), px(0.)));
                 self.show_mini(npub.to_string(), None, Some(at), cx)
             }
+            Target::Action(a) if a.as_ref() == "edited" => self.show_edit_history(msg_id, window, cx),
+            Target::Action(_) => {}
         }
+    }
+
+    /// `showEditHistory`: against the message's row, its revisions' emoji from its tags and
+    /// the equipped packs.
+    fn show_edit_history(&mut self, id: String, window: &Window, cx: &mut Context<Self>) {
+        let Some(m) = self.message(&id) else { return };
+        let Some(entries) = m.edit_history.clone().filter(|e| !e.is_empty()) else { return };
+        let anchor = self
+            .row_of(&id)
+            .and_then(|ix| self.timeline.bounds_for_item(ix))
+            .unwrap_or_else(|| gpui::Bounds::new(window.mouse_position(), gpui::size(px(0.), px(0.))));
+        let mut tags: Vec<(String, String)> = m.emoji_tags.iter().map(|t| (t.shortcode.clone(), t.url.clone())).collect();
+        let picker = self.emoji_picker.read(cx);
+        for e in &entries {
+            for (code, url) in picker.customs_in(&e.content) {
+                if !tags.iter().any(|(c, _)| *c == code) {
+                    tags.push((code, url));
+                }
+            }
+        }
+        // Reopened by the same press that closed it: keep the measured size, so no blank frame.
+        let size = self.edit_history.take().filter(|h| h.msg == id).map(|h| h.size).unwrap_or_default();
+        self.edit_history = Some(crate::edithistory::EditHistory {
+            msg: id,
+            entries,
+            anchor,
+            tags,
+            size,
+            scroll: Default::default(),
+        });
+        cx.notify();
     }
 
     /// A message in the open chat, or in the one the floating player came from.
@@ -4417,6 +4453,17 @@ impl Render for VectorApp {
                 };
                 crate::call::render(&self.call, &self.store.borrow(), &proc_, CHROME_H, &on)
             })
+            .children(self.edit_history.as_ref().map(|h| {
+                let app = cx.entity().downgrade();
+                let close: crate::edithistory::OnClose = Rc::new(move |_, cx| {
+                    app.update(cx, |app, cx| {
+                        app.edit_history = None;
+                        cx.notify();
+                    })
+                    .ok();
+                });
+                crate::edithistory::render(h, &store, &self.media, window.viewport_size(), &close)
+            }))
             .children(self.mini_profile.as_ref().map(|m| {
                 let app = cx.entity().downgrade();
                 let on: crate::miniprofile::OnAct = Rc::new(move |act, window, cx| {
@@ -10897,6 +10944,7 @@ impl VectorApp {
         }
         if self.menu.take().is_some()
             || self.mini_profile.take().is_some()
+            || self.edit_history.take().is_some()
             || self.perm_prompt.take().is_some()
             || self.publish.take_if(|f| !f.busy()).is_some()
             || self.launch.take().is_some()
