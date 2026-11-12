@@ -75,6 +75,7 @@ impl VectorApp {
         }
         let seq = view.get("config_seq").and_then(Value::as_u64);
         let config_moved = seq != self.net_seq;
+        let flipped = self.net_view.as_ref().is_none_or(|p| p["kind"] != view["kind"] || p["ready"] != view["ready"]);
         self.net_seq = seq;
         self.net_view = Some(view.clone());
         let tor_up = view.get("kind").and_then(Value::as_str) == Some("tor") && view.get("ready").and_then(Value::as_bool) == Some(true);
@@ -87,6 +88,8 @@ impl VectorApp {
         }
         if config_moved {
             self.load_net_config(cx);
+        } else if flipped {
+            self.check_stranded(cx);
         }
         if let Some(at) = self.net_renewed {
             let in_use = view.get("kind").and_then(Value::as_str) == Some("i2p") && view.get("ready").and_then(Value::as_bool) == Some(true);
@@ -199,6 +202,8 @@ impl VectorApp {
     /// I2P's settings in effect.
     fn load_net_config(&mut self, cx: &mut Context<Self>) {
         let config = if self.live { Some(json(net::i2p_get_config())) } else { self.store.borrow().fixture_i2p.clone() };
+        self.net_config = config.clone();
+        self.check_stranded(cx);
         let Some(r) = self.routing() else { return };
         r.config = config.clone();
         let port = config.as_ref().and_then(|c| c.get("sam_port")).and_then(Value::as_u64);
@@ -498,16 +503,28 @@ impl VectorApp {
             }
             NetAct::AuthRemove => self.set_router_auth(None, cx),
             NetAct::I2pOnly(on) => {
-                if on && !self.relays_on_i2p() {
-                    let mut popup = kit::Popup::notice("Turn on I2P-Only?");
-                    popup.icon = None;
-                    popup.text = Some("None of your relays are on I2P. Turn on I2P-Only anyway?".into());
-                    popup.confirm = "Turn On".into();
-                    popup.cancel = Some("Cancel".into());
-                    self.popup = Some((popup, PopupAct::NetI2pOnly));
+                if !on || !self.live {
+                    self.set_i2p_only(on, cx);
                     return;
                 }
-                self.set_i2p_only(on, cx);
+                let rx = crate::backend::run(crate::backend::network::relay_rows());
+                cx.spawn(async move |this, cx| {
+                    let Ok(rows) = rx.await else { return };
+                    this.update(cx, |app, cx| {
+                        if Self::relays_on_i2p(&rows) {
+                            return app.set_i2p_only(true, cx);
+                        }
+                        let mut popup = kit::Popup::notice("Turn on I2P-Only?");
+                        popup.icon = None;
+                        popup.text = Some("None of your relays are on I2P. Turn on I2P-Only anyway?".into());
+                        popup.confirm = "Turn On".into();
+                        popup.cancel = Some("Cancel".into());
+                        app.popup = Some((popup, PopupAct::NetI2pOnly));
+                        cx.notify();
+                    })
+                    .ok();
+                })
+                .detach();
             }
             NetAct::OpMove(i, by) => {
                 let Some(mut list) = self.outproxy_inputs() else { return };
@@ -826,20 +843,37 @@ impl VectorApp {
 
     /// Whether any enabled relay is reachable inside I2P: an .i2p host, or one with a working
     /// I2P address.
-    fn relays_on_i2p(&self) -> bool {
-        if !self.live {
-            return true;
-        }
-        let aliases = net::transport_get_aliases();
-        let relays = self.settings.as_ref().and_then(|s| s.relays.clone()).unwrap_or_default();
+    fn relays_on_i2p(relays: &[crate::backend::network::RelayRow]) -> bool {
+        let aliases: Vec<Value> = net::transport_get_aliases().iter().map(json).collect();
         relays.iter().filter(|r| r.enabled).any(|r| {
             let host = url::Url::parse(&r.url).ok().and_then(|u| u.host_str().map(str::to_ascii_lowercase)).unwrap_or_default();
-            host.ends_with(".i2p")
-                || aliases.iter().any(|a| {
-                    let v = json(a);
-                    v["host"] == host.as_str() && !v["twins"]["i2p"].is_null() && v["check"]["state"] != "failed"
-                })
+            host.ends_with(".i2p") || aliases.iter().any(|v| v["host"] == host.as_str() && !v["twins"]["i2p"].is_null() && v["check"]["state"] != "failed")
         })
+    }
+
+    /// `checkI2pStranded`: I2P-Only in use with none of the relays inside I2P.
+    pub(super) fn check_stranded(&mut self, cx: &mut Context<Self>) {
+        let only = self.net_config.as_ref().is_some_and(|c| c["exit"] == "off");
+        let in_i2p = self.net_view.as_ref().is_some_and(|v| v["kind"] == "i2p");
+        if !(only && in_i2p) || !self.live {
+            self.set_stranded(false, cx);
+            return;
+        }
+        let rx = crate::backend::run(crate::backend::network::relay_rows());
+        cx.spawn(async move |this, cx| {
+            let Ok(rows) = rx.await else { return };
+            let stranded = !Self::relays_on_i2p(&rows);
+            this.update(cx, |app, cx| app.set_stranded(stranded, cx)).ok();
+        })
+        .detach();
+    }
+
+    fn set_stranded(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.net_stranded = on;
+        if let Some(r) = self.routing() {
+            r.stranded = on;
+        }
+        cx.notify();
     }
 
     pub(super) fn set_i2p_only(&mut self, on: bool, cx: &mut Context<Self>) {
@@ -860,19 +894,7 @@ impl VectorApp {
                 }
             }
             app.load_net_config(cx);
-            app.check_stranded(cx);
         });
-    }
-
-    /// `checkI2pStranded`: I2P-Only in use with none of the relays inside I2P.
-    pub(super) fn check_stranded(&mut self, cx: &mut Context<Self>) {
-        let only = self.routing().and_then(|r| r.config.as_ref()).is_some_and(|c| c["exit"] == "off");
-        let in_i2p = self.net_view.as_ref().is_some_and(|v| v["kind"] == "i2p");
-        let stranded = only && in_i2p && !self.relays_on_i2p();
-        if let Some(r) = self.routing() {
-            r.stranded = stranded;
-        }
-        cx.notify();
     }
 
     fn outproxy_inputs(&mut self) -> Option<Vec<vector_core::transport::i2p_config::OutproxyInput>> {

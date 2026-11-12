@@ -259,15 +259,8 @@ impl Routing {
         Some(left.ceil().max(1.) as u64)
     }
 
-    /// `startStuck`: a start nothing drives, or one past its budget.
     fn stuck(&self) -> bool {
-        let Some(v) = &self.view else { return false };
-        if s(v, "phase") != "starting" {
-            return false;
-        }
-        let since = v.get("since").and_then(Value::as_u64).unwrap_or(0);
-        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
-        since > 0 && now.saturating_sub(since) > 120_000
+        self.view.as_ref().is_some_and(start_stuck)
     }
 
     /// Something on screen moves on its own: the glyph, a pulsing dot, a countdown.
@@ -1538,5 +1531,112 @@ fn foot() -> AnyElement {
         .line_height(px(16.8))
         .text_color(white_a(0.4))
         .child("Works with i2pd or Java I2P with SAM turned on.")
+        .into_any_element()
+}
+
+/// `startStuck`: a start nothing drives, or one past its kind's budget.
+pub fn start_stuck(v: &Value) -> bool {
+    let kind = s(v, "kind");
+    if s(v, "phase") != "starting" || kind == "unknown" || kind == "clearnet" {
+        return false;
+    }
+    let driven = if kind == "tor" { v.get("detail").map(|d| s(d, "status")) == Some("bootstrapping") } else { !steps(v).is_empty() };
+    let since = v.get("since").and_then(Value::as_u64).unwrap_or(0);
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    !driven || now.saturating_sub(since) > if kind == "tor" { 120 } else { 180 }
+}
+
+/// `NetworkNotice`: one line over the chat list while the network holds traffic back. The pane
+/// is narrow, so the line is the reason's gist and the full reason its tooltip.
+pub struct Notice {
+    pub text: SharedString,
+    pub title: SharedString,
+    /// Amber for what mends itself or still half works; red when the user has to act.
+    pub warn: bool,
+}
+
+pub fn notice(v: &Value, stranded: bool) -> Option<Notice> {
+    let line = |v: &Value| {
+        let r = v.get("reason")?;
+        let full = s(r, "text");
+        if full.is_empty() {
+            return None;
+        }
+        let code = s(r, "code");
+        let short = match code {
+            "router_unreachable" => "I2P router not answering.",
+            "sam_refused" => "That port isn't an I2P router.",
+            "sam_too_old" => "I2P router too old for Vector.",
+            "sam_auth_required" => "I2P router asks for a password.",
+            "sam_auth_failed" => "I2P router refused the password.",
+            "session_failed" => "I2P router couldn't open a session.",
+            "session_lost" => "Reconnecting to I2P.",
+            "tor_failed" => "Tor couldn't connect.",
+            _ => full,
+        };
+        Some(Notice { text: short.to_string().into(), title: full.to_string().into(), warn: code == "session_lost" })
+    };
+    let plain = |text: &str, warn| Some(Notice { text: text.to_string().into(), title: text.to_string().into(), warn });
+    match s(v, "kind") {
+        "clearnet" | "" => None,
+        "unknown" => line(v),
+        _ if !b(v, "ready") && s(v, "phase") == "starting" => {
+            if !start_stuck(v) {
+                return None;
+            }
+            let label = s(v, "label");
+            plain(&format!("{} isn't starting.", if label.is_empty() { "The network" } else { label }), true)
+        }
+        _ if !b(v, "ready") => line(v),
+        _ if stranded => Some(Notice {
+            text: "None of your relays are on I2P.".into(),
+            title: "I2P-Only is on and none of your relays are on I2P.".into(),
+            warn: false,
+        }),
+        _ if steps(v).iter().any(|st| s(st, "id") == "exit" && s(st, "state") == "fail") => plain("No outproxy is reachable right now.", true),
+        _ => None,
+    }
+}
+
+pub fn notice_line(n: Notice, open: impl Fn(&gpui::ClickEvent, &mut gpui::Window, &mut gpui::App) + 'static) -> AnyElement {
+    let (rgb, text, dot): ((u8, u8, u8), u32, u32) = if n.warn { ((255, 193, 7), 0xffd98a, 0xffc107) } else { ((255, 120, 96), 0xffb3a3, 0xff7860) };
+    let (bg, hover) = if n.warn { (0.06, 0.1) } else { (0.07, 0.12) };
+    let tip = n.title;
+    div()
+        .id("net-notice")
+        .mx(px(15.))
+        .mt(px(22.))
+        .mb(px(12.))
+        .py(px(8.))
+        .px(px(12.))
+        .flex()
+        .items_center()
+        .gap(px(9.))
+        .border_1()
+        .border_color(ca(rgb.0, rgb.1, rgb.2, 0.28))
+        .rounded(px(10.))
+        .bg(ca(rgb.0, rgb.1, rgb.2, bg))
+        .hover(move |d| d.bg(ca(rgb.0, rgb.1, rgb.2, hover)))
+        .text_size(px(12.5))
+        .line_height(px(15.))
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(c(text))
+        .cursor_pointer()
+        .tooltip(crate::kit::tooltip(tip))
+        .on_click(open)
+        .child(
+            div()
+                .flex_shrink_0()
+                .size(px(7.))
+                .rounded_full()
+                .bg(c(dot))
+                .shadow(vec![gpui::BoxShadow { color: ca(rgb.0, rgb.1, rgb.2, if n.warn { 0.5 } else { 0.6 }), offset: point(px(0.), px(0.)), blur_radius: px(6.), spread_radius: px(0.), inset: false }])
+                .with_animation("net-notice-dot", gpui::Animation::new(std::time::Duration::from_millis(1600)).repeat(), |d, t| {
+                    let k = if t < 0.5 { t * 2. } else { (1. - t) * 2. };
+                    d.opacity(1. - 0.7 * k * k * (3. - 2. * k))
+                }),
+        )
+        .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(n.text))
+        .child(svg().path("ui/notice-go.svg").flex_shrink_0().w(px(6.)).h(px(10.)).text_color(c(text)).opacity(0.7))
         .into_any_element()
 }

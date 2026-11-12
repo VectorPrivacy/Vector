@@ -54,6 +54,10 @@ pub struct VectorApp {
     /// The transport's view, as the backend last reported it.
     net_view: Option<Value>,
     net_seq: Option<u64>,
+    /// I2P's settings, where this build has I2P.
+    net_config: Option<Value>,
+    /// I2P-Only with none of the account's relays inside I2P.
+    net_stranded: bool,
     net_polling: bool,
     /// A new I2P address was asked for: its toast waits until it is in use.
     net_renewed: Option<std::time::Instant>,
@@ -764,6 +768,8 @@ impl VectorApp {
             screen: Screen::Main,
             net_view: None,
             net_seq: None,
+            net_config: None,
+            net_stranded: false,
             net_polling: false,
             net_renewed: None,
             net_info: None,
@@ -913,6 +919,9 @@ impl VectorApp {
     ) -> Self {
         let mut app = Self::base(store, false, window, cx);
         app.reload_picker_packs(cx);
+        if let Some(v) = app.net_initial() {
+            app.on_transport_view(v, cx);
+        }
         if let Some(id) = open {
             app.open_chat(id.into(), window, cx);
         }
@@ -2207,6 +2216,9 @@ impl VectorApp {
     fn logged_in(&mut self, npub: String, _window: &mut Window, cx: &mut Context<Self>) {
         self.store.borrow_mut().my_npub = npub;
         self.screen = Screen::Main;
+        if let Some(v) = self.net_initial() {
+            self.on_transport_view(v, cx);
+        }
         self.syncing = true;
         let _ = backend::run(async {
             sync::fetch_messages(true).await;
@@ -5539,6 +5551,8 @@ fn chat_list(
     let store = shared.clone();
     let view = cx.entity().downgrade();
     let state = app.chatlist.clone();
+    let notice = app.net_view.as_ref().and_then(|v| crate::routing::notice(v, app.net_stranded));
+    let noticed = notice.is_some();
     div()
         .w(px(LIST_W))
         .flex_shrink_0()
@@ -5548,10 +5562,13 @@ fn chat_list(
         .bg(c(LIST_BG))
         .border_r_1()
         .border_color(c(DIVIDER))
+        .children(notice.map(|n| {
+            crate::routing::notice_line(n, cx.listener(|app, _: &gpui::ClickEvent, window, cx| app.open_settings_path("privacy/routing", window, cx)))
+        }))
         .child(
             // .chatlist-head
             div()
-                .mt(px(22.))
+                .mt(px(if noticed { 0. } else { 22. }))
                 .ml(px(15.))
                 .mr(px(12.))
                 .h(px(36.))
