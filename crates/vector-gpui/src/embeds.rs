@@ -1032,6 +1032,7 @@ fn rich(
             base: look,
             revealed: &empty,
             now: env.store.now_ms() as f64 / 1000.,
+            mention: Some(&|npub: &str| env.store.name(npub)),
             custom: custom
                 .as_ref()
                 .map(|f| f as &dyn Fn(&str) -> Option<crate::media::Custom>),

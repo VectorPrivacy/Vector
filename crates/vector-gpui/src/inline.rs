@@ -864,7 +864,7 @@ impl Element for Inline {
                         }
                         Kind::Mention(_) => {
                             window.paint_quad(
-                                fill(boxed(1.), white_a(0.08)).corner_radii(Corners::all(px(4.))),
+                                fill(boxed(1.), white_a(0.075)).corner_radii(Corners::all(px(4.))),
                             );
                         }
                         Kind::Time => {

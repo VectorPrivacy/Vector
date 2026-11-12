@@ -380,6 +380,7 @@ fn content(ctx: &Ctx, m: &Message) -> AnyElement {
             base: base_look(),
             revealed,
             now: ctx.store.now_ms() as f64 / 1000.,
+            mention: Some(&|npub: &str| ctx.store.chat_name(npub, &ctx.chat.id)),
             custom: custom
                 .as_ref()
                 .map(|f| f as &dyn Fn(&str) -> Option<crate::media::Custom>),
@@ -982,6 +983,7 @@ fn reply_quote(ctx: &Ctx, m: &Message) -> Option<AnyElement> {
         Some(text) => {
             let mut look = Look::new(RUBIK, 13., 16.9, white_a(0.45));
             look.weight = FontWeight::NORMAL;
+            let text = ctx.store.resolve_mentions(&text, ctx.store.community_of(&ctx.chat.id).map(|c| c.community_id.as_str()));
             let atoms = crate::preview::reply_atoms(&text, &look);
             div()
                 .flex_1()

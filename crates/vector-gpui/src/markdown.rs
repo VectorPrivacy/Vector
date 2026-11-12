@@ -65,6 +65,8 @@ pub struct Ctx<'a> {
     pub custom: Option<&'a dyn Fn(&str) -> Option<crate::media::Custom>>,
     /// Unix seconds, for times shown relative to now.
     pub now: f64,
+    /// A tagged npub's name; `None` leaves npubs as text.
+    pub mention: Option<&'a dyn Fn(&str) -> String>,
 }
 
 enum Swap {
@@ -421,12 +423,37 @@ impl Builder<'_> {
         }
         let mut last = 0;
         for (start, end) in find_urls(t) {
+            self.tagged(&t[last..start]);
+            match profile_link(&t[start..end]).filter(|_| self.ctx.mention.is_some()) {
+                Some(npub) => self.pill(npub),
+                None => {
+                    let url: SharedString = t[start..end].to_string().into();
+                    self.styled(&t[start..end], Kind::Link(url));
+                }
+            }
+            last = end;
+        }
+        self.tagged(&t[last..]);
+    }
+
+    /// Text with each tagged npub as a pill: `renderMentions` with `allowBare`.
+    fn tagged(&mut self, t: &str) {
+        if self.ctx.mention.is_none() {
+            return self.emoji_text(t, Kind::Plain);
+        }
+        let mut last = 0;
+        for (start, end, npub) in find_npubs(t) {
             self.emoji_text(&t[last..start], Kind::Plain);
-            let url: SharedString = t[start..end].to_string().into();
-            self.styled(&t[start..end], Kind::Link(url));
+            self.pill(npub);
             last = end;
         }
         self.emoji_text(&t[last..], Kind::Plain);
+    }
+
+    fn pill(&mut self, npub: &str) {
+        let Some(name) = self.ctx.mention else { return };
+        let text = format!("@{}", name(npub));
+        self.styled(&text, Kind::Mention(npub.to_string().into()));
     }
 
     /// Text with its `:shortcode:`s swapped for the custom emoji the message carries.
@@ -482,8 +509,13 @@ impl Builder<'_> {
             return;
         }
         let mut look = self.look();
-        if let Kind::Link(_) = kind {
-            look.color = gpui::rgb(0x59fcb3).into();
+        match kind {
+            Kind::Link(_) => look.color = gpui::rgb(0x59fcb3).into(),
+            Kind::Mention(_) => {
+                look.color = gpui::rgb(0x59fcb3).into();
+                look.weight = gpui::FontWeight::MEDIUM;
+            }
+            _ => {}
         }
         // Merge into the previous run when nothing differs.
         if let Some(Atom::Text {
@@ -492,7 +524,7 @@ impl Builder<'_> {
             kind: k,
         }) = self.atoms.last_mut()
         {
-            if *l == look && *k == kind && !matches!(kind, Kind::Spoiler { .. } | Kind::Code) {
+            if *l == look && *k == kind && !matches!(kind, Kind::Spoiler { .. } | Kind::Code | Kind::Mention(_)) {
                 *text = format!("{text}{t}").into();
                 return;
             }
@@ -857,6 +889,57 @@ fn host_of(url: &str) -> Option<String> {
 
 /// Bare http(s) URLs (`linkifyUrls`): to whitespace or a delimiter, less trailing prose
 /// punctuation and unbalanced closing parentheses.
+/// Our own `vectorapp.io/profile/<npub>` link, which reads as a tag.
+fn profile_link(url: &str) -> Option<&str> {
+    let rest = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))?;
+    let (host, path) = rest.split_at(rest.find('/')?);
+    if !host.eq_ignore_ascii_case("vectorapp.io") || path.len() < 9 || !path[..9].eq_ignore_ascii_case("/profile/") {
+        return None;
+    }
+    let npub = path[9..].strip_suffix('/').unwrap_or(&path[9..]);
+    (npub.len() == 63 && is_npub(&npub.to_ascii_lowercase())).then_some(npub)
+}
+
+fn is_npub(s: &str) -> bool {
+    s.len() == 63 && s.starts_with("npub1") && s[5..].bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+}
+
+/// Bare npubs, `@` or `nostr:` prefixed or not, that no word or `/` runs into: (start, end, npub).
+pub fn find_npubs(t: &str) -> Vec<(usize, usize, &str)> {
+    find_npubs_where(t, |c| c.is_ascii_alphanumeric() || c == '_' || c == '/')
+}
+
+/// As [`find_npubs`], with `stop` naming what may not run into one from the left.
+pub fn find_npubs_where(t: &str, stop: impl Fn(char) -> bool) -> Vec<(usize, usize, &str)> {
+    let word = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    let mut out = Vec::new();
+    let mut from = 0;
+    while let Some(off) = t[from..].find("npub1") {
+        let at = from + off;
+        from = at + 5;
+        let Some(npub) = t.get(at..at + 63).filter(|n| is_npub(n)) else { continue };
+        if t[at + 63..].chars().next().is_some_and(word) {
+            continue;
+        }
+        let clear = |i: usize| !t[..i].chars().next_back().is_some_and(&stop);
+        let prefixed = if t[..at].ends_with("nostr:") {
+            Some(at - 6)
+        } else if t[..at].ends_with('@') {
+            Some(at - 1)
+        } else {
+            None
+        };
+        let Some(start) = prefixed.filter(|&i| clear(i)).or_else(|| clear(at).then_some(at)) else {
+            continue;
+        };
+        out.push((start, at + 63, npub));
+        from = at + 63;
+    }
+    out
+}
+
 pub fn find_urls(t: &str) -> Vec<(usize, usize)> {
     let mut out = Vec::new();
     let lower = t.to_ascii_lowercase();
@@ -1041,6 +1124,19 @@ mod custom_tests {
     use super::*;
 
     #[test]
+    fn tags_only_free_standing_npubs() {
+        let n = "npub10j7vkrzv4t0elnd4rmj902pge3e2gkresvd4h9u2ut3valzyjuzsz7ad26";
+        let hits = |t: &str| find_npubs(t).into_iter().map(|(a, b, _)| t[a..b].to_string()).collect::<Vec<_>>();
+        assert_eq!(hits(&format!("hi @{n}!")), vec![format!("@{n}")]);
+        assert_eq!(hits(&format!("nostr:{n}")), vec![format!("nostr:{n}")]);
+        assert_eq!(hits(&format!("x@{n}")), vec![n.to_string()]);
+        assert!(hits(&format!("https://x.com/{n}")).is_empty());
+        assert!(hits(&format!("{n}x")).is_empty());
+        assert_eq!(profile_link(&format!("https://vectorapp.io/profile/{n}/")), Some(n));
+        assert_eq!(profile_link(&format!("https://evil.io/profile/{n}")), None);
+    }
+
+    #[test]
     fn shortcodes_become_images() {
         let revealed = HashSet::new();
         let pic = std::sync::Arc::new(gpui::RenderImage::new(Vec::new()));
@@ -1050,6 +1146,7 @@ mod custom_tests {
             revealed: &revealed,
             custom: Some(&f),
             now: 0.,
+            mention: None,
         };
         let blocks = parse("Have you seen this? :grin: and 21:20:30", &ctx);
         let Block::Para(p) = &blocks[0] else { panic!() };

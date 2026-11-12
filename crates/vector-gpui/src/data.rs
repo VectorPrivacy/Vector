@@ -191,6 +191,82 @@ pub struct Store {
     /// Each community's logo and banner as local files, once resolved.
     pub art: HashMap<String, Art>,
     pub hidden_banners: Vec<String>,
+    pub streamer: Streamer,
+}
+
+/// What Streamer Mode shows for a hidden person's name: fixed length, so it says nothing.
+pub const STREAM_DOTS: &str = "\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}";
+
+/// Streamer Mode, from the account's synced settings.
+pub struct Streamer {
+    pub on: bool,
+    pub hide_wallpapers: bool,
+    /// The stream's SipHash key; until a seed is read, one that never leaves memory.
+    key: [u8; 16],
+}
+
+impl Default for Streamer {
+    fn default() -> Self {
+        let mut key = [0u8; 16];
+        rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut key);
+        Self { on: false, hide_wallpapers: true, key }
+    }
+}
+
+impl Streamer {
+    pub fn set(&mut self, view: &vector_core::synced_prefs::StreamerSettings) {
+        self.on = view.on;
+        self.hide_wallpapers = view.hide_wallpapers;
+        let digit = |b: u8| (b as char).to_digit(16);
+        let bytes = view.seed.as_bytes();
+        if bytes.len() == 32 && bytes.iter().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(b)) {
+            for (i, pair) in bytes.chunks(2).enumerate() {
+                self.key[i] = (digit(pair[0]).unwrap() * 16 + digit(pair[1]).unwrap()) as u8;
+            }
+        }
+    }
+
+    /// The npub's 64-bit tag under this stream's key: tints take the low half, codes the high.
+    fn tag(&self, npub: &str) -> u64 {
+        #[allow(deprecated)]
+        let mut h = std::hash::SipHasher::new_with_keys(
+            u64::from_le_bytes(self.key[..8].try_into().unwrap()),
+            u64::from_le_bytes(self.key[8..].try_into().unwrap()),
+        );
+        std::hash::Hasher::write(&mut h, npub.as_bytes());
+        std::hash::Hasher::finish(&h)
+    }
+
+    /// A hidden person's avatar: a solid circle whose hue is all that tells them apart.
+    pub fn tint(&self, npub: &str) -> PathBuf {
+        let hue = (self.tag(npub) & 0xffff_ffff) % 360;
+        let dir = std::env::temp_dir().join("vector-stream-tints-v1");
+        let path = dir.join(format!("{hue}.svg"));
+        if !path.exists() {
+            let (r, g, b) = hsl(hue as f32, 0.48, 0.46);
+            let _ = std::fs::create_dir_all(&dir);
+            let _ = std::fs::write(
+                &path,
+                format!(r##"<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256"><circle cx="128" cy="128" r="128" fill="#{r:02x}{g:02x}{b:02x}"/></svg>"##),
+            );
+        }
+        path
+    }
+
+    /// A short per-stream label for a hidden person: `len` hex digits of the tag's high half.
+    pub fn code(&self, npub: &str, len: usize) -> String {
+        format!("{:08x}", self.tag(npub) >> 32)[..len.min(8)].to_string()
+    }
+}
+
+fn hsl(h: f32, s: f32, l: f32) -> (u8, u8, u8) {
+    let a = s * l.min(1. - l);
+    let f = |n: f32| {
+        let k = (n + h / 30.) % 12.;
+        let v = l - a * (k - 3.).min(9. - k).clamp(-1., 1.);
+        (v * 255.).round() as u8
+    };
+    (f(0.), f(8.), f(4.))
 }
 
 impl Store {
@@ -226,6 +302,18 @@ impl Store {
             nicknames: f.nicknames,
             art: HashMap::new(),
             hidden_banners: Vec::new(),
+            // Fixtures: VECTOR_STREAMER=1 goes live under the mock's seed.
+            streamer: {
+                let mut st = Streamer::default();
+                if std::env::var_os("VECTOR_STREAMER").is_some() {
+                    st.set(&vector_core::synced_prefs::StreamerSettings {
+                        on: true,
+                        seed: "00112233445566778899aabbccddeeff".into(),
+                        ..Default::default()
+                    });
+                }
+                st
+            },
         })
     }
 
@@ -250,6 +338,7 @@ impl Store {
             nicknames: HashMap::new(),
             art: HashMap::new(),
             hidden_banners: Vec::new(),
+            streamer: Default::default(),
         }
     }
 
@@ -334,8 +423,43 @@ impl Store {
         self.name_in(npub, None)
     }
 
+    /// `streamHidden`: while streaming, anyone but this account who hasn't allowed streams,
+    /// a profile not fetched yet included.
+    pub fn stream_hidden(&self, npub: &str) -> bool {
+        self.streamer.on
+            && npub.starts_with("npub1")
+            && npub != self.my_npub
+            && !self.profiles.get(npub).is_some_and(|p| p.mine || p.stream_consent)
+    }
+
+    /// `resolveMentionText`: tagged npubs as `@name`, for previews and notifications.
+    pub fn resolve_mentions(&self, text: &str, community: Option<&str>) -> String {
+        let spots = crate::markdown::find_npubs_where(text, |c| {
+            c.is_ascii_alphanumeric() || "_/=?&#%.-".contains(c)
+        });
+        if spots.is_empty() {
+            return text.to_string();
+        }
+        let mut out = String::with_capacity(text.len());
+        let mut last = 0;
+        for (start, end, npub) in spots {
+            if !self.stream_hidden(npub) && !self.profiles.contains_key(npub) {
+                continue;
+            }
+            out.push_str(&text[last..start]);
+            out.push('@');
+            out.push_str(&self.name_in(npub, community));
+            last = end;
+        }
+        out.push_str(&text[last..]);
+        out
+    }
+
     /// `getName` with a community: its nickname ranks under your own, over their name.
     pub fn name_in(&self, npub: &str, community: Option<&str>) -> String {
+        if self.stream_hidden(npub) {
+            return STREAM_DOTS.into();
+        }
         let nick = community
             .and_then(|c| self.nicknames.get(c))
             .and_then(|n| n.get(npub))
@@ -410,6 +534,9 @@ impl Store {
     }
 
     pub fn avatar_path(&self, npub: &str) -> Option<PathBuf> {
+        if self.stream_hidden(npub) {
+            return Some(self.streamer.tint(npub));
+        }
         if self.pictures_held(npub) {
             return None;
         }

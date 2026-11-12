@@ -1866,11 +1866,11 @@ impl VectorApp {
                 backend::storage::auto_download(),
                 b[0],
                 (b[1], b[2], b[3]),
-                backend::actions::emoji_usage(),
+                (backend::actions::emoji_usage(), backend::prefs::synced_settings()),
             )
         });
         cx.spawn(async move |this, cx| {
-            let Ok(((on, limit), previews, (emoticons, times, chat_bg), used)) = rx.await else {
+            let Ok(((on, limit), previews, (emoticons, times, chat_bg), (used, synced))) = rx.await else {
                 return;
             };
             this.update(cx, |this, cx| {
@@ -1881,6 +1881,7 @@ impl VectorApp {
                 this.emoticons = emoticons;
                 this.time_suggestions = times;
                 this.chat_bg = chat_bg;
+                this.store.borrow_mut().streamer.set(&synced.streamer);
                 this.emoji_picker.update(cx, |p, cx| p.set_usage(used, cx));
             })
             .ok();
@@ -1979,6 +1980,15 @@ impl VectorApp {
             "call_level" => self.call.apply_level(&payload),
             "call_stats" => self.call.apply_stats(&payload),
             "audio_devices_changed" => self.reload_devices(cx),
+            "synced_settings_updated" => {
+                if let Some(view) = payload
+                    .get("streamer")
+                    .cloned()
+                    .and_then(|v| serde_json::from_value::<vector_core::synced_prefs::StreamerSettings>(v).ok())
+                {
+                    self.store.borrow_mut().streamer.set(&view);
+                }
+            }
             "wallpaper_updated" => {
                 if let Some(chat) = self.store.borrow_mut().chat_mut(&chat_id) {
                     chat.wallpaper_path = payload.get("path").and_then(Value::as_str).unwrap_or_default().to_string();
@@ -2612,7 +2622,7 @@ impl VectorApp {
                 };
                 let name = self.store.borrow().name(&author);
                 let snippet = if !m.content.is_empty() {
-                    m.content.clone()
+                    self.store.borrow().resolve_mentions(&m.content, None)
                 } else if let Some(a) = m.attachments.first() {
                     data::file_type(&a.extension).1.to_string()
                 } else {
@@ -4571,7 +4581,7 @@ fn get_started(cx: &mut Context<VectorApp>) -> impl IntoElement {
 
 /// `.chatlist-contact` (ChatlistRow.svelte).
 /// The chat list's last-message line (`chatPreviewText`).
-fn preview_line(chat: &SerializableChat, color: gpui::Hsla) -> AnyElement {
+fn preview_line(store: &Store, chat: &SerializableChat, color: gpui::Hsla) -> AnyElement {
     let look = crate::inline::Look::new(RUBIK, 13., 18., color);
     let Some(m) = chat.messages.last() else {
         return crate::inline::inline(Vec::new(), look).into_any_element();
@@ -4607,6 +4617,7 @@ fn preview_line(chat: &SerializableChat, color: gpui::Hsla) -> AnyElement {
             &m.text_spans,
             chrono::Local::now().timestamp() as f64,
         );
+        let content = store.resolve_mentions(&content, store.community_of(&chat.id).map(|c| c.community_id.as_str()));
         v.extend(crate::preview::atoms(
             &crate::embeds::for_preview(&content),
             usize::MAX,
@@ -4693,7 +4704,7 @@ fn chat_row(store: &Store, chat: &SerializableChat, active: bool) -> gpui::State
                                         .ml(px(10.))
                                         .mr(px(8.))
                                         .overflow_hidden()
-                                        .child(preview_line(chat, preview_color)),
+                                        .child(preview_line(store, chat, preview_color)),
                                 )
                                 .child(
                                     div()
@@ -4727,11 +4738,12 @@ fn empty_pane(viktor: Option<Entity<crate::viktor::Viktor>>) -> AnyElement {
         .flex_col()
         .items_center()
         .justify_center()
-        .child(img("ui/logo-mark.svg").w(px(48.)).h(px(80.)).opacity(0.25))
+        .child(img("icons/vector-logo.svg").w(px(128.)).h(px(132.)).opacity(0.1))
         .child(
             div()
-                .mt(px(12.))
+                .mt(px(14.))
                 .text_size(px(14.))
+                .line_height(px(24.))
                 .text_color(white_a(0.35))
                 .child("Pick a conversation to get started"),
         )
@@ -4904,7 +4916,8 @@ impl VectorApp {
         }
         let store = self.store.borrow();
         let chat = store.chat(id)?;
-        if !self.chat_bg || chat.wallpaper_path.is_empty() || store.is_request(chat) {
+        let streaming = store.streamer.on && store.streamer.hide_wallpapers;
+        if !self.chat_bg || streaming || chat.wallpaper_path.is_empty() || store.is_request(chat) {
             return None;
         }
         Some(crate::wallpaper::Key {
@@ -11546,6 +11559,9 @@ impl VectorApp {
                 if key == "chat_bg_enabled" {
                     self.chat_bg = value;
                 }
+                if !self.live && key == "streamer_on" {
+                    self.store.borrow_mut().streamer.on = value;
+                }
                 if key == "notif_global_mute" && value {
                     backend::sound::purge();
                 }
@@ -11866,6 +11882,7 @@ impl VectorApp {
         cx.spawn(async move |this, cx| {
             let Ok(Ok(view)) = rx.await else { return };
             this.update(cx, |this, cx| {
+                this.store.borrow_mut().streamer.set(&view.streamer);
                 if let Some(s) = this.settings.as_mut() {
                     let stuck = match key {
                         "advanced" => view.advanced,

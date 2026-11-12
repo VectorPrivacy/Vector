@@ -1,2 +1,4 @@
-// Opens the chat whose id is window.__OPEN_NAME__ (OPEN), wherever it sits in the list.
-(() => { openChat(window.__OPEN_NAME__); })();
+// Opens the chat whose id is OPEN (an npub), for when Streamer Mode hides the names.
+(async () => {
+    await openChat(window.__OPEN_NAME__);
+})();
