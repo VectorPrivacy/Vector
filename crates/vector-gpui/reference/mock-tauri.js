@@ -39,7 +39,11 @@
             const all = msgs(chatId); const i = all.findIndex((m) => m.id === anchorId);
             return i < 0 ? all.slice(-before) : all.slice(Math.max(0, i - before + 1), i + after + 1);
         },
-        get_message_position: ({ chatId, messageId }) => msgs(chatId).findIndex((m) => m.id === messageId),
+        get_message_position: ({ chatId, messageId }) => {
+            const all = msgs(chatId); const i = all.findIndex((m) => m.id === messageId);
+            return i < 0 ? null : { newer: all.length - 1 - i, total: all.length };
+        },
+        get_message_time_at: ({ chatId, newer }) => msgs(chatId).reverse()[newer]?.at ?? null,
         get_unread_counts: () => Object.fromEntries(FIX.chats.map((c) => {
             const i = c.messages.findIndex((m) => m.id === c.last_read);
             return [c.id, c.messages.slice(i + 1).filter((m) => !m.mine).length];

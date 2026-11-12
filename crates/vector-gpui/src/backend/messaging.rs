@@ -143,6 +143,18 @@ pub async fn message_views(
     db::events::get_message_views(id, limit, offset).await
 }
 
+/// Messages newer than `id` and the chat's total, for the scrollbar.
+pub fn message_position(chat_id: &str, id: &str) -> Option<(usize, usize)> {
+    let chat = db::id_cache::get_chat_id_by_identifier(chat_id).ok()?;
+    db::events::get_message_position(chat, id).ok().flatten().map(|p| (p.newer, p.total))
+}
+
+/// When the message `newer` places from the newest was sent (ms).
+pub fn message_time_at(chat_id: &str, newer: usize) -> Option<u64> {
+    let chat = db::id_cache::get_chat_id_by_identifier(chat_id).ok()?;
+    db::events::get_message_time_at(chat, newer).ok().flatten()
+}
+
 pub fn message_count(chat_id: &str) -> usize {
     db::id_cache::get_chat_id_by_identifier(chat_id)
         .and_then(db::events::get_chat_message_count)

@@ -51,6 +51,8 @@ await page.addInitScript({ path: join(HERE, 'mock-tauri.js') });
 await page.goto(`http://localhost:${port}/`);
 await page.waitForTimeout(2500);
 if (after) { await page.evaluate(readFileSync(after, 'utf8')); await page.waitForTimeout(+(process.env.WAIT || 1500)); }
+// MOUSE=x,y[;x,y…]: pointer moves after the script, each given a moment.
+for (const p of (process.env.MOUSE || '').split(';').filter(Boolean)) { const [x, y] = p.split(',').map(Number); await page.mouse.move(x, y, { steps: 4 }); await page.waitForTimeout(400); }
 await page.screenshot({ path: `${out}.png` });
 const boxes = await page.evaluate(() => {
     const pick = [...document.querySelectorAll('body *')].filter((e) => { const r = e.getBoundingClientRect(); const s = getComputedStyle(e); return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none' && r.bottom > 0 && r.top < innerHeight; });

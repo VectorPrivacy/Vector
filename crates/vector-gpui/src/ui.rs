@@ -242,6 +242,10 @@ pub struct VectorApp {
     rx_hover: Option<(String, String)>,
     rx_gen: u64,
     rx_long: bool,
+    bar: crate::scrollbar::Bar,
+    /// A seek's run and its newest message, while a gap lies between it and the held tail.
+    gap: Option<(String, String)>,
+    paging_newer: bool,
     secret_guard: Option<crate::secretguard::Guard>,
     /// The next send has been through the secret guard.
     secret_pass: bool,
@@ -491,6 +495,8 @@ mod voice_ops;
 mod miniprofile_ops;
 #[path = "ui_members.rs"]
 mod members_ops;
+#[path = "ui_scrollbar.rs"]
+mod ui_scrollbar;
 #[path = "ui_pins.rs"]
 mod pins_ops;
 #[path = "ui_msgmenu.rs"]
@@ -861,6 +867,9 @@ impl VectorApp {
             rx_hover: None,
             rx_gen: 0,
             rx_long: false,
+            bar: Default::default(),
+            gap: None,
+            paging_newer: false,
             secret_guard: None,
             secret_pass: false,
             anchors: Default::default(),
@@ -2592,6 +2601,11 @@ impl VectorApp {
             .and_then(|id| store.chat(id))
             .map(|c| data::timeline(c, store.now_ms(), self.read_anchor.as_deref(), names.as_deref()))
             .unwrap_or_default();
+        if let Some(g) = self.gap_index(&store) {
+            if let Some(r) = rows.iter().position(|r| matches!(r, Row::Message { index, .. } if *index == g)) {
+                rows.truncate(r + 1);
+            }
+        }
         drop(store);
         if let Some(edge) = self.edge(&rows) {
             rows.insert(0, Row::Edge(edge));
@@ -2702,6 +2716,8 @@ impl VectorApp {
             vector_media::voice::AudioRecorder::global().cancel();
             self.rec.idle();
         }
+        self.drop_gap();
+        self.bar.reset();
         self.read_anchor = self.store.borrow().chat(&id).map(|c| c.last_read.clone());
         if self.open.as_ref() != Some(&id) {
             self.leave_media(id.as_ref(), window);
@@ -2826,7 +2842,7 @@ impl VectorApp {
     }
 
     /// The page of history before the oldest message held.
-    fn load_older(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn load_older(&mut self, cx: &mut Context<Self>) {
         let Some(id) = self.open.clone() else { return };
         if !self.live || self.paging {
             return;
@@ -4146,6 +4162,7 @@ impl VectorApp {
             chat.messages.push(msg);
             store.resort();
         }
+        self.drop_gap();
         self.refresh_rows(false);
         self.timeline.scroll_to_end();
         cx.notify();
@@ -4155,6 +4172,7 @@ impl VectorApp {
 impl Render for VectorApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let rail_mode = self.rail_mode(window);
+        self.bar_update(window, cx);
         if self.media.borrow_mut().audio.tick() || self.rec.animating() {
             window.request_animation_frame();
         }
@@ -4447,7 +4465,7 @@ impl Render for VectorApp {
                                     .min_w_0()
                                     .h_full()
                                     .flex()
-                                    .child(self.chat_pane(&store, id, &on_community, cx))
+                                    .child(self.chat_pane(&store, id, &on_community, window, cx))
                                     .child(crate::community::members_panel(
                                         &store,
                                         view,
@@ -4458,7 +4476,7 @@ impl Render for VectorApp {
                                     ))
                                     .into_any_element(),
                                 None => self
-                                    .chat_pane(&store, id, &on_community, cx)
+                                    .chat_pane(&store, id, &on_community, window, cx)
                                     .into_any_element(),
                             },
                             (None, None) => empty_pane(self.viktor.clone()).into_any_element(),
@@ -6250,6 +6268,7 @@ impl VectorApp {
         store: &Store,
         id: SharedString,
         on_community: &crate::community::OnAct,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let channel = store.community_of(&id).and_then(|com| com.channel(&id));
@@ -6433,6 +6452,7 @@ impl VectorApp {
             let max_h = ((pane_h + 32.) * 0.4).max(200.);
             crate::pins::drawer(&self.pins, store, &self.revealed.borrow(), clock, max_h, &self.pins_on(cx))
         });
+        let bar = (alone.is_none() && drawer.is_none()).then(|| crate::scrollbar::render(&self.bar, window, self.bar_on(cx)));
         let request = store
             .chat(&id)
             .is_some_and(|chat| store.is_request(chat))
@@ -6463,6 +6483,7 @@ impl VectorApp {
                     .min_h_0()
                     .when(paper.is_none(), |d| d.bg(c(MESSAGES_BG)))
                     .pt(px(if request.is_some() { 12. + 56. } else { 12. }))
+                    .children(bar)
                     .map(|d| match alone {
                         Some(edge) => d.child(div().size_full().flex().flex_col().justify_center().child(edge)),
                         None => d.child(messages),
