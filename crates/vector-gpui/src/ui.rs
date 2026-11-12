@@ -74,7 +74,7 @@ pub struct VectorApp {
     timeline: ListState,
     /// The open chat's rows, rebuilt when it changes rather than per frame.
     rows: Rc<Vec<Row>>,
-    read_anchor: Option<String>,
+    read_anchor: Option<data::Unread>,
     input: Entity<TextInput>,
     syncing: bool,
     /// Spoilers revealed, by message.
@@ -3203,7 +3203,7 @@ impl VectorApp {
             .open
             .as_ref()
             .and_then(|id| store.chat(id))
-            .map(|c| data::timeline(c, store.now_ms(), self.read_anchor.as_deref(), names.as_deref(), &|m| store.hidden(c, m) == Some(data::Hidden::Blocked)))
+            .map(|c| data::timeline(c, store.now_ms(), self.read_anchor.as_ref(), names.as_deref(), &|m| store.hidden(c, m) == Some(data::Hidden::Blocked)))
             .unwrap_or_default();
         let gap = self.gap_index(&store);
         if let Some(g) = gap {
@@ -3332,7 +3332,9 @@ impl VectorApp {
         self.bar.reset();
         self.unread_below = 0;
         self.return_shown = false;
-        self.read_anchor = self.store.borrow().chat(&id).map(|c| c.last_read.clone());
+        self.read_anchor = self.store.borrow().chat(&id).map(|c| {
+            if c.unread_from.is_empty() { data::Unread::After(c.last_read.clone()) } else { data::Unread::At(c.unread_from.clone()) }
+        });
         if self.open.as_ref() != Some(&id) {
             self.leave_media(id.as_ref(), window);
         }

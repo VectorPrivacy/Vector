@@ -1011,21 +1011,33 @@ pub fn collapses(prev: &vector_core::types::Message, cur: &vector_core::types::M
     }
 }
 
+/// Where the NEW divider goes, fixed when the chat opens so reading doesn't move it.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Unread {
+    /// Above the first message from someone else after this one (`last_read`).
+    After(String),
+    /// Above this message (Mark as Unread's `unread_from`).
+    At(String),
+}
+
 /// Lays a chat's messages out as the Tauri timeline does: a date divider before the first
-/// message of each day, and the NEW divider after the last read message.
-/// `read_anchor` is `last_read` as it stood when the chat opened: the divider stays put while
-/// the chat is on screen, even as reading moves `last_read` on.
+/// message of each day, and the NEW divider where `read_anchor` puts it.
 pub fn timeline(
     chat: &SerializableChat,
     now_ms: u64,
-    read_anchor: Option<&str>,
+    read_anchor: Option<&Unread>,
     commands: Option<&HashSet<String>>,
     blocked: &dyn Fn(&vector_core::Message) -> bool,
 ) -> Vec<Row> {
     let mut rows = Vec::with_capacity(chat.messages.len() + 2);
     let mut last_day = None;
     let mut run_head: Option<usize> = None;
-    let read_at = read_anchor.and_then(|a| chat.messages.iter().position(|m| m.id == a));
+    let at = |id: &str| chat.messages.iter().position(|m| m.id == id);
+    let divider = match read_anchor {
+        Some(Unread::At(id)) => at(id),
+        Some(Unread::After(id)) => at(id).and_then(|r| (r + 1..chat.messages.len()).find(|&i| !chat.messages[i].mine)),
+        None => None,
+    };
     for (i, m) in chat.messages.iter().enumerate() {
         let day = local(m.at).date_naive();
         if last_day != Some(day) {
@@ -1036,7 +1048,7 @@ pub fn timeline(
             last_day = Some(day);
             run_head = None;
         }
-        if read_at.is_some_and(|r| i == r + 1) && !m.mine {
+        if divider == Some(i) {
             rows.push(Row::Unread);
         }
         // As `deriveWindow`: a day divider doesn't end a streak.

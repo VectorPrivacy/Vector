@@ -213,7 +213,7 @@ impl VectorApp {
             })
         };
         let Some(before) = before else { return };
-        self.read_anchor = Some(before.clone());
+        self.read_anchor = Some(crate::data::Unread::At(id.clone()));
         if let Some(c) = self.store.borrow_mut().chat_mut(&chat) {
             c.unread_from = id.clone();
             if !self.live {
