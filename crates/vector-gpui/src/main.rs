@@ -92,6 +92,7 @@ mod transcript;
 mod wallpaper;
 mod transfer;
 mod ui;
+mod uploaderr;
 #[allow(dead_code)]
 mod util;
 mod viewer;

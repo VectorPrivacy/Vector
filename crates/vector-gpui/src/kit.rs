@@ -219,6 +219,10 @@ pub struct Popup {
     pub cancel: Option<SharedString>,
     /// A text field, for a popup that asks for a value.
     pub input: Option<gpui::Entity<crate::composer::TextInput>>,
+    /// Small dimmed detail under the text.
+    pub fine: Option<SharedString>,
+    /// A `.net-link` button after the text; it closes the popup itself.
+    pub link: Option<(SharedString, std::rc::Rc<dyn Fn(&mut Window, &mut App)>)>,
 }
 
 impl Popup {
@@ -230,6 +234,8 @@ impl Popup {
             confirm: "Okay".into(),
             cancel: None,
             input: None,
+            fine: None,
+            link: None,
         }
     }
 }
@@ -259,13 +265,32 @@ pub fn popup(
         } else {
             text.clone().into_any_element()
         };
+        let list = text.starts_with("• ");
         content = content.child(
             div()
-                .text_center()
+                .when(!list, |d| d.text_center())
+                .when(list, |d| d.line_height(px(24.)))
                 .text_color(c(TEXT))
                 .mb(px(16.))
                 .when(p.icon.is_some(), |d| d.max_w(px(420.)))
-                .child(body),
+                .child(body)
+                .when_some(p.link.clone(), |d, (label, go)| {
+                    d.child(
+                        div().mt(px(16.)).flex().justify_center().child(
+                            div()
+                                .id("popup-link")
+                                .text_color(c(0x59fcb3))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .cursor_pointer()
+                                .hover(|s| s.underline())
+                                .on_click(move |_, w, cx| go(w, cx))
+                                .child(label),
+                        ),
+                    )
+                })
+                .when_some(p.fine.clone(), |d, fine| {
+                    d.child(div().mt(px(22.)).text_center().text_size(px(12.)).opacity(0.5).child(fine))
+                }),
         );
     }
     if let Some(input) = &p.input {

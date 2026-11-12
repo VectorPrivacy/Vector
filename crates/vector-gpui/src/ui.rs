@@ -1351,6 +1351,10 @@ impl VectorApp {
             r.set(pct, Some("Copying history".into()));
             app.rekey = Some(r);
         }
+        // Fixtures: VECTOR_UPLOAD_ERR=<raw error> shows its upload failure popup.
+        if let Ok(raw) = std::env::var("VECTOR_UPLOAD_ERR") {
+            app.upload_failed(&raw.replace("\\n", "\n"), cx);
+        }
         // Fixtures: VECTOR_START opens the Main Menu.
         if std::env::var("VECTOR_START").is_ok() {
             app.toggle_start(window, cx);
@@ -4646,6 +4650,29 @@ impl VectorApp {
             p.cancel = Some("Cancel".into());
         }
         self.popup = Some((p, if can_open { PopupAct::OpenMicSettings } else { PopupAct::Notice }));
+        cx.notify();
+    }
+
+    /// `humanizeUploadError`: a refused upload, titled by the kind of refusal.
+    fn upload_failed(&mut self, raw: &str, cx: &mut Context<Self>) {
+        let u = crate::uploaderr::humanize(raw);
+        let mut p = kit::Popup::notice(u.title);
+        p.text = Some(u.body.into());
+        p.fine = u.fine.map(Into::into);
+        if u.routing {
+            let app = cx.entity().downgrade();
+            p.link = Some((
+                "Open Routing".into(),
+                Rc::new(move |window, cx| {
+                    app.update(cx, |app, cx| {
+                        app.popup = None;
+                        app.open_settings_path("privacy/routing", window, cx);
+                    })
+                    .ok();
+                }),
+            ));
+        }
+        self.popup = Some((p, PopupAct::Notice));
         cx.notify();
     }
 
@@ -8721,8 +8748,7 @@ impl VectorApp {
             if err.contains("Upload cancelled") {
                 return;
             }
-            this.update(cx, |this, cx| this.notice("Upload Failed", err, cx))
-                .ok();
+            this.update(cx, |this, cx| this.upload_failed(&err, cx)).ok();
         })
         .detach();
     }
@@ -12062,6 +12088,8 @@ impl VectorApp {
                                 confirm: "Confirm".into(),
                                 cancel: Some("Cancel".into()),
                                 input: None,
+                                fine: None,
+                                link: None,
                             },
                             PopupAct::JoinInvite { key, name: p.name },
                         ));
