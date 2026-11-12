@@ -143,6 +143,7 @@ pub struct VectorApp {
     composer_box: Rc<std::cell::Cell<Option<gpui::Bounds<gpui::Pixels>>>>,
     /// The chat header's ⋯ as last painted, which its menus hang from.
     chat_menu_btn: Rc<std::cell::Cell<Option<gpui::Bounds<gpui::Pixels>>>>,
+    new_btn: Rc<std::cell::Cell<Option<gpui::Bounds<gpui::Pixels>>>>,
     send_btn: Rc<std::cell::Cell<Option<gpui::Bounds<gpui::Pixels>>>>,
     /// A press on Send, by number, while it is held; a long one opened the timer instead.
     send_held: Option<u64>,
@@ -304,6 +305,8 @@ enum Mode {
 #[derive(Clone)]
 /// What a context menu row does.
 enum MenuAct {
+    NewMessage,
+    NewCommunity,
     BannerHidden(String, bool),
     StartFolder(String),
     StartRename(String),
@@ -830,6 +833,7 @@ impl VectorApp {
             time_suggestions: true,
             composer_box: Rc::default(),
             chat_menu_btn: Rc::default(),
+            new_btn: Rc::default(),
             send_btn: Rc::default(),
             send_held: None,
             send_long: false,
@@ -1707,6 +1711,8 @@ impl VectorApp {
                 acts.insert(ix.min(acts.len()), MenuAct::Nothing);
                 self.menu = Some((at, items, acts));
             }
+            MenuAct::NewMessage => self.open_new_chat(window, cx),
+            MenuAct::NewCommunity => self.open_create_community(window, cx),
             MenuAct::Sub(label, sub_items, sub_acts) => {
                 acts.insert(ix.min(acts.len()), MenuAct::Nothing);
                 self.menu_trail.push((items, acts));
@@ -6246,6 +6252,7 @@ fn chat_list(
                 .child(
                     div()
                         .id("chatlist-new")
+                        .tooltip(kit::tooltip("New Message or Community"))
                         .size(px(32.))
                         .rounded(px(8.))
                         .border_1()
@@ -6254,7 +6261,21 @@ fn chat_list(
                         .items_center()
                         .justify_center()
                         .cursor_pointer()
-                        .on_click(cx.listener(|app, _, window, cx| app.open_new_chat(window, cx)))
+                        .on_click(cx.listener(|app, _, _, cx| {
+                            let b = app.new_btn.get().unwrap_or_default();
+                            app.show_menu(
+                                gpui::point(b.left(), b.bottom() + px(6.)),
+                                vec![
+                                    (kit::MenuItem::new("New Message", "chat-circle").lead(), MenuAct::NewMessage),
+                                    (kit::MenuItem::new("New Community", "users-multi").lead(), MenuAct::NewCommunity),
+                                ],
+                                cx,
+                            );
+                        }))
+                        .child({
+                            let probe = app.new_btn.clone();
+                            gpui::canvas(move |b, _, _| probe.set(Some(b)), |_, _, _, _| {}).absolute().size_full()
+                        })
                         .child(
                             svg()
                                 .path("ui/plus-thin.svg")

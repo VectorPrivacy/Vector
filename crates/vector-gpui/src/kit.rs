@@ -551,6 +551,8 @@ pub struct MenuItem {
     pub swatch: Option<gpui::Hsla>,
     /// A live value from 0 to 1 and how it reads: applies as it moves, the menu stays open.
     pub slider: Option<(f32, SharedString)>,
+    /// A place to go: the icon leads the label, like a launcher's.
+    pub lead: bool,
 }
 
 #[derive(Clone, Copy, Default, PartialEq)]
@@ -608,6 +610,10 @@ impl MenuItem {
     }
     pub fn danger(mut self) -> Self {
         self.danger = true;
+        self
+    }
+    pub fn lead(mut self) -> Self {
+        self.lead = true;
         self
     }
     pub fn checked(mut self, on: bool) -> Self {
@@ -791,6 +797,7 @@ pub fn context_menu(
         let pick = on_pick.clone();
         let danger = c(crate::timeline::DANGER);
         let back = item.kind == MenuKind::Back;
+        let lead = item.lead && !back;
         let icon = match item.kind {
             MenuKind::Sub => Some(SharedString::from("icons/chevron-right.svg")),
             _ if item.checked => Some(SharedString::from("icons/check.svg")),
@@ -823,7 +830,8 @@ pub fn context_menu(
                 .id(("ctx", ix))
                 .flex()
                 .items_center()
-                .when(!back && swatch.is_none(), |d| d.justify_between().gap(px(12.)))
+                .when(!back && swatch.is_none() && !lead, |d| d.justify_between().gap(px(12.)))
+                .when(lead, |d| d.gap(px(12.)))
                 .when_some(swatch, |d, color| {
                     d.gap(px(10.)).child(
                         div()
@@ -837,6 +845,7 @@ pub fn context_menu(
                 })
                 .when(back, |d| d.gap(px(8.)))
                 .px(px(14.))
+                .when(lead, |d| d.pr(px(22.)))
                 .py(px(10.))
                 .text_size(px(14.))
                 .line_height(px(24.))
@@ -860,8 +869,11 @@ pub fn context_menu(
                             .text_color(ink),
                     )
                 })
+                .when(lead, |d| {
+                    d.children(icon.clone().map(|i| gpui::svg().path(i).size(px(20.)).flex_shrink_0().text_color(ink)))
+                })
                 .child(label)
-                .when(!back, |d| {
+                .when(!back && !lead, |d| {
                     d.children(icon.map(|i| {
                         let color = if item.checked && item.kind != MenuKind::Sub {
                             c(crate::theme::PRIMARY)
