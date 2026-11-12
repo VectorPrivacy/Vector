@@ -461,3 +461,35 @@ async fn dispatch(
     })
     .await
 }
+
+pub const RETRY_FILE_MISSING: &str = "This file is no longer on this device. Attach it again to send it.";
+
+/// `retry_failed_community_message`: republish the retained wrap, else send the files again from
+/// whatever this device still holds of them. False when there was nothing to go again from.
+pub async fn retry(message_id: String) -> Result<bool, String> {
+    vector_core::db::scoped(async move {
+        let failed = {
+            let state = vector_core::state::STATE.lock().await;
+            state.find_message(&message_id).map(|(chat, m)| (chat.id().to_string(), m))
+        };
+        if !failed.as_ref().is_some_and(|(_, m)| m.failed) {
+            return Err("Message is not failed or does not exist".into());
+        }
+        if vector_core::community::v2::service::retry_unconfirmed(&message_id).await {
+            return Ok(true);
+        }
+        let Some((channel, msg)) = failed.filter(|(_, m)| !m.attachments.is_empty()) else {
+            return Ok(false);
+        };
+        let mut prepared = Vec::with_capacity(msg.attachments.len());
+        for att in &msg.attachments {
+            let source = vector_core::sending::retry_source(att).ok_or(RETRY_FILE_MISSING)?;
+            let plain_len = att.size.saturating_sub(16);
+            prepared.push(stage(source, plain_len, att.id.clone(), att.extension.clone(), att.name.clone(), att.img_meta.clone()));
+        }
+        super::actions::remove_failed(&message_id, false).await?;
+        dispatch(channel, msg.content, msg.replied_to, prepared).await?;
+        Ok(true)
+    })
+    .await
+}

@@ -100,6 +100,13 @@ pub async fn delete(message_id: String) -> Result<(), String> {
 
 /// A failed send never reached the wire: local cleanup, and its uploads taken back.
 pub async fn delete_failed(message_id: String) -> Result<(), String> {
+    remove_failed(&message_id, true).await
+}
+
+/// Drop a failed message and the blobs it uploaded; `drop_files` also lets go of what it kept
+/// to go again, which a retry still needs.
+pub async fn remove_failed(message_id: &str, drop_files: bool) -> Result<(), String> {
+    let message_id = message_id.to_string();
     let removed = {
         let mut state = STATE.lock().await;
         match state.find_message(&message_id) {
@@ -115,13 +122,22 @@ pub async fn delete_failed(message_id: String) -> Result<(), String> {
             _ => return Err("Message is not failed or does not exist".into()),
         },
     };
-    let download_dir = db::get_download_dir();
-    for att in &msg.attachments {
-        if att.path.is_empty() || !Path::new(&att.path).starts_with(&download_dir) {
-            continue;
+    if drop_files {
+        for att in &msg.attachments {
+            vector_core::sending::discard_retry_copy(att);
         }
-        if db::attachments::hash_referenced_elsewhere(&att.id, &message_id) == Ok(false) {
-            let _ = tokio::fs::remove_file(&att.path).await;
+        if let Ok(download_dir) = std::fs::canonicalize(db::get_download_dir()) {
+            for att in &msg.attachments {
+                if att.path.is_empty() {
+                    continue;
+                }
+                if let Ok(path) = std::fs::canonicalize(&att.path)
+                    && path.starts_with(&download_dir)
+                    && db::attachments::hash_referenced_elsewhere(&att.id, &message_id) == Ok(false)
+                {
+                    let _ = tokio::fs::remove_file(&path).await;
+                }
+            }
         }
     }
     let urls: Vec<String> = msg
@@ -137,10 +153,17 @@ pub async fn delete_failed(message_id: String) -> Result<(), String> {
     }
     let _ = db::events::delete_event(&message_id).await;
     emit_removed(&message_id, &chat_id);
+    // A Community message that went unconfirmed may have landed anyway: take it back.
+    db::spawn_bound(async move {
+        vector_core::community::v2::service::discard_unconfirmed(&chat_id, &message_id).await;
+    });
     Ok(())
 }
 
 pub async fn retry(receiver: String, message_id: String) -> Result<bool, String> {
+    if !receiver.starts_with("npub1") {
+        return super::community_files::retry(message_id).await;
+    }
     let failed = VectorCore
         .get_message(&message_id)
         .await

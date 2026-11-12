@@ -3606,6 +3606,21 @@ impl VectorApp {
     }
 
     /// A message in the open chat, or in the one the floating player came from.
+    fn set_send_state(&mut self, chat: &str, id: &str, failed: bool, pending: bool) {
+        if let Some(m) = self
+            .store
+            .borrow_mut()
+            .chat_mut(chat)
+            .and_then(|c| c.messages.iter_mut().find(|m| m.id == id))
+        {
+            m.failed = failed;
+            m.pending = pending;
+        }
+        if self.open.as_deref() == Some(chat) {
+            self.refresh_rows(false);
+        }
+    }
+
     fn message(&self, id: &str) -> Option<Message> {
         let store = self.store.borrow();
         let find = |chat: &str| store.chat(chat)?.messages.iter().find(|m| m.id == id).cloned();
@@ -3851,16 +3866,37 @@ impl VectorApp {
                 let Some(chat) = self.open.clone() else {
                     return;
                 };
-                if self.live {
-                    let rx = backend::run(backend::actions::retry(chat.to_string(), id));
-                    cx.spawn(async move |this, cx| {
-                        if let Ok(Err(e)) = rx.await {
-                            this.update(cx, |this, cx| this.notice("Retry Failed", e, cx))
-                                .ok();
+                if !self.live {
+                    return;
+                }
+                let Some(m) = self.message(&id) else { return };
+                // Back to pending at once, so a slow resend doesn't invite another tap.
+                self.set_send_state(&chat, &id, false, true);
+                let chat = chat.to_string();
+                let rx = backend::run(backend::actions::retry(chat.clone(), id.clone()));
+                cx.spawn(async move |this, cx| {
+                    let res = rx.await.unwrap_or_else(|_| Err("cancelled".into()));
+                    this.update(cx, |this, cx| match res {
+                        Ok(true) => {}
+                        // Nothing retained: drop the row and send the text fresh.
+                        Ok(false) => {
+                            let _ = backend::run(async move {
+                                backend::actions::delete_failed(id).await?;
+                                messaging::send(chat, m.content, m.replied_to, None).await
+                            });
+                        }
+                        Err(e) => {
+                            this.set_send_state(&chat, &id, true, false);
+                            if e.contains("no longer on this device") {
+                                this.notice("Cannot retry", e, cx);
+                            }
+                            cx.notify();
                         }
                     })
-                    .detach();
-                }
+                    .ok();
+                })
+                .detach();
+                cx.notify();
             }
             Act::Delete => {
                 let failed = self.message(&id).is_some_and(|m| m.mine && m.failed);
