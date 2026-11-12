@@ -556,6 +556,7 @@ pub async fn leave_or_delete(community_id: String, owner: bool) -> Result<(), St
                 .map_err(|e| e.to_string())?;
         }
         teardown_local(&community_id, &channels, &relays).await;
+        super::rail::forget(community_id.clone()).await;
         super::emit("communities_changed", ());
         Ok(())
     })

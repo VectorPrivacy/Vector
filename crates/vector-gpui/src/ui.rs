@@ -194,6 +194,8 @@ pub struct VectorApp {
     tab_slid: bool,
     chatlist: ListState,
     chatlist_keys: RefCell<Vec<(u8, String)>>,
+    /// Rail folders open on this device.
+    rail_open: HashSet<String>,
     archive: chatlist_ops::Fold,
     /// The request senders last asked about for shared Communities.
     mutuals_asked: Vec<String>,
@@ -298,9 +300,15 @@ enum MenuAct {
     },
     CopyId(String, &'static str),
     NexusLink(String),
+    /// A rail folder's communities read at once.
+    RailRead(Vec<String>),
+    RailRename(String),
+    RailHue(String, Option<u16>),
+    RailUngroup(String),
 }
 
 enum PopupAct {
+    RailRename(String),
     NexusUninstall(String),
     Notice,
     OpenWeb(String),
@@ -415,6 +423,8 @@ mod publish_ops;
 mod pivx_ops;
 #[path = "ui_chatlist.rs"]
 mod chatlist_ops;
+#[path = "ui_rail.rs"]
+mod rail_ops;
 
 impl VectorApp {
     fn base(store: Store, live: bool, window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -743,6 +753,7 @@ impl VectorApp {
             requests_tab: false,
             chatlist: ListState::new(0, ListAlignment::Top, px(400.)),
             chatlist_keys: RefCell::new(Vec::new()),
+            rail_open: HashSet::new(),
             archive: Default::default(),
             tab_slid: false,
             mutuals_asked: Vec::new(),
@@ -939,6 +950,9 @@ impl VectorApp {
                     }
                 }
             }
+        }
+        if !app.live {
+            app.load_rail();
         }
         // Fixtures: VECTOR_START opens the Main Menu.
         if std::env::var("VECTOR_START").is_ok() {
@@ -1458,6 +1472,9 @@ impl VectorApp {
                 cx,
             ),
             MenuAct::StartTogglePin(key) => self.start_pin(key, cx),
+            act @ (MenuAct::RailRead(_) | MenuAct::RailRename(_) | MenuAct::RailHue(..) | MenuAct::RailUngroup(_)) => {
+                self.rail_menu_act(act, window, cx)
+            }
             MenuAct::StartUnpin(key) => self.start_edit(
                 move |l| {
                     vector_core::start_menu::unpin(l, &key);
@@ -2115,6 +2132,7 @@ impl VectorApp {
                     store.resort();
                 }
                 self.load_chatlist_prefs();
+                self.load_rail();
                 self.refresh_unread(cx);
                 self.reload_communities(cx);
                 self.reload_invites(cx);
@@ -2172,6 +2190,7 @@ impl VectorApp {
                     self.store.borrow_mut().hidden_banners = ids;
                 }
             }
+            "rail_layout_updated" => self.rail_event(&payload, cx),
             "start_layout_updated" => {
                 if let (Some(sm), Ok(layout)) = (self.start.as_mut(), serde_json::from_value(payload.clone())) {
                     sm.layout = layout;
@@ -3653,6 +3672,10 @@ impl VectorApp {
                     self.start_edit(move |l| l.rename_folder(&id, &name), cx);
                 }
             }
+            PopupAct::RailRename(folder) => {
+                let name = popup.input.map(|i| i.read(cx).text().trim().to_string()).unwrap_or_default();
+                self.rail_rename(folder, name, cx);
+            }
             PopupAct::CommunityNickname { community, npub } => {
                 let nick = popup
                     .input
@@ -3927,6 +3950,7 @@ impl Render for VectorApp {
                     .min_h_0()
                     .child(rail(
                         &store,
+                        &self.rail_open,
                         self.open.as_ref(),
                         self.community.as_ref().map(|v| v.id.as_str()),
                         &on_community,
@@ -4472,6 +4496,7 @@ fn rail_label(text: &'static str) -> impl IntoElement {
 
 fn rail(
     store: &Store,
+    folders: &HashSet<String>,
     open: Option<&SharedString>,
     active: Option<&str>,
     on_c: &crate::community::OnAct,
@@ -4582,7 +4607,7 @@ fn rail(
         .pt(px(6.))
         .child(div().mx(px(16.)).h(px(1.)).bg(c(DIVIDER)))
         .child(div().pt(px(16.)).child(rail_label("Communities")))
-        .child(crate::community::rail_rows(store, active, on_c))
+        .child(crate::rail::render(store, &store.rail, folders, active, on_c))
         .child(
             div()
                 .id("rail-create-community")
@@ -6973,6 +6998,11 @@ impl VectorApp {
                 }
             }
             Act::Create => self.open_create_community(window, cx),
+            Act::RailFolder(id) => self.rail_toggle(id, cx),
+            Act::RailMenu(Some(key), _, at) => self.community_menu(key, at, cx),
+            Act::RailMenu(None, Some(folder), at) => self.rail_folder_menu(folder, at, cx),
+            Act::RailMenu(None, None, _) => {}
+            Act::RailDrop(source, target) => self.rail_drop(source, target, cx),
             Act::Invite => {
                 if let Some(id) = self.community.as_ref().map(|v| v.id.clone()) {
                     self.open_invite(id, window, cx);

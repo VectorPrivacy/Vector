@@ -16,6 +16,7 @@ pub mod images;
 pub mod inline;
 pub mod market;
 pub mod pivx;
+pub mod rail;
 pub mod messaging;
 pub mod mic;
 pub mod network;

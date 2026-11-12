@@ -51,6 +51,9 @@ struct Fixtures {
     /// Pins and archived chats, which VECTOR_CHATLIST_DEMO=1 applies.
     #[serde(default)]
     chatlist_demo: Option<ChatlistDemo>,
+    /// More communities for the rail, which VECTOR_RAIL_DEMO=1 adds.
+    #[serde(default)]
+    rail_demo: Vec<Community>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -225,6 +228,8 @@ pub struct Store {
     pub pinned: Vec<String>,
     /// Archived DMs: chat id → the newest message time when archived.
     pub archived: HashMap<String, u64>,
+    /// The community rail's synced order and folders.
+    pub rail: vector_core::rail_layout::RailLayout,
 }
 
 /// What Streamer Mode shows for a hidden person's name: fixed length, so it says nothing.
@@ -328,7 +333,10 @@ impl Store {
             frozen_now_ms: Some(f.now),
             unread: None,
             mutuals: Default::default(),
-            communities: f.communities,
+            communities: match std::env::var_os("VECTOR_RAIL_DEMO") {
+                Some(_) => f.communities.into_iter().chain(f.rail_demo).collect(),
+                None => f.communities,
+            },
             invites: f.invites.into_iter().map(Invite::from).collect(),
             fixture_audit: f.audit,
             fixture_roles: f.roles_view,
@@ -348,6 +356,7 @@ impl Store {
             hidden_banners: Vec::new(),
             pinned: demo.pinned,
             archived: demo.archived,
+            rail: Default::default(),
             // Fixtures: VECTOR_STREAMER=1 goes live under the mock's seed.
             streamer: {
                 let mut st = Streamer::default();
@@ -394,6 +403,7 @@ impl Store {
             streamer: Default::default(),
             pinned: Vec::new(),
             archived: HashMap::new(),
+            rail: Default::default(),
         }
     }
 

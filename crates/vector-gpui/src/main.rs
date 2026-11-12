@@ -10,6 +10,7 @@ mod call;
 mod chaneditor;
 mod commsettings;
 mod community;
+mod rail;
 mod cmdform;
 mod commands;
 mod composer;

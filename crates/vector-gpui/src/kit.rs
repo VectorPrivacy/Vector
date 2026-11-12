@@ -502,6 +502,8 @@ pub struct MenuItem {
     pub disabled: bool,
     /// A dimmed qualifier after the label.
     pub hint: Option<SharedString>,
+    /// A colour choice: its dot leads the row.
+    pub swatch: Option<gpui::Hsla>,
 }
 
 #[derive(Clone, Copy, Default, PartialEq)]
@@ -563,6 +565,10 @@ impl MenuItem {
     }
     pub fn checked(mut self, on: bool) -> Self {
         self.checked = on;
+        self
+    }
+    pub fn swatch(mut self, color: gpui::Hsla) -> Self {
+        self.swatch = Some(color);
         self
     }
 }
@@ -632,7 +638,9 @@ pub fn context_menu(
             c(0xb2b2b2)
         };
         let live = !item.disabled;
+        let swatch = item.swatch;
         let label = div()
+            .when(swatch.is_some(), |d| d.flex_1())
             .min_w_0()
             .overflow_hidden()
             .text_ellipsis()
@@ -649,7 +657,18 @@ pub fn context_menu(
                 .id(("ctx", ix))
                 .flex()
                 .items_center()
-                .when(!back, |d| d.justify_between().gap(px(12.)))
+                .when(!back && swatch.is_none(), |d| d.justify_between().gap(px(12.)))
+                .when_some(swatch, |d, color| {
+                    d.gap(px(10.)).child(
+                        div()
+                            .size(px(14.))
+                            .flex_shrink_0()
+                            .rounded_full()
+                            .bg(color)
+                            .border_1()
+                            .border_color(gpui::white().opacity(0.18)),
+                    )
+                })
                 .when(back, |d| d.gap(px(8.)))
                 .px(px(14.))
                 .py(px(10.))

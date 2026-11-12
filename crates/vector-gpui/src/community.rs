@@ -27,6 +27,14 @@ pub enum Act {
     /// A Category's "+": a new channel inside it.
     AddChannel(String),
     Create,
+    /// A rail folder opened or shut.
+    RailFolder(String),
+    /// Right-click on a rail row: a community's key, or a folder's id.
+    RailMenu(Option<String>, Option<String>, gpui::Point<gpui::Pixels>),
+    RailDrop(
+        vector_core::rail_layout::RailDrag,
+        vector_core::rail_layout::RailDrop,
+    ),
     /// Invite People, for the open Community.
     Invite,
     CategoryMenu(String, gpui::Point<gpui::Pixels>),
@@ -78,69 +86,6 @@ fn click(
 ) -> impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static {
     let on = on.clone();
     move |_, window, cx| on(act(), window, cx)
-}
-
-/// `#ws-rail-spaces` rows: a rounded square per Community, the open one marked by a bar.
-pub fn rail_rows(store: &Store, active: Option<&str>, on: &OnAct) -> impl IntoElement {
-    div().children(
-        store
-            .communities
-            .iter()
-            .filter(|c| !c.dissolved)
-            .map(|com| {
-                let open = active == Some(com.community_id.as_str());
-                let unread = !open && com.channels.iter().any(|ch| channel_unread(store, ch) > 0);
-                let id = com.community_id.clone();
-                div()
-                    .id(SharedString::from(format!("rail-c-{}", com.community_id)))
-                    .relative()
-                    .mx(px(8.))
-                    .h(px(31.))
-                    .rounded(px(10.))
-                    .flex()
-                    .items_center()
-                    .px(px(8.))
-                    .gap(px(10.))
-                    .cursor_pointer()
-                    .hover(|d| d.bg(white_a(0.045)))
-                    .on_click(click(on, move || Act::Open(id.clone())))
-                    .when(open, |d| {
-                        d.child(
-                            div()
-                                .absolute()
-                                .left(px(-8.))
-                                .top(px(3.))
-                                .w(px(4.))
-                                .h(px(25.))
-                                .rounded_r(px(4.))
-                                .bg(c(PRIMARY)),
-                        )
-                    })
-                    .when(unread, |d| {
-                        d.child(
-                            div()
-                                .absolute()
-                                .left(px(-8.))
-                                .top(px(10.5))
-                                .w(px(4.))
-                                .h(px(10.))
-                                .rounded_r(px(4.))
-                                .bg(c(ICON_MUTED)),
-                        )
-                    })
-                    .child(logo(store, &com.community_id, 26., 4.9))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .font_family(RUBIK)
-                            .text_size(px(14.))
-                            .text_color(c(0xffffff))
-                            .child(com.name.clone()),
-                    )
-            }),
-    )
 }
 
 fn icon(path: &'static str, size: f32, color: gpui::Hsla) -> gpui::Svg {
