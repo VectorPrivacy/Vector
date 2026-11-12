@@ -9,6 +9,8 @@ use vector_core::sending::{SendCallback, SendConfig};
 use vector_core::{Message, STATE, db};
 
 /// Cancel flags for uploads in flight, by pending id.
+/// Cancelled uploads whose failure is still to persist: the row goes instead.
+static CANCELLED: Mutex<Vec<String>> = Mutex::new(Vec::new());
 static UPLOAD_CANCEL: LazyLock<Mutex<HashMap<String, Arc<AtomicBool>>>> =
     LazyLock::new(Default::default);
 /// A failure's reason, from `on_failed_reason` to the `on_failed` that follows it.
@@ -101,7 +103,16 @@ impl SendCallback for Callback {
     }
 
     fn on_failed(&self, chat_id: &str, old_id: &str, msg: &Message) {
-        UPLOAD_CANCEL.lock().unwrap().remove(old_id);
+        let cancelled = UPLOAD_CANCEL
+            .lock()
+            .unwrap()
+            .remove(old_id)
+            .is_some_and(|f| f.load(Ordering::Relaxed));
+        if cancelled {
+            FAIL_REASONS.lock().unwrap().remove(old_id);
+            CANCELLED.lock().unwrap().push(old_id.to_string());
+            return;
+        }
         let reason = FAIL_REASONS.lock().unwrap().remove(old_id);
         vector_core::emit_event(
             "message_update",
@@ -110,6 +121,19 @@ impl SendCallback for Callback {
     }
 
     fn on_persist(&self, chat_id: &str, msg: &Message) {
+        let cancelled = {
+            let mut c = CANCELLED.lock().unwrap();
+            c.iter().position(|id| *id == msg.id).map(|at| c.swap_remove(at))
+        };
+        if let Some(id) = cancelled {
+            let chat_id = chat_id.to_string();
+            db::spawn_bound(async move {
+                STATE.lock().await.remove_message(&id);
+                let _ = db::events::delete_event(&id).await;
+                vector_core::emit_event("message_removed", &json!({ "id": id, "chat_id": chat_id, "reason": "cancelled" }));
+            });
+            return;
+        }
         let (chat_id, msg) = (chat_id.to_string(), msg.clone());
         db::spawn_bound(async move {
             let _ = db::events::save_message(&chat_id, &msg).await;

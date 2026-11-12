@@ -144,6 +144,7 @@ pub struct VectorApp {
     /// The chat header's ⋯ as last painted, which its menus hang from.
     chat_menu_btn: Rc<std::cell::Cell<Option<gpui::Bounds<gpui::Pixels>>>>,
     new_btn: Rc<std::cell::Cell<Option<gpui::Bounds<gpui::Pixels>>>>,
+    signer_offline_told: bool,
     send_btn: Rc<std::cell::Cell<Option<gpui::Bounds<gpui::Pixels>>>>,
     /// A press on Send, by number, while it is held; a long one opened the timer instead.
     send_held: Option<u64>,
@@ -836,6 +837,7 @@ impl VectorApp {
             composer_box: Rc::default(),
             chat_menu_btn: Rc::default(),
             new_btn: Rc::default(),
+            signer_offline_told: false,
             send_btn: Rc::default(),
             send_held: None,
             send_long: false,
@@ -2686,6 +2688,19 @@ impl VectorApp {
                 if let Some((_, dot)) = self.settings.as_mut().and_then(|s| s.signer.as_mut()) {
                     *dot = state;
                 }
+                // Steady-state health only: pairing on the login screen reports its own status.
+                match state {
+                    "offline" if self.live && !self.signer_offline_told => {
+                        self.signer_offline_told = true;
+                        self.show_toast("Remote signer offline. Please check your signer app.", cx);
+                    }
+                    "online" if self.live && self.signer_offline_told => {
+                        self.signer_offline_told = false;
+                        self.show_toast("Remote signer back online.", cx);
+                    }
+                    "offline" | "online" => {}
+                    _ => self.signer_offline_told = false,
+                }
             }
             "bunker_auth_url" => {
                 if let Some(url) = payload.get("url").and_then(Value::as_str) {
@@ -2853,6 +2868,9 @@ impl VectorApp {
                 self.store.borrow_mut().resort();
                 if self.open.as_deref() == Some(chat_id.as_str()) {
                     self.refresh_rows(false);
+                }
+                if payload.get("reason").and_then(Value::as_str) == Some("cancelled") {
+                    self.show_toast("Upload Cancelled", cx);
                 }
             }
             "message_new" | "message_update" => {
