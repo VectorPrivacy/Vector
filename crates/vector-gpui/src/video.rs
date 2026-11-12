@@ -140,6 +140,19 @@ impl Clip {
         }
     }
 
+    /// What shows: the frame it is on, else the poster.
+    pub fn picture(&self) -> Option<Arc<RenderImage>> {
+        self.frame.clone().or_else(|| self.info.as_ref().and_then(|i| i.poster.clone()))
+    }
+
+    pub fn aspect(&self) -> f32 {
+        self.info.as_ref().map_or(16. / 9., |i| i.w.max(1) as f32 / i.h.max(1) as f32)
+    }
+
+    pub fn duration(&self) -> u64 {
+        self.info.as_ref().map_or(0, |i| i.duration)
+    }
+
     fn controls(&self) -> bool {
         !self.playing || self.scrub.is_some() || (self.hovered && self.moved.is_some_and(|t| t.elapsed() < IDLE))
     }
@@ -285,24 +298,25 @@ impl Videos {
         }
     }
 
+    /// The clip playing now, if any.
+    pub fn playing(&self) -> Option<&str> {
+        let a = self.active.as_deref()?;
+        self.clips.get(a).is_some_and(|c| c.playing || c.loading).then_some(a)
+    }
+
+    /// Every clip but `keep` stopped.
+    pub fn stop_except(&mut self, keep: Option<&str>) {
+        let ids: Vec<String> = self.clips.keys().filter(|a| Some(a.as_str()) != keep).cloned().collect();
+        for a in ids {
+            self.stop(&a);
+        }
+    }
+
     /// Paused, its decoder and sound let go; the frame it was on stays.
-    fn stop(&mut self, att: &str) {
+    pub fn stop(&mut self, att: &str) {
         self.pause(att);
         if let Some(c) = self.clips.get_mut(att) {
             c.play = None;
-        }
-    }
-
-    pub fn pause_all(&mut self) {
-        if let Some(a) = self.active.clone() {
-            self.pause(&a);
-        }
-    }
-
-    pub fn stop_all(&mut self) {
-        let ids: Vec<String> = self.clips.keys().cloned().collect();
-        for a in ids {
-            self.stop(&a);
         }
     }
 
@@ -515,10 +529,10 @@ use ff::{decode, decode_audio, probe};
 pub type OnAct = Rc<dyn Fn(Act, &mut Window, &mut App)>;
 
 /// The clip at its fitted size, its controls over it while paused or pointed at.
-pub fn view(id: &str, clip: &Clip, dim: bool, on: OnAct) -> AnyElement {
+pub fn view(id: &str, clip: &Clip, dim: bool, size: Option<(f32, f32)>, radius: f32, on: OnAct) -> AnyElement {
     let info = clip.info.as_ref();
-    let (w, h) = info.map_or((MAX_W, MAX_H * 0.6), |i| fit(i.w, i.h));
-    let picture = clip.frame.clone().or_else(|| info.and_then(|i| i.poster.clone()));
+    let (w, h) = size.unwrap_or_else(|| info.map_or((MAX_W, MAX_H * 0.6), |i| fit(i.w, i.h)));
+    let picture = clip.picture();
     let duration = info.map_or(0, |i| i.duration);
     let pos = clip.position().min(duration);
     let shown = clip.controls() && !dim;
@@ -617,7 +631,7 @@ pub fn view(id: &str, clip: &Clip, dim: bool, on: OnAct) -> AnyElement {
         .relative()
         .w(px(w))
         .h(px(h))
-        .rounded(px(8.))
+        .rounded(px(radius))
         .overflow_hidden()
         .bg(gpui::black())
         .cursor_pointer()

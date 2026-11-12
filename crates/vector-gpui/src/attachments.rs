@@ -143,6 +143,8 @@ pub fn attachments(ctx: &Ctx, m: &Message) -> Option<AnyElement> {
                                 &att.id,
                                 clip,
                                 m.pending,
+                                None,
+                                8.,
                                 std::rc::Rc::new(move |a, w, cx| on_act(&msg, Act::Video(aid.clone(), a), w, cx)),
                             ),
                             6.,

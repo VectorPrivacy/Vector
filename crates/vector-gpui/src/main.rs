@@ -44,6 +44,7 @@ mod packdetails;
 mod packs;
 mod picker;
 mod policies;
+mod popout;
 mod preview;
 mod profile;
 mod qr;

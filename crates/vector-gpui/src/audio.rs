@@ -130,6 +130,10 @@ impl Player {
         if self.duration > 0 { p.min(self.duration) } else { p }
     }
 
+    pub fn display(&self) -> &[f32] {
+        &self.display
+    }
+
     fn progress(&self) -> f32 {
         if self.duration == 0 {
             return 0.;
@@ -540,10 +544,10 @@ impl Audio {
         }
     }
 
-    pub fn pause_active(&mut self) {
-        if let Some(a) = self.active.clone() {
-            self.pause(&a);
-        }
+    /// The attachment sounding now, if any.
+    pub fn playing(&self) -> Option<&str> {
+        let a = self.active.as_deref()?;
+        self.players.get(a).is_some_and(|p| p.playing || p.loading).then_some(a)
     }
 
     pub fn pause(&mut self, att: &str) {
@@ -1138,7 +1142,7 @@ fn album_clock() -> f32 {
 }
 
 /// `.audio-art-glow`, crossfading to the taller window as the lyrics open.
-fn glows(tags: Option<&Tags>, open: f32) -> Vec<AnyElement> {
+pub(crate) fn glows(tags: Option<&Tags>, open: f32) -> Vec<AnyElement> {
     let Some(t) = tags else { return Vec::new() };
     [(t.glow.clone(), 1. - open), (t.glow_tall.clone(), open)]
         .into_iter()

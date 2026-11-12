@@ -123,6 +123,7 @@ pub struct VectorApp {
     chat_box: Rc<std::cell::Cell<Option<gpui::Bounds<gpui::Pixels>>>>,
     /// Display → Background Wallpaper.
     chat_bg: bool,
+    popout: crate::popout::Popout,
     rec: crate::recorder::Recorder,
     /// Who a `@` can name in the open chat, gathered once per open panel.
     mention_pool: Option<Rc<Vec<crate::mentions::Item>>>,
@@ -377,6 +378,8 @@ mod chaneditor_ops;
 mod commands_ops;
 #[path = "ui_moderation.rs"]
 mod moderation_ops;
+#[path = "ui_popout.rs"]
+mod popout_ops;
 
 impl VectorApp {
     fn base(store: Store, live: bool, window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -637,6 +640,7 @@ impl VectorApp {
             wallpaper: Default::default(),
             chat_box: Rc::default(),
             chat_bg: true,
+            popout: Default::default(),
             rec: Default::default(),
             mention_pool: None,
             tracked: Vec::new(),
@@ -1927,16 +1931,17 @@ impl VectorApp {
                 ("emoticon_suggestions", true),
                 ("time_suggestions", true),
                 ("chat_bg_enabled", true),
+                ("floating_player", true),
             ]);
             (
                 backend::storage::auto_download(),
                 b[0],
-                (b[1], b[2], b[3]),
+                (b[1], b[2], b[3], b[4]),
                 (backend::actions::emoji_usage(), backend::prefs::synced_settings()),
             )
         });
         cx.spawn(async move |this, cx| {
-            let Ok(((on, limit), previews, (emoticons, times, chat_bg), (used, synced))) = rx.await else {
+            let Ok(((on, limit), previews, (emoticons, times, chat_bg, floating), (used, synced))) = rx.await else {
                 return;
             };
             this.update(cx, |this, cx| {
@@ -1947,6 +1952,7 @@ impl VectorApp {
                 this.emoticons = emoticons;
                 this.time_suggestions = times;
                 this.chat_bg = chat_bg;
+                this.popout.enabled = floating;
                 this.store.borrow_mut().streamer.set(&synced.streamer);
                 this.emoji_picker.update(cx, |p, cx| p.set_usage(used, cx));
             })
@@ -2327,7 +2333,7 @@ impl VectorApp {
         }
         self.read_anchor = self.store.borrow().chat(&id).map(|c| c.last_read.clone());
         if self.open.as_ref() != Some(&id) {
-            self.media.borrow_mut().videos.stop_all();
+            self.leave_media(id.as_ref(), window);
         }
         self.open = Some(id.clone());
         self.commands.close();
@@ -2576,14 +2582,14 @@ impl VectorApp {
         }
     }
 
+    /// A message in the open chat, or in the one the floating player came from.
     fn message(&self, id: &str) -> Option<Message> {
         let store = self.store.borrow();
-        store
-            .chat(self.open.as_deref()?)?
-            .messages
-            .iter()
-            .find(|m| m.id == id)
-            .cloned()
+        let find = |chat: &str| store.chat(chat)?.messages.iter().find(|m| m.id == id).cloned();
+        self.open
+            .as_deref()
+            .and_then(find)
+            .or_else(|| self.popout.item.as_ref().and_then(|i| find(&i.chat)))
     }
 
     fn on_act(
@@ -2663,10 +2669,17 @@ impl VectorApp {
             }
             Act::OpenFile(att) => self.open_file(id, att, cx),
             Act::Audio(att, a) => {
-                self.media.borrow_mut().videos.pause_all();
+                if matches!(a, crate::audio::Act::Toggle) {
+                    self.yield_popout(crate::popout::Kind::Audio, &att);
+                }
                 self.audio_act(id, att, a, cx)
             }
-            Act::Video(att, a) => self.video_act(id, att, a, cx),
+            Act::Video(att, a) => {
+                if matches!(a, crate::video::Act::Toggle) {
+                    self.yield_popout(crate::popout::Kind::Video, &att);
+                }
+                self.video_act(id, att, a, cx)
+            }
             Act::View(open) => {
                 let live = self.live;
                 let viewer = cx.new(|cx| crate::viewer::Viewer::new(open, live, window, cx));
@@ -3037,11 +3050,7 @@ impl VectorApp {
 
     fn video_act(&mut self, msg: String, att: String, act: crate::video::Act, cx: &mut Context<Self>) {
         let input = self.audio_input(&msg, &att);
-        let mut media = self.media.borrow_mut();
-        if media.videos.act(&att, input, act) {
-            media.audio.pause_active();
-        }
-        drop(media);
+        self.media.borrow_mut().videos.act(&att, input, act);
         cx.notify();
     }
 
@@ -3103,24 +3112,22 @@ impl VectorApp {
         let ended = self.media.borrow_mut().audio.on_event(name, &v);
         cx.notify();
         let Some(att) = ended else { return };
-        let Some(chat) = self.open.clone() else { return };
-        let next = {
+        let floating = self.popout.item.as_ref().filter(|i| i.att == att).map(|i| i.chat.clone());
+        let Some(chat) = floating.clone().or_else(|| self.open.as_ref().map(|s| s.to_string())) else { return };
+        let next = (|| {
             let store = self.store.borrow();
-            let Some(chat) = store.chat(&chat) else { return };
-            let Some(at) = chat
+            let chat = store.chat(&chat)?;
+            let at = chat
                 .messages
                 .iter()
-                .position(|m| m.attachments.iter().any(|a| a.id == att))
-            else {
-                return;
-            };
+                .position(|m| m.attachments.iter().any(|a| a.id == att))?;
             let voice = |a: &vector_core::Attachment| {
                 a.name.is_empty()
                     && (a.downloaded || a.resident)
                     && crate::audio::EXTENSIONS.contains(&a.extension.to_ascii_lowercase().as_str())
             };
             if !chat.messages[at].attachments.iter().any(|a| a.id == att && voice(a)) {
-                return;
+                return None;
             }
             chat.messages.get(at + 1).and_then(|m| {
                 m.attachments
@@ -3128,7 +3135,20 @@ impl VectorApp {
                     .find(|a| voice(a))
                     .map(|a| (m.id.clone(), a.id.clone()))
             })
-        };
+        })();
+        if floating.is_some() {
+            match &next {
+                Some((msg, att)) => {
+                    if let Some(i) = self.popout.item.as_mut() {
+                        i.msg = msg.clone();
+                        i.att = att.clone();
+                    }
+                }
+                None => {
+                    self.popout.close();
+                }
+            }
+        }
         if let Some((msg, att)) = next {
             self.audio_act(msg, att, crate::audio::Act::Toggle, cx);
         }
@@ -3519,6 +3539,7 @@ impl Render for VectorApp {
                 let _ = window.drop_image(old);
             }
         }
+        let popout = self.popout_view(window, cx);
         match self.rec.due() {
             Some(crate::recorder::Due::Locked) => self.rec.locked(),
             Some(crate::recorder::Due::Idle) => self.rec.idle(),
@@ -3848,6 +3869,7 @@ impl Render for VectorApp {
                 .with_priority(12)
             }))
             .children(self.pack_details_view(cx))
+            .children(popout)
             .children(self.toast_view(window))
             .children(
                 self.viewer
@@ -11911,6 +11933,16 @@ impl VectorApp {
                 }
                 if key == "chat_bg_enabled" {
                     self.chat_bg = value;
+                }
+                if key == "floating_player" {
+                    self.popout.enabled = value;
+                    if !value && let Some(i) = self.popout.close() {
+                        let mut media = self.media.borrow_mut();
+                        match i.kind {
+                            crate::popout::Kind::Audio => media.audio.pause(&i.att),
+                            crate::popout::Kind::Video => media.videos.stop(&i.att),
+                        }
+                    }
                 }
                 if !self.live && key == "streamer_on" {
                     self.store.borrow_mut().streamer.on = value;

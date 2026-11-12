@@ -9,6 +9,9 @@
     };
     const msgs = (id) => (FIX.chats.find((c) => c.id === id)?.messages || []).slice().sort((a, b) => a.at - b.at);
     const fns = {
+        audio_load: ({ path }) => ({ id: 7, duration_ms: String(path).includes("golden") ? 9000 : 7400, waveform_fps: 20, bins: 32 }),
+        audio_play: () => 2400,
+        audio_pause: () => 2400,
         audio_probe: ({ path }) => (String(path).includes("loop") ? 12000 : String(path).includes("golden") ? 9000 : String(path).includes("northern") ? 32000 : 7400),
         get_audio_metadata: ({ path }) => String(path).includes("northern")
             ? { title: "Northern Lines (Deluxe Edition)", artist: "Mira Vale", album: "Northern Lines (Deluxe Edition)", cover_art: "/__ref/media/album-cover.png", lyrics: null, year: 2024,
