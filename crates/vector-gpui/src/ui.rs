@@ -1772,6 +1772,9 @@ impl VectorApp {
             MenuAct::ChatPin(id, pin) => self.chat_pin(id, pin, cx),
             MenuAct::ChatArchive(id, archive) => self.chat_archive(id, archive, cx),
             MenuAct::ChatBlock(npub) => {
+                if self.blocked_by_sync(cx) {
+                    return;
+                }
                 let mut popup = kit::Popup::notice("Block User");
                 popup.text = Some("Are you sure you want to block this user? You will no longer receive DMs from them.".into());
                 popup.confirm = "Confirm".into();
@@ -4611,12 +4614,13 @@ impl VectorApp {
             }
             PopupAct::RemoveAccount { npub } => self.remove_account(npub, window, cx),
             PopupAct::Unblock { npub } => {
+                let from_settings = self.settings.as_ref().is_some_and(|s| s.blocked.is_some());
                 if let Some(s) = self.settings.as_mut()
                     && let Some(list) = s.blocked.as_mut()
                 {
                     list.retain(|u| u.npub != npub);
                 }
-                self.set_blocked(npub, false, cx);
+                self.set_blocked_toast(npub, false, if from_settings { "User unblocked" } else { "User Unblocked" }, cx);
             }
             PopupAct::RemoveWallpaper(chat) => {
                 let rx = backend::run(vector_core::db::scoped(async move {
@@ -4738,7 +4742,9 @@ impl VectorApp {
             PopupAct::Nickname { npub } => {
                 if let Some(input) = popup.input {
                     let nick = input.read(cx).text().trim().to_string();
-                    self.set_nickname(npub, nick, cx);
+                    if !self.blocked_by_sync(cx) {
+                        self.set_nickname(npub, nick, cx);
+                    }
                 }
             }
             PopupAct::Hide(id) => self.hide_message(id, cx),
@@ -15544,6 +15550,10 @@ impl VectorApp {
                 let Some(s) = self.switcher.as_ref() else {
                     return;
                 };
+                // A veiled row can't say which account it is, and this can't be undone.
+                if self.store.borrow().streamer.on && npub != self.store.borrow().my_npub {
+                    return self.show_toast("Turn off Streamer Mode to delete another account.", cx);
+                }
                 let row = s.rows.iter().find(|r| r.npub == npub);
                 let label = row
                     .and_then(|r| r.name.clone())
@@ -15881,12 +15891,20 @@ impl VectorApp {
         .detach();
     }
 
+    /// `blockedBySync`: account edits wait until the first sync lands, or it would undo them.
+    pub(super) fn blocked_by_sync(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.live && self.syncing {
+            self.show_toast("Syncing your account — try again in a moment", cx);
+            return true;
+        }
+        false
+    }
+
     fn set_blocked(&mut self, npub: String, block: bool, cx: &mut Context<Self>) {
-        let done = if block {
-            "User Blocked"
-        } else {
-            "User Unblocked"
-        };
+        self.set_blocked_toast(npub, block, if block { "User Blocked" } else { "User Unblocked" }, cx);
+    }
+
+    fn set_blocked_toast(&mut self, npub: String, block: bool, done: &'static str, cx: &mut Context<Self>) {
         if !self.live {
             if let Some(p) = self.store.borrow_mut().profiles.get_mut(&npub) {
                 p.is_blocked = block;

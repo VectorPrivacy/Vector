@@ -352,7 +352,9 @@ impl VectorApp {
         } else if !muted && can_unread {
             rows.push((kit::MenuItem::new("Mark as Unread", "eye-off"), MenuAct::ChatUnread(id.clone())));
         }
-        rows.extend(self.notify_rows(&id, None));
+        if !(self.live && self.syncing) {
+            rows.extend(self.notify_rows(&id, None));
+        }
         rows.push((kit::MenuItem::new(if pinned { "Unpin" } else { "Pin" }, "pin"), MenuAct::ChatPin(id.clone(), !pinned)));
         rows.push((
             kit::MenuItem::new(if archived { "Unarchive" } else { "Archive" }, "archive"),
@@ -416,6 +418,9 @@ impl VectorApp {
 
     /// `chatPinMenuItem`: the backend holds the tier's cap and says so.
     pub(super) fn chat_pin(&mut self, id: String, pin: bool, cx: &mut Context<Self>) {
+        if self.blocked_by_sync(cx) {
+            return;
+        }
         if !self.live {
             let mut store = self.store.borrow_mut();
             store.pinned.retain(|p| *p != id);
@@ -442,6 +447,9 @@ impl VectorApp {
 
     /// Move a pin to just before `before`, or to the end.
     pub(super) fn chat_move_pin(&mut self, id: String, before: Option<String>, cx: &mut Context<Self>) {
+        if self.blocked_by_sync(cx) {
+            return;
+        }
         if !self.live {
             let mut store = self.store.borrow_mut();
             store.pinned.retain(|p| *p != id);
@@ -469,6 +477,9 @@ impl VectorApp {
 
     /// `setChatArchived`: archiving reads it; the archive keeps the newest message seen here.
     pub(super) fn chat_archive(&mut self, id: String, archive: bool, cx: &mut Context<Self>) {
+        if self.blocked_by_sync(cx) {
+            return;
+        }
         let at = archive.then(|| self.store.borrow().chat(&id).map(crate::data::last_activity).unwrap_or(0));
         if archive {
             self.chat_mark_read(id.clone(), cx);
