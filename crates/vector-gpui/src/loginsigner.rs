@@ -192,7 +192,7 @@ impl LoginView {
                                 }
                                 this.signer.status = Some(("Connected. Choosing security…".into(), Tone::Online));
                                 if matches!(imported, account::Imported::Staged(_)) {
-                                    backend::run(account::connect());
+                                    let _ = backend::run(account::connect());
                                 }
                                 this.imported(imported, window, cx);
                             }
@@ -294,7 +294,7 @@ impl LoginView {
         self.signer.status = None;
         // A re-pair never staged anything, and the account it serves stays signed in.
         if !self.signer.busy && self.reauth.is_none() {
-            backend::run(bunker::cancel());
+            let _ = backend::run(bunker::cancel());
         }
         cx.notify();
     }

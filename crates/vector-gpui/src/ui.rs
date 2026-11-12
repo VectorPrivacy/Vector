@@ -1364,13 +1364,18 @@ impl VectorApp {
                 store.typing.insert(id, (who, now));
             }
         }
-        // Fixtures: VECTOR_EMBED_VIDEO=idle|loading|failed|ready|preview gives the video embed a file of its
+        // Fixtures: VECTOR_EMBED_VIDEO=idle|loading|failed|ready|preview|grid gives the video embed a file of its
         // own, in that state.
         if let Ok(state) = std::env::var("VECTOR_EMBED_VIDEO") {
             let url = "https://cdn.example.org/vector-tour.mp4".to_string();
             if let Some((_, v)) = app.store.borrow_mut().fixture_embeds.iter_mut().find(|(_, v)| v["class"] == "video") {
                 v["link"] = Value::Null;
                 v["video"] = serde_json::json!({ "url": url, "is_video": true, "width": 1280, "height": 720, "size": 48_000_000u64, "duration": 83.0, "poster": null, "sha256": null, "fallbacks": [] });
+            }
+            if state == "grid"
+                && let Some((_, v)) = app.store.borrow_mut().fixture_embeds.iter_mut().find(|(_, v)| v["media"].as_array().is_some_and(|m| m.len() > 1))
+            {
+                v["media"][1] = serde_json::json!({ "url": "https://cdn.example.org/tile.mp4", "is_video": true, "width": 480, "height": 640, "size": 48_000_000u64, "duration": 12.0, "poster": "media/portrait.png", "sha256": null, "fallbacks": [] });
             }
             use crate::embeds::VideoState;
             let clip = std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/reference/media/clip.mp4"));

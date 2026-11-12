@@ -1125,10 +1125,14 @@ fn duration(secs: f64) -> String {
 /// `.ne-video`: a poster with its play button. A video fetches, then plays in place; a page
 /// opens outside the app.
 fn poster(env: &Env, e: &Embed, key: &str, open: Option<String>, send: &Send) -> AnyElement {
-    let short = e.class == "short";
-    let video = e.video.clone();
+    poster_in(env, e.class == "short", e.image.as_deref(), e.video.clone(), key, open, None, send)
+}
+
+/// `tile`: a square cell beside pictures in a post's media grid.
+#[allow(clippy::too_many_arguments)]
+fn poster_in(env: &Env, short: bool, image: Option<&str>, video: Option<Media>, key: &str, open: Option<String>, tile: Option<f32>, send: &Send) -> AnyElement {
     let (loading, ready, failed) = video.as_ref().map_or((None, None, None), |v| video_state(env, v));
-    let (w, h) = if short { (202.5, 360.) } else {
+    let (w, h) = if let Some(side) = tile { (side, side) } else if short { (202.5, 360.) } else {
         let ratio = video.as_ref().and_then(|v| Some(v.width? as f32 / v.height.filter(|h| *h > 0)? as f32)).unwrap_or(16. / 9.);
         (CARD_W, (CARD_W / ratio).min(CARD_W * 1.25))
     };
@@ -1147,11 +1151,9 @@ fn poster(env: &Env, e: &Embed, key: &str, open: Option<String>, send: &Send) ->
                 .into_any_element();
         }
     }
-    let first = video.as_ref().filter(|_| e.image.is_none()).and_then(|v| preview_frame(env, v));
-    let art = e
-        .image
-        .as_deref()
-        .or(e.video.as_ref().and_then(|v| v.poster.as_deref()))
+    let first = video.as_ref().filter(|_| image.is_none()).and_then(|v| preview_frame(env, v));
+    let art = image
+        .or(video.as_ref().and_then(|v| v.poster.as_deref()))
         .map(|u| match pic(env, u) {
             Pic::Ready(image, ..) => img(image)
                 .absolute()
@@ -1184,7 +1186,9 @@ fn poster(env: &Env, e: &Embed, key: &str, open: Option<String>, send: &Send) ->
         .justify_center()
         .cursor_pointer()
         .map(|d| {
-            if short {
+            if tile.is_some() {
+                d.w(px(w)).h(px(h))
+            } else if short {
                 d.h(px(360.)).w(px(202.5)).mx_auto()
             } else {
                 d.w_full().h(px(h))
@@ -1261,11 +1265,10 @@ fn media(env: &Env, all: &[Media], key: &str) -> AnyElement {
     let grid = shown.len() > 1;
     let side = (CARD_W - 4.) / 2.;
     let tiles = shown.iter().enumerate().map(|(i, m)| {
-        let url = if m.is_video {
-            m.poster.as_deref()
-        } else {
-            Some(m.url.as_str())
-        };
+        if m.is_video {
+            return poster_in(env, false, None, Some(m.clone()), &format!("{key}-m{i}"), None, grid.then_some(side), &env.send);
+        }
+        let url = Some(m.url.as_str());
         let ratio = match (m.width, m.height) {
             (Some(w), Some(h)) if w > 0 && h > 0 => Some(w as f32 / h as f32),
             _ => None,
