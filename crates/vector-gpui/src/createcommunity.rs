@@ -35,12 +35,14 @@ pub struct CreateCommunity {
     pub picked: HashSet<String>,
     /// Who is listable: the people this account has written with.
     pub contacts: Option<HashSet<String>>,
+    pub icon: Option<crate::commsettings::Pick>,
 }
 
 pub enum Act {
     Next,
     Back,
     Public(bool),
+    PickIcon,
     Create,
     Copy,
     ShowQr,
@@ -204,7 +206,7 @@ fn choice(
 }
 
 /// The channel pane's own head and one channel, so the preview is how it will look.
-fn preview(name: &str) -> impl IntoElement {
+fn preview(name: &str, icon: Option<&crate::commsettings::Pick>) -> impl IntoElement {
     let name = if name.trim().is_empty() {
         "Your Community".to_string()
     } else {
@@ -241,12 +243,17 @@ fn preview(name: &str) -> impl IntoElement {
                         .items_center()
                         .gap(px(10.))
                         .px(px(12.))
-                        .child(
-                            img("icons/group-placeholder.svg")
+                        .child(match icon {
+                            Some(p) => div()
+                                .flex_shrink_0()
+                                .child(crate::commsettings::cut(p, 36., 36., 11.))
+                                .into_any_element(),
+                            None => img("icons/group-placeholder.svg")
                                 .size(px(36.))
                                 .rounded(px(11.))
-                                .flex_shrink_0(),
-                        )
+                                .flex_shrink_0()
+                                .into_any_element(),
+                        })
                         .child(
                             div()
                                 .flex_1()
@@ -643,15 +650,20 @@ pub fn view(m: &CreateCommunity, store: &Store, width: f32, on: &OnAct, cx: &App
                     .gap(px(12.))
                     .child(
                         div()
+                            .id("cc-icon")
                             .relative()
                             .size(px(56.))
                             .flex_shrink_0()
-                            .opacity(0.7)
-                            .child(
-                                img("icons/group-placeholder.svg")
+                            .cursor_pointer()
+                            .when(m.icon.is_none(), |d| d.opacity(0.7).hover(|s| s.opacity(1.)))
+                            .on_click(click(on, || Act::PickIcon))
+                            .child(match &m.icon {
+                                Some(p) => crate::commsettings::cut(p, 56., 56., 28.),
+                                None => img("icons/group-placeholder.svg")
                                     .size(px(56.))
-                                    .rounded_full(),
-                            )
+                                    .rounded_full()
+                                    .into_any_element(),
+                            })
                             .child(
                                 div()
                                     .absolute()
@@ -696,7 +708,7 @@ pub fn view(m: &CreateCommunity, store: &Store, width: f32, on: &OnAct, cx: &App
                             ),
                     ),
             )
-            .child(preview(&name))
+            .child(preview(&name, m.icon.as_ref()))
             .into_any_element(),
         2 => div()
             .w(px(460.))

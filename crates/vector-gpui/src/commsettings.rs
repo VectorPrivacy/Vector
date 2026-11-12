@@ -58,6 +58,37 @@ pub struct Pick {
     pub crop: Option<vector_core::image_crop::CropRect>,
     pub preview: std::sync::Arc<gpui::RenderImage>,
     pub natural: (u32, u32),
+    /// The crop cut out of `preview`, so corners can round it.
+    pub cut: Option<std::sync::Arc<gpui::RenderImage>>,
+}
+
+impl Pick {
+    pub fn set_crop(&mut self, crop: vector_core::image_crop::CropRect) {
+        self.cut = cut_out(&self.preview, self.natural, &crop);
+        self.crop = Some(crop);
+    }
+}
+
+fn cut_out(
+    image: &gpui::RenderImage,
+    natural: (u32, u32),
+    r: &vector_core::image_crop::CropRect,
+) -> Option<std::sync::Arc<gpui::RenderImage>> {
+    let size = image.size(0);
+    let (pw, ph) = (size.width.0 as u32, size.height.0 as u32);
+    let k = pw as f32 / natural.0.max(1) as f32;
+    let x = ((r.x as f32 * k) as u32).min(pw.saturating_sub(1));
+    let y = ((r.y as f32 * k) as u32).min(ph.saturating_sub(1));
+    let w = ((r.w as f32 * k).round() as u32).clamp(1, pw - x);
+    let h = ((r.h as f32 * k).round() as u32).clamp(1, ph - y);
+    let src = image.as_bytes(0)?;
+    let mut out = Vec::with_capacity((w * h * 4) as usize);
+    for row in y..y + h {
+        let at = ((row * pw + x) * 4) as usize;
+        out.extend_from_slice(src.get(at..at + (w * 4) as usize)?);
+    }
+    let buf = image::RgbaImage::from_raw(w, h, out)?;
+    Some(std::sync::Arc::new(gpui::RenderImage::new(vec![image::Frame::new(buf)])))
 }
 
 pub struct CommSettings {
@@ -480,7 +511,15 @@ fn remove_btn(
 }
 
 /// A pick's crop, drawn at `width` like `.banner-art` with a rect.
-fn cut(p: &Pick, width: f32, height: f32, radius: f32) -> AnyElement {
+pub fn cut(p: &Pick, width: f32, height: f32, radius: f32) -> AnyElement {
+    if let Some(cut) = &p.cut {
+        return img(cut.clone())
+            .w(px(width))
+            .h(px(height))
+            .rounded(px(radius))
+            .object_fit(gpui::ObjectFit::Cover)
+            .into_any_element();
+    }
     let (nw, nh) = (p.natural.0.max(1) as f32, p.natural.1.max(1) as f32);
     let (x, y, w) = match p.crop {
         Some(r) => (r.x as f32, r.y as f32, r.w.max(1) as f32),

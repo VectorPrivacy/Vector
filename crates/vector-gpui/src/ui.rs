@@ -199,10 +199,10 @@ pub struct VectorApp {
     create_community: Option<crate::createcommunity::CreateCommunity>,
     invite: Option<crate::invite::Invite>,
     comm_settings: Option<crate::commsettings::CommSettings>,
-    /// The cropper over Community Settings, and the pick it is cutting (`true` for a banner).
+    /// The cropper over a Community's art, and the pick it is cutting.
     comm_crop: Option<(
         Entity<crate::cropper::Cropper>,
-        bool,
+        art_ops::Art,
         crate::commsettings::Pick,
     )>,
     moderation: Option<crate::moderation::Moderation>,
@@ -1467,6 +1467,9 @@ impl VectorApp {
         // Fixtures: VECTOR_CREATE_COMMUNITY=1|2|public|private, the step to show.
         if let Ok(step) = std::env::var("VECTOR_CREATE_COMMUNITY") {
             app.open_create_community(window, cx);
+            if let Ok(icon) = std::env::var("VECTOR_CC_ICON") {
+                app.fixture_new_icon(icon.into(), window, cx);
+            }
             if let Some(m) = app.create_community.as_mut() {
                 m.name.update(cx, |t, cx| t.set_text("Cool Kids", cx));
                 match step.as_str() {
@@ -15375,6 +15378,33 @@ impl VectorApp {
         cx.notify();
     }
 
+    fn upload_new_community_icon(
+        &mut self,
+        community: String,
+        icon: crate::commsettings::Pick,
+        cx: &mut Context<Self>,
+    ) {
+        let rx = backend::run(backend::community::set_image(
+            community,
+            icon.path,
+            false,
+            icon.crop,
+            |_| {},
+        ));
+        cx.spawn(async move |this, cx| {
+            let ok = matches!(rx.await, Ok(Ok(())));
+            this.update(cx, |this, cx| {
+                if ok {
+                    this.reload_communities(cx);
+                } else {
+                    this.show_toast("Community created, but the avatar upload failed", cx);
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     fn open_create_community(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let name = cx.new(|cx| {
             TextInput::new("Community Name", cx)
@@ -15447,6 +15477,7 @@ impl VectorApp {
             filter,
             picked: HashSet::new(),
             contacts,
+            icon: None,
         });
         if self.live {
             let rx = backend::run(async {
@@ -15522,6 +15553,7 @@ impl VectorApp {
                 }
             }
             Act::Public(public) => m.public = public,
+            Act::PickIcon => return self.pick_new_community_icon(window, cx),
             Act::Create => {
                 if m.busy {
                     return;
@@ -15547,6 +15579,12 @@ impl VectorApp {
                         m.progress = None;
                         match res {
                             Ok(ids) => {
+                                if let Some(icon) = m.icon.take() {
+                                    this.upload_new_community_icon(ids.0.clone(), icon, cx);
+                                }
+                                let Some(m) = this.create_community.as_mut() else {
+                                    return;
+                                };
                                 m.created = Some(ids);
                                 m.step = 3;
                                 let public = m.public;
@@ -15557,7 +15595,10 @@ impl VectorApp {
                                 }
                                 this.reload_communities(cx);
                             }
-                            Err(e) => m.error = Some(e),
+                            Err(e) => {
+                                m.error = Some(e.clone());
+                                this.notice("Community creation failed", e, cx);
+                            }
                         }
                         cx.notify();
                     })
