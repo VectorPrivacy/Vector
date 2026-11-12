@@ -15,6 +15,7 @@ pub mod gifs;
 pub mod images;
 pub mod inline;
 pub mod market;
+pub mod mediaport;
 pub mod pivx;
 pub mod rail;
 pub mod voice;

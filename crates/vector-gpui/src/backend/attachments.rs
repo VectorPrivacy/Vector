@@ -42,6 +42,11 @@ impl Drop for Active {
     }
 }
 
+/// Whether any download runs: one that read the old setting could still keep a file.
+pub fn any_running() -> bool {
+    !ACTIVE.lock().unwrap().is_empty()
+}
+
 /// Stop every running download: the account they belong to is leaving.
 pub fn cancel_all() {
     ACTIVE

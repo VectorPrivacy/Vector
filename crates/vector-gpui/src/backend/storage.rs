@@ -179,12 +179,17 @@ async fn clear_unclaimed() -> u64 {
 pub async fn clear_all() -> Result<u64, String> {
     vector_core::db::scoped(async {
         let before = total();
+        if !super::mediaport::stop().await {
+            return Err(CLEAR_BUSY.into());
+        }
         clear_kept(None).await?;
         vector_core::db::blocking_bound(|| vector_core::media::store::forget_where(|_| true))
             .await?;
         release_downloads(|_| true).await;
         let unclaimed = clear_unclaimed().await;
         clear_caches();
+        let _ = vector_core::db::miniapps::prune_dangling_miniapp_history();
+        super::mediaport::resume();
         Ok(before.saturating_sub(total()) + unclaimed)
     })
     .await
@@ -202,6 +207,9 @@ pub async fn clear_category(category: &str, exts: Vec<String>) -> Result<u64, St
             if set.is_empty() {
                 return Err("No file types to clear".into());
             }
+            if !super::mediaport::stop().await {
+                return Err(CLEAR_BUSY.into());
+            }
             clear_kept(Some(&set)).await?;
             let kept = set.clone();
             vector_core::db::blocking_bound(move || {
@@ -210,15 +218,22 @@ pub async fn clear_category(category: &str, exts: Vec<String>) -> Result<u64, St
                 })
             })
             .await?;
+            let apps = set.contains("xdc");
             release_downloads(move |item| set.contains(&plain_ext(item))).await;
+            super::mediaport::resume();
+            if apps {
+                super::market::sweep_installs().await;
+            }
+            let _ = vector_core::db::miniapps::prune_dangling_miniapp_history();
         }
         Ok(before.saturating_sub(total()))
     })
     .await
 }
 
-/// What turning Keep Files off would delete: (files, bytes).
-pub async fn kept_summary() -> (u64, u64) {
+/// What turning Keep Files off would delete: (files, bytes), old downloads included, and
+/// whether a download is running.
+pub async fn kept_summary() -> (u64, u64, bool) {
     let (mut files, mut bytes) =
         vector_core::db::blocking_bound(vector_core::media::store::kept_files)
             .await
@@ -237,15 +252,29 @@ pub async fn kept_summary() -> (u64, u64) {
             }
         }
     }
-    (files, bytes)
+    let (old, old_bytes) = super::mediaport::old_downloads().await;
+    (files + old, bytes + old_bytes, super::attachments::any_running())
 }
+
+const KEEP_MEDIA_BUSY: &str = "Turn this off once your downloads finish.";
+const CLEAR_BUSY: &str = "Clear this once your files finish moving.";
 
 /// Keep Files on or off. Off deletes what it kept, so a file is kept or held, never both.
 pub async fn set_keep_media(on: bool) -> Result<(), String> {
     vector_core::db::scoped(async move {
-        vector_core::db::set_sql_setting("keep_media".into(), on.to_string())?;
+        let set = |on: bool| vector_core::db::set_sql_setting("keep_media".into(), on.to_string());
         if on {
+            set(true)?;
+            super::mediaport::start(std::time::Duration::ZERO);
             return Ok(());
+        }
+        if super::attachments::any_running() || !super::mediaport::stop().await {
+            return Err(KEEP_MEDIA_BUSY.into());
+        }
+        set(false)?;
+        if super::attachments::any_running() {
+            let _ = set(true);
+            return Err(KEEP_MEDIA_BUSY.into());
         }
         vector_core::db::set_sql_setting("keep_unencrypted".into(), "false".into())?;
         clear_kept(None).await?;

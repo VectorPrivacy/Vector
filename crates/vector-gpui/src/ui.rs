@@ -478,6 +478,7 @@ enum PopupAct {
     },
     /// Turn Keep Files off, deleting what it kept.
     StopKeeping,
+    KeepPlain,
     /// Agree to connect outside the chosen network, then go on with the call.
     Realtime(CallGo),
     /// Switch networks though the router check failed.
@@ -1127,6 +1128,19 @@ impl VectorApp {
                 .map(|c| c.id)
                 .unwrap_or("appearance");
             app.open_settings(id, window, cx);
+            // VECTOR_TOGGLES=key,key turns those switches on; VECTOR_MOVING=done/total[/plain].
+            if let Some(s) = app.settings.as_mut() {
+                for key in std::env::var("VECTOR_TOGGLES").unwrap_or_default().split(',') {
+                    if let Some(t) = crate::settings::toggle_of(key) {
+                        s.on.insert(t.key, true);
+                    }
+                }
+                if let Ok(m) = std::env::var("VECTOR_MOVING") {
+                    let p: Vec<&str> = m.split('/').collect();
+                    let n = |i: usize| p.get(i).and_then(|v| v.parse::<usize>().ok()).unwrap_or(0);
+                    s.moving = Some((format!("{} of {}", crate::security::thousands(n(0)), crate::security::thousands(n(1))), p.len() > 2));
+                }
+            }
         }
         // Fixtures: VECTOR_REC=recording|locked|preview holds the voice recorder in that state.
         if let Ok(state) = std::env::var("VECTOR_REC") {
@@ -2510,6 +2524,14 @@ impl VectorApp {
             .unwrap_or_default()
             .to_string();
         match name {
+            "media_import_progress" => {
+                let n = |k: &str| payload.get(k).and_then(Value::as_u64).unwrap_or(0);
+                let plain = payload.get("plain").and_then(Value::as_bool).unwrap_or(false);
+                if let Some(s) = self.settings.as_mut() {
+                    s.moving = (n("done") < n("total")).then(|| (format!("{} of {}", crate::security::thousands(n("done") as usize), crate::security::thousands(n("total") as usize)), plain));
+                    cx.notify();
+                }
+            }
             "communities_changed"
             | "community_refreshed"
             | "community_kicked"
@@ -4297,6 +4319,7 @@ impl VectorApp {
                 cx,
             ),
             PopupAct::StopKeeping => self.set_keep_media(false, cx),
+            PopupAct::KeepPlain => self.set_keep_unencrypted(true, cx),
             PopupAct::Realtime(then) => {
                 backend::calls::allow_realtime();
                 self.call_go(then, cx);
@@ -12272,6 +12295,7 @@ impl VectorApp {
             }
             .unwrap_or(10_485_760),
             clearing: false,
+            moving: None,
             notif_sound: if self.live {
                 backend::prefs::sql("notif_sound")
             } else {
@@ -13458,6 +13482,9 @@ impl VectorApp {
                     popup.text = Some(e.into());
                     this.popup = Some((popup, PopupAct::Notice));
                 } else if !on {
+                    if let Some(s) = this.settings.as_mut() {
+                        s.on.insert("keep_unencrypted", false);
+                    }
                     this.load_storage(cx);
                 }
                 cx.notify();
@@ -13475,8 +13502,15 @@ impl VectorApp {
         let rx =
             backend::run(async { vector_core::db::scoped(backend::storage::kept_summary()).await });
         cx.spawn(async move |this, cx| {
-            let (files, bytes) = rx.await.unwrap_or((0, 0));
+            let (files, bytes, busy) = rx.await.unwrap_or((0, 0, false));
             this.update(cx, |this, cx| {
+                if busy {
+                    let mut popup = kit::Popup::notice("Downloads in progress");
+                    popup.icon = Some("icons/vector_warning.svg");
+                    popup.text = Some("Turn this off once your downloads finish.".into());
+                    this.popup = Some((popup, PopupAct::Notice));
+                    return cx.notify();
+                }
                 if files == 0 {
                     return this.set_keep_media(false, cx);
                 }
@@ -13493,6 +13527,52 @@ impl VectorApp {
             .ok();
         })
         .detach();
+    }
+
+    /// Turning Keep Unencrypted on asks first: other apps can then read what Vector keeps.
+    fn toggle_keep_unencrypted(&mut self, on: bool, cx: &mut Context<Self>) {
+        if !on || !self.live {
+            return self.set_keep_unencrypted(on, cx);
+        }
+        let mut popup = kit::Popup::notice("Keep media unencrypted?");
+        popup.icon = Some("icons/vector_warning.svg");
+        popup.text = Some(
+            format!("Everything Vector keeps becomes a normal file in {}. Any app or person with access to this device's files can open them.", backend::mediaport::public_folder()).into(),
+        );
+        popup.confirm = "Confirm".into();
+        popup.cancel = Some("Cancel".into());
+        self.popup = Some((popup, PopupAct::KeepPlain));
+        cx.notify();
+    }
+
+    /// Keep Unencrypted on or off; the switch goes back if the change doesn't happen.
+    fn set_keep_unencrypted(&mut self, on: bool, cx: &mut Context<Self>) {
+        if let Some(s) = self.settings.as_mut() {
+            s.on.insert("keep_unencrypted", on);
+            s.flipped.insert("keep_unencrypted");
+        }
+        if !self.live {
+            return cx.notify();
+        }
+        let rx = backend::run(backend::mediaport::set_keep_unencrypted(on));
+        cx.spawn(async move |this, cx| {
+            let result = rx.await.unwrap_or_else(|_| Err("cancelled".into()));
+            this.update(cx, |this, cx| {
+                if let Err(e) = result {
+                    if let Some(s) = this.settings.as_mut() {
+                        s.on.insert("keep_unencrypted", !on);
+                    }
+                    let mut popup = kit::Popup::notice("Keep Unencrypted");
+                    popup.icon = Some("icons/vector_warning.svg");
+                    popup.text = Some(e.into());
+                    this.popup = Some((popup, PopupAct::Notice));
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+        cx.notify();
     }
 
     /// Pick, check and store a custom notification sound.
@@ -13660,6 +13740,7 @@ impl VectorApp {
             }
             Act::Scrolled => s.jumped = None,
             Act::Toggle("keep_media", value) => self.toggle_keep_media(value, cx),
+            Act::Toggle("keep_unencrypted", value) => self.toggle_keep_unencrypted(value, cx),
             Act::Toggle("encryption", value) => {
                 s.on.insert("encryption", value);
                 s.flipped.insert("encryption");

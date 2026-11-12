@@ -108,6 +108,7 @@ pub async fn fetch_messages(init: bool) {
         vector_core::transport::prelogin::commit();
         hydrate().await;
         db::spawn_bound(super::market::preload());
+        db::spawn_bound(super::mediaport::after_boot());
     }
     db::spawn_bound(async move {
         super::emit("sync_progress", serde_json::json!({ "mode": "Syncing" }));

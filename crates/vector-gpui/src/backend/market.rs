@@ -49,6 +49,22 @@ pub async fn refresh() -> Result<Vec<MarketplaceApp>, String> {
     Ok(cached().await)
 }
 
+/// Installs are shared by every account: clearing the Apps slice uninstalls them, unless saved.
+pub async fn sweep_installs() {
+    use tauri::Manager;
+    let Ok(h) = handle() else { return };
+    if let Ok(root) = h.path().app_data_dir() {
+        for e in std::fs::read_dir(root.join("miniapps").join("marketplace")).into_iter().flatten().flatten() {
+            let name = e.file_name().to_string_lossy().into_owned();
+            let file = e.metadata().is_ok_and(|m| m.is_file());
+            if file && !name.starts_with('.') && name.to_lowercase().ends_with(".xdc") && !vector_core::db::saved::is_saved(&e.path().to_string_lossy()).unwrap_or(true) {
+                let _ = std::fs::remove_file(e.path());
+            }
+        }
+    }
+    mk::sync_install_status_from_disk(&h).await;
+}
+
 pub async fn install(id: String) -> Result<String, String> {
     mk::install_marketplace_app(&handle()?, &id).await
 }

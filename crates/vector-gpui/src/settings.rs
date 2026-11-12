@@ -368,7 +368,7 @@ pub const NOTIFY: [Toggle; 2] = [
     ),
 ];
 
-pub const STORAGE: [Toggle; 2] = [
+pub const STORAGE: [Toggle; 3] = [
     t(
         "auto_download_enabled",
         "Auto-Download Media",
@@ -380,6 +380,13 @@ pub const STORAGE: [Toggle; 2] = [
         "keep_media",
         "Keep Files on This Device",
         "keepMedia",
+        Home::Sql(false),
+        "",
+    ),
+    t(
+        "keep_unencrypted",
+        "Keep Unencrypted",
+        "keepUnencrypted",
         Home::Sql(false),
         "",
     ),
@@ -470,6 +477,12 @@ pub fn help(key: &str) -> Option<(&'static str, String)> {
             "Keep Files on This Device",
             "<b>When enabled:</b> every file you receive is kept on this device, encrypted, so it opens instantly and never downloads twice.<br><br><b>When disabled:</b> files stay in memory while Vector is open, and load again after it closes. One too large to hold waits for a tap, then is kept. Turning it off deletes what it kept.",
         ),
+        "keepUnencrypted" => {
+            return Some((
+                "Keep Unencrypted",
+                format!("What Vector keeps is saved as normal files in {}, so other apps and backups can open them.<br><br>Anyone with access to this device's files can open them too.", crate::backend::mediaport::public_folder()),
+            ));
+        }
         "stripTracking" => (
             "Strip Tracking Markers",
             "When enabled, Vector will <b>automatically remove tracking markers</b> from URLs before displaying or sending them.<br><br>This helps reduce your footprint and enhances your privacy with no loss in functionality, only disable if you know what you're doing.",
@@ -736,6 +749,8 @@ pub struct Settings {
     /// The auto-download size limit, in bytes.
     pub auto_limit: u64,
     pub clearing: bool,
+    /// Kept files moving, as "N of M", and whether out to plain files.
+    pub moving: Option<(String, bool)>,
     pub relays: Option<Vec<crate::backend::network::RelayRow>>,
     pub servers: Option<Vec<vector_core::blossom_servers::BlossomServerInfo>>,
     pub clock: Option<vector_core::clock::Status>,
@@ -2243,6 +2258,16 @@ fn storage_block(s: &Settings, on: &OnAct) -> AnyElement {
         )
         // The next group's 15px top margin outweighs the line's 10.
         .child(div().mt(px(5.)).child(row(s, "keep_media", on, false)))
+        .when(shows_plain(s), |d| d.child(div().mt(px(5.)).child(row(s, "keep_unencrypted", on, false))))
+        .when_some(s.moving.as_ref(), |d, (count, plain)| {
+            d.child(line(
+                "moving",
+                if *plain { "Decrypting your kept files" } else { "Moving your files into Vector" },
+                None,
+                div().child(count.clone()).into_any_element(),
+                on,
+            ))
+        })
         .child(line(
             "clear",
             "Clear Storage",
@@ -2251,6 +2276,12 @@ fn storage_block(s: &Settings, on: &OnAct) -> AnyElement {
             on,
         ))
         .into_any_element()
+}
+
+/// Keep Unencrypted shows under Keep Files, for Advanced Mode or once it is on.
+fn shows_plain(s: &Settings) -> bool {
+    let on = |k| s.on.get(k).copied().unwrap_or(false);
+    on("keep_media") && (on("advanced") || on("keep_unencrypted"))
 }
 
 /// `.st-btn`: the small grey button.
