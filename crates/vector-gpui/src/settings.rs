@@ -803,6 +803,8 @@ pub struct Settings {
     /// Categories a search matched that the reader folded shut.
     pub slim_shut: Vec<&'static str>,
     pub slim_scroll: ScrollHandle,
+    /// The window is 600px or less: paired controls stack.
+    pub narrow: bool,
 }
 
 /// The chart's pointer state: a slice previewed, one picked, a Delete running.
@@ -1624,9 +1626,21 @@ fn dropdown(
     s: &Settings,
     on: &OnAct,
 ) -> AnyElement {
-    crate::kit::select_with(
+    dropdown_w(id, 230., choices, value, s, on)
+}
+
+/// 230px, giving way when the row runs short (`.vselect` shrinks like any flex item).
+fn dropdown_w(
+    id: &'static str,
+    width: f32,
+    choices: &'static [crate::kit::Choice],
+    value: &str,
+    s: &Settings,
+    on: &OnAct,
+) -> AnyElement {
+    div().w(px(width)).min_w(px(120.)).flex_shrink(1.).child(crate::kit::select_with(
         id,
-        230.,
+        f32::INFINITY,
         12.,
         choices,
         &[],
@@ -1640,7 +1654,8 @@ fn dropdown(
             let on = on.clone();
             move |v, w, cx| on(Act::Pick(id, v), w, cx)
         },
-    )
+    ))
+    .into_any_element()
 }
 
 fn notifications_block(s: &Settings, on: &OnAct) -> AnyElement {
@@ -1674,8 +1689,8 @@ fn notifications_block(s: &Settings, on: &OnAct) -> AnyElement {
                 .min_h(px(36.))
                 .mb(px(15.))
                 .flex()
-                .items_center()
-                .justify_between()
+                .when(s.narrow, |d| d.flex_col().items_stretch())
+                .when(!s.narrow, |d| d.items_center().justify_between())
                 .gap(px(10.))
                 .child(
                     div()
@@ -1696,13 +1711,14 @@ fn notifications_block(s: &Settings, on: &OnAct) -> AnyElement {
         .child(
             div()
                 .min_h(px(36.))
-                .mb(px(15.))
+                .when(choice == "custom", |d| d.mb(px(15.)))
                 .flex()
                 .items_center()
                 .gap(px(8.))
                 .child(
                     div()
-                        .flex_1()
+                        .flex_grow(1.)
+                        .flex_shrink_0()
                         .text_size(px(16.))
                         .line_height(px(24.))
                         .text_color(c(0xffffff))
@@ -3652,6 +3668,7 @@ fn calls_block(s: &Settings, on: &OnAct) -> AnyElement {
         col = col.child(
             div()
                 .flex()
+                .when(s.narrow, |d| d.flex_col())
                 .gap(px(20.))
                 .mb(px(28.))
                 .child(calls_field(
@@ -3685,7 +3702,8 @@ fn calls_block(s: &Settings, on: &OnAct) -> AnyElement {
     col = col.child(
         div()
             .flex()
-            .gap(px(20.))
+            .when(s.narrow, |d| d.flex_col())
+                .gap(px(20.))
             .mb(px(28.))
             .child(calls_field(
                 "Microphone Volume",

@@ -1193,6 +1193,9 @@ impl VectorApp {
                 .map(|c| c.id)
                 .unwrap_or("appearance");
             app.open_settings(id, window, cx);
+            if let Some(s) = app.settings.as_mut() {
+                s.slim_open = Some(id);
+            }
             // VECTOR_TOGGLES=key,key turns those switches on; VECTOR_MOVING=done/total[/plain].
             if let Some(s) = app.settings.as_mut() {
                 for key in std::env::var("VECTOR_TOGGLES").unwrap_or_default().split(',') {
@@ -5131,6 +5134,9 @@ impl Render for VectorApp {
         let slim = f32::from(window.viewport_size().width) < slim_ops::WIDE_MIN;
         self.is_slim = slim;
         self.archive.slim = slim;
+        if let Some(s) = self.settings.as_mut() {
+            s.narrow = f32::from(window.viewport_size().width) <= 600.;
+        }
         if let Some(s) = self.settings.as_mut()
             && s.slim != slim
         {
@@ -13550,6 +13556,7 @@ impl VectorApp {
             book: Default::default(),
             slim: self.is_slim,
             slim_open: None,
+            narrow: false,
             slim_shut: Vec::new(),
             slim_scroll: gpui::ScrollHandle::new(),
         });

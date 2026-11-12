@@ -149,7 +149,11 @@ pub fn select_with(
                 .child(label),
         )
         .child(caret);
-    let mut root = div().relative().w(px(width)).flex_shrink_0().child(button);
+    let mut root = div()
+        .relative()
+        .map(|d| if width.is_finite() { d.w(px(width)) } else { d.w_full() })
+        .flex_shrink_0()
+        .child(button);
     if open {
         let mut list = div()
             .absolute()
