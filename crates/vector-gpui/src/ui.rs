@@ -7778,7 +7778,7 @@ impl VectorApp {
         let request = store
             .chat(&id)
             .is_some_and(|chat| store.is_request(chat))
-            .then(|| request_bar(id.to_string(), store.pictures_held(&id), cx));
+            .then(|| request_bar(id.to_string(), store.pictures_held(&id), self.vw < 380., cx));
         div()
             .flex_1()
             .h_full()
@@ -7881,7 +7881,7 @@ impl VectorApp {
 }
 
 /// `.request-bar`: under the header of a DM from someone new, Block or Accept.
-fn request_bar(npub: String, pictures: bool, cx: &mut Context<VectorApp>) -> impl IntoElement {
+fn request_bar(npub: String, pictures: bool, tiny: bool, cx: &mut Context<VectorApp>) -> impl IntoElement {
     let button = |id: &'static str, label: &'static str| {
         div()
             .id(id)
@@ -7914,13 +7914,15 @@ fn request_bar(npub: String, pictures: bool, cx: &mut Context<VectorApp>) -> imp
         .bg(c(0x0d0d0d))
         .border_b_1()
         .border_color(white_a(0.12))
-        .child(
-            svg()
-                .path("ui/request-shield.svg")
-                .size(px(22.))
-                .flex_shrink_0()
-                .text_color(c(ACCENT)),
-        )
+        .when(!tiny, |d| {
+            d.child(
+                svg()
+                    .path("ui/request-shield.svg")
+                    .size(px(22.))
+                    .flex_shrink_0()
+                    .text_color(c(ACCENT)),
+            )
+        })
         .child(
             div()
                 .flex_1()
