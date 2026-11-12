@@ -51,6 +51,8 @@ enum Screen {
 
 pub struct VectorApp {
     screen: Screen,
+    /// This build is older than the account's database: (this build, the one it needs).
+    downgrade: Option<(String, String)>,
     /// The transport's view, as the backend last reported it.
     net_view: Option<Value>,
     net_seq: Option<u64>,
@@ -774,6 +776,7 @@ impl VectorApp {
         }
         Self {
             screen: Screen::Main,
+            downgrade: None,
             net_view: None,
             net_seq: None,
             net_config: None,
@@ -1114,6 +1117,11 @@ impl VectorApp {
             if let Some(w) = held.get(n.saturating_sub(1)) {
                 app.on_profile(crate::profile::Act::Badge(*w), window, cx);
             }
+        }
+        // Fixtures: VECTOR_DOWNGRADE=<version> shows the takeover for an account that version wrote.
+        if let Ok(v) = std::env::var("VECTOR_DOWNGRADE") {
+            app.screen = Screen::Booting;
+            app.downgrade = Some(crate::downgrade::versions(&vector_core::db::DowngradeBlock { db_schema: 90, supported_schema: 87, last_app_version: Some(v) }));
         }
         // Fixtures: VECTOR_SETTINGS=<category> opens Settings there.
         if let Ok(cat) = std::env::var("VECTOR_SETTINGS") {
@@ -2288,6 +2296,10 @@ impl VectorApp {
         cx.spawn_in(window, async move |this, cx| {
             let Ok(info) = probe.await else { return };
             this.update_in(cx, |this, window, cx| {
+                if let Some(block) = &info.downgrade {
+                    this.downgrade = Some(crate::downgrade::versions(block));
+                    return cx.notify();
+                }
                 match (&info.account, info.encrypted) {
                     (Some(_), false) => this.unlock_plain(window, cx),
                     (Some(_), true) => {
@@ -4573,7 +4585,9 @@ impl Render for VectorApp {
             .line_height(px(24.));
         match &self.screen {
             Screen::Booting => {
-                return root.child(div().absolute().inset_0().child(chrome(window, true, false)));
+                return root
+                    .child(div().absolute().inset_0().child(chrome(window, true, false)))
+                    .children(self.downgrade.as_ref().map(|(now, needs)| crate::downgrade::render(now, needs)));
             }
             Screen::Login(view) => {
                 return root

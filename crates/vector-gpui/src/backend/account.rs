@@ -21,6 +21,8 @@ pub struct BootInfo {
     /// "pin" or "password".
     pub security_type: String,
     pub signer: String,
+    /// The remembered account's database is newer than this build: nothing may open it.
+    pub downgrade: Option<vector_core::db::DowngradeBlock>,
 }
 
 #[derive(Debug, Clone)]
@@ -67,6 +69,17 @@ fn is_committed(npub: &str) -> bool {
 
 /// Select the remembered account, or arm the welcome screen's network when there is none.
 pub fn boot() -> BootInfo {
+    if let Some(npub) = db::read_active_account_file().ok().flatten()
+        && let Ok(Some(block)) = db::inspect_downgrade(&npub)
+    {
+        return BootInfo {
+            account: None,
+            encrypted: false,
+            security_type: "pin".into(),
+            signer: "local".into(),
+            downgrade: Some(block),
+        };
+    }
     let account = match db::get_current_account() {
         Ok(npub) => Some(npub),
         Err(_) => match db::read_active_account_file().ok().flatten() {
@@ -100,6 +113,7 @@ pub fn boot() -> BootInfo {
             encrypted: false,
             security_type: "pin".into(),
             signer: "local".into(),
+            downgrade: None,
         };
     };
     state::init_encryption_enabled();
@@ -118,6 +132,7 @@ pub fn boot() -> BootInfo {
         encrypted,
         security_type,
         signer,
+        downgrade: None,
     }
 }
 

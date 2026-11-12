@@ -47,6 +47,7 @@ mod media;
 mod model3d;
 mod callvideo;
 mod callpics;
+mod downgrade;
 mod screenpick;
 mod miniapp;
 mod mentions;

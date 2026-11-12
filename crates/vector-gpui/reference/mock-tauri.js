@@ -28,6 +28,7 @@
             ['large-v3', 'Highest Quality - Slowest', 1080, 2400, true],
         ].map(([name, display_name, size, ram_required, supports_translate]) => ({ model: { name, display_name, size, ram_required, supports_translate }, downloaded: name === 'small' && window.__TYPE__ !== 'missing' })),
         get_device_memory: () => 2 * 1024 * 1024 * 1024,
+        check_account_downgrade: () => (window.__TYPE__ === 'downgrade' ? { db_schema: 90, supported_schema: 87, last_app_version: '0.6.0-2' } : null),
         get_sql_setting: (a) => ((window.__SQL__ || {})[a?.key] ?? null),
         transcribe: () => ({ lang: 'ru', language: 'ru', confidence: 0.9, sections: [
             [0, 'Привет, это Ана.'], [1800, 'Я буду дома около семи,'], [4200, 'купи, пожалуйста, хлеб по дороге.'],
