@@ -254,6 +254,7 @@ fn row(pins: &Pins, pin: &Pin, store: &Store, revealed: &HashMap<String, HashSet
                 tags: &[],
                 mask: Some(&|t: &str| store.stream_mask(t)),
                 colors: &[],
+                go: Some(&|url: &str, look: &crate::inline::Look| crate::golinks::pill(store, url, Some(&pins.community), look)),
             },
         );
         let on_text: crate::inline::OnClick = {

@@ -665,6 +665,7 @@ fn content(ctx: &Ctx, m: &Message) -> AnyElement {
 
     let custom = custom_emoji(ctx.store, ctx.media, &m.emoji_tags);
     let chips = tag_chips(ctx, m);
+    let here = ctx.store.community_of(&ctx.chat.id).map(|c| c.community_id.clone());
     let mut blocks = markdown::parse(
         text.trim(),
         &markdown::Ctx {
@@ -675,6 +676,7 @@ fn content(ctx: &Ctx, m: &Message) -> AnyElement {
             tags: &chips,
             mask: Some(&|t: &str| ctx.store.stream_mask(t)),
             colors: if marked.is_some() { &colors } else { &[] },
+            go: Some(&|url: &str, look: &crate::inline::Look| crate::golinks::pill(ctx.store, url, here.as_deref(), look)),
             custom: custom
                 .as_ref()
                 .map(|f| f as &dyn Fn(&str) -> Option<crate::media::Custom>),

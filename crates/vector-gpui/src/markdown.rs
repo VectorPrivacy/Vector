@@ -73,6 +73,8 @@ pub struct Ctx<'a> {
     pub mask: Option<&'a dyn Fn(&str) -> Option<String>>,
     /// Colour spans, indexed by the sentinels `textcolor::mark` put in the source.
     pub colors: &'a [vector_core::text_color::ColorSpan],
+    /// A Vector link as the pill naming its place; `None` leaves them as links.
+    pub go: Option<&'a dyn Fn(&str, &Look) -> Option<std::rc::Rc<crate::inline::Pill>>>,
 }
 
 /// Colour painting state: pass one counts each span's glyphs, pass two paints them.
@@ -438,6 +440,13 @@ impl Builder<'_> {
             return;
         }
         if let Some(url) = self.link() {
+            if let Some(pill) = self.ctx.go.and_then(|go| go(&url, &self.look())) {
+                let dup = matches!(self.atoms.last(), Some(Atom::Pill(p)) if matches!(&p.target, crate::inline::Target::Link(u) if *u == url));
+                if !dup {
+                    self.atoms.push(Atom::Pill(pill));
+                }
+                return;
+            }
             let bare = |u: &str| u.trim().trim_end_matches('/').to_string();
             let kind = if bare(t) == bare(&url) || !url.starts_with("http") {
                 Kind::Link(url)
@@ -453,7 +462,31 @@ impl Builder<'_> {
             return;
         }
         let mut last = 0;
-        for (start, end) in find_urls(t) {
+        let mut spans = find_urls(t);
+        if self.ctx.go.is_some() {
+            let mut from = 0;
+            while let Some(off) = t[from..].find("vector://") {
+                let start = from + off;
+                let end = start + t[start..].find(char::is_whitespace).unwrap_or(t.len() - start);
+                let end = start + t[start..end].trim_end_matches(['.', ',', ';', ':', '!', '?', ')']).len();
+                spans.push((start, end));
+                from = end.max(start + 9);
+            }
+            spans.sort();
+        }
+        for (start, end) in spans {
+            if start < last {
+                continue;
+            }
+            if let Some(pill) = self.ctx.go.and_then(|go| go(&t[start..end], &self.look())) {
+                self.tagged(&t[last..start]);
+                self.atoms.push(Atom::Pill(pill));
+                last = end;
+                continue;
+            }
+            if !t[start..end].starts_with("http") {
+                continue;
+            }
             self.tagged(&t[last..start]);
             match profile_link(&t[start..end]).filter(|_| self.ctx.mention.is_some()) {
                 Some(npub) => self.pill(npub),
@@ -1330,6 +1363,7 @@ mod custom_tests {
             tags: &[],
             mask: None,
             colors: &[],
+            go: None,
         };
         let blocks = parse("Have you seen this? :grin: and 21:20:30", &ctx);
         let Block::Para(p) = &blocks[0] else { panic!() };
@@ -1356,6 +1390,7 @@ mod custom_tests {
             tags: &[],
             mask: Some(&mask),
             colors: &[],
+            go: None,
         };
         let kinds = |src: &str| -> Vec<Kind> {
             let blocks = parse(src, &ctx);

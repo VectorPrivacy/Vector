@@ -18,6 +18,7 @@ mod edithistory;
 mod payaddr;
 mod reactpop;
 mod relayinfo;
+mod golinks;
 mod scrollbar;
 mod serverinfo;
 mod secretguard;

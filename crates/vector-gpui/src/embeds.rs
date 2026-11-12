@@ -1084,6 +1084,7 @@ fn rich(
             tags: &[],
             mask: Some(&|t: &str| env.store.stream_mask(t)),
             colors: &[],
+            go: None,
             custom: custom
                 .as_ref()
                 .map(|f| f as &dyn Fn(&str) -> Option<crate::media::Custom>),

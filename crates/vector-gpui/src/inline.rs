@@ -176,6 +176,82 @@ pub enum Atom {
     Ring(Option<f32>),
     /// A forced line break.
     Break,
+    /// `.mention.go-link`: a Vector link as the place it names, one unbreakable box.
+    Pill(Rc<Pill>),
+}
+
+pub struct Pill {
+    pub parts: Vec<Part>,
+    pub look: Look,
+    pub tip: Option<SharedString>,
+    pub target: Target,
+}
+
+pub enum Part {
+    Icon(&'static str),
+    Avatar(gpui::ImageSource),
+    Text { text: SharedString, alpha: f32, strike: bool },
+}
+
+const PILL_PAD: f32 = 4.;
+const PILL_GAP: f32 = 3.;
+
+impl Pill {
+    fn width(&self, window: &Window) -> f32 {
+        let em = self.look.size;
+        let parts: f32 = self
+            .parts
+            .iter()
+            .map(|p| match p {
+                Part::Icon(_) => 0.95 * em,
+                Part::Avatar(_) => 1.15 * em + 1.,
+                Part::Text { text, .. } => f32::from(shape(text, &self.look, self.look.color, window).width),
+            })
+            .sum();
+        parts + PILL_GAP * self.parts.len().saturating_sub(1) as f32 + 2. * PILL_PAD
+    }
+
+    fn element(&self, id: ElementId, h: f32) -> AnyElement {
+        let em = self.look.size;
+        let tip = self.tip.clone();
+        div()
+            .id(id)
+            .h(px(h))
+            .px(px(PILL_PAD))
+            .flex()
+            .items_center()
+            .gap(px(PILL_GAP))
+            .rounded(px(4.))
+            .bg(white_a(0.08))
+            .hover(|s| s.bg(white_a(0.12)))
+            .when_some(tip, |d, tip| d.tooltip(move |w, cx| crate::kit::tooltip(tip.clone())(w, cx)))
+            .font_family(self.look.family.clone())
+            .text_size(px(em))
+            .line_height(px(self.look.line_height))
+            .font_weight(self.look.weight)
+            .text_color(self.look.color)
+            .whitespace_nowrap()
+            .children(self.parts.iter().map(|p| match p {
+                Part::Icon(path) => gpui::svg()
+                    .path(*path)
+                    .size(px(0.95 * em))
+                    .flex_shrink_0()
+                    .text_color(self.look.color)
+                    .into_any_element(),
+                Part::Avatar(src) => gpui::StyledImage::object_fit(img(src.clone()), gpui::ObjectFit::Cover)
+                    .size(px(1.15 * em))
+                    .mr(px(1.))
+                    .flex_shrink_0()
+                    .rounded_full()
+                    .into_any_element(),
+                Part::Text { text, alpha, strike } => div()
+                    .opacity(*alpha)
+                    .when(*strike, |d| d.line_through())
+                    .child(text.clone())
+                    .into_any_element(),
+            }))
+            .into_any_element()
+    }
 }
 
 /// What a click landed on.
@@ -355,6 +431,21 @@ fn segments(atoms: &[Atom], window: &Window) -> Vec<Seg> {
                     atom: i,
                     range: 0..0,
                     width: *size,
+                    hang: 0.,
+                    lead: 0.,
+                    tail: 0.,
+                    brk: true,
+                    hard: false,
+                });
+            }
+            Atom::Pill(p) => {
+                if let Some(last) = segs.last_mut() {
+                    last.brk = true;
+                }
+                segs.push(Seg {
+                    atom: i,
+                    range: 0..0,
+                    width: p.width(window),
                     hang: 0.,
                     lead: 0.,
                     tail: 0.,
@@ -584,6 +675,12 @@ fn layout(atoms: &[Atom], base: &Look, width: f32, window: &Window) -> Laid {
                 Atom::Ring(_) => {
                     above = above.max(RING - RING_DROP);
                     below = below.max(RING_DROP);
+                }
+                Atom::Pill(pill) => {
+                    let m = metrics(&pill.look, window);
+                    let h = half(&m, pill.look.line_height) + 1.;
+                    above = above.max(m.ascent + h);
+                    below = below.max(m.descent + h);
                 }
                 _ => {}
             }
@@ -900,6 +997,23 @@ impl Element for Inline {
                             window,
                             cx,
                         );
+                        images.push(el);
+                    }
+                    Atom::Pill(pill) => {
+                        let m = metrics(&pill.look, window);
+                        let h = pill.look.line_height + 2.;
+                        let lead = (pill.look.line_height - (m.ascent + m.descent)) / 2.;
+                        let origin = bounds.origin + point(px(p.x), px(line.baseline - m.ascent - lead - 1.));
+                        let sz = size(px(p.width), px(h));
+                        hits.push((
+                            window.insert_hitbox(Bounds::new(origin, sz), HitboxBehavior::Normal),
+                            pill.target.clone(),
+                        ));
+                        let mut el = pill.element(
+                            ElementId::Name(format!("inline-{salt}-pill-{}", images.len()).into()),
+                            h,
+                        );
+                        el.prepaint_as_root(origin, sz.map(Into::into), window, cx);
                         images.push(el);
                     }
                     Atom::Break | Atom::Gap(_) => {}
