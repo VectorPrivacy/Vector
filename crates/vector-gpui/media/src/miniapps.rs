@@ -109,6 +109,7 @@ pub mod isolated {
     }
 
     /// The realtime WebSocket's port, which an isolated app reaches past its proxy.
+    #[cfg(target_os = "linux")]
     pub fn rt_ws_port() -> Option<u16> {
         super::scheme::rt_ws_port()
     }
