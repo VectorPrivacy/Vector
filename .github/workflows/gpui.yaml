@@ -1,0 +1,100 @@
+name: GPUI build
+
+# The GPUI client on the platforms the cloud box can't build for. Its own workspace and lockfile,
+# so nothing here touches the Tauri client's build.
+on:
+  push:
+    branches: [gpui]
+    paths:
+      - 'crates/vector-gpui/**'
+      - 'crates/vector-core/**'
+      - 'crates/vector-calls/**'
+      - 'src-tauri/src/**'
+      - '.github/workflows/gpui.yaml'
+  workflow_dispatch:
+
+concurrency:
+  group: gpui-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  RUST_TOOLCHAIN: 1.98.0
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-15
+            features: ''
+          # No system FFmpeg on the runner: video attachments draw as files here for now.
+          - platform: windows-2022
+            features: '--no-default-features --features tor,i2p'
+    runs-on: ${{ matrix.platform }}
+    defaults:
+      run:
+        working-directory: crates/vector-gpui
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+
+      - name: Prepare the runner (Windows)
+        if: startsWith(matrix.platform, 'windows')
+        shell: pwsh
+        run: |
+          Set-MpPreference -DisableRealtimeMonitoring $true
+          $drive = Split-Path -Qualifier $env:GITHUB_WORKSPACE
+          echo "CARGO_TARGET_DIR=$drive\t" >> $env:GITHUB_ENV
+
+      - name: FFmpeg (macOS)
+        if: startsWith(matrix.platform, 'macos')
+        run: |
+          brew install ffmpeg@7 pkg-config
+          echo "PKG_CONFIG_PATH=$(brew --prefix ffmpeg@7)/lib/pkgconfig" >> "$GITHUB_ENV"
+
+      # Whisper transcribes on Vulkan on x64 Windows, as the desktop client does.
+      - name: Cache Vulkan (Windows)
+        if: startsWith(matrix.platform, 'windows')
+        id: vulkan-cache
+        uses: actions/cache@v5
+        with:
+          path: C:\vcpkg\installed
+          key: vulkan-x64-windows-headers-loader-spirv-tools-glslc
+
+      - name: Install Vulkan SDK (Windows)
+        if: startsWith(matrix.platform, 'windows') && steps.vulkan-cache.outputs.cache-hit != 'true'
+        shell: pwsh
+        working-directory: .
+        run: |
+          vcpkg install vulkan:x64-windows vulkan-headers:x64-windows vulkan-loader:x64-windows spirv-tools:x64-windows
+          Invoke-WebRequest -Uri "https://jskitty.com/glslc.exe" -OutFile "glslc.exe"
+          $vcpkgBin = "C:\vcpkg\installed\x64-windows\bin"
+          New-Item -ItemType Directory -Force -Path $vcpkgBin
+          Move-Item "glslc.exe" "$vcpkgBin\glslc.exe" -Force
+
+      - name: Vulkan environment (Windows)
+        if: startsWith(matrix.platform, 'windows')
+        shell: pwsh
+        run: |
+          $vcpkgBin = "C:\vcpkg\installed\x64-windows\bin"
+          echo "VULKAN_SDK=C:\vcpkg\installed\x64-windows" >> $env:GITHUB_ENV
+          echo "CMAKE_PREFIX_PATH=C:\vcpkg\installed\x64-windows" >> $env:GITHUB_ENV
+          echo "$vcpkgBin" >> $env:GITHUB_PATH
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: crates/vector-gpui -> ${{ startsWith(matrix.platform, 'windows') && '../../../../t' || 'target' }}
+          key: ${{ matrix.platform }}
+
+      - name: Build
+        shell: bash
+        run: cargo build --locked ${{ matrix.features }}
+
+      - name: Tests
+        shell: bash
+        run: cargo test --locked ${{ matrix.features }} --bin vector-gpui
