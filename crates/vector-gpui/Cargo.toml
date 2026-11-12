@@ -39,7 +39,7 @@ sysinfo = { version = "0.31", default-features = false, features = ["system"] }
 rand = "0.8"
 regex = "1"
 base64 = "0.22"
-nostr-sdk = "=0.45.4"
+nostr-sdk = "=0.45.6"
 bip39 = "2.2.2"
 zeroize = "1.8"
 rusqlite = { version = "0.38", features = ["bundled"] }
@@ -141,9 +141,9 @@ strip = true
 [patch.crates-io]
 # whisper.cpp 1.9.5 with scripts/whisper/patches, as the desktop client builds it.
 whisper-rs-sys = { git = "https://github.com/VectorPrivacy/whisper-rs.git", rev = "97540c4ce03944e54aa2da3381a64947b4a824cb" }
-nostr = { git = "https://github.com/VectorPrivacy/nostr.git", branch = "vector-v0.45.4" }
-nostr-sdk = { git = "https://github.com/VectorPrivacy/nostr.git", branch = "vector-v0.45.4" }
-nostr-database = { git = "https://github.com/VectorPrivacy/nostr.git", branch = "vector-v0.45.4" }
+nostr = { git = "https://github.com/VectorPrivacy/nostr.git", branch = "vector-v0.45.6" }
+nostr-sdk = { git = "https://github.com/VectorPrivacy/nostr.git", branch = "vector-v0.45.6" }
+nostr-database = { git = "https://github.com/VectorPrivacy/nostr.git", branch = "vector-v0.45.6" }
 saturating-time = { path = "../vendor/saturating-time" }
 async-process = { git = "https://github.com/zed-industries/async-process.git", rev = "0b6d6713570af61806e1e5cb40e0f757cb93fd9d" }
 async-task = { git = "https://github.com/zed-industries/async-task.git", rev = "015845a19fc31752c02367567d3b8900a406f9da" }
