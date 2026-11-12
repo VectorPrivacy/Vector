@@ -40,7 +40,15 @@ pub(super) struct MiniPanel {
     apps: Vec<GridApp>,
     loaded: bool,
     opened: std::time::Instant,
+    /// `editMode`: the grid wobbles and each app grows a delete badge.
+    edit: Option<std::time::Instant>,
+    /// The click that ends the hold which started edit mode.
+    just: bool,
+    hold: Option<gpui::Task<()>>,
+    pub(super) pivx_hidden: bool,
 }
+
+const PIVX_HIDDEN: &str = "pivx_hidden";
 
 pub(super) struct Launch {
     app: GridApp,
@@ -74,6 +82,10 @@ impl VectorApp {
             apps: Vec::new(),
             loaded: !self.live,
             opened: std::time::Instant::now(),
+            edit: None,
+            just: false,
+            hold: None,
+            pivx_hidden: false,
         });
         self.load_mini_history(cx);
         cx.notify();
@@ -97,13 +109,15 @@ impl VectorApp {
                 });
             }
             apps.sort_by(|a, b| b.last.cmp(&a.last));
-            apps
+            let hidden = vector_core::db::get_sql_setting(PIVX_HIDDEN.into()).ok().flatten().as_deref() == Some("true");
+            (apps, hidden)
         });
         cx.spawn(async move |this, cx| {
-            let Ok(apps) = rx.await else { return };
+            let Ok((apps, hidden)) = rx.await else { return };
             this.update(cx, |this, cx| {
                 if let Some(m) = this.mini.as_mut() {
                     m.apps = apps;
+                    m.pivx_hidden = hidden;
                     m.loaded = true;
                     cx.notify();
                 }
@@ -111,6 +125,134 @@ impl VectorApp {
             .ok();
         })
         .detach();
+    }
+
+    pub(super) fn mini_animating(&self) -> bool {
+        self.mini.as_ref().is_some_and(|m| m.edit.is_some() || m.opened.elapsed().as_secs_f32() < 0.3 + (m.apps.len() + 2) as f32 * 0.08)
+    }
+
+    /// A removable tile: hold for edit mode, then a delete badge.
+    fn editable(
+        &self,
+        tile: gpui::Stateful<gpui::Div>,
+        name: String,
+        pivx: bool,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        let editing = self.mini.as_ref().is_some_and(|m| m.edit.is_some());
+        tile.on_mouse_down(
+            gpui::MouseButton::Left,
+            cx.listener(|app, _, _, cx| {
+                let Some(m) = app.mini.as_mut() else { return };
+                if m.edit.is_some() {
+                    return;
+                }
+                m.hold = Some(cx.spawn(async move |this, cx| {
+                    cx.background_executor().timer(std::time::Duration::from_millis(500)).await;
+                    this.update(cx, |app, cx| {
+                        if let Some(m) = app.mini.as_mut() {
+                            m.hold = None;
+                            m.edit = Some(std::time::Instant::now());
+                            m.just = true;
+                            cx.notify();
+                        }
+                    })
+                    .ok();
+                }));
+            }),
+        )
+        .on_mouse_up(
+            gpui::MouseButton::Left,
+            cx.listener(|app, _, _, _| {
+                if let Some(m) = app.mini.as_mut() {
+                    m.hold = None;
+                }
+            }),
+        )
+        .when(editing, |d| {
+            d.child(
+                div()
+                    .id(SharedString::from(format!("mini-del-{name}")))
+                    .absolute()
+                    .top(px(-6.))
+                    .right(px(-6.))
+                    .size(px(20.))
+                    .rounded_full()
+                    .bg(c(0xe53935))
+                    .hover(|s| s.bg(c(0xc62828)))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .cursor_pointer()
+                    .child(svg().path("icons/x.svg").size(px(12.)).text_color(c(0xffffff)))
+                    .on_click(cx.listener(move |app, _, _, cx| {
+                        cx.stop_propagation();
+                        if let Some(m) = app.mini.as_mut() {
+                            m.just = false;
+                        }
+                        let mut p = crate::kit::Popup::notice("Remove App?");
+                        p.text = Some(
+                            format!(
+                                "Are you sure you want to remove <b>{}</b> from your recent Mini Apps?",
+                                name.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+                            )
+                            .into(),
+                        );
+                        p.confirm = "Confirm".into();
+                        p.cancel = Some("Cancel".into());
+                        app.popup = Some((p, super::PopupAct::RemoveMiniApp { name: name.clone(), pivx }));
+                        cx.notify();
+                    })),
+            )
+        })
+    }
+
+    /// A click in the grid while editing ends edit mode, except the hold's own release.
+    fn edit_click(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(m) = self.mini.as_mut() else { return false };
+        if m.edit.is_none() {
+            return false;
+        }
+        if std::mem::take(&mut m.just) {
+            return true;
+        }
+        self.end_edit(cx);
+        true
+    }
+
+    fn end_edit(&mut self, cx: &mut Context<Self>) {
+        if let Some(m) = self.mini.as_mut() {
+            m.edit = None;
+            m.just = false;
+            cx.notify();
+        }
+    }
+
+    fn set_pivx_hidden(&mut self, hidden: bool, cx: &mut Context<Self>) {
+        if let Some(m) = self.mini.as_mut() {
+            m.pivx_hidden = hidden;
+        }
+        if self.live {
+            let _ = backend::run(async move {
+                vector_core::db::set_sql_setting(PIVX_HIDDEN.into(), hidden.to_string())
+            });
+        }
+        cx.notify();
+    }
+
+    /// `removeGridApp`, once confirmed.
+    pub(super) fn remove_miniapp(&mut self, name: String, pivx: bool, cx: &mut Context<Self>) {
+        self.end_edit(cx);
+        if pivx {
+            self.set_pivx_hidden(true, cx);
+            return;
+        }
+        if let Some(m) = self.mini.as_mut() {
+            m.apps.retain(|a| a.name != name);
+        }
+        if self.live {
+            let _ = backend::run(async move { vector_core::db::miniapps::remove_miniapp_from_history(&name) });
+        }
     }
 
     /// `#attachment-panel-miniapps-view`: Back and search over the grid.
@@ -122,10 +264,15 @@ impl VectorApp {
         let tile = |i: usize, id: SharedString, face: AnyElement, label: SharedString, store: bool| {
             let it = t(i);
             let pivx = id.as_ref() == "mini-pivx";
+            let wob = m.edit.filter(|_| !store).map_or(0., |at| {
+                let ph = (at.elapsed().as_secs_f32() / 0.12 + (i % 2) as f32 * 0.5) % 2.;
+                if ph < 1. { ph * 2. - 1. } else { 3. - ph * 2. }
+            });
             div()
                 .id(id.clone())
                 .relative()
-                .left(px(-10. * (1. - it)))
+                .left(px(-10. * (1. - it) + wob))
+                .top(px(-0.5 * wob))
                 .opacity(it)
                 .w(px(64.))
                 .flex()
@@ -190,28 +337,44 @@ impl VectorApp {
                 None => glyph("icons/play.svg", 22.),
             };
             let app = a.clone();
+            let t = tile(k + 1, SharedString::from(format!("mini-app-{k}")), face, a.name.clone().into(), false);
             tiles.push(
-                tile(k + 1, SharedString::from(format!("mini-app-{k}")), face, a.name.clone().into(), false)
+                self.editable(t, a.name.clone(), false, cx)
                     .on_click(cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        if this.edit_click(cx) {
+                            return;
+                        }
                         this.launch = Some(Launch { app: app.clone() });
                         cx.notify();
                     }))
                     .into_any_element(),
             );
         }
-        if !searching || "pivx".contains(&query) || "pivx wallet".contains(&query) {
+        let pivx_match = "pivx".contains(&query) || "pivx wallet".contains(&query);
+        if if m.pivx_hidden { searching && pivx_match } else { !searching || pivx_match } {
             let i = tiles.len();
+            let t = tile(i, "mini-pivx".into(), img("icons/pivx.svg").size(px(38.)).into_any_element(), "PIVX".into(), false);
+            let t = if m.pivx_hidden { t } else { self.editable(t, "PIVX Wallet".into(), true, cx) };
             tiles.push(
-                tile(i, "mini-pivx".into(), img("icons/pivx.svg").size(px(38.)).into_any_element(), "PIVX".into(), false)
-                    .on_click(cx.listener(|app, _, _, cx| app.show_toast("The PIVX Wallet isn't in this build yet", cx)))
-                    .into_any_element(),
+                t.on_click(cx.listener(|app, _, _, cx| {
+                    cx.stop_propagation();
+                    if app.edit_click(cx) {
+                        return;
+                    }
+                    if app.mini.as_ref().is_some_and(|m| m.pivx_hidden) {
+                        app.set_pivx_hidden(false, cx);
+                        let mut p = crate::kit::Popup::notice("PIVX Wallet Restored");
+                        p.text = Some("The PIVX Wallet has been restored to your Mini Apps panel.".into());
+                        p.icon = None;
+                        app.popup = Some((p, super::PopupAct::Notice));
+                        cx.notify();
+                        return;
+                    }
+                    app.show_toast("The PIVX Wallet isn't in this build yet", cx)
+                }))
+                .into_any_element(),
             );
-        }
-        if m.opened.elapsed().as_secs_f32() < 0.3 + tiles.len() as f32 * 0.08 {
-            let me = cx.entity().downgrade();
-            cx.defer(move |cx| {
-                me.update(cx, |_, cx| cx.notify()).ok();
-            });
         }
         let empty = m.loaded && m.apps.is_empty() && !searching;
         let none_found = searching && shown.is_empty();
@@ -271,6 +434,14 @@ impl VectorApp {
                 .child(
                     div()
                         .id("miniapps-grid")
+                        .on_click(cx.listener(|app, _, _, cx| {
+                            app.edit_click(cx);
+                        }))
+                        .on_mouse_down_out(cx.listener(|app, _, _, cx| {
+                            if app.popup.is_none() && app.mini.as_ref().is_some_and(|m| m.edit.is_some() && !m.just) {
+                                app.end_edit(cx);
+                            }
+                        }))
                         .max_h(px(195.))
                         .overflow_y_scroll()
                         .pt(px(6.))

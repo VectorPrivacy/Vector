@@ -323,6 +323,10 @@ enum PopupAct {
     },
     Logout,
     ClearStorage,
+    RemoveMiniApp {
+        name: String,
+        pivx: bool,
+    },
     JoinInvite {
         key: String,
         name: String,
@@ -3508,6 +3512,7 @@ impl VectorApp {
                 backend::calls::allow_realtime();
                 self.call_go(then, cx);
             }
+            PopupAct::RemoveMiniApp { name, pivx } => self.remove_miniapp(name, pivx, cx),
             PopupAct::Logout => {
                 let me = self.store.borrow().my_npub.clone();
                 self.settings = None;
@@ -3658,6 +3663,9 @@ impl Render for VectorApp {
             for old in media.videos.retired.drain(..) {
                 let _ = window.drop_image(old);
             }
+        }
+        if self.mini_animating() {
+            window.request_animation_frame();
         }
         let popout = self.popout_view(window, cx);
         let launch = self.launch_view(cx);
