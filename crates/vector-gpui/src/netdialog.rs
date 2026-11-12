@@ -152,6 +152,7 @@ fn card(id: &'static str, body: impl IntoElement, on: &OnAct) -> AnyElement {
             .id("net-dialog-overlay")
             .absolute()
             .inset_0()
+            .px(px(19.))
             .flex()
             .items_center()
             .justify_center()
@@ -161,7 +162,8 @@ fn card(id: &'static str, body: impl IntoElement, on: &OnAct) -> AnyElement {
             .child(
                 div()
                     .id(id)
-                    .w(px(422.))
+                    .w_full()
+                    .max_w(px(422.))
                     .rounded(px(16.))
                     .border_1()
                     .border_color(c(0x262626))

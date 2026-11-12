@@ -1140,7 +1140,8 @@ pub fn invite_details(
     };
     let card = div()
         .id("invite-details")
-        .w(px(422.))
+        .w_full()
+        .max_w(px(422.))
         .p(px(21.))
         .rounded(px(16.))
         .border_1()
@@ -1225,6 +1226,7 @@ pub fn invite_details(
             .id("invite-details-overlay")
             .absolute()
             .inset_0()
+            .px(px(19.))
             .bg(ca(0, 0, 0, 0.85))
             .flex()
             .items_center()

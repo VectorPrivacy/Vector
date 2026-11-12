@@ -702,7 +702,8 @@ impl Render for FilePreview {
             None => match &self.image {
                 Some((image, w, h)) => {
                     let (w, h) = (*w as f32, *h as f32);
-                    let s = (450. / w).min(max_h / h).min(1.);
+                    let room = 500f32.min(f32::from(window.viewport_size().width) - 40.) - 48.;
+                    let s = (room / w).min(max_h / h).min(1.);
                     let (dw, dh) = (w * s, h * s);
                     let shown = if self.spoiler {
                         self.blur.clone().unwrap_or(image.clone())
