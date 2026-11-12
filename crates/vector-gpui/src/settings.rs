@@ -2448,6 +2448,7 @@ fn relays_block(s: &Settings, on: &OnAct) -> AnyElement {
                     .child(if r.mode == "read" { "R" } else { "W" }),
             );
         }
+        let info = crate::relayinfo::get(&r.url);
         content = content
             .child(origin_pill(r.is_default))
             .child(
@@ -2457,12 +2458,18 @@ fn relays_block(s: &Settings, on: &OnAct) -> AnyElement {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .child(
-                        svg()
+                    .child(match info.as_ref().and_then(|m| m.icon.clone()) {
+                        Some(pic) => gpui::img(pic)
+                            .size_full()
+                            .rounded(px(5.))
+                            .object_fit(gpui::ObjectFit::Cover)
+                            .into_any_element(),
+                        None => svg()
                             .path("icons/globe.svg")
                             .size(px(16.))
-                            .text_color(c(0x7a7a7a)),
-                    ),
+                            .text_color(c(0x7a7a7a))
+                            .into_any_element(),
+                    }),
             )
             .child(
                 div()
@@ -2473,7 +2480,7 @@ fn relays_block(s: &Settings, on: &OnAct) -> AnyElement {
                     .text_size(px(16.))
                     .line_height(px(24.))
                     .text_color(c(0xffffff))
-                    .child(host(&r.url)),
+                    .child(info.and_then(|m| m.name).unwrap_or_else(|| host(&r.url))),
             );
         col = col.child(
             net_row(

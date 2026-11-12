@@ -101,6 +101,7 @@ pub struct CommSettings {
 }
 
 pub enum Act {
+    ExplainAuth,
     PickIcon,
     PickBanner,
     RemoveIcon,
@@ -683,7 +684,11 @@ fn relay_row(
     url: &str,
     editing: Option<&Entity<TextInput>>,
     actions: Vec<AnyElement>,
+    info: Option<(crate::relayinfo::Meta, &OnAct)>,
 ) -> impl IntoElement {
+    let name = info.as_ref().and_then(|(m, _)| m.name.clone());
+    let auth = info.as_ref().filter(|(m, _)| m.auth).map(|(_, on)| (*on).clone());
+    let pic = info.as_ref().and_then(|(m, _)| m.icon.clone());
     let (scheme, rest) = match url.find("://") {
         Some(i) => (&url[..i + 3], url[i + 3..].trim_end_matches('/')),
         None => ("", url),
@@ -696,13 +701,21 @@ fn relay_row(
         .gap(px(12.))
         .bg(c(0x0c0c0c))
         .when(!first, |d| d.border_t_1().border_color(c(0x1e1e1e)))
-        .child(
-            svg()
+        .child(match pic {
+            Some(pic) => gpui::img(pic)
+                .size(px(22.))
+                .mx(px(-3.))
+                .flex_shrink_0()
+                .rounded(px(5.))
+                .object_fit(gpui::ObjectFit::Cover)
+                .into_any_element(),
+            None => svg()
                 .path(icon)
                 .size(px(16.))
                 .flex_shrink_0()
-                .text_color(c(0x7a7a7a)),
-        )
+                .text_color(c(0x7a7a7a))
+                .into_any_element(),
+        })
         .when_some(editing, |d, input| {
             d.child(
                 div()
@@ -721,24 +734,64 @@ fn relay_row(
             )
         })
         .when(editing.is_none(), |d| {
+            let sub = name.is_some();
             d.child(
                 div()
                     .flex_1()
                     .min_w_0()
-                    .truncate()
-                    .text_size(px(14.))
-                    .line_height(px(24.))
-                    .text_color(c(0xe8e8e8))
+                    .flex()
+                    .flex_col()
+                    .children(name.map(|n| {
+                        div()
+                            .truncate()
+                            .text_size(px(14.))
+                            .line_height(px(18.))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(c(0xe8e8e8))
+                            .child(n)
+                    }))
                     .child(
-                        gpui::StyledText::new(format!("{scheme}{rest}")).with_highlights([(
-                            0..scheme.len(),
-                            gpui::HighlightStyle {
-                                color: Some(c(0x6a6a6a)),
-                                ..Default::default()
-                            },
-                        )]),
+                        div()
+                            .truncate()
+                            .text_size(px(if sub { 12. } else { 14. }))
+                            .line_height(px(if sub { 16. } else { 24. }))
+                            .text_color(c(if sub { 0x9a9a9a } else { 0xe8e8e8 }))
+                            .child(
+                                gpui::StyledText::new(format!("{scheme}{rest}")).with_highlights([(
+                                    0..scheme.len(),
+                                    gpui::HighlightStyle {
+                                        color: Some(c(0x6a6a6a)),
+                                        ..Default::default()
+                                    },
+                                )]),
+                            ),
                     ),
             )
+            .when_some(auth, |d, on| {
+                d.child(
+                    div()
+                        .id("cs-relay-auth")
+                        .tooltip(crate::kit::tooltip("What AUTH means"))
+                        .h(px(22.))
+                        .px(px(8.))
+                        .flex_shrink_0()
+                        .flex()
+                        .items_center()
+                        .gap(px(4.))
+                        .rounded(px(11.))
+                        .border_1()
+                        .border_color(ca(242, 184, 75, 0.35))
+                        .bg(ca(242, 184, 75, 0.1))
+                        .hover(|d| d.bg(ca(242, 184, 75, 0.18)))
+                        .cursor_pointer()
+                        .text_size(px(11.))
+                        .font_weight(FontWeight::BOLD)
+                        .text_color(c(0xf2b84b))
+                        .on_click(click(&on, || Act::ExplainAuth))
+                        .child(svg().path("icons/locked.svg").size(px(11.)).text_color(c(0xf2b84b)))
+                        .child(crate::kit::spaced("AUTH", 0.44)),
+                )
+            })
         })
         .children(actions)
 }
@@ -807,7 +860,8 @@ fn relays(m: &CommSettings, on: &OnAct, cx: &App) -> AnyElement {
                     ));
                 }
             }
-            relay_row(i == 0, "icons/globe.svg", url, editing, actions)
+            let info = crate::relayinfo::get(url).map(|m| (m, on));
+            relay_row(i == 0, "icons/globe.svg", url, editing, actions, info)
         }))
         .when(m.relays.is_empty(), |d| {
             d.child(hint("No relays recorded for this community.").mx(px(16.)).my(px(14.)))
@@ -851,7 +905,7 @@ fn relays(m: &CommSettings, on: &OnAct, cx: &App) -> AnyElement {
                     } else {
                         Vec::new()
                     };
-                    relay_row(i == 0, "icons/volume-max.svg", url, None, actions)
+                    relay_row(i == 0, "icons/volume-max.svg", url, None, actions, None)
                 }))
             }
         });

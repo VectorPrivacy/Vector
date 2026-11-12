@@ -17,6 +17,7 @@ mod pins;
 mod edithistory;
 mod payaddr;
 mod reactpop;
+mod relayinfo;
 mod scrollbar;
 mod serverinfo;
 mod secretguard;

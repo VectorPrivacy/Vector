@@ -73,6 +73,9 @@ struct Fixtures {
     /// Transport states by name, which VECTOR_NET=<name> shows; `i2p_config` is I2P's settings.
     #[serde(default)]
     net_demo: serde_json::Value,
+    /// NIP-11 names, icons and AUTH by relay URL, as `get_relay_info` answers.
+    #[serde(default)]
+    relay_info: HashMap<String, serde_json::Value>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -391,7 +394,7 @@ fn hsl(h: f32, s: f32, l: f32) -> (u8, u8, u8) {
 
 impl Store {
     pub fn from_fixtures(path: &Path) -> anyhow::Result<Self> {
-        let f: Fixtures = serde_json::from_slice(&std::fs::read(path)?)?;
+        let mut f: Fixtures = serde_json::from_slice(&std::fs::read(path)?)?;
         let demo = match std::env::var_os("VECTOR_CHATLIST_DEMO") {
             Some(_) => f.chatlist_demo.unwrap_or_default(),
             None => ChatlistDemo::default(),
@@ -407,6 +410,10 @@ impl Store {
             chat.messages.retain(|m| !m.mine);
         }
         chats.sort_by_key(|c| std::cmp::Reverse(last_activity(c)));
+        crate::relayinfo::set_fixture(
+            std::mem::take(&mut f.relay_info),
+            path.parent().unwrap_or(Path::new(".")).to_path_buf(),
+        );
         Ok(Self {
             my_npub: f.npub,
             profiles: f.profiles.into_iter().map(|p| (p.id.clone(), p)).collect(),

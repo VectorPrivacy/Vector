@@ -143,8 +143,15 @@ fn channel_row(
         white_a(0.55)
     };
     let action = |path: &'static str, shown: bool, act: Option<Rc<dyn Fn() -> Act>>| {
+        let tip = match path {
+            "icons/add-user.svg" => Some("Invite People"),
+            "icons/settings.svg" => Some("Edit Channel"),
+            "icons/chat-bubble.svg" => Some("Open Chat"),
+            _ => None,
+        };
         div()
             .id(path)
+            .when_some(tip.filter(|_| shown), |d, t| d.tooltip(crate::kit::tooltip(t)))
             .when_some(act, |d, act| {
                 let on = on.clone();
                 d.on_click(move |_, w, cx| {

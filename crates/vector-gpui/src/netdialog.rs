@@ -519,11 +519,26 @@ fn relay(
                 .child(
                     div()
                         .min_w_0()
-                        .truncate()
-                        .text_size(px(13.))
-                        .line_height(px(24.))
-                        .text_color(white_a(0.5))
-                        .child(crate::settings::host(&row.url)),
+                        .flex()
+                        .flex_col()
+                        .children(crate::relayinfo::get(&row.url).and_then(|m| m.name).map(|n| {
+                            div()
+                                .truncate()
+                                .text_size(px(16.))
+                                .line_height(px(24.))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(c(0xffffff))
+                                .child(n)
+                        }))
+                        .child(
+                            div()
+                                .min_w_0()
+                                .truncate()
+                                .text_size(px(13.))
+                                .line_height(px(24.))
+                                .text_color(white_a(0.5))
+                                .child(crate::settings::host(&row.url)),
+                        ),
                 )
                 .child(match &tag {
                     Some(t) => tag_pill(t),

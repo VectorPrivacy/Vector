@@ -4838,6 +4838,8 @@ impl VectorApp {
 
 impl Render for VectorApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let me = cx.entity().downgrade();
+        cx.defer(move |cx| crate::relayinfo::pump(me, cx));
         let rail_mode = self.rail_mode(window);
         self.bar_update(window, cx);
         self.video_tick(window, cx);
@@ -10391,6 +10393,11 @@ impl VectorApp {
             return;
         };
         match act {
+            Act::ExplainAuth => self.notice(
+                "This relay uses AUTH",
+                "AUTH relays ask every app to sign in with its Nostr key. Vector signs in as you, so the relay can link your npub to this community every time you connect. Without AUTH, the relay sees this community only through Concord's anonymous keys.\n\nFor faster connections and more privacy, use relays without AUTH.".into(),
+                cx,
+            ),
             Act::PickIcon => self.pick_comm_image(false, window, cx),
             Act::PickBanner => self.pick_comm_image(true, window, cx),
             Act::RemoveIcon => {

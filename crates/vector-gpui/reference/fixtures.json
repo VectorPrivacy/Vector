@@ -4907,5 +4907,17 @@
     "base_plane": "5c0e2a91d7f3"
    }
   }
+ },
+ "relay_info": {
+  "wss://jskitty.com/nostr": {
+   "name": "JSKitty's Relay",
+   "icon": "avatars/grace.png",
+   "auth": true
+  },
+  "wss://asia.vectorapp.io/nostr": {
+   "name": "Vector Asia",
+   "icon": null,
+   "auth": false
+  }
  }
 }
