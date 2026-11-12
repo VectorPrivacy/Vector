@@ -135,13 +135,83 @@ fn cat_row(cat: &Category, first: bool, open: bool, on: &OnAct) -> AnyElement {
         .into_any_element()
 }
 
+/// `.sm-update`: a waiting update, lifted out of the list into a card of its own.
+fn update_row(version: Option<String>, open: bool, on: &OnAct) -> AnyElement {
+    div()
+        .id("sm-row-updates")
+        .min_h(px(54.))
+        .px(px(16.))
+        .flex()
+        .items_center()
+        .gap(px(14.))
+        .cursor_pointer()
+        .on_click(click(on, || Act::Fold("updates")))
+        .child(svg().path("icons/refresh.svg").size(px(24.)).flex_shrink_0().text_color(c(ACCENT)))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .items_center()
+                .text_size(px(17.))
+                .line_height(px(22.))
+                .text_color(c(ACCENT))
+                .child(div().flex_shrink_0().child("Update Pending"))
+                .children(version.map(|v| {
+                    div().ml(px(8.)).min_w_0().truncate().text_size(px(13.)).text_color(c(0x8a8a8a)).child(format!("– {v}"))
+                })),
+        )
+        .child(
+            div()
+                .flex_shrink_0()
+                .min_w(px(24.))
+                .h(px(24.))
+                .rounded(px(12.))
+                .bg(c(ACCENT))
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_size(px(13.))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(c(0x000000))
+                .child("1"),
+        )
+        .child(
+            svg()
+                .path(if open { "icons/chevron-down.svg" } else { "icons/chevron-right.svg" })
+                .size(px(18.))
+                .flex_shrink_0()
+                .text_color(c(ROW_INK)),
+        )
+        .into_any_element()
+}
+
 pub fn slim_view(s: &Settings, on: &OnAct, cx: &App) -> AnyElement {
     let cats = categories(&s.offers);
     let q = query(s, cx);
     let mut card = div().rounded(px(10.)).bg(c(CARD)).flex().flex_col();
     let mut first = true;
+    let waiting = s.updates.phase == UpdPhase::Available;
+    let mut pending = None;
     for cat in &cats {
         let shown = hits(cat, &q);
+        if waiting && cat.id == "updates" {
+            let open = if q.is_empty() { s.slim_open == Some(cat.id) } else { !s.slim_shut.contains(&cat.id) };
+            pending = shown.contains(&true).then(|| {
+                let version = s.updates.found.as_ref().map(|f| f.0.clone());
+                div()
+                    .mb(px(14.))
+                    .rounded(px(10.))
+                    .bg(c(CARD))
+                    .border(px(1.5))
+                    .border_color(c(ACCENT))
+                    .flex()
+                    .flex_col()
+                    .child(update_row(version, open, on))
+                    .when(open, |d| d.child(body(cat, &shown, s, on)))
+            });
+            continue;
+        }
         if !shown.contains(&true) {
             continue;
         }
@@ -224,6 +294,7 @@ pub fn slim_view(s: &Settings, on: &OnAct, cx: &App) -> AnyElement {
                         .child("Settings"),
                 )
                 .child(search)
+                .children(pending)
                 .child(card)
                 .when(empty, |d| {
                     d.child(
