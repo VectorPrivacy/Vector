@@ -40,6 +40,7 @@ impl VectorApp {
             .detach();
             let root = (!self.live).then(|| self.store.borrow().media_root.clone());
             let mut n = Nexus::new(search, root);
+            n.me = self.store.borrow().my_npub.clone();
             if let Some(ms) = self.store.borrow().frozen_now_ms {
                 n.now_ms = ms as i64;
             }
@@ -263,6 +264,7 @@ impl VectorApp {
                 n.search.update(cx, |s, cx| s.set_text("", cx));
                 n.turned = std::time::Instant::now();
             }
+            Act::EditListing(id) => return self.open_edit_listing(id, window, cx),
             Act::Perm(perm, on) => self.nexus_set_perm(perm, on, cx),
             Act::ResetPerms => {
                 if let Some(app) = n.details.as_ref().and_then(|id| n.app(id)).cloned() {

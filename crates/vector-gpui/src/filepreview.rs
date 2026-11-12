@@ -43,6 +43,8 @@ pub enum Event {
     Failed(String),
     /// Dismissed: the file it showed.
     Close(PathBuf),
+    /// The Mini App goes to the App Store instead.
+    Publish(PathBuf),
 }
 
 impl EventEmitter<Event> for FilePreview {}
@@ -70,6 +72,8 @@ pub struct FilePreview {
     keep_metadata: bool,
     rename: Option<Entity<TextInput>>,
     zip: Option<Zip>,
+    /// Offers Publish: a Mini App in the trusted publisher's hands.
+    pub publish: bool,
 }
 
 /// A folder or a selection being zipped, then what the archive holds.
@@ -293,6 +297,7 @@ impl FilePreview {
             keep_metadata: false,
             rename: None,
             zip: None,
+            publish: false,
         }
     }
 
@@ -353,6 +358,7 @@ impl FilePreview {
             keep_metadata: false,
             rename: None,
             zip: Some(Zip::Running(percent)),
+            publish: false,
         }
     }
 
@@ -915,6 +921,21 @@ impl Render for FilePreview {
             .mt_auto()
             .flex()
             .gap(px(12.))
+            .when(self.publish && self.ext.eq_ignore_ascii_case("xdc"), |d| {
+                d.child(
+                    button("fp-publish", "Publish")
+                        .flex()
+                        .items_center()
+                        .gap(px(8.))
+                        .bg(white_a(0.15))
+                        .hover(|s| s.bg(white_a(0.25)))
+                        .text_color(c(0xffffff))
+                        .child(svg().path("icons/star.svg").size(px(16.)).text_color(c(0xffffff)))
+                        .on_click(cx.listener(|p, _, _, cx| {
+                            cx.emit(Event::Publish(p.path.clone()));
+                        })),
+                )
+            })
             .child(
                 button("fp-cancel", "Cancel")
                     .bg(white_a(0.1))

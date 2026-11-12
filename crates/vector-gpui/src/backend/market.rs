@@ -159,3 +159,63 @@ pub fn set_permission(hash: &str, perm: &str, granted: bool) -> Result<(), Strin
 pub fn revoke_permissions(hash: &str) -> Result<(), String> {
     vector_core::db::miniapps::revoke_all_miniapp_permissions(hash)
 }
+
+/// The publish form's fields, owned so they cross into the backend.
+pub struct Listing {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub version: String,
+    pub categories: Vec<String>,
+    pub changelog: Option<String>,
+    pub developer: Option<String>,
+    pub source: Option<String>,
+    pub permissions: Option<String>,
+}
+
+impl Listing {
+    fn borrow<'a>(&'a self, version: &'a str) -> vector_core::webxdc::MarketplaceListing<'a> {
+        vector_core::webxdc::MarketplaceListing {
+            app_id: &self.id,
+            name: &self.name,
+            description: &self.description,
+            version: if version.is_empty() { &self.version } else { version },
+            categories: self.categories.iter().map(String::as_str).collect(),
+            changelog: self.changelog.as_deref(),
+            developer: self.developer.as_deref(),
+            source_url: self.source.as_deref(),
+            permissions: self.permissions.as_deref(),
+            released_at: None,
+        }
+    }
+}
+
+pub fn trusted_publisher() -> &'static str {
+    mk::TRUSTED_PUBLISHER
+}
+
+/// `marketplace_publish_app`: upload the package, then sign its listing.
+pub async fn publish(file: String, listing: Listing) -> Result<String, String> {
+    let signer = vector_core::signer::active_signer().map_err(|e| format!("Failed to get signer: {e}"))?;
+    let servers = vector_core::state::get_blossom_servers();
+    mk::publish_to_marketplace(signer, &file, &listing.borrow(""), servers).await
+}
+
+/// `marketplace_edit_listing`: a new listing over the package it already names.
+pub async fn edit_listing(listing: Listing) -> Result<Vec<MarketplaceApp>, String> {
+    let session = vector_core::db::current_session();
+    let current = MARKETPLACE_STATE.read().await.get_app(&listing.id).cloned().ok_or("Listing not found")?;
+    let edited = vector_core::webxdc::edit_marketplace_listing(&current, &listing.borrow(&current.version)).await?;
+    if !session.is_live() {
+        return Err("Account changed during the edit".into());
+    }
+    let apps = {
+        let mut state = MARKETPLACE_STATE.write().await;
+        state.upsert_app(edited);
+        state.get_apps()
+    };
+    if let Err(e) = vector_core::db::miniapps::save_marketplace_cache(&apps) {
+        log::warn!("[Marketplace] Failed to cache the edited listing: {e}");
+    }
+    Ok(tidy(apps))
+}

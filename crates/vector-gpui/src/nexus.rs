@@ -98,6 +98,8 @@ pub struct Nexus {
     pub picker: Option<(String, Entity<TextInput>)>,
     /// The open page's permission toggles: its app id, then `(id, label, description, granted)` rows.
     pub perms: Option<(String, Result<Vec<(String, String, String, bool)>, String>)>,
+    /// This account's npub: its own listings can be edited.
+    pub me: String,
 }
 
 pub enum Act {
@@ -122,6 +124,7 @@ pub enum Act {
     Menu(String, gpui::Point<gpui::Pixels>),
     Perm(String, bool),
     ResetPerms,
+    EditListing(String),
 }
 
 pub type OnAct = Rc<dyn Fn(Act, &mut Window, &mut App)>;
@@ -133,10 +136,10 @@ fn click(on: &OnAct, act: impl Fn() -> Act + 'static) -> impl Fn(&gpui::ClickEve
 
 // ---- lib/nexus.js ----
 
-const TOUCH: [&str; 6] = ["mobile", "touch", "touchscreen", "tap", "mobile-only", "touch-only"];
-const PAD: [&str; 4] = ["controller", "gamepad", "controller-only", "gamepad-only"];
-const KEYS: [&str; 3] = ["keyboard", "mouse", "kbm"];
-const ONLY: [&str; 4] = ["mobile-only", "touch-only", "controller-only", "gamepad-only"];
+pub const TOUCH: [&str; 6] = ["mobile", "touch", "touchscreen", "tap", "mobile-only", "touch-only"];
+pub const PAD: [&str; 4] = ["controller", "gamepad", "controller-only", "gamepad-only"];
+pub const KEYS: [&str; 3] = ["keyboard", "mouse", "kbm"];
+pub const ONLY: [&str; 4] = ["mobile-only", "touch-only", "controller-only", "gamepad-only"];
 
 fn canonical(t: &str) -> &str {
     if ONLY.contains(&t) {
@@ -369,6 +372,7 @@ impl Nexus {
             spot_armed: None,
             picker: None,
             perms: None,
+            me: String::new(),
         }
     }
 
@@ -1699,6 +1703,10 @@ fn details(n: &Nexus, app: &MarketplaceApp, publisher: Option<&(SharedString, Op
         let id = app.id.clone();
         let b = soft("nx-d-friends", Some("users-multi"), "Play with Friends", busy);
         actions = actions.child(if busy { b } else { b.on_click(click(on, move || Act::PlayWith(id.clone()))) });
+    }
+    if !n.me.is_empty() && app.publisher == n.me {
+        let id = app.id.clone();
+        actions = actions.child(soft("nx-d-edit", Some("edit"), "Edit Listing", false).on_click(click(on, move || Act::EditListing(id.clone()))));
     }
     let copy_id = app.id.clone();
     let head = div()

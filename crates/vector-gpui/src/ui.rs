@@ -85,6 +85,7 @@ pub struct VectorApp {
     nexus: Option<crate::nexus::Nexus>,
     launch: Option<miniapps_ops::Launch>,
     perm_prompt: Option<nexus_ops::PermPrompt>,
+    publish: Option<publish_ops::PublishForm>,
     file_preview: Option<Entity<crate::filepreview::FilePreview>>,
     /// The avatar cropper, and the picked file it cuts.
     cropper: Option<(Entity<crate::cropper::Cropper>, std::path::PathBuf)>,
@@ -397,6 +398,8 @@ mod popout_ops;
 mod miniapps_ops;
 #[path = "ui_nexus.rs"]
 mod nexus_ops;
+#[path = "ui_publish.rs"]
+mod publish_ops;
 
 impl VectorApp {
     fn base(store: Store, live: bool, window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -699,6 +702,7 @@ impl VectorApp {
             nexus: None,
             launch: None,
             perm_prompt: None,
+            publish: None,
             file_preview: None,
             profile: None,
             toast: None,
@@ -3715,6 +3719,7 @@ impl Render for VectorApp {
         let launch = self.launch_view(cx);
         let pick = self.nexus_picker_view(cx);
         let perm = self.perm_prompt_view(cx);
+        let publish = self.publish_view(window, cx);
         match self.rec.due() {
             Some(crate::recorder::Due::Locked) => self.rec.locked(),
             Some(crate::recorder::Due::Idle) => self.rec.idle(),
@@ -4051,6 +4056,7 @@ impl Render for VectorApp {
             .children(popout)
             .children(launch)
             .children(pick)
+            .children(publish)
             .children(perm)
             .children(self.toast_view(window))
             .children(
@@ -6588,7 +6594,12 @@ impl VectorApp {
             Mode::Reply { id, .. } => id.clone(),
             _ => String::new(),
         };
-        let preview = cx.new(|cx| make(chat.to_string(), reply, window, cx));
+        let publish = self.can_publish();
+        let preview = cx.new(|cx| {
+            let mut p = make(chat.to_string(), reply, window, cx);
+            p.publish = publish;
+            p
+        });
         cx.subscribe_in(
             &preview,
             window,
@@ -6599,6 +6610,7 @@ impl VectorApp {
                 match e {
                     crate::filepreview::Event::Send(send) => this.send_file(send, cx),
                     crate::filepreview::Event::Close(path) => backend::archive::forget(path),
+                    crate::filepreview::Event::Publish(path) => this.open_publish(path.clone(), window, cx),
                     crate::filepreview::Event::Failed(err) => {
                         this.notice("Compression Failed", err.clone(), cx)
                     }
@@ -10176,6 +10188,7 @@ impl VectorApp {
         }
         if self.menu.take().is_some()
             || self.perm_prompt.take().is_some()
+            || self.publish.take_if(|f| !f.busy()).is_some()
             || self.launch.take().is_some()
             || self.nexus.as_mut().and_then(|n| n.picker.take()).is_some()
             || self.pack_details.take().is_some()

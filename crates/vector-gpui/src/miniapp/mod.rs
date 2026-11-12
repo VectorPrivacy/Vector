@@ -504,6 +504,9 @@ pub struct Info {
     pub icon: Option<PathBuf>,
     pub uses_realtime: bool,
     pub hash: String,
+    pub description: String,
+    pub version: String,
+    pub source: Option<String>,
 }
 
 /// `miniapp_load_info`: the package's listing, read once and kept by the package cache.
@@ -530,6 +533,9 @@ pub async fn info(file_path: String) -> Result<Info, String> {
         icon: dir.and_then(|d| package.icon_path(&d)),
         uses_realtime: package.uses_realtime,
         hash: package.hash_hex(),
+        description: package.description.to_string(),
+        version: package.version.to_string(),
+        source: package.source_code_url.as_deref().map(str::to_string),
     })
     .await
     .map_err(|e| e.to_string())
