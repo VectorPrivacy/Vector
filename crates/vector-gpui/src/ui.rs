@@ -4679,6 +4679,15 @@ impl VectorApp {
         cx.notify();
     }
 
+    /// A notice with no icon, escaping `text`: `popupConfirm(title, escapeHtml(e), true)`.
+    fn notice_plain(&mut self, title: &str, text: &str, cx: &mut Context<Self>) {
+        let mut p = kit::Popup::notice(title.to_string());
+        p.icon = None;
+        p.text = Some(kit::escape(text).into());
+        self.popup = Some((p, PopupAct::Notice));
+        cx.notify();
+    }
+
     fn notice(&mut self, title: &str, text: String, cx: &mut Context<Self>) {
         let mut p = kit::Popup::notice(title.to_string());
         p.text = Some(text.into());
@@ -7261,7 +7270,7 @@ impl VectorApp {
                             this.popup = Some((popup, PopupAct::Notice));
                         }
                     }
-                    Err(e) => this.notice("Wallpaper not sent", e, cx),
+                    Err(e) => this.notice_plain("Wallpaper not sent", &e, cx),
                 }
                 cx.notify();
             })
@@ -13498,6 +13507,7 @@ impl VectorApp {
                 let typed = input.read(cx).text().trim().to_string();
                 if typed.is_empty() {
                     let mut popup = kit::Popup::notice("Invalid URL");
+                    popup.icon = None;
                     popup.text = Some("Please enter a relay URL.".into());
                     self.popup = Some((popup, PopupAct::Notice));
                     return;
@@ -13541,6 +13551,7 @@ impl VectorApp {
                             }
                             Err(e) => {
                                 let mut popup = kit::Popup::notice("Failed to Add Relay");
+                                popup.icon = None;
                                 popup.text = Some(e.into());
                                 this.popup = Some((popup, PopupAct::Notice));
                             }
@@ -15861,7 +15872,7 @@ impl VectorApp {
                     let result = rx.await.unwrap_or_else(|_| Err("Backend stopped".into()));
                     this.update_in(cx, |this, window, cx| match result {
                         Ok(()) => this.reboot(window, cx),
-                        Err(e) => this.notice("Switch failed", e.into(), cx),
+                        Err(e) => this.notice_plain("Switch failed", &e, cx),
                     })
                     .ok();
                 })
@@ -15929,13 +15940,7 @@ impl VectorApp {
             this.update_in(cx, |this, window, cx| match result {
                 Ok(true) => this.reboot(window, cx),
                 Ok(false) => this.open_switcher(cx),
-                Err(e) => {
-                    let mut p = kit::Popup::notice(fail);
-                    p.icon = None;
-                    p.text = Some(kit::escape(&e).into());
-                    this.popup = Some((p, PopupAct::Notice));
-                    cx.notify();
-                }
+                Err(e) => this.notice_plain(fail, &e, cx),
             })
             .ok();
         })
