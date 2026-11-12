@@ -3016,7 +3016,8 @@ fn updates_block(s: &Settings, on: &OnAct) -> AnyElement {
                 .mb(px(20.))
                 .child(
                     div()
-                        .w(px(400.))
+                        .w_full()
+                        .max_w(px(400.))
                         .flex()
                         .flex_col()
                         .child(
