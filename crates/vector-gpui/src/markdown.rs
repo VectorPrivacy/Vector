@@ -67,6 +67,8 @@ pub struct Ctx<'a> {
     pub now: f64,
     /// A tagged npub's name; `None` leaves npubs as text.
     pub mention: Option<&'a dyn Fn(&str) -> String>,
+    /// `@everyone` and the Roles that may show as chips, with each Role's colour.
+    pub tags: &'a [(String, Option<u32>)],
 }
 
 enum Swap {
@@ -444,9 +446,41 @@ impl Builder<'_> {
         }
         let mut last = 0;
         for (start, end, npub) in find_npubs(t) {
-            self.emoji_text(&t[last..start], Kind::Plain);
+            self.role_tagged(&t[last..start]);
             self.pill(npub);
             last = end;
+        }
+        self.role_tagged(&t[last..]);
+    }
+
+    /// `@everyone` and Role names as chips, longest name first.
+    fn role_tagged(&mut self, t: &str) {
+        let tags = self.ctx.tags;
+        if tags.is_empty() {
+            return self.emoji_text(t, Kind::Plain);
+        }
+        let mut last = 0;
+        let mut i = 0;
+        while let Some(off) = t[i..].find('@') {
+            let at = i + off;
+            let rest = &t[at + 1..];
+            let hit = tags
+                .iter()
+                .filter(|(name, _)| {
+                    rest.starts_with(name.as_str())
+                        && !rest[name.len()..].chars().next().is_some_and(|c| c.is_alphanumeric() || c == '_')
+                })
+                .max_by_key(|(name, _)| name.len());
+            match hit {
+                Some((name, color)) => {
+                    self.emoji_text(&t[last..at], Kind::Plain);
+                    let end = at + 1 + name.len();
+                    self.styled(&t[at..end], Kind::Tag(*color));
+                    last = end;
+                    i = end;
+                }
+                None => i = at + 1,
+            }
         }
         self.emoji_text(&t[last..], Kind::Plain);
     }
@@ -512,8 +546,12 @@ impl Builder<'_> {
         let mut look = self.look();
         match kind {
             Kind::Link(_) => look.color = gpui::rgb(0x59fcb3).into(),
-            Kind::Mention(_) => {
+            Kind::Mention(_) | Kind::Tag(None) => {
                 look.color = gpui::rgb(0x59fcb3).into();
+                look.weight = gpui::FontWeight::MEDIUM;
+            }
+            Kind::Tag(Some(color)) => {
+                look.color = gpui::rgb(color).into();
                 look.weight = gpui::FontWeight::MEDIUM;
             }
             _ => {}
@@ -525,7 +563,7 @@ impl Builder<'_> {
             kind: k,
         }) = self.atoms.last_mut()
         {
-            if *l == look && *k == kind && !matches!(kind, Kind::Spoiler { .. } | Kind::Code | Kind::Mention(_)) {
+            if *l == look && *k == kind && !matches!(kind, Kind::Spoiler { .. } | Kind::Code | Kind::Mention(_) | Kind::Tag(_)) {
                 *text = format!("{text}{t}").into();
                 return;
             }
@@ -1148,6 +1186,7 @@ mod custom_tests {
             custom: Some(&f),
             now: 0.,
             mention: None,
+            tags: &[],
         };
         let blocks = parse("Have you seen this? :grin: and 21:20:30", &ctx);
         let Block::Para(p) = &blocks[0] else { panic!() };

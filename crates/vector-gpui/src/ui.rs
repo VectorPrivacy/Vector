@@ -2266,6 +2266,10 @@ impl VectorApp {
         self.opening = self.live.then_some(None);
         self.tracked.clear();
         self.sync_mentions(cx);
+        let community = self.store.borrow().community_of(&id).map(|c| c.community_id.clone());
+        if let Some(cid) = community.filter(|c| self.live && !self.mention_rules.contains_key(c)) {
+            self.load_mention_rules(cid, cx);
+        }
         self.chip_passed.clear();
         self.close_popups(cx);
         window.focus(&self.input.read(cx).focus_handle(cx), cx);
@@ -5203,6 +5207,13 @@ impl VectorApp {
         let media = self.media.clone();
         let live = self.live;
         let invites = Rc::new(self.invite_previews.clone());
+        let rules: Option<Rc<crate::mentions::Rules>> = store
+            .community_of(&id)
+            .map(|c| match self.mention_rules.get(&c.community_id) {
+                Some(r) => Rc::new(r.clone()),
+                // Fixtures answer as the mock does: anyone may ping everyone.
+                None => Rc::new(crate::mentions::Rules { anyone: !self.live, ..Default::default() }),
+            });
         let jumped = self
             .jumped
             .clone()
@@ -5215,6 +5226,7 @@ impl VectorApp {
             let revealed = revealed.borrow();
             let fail_reasons = fail_reasons.borrow();
             let ctx = timeline::Ctx {
+                rules: rules.as_deref(),
                 store: &rows_store,
                 chat,
                 revealed: &revealed,

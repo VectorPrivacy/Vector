@@ -89,6 +89,30 @@ pub struct Ctx<'a> {
     pub invites: &'a HashMap<String, crate::newchat::Preview>,
     /// The message a jump landed on, and seconds since.
     pub jumped: Option<(&'a str, f32)>,
+    /// The Community's mention rules, for `@everyone` and Role chips.
+    pub rules: Option<&'a crate::mentions::Rules>,
+}
+
+/// The `@everyone` and Role chips `m` may show (`standingRoleMentions`): names and colours.
+fn tag_chips(ctx: &Ctx, m: &Message) -> Vec<(String, Option<u32>)> {
+    let Some(rules) = ctx.rules else { return Vec::new() };
+    let sender = if m.mine { ctx.store.my_npub.as_str() } else { m.npub.as_deref().unwrap_or_default() };
+    let by_anyone = rules.anyone || rules.pingers.iter().any(|p| p == sender);
+    let mut out: Vec<(String, Option<u32>)> = rules
+        .roles
+        .iter()
+        .filter(|r| {
+            !r.name.is_empty()
+                && m.role_mentions.contains(&r.id)
+                && m.content.contains(&format!("@{}", r.name))
+                && (r.mentionable || by_anyone)
+        })
+        .map(|r| (r.name.clone(), Some(r.color.map_or(0x59fcb3, |c| c & 0xff_ffff))))
+        .collect();
+    if by_anyone {
+        out.push(("everyone".into(), None));
+    }
+    out
 }
 
 /// `highlightMessage`: in to 20%, held to 80%, out, over 1.5s eased out.
@@ -374,6 +398,7 @@ fn content(ctx: &Ctx, m: &Message) -> AnyElement {
     }
 
     let custom = custom_emoji(ctx.store, ctx.media, &m.emoji_tags);
+    let chips = tag_chips(ctx, m);
     let mut blocks = markdown::parse(
         text.trim(),
         &markdown::Ctx {
@@ -381,6 +406,7 @@ fn content(ctx: &Ctx, m: &Message) -> AnyElement {
             revealed,
             now: ctx.store.now_ms() as f64 / 1000.,
             mention: Some(&|npub: &str| ctx.store.chat_name(npub, &ctx.chat.id)),
+            tags: &chips,
             custom: custom
                 .as_ref()
                 .map(|f| f as &dyn Fn(&str) -> Option<crate::media::Custom>),

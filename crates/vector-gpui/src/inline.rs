@@ -94,6 +94,8 @@ pub enum Kind {
     },
     /// A profile pill.
     Mention(SharedString),
+    /// `@everyone`, or a Role in its colour: a chip that goes nowhere.
+    Tag(Option<u32>),
     /// `.vt-time`: a time in the reader's zone, never broken across lines; its hover hint.
     Time(SharedString),
 }
@@ -128,14 +130,14 @@ impl Kind {
         match self {
             Kind::Code => 7.,
             Kind::Spoiler { .. } => 4.,
-            Kind::Mention(_) | Kind::Time(_) => 4.,
+            Kind::Mention(_) | Kind::Tag(_) | Kind::Time(_) => 4.,
             _ => 0.,
         }
     }
 
     fn target(&self, text: &str) -> Option<Target> {
         match self {
-            Kind::Plain | Kind::Time(_) => None,
+            Kind::Plain | Kind::Time(_) | Kind::Tag(_) => None,
             Kind::Link(url) => Some(Target::Link(url.clone())),
             Kind::Code => Some(Target::Code(text.to_string().into())),
             Kind::Spoiler {
@@ -942,9 +944,15 @@ impl Element for Inline {
                             );
                             shimmering = true;
                         }
-                        Kind::Mention(_) => {
+                        Kind::Mention(_) | Kind::Tag(None) => {
                             window.paint_quad(
                                 fill(boxed(1.), white_a(0.075)).corner_radii(Corners::all(px(4.))),
+                            );
+                        }
+                        Kind::Tag(Some(color)) => {
+                            let tint: Hsla = gpui::rgb(*color).into();
+                            window.paint_quad(
+                                fill(boxed(1.), tint.opacity(0.16)).corner_radii(Corners::all(px(4.))),
                             );
                         }
                         Kind::Time(_) => {

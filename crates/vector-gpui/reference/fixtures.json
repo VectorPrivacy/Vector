@@ -1665,7 +1665,7 @@
    "messages": [
     {
      "id": "c42822194abfc07af77d310d9fd4d35d0fba4fa68d45d753e5a99181c926caea",
-     "content": "CI is green again.",
+     "content": "CI is green again, @everyone go pull.",
      "replied_to": "",
      "preview_metadata": null,
      "attachments": [],
