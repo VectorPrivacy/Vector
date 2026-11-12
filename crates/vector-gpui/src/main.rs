@@ -15,6 +15,7 @@ mod voice;
 mod miniprofile;
 mod pins;
 mod edithistory;
+mod payaddr;
 mod reactpop;
 mod secretguard;
 mod cmdform;

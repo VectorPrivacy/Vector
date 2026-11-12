@@ -323,6 +323,10 @@ pub fn message_row(ctx: &Ctx, index: usize, first: bool, gap: f32) -> AnyElement
             .when(pending || failed, |d| d.opacity(0.6))
             .child(content(ctx, m))
             .children(crate::attachments::attachments(ctx, m))
+            .children(crate::payaddr::detect(&m.content).map(|coin| {
+                let (act, id) = (ctx.on_act.clone(), m.id.clone());
+                crate::payaddr::card(&m.id, &coin, move |uri, w, cx| act(&id, Act::Text(Target::Link(uri.into())), w, cx))
+            }))
             .children(crate::packs::cards(ctx, m))
             .when_some(m.expiration.filter(|_| !m.attachments.is_empty()), |d, at| {
                 d.child(
