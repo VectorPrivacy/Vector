@@ -5,10 +5,14 @@
 use std::collections::HashMap;
 use std::cell::Cell;
 use std::rc::Rc;
+use std::sync::Arc;
 use std::time::Instant;
 
 use gpui::prelude::*;
-use gpui::{AnyElement, App, BoxShadow, Bounds, Pixels, Point, canvas, SharedString, Window, div, point, px, svg};
+use gpui::{
+    AnyElement, App, Bounds, BoxShadow, ObjectFit, Pixels, Point, RenderImage, SharedString,
+    StyledImage, Window, canvas, div, img, point, px, svg,
+};
 use serde::Deserialize;
 
 use crate::call::{Quality, accent_mix, call_btn, dot, grade, phone, round_btn};
@@ -41,6 +45,11 @@ pub struct Session {
     pub mic: bool,
     pub server_muted: bool,
     pub server_deafened: bool,
+    /// Our screen and camera go to whoever watches; `viewers` are watching the screen.
+    pub sharing: bool,
+    pub viewers: u32,
+    pub camera: bool,
+    pub can_video: bool,
 }
 
 impl Session {
@@ -91,6 +100,19 @@ pub struct Voice {
     /// The stage grid's width, as last laid out: its columns follow it.
     grid_w: Rc<Cell<f32>>,
     pub(crate) drag: Rc<Cell<Option<crate::call::Drag>>>,
+    /// The screen on the stage: None picks the first sharer's, an empty one hides it.
+    pub focus: Option<String>,
+    pub expanded: bool,
+    /// What we asked of each member's pictures, (screen, camera).
+    pub watched: HashMap<String, (bool, bool)>,
+}
+
+/// The pictures the stage shows this frame.
+#[derive(Default)]
+pub struct Seen {
+    /// Members' pictures by their key (hex) and track.
+    pub members: HashMap<(String, usize), Arc<RenderImage>>,
+    pub mine: [Option<Arc<RenderImage>>; 2],
 }
 
 /// Louder than room tone.
@@ -106,6 +128,65 @@ impl Voice {
             _ => {}
         }
         self.session = s;
+    }
+
+    fn in_call(&self, channel: &str) -> Option<&Session> {
+        self.session.as_ref().filter(|s| s.channel_id == channel)
+    }
+
+    fn sharing(&self, p: &Member, me: &str) -> bool {
+        p.screen || (p.npub == me && self.session.as_ref().is_some_and(|s| s.sharing))
+    }
+
+    fn cam(&self, p: &Member, me: &str) -> bool {
+        p.camera || (p.npub == me && self.session.as_ref().is_some_and(|s| s.camera))
+    }
+
+    /// A linked member's key (hex), which their pictures are tagged with.
+    pub fn key_of(&self, npub: &str) -> Option<&str> {
+        self.session
+            .as_ref()?
+            .peers
+            .iter()
+            .find(|p| p.npub == npub && p.connected)
+            .map(|p| p.pubkey.as_str())
+            .filter(|k| !k.is_empty())
+    }
+
+    /// Whose screen the stage shows: the one picked while it lasts, else the first other sharer's.
+    pub fn viewing(&self, channel: &str, me: &str) -> Option<String> {
+        self.in_call(channel)?;
+        let sharers: Vec<&str> = self
+            .present(channel)
+            .iter()
+            .filter(|p| self.sharing(p, me))
+            .map(|p| p.npub.as_str())
+            .collect();
+        match self.focus.as_deref() {
+            Some("") => None,
+            Some(f) if sharers.contains(&f) => Some(f.to_string()),
+            _ => sharers.into_iter().find(|n| *n != me).map(str::to_string),
+        }
+    }
+
+    /// What we want of each member's pictures with `shown` on screen: only what the stage
+    /// shows, as every picture costs its sender an upload.
+    pub fn wants(&self, shown: Option<&str>, me: &str) -> HashMap<String, (bool, bool)> {
+        let Some(ch) = shown.filter(|c| self.in_call(c).is_some()) else {
+            return HashMap::new();
+        };
+        let viewing = self.viewing(ch, me);
+        self.present(ch)
+            .iter()
+            .filter(|p| p.npub != me)
+            .map(|p| {
+                (
+                    p.npub.clone(),
+                    (viewing.as_deref() == Some(p.npub.as_str()), p.camera),
+                )
+            })
+            .filter(|(_, (a, b))| *a || *b)
+            .collect()
     }
 
     pub fn present(&self, channel: &str) -> &[Member] {
@@ -141,6 +222,12 @@ pub enum Act {
     Move(Point<Pixels>),
     Moved,
     MicAccess,
+    Camera(bool),
+    Share(bool),
+    /// A sharer's tile tapped: their screen on the stage, or off it.
+    Pick(String),
+    HideScreen,
+    Expand,
 }
 
 pub type OnAct = Rc<dyn Fn(Act, &mut Window, &mut App)>;
@@ -279,6 +366,140 @@ fn deafen_btn(s: &Session, on: &OnAct) -> impl IntoElement {
         ))
 }
 
+fn video_btn(
+    id: &'static str,
+    path: &'static str,
+    size: f32,
+    state: bool,
+    act: Act,
+    on: &OnAct,
+) -> impl IntoElement {
+    call_btn(id, state)
+        .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .on_click(click(on, act))
+        .child(icon(
+            path,
+            size,
+            if state { c(ACCENT) } else { white_a(0.88) },
+        ))
+}
+
+/// `.voice-screen`: the shared screen on the stage at its own aspect, its bar on hover.
+fn screen(
+    voice: &Voice,
+    store: &Store,
+    seen: &Seen,
+    viewing: &str,
+    channel: &str,
+    me: &str,
+    max_w: f32,
+    win_h: f32,
+    on: &OnAct,
+) -> AnyElement {
+    let image = if viewing == me {
+        seen.mine[1].clone()
+    } else {
+        voice
+            .key_of(viewing)
+            .and_then(|k| seen.members.get(&(k.to_string(), 1)).cloned())
+    };
+    let max_h = win_h * if voice.expanded { 0.74 } else { 0.42 };
+    let (w, h) = match image.as_ref().map(|i| i.size(0)) {
+        Some(sz) if sz.width.0 > 0 && sz.height.0 > 0 => {
+            let aspect = sz.width.0 as f32 / sz.height.0 as f32;
+            let w = max_w.min(max_h * aspect);
+            (w, w / aspect)
+        }
+        // A video element with nothing to show yet is 150 px tall.
+        _ => (max_w, 150f32.min(max_h)),
+    };
+    let label = if viewing == me {
+        "Your screen".to_string()
+    } else {
+        format!("{}'s screen", store.chat_name(viewing, channel))
+    };
+    let btn = |id: &'static str, act: Act, child: AnyElement| {
+        div()
+            .id(id)
+            .size(px(28.))
+            .flex_shrink_0()
+            .rounded(px(8.))
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(white_a(0.12))
+            .hover(|d| d.bg(white_a(0.22)))
+            .cursor_pointer()
+            .on_click(click(on, act))
+            .child(child)
+    };
+    div()
+        .id("voice-screen")
+        .group("voice-screen")
+        .relative()
+        .mt(px(12.))
+        .flex()
+        .justify_center()
+        .rounded(px(10.))
+        .overflow_hidden()
+        .bg(c(0x000000))
+        .child(div().relative().w(px(w)).h(px(h)).children(image.map(|i| {
+            img(i)
+                .absolute()
+                .inset_0()
+                .size_full()
+                .object_fit(ObjectFit::Contain)
+        })))
+        .child(
+            div()
+                .absolute()
+                .left_0()
+                .right_0()
+                .bottom_0()
+                .flex()
+                .items_center()
+                .gap(px(6.))
+                .px(px(10.))
+                .py(px(8.))
+                .bg(gpui::linear_gradient(
+                    180.,
+                    gpui::linear_color_stop(gpui::transparent_black(), 0.),
+                    gpui::linear_color_stop(ca(0, 0, 0, 0.7), 1.),
+                ))
+                .opacity(0.)
+                .group_hover("voice-screen", |d| d.opacity(1.))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_size(px(13.))
+                        .text_color(c(0xffffff))
+                        .child(label),
+                )
+                .child(btn(
+                    "voice-screen-size",
+                    Act::Expand,
+                    icon(
+                        if voice.expanded {
+                            "ui/voice-smaller.svg"
+                        } else {
+                            "ui/voice-bigger.svg"
+                        },
+                        16.,
+                        c(0xffffff),
+                    )
+                    .into_any_element(),
+                ))
+                .child(btn(
+                    "voice-screen-hide",
+                    Act::HideScreen,
+                    icon("icons/x.svg", 12., c(0xffffff)).into_any_element(),
+                )),
+        )
+        .into_any_element()
+}
+
 fn leave_btn(on: &OnAct) -> impl IntoElement {
     round_btn("voice-leave", 34.)
         .bg(c(crate::call::DANGER))
@@ -289,8 +510,20 @@ fn leave_btn(on: &OnAct) -> impl IntoElement {
 }
 
 /// `.voice-stage`: who is in the call, and joining it or the call's own controls once in.
-pub fn stage(voice: &Voice, store: &Store, community: &str, channel: &str, me: &str, on: &OnAct) -> AnyElement {
-    let session = voice.session.as_ref().filter(|s| s.channel_id == channel);
+#[allow(clippy::too_many_arguments)]
+pub fn stage(
+    voice: &Voice,
+    store: &Store,
+    seen: &Seen,
+    win_h: f32,
+    community: &str,
+    channel: &str,
+    me: &str,
+    on: &OnAct,
+) -> AnyElement {
+    let session = voice.in_call(channel);
+    let viewing = voice.viewing(channel, me);
+    let small = viewing.is_some();
     let people = voice.present(channel);
     let joining = voice.joining.as_deref() == Some(channel);
     let connected = |npub: &str| npub == me || session.is_some_and(|s| s.peers.iter().any(|p| p.npub == npub && p.connected));
@@ -306,6 +539,20 @@ pub fn stage(voice: &Voice, store: &Store, community: &str, channel: &str, me: &
             "Nobody is here yet".to_string()
         } else {
             format!("{} in the call", people.len())
+        })
+        .when_some(session.filter(|s| s.sharing), |d, s| {
+            d.child(div().child("·"))
+                .child(
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .text_color(c(ACCENT))
+                        .child(if s.viewers > 0 {
+                            format!("Sharing your screen · {} watching", s.viewers)
+                        } else {
+                            "Sharing your screen".to_string()
+                        }),
+                )
         })
         .when(session.is_some_and(|s| !s.mic), |d| {
             d.child(div().child("·")).child(
@@ -338,6 +585,20 @@ pub fn stage(voice: &Voice, store: &Store, community: &str, channel: &str, me: &
                 .justify_center()
                 .child(icon(path, 12., if server { c(0xffffff) } else { c(crate::call::DANGER) }))
         };
+        let sharing = voice.sharing(p, me);
+        let picture = if voice.cam(p, me) {
+            if p.npub == me {
+                seen.mine[0].clone()
+            } else {
+                voice
+                    .key_of(&p.npub)
+                    .and_then(|k| seen.members.get(&(k.to_string(), 0)).cloned())
+            }
+        } else {
+            None
+        };
+        let has_cam = voice.cam(p, me) && (p.npub == me || voice.key_of(&p.npub).is_some());
+        let is_viewing = viewing.as_deref() == Some(p.npub.as_str());
         let note = if p.elsewhere {
             Some("another app")
         } else if pending {
@@ -345,65 +606,165 @@ pub fn stage(voice: &Voice, store: &Store, community: &str, channel: &str, me: &
         } else {
             None
         };
+        let badges = (p.muted || p.deafened).then(|| {
+            div()
+                .absolute()
+                .right(px(if has_cam { 6. } else { -4. }))
+                .bottom(px(if has_cam { 6. } else { -4. }))
+                .flex()
+                .gap(px(2.))
+                .when(p.muted, |d| {
+                    d.child(badge("icons/mic-off.svg", p.server_muted))
+                })
+                .when(p.deafened, |d| {
+                    d.child(badge("icons/volume-mute.svg", p.server_deafened))
+                })
+        });
+        let name = if p.npub == me {
+            "You".to_string()
+        } else {
+            store.chat_name(&p.npub, channel)
+        };
+        let pick = (session.is_some() && sharing).then(|| on.clone());
+        let npub = p.npub.clone();
         div()
             .id(SharedString::from(format!("voice-tile-{}", p.npub)))
+            .relative()
             .flex_shrink_0()
-            .h(px(150.))
             .rounded(px(12.))
+            .overflow_hidden()
             .bg(white_a(0.04))
             .flex()
             .flex_col()
             .items_center()
             .justify_center()
-            .gap(px(8.))
-            .px(px(8.))
+            .gap(px(if small { 4. } else { 8. }))
+            .when(!has_cam, |d| d.px(px(if small { 6. } else { 8. })))
             .when(pending, |d| d.opacity(0.55))
-            .on_mouse_down(gpui::MouseButton::Right, menu(on, community, channel, &p.npub))
-            .child(
-                div()
-                    .relative()
-                    .rounded_full()
-                    .shadow(vec![
-                        BoxShadow {
-                            color: c(ACCENT).opacity(talk * 0.95),
-                            offset: point(px(0.), px(0.)),
-                            blur_radius: px(0.),
-                            spread_radius: px(2.),
-                            inset: false,
-                        },
-                        BoxShadow {
-                            color: c(ACCENT).opacity(talk * 0.6),
-                            offset: point(px(0.), px(0.)),
-                            blur_radius: px(talk * 14.),
-                            spread_radius: px(0.),
-                            inset: false,
-                        },
-                    ])
-                    .child(crate::ui::avatar(store, &p.npub, 64.))
-                    .when(p.muted || p.deafened, |d| {
-                        d.child(
-                            div()
-                                .absolute()
-                                .right(px(-4.))
-                                .bottom(px(-4.))
-                                .flex()
-                                .gap(px(2.))
-                                .when(p.muted, |d| d.child(badge("icons/mic-off.svg", p.server_muted)))
-                                .when(p.deafened, |d| d.child(badge("icons/volume-mute.svg", p.server_deafened))),
-                        )
-                    }),
+            .when(is_viewing, |d| {
+                d.shadow(vec![BoxShadow {
+                    color: c(ACCENT).opacity(0.45),
+                    offset: point(px(0.), px(0.)),
+                    blur_radius: px(0.),
+                    spread_radius: px(1.),
+                    inset: true,
+                }])
+            })
+            .when_some(pick, |d, o| {
+                d.cursor_pointer()
+                    .on_click(move |_, w, cx| o(Act::Pick(npub.clone()), w, cx))
+            })
+            .on_mouse_down(
+                gpui::MouseButton::Right,
+                menu(on, community, channel, &p.npub),
             )
-            .child(
-                div()
-                    .max_w_full()
-                    .truncate()
-                    .text_size(px(13.))
-                    .line_height(px(24.))
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .text_color(c(TEXT))
-                    .child(if p.npub == me { "You".to_string() } else { store.chat_name(&p.npub, channel) }),
-            )
-            .children(note.map(|n| div().mt(px(-8.)).text_size(px(10.)).text_color(white_a(0.4)).child(n)))
+            .map(|d| {
+                if has_cam {
+                    d.child(
+                        div()
+                            .absolute()
+                            .inset_0()
+                            .rounded(px(12.))
+                            .bg(c(0x000000))
+                            .children(picture.map(|image| {
+                                img(image)
+                                    .absolute()
+                                    .inset_0()
+                                    .size_full()
+                                    .rounded(px(12.))
+                                    .object_fit(ObjectFit::Cover)
+                            }))
+                            .child(div().absolute().inset_0().rounded(px(12.)).shadow(vec![
+                                BoxShadow {
+                                    color: c(ACCENT).opacity(talk * 0.95),
+                                    offset: point(px(0.), px(0.)),
+                                    blur_radius: px(0.),
+                                    spread_radius: px(2.),
+                                    inset: true,
+                                },
+                            ]))
+                            .children(badges),
+                    )
+                    .child(
+                        div()
+                            .absolute()
+                            .left(px(8.))
+                            .bottom(px(8.))
+                            .max_w(px(160.))
+                            .px(px(8.))
+                            .py(px(2.))
+                            .rounded(px(8.))
+                            .bg(ca(0, 0, 0, 0.6))
+                            .truncate()
+                            .text_size(px(13.))
+                            .line_height(px(20.))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(c(TEXT))
+                            .child(name),
+                    )
+                } else {
+                    d.child(
+                        div()
+                            .relative()
+                            .rounded_full()
+                            .shadow(vec![
+                                BoxShadow {
+                                    color: c(ACCENT).opacity(talk * 0.95),
+                                    offset: point(px(0.), px(0.)),
+                                    blur_radius: px(0.),
+                                    spread_radius: px(2.),
+                                    inset: false,
+                                },
+                                BoxShadow {
+                                    color: c(ACCENT).opacity(talk * 0.6),
+                                    offset: point(px(0.), px(0.)),
+                                    blur_radius: px(talk * 14.),
+                                    spread_radius: px(0.),
+                                    inset: false,
+                                },
+                            ])
+                            .child(crate::ui::avatar(
+                                store,
+                                &p.npub,
+                                if small { 40. } else { 64. },
+                            ))
+                            .children(badges),
+                    )
+                    .child(
+                        div()
+                            .max_w_full()
+                            .truncate()
+                            .text_size(px(13.))
+                            .line_height(px(if small { 16. } else { 24. }))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(c(TEXT))
+                            .child(name),
+                    )
+                    .children(note.map(|n| {
+                        div()
+                            .mt(px(if small { -4. } else { -8. }))
+                            .text_size(px(10.))
+                            .text_color(white_a(0.4))
+                            .child(n)
+                    }))
+                }
+            })
+            .when(sharing, |d| {
+                d.child(
+                    div()
+                        .absolute()
+                        .top(px(6.))
+                        .right(px(6.))
+                        .px(px(6.))
+                        .rounded(px(6.))
+                        .bg(c(crate::call::DANGER))
+                        .text_color(c(0xffffff))
+                        .text_size(px(10.))
+                        .line_height(px(16.))
+                        .font_weight(gpui::FontWeight::BOLD)
+                        .child("LIVE"),
+                )
+            })
     });
     let actions = div()
         .mt(px(12.))
@@ -412,7 +773,28 @@ pub fn stage(voice: &Voice, store: &Store, community: &str, channel: &str, me: &
         .justify_center()
         .gap(px(8.));
     let actions = match session {
-        Some(s) => actions.child(mic_btn(s, on)).child(deafen_btn(s, on)).child(leave_btn(on)),
+        Some(s) => actions
+            .when(s.can_video, |d| {
+                d.child(video_btn(
+                    "voice-camera",
+                    "icons/video.svg",
+                    18.7,
+                    s.camera,
+                    Act::Camera(!s.camera),
+                    on,
+                ))
+                .child(video_btn(
+                    "voice-share",
+                    "ui/call-screen.svg",
+                    20.,
+                    s.sharing,
+                    Act::Share(!s.sharing),
+                    on,
+                ))
+            })
+            .child(mic_btn(s, on))
+            .child(deafen_btn(s, on))
+            .child(leave_btn(on)),
         None => actions.child(
             div()
                 .id("voice-join")
@@ -447,14 +829,22 @@ pub fn stage(voice: &Voice, store: &Store, community: &str, channel: &str, me: &
                 .px(px(14.))
                 .pb(px(14.))
                 .child(head)
-                .when(!people.is_empty(), |d| {
-                    // `repeat(auto-fill, minmax(180px, 240px))`, the tracks centred.
+                .when_some(viewing.as_deref(), |d, v| {
                     let w = match voice.grid_w.get() {
                         0. => 558.,
                         w => w,
                     };
-                    let cols = (((w + 10.) / 190.).floor() as usize).max(1);
-                    let col = ((w - 10. * (cols - 1) as f32) / cols as f32).min(240.);
+                    d.child(screen(voice, store, seen, v, channel, me, w, win_h, on))
+                })
+                .when(!people.is_empty(), |d| {
+                    // `repeat(auto-fit, minmax(_, hi))`: as many `hi` tracks as fit, centred.
+                    let w = match voice.grid_w.get() {
+                        0. => 558.,
+                        w => w,
+                    };
+                    let hi: f32 = if small { 150. } else { 240. };
+                    let cols = (((w + 10.) / (hi + 10.)).floor() as usize).max(1);
+                    let col = hi.min(w);
                     let record = voice.grid_w.clone();
                     let mut grid = div().mt(px(10.)).relative().flex().flex_col().items_center().gap(px(10.)).child(
                         gpui::canvas(move |b, _, _| record.set(f32::from(b.size.width)), |_, _, _, _| {})
@@ -463,7 +853,11 @@ pub fn stage(voice: &Voice, store: &Store, community: &str, channel: &str, me: &
                     );
                     let mut tiles = tiles.peekable();
                     while tiles.peek().is_some() {
-                        let row: Vec<_> = tiles.by_ref().take(cols).map(|t| t.w(px(col))).collect();
+                        let row: Vec<_> = tiles
+                            .by_ref()
+                            .take(cols)
+                            .map(|t| t.w(px(col)).h(px((col * 10. / 16.).round())))
+                            .collect();
                         grid = grid.child(
                             div()
                                 .w(px(col * cols as f32 + 10. * (cols - 1) as f32))

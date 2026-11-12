@@ -49,3 +49,15 @@ pub async fn moderate(community_id: String, channel_id: String, npub: String, ac
     let pk = PublicKey::from_bech32(&npub).map_err(|e| e.to_string())?;
     db::scoped(async move { voice::moderate(&community_id, &channel_id, &pk, action, to.as_deref()).await }).await
 }
+
+/// Our camera or screen to the voice call, or stopped.
+pub async fn set_video(kind: vector_core::calls::wire::VideoKind, on: bool) -> Result<(), String> {
+    vector_core::db::scoped(async move { vector_core::calls::voice::set_video(kind, on) }).await
+}
+
+/// Which of a member's pictures this device shows.
+pub async fn watch(npub: String, screen: bool, camera: bool) -> Result<(), String> {
+    let member = nostr_sdk::prelude::PublicKey::parse(&npub).map_err(|e| e.to_string())?;
+    let want = vector_core::calls::wire::Tracks { camera, screen };
+    vector_core::db::scoped(async move { vector_core::calls::voice::watch(&member, want) }).await
+}

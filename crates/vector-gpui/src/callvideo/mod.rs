@@ -244,7 +244,12 @@ impl Video {
 
 impl Video {
     /// Pictures from files, for the parity renders: their camera and screen, then ours.
-    pub fn show_fixture(&self, peer: [Option<image::RgbaImage>; 2], mine: [Option<image::RgbaImage>; 2]) {
+    pub fn show_fixture(
+        &self,
+        peer: [Option<image::RgbaImage>; 2],
+        mine: [Option<image::RgbaImage>; 2],
+        members: Vec<((String, usize), image::RgbaImage)>,
+    ) {
         let pic = |img: image::RgbaImage| {
             let (w, h) = img.dimensions();
             let mut raw = img.into_raw();
@@ -255,5 +260,9 @@ impl Video {
         p.peer = peer.map(|i| i.and_then(pic));
         p.mine = mine.map(|i| i.and_then(pic));
         p.dec_fps = [30, 15];
+        p.members = members
+            .into_iter()
+            .filter_map(|(k, i)| Some((k, pic(i)?)))
+            .collect();
     }
 }

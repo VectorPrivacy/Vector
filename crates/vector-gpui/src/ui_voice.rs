@@ -133,6 +133,25 @@ impl VectorApp {
                     );
                 }
             }
+            Act::Camera(on) => self.set_video(0, on, cx),
+            Act::Share(on) => self.set_video(1, on, cx),
+            Act::Pick(npub) => {
+                let me = self.store.borrow().my_npub.clone();
+                let ch = self
+                    .voice
+                    .session
+                    .as_ref()
+                    .map(|s| s.channel_id.clone())
+                    .unwrap_or_default();
+                let viewing = self.voice.viewing(&ch, &me);
+                self.voice.focus = Some(if viewing.as_deref() == Some(npub.as_str()) {
+                    String::new()
+                } else {
+                    npub
+                });
+            }
+            Act::HideScreen => self.voice.focus = Some(String::new()),
+            Act::Expand => self.voice.expanded = !self.voice.expanded,
             Act::MicAccess => {
                 let where_ = if cfg!(target_os = "macos") {
                     "System Settings → Privacy & Security → Microphone"

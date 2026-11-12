@@ -233,6 +233,10 @@ pub struct VectorApp {
     call: crate::call::Call,
     video: crate::callvideo::Video,
     screen_pick: Option<crate::screenpick::Picker>,
+    call_seen: crate::call::Seen,
+    voice_seen: crate::voice::Seen,
+    /// Members' pictures the worker decodes, by key (hex) and track.
+    voice_wanted: std::collections::HashSet<(String, usize)>,
     /// The processing switches the call panel shows, read when a call first appears.
     call_audio: Option<vector_core::calls::settings::AudioSettings>,
     call_ticking: bool,
@@ -885,6 +889,9 @@ impl VectorApp {
             call: crate::call::Call::at(Self::saved_pill_pos()),
             video: Default::default(),
             screen_pick: None,
+            call_seen: Default::default(),
+            voice_seen: Default::default(),
+            voice_wanted: Default::default(),
             call_audio: None,
             call_ticking: false,
             community: None,
@@ -931,35 +938,121 @@ impl VectorApp {
         .detach();
     }
 
-    /// The call's video, each frame: the link follows the call, stopped captures are told,
-    /// and the newest pictures are handed to the overlay.
-    fn call_video(&mut self, window: &mut Window, cx: &mut Context<Self>) -> crate::call::Seen {
-        let key = (self.call.live() && self.call.peer_decodes).then(|| self.call.id.clone()).flatten();
-        self.video.follow(key.as_deref());
+    /// Video, each frame: the link follows the call (or the voice Channel's), the stage's
+    /// wants are told, stopped captures are told, and the newest pictures are taken.
+    fn video_tick(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         use crate::callvideo::VideoKind;
+        let key = if self.call.live() {
+            self.call
+                .peer_decodes
+                .then(|| self.call.id.clone())
+                .flatten()
+        } else {
+            self.voice
+                .session
+                .as_ref()
+                .map(|s| format!("voice:{}", s.channel_id))
+        };
+        self.video.follow(key.as_deref());
         let kinds = [VideoKind::Camera, VideoKind::Screen];
+        let voice = self.voice.session.as_ref().filter(|_| !self.call.live());
+        let mine = match voice {
+            Some(v) => [v.camera, v.sharing],
+            None => self.call.video_mine,
+        };
         for (k, kind) in kinds.into_iter().enumerate() {
             // The call stopped a picture of ours: the capture stops with it.
-            if self.video.capturing(kind) && !self.call.video_mine[k] && !self.video.starting[k] {
+            if self.video.capturing(kind) && !mine[k] && !self.video.starting[k] {
                 self.video.stop(kind);
             }
         }
         let lost: Vec<_> = std::mem::take(&mut self.video.pics().lost);
         for kind in lost {
-            self.on_call(crate::call::Act::Video(kind.index(), false), window, cx);
+            self.set_video(kind.index(), false, cx);
         }
+        self.voice_watch();
         let mut p = self.video.pics();
         for old in p.retired.drain(..) {
             let _ = window.drop_image(old);
         }
-        let seen = crate::call::Seen {
+        self.call_seen = crate::call::Seen {
             peer: std::array::from_fn(|k| p.peer[k].as_ref().map(|x| (x.image.clone(), x.w, x.h))),
             mine: std::array::from_fn(|k| p.mine[k].as_ref().map(|x| x.image.clone())),
             dec_fps: p.dec_fps,
             can_send: self.call.peer_decodes,
         };
-        drop(p);
-        seen
+        self.voice_seen = crate::voice::Seen {
+            members: p
+                .members
+                .iter()
+                .map(|(k, v)| (k.clone(), v.image.clone()))
+                .collect(),
+            mine: std::array::from_fn(|k| p.mine[k].as_ref().map(|x| x.image.clone())),
+        };
+    }
+
+    /// The stage asks for what it shows of each member, and the worker decodes just that.
+    fn voice_watch(&mut self) {
+        let me = self.store.borrow().my_npub.clone();
+        let shown = self.open.as_deref().map(str::to_string);
+        let wants = self.voice.wants(shown.as_deref(), &me);
+        let mut decode = std::collections::HashSet::new();
+        for (npub, (screen, camera)) in &wants {
+            if let Some(key) = self.voice.key_of(npub) {
+                if *screen {
+                    decode.insert((key.to_string(), 1));
+                }
+                if *camera {
+                    decode.insert((key.to_string(), 0));
+                }
+            }
+        }
+        let kinds = [
+            crate::callvideo::VideoKind::Camera,
+            crate::callvideo::VideoKind::Screen,
+        ];
+        for (key, k) in decode.difference(&self.voice_wanted) {
+            self.video.want(key.clone(), kinds[*k], true);
+        }
+        for (key, k) in self.voice_wanted.difference(&decode) {
+            self.video.want(key.clone(), kinds[*k], false);
+        }
+        self.voice_wanted = decode;
+        if !self.live {
+            self.voice.watched = wants;
+            return;
+        }
+        let before = std::mem::take(&mut self.voice.watched);
+        for npub in before
+            .keys()
+            .chain(wants.keys())
+            .collect::<std::collections::HashSet<_>>()
+        {
+            let (a, b) = (before.get(npub), wants.get(npub));
+            if a == b {
+                continue;
+            }
+            let (screen, camera) = b.copied().unwrap_or((false, false));
+            let _ = backend::run(backend::voice::watch(npub.clone(), screen, camera));
+        }
+        self.voice.watched = wants;
+    }
+
+    /// Tell whichever call we're in that a picture of ours started or stopped.
+    fn video_backend(
+        &self,
+        k: usize,
+        on: bool,
+    ) -> futures::channel::oneshot::Receiver<Result<(), String>> {
+        let kind = [
+            crate::callvideo::VideoKind::Camera,
+            crate::callvideo::VideoKind::Screen,
+        ][k];
+        if self.call.live() || self.voice.session.is_none() {
+            backend::run(backend::calls::set_video(kind, on))
+        } else {
+            backend::run(backend::voice::set_video(kind, on))
+        }
     }
 
     fn listen_models(&mut self, cx: &mut Context<Self>) {
@@ -1068,6 +1161,29 @@ impl VectorApp {
         // (VECTOR_CALL_PICS=1 fills the pictures from reference/media).
         if let Ok(state) = std::env::var("VECTOR_CALL") {
             app.fixture_call(&state, cx);
+        }
+        // VECTOR_VOICE=video with VECTOR_CALL_PICS=1: alice's camera and screen, and our camera.
+        if std::env::var("VECTOR_VOICE").as_deref() == Ok("video")
+            && std::env::var("VECTOR_CALL_PICS").is_ok()
+        {
+            let load = |f: &str| {
+                image::open(format!("reference/media/{f}"))
+                    .ok()
+                    .map(|i| i.to_rgba8())
+            };
+            let alice = "1".repeat(64);
+            let members = [
+                ((alice.clone(), 0), load("portrait.png")),
+                ((alice, 1), load("cover.png")),
+            ];
+            app.video.show_fixture(
+                [None, None],
+                [load("photo.png"), None],
+                members
+                    .into_iter()
+                    .filter_map(|(k, i)| Some((k, i?)))
+                    .collect(),
+            );
         }
         // Fixtures: VECTOR_COMMUNITY=<name> opens that Community; VECTOR_CHANNEL=<name> a channel in it.
         if let Ok(name) = std::env::var("VECTOR_COMMUNITY") {
@@ -4345,6 +4461,7 @@ impl Render for VectorApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let rail_mode = self.rail_mode(window);
         self.bar_update(window, cx);
+        self.video_tick(window, cx);
         if self.media.borrow_mut().audio.tick() || self.rec.animating() {
             window.request_animation_frame();
         }
@@ -4785,8 +4902,15 @@ impl Render for VectorApp {
                     echo_cancel: a.echo_cancel,
                     noise_suppress: a.noise_suppress,
                 };
-                let seen = self.call_video(window, cx);
-                crate::call::render(&self.call, &self.store.borrow(), &proc_, &seen, window.viewport_size(), CHROME_H, &on)
+                crate::call::render(
+                    &self.call,
+                    &self.store.borrow(),
+                    &proc_,
+                    &self.call_seen,
+                    window.viewport_size(),
+                    CHROME_H,
+                    &on,
+                )
             })
             .children(self.screen_pick.as_ref().map(|p| {
                 let app = cx.entity().downgrade();
@@ -6492,7 +6616,16 @@ impl VectorApp {
         let channel = store.community_of(&id).and_then(|com| com.channel(&id));
         let stage = channel.filter(|ch| ch.is_voice()).and_then(|ch| {
             let com = store.community_of(&id)?;
-            Some(crate::voice::stage(&self.voice, store, &com.community_id, &ch.channel_id, &store.my_npub, &self.on_voice_handler(cx)))
+            Some(crate::voice::stage(
+                &self.voice,
+                store,
+                &self.voice_seen,
+                f32::from(window.viewport_size().height),
+                &com.community_id,
+                &ch.channel_id,
+                &store.my_npub,
+                &self.on_voice_handler(cx),
+            ))
         });
         let panel = self.community.as_ref().is_some_and(|v| v.panel);
         let paper = self.wallpaper.image(self.wallpaper_key().as_ref());
@@ -6718,7 +6851,8 @@ impl VectorApp {
                     .children(bar)
                     .children(back)
                     .map(|d| match alone {
-                        Some(edge) => d.child(div().size_full().flex().flex_col().justify_center().child(edge)),
+                        // Auto margins centre it until it no longer fits, then it scrolls from its top.
+                        Some(edge) => d.child(div().id("chat-start").size_full().flex().flex_col().overflow_y_scroll().child(div().my_auto().child(edge))),
                         None => d.child(messages),
                     })
                     .children(request)
@@ -12704,8 +12838,16 @@ impl VectorApp {
         self.call.apply_state(&serde_json::json!({ "id": "fixture", "peer": alice, "outgoing": outgoing, "phase": phase, "active_ms": 83_000, "volume": 1.0,
             "video_mine": { "camera": video, "screen": false }, "video_peer": { "camera": video, "screen": video }, "peer_decodes": if video { vec!["h264"] } else { vec![] } }));
         if video && std::env::var("VECTOR_CALL_PICS").is_ok() {
-            let load = |f: &str| image::open(format!("reference/media/{f}")).ok().map(|i| i.to_rgba8());
-            self.video.show_fixture([load("portrait.png"), load("cover.png")], [load("photo.png"), None]);
+            let load = |f: &str| {
+                image::open(format!("reference/media/{f}"))
+                    .ok()
+                    .map(|i| i.to_rgba8())
+            };
+            self.video.show_fixture(
+                [load("portrait.png"), load("cover.png")],
+                [load("photo.png"), None],
+                Vec::new(),
+            );
         }
         if phase == "active" {
             for (i, rtt) in [
@@ -12883,7 +13025,7 @@ impl VectorApp {
                 }
                 self.call.hover = i;
             }
-            Act::Video(k, on) => self.call_set_video(k, on, cx),
+            Act::Video(k, on) => self.set_video(k, on, cx),
             Act::Maximize(m) => {
                 self.call.maximized = m;
                 self.call.max_controls = m.map(|_| std::time::Instant::now() + std::time::Duration::from_millis(2500));
@@ -12923,15 +13065,22 @@ impl VectorApp {
 
     /// One of our pictures on or off. Opening a camera can wait on a system prompt, so it
     /// runs off the UI thread; the call hears of it only once the camera is open.
-    fn call_set_video(&mut self, k: usize, on: bool, cx: &mut Context<Self>) {
+    fn set_video(&mut self, k: usize, on: bool, cx: &mut Context<Self>) {
         use crate::callvideo::VideoKind;
         let kind = [VideoKind::Camera, VideoKind::Screen][k];
         if !on {
-            let had = self.video.capturing(kind) || self.call.video_mine[k];
+            let had = self.video.capturing(kind)
+                || self.call.video_mine[k]
+                || self
+                    .voice
+                    .session
+                    .as_ref()
+                    .is_some_and(|s| [s.camera, s.sharing][k]);
             self.video.stop(kind);
             self.call.video_mine[k] = false;
-            if had {
-                self.call_cmd(backend::calls::set_video(kind, false), cx);
+            if had && self.live {
+                let rx = self.video_backend(k, false);
+                self.toast_err(rx, cx);
             }
             return;
         }
@@ -12948,12 +13097,18 @@ impl VectorApp {
         };
         self.video.starting[k] = true;
         let live = self.live;
+        let voice = !self.call.live() && self.voice.session.is_some();
         cx.spawn(async move |this, cx| {
             let cap = cx.background_executor().spawn(async move { open() }).await;
             let told = match &cap {
-                Ok(_) if live => backend::run(backend::calls::set_video(kind, true))
-                    .await
-                    .unwrap_or_else(|_| Err("Not in a call".into())),
+                Ok(_) if live => {
+                    let rx = if voice {
+                        backend::run(backend::voice::set_video(kind, true))
+                    } else {
+                        backend::run(backend::calls::set_video(kind, true))
+                    };
+                    rx.await.unwrap_or_else(|_| Err("Not in a call".into()))
+                }
                 _ => Ok(()),
             };
             this.update(cx, |this, cx| {
@@ -13016,13 +13171,13 @@ impl VectorApp {
                 if !change {
                     self.video.starting[1] = true;
                 }
-                let live = self.live;
+                let told = (self.live && !change).then(|| self.video_backend(1, true));
                 cx.spawn(async move |this, cx| {
                     let cap = cx.background_executor().spawn(async move { open() }).await;
-                    let told = match &cap {
-                        Ok(_) if live && !change => backend::run(backend::calls::set_video(VideoKind::Screen, true))
-                            .await
-                            .unwrap_or_else(|_| Err("Not in a call".into())),
+                    let told = match (&cap, told) {
+                        (Ok(_), Some(rx)) => {
+                            rx.await.unwrap_or_else(|_| Err("Not in a call".into()))
+                        }
                         _ => Ok(()),
                     };
                     this.update(cx, |this, cx| {

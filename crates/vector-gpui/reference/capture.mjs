@@ -25,10 +25,10 @@ const fixtures = JSON.parse(readFileSync(process.env.FIXTURES || join(HERE, 'fix
 const requests = +process.env.REQUESTS || 0;
 // CHATLIST_DEMO=1: pins and archived chats from the fixtures' demo block.
 if (process.env.CHATLIST_DEMO) Object.assign(fixtures, fixtures.chatlist_demo);
-// VOICE_DEMO=present|joined: who is in the Lounge's call, and (joined) our own session in it.
+// VOICE_DEMO=present|joined|video: who is in the Lounge's call, and (joined, video) our own session in it.
 if (process.env.VOICE_DEMO) fixtures.voice = {
-    present: fixtures.voice_demo[process.env.VOICE_DEMO === 'joined' ? 'joined' : 'present'],
-    session: process.env.VOICE_DEMO === 'joined' ? fixtures.voice_demo.session : null,
+    present: fixtures.voice_demo[process.env.VOICE_DEMO] || fixtures.voice_demo.present,
+    session: { joined: fixtures.voice_demo.session, video: fixtures.voice_demo.session_video }[process.env.VOICE_DEMO] || null,
 };
 // PINS_DEMO=1: the general channel's pins.
 if (process.env.PINS_DEMO) fixtures.pins = fixtures.pins_demo;

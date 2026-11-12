@@ -54,7 +54,7 @@ struct Fixtures {
     /// More communities for the rail, which VECTOR_RAIL_DEMO=1 adds.
     #[serde(default)]
     rail_demo: Vec<Community>,
-    /// Who is in each voice call, and ours: VECTOR_VOICE=present|joined picks one.
+    /// Who is in each voice call, and ours: VECTOR_VOICE=present|joined|video picks one.
     #[serde(default)]
     voice_demo: Option<serde_json::Value>,
     /// Each channel's pins, which VECTOR_PINS=1 applies.
@@ -364,7 +364,11 @@ impl Store {
             fixture_moderation: f.moderation,
             fixture_voice: std::env::var("VECTOR_VOICE").ok().and_then(|k| {
                 let demo = f.voice_demo.as_ref()?;
-                let session = (k == "joined").then(|| demo.get("session").cloned()).flatten();
+                let session = match k.as_str() {
+                    "joined" => demo.get("session").cloned(),
+                    "video" => demo.get("session_video").cloned(),
+                    _ => None,
+                };
                 Some(serde_json::json!({ "present": demo.get(&k)?, "session": session }))
             }),
             fixture_pins: if std::env::var_os("VECTOR_PINS").is_some() { f.pins_demo } else { HashMap::new() },
