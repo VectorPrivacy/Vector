@@ -271,7 +271,7 @@ pub fn atoms(content: &str, max: usize, look: &Look) -> Vec<Atom> {
                 out.push(Atom::Image {
                     src: src.into(),
                     size: l.size * 1.15,
-                    drop: l.size * 0.2,
+                    drop: l.size * 0.2, tip: None,
                 });
                 start = i + g.len();
             }

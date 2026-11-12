@@ -848,7 +848,12 @@ fn trailing_atoms(m: &Message) -> Vec<Atom> {
             out.push(Atom::Text { text: " ".into(), look: base_look(), kind: Kind::Plain });
         }
         out.push(Atom::Gap(6.));
-        out.push(Atom::Image { src: SharedString::from("ui/self-destruct-chip.svg").into(), size: 12., drop: -2. });
+        out.push(Atom::Image {
+            src: SharedString::from("ui/self-destruct-chip.svg").into(),
+            size: 12.,
+            drop: -2.,
+            tip: m.expiration.map(|at| crate::inline::Tip::Dissolve(at as i64)),
+        });
     }
     out
 }

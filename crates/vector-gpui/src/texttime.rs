@@ -88,6 +88,19 @@ pub fn full(unix: i64, date_only: bool) -> String {
     format!("{} at {} {}", t.format("%A, %B %-d, %Y"), clock(&t, true), zone(&t))
 }
 
+/// A chip's hover (`ttHint`): how far off a written time is, or a countdown's moment.
+pub fn hint(unix: i64, style: char, now: f64) -> String {
+    if style != 'R' {
+        return relative(unix, now);
+    }
+    if (unix as f64 - now).abs() < 86_400. {
+        return format(unix, 't', now);
+    }
+    let Some(t) = at(unix) else { return String::new() };
+    let this_year = at(now as i64).is_some_and(|n| n.year() == t.year());
+    if this_year { t.format("%a, %b %-d").to_string() } else { t.format("%a, %b %-d, %Y").to_string() }
+}
+
 /// A countdown's moment, briefly: the time today, else a short day and date too.
 pub fn when_at(unix: i64, now: f64) -> String {
     let Some(t) = at(unix) else { return String::new() };

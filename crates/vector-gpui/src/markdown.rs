@@ -395,7 +395,8 @@ impl Builder<'_> {
                 Swap::Shrug => self.styled("¯\\_(ツ)_/¯", Kind::Plain),
                 &Swap::Time(unix, style) => {
                     let text = crate::texttime::format(unix, style, self.ctx.now);
-                    self.styled(&text, Kind::Time);
+                    let hint = crate::texttime::hint(unix, style, self.ctx.now);
+                    self.styled(&text, Kind::Time(hint.into()));
                 }
                 Swap::Spoiler(s) => {
                     let id = self.spoilers;
@@ -473,7 +474,7 @@ impl Builder<'_> {
                     self.atoms.push(Atom::Image {
                         src: image.into(),
                         size: size * 1.15,
-                        drop: size * 0.2,
+                        drop: size * 0.2, tip: None,
                     });
                 }
                 crate::media::Custom::Pending => {
@@ -496,7 +497,7 @@ impl Builder<'_> {
                 self.atoms.push(Atom::Image {
                     src: src.into(),
                     size: size * 1.15,
-                    drop: size * 0.2,
+                    drop: size * 0.2, tip: None,
                 });
                 run_start = i + g.len();
             }

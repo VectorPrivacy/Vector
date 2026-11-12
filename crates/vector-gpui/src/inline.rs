@@ -15,7 +15,7 @@ use gpui::{
     FontWeight, GlobalElementId, Hitbox, HitboxBehavior, Hsla, InspectorElementId, IntoElement,
     LayoutId, MouseButton, MouseDownEvent, MouseUpEvent, Pixels, ShapedLine, SharedString, Size,
     StrikethroughStyle, Style, Styled, TextAlign, TextRun, Window, fill, img, outline, point, px,
-    size,
+    size, div, InteractiveElement, StatefulInteractiveElement, ParentElement, prelude::FluentBuilder,
 };
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -94,8 +94,32 @@ pub enum Kind {
     },
     /// A profile pill.
     Mention(SharedString),
-    /// `.vt-time`: a time in the reader's zone, never broken across lines.
-    Time,
+    /// `.vt-time`: a time in the reader's zone, never broken across lines; its hover hint.
+    Time(SharedString),
+}
+
+/// What hovering an atom says.
+#[derive(Clone, PartialEq, Debug)]
+pub enum Tip {
+    Text(SharedString),
+    /// `.dmsg-selfdestruct`: the countdown to a NIP-40 expiry, read when shown.
+    Dissolve(i64),
+}
+
+impl Tip {
+    fn text(&self) -> String {
+        match self {
+            Tip::Text(t) => t.to_string(),
+            Tip::Dissolve(at) => {
+                let left = at - chrono::Utc::now().timestamp();
+                if left > 0 {
+                    format!("Message dissolves in {}", crate::timeline::countdown(left as u64))
+                } else {
+                    "Dissolving...".into()
+                }
+            }
+        }
+    }
 }
 
 impl Kind {
@@ -104,14 +128,14 @@ impl Kind {
         match self {
             Kind::Code => 7.,
             Kind::Spoiler { .. } => 4.,
-            Kind::Mention(_) | Kind::Time => 4.,
+            Kind::Mention(_) | Kind::Time(_) => 4.,
             _ => 0.,
         }
     }
 
     fn target(&self, text: &str) -> Option<Target> {
         match self {
-            Kind::Plain | Kind::Time => None,
+            Kind::Plain | Kind::Time(_) => None,
             Kind::Link(url) => Some(Target::Link(url.clone())),
             Kind::Code => Some(Target::Code(text.to_string().into())),
             Kind::Spoiler {
@@ -136,6 +160,8 @@ pub enum Atom {
         src: gpui::ImageSource,
         size: f32,
         drop: f32,
+        /// Shown at 40%, whole on hover, with this hint.
+        tip: Option<Tip>,
     },
     /// Fixed space that never breaks from what follows (an inline box's margin).
     Gap(f32),
@@ -342,7 +368,7 @@ fn segments(atoms: &[Atom], window: &Window) -> Vec<Seg> {
                 let pad = kind.pad();
                 let mut start = 0;
                 let first = segs.len();
-                let ends: Vec<usize> = if matches!(kind, Kind::Time) {
+                let ends: Vec<usize> = if matches!(kind, Kind::Time(_)) {
                     vec![text.len()]
                 } else {
                     unicode_linebreak::linebreaks(text).map(|(e, _)| e).collect()
@@ -661,6 +687,8 @@ fn place(lines: &mut [Vec<Placed>], x: &mut f32, s: &Seg, atoms: &[Atom]) {
 pub struct Prepainted {
     hits: Vec<(Hitbox, Target)>,
     images: Vec<AnyElement>,
+    /// Hover layers under the text: a tag's lift, a time's hint.
+    under: Vec<AnyElement>,
 }
 
 impl Element for Inline {
@@ -734,6 +762,19 @@ impl Element for Inline {
         let s = laid.borrow();
         let mut hits = Vec::new();
         let mut images = Vec::new();
+        let mut under = Vec::new();
+        // Hover and tooltip state outlive a frame, so their ids must too.
+        let salt = {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            format!("{:?}", self.id).hash(&mut h);
+            for a in self.atoms.iter() {
+                if let Atom::Text { text, .. } = a {
+                    text.hash(&mut h);
+                }
+            }
+            h.finish()
+        };
         for line in &s.lines {
             // A box run (a chip) is one hit area per line.
             let mut k = 0;
@@ -748,15 +789,40 @@ impl Element for Inline {
                             range.end = line.items[end].range.end;
                         }
                         let last = &line.items[end];
+                        let m = metrics(look, window);
+                        let x0 = p.x;
+                        let x1 = last.x + last.lead + last.width + last.tail;
+                        let rect = Bounds::new(
+                            bounds.origin + point(px(x0), px(line.baseline - m.ascent - 2.)),
+                            size(px(x1 - x0), px(m.ascent + m.descent + 4.)),
+                        );
                         if let Some(target) = kind.target(&text[..]) {
-                            let m = metrics(look, window);
-                            let x0 = p.x;
-                            let x1 = last.x + last.lead + last.width + last.tail;
-                            let rect = Bounds::new(
-                                bounds.origin + point(px(x0), px(line.baseline - m.ascent - 2.)),
-                                size(px(x1 - x0), px(m.ascent + m.descent + 4.)),
-                            );
                             hits.push((window.insert_hitbox(rect, HitboxBehavior::Normal), target));
+                        }
+                        let (lift, hint) = match kind {
+                            Kind::Mention(_) => (true, None),
+                            Kind::Time(hint) if !hint.is_empty() => (false, Some(hint.clone())),
+                            _ => (false, None),
+                        };
+                        if lift || hint.is_some() {
+                            let sz = size(rect.size.width, rect.size.height - px(2.));
+                            let mut el = div()
+                                .id(ElementId::Name(format!("inline-{salt}-{}", under.len()).into()))
+                                .w(sz.width)
+                                .h(sz.height)
+                                .rounded(px(4.))
+                                .when(lift, |d| d.hover(|s| s.bg(white_a(0.05))))
+                                .when_some(hint, |d, hint| {
+                                    d.tooltip(move |w, cx| crate::kit::tooltip(hint.clone())(w, cx))
+                                })
+                                .into_any_element();
+                            el.prepaint_as_root(
+                                rect.origin + point(px(0.), px(1.)),
+                                sz.map(Into::into),
+                                window,
+                                cx,
+                            );
+                            under.push(el);
                         }
                         let _ = range;
                         k = end + 1;
@@ -766,12 +832,23 @@ impl Element for Inline {
                         src,
                         size: sz,
                         drop,
+                        tip,
                     } => {
-                        let mut el = gpui::StyledImage::object_fit(
+                        let pic = gpui::StyledImage::object_fit(
                             img(src.clone()).size(px(*sz)).aspect_ratio(1.),
                             gpui::ObjectFit::Contain,
-                        )
-                        .into_any_element();
+                        );
+                        let mut el = match tip.clone() {
+                            Some(tip) => div()
+                                .id(ElementId::Name(format!("inline-{salt}-tip-{}", images.len()).into()))
+                                .size(px(*sz))
+                                .opacity(0.4)
+                                .hover(|s| s.opacity(1.))
+                                .tooltip(move |w, cx| crate::kit::tooltip(tip.text())(w, cx))
+                                .child(pic)
+                                .into_any_element(),
+                            None => pic.into_any_element(),
+                        };
                         let origin = bounds.origin + point(px(p.x), px(line.baseline + drop - sz));
                         el.prepaint_as_root(
                             origin,
@@ -806,7 +883,7 @@ impl Element for Inline {
                 k += 1;
             }
         }
-        Prepainted { hits, images }
+        Prepainted { hits, images, under }
     }
 
     fn paint(
@@ -821,6 +898,9 @@ impl Element for Inline {
     ) {
         let s = laid.borrow();
         let mut shimmering = false;
+        for el in &mut pre.under {
+            el.paint(window, cx);
+        }
         for line in &s.lines {
             // Boxes first, so text paints over them.
             let mut k = 0;
@@ -867,7 +947,7 @@ impl Element for Inline {
                                 fill(boxed(1.), white_a(0.075)).corner_radii(Corners::all(px(4.))),
                             );
                         }
-                        Kind::Time => {
+                        Kind::Time(_) => {
                             window.paint_quad(
                                 fill(boxed(0.), white_a(0.09)).corner_radii(Corners::all(px(4.))),
                             );
@@ -1018,6 +1098,7 @@ pub fn emoji_line(text: &str, look: Look, emoji: f32, drop: f32) -> Inline {
                     src: src.into(),
                     size: emoji,
                     drop,
+                    tip: None,
                 });
             }
             None => run.push_str(g),
