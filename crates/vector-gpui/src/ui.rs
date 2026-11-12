@@ -8400,6 +8400,7 @@ impl VectorApp {
             .detach();
             self.community = Some(crate::community::View {
                 id: id.clone(),
+                loading: self.live && members.is_empty(),
                 members,
                 admins: Vec::new(),
                 panel: true,
@@ -8412,13 +8413,14 @@ impl VectorApp {
                 self.store.borrow_mut().nicknames.insert(id.clone(), named);
                 let rx = backend::run(backend::community::members(id.clone()));
                 cx.spawn(async move |this, cx| {
-                    let Ok((members, admins)) = rx.await else {
-                        return;
-                    };
+                    let read = rx.await;
                     this.update(cx, |this, cx| {
                         if let Some(v) = this.community.as_mut().filter(|v| v.id == id) {
-                            v.members = members;
-                            v.admins = admins;
+                            if let Ok((members, admins)) = read {
+                                v.members = members;
+                                v.admins = admins;
+                            }
+                            v.loading = false;
                         }
                         cx.notify();
                     })

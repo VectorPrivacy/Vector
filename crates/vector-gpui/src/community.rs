@@ -58,6 +58,8 @@ pub struct View {
     pub id: String,
     pub members: Vec<String>,
     pub admins: Vec<String>,
+    /// No roster yet, cached or read.
+    pub loading: bool,
     pub panel: bool,
     pub search: Entity<TextInput>,
     pub folded: HashSet<String>,
@@ -768,10 +770,29 @@ pub fn members_panel(
                 .min_h_0()
                 .overflow_y_scroll()
                 .px(px(8.))
-                .children(admin_section)
-                .children(
-                    section("sec-members", "MEMBERS", rest).map(|s| s.when(gap, |d| d.mt(px(12.)))),
-                ),
+                .map(|d| {
+                    let members = section("sec-members", "MEMBERS", rest).map(|s| s.when(gap, |d| d.mt(px(12.))));
+                    if admin_section.is_some() || members.is_some() {
+                        return d.children(admin_section).children(members);
+                    }
+                    let (text, italic) = match (view.loading, query.is_empty()) {
+                        (true, true) => ("Loading members…", false),
+                        (_, true) => ("No one has spoken yet. Members appear here once they post.", true),
+                        _ => ("No matches.", true),
+                    };
+                    d.child(
+                        div()
+                            .mt(px(16.))
+                            .p(px(14.))
+                            .text_center()
+                            .text_size(if italic { px(16.) } else { px(12.5) })
+                            .line_height(px(if italic { 24. } else { 18. }))
+                            .text_color(c(TEXT))
+                            .opacity(if italic { 0.5 } else { 0.4 })
+                            .when(italic, |d| d.italic())
+                            .child(text),
+                    )
+                }),
         )
 }
 
