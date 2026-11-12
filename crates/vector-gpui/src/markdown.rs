@@ -547,7 +547,7 @@ impl Builder<'_> {
         match kind {
             Kind::Link(_) => look.color = gpui::rgb(0x59fcb3).into(),
             Kind::Mention(_) | Kind::Tag(None) => {
-                look.color = gpui::rgb(0x59fcb3).into();
+                look.color = gpui::rgb(crate::theme::PRIMARY).into();
                 look.weight = gpui::FontWeight::MEDIUM;
             }
             Kind::Tag(Some(color)) => {

@@ -93,6 +93,41 @@ pub struct Ctx<'a> {
     pub rules: Option<&'a crate::mentions::Rules>,
 }
 
+/// `_dmsgIsPinged`: a tag of me, an authorised `@everyone`, a Role I hold, or a reply to me.
+fn pings_me(ctx: &Ctx, m: &Message) -> bool {
+    if m.mine || m.npub.as_deref().is_some_and(|n| ctx.store.profiles.get(n).is_some_and(|p| p.is_blocked)) {
+        return false;
+    }
+    let me = ctx.store.my_npub.as_str();
+    if !me.is_empty() && m.content.contains(&format!("@{me}")) {
+        return true;
+    }
+    if !m.replied_to.is_empty() {
+        let to_me = match ctx.chat.messages.iter().find(|p| p.id == m.replied_to) {
+            Some(p) => p.mine,
+            None => m.replied_to_npub.as_deref() == Some(me),
+        };
+        if to_me {
+            return true;
+        }
+    }
+    let Some(rules) = ctx.rules else { return false };
+    let sender = m.npub.as_deref().unwrap_or_default();
+    let by_anyone = rules.anyone || rules.pingers.iter().any(|p| p == sender);
+    let everyone = by_anyone
+        && m.content.match_indices("@everyone").any(|(i, _)| {
+            !m.content[i + 9..].chars().next().is_some_and(|c| c.is_alphanumeric() || c == '_')
+        });
+    everyone
+        || rules.roles.iter().any(|r| {
+            r.held
+                && !r.name.is_empty()
+                && m.role_mentions.contains(&r.id)
+                && m.content.contains(&format!("@{}", r.name))
+                && (r.mentionable || by_anyone)
+        })
+}
+
 /// The `@everyone` and Role chips `m` may show (`standingRoleMentions`): names and colours.
 fn tag_chips(ctx: &Ctx, m: &Message) -> Vec<(String, Option<u32>)> {
     let Some(rules) = ctx.rules else { return Vec::new() };
@@ -107,7 +142,7 @@ fn tag_chips(ctx: &Ctx, m: &Message) -> Vec<(String, Option<u32>)> {
                 && m.content.contains(&format!("@{}", r.name))
                 && (r.mentionable || by_anyone)
         })
-        .map(|r| (r.name.clone(), Some(r.color.map_or(0x59fcb3, |c| c & 0xff_ffff))))
+        .map(|r| (r.name.clone(), Some(r.color.map_or(PRIMARY, |c| c & 0xff_ffff))))
         .collect();
     if by_anyone {
         out.push(("everyone".into(), None));
@@ -160,6 +195,7 @@ pub fn message_row(ctx: &Ctx, index: usize, first: bool, gap: f32) -> AnyElement
     let group: SharedString = format!("dmsg-{}", m.id).into();
     let replying = ctx.replying == Some(m.id.as_str());
     let hovered = ctx.hovered == Some(m.id.as_str());
+    let pinged = pings_me(ctx, m);
 
     let gutter = div()
         .relative()
@@ -306,6 +342,7 @@ pub fn message_row(ctx: &Ctx, index: usize, first: bool, gap: f32) -> AnyElement
                 .border_color(gpui::transparent_black())
                 .font_family(RUBIK)
                 .hover(|s| s.bg(white_a(0.03)))
+                .when(pinged, |d| d.bg(c(PRIMARY).opacity(0.13)).border_color(c(PRIMARY)))
                 .when(replying, |d| d.bg(white_a(0.05)).border_color(white_a(0.5)))
                 .when_some(ctx.jumped.filter(|(id, _)| *id == m.id), |d, (_, t)| {
                     d.bg(ca(90, 252, 180, jump_flash(t)))

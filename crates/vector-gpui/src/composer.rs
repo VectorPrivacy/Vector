@@ -831,7 +831,7 @@ impl TextInput {
                     Deco::Spoiler => {}
                     Deco::Code => styled.font.family = crate::markdown::MONO.into(),
                     Deco::Mention => {
-                        styled.color = gpui::rgb(0x59fcb3).into();
+                        styled.color = gpui::rgb(crate::theme::PRIMARY).into();
                         styled.font.weight = gpui::FontWeight::MEDIUM;
                     }
                     Deco::Subtext => styled.color = base.opacity(0.75),

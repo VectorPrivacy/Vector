@@ -31,6 +31,8 @@ pub struct Role {
     pub name: String,
     pub color: Option<u32>,
     pub mentionable: bool,
+    /// This account holds it, so naming it pings us.
+    pub held: bool,
 }
 
 #[derive(Clone)]
