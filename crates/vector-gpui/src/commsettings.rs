@@ -806,7 +806,10 @@ fn relays(m: &CommSettings, on: &OnAct, cx: &App) -> AnyElement {
                 }
             }
             relay_row(i == 0, "icons/globe.svg", url, editing, actions)
-        }));
+        }))
+        .when(m.relays.is_empty(), |d| {
+            d.child(hint("No relays recorded for this community.").mx(px(16.)).my(px(14.)))
+        });
     let voice = div()
         .rounded(px(12.))
         .border_1()

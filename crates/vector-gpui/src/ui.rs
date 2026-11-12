@@ -5137,6 +5137,10 @@ impl Render for VectorApp {
                                             .get(&k)
                                             .cloned()
                                             .unwrap_or(crate::newchat::Preview::Loading)
+                                    })
+                                    .or_else(|| {
+                                        crate::newchat::go_link(nc.filter.read(cx).text())
+                                            .map(crate::newchat::Preview::Go)
                                     });
                                 div()
                                     .flex_1()
@@ -15341,7 +15345,12 @@ impl VectorApp {
             }
             Act::Hub => self.open_web("https://vectorapp.io/hub", cx),
             Act::Join => {
-                let Some(key) = crate::newchat::invite_key(n.filter.read(cx).text()) else {
+                let text = n.filter.read(cx).text().to_string();
+                let Some(key) = crate::newchat::invite_key(&text) else {
+                    if let Some(link) = crate::newchat::go_link(&text) {
+                        self.new_chat = None;
+                        self.open_go_link(link, window, cx);
+                    }
                     return;
                 };
                 let Some(crate::newchat::Preview::Ready(info)) =

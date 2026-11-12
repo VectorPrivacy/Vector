@@ -779,7 +779,11 @@ fn dial(p: &Policies, mo: &Moderation, d: &Value, on: &OnAct) -> AnyElement {
                 div()
                     .text_size(px(11.5))
                     .text_color(muted())
-                    .child("This community has no channels.")
+                    .child(if mo.intel.is_some() {
+                        "This community has no channels."
+                    } else {
+                        "Loading channels…"
+                    })
                     .into_any_element()
             } else {
                 div()

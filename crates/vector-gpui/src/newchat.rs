@@ -27,6 +27,13 @@ pub enum Preview {
     Loading,
     Ready(crate::backend::community::InvitePreview),
     Failed,
+    Go(vector_core::golink::GoLink),
+}
+
+/// A Vector link anywhere in `text`, as `parseContactInput` finds one.
+pub fn go_link(text: &str) -> Option<vector_core::golink::GoLink> {
+    text.split_whitespace()
+        .find_map(vector_core::golink::GoLink::parse_url)
 }
 
 /// The invite key (`naddr1…#fragment`) inside any wrapper, as `inviteKey` reads it.
@@ -484,8 +491,9 @@ pub fn view(
                             .justify_center()
                             .gap(px(10.))
                             .child({
-                                let ready = matches!(p, Preview::Ready(_)) && !n.joining;
+                                let ready = matches!(p, Preview::Ready(_) | Preview::Go(_)) && !n.joining;
                                 let label = match p {
+                                    Preview::Go(_) => "Open Link",
                                     _ if n.joining => "Joining…",
                                     Preview::Ready(i) if member(&i.community_id) => {
                                         "Open Community"
@@ -565,9 +573,13 @@ fn link_card(p: &Preview, member: impl Fn(&str) -> bool) -> impl IntoElement {
     let icon = |path: gpui::ImageSource, pad: f32| {
         div()
             .size(px(88.))
+            .flex_shrink_0()
+            .overflow_hidden()
             .rounded(px(22.))
             .bg(c(0x0a0a0a))
-            .p(px(pad))
+            .flex()
+            .items_center()
+            .justify_center()
             .shadow(vec![
                 gpui::BoxShadow {
                     color: white_a(0.06),
@@ -586,9 +598,9 @@ fn link_card(p: &Preview, member: impl Fn(&str) -> bool) -> impl IntoElement {
             ])
             .child(
                 gpui::img(path)
-                    .size_full()
+                    .size(px(88. - 2. * pad))
                     .rounded(px(22.))
-                    .object_fit(gpui::ObjectFit::Cover),
+                    .object_fit(if pad > 0. { gpui::ObjectFit::Contain } else { gpui::ObjectFit::Cover }),
             )
     };
     let eyebrow = |t: &'static str| {
@@ -654,6 +666,11 @@ fn link_card(p: &Preview, member: impl Fn(&str) -> bool) -> impl IntoElement {
             .child(div().mt(px(12.)).w(gpui::relative(0.82)).h(px(12.)).rounded(px(6.)).bg(white_a(0.06)))
             .child(div().mt(px(8.)).w(gpui::relative(0.5)).h(px(12.)).rounded(px(6.)).bg(white_a(0.06)))
             .child(div().mt(px(18.)).text_size(px(13.)).text_color(white_a(0.55)).child("Loading invite...")),
+        Preview::Go(_) => card
+            .child(eyebrow("Vector Link"))
+            .child(icon("icons/vector-mark.svg".into(), 18.))
+            .child(name("Open in Vector".into()))
+            .child(desc("This link opens a place inside Vector.".into())),
         Preview::Failed => card
             .child(eyebrow("Community Invite"))
             .child(icon("icons/vector_warning.svg".into(), 18.))
