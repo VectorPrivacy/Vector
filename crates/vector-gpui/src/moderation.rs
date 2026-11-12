@@ -781,10 +781,12 @@ fn mod_btn(
     danger: bool,
     live: bool,
     on: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
+    narrow: bool,
 ) -> impl IntoElement {
     let red = c(crate::timeline::DANGER);
     div()
         .id(id)
+        .when(narrow, |d| d.flex_1().min_w_0().justify_center())
         .px(px(14.))
         .py(px(9.))
         .flex()
@@ -821,7 +823,7 @@ fn mod_btn(
         .child(label)
 }
 
-fn foot(m: &Moderation, on: &OnAct) -> impl IntoElement {
+fn foot(m: &Moderation, narrow: bool, on: &OnAct) -> impl IntoElement {
     let total = m.members().len();
     let cut = m.cut().len();
     let invites = m.invites();
@@ -863,9 +865,11 @@ fn foot(m: &Moderation, on: &OnAct) -> impl IntoElement {
         .bg(c(0x101010))
         .border_t_1()
         .border_color(ca(57, 57, 57, 0.5))
+        .when(narrow, |d| d.flex_wrap())
         .child(
             div()
-                .flex_1()
+                .when(narrow, |d| d.w_full().justify_center())
+                .when(!narrow, |d| d.flex_1())
                 .min_w_0()
                 .flex()
                 .items_center()
@@ -888,6 +892,7 @@ fn foot(m: &Moderation, on: &OnAct) -> impl IntoElement {
             div()
                 .flex()
                 .gap(px(8.))
+                .when(narrow, |d| d.w_full())
                 .child(mod_btn(
                     "mod-revoke",
                     "icons/locked.svg",
@@ -902,6 +907,7 @@ fn foot(m: &Moderation, on: &OnAct) -> impl IntoElement {
                     false,
                     idle && invites > 0,
                     click(on, || Act::Revoke),
+                    narrow,
                 ))
                 .child(mod_btn(
                     "mod-rotate",
@@ -914,6 +920,7 @@ fn foot(m: &Moderation, on: &OnAct) -> impl IntoElement {
                     false,
                     idle,
                     click(on, || Act::Rotate),
+                    narrow,
                 ))
                 .child(mod_btn(
                     "mod-ban",
@@ -926,6 +933,7 @@ fn foot(m: &Moderation, on: &OnAct) -> impl IntoElement {
                     true,
                     idle && cut > 0 && !over,
                     click(on, || Act::BanRotate),
+                    narrow,
                 )),
         )
 }
@@ -938,6 +946,7 @@ pub fn view(
     cx: &App,
 ) -> impl IntoElement + use<> {
     let members = m.tab == Tab::Members;
+    let narrow = viewport <= 620.;
     let body = if members {
         div()
             .flex_1()
@@ -975,14 +984,14 @@ pub fn view(
                     .child(chips(m, on)),
             )
             .child(div().id("mod-list").flex_1().min_h_0().overflow_y_scroll().track_scroll(&m.scroll).px(px(12.)).pb(px(10.)).child(list(m, store, on, cx)))
-            .child(foot(m, on))
+            .child(foot(m, narrow, on))
             .into_any_element()
     } else {
         crate::policies::view(
             &m.policies,
             m,
             store,
-            (viewport - 52.).min(1040.) - 38.,
+            (if narrow { viewport } else { (viewport - 52.).min(1040.) }) - 38.,
             on,
             cx,
         )
@@ -997,21 +1006,19 @@ pub fn view(
             .flex()
             .items_center()
             .justify_center()
-            .p(px(26.))
+            .when(!narrow, |d| d.p(px(26.)))
             .occlude()
             .on_click(move |_, w, cx| close(Act::Close, w, cx))
             .child(
                 div()
                     .id("mod-card")
                     .w_full()
-                    .max_w(px(1040.))
                     .max_h_full()
                     .min_h(px(300.))
                     .flex()
                     .flex_col()
-                    .rounded(px(18.))
-                    .border_1()
-                    .border_color(c(0x2c2e2f))
+                    .when(narrow, |d| d.h_full())
+                    .when(!narrow, |d| d.max_w(px(1040.)).rounded(px(18.)).border_1().border_color(c(0x2c2e2f)))
                     .bg(c(0x101010))
                     .overflow_hidden()
                     .font_family(INTER)
