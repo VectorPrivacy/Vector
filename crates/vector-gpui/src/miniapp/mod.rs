@@ -133,6 +133,7 @@ pub async fn open(
 ) -> Result<(), String> {
     vector_core::db::scoped(async move {
         let opened = file_path.clone();
+        let file_path = package_path(&file_path).await?;
         let path = PathBuf::from(&file_path);
         let id = format!("miniapp_{:x}", md5_hash(&file_path));
         let label = if chat_id == "solo" || (chat_id.is_empty() && message_id.is_empty()) {
@@ -479,7 +480,7 @@ fn emit_lobby(topic: &str, peers: Vec<String>, is_active: bool) {
 }
 
 /// A package Vector holds (no file of its own) written out sealed, as the desktop keeps one.
-pub async fn held_package(hash: [u8; 32]) -> Result<String, String> {
+async fn held_package(hash: [u8; 32]) -> Result<String, String> {
     let dir = dirs::cache_dir()
         .ok_or("No cache folder")?
         .join("io.vectorapp")
@@ -510,6 +511,7 @@ pub async fn info(file_path: String) -> Result<Info, String> {
     if file_path.is_empty() {
         return Err("Empty file path".into());
     }
+    let file_path = package_path(&file_path).await?;
     let path = PathBuf::from(&file_path);
     if !tokio::fs::try_exists(&path).await.unwrap_or(false) {
         return Err(format!("File not found: {file_path}"));
@@ -531,4 +533,12 @@ pub async fn info(file_path: String) -> Result<Info, String> {
     })
     .await
     .map_err(|e| e.to_string())
+}
+
+/// A file, or a `vmedia:` ref to a package Vector holds, as a file the package loader reads.
+async fn package_path(path_or_ref: &str) -> Result<String, String> {
+    match vector_core::media::MediaRef::parse(path_or_ref).ok_or("Unknown file")? {
+        vector_core::media::MediaRef::File(p) => Ok(p),
+        vector_core::media::MediaRef::Held(h) => held_package(h).await,
+    }
 }

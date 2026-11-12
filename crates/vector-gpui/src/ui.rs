@@ -80,6 +80,9 @@ pub struct VectorApp {
     viewer: Option<Entity<crate::viewer::Viewer>>,
     /// The attachment panel is open, and since when (its items fade in from then).
     attach: Option<std::time::Instant>,
+    /// The attachment panel's Mini Apps view, while it shows.
+    mini: Option<miniapps_ops::MiniPanel>,
+    launch: Option<miniapps_ops::Launch>,
     file_preview: Option<Entity<crate::filepreview::FilePreview>>,
     /// The avatar cropper, and the picked file it cuts.
     cropper: Option<(Entity<crate::cropper::Cropper>, std::path::PathBuf)>,
@@ -380,6 +383,8 @@ mod commands_ops;
 mod moderation_ops;
 #[path = "ui_popout.rs"]
 mod popout_ops;
+#[path = "ui_miniapps.rs"]
+mod miniapps_ops;
 
 impl VectorApp {
     fn base(store: Store, live: bool, window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -678,6 +683,8 @@ impl VectorApp {
             viewer: None,
             cropper: None,
             attach: None,
+            mini: None,
+            launch: None,
             file_preview: None,
             profile: None,
             toast: None,
@@ -3259,7 +3266,7 @@ impl VectorApp {
             let rx = backend::run(async move {
                 let file = match src {
                     crate::media::Source::File(p) => p.to_string_lossy().into_owned(),
-                    crate::media::Source::Held(h) => crate::miniapp::held_package(h).await?,
+                    crate::media::Source::Held(h) => vector_core::media::MediaRef::held(&h),
                 };
                 crate::miniapp::info(file).await
             });
@@ -3296,7 +3303,7 @@ impl VectorApp {
         let rx = backend::run(async move {
             let file = match (file, hash) {
                 (Some(f), _) => f.to_string_lossy().into_owned(),
-                (None, Some(h)) => crate::miniapp::held_package(h).await?,
+                (None, Some(h)) => vector_core::media::MediaRef::held(&h),
                 (None, None) => return Err("This app isn't on this device any more".to_string()),
             };
             crate::miniapp::open(file, chat, msg_id, None, topic).await
@@ -3653,6 +3660,7 @@ impl Render for VectorApp {
             }
         }
         let popout = self.popout_view(window, cx);
+        let launch = self.launch_view(cx);
         match self.rec.due() {
             Some(crate::recorder::Due::Locked) => self.rec.locked(),
             Some(crate::recorder::Due::Idle) => self.rec.idle(),
@@ -3983,6 +3991,7 @@ impl Render for VectorApp {
             }))
             .children(self.pack_details_view(cx))
             .children(popout)
+            .children(launch)
             .children(self.toast_view(window))
             .children(
                 self.viewer
@@ -5663,7 +5672,7 @@ impl VectorApp {
                 &self.mode,
                 (self.picker_open && !self.picker_status)
                     .then(|| (self.emoji_picker.clone(), self.picker.is_none())),
-                self.attach,
+                self.attach.map(|o| (o, self.miniapps_view(cx))),
                 self.command_popup(cx).or_else(|| self.time_popup(cx)).or_else(|| self.mention
                     .as_ref()
                     .map(|p| {
@@ -5873,7 +5882,7 @@ fn composer(
     input: Entity<TextInput>,
     mode: &Mode,
     picker: Option<(Entity<crate::picker::EmojiPicker>, bool)>,
-    attach: Option<std::time::Instant>,
+    attach: Option<(std::time::Instant, Option<AnyElement>)>,
     popup: Option<AnyElement>,
     measure: Rc<std::cell::Cell<Option<gpui::Bounds<gpui::Pixels>>>>,
     send: (bool, usize),
@@ -6104,8 +6113,8 @@ fn composer(
                 }),
         )
         .children(crate::recorder::overlays(rec))
-        .when_some(attach.filter(|_| !editing), |d, opened| {
-            d.child(attachment_panel(opened, cx))
+        .when_some(attach.filter(|_| !editing), |d, (opened, mini)| {
+            d.child(attachment_panel(opened, mini, cx))
         })
         // `.emoji-picker`: 10px above the composer, 16px from the right edge.
         .when_some(picker, |d, (p, _)| {
@@ -6269,7 +6278,31 @@ fn attach_button(open: bool, cx: &mut Context<VectorApp>) -> impl IntoElement {
 }
 
 /// `.attachment-panel`: File, Folder, Commands and Mini Apps, risen from behind the composer.
-fn attachment_panel(opened: std::time::Instant, cx: &mut Context<VectorApp>) -> impl IntoElement {
+fn attachment_panel(
+    opened: std::time::Instant,
+    mini: Option<AnyElement>,
+    cx: &mut Context<VectorApp>,
+) -> impl IntoElement {
+    if let Some(view) = mini {
+        return div()
+            .absolute()
+            .left(px(8.))
+            .right(px(8.))
+            .bottom(gpui::relative(1.))
+            .pb(px(10.))
+            .child(
+                div()
+                    .id("attachment-panel")
+                    .p(px(16.))
+                    .bg(c(0x0c0c0c))
+                    .border_1()
+                    .border_color(c(DIVIDER))
+                    .rounded(px(12.))
+                    .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .child(view),
+            )
+            .into_any_element();
+    }
     const H: f32 = 107.;
     let t = (opened.elapsed().as_secs_f32() / 0.3).min(1.);
     // cubic-bezier(0.4, 0, 0.2, 1)
@@ -6352,18 +6385,17 @@ fn attachment_panel(opened: std::time::Instant, cx: &mut Context<VectorApp>) -> 
                     item(2, "attach-commands", "ui/slash.svg", 22.5, "Commands")
                         .on_click(cx.listener(|app, _, window, cx| app.open_commands(window, cx))),
                 )
-                .child(item(
-                    3,
-                    "attach-miniapps",
-                    "icons/grid-outline.svg",
-                    22.,
-                    "Mini Apps",
-                )),
+                .child(
+                    item(3, "attach-miniapps", "icons/grid-outline.svg", 22., "Mini Apps")
+                        .on_click(cx.listener(|app, _, window, cx| app.show_miniapps(window, cx))),
+                ),
         )
+        .into_any_element()
 }
 
 impl VectorApp {
     fn toggle_attach(&mut self, cx: &mut Context<Self>) {
+        self.mini = None;
         self.attach = match self.attach {
             Some(_) => None,
             None => {
