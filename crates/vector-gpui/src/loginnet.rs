@@ -703,7 +703,7 @@ impl LoginView {
     }
 
     /// `.lg-net-modal`: the explainer, a tab per network, I2P's with its router setup.
-    pub(super) fn net_modal(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+    pub(super) fn net_modal(&self, narrow: bool, cx: &mut Context<Self>) -> Option<AnyElement> {
         let kind = self.net.info?;
         let (a, b) = (cx.entity(), cx.entity());
         let tabs = self.tabs();
@@ -711,6 +711,7 @@ impl LoginView {
             on_tab: Some(Rc::new(move |k, w, cx| b.update(cx, |this, cx| this.net_info(Some(k), w, cx)))),
             tabs,
             router: (kind == "i2p").then(|| self.sam_router(cx)),
+            narrow,
         };
         Some(crate::netinfo::modal(
             kind,

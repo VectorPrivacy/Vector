@@ -20,6 +20,8 @@ pub struct Extras {
     pub tabs: Vec<&'static str>,
     pub on_tab: Option<Rc<dyn Fn(&'static str, &mut Window, &mut App)>>,
     pub router: Option<AnyElement>,
+    /// A window of 480px or less: `.lg-net-card`'s slimmer gutters.
+    pub narrow: bool,
 }
 
 fn tab_bar(tabs: &[&'static str], on: &'static str, pick: Rc<dyn Fn(&'static str, &mut Window, &mut App)>) -> AnyElement {
@@ -104,9 +106,7 @@ pub fn modal(
         .flex()
         .flex_col()
         .items_center()
-        .pt(px(37.))
-        .px(px(34.))
-        .pb(px(26.))
+        .map(|d| if extras.narrow { d.pt(px(30.)).px(px(20.)).pb(px(22.)) } else { d.pt(px(37.)).px(px(34.)).pb(px(26.)) })
         .border_1()
         .border_color(c(0x474747))
         .rounded(px(9.))

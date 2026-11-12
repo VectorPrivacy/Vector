@@ -1445,7 +1445,7 @@ impl Render for LoginView {
                 .child(kit::spaced(if self.bg_hidden { "Show Background" } else { "Hide Background" }, 0.8)),
         )
         .children(account_list)
-        .children(self.net_modal(cx))
+        .children(self.net_modal(vw <= 480., cx))
         .children(self.signer_qr(cx))
         .children(self.pill(cx).map(|pill| div().absolute().top(px(51. + lock_h + 23.)).left_0().right_0().px(px(24.)).flex().justify_center().child(pill)))
         .when_some(self.popup.clone(), |root, p| {

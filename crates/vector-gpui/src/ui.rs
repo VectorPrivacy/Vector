@@ -5332,7 +5332,7 @@ impl Render for VectorApp {
             crate::netinfo::modal(
                 kind,
                 true,
-                Default::default(),
+                crate::netinfo::Extras { narrow: self.vw <= 480., ..Default::default() },
                 move |_, cx| {
                     a.update(cx, |app, cx| {
                         app.net_info = None;
