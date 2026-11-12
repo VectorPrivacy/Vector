@@ -552,6 +552,7 @@ fn command_line(ctx: &Ctx, m: &Message, name: String, bot: Option<String>) -> An
         .items_center()
         .gap_x(px(4.))
         .text_size(px(13.))
+        .line_height(px(21.))
         .italic()
         .text_color(white_a(0.45))
         .child(
