@@ -263,11 +263,17 @@ impl VectorApp {
             Some((crate::transcript::Phase::Ready { .. }, true)) => "icons/file-minus.svg",
             _ => "icons/file-plus.svg",
         };
+        let transcript_tip = match transcript.map(|t| (&t.phase, t.open)) {
+            Some((crate::transcript::Phase::Ready { .. }, true)) => "Hide transcript",
+            Some((crate::transcript::Phase::Ready { .. }, false)) => "Show transcript",
+            _ => "Transcribe",
+        };
         let transcript_lit = transcript.is_some_and(|t| t.open && matches!(t.phase, crate::transcript::Phase::Ready { .. }));
-        let action = |key: &'static str, icon: &'static str, act: Act, lit: bool| {
+        let action = |key: &'static str, icon: &'static str, tip: &'static str, act: Act, lit: bool| {
             let on = on.clone();
             div()
                 .id(key)
+                .tooltip(crate::kit::tooltip(tip))
                 .size(px(32.))
                 .flex_none()
                 .rounded(px(8.))
@@ -288,20 +294,21 @@ impl VectorApp {
             .gap(px(4.))
             .flex_none()
             .when(is_album_now && !compact, |d| {
-                d.child(action("popout-songs", "icons/list-music.svg", Act::Songs, self.popout.tracks_open))
+                d.child(action("popout-songs", "icons/list-music.svg", if self.popout.tracks_open { "Hide songs" } else { "Songs" }, Act::Songs, self.popout.tracks_open))
             })
-            .when(has_lyrics && !compact, |d| d.child(action("popout-lyrics", "icons/align-left.svg", Act::Lyrics, lyrics_open)))
-            .when(transcribable, |d| d.child(action("popout-transcribe", transcript_icon, Act::Transcribe, transcript_lit)))
+            .when(has_lyrics && !compact, |d| d.child(action("popout-lyrics", "icons/align-left.svg", if lyrics_open { "Hide lyrics" } else { "Lyrics" }, Act::Lyrics, lyrics_open)))
+            .when(transcribable, |d| d.child(action("popout-transcribe", transcript_icon, transcript_tip, Act::Transcribe, transcript_lit)))
             .when(item.kind == Kind::Video, |d| {
                 d.child(action(
                     "popout-sound",
                     if sound_only { "icons/video.svg" } else { "icons/volume-max.svg" },
+                    if sound_only { "Show video" } else { "Sound only" },
                     Act::SoundOnly,
                     false,
                 ))
             })
-            .child(action("popout-chat", "icons/chat-bubble.svg", Act::ShowInChat, false))
-            .child(action("popout-close", "icons/x.svg", Act::Close, false));
+            .child(action("popout-chat", "icons/chat-bubble.svg", "Show in chat", Act::ShowInChat, false))
+            .child(action("popout-close", "icons/x.svg", "Close", Act::Close, false));
         let words = div()
             .flex_1()
             .min_w_0()

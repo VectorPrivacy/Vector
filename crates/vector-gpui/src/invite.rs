@@ -107,11 +107,13 @@ fn section_head(
 fn icon_btn(
     id: SharedString,
     icon: &'static str,
+    tip: &'static str,
     live: bool,
     on: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
     div()
         .id(id)
+        .tooltip(crate::kit::tooltip(tip))
         .w(px(38.4))
         .h(px(30.))
         .flex_shrink_0()
@@ -131,6 +133,12 @@ fn icon_btn(
 
 fn links(m: &Invite, store: &Store, on: &OnAct) -> impl IntoElement {
     let pill = div()
+        .id("cmt-visibility")
+        .tooltip(crate::kit::tooltip(if m.public {
+            "Anyone with a link can join"
+        } else {
+            "Invite-only — no public links"
+        }))
         .h(px(26.))
         .px(px(8.))
         .rounded_full()
@@ -272,10 +280,23 @@ fn links(m: &Invite, store: &Store, on: &OnAct) -> impl IntoElement {
                                         .text_color(c(ACCENT))
                                         .opacity(0.85),
                                 )
-                                .child(div().min_w_0().truncate().child(label)),
+                                .child(
+                                    div()
+                                        .id(SharedString::from(format!("cmt-url-{}", link.token)))
+                                        .min_w_0()
+                                        .truncate()
+                                        .tooltip(crate::kit::tooltip(link.url.clone()))
+                                        .child(label),
+                                ),
                         )
                         .child(
                             div()
+                                .id(SharedString::from(format!("cmt-joins-{}", link.token)))
+                                .tooltip(crate::kit::tooltip(format!(
+                                    "{} member{} joined via this link",
+                                    link.joins,
+                                    if link.joins == 1 { "" } else { "s" }
+                                )))
                                 .mr(px(6.))
                                 .flex()
                                 .items_center()
@@ -299,6 +320,7 @@ fn links(m: &Invite, store: &Store, on: &OnAct) -> impl IntoElement {
                             } else {
                                 "icons/copy.svg"
                             },
+                            "Copy link",
                             live,
                             click(on, move || Act::Copy(tok_c.clone())),
                         ))
@@ -309,6 +331,7 @@ fn links(m: &Invite, store: &Store, on: &OnAct) -> impl IntoElement {
                             } else {
                                 "icons/trash.svg"
                             },
+                            "Revoke link",
                             live,
                             click(on, move || Act::Revoke(tok_r.clone())),
                         ))
