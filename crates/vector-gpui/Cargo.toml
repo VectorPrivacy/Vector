@@ -71,6 +71,24 @@ tauri = { package = "vector-tauri-shim", path = "tauri-shim" }
 ffmpeg-next = { version = "9", default-features = false, features = ["codec", "format"], optional = true }
 http = "1.3"
 url = "2.5.7"
+# 3D model attachments: parsed here, drawn offscreen on the GPU (src/model3d).
+glam = { version = "0.30", features = ["bytemuck"] }
+bytemuck = { version = "1", features = ["derive"] }
+gltf = { version = "1.4", default-features = false, features = ["utils", "names", "KHR_materials_emissive_strength", "KHR_texture_transform", "KHR_materials_unlit"] }
+tobj = { version = "4", default-features = false }
+fbxcel = { version = "0.9", features = ["tree"] }
+pollster = "0.4"
+
+# The same wgpu GPUI draws with on Linux; elsewhere its default backends (Metal, DX12).
+[target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies.wgpu]
+git = "https://github.com/gfx-rs/wgpu"
+rev = "cddb2f5d80dc0009b2ef6767635140cacf90a007"
+default-features = false
+features = ["std", "metal", "gles", "vulkan", "wgsl", "webgpu"]
+
+[target.'cfg(not(any(target_os = "linux", target_os = "freebsd")))'.dependencies.wgpu]
+git = "https://github.com/gfx-rs/wgpu"
+rev = "cddb2f5d80dc0009b2ef6767635140cacf90a007"
 
 # Mini Apps run in the OS webview, through the desktop client's own webview crate.
 [target.'cfg(target_os = "linux")'.dependencies]

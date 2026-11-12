@@ -230,7 +230,7 @@ impl VectorApp {
     }
 
     /// A downloaded file's place on disk, or a stored one saved where the user picks.
-    fn reveal_attachment(&mut self, msg: String, att: String, cx: &mut Context<Self>) {
+    pub(super) fn reveal_attachment(&mut self, msg: String, att: String, cx: &mut Context<Self>) {
         let Some(a) = self.message(&msg).and_then(|m| m.attachments.into_iter().find(|a| a.id == att)) else { return };
         if a.resident {
             let name = if a.name.is_empty() { format!("{}.{}", &a.id[..16.min(a.id.len())], a.extension) } else { a.name };

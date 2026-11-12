@@ -474,6 +474,34 @@
      "edited": false
     },
     {
+     "id": "fae91624685ae6d8b7c0df70b11eaae2ed785620a551bb4d56d006fb30b6840a",
+     "content": "Made a little fox",
+     "replied_to": "",
+     "preview_metadata": null,
+     "attachments": [
+      {
+       "id": "d97044e701822bac5a62696459b27d7b375aada5de8574ed4362edbba94771f7",
+       "key": "",
+       "nonce": "",
+       "extension": "glb",
+       "name": "Fox.glb",
+       "url": "https://example.invalid/fox",
+       "path": "media/fox.glb",
+       "size": 162852,
+       "img_meta": null,
+       "downloading": false,
+       "downloaded": true
+      }
+     ],
+     "reactions": [],
+     "at": 1794361140000,
+     "pending": false,
+     "failed": false,
+     "mine": false,
+     "npub": "npub17jjvuhaxxs9rt2jakz6td5c6d7a2vpfr2erqmwc9xajhmqplt03q63stmv",
+     "edited": false
+    },
+    {
      "id": "2bdaad8f7f7f63f749a37d97e109d72300424e5ca39d1b623d8b717de7802d08",
      "content": "Thanks!",
      "replied_to": "",

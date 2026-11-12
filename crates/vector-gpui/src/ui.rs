@@ -94,6 +94,7 @@ pub struct VectorApp {
     /// Bumped by each hover, so a stale leave doesn't hide the toolbar.
     hover_gen: u64,
     viewer: Option<Entity<crate::viewer::Viewer>>,
+    model_viewer: Option<(Entity<crate::model3d::viewer::ModelViewer>, String, String)>,
     /// The attachment panel is open, and since when (its items fade in from then).
     attach: Option<std::time::Instant>,
     /// The attachment panel's Mini Apps view, while it shows.
@@ -832,6 +833,7 @@ impl VectorApp {
             picker_closed: std::time::Instant::now(),
             hover_gen: 0,
             viewer: None,
+            model_viewer: None,
             cropper: None,
             attach: None,
             mini: None,
@@ -910,6 +912,20 @@ impl VectorApp {
         }
     }
 
+    /// A 3D model's frame landed: paint it.
+    fn listen_models(&mut self, cx: &mut Context<Self>) {
+        let Some(mut rx) = self.media.borrow_mut().models.take_wake() else { return };
+        cx.spawn(async move |this, cx| {
+            use futures::StreamExt;
+            while rx.next().await.is_some() {
+                if this.update(cx, |_, cx| cx.notify()).is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
     /// Fixture data, offline: what the parity renders compare.
     pub fn fixtures(
         store: Store,
@@ -918,6 +934,7 @@ impl VectorApp {
         cx: &mut Context<Self>,
     ) -> Self {
         let mut app = Self::base(store, false, window, cx);
+        app.listen_models(cx);
         app.reload_picker_packs(cx);
         if let Some(v) = app.net_initial() {
             app.on_transport_view(v, cx);
@@ -1285,6 +1302,7 @@ impl VectorApp {
         cx: &mut Context<Self>,
     ) -> Self {
         let mut app = Self::base(Store::live(), true, window, cx);
+        app.listen_models(cx);
         app.screen = Screen::Booting;
         cx.spawn_in(window, async move |this, cx| {
             while let Some(ev) = events.next().await {
@@ -3222,6 +3240,12 @@ impl VectorApp {
                 }
                 self.video_act(id, att, a, cx)
             }
+            Act::Model(att, a) => {
+                if self.media.borrow_mut().models.act(&att, &a) {
+                    self.open_model(id, att, window, cx);
+                }
+                cx.notify();
+            }
             Act::View(open) => {
                 let live = self.live;
                 let viewer = cx.new(|cx| crate::viewer::Viewer::new(open, live, window, cx));
@@ -3642,6 +3666,40 @@ impl VectorApp {
         let s = art.size(0);
         let open = crate::viewer::Open { image: art, w: s.width.0 as u32, h: s.height.0 as u32, full: None };
         self.on_act(String::new(), timeline::Act::View(open), window, cx);
+    }
+
+    /// A model's source for a new view: its file, or what holds it for this account.
+    pub(crate) fn model_src(&self, att: &vector_core::types::Attachment) -> Option<crate::model3d::Src> {
+        if (att.resident || att.path.is_empty())
+            && let Some(h) = vector_core::simd::hex::hex_to_bytes_32_checked(&att.id)
+        {
+            return vector_core::media::open(&h).map(crate::model3d::Src::Held);
+        }
+        let p = std::path::PathBuf::from(&att.path);
+        Some(crate::model3d::Src::File(if p.is_absolute() { p } else { self.store.borrow().media_root.join(p) }))
+    }
+
+    fn open_model(&mut self, msg: String, att_id: String, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(att) = self.message(&msg).and_then(|m| m.attachments.into_iter().find(|a| a.id == att_id)) else { return };
+        let Some(src) = self.model_src(&att) else { return };
+        let file = Some(if att.resident { crate::model3d::viewer::FileAction::Save } else { crate::model3d::viewer::FileAction::Reveal });
+        let ext = att.extension.to_ascii_lowercase();
+        let viewer = cx.new(|cx| crate::model3d::viewer::ModelViewer::new(src, &ext, att.name.clone(), file, window, cx));
+        cx.subscribe_in(&viewer, window, |app, _, e: &crate::model3d::viewer::Event, window, cx| match e {
+            crate::model3d::viewer::Event::Closed => {
+                app.model_viewer = None;
+                window.focus(&app.input.focus_handle(cx), cx);
+                cx.notify();
+            }
+            crate::model3d::viewer::Event::File => {
+                if let Some((_, msg, att)) = app.model_viewer.clone() {
+                    app.reveal_attachment(msg, att, cx);
+                }
+            }
+        })
+        .detach();
+        self.model_viewer = Some((viewer, msg, att_id));
+        cx.notify();
     }
 
     fn video_act(&mut self, msg: String, att: String, act: crate::video::Act, cx: &mut Context<Self>) {
@@ -4246,6 +4304,15 @@ impl Render for VectorApp {
             for old in media.videos.retired.drain(..) {
                 let _ = window.drop_image(old);
             }
+            media.models.scale = window.scale_factor();
+            media.models.active = window.is_window_active();
+            media.models.front = self.model_viewer.is_some();
+            if media.models.tick() {
+                window.request_animation_frame();
+            }
+            for old in media.models.retired.drain(..) {
+                let _ = window.drop_image(old);
+            }
         }
         self.revoke_outlived_archives();
         if self.mini_animating() || self.pivx_animating() || self.archive.animating() || self.nexus.as_ref().is_some_and(|n| n.animating()) {
@@ -4634,6 +4701,11 @@ impl Render for VectorApp {
                 self.viewer
                     .clone()
                     .map(|v| gpui::deferred(div().absolute().inset_0().child(v)).with_priority(10)),
+            )
+            .children(
+                self.model_viewer
+                    .as_ref()
+                    .map(|(v, _, _)| gpui::deferred(div().absolute().inset_0().child(v.clone())).with_priority(10)),
             )
             .children(
                 self.file_preview
@@ -11179,7 +11251,7 @@ impl VectorApp {
 
     /// Escape closes the topmost light overlay; true when it did.
     fn escape_overlay(&mut self) -> bool {
-        if self.viewer.is_some() {
+        if self.viewer.is_some() || self.model_viewer.is_some() {
             return false;
         }
         if self.menu.take().is_some()

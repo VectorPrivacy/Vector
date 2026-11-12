@@ -153,6 +153,7 @@ pub fn attachments(ctx: &Ctx, m: &Message) -> Option<AnyElement> {
                     None => (video_placeholder(att), 6.),
                 }
             }
+            Phase::Ready if crate::model3d::supports(&e) => (model(ctx, &mut media, m, att), 6.),
             Phase::Ready if IMAGES.contains(&e.as_str()) => {
                 match picture(ctx, &mut media, m, att) {
                     Some(el) => (el, 6.),
@@ -200,6 +201,36 @@ pub fn attachments(ctx: &Ctx, m: &Message) -> Option<AnyElement> {
         prev_bottom = bottom;
     }
     Some(col.child(div().h(px(prev_bottom))).into_any_element())
+}
+
+/// `ModelAttachment.svelte`: the stage, and the file's box only when the stage can't stand
+/// in for it: while it uploads, or when the model won't open here.
+fn model(ctx: &Ctx, media: &mut Media, m: &Message, att: &Attachment) -> AnyElement {
+    let (on_act, msg, aid) = (ctx.on_act.clone(), m.id.clone(), att.id.clone());
+    let on: crate::model3d::stage::OnAct = std::rc::Rc::new(move |a, w, cx| on_act(&msg, Act::Model(aid.clone(), a), w, cx));
+    let src = source(ctx, att);
+    let ext = ext(att);
+    let facts = crate::model3d::stage::Facts { att: &att.id, size: att.size, ext: &ext };
+    let stage = crate::model3d::stage::stage(
+        &mut media.models,
+        &facts,
+        move || match src {
+            Source::Held(h) => vector_core::media::open(&h).map(crate::model3d::Src::Held),
+            Source::File(p) => Some(crate::model3d::Src::File(p)),
+        },
+        on,
+    );
+    let failed = media.models.get(&att.id).is_some_and(|v| matches!(v.phase, crate::model3d::view::Phase::Failed(_)));
+    let show_file = stage.is_none() || (m.mine && m.pending) || failed;
+    div()
+        .w(px(320.))
+        .max_w_full()
+        .flex()
+        .flex_col()
+        .gap(px(6.))
+        .children(stage)
+        .when(show_file, |d| d.child(file_box(ctx, media, m, att, FileState::Local, None)))
+        .into_any_element()
 }
 
 /// Sized from what the sender said while the file's own header is read.

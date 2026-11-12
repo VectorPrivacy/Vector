@@ -73,6 +73,7 @@ pub enum Act {
     /// An audio attachment's controls, by attachment.
     Audio(String, crate::audio::Act),
     Video(String, crate::video::Act),
+    Model(String, crate::model3d::stage::Act),
     /// An invocation line's command name: the composer takes it, to run again.
     Rerun(String),
     /// A PIVX payment's bubble: claim it, by gift code.

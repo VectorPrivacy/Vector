@@ -44,6 +44,7 @@ mod markdown;
 mod langnames;
 mod lyrics;
 mod media;
+mod model3d;
 mod miniapp;
 mod mentions;
 #[allow(dead_code, clippy::all)]
