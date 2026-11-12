@@ -595,6 +595,21 @@ impl VectorApp {
             }));
             t
         });
+        {
+            // Nobody here watches theirs while we're out of sight: the peer may stop spending upload.
+            let app = cx.entity().downgrade();
+            window
+                .observe_window_visibility(move |vis, _, cx| {
+                    app.update(cx, |app, _| {
+                        if app.video.link_open() {
+                            let hidden = !vis.is_visible();
+                            drop(backend::run(async move { vector_core::calls::session::set_video_pause(hidden).await }));
+                        }
+                    })
+                    .ok();
+                })
+                .detach();
+        }
         cx.subscribe(&input, |app, _, SendText(text), cx| {
             app.send(text.clone(), cx)
         })
