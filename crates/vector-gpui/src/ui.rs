@@ -74,6 +74,8 @@ pub struct VectorApp {
     timeline: ListState,
     /// The open chat's rows, rebuilt when it changes rather than per frame.
     rows: Rc<Vec<Row>>,
+    /// The open chat's message positions by id, built with `rows`.
+    msg_index: Rc<HashMap<String, usize>>,
     read_anchor: Option<data::Unread>,
     input: Entity<TextInput>,
     syncing: bool,
@@ -846,6 +848,7 @@ impl VectorApp {
             open: None,
             timeline: ListState::new(0, ListAlignment::Top, px(600.)),
             rows: Rc::default(),
+            msg_index: Rc::default(),
             read_anchor: None,
             input,
             syncing: false,
@@ -3251,6 +3254,13 @@ impl VectorApp {
     fn rebuild_rows(&mut self) -> usize {
         let names = self.command_names();
         let store = self.store.borrow();
+        self.msg_index = Rc::new(
+            self.open
+                .as_ref()
+                .and_then(|id| store.chat(id))
+                .map(|c| c.messages.iter().enumerate().map(|(i, m)| (m.id.clone(), i)).collect())
+                .unwrap_or_default(),
+        );
         let mut rows = self
             .open
             .as_ref()
@@ -7637,6 +7647,7 @@ impl VectorApp {
         let rows_store = self.store.clone();
         let rows_id = id.clone();
         let rows = self.rows.clone();
+        let msg_index = self.msg_index.clone();
         let revealed = self.revealed.clone();
         let clock = self.started.elapsed().as_secs_f32();
         let app = cx.entity().downgrade();
@@ -7685,6 +7696,7 @@ impl VectorApp {
             let revealed = revealed.borrow();
             let fail_reasons = fail_reasons.borrow();
             let ctx = timeline::Ctx {
+                by_id: &msg_index,
                 anchors: &anchors,
                 rules: rules.as_deref(),
                 store: &rows_store,

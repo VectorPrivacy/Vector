@@ -903,7 +903,7 @@ pub fn last_activity(chat: &SerializableChat) -> u64 {
 
 /// Messages after `last_read` that someone else sent: `computeListRowUnreadCount`.
 pub fn unread_count(chat: &SerializableChat) -> usize {
-    let Some(i) = chat.messages.iter().position(|m| m.id == chat.last_read) else {
+    let Some(i) = chat.messages.iter().rposition(|m| m.id == chat.last_read) else {
         return chat.messages.iter().filter(|m| !m.mine).count();
     };
     chat.messages[i + 1..].iter().filter(|m| !m.mine).count()

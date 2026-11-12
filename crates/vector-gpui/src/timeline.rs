@@ -125,8 +125,18 @@ pub struct Ctx<'a> {
     pub anchors: &'a crate::kit::Anchors,
     /// The message column's width, for media to fit; 0 before the list has laid out.
     pub content_w: f32,
+    /// The chat's message positions by id; a stale entry falls back to a scan.
+    pub by_id: &'a HashMap<String, usize>,
     /// The window's width: what `100vw` reads.
     pub vw: f32,
+}
+
+/// The open chat's message `id`.
+pub fn find<'b>(ctx: &Ctx<'b>, id: &str) -> Option<&'b Message> {
+    match ctx.by_id.get(id).and_then(|&i| ctx.chat.messages.get(i)) {
+        Some(m) if m.id == id => Some(m),
+        _ => ctx.chat.messages.iter().rev().find(|m| m.id == id),
+    }
 }
 
 /// `_dmsgIsPinged`: a tag of me, an authorised `@everyone`, a Role I hold, or a reply to me.
@@ -139,7 +149,7 @@ fn pings_me(ctx: &Ctx, m: &Message) -> bool {
         return true;
     }
     if !m.replied_to.is_empty() {
-        let to_me = match ctx.chat.messages.iter().find(|p| p.id == m.replied_to) {
+        let to_me = match find(ctx, &m.replied_to) {
             Some(p) => p.mine,
             None => m.replied_to_npub.as_deref() == Some(me),
         };
@@ -1314,7 +1324,7 @@ fn reactions(ctx: &Ctx, m: &Message) -> Option<AnyElement> {
 
 /// `.dmsg-reply`: the quoted parent above a reply, one line, with the elbow from the avatar.
 fn reply_quote(ctx: &Ctx, m: &Message) -> Option<AnyElement> {
-    let parent = ctx.chat.messages.iter().find(|p| p.id == m.replied_to);
+    let parent = find(ctx, &m.replied_to);
     let content = m
         .replied_to_content
         .clone()
