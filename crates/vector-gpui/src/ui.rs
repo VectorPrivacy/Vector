@@ -104,6 +104,14 @@ pub struct VectorApp {
     time_suggestions: bool,
     /// The composer box as last painted, to put the chip under its phrase.
     composer_box: Rc<std::cell::Cell<Option<gpui::Bounds<gpui::Pixels>>>>,
+    /// The chat header's ⋯ as last painted, which its menus hang from.
+    chat_menu_btn: Rc<std::cell::Cell<Option<gpui::Bounds<gpui::Pixels>>>>,
+    send_btn: Rc<std::cell::Cell<Option<gpui::Bounds<gpui::Pixels>>>>,
+    /// A press on Send, by number, while it is held; a long one opened the timer instead.
+    send_held: Option<u64>,
+    send_long: bool,
+    /// The open chat's Self-Destruct Timer, in seconds.
+    self_destruct: Option<u64>,
     rec: crate::recorder::Recorder,
     /// Who a `@` can name in the open chat, gathered once per open panel.
     mention_pool: Option<Rc<Vec<crate::mentions::Item>>>,
@@ -243,6 +251,9 @@ enum MenuAct {
     PackRemove(String),
     CreatorRename(usize),
     CreatorDelete(usize),
+    /// The chat's ⋯: open its Self-Destruct Timer picker, or set the timer.
+    SelfDestruct(String),
+    SetSelfDestruct(String, Option<u64>),
 }
 
 enum PopupAct {
@@ -568,6 +579,11 @@ impl VectorApp {
             chip_passed: HashSet::new(),
             time_suggestions: true,
             composer_box: Rc::default(),
+            chat_menu_btn: Rc::default(),
+            send_btn: Rc::default(),
+            send_held: None,
+            send_long: false,
+            self_destruct: None,
             rec: Default::default(),
             mention_pool: None,
             tracked: Vec::new(),
@@ -1110,6 +1126,15 @@ impl VectorApp {
             MenuAct::Back => {
                 if let Some((items, acts)) = self.menu_trail.pop() {
                     self.menu = Some((at, items, acts));
+                }
+            }
+            MenuAct::SelfDestruct(chat) => self.open_self_destruct(chat, at),
+            MenuAct::SetSelfDestruct(chat, secs) => {
+                if self.live && vector_core::self_destruct::set_chat_duration_secs(&chat, secs).is_err() {
+                    return;
+                }
+                if self.open.as_deref() == Some(chat.as_str()) {
+                    self.self_destruct = secs;
                 }
             }
             MenuAct::CommunityRead(id) => {
@@ -2162,6 +2187,12 @@ impl VectorApp {
         if elsewhere {
             self.community = None;
         }
+        self.self_destruct = if self.live {
+            vector_core::self_destruct::chat_duration_secs(&id)
+        } else {
+            // Fixtures: VECTOR_SELF_DESTRUCT=<secs> sets every chat's timer.
+            std::env::var("VECTOR_SELF_DESTRUCT").ok().and_then(|v| v.parse().ok())
+        };
         self.profile = None;
         self.embed_modal = None;
         self.new_chat = None;
@@ -4769,20 +4800,98 @@ impl VectorApp {
                                 ),
                         )
                     })
-                    .child(
+                    .child({
+                        let probe = self.chat_menu_btn.clone();
+                        let chat = id.to_string();
                         div()
+                            .id("chat-menu")
+                            .relative()
                             .size(px(40.))
                             .flex()
                             .items_center()
                             .justify_center()
+                            .cursor_pointer()
+                            .on_click(cx.listener(move |app, _, _, cx| app.open_chat_menu(chat.clone(), cx)))
+                            .child(
+                                gpui::canvas(move |b, _, _| probe.set(Some(b)), |_, _, _, _| {})
+                                    .absolute()
+                                    .size_full(),
+                            )
                             .child(
                                 svg()
                                     .path("ui/menu-dots.svg")
                                     .size(px(28.))
                                     .text_color(c(ICON_MUTED)),
-                            ),
-                    ),
+                            )
+                    }),
             )
+    }
+
+    /// Under the header's ⋯, as `showContextMenu` places it.
+    fn chat_menu_at(&self) -> gpui::Point<gpui::Pixels> {
+        let b = self.chat_menu_btn.get().unwrap_or_default();
+        gpui::point(b.right(), b.bottom() + px(4.))
+    }
+
+    /// Send held for 500ms opens the timer picker rather than sending.
+    fn send_press(&mut self, cx: &mut Context<Self>) {
+        let n = self.send_held.map_or(0, |n| n + 1);
+        self.send_held = Some(n);
+        self.send_long = false;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(std::time::Duration::from_millis(500)).await;
+            this.update(cx, |app, cx| {
+                if app.send_held == Some(n) {
+                    app.send_long = true;
+                    app.open_send_timer(cx);
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// The timer picker, from a right-click or a long press on Send.
+    fn open_send_timer(&mut self, cx: &mut Context<Self>) {
+        let Some(chat) = self.open.clone() else { return };
+        let b = self.send_btn.get().unwrap_or_default();
+        self.open_self_destruct(chat.to_string(), gpui::point(b.right(), b.bottom() + px(4.)));
+        cx.notify();
+    }
+
+    /// `buildChatMenuItems`: what the open chat's ⋯ offers.
+    fn open_chat_menu(&mut self, chat: String, cx: &mut Context<Self>) {
+        let items = vec![kit::MenuItem::new("Self-Destruct Timer", "clock")];
+        let acts = vec![MenuAct::SelfDestruct(chat)];
+        self.menu_trail.clear();
+        self.menu = Some((self.chat_menu_at(), items, acts));
+        cx.notify();
+    }
+
+    /// The timer's durations, the current one ticked; a pick applies to the next send.
+    fn open_self_destruct(&mut self, chat: String, at: gpui::Point<gpui::Pixels>) {
+        const OPTIONS: [(&str, Option<u64>); 8] = [
+            ("Permanent", None),
+            ("1 Week", Some(604_800)),
+            ("1 Day", Some(86_400)),
+            ("6 Hours", Some(21_600)),
+            ("1 Hour", Some(3_600)),
+            ("5 Minutes", Some(300)),
+            ("60 Seconds", Some(60)),
+            ("10 Seconds", Some(10)),
+        ];
+        let current = if self.live { vector_core::self_destruct::chat_duration_secs(&chat) } else { self.self_destruct };
+        let items = OPTIONS
+            .iter()
+            .map(|(label, secs)| kit::MenuItem {
+                label: (*label).into(),
+                hint: (*secs == current).then(|| "\u{2713}".into()),
+                ..Default::default()
+            })
+            .collect();
+        let acts = OPTIONS.iter().map(|(_, secs)| MenuAct::SetSelfDestruct(chat.clone(), *secs)).collect();
+        self.menu_trail.clear();
+        self.menu = Some((at, items, acts));
     }
 
     fn chat_pane(
@@ -4983,6 +5092,7 @@ impl VectorApp {
                     self.send_shown || matches!(self.mode, Mode::Edit { .. }),
                     self.send_flips,
                 ),
+                (self.self_destruct, self.send_btn.clone()),
                 &self.rec,
                 {
                     let app = cx.entity().downgrade();
@@ -5166,6 +5276,7 @@ fn composer(
     popup: Option<AnyElement>,
     measure: Rc<std::cell::Cell<Option<gpui::Bounds<gpui::Pixels>>>>,
     send: (bool, usize),
+    (timer, send_probe): (Option<u64>, Rc<std::cell::Cell<Option<gpui::Bounds<gpui::Pixels>>>>),
     rec: &crate::recorder::Recorder,
     on_rec: crate::recorder::On,
     cx: &mut Context<VectorApp>,
@@ -5347,9 +5458,22 @@ fn composer(
                         rec.state == R::Pending,
                         previewing,
                         rec.dictating,
+                        send_probe,
                         on_rec.clone(),
                         cx,
                     ))
+                })
+                // `.self-destruct-badge`: the chat's timer, on Send's top-right corner.
+                .when(timer.is_some() && send.0 && !busy, |d| {
+                    d.child(
+                        svg()
+                            .path("ui/self-destruct.svg")
+                            .absolute()
+                            .bottom(px(27.))
+                            .right(px(6.))
+                            .size(px(11.))
+                            .text_color(c(ACCENT)),
+                    )
                 })
                 .children(crate::recorder::dot(rec, on_rec.clone()))
                 .when(matches!(rec.state, R::Pending | R::Recording), |d| {
@@ -5383,6 +5507,7 @@ fn send_or_mic(
     pending: bool,
     voice_send: bool,
     dictating: bool,
+    probe: Rc<std::cell::Cell<Option<gpui::Bounds<gpui::Pixels>>>>,
     on_rec: crate::recorder::On,
     cx: &mut Context<VectorApp>,
 ) -> impl IntoElement {
@@ -5453,11 +5578,26 @@ fn send_or_mic(
         })
         .when(voice_send && dictating, |d| d.opacity(0.35).cursor_default())
         .when(send && !voice_send, |d| {
-            d.on_mouse_down(gpui::MouseButton::Left, |_, w, _| w.prevent_default())
-                .on_click(cx.listener(|app, _, window, cx| {
-                    app.input.update(cx, |i, cx| i.submit(window, cx))
-                }))
+            d.on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(|app, _, w, cx| {
+                    w.prevent_default();
+                    app.send_press(cx)
+                }),
+            )
+            .on_mouse_up(gpui::MouseButton::Left, cx.listener(|app, _, _, _| app.send_held = None))
+            .on_mouse_down(
+                gpui::MouseButton::Right,
+                cx.listener(|app, _, _, cx| app.open_send_timer(cx)),
+            )
+            .on_click(cx.listener(|app, _, window, cx| {
+                if std::mem::take(&mut app.send_long) {
+                    return;
+                }
+                app.input.update(cx, |i, cx| i.submit(window, cx))
+            }))
         })
+        .child(gpui::canvas(move |b, _, _| probe.set(Some(b)), |_, _, _, _| {}).absolute().size_full())
         .when(!send, move |d| {
             d.on_mouse_down(gpui::MouseButton::Left, move |e, w, cx| {
                 w.prevent_default();

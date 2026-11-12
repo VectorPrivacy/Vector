@@ -1775,7 +1775,8 @@
      "failed": false,
      "mine": true,
      "npub": "npub1yazve5gvw5em6um2mzg0nh2u4v4dkfas04gqh9yn72wdcssvktsqfmmmv4",
-     "edited": false
+     "edited": false,
+     "expiration": 1893456000
     },
     {
      "id": "b02add15a54a6a91cf66fe50248abdec79f84ed022c788d67a3984fb4fcadc50",
@@ -1831,7 +1832,8 @@
      "failed": false,
      "mine": false,
      "npub": "npub1yn2tjm6cmfk54pgjxyam6q4z36lse22aa3hyeph00r887q083zkq7g4t6h",
-     "edited": false
+     "edited": false,
+     "expiration": 1893456000
     },
     {
      "id": "5b1e0c3a9d7f4e2b8a6c1d0e9f8a7b6c5d4e3f2a1b0c9d8e7f6a5b4c3d2e1f00",

@@ -116,6 +116,8 @@ pub fn start(data_dir: PathBuf) -> mpsc::UnboundedReceiver<UiEvent> {
         let _guard = rt.enter();
         crate::calls::session::install();
     }
+    // spawn-detached: the sweep expires messages for whichever account is live, as on desktop.
+    rt.spawn(vector_core::self_destruct::run_sweeper_loop());
     // spawn-detached: the processor serves whichever account is live, as on desktop.
     rt.spawn(vector_core::profile::sync::start_profile_sync_processor(
         Arc::new(sync::ProfileHandler),

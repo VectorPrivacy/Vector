@@ -28,6 +28,7 @@
         transcribe: () => ({ lang: 'ru', language: 'ru', confidence: 0.9, sections: [
             [0, 'Привет, это Ана.'], [1800, 'Я буду дома около семи,'], [4200, 'купи, пожалуйста, хлеб по дороге.'],
         ].map(([at, text]) => ({ at, text, confidence: 0.9 })) }),
+        get_self_destruct_timer: () => (window.__TYPE__ === 'timer' ? 3600 : null),
         get_chat_message_count: ({ chatId }) => msgs(chatId).length,
         get_message_views: ({ chatId, limit = 50, offset = 0 }) => msgs(chatId).reverse().slice(offset, offset + limit),
         get_messages_around: ({ chatId, anchorId, before = 0, after = 0 }) => {

@@ -214,6 +214,30 @@ pub fn message_row(ctx: &Ctx, index: usize, first: bool, gap: f32) -> AnyElement
             .child(content(ctx, m))
             .children(crate::attachments::attachments(ctx, m))
             .children(crate::packs::cards(ctx, m))
+            .when_some(m.expiration.filter(|_| !m.attachments.is_empty()), |d, at| {
+                d.child(
+                    div().h(px(21.)).relative().child(
+                        div()
+                            .id(SharedString::from(format!("{}-sd", m.id)))
+                            .absolute()
+                            .top(px(11.1))
+                            .left(px(6.))
+                            .size(px(12.))
+                            .opacity(0.4)
+                            .hover(|s| s.opacity(1.))
+                            .tooltip(move |w, cx| {
+                                let left = at as i64 - chrono::Utc::now().timestamp();
+                                let text = if left > 0 {
+                                    format!("Message dissolves in {}", countdown(left as u64))
+                                } else {
+                                    "Dissolving...".into()
+                                };
+                                crate::kit::tooltip(text)(w, cx)
+                            })
+                            .child(svg().path("ui/self-destruct.svg").size_full().text_color(c(ACCENT))),
+                    ),
+                )
+            })
             .when(!ctx.held && !m.content.is_empty(), |d| {
                 d.children(
                     crate::newchat::invite_card_keys(&m.content)
@@ -789,6 +813,17 @@ fn table(
     t.into_any_element()
 }
 
+/// `fmtCountdown`: days and hours, hours and minutes, or m:ss.
+pub fn countdown(secs: u64) -> String {
+    if secs >= 86_400 {
+        format!("{}d {}h", secs / 86_400, secs % 86_400 / 3600)
+    } else if secs >= 3600 {
+        format!("{}h {}m", secs / 3600, secs % 3600 / 60)
+    } else {
+        format!("{}:{:02}", secs / 60, secs % 60)
+    }
+}
+
 /// `(edited)` (and later marks) at the end of the text's last line.
 fn trailing_atoms(m: &Message) -> Vec<Atom> {
     let mut out = Vec::new();
@@ -804,6 +839,15 @@ fn trailing_atoms(m: &Message) -> Vec<Atom> {
             look: Look::new(RUBIK, 10., 14., white_a(0.4)),
             kind: Kind::Plain,
         });
+    }
+    // `.dmsg-selfdestruct`: the message dissolves at its NIP-40 expiry; after any attachment, a
+    // line of its own.
+    if m.expiration.is_some() && m.attachments.is_empty() {
+        if !m.edited {
+            out.push(Atom::Text { text: " ".into(), look: base_look(), kind: Kind::Plain });
+        }
+        out.push(Atom::Gap(6.));
+        out.push(Atom::Image { src: SharedString::from("ui/self-destruct-chip.svg").into(), size: 12., drop: -2. });
     }
     out
 }
