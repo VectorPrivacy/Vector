@@ -313,6 +313,8 @@ enum Mode {
 /// What a context menu row does.
 enum MenuAct {
     FoldRail,
+    /// The Messages door's catch-up: every unread DM.
+    ReadAllDms,
     AddFriend,
     Bookmark,
     AppStore,
@@ -1812,6 +1814,11 @@ impl VectorApp {
                 }
             }
             MenuAct::ChatRead(id) => self.chat_mark_read(id, cx),
+            MenuAct::ReadAllDms => {
+                for id in self.unread_dms() {
+                    self.chat_mark_read(id, cx);
+                }
+            }
             MenuAct::ChatUnread(id) => self.chat_mark_unread(id, cx),
             MenuAct::ChatPin(id, pin) => self.chat_pin(id, pin, cx),
             MenuAct::ChatArchive(id, archive) => self.chat_archive(id, archive, cx),
@@ -6036,6 +6043,13 @@ fn rail(
                     .justify_center()
                     .when(!home, |d| d.cursor_pointer())
                     .on_click(move |_, window, cx| on(crate::community::Act::Home, window, cx))
+                    .on_mouse_down(gpui::MouseButton::Right, {
+                        let on = on_c.clone();
+                        move |e, window, cx| {
+                            cx.stop_propagation();
+                            on(crate::community::Act::MessagesMenu(e.position), window, cx)
+                        }
+                    })
                     .child(svg().path("ui/rail-mail.svg").w(px(33.)).h(px(27.)).text_color(c(0xffffff)))
                     .when(any_unread, |d| d.child(slim_badge(c(PRIMARY)).top(px(2.)).left(px(32.)))),
             )
@@ -6051,6 +6065,13 @@ fn rail(
             .on_click({
                 let on = on_c.clone();
                 move |_, window, cx| on(crate::community::Act::Home, window, cx)
+            })
+            .on_mouse_down(gpui::MouseButton::Right, {
+                let on = on_c.clone();
+                move |e, window, cx| {
+                    cx.stop_propagation();
+                    on(crate::community::Act::MessagesMenu(e.position), window, cx)
+                }
             })
             .flex()
             .items_center()
@@ -8987,6 +9008,7 @@ impl VectorApp {
                     v.folded.insert(key);
                 }
             }
+            Act::MessagesMenu(at) => self.messages_menu(at, cx),
             Act::Panel if self.is_slim => {
                 self.slim.details = match self.slim.details.take() {
                     Some(_) => None,
@@ -9080,6 +9102,24 @@ impl VectorApp {
             }
         }
         cx.notify();
+    }
+
+    fn unread_dms(&self) -> Vec<String> {
+        let store = self.store.borrow();
+        let me = store.my_npub.clone();
+        store
+            .chats
+            .iter()
+            .filter(|c| store.listed(c) && c.id != me && store.community_of(&c.id).is_none() && store.unread_count(c) > 0)
+            .map(|c| c.id.clone())
+            .collect()
+    }
+
+    /// `openMessagesMenu`: the Messages door's catch-up.
+    pub(super) fn messages_menu(&mut self, at: gpui::Point<gpui::Pixels>, cx: &mut Context<Self>) {
+        let none = self.unread_dms().is_empty();
+        let rows = vec![(kit::MenuItem::new("Mark All as Read", "check").disabled(none), MenuAct::ReadAllDms)];
+        self.show_menu(at, rows, cx);
     }
 
     fn show_menu(

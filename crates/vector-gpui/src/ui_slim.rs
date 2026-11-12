@@ -506,6 +506,13 @@ impl VectorApp {
             .justify_center()
             .cursor_pointer()
             .on_click(move |_, window, cx| on(crate::community::Act::Home, window, cx))
+            .on_mouse_down(
+                gpui::MouseButton::Right,
+                cx.listener(|app, e: &gpui::MouseDownEvent, _, cx| {
+                    cx.stop_propagation();
+                    app.messages_menu(e.position, cx);
+                }),
+            )
             .child(
                 svg()
                     .path("ui/rail-mail.svg")

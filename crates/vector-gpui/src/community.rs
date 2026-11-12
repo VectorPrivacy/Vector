@@ -18,6 +18,8 @@ pub enum Act {
     Open(String),
     /// Back to Messages.
     Home,
+    /// Right-click on the Messages door.
+    MessagesMenu(gpui::Point<gpui::Pixels>),
     /// An unread DM from the rail.
     Dm(String),
     Channel(String),
