@@ -9,7 +9,7 @@ use gpui::prelude::*;
 use gpui::{AnyElement, App, Entity, FontWeight, ScrollHandle, SharedString, Window, div, px, svg};
 use serde_json::Value;
 
-use crate::commsettings::{block, field_head, heading, hint, input_box, lede, save_btn, short_npub, text_btn};
+use crate::commsettings::{block, field_head, heading, hint, input_box, lede, save_btn, short_npub, tab_strip, text_btn};
 use crate::composer::TextInput;
 use crate::data::Store;
 use crate::settings::{Anchor, Category, NavOn, anchor};
@@ -421,7 +421,7 @@ fn perm_text(name: impl IntoElement, desc: impl Into<SharedString>) -> gpui::Div
         .child(div().text_size(px(12.5)).line_height(px(17.5)).text_color(c(0x7a7a7a)).child(desc.into()))
 }
 
-fn overview(m: &ChannelEditor, on: &OnAct, cx: &App) -> Vec<AnyElement> {
+fn overview(m: &ChannelEditor, narrow: bool, on: &OnAct, cx: &App) -> Vec<AnyElement> {
     let editable = !m.busy;
     let name_len = m.name.read(cx).text().len();
     let name_warn = name_len > NAME_MAX || m.name.read(cx).text().trim().is_empty();
@@ -459,13 +459,13 @@ fn overview(m: &ChannelEditor, on: &OnAct, cx: &App) -> Vec<AnyElement> {
         )
         .into_any_element(),
     );
-    let views = div().flex().gap(px(8.)).children(VIEWS.iter().map(|&(id, name, desc)| {
+    let views = div().flex().when(narrow, |d| d.flex_col()).gap(px(8.)).children(VIEWS.iter().map(|&(id, name, desc)| {
         let on_ = m.view == id;
         div()
             .id(SharedString::from(format!("ce-view-{id}")))
-            .w(px((596. - 16.) / 3.))
+            .map(|d| if narrow { d.w_full() } else { d.w(px((596. - 16.) / 3.)) })
             .min_w_0()
-            .min_h(px(78.))
+            .when(!narrow, |d| d.min_h(px(78.)))
             .px(px(12.))
             .py(px(10.))
             .flex()
@@ -727,7 +727,7 @@ fn permissions(m: &ChannelEditor, store: &Store, on: &OnAct, cx: &App) -> Vec<An
                         .justify_between()
                         .gap(px(12.))
                         .child(
-                            div().text_size(px(14.)).line_height(px(21.)).text_color(c(0x9a9a9a)).child(if synced {
+                            div().flex_1().min_w_0().text_size(px(14.)).line_height(px(21.)).text_color(c(0x9a9a9a)).child(if synced {
                                 "This channel follows its category's permissions. Edit them from the category, or stop syncing to set its own."
                             } else {
                                 "This channel sets its own permissions."
@@ -988,7 +988,9 @@ impl ChannelEditor {
     }
 }
 
-pub fn view(m: &ChannelEditor, store: &Store, on: &OnAct, cx: &App) -> impl IntoElement + use<> {
+/// `vw`: under 760 it is Community Settings' phone sheet, the sections a strip of tabs.
+pub fn view(m: &ChannelEditor, store: &Store, vw: f32, on: &OnAct, cx: &App) -> impl IntoElement + use<> {
+    let compact = vw <= 760.;
     let sections = m.sections();
     let section = sections.iter().find(|s| s.id == m.section).unwrap_or(&sections[0]);
     let active = m
@@ -1056,9 +1058,28 @@ pub fn view(m: &ChannelEditor, store: &Store, on: &OnAct, cx: &App) -> impl Into
         anchor: Rc::new(move |(s, x), w, cx| b(Act::Anchor(s, x), w, cx)),
         clear: Rc::new(move |_, w, cx| d(Act::ClearSearch, w, cx)),
     };
-    let nav = crate::settings::section_nav(&sections, section.id, &[], active, &m.search, head, footer, 249., 0x0b0b0b, &nav_on, cx);
+    let nav = if compact {
+        let pick = on.clone();
+        let trash = (m.is_category || !m.primary).then(|| {
+            div()
+                .id("ce-delete")
+                .h(px(38.))
+                .px(px(11.))
+                .flex()
+                .items_center()
+                .rounded(px(8.))
+                .hover(|d| d.bg(c(0x151515)))
+                .when(m.busy, |d| d.opacity(0.45))
+                .when(!m.busy, |d| d.cursor_pointer().on_click(click(on, || Act::Delete)))
+                .child(svg().path("icons/trash.svg").size(px(17.)).text_color(c(crate::timeline::DANGER)))
+                .into_any_element()
+        });
+        tab_strip(&sections, section.id, Rc::new(move |id, w, cx| pick(Act::Section(id), w, cx)), trash)
+    } else {
+        crate::settings::section_nav(&sections, section.id, &[], active, &m.search, head, footer, 249., 0x0b0b0b, &nav_on, cx)
+    };
     let blocks = match section.id {
-        "overview" => overview(m, on, cx),
+        "overview" => overview(m, vw <= 520., on, cx),
         _ => permissions(m, store, on, cx),
     };
     let close = on.clone();
@@ -1120,19 +1141,19 @@ pub fn view(m: &ChannelEditor, store: &Store, on: &OnAct, cx: &App) -> impl Into
                 .pt(px(12.))
                 .pb(px(140.))
                 .when(m.busy, |d| d.opacity(0.6))
-                .children(blocks.into_iter().map(|b| div().w_full().max_w(px(720.)).mx_auto().px(px(62.)).child(b))),
+                .when(compact, |d| d.pt(px(4.)))
+                .children(blocks.into_iter().map(|b| {
+                    div().w_full().map(|d| if compact { d.px(px(18.)) } else { d.max_w(px(720.)).mx_auto().px(px(62.)) }).child(b)
+                })),
         )
         .children(save_bar(m, on, cx));
     let card = div()
         .id("ce-card")
         .w_full()
-        .max_w(px(1182.))
         .h_full()
-        .max_h(px(862.))
         .flex()
-        .rounded(px(18.))
-        .border_1()
-        .border_color(c(0x2c2e2f))
+        .when(compact, |d| d.flex_col())
+        .when(!compact, |d| d.max_w(px(1182.)).max_h(px(862.)).rounded(px(18.)).border_1().border_color(c(0x2c2e2f)))
         .bg(c(0x050505))
         .overflow_hidden()
         .font_family(RUBIK)
@@ -1150,7 +1171,7 @@ pub fn view(m: &ChannelEditor, store: &Store, on: &OnAct, cx: &App) -> impl Into
             .flex()
             .items_center()
             .justify_center()
-            .p(px(25.))
+            .when(!compact, |d| d.p(px(25.)))
             .occlude()
             .on_click(move |_, w, cx| dismiss(Act::Close, w, cx))
             .child(card),

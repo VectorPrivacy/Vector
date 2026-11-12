@@ -1624,7 +1624,8 @@ pub fn view(m: &CommSettings, store: &Store, compact: bool, on: &OnAct, cx: &App
         clear: Rc::new(move |_, w, cx| d(Act::ClearSearch, w, cx)),
     };
     let nav = if compact {
-        tab_strip(&sections, section.id, on)
+        let pick = on.clone();
+        tab_strip(&sections, section.id, Rc::new(move |id, w, cx| pick(Act::Section(id), w, cx)), None)
     } else {
         crate::settings::section_nav(
         &sections,
@@ -1763,7 +1764,12 @@ pub fn view(m: &CommSettings, store: &Store, compact: bool, on: &OnAct, cx: &App
 }
 
 /// `.cs-nav` on a phone: the sections side by side in a strip that scrolls.
-fn tab_strip(sections: &[Category], current: &str, on: &OnAct) -> AnyElement {
+pub(crate) fn tab_strip(
+    sections: &[Category],
+    current: &str,
+    pick: Rc<dyn Fn(&'static str, &mut Window, &mut App)>,
+    tail: Option<AnyElement>,
+) -> AnyElement {
     let mut strip = div()
         .id("cs-tabs")
         .flex()
@@ -1774,7 +1780,7 @@ fn tab_strip(sections: &[Category], current: &str, on: &OnAct) -> AnyElement {
     for s in sections {
         let here = s.id == current;
         let id = s.id;
-        let on = on.clone();
+        let pick = pick.clone();
         strip = strip.child(
             div()
                 .id(SharedString::from(format!("cs-tab-{id}")))
@@ -1791,7 +1797,7 @@ fn tab_strip(sections: &[Category], current: &str, on: &OnAct) -> AnyElement {
                 .cursor_pointer()
                 .when(here, |d| d.bg(c(0x1b1b1b)).text_color(c(0xffffff)))
                 .when(!here, |d| d.text_color(c(0xb2b2b2)).hover(|d| d.bg(c(0x141414))))
-                .on_click(move |_, w, cx| on(Act::Section(id), w, cx))
+                .on_click(move |_, w, cx| pick(id, w, cx))
                 .child(
                     svg()
                         .path(SharedString::from(format!("icons/{}.svg", s.icon)))
@@ -1807,7 +1813,7 @@ fn tab_strip(sections: &[Category], current: &str, on: &OnAct) -> AnyElement {
         .bg(c(0x0b0b0b))
         .border_b_1()
         .border_color(c(0x262626))
-        .child(strip)
+        .child(strip.children(tail.map(|t| div().ml_auto().flex_shrink_0().child(t))))
         .into_any_element()
 }
 

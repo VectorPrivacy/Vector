@@ -5768,7 +5768,7 @@ impl Render for VectorApp {
                     app.update(cx, |app, cx| app.on_channel_editor(act, window, cx))
                         .ok();
                 });
-                crate::chaneditor::view(m, &store, &on, cx)
+                crate::chaneditor::view(m, &store, f32::from(window.viewport_size().width), &on, cx)
             }))
             .children(self.moderation.as_ref().map(|m| {
                 let app = cx.entity().downgrade();
