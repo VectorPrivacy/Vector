@@ -147,6 +147,7 @@ impl VectorApp {
 
     /// Out of the chat on screen: a community of many channels to its drawer, else the list.
     pub(super) fn slim_back(&mut self, cx: &mut Context<Self>) {
+        self.slim.details = None;
         let multi = self.community.as_ref().is_some_and(|v| {
             self.store.borrow().community(&v.id).is_some_and(|c| c.channels.len() > 1)
         });
