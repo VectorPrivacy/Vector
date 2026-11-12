@@ -37,7 +37,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - platform: macos-15
+          # The arm64 pool rarely takes a job; the release builds use this one too.
+          - platform: macos-26-intel
             features: ''
           # No system FFmpeg on the runner: video attachments draw as files here for now.
           - platform: windows-2022
