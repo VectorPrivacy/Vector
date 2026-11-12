@@ -579,6 +579,29 @@ pub fn close(label: &str) {
     host::close(label);
 }
 
+/// A peer's realtime signal, from a DM or a Community channel: core persists it and dials the
+/// peer into our session; the lobby follows who is playing now.
+pub async fn on_peer_signal(chat_id: &str, npub: &str, topic_id: &str, node_addr: Option<&str>, event_id: &str, created_at: u64) {
+    let Some(sig) = vector_core::xdc::on_signal(chat_id, npub, topic_id, node_addr, event_id, created_at).await else {
+        vector_core::log_warn!("[WEBXDC] Dropped a malformed peer signal for topic {}", topic_id);
+        return;
+    };
+    // History stays persisted; a replayed or out-of-order signal must not move the lobby.
+    if !sig.current {
+        return;
+    }
+    let Ok(topic) = realtime::decode_topic_id(topic_id) else { return };
+    let apps = core::apps();
+    if node_addr.is_some() {
+        apps.add_session_peer(topic, npub.to_string()).await;
+    } else {
+        apps.remove_session_peer(&topic, npub).await;
+    }
+    let playing = apps.has_realtime_channel_for_topic(&topic).await;
+    let peers = apps.get_session_peers(&topic).await;
+    emit_lobby(&sig.topic, peers, playing);
+}
+
 fn emit_lobby(topic: &str, peers: Vec<String>, is_active: bool) {
     vector_core::traits::emit_event_json(
         "miniapp_realtime_status",
