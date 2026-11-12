@@ -20,6 +20,8 @@ pub(super) struct GridApp {
     pub icon: Option<PathBuf>,
     pub categories: String,
     pub last: i64,
+    /// Its App Store id, which keys its permission prompt.
+    pub market: Option<String>,
 }
 
 impl GridApp {
@@ -106,6 +108,7 @@ impl VectorApp {
                     icon,
                     categories: h.categories,
                     last: h.last_opened_at,
+                    market: h.marketplace_id,
                 });
             }
             apps.sort_by(|a, b| b.last.cmp(&a.last));
@@ -633,15 +636,31 @@ impl VectorApp {
         self.attach = None;
         cx.notify();
         let chat = self.open.as_ref().map(|s| s.to_string());
-        let src = app.src.clone();
-        self.realtime_gate(
-            src,
-            move |this, cx| match chat.filter(|_| invite) {
-                Some(chat) => this.invite_miniapp(app, chat, cx),
-                None => this.play_solo(app.src, cx),
-            },
-            cx,
-        );
+        match chat.filter(|_| invite) {
+            Some(chat) => self.gated_invite(app, chat, cx),
+            None => {
+                let Some(id) = app.market.clone() else {
+                    return self.realtime_gate(app.src.clone(), move |this, cx| this.play_solo(app.src, cx), cx);
+                };
+                self.perm_gate(
+                    backend::market::Ask::App(id),
+                    move |this, cx| this.realtime_gate(app.src.clone(), move |this, cx| this.play_solo(app.src, cx), cx),
+                    cx,
+                );
+            }
+        }
+    }
+
+    /// `inviteMiniAppToChat`'s consents: permissions, then the network, before anything is sent.
+    pub(super) fn gated_invite(&mut self, app: GridApp, chat: String, cx: &mut Context<Self>) {
+        let market = app.market.clone();
+        let go = move |this: &mut Self, cx: &mut Context<Self>| {
+            this.realtime_gate(app.src.clone(), move |this, cx| this.invite_miniapp(app, chat, cx), cx)
+        };
+        match market {
+            Some(id) => self.perm_gate(backend::market::Ask::App(id), go, cx),
+            None => go(self, cx),
+        }
     }
 
     /// `confirmMiniAppNetwork`: off Clearnet, a multiplayer app connects only once the account agrees.

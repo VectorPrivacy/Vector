@@ -198,6 +198,8 @@ impl VectorApp {
             Act::Show(v) => n.show(v, cx),
             Act::Details(id) => {
                 n.open_details(id.clone(), cx);
+                self.nexus_perms(&id);
+                let Some(n) = self.nexus.as_mut() else { return };
                 if self.live
                     && let Some(npub) = n.app(&id).map(|a| a.publisher.clone())
                     && !self.store.borrow().profiles.contains_key(&npub)
@@ -260,6 +262,17 @@ impl VectorApp {
             Act::ClearSearch => {
                 n.search.update(cx, |s, cx| s.set_text("", cx));
                 n.turned = std::time::Instant::now();
+            }
+            Act::Perm(perm, on) => self.nexus_set_perm(perm, on, cx),
+            Act::ResetPerms => {
+                if let Some(app) = n.details.as_ref().and_then(|id| n.app(id)).cloned() {
+                    if self.live {
+                        let _ = backend::market::revoke_permissions(&app.blossom_hash);
+                    } else {
+                        FIXTURE_GRANTS.with(|g| g.borrow_mut().insert(app.blossom_hash.clone(), String::new()));
+                    }
+                    self.nexus_perms(&app.id);
+                }
             }
             Act::Menu(id, at) => {
                 self.menu = Some((at, vec![crate::kit::MenuItem::new("Copy Link", "share")], vec![super::MenuAct::NexusLink(id)]));
@@ -325,26 +338,31 @@ impl VectorApp {
         .detach();
     }
 
+    /// `openMarketplaceApp`, once its permissions are settled.
+    fn nexus_launch(&mut self, app: backend::market::MarketplaceApp, cx: &mut Context<Self>) {
+        let open_id = app.id.clone();
+        self.nexus_run(
+            app.id.clone(),
+            Kind::Launching,
+            crate::nexus::launching_text(&app),
+            crate::nexus::action_text(&app),
+            async move { backend::market::open(open_id).await.map(|_| None) },
+            |this, _, _| {
+                if let Some(n) = this.nexus.as_mut() {
+                    n.played = backend::market::plays();
+                }
+            },
+            cx,
+        );
+    }
+
     /// `handleAppInstallOrPlay`: update if one waits, play if installed, otherwise install.
     fn nexus_card(&mut self, id: String, cx: &mut Context<Self>) {
         let Some(app) = self.nexus.as_ref().and_then(|n| n.app(&id)).cloned() else { return };
         if app.update_available {
             self.nexus_update(id, cx);
         } else if crate::nexus::is_installed(&app) {
-            let open_id = id.clone();
-            self.nexus_run(
-                id,
-                Kind::Launching,
-                crate::nexus::launching_text(&app),
-                crate::nexus::action_text(&app),
-                async move { backend::market::open(open_id).await.map(|_| None) },
-                |this, _, _| {
-                    if let Some(n) = this.nexus.as_mut() {
-                        n.played = backend::market::plays();
-                    }
-                },
-                cx,
-            );
+            self.perm_gate(backend::market::Ask::App(id.clone()), move |this, cx| this.nexus_launch(app, cx), cx);
         } else {
             let version = app.version.clone();
             let install_id = id.clone();
@@ -364,6 +382,7 @@ impl VectorApp {
                             a.update_available = false;
                         });
                     }
+                    this.nexus_perms(&patch_id);
                 },
                 cx,
             );
@@ -575,8 +594,9 @@ impl VectorApp {
             icon,
             categories: app.categories.join(","),
             last: 0,
+            market: Some(id),
         };
-        self.invite_miniapp(grid, chat, cx);
+        self.gated_invite(grid, chat, cx);
     }
 
     pub(super) fn nexus_picker_view(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -770,5 +790,225 @@ impl VectorApp {
             return None;
         }
         Some(std::time::Duration::from_secs(7).saturating_sub(n.spot_since.elapsed()))
+    }
+}
+
+thread_local! {
+    /// Fixture runs keep grants in memory: bundle hash to its granted list, present once prompted.
+    static FIXTURE_GRANTS: std::cell::RefCell<std::collections::HashMap<String, String>> = Default::default();
+}
+
+/// A first launch's permission prompt and the launch it holds.
+pub(super) struct PermPrompt {
+    prompt: backend::market::Prompt,
+    on: Vec<bool>,
+    then: Box<dyn FnOnce(&mut VectorApp, &mut Context<VectorApp>)>,
+}
+
+impl VectorApp {
+    /// `showPermissionPrompt` ahead of `then`, when the app asks for anything it hasn't been asked before.
+    pub(super) fn perm_gate(
+        &mut self,
+        ask: backend::market::Ask,
+        then: impl FnOnce(&mut Self, &mut Context<Self>) + 'static,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.live {
+            let prompt = match &ask {
+                backend::market::Ask::App(id) => self.nexus.as_ref().and_then(|n| n.app(id)).and_then(|a| {
+                    backend::market::prompt_of(a, |h| FIXTURE_GRANTS.with(|g| g.borrow().contains_key(h)))
+                }),
+                backend::market::Ask::File(_) => None,
+            };
+            return match prompt {
+                Some(p) => self.show_perm_prompt(p, Box::new(then), cx),
+                None => then(self, cx),
+            };
+        }
+        let rx = backend::run(backend::market::prompt_for(ask));
+        cx.spawn(async move |this, cx| {
+            let prompt = rx.await.ok().flatten();
+            this.update(cx, |this, cx| match prompt {
+                Some(p) => this.show_perm_prompt(p, Box::new(then), cx),
+                None => then(this, cx),
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn show_perm_prompt(
+        &mut self,
+        prompt: backend::market::Prompt,
+        then: Box<dyn FnOnce(&mut VectorApp, &mut Context<VectorApp>)>,
+        cx: &mut Context<Self>,
+    ) {
+        let on = vec![false; prompt.items.len()];
+        self.perm_prompt = Some(PermPrompt { prompt, on, then });
+        cx.notify();
+    }
+
+    /// Continue saves every choice, so the prompt never shows for this bundle again.
+    fn perm_answer(&mut self, allow: bool, cx: &mut Context<Self>) {
+        let Some(p) = self.perm_prompt.take() else { return };
+        cx.notify();
+        if !allow {
+            return;
+        }
+        let perms: Vec<(String, bool)> = p.prompt.items.iter().map(|i| i.0.clone()).zip(p.on.iter().copied()).collect();
+        if self.live {
+            if let Err(e) = backend::market::set_permissions(&p.prompt.hash, &perms) {
+                log::warn!("saving permissions: {e}");
+            }
+        } else {
+            let granted: Vec<&str> = perms.iter().filter(|p| p.1).map(|p| p.0.as_str()).collect();
+            FIXTURE_GRANTS.with(|g| g.borrow_mut().insert(p.prompt.hash.clone(), granted.join(",")));
+        }
+        if let Some(id) = self.nexus.as_ref().and_then(|n| n.details.clone()) {
+            self.nexus_perms(&id);
+        }
+        (p.then)(self, cx);
+    }
+
+    /// `loadAppPermissions`: the open page's toggles, keyed by its bundle hash.
+    pub(super) fn nexus_perms(&mut self, id: &str) {
+        let live = self.live;
+        let Some(n) = self.nexus.as_mut() else { return };
+        let Some(app) = n.app(id) else { return };
+        if app.requested_permissions.trim().is_empty() {
+            n.perms = None;
+            return;
+        }
+        let rows = if app.blossom_hash.is_empty() {
+            Err("No permissions available".to_string())
+        } else if live {
+            backend::market::granted(&app.blossom_hash)
+                .map(|g| backend::market::permission_rows(&app.requested_permissions, &g))
+                .map_err(|_| "Failed to load permissions".to_string())
+        } else {
+            let g = FIXTURE_GRANTS.with(|g| g.borrow().get(&app.blossom_hash).cloned().unwrap_or_default());
+            Ok(backend::market::permission_rows(&app.requested_permissions, &g))
+        };
+        n.perms = Some((id.to_string(), rows));
+    }
+
+    /// `setAppPermission`: flip it in place, or reload the truth when the write fails.
+    fn nexus_set_perm(&mut self, perm: String, on: bool, cx: &mut Context<Self>) {
+        let live = self.live;
+        let Some(n) = self.nexus.as_mut() else { return };
+        let Some(app) = n.details.as_ref().and_then(|id| n.app(id)).cloned() else { return };
+        let saved = if live {
+            backend::market::set_permission(&app.blossom_hash, &perm, on).is_ok()
+        } else {
+            FIXTURE_GRANTS.with(|g| {
+                let mut g = g.borrow_mut();
+                let list = g.entry(app.blossom_hash.clone()).or_default();
+                let mut set: Vec<String> = list.split(',').filter(|s| !s.is_empty() && *s != perm).map(String::from).collect();
+                if on {
+                    set.push(perm.clone());
+                }
+                *list = set.join(",");
+            });
+            true
+        };
+        if !saved {
+            return self.nexus_perms(&app.id);
+        }
+        if let Some((_, Ok(rows))) = n.perms.as_mut() {
+            for r in rows.iter_mut().filter(|r| r.0 == perm) {
+                r.3 = on;
+            }
+        }
+        cx.notify();
+    }
+
+    pub(super) fn perm_prompt_view(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let p = self.perm_prompt.as_ref()?;
+        let me = cx.entity().downgrade();
+        let answer = |allow: bool| {
+            let me = me.clone();
+            move |_: &gpui::ClickEvent, _: &mut Window, cx: &mut gpui::App| {
+                me.update(cx, |a, cx| a.perm_answer(allow, cx)).ok();
+            }
+        };
+        let mut list = div()
+            .id("ma-perm-list")
+            .flex()
+            .flex_col()
+            .max_h(px(0.46 * 900.))
+            .overflow_y_scroll()
+            .rounded(px(14.))
+            .bg(c(0x0c0c0c))
+            .border_1()
+            .border_color(c(0x1f1f1f));
+        for (i, ((id, label, sub), on)) in p.prompt.items.iter().zip(p.on.iter().copied()).enumerate() {
+            let flip = {
+                let me = me.clone();
+                move |_: &gpui::ClickEvent, _: &mut Window, cx: &mut gpui::App| {
+                    me.update(cx, |a, cx| {
+                        if let Some(v) = a.perm_prompt.as_mut().and_then(|p| p.on.get_mut(i)) {
+                            *v = !*v;
+                        }
+                        cx.notify();
+                    })
+                    .ok();
+                }
+            };
+            list = list.child(
+                div()
+                    .id(SharedString::from(format!("ma-perm-{id}")))
+                    .flex()
+                    .items_center()
+                    .gap(px(12.))
+                    .px(px(14.))
+                    .py(px(12.))
+                    .cursor_pointer()
+                    .when(i > 0, |d| d.border_t_1().border_color(c(0x1f1f1f)))
+                    .on_click(flip.clone())
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(2.))
+                            .flex_1()
+                            .min_w_0()
+                            .child(div().text_size(px(15.)).line_height(px(22.5)).font_weight(FontWeight::MEDIUM).child(label.clone()))
+                            .child(div().text_size(px(12.5)).line_height(px(17.5)).text_color(white_a(0.55)).child(sub.clone())),
+                    )
+                    .child(crate::settings::toggle(SharedString::from(format!("ma-perm-t-{id}")), on, true, flip)),
+            );
+        }
+        let card = crate::security::card("ma-perm")
+            .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .child(crate::security::head("icons/shield-filled.svg", format!("{} asks for access", p.prompt.name).into(), None))
+            .child(crate::security::lead(
+                "Turn on what you're happy to share. It may work with less, and you can change these later on its App Store page.",
+                false,
+            ))
+            .child(list)
+            .child(
+                crate::security::actions()
+                    .child(crate::security::button("ma-perm-go", "Continue", false, true, answer(true)))
+                    .child(crate::security::button("ma-perm-cancel", "Cancel", true, true, answer(false))),
+            );
+        let backdrop = cx.listener(|a, _: &gpui::MouseDownEvent, _, cx| a.perm_answer(false, cx));
+        Some(
+            gpui::deferred(
+                div()
+                    .id("ma-perm-overlay")
+                    .absolute()
+                    .inset_0()
+                    .p(px(16.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .bg(ca(0, 0, 0, 0.88))
+                    .occlude()
+                    .on_mouse_down(gpui::MouseButton::Left, backdrop)
+                    .child(card),
+            )
+            .with_priority(10)
+            .into_any_element(),
+        )
     }
 }

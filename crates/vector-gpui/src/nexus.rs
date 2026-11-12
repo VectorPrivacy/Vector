@@ -96,6 +96,8 @@ pub struct Nexus {
     pub spot_armed: Option<Instant>,
     /// Play with Friends: the app going out, and the chat search.
     pub picker: Option<(String, Entity<TextInput>)>,
+    /// The open page's permission toggles: its app id, then `(id, label, description, granted)` rows.
+    pub perms: Option<(String, Result<Vec<(String, String, String, bool)>, String>)>,
 }
 
 pub enum Act {
@@ -118,6 +120,8 @@ pub enum Act {
     CopyLink(String),
     ClearSearch,
     Menu(String, gpui::Point<gpui::Pixels>),
+    Perm(String, bool),
+    ResetPerms,
 }
 
 pub type OnAct = Rc<dyn Fn(Act, &mut Window, &mut App)>;
@@ -364,6 +368,7 @@ impl Nexus {
             now_ms: chrono::Utc::now().timestamp_millis(),
             spot_armed: None,
             picker: None,
+            perms: None,
         }
     }
 
@@ -1887,6 +1892,9 @@ fn details(n: &Nexus, app: &MarketplaceApp, publisher: Option<&(SharedString, Op
                 .child(prose(log.clone())),
         );
     }
+    if installed && !app.requested_permissions.trim().is_empty() {
+        page = page.child(permissions(n, app, on));
+    }
     let pub_npub = app.publisher.clone();
     let avatar = match publisher.and_then(|p| p.1.clone()) {
         Some(p) => img(p).size_full().object_fit(ObjectFit::Cover).into_any_element(),
@@ -2227,4 +2235,71 @@ pub fn view(
             },
         )
         .into_any_element()
+}
+
+/// The details page's Permissions section: what the app may use, switchable any time.
+fn permissions(n: &Nexus, app: &MarketplaceApp, on: &OnAct) -> gpui::Div {
+    let hint = |t: String| div().text_size(px(13.)).line_height(px(18.85)).text_color(c(MUTE)).child(t);
+    let row = || div().flex().items_center().gap(px(12.)).min_h(px(52.)).px(px(16.)).py(px(10.));
+    let mut list = div()
+        .flex()
+        .flex_col()
+        .overflow_hidden()
+        .rounded(px(14.))
+        .bg(c(RAISE))
+        .border_1()
+        .border_color(c(LINE));
+    let mut any = false;
+    match n.perms.as_ref().filter(|p| p.0 == app.id).map(|p| &p.1) {
+        None => list = list.child(row().child(hint("Loading permissions…".into()))),
+        Some(Err(e)) => list = list.child(row().child(hint(e.clone()))),
+        Some(Ok(items)) => {
+            any = !items.is_empty();
+            for (i, (id, label, sub, granted)) in items.iter().enumerate() {
+                let (pid, on_now) = (id.clone(), *granted);
+                let on = on.clone();
+                list = list.child(
+                    row()
+                        .when(i > 0, |d| d.border_t_1().border_color(c(LINE_2)))
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .flex_1()
+                                .min_w_0()
+                                .child(div().truncate().text_size(px(15.)).line_height(px(19.)).text_color(c(0xffffff)).child(label.clone()))
+                                .child(div().text_size(px(12.)).line_height(px(16.)).text_color(c(MUTE)).child(sub.clone())),
+                        )
+                        .child(crate::settings::toggle(
+                            SharedString::from(format!("nx-perm-{id}")),
+                            *granted,
+                            false,
+                            move |_, w, cx| on(Act::Perm(pid.clone(), !on_now), w, cx),
+                        )),
+                );
+            }
+        }
+    }
+    div()
+        .mt(px(32.))
+        .flex()
+        .flex_col()
+        .child(h3("Permissions").mb(px(10.)))
+        .child(hint(format!("What {} may use. Turn any off at any time.", app.name)).mt(px(-4.)).mb(px(12.)))
+        .child(list)
+        .when(any, |d| {
+            d.child(
+                div()
+                    .id("nx-perm-reset")
+                    .mt(px(12.))
+                    .self_start()
+                    .text_size(px(13.))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(c(DANGER))
+                    .cursor_pointer()
+                    .hover(|s| s.opacity(0.75))
+                    .on_click(click(on, || Act::ResetPerms))
+                    .child("Reset Permissions"),
+            )
+        })
 }

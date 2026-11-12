@@ -87,3 +87,75 @@ pub async fn preload() {
 pub async fn reset() {
     MARKETPLACE_STATE.write().await.clear_for_session_reset();
 }
+
+/// What a launch asks the permission prompt about.
+pub enum Ask {
+    App(String),
+    File(String),
+}
+
+/// A first launch's prompt: the bundle hash it's keyed by, and `(id, label, description)` rows.
+pub struct Prompt {
+    pub hash: String,
+    pub name: String,
+    pub items: Vec<(String, String, String)>,
+}
+
+/// `checkMiniAppPermissions` / `checkChatMiniAppPermissions`: a prompt only on an app's first
+/// launch of this bundle, and only when it asks for anything.
+pub async fn prompt_for(ask: Ask) -> Option<Prompt> {
+    let app = match ask {
+        Ask::App(id) => MARKETPLACE_STATE.read().await.get_app(&id).cloned()?,
+        Ask::File(path) => {
+            let hash = crate::miniapp::info(path).await.ok()?.hash;
+            if vector_core::db::miniapps::has_miniapp_permission_prompt(&hash).unwrap_or(true) {
+                return None;
+            }
+            MARKETPLACE_STATE.read().await.get_app_by_hash(&hash).cloned()?
+        }
+    };
+    prompt_of(&app, |h| vector_core::db::miniapps::has_miniapp_permission_prompt(h).unwrap_or(true))
+}
+
+pub fn prompt_of(app: &MarketplaceApp, prompted: impl Fn(&str) -> bool) -> Option<Prompt> {
+    if app.requested_permissions.trim().is_empty() || app.blossom_hash.is_empty() || prompted(&app.blossom_hash) {
+        return None;
+    }
+    let items: Vec<_> = permission_rows(&app.requested_permissions, "")
+        .into_iter()
+        .map(|(id, label, sub, _)| (id, label, sub))
+        .collect();
+    Some(Prompt { hash: app.blossom_hash.clone(), name: app.name.clone(), items })
+}
+
+/// The requested permissions this build knows, in request order: `(id, label, description, granted)`.
+pub fn permission_rows(requested: &str, granted: &str) -> Vec<(String, String, String, bool)> {
+    let known = vector_core::webxdc_permissions::get_all_permission_info();
+    let granted: Vec<&str> = granted.split(',').filter(|s| !s.is_empty()).collect();
+    requested
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .filter_map(|id| {
+            let info = known.iter().find(|p| p.id == id)?;
+            Some((id.to_string(), info.label.clone(), info.description.clone(), granted.contains(&id)))
+        })
+        .collect()
+}
+
+pub fn granted(hash: &str) -> Result<String, String> {
+    vector_core::db::miniapps::get_miniapp_granted_permissions(hash)
+}
+
+pub fn set_permissions(hash: &str, perms: &[(String, bool)]) -> Result<(), String> {
+    let refs: Vec<(&str, bool)> = perms.iter().map(|(p, g)| (p.as_str(), *g)).collect();
+    vector_core::db::miniapps::set_miniapp_permissions(hash, &refs)
+}
+
+pub fn set_permission(hash: &str, perm: &str, granted: bool) -> Result<(), String> {
+    vector_core::db::miniapps::set_miniapp_permission(hash, perm, granted)
+}
+
+pub fn revoke_permissions(hash: &str) -> Result<(), String> {
+    vector_core::db::miniapps::revoke_all_miniapp_permissions(hash)
+}

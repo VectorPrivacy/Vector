@@ -84,6 +84,7 @@ pub struct VectorApp {
     mini: Option<miniapps_ops::MiniPanel>,
     nexus: Option<crate::nexus::Nexus>,
     launch: Option<miniapps_ops::Launch>,
+    perm_prompt: Option<nexus_ops::PermPrompt>,
     file_preview: Option<Entity<crate::filepreview::FilePreview>>,
     /// The avatar cropper, and the picked file it cuts.
     cropper: Option<(Entity<crate::cropper::Cropper>, std::path::PathBuf)>,
@@ -697,6 +698,7 @@ impl VectorApp {
             mini: None,
             nexus: None,
             launch: None,
+            perm_prompt: None,
             file_preview: None,
             profile: None,
             toast: None,
@@ -3335,7 +3337,13 @@ impl VectorApp {
             (None, Some(h)) => vector_core::media::MediaRef::held(&h),
             (None, None) => return self.show_toast("This app isn't on this device any more", cx),
         };
-        self.realtime_gate(src.clone(), move |this, cx| this.launch_miniapp_now(msg_id, src, att, cx), cx);
+        self.perm_gate(
+            backend::market::Ask::File(src.clone()),
+            move |this, cx| {
+                this.realtime_gate(src.clone(), move |this, cx| this.launch_miniapp_now(msg_id, src, att, cx), cx)
+            },
+            cx,
+        );
     }
 
     fn launch_miniapp_now(&mut self, msg_id: String, file: String, att: vector_core::Attachment, cx: &mut Context<Self>) {
@@ -3706,6 +3714,7 @@ impl Render for VectorApp {
         let popout = self.popout_view(window, cx);
         let launch = self.launch_view(cx);
         let pick = self.nexus_picker_view(cx);
+        let perm = self.perm_prompt_view(cx);
         match self.rec.due() {
             Some(crate::recorder::Due::Locked) => self.rec.locked(),
             Some(crate::recorder::Due::Idle) => self.rec.idle(),
@@ -4042,6 +4051,7 @@ impl Render for VectorApp {
             .children(popout)
             .children(launch)
             .children(pick)
+            .children(perm)
             .children(self.toast_view(window))
             .children(
                 self.viewer
@@ -10165,6 +10175,9 @@ impl VectorApp {
             return false;
         }
         if self.menu.take().is_some()
+            || self.perm_prompt.take().is_some()
+            || self.launch.take().is_some()
+            || self.nexus.as_mut().and_then(|n| n.picker.take()).is_some()
             || self.pack_details.take().is_some()
             || self.embed_modal.take().is_some()
             || self.invite_details.take().is_some()

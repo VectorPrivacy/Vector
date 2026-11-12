@@ -3415,7 +3415,7 @@
    "local_path": "/tmp/chess.xdc",
    "installed_version": "1.0.0",
    "update_available": false,
-   "requested_permissions": ""
+   "requested_permissions": "microphone,fullscreen,clipboard-write"
   },
   {
    "id": "tetra",
