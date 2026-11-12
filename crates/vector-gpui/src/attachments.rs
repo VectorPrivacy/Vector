@@ -732,7 +732,8 @@ pub fn xdc_url_card(ctx: &Ctx, m: &Message) -> Option<AnyElement> {
             file_box_on(ctx, &media, m, &att, FileState::Remote, Some(&label), tap(Act::XdcUrl(url)))
         }
     };
-    Some(div().flex().flex_col().items_start().child(el).into_any_element())
+    // The trailing whitespace after Tauri's card wrapper lays a 6px line under it.
+    Some(div().pb(px(6.)).flex().flex_col().items_start().child(el).into_any_element())
 }
 
 fn file_box(
