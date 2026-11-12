@@ -1615,6 +1615,7 @@ fn notifications_block(s: &Settings, on: &OnAct) -> AnyElement {
     let choice = s.sound_choice();
     let preview = div()
         .id("notif-preview")
+        .tooltip(crate::kit::tooltip("Preview Sound"))
         .w(px(28.))
         .h(px(36.))
         .flex()
@@ -1701,6 +1702,7 @@ fn notifications_block(s: &Settings, on: &OnAct) -> AnyElement {
         col = col.child(
             div()
                 .id("notif-sound-chip")
+                .tooltip(crate::kit::tooltip("Click to change sound"))
                 .mt(px(5.))
                 .mb(px(15.))
                 .flex()
@@ -1736,6 +1738,7 @@ fn notifications_block(s: &Settings, on: &OnAct) -> AnyElement {
                 .child(
                     div()
                         .id("notif-sound-clear")
+                        .tooltip(crate::kit::tooltip("Remove custom sound"))
                         .size(px(20.))
                         .flex_shrink_0()
                         .flex()

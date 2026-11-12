@@ -589,6 +589,7 @@ fn card(r: &Routing, viewed: &str, on: &OnAct) -> AnyElement {
         body = body.child(
             div()
                 .id("tor-attribution")
+                .tooltip(crate::kit::tooltip("Visit torproject.org"))
                 .mt(px(6.))
                 .h(px(23.))
                 .opacity(0.85)
@@ -877,6 +878,7 @@ fn circuits(r: &Routing, on: &OnAct) -> AnyElement {
     let loading = r.circuits.phase == Load::Loading;
     let refresh = div()
         .id("tor-circuits-refresh")
+        .tooltip(crate::kit::tooltip("Build a new circuit"))
         .flex()
         .items_center()
         .gap(px(6.))
@@ -1397,6 +1399,7 @@ fn outproxies(r: &Routing, cfg: &Value, v: &Value, on: &OnAct) -> AnyElement {
         let mv = |dir: isize, path: &'static str, can: bool| {
             div()
                 .id(SharedString::from(format!("op-move-{i}-{dir}")))
+                .tooltip(crate::kit::tooltip(if dir < 0 { "Move up" } else { "Move down" }))
                 .w(px(22.))
                 .h(px(17.))
                 .flex()
@@ -1468,6 +1471,7 @@ fn outproxies(r: &Routing, cfg: &Value, v: &Value, on: &OnAct) -> AnyElement {
                 d.child(
                     div()
                         .id(SharedString::from(format!("op-remove-{i}")))
+                        .tooltip(crate::kit::tooltip("Remove"))
                         .size(px(24.))
                         .flex_shrink_0()
                         .flex()
