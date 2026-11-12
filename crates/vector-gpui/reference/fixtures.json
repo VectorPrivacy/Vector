@@ -3883,5 +3883,64 @@
    "camera": false,
    "can_video": false
   }
+ },
+ "pins_demo": {
+  "a0f367a05f629b3bb09ee8f1561bf03267962217d9ff6fc7ce3b235235702bc1": [
+   {
+    "rumor_id": "7a3c760d48ddcb81b5b84767bdb6888628fe32badc3075ee364324255c1f53a1",
+    "author": "2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b",
+    "kind": 9,
+    "content": "Welcome to the new community!",
+    "tags": [],
+    "epoch": null,
+    "ms": 1794360000000,
+    "created_at": 1794360000,
+    "wrap_hint": null,
+    "edited": null
+   },
+   {
+    "rumor_id": "c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+    "author": "2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b",
+    "kind": 9,
+    "content": "**Community rules**\n1. Be kind to each other\n2. No spam or self-promotion\n3. Keep it on topic",
+    "tags": [],
+    "epoch": null,
+    "ms": 1793000000000,
+    "created_at": 1793000000,
+    "wrap_hint": null,
+    "edited": null
+   },
+   {
+    "rumor_id": "d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1",
+    "author": "2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b",
+    "kind": 9,
+    "content": "Relay list for the meetup: wss://relay.damus.io, wss://nos.lol, wss://relay.primal.net, wss://relay.snort.social and wss://nostr.wine for anyone who wants paid",
+    "tags": [],
+    "epoch": null,
+    "ms": 1792000000000,
+    "created_at": 1792000000,
+    "wrap_hint": null,
+    "edited": null
+   },
+   {
+    "rumor_id": "e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2",
+    "author": "2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b",
+    "kind": 9,
+    "content": "",
+    "tags": [
+     [
+      "imeta",
+      "url https://blossom.example/abc",
+      "m application/pdf",
+      "name roadmap.pdf"
+     ]
+    ],
+    "epoch": null,
+    "ms": 1791000000000,
+    "created_at": 1791000000,
+    "wrap_hint": null,
+    "edited": null
+   }
+  ]
  }
 }

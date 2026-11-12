@@ -195,6 +195,8 @@ pub struct Inline {
     clock: f32,
     /// One line, cut with `…` (`white-space: nowrap; text-overflow: ellipsis`).
     ellipsis: bool,
+    /// Told whether the one line was cut, as laid out.
+    clipped: Option<Rc<std::cell::Cell<bool>>>,
 }
 
 pub fn inline(atoms: impl Into<Rc<[Atom]>>, base: Look) -> Inline {
@@ -205,6 +207,7 @@ pub fn inline(atoms: impl Into<Rc<[Atom]>>, base: Look) -> Inline {
         on_click: None,
         clock: 0.,
         ellipsis: false,
+        clipped: None,
     }
 }
 
@@ -221,6 +224,12 @@ impl Inline {
 
     pub fn single_line(mut self) -> Self {
         self.ellipsis = true;
+        self
+    }
+
+    /// A one-line cut repaints the next frame when it changes.
+    pub fn report_clip(mut self, cell: Rc<std::cell::Cell<bool>>) -> Self {
+        self.clipped = Some(cell);
         self
     }
 
@@ -764,6 +773,11 @@ impl Element for Inline {
             }
         }
         let s = laid.borrow();
+        if let Some(cell) = &self.clipped
+            && cell.replace(s.ellipsis.is_some()) != s.ellipsis.is_some()
+        {
+            window.request_animation_frame();
+        }
         let mut hits = Vec::new();
         let mut images = Vec::new();
         let mut under = Vec::new();

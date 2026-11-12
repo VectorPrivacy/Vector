@@ -30,6 +30,8 @@ if (process.env.VOICE_DEMO) fixtures.voice = {
     present: fixtures.voice_demo[process.env.VOICE_DEMO === 'joined' ? 'joined' : 'present'],
     session: process.env.VOICE_DEMO === 'joined' ? fixtures.voice_demo.session : null,
 };
+// PINS_DEMO=1: the general channel's pins.
+if (process.env.PINS_DEMO) fixtures.pins = fixtures.pins_demo;
 if (requests) for (const chat of fixtures.chats.slice(-requests)) chat.messages = chat.messages.filter((m) => !m.mine);
 
 const browser = await chromium.launch();

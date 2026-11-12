@@ -461,6 +461,7 @@ pub fn header(
     ch: &Channel,
     panel: bool,
     probe: Rc<std::cell::Cell<Option<gpui::Bounds<gpui::Pixels>>>>,
+    pins: Option<crate::pins::OnAct>,
     on: &OnAct,
 ) -> impl IntoElement {
     div()
@@ -513,6 +514,7 @@ pub fn header(
                         .child(topic)
                 })),
         )
+        .children(pins.map(crate::pins::button))
         .child(
             div()
                 .id("chat-menu")

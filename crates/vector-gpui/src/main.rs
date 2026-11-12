@@ -13,6 +13,7 @@ mod community;
 mod rail;
 mod voice;
 mod miniprofile;
+mod pins;
 mod cmdform;
 mod commands;
 mod composer;

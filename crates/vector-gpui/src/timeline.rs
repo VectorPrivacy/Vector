@@ -32,6 +32,8 @@ pub enum Act {
     RetryHistory,
     /// An avatar or name tapped: their mini profile, beside what was painted under the key.
     Mini(String, SharedString),
+    /// Right-click on a message: its menu, at the pointer.
+    MessageMenu(gpui::Point<gpui::Pixels>),
     /// Right-clicked: in a community, their member menu.
     AuthorMenu(String, SharedString, gpui::Point<gpui::Pixels>),
     Text(Target),
@@ -390,6 +392,10 @@ fn row_shell(
                 .on_hover({
                     let (act, id) = (ctx.on_act.clone(), m.id.clone());
                     move |h, w, cx| act(&id, Act::Hover(*h), w, cx)
+                })
+                .on_mouse_down(gpui::MouseButton::Right, {
+                    let (act, id) = (ctx.on_act.clone(), m.id.clone());
+                    move |e, w, cx| act(&id, Act::MessageMenu(e.position), w, cx)
                 })
                 .flex()
                 .items_start()
@@ -804,7 +810,7 @@ fn linked_pictures(ctx: &Ctx, blocks: Vec<Block>) -> Vec<Piece> {
 }
 
 /// The space a block keeps above and below it, by its CSS margins.
-fn margins(b: &Block, first: bool, last: bool) -> (f32, f32) {
+pub(crate) fn margins(b: &Block, first: bool, last: bool) -> (f32, f32) {
     let (t, bt) = match b {
         Block::Para(p) => match p.kind {
             ParaKind::Heading(_) => (p.base.size * 0.4, p.base.size * 0.15),
@@ -822,7 +828,7 @@ fn margins(b: &Block, first: bool, last: bool) -> (f32, f32) {
     )
 }
 
-fn block(b: &Block, key: &str, click: &OnClick, clock: f32) -> AnyElement {
+pub(crate) fn block(b: &Block, key: &str, click: &OnClick, clock: f32) -> AnyElement {
     match b {
         Block::Para(p) => inline(p.atoms.clone(), p.base.clone())
             .id(SharedString::from(key.to_string()))
@@ -1115,7 +1121,13 @@ fn reactions(ctx: &Ctx, m: &Message) -> Option<AnyElement> {
             None => groups.push((&r.emoji, 1, mine, r.emoji_url.as_deref())),
         }
     }
-    let mut row = div().flex().flex_wrap().gap(px(4.)).mt(px(4.)).mb(px(4.));
+    let mut row = div()
+        .flex()
+        .flex_wrap()
+        .gap(px(4.))
+        .mt(px(4.))
+        .mb(px(4.))
+        .on_mouse_down(gpui::MouseButton::Right, |_, _, cx| cx.stop_propagation());
     for (emoji_str, count, mine, url) in groups {
         let custom = url.map(|u| {
             ctx.media

@@ -1441,3 +1441,31 @@ pub async fn delete_category(community_id: String, category_id: String) -> Resul
     })
     .await
 }
+
+/// `get_channel_pins`: `{pins, sealed, version}` from the locally folded head.
+pub fn channel_pins(community_id: &str, channel_id: &str) -> Result<serde_json::Value, String> {
+    VectorCore.get_channel_pins(community_id, channel_id).map_err(|e| e.to_string())
+}
+
+pub async fn set_pinned(community_id: String, channel_id: String, message_id: String, on: bool) -> Result<(), String> {
+    db::scoped(async move {
+        let res = if on {
+            VectorCore.pin_community_message(&community_id, &channel_id, &message_id).await
+        } else {
+            VectorCore.unpin_community_message(&community_id, &channel_id, &message_id).await
+        };
+        res.map_err(|e| e.to_string())
+    })
+    .await
+}
+
+/// `fetch_pinned_attachment`: the pin's file from the proof alone, `{path, mime, name}`.
+pub async fn pinned_attachment(community_id: String, channel_id: String, message_id: String) -> Result<serde_json::Value, String> {
+    db::scoped(async move {
+        VectorCore
+            .fetch_pinned_attachment(&community_id, &channel_id, &message_id)
+            .await
+            .map_err(|e| e.to_string())
+    })
+    .await
+}

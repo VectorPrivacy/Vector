@@ -239,3 +239,64 @@ pub fn bump_emoji_batch(emoji: Vec<String>, custom: Vec<(String, String)>) {
         .collect();
     let _ = vector_core::emoji_usage::bump_batch(&uses);
 }
+
+/// What the message menu's delete row offers (`get_message_delete_options`).
+#[derive(Clone, Copy, Default)]
+pub struct DeleteOptions {
+    pub mine: bool,
+    /// Ours, but the key that would remove it from relays isn't on this device.
+    pub limited: bool,
+    pub attachments: bool,
+    /// Someone else's Community message we hold the authority to hide for everyone.
+    pub hide: bool,
+}
+
+pub async fn delete_options(message_id: String) -> DeleteOptions {
+    use vector_core::ChatType;
+    let resident = {
+        let state = STATE.lock().await;
+        state.find_message(&message_id).map(|(chat, msg)| {
+            (Some(chat.chat_type.clone()), chat.id.clone(), msg.mine, msg.npub.clone(), msg.attachments.iter().any(|a| !a.url.is_empty()))
+        })
+    };
+    let ctx = resident.or_else(|| {
+        db::events::event_delete_context(&message_id)
+            .ok()
+            .flatten()
+            .map(|(chat, mine, author)| (None, chat, mine, author, false))
+    });
+    let Some((chat_type, chat_id, mine, author, attachments)) = ctx else {
+        return DeleteOptions::default();
+    };
+    let community = matches!(chat_type, Some(ChatType::Community)) || chat_type.is_none();
+    let hide = !mine
+        && community
+        && (|| {
+            let author = author.as_deref()?;
+            let me = vector_core::state::my_public_key()?;
+            let cid = db::community::community_id_for_channel(&chat_id).ok()??;
+            let roster = db::community::get_community_roles(&cid).ok()?;
+            let private = db::community::channel_is_private(&chat_id).ok().flatten().unwrap_or(false);
+            Some(vector_core::community::moderation::can_hide_in_channel(
+                vector_core::community::moderation::owner_hex(&cid).as_deref(),
+                &roster,
+                &me.to_hex(),
+                author,
+                &chat_id,
+                private,
+            ))
+        })()
+        .unwrap_or(false);
+    let retained = mine
+        && match chat_type {
+            Some(ChatType::DirectMessage) => EventId::from_hex(&message_id).is_ok(),
+            Some(ChatType::Community) => db::community::has_wrap_owner(&message_id).unwrap_or(false),
+            _ => db::community::has_wrap_owner(&message_id).unwrap_or(false) || EventId::from_hex(&message_id).is_ok(),
+        };
+    DeleteOptions { mine, limited: mine && !retained, attachments, hide }
+}
+
+/// A moderator's permanent hide of someone else's Community message.
+pub async fn hide(channel_id: String, message_id: String) -> Result<(), String> {
+    VectorCore.hide_community_message(&channel_id, &message_id).await.map_err(|e| e.to_string())
+}

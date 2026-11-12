@@ -83,3 +83,23 @@ pub async fn mark_unread(chat_id: String) -> Option<String> {
     vector_core::emit_event("unread_counts_stale", &json!({ "chats": [chat_id] }));
     Some(hex)
 }
+
+/// Unread from `message_id` on, past our own replies, until the chat is read again.
+pub async fn mark_unread_from(chat_id: String, message_id: String) -> Result<u32, String> {
+    let slim = {
+        let mut state = STATE.lock().await;
+        let idx = state.chats.iter().position(|c| c.id == chat_id).ok_or("Chat not found")?;
+        state.chats[idx].unread_from = vector_core::compact::encode_message_id(&message_id);
+        db::chats::SlimChatDB::from_chat(&state.chats[idx], &state.interner)
+    };
+    db::chats::save_slim_chat(&slim)?;
+    let count = db::events::unread_count_for_chat(&chat_id).await?;
+    {
+        let mut state = STATE.lock().await;
+        if state.unread_seeded {
+            state.unread_set(&chat_id, count);
+        }
+    }
+    vector_core::emit_event("unread_counts_stale", &json!({ "chats": [chat_id] }));
+    Ok(count)
+}

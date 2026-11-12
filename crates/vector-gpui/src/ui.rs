@@ -235,6 +235,7 @@ pub struct VectorApp {
     voice: crate::voice::Voice,
     voice_ticking: bool,
     mini_profile: Option<crate::miniprofile::Mini>,
+    pins: crate::pins::Pins,
     anchors: kit::Anchors,
     /// The role a member's change is under way for.
     role_busy: Option<String>,
@@ -339,6 +340,8 @@ enum MenuAct {
     MemberTimeout(String, String, u64),
     /// Kick, or (true) ban, once confirmed.
     MemberRemove(String, String, bool),
+    /// A message's menu row.
+    Msg(String, msgmenu_ops::MsgAct),
     /// Give (`on`) or take a role; the menu stays open and repaints.
     MemberRole {
         community: String,
@@ -349,6 +352,8 @@ enum MenuAct {
 }
 
 enum PopupAct {
+    /// A moderator's hide of someone else's message, once confirmed.
+    Hide(String),
     RemoveMember {
         community: String,
         npub: String,
@@ -477,6 +482,10 @@ mod voice_ops;
 mod miniprofile_ops;
 #[path = "ui_members.rs"]
 mod members_ops;
+#[path = "ui_pins.rs"]
+mod pins_ops;
+#[path = "ui_msgmenu.rs"]
+mod msgmenu_ops;
 
 impl VectorApp {
     fn base(store: Store, live: bool, window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -834,6 +843,7 @@ impl VectorApp {
             voice: Default::default(),
             voice_ticking: false,
             mini_profile: None,
+            pins: Default::default(),
             anchors: Default::default(),
             role_busy: None,
         }
@@ -1363,6 +1373,7 @@ impl VectorApp {
                 }
             }
             MenuAct::SelfDestruct(chat) => self.open_self_destruct(chat, at),
+            MenuAct::Msg(id, act) => self.message_menu_act(id, act, window, cx),
             MenuAct::ChangeWallpaper(chat) => self.pick_wallpaper(chat, cx),
             MenuAct::RemoveWallpaper(chat) => {
                 let mut popup = kit::Popup::notice("Remove wallpaper?");
@@ -2278,6 +2289,11 @@ impl VectorApp {
             }
             "rail_layout_updated" => self.rail_event(&payload, cx),
             "voice_state" | "voice_levels" | "voice_presence" => self.voice_event(name, &payload, cx),
+            "community_pins_updated" => {
+                if payload.get("channel_id").and_then(Value::as_str) == Some(self.pins.channel.as_str()) {
+                    self.pins_refresh(cx);
+                }
+            }
             "start_layout_updated" => {
                 if let (Some(sm), Ok(layout)) = (self.start.as_mut(), serde_json::from_value(payload.clone())) {
                     sm.layout = layout;
@@ -2683,6 +2699,7 @@ impl VectorApp {
         }
         self.chip_passed.clear();
         self.close_popups(cx);
+        self.pins_opened(cx);
         window.focus(&self.input.read(cx).focus_handle(cx), cx);
         if !self.live {
             return;
@@ -2959,6 +2976,7 @@ impl VectorApp {
                 self.show_mini(npub, None, at, cx);
             }
             Act::AuthorMenu(npub, key, at) => self.author_menu(npub, key, at, cx),
+            Act::MessageMenu(at) => self.message_menu(id, at, cx),
             Act::RetryHistory => {
                 if let Some(open) = self.open.clone() {
                     self.history_net.remove(open.as_ref());
@@ -3548,15 +3566,20 @@ impl VectorApp {
         if !self.live {
             return;
         }
-        let Some(hash) = vector_core::simd::hex::hex_to_bytes_32_checked(&att.id) else {
-            return;
-        };
-        let dir = dirs::download_dir().unwrap_or_else(std::env::temp_dir);
         let name = if att.name.is_empty() {
             format!("{}.{}", &att.id[..16.min(att.id.len())], att.extension)
         } else {
             att.name.clone()
         };
+        self.save_resident(att.id, name, cx);
+    }
+
+    /// A file held in the app's own storage, saved where the user picks.
+    fn save_resident(&mut self, id: String, name: String, cx: &mut Context<Self>) {
+        let Some(hash) = vector_core::simd::hex::hex_to_bytes_32_checked(&id) else {
+            return;
+        };
+        let dir = dirs::download_dir().unwrap_or_else(std::env::temp_dir);
         let pick = cx.prompt_for_new_path(&dir, Some(&name));
         cx.spawn(async move |this, cx| {
             let Ok(Ok(Some(dest))) = pick.await else {
@@ -3869,6 +3892,7 @@ impl VectorApp {
                     self.set_nickname(npub, nick, cx);
                 }
             }
+            PopupAct::Hide(id) => self.hide_message(id, cx),
             PopupAct::Delete { id, failed } => {
                 if !self.live {
                     let open = self.open.clone();
@@ -6070,7 +6094,8 @@ impl VectorApp {
         let panel = self.community.as_ref().is_some_and(|v| v.panel);
         let paper = self.wallpaper.image(self.wallpaper_key().as_ref());
         let header = if let Some(ch) = channel {
-            crate::community::header(ch, panel, self.chat_menu_btn.clone(), on_community).into_any_element()
+            let pins = self.pins.button(&id).map(|_| self.pins_on(cx));
+            crate::community::header(ch, panel, self.chat_menu_btn.clone(), pins, on_community).into_any_element()
         } else {
             self.dm_header(store, &id, paper.is_some(), cx).into_any_element()
         };
@@ -6236,6 +6261,12 @@ impl VectorApp {
         })
         .size_full();
 
+        let drawer = (self.pins.open && self.pins.button(&id).is_some()).then(|| {
+            let pane_h = self.chat_box.get().map_or(800., |b| f32::from(b.size.height));
+            // `max(200px, 40vh)`, the window being the pane plus its chrome.
+            let max_h = ((pane_h + 32.) * 0.4).max(200.);
+            crate::pins::drawer(&self.pins, store, &self.revealed.borrow(), clock, max_h, &self.pins_on(cx))
+        });
         let request = store
             .chat(&id)
             .is_some_and(|chat| store.is_request(chat))
@@ -6271,6 +6302,7 @@ impl VectorApp {
                         None => d.child(messages),
                     })
                     .children(request)
+                    .children(drawer)
                     // `.fadeout-bottom-msgs`: rows dim into the composer.
                     .child(
                         div()
@@ -7915,6 +7947,7 @@ impl VectorApp {
                 "ban",
                 "manage_roles",
                 "view_audit_log",
+                "pin_messages",
             ]
             .map(String::from)
             .into()
