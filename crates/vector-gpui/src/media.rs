@@ -142,6 +142,10 @@ pub struct Media {
     pub embed_videos: HashMap<String, crate::embeds::VideoState>,
     pub embed_video_queue: Vec<crate::embeds::Media>,
     pub embed_autoplay: HashSet<String>,
+    /// First-frame openings for videos with no poster that won't download on their own: None
+    /// while fetching or when there is none.
+    pub embed_previews: HashMap<String, Option<crate::audio::AudioInputSpec>>,
+    pub embed_preview_queue: Vec<crate::embeds::Media>,
     /// Realtime sessions, by topic (or `att:<id>` for an app without one).
     pub xdc_live: HashMap<String, XdcLive>,
 }

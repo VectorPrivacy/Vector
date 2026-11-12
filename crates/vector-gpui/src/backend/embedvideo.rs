@@ -84,6 +84,39 @@ fn cached(dir: &Path, stem: &str) -> Option<Fetched> {
         .map(|(p, ext)| Fetched::Sealed(p, mime(ext)))
 }
 
+/// The video's opening, enough for its first frame, fetched as byte ranges rather than the
+/// whole file. The whole file, when it is already here, does as well.
+pub async fn preview(url: String, sha256: Option<String>) -> Result<Fetched, String> {
+    if !url.starts_with("https://") {
+        return Err("Not a web video".into());
+    }
+    let dir = dir()?;
+    let stem = stem(&url, sha256.as_deref());
+    let whole = vector_core::media::url_key("embed-video", &stem);
+    if vector_core::media::resident(&whole) {
+        return Ok(Fetched::Held(whole));
+    }
+    if let Some(done) = cached(&dir, &stem) {
+        return Ok(done);
+    }
+    let named = format!("{stem}-poster");
+    let held = vector_core::media::url_key("embed-poster", &stem);
+    if vector_core::media::resident(&held) {
+        return Ok(Fetched::Held(held));
+    }
+    if let Some(done) = cached(&dir, &named) {
+        return Ok(done);
+    }
+    let poster = vector_core::video_poster::fetch(&url).await?;
+    if !vector_core::media::keep_media() {
+        vector_core::media::ram::insert(held, poster.bytes, mime(poster.ext)).map_err(|_| "Too much media is open to show this one".to_string())?;
+        return Ok(Fetched::Held(held));
+    }
+    let path = dir.join(format!("{named}.{}", poster.ext));
+    vector_core::vcache::write(&path, &poster.bytes)?;
+    Ok(Fetched::Sealed(path, mime(poster.ext)))
+}
+
 pub async fn fetch(url: String, size: Option<u64>, sha256: Option<String>, fallbacks: Vec<String>) -> Result<Fetched, String> {
     if !url.starts_with("https://") {
         return Err("Not a web video".into());

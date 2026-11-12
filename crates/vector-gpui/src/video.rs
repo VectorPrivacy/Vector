@@ -320,6 +320,16 @@ impl Videos {
         }
     }
 
+    /// Dropped with its frames, so the next sight of it probes its source afresh.
+    pub fn forget(&mut self, att: &str) {
+        self.stop(att);
+        self.failed.remove(att);
+        if let Some(c) = self.clips.remove(att) {
+            self.retired.extend(c.frame);
+            self.retired.extend(c.info.and_then(|i| i.poster));
+        }
+    }
+
     /// One frame: true while anything moves.
     pub fn tick(&mut self) -> bool {
         let mut moving = false;

@@ -1364,7 +1364,7 @@ impl VectorApp {
                 store.typing.insert(id, (who, now));
             }
         }
-        // Fixtures: VECTOR_EMBED_VIDEO=idle|loading|failed|ready gives the video embed a file of its
+        // Fixtures: VECTOR_EMBED_VIDEO=idle|loading|failed|ready|preview gives the video embed a file of its
         // own, in that state.
         if let Ok(state) = std::env::var("VECTOR_EMBED_VIDEO") {
             let url = "https://cdn.example.org/vector-tour.mp4".to_string();
@@ -1379,6 +1379,7 @@ impl VectorApp {
                 "loading" => drop(media.embed_videos.insert(url, VideoState::Loading(42))),
                 "failed" => drop(media.embed_videos.insert(url, VideoState::Failed("Media server returned an error status".into()))),
                 "ready" => drop(media.embed_videos.insert(url, VideoState::Ready(crate::audio::AudioInputSpec::File(clip)))),
+                "preview" => drop(media.embed_previews.insert(url, Some(crate::audio::AudioInputSpec::File(clip)))),
                 _ => {}
             }
         }
@@ -7172,6 +7173,18 @@ impl VectorApp {
                     .ok();
                 });
             }
+            let previews = std::mem::take(&mut media.borrow_mut().embed_preview_queue);
+            if !previews.is_empty() && live {
+                let app = app_media.clone();
+                cx.defer(move |cx| {
+                    app.update(cx, |app, cx| {
+                        for v in previews {
+                            app.fetch_embed_preview(v, cx);
+                        }
+                    })
+                    .ok();
+                });
+            }
             let links = std::mem::take(&mut media.borrow_mut().xdc_url_queue);
             if !links.is_empty() && live {
                 let app = app_media.clone();
@@ -12051,6 +12064,25 @@ impl VectorApp {
         cx.notify();
     }
 
+    fn fetch_embed_preview(&mut self, v: crate::embeds::Media, cx: &mut Context<Self>) {
+        let url = v.url.clone();
+        let rx = backend::run(backend::embedvideo::preview(v.url, v.sha256));
+        cx.spawn(async move |this, cx| {
+            let spec = match rx.await {
+                Ok(Ok(backend::embedvideo::Fetched::Held(h))) => crate::audio::AudioInputSpec::Held(h),
+                Ok(Ok(backend::embedvideo::Fetched::Sealed(p, mime))) => crate::audio::AudioInputSpec::Sealed(p, mime),
+                _ => return,
+            };
+            this.update(cx, |this, cx| {
+                this.media.borrow_mut().embed_previews.insert(url, Some(spec));
+                this.refresh_rows(false);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     fn fetch_embed_video(&mut self, v: crate::embeds::Media, cx: &mut Context<Self>) {
         let url = v.url.clone();
         let rx = backend::run(backend::embedvideo::fetch(v.url, v.size, v.sha256, v.fallbacks));
@@ -13932,6 +13964,34 @@ impl VectorApp {
         self.popup = Some((popup, PopupAct::DeleteSlice { category, exts }));
     }
 
+    /// Cached embed videos the clear took: the next sight fetches them again.
+    fn forget_sealed_embeds(&mut self) {
+        use crate::audio::AudioInputSpec::Sealed;
+        use crate::embeds::VideoState;
+        let mut media = self.media.borrow_mut();
+        let media = &mut *media;
+        let gone: Vec<String> = media
+            .embed_videos
+            .iter()
+            .filter(|(_, s)| matches!(s, VideoState::Ready(Sealed(p, _)) if !p.exists()))
+            .map(|(u, _)| u.clone())
+            .collect();
+        for url in gone {
+            media.embed_videos.remove(&url);
+            media.videos.forget(&crate::embeds::clip_id(&url));
+        }
+        let gone: Vec<String> = media
+            .embed_previews
+            .iter()
+            .filter(|(_, s)| matches!(s, Some(Sealed(p, _)) if !p.exists()))
+            .map(|(u, _)| u.clone())
+            .collect();
+        for url in gone {
+            media.embed_previews.remove(&url);
+            media.videos.forget(&crate::embeds::preview_id(&url));
+        }
+    }
+
     fn after_storage_clear(
         &mut self,
         rx: futures::channel::oneshot::Receiver<Result<u64, String>>,
@@ -13944,6 +14004,9 @@ impl VectorApp {
                 if let Some(s) = this.settings.as_mut() {
                     s.clearing = false;
                     s.donut.busy = false;
+                }
+                if result.is_ok() {
+                    this.forget_sealed_embeds();
                 }
                 match result {
                     Ok(freed) if slice => this.show_toast(

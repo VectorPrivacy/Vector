@@ -55,6 +55,30 @@ pub fn clip_id(url: &str) -> String {
     format!("embed:{url}")
 }
 
+pub fn preview_id(url: &str) -> String {
+    format!("embed-preview:{url}")
+}
+
+/// The opening frame of a video with no poster that won't download on its own.
+fn preview_frame(env: &Env, v: &Media) -> Option<Arc<RenderImage>> {
+    let mut media = env.media.borrow_mut();
+    let auto = media.auto_download.on && v.size.is_some_and(|n| n > 0 && n <= media.auto_download.limit);
+    if v.poster.is_some() || auto {
+        return None;
+    }
+    let spec = match media.embed_previews.get(&v.url) {
+        Some(spec) => spec.clone()?,
+        None => {
+            media.embed_previews.insert(v.url.clone(), None);
+            media.embed_preview_queue.push(v.clone());
+            return None;
+        }
+    };
+    let id = preview_id(&v.url);
+    media.videos.want_probe(&id, &spec);
+    media.videos.clip(&id)?.picture()
+}
+
 #[derive(Clone, Debug, Deserialize)]
 pub struct ReplyTo {
     pub kind: Option<u16>,
@@ -1123,6 +1147,7 @@ fn poster(env: &Env, e: &Embed, key: &str, open: Option<String>, send: &Send) ->
                 .into_any_element();
         }
     }
+    let first = video.as_ref().filter(|_| e.image.is_none()).and_then(|v| preview_frame(env, v));
     let art = e
         .image
         .as_deref()
@@ -1178,6 +1203,7 @@ fn poster(env: &Env, e: &Embed, key: &str, open: Option<String>, send: &Send) ->
             }),
         })
         .children(art)
+        .children(first.map(|f| img(f).absolute().inset_0().size_full().object_fit(gpui::ObjectFit::Cover)))
         .child(
             div()
                 .relative()
