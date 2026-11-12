@@ -1223,6 +1223,10 @@ impl VectorApp {
                     .collect(),
             );
         }
+        // VECTOR_LOCK=blocked|dissolved|perms|writer|timeout: why the composer can't send.
+        if let Ok(lock) = std::env::var("VECTOR_LOCK") {
+            app.fixture_lock(&lock, window, cx);
+        }
         // Fixtures: VECTOR_COMMUNITY=<name> opens that Community; VECTOR_CHANNEL=<name> a channel in it.
         if let Ok(name) = std::env::var("VECTOR_COMMUNITY") {
             let found = app
@@ -3021,10 +3025,16 @@ impl VectorApp {
             .and_then(|id| store.chat(id))
             .map(|c| data::timeline(c, store.now_ms(), self.read_anchor.as_deref(), names.as_deref()))
             .unwrap_or_default();
-        if let Some(g) = self.gap_index(&store) {
+        let gap = self.gap_index(&store);
+        if let Some(g) = gap {
             if let Some(r) = rows.iter().position(|r| matches!(r, Row::Message { index, .. } if *index == g)) {
                 rows.truncate(r + 1);
             }
+        }
+        if gap.is_none()
+            && let Some(notice) = self.open.as_deref().and_then(|id| store.end_notice(id))
+        {
+            rows.push(Row::Notice(notice));
         }
         drop(store);
         if let Some(edge) = self.edge() {
@@ -7030,6 +7040,35 @@ impl VectorApp {
         })
     }
 
+    fn fixture_lock(&mut self, lock: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let mut store = self.store.borrow_mut();
+        let now = store.now_ms() / 1000;
+        let me = store.my_npub.clone();
+        if lock == "blocked" {
+            let Some(frank) = store.profiles.iter().find(|(_, p)| p.name == "frank").map(|(n, _)| n.clone()) else { return };
+            if let Some(p) = store.profiles.get_mut(&frank) {
+                p.is_blocked = true;
+            }
+            drop(store);
+            self.open_chat(frank.into(), window, cx);
+            return;
+        }
+        for c in &mut store.communities {
+            match lock {
+                "dissolved" => c.dissolved = true,
+                "perms" => c.channels.iter_mut().for_each(|ch| ch.my_permissions = Some("0".into())),
+                "writer" => c.channels.iter_mut().for_each(|ch| (ch.restricted, ch.can_post) = (true, false)),
+                _ => {}
+            }
+        }
+        if lock == "timeout" {
+            let ids: Vec<String> = store.communities.iter().map(|c| c.community_id.clone()).collect();
+            for id in ids {
+                store.timeouts.entry(id).or_default().insert(me.clone(), data::Timeout { from: now - 600, until: now + 3 * 3600 });
+            }
+        }
+    }
+
     fn chat_pane(
         &self,
         store: &Store,
@@ -7039,6 +7078,7 @@ impl VectorApp {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let channel = store.community_of(&id).and_then(|com| com.channel(&id));
+        let lock = store.send_lock(&id);
         let stage = channel.filter(|ch| ch.is_voice()).and_then(|ch| {
             let com = store.community_of(&id)?;
             Some(crate::voice::stage(
@@ -7373,6 +7413,7 @@ impl VectorApp {
                     })
                 },
                 self.command_form_view(cx),
+                lock.map(SharedString::from),
                 cx,
             ))
     }
@@ -7595,6 +7636,10 @@ fn timeline_row(ctx: &timeline::Ctx, row: &Row, after_message: bool) -> AnyEleme
             ca(89, 252, 179, 0.6),
             1.,
         ),
+        Row::Notice(text) => div()
+            .pb(px(20.))
+            .child(divider(div().text_size(px(12.)).text_color(c(TEXT)).child(text.clone()), white_a(0.1), 0.7))
+            .into_any_element(),
         Row::Message { index, first } => {
             let gap = if !after_message {
                 0.
@@ -7643,12 +7688,14 @@ fn composer(
     rec: &crate::recorder::Recorder,
     on_rec: crate::recorder::On,
     command: Option<(AnyElement, AnyElement)>,
+    lock: Option<SharedString>,
     cx: &mut Context<VectorApp>,
 ) -> impl IntoElement {
     use crate::recorder::State as R;
     let (strip, form) = command.map_or((None, None), |(s, f)| (Some(s), Some(f)));
     let commanding = form.is_some();
-    let busy = matches!(rec.state, R::Recording | R::Locked | R::Preview | R::Cancelled);
+    let locked = lock.is_some();
+    let busy = !locked && matches!(rec.state, R::Recording | R::Locked | R::Preview | R::Cancelled);
     let previewing = rec.state == R::Preview;
     let hides_mic = matches!(rec.state, R::Recording | R::Locked | R::Preview);
     let icon = |path: &'static str| {
@@ -7807,7 +7854,7 @@ fn composer(
                         crate::recorder::strip(rec)
                     })
                 })
-                .when(!busy && !commanding, |d| d.child(if editing {
+                .when(!busy && !commanding && !locked, |d| d.child(if editing {
                     cancel("edit-cancel", 23., cx)
                         .w(px(38.))
                         .h(px(45.))
@@ -7816,7 +7863,20 @@ fn composer(
                     attach_button(attach.is_some(), cx).into_any_element()
                 }))
                 .when_some(form, |d, form| d.child(div().flex_1().min_w_0().child(form)))
-                .when(!commanding, |d| d.child(
+                .when_some(lock, |d, lock| d.child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .py(px(12.))
+                        .pl(px(15.))
+                        .pr(px(10.))
+                        .font_family(RUBIK)
+                        .text_size(px(15.))
+                        .line_height(px(21.))
+                        .text_color(white_a(0.38))
+                        .child(lock),
+                ))
+                .when(!commanding && !locked, |d| d.child(
                     div()
                         .flex_1()
                         .min_w_0()
@@ -7825,7 +7885,7 @@ fn composer(
                         .when(busy, |d| d.absolute().invisible().size_0())
                         .child(input),
                 ))
-                .when(!busy && !commanding, |d| d.child(
+                .when(!busy && !commanding && !locked, |d| d.child(
                     icon(if picker.as_ref().is_some_and(|p| p.1) {
                         "icons/wink-face.svg"
                     } else {
@@ -7837,7 +7897,7 @@ fn composer(
                         cx.listener(|app, _, window, cx| app.toggle_picker(None, window, cx)),
                     ),
                 ))
-                .when(!hides_mic || previewing, |d| {
+                .when(!locked && (!hides_mic || previewing), |d| {
                     d.child(send_or_mic(
                         (send.0 || previewing, send.1),
                         rec.state == R::Pending,
@@ -7849,7 +7909,7 @@ fn composer(
                     ))
                 })
                 // `.self-destruct-badge`: the chat's timer, on Send's top-right corner.
-                .when(timer.is_some() && send.0 && !busy, |d| {
+                .when(timer.is_some() && send.0 && !busy && !locked, |d| {
                     d.child(
                         svg()
                             .path("ui/self-destruct.svg")
@@ -7866,7 +7926,7 @@ fn composer(
                 }),
         )
         .children(crate::recorder::overlays(rec))
-        .when_some(attach.filter(|_| !editing), |d, (opened, mini)| {
+        .when_some(attach.filter(|_| !editing && !locked), |d, (opened, mini)| {
             d.child(attachment_panel(opened, mini, cx))
         })
         // `.emoji-picker`: 10px above the composer, 16px from the right edge.

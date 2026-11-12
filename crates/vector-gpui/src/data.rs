@@ -39,6 +39,10 @@ struct Fixtures {
     #[serde(default)]
     nicknames: HashMap<String, HashMap<String, String>>,
     #[serde(default)]
+    timeouts: HashMap<String, HashMap<String, Timeout>>,
+    #[serde(default)]
+    send_denied: HashMap<String, HashSet<String>>,
+    #[serde(default)]
     moderation: Option<serde_json::Value>,
     #[serde(default)]
     policy_presets: Option<serde_json::Value>,
@@ -164,6 +168,15 @@ pub struct Channel {
     pub view: String,
     pub restricted: bool,
     pub can_post: bool,
+    pub my_permissions: Option<String>,
+}
+
+/// A running Timeout, in unix seconds.
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct Timeout {
+    pub from: u64,
+    pub until: u64,
 }
 
 impl Channel {
@@ -245,6 +258,10 @@ pub struct Store {
     pub pivx_price: Option<(f64, String)>,
     /// Each community's nicknames, npub → name.
     pub nicknames: HashMap<String, HashMap<String, String>>,
+    /// Each community's running Timeouts, npub → its span.
+    pub timeouts: HashMap<String, HashMap<String, Timeout>>,
+    /// Per channel, the authors seen there who can't send in it.
+    pub send_denied: HashMap<String, HashSet<String>>,
     /// Each community's logo and banner as local files, once resolved.
     pub art: HashMap<String, Art>,
     pub hidden_banners: Vec<String>,
@@ -392,6 +409,8 @@ impl Store {
             pivx_bubbles: HashMap::new(),
             pivx_price: None,
             nicknames: f.nicknames,
+            timeouts: f.timeouts,
+            send_denied: f.send_denied,
             art: HashMap::new(),
             hidden_banners: Vec::new(),
             pinned: demo.pinned,
@@ -445,6 +464,8 @@ impl Store {
             pivx_bubbles: HashMap::new(),
             pivx_price: None,
             nicknames: HashMap::new(),
+            timeouts: HashMap::new(),
+            send_denied: HashMap::new(),
             art: HashMap::new(),
             hidden_banners: Vec::new(),
             streamer: Default::default(),
@@ -711,6 +732,47 @@ impl Store {
         )
     }
 
+    /// `npub`'s Timeout in `community`, while it runs.
+    pub fn timeout(&self, community: &str, npub: &str) -> Option<Timeout> {
+        let now = self.now_ms() / 1000;
+        self.timeouts.get(community)?.get(npub).copied().filter(|t| t.until > now)
+    }
+
+    /// Why the composer can't send in `chat`, as its placeholder.
+    pub fn send_lock(&self, chat: &str) -> Option<String> {
+        if self.chat(chat).is_some_and(|c| c.chat_type == vector_core::ChatType::DirectMessage)
+            && self.profiles.get(chat).is_some_and(|p| p.is_blocked)
+        {
+            return Some("Unblock to send messages".into());
+        }
+        let community = self.community_of(chat)?;
+        let channel = community.channel(chat)?;
+        if community.dissolved {
+            return Some("This community has been dissolved.".into());
+        }
+        const SEND_MESSAGES: u64 = 1 << 14;
+        if channel.my_permissions.as_deref().and_then(|p| p.parse::<u64>().ok()).is_some_and(|p| p & SEND_MESSAGES == 0) {
+            return Some("You can't send messages in this channel".into());
+        }
+        if channel.restricted && !channel.can_post {
+            return Some("Your key to post here is on its way".into());
+        }
+        let t = self.timeout(&community.community_id, &self.my_npub)?;
+        let until = chrono::DateTime::from_timestamp(t.until as i64, 0)?.with_timezone(&Local);
+        Some(format!("You're timed out until {}", until.format("%a %I:%M %p")))
+    }
+
+    /// What closes the timeline: a blocked contact, or a community its owner dissolved.
+    pub fn end_notice(&self, chat: &str) -> Option<String> {
+        if self.chat(chat).is_some_and(|c| c.chat_type == vector_core::ChatType::DirectMessage)
+            && self.profiles.get(chat).is_some_and(|p| p.is_blocked)
+        {
+            return Some("Blocked: you won't receive new messages from them".into());
+        }
+        let c = self.community_of(chat).filter(|c| c.dissolved)?;
+        Some(format!("{} was dissolved by the owner.", if c.name.is_empty() { "This community" } else { &c.name }))
+    }
+
     pub fn community_of(&self, channel_id: &str) -> Option<&Community> {
         self.communities
             .iter()
@@ -827,6 +889,8 @@ pub enum Row {
         time: String,
     },
     Unread,
+    /// Under the last message: why nothing new will arrive.
+    Notice(String),
     /// `first` heads a streak (avatar and header); otherwise a continuation.
     Message {
         index: usize,
