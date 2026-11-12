@@ -585,6 +585,8 @@ function removeParagraphTags(html) {
  * NBSP (serialised as an entity), no list or indent opening, and (checked apart) no `www.`
  * autolink. Its render is `<span class="markdown-paragraph">` around the text itself.
  */
+const MD_TILDE = '\u{F0220}';
+const MD_SHORTCODE_TILDE = /:[a-zA-Z0-9_-]+(?:~[a-zA-Z0-9_-]+)+:/g;
 const PLAIN_MARKDOWN = /^(?![\s-]|\d+[.)])[^\n\r\t\u00a0\u2028\u2029<>&"`*_~|#[\]\\/:@=+{}$^]+$/;
 
 /** Rendered HTML by source text, most recent last. Rendering is a pure function of the text. */
@@ -610,7 +612,11 @@ function parseMarkdown(md) {
         markdownCache.set(rawInput, hit);
         return hit;
     }
-    const html = renderMarkdown(rawInput);
+    // A pack emoji's disambiguating `~` (`:love~2:`) is not strikethrough: it rides through
+    // markdown as a stand-in, so two such emoji in one message stay emoji.
+    const html = rawInput.includes('~')
+        ? renderMarkdown(rawInput.replace(MD_SHORTCODE_TILDE, (m) => m.replaceAll('~', MD_TILDE))).replaceAll(MD_TILDE, '~')
+        : renderMarkdown(rawInput);
     // Only sanitised output is kept: before DOMPurify loads the render is raw.
     if (typeof DOMPurify !== 'undefined' && rawInput.length <= MARKDOWN_CACHE_MAX_INPUT) {
         markdownCache.set(rawInput, html);
