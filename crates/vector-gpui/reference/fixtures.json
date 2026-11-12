@@ -4816,5 +4816,96 @@
     "ready": true
    }
   }
+ },
+ "sync_report": {
+  "control": {
+   "root_epoch": 3,
+   "converged": true,
+   "complete": true,
+   "activated": true,
+   "authority_gapped": false,
+   "fold_gapped": false,
+   "truncated": false,
+   "pages_read": 4,
+   "editions": 27,
+   "would_update": true,
+   "healed": [],
+   "entities": [
+    {
+     "entity": "9f2c41d07ab3",
+     "kind": 2,
+     "mine": false,
+     "served": 3,
+     "newest": {
+      "version": 5,
+      "age_days": 1,
+      "author": "owner",
+      "admitted": true,
+      "is_floor": false,
+      "extends_floor": true
+     },
+     "floor": {
+      "version": 4,
+      "served": true
+     },
+     "folds_to": null,
+     "refused": null,
+     "carried": false,
+     "kept": false
+    },
+    {
+     "entity": "1be07c9a44d2",
+     "kind": 1,
+     "mine": false,
+     "served": 2,
+     "newest": {
+      "version": 2,
+      "age_days": 6,
+      "author": "3e1a90bb27c4",
+      "admitted": false,
+      "is_floor": false,
+      "extends_floor": false
+     },
+     "floor": {
+      "version": 1,
+      "served": true
+     },
+     "folds_to": null,
+     "refused": "unauthorized",
+     "carried": false,
+     "kept": false
+    },
+    {
+     "entity": "a03d55e18f60",
+     "kind": 0,
+     "mine": false,
+     "served": 1,
+     "newest": {
+      "version": 9,
+      "age_days": 0,
+      "author": "owner",
+      "admitted": true,
+      "is_floor": true,
+      "extends_floor": null
+     },
+     "floor": {
+      "version": 9,
+      "served": true
+     },
+     "folds_to": null,
+     "refused": null,
+     "carried": false,
+     "kept": false
+    }
+   ]
+  },
+  "epoch": {
+   "root_epoch": 3,
+   "verdict": "current",
+   "held": {
+    "epoch": 3,
+    "base_plane": "5c0e2a91d7f3"
+   }
+  }
  }
 }

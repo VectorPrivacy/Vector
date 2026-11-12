@@ -29,6 +29,8 @@ struct Fixtures {
     #[serde(default)]
     audit: Option<serde_json::Value>,
     #[serde(default)]
+    sync_report: Option<serde_json::Value>,
+    #[serde(default)]
     roles_view: Option<serde_json::Value>,
     #[serde(default)]
     channel_perms: Option<serde_json::Value>,
@@ -209,6 +211,8 @@ pub struct Store {
     pub invites: Vec<Invite>,
     /// The fixtures' Audit Log, as `get_community_audit_log` answers.
     pub fixture_audit: Option<serde_json::Value>,
+    /// The fixtures' Sync Report reads: `{ control, epoch }`.
+    pub fixture_sync_report: Option<serde_json::Value>,
     pub fixture_roles: Option<serde_json::Value>,
     pub fixture_channel_perms: Option<serde_json::Value>,
     /// Fixtures: each chat's bots and their commands, as `get_chat_commands` answers.
@@ -360,6 +364,7 @@ impl Store {
             },
             invites: f.invites.into_iter().map(Invite::from).collect(),
             fixture_audit: f.audit,
+            fixture_sync_report: f.sync_report,
             fixture_roles: f.roles_view,
             fixture_channel_perms: f.channel_perms,
             fixture_bot_commands: f.bot_commands,
@@ -420,6 +425,7 @@ impl Store {
             communities: Vec::new(),
             invites: Vec::new(),
             fixture_audit: None,
+            fixture_sync_report: None,
             fixture_roles: None,
             fixture_channel_perms: None,
             fixture_bot_commands: None,

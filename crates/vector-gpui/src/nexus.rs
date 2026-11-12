@@ -2036,7 +2036,7 @@ fn details(n: &Nexus, app: &MarketplaceApp, publisher: Option<&(SharedString, Op
             .min_w_0()
             .flex()
             .justify_end()
-            .child(div().truncate().font_family("monospace").text_size(px(12.)).text_color(c(0xffffff)).child(app.id.clone()))
+            .child(div().truncate().font_family(MONO).text_size(px(12.)).text_color(c(0xffffff)).child(app.id.clone()))
             .into_any_element(),
         false,
     ));

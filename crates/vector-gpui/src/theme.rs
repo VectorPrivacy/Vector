@@ -6,6 +6,13 @@ use gpui::{Hsla, Rgba, rgb};
 
 pub const RUBIK: &str = "Rubik";
 pub const INTER: &str = "Inter";
+/// What a webview's `monospace` resolves to on each platform.
+#[cfg(target_os = "macos")]
+pub const MONO: &str = "Menlo";
+#[cfg(target_os = "windows")]
+pub const MONO: &str = "Consolas";
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+pub const MONO: &str = "DejaVu Sans Mono";
 
 pub fn c(hex: u32) -> Hsla {
     rgb(hex).into()

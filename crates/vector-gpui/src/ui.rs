@@ -1294,6 +1294,10 @@ impl VectorApp {
                         .find(|s| *s == section)
                         .unwrap_or("overview");
                     app.open_comm_settings(id.clone(), section, window, cx);
+                    // VECTOR_SYNC_REPORT=<any>|epoch-error opens the Sync Report.
+                    if std::env::var("VECTOR_SYNC_REPORT").is_ok() {
+                        app.load_sync_report(cx);
+                    }
                     // VECTOR_ROLE=<name> opens that role in the editor.
                     if let Ok(name) = std::env::var("VECTOR_ROLE") {
                         let role = app.comm_settings.as_ref().and_then(|m| {
@@ -9533,6 +9537,8 @@ impl VectorApp {
                 ..Default::default()
             },
             audit_query,
+            advanced: self.advanced(),
+            report: None,
             roles: Default::default(),
             role_name,
             role_query,
@@ -10074,6 +10080,56 @@ impl VectorApp {
         .detach();
     }
 
+    fn load_sync_report(&mut self, cx: &mut Context<Self>) {
+        let live = self.live;
+        let fixture = if live { None } else { self.store.borrow().fixture_sync_report.clone() };
+        let Some(m) = self.comm_settings.as_mut() else {
+            return;
+        };
+        if m.report.as_ref().is_some_and(|r| r.loading) {
+            return;
+        }
+        m.report = Some(crate::commsettings::Report { loading: true, ..Default::default() });
+        let id = m.community.clone();
+        let rx = if live {
+            backend::run(backend::community::sync_report(id.clone()))
+        } else {
+            let (tx, rx) = futures::channel::oneshot::channel();
+            let _ = tx.send(sync_report_fixture(fixture));
+            rx
+        };
+        cx.spawn(async move |this, cx| {
+            let (control, epoch) = rx.await.unwrap_or_else(|_| (Err("The report couldn't be read.".into()), Err(String::new())));
+            this.update(cx, |this, cx| {
+                let Some(r) = this.comm_settings.as_mut().filter(|m| m.community == id).and_then(|m| m.report.as_mut()) else {
+                    return;
+                };
+                r.loading = false;
+                if let (Err(e), Err(_)) = (&control, &epoch) {
+                    r.error = Some(e.clone());
+                } else {
+                    let side = |v: Result<serde_json::Value, String>| v.unwrap_or_else(|e| serde_json::json!({ "error": e }));
+                    let data = serde_json::json!({
+                        "client": std::env::consts::OS,
+                        "version": env!("CARGO_PKG_VERSION"),
+                        "at": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+                        "community": id.chars().take(12).collect::<String>(),
+                        "control": side(control),
+                        "epoch": side(epoch),
+                    });
+                    let mut out = Vec::new();
+                    let mut ser = serde_json::Serializer::with_formatter(&mut out, serde_json::ser::PrettyFormatter::with_indent(b" "));
+                    let _ = serde::Serialize::serialize(&data, &mut ser);
+                    r.text = String::from_utf8(out).unwrap_or_default().into();
+                    r.data = Some(data);
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     fn load_audit(&mut self, cx: &mut Context<Self>) {
         let Some(m) = self.comm_settings.as_mut() else {
             return;
@@ -10141,6 +10197,7 @@ impl VectorApp {
                 m.banner_pick = None;
                 m.banner_removed = self.store.borrow().banner(&m.community).is_some();
             }
+            Act::Close if m.report.is_some() => m.report = None,
             Act::Close => {
                 if m.saving || m.unbanning {
                     return;
@@ -10360,6 +10417,14 @@ impl VectorApp {
             Act::Save => self.save_comm_settings(cx),
             Act::Learn => self.open_web("https://docs.iroh.computer/concepts/relays", cx),
             Act::AuditRefresh => self.load_audit(cx),
+            Act::SyncReport => self.load_sync_report(cx),
+            Act::ReportClose => m.report = None,
+            Act::ReportCopy => {
+                if let Some(text) = m.report.as_ref().map(|r| r.text.to_string()).filter(|t| !t.is_empty()) {
+                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+                    self.toast = Some(("Copied Sync Report".into(), std::time::Instant::now()));
+                }
+            }
             Act::Role(a) => return self.on_role(a, window, cx),
             Act::AuditToggle(id) => {
                 if !m.audit.open.remove(&id) {
@@ -16369,4 +16434,15 @@ impl VectorApp {
         })
         .detach();
     }
+}
+
+/// `VECTOR_SYNC_REPORT=epoch-error` fails the epoch read alone.
+fn sync_report_fixture(f: Option<serde_json::Value>) -> (Result<serde_json::Value, String>, Result<serde_json::Value, String>) {
+    let f = f.unwrap_or_default();
+    let epoch = if std::env::var("VECTOR_SYNC_REPORT").is_ok_and(|v| v == "epoch-error") {
+        Err("relay timed out".to_string())
+    } else {
+        Ok(f["epoch"].clone())
+    };
+    (Ok(f["control"].clone()), epoch)
 }

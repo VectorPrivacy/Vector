@@ -43,6 +43,15 @@ pub struct Audit {
 
 pub const AUDIT_PAGE: usize = 50;
 
+/// The Sync Report: how this device reads the community's control plane.
+#[derive(Default)]
+pub struct Report {
+    pub loading: bool,
+    pub error: Option<String>,
+    pub data: Option<serde_json::Value>,
+    pub text: SharedString,
+}
+
 /// A picked image awaiting Save: the file, the part to upload, and what shows meanwhile.
 pub struct Pick {
     pub path: std::path::PathBuf,
@@ -73,6 +82,8 @@ pub struct CommSettings {
     pub ban_sel: HashSet<String>,
     pub unbanning: bool,
     pub audit: Audit,
+    pub advanced: bool,
+    pub report: Option<Report>,
     pub roles: crate::roles::Roles,
     pub role_name: Entity<TextInput>,
     pub role_query: Entity<TextInput>,
@@ -117,6 +128,9 @@ pub enum Act {
     AuditMore,
     AuditFilter,
     AuditPick(&'static str),
+    SyncReport,
+    ReportClose,
+    ReportCopy,
     Role(crate::roles::Act),
 }
 
@@ -1260,12 +1274,25 @@ fn audit(m: &CommSettings, store: &Store, on: &OnAct, cx: &App) -> AnyElement {
                             .text_color(c(0xffffff))
                             .child("Audit Log"),
                     )
-                    .child(text_btn(
-                        "audit-refresh",
-                        "Refresh",
-                        !a.loading,
-                        click(on, || Act::AuditRefresh),
-                    )),
+                    .child(
+                        div()
+                            .flex()
+                            .gap(px(4.))
+                            .when(m.advanced, |d| {
+                                d.child(text_btn(
+                                    "audit-report",
+                                    "Sync Report",
+                                    !m.report.as_ref().is_some_and(|r| r.loading),
+                                    click(on, || Act::SyncReport),
+                                ))
+                            })
+                            .child(text_btn(
+                                "audit-refresh",
+                                "Refresh",
+                                !a.loading,
+                                click(on, || Act::AuditRefresh),
+                            )),
+                    ),
             )
             .child(lede(
                 "Every change to this community, signed by whoever made it.",
@@ -1615,6 +1642,7 @@ pub fn view(m: &CommSettings, store: &Store, on: &OnAct, cx: &App) -> impl IntoE
         .on_click(|_, _, cx| cx.stop_propagation())
         .child(nav)
         .child(main);
+    let report = m.report.as_ref().map(|r| sync_report(r, on));
     let dismiss = on.clone();
     gpui::deferred(
         div()
@@ -1628,9 +1656,294 @@ pub fn view(m: &CommSettings, store: &Store, on: &OnAct, cx: &App) -> impl IntoE
             .p(px(25.))
             .occlude()
             .on_click(move |_, w, cx| dismiss(Act::Close, w, cx))
-            .child(card),
+            .child(card)
+            .children(report),
     )
     .with_priority(12)
+}
+
+const REPORT_KINDS: &[(u64, &str)] = &[
+    (0, "community"),
+    (1, "role"),
+    (2, "channel"),
+    (3, "grant"),
+    (4, "banlist"),
+    (8, "invite links"),
+    (10, "dissolved"),
+    (11, "pins"),
+    (13, "role"),
+    (14, "permissions"),
+    (15, "category"),
+    (16, "tenure"),
+    (17, "channel sync"),
+    (18, "writers"),
+];
+
+fn kind_name(k: &serde_json::Value) -> String {
+    let n = k.as_u64().unwrap_or(u64::MAX);
+    REPORT_KINDS.iter().find(|(id, _)| *id == n).map(|(_, s)| s.to_string()).unwrap_or_else(|| format!("kind {k}"))
+}
+
+fn truthy(v: &serde_json::Value) -> bool {
+    match v {
+        serde_json::Value::Null => false,
+        serde_json::Value::Bool(b) => *b,
+        serde_json::Value::Number(n) => n.as_f64().is_some_and(|f| f != 0.0),
+        serde_json::Value::String(s) => !s.is_empty(),
+        _ => true,
+    }
+}
+
+/// Refused, held back, or not this device's newest.
+pub fn report_flagged(data: &serde_json::Value) -> Vec<&serde_json::Value> {
+    let ver = |v: &serde_json::Value| v["version"].as_f64();
+    data["control"]["entities"]
+        .as_array()
+        .map(|ents| {
+            ents.iter()
+                .filter(|e| {
+                    let newest = &e["newest"];
+                    let has = truthy(newest);
+                    truthy(&e["refused"])
+                        || truthy(&e["carried"])
+                        || truthy(&e["kept"])
+                        || truthy(&e["mine"])
+                        || (has && !truthy(&newest["admitted"]))
+                        || (has
+                            && truthy(&e["floor"])
+                            && ver(newest) > ver(&e["floor"])
+                            && !(truthy(&e["folds_to"]) && ver(&e["folds_to"]) >= ver(newest)))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn report_row(e: &serde_json::Value) -> String {
+    let v = |x: &serde_json::Value| x["version"].as_u64().map(|n| n.to_string()).unwrap_or_else(|| "–".into());
+    let shown = |x: &serde_json::Value| x.as_str().map(str::to_string).unwrap_or_else(|| x.to_string());
+    let mut out = format!(
+        " {}{} · held v{} · newest v{}",
+        shown(&e["entity"]),
+        if truthy(&e["mine"]) { " (yours)" } else { "" },
+        v(&e["floor"]),
+        v(&e["newest"]),
+    );
+    if truthy(&e["newest"]) {
+        out += &format!(" by {}", shown(&e["newest"]["author"]));
+    }
+    if truthy(&e["refused"]) {
+        out += &format!(" · refused: {}", shown(&e["refused"]));
+    }
+    if truthy(&e["carried"]) {
+        out += "· kept, refused";
+    }
+    if truthy(&e["kept"]) {
+        out += "· kept";
+    }
+    if truthy(&e["newest"]) && !truthy(&e["newest"]["admitted"]) {
+        out += "· not admitted";
+    }
+    out
+}
+
+fn report_chip(text: impl Into<SharedString>, bad: bool) -> impl IntoElement {
+    let tone = if bad { c(crate::timeline::DANGER) } else { white_a(0.14) };
+    div()
+        .px(px(10.))
+        .py(px(4.))
+        .rounded_full()
+        .border_1()
+        .border_color(tone)
+        .text_size(px(12.))
+        .line_height(px(24.))
+        .text_color(if bad { tone } else { white_a(0.8) })
+        .child(text.into())
+}
+
+fn report_label(text: &'static str) -> impl IntoElement {
+    div()
+        .mt(px(16.))
+        .mb(px(6.))
+        .text_size(px(11.))
+        .line_height(px(24.))
+        .font_weight(FontWeight::BOLD)
+        .text_color(white_a(0.45))
+        .child(crate::kit::spaced(text.to_uppercase(), 11. * 0.12))
+}
+
+fn sync_report(r: &Report, on: &OnAct) -> AnyElement {
+    let shown = |x: &serde_json::Value| x.as_str().map(str::to_string).unwrap_or_else(|| x.to_string());
+    let mut body = div()
+        .id("sr-body")
+        .flex_1()
+        .min_h_0()
+        .overflow_y_scroll()
+        .px(px(18.))
+        .py(px(14.));
+    if r.loading {
+        body = body.child(div().p(px(2.)).mb(px(11.)).text_size(px(12.5)).line_height(px(18.)).text_color(white_a(0.4)).child("Reading the control plane…"));
+    } else if let Some(err) = &r.error {
+        body = body.child(div().text_size(px(13.)).text_color(c(crate::timeline::DANGER)).child(err.clone()));
+    } else if let Some(d) = &r.data {
+        let ctl = &d["control"];
+        let ep = &d["epoch"];
+        let mut chips = div().flex().flex_wrap().gap(px(6.)).child(report_chip(
+            format!("{} {}", shown(&d["client"]), shown(&d["version"])),
+            false,
+        ));
+        if truthy(ctl) && !truthy(&ctl["error"]) {
+            let settled = truthy(&ctl["converged"]);
+            let cut = truthy(&ctl["truncated"]);
+            chips = chips
+                .child(report_chip(format!("Epoch {}", shown(&ctl["root_epoch"])), false))
+                .child(report_chip(if settled { "Authority settled" } else { "Authority unsettled" }, !settled))
+                .child(report_chip(if cut { "Read cut short" } else { "Read whole" }, cut))
+                .child(report_chip(
+                    format!("{} edits, {} pages", shown(&ctl["editions"]), shown(&ctl["pages_read"])),
+                    false,
+                ))
+                .when(truthy(&ctl["would_update"]), |d| d.child(report_chip("Unsaved changes", true)));
+        } else if truthy(&ctl["error"]) {
+            chips = chips.child(report_chip(format!("Control: {}", shown(&ctl["error"])), true));
+        }
+        if truthy(&ep["error"]) {
+            chips = chips.child(report_chip(format!("Epoch: {}", shown(&ep["error"])), true));
+        }
+        body = body.child(chips);
+        let flagged = report_flagged(d);
+        if !flagged.is_empty() {
+            body = body.child(report_label("Worth a look")).child(
+                div().pl(px(18.)).flex().flex_col().children(flagged.into_iter().map(|e| {
+                    div()
+                        .relative()
+                        .text_size(px(13.))
+                        .line_height(px(22.))
+                        .text_color(white_a(0.85))
+                        .child(div().absolute().left(px(-12.)).child("•"))
+                        .child(
+                            div()
+                                .flex()
+                                .flex_wrap()
+                                .child(div().font_weight(FontWeight::BOLD).child(kind_name(&e["kind"])))
+                                .child(report_row(e)),
+                        )
+                })),
+            );
+        }
+        body = body.child(report_label("Full report")).child(
+            div()
+                .id("sr-pre")
+                .max_h(px(342.))
+                .overflow_scroll()
+                .px(px(12.))
+                .py(px(10.))
+                .rounded(px(10.))
+                .border_1()
+                .border_color(white_a(0.08))
+                .bg(c(0x070707))
+                .font_family(MONO)
+                .text_size(px(11.))
+                .line_height(px(16.))
+                .text_color(c(0xf6f6f6))
+                .whitespace_nowrap()
+                .child(r.text.clone()),
+        );
+    }
+    let close = on.clone();
+    let card = div()
+        .id("sr-card")
+        .w_full()
+        .max_w(px(720.))
+        .max_h_full()
+        .flex()
+        .flex_col()
+        .rounded(px(18.))
+        .border_1()
+        .border_color(c(0x2c2e2f))
+        .bg(c(0x101010))
+        .overflow_hidden()
+        .occlude()
+        .on_click(|_, _, cx| cx.stop_propagation())
+        .child(
+            div()
+                .flex()
+                .items_start()
+                .justify_between()
+                .gap(px(12.))
+                .pt(px(16.))
+                .px(px(18.))
+                .pb(px(12.))
+                .border_b_1()
+                .border_color(ca(57, 57, 57, 0.5))
+                .child(
+                    div()
+                        .child(div().text_size(px(17.)).line_height(px(24.)).font_weight(FontWeight::SEMIBOLD).text_color(c(0xf6f6f6)).child("Sync Report"))
+                        .child(
+                            div()
+                                .mt(px(4.))
+                                .text_size(px(13.))
+                                .line_height(px(24.))
+                                .text_color(white_a(0.55))
+                                .child("How this device reads the community. Versions and short IDs only, safe to share."),
+                        ),
+                )
+                .child(
+                    div()
+                        .id("sr-close")
+                        .flex()
+                        .flex_col()
+                        .items_center()
+                        .gap(px(2.))
+                        .cursor_pointer()
+                        .group("sr-close")
+                        .on_click(move |_, w, cx| close(Act::ReportClose, w, cx))
+                        .child(
+                            div()
+                                .size(px(30.))
+                                .rounded_full()
+                                .border(px(1.5))
+                                .border_color(c(0x4a4a4a))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .text_size(px(12.))
+                                .text_color(c(0x9a9a9a))
+                                .group_hover("sr-close", |d| d.text_color(c(0xffffff)).border_color(c(0x9a9a9a)))
+                                .child("✕"),
+                        ),
+                ),
+        )
+        .child(body)
+        .child(
+            div()
+                .flex()
+                .justify_end()
+                .gap(px(8.))
+                .px(px(18.))
+                .py(px(12.))
+                .border_t_1()
+                .border_color(ca(57, 57, 57, 0.5))
+                .child(text_btn("sr-done", "Close", true, click(on, || Act::ReportClose)))
+                .child(save_btn("sr-copy", "Copy Report", !r.text.is_empty(), click(on, || Act::ReportCopy))),
+        );
+    let dismiss = on.clone();
+    div()
+        .id("sr-overlay")
+        .absolute()
+        .inset_0()
+        .bg(ca(0, 0, 0, 0.7))
+        .flex()
+        .items_center()
+        .justify_center()
+        .p(px(16.))
+        .occlude()
+        .on_click(move |_, w, cx| {
+            cx.stop_propagation();
+            dismiss(Act::ReportClose, w, cx)
+        })
+        .child(card)
+        .into_any_element()
 }
 
 #[cfg(test)]

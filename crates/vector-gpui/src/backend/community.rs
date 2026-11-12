@@ -927,6 +927,22 @@ pub async fn audit_log(community_id: String) -> Result<serde_json::Value, String
     .await
 }
 
+/// The Sync Report's two reads, each failing alone: the control fold and the epoch walk.
+pub async fn sync_report(community_id: String) -> (Result<Value, String>, Result<Value, String>) {
+    db::scoped(async move {
+        let c = match load(&community_id) {
+            Ok(c) => c,
+            Err(e) => return (Err(e.clone()), Err(e)),
+        };
+        let transport = vector_core::community::transport::LiveTransport::with_timeout(std::time::Duration::from_secs(12));
+        tokio::join!(
+            vector_core::community::v2::service::debug_control_report(&c),
+            vector_core::community::v2::service::explain_epoch_state(&transport, &c),
+        )
+    })
+    .await
+}
+
 /// `get_community_roles_view`: everything the role editor needs, read locally.
 pub fn roles_view(community_id: &str) -> Result<serde_json::Value, String> {
     VectorCore
