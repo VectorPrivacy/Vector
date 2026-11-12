@@ -761,7 +761,15 @@ impl LoginView {
                     cx.emit(LoggedIn { npub });
                 }
                 Err(e) => {
-                    this.show_error(format!("Could not finish setup: {e}"), cx);
+                    let mut p = Popup::notice(if security == "password" {
+                        "Could not save your password"
+                    } else {
+                        "Could not save your PIN"
+                    });
+                    p.icon = None;
+                    p.text = Some(e.into());
+                    this.popup = Some(p);
+                    this.popup_reauth = false;
                     this.open_encryption(cx);
                     let _ = window;
                 }

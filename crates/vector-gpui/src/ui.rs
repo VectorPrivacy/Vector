@@ -4890,7 +4890,7 @@ impl VectorApp {
             PopupAct::Logout => {
                 let me = self.store.borrow().my_npub.clone();
                 self.settings = None;
-                self.remove_account(me, window, cx);
+                self.remove_account_or(me, "Logout failed", window, cx);
             }
             PopupAct::RenameFolder { id } => {
                 if let Some(input) = popup.input {
@@ -15907,6 +15907,16 @@ impl VectorApp {
     }
 
     fn remove_account(&mut self, npub: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.remove_account_or(npub, "Delete failed", window, cx);
+    }
+
+    fn remove_account_or(
+        &mut self,
+        npub: String,
+        fail: &'static str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if !self.live {
             if let Some(s) = self.switcher.as_mut() {
                 s.rows.retain(|r| r.npub != npub);
@@ -15919,7 +15929,13 @@ impl VectorApp {
             this.update_in(cx, |this, window, cx| match result {
                 Ok(true) => this.reboot(window, cx),
                 Ok(false) => this.open_switcher(cx),
-                Err(e) => this.notice("Delete failed", e, cx),
+                Err(e) => {
+                    let mut p = kit::Popup::notice(fail);
+                    p.icon = None;
+                    p.text = Some(kit::escape(&e).into());
+                    this.popup = Some((p, PopupAct::Notice));
+                    cx.notify();
+                }
             })
             .ok();
         })
