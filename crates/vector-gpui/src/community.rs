@@ -255,6 +255,7 @@ pub fn sidebar(
     raid: bool,
     on: &OnAct,
     (voice, on_voice, anchors): (&crate::voice::Voice, &crate::voice::OnAct, &crate::kit::Anchors),
+    width: f32,
 ) -> AnyElement {
     let row = |ch: &Channel| {
         let open = open == Some(ch.channel_id.as_str());
@@ -339,7 +340,7 @@ pub fn sidebar(
                     let on = on.clone();
                     move |e, w, cx| on(Act::BannerMenu(e.position), w, cx)
                 })
-                .child(banner_art(path, f32::from(crate::ui::LIST_W)))
+                .child(banner_art(path, width))
         });
     let head = div()
         .flex_none()
@@ -451,7 +452,7 @@ pub fn sidebar(
         );
     }
     div()
-        .w(px(crate::ui::LIST_W))
+        .w(px(width))
         .flex_shrink_0()
         .h_full()
         .flex()
@@ -570,6 +571,81 @@ pub fn header(
                     22.8,
                     c(ICON_MUTED),
                 )),
+        )
+}
+
+/// The slim layout's channel header: the community's face and `#name` centred over the topic,
+/// as a DM's is, with only the channel's menu.
+pub fn slim_header(
+    store: &Store,
+    com: &Community,
+    ch: &Channel,
+    probe: Rc<std::cell::Cell<Option<gpui::Bounds<gpui::Pixels>>>>,
+    on: &OnAct,
+) -> impl IntoElement {
+    let face = match store.icon(&com.community_id) {
+        Some(path) => img(path).size(px(22.)).rounded_full().flex_shrink_0().into_any_element(),
+        None => img("icons/group-placeholder.svg").size(px(22.)).rounded_full().flex_shrink_0().into_any_element(),
+    };
+    let topic = ch.topic.clone().filter(|t| !t.is_empty());
+    div()
+        .h(px(61.))
+        .flex_shrink_0()
+        .relative()
+        .bg(c(CHAT_HEADER_BG))
+        .border_b_1()
+        .border_color(c(DIVIDER))
+        .flex()
+        .justify_center()
+        .child(
+            div()
+                .pt(px(if topic.is_some() { 8. } else { 18. }))
+                .max_w(gpui::relative(0.6))
+                .flex()
+                .flex_col()
+                .items_center()
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(6.))
+                        .child(face)
+                        .child(
+                            div()
+                                .truncate()
+                                .font_family(RUBIK)
+                                .font_weight(FontWeight::BOLD)
+                                .text_size(px(18.72))
+                                .line_height(px(24.))
+                                .text_color(c(TEXT))
+                                .child(format!("#{}", ch.name)),
+                        ),
+                )
+                .children(topic.map(|t| {
+                    div()
+                        .max_w_full()
+                        .truncate()
+                        .opacity(0.8)
+                        .text_size(px(14.))
+                        .line_height(px(24.))
+                        .text_color(c(TEXT))
+                        .child(t)
+                })),
+        )
+        .child(
+            div()
+                .id("chat-menu")
+                .absolute()
+                .right(px(10.))
+                .top(px(10.))
+                .size(px(40.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .cursor_pointer()
+                .on_click(click(on, || Act::ChatMenu))
+                .child(gpui::canvas(move |b, _, _| probe.set(Some(b)), |_, _, _, _| {}).absolute().size_full())
+                .child(icon("ui/menu-dots.svg", 28., c(ICON_MUTED))),
         )
 }
 

@@ -148,6 +148,9 @@ pub struct VectorApp {
     signer_offline_told: bool,
     call_mic_told: Option<String>,
     jump_miss: Option<(String, &'static str)>,
+    /// The window is narrower than widescreen: the slim layout.
+    is_slim: bool,
+    slim: slim_ops::Slim,
     send_btn: Rc<std::cell::Cell<Option<gpui::Bounds<gpui::Pixels>>>>,
     /// A press on Send, by number, while it is held; a long one opened the timer instead.
     send_held: Option<u64>,
@@ -309,6 +312,9 @@ enum Mode {
 #[derive(Clone)]
 /// What a context menu row does.
 enum MenuAct {
+    AddFriend,
+    Bookmark,
+    AppStore,
     StartDetails(String),
     StartCopyLink(String),
     NewMessage,
@@ -521,6 +527,8 @@ enum CallGo {
 
 #[path = "ui_art.rs"]
 mod art_ops;
+#[path = "ui_slim.rs"]
+mod slim_ops;
 #[path = "ui_chaneditor.rs"]
 mod chaneditor_ops;
 #[path = "ui_commands.rs"]
@@ -846,6 +854,8 @@ impl VectorApp {
             signer_offline_told: false,
             call_mic_told: None,
             jump_miss: None,
+            is_slim: false,
+            slim: slim_ops::Slim::new(),
             send_btn: Rc::default(),
             send_held: None,
             send_long: false,
@@ -1745,6 +1755,17 @@ impl VectorApp {
                 self.show_toast("Copied Link", cx);
             }
             MenuAct::NewMessage => self.open_new_chat(window, cx),
+            MenuAct::AddFriend => {
+                let me = self.store.borrow().my_npub.clone();
+                self.show_profile_qr(&me, window, cx);
+            }
+            MenuAct::Bookmark => {
+                let me = self.store.borrow().my_npub.clone();
+                self.settings = None;
+                self.store.borrow_mut().ensure_dm(&me);
+                self.open_chat(me.into(), window, cx);
+            }
+            MenuAct::AppStore => self.show_nexus(None, window, cx),
             MenuAct::NewCommunity => self.open_create_community(window, cx),
             MenuAct::Sub(label, sub_items, sub_acts) => {
                 acts.insert(ix.min(acts.len()), MenuAct::Nothing);
@@ -5091,6 +5112,8 @@ impl Render for VectorApp {
         let me = cx.entity().downgrade();
         cx.defer(move |cx| crate::relayinfo::pump(me, cx));
         let rail_mode = self.rail_mode(window);
+        let slim = f32::from(window.viewport_size().width) < slim_ops::WIDE_MIN;
+        self.is_slim = slim;
         self.bar_update(window, cx);
         self.video_tick(window, cx);
         if self.media.borrow_mut().audio.tick() || self.rec.animating() {
@@ -5285,8 +5308,10 @@ impl Render for VectorApp {
                 gpui::deferred(crate::rekey::view(r)).with_priority(16)
             }))
             .child(self.security.clone())
-            .child(chrome(window, false, rail_mode.collapsed).children(self.update_banner(cx)))
-            .child(
+            .child(chrome(window, false, rail_mode.collapsed && !slim).children(self.update_banner(cx)))
+            .child(if slim {
+                self.slim_main(&store, &on_community, window, cx)
+            } else {
                 div()
                     .flex()
                     .flex_row()
@@ -5350,6 +5375,7 @@ impl Render for VectorApp {
                                     .is_some_and(|r| r.0 || r.1 > 0),
                                 &on_community,
                                 (&self.voice, &self.on_voice_handler(cx), &self.anchors),
+                                LIST_W,
                             )),
                             None => row.child(chat_list(
                                 self,
@@ -5457,12 +5483,20 @@ impl Render for VectorApp {
                             },
                             (None, None) => empty_pane(self.viktor.clone()).into_any_element(),
                         })
-                    }),
-            )
+                    })
+                .into_any_element()
+            })
+            .children(self.switcher.as_ref().filter(|_| slim).map(|s| {
+                let app = cx.entity().downgrade();
+                let on: crate::switcher::OnAct = Rc::new(move |act, window, cx| {
+                    app.update(cx, |app, cx| app.on_switcher(act, window, cx)).ok();
+                });
+                crate::switcher::view(s, CHROME_H + 52., 8., f32::from(window.viewport_size().height), &on)
+            }))
             .children(
                 self.switcher
                     .as_ref()
-                    .filter(|_| self.profile.is_some())
+                    .filter(|_| self.profile.is_some() && !slim)
                     .map(|s| {
                         let app = cx.entity().downgrade();
                         let on: crate::switcher::OnAct = Rc::new(move |act, window, cx| {
@@ -6746,6 +6780,10 @@ fn typing_strip(store: &Store, chat: &str, fade: f32) -> Option<AnyElement> {
 }
 
 fn preview_line(store: &Store, chat: &SerializableChat, color: gpui::Hsla) -> AnyElement {
+    preview_line_at(store, chat, color, 13., 18.)
+}
+
+fn preview_line_at(store: &Store, chat: &SerializableChat, color: gpui::Hsla, size: f32, line: f32) -> AnyElement {
     let typers = store.typers(&chat.id);
     let group = chat.chat_type != vector_core::ChatType::DirectMessage;
     if let Some(text) = data::typing_text(&typers, group, |n| store.name(n)) {
@@ -6753,12 +6791,12 @@ fn preview_line(store: &Store, chat: &SerializableChat, color: gpui::Hsla) -> An
         let phase = (crate::attachments::EPOCH.elapsed().as_secs_f32() / 6.).fract();
         return div()
             .overflow_hidden()
-            .text_size(px(13.))
-            .line_height(px(18.))
+            .text_size(px(size))
+            .line_height(px(line))
             .child(crate::kit::gradient_text_in(&text, 0., phase, c(0xffffff), c(0x808080)))
             .into_any_element();
     }
-    let look = crate::inline::Look::new(RUBIK, 13., 18., color);
+    let look = crate::inline::Look::new(RUBIK, size, line, color);
     let Some(m) = chat.messages.last() else {
         return crate::inline::inline(Vec::new(), look).into_any_element();
     };
@@ -7441,7 +7479,10 @@ impl VectorApp {
         });
         let panel = self.community.as_ref().is_some_and(|v| v.panel);
         let paper = self.wallpaper.image(self.wallpaper_key().as_ref());
-        let header = if let Some(ch) = channel {
+        let slim_com = channel.and_then(|_| store.community_of(&id)).filter(|_| self.is_slim);
+        let header = if let (Some(ch), Some(com)) = (channel, slim_com) {
+            crate::community::slim_header(store, com, ch, self.chat_menu_btn.clone(), on_community).into_any_element()
+        } else if let Some(ch) = channel {
             let pins = self.pins.button(&id).map(|_| self.pins_on(cx));
             crate::community::header(ch, panel, self.chat_menu_btn.clone(), pins, on_community).into_any_element()
         } else {
@@ -8891,6 +8932,19 @@ impl VectorApp {
         cx: &mut Context<Self>,
     ) {
         use crate::community::Act;
+        if self.is_slim {
+            match &act {
+                Act::Open(id) => {
+                    self.slim.drawer = self.store.borrow().community(id).is_some_and(|c| c.channels.len() > 1);
+                }
+                Act::Channel(_) | Act::ChannelChat(_) | Act::Dm(_) => self.slim.drawer = false,
+                Act::Home => {
+                    self.slim.drawer = false;
+                    self.open = None;
+                }
+                _ => {}
+            }
+        }
         match act {
             Act::Open(id) => self.open_community(id, window, cx),
             Act::Home => self.leave_community(),
@@ -13100,17 +13154,7 @@ impl VectorApp {
                 }
             }
             Act::SetStatus => self.open_status(window, cx),
-            Act::Qr => {
-                let side = (288. * window.scale_factor()).round() as u32;
-                if let Some(image) =
-                    crate::qr::image(&format!("https://vectorapp.io/profile/{npub}"), side)
-                {
-                    let focus = cx.focus_handle();
-                    window.focus(&focus, cx);
-                    self.qr = Some((image, focus));
-                    cx.notify();
-                }
-            }
+            Act::Qr => self.show_profile_qr(&npub, window, cx),
             Act::Edit => {
                 let Some(me) = self.store.borrow().me().cloned() else {
                     return;
@@ -13248,6 +13292,21 @@ impl VectorApp {
                 }
             }
         }
+    }
+
+    fn show_profile_qr(&mut self, npub: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let side = (288. * window.scale_factor()).round() as u32;
+        if let Some(image) = crate::qr::image(&format!("https://vectorapp.io/profile/{npub}"), side) {
+            let focus = cx.focus_handle();
+            window.focus(&focus, cx);
+            self.qr = Some((image, focus));
+            cx.notify();
+        }
+    }
+
+    /// `openQrScanner`: needs a camera decoder this client doesn't carry yet.
+    fn open_qr_scanner(&mut self, _: &mut Window, cx: &mut Context<Self>) {
+        self.show_toast("Scanner unavailable", cx);
     }
 
     fn open_switcher(&mut self, cx: &mut Context<Self>) {
