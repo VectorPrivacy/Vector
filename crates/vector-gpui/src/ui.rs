@@ -5114,6 +5114,12 @@ impl Render for VectorApp {
         let rail_mode = self.rail_mode(window);
         let slim = f32::from(window.viewport_size().width) < slim_ops::WIDE_MIN;
         self.is_slim = slim;
+        if let Some(s) = self.settings.as_mut()
+            && s.slim != slim
+        {
+            s.slim = slim;
+            s.search.update(cx, |t, cx| t.set_look(settings_search_look(slim), cx));
+        }
         self.bar_update(window, cx);
         self.video_tick(window, cx);
         if self.media.borrow_mut().audio.tick() || self.rec.animating() {
@@ -13340,15 +13346,8 @@ impl VectorApp {
 
     fn open_settings(&mut self, cat: &'static str, window: &mut Window, cx: &mut Context<Self>) {
         use crate::settings::{Home, Settings};
-        let search = cx.new(|cx| {
-            TextInput::new("Search", cx).with_look(crate::composer::Look {
-                size: px(14.),
-                line_height: px(17.),
-                weight: FontWeight::NORMAL,
-                placeholder: c(0xb2b2b2),
-                ..kit::field_look()
-            })
-        });
+        let slim = self.is_slim;
+        let search = cx.new(|cx| TextInput::new("Search", cx).with_look(settings_search_look(slim)));
         cx.subscribe_in(
             &search,
             window,
@@ -13480,6 +13479,10 @@ impl VectorApp {
             jumped: None,
             net: Default::default(),
             book: Default::default(),
+            slim: self.is_slim,
+            slim_open: None,
+            slim_shut: Vec::new(),
+            slim_scroll: gpui::ScrollHandle::new(),
         });
         self.load_routing(window, cx);
         self.load_blocked(cx);
@@ -14931,9 +14934,24 @@ impl VectorApp {
                 )));
                 self.show_toast("Copied Settings Link", cx);
             }
+            Act::Fold(id) => {
+                s.open_select = None;
+                if s.search.read(cx).text().trim().is_empty() {
+                    s.slim_open = (s.slim_open != Some(id)).then_some(id);
+                    if s.slim_open.is_some() {
+                        s.cat = id;
+                        self.mark_settings_seen(None);
+                    }
+                } else if let Some(i) = s.slim_shut.iter().position(|x| *x == id) {
+                    s.slim_shut.remove(i);
+                } else {
+                    s.slim_shut.push(id);
+                }
+            }
             Act::Category(id) => {
                 s.open_select = None;
                 s.jumped = None;
+                s.slim_open = Some(id);
                 if s.cat != id {
                     s.cat = id;
                     s.scroll = gpui::ScrollHandle::new();
@@ -14942,6 +14960,7 @@ impl VectorApp {
             }
             Act::Anchor(cat, anchor) => {
                 s.open_select = None;
+                s.slim_open = Some(cat);
                 if s.cat != cat {
                     s.cat = cat;
                     s.scroll = gpui::ScrollHandle::new();
@@ -15010,6 +15029,9 @@ impl VectorApp {
                 }
                 if key == "chat_bg_enabled" {
                     self.chat_bg = value;
+                }
+                if key == "cc_rail_hidden" {
+                    self.slim.hidden = value;
                 }
                 if key == "floating_player" {
                     self.popout.enabled = value;
@@ -15353,6 +15375,7 @@ impl VectorApp {
                 _ => "https://vectorapp.io/privacy-policy",
             }, cx),
             Act::ClearSearch => {
+                s.slim_shut.clear();
                 let search = s.search.clone();
                 search.update(cx, |input, cx| input.clear(window, cx));
                 window.focus(&search.focus_handle(cx), cx);
@@ -17302,4 +17325,15 @@ fn relay_cautions(checks: &[vector_core::community::v2::service::RelayCheck], re
         ));
     }
     out
+}
+
+/// The settings search: the nav's compact field, or a phone's full-width one.
+fn settings_search_look(slim: bool) -> crate::composer::Look {
+    crate::composer::Look {
+        size: px(if slim { 17. } else { 14. }),
+        line_height: px(if slim { 22. } else { 17. }),
+        weight: FontWeight::NORMAL,
+        placeholder: c(if slim { 0x6f6f6f } else { 0xb2b2b2 }),
+        ..kit::field_look()
+    }
 }

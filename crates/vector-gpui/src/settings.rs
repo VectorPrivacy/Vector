@@ -15,6 +15,10 @@ use gpui::{
 use crate::composer::TextInput;
 use crate::theme::*;
 
+#[path = "settings_slim.rs"]
+mod slim;
+pub use slim::slim_view;
+
 pub struct Anchor {
     pub id: &'static str,
     pub label: &'static str,
@@ -289,6 +293,15 @@ pub const DISPLAY: [Toggle; 8] = [
     ),
 ];
 
+/// Display's slim-only row: the rail folded with nothing to pull it out.
+pub const RAIL_HIDDEN: Toggle = t(
+    "cc_rail_hidden",
+    "Hide Community Rail",
+    "hideRail",
+    Home::Device("true", "false", false),
+    "Chat List",
+);
+
 pub const PRIVACY: [Toggle; 4] = [
     t(
         "web_previews",
@@ -408,6 +421,7 @@ pub fn toggles() -> impl Iterator<Item = &'static Toggle> {
         .chain(STORAGE.iter())
         .chain(OTHER.iter())
         .chain(std::iter::once(&CLOCK))
+        .chain(std::iter::once(&RAIL_HIDDEN))
 }
 
 pub fn toggle_of(key: &str) -> Option<&'static Toggle> {
@@ -420,6 +434,10 @@ pub fn help(key: &str) -> Option<(&'static str, String)> {
         "startMenu" => (
             "Main Menu",
             "<b>When enabled:</b> your Profile, Chat, Bookmarks, Mini Apps and Settings live in a Main Menu that opens from your row at the bottom of the sidebar, beside pins for the apps, chats and places you use most.<br><br><b>When disabled:</b> they sit down the sidebar as tabs, as before.<br><br>This applies to this device only.",
+        ),
+        "hideRail" => (
+            "Hide Community Rail",
+            "When enabled, the <b>community rail and its pull tab are hidden</b>, and your communities sit in the chat list behind the <b>All</b>, <b>Messages</b>, <b>Communities</b> and <b>Requests</b> filters.<br><br>This applies to this device only.",
         ),
         "imageTypes" => (
             "Display Image Types",
@@ -779,6 +797,12 @@ pub struct Settings {
     pub net: crate::routing::Routing,
     /// How each listed relay and server is reached on the network in use.
     pub book: crate::routes::RouteBook,
+    /// Laid out for a phone: one card of categories that fold open.
+    pub slim: bool,
+    pub slim_open: Option<&'static str>,
+    /// Categories a search matched that the reader folded shut.
+    pub slim_shut: Vec<&'static str>,
+    pub slim_scroll: ScrollHandle,
 }
 
 /// The chart's pointer state: a slice previewed, one picked, a Delete running.
@@ -803,6 +827,8 @@ pub enum Act {
     /// Copy the Vector link to `category/anchor`.
     CopyPlace(&'static str, &'static str),
     Category(&'static str),
+    /// A phone's category row: fold it open or shut.
+    Fold(&'static str),
     Anchor(&'static str, &'static str),
     Toggle(&'static str, bool),
     Help(&'static str),
@@ -1191,7 +1217,12 @@ fn display_block(s: &Settings, on: &OnAct) -> AnyElement {
                 .child(theme_picker(s, on)),
         );
     let mut last = "";
-    for t in &DISPLAY {
+    let rows: Vec<&Toggle> = if s.slim {
+        std::iter::once(&RAIL_HIDDEN).chain(DISPLAY.iter().filter(|t| t.key != "ws_nav")).collect()
+    } else {
+        DISPLAY.iter().collect()
+    };
+    for t in rows {
         if t.group != last {
             col = col.child(group_label(t.group, false));
             last = t.group;

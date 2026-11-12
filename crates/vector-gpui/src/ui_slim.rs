@@ -57,6 +57,8 @@ enum Item {
 pub(super) struct Slim {
     /// The community rail is out (Discord) rather than folded (Telegram).
     pub rail: bool,
+    /// Display's Hide Community Rail: folded with no pull tab.
+    pub hidden: bool,
     pub filter: Filter,
     /// A community's channels stand over the channel on screen.
     pub drawer: bool,
@@ -73,6 +75,7 @@ impl Slim {
     pub fn new() -> Self {
         Self {
             rail: crate::backend::device::get("cc_rail").is_none_or(|v| v != "false"),
+            hidden: crate::backend::device::get("cc_rail_hidden").is_some_and(|v| v == "true"),
             filter: Filter::Messages,
             drawer: false,
             search: None,
@@ -85,8 +88,12 @@ impl Slim {
     }
 
     /// The tabs on offer: communities live on the rail while it shows.
+    fn rail_out(&self) -> bool {
+        self.rail && !self.hidden
+    }
+
     fn filters(&self) -> &'static [Filter] {
-        if self.rail {
+        if self.rail_out() {
             &[Filter::Messages, Filter::Requests]
         } else {
             &[Filter::All, Filter::Messages, Filter::Communities, Filter::Requests]
@@ -191,7 +198,7 @@ impl VectorApp {
             let on: crate::settings::OnAct = Rc::new(move |act, window, cx| {
                 app.update(cx, |app, cx| app.on_settings(act, window, cx)).ok();
             });
-            let view = div().flex_1().min_h_0().child(crate::settings::view(settings, width, &on, cx));
+            let view = div().flex_1().min_h_0().child(crate::settings::slim_view(settings, &on, cx));
             return screen(view.into_any_element()).child(self.slim_navbar(store, cx)).into_any_element();
         }
         if self.nexus.is_some() {
@@ -417,7 +424,7 @@ impl VectorApp {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let query = self.slim_query(cx);
-        let rail = self.slim.rail && query.is_empty();
+        let rail = self.slim.rail_out() && query.is_empty();
         let pane_w = width - if rail { RAIL_W } else { 0. };
         let community = self
             .community
@@ -775,7 +782,7 @@ impl VectorApp {
         let origin = self.slim.tabs.borrow().get(&filters[0]).map(|b| f32::from(b.left())).unwrap_or(0.);
         let bar = bar.map(|b| div().absolute().inset_0().ml(px(-origin)).child(b));
         let _ = row_probe;
-        let folded = !self.slim.rail;
+        let folded = !self.slim.rail_out() && !self.slim.hidden;
         div()
             .h(px(49.))
             .flex_shrink_0()
