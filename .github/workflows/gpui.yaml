@@ -17,6 +17,9 @@ on:
       - '.github/workflows/gpui.yaml'
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 concurrency:
   group: gpui-${{ github.ref }}
   cancel-in-progress: true
