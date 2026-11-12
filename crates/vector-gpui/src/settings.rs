@@ -574,6 +574,18 @@ pub fn help(key: &str) -> Option<(&'static str, String)> {
             "Logs",
             "Copies error logs and crash details to your clipboard.<br><br>Share with developers when reporting bugs to help diagnose issues.",
         ),
+        "voiceModel" => (
+            "Vector Voice AI Model",
+            "The Vector Voice AI model <b>determines the Quality of your transcriptions.</b><br><br>A larger model will provide more accurate transcriptions & translations, but require more Disk Space, Memory and CPU power to run.",
+        ),
+        "voiceTranslate" => (
+            "Vector Voice Translations",
+            "Vector Voice AI can <b>automatically detect non-English languages and translate them in to English text for you.</b><br><br>You can decide whether Vector Voice transcribes in to their native spoken language, or instead translates in to English on your behalf.",
+        ),
+        "voiceTranscribe" => (
+            "Vector Voice Transcriptions",
+            "Vector Voice AI can <b>automatically transcribe incoming Voice Messages</b> for immediate reading, without needing to listen.<br><br>You can decide whether Vector Voice transcribes automatically, or if you prefer to transcribe each message explicitly.",
+        ),
         "logout" => (
             "Logout",
             "Logout will erase the local database and remove all stored keys. You will lose access to your communities unless you have a backup.",
@@ -701,6 +713,8 @@ pub struct Settings {
     pub dragging: Rc<std::cell::Cell<Option<&'static str>>>,
     /// Blocked users, once loaded.
     pub blocked: Option<Vec<Blocked>>,
+    /// Voice: the models and switches once read.
+    pub voice: Option<VoiceView>,
     /// Anchors whose NEW pill has been seen.
     pub seen: HashSet<String>,
     /// The anchor a nav click scrolled to, until the reader scrolls.
@@ -762,6 +776,10 @@ pub enum Act {
     /// `input` or `output`; None is the system default.
     Device(&'static str, Option<String>),
     Link(&'static str),
+    /// Voice: fetch the chosen model, stop fetching it, or delete it.
+    VoiceDownload,
+    VoiceCancel,
+    VoiceDelete,
     ClearSearch,
     /// The reader scrolled the page: the spy takes over from a jump.
     Scrolled,
@@ -2828,6 +2846,269 @@ fn updates_block(s: &Settings, on: &OnAct) -> AnyElement {
     col.into_any_element()
 }
 
+pub struct VoiceView {
+    pub models: Vec<crate::backend::transcribe::Model>,
+    pub memory_mb: u64,
+    pub selected: &'static str,
+    pub auto_translate: bool,
+    pub auto_transcribe: bool,
+    /// The fetch under way, as its progress line.
+    pub download: Option<String>,
+    pub error: String,
+}
+
+impl VoiceView {
+    /// `findBestModelForDevice`: small, base, tiny, the first this memory can run.
+    pub fn recommended(&self) -> &'static str {
+        ["small", "base", "tiny"]
+            .into_iter()
+            .find(|n| self.models.iter().any(|m| m.name == *n && self.memory_mb >= m.ram as u64))
+            .or(self.models.first().map(|m| m.name))
+            .unwrap_or("small")
+    }
+
+    pub fn current(&self) -> Option<&crate::backend::transcribe::Model> {
+        self.models.iter().find(|m| m.name == self.selected)
+    }
+
+    /// `findBestFallbackModel`: when `gone` is no longer usable, the nearest downloaded model
+    /// above it, then below, then small, then the largest downloaded.
+    pub fn fallback(&self, gone: &str) -> &'static str {
+        let mut order: Vec<_> = self.models.iter().collect();
+        order.sort_by_key(|m| m.size);
+        let has = |n: &str| self.models.iter().any(|m| m.name == n && m.downloaded);
+        if let Some(i) = order.iter().position(|m| m.name == gone) {
+            if let Some(m) = order[i + 1..].iter().chain(order[..i].iter().rev()).find(|m| has(m.name)) {
+                return m.name;
+            }
+        }
+        if has("small") || !self.models.iter().any(|m| m.downloaded) {
+            return "small";
+        }
+        order.iter().rev().find(|m| has(m.name)).map_or("small", |m| m.name)
+    }
+}
+
+/// A label made at runtime for a static-labelled select; the set of labels is small and fixed.
+fn interned(text: String) -> &'static str {
+    use std::sync::{Mutex, OnceLock};
+    static LABELS: OnceLock<Mutex<HashSet<&'static str>>> = OnceLock::new();
+    let mut set = LABELS.get_or_init(Default::default).lock().unwrap();
+    if let Some(l) = set.get(text.as_str()) {
+        return l;
+    }
+    let l: &'static str = Box::leak(text.into_boxed_str());
+    set.insert(l);
+    l
+}
+
+fn voice_block(s: &Settings, on: &OnAct) -> AnyElement {
+    let Some(v) = s.voice.as_ref() else {
+        return div().into_any_element();
+    };
+    let current = v.current();
+    let can_translate = current.is_none_or(|m| m.translate);
+    let busy = v.download.is_some();
+    let switch = |key: &'static str, value: bool, enabled: bool| {
+        toggle(key, value, s.flipped.contains(key), {
+            let on = on.clone();
+            move |_, w, cx| {
+                if enabled {
+                    on(Act::Toggle(key, !value), w, cx)
+                }
+            }
+        })
+    };
+    let translate = div()
+        .when(!can_translate, |d| d.opacity(0.45))
+        .child(toggle_row(
+            "voice-translate",
+            "Auto-Translate",
+            Some(Box::new(click(on, || Act::Help("voiceTranslate")))),
+            switch("voiceTranslate", can_translate && v.auto_translate, can_translate),
+            false,
+        ));
+    let warning = (!can_translate).then(|| {
+        div()
+            .h(px(36.))
+            .flex()
+            .items_center()
+            .justify_center()
+            .gap(px(6.))
+            .text_size(px(13.))
+            .text_color(c(0xFCE459))
+            .child(svg().path("icons/vector_warning.svg").size(px(16.)).flex_shrink_0().text_color(c(0xFCE459)))
+            .child("Selected model does not support translation")
+            .mb(px(10.))
+    });
+    let transcribe = toggle_row(
+        "voice-transcribe",
+        "Auto-Transcribe",
+        Some(Box::new(click(on, || Act::Help("voiceTranscribe")))),
+        switch("voiceTranscribe", v.auto_transcribe, true),
+        false,
+    );
+    let recommended = v.recommended();
+    let choices: Vec<crate::kit::Choice> = v
+        .models
+        .iter()
+        .map(|m| crate::kit::Choice {
+            value: m.name,
+            label: interned(if v.memory_mb < m.ram as u64 {
+                format!("{} (Insufficient RAM)", m.display)
+            } else if m.name == recommended {
+                format!("{} [Recommended]", m.display)
+            } else {
+                m.display.to_string()
+            }),
+        })
+        .collect();
+    let disabled: Vec<&str> = v.models.iter().filter(|m| v.memory_mb < m.ram as u64).map(|m| m.name).collect();
+    let select = crate::kit::select_with(
+        "whisper-model",
+        230.,
+        12.,
+        &choices,
+        &disabled,
+        v.selected,
+        s.open_select == Some("whisper-model") && !busy,
+        {
+            let on = on.clone();
+            move |w, cx| {
+                if !busy {
+                    on(Act::Select("whisper-model"), w, cx)
+                }
+            }
+        },
+        {
+            let on = on.clone();
+            move |v, w, cx| on(Act::Pick("whisper-model", v), w, cx)
+        },
+    );
+    let trash = current.filter(|m| m.downloaded && !busy).map(|_| {
+        div()
+            .id("delete-model")
+            .w(px(28.))
+            .h(px(36.))
+            .flex()
+            .items_center()
+            .justify_center()
+            .flex_shrink_0()
+            .cursor_pointer()
+            .opacity(0.75)
+            .hover(|d| d.opacity(1.))
+            .on_click(click(on, || Act::VoiceDelete))
+            .child(svg().path("icons/trash.svg").size(px(20.)).text_color(c(crate::timeline::DANGER)))
+    });
+    let label = div()
+        .flex()
+        .items_center()
+        .gap(px(6.))
+        .text_size(px(16.))
+        .line_height(px(24.))
+        .text_color(c(0xffffff))
+        .child("Whisper Model")
+        .child(info("voice-model-info", click(on, || Act::Help("voiceModel"))));
+    let warn = |text: SharedString| {
+        div()
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .text_color(c(0xb2b2b2))
+            .child(div().size(px(7.)).rounded_full().flex_shrink_0().bg(c(0xFCA559)))
+            .child(text)
+            .into_any_element()
+    };
+    let status: Option<AnyElement> = if let Some(d) = &v.download {
+        Some(
+            div()
+                .flex()
+                .items_center()
+                .text_color(c(0x59FCB3))
+                .child(
+                    div()
+                        .size(px(16.))
+                        .mr(px(6.))
+                        .rounded_full()
+                        .border_2()
+                        .border_color(white_a(0.1))
+                        .child(
+                            svg()
+                                .path("icons/loading.svg")
+                                .size_full()
+                                .text_color(c(PRIMARY))
+                                .with_animation(
+                                    "model-spin",
+                                    gpui::Animation::new(std::time::Duration::from_millis(800)).repeat(),
+                                    |s, t| s.with_transformation(gpui::Transformation::rotate(gpui::percentage(t))),
+                                ),
+                        ),
+                )
+                .child(format!(" Downloading... {d}"))
+                .into_any_element(),
+        )
+    } else if !v.error.is_empty() {
+        Some(warn(v.error.clone().into()))
+    } else if current.is_some_and(|m| m.downloaded) {
+        Some(div().text_color(c(0x59FCB3)).child("Vector AI is ready").into_any_element())
+    } else if current.is_some() {
+        Some(warn("Model not downloaded".into()))
+    } else {
+        None
+    };
+    let model = div()
+        .mb(px(10.))
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .child(label)
+                .child(div().flex().items_center().gap(px(8.)).children(trash).child(select)),
+        )
+        .child(div().mt(px(8.)).min_h(px(24.)).text_size(px(14.)).line_height(px(24.)).children(status));
+    let action: Option<AnyElement> = if busy {
+        Some(
+            div()
+                .mt(px(16.))
+                .child(small_button("cancel-download", "Cancel Download", || Act::VoiceCancel, on))
+                .into_any_element(),
+        )
+    } else {
+        current.filter(|m| !m.downloaded).map(|m| {
+            div()
+                .id("download-model")
+                .w(gpui::relative(0.8))
+                .mx_auto()
+                .h(px(43.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(8.))
+                .bg(gpui::linear_gradient(
+                    90.,
+                    gpui::linear_color_stop(c(0x33db98), 0.),
+                    gpui::linear_color_stop(c(0x00ff9d), 1.),
+                ))
+                .text_size(px(16.))
+                .font_weight(FontWeight::BOLD)
+                .text_color(c(0x000000))
+                .cursor_pointer()
+                .hover(|d| d.opacity(0.75))
+                .on_click(click(on, || Act::VoiceDownload))
+                .child(format!("Download Model ({})", crate::media::format_bytes(m.size as u64 * 1024 * 1024)))
+                .into_any_element()
+        })
+    };
+    div()
+        .child(translate)
+        .children(warning)
+        .child(transcribe)
+        .child(model)
+        .children(action)
+        .into_any_element()
+}
+
 pub struct AudioView {
     pub settings: vector_core::calls::settings::AudioSettings,
     pub devices: crate::backend::mic::DeviceList,
@@ -3274,6 +3555,7 @@ fn block(id: &str, s: &Settings, on: &OnAct) -> Option<AnyElement> {
         "security" => security_block(s, on),
         "updates" => updates_block(s, on),
         "calls" => calls_block(s, on),
+        "voice" => voice_block(s, on),
         "display" => display_block(s, on),
         "privacy" => privacy_block(s, on),
         "notifications" => notifications_block(s, on),

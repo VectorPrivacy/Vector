@@ -8968,6 +8968,7 @@ dependencies = [
  "serde_json",
  "simd-adler32",
  "symphonia",
+ "sysinfo",
  "tokio",
  "unicode-linebreak",
  "unicode-segmentation",

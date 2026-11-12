@@ -247,6 +247,7 @@ enum MenuAct {
 
 enum PopupAct {
     Notice,
+    DeleteModel(&'static str),
     ModRevoke,
     ModRotate,
     ModBanRotate,
@@ -673,7 +674,7 @@ impl VectorApp {
         // Fixtures: VECTOR_SETTINGS=<category> opens Settings there.
         if let Ok(cat) = std::env::var("VECTOR_SETTINGS") {
             let cats = crate::settings::categories(&crate::settings::Offers {
-                voice: false,
+                voice: std::env::var_os("VECTOR_TRANSCRIPT").is_some(),
                 routing: true,
                 updates: true,
             });
@@ -1574,7 +1575,7 @@ impl VectorApp {
                     }
                     ["settings", rest @ ..] => {
                         let cats = crate::settings::categories(&crate::settings::Offers {
-                            voice: false,
+                            voice: self.live || std::env::var_os("VECTOR_TRANSCRIPT").is_some(),
                             routing: true,
                             updates: true,
                         });
@@ -2895,6 +2896,15 @@ impl VectorApp {
         {
             self.rec.ended();
         }
+        if name == "whisper_download_progress"
+            && let Some(d) = self.settings.as_mut().and_then(|s| s.voice.as_mut()).and_then(|v| v.download.as_mut())
+        {
+            let mb = |k: &str| v.get(k).and_then(Value::as_f64).filter(|b| *b > 0.).map(|b| b / (1024. * 1024.));
+            *d = match (mb("downloaded_bytes"), mb("total_bytes")) {
+                (Some(a), Some(b)) => format!("{a:.1}/{b:.1} MB"),
+                _ => format!("{}%", v.get("progress").and_then(Value::as_f64).unwrap_or(0.).round()),
+            };
+        }
         let ended = self.media.borrow_mut().audio.on_event(name, &v);
         cx.notify();
         let Some(att) = ended else { return };
@@ -3071,6 +3081,20 @@ impl VectorApp {
                     list.retain(|u| u.npub != npub);
                 }
                 self.set_blocked(npub, false, cx);
+            }
+            PopupAct::DeleteModel(model) => {
+                let rx = backend::run(backend::transcribe::delete(model.to_string()));
+                cx.spawn(async move |this, cx| {
+                    let ok = rx.await.unwrap_or(false);
+                    this.update(cx, |this, cx| {
+                        if ok {
+                            this.show_toast("Model Deleted", cx);
+                        }
+                        this.load_voice(cx);
+                    })
+                    .ok();
+                })
+                .detach();
             }
             PopupAct::ClearStorage => {
                 if let Some(s) = self.settings.as_mut() {
@@ -8654,7 +8678,7 @@ impl VectorApp {
         };
         let mut parts = path.split('/').filter(|p| !p.is_empty());
         let cats = crate::settings::categories(&crate::settings::Offers {
-            voice: self.live,
+            voice: self.live || std::env::var_os("VECTOR_TRANSCRIPT").is_some(),
             routing: true,
             updates: true,
         });
@@ -9895,7 +9919,7 @@ impl VectorApp {
             search,
             scroll: gpui::ScrollHandle::new(),
             offers: crate::settings::Offers {
-                voice: false,
+                voice: self.live || std::env::var_os("VECTOR_TRANSCRIPT").is_some(),
                 routing: vector_core::transport::supported().len() > 1,
                 updates: true,
             },
@@ -9936,11 +9960,13 @@ impl VectorApp {
             .unwrap_or_else(|| "default".into()),
             sound_custom: false,
             blocked: None,
+            voice: None,
             seen: seen.into_iter().collect(),
             jumped: None,
         });
         self.load_blocked(cx);
         self.load_audio(cx);
+        self.load_voice(cx);
         self.load_storage(cx);
         self.load_network(cx);
         self.mark_settings_seen(None);
@@ -10258,6 +10284,59 @@ impl VectorApp {
                 })
                 .ok();
             }
+        })
+        .detach();
+    }
+
+    /// The Voice page's models and switches. A selection that is gone or can't run here falls
+    /// back as `loadWhisperModels` does.
+    fn load_voice(&mut self, cx: &mut Context<Self>) {
+        if !self.settings.as_ref().is_some_and(|s| s.offers.voice) {
+            return;
+        }
+        fn read() -> (Vec<backend::transcribe::Model>, u64, String, bool, bool) {
+            let (model, translate) = backend::transcribe::choice();
+            (
+                backend::transcribe::models(),
+                backend::transcribe::memory_mb(),
+                model,
+                translate,
+                backend::transcribe::auto_transcribe(),
+            )
+        }
+        let rx = if self.live {
+            backend::run(vector_core::db::scoped(async { read() }))
+        } else {
+            let (tx, rx) = futures::channel::oneshot::channel();
+            let _ = tx.send(read());
+            rx
+        };
+        cx.spawn(async move |this, cx| {
+            let Ok((models, memory_mb, model, translate, transcribe)) = rx.await else { return };
+            this.update(cx, |this, cx| {
+                let Some(s) = this.settings.as_mut() else { return };
+                let (download, error) = s.voice.take().map_or((None, String::new()), |v| (v.download, v.error));
+                let mut v = crate::settings::VoiceView {
+                    models,
+                    memory_mb,
+                    selected: "small",
+                    auto_translate: translate,
+                    auto_transcribe: transcribe,
+                    download,
+                    error,
+                };
+                let want = v.models.iter().find(|m| m.name == model).map(|m| m.name);
+                v.selected = match v.models.iter().find(|m| Some(m.name) == want) {
+                    Some(m) if m.downloaded && memory_mb >= m.ram as u64 => m.name,
+                    _ => v.fallback(want.unwrap_or("")),
+                };
+                if want != Some(v.selected) && this.live {
+                    backend::transcribe::set("whisper_model_name", v.selected);
+                }
+                s.voice = Some(v);
+                cx.notify();
+            })
+            .ok();
         })
         .detach();
     }
@@ -11019,6 +11098,21 @@ impl VectorApp {
                     .detach();
                 }
             }
+            Act::Toggle(key @ ("voiceTranslate" | "voiceTranscribe"), value) => {
+                let Some(v) = s.voice.as_mut() else { return };
+                s.flipped.insert(key);
+                let sql = if key == "voiceTranslate" {
+                    v.auto_translate = value;
+                    "whisper_auto_translate"
+                } else {
+                    v.auto_transcribe = value;
+                    "whisper_auto_transcribe"
+                };
+                if self.live {
+                    backend::transcribe::set(sql, value);
+                }
+                self.media.borrow_mut().audio.auto_transcribe = None;
+            }
             Act::Toggle(key, value) => {
                 let Some(t) = crate::settings::toggle_of(key) else { return };
                 if key == "auto_download_enabled" {
@@ -11083,6 +11177,18 @@ impl VectorApp {
             Act::Pick(id, value) => {
                 s.open_select = None;
                 match id {
+                    "whisper-model" => {
+                        if let Some(v) = s.voice.as_mut()
+                            && let Some(m) = v.models.iter().find(|m| m.name == value)
+                        {
+                            v.selected = m.name;
+                            v.error.clear();
+                            if self.live {
+                                backend::transcribe::set("whisper_model_name", m.name);
+                            }
+                            self.media.borrow_mut().audio.auto_transcribe = None;
+                        }
+                    }
                     "theme" => {
                         s.theme = value.to_string();
                         if self.live {
@@ -11173,6 +11279,41 @@ impl VectorApp {
             Act::DonutHover(at) => s.donut.hover = at,
             Act::DonutPick(i) => s.donut.picked = if s.donut.picked == Some(i) { None } else { Some(i) },
             Act::DonutDelete => self.confirm_storage_delete(),
+            Act::VoiceDownload => {
+                let Some(v) = s.voice.as_mut() else { return };
+                if v.download.is_some() || v.current().is_none_or(|m| m.downloaded) {
+                    return;
+                }
+                v.download = Some("0%".into());
+                v.error.clear();
+                let rx = backend::run(backend::transcribe::download(v.selected.to_string()));
+                cx.spawn(async move |this, cx| {
+                    let res = rx.await.unwrap_or_else(|_| Err("cancelled".into()));
+                    this.update(cx, |this, cx| {
+                        if let Some(v) = this.settings.as_mut().and_then(|s| s.voice.as_mut()) {
+                            v.download = None;
+                            if let Err(e) = &res
+                                && !e.contains("cancelled")
+                            {
+                                v.error = format!("Download failed: {e}");
+                            }
+                        }
+                        this.media.borrow_mut().audio.auto_transcribe = None;
+                        this.load_voice(cx);
+                    })
+                    .ok();
+                })
+                .detach();
+            }
+            Act::VoiceCancel => backend::transcribe::cancel_download(),
+            Act::VoiceDelete => {
+                let Some(m) = s.voice.as_ref().and_then(|v| v.current()) else { return };
+                let mut popup = kit::Popup::notice("Delete Model?");
+                popup.text = Some(format!("Are you sure you want to delete the \"{}\" model? This will free up disk space but you'll need to download it again to use it.", m.name).into());
+                popup.confirm = "Confirm".into();
+                popup.cancel = Some("Cancel".into());
+                self.popup = Some((popup, PopupAct::DeleteModel(m.name)));
+            }
             Act::ClearStorage => {
                 if !s.clearing {
                     let mut popup = kit::Popup::notice("Clear Storage?");

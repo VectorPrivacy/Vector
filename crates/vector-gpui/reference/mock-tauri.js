@@ -19,8 +19,12 @@
                 [500, "Light on the water"], [2200, "Gold in your hair"], [4000, ""], [5200, "We drove till the coastline"], [7000, "Ran out of air"],
             ].map(([at_ms, text]) => ({ at_ms, text, words: [] })) }, year: null, chapters: [] }
             : null),
-        list_models: () => [{ model: { name: 'small', display_name: 'Small', size: 488, ram_required: 1000 }, downloaded: true }],
-        get_device_memory: () => 16 * 1024 * 1024 * 1024,
+        list_models: () => [
+            ['tiny', 'Lowest Quality - Fastest', 44, 310, false], ['base', 'Base Quality - Fast', 82, 360, false],
+            ['small', 'Good Quality - Fast', 264, 620, true], ['medium', 'High Quality - Moderate', 823, 1320, true],
+            ['large-v3', 'Highest Quality - Slowest', 1080, 2400, true],
+        ].map(([name, display_name, size, ram_required, supports_translate]) => ({ model: { name, display_name, size, ram_required, supports_translate }, downloaded: name === 'small' && window.__TYPE__ !== 'missing' })),
+        get_device_memory: () => 2 * 1024 * 1024 * 1024,
         transcribe: () => ({ lang: 'ru', language: 'ru', confidence: 0.9, sections: [
             [0, 'Привет, это Ана.'], [1800, 'Я буду дома около семи,'], [4200, 'купи, пожалуйста, хлеб по дороге.'],
         ].map(([at, text]) => ({ at, text, confidence: 0.9 })) }),
