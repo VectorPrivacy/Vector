@@ -437,6 +437,29 @@ impl Store {
             && !self.profiles.get(npub).is_some_and(|p| p.mine || p.stream_consent)
     }
 
+    /// `streamMaskNpubs`: `text` with each hidden person's npub or nprofile as dots, or
+    /// `None` when nothing in it is hidden.
+    pub fn stream_mask(&self, text: &str) -> Option<String> {
+        if !self.streamer.on {
+            return None;
+        }
+        let spans = find_bech_people(text);
+        let mut out = String::new();
+        let mut last = 0;
+        for (start, end, npub) in spans {
+            if npub.as_deref().is_some_and(|n| !self.stream_hidden(n)) {
+                continue;
+            }
+            out.push_str(&text[last..start]);
+            out.push_str(STREAM_DOTS);
+            last = end;
+        }
+        (last > 0).then(|| {
+            out.push_str(&text[last..]);
+            out
+        })
+    }
+
     /// `resolveMentionText`: tagged npubs as `@name`, for previews and notifications.
     pub fn resolve_mentions(&self, text: &str, community: Option<&str>) -> String {
         let spots = crate::markdown::find_npubs_where(text, |c| {
@@ -896,5 +919,67 @@ pub fn file_type(extension: &str) -> (&'static str, &'static str) {
         "torrent" => ("file", "Torrent File"),
         "xdc" => ("gift", "Mini App"),
         _ => ("file-unknown", "Unknown File"),
+    }
+}
+
+/// Each `npub1…` or `nprofile1…` in `text`, with any `@` or `nostr:` before it, and the
+/// npub it names (`None` for an nprofile that doesn't decode).
+pub fn find_bech_people(text: &str) -> Vec<(usize, usize, Option<String>)> {
+    use nostr_sdk::prelude::{FromBech32, Nip19Profile, ToBech32};
+    let lower = text.to_ascii_lowercase();
+    let b = lower.as_bytes();
+    let body = |c: u8| c.is_ascii_lowercase() || c.is_ascii_digit();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < b.len() {
+        let (hrp, profile) = if lower[i..].starts_with("npub1") {
+            (5, false)
+        } else if lower[i..].starts_with("nprofile1") {
+            (9, true)
+        } else {
+            i += 1;
+            continue;
+        };
+        let len = b[i + hrp..].iter().take_while(|&&c| body(c)).count();
+        let end = i + hrp + len;
+        let npub = if profile {
+            (len > 0).then_some(()).and_then(|_| Nip19Profile::from_bech32(&lower[i..end]).ok())
+                .and_then(|p| p.public_key.to_bech32().ok())
+        } else if len >= 58 {
+            Some(lower[i..i + 63].to_string())
+        } else {
+            i = end.max(i + 1);
+            continue;
+        };
+        let end = if profile { end } else { i + 63 };
+        let start = if lower[..i].ends_with("nostr:") {
+            i - 6
+        } else if lower[..i].ends_with('@') {
+            i - 1
+        } else {
+            i
+        };
+        out.push((start, end, npub));
+        i = end;
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bech_people_with_prefixes_and_nprofiles() {
+        use nostr_sdk::prelude::{FromBech32, Nip19Profile, PublicKey, ToBech32};
+        let npub = "npub1v84qsqlcs56j8dmh6s22eccnpn2d87fdutxhl7rftseh67wzamhqfv9ft6";
+        let pk = PublicKey::from_bech32(npub).unwrap();
+        let nprofile = Nip19Profile::new(pk, [nostr_sdk::prelude::RelayUrl::parse("wss://relay.example.com").unwrap()]).to_bech32().unwrap();
+        let text = format!("hi nostr:{npub} and https://x.io/{nprofile}?a=1 @npub1short");
+        let found = find_bech_people(&text);
+        assert_eq!(found.len(), 2);
+        assert_eq!(&text[found[0].0..found[0].1], format!("nostr:{npub}"));
+        assert_eq!(found[1].2.as_deref(), Some(npub));
+        assert_eq!(&text[found[1].0..found[1].1], nprofile);
     }
 }

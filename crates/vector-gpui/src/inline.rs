@@ -85,6 +85,8 @@ const RING_DROP: f32 = 4.5;
 pub enum Kind {
     Plain,
     Link(SharedString),
+    /// A link whose text isn't its destination: the destination shows on hover.
+    LinkTip(SharedString, SharedString),
     /// `code`: a bordered chip, copied on click.
     Code,
     /// `||spoiler||`, hidden until clicked; the id is its index in the message.
@@ -138,7 +140,7 @@ impl Kind {
     fn target(&self, text: &str) -> Option<Target> {
         match self {
             Kind::Plain | Kind::Time(_) | Kind::Tag(_) => None,
-            Kind::Link(url) => Some(Target::Link(url.clone())),
+            Kind::Link(url) | Kind::LinkTip(url, _) => Some(Target::Link(url.clone())),
             Kind::Code => Some(Target::Code(text.to_string().into())),
             Kind::Spoiler {
                 id,
@@ -804,6 +806,7 @@ impl Element for Inline {
                         let (lift, hint) = match kind {
                             Kind::Mention(_) => (true, None),
                             Kind::Time(hint) if !hint.is_empty() => (false, Some(hint.clone())),
+                            Kind::LinkTip(_, tip) => (false, Some(tip.clone())),
                             _ => (false, None),
                         };
                         if lift || hint.is_some() {

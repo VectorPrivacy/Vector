@@ -277,6 +277,7 @@ enum MenuAct {
 
 enum PopupAct {
     Notice,
+    OpenWeb(String),
     DeleteChannel {
         community: String,
         channel: String,
@@ -3141,6 +3142,7 @@ impl VectorApp {
         }
         match act {
             PopupAct::Notice => {}
+            PopupAct::OpenWeb(url) => cx.open_url(&url),
             PopupAct::DeleteChannel { community, channel, category } => {
                 self.delete_channel(community, channel, category, cx)
             }
@@ -8325,7 +8327,7 @@ impl VectorApp {
                 m.warn_until = None;
             }
             Act::Save => self.save_comm_settings(cx),
-            Act::Learn => cx.open_url("https://docs.iroh.computer/concepts/relays"),
+            Act::Learn => self.open_web("https://docs.iroh.computer/concepts/relays", cx),
             Act::AuditRefresh => self.load_audit(cx),
             Act::Role(a) => return self.on_role(a, window, cx),
             Act::AuditToggle(id) => {
@@ -9234,8 +9236,29 @@ impl VectorApp {
     fn follow_url(&mut self, url: &str, window: &mut Window, cx: &mut Context<Self>) {
         match vector_core::deep_link::parse_deep_link(url) {
             Some(a) => self.open_deep_link(a, window, cx),
-            None => cx.open_url(url),
+            None => self.open_web(url, cx),
         }
+    }
+
+    /// `openUrl`: off Clearnet a web page loads outside the account's network, so it asks first.
+    fn open_web(&mut self, url: &str, cx: &mut Context<Self>) {
+        let web = url.starts_with("http://") || url.starts_with("https://");
+        let label = if self.live && web { backend::calls::off_clearnet_label() } else { None };
+        let Some(label) = label else {
+            return cx.open_url(url);
+        };
+        let masked = self.store.borrow().stream_mask(url).unwrap_or_else(|| url.to_string());
+        let shown = match masked.char_indices().nth(220) {
+            Some((i, _)) => format!("{}…", &masked[..i]),
+            None => masked,
+        };
+        let esc = |t: &str| t.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
+        let mut popup = kit::Popup::notice("Open in your browser?");
+        popup.text = Some(format!("It loads outside {}.<br><br>{}", esc(&label), esc(&shown)).into());
+        popup.confirm = "Open".into();
+        popup.cancel = Some("Cancel".into());
+        self.popup = Some((popup, PopupAct::OpenWeb(url.to_string())));
+        cx.notify();
     }
 
     /// A link from the OS: held until an account is open.
@@ -9831,7 +9854,7 @@ impl VectorApp {
     fn on_embed(&mut self, act: crate::embeds::Act, _window: &mut Window, cx: &mut Context<Self>) {
         use crate::embeds::Act;
         match act {
-            Act::OpenUrl(url) => cx.open_url(&url),
+            Act::OpenUrl(url) => self.open_web(&url, cx),
             Act::Copy(text, label) => {
                 cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
                 self.toast = Some((format!("{label} copied").into(), std::time::Instant::now()));
@@ -11977,7 +12000,7 @@ impl VectorApp {
             Act::CheckUpdates => {
                 if self.updates.phase == crate::settings::UpdPhase::Available {
                     if let Some(url) = self.update_url.clone() {
-                        cx.open_url(&url);
+                        self.open_web(&url, cx);
                     }
                 } else if self.live {
                     self.check_updates(false, cx);
@@ -12066,11 +12089,11 @@ impl VectorApp {
                 popup.cancel = Some("Cancel".into());
                 self.popup = Some((popup, PopupAct::Logout));
             }
-            Act::Link(key) => cx.open_url(match key {
+            Act::Link(key) => self.open_web(match key {
                 "donate" => "https://vector-privacy.gitbook.io/vector-privacy/vector-messenger/more/donations",
                 "gitbook" => "https://docs.vectorapp.io",
                 _ => "https://vectorapp.io/privacy-policy",
-            }),
+            }, cx),
             Act::ClearSearch => {
                 let search = s.search.clone();
                 search.update(cx, |input, cx| input.clear(window, cx));
@@ -12513,7 +12536,7 @@ impl VectorApp {
                 self.open = None;
                 cx.notify();
             }
-            Act::Hub => cx.open_url("https://vectorapp.io/hub"),
+            Act::Hub => self.open_web("https://vectorapp.io/hub", cx),
             Act::Join => {
                 let Some(key) = crate::newchat::invite_key(n.filter.read(cx).text()) else {
                     return;

@@ -69,6 +69,8 @@ pub struct Ctx<'a> {
     pub mention: Option<&'a dyn Fn(&str) -> String>,
     /// `@everyone` and the Roles that may show as chips, with each Role's colour.
     pub tags: &'a [(String, Option<u32>)],
+    /// Streamer Mode: text with hidden people's npubs and nprofiles masked, when any are.
+    pub mask: Option<&'a dyn Fn(&str) -> Option<String>>,
 }
 
 enum Swap {
@@ -421,7 +423,18 @@ impl Builder<'_> {
             return;
         }
         if let Some(url) = self.link() {
-            self.emoji_text(t, Kind::Link(url));
+            let bare = |u: &str| u.trim().trim_end_matches('/').to_string();
+            let kind = if bare(t) == bare(&url) || !url.starts_with("http") {
+                Kind::Link(url)
+            } else {
+                let shown = self.ctx.mask.and_then(|m| m(&url)).unwrap_or_else(|| url.to_string());
+                let tip = match shown.char_indices().nth(140) {
+                    Some((i, _)) => format!("{}…", &shown[..i]),
+                    None => shown,
+                };
+                Kind::LinkTip(url, tip.into())
+            };
+            self.emoji_text(t, kind);
             return;
         }
         let mut last = 0;
@@ -493,6 +506,9 @@ impl Builder<'_> {
 
     /// Text with its `:shortcode:`s swapped for the custom emoji the message carries.
     fn emoji_text(&mut self, t: &str, kind: Kind) {
+        if let Some(masked) = self.ctx.mask.and_then(|m| m(t)) {
+            return self.emoji_text(&masked, kind);
+        }
         let Some(custom) = self.ctx.custom else {
             return self.twemoji_text(t, kind);
         };
@@ -545,7 +561,7 @@ impl Builder<'_> {
         }
         let mut look = self.look();
         match kind {
-            Kind::Link(_) => look.color = gpui::rgb(0x59fcb3).into(),
+            Kind::Link(_) | Kind::LinkTip(..) => look.color = gpui::rgb(0x59fcb3).into(),
             Kind::Mention(_) | Kind::Tag(None) => {
                 look.color = gpui::rgb(crate::theme::PRIMARY).into();
                 look.weight = gpui::FontWeight::MEDIUM;
@@ -1187,6 +1203,7 @@ mod custom_tests {
             now: 0.,
             mention: None,
             tags: &[],
+            mask: None,
         };
         let blocks = parse("Have you seen this? :grin: and 21:20:30", &ctx);
         let Block::Para(p) = &blocks[0] else { panic!() };
@@ -1198,5 +1215,36 @@ mod custom_tests {
             }
         )));
         assert_eq!(shortcodes("21:20:30"), vec![]);
+    }
+
+    #[test]
+    fn labelled_links_show_their_destination_masked() {
+        let revealed = HashSet::new();
+        let mask = |t: &str| t.contains("npub1").then(|| t.replace("npub1", "•••"));
+        let ctx = Ctx {
+            base: Look::new("Rubik", 15., 21., gpui::white()),
+            revealed: &revealed,
+            custom: None,
+            now: 0.,
+            mention: None,
+            tags: &[],
+            mask: Some(&mask),
+        };
+        let kinds = |src: &str| -> Vec<Kind> {
+            let blocks = parse(src, &ctx);
+            let Block::Para(p) = &blocks[0] else { panic!() };
+            p.atoms
+                .iter()
+                .filter_map(|a| match a {
+                    Atom::Text { kind, .. } => Some(kind.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+        assert!(kinds("[docs](https://evil.io/npub1x)").iter().any(|k| matches!(
+            k,
+            Kind::LinkTip(url, tip) if url.as_ref() == "https://evil.io/npub1x" && tip.as_ref() == "https://evil.io/•••x"
+        )));
+        assert!(kinds("[https://a.io/](https://a.io)").iter().all(|k| !matches!(k, Kind::LinkTip(..))));
     }
 }

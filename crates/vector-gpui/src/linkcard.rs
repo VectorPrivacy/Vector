@@ -246,6 +246,10 @@ pub fn card(ctx: &Ctx, m: &Message) -> Option<AnyElement> {
     if meta.og_url.as_deref().is_some_and(shared) {
         return None;
     }
+    // A card for a hidden person's profile page would show their name and picture.
+    if urls(&m.content).any(|u| u.starts_with("http") && ctx.store.stream_mask(u).is_some()) {
+        return None;
+    }
     if !urls(&m.content).any(|u| {
         u.starts_with("https://") && vector_core::nostr_embed::EmbedRef::from_url(u).is_none()
     }) {

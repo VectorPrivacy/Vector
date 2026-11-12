@@ -444,6 +444,7 @@ fn content(ctx: &Ctx, m: &Message) -> AnyElement {
             now: ctx.store.now_ms() as f64 / 1000.,
             mention: Some(&|npub: &str| ctx.store.chat_name(npub, &ctx.chat.id)),
             tags: &chips,
+            mask: Some(&|t: &str| ctx.store.stream_mask(t)),
             custom: custom
                 .as_ref()
                 .map(|f| f as &dyn Fn(&str) -> Option<crate::media::Custom>),
