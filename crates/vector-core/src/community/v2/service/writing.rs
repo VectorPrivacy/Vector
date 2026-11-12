@@ -18,6 +18,9 @@ const BACKSTOP_RETRY_MS: u64 = 10 * 60 * 1000;
 /// How long a manager who may post goes unserved before it mints a key it can use.
 const STARVED_MS: u64 = 10 * 60 * 1000;
 
+/// How long a Locked window waits on its minter's seal before another manager makes it.
+const SEAL_BACKSTOP_MS: u64 = 3600 * 1000;
+
 /// Each rank step down waits this much longer before a backstop mint, so one manager acts.
 const RANK_STAGGER_MS: u64 = 2_000;
 
@@ -25,14 +28,68 @@ fn hex(b: &[u8; 32]) -> String {
     crate::simd::hex::bytes_to_hex_32(b)
 }
 
-/// Whether `member_hex` may post in `ch` by `roster`.
-pub(crate) fn may_write(roster: &CommunityRoles, owner_hex: &str, member_hex: &str, ch: &ChannelV2) -> bool {
-    roster.channel_permissions(Some(owner_hex), member_hex, &hex(&ch.id.0), ch.private).contains(Permissions::SEND_MESSAGES)
-}
-
 /// Whether `roster` restricts `ch`.
 pub(crate) fn restricts(roster: &CommunityRoles, ch: &ChannelV2) -> bool {
     !roster.everyone_sends(&hex(&ch.id.0))
+}
+
+/// Whether `roster` locks `ch`: `@everyone` there may write nothing, so every write takes the
+/// writer key. A Locked Channel is restricted too.
+pub(crate) fn locks(roster: &CommunityRoles, ch: &ChannelV2) -> bool {
+    roster.everyone_writes_nothing(&hex(&ch.id.0))
+}
+
+/// What a member may write at a Channel's writer address (CORD-03 §1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Rights {
+    /// Every write: they may post there, or manage it.
+    Full,
+    /// In a Locked Channel, only the writes these CORD-04 bits name, and deletions, which their
+    /// signer's authority judges.
+    Scoped(u64),
+}
+
+/// The bits a scoped certificate may carry.
+const SCOPED_BITS: u64 = Permissions::ADD_REACTIONS | Permissions::CONNECT;
+
+impl Rights {
+    /// Whether these rights hold every write `other` does.
+    pub(crate) fn covers(self, other: Rights) -> bool {
+        match (self, other) {
+            (Rights::Full, _) => true,
+            (Rights::Scoped(_), Rights::Full) => false,
+            (Rights::Scoped(a), Rights::Scoped(b)) => a & b == b,
+        }
+    }
+
+    /// The certificate these rights take, signed by `certifying`.
+    fn certificate(self, community: &CommunityV2, ch: &ChannelV2, epoch: Epoch, certifying: &[u8; 32], writer: &PublicKey) -> Option<chat::WriterCert> {
+        let (cid, w) = (community.id().0, writer.to_bytes());
+        match self {
+            Rights::Full => writers::sign_writer_cert(certifying, &writers::cert_digest(&cid, &ch.id.0, epoch, &w)).map(chat::WriterCert::Full),
+            Rights::Scoped(bits) => writers::sign_writer_cert(certifying, &writers::scoped_cert_digest(&cid, &ch.id.0, epoch, &w, bits)).map(|c| chat::WriterCert::Scoped(c, bits)),
+        }
+    }
+}
+
+/// What `member_hex` may write in `ch` by `roster` when the Channel is `locked`: everything with
+/// Send; in a Locked Channel, reactions and calls by their own bits, and a moderator's deletions.
+pub(crate) fn rights_of(roster: &CommunityRoles, owner_hex: &str, member_hex: &str, ch: &ChannelV2, locked: bool) -> Option<Rights> {
+    let p = roster.channel_permissions(Some(owner_hex), member_hex, &hex(&ch.id.0), ch.private);
+    if p.contains(Permissions::SEND_MESSAGES) {
+        return Some(Rights::Full);
+    }
+    let bits = p.0 & SCOPED_BITS;
+    (locked && (bits != 0 || p.contains(Permissions::MANAGE_MESSAGES))).then_some(Rights::Scoped(bits))
+}
+
+/// Whether `member_hex` may send a write of `kind` in `ch` by `roster`.
+fn may_send_kind(roster: &CommunityRoles, owner_hex: &str, member_hex: &str, ch: &ChannelV2, kind: u16) -> bool {
+    let p = roster.channel_permissions(Some(owner_hex), member_hex, &hex(&ch.id.0), ch.private);
+    match chat::writer_bit(kind) {
+        Some(bit) => p.contains(bit),
+        None => rights_of(roster, owner_hex, member_hex, ch, true).is_some(),
+    }
 }
 
 /// Who may post in a Channel by a Roster: members it hasn't banned who hold Send there.
@@ -50,8 +107,22 @@ impl<'a> Posters<'a> {
         Ok(Posters { roster, owner_hex: community.owner()?.to_hex(), members, banned })
     }
 
+    /// Whether `p` is owed the writer key: they may write anything there.
     fn writes(&self, p: &PublicKey, ch: &ChannelV2) -> bool {
-        self.members.contains(p) && !self.banned.contains(&p.to_hex()) && may_write(self.roster, &self.owner_hex, &p.to_hex(), ch)
+        self.rights(p, ch).is_some()
+    }
+
+    /// What `p` may write at `ch`'s writer address, read at the mode this Roster gives it.
+    fn rights(&self, p: &PublicKey, ch: &ChannelV2) -> Option<Rights> {
+        if !self.members.contains(p) || self.banned.contains(&p.to_hex()) {
+            return None;
+        }
+        rights_of(self.roster, &self.owner_hex, &p.to_hex(), ch, locks(self.roster, ch))
+    }
+
+    /// The certificate `p` is owed: a manager's is whole, since a manager holds the key by design.
+    fn owed(&self, p: &PublicKey, ch: &ChannelV2) -> Rights {
+        if self.manages(p) { Rights::Full } else { self.rights(p, ch).unwrap_or(Rights::Full) }
     }
 
     /// Whether `p` manages the Channel's writers: the owner, or a member it hasn't banned holding
@@ -68,10 +139,11 @@ impl<'a> Posters<'a> {
 }
 
 
-/// Whether `p` may no longer post in `ch`: the Roster takes Send, or a ban. One who left the
-/// Community needs no stop line: the Guestbook every reader holds already stops them.
-fn lost_send(roster: &CommunityRoles, owner_hex: &str, banned: &std::collections::BTreeSet<String>, p: &PublicKey, ch: &ChannelV2) -> bool {
-    !may_write(roster, owner_hex, &p.to_hex(), ch) || banned.contains(&p.to_hex())
+/// Whether `p` may no longer write all that `had` covered in `ch`: the Roster narrows or takes
+/// their rights, or a ban. One who left the Community needs no stop line: the Guestbook every
+/// reader holds already stops them.
+fn lost_rights(roster: &CommunityRoles, owner_hex: &str, banned: &std::collections::BTreeSet<String>, p: &PublicKey, ch: &ChannelV2, had: Rights) -> bool {
+    banned.contains(&p.to_hex()) || !rights_of(roster, owner_hex, &p.to_hex(), ch, locks(roster, ch)).is_some_and(|now| now.covers(had))
 }
 
 /// The writer secret this device holds for `ch`'s live writer epoch, given or minted here,
@@ -96,18 +168,18 @@ pub(crate) fn writer_keys_at(community: &CommunityV2, ch: &ChannelV2, wepoch: Ep
     })
 }
 
-/// The live writer key, when the stored Roster lets this device post and it holds the epoch's
-/// certificate: a key a manager minted or a cut writer kept is no licence, and a post without
-/// its proof would never stand.
-fn usable_writer(community: &CommunityV2, ch: &ChannelV2) -> Option<(Epoch, [u8; 32], GroupKey)> {
+/// The live writer key for a write of `kind`, when the stored Roster lets this device make it and
+/// it holds a certificate covering it: a key a manager minted or a cut writer kept is no licence,
+/// and a write without its proof would never stand.
+fn usable_writer(community: &CommunityV2, ch: &ChannelV2, kind: u16) -> Option<(Epoch, [u8; 32], GroupKey)> {
     let roster = crate::db::community::get_community_roles(&hex(&community.id().0)).ok()?;
     let me = me_pk().ok()?.to_hex();
-    if !may_write(&roster, &community.owner().ok()?.to_hex(), &me, ch) {
+    if !may_send_kind(&roster, &community.owner().ok()?.to_hex(), &me, ch, kind) {
         return None;
     }
     let live = live_writer(community, ch)?;
     let ledger = ch.writers.as_ref()?;
-    let certified = ledger.certifier(live.0).is_none() || my_cert(community, ch, live.0).is_some();
+    let certified = ledger.certifier(live.0).is_none() || my_cert_for(community, ch, live.0, kind).is_some();
     let me = me_pk().ok()?;
     // Kicked while this epoch held, what this device posts at it stands nowhere: it waits for a fresh
     // one. A manager's posts stand on the Roster, so it never waits.
@@ -120,10 +192,15 @@ fn usable_writer(community: &CommunityV2, ch: &ChannelV2) -> Option<(Epoch, [u8;
 /// Where a send of `kind` lands in `ch`: the read group, or the live writer key signing with the
 /// read key encrypting, and the writer epoch the rumor commits.
 pub(crate) fn send_group(community: &CommunityV2, ch: &ChannelV2, read: &GroupKey, kind: u16) -> Result<(GroupKey, Option<Epoch>), String> {
-    if !ch.restricted() || !chat::rides_writer_address(kind) {
+    if !ch.restricted() || !chat::rides_writer_address(kind, ch.locked()) {
         return Ok((read.clone(), None));
     }
-    let (wepoch, _, writer) = usable_writer(community, ch).ok_or("only this channel's writers can post here")?;
+    let refused = match chat::writer_bit(kind) {
+        Some(Permissions::ADD_REACTIONS) => "you can't react in this channel",
+        Some(Permissions::CONNECT) => "you can't join calls in this channel",
+        _ => "only this channel's writers can post here",
+    };
+    let (wepoch, _, writer) = usable_writer(community, ch, kind).ok_or(refused)?;
     Ok((GroupKey::from_parts(writer.keys().clone(), *read.conv_key()), Some(wepoch)))
 }
 
@@ -131,10 +208,10 @@ pub(crate) fn send_group(community: &CommunityV2, ch: &ChannelV2, read: &GroupKe
 /// address. A client precomputing a rumor id builds it through this.
 pub fn outbound_rumor(community: &CommunityV2, channel_id: &ChannelId, rumor: nostr_sdk::prelude::UnsignedEvent) -> nostr_sdk::prelude::UnsignedEvent {
     let Some(ch) = community.channel(channel_id) else { return rumor };
-    if !ch.restricted() || !chat::rides_writer_address(rumor.kind.as_u16()) {
+    if !ch.restricted() || !chat::rides_writer_address(rumor.kind.as_u16(), ch.locked()) {
         return rumor;
     }
-    match usable_writer(community, ch) {
+    match usable_writer(community, ch, rumor.kind.as_u16()) {
         Some((wepoch, ..)) => as_writer(community, ch, rumor, wepoch),
         None => rumor,
     }
@@ -143,12 +220,13 @@ pub fn outbound_rumor(community: &CommunityV2, channel_id: &ChannelId, rumor: no
 /// `rumor` as a writer sends it at `wepoch`: committing the epoch, and carrying this device's
 /// certificate for it when it holds one.
 pub(crate) fn as_writer(community: &CommunityV2, ch: &ChannelV2, rumor: nostr_sdk::prelude::UnsignedEvent, wepoch: Epoch) -> nostr_sdk::prelude::UnsignedEvent {
-    chat::with_writer(rumor, wepoch, my_cert(community, ch, wepoch).as_ref())
+    let cert = my_cert_for(community, ch, wepoch, rumor.kind.as_u16());
+    chat::with_writer_cert(rumor, wepoch, cert)
 }
 
 /// Whether this device may post in `channel` now: a restricted Channel takes only its writers.
 pub fn can_post(community: &CommunityV2, channel_id: &ChannelId) -> bool {
-    community.channel(channel_id).is_some_and(|ch| !ch.restricted() || usable_writer(community, ch).is_some())
+    community.channel(channel_id).is_some_and(|ch| !ch.restricted() || usable_writer(community, ch, super::super::kind::MESSAGE).is_some())
 }
 
 /// Every member a writer secret could be owed to, the owner and this device included.
@@ -269,7 +347,8 @@ async fn mint_over<T: Transport + ?Sized>(transport: &T, community: &CommunityV2
     };
     let certifier = writers::certifier_of(&certifying).ok_or("couldn't make a writer certifier")?;
     let spell = Spell::Writer { epoch, pk, root: community.root_epoch, by: me.to_bytes(), certifier: Some(certifier) };
-    ledger.appended(now_ms(), spell).ok_or("this channel's writer ledger can't take another epoch")?;
+    let locked = locks(posters.roster, ch);
+    ledger.appended_writer(now_ms(), spell, locked).ok_or("this channel's writer ledger can't take another epoch")?;
     // Nothing goes out for a ledger this device couldn't publish over.
     if !chains_from_head(community, ch, &ledger)? {
         return Err(LEDGER_MOVED.to_string());
@@ -282,11 +361,13 @@ async fn mint_over<T: Transport + ?Sized>(transport: &T, community: &CommunityV2
     let candidates = writer_candidates(community, posters.roster)?;
     let recipients: Vec<PublicKey> = candidates.iter().filter(|p| posters.manages(p) || (!cut.contains(p) && posters.writes(p, ch))).copied().collect();
     let managers: Vec<PublicKey> = recipients.iter().filter(|p| **p != me && posters.manages(p)).copied().collect();
-    let certs = certify(community, ch, epoch, &certifying, &recipients);
+    let certs = certify(community, ch, epoch, &certifying, &recipients, &|p| posters.owed(p, ch));
     if recipients.contains(&me) {
         crate::db::community::store_epoch_key(&cid_hex, &writers::secret_scope(&ch.id), epoch.0, &secret)?;
-        if let Some(mine) = certs.get(&me) {
-            store_my_cert(community, ch, epoch, mine);
+        match certs.get(&me) {
+            Some(chat::WriterCert::Full(mine)) => store_my_cert(community, ch, epoch, mine),
+            Some(chat::WriterCert::Scoped(mine, rights)) => store_my_scoped_cert(community, ch, epoch, mine, *rights),
+            None => {}
         }
     }
     // Every delivery is built first, the signer's slow part. Then the ledger goes, so a manager
@@ -303,7 +384,7 @@ async fn mint_over<T: Transport + ?Sized>(transport: &T, community: &CommunityV2
     if ledger_moved_since(transport, community, ch).await? {
         return Err(LEDGER_MOVED.to_string());
     }
-    publish_ledger(transport, community, ch, &ledger, spell, None).await?;
+    publish_ledger(transport, community, ch, &ledger, spell, None, locked).await?;
     // Every part matters: a mint missing one leaves nobody out, but serves nobody it carried.
     for wrap in &sends {
         let mut tries = 0;
@@ -346,12 +427,10 @@ async fn certifier_holders<T: Transport + ?Sized>(transport: &T, held: &Communit
         .collect())
 }
 
-/// Writer certificates from `certifying` for `writers` at `epoch` of `ch` (CORD-03 §1).
-fn certify(community: &CommunityV2, ch: &ChannelV2, epoch: Epoch, certifying: &[u8; 32], writers: &[PublicKey]) -> std::collections::HashMap<PublicKey, [u8; 64]> {
-    writers
-        .iter()
-        .filter_map(|w| writers::sign_writer_cert(certifying, &writers::cert_digest(&community.id().0, &ch.id.0, epoch, &w.to_bytes())).map(|c| (*w, c)))
-        .collect()
+/// Writer certificates from `certifying` for `writers` at `epoch` of `ch` (CORD-03 §1), each for
+/// the rights `owed` gives them.
+fn certify(community: &CommunityV2, ch: &ChannelV2, epoch: Epoch, certifying: &[u8; 32], writers: &[PublicKey], owed: &dyn Fn(&PublicKey) -> Rights) -> std::collections::HashMap<PublicKey, chat::WriterCert> {
+    writers.iter().filter_map(|w| owed(w).certificate(community, ch, epoch, certifying, w).map(|c| (*w, c))).collect()
 }
 
 /// The certifier secret this device holds for `ch`'s writer `epoch`, minted or handed to it,
@@ -368,6 +447,38 @@ fn cert_key(community: &CommunityV2, ch: &ChannelV2, epoch: Epoch) -> String {
 
 fn store_my_cert(community: &CommunityV2, ch: &ChannelV2, epoch: Epoch, cert: &[u8; 64]) {
     let _ = crate::db::settings::set_sql_setting(cert_key(community, ch, epoch), crate::simd::hex::bytes_to_hex_string(cert));
+}
+
+fn scoped_cert_key(community: &CommunityV2, ch: &ChannelV2, epoch: Epoch) -> String {
+    format!("writer_rcert:{}:{}:{}", hex(&community.id().0), hex(&ch.id.0), epoch.0)
+}
+
+fn store_my_scoped_cert(community: &CommunityV2, ch: &ChannelV2, epoch: Epoch, cert: &[u8; 64], rights: u64) {
+    let _ = crate::db::settings::set_sql_setting(scoped_cert_key(community, ch, epoch), format!("{}:{rights}", crate::simd::hex::bytes_to_hex_string(cert)));
+}
+
+/// This device's scoped certificate for `ch`'s writer `epoch` and the bits it covers, when the
+/// ledger's certifier signed it.
+pub(crate) fn my_scoped_cert(community: &CommunityV2, ch: &ChannelV2, epoch: Epoch) -> Option<([u8; 64], u64)> {
+    let key = scoped_cert_key(community, ch, epoch);
+    let held = crate::db::settings::get_sql_setting(key.clone()).ok()??;
+    let (sig, rights) = held.split_once(':')?;
+    let cert: [u8; 64] = crate::simd::hex::hex_string_to_bytes_checked(sig)?.try_into().ok()?;
+    let rights: u64 = rights.parse().ok()?;
+    if ch.writers.as_ref()?.certifies_scoped(&community.id().0, epoch, &me_pk().ok()?.to_bytes(), rights, &cert) {
+        return Some((cert, rights));
+    }
+    let _ = crate::db::settings::remove_setting(&key);
+    None
+}
+
+/// The certificate this device sends a write of `kind` with at `ch`'s writer `epoch`: its whole
+/// one, else a scoped one that covers the write.
+pub(crate) fn my_cert_for(community: &CommunityV2, ch: &ChannelV2, epoch: Epoch, kind: u16) -> Option<chat::WriterCert> {
+    if let Some(cert) = my_cert(community, ch, epoch) {
+        return Some(chat::WriterCert::Full(cert));
+    }
+    my_scoped_cert(community, ch, epoch).filter(|(_, rights)| chat::scope_covers(*rights, kind)).map(|(c, r)| chat::WriterCert::Scoped(c, r))
 }
 
 /// This device's writer certificate for `ch`'s writer `epoch`, when it holds one the ledger's
@@ -411,10 +522,10 @@ async fn reopen<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, c
         let fresh = crate::db::community::load_community_v2(community.id())?.ok_or("this community is gone")?;
         let ch = fresh.channel(&ch.id).cloned().ok_or("no such channel")?;
         let ledger = ch.writers.clone().unwrap_or_else(|| Ledger::new(&ch.id));
-        return publish_ledger(transport, &fresh, &ch, &ledger, Spell::Open, None).await;
+        return publish_ledger(transport, &fresh, &ch, &ledger, Spell::Open, None, false).await;
     }
     let ledger = ch.writers.clone().unwrap_or_else(|| Ledger::new(&ch.id));
-    publish_ledger(transport, community, ch, &ledger, Spell::Open, None).await
+    publish_ledger(transport, community, ch, &ledger, Spell::Open, None, false).await
 }
 
 /// Append a stop for `writer` to `ch`'s ledger: their certificate at the live epoch vouches for
@@ -424,14 +535,14 @@ async fn stop<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, ch:
         return Err("this channel's writer ledger can't be read; nothing appended to it".to_string());
     }
     let ledger = ch.writers.clone().ok_or("this channel keeps no writer ledger")?;
-    publish_ledger(transport, community, ch, &ledger, Spell::Stop { writer: writer.to_bytes() }, None).await
+    publish_ledger(transport, community, ch, &ledger, Spell::Stop { writer: writer.to_bytes() }, None, false).await
 }
 
 /// A stop for `writer` recording that they left at `from`: what a reader who never read the
 /// Guestbook that says so needs, once a Refounding moves it.
 async fn stop_from<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, ch: &ChannelV2, writer: &PublicKey, from: u64) -> Result<(), String> {
     let ledger = ch.writers.clone().ok_or("this channel keeps no writer ledger")?;
-    publish_ledger(transport, community, ch, &ledger, Spell::Stop { writer: writer.to_bytes() }, Some(from)).await
+    publish_ledger(transport, community, ch, &ledger, Spell::Stop { writer: writer.to_bytes() }, Some(from), false).await
 }
 
 /// Whether a stop for `writer` fits `ch`'s ledger (a ledger refuses one that would retire its
@@ -462,8 +573,13 @@ fn chains_from_head(community: &CommunityV2, ch: &ChannelV2, base: &Ledger) -> R
 
 /// Append `spell` to `base` as `ch`'s ledger, dated now, once the edition passes the rules every
 /// reader holds it to: an edition they'd refuse would leave this device alone on it.
-async fn publish_ledger<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, ch: &ChannelV2, base: &Ledger, spell: Spell, from: Option<u64>) -> Result<(), String> {
-    let next = base.appended_from(entry_time(ch).await, spell, from).ok_or("this channel's writer ledger can't take that")?;
+pub(super) async fn publish_ledger<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, ch: &ChannelV2, base: &Ledger, spell: Spell, from: Option<u64>, locked: bool) -> Result<(), String> {
+    let at = entry_time(ch).await;
+    let next = match spell {
+        Spell::Writer { .. } => base.appended_writer(at, spell, locked),
+        _ => base.appended_from(at, spell, from),
+    }
+    .ok_or("this channel's writer ledger can't take that")?;
     if !crate::db::current_session().is_live() {
         return Err("account changed while moving a channel's writers".to_string());
     }
@@ -546,15 +662,19 @@ async fn settle_one<T: Transport + ?Sized>(
     may_manage: bool,
 ) -> Result<(), String> {
     let moved = restricts(before, ch) != restricts(after, ch);
+    // Locking or unlocking a restricted Channel takes a fresh epoch: the flag is the window's.
+    let remode = restricts(after, ch) && ch.restricted() && locks(before, ch) != locks(after, ch) && ch.locked() != locks(after, ch);
     let live = ch.writers.as_ref().and_then(|l| l.current_writer().map(|(e, _)| (l, e)));
     // A manager keeps the key by design, so losing Send stops nothing; one the ledger already
-    // stopped is nothing to act on.
+    // stopped is nothing to act on. Narrower rights count as lost: their certificate covers more.
     let lost: Vec<PublicKey> = candidates
         .iter()
-        .filter(|p| was.writes(p, ch) && !now.writes(p, ch) && !now.manages(p))
+        .filter(|p| was.rights(p, ch).is_some_and(|w| !now.rights(p, ch).is_some_and(|n| n.covers(w))) && !now.manages(p))
         .filter(|p| !live.is_some_and(|(l, e)| l.stopped(e, &p.to_bytes(), u64::MAX)))
         .copied()
         .collect();
+    // A fresh epoch leaves out only who may write nothing now; the narrowed it certifies anew.
+    let cut: Vec<PublicKey> = lost.iter().filter(|p| !now.writes(p, ch)).copied().collect();
     // A manager who lost the bit, or left, and holds this Channel's certifier: only a fresh epoch
     // takes it back.
     let dropped: Vec<PublicKey> = candidates.iter().filter(|p| (p.to_hex() == was.owner_hex || before.is_authorized(&p.to_hex(), Some(&was.owner_hex), Permissions::MANAGE_CHANNELS)) && !now.manages(p)).copied().collect();
@@ -565,24 +685,26 @@ async fn settle_one<T: Transport + ?Sized>(
     let acts = match (restricts(after, ch), ch.restricted()) {
         (true, false) => may_manage && moved,
         (false, true) => may_manage && moved,
-        (true, true) => may_manage && (!lost.is_empty() || demoted),
+        (true, true) => may_manage && (!lost.is_empty() || demoted || remode),
         (false, false) => false,
     };
     if acts {
         let Some((fresh, ch)) = ledger_still(transport, held, &ch.id, &ch.writers).await? else { return Ok(()) };
         return match ch.restricted() {
-            false => mint(transport, &fresh, &ch, now, &lost).await,
-            true if restricts(after, &ch) => match (demoted, lost.as_slice()) {
+            false => mint(transport, &fresh, &ch, now, &cut).await,
+            true if restricts(after, &ch) && ch.locked() == locks(after, &ch) => match (demoted, lost.as_slice()) {
                 (false, [one]) if stop_fits(&ch, one) => stop(transport, &fresh, &ch, one).await,
-                _ => mint(transport, &fresh, &ch, now, &lost).await,
+                _ => mint(transport, &fresh, &ch, now, &cut).await,
             },
+            true if restricts(after, &ch) => mint(transport, &fresh, &ch, now, &cut).await,
             true => reopen(transport, &fresh, &ch).await,
         };
     }
     if !ch.restricted() || !restricts(after, ch) {
         return Ok(());
     }
-    let gained: Vec<PublicKey> = candidates.iter().filter(|p| !was.writes(p, ch) && now.writes(p, ch)).copied().collect();
+    // New to the key, or owed a certificate that covers more than the one they hold.
+    let gained: Vec<PublicKey> = candidates.iter().filter(|p| now.rights(p, ch).is_some_and(|n| !was.rights(p, ch).is_some_and(|w| w.covers(n)))).copied().collect();
     if gained.is_empty() {
         return Ok(());
     }
@@ -607,7 +729,7 @@ async fn settle_one<T: Transport + ?Sized>(
         },
         _ if served.is_empty() => Ok(()),
         (Some((epoch, secret, writer)), Some(certifying)) => {
-            let certs = certify(held, ch, epoch, &certifying, &served);
+            let certs = certify(held, ch, epoch, &certifying, &served, &|p| now.owed(p, ch));
             deliver_certified(transport, held, &ch.id, writers::writer_rekey_scope(&ch.id), epoch, Some(writer.pk().to_bytes()), &secret, &served, &certs).await
         }
         // Only an epoch's minter can certify a writer: a manager mints one that includes them.
@@ -624,14 +746,34 @@ fn kicked_in(spans: &[super::super::guestbook::Span], start: u64, at_ms: u64) ->
     spans.iter().any(|(from, until, kicked)| *kicked && *from <= at_ms && until.is_none_or(|u| u > start))
 }
 
-/// Who epoch `e` vouches for: its minter, and each writer a `trusted` delivery certified.
-fn vouched_at(cid: &[u8; 32], ledger: &Ledger, deliveries: &[rekey::AccessDelivery], trusted: &dyn Fn(&PublicKey, Epoch) -> bool, e: Epoch) -> std::collections::BTreeSet<PublicKey> {
-    ledger
-        .minter(e)
-        .and_then(|m| PublicKey::from_slice(&m).ok())
-        .into_iter()
-        .chain(deliveries.iter().filter(|d| d.epoch == e && trusted(&d.deliverer, e)).flat_map(|d| d.certs.iter().filter(|(w, c)| ledger.certifies(cid, e, w, c)).filter_map(|(w, _)| PublicKey::from_slice(w).ok())))
-        .collect()
+/// Who epoch `e` vouches for, and for what: its minter whole, and each writer a `trusted`
+/// delivery certified, at the widest rights its certificates cover.
+fn vouched_at(cid: &[u8; 32], ledger: &Ledger, deliveries: &[rekey::AccessDelivery], trusted: &dyn Fn(&PublicKey, Epoch) -> bool, e: Epoch) -> std::collections::BTreeMap<PublicKey, Rights> {
+    let mut out: std::collections::BTreeMap<PublicKey, Rights> = std::collections::BTreeMap::new();
+    let mut widen = |p: PublicKey, r: Rights| {
+        let merged = match (out.get(&p).copied(), r) {
+            (Some(Rights::Full), _) | (_, Rights::Full) => Rights::Full,
+            (Some(Rights::Scoped(a)), Rights::Scoped(b)) => Rights::Scoped(a | b),
+            (None, r) => r,
+        };
+        out.insert(p, merged);
+    };
+    if let Some(m) = ledger.minter(e).and_then(|m| PublicKey::from_slice(&m).ok()) {
+        widen(m, Rights::Full);
+    }
+    for d in deliveries.iter().filter(|d| d.epoch == e && trusted(&d.deliverer, e)) {
+        for (w, _) in d.certs.iter().filter(|(w, c)| ledger.certifies(cid, e, w, c)) {
+            if let Ok(p) = PublicKey::from_slice(w) {
+                widen(p, Rights::Full);
+            }
+        }
+        for (w, _, r) in d.scoped.iter().filter(|(w, c, r)| ledger.certifies_scoped(cid, e, w, *r, c)) {
+            if let Ok(p) = PublicKey::from_slice(w) {
+                widen(p, Rights::Scoped(*r));
+            }
+        }
+    }
+    out
 }
 
 /// Whom the live epoch's minting delivery left out after the epoch before vouched for them,
@@ -646,7 +788,7 @@ fn left_out(cid: &[u8; 32], ledger: &Ledger, deliveries: &[rekey::AccessDelivery
         return Default::default();
     }
     let minted_to = |p: &PublicKey| minting.iter().any(|d| rekey::find_my_blob(&d.blobs, &d.deliverer.to_bytes(), &p.to_bytes(), scope, epoch).is_some());
-    ledger.previous_writer().map(|e| vouched_at(cid, ledger, deliveries, trusted, e)).unwrap_or_default().into_iter().filter(|p| !minted_to(p)).collect()
+    ledger.previous_writer().map(|e| vouched_at(cid, ledger, deliveries, trusted, e)).unwrap_or_default().into_keys().filter(|p| !minted_to(p)).collect()
 }
 
 /// What one run of the writer duty did.
@@ -678,6 +820,8 @@ enum Lane {
     Unserved,
     /// Minting to take the certifier back from someone who no longer manages.
     Certifier,
+    /// Sealing a Locked window's history.
+    Seal,
 }
 
 impl Lane {
@@ -689,6 +833,7 @@ impl Lane {
             Lane::Certifier => ([2; 32], BACKSTOP_MOVE_MS),
             Lane::Retry => ([3; 32], BACKSTOP_RETRY_MS),
             Lane::Unserved => ([4; 32], BACKSTOP_MOVE_MS),
+            Lane::Seal => ([5; 32], BACKSTOP_MOVE_MS),
         }
     }
 }
@@ -788,7 +933,8 @@ async fn duty_for<T: Transport + ?Sized>(transport: &T, held: &CommunityV2, ch: 
     // A Refounding retires the live writer epoch: the members it removed may hold it. One whose
     // entry named no certifier predates certificates, so anyone handed its key could post.
     let retired = live.is_some_and(|(root, ..)| root < held.root_epoch) || ch.writers.as_ref().and_then(|l| l.current_writer()).is_some_and(|(e, _)| ch.writers.as_ref().is_some_and(|l| l.certifier(e).is_none()));
-    if may_manage && due(&ch.id, Lane::Move) && ((restrict && retired) || restrict != ch.restricted()) {
+    let remode = restrict && ch.restricted() && ch.locked() != locks(roster, ch);
+    if may_manage && due(&ch.id, Lane::Move) && ((restrict && retired) || restrict != ch.restricted() || remode) {
         if backstop_damped(transport, held, ch, posters, Act::Mint(&[]), &[Lane::Move]).await? {
             done.moved += 1;
         }
@@ -807,9 +953,16 @@ async fn duty_for<T: Transport + ?Sized>(transport: &T, held: &CommunityV2, ch: 
     let minted = |d: &PublicKey, e: Epoch| Some(*d) == ledger.minter(e).and_then(|m| PublicKey::from_slice(&m).ok());
     let trusted = |d: &PublicKey, e: Epoch| minted(d, e) || posters.manages(d);
     let vouching = |d: &PublicKey, e: Epoch| minted(d, e) || posters.vouches_as_manager(d);
-    // At a certified epoch, served means handed a certificate too.
+    // At a certified epoch, served means handed a certificate too, one covering all they may write.
     let certified = |p: &PublicKey, e: Epoch| {
-        ledger.certifier(e).is_none() || deliveries.iter().any(|d| d.epoch == e && trusted(&d.deliverer, e) && d.certs.iter().any(|(w, c)| *w == p.to_bytes() && ledger.certifies(&cid, e, w, c)))
+        let owed = posters.owed(p, ch);
+        ledger.certifier(e).is_none()
+            || deliveries.iter().any(|d| {
+                d.epoch == e
+                    && trusted(&d.deliverer, e)
+                    && (d.certs.iter().any(|(w, c)| *w == p.to_bytes() && ledger.certifies(&cid, e, w, c))
+                        || d.scoped.iter().any(|(w, c, r)| *w == p.to_bytes() && Rights::Scoped(*r).covers(owed) && ledger.certifies_scoped(&cid, e, w, *r, c)))
+            })
     };
     let served = |p: &PublicKey, e: Epoch| served_at(&deliveries, p, scope, e, &|d| trusted(d, e)) && certified(p, e);
     let vouched = |e: Epoch| vouched_at(&cid, ledger, &deliveries, &vouching, e);
@@ -833,17 +986,17 @@ async fn duty_for<T: Transport + ?Sized>(transport: &T, held: &CommunityV2, ch: 
         }
         // A manager may hold the key by design; a writer the Channel no longer lets post is stopped,
         // on evidence rather than an absence.
-        let out: Vec<PublicKey> = vouched(epoch)
+        let out: Vec<(PublicKey, Rights)> = vouched(epoch)
             .into_iter()
-            .filter(|p| walked && *p != me && !posters.manages(p) && !ledger.stopped(epoch, &p.to_bytes(), now))
-            .filter(|p| lost_send(roster, owner_hex, posters.banned, p, ch))
-            .filter(|p| me_hex == owner_hex || roster.can_act_on_member(&me_hex, Some(owner_hex), &p.to_hex(), Permissions::MANAGE_CHANNELS))
-            .filter(|p| due(&ch.id, Lane::Cut(*p)))
+            .filter(|(p, _)| walked && *p != me && !posters.manages(p) && !ledger.stopped(epoch, &p.to_bytes(), now))
+            .filter(|(p, had)| lost_rights(roster, owner_hex, posters.banned, p, ch, *had))
+            .filter(|(p, _)| me_hex == owner_hex || roster.can_act_on_member(&me_hex, Some(owner_hex), &p.to_hex(), Permissions::MANAGE_CHANNELS))
+            .filter(|(p, _)| due(&ch.id, Lane::Cut(*p)))
             .collect();
         if !out.is_empty() {
-            let lanes: Vec<Lane> = out.iter().map(|p| Lane::Cut(*p)).collect();
+            let lanes: Vec<Lane> = out.iter().map(|(p, _)| Lane::Cut(*p)).collect();
             let act = match out.as_slice() {
-                [one] => Act::Stop(*one),
+                [(one, had)] => Act::Stop(*one, *had),
                 many => Act::Mint(many),
             };
             if backstop_damped(transport, held, ch, posters, act, &lanes).await? {
@@ -866,6 +1019,17 @@ async fn duty_for<T: Transport + ?Sized>(transport: &T, held: &CommunityV2, ch: 
         if keyless && starved && due(&ch.id, Lane::Starved) {
             if backstop_damped(transport, held, ch, posters, Act::Mint(&[]), &[Lane::Starved]).await? {
                 done.moved += 1;
+            }
+            return Ok(());
+        }
+        // A Locked window's history is sealed once: by its minter, or failing them, any manager.
+        let unsealed = ch.locked() && ledger.sealed().is_none_or(|s| s.window != epoch);
+        let mine = ledger.minter(epoch) == Some(me.to_bytes());
+        if unsealed && (mine || now.saturating_sub(began) > SEAL_BACKSTOP_MS) && due(&ch.id, Lane::Seal) {
+            acted(&ch.id, &[Lane::Seal]);
+            match super::sealing::seal_history(transport, held, ch).await {
+                Ok(n) => crate::log_info!("[v2:writers {}] sealed {n} posts before the lock", &hex(&ch.id.0)[..8]),
+                Err(e) => crate::log_warn!("[v2:writers {}] sealing failed (retried later): {e}", &hex(&ch.id.0)[..8]),
             }
             return Ok(());
         }
@@ -904,7 +1068,7 @@ async fn duty_for<T: Transport + ?Sized>(transport: &T, held: &CommunityV2, ch: 
     }
     match (live, certifying) {
         (Some((_, secret, _)), Some(certifying)) => {
-            let certs = certify(held, ch, epoch, &certifying, &unserved);
+            let certs = certify(held, ch, epoch, &certifying, &unserved, &|p| posters.owed(p, ch));
             deliver_certified(transport, held, &ch.id, scope, epoch, Some(pk), &secret, &unserved, &certs).await?;
             sent.lock().unwrap_or_else(|e| e.into_inner()).extend(unserved.iter().map(|p| (ch.id.0, epoch.0, p.to_bytes())));
             done.delivered += unserved.len();
@@ -935,10 +1099,12 @@ async fn backstop_damped<T: Transport + ?Sized>(transport: &T, held: &CommunityV
 /// What a backstop does to a restricted Channel's ledger.
 #[derive(Clone, Copy)]
 pub(super) enum Act<'a> {
-    /// Mint a fresh epoch for the writers who remain, leaving these out.
-    Mint(&'a [PublicKey]),
-    /// Stop one writer, or mint without them when a stop doesn't fit.
-    Stop(PublicKey),
+    /// Mint a fresh epoch for the writers who remain, leaving out those of these who may write
+    /// nothing now, each with the rights its certificate held.
+    Mint(&'a [(PublicKey, Rights)]),
+    /// Stop one writer, whose certificate held these rights, or mint without them when a stop
+    /// doesn't fit.
+    Stop(PublicKey, Rights),
     /// Mint a fresh epoch for a stopped writer the Channel lets post again.
     Restart(PublicKey),
 }
@@ -975,26 +1141,26 @@ async fn backstop<T: Transport + ?Sized>(transport: &T, held: &CommunityV2, ch: 
     if !now.everyone_served || now.gapped {
         return Ok(Backstop::Short);
     }
-    if restricts(&now.roles, &ch) != restricts(posters.roster, &ch) {
+    if restricts(&now.roles, &ch) != restricts(posters.roster, &ch) || locks(&now.roles, &ch) != locks(posters.roster, &ch) {
         return Ok(Backstop::StoodDown);
     }
     // What justified acting on one writer must hold on what was just read too: the roster, and
     // the Guestbook caught up.
-    let mut kept_out: Vec<PublicKey> = Vec::new();
+    let mut kept_out: Vec<(PublicKey, Rights)> = Vec::new();
     let act = match act {
-        Act::Stop(_) | Act::Restart(_) | Act::Mint([_, ..]) => {
+        Act::Stop(..) | Act::Restart(_) | Act::Mint([_, ..]) => {
             if sync_guestbook(transport, &fresh).await.is_err() {
                 return Ok(Backstop::Short);
             }
-            let lost = |p: &PublicKey| lost_send(&now.roles, &posters.owner_hex, posters.banned, p, &ch);
+            let lost = |p: &PublicKey, had: Rights| lost_rights(&now.roles, &posters.owner_hex, posters.banned, p, &ch, had);
             match act {
-                Act::Stop(p) if !lost(&p) => return Ok(Backstop::StoodDown),
-                Act::Restart(p) if lost(&p) => return Ok(Backstop::StoodDown),
+                Act::Stop(p, had) if !lost(&p, had) => return Ok(Backstop::StoodDown),
+                Act::Restart(p) if rights_of(&now.roles, &posters.owner_hex, &p.to_hex(), &ch, locks(&now.roles, &ch)).is_none() || posters.banned.contains(&p.to_hex()) => return Ok(Backstop::StoodDown),
                 Act::Mint(cut) => {
-                    kept_out = cut.iter().filter(|p| lost(p)).copied().collect();
+                    kept_out = cut.iter().filter(|(p, had)| lost(p, *had)).copied().collect();
                     match kept_out.as_slice() {
                         [] => return Ok(Backstop::StoodDown),
-                        [one] => Act::Stop(*one),
+                        [(one, had)] => Act::Stop(*one, *had),
                         _ => Act::Mint(&[]),
                     }
                 }
@@ -1003,14 +1169,20 @@ async fn backstop<T: Transport + ?Sized>(transport: &T, held: &CommunityV2, ch: 
         }
         act => act,
     };
+    // A fresh epoch leaves out only who may write nothing now; the narrowed it certifies anew.
+    let gone = |list: &[(PublicKey, Rights)]| -> Vec<PublicKey> {
+        let locked = locks(&now.roles, &ch);
+        list.iter().map(|(p, _)| *p).filter(|p| posters.banned.contains(&p.to_hex()) || rights_of(&now.roles, &posters.owner_hex, &p.to_hex(), &ch, locked).is_none()).collect()
+    };
     let done = match (restricts(posters.roster, &ch), ch.restricted()) {
         (false, true) => reopen(transport, &fresh, &ch).await,
         (false, false) => return Ok(Backstop::Moved),
+        (true, true) if ch.locked() != locks(posters.roster, &ch) => mint(transport, &fresh, &ch, posters, &gone(&kept_out)).await,
         (true, true) => match act {
-            Act::Stop(writer) if stop_fits(&ch, &writer) => stop(transport, &fresh, &ch, &writer).await,
-            Act::Stop(writer) => mint(transport, &fresh, &ch, posters, &[writer]).await,
-            Act::Mint(_) if !kept_out.is_empty() => mint(transport, &fresh, &ch, posters, &kept_out).await,
-            Act::Mint(cut) => mint(transport, &fresh, &ch, posters, cut).await,
+            Act::Stop(writer, _) if stop_fits(&ch, &writer) => stop(transport, &fresh, &ch, &writer).await,
+            Act::Stop(writer, had) => mint(transport, &fresh, &ch, posters, &gone(&[(writer, had)])).await,
+            Act::Mint(_) if !kept_out.is_empty() => mint(transport, &fresh, &ch, posters, &gone(&kept_out)).await,
+            Act::Mint(cut) => mint(transport, &fresh, &ch, posters, &gone(cut)).await,
             Act::Restart(_) => mint(transport, &fresh, &ch, posters, &[]).await,
         },
         (true, false) => mint(transport, &fresh, &ch, posters, &[]).await,
@@ -1123,18 +1295,18 @@ impl Judge {
     /// A post by a member who manages the Channel stands. So does one by a member who may post
     /// there now, sent across a move of the ledger it hadn't read yet: dated within
     /// [`writers::ENTRY_SKEW_MS`] past the entry that moved its address.
-    fn vouched_by_roster(&self, author: &str, at_ms: u64, wepoch: Option<Epoch>) -> bool {
-        self.vouches(author, at_ms, wepoch, true)
+    fn vouched_by_roster(&self, author: &str, at_ms: u64, wepoch: Option<Epoch>, kind: u16) -> bool {
+        self.vouches(author, at_ms, wepoch, true, kind)
     }
 
     /// [`Self::vouched_by_roster`]; `gated` reads today's Roster for writers only while the
     /// Channel is restricted, since once open it lets everyone.
-    fn vouches(&self, author: &str, at_ms: u64, wepoch: Option<Epoch>, gated: bool) -> bool {
+    fn vouches(&self, author: &str, at_ms: u64, wepoch: Option<Epoch>, gated: bool, kind: u16) -> bool {
         if author == self.owner_hex {
             return true;
         }
         let manages = self.roster.is_authorized(author, Some(&self.owner_hex), Permissions::MANAGE_CHANNELS);
-        let writes = || (!gated || self.channel.restricted()) && self.crossed_a_move(at_ms, wepoch) && may_write(&self.roster, &self.owner_hex, author, &self.channel);
+        let writes = || (!gated || self.channel.restricted()) && self.crossed_a_move(at_ms, wepoch) && may_send_kind(&self.roster, &self.owner_hex, author, &self.channel, kind);
         // The memberlist leaves out the banned; nobody vouches for what they posted while away.
         let away = || PublicKey::from_hex(author).is_ok_and(|p| self.departed(&p, at_ms));
         (manages || writes()) && self.member(author) && !away()
@@ -1157,11 +1329,16 @@ impl Judge {
         // Once the Channel is open, anyone may post at its read address: a writer still posting
         // at its own takes nothing new.
         let open = self.ledger.read_address_takes(o.at_ms);
+        let kind = o.rumor.kind.as_u16();
         match wepoch {
-            None => !chat::rides_writer_address(o.rumor.kind.as_u16()) || open,
+            None => !chat::rides_writer_address(kind, self.ledger.locked_at(o.at_ms)) || open,
             Some(e) => {
+                let (cid, author) = (self.community.id().0, o.author.to_bytes());
                 let certified = match self.ledger.certifier(e) {
-                    Some(_) => chat::writer_cert_of(&o.rumor).is_some_and(|c| self.ledger.certifies(&self.community.id().0, e, &o.author.to_bytes(), &c)),
+                    Some(_) => {
+                        chat::writer_cert_of(&o.rumor).is_some_and(|c| self.ledger.certifies(&cid, e, &author, &c))
+                            || chat::scoped_cert_of(&o.rumor).is_some_and(|(c, r)| chat::scope_covers(r, kind) && self.ledger.certifies_scoped(&cid, e, &author, r, &c))
+                    }
                     None => true,
                 };
                 open || (certified && self.ledger.writer_address_takes(e, o.at_ms) && !self.ledger.stopped(e, &o.author.to_bytes(), o.at_ms) && !self.away_in(e, &o.author, o.at_ms) && !self.departed(&o.author, o.at_ms))
@@ -1175,8 +1352,12 @@ impl Judge {
         if self.banned.contains(&o.author.to_hex()) {
             return Arrival::Dropped;
         }
-        if self.stands_by_ledger(&event, wepoch) || self.vouched_by_roster(&o.author.to_hex(), o.at_ms, wepoch) {
+        if self.stands_by_ledger(&event, wepoch) || self.vouched_by_roster(&o.author.to_hex(), o.at_ms, wepoch, o.rumor.kind.as_u16()) {
             return Arrival::Stands(event);
+        }
+        // Nothing at a Locked window's read address can come to stand: it isn't kept, even marked.
+        if wepoch.is_none() && self.ledger.read_address_quiet(o.at_ms) {
+            return Arrival::Dropped;
         }
         if fleeting(&event) {
             return Arrival::Dropped;
@@ -1486,7 +1667,7 @@ async fn retract_since_bound<T: Transport + ?Sized>(transport: &T, community: &C
                     if o.rumor_id.to_hex() != post.id || judge.banned.contains(&o.author.to_hex()) {
                         continue;
                     }
-                    if judge.stands_by_ledger(&event, wepoch) || judge.vouches(&o.author.to_hex(), o.at_ms, wepoch, false) {
+                    if judge.stands_by_ledger(&event, wepoch) || judge.vouches(&o.author.to_hex(), o.at_ms, wepoch, false, o.rumor.kind.as_u16()) {
                         continue;
                     }
                     (o.author, o.at_ms)
@@ -1568,11 +1749,12 @@ async fn collect_writers_bound<T: Transport + ?Sized>(transport: &T, community: 
     let opened = crate::db::current_session().scoped::<OpenedWriterBlobs, std::sync::Mutex<std::collections::HashSet<([u8; 32], [u8; 32], [u8; 32], [u8; 32])>>>();
     let mut adopted = 0;
     for ch in community.channels.iter().filter(|c| c.restricted()) {
-        let writes = may_write(&roster, &owner_hex, &me_hex, ch);
+        let rights = rights_of(&roster, &owner_hex, &me_hex, ch, ch.locked());
         let Some(ledger) = ch.writers.as_ref() else { continue };
         let Some((epoch, pk)) = ledger.current_writer() else { continue };
-        let need_key = (writes || manages) && live_writer(community, ch).is_none();
-        let need_cert = writes && ledger.certifier(epoch).is_some() && my_cert(community, ch, epoch).is_none();
+        let need_key = (rights.is_some() || manages) && live_writer(community, ch).is_none();
+        let covered = || my_cert(community, ch, epoch).is_some() || my_scoped_cert(community, ch, epoch).is_some_and(|(_, r)| rights.is_some_and(|need| Rights::Scoped(r).covers(need)));
+        let need_cert = rights.is_some() && ledger.certifier(epoch).is_some() && !covered();
         let need_certifier = manages && certifier_held(community, ch, epoch).is_none() && ledger.certifier(epoch).is_some();
         if !need_key && !need_cert && !need_certifier {
             continue;
@@ -1581,8 +1763,11 @@ async fn collect_writers_bound<T: Transport + ?Sized>(transport: &T, community: 
         let deliveries: Vec<rekey::AccessDelivery> = named_deliveries(transport, community, ch, ledger).await?.into_iter().filter(|d| d.epoch == epoch).collect();
         // A certificate is taken only if the ledger's certifier signed it, whoever carried it.
         if need_cert {
-            if let Some(cert) = deliveries.iter().flat_map(|d| d.certs.iter()).find(|(who, cert)| *who == me.to_bytes() && ledger.certifies(&community.id().0, epoch, &me.to_bytes(), cert)) {
+            let cid = community.id().0;
+            if let Some(cert) = deliveries.iter().flat_map(|d| d.certs.iter()).find(|(who, cert)| *who == me.to_bytes() && ledger.certifies(&cid, epoch, &me.to_bytes(), cert)) {
                 store_my_cert(community, ch, epoch, &cert.1);
+            } else if let Some((_, cert, r)) = deliveries.iter().flat_map(|d| d.scoped.iter()).filter(|(who, cert, r)| *who == me.to_bytes() && ledger.certifies_scoped(&cid, epoch, &me.to_bytes(), *r, cert)).max_by_key(|(_, _, r)| r.count_ones()) {
+                store_my_scoped_cert(community, ch, epoch, cert, *r);
             }
         }
         if need_key {

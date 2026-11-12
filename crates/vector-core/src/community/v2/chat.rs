@@ -615,11 +615,49 @@ pub fn carries_writer_epoch(rumor: &UnsignedEvent) -> bool {
 }
 
 const TAG_WCERT: &str = "wcert";
+const TAG_RCERT: &str = "rcert";
+
+/// A writer's proof of place at one writer epoch: whole, or for only some writes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WriterCert {
+    Full([u8; 64]),
+    /// `rights`: the CORD-04 bits of the writes it covers.
+    Scoped([u8; 64], u64),
+}
 
 /// The writer certificate a rumor carries, if a well-formed one.
 pub fn writer_cert_of(rumor: &UnsignedEvent) -> Option<[u8; 64]> {
     let s = rumor.tags.iter().map(|t| t.as_slice()).find(|s| s.first().map(String::as_str) == Some(TAG_WCERT))?;
     crate::simd::hex::hex_string_to_bytes_checked(s.get(1)?)?.try_into().ok()
+}
+
+/// The scoped writer certificate a rumor carries, `["rcert", <sig hex>, <rights decimal>]`, if
+/// its first one is well-formed.
+pub fn scoped_cert_of(rumor: &UnsignedEvent) -> Option<([u8; 64], u64)> {
+    let s = rumor.tags.iter().map(|t| t.as_slice()).find(|s| s.first().map(String::as_str) == Some(TAG_RCERT))?;
+    let sig = crate::simd::hex::hex_string_to_bytes_checked(s.get(1)?)?.try_into().ok()?;
+    let rights = s.get(2).and_then(|v| v.parse::<u64>().ok().filter(|n| n.to_string() == *v))?;
+    Some((sig, rights))
+}
+
+/// The CORD-04 bit a write of `kind` needs at a writer address, `None` for a deletion, which is
+/// judged on its signer's authority wherever it lands.
+pub fn writer_bit(kind: u16) -> Option<u64> {
+    use crate::community::roles::Permissions;
+    match kind {
+        kind::REACTION => Some(Permissions::ADD_REACTIONS),
+        kind::VOICE_PRESENCE | kind::VOICE_DIRECTIVE => Some(Permissions::CONNECT),
+        kind::DELETE => None,
+        _ => Some(Permissions::SEND_MESSAGES),
+    }
+}
+
+/// Whether a scoped certificate for `rights` covers a write of `kind`: never a post.
+pub fn scope_covers(rights: u64, kind: u16) -> bool {
+    match writer_bit(kind) {
+        None => true,
+        Some(bit) => bit != crate::community::roles::Permissions::SEND_MESSAGES && rights & bit != 0,
+    }
 }
 
 /// `rumor` committing writer epoch `wepoch` (CORD-03 §3), its id recomputed.
@@ -629,10 +667,17 @@ pub fn with_writer_epoch(rumor: UnsignedEvent, wepoch: Epoch) -> UnsignedEvent {
 
 /// [`with_writer_epoch`], carrying the author's writer certificate for that epoch.
 pub fn with_writer(rumor: UnsignedEvent, wepoch: Epoch, cert: Option<&[u8; 64]>) -> UnsignedEvent {
+    with_writer_cert(rumor, wepoch, cert.map(|c| WriterCert::Full(*c)))
+}
+
+/// [`with_writer_epoch`], carrying `cert`, whole or scoped.
+pub fn with_writer_cert(rumor: UnsignedEvent, wepoch: Epoch, cert: Option<WriterCert>) -> UnsignedEvent {
     let mut tags: Vec<Tag> = rumor.tags.iter().cloned().collect();
     tags.push(Tag::custom(TAG_WEPOCH, [wepoch.0.to_string()]));
-    if let Some(cert) = cert {
-        tags.push(Tag::custom(TAG_WCERT, [crate::simd::hex::bytes_to_hex_string(cert)]));
+    match cert {
+        Some(WriterCert::Full(cert)) => tags.push(Tag::custom(TAG_WCERT, [crate::simd::hex::bytes_to_hex_string(&cert)])),
+        Some(WriterCert::Scoped(cert, rights)) => tags.push(Tag::custom(TAG_RCERT, [crate::simd::hex::bytes_to_hex_string(&cert), rights.to_string()])),
+        None => {}
     }
     let mut out = EventBuilder::new(rumor.kind, rumor.content).tags(tags).custom_created_at(rumor.created_at).finalize_unsigned_with_id(rumor.pubkey);
     out.ensure_id();
@@ -642,9 +687,10 @@ pub fn with_writer(rumor: UnsignedEvent, wepoch: Epoch, cert: Option<&[u8; 64]>)
 /// Whether a rumor kind moves to a restricted Channel's writer address. Reactions and deletions
 /// stay at the read address: a restricted Channel gates posting, not reacting, and a deletion is
 /// judged by its signer's authority wherever it lands. Typing signals posting, so it moves too.
-/// Voice presence stays: being in a call is CONNECT, not posting.
-pub fn rides_writer_address(kind: u16) -> bool {
-    !matches!(kind, kind::REACTION | kind::DELETE | kind::VOICE_PRESENCE | kind::VOICE_DIRECTIVE)
+/// Voice presence stays: being in a call is CONNECT, not posting. In a Locked window everything
+/// moves, so the read address carries nothing anyone needs.
+pub fn rides_writer_address(kind: u16, locked: bool) -> bool {
+    locked || !matches!(kind, kind::REACTION | kind::DELETE | kind::VOICE_PRESENCE | kind::VOICE_DIRECTIVE)
 }
 
 /// Open a chat wrap against every `(epoch, secret)` a client holds for one

@@ -655,6 +655,10 @@ pub fn dispatch_wrap(
         if wrap.pubkey != group.pk() {
             continue;
         }
+        // Dated where a Locked Channel's read address takes nothing: never worth opening.
+        if ch.writers.as_ref().is_some_and(|l| l.read_address_quiet(wrap.created_at.as_secs().saturating_mul(1000))) {
+            return DispatchedV2::Ignored;
+        }
         let Ok(event) = chat::open_chat_event(wrap, &group, &ch.id, epoch) else {
             return DispatchedV2::NotOurs;
         };

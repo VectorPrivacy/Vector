@@ -350,7 +350,10 @@ fn community_addresses(c: &CommunityV2) -> Vec<PublicKey> {
             continue;
         }
         let (secret, epoch) = c.channel_secret(ch);
-        out.push(derive::channel_group_key(&secret, &ch.id, epoch).pk());
+        // A Locked Channel takes nothing new at its read address: nobody listens there.
+        if !ch.locked() {
+            out.push(derive::channel_group_key(&secret, &ch.id, epoch).pk());
+        }
         if let Some(pk) = ch.writers.as_ref().and_then(|l| l.current_writer()).and_then(|(_, pk)| PublicKey::from_slice(&pk).ok()) {
             out.push(pk);
         }

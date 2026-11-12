@@ -5560,7 +5560,7 @@ pub(crate) fn retraction_since(old: Option<&str>, new: &str) -> Option<u64> {
     let old = old.and_then(Ledger::parse);
     let added = new.entries.iter().filter(|e| matches!(e.spell, Spell::Writer { .. })).filter(|e| !old.as_ref().is_some_and(|o| o.entries.contains(e)));
     let front = new.entries.first().map_or(u64::MAX, |e| e.at);
-    let dropped = old.iter().flat_map(|o| o.entries.iter()).filter(|e| !matches!(e.spell, Spell::Other) && e.at >= front && !new.entries.contains(e));
+    let dropped = old.iter().flat_map(|o| o.entries.iter()).filter(|e| !matches!(e.spell, Spell::Other | Spell::Seal { .. }) && e.at >= front && !new.entries.contains(e));
     added.chain(dropped).map(|e| e.effective()).min()
 }
 

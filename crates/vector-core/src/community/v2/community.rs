@@ -62,6 +62,11 @@ impl ChannelV2 {
     pub fn restricted(&self) -> bool {
         self.writers.as_ref().is_some_and(|l| l.restricted())
     }
+
+    /// Whether every write lands at a writer address now: reactions and calls too.
+    pub fn locked(&self) -> bool {
+        self.writers.as_ref().is_some_and(|l| l.locked())
+    }
 }
 
 /// A Category (CORD-03 §4): a sidebar group Channels file under by their `category`.

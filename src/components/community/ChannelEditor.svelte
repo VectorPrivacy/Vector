@@ -73,6 +73,7 @@
             icon: 'shield-filled',
             anchors: [
                 ...(syncable ? [{ id: 'ch-sync', label: 'Category Sync', icon: 'folder', keys: 'sync category inherit' }] : []),
+                ...(permsOpen && !st.perms?.synced ? [{ id: 'ch-lock', label: 'Lockdown', icon: 'locked', keys: 'lock lockdown locked spam read only announcements' }] : []),
                 { id: 'ch-targets', label: 'Roles & Members', icon: 'add-user', keys: 'roles members everyone overwrite who' },
                 ...(permsOpen && !st.perms?.synced ? PERM_GROUPS.map((g) => ({ id: g.id, label: g.title, icon: 'shield-filled', keys: g.keys })) : []),
             ],
@@ -185,6 +186,21 @@
     function canTouch(bit) {
         const stored = storedOverwrite(st.target);
         return (grantable & bit) === bit || ((BigInt(stored.allow) | BigInt(stored.deny)) & bit) === bit;
+    }
+
+    // Locked: @everyone may post, react and join calls nowhere here, so every write takes the
+    // channel's writer key and nothing anyone else sends reaches its readers.
+    const LOCK_BITS = [BIT(14), BIT(17), BIT(19)];
+    const everyoneRule = $derived(st.target === 'everyone' && st.draft ? st.draft : storedOverwrite('everyone'));
+    const locked = $derived(LOCK_BITS.every((b) => (BigInt(everyoneRule.deny) & b) === b));
+    const canLock = $derived.by(() => {
+        const stored = storedOverwrite('everyone');
+        return LOCK_BITS.every((b) => (grantable & b) === b || ((BigInt(stored.allow) | BigInt(stored.deny)) & b) === b);
+    });
+    function setLocked(on) {
+        selectOverwrite('everyone');
+        if (st.target !== 'everyone') return;
+        for (const b of LOCK_BITS) setOverwriteBit(b, on ? 'deny' : 'inherit');
     }
 
     const enc = new TextEncoder();
@@ -305,6 +321,13 @@
                             </section>
                         {/if}
                         {#if !st.perms.synced}
+                            <section class="cs-block" data-anchor="ch-lock">
+                                <h3 class="cs-heading">Lockdown</h3>
+                                <div class="ce-sync">
+                                    <p class="cs-lede">{locked ? 'Locked. Only the roles and members you allow can post, react or join calls here.' : 'Only the roles and members you allow can post, react or join calls, and nothing anyone else sends reaches its readers.'}</p>
+                                    <button class="cs-btn-text" disabled={st.busy || !canLock} onclick={() => setLocked(!locked)}>{locked ? 'Unlock' : `Lock ${st.isCategory ? 'Category' : 'Channel'}`}</button>
+                                </div>
+                            </section>
                             <section class="cs-block" data-anchor="ch-targets">
                                 <div class="cs-heading-row ce-add-anchor">
                                     <h3 class="cs-heading">Roles & Members</h3>

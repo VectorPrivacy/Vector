@@ -30,6 +30,7 @@ pub mod volley;
 pub mod voice;
 pub mod rekey;
 pub mod roles;
+pub mod seal;
 pub mod service;
 pub mod stream;
 pub mod streamauth;
@@ -68,6 +69,8 @@ pub mod kind {
     pub const TIMEOUT: u16 = 3314;
     /// A Nickname (CORD-04 §10): `["p", target]`, the nickname as content, `""` clearing it.
     pub const NICKNAME: u16 = 3315;
+    /// One page of a Locked Channel's sealed history (CORD-03 §1), at its writer address.
+    pub const SEAL_PAGE: u16 = 3321;
     /// Direct invite rumor — rides a STANDARD NIP-59 giftwrap to a person,
     /// never a stream wrap (CORD-05 §6).
     pub const DIRECT_INVITE: u16 = 3313;
