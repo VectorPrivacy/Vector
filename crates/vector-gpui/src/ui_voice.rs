@@ -152,20 +152,7 @@ impl VectorApp {
             }
             Act::HideScreen => self.voice.focus = Some(String::new()),
             Act::Expand => self.voice.expanded = !self.voice.expanded,
-            Act::MicAccess => {
-                let where_ = if cfg!(target_os = "macos") {
-                    "System Settings → Privacy & Security → Microphone"
-                } else if cfg!(windows) {
-                    "Settings → Privacy → Microphone"
-                } else {
-                    "your device's app settings"
-                };
-                self.notice(
-                    "Microphone Access",
-                    format!("Vector doesn't have access to your microphone. Allow it in {where_}, then try again."),
-                    cx,
-                );
-            }
+            Act::MicAccess => self.mic_access(cx),
         }
         cx.notify();
     }

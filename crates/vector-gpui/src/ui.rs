@@ -405,6 +405,7 @@ enum MenuAct {
 }
 
 enum PopupAct {
+    OpenMicSettings,
     MoveRelays { id: String, relays: Vec<String> },
     /// A moderator's hide of someone else's message, once confirmed.
     Hide(String),
@@ -4591,6 +4592,25 @@ impl VectorApp {
         }
     }
 
+    /// `promptMicAccess`: where to allow the microphone, and a way there where the OS has one.
+    pub(super) fn mic_access(&mut self, cx: &mut Context<Self>) {
+        let (where_, can_open) = if cfg!(target_os = "macos") {
+            ("System Settings → Privacy & Security → Microphone", true)
+        } else if cfg!(windows) {
+            ("Settings → Privacy → Microphone", true)
+        } else {
+            ("your device's app settings", false)
+        };
+        let mut p = kit::Popup::notice("Microphone Access");
+        p.text = Some(format!("Vector doesn't have access to your microphone. Allow it in {where_}, then try again.").into());
+        if can_open {
+            p.confirm = "Open Settings".into();
+            p.cancel = Some("Cancel".into());
+        }
+        self.popup = Some((p, if can_open { PopupAct::OpenMicSettings } else { PopupAct::Notice }));
+        cx.notify();
+    }
+
     fn notice(&mut self, title: &str, text: String, cx: &mut Context<Self>) {
         let mut p = kit::Popup::notice(title.to_string());
         p.text = Some(text.into());
@@ -4612,6 +4632,11 @@ impl VectorApp {
         }
         match act {
             PopupAct::Notice => {}
+            PopupAct::OpenMicSettings => {
+                if let Err(e) = vector_media::mic_access::open_settings() {
+                    self.show_toast(&e, cx);
+                }
+            }
             PopupAct::MoveRelays { id, relays } => self.move_relays(id, relays, cx),
             PopupAct::NetKeepRealtime(_) => {}
             PopupAct::NetUse(kind) => self.use_network(kind, None, true, cx),
@@ -4749,8 +4774,8 @@ impl VectorApp {
                     let result = rx.await.unwrap_or_else(|_| Err("cancelled".into()));
                     this.update(cx, |this, cx| {
                         if let Err(e) = result {
-                            let mut popup = kit::Popup::notice("Failed to Add Server");
-                            popup.text = Some(e.into());
+                            let mut popup = kit::Popup::notice("Could not add server");
+                            popup.text = Some(kit::escape(&e).into());
                             this.popup = Some((popup, PopupAct::Notice));
                         }
                         this.load_network(cx);
@@ -13970,16 +13995,7 @@ impl VectorApp {
                 }
                 self.call_cmd(backend::calls::hangup(), cx);
             }
-            Act::Mic if self.call.mic_off => {
-                let where_ = if cfg!(target_os = "macos") {
-                    "System Settings → Privacy & Security → Microphone"
-                } else if cfg!(windows) {
-                    "Settings → Privacy → Microphone"
-                } else {
-                    "your device's app settings"
-                };
-                self.notice("Microphone Access", format!("Vector doesn't have access to your microphone. Allow it in {where_}, then try again."), cx);
-            }
+            Act::Mic if self.call.mic_off => self.mic_access(cx),
             Act::Mic => {
                 let on = !self.call.muted;
                 self.call.muted = on;
@@ -14281,7 +14297,14 @@ impl VectorApp {
     ) {
         cx.spawn(async move |this, cx| {
             if let Ok(Err(e)) = rx.await {
-                this.update(cx, |this, cx| this.show_toast(&e, cx)).ok();
+                this.update(cx, |this, cx| {
+                    if e == vector_media::mic_access::DENIED {
+                        this.mic_access(cx)
+                    } else {
+                        this.show_toast(&e, cx)
+                    }
+                })
+                .ok();
             }
         })
         .detach();
@@ -14317,7 +14340,11 @@ impl VectorApp {
                         true
                     }
                     Err(e) => {
-                        this.show_toast(&e, cx);
+                        if e == vector_media::mic_access::DENIED {
+                            this.mic_access(cx);
+                        } else {
+                            this.show_toast(&e, cx);
+                        }
                         false
                     }
                 })
@@ -14977,7 +15004,18 @@ impl VectorApp {
                 window.focus(&input.focus_handle(cx), cx);
                 let mut popup = kit::Popup::notice("Add Media Server");
                 popup.icon = None;
-                popup.text = Some("Enter the address of a Blossom-compatible server. A bare domain like <b>blossom.primal.net</b> works. Vector adds <b>https://</b> automatically.".into());
+                let i2p = self
+                    .net_view
+                    .as_ref()
+                    .and_then(|v| v.get("supported")?.as_array().map(|a| a.iter().any(|k| k == "i2p")))
+                    .unwrap_or(false);
+                popup.text = Some(
+                    format!(
+                        "Enter the address of a Blossom-compatible server. A bare domain like <b>blossom.primal.net</b> works. Vector adds <b>https://</b> automatically.{}",
+                        if i2p { "<br><br>An <b>.i2p</b> server gets <b>http://</b>. Only people using I2P can load files from it." } else { "" }
+                    )
+                    .into(),
+                );
                 popup.confirm = "Confirm".into();
                 popup.cancel = Some("Cancel".into());
                 popup.input = Some(input);
@@ -16908,9 +16946,13 @@ impl VectorApp {
                 match done {
                     Ok(()) if live => app.rec.recording(),
                     Ok(()) => vector_media::voice::AudioRecorder::global().cancel(),
+                    Err(e) if e == vector_media::mic_access::DENIED => {
+                        app.rec.idle();
+                        app.mic_access(cx);
+                    }
                     Err(e) => {
                         app.rec.idle();
-                        app.notice("Recording Failed", e, cx);
+                        app.notice("Recording Error", e, cx);
                     }
                 }
                 cx.notify();
@@ -16940,8 +16982,8 @@ impl VectorApp {
                         };
                     }
                     Err(e) => {
+                        log::warn!("recording stop failed: {e}");
                         app.rec.idle();
-                        app.notice("Recording Failed", e, cx);
                     }
                 }
                 cx.notify();
