@@ -53,7 +53,7 @@ pub(super) struct MiniPanel {
 const PIVX_HIDDEN: &str = "pivx_hidden";
 
 pub(super) struct Launch {
-    app: GridApp,
+    pub app: GridApp,
 }
 
 const GAP: f32 = 12.;

@@ -23,6 +23,21 @@ fn tidy(mut apps: Vec<MarketplaceApp>) -> Vec<MarketplaceApp> {
     apps
 }
 
+/// One listing as the catalogue holds it now, for a caller that can't wait on it.
+pub fn find(id: &str) -> Option<MarketplaceApp> {
+    let mut app = MARKETPLACE_STATE.try_read().ok()?.get_app(id).cloned()?;
+    app.categories = tidy(vec![app.clone()]).remove(0).categories;
+    Some(app)
+}
+
+/// Every listing's id and whether it's installed, for the start menu's search.
+pub fn ids() -> Vec<(String, String, bool)> {
+    MARKETPLACE_STATE
+        .try_read()
+        .map(|s| s.get_apps().into_iter().map(|a| (a.id, a.name, a.installed || a.local_path.is_some())).collect())
+        .unwrap_or_default()
+}
+
 pub async fn cached() -> Vec<MarketplaceApp> {
     tidy(MARKETPLACE_STATE.read().await.get_apps())
 }

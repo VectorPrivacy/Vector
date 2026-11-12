@@ -100,6 +100,8 @@ pub struct Nexus {
     pub perms: Option<(String, Result<Vec<(String, String, String, bool)>, String>)>,
     /// This account's npub: its own listings can be edited.
     pub me: String,
+    /// A link's app the catalogue doesn't hold yet: its page opens when it arrives.
+    pub awaited: Option<String>,
 }
 
 pub enum Act {
@@ -373,6 +375,7 @@ impl Nexus {
             picker: None,
             perms: None,
             me: String::new(),
+            awaited: None,
         }
     }
 

@@ -32,10 +32,23 @@ pub struct StartMenu {
 
 impl StartMenu {
     pub fn pinned(&self, key: &str) -> bool {
-        self.layout.nodes.iter().any(|n| match n {
-            RailNode::Item { key: k } => k == key,
-            RailNode::Folder { keys, .. } => keys.iter().any(|k| k == key),
-        })
+        layout_pins(&self.layout, key)
+    }
+}
+
+pub fn layout_pins(layout: &RailLayout, key: &str) -> bool {
+    layout.nodes.iter().any(|n| match n {
+        RailNode::Item { key: k } => k == key,
+        RailNode::Folder { keys, .. } => keys.iter().any(|k| k == key),
+    })
+}
+
+/// Every App Store listing: `(id, name, installed)`.
+fn market_apps(store: &Store) -> Vec<(String, String, bool)> {
+    if store.fixture_market.is_empty() {
+        crate::backend::market::ids()
+    } else {
+        store.fixture_market.iter().map(|a| (a.id.clone(), a.name.clone(), a.installed || a.local_path.is_some())).collect()
     }
 }
 
@@ -252,7 +265,23 @@ fn resolve(key: &str, store: &Store) -> Resolved {
         }
         ["requests"] => r("Requests".into(), "Messages", icon("mail"), false),
         ["nexus"] => r("App Store".into(), "Mini Apps", icon("nexus"), false),
-        ["app", id] => r(id.to_string(), "Mini App", icon("grid-fill"), true),
+        ["app", id] => {
+            let app = match store.fixture_market.iter().find(|a| a.id == *id) {
+                Some(a) => Some(a.clone()),
+                None => crate::backend::market::find(id),
+            };
+            match app {
+                Some(a) => {
+                    let glyph = match a.icon_cached.as_ref().map(std::path::PathBuf::from) {
+                        Some(p) if p.is_relative() => Glyph::Picture(store.media_root.join(p), false),
+                        Some(p) => Glyph::Picture(p, false),
+                        None => Glyph::Initial(initial(&a.name), false),
+                    };
+                    r(a.name, "Mini App", glyph, false)
+                }
+                None => r(id.to_string(), "Mini App", icon("grid-fill"), true),
+            }
+        }
         ["c", ..] => r(
             "Community".into(),
             "A community you're not in",
@@ -328,11 +357,13 @@ pub fn hits(sm: &StartMenu, store: &Store, query: &str) -> Vec<Hit> {
     }
     places.push("nexus".into());
     places.push("requests".into());
+    let apps = market_apps(store);
     let mut out: Vec<Hit> = if q.is_empty() {
-        dms.into_iter()
-            .map(|(_, k)| k)
+        apps.iter()
+            .filter(|a| a.2)
+            .map(|a| format!("app/{}", a.0))
             .filter(|k| !sm.pinned(k))
-            .take(8)
+            .chain(dms.into_iter().map(|(_, k)| k).filter(|k| !sm.pinned(k)).take(8))
             .chain(places.into_iter().filter(|k| !sm.pinned(k)))
             .map(hit)
             .collect()
@@ -362,6 +393,7 @@ pub fn hits(sm: &StartMenu, store: &Store, query: &str) -> Vec<Hit> {
                 places
                     .into_iter()
                     .chain(dms.into_iter().map(|(_, k)| k))
+                    .chain(apps.iter().map(|a| format!("app/{}", a.0)))
                     .map(hit),
             )
             .map(|h| (score(&h.label) * 2 + u8::from(score(&h.sub) > 0), h))

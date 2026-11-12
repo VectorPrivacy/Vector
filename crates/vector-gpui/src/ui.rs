@@ -239,6 +239,7 @@ enum MenuAct {
     StartUngroup(String),
     StartMoveOut(String),
     StartUnpin(String),
+    StartTogglePin(String),
     Device(&'static str, Option<String>, backend::mic::DevicePrefs),
     /// Rows that act on nothing: dividers and headers.
     Nothing,
@@ -1426,6 +1427,7 @@ impl VectorApp {
                 },
                 cx,
             ),
+            MenuAct::StartTogglePin(key) => self.start_pin(key, cx),
             MenuAct::StartUnpin(key) => self.start_edit(
                 move |l| {
                     vector_core::start_menu::unpin(l, &key);
@@ -1516,11 +1518,17 @@ impl VectorApp {
         cx.notify();
     }
 
+    /// Whether `key` is pinned, from the open menu or else the synced layout.
+    pub(super) fn start_pinned(&self, key: &str) -> bool {
+        match &self.start {
+            Some(sm) => sm.pinned(key),
+            None if self.live => crate::startmenu::layout_pins(&vector_core::synced_prefs::load_start(), key),
+            None => false,
+        }
+    }
+
     fn start_pin(&mut self, key: String, cx: &mut Context<Self>) {
-        let Some(sm) = self.start.as_ref() else {
-            return;
-        };
-        let pinned = sm.pinned(&key);
+        let pinned = self.start_pinned(&key);
         self.start_edit(
             move |l| {
                 if pinned {
@@ -1778,6 +1786,8 @@ impl VectorApp {
                         self.profile = None;
                         self.requests_tab = true;
                     }
+                    ["nexus"] => self.show_nexus(None, window, cx),
+                    ["app", id] => self.open_app_pin(id.to_string(), window, cx),
                     _ => self.show_toast("This pin opens something not in this build yet", cx),
                 }
             }
@@ -9689,6 +9699,8 @@ impl VectorApp {
                 }
             },
             "settings" => self.open_settings_path(&a.target, window, cx),
+            "nexus" if a.target.is_empty() => self.show_nexus(None, window, cx),
+            "nexus" => self.nexus_show_app(a.target, window, cx),
             "requests" | "home" => {
                 self.go_home();
                 if a.action_type == "requests" {

@@ -74,7 +74,7 @@ impl VectorApp {
             n.apps = apps;
             let installed = n.apps.iter().any(crate::nexus::is_installed);
             n.view = view.unwrap_or(if installed { View::Library } else { View::Discover });
-            self.nexus_washes(cx);
+            self.nexus_apps_changed(cx);
             return;
         }
         n.loading = true;
@@ -99,7 +99,7 @@ impl VectorApp {
                     }
                     n.played = played;
                 }
-                this.nexus_washes(cx);
+                this.nexus_apps_changed(cx);
                 cx.notify();
             })
             .ok();
@@ -118,12 +118,83 @@ impl VectorApp {
                     }
                     Err(_) => {}
                 }
-                this.nexus_washes(cx);
+                this.nexus_apps_changed(cx);
                 cx.notify();
             })
             .ok();
         })
         .detach();
+    }
+
+    /// The catalogue changed: an awaited link's page opens once its app arrives.
+    fn nexus_apps_changed(&mut self, cx: &mut Context<Self>) {
+        if let Some(n) = self.nexus.as_mut()
+            && let Some(id) = n.awaited.take_if(|id| n.apps.iter().any(|a| a.id == *id))
+        {
+            n.open_details(id.clone(), cx);
+            self.nexus_perms(&id);
+        }
+        self.nexus_washes(cx);
+    }
+
+    /// `showAppDetailsById`: one app's page, by id, never launching it.
+    pub(super) fn nexus_show_app(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.show_nexus(None, window, cx);
+        let Some(n) = self.nexus.as_mut() else { return };
+        if n.app(&id).is_some() {
+            n.awaited = None;
+            self.on_nexus(Act::Details(id), window, cx);
+        } else {
+            n.awaited = Some(id);
+        }
+    }
+
+    /// `openStartKey('app/…')`: an installed app launches, or offers its invite in a chat; else its page.
+    pub(super) fn open_app_pin(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
+        let app = if self.live {
+            backend::market::find(&id)
+        } else {
+            self.store.borrow().fixture_market.iter().find(|a| a.id == id).cloned()
+        };
+        let Some(app) = app.filter(crate::nexus::is_installed) else {
+            return self.nexus_show_app(id, window, cx);
+        };
+        let can_invite = self.open.as_ref().is_some_and(|c| {
+            let store = self.store.borrow();
+            c.starts_with("npub1") && !store.profiles.get(c.as_ref()).is_some_and(|p| p.is_blocked)
+        });
+        match app.local_path.clone() {
+            Some(src) if can_invite => {
+                let icon = app.icon_cached.as_ref().map(std::path::PathBuf::from);
+                self.launch = Some(super::miniapps_ops::Launch {
+                    app: super::miniapps_ops::GridApp {
+                        name: app.name.clone(),
+                        src,
+                        icon,
+                        categories: app.categories.join(","),
+                        last: 0,
+                        market: Some(app.id.clone()),
+                    },
+                });
+                cx.notify();
+            }
+            _ => self.perm_gate(
+                backend::market::Ask::App(id.clone()),
+                move |this, cx| {
+                    if !this.live {
+                        return;
+                    }
+                    let rx = backend::run(backend::market::open(id));
+                    cx.spawn(async move |this, cx| {
+                        if let Ok(Err(e)) = rx.await {
+                            this.update(cx, |this, cx| this.show_toast(&e, cx)).ok();
+                        }
+                    })
+                    .detach();
+                },
+                cx,
+            ),
+        }
     }
 
     /// Each icon's colour for the spotlight, read off the thread.
@@ -181,7 +252,7 @@ impl VectorApp {
                         })
                         .collect();
                 }
-                self.nexus_washes(cx);
+                self.nexus_apps_changed(cx);
             }
             _ => return,
         }
@@ -277,7 +348,20 @@ impl VectorApp {
                 }
             }
             Act::Menu(id, at) => {
-                self.menu = Some((at, vec![crate::kit::MenuItem::new("Copy Link", "share")], vec![super::MenuAct::NexusLink(id)]));
+                let key = format!("app/{id}");
+                let pinned = self.start_pinned(&key);
+                self.menu = Some((
+                    at,
+                    vec![
+                        crate::kit::MenuItem::new("Copy Link", "share"),
+                        if pinned {
+                            crate::kit::MenuItem::new("Unpin", "pin").danger()
+                        } else {
+                            crate::kit::MenuItem::new("Pin to Main Menu", "pin")
+                        },
+                    ],
+                    vec![super::MenuAct::NexusLink(id), super::MenuAct::StartTogglePin(key)],
+                ));
             }
         }
         let _ = window;
