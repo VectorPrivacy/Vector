@@ -17,6 +17,7 @@ pub(super) enum MsgAct {
     Unread,
     Link,
     File(String),
+    CopyFile(String),
     Delete { limited: bool, attachments: bool },
     Hide,
 }
@@ -72,6 +73,7 @@ impl VectorApp {
             } else {
                 (kit::MenuItem::new("Reveal in folder", "file-search"), act(MsgAct::File(a.id.clone())))
             });
+            rows.push((kit::MenuItem::new("Copy", "copy"), act(MsgAct::CopyFile(a.id.clone()))));
         }
         if !m.content.is_empty() {
             let plain = strip_markdown(&m.content);
@@ -154,6 +156,7 @@ impl VectorApp {
                 self.show_toast("Copied Message Link", cx);
             }
             MsgAct::File(att) => self.reveal_attachment(id, att, cx),
+            MsgAct::CopyFile(att) => self.copy_attachment(id, att, cx),
             MsgAct::Delete { limited, attachments } => {
                 let mut p = kit::Popup::notice(if limited { "Limited Delete" } else { "Delete this message?" });
                 p.icon = Some("icons/vector_warning.svg");
@@ -230,6 +233,37 @@ impl VectorApp {
     }
 
     /// A downloaded file's place on disk, or a stored one saved where the user picks.
+    fn copy_attachment(&mut self, msg: String, att: String, cx: &mut Context<Self>) {
+        let Some(a) = self.message(&msg).and_then(|m| m.attachments.into_iter().find(|a| a.id == att)) else { return };
+        let path = if a.path.is_empty() {
+            String::new()
+        } else {
+            let p = std::path::PathBuf::from(&a.path);
+            let p = if p.is_absolute() { p } else { self.store.borrow().media_root.join(p) };
+            std::path::absolute(&p).unwrap_or(p).to_string_lossy().into_owned()
+        };
+        if !path.is_empty() && !vector_core::vcache::is_sealed(std::path::Path::new(&path)) {
+            match crate::fileclip::write(vec![path.into()], cx) {
+                Ok(()) => self.show_toast("Copied file to clipboard", cx),
+                Err(e) => self.show_toast(&e, cx),
+            }
+            return;
+        }
+        let hash = vector_core::simd::hex::hex_to_bytes_32_checked(&a.id);
+        let rx = crate::backend::run(crate::fileclip::materialize(hash, path, a.name));
+        cx.spawn(async move |this, cx| {
+            let Ok(got) = rx.await else { return };
+            this.update(cx, |this, cx| {
+                match got.and_then(|p| crate::fileclip::write(vec![p], cx)) {
+                    Ok(()) => this.show_toast("Copied file to clipboard", cx),
+                    Err(e) => this.show_toast(&e, cx),
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     pub(super) fn reveal_attachment(&mut self, msg: String, att: String, cx: &mut Context<Self>) {
         let Some(a) = self.message(&msg).and_then(|m| m.attachments.into_iter().find(|a| a.id == att)) else { return };
         if a.resident {

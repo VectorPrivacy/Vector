@@ -98,6 +98,15 @@ features = ["std", "metal", "gles", "vulkan", "wgsl", "webgpu"]
 git = "https://github.com/gfx-rs/wgpu"
 rev = "cddb2f5d80dc0009b2ef6767635140cacf90a007"
 
+# File references on the clipboard, which GPUI writes only as text there.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSString", "NSArray", "NSURL"] }
+objc2-app-kit = { version = "0.3", features = ["NSPasteboard"] }
+
+[target.'cfg(windows)'.dependencies]
+clipboard-win = "5"
+
 # Mini Apps run in the OS webview, through the desktop client's own webview crate.
 [target.'cfg(target_os = "linux")'.dependencies]
 wry = { version = "=0.57.0", default-features = false, features = ["os-webview", "linux-body"] }
@@ -137,3 +146,7 @@ khronos-egl = { git = "https://github.com/zed-industries/khronos-egl", rev = "42
 [dev-dependencies]
 # The shared simd module checks its quantiser against this reference.
 color_quant = "1.1"
+
+# gpui_linux at the same rev, plus file references on the clipboard (text/uri-list) for X11 and Wayland.
+[patch."https://github.com/zed-industries/zed"]
+gpui_linux = { path = "vendor/gpui_linux" }

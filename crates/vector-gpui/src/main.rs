@@ -35,6 +35,7 @@ mod decorate;
 mod deeplink;
 mod embeds;
 mod emoji;
+mod fileclip;
 mod filepreview;
 mod highlight;
 mod inline;
@@ -190,6 +191,9 @@ fn main() {
         .unwrap_or_else(backend::default_data_dir);
     if fixtures.is_none() && !deeplink::claim(&data_dir, &deeplink::from_args(), links_tx.clone()) {
         return;
+    }
+    if fixtures.is_none() {
+        fileclip::purge();
     }
     let events = fixtures.is_none().then(|| backend::start(data_dir));
 
