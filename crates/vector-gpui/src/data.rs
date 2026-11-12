@@ -753,6 +753,8 @@ pub fn day_label(now_ms: u64, ms: u64) -> String {
 
 /// One row of the message timeline; `Message` indexes the chat's `messages`.
 pub enum Row {
+    /// Above the oldest message: the chat's beginning, or older history on its way.
+    Edge(Edge),
     Date {
         label: String,
         time: String,
@@ -763,6 +765,13 @@ pub enum Row {
         index: usize,
         first: bool,
     },
+}
+
+#[derive(Clone, Copy, PartialEq)]
+pub enum Edge {
+    Start,
+    Loading,
+    Retry,
 }
 
 const STREAK_WINDOW_MS: u64 = 7 * 60 * 1000;

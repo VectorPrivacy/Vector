@@ -155,6 +155,9 @@ pub struct VectorApp {
     opening: Option<Option<String>>,
     /// Chats whose first message is loaded.
     history_done: HashSet<String>,
+    /// A Community channel's history past the database: all fetched, or the last ask failed.
+    history_net: HashMap<String, bool>,
+    history_net_busy: HashSet<String>,
     pack_crop: Option<(
         Entity<crate::cropper::Cropper>,
         futures::channel::oneshot::Sender<Option<vector_core::image_crop::CropRect>>,
@@ -737,6 +740,8 @@ impl VectorApp {
             paging: false,
             opening: None,
             history_done: HashSet::new(),
+            history_net: HashMap::new(),
+            history_net_busy: HashSet::new(),
             pack_crop: None,
             emoji_picker,
             picker_open: false,
@@ -2509,14 +2514,74 @@ impl VectorApp {
     fn rebuild_rows(&mut self) -> usize {
         let names = self.command_names();
         let store = self.store.borrow();
-        let rows = self
+        let mut rows = self
             .open
             .as_ref()
             .and_then(|id| store.chat(id))
             .map(|c| data::timeline(c, store.now_ms(), self.read_anchor.as_deref(), names.as_deref()))
             .unwrap_or_default();
+        drop(store);
+        if let Some(edge) = self.edge(&rows) {
+            rows.insert(0, Row::Edge(edge));
+        }
         self.rows = Rc::new(rows);
         self.rows.len()
+    }
+
+    /// `updateHistoryEdge`: what sits above the oldest message, once the database has no older.
+    fn edge(&self, rows: &[Row]) -> Option<data::Edge> {
+        let id = self.open.as_deref()?;
+        let alone = !rows.iter().any(|r| matches!(r, Row::Message { .. }));
+        if !self.live {
+            // Fixtures: an empty chat is its whole history.
+            return alone.then_some(data::Edge::Start);
+        }
+        if !self.history_done.contains(id) {
+            return None;
+        }
+        let community = self.store.borrow().community_of(id).is_some();
+        Some(match (community, self.history_net.get(id)) {
+            (true, Some(false)) => data::Edge::Retry,
+            (true, None) => data::Edge::Loading,
+            (false, _) if self.syncing => data::Edge::Loading,
+            _ => data::Edge::Start,
+        })
+    }
+
+    /// A Community channel's older page from the relays, once the database has none.
+    fn load_older_net(&mut self, cx: &mut Context<Self>) {
+        let Some(id) = self.open.clone() else { return };
+        if !self.live || self.history_net.contains_key(id.as_ref()) || !self.history_net_busy.insert(id.to_string()) {
+            return;
+        }
+        let before = self.store.borrow().chat(&id).and_then(|c| c.messages.first()).map(|m| m.at);
+        let rx = backend::run(backend::community::sync_channel(id.to_string(), before));
+        cx.spawn(async move |this, cx| {
+            let res = rx.await;
+            this.update(cx, |this, cx| {
+                this.history_net_busy.remove(id.as_ref());
+                match res {
+                    Ok(Ok(true)) => {
+                        this.history_net.insert(id.to_string(), true);
+                    }
+                    Ok(Ok(false)) => {
+                        this.history_done.remove(id.as_ref());
+                        if this.open.as_ref() == Some(&id) {
+                            this.load_older(cx);
+                        }
+                    }
+                    _ => {
+                        this.history_net.insert(id.to_string(), false);
+                    }
+                }
+                if this.open.as_ref() == Some(&id) {
+                    this.relayout_keeping_top();
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// The open chat's rows changed: re-laid, following the end when `follow`.
@@ -2604,6 +2669,9 @@ impl VectorApp {
                     return;
                 };
                 views.reverse();
+                if views.len() < 200 {
+                    this.history_done.insert(id.to_string());
+                }
                 if let Some(chat) = this.store.borrow_mut().chat_mut(&id) {
                     // Anything newer that landed meanwhile stays.
                     let newest = views.last().map(|m| m.at).unwrap_or(0);
@@ -2620,6 +2688,9 @@ impl VectorApp {
                 this.timeline.scroll_to_end();
                 if let Some(Some(jump)) = this.opening.take() {
                     this.jump_to_message(jump, cx);
+                }
+                if this.history_done.contains(id.as_ref()) && this.timeline.logical_scroll_top().item_ix < 4 {
+                    this.load_older(cx);
                 }
                 cx.notify();
             })
@@ -2680,7 +2751,13 @@ impl VectorApp {
     /// The page of history before the oldest message held.
     fn load_older(&mut self, cx: &mut Context<Self>) {
         let Some(id) = self.open.clone() else { return };
-        if !self.live || self.paging || self.history_done.contains(id.as_ref()) {
+        if !self.live || self.paging {
+            return;
+        }
+        if self.history_done.contains(id.as_ref()) {
+            if self.store.borrow().community_of(&id).is_some() {
+                self.load_older_net(cx);
+            }
             return;
         }
         let Some(anchor) = self
@@ -2690,7 +2767,9 @@ impl VectorApp {
             .and_then(|c| c.messages.first())
             .map(|m| m.id.clone())
         else {
-            return;
+            self.history_done.insert(id.to_string());
+            self.relayout_keeping_top();
+            return self.load_older(cx);
         };
         self.paging = true;
         let chat_id = id.to_string();
@@ -2708,6 +2787,9 @@ impl VectorApp {
                 };
                 if this.merge_messages(&id, views) == 0 {
                     this.history_done.insert(id.to_string());
+                    this.relayout_keeping_top();
+                    this.load_older(cx);
+                    cx.notify();
                     return;
                 }
                 this.relayout_keeping_top();
@@ -2832,6 +2914,13 @@ impl VectorApp {
     ) {
         use timeline::Act;
         match act {
+            Act::RetryHistory => {
+                if let Some(open) = self.open.clone() {
+                    self.history_net.remove(open.as_ref());
+                    self.relayout_keeping_top();
+                    self.load_older(cx);
+                }
+            }
             Act::Invite(key) => {
                 let Some(crate::newchat::Preview::Ready(info)) =
                     self.invite_previews.get(&key).cloned()
@@ -5982,6 +6071,11 @@ impl VectorApp {
             .clone()
             .filter(|(_, t)| t.elapsed().as_secs_f32() < 1.5);
         let cmd_names = self.command_names();
+        // `.history-edge.alone`: a chat with nothing yet has its beginning mid-view.
+        let alone = match self.rows.as_slice() {
+            [Row::Edge(edge)] => store.chat(&id).map(|chat| history_edge(store, chat, &on_act, *edge)),
+            _ => None,
+        };
         let messages = list(self.timeline.clone(), move |i, window, cx| {
             let rows_store = rows_store.borrow();
             let (Some(chat), Some(row)) = (rows_store.chat(&rows_id), rows.get(i)) else {
@@ -6116,7 +6210,10 @@ impl VectorApp {
                     .min_h_0()
                     .when(paper.is_none(), |d| d.bg(c(MESSAGES_BG)))
                     .pt(px(if request.is_some() { 12. + 56. } else { 12. }))
-                    .child(messages)
+                    .map(|d| match alone {
+                        Some(edge) => d.child(div().size_full().flex().flex_col().justify_center().child(edge)),
+                        None => d.child(messages),
+                    })
                     .children(request)
                     // `.fadeout-bottom-msgs`: rows dim into the composer.
                     .child(
@@ -6268,6 +6365,95 @@ fn request_bar(npub: String, pictures: bool, cx: &mut Context<VectorApp>) -> imp
         )
 }
 
+/// `.history-edge`: the chat's face over its beginning, or older history on its way.
+fn history_edge(store: &Store, chat: &SerializableChat, on: &timeline::OnAct, edge: data::Edge) -> AnyElement {
+    let line = |d: gpui::Div| {
+        d.flex()
+            .items_center()
+            .justify_center()
+            .gap(px(8.))
+            .pt(px(18.))
+            .pb(px(10.))
+            .text_size(px(13.))
+            .text_color(white_a(0.5))
+    };
+    match edge {
+        data::Edge::Loading => line(div())
+            .child(div().size(px(14.)).child(crate::attachments::spinner(14., 2., 0.8, 0.25, ca(255, 255, 255, 0.15), c(PRIMARY))))
+            .child("Loading older messages…")
+            .into_any_element(),
+        data::Edge::Retry => {
+            let on = on.clone();
+            line(div())
+                .child("Couldn't load older messages")
+                .child(
+                    div()
+                        .id("history-retry")
+                        .px(px(12.))
+                        .py(px(4.))
+                        .rounded_full()
+                        .border_1()
+                        .border_color(white_a(0.15))
+                        .hover(|d| d.border_color(white_a(0.3)))
+                        .text_size(px(12.))
+                        .text_color(c(0xffffff))
+                        .cursor_pointer()
+                        .on_click(move |_, w, cx| on("", timeline::Act::RetryHistory, w, cx))
+                        .child("Retry"),
+                )
+                .into_any_element()
+        }
+        data::Edge::Start => {
+            let alone = chat.messages.is_empty();
+            let (art, title, note) = match store.community_of(&chat.id) {
+                Some(com) => {
+                    let name = com.channel(&chat.id).map_or("general", |ch| ch.name.as_str());
+                    (
+                        crate::community::logo(store, &com.community_id, 64., 32.).into_any_element(),
+                        format!("Welcome to #{name}"),
+                        if alone {
+                            "This is the very beginning of the channel, say hello! 👋"
+                        } else {
+                            "This is the beginning of the channel."
+                        },
+                    )
+                }
+                None if chat.id == store.my_npub => (
+                    crate::ui::avatar(store, &chat.id, 64.),
+                    "Notes".to_string(),
+                    "This is the beginning of your notes.",
+                ),
+                None => (
+                    crate::ui::avatar(store, &chat.id, 64.),
+                    store.name(&chat.id),
+                    "This is the beginning of your conversation.",
+                ),
+            };
+            div()
+                .flex()
+                .flex_col()
+                .items_center()
+                .font_family(RUBIK)
+                .line_height(px(24.))
+                .pt(px(32.))
+                .px(px(24.))
+                .pb(px(20.))
+                .gap(px(6.))
+                .text_color(white_a(0.6))
+                .child(div().mb(px(8.)).child(art))
+                .child(
+                    div()
+                        .text_size(px(16.))
+                        .font_weight(FontWeight::BOLD)
+                        .text_color(white_a(0.9))
+                        .child(title),
+                )
+                .child(div().max_w(px(280.)).text_center().text_size(px(13.)).child(note))
+                .into_any_element()
+        }
+    }
+}
+
 /// A short chat sits at the top, as the Tauri list does; a long one opens at its end and
 /// follows new messages while scrolled there.
 fn timeline_state(count: usize, app: gpui::WeakEntity<VectorApp>) -> ListState {
@@ -6287,6 +6473,7 @@ fn timeline_state(count: usize, app: gpui::WeakEntity<VectorApp>) -> ListState {
 
 fn timeline_row(ctx: &timeline::Ctx, row: &Row, after_message: bool) -> AnyElement {
     match row {
+        Row::Edge(edge) => history_edge(ctx.store, ctx.chat, &ctx.on_act, *edge),
         Row::Date { label, time } => divider(
             div()
                 .flex()

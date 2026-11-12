@@ -28,6 +28,8 @@ pub const TEXT_LH: f32 = 21.;
 /// What the user did to a message.
 #[derive(Clone)]
 pub enum Act {
+    /// Older history failed to load: ask again.
+    RetryHistory,
     Text(Target),
     Hover(bool),
     React,
