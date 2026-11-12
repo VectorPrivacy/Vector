@@ -1,6 +1,7 @@
 //! The `/` command picker's wiring: the draft drives it, its keys arrive as `Nav`, and a
 //! send asks it where the text goes.
 
+use gpui::prelude::*;
 use gpui::{AnyElement, Context, Focusable, SharedString, Window};
 use std::rc::Rc;
 
@@ -74,13 +75,21 @@ impl VectorApp {
     }
 
     /// Asks for the open chat's bot commands; `force` re-asks, so a bot that joined is seen.
-    fn load_commands(&mut self, force: bool, cx: &mut Context<Self>) {
+    pub(super) fn load_commands(&mut self, force: bool, cx: &mut Context<Self>) {
         let Some(chat) = self.open.clone() else { return };
         if self.cmd_loading.contains(chat.as_str()) || (!force && self.cmd_snaps.contains_key(chat.as_str())) {
             return;
         }
         if !self.live {
-            self.cmd_snaps.insert(chat.to_string(), Snapshot { fresh: true, ..Snapshot::default() });
+            let fixture = self.store.borrow().fixture_bot_commands.as_ref().and_then(|v| v.get(chat.as_ref()).cloned());
+            let bots: Vec<(String, Vec<vector_core::bot_interface::CommandSpec>)> = fixture
+                .and_then(|v| v.as_array().cloned())
+                .unwrap_or_default()
+                .iter()
+                .filter_map(|b| Some((b.get("bot")?.as_str()?.to_string(), serde_json::from_value(b.get("commands")?.clone()).ok()?)))
+                .collect();
+            let commands = bots.iter().flat_map(|(bot, c)| crate::commands::bot_commands(bot, c)).collect();
+            self.cmd_snaps.insert(chat.to_string(), Snapshot { bots: bots.len(), commands, fresh: true });
             return;
         }
         self.cmd_loading.insert(chat.to_string());
@@ -90,6 +99,10 @@ impl VectorApp {
             this.update(cx, |app, cx| {
                 app.cmd_loading.remove(chat.as_str());
                 app.cmd_snaps.insert(chat.to_string(), snap);
+                if app.open.as_deref() == Some(chat.as_ref()) {
+                    app.refresh_rows(false);
+                    cx.notify();
+                }
                 if app.open.as_deref() == Some(chat.as_ref()) && app.commands.view.is_some() {
                     let text = app.input.read(cx).text().to_string();
                     app.update_commands(&text, cx);
@@ -154,9 +167,33 @@ impl VectorApp {
         self.update_commands(&draft, cx);
     }
 
+    /// An invocation line's command name: the draft becomes `/name`, as if typed.
+    pub(super) fn rerun_command(&mut self, name: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.input.update(cx, |input, cx| {
+            let len = input.text().len();
+            input.replace(0..len, &format!("/{name}"), window, cx);
+        });
+        window.focus(&self.input.read(cx).focus_handle(cx), cx);
+        let draft = self.input.read(cx).text().to_string();
+        self.update_commands(&draft, cx);
+    }
+
+    /// The command names the open chat's bots declare, for invocation lines.
+    pub(super) fn command_names(&self) -> Option<std::rc::Rc<std::collections::HashSet<String>>> {
+        let snap = self.cmd_snaps.get(self.open.as_deref()?)?;
+        Some(std::rc::Rc::new(snap.commands.iter().map(|c| c.name.clone()).collect()))
+    }
+
     pub(super) fn pick_command(&mut self, i: usize, window: &mut Window, cx: &mut Context<Self>) {
         let (Some(cmd), Some(chat)) = (self.commands.row(i), self.open.clone()) else { return };
         let (text, send) = self.commands.select(&chat, &cmd);
+        if !cmd.is_system() && !send {
+            self.input.update(cx, |input, cx| {
+                input.set_nav(false);
+                input.clear(window, cx);
+            });
+            return self.open_command_form(cmd, chat.to_string(), window, cx);
+        }
         self.input.update(cx, |input, cx| {
             input.set_nav(false);
             let len = input.text().len();
@@ -205,6 +242,67 @@ impl VectorApp {
     /// Whether the open chat's `/name` is Vector's own, so the composer previews its colour.
     pub(super) fn command_is_system(&mut self, name: &str) -> bool {
         self.with_commands(|p, ctx| p.system_owns(ctx, name)).unwrap_or(true)
+    }
+
+    /// Bot commands with arguments fill them in pills, one per argument.
+    fn open_command_form(&mut self, cmd: crate::commands::Cmd, chat: String, window: &mut Window, cx: &mut Context<Self>) {
+        let members = self.command_members();
+        let form = cx.new(|cx| crate::cmdform::CommandForm::new(cmd, chat, members, window, cx));
+        cx.subscribe_in(&form, window, |app, _, e: &crate::cmdform::Event, window, cx| match e {
+            crate::cmdform::Event::Exit => app.exit_command_form(false, window, cx),
+            crate::cmdform::Event::Submit(text) => {
+                let text = text.clone();
+                app.exit_command_form(true, window, cx);
+                app.send(text, cx);
+            }
+        })
+        .detach();
+        self.attach = None;
+        self.picker_open = false;
+        self.cmd_form = Some(form.clone());
+        form.update(cx, |f, cx| f.focus(0, false, window, cx));
+        cx.notify();
+    }
+
+    /// Closes the pills; `keep_pick` leaves the command armed so its send routes to its bot.
+    pub(super) fn exit_command_form(&mut self, keep_pick: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self.cmd_form.take().is_none() {
+            return;
+        }
+        if !keep_pick {
+            self.commands.armed = None;
+        }
+        window.focus(&self.input.read(cx).focus_handle(cx), cx);
+        cx.notify();
+    }
+
+    /// Who a user argument can name: the chat's members, as `@` offers them.
+    fn command_members(&self) -> Vec<crate::cmdform::Member> {
+        let Some(chat_id) = self.open.as_deref() else { return Vec::new() };
+        let store = self.store.borrow();
+        let Some(chat) = store.chat(chat_id) else { return Vec::new() };
+        let roster = self.community.as_ref().map(|v| v.members.as_slice()).unwrap_or_default();
+        crate::mentions::candidates(&store, chat, roster, None)
+            .into_iter()
+            .filter_map(|i| match i.kind {
+                crate::mentions::Kind::Member { avatar } => Some(crate::cmdform::Member { npub: i.npub, name: i.name, avatar }),
+                _ => None,
+            })
+            .collect()
+    }
+
+    pub(super) fn command_form_view(&self, cx: &mut Context<Self>) -> Option<(AnyElement, AnyElement)> {
+        let form = self.cmd_form.clone()?;
+        let bot = form.read(cx).cmd.bot.clone();
+        let face = {
+            let s = self.store.borrow();
+            (SharedString::from(s.name(&bot)), s.avatar_path(&bot))
+        };
+        let app = cx.entity().downgrade();
+        let strip = crate::cmdform::strip(form.read(cx), face, move |w, cx| {
+            app.update(cx, |app, cx| app.exit_command_form(false, w, cx)).ok();
+        });
+        Some((strip, form.into_any_element()))
     }
 
     pub(super) fn command_popup(&self, cx: &mut Context<Self>) -> Option<AnyElement> {

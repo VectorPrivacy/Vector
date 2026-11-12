@@ -695,6 +695,37 @@
      ]
     },
     {
+     "id": "c022222222222222222222222222222222222222222222222222222222222222",
+     "content": "/roll 20",
+     "replied_to": "",
+     "preview_metadata": null,
+     "attachments": [],
+     "reactions": [],
+     "at": 1794362320000,
+     "pending": false,
+     "failed": false,
+     "mine": true,
+     "npub": "npub1yazve5gvw5em6um2mzg0nh2u4v4dkfas04gqh9yn72wdcssvktsqfmmmv4",
+     "edited": false
+    },
+    {
+     "id": "c033333333333333333333333333333333333333333333333333333333333333",
+     "content": "/say hello there",
+     "replied_to": "",
+     "preview_metadata": null,
+     "attachments": [],
+     "reactions": [],
+     "at": 1794362330000,
+     "pending": false,
+     "failed": false,
+     "mine": true,
+     "npub": "npub1yazve5gvw5em6um2mzg0nh2u4v4dkfas04gqh9yn72wdcssvktsqfmmmv4",
+     "edited": false,
+     "addressed_bots": [
+      "npub15387nevpzd0u700y2t24ym9l0zxe8fsxx2w7qn47ysn6mndn9gvqqmlahu"
+     ]
+    },
+    {
      "id": "c045acf2d273a786b030c9bc52f82e5208621ae4f0f7400c6ed71f088498e0d3",
      "content": "👍",
      "replied_to": "",
@@ -3238,6 +3269,56 @@
    {
     "id": "4c26d9074c27d89ede59270c0ac14b71e071b15239519f75474b2f3ba63481f5",
     "npub": "npub1fsndjp6vylvfahjeyuxq4s2tw8s8rv2j89ge7a28fvhnhf35s86sg3uctf"
+   }
+  ]
+ },
+ "bot_commands": {
+  "npub15387nevpzd0u700y2t24ym9l0zxe8fsxx2w7qn47ysn6mndn9gvqqmlahu": [
+   {
+    "bot": "npub15387nevpzd0u700y2t24ym9l0zxe8fsxx2w7qn47ysn6mndn9gvqqmlahu",
+    "commands": [
+     {
+      "name": "roll",
+      "description": "Roll a die",
+      "args": [
+       {
+        "name": "sides",
+        "type": "int",
+        "description": "How many sides",
+        "required": false
+       }
+      ]
+     },
+     {
+      "name": "say",
+      "description": "Make the bot say something",
+      "args": [
+       {
+        "name": "text",
+        "type": "string",
+        "description": "What to say",
+        "required": true
+       }
+      ]
+     },
+     {
+      "name": "mode",
+      "description": "Pick a play mode",
+      "args": [
+       {
+        "name": "mode",
+        "type": "choice",
+        "description": "The mode",
+        "required": true,
+        "choices": [
+         "easy",
+         "hard",
+         "chaos"
+        ]
+       }
+      ]
+     }
+    ]
    }
   ]
  }

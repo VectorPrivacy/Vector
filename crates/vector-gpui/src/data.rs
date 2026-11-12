@@ -2,7 +2,7 @@
 //! frontend makes from them (names, previews, unread marks, time labels). Each helper names
 //! the JS function it mirrors, so a change there has one place to land here.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Local, TimeZone};
@@ -26,6 +26,8 @@ struct Fixtures {
     roles_view: Option<serde_json::Value>,
     #[serde(default)]
     channel_perms: Option<serde_json::Value>,
+    #[serde(default)]
+    bot_commands: Option<serde_json::Value>,
     #[serde(default)]
     nicknames: HashMap<String, HashMap<String, String>>,
     #[serde(default)]
@@ -182,6 +184,8 @@ pub struct Store {
     pub fixture_audit: Option<serde_json::Value>,
     pub fixture_roles: Option<serde_json::Value>,
     pub fixture_channel_perms: Option<serde_json::Value>,
+    /// Fixtures: each chat's bots and their commands, as `get_chat_commands` answers.
+    pub fixture_bot_commands: Option<serde_json::Value>,
     /// `get_moderation_intel` and `policy_presets`, as they answer.
     pub fixture_moderation: Option<serde_json::Value>,
     pub fixture_presets: Option<serde_json::Value>,
@@ -299,6 +303,7 @@ impl Store {
             fixture_audit: f.audit,
             fixture_roles: f.roles_view,
             fixture_channel_perms: f.channel_perms,
+            fixture_bot_commands: f.bot_commands,
             fixture_moderation: f.moderation,
             fixture_presets: f.policy_presets,
             fixture_embeds: f.embeds,
@@ -336,6 +341,7 @@ impl Store {
             fixture_audit: None,
             fixture_roles: None,
             fixture_channel_perms: None,
+            fixture_bot_commands: None,
             fixture_moderation: None,
             fixture_presets: None,
             fixture_embeds: HashMap::new(),
@@ -681,7 +687,12 @@ pub fn collapses(prev: &vector_core::types::Message, cur: &vector_core::types::M
 /// message of each day, and the NEW divider after the last read message.
 /// `read_anchor` is `last_read` as it stood when the chat opened: the divider stays put while
 /// the chat is on screen, even as reading moves `last_read` on.
-pub fn timeline(chat: &SerializableChat, now_ms: u64, read_anchor: Option<&str>) -> Vec<Row> {
+pub fn timeline(
+    chat: &SerializableChat,
+    now_ms: u64,
+    read_anchor: Option<&str>,
+    commands: Option<&HashSet<String>>,
+) -> Vec<Row> {
     let mut rows = Vec::with_capacity(chat.messages.len() + 2);
     let mut last_day = None;
     let read_at = read_anchor.and_then(|a| chat.messages.iter().position(|m| m.id == a));
@@ -698,10 +709,27 @@ pub fn timeline(chat: &SerializableChat, now_ms: u64, read_anchor: Option<&str>)
             rows.push(Row::Unread);
         }
         // As `deriveWindow`: a day divider doesn't end a streak.
-        let first = i == 0 || !collapses(&chat.messages[i - 1], m);
+        let first = (i == 0 || !collapses(&chat.messages[i - 1], m)) && command(m, commands).is_none();
         rows.push(Row::Message { index: i, first });
     }
     rows
+}
+
+/// A slash command worth the passive line: tagged to a bot, bare, or one a bot here declares.
+/// An untagged `/word plus prose` nobody declares stays text, so no real content hides.
+pub fn command(m: &vector_core::Message, known: Option<&HashSet<String>>) -> Option<(String, Option<String>)> {
+    let content = m.content.trim();
+    let rest = content.strip_prefix('/')?;
+    let len = rest.find(char::is_whitespace).unwrap_or(rest.len());
+    let name = &rest[..len];
+    if !(1..=32).contains(&name.len()) || !name.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-') {
+        return None;
+    }
+    let bot = m.addressed_bots.first().cloned();
+    if bot.is_none() && len != rest.len() && !known.is_some_and(|k| k.contains(name)) {
+        return None;
+    }
+    Some((name.to_string(), bot))
 }
 
 /// `getFileTypeInfo` (misc.js): an extension's icon and description.

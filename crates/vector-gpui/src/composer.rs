@@ -72,6 +72,7 @@ pub struct TextInput {
     subs: std::cell::RefCell<(SharedString, std::rc::Rc<[Sub]>)>,
     /// An autocomplete is open: its keys go to it as `Nav`.
     nav: bool,
+    edges: bool,
     colors: Option<bool>,
     chip: bool,
     /// Markdown and tags styled in place, with the names a tag may carry.
@@ -269,6 +270,9 @@ impl Layout {
 
 impl TextInput {
     fn left(&mut self, _: &Left, window: &mut Window, cx: &mut Context<Self>) {
+        if self.edges && self.selected_range == (0..0) {
+            return cx.emit(Edge::Start);
+        }
         if self.selected_range.is_empty() {
             self.move_to(self.previous_boundary(self.cursor_offset()), window, cx);
         } else {
@@ -277,6 +281,10 @@ impl TextInput {
     }
 
     fn right(&mut self, _: &Right, window: &mut Window, cx: &mut Context<Self>) {
+        let end = self.content.len();
+        if self.edges && self.selected_range == (end..end) {
+            return cx.emit(Edge::End);
+        }
         if self.selected_range.is_empty() {
             self.move_to(self.next_boundary(self.selected_range.end), window, cx);
         } else {
@@ -306,6 +314,9 @@ impl TextInput {
     }
 
     fn backspace(&mut self, _: &Backspace, window: &mut Window, cx: &mut Context<Self>) {
+        if self.edges && self.content.is_empty() {
+            return cx.emit(Edge::Empty);
+        }
         if self.selected_range.is_empty() {
             let prev = self.previous_boundary(self.cursor_offset());
             if self.cursor_offset() == prev {
@@ -318,6 +329,9 @@ impl TextInput {
     }
 
     fn delete(&mut self, _: &Delete, window: &mut Window, cx: &mut Context<Self>) {
+        if self.edges && self.content.is_empty() {
+            return cx.emit(Edge::Empty);
+        }
         if self.selected_range.is_empty() {
             let next = self.next_boundary(self.cursor_offset());
             if self.cursor_offset() == next {
@@ -1212,6 +1226,16 @@ pub struct SendText(pub String);
 /// The text changed.
 pub struct InputChanged;
 impl EventEmitter<InputChanged> for TextInput {}
+
+/// A key that would leave the field: Left at its start, Right at its end, Backspace or
+/// Delete when empty. Only emitted with `edges`, for a row of fields walked as one.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Edge {
+    Start,
+    End,
+    Empty,
+}
+impl EventEmitter<Edge> for TextInput {}
 /// Escape in the field.
 pub struct CancelInput;
 
@@ -1249,6 +1273,7 @@ impl TextInput {
             max_chars: None,
             subs: Default::default(),
             nav: false,
+            edges: false,
             colors: None,
             chip: false,
             decorated: None,
@@ -1397,6 +1422,11 @@ impl TextInput {
     }
 
     /// Enter submits an empty field too.
+    pub fn edges(mut self) -> Self {
+        self.edges = true;
+        self
+    }
+
     pub fn submit_empty(mut self) -> Self {
         self.submit_empty = true;
         self
@@ -1416,6 +1446,11 @@ impl TextInput {
     pub fn with_look(mut self, look: Look) -> Self {
         self.look = look;
         self
+    }
+
+    pub fn set_look(&mut self, look: Look, cx: &mut Context<Self>) {
+        self.look = look;
+        cx.notify();
     }
 
     pub fn text(&self) -> &str {
@@ -1441,6 +1476,13 @@ impl TextInput {
     }
 
     /// Replaces the text, caret at the end.
+    pub fn set_caret(&mut self, at: usize, cx: &mut Context<Self>) {
+        let at = at.min(self.content.len());
+        self.selected_range = at..at;
+        self.reveal = true;
+        cx.notify();
+    }
+
     pub fn set_text(&mut self, text: &str, cx: &mut Context<Self>) {
         self.content = text.to_string().into();
         self.selected_range = self.content.len()..self.content.len();

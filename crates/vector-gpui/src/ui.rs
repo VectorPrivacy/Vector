@@ -91,6 +91,8 @@ pub struct VectorApp {
     commands: crate::commands::Picker,
     cmd_snaps: HashMap<String, crate::commands::Snapshot>,
     cmd_loading: HashSet<String>,
+    /// A bot command's argument pills, in place of the draft.
+    cmd_form: Option<Entity<crate::cmdform::CommandForm>>,
     /// The composer's `:shortcode` suggestions.
     shortcode: Option<crate::shortcodes::Popup>,
     /// `:)` and friends suggest their emoji.
@@ -617,6 +619,7 @@ impl VectorApp {
             commands: Default::default(),
             cmd_snaps: HashMap::new(),
             cmd_loading: HashSet::new(),
+            cmd_form: None,
             shortcode: None,
             emoticons: true,
             mention: None,
@@ -2267,12 +2270,13 @@ impl VectorApp {
     }
 
     fn rebuild_rows(&mut self) -> usize {
+        let names = self.command_names();
         let store = self.store.borrow();
         let rows = self
             .open
             .as_ref()
             .and_then(|id| store.chat(id))
-            .map(|c| data::timeline(c, store.now_ms(), self.read_anchor.as_deref()))
+            .map(|c| data::timeline(c, store.now_ms(), self.read_anchor.as_deref(), names.as_deref()))
             .unwrap_or_default();
         self.rows = Rc::new(rows);
         self.rows.len()
@@ -2322,6 +2326,8 @@ impl VectorApp {
         }
         self.read_anchor = self.store.borrow().chat(&id).map(|c| c.last_read.clone());
         self.open = Some(id.clone());
+        self.commands.close();
+        self.load_commands(false, cx);
         let count = self.rebuild_rows();
         self.timeline = timeline_state(count, cx.entity().downgrade());
         self.jumped = None;
@@ -2599,6 +2605,7 @@ impl VectorApp {
             }
             Act::Text(t) => self.on_text(id, t, window, cx),
             Act::Jump(target) => self.jump_to_message(target, cx),
+            Act::Rerun(name) => self.rerun_command(name, window, cx),
             Act::Embed(a) => self.on_embed(a, window, cx),
             Act::Pack(a) => self.on_pack(a, cx),
             Act::Hover(true) => {
@@ -3386,7 +3393,7 @@ impl VectorApp {
 
     fn send(&mut self, text: String, cx: &mut Context<Self>) {
         let Some(id) = self.open.clone() else { return };
-        let Some((text, _bot)) = self.route_command(&text, cx) else {
+        let Some((text, bot)) = self.route_command(&text, cx) else {
             self.input.update(cx, |i, cx| i.set_text(&text, cx));
             return;
         };
@@ -3422,7 +3429,7 @@ impl VectorApp {
                 let _ =
                     backend::run(async move { backend::actions::bump_emoji_batch(used, custom) });
             }
-            let rx = backend::run(messaging::send(receiver, text, reply));
+            let rx = backend::run(messaging::send(receiver, text, reply, bot));
             cx.spawn(async move |this, cx| {
                 if let Ok(Err(e)) = rx.await {
                     log::warn!("send failed: {e}");
@@ -3441,7 +3448,9 @@ impl VectorApp {
                 return;
             };
             let (text, colors) = vector_core::text_color::extract(&text);
+            let addressed_bots = bot.into_iter().filter(|_| !id.starts_with("npub1")).collect();
             let msg = Message {
+                addressed_bots,
                 id: format!("local-{now}-{}", chat.messages.len()),
                 content: text,
                 text_spans: colors.into_iter().map(vector_core::text_spans::TextSpan::Color).collect(),
@@ -5318,6 +5327,7 @@ impl VectorApp {
             .jumped
             .clone()
             .filter(|(_, t)| t.elapsed().as_secs_f32() < 1.5);
+        let cmd_names = self.command_names();
         let messages = list(self.timeline.clone(), move |i, window, cx| {
             let rows_store = rows_store.borrow();
             let (Some(chat), Some(row)) = (rows_store.chat(&rows_id), rows.get(i)) else {
@@ -5343,6 +5353,7 @@ impl VectorApp {
                 jumped: jumped
                     .as_ref()
                     .map(|(id, t)| (id.as_str(), t.elapsed().as_secs_f32())),
+                commands: cmd_names.as_deref(),
             };
             if ctx.jumped.is_some_and(|(id, _)| {
                 chat.messages
@@ -5485,7 +5496,7 @@ impl VectorApp {
                     })).or_else(|| self.time_chip_view(cx)),
                 self.composer_box.clone(),
                 (
-                    self.send_shown || matches!(self.mode, Mode::Edit { .. }),
+                    self.send_shown || matches!(self.mode, Mode::Edit { .. }) || self.cmd_form.is_some(),
                     self.send_flips,
                 ),
                 (self.self_destruct, self.send_btn.clone()),
@@ -5496,6 +5507,7 @@ impl VectorApp {
                         app.update(cx, |app, cx| app.rec_ui(ui, w, cx)).ok();
                     })
                 },
+                self.command_form_view(cx),
                 cx,
             ))
     }
@@ -5675,9 +5687,12 @@ fn composer(
     (timer, send_probe): (Option<u64>, Rc<std::cell::Cell<Option<gpui::Bounds<gpui::Pixels>>>>),
     rec: &crate::recorder::Recorder,
     on_rec: crate::recorder::On,
+    command: Option<(AnyElement, AnyElement)>,
     cx: &mut Context<VectorApp>,
 ) -> impl IntoElement {
     use crate::recorder::State as R;
+    let (strip, form) = command.map_or((None, None), |(s, f)| (Some(s), Some(f)));
+    let commanding = form.is_some();
     let busy = matches!(rec.state, R::Recording | R::Locked | R::Preview | R::Cancelled);
     let previewing = rec.state == R::Preview;
     let hides_mic = matches!(rec.state, R::Recording | R::Locked | R::Preview);
@@ -5719,7 +5734,7 @@ fn composer(
         .relative()
         .flex_shrink_0()
         .px(px(8.))
-        .pt(px(if replying { 39. } else { 5. }))
+        .pt(px(5. + if replying { 34. } else { 0. } + if commanding { 34. } else { 0. }))
         .pb(px(5.))
         .bg(linear_gradient(
             90.,
@@ -5787,6 +5802,24 @@ fn composer(
                 ),
         );
     }
+    if let Some(strip) = strip {
+        boxed = boxed.child(
+            div()
+                .absolute()
+                .top(px(if replying { 39. } else { 5. }))
+                .left(px(8.))
+                .right(px(8.))
+                .h(px(46.))
+                .pl(px(12.))
+                .pr(px(44.))
+                .pb(px(12.))
+                .rounded_t(px(10.))
+                .bg(c(0x0b1510))
+                .flex()
+                .items_center()
+                .child(strip),
+        );
+    }
     if let Some(popup) = popup {
         boxed = boxed.child(
             gpui::deferred(
@@ -5819,7 +5852,7 @@ fn composer(
                         crate::recorder::strip(rec)
                     })
                 })
-                .when(!busy, |d| d.child(if editing {
+                .when(!busy && !commanding, |d| d.child(if editing {
                     cancel("edit-cancel", 23., cx)
                         .w(px(38.))
                         .h(px(45.))
@@ -5827,7 +5860,8 @@ fn composer(
                 } else {
                     attach_button(attach.is_some(), cx).into_any_element()
                 }))
-                .child(
+                .when_some(form, |d, form| d.child(div().flex_1().min_w_0().child(form)))
+                .when(!commanding, |d| d.child(
                     div()
                         .flex_1()
                         .min_w_0()
@@ -5835,8 +5869,8 @@ fn composer(
                         .pr(px(10.))
                         .when(busy, |d| d.absolute().invisible().size_0())
                         .child(input),
-                )
-                .when(!busy, |d| d.child(
+                ))
+                .when(!busy && !commanding, |d| d.child(
                     icon(if picker.as_ref().is_some_and(|p| p.1) {
                         "icons/wink-face.svg"
                     } else {
@@ -5989,6 +6023,9 @@ fn send_or_mic(
             .on_click(cx.listener(|app, _, window, cx| {
                 if std::mem::take(&mut app.send_long) {
                     return;
+                }
+                if let Some(form) = app.cmd_form.clone() {
+                    return form.update(cx, |f, cx| f.submit(window, cx));
                 }
                 app.input.update(cx, |i, cx| i.submit(window, cx))
             }))

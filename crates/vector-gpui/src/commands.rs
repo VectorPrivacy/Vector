@@ -645,7 +645,7 @@ pub fn view(
         .left_0()
         .w_full()
         .max_w(px(422.))
-        .max_h(px(320.))
+        .max_h(px(328.))
         .overflow_y_scroll()
         .bg(c(PANEL_BG))
         .border_1()

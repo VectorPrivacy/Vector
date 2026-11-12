@@ -125,7 +125,7 @@ pub async fn sync_channel(channel_id: String, before_ms: Option<u64>) -> Result<
 }
 
 /// The optimistic bubble carries the real id: the rumor is built before it shows.
-pub async fn send(channel_id: String, content: String, replied_to: String) -> Result<(), String> {
+pub async fn send(channel_id: String, content: String, replied_to: String, bot: Option<String>) -> Result<(), String> {
     db::scoped(async move {
         let reply = (!replied_to.is_empty()).then_some(replied_to);
         let community_id = db::community::community_id_for_channel(&channel_id)?
@@ -137,6 +137,10 @@ pub async fn send(channel_id: String, content: String, replied_to: String) -> Re
             .into_iter()
             .collect();
         extra_tags.extend(vector_core::community::mentions::to_tags(&role_mentions));
+        // Names the chosen bot, so only it runs a command two bots share.
+        let bot = bot.as_deref().and_then(|b| PublicKey::parse(b).ok());
+        extra_tags.extend(bot.map(|pk| vector_core::bot_interface::bot_tag(&pk)));
+        let addressed_bots: Vec<String> = bot.and_then(|pk| pk.to_bech32().ok()).into_iter().collect();
 
         let author = vector_core::my_public_key().ok_or("Public key not set")?;
         let community = load(&community_id)?;
@@ -199,6 +203,7 @@ pub async fn send(channel_id: String, content: String, replied_to: String) -> Re
             emoji_tags: emoji_tags.clone(),
             text_spans,
             role_mentions,
+            addressed_bots,
             expiration: expiry,
             ..Default::default()
         };

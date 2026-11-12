@@ -118,9 +118,10 @@ impl SendCallback for Callback {
 }
 
 /// Send `content` to a DM; `replied_to` quotes a message when not empty.
-pub async fn send(receiver: String, content: String, replied_to: String) -> Result<(), String> {
+/// `bot` names the bot a `/` command is for; only a Community message carries the tag.
+pub async fn send(receiver: String, content: String, replied_to: String, bot: Option<String>) -> Result<(), String> {
     if !receiver.starts_with("npub1") {
-        return super::community::send(receiver, content, replied_to).await;
+        return super::community::send(receiver, content, replied_to, bot).await;
     }
     let config = SendConfig {
         expiration: vector_core::self_destruct::resolve_send_expiry(&receiver),

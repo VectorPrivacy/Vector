@@ -58,6 +58,8 @@ pub enum Act {
     Jump(String),
     /// An audio attachment's controls, by attachment.
     Audio(String, crate::audio::Act),
+    /// An invocation line's command name: the composer takes it, to run again.
+    Rerun(String),
 }
 
 pub type OnAct = Rc<dyn Fn(&str, Act, &mut Window, &mut App)>;
@@ -91,6 +93,8 @@ pub struct Ctx<'a> {
     pub jumped: Option<(&'a str, f32)>,
     /// The Community's mention rules, for `@everyone` and Role chips.
     pub rules: Option<&'a crate::mentions::Rules>,
+    /// The command names the chat's bots declare, once known.
+    pub commands: Option<&'a HashSet<String>>,
 }
 
 /// `_dmsgIsPinged`: a tag of me, an authorised `@everyone`, a Role I hold, or a reply to me.
@@ -394,8 +398,69 @@ pub fn emoji_source(store: &Store, url: &str) -> String {
     }
 }
 
+/// `.dmsg-command-line`: "JSKitty ran /roll with Concordia", the arguments left out.
+fn command_line(ctx: &Ctx, m: &Message, name: String, bot: Option<String>) -> AnyElement {
+    let author = if m.mine { ctx.store.my_npub.clone() } else { m.npub.clone().unwrap_or_default() };
+    let to = |npub: String| {
+        let act = ctx.on_act.clone();
+        let id = m.id.clone();
+        move |_: &gpui::ClickEvent, w: &mut Window, cx: &mut App| {
+            act(&id, Act::Text(Target::Mention(npub.clone().into())), w, cx)
+        }
+    };
+    let word = |t: &'static str| div().child(t);
+    let accent = |d: gpui::Stateful<gpui::Div>| {
+        d.not_italic()
+            .font_weight(FontWeight::SEMIBOLD)
+            .text_color(c(PRIMARY))
+            .cursor_pointer()
+            .hover(|s| s.underline())
+    };
+    let rerun = {
+        let act = ctx.on_act.clone();
+        let (id, name) = (m.id.clone(), name.clone());
+        move |_: &gpui::ClickEvent, w: &mut Window, cx: &mut App| act(&id, Act::Rerun(name.clone()), w, cx)
+    };
+    div()
+        .flex()
+        .flex_wrap()
+        .items_center()
+        .gap_x(px(4.))
+        .text_size(px(13.))
+        .italic()
+        .text_color(white_a(0.45))
+        .child(
+            div()
+                .id(SharedString::from(format!("cmd-author-{}", m.id)))
+                .not_italic()
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(white_a(0.8))
+                .cursor_pointer()
+                .child(ctx.store.name(&author))
+                .on_click(to(author.clone())),
+        )
+        .child(word("ran"))
+        .child(accent(div().id(SharedString::from(format!("cmd-name-{}", m.id))).child(format!("/{name}"))).on_click(rerun))
+        .when_some(bot, |d, bot| {
+            d.child(word("with")).child(
+                div()
+                    .id(SharedString::from(format!("cmd-bot-{}", m.id)))
+                    .flex()
+                    .items_center()
+                    .gap(px(4.))
+                    .child(avatar(ctx.store, &bot, 15.))
+                    .child(accent(div().id("bot-name").max_w(px(22. * 7.)).truncate().child(ctx.store.name(&bot))))
+                    .on_click(to(bot.clone())),
+            )
+        })
+        .into_any_element()
+}
+
 /// `.dmsg-content`: the text, then its trailing marks.
 fn content(ctx: &Ctx, m: &Message) -> AnyElement {
+    if let Some((name, bot)) = crate::data::command(m, ctx.commands) {
+        return command_line(ctx, m, name, bot);
+    }
     let empty = HashSet::new();
     let revealed = ctx.revealed.get(&m.id).unwrap_or(&empty);
     let id = m.id.clone();
@@ -1188,7 +1253,7 @@ fn toolbar(ctx: &Ctx, m: &Message, first: bool) -> Option<AnyElement> {
             acts.push(("icons/smile-face.svg", "Add reaction", Act::React, false));
         }
         acts.push(("icons/reply.svg", "Reply", Act::Reply, false));
-        if m.mine && !m.content.is_empty() && m.attachments.is_empty() {
+        if m.mine && !m.content.is_empty() && m.attachments.is_empty() && crate::data::command(m, ctx.commands).is_none() {
             acts.push(("icons/edit.svg", "Edit", Act::Edit, false));
         }
         if ctx.chat.id.starts_with("npub1") || m.mine {
