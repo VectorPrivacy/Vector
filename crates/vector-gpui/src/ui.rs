@@ -13401,7 +13401,7 @@ impl VectorApp {
     }
 
     fn show_profile_qr(&mut self, npub: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let side = (288. * window.scale_factor()).round() as u32;
+        let side = (((self.vw * 0.72).min(320.) - 32.) * window.scale_factor()).round() as u32;
         if let Some(image) = crate::qr::image(&format!("https://vectorapp.io/profile/{npub}"), side) {
             let focus = cx.focus_handle();
             window.focus(&focus, cx);
@@ -15841,7 +15841,7 @@ impl VectorApp {
             }
             Act::ShowQr => {
                 let Some(link) = m.link.clone() else { return };
-                let side = (288. * window.scale_factor()).round() as u32;
+                let side = (((self.vw * 0.72).min(320.) - 32.) * window.scale_factor()).round() as u32;
                 if let Some(image) = crate::qr::image(&link, side) {
                     let focus = cx.focus_handle();
                     window.focus(&focus, cx);
@@ -17017,6 +17017,7 @@ impl VectorApp {
 impl VectorApp {
     fn qr_view(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let (image, focus) = self.qr.clone()?;
+        let tile = (self.vw * 0.72).min(320.);
         let close = |app: &mut Self, cx: &mut Context<Self>| {
             app.qr = None;
             cx.notify();
@@ -17034,11 +17035,11 @@ impl VectorApp {
             .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .child(
                 div()
-                    .w(px(320.))
+                    .w(px(tile))
                     .p(px(16.))
                     .rounded(px(10.))
                     .bg(c(0xffffff))
-                    .child(img(image).size(px(288.))),
+                    .child(img(image).size(px(tile - 32.))),
             )
             .child(
                 div()
