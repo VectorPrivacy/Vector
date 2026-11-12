@@ -34,6 +34,7 @@ mod markdown;
 mod langnames;
 mod lyrics;
 mod media;
+mod miniapp;
 mod mentions;
 #[allow(dead_code, clippy::all)]
 mod message;

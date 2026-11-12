@@ -159,7 +159,17 @@ pub fn attachments(ctx: &Ctx, m: &Message) -> Option<AnyElement> {
                     None => (file_box(ctx, &media, m, att, FileState::Local, None), 6.),
                 }
             }
-            Phase::Ready => (file_box(ctx, &media, m, att, FileState::Local, None), 6.),
+            Phase::Ready => {
+                if e == "xdc" && !media.xdc.contains_key(&att.id) {
+                    media.xdc.insert(att.id.clone(), None);
+                    let src = match source(ctx, att) {
+                        Source::Held(h) => crate::media::Source::Held(h),
+                        Source::File(p) => crate::media::Source::File(p),
+                    };
+                    media.xdc_queue.push((att.id.clone(), src));
+                }
+                (file_box(ctx, &media, m, att, FileState::Local, None), 6.)
+            }
             _ if BLURRED.contains(&e.as_str())
                 && let Some(el) = blur(ctx, &mut media, m, att, phase, failed.as_deref()) =>
             {
@@ -609,12 +619,21 @@ fn file_box(
     label: Option<&str>,
 ) -> AnyElement {
     let (icon, description) = data::file_type(&att.extension);
-    let icon = if icon == "gift" { "gamepad" } else { icon };
-    let title: SharedString = if att.name.is_empty() {
-        description.into()
-    } else {
-        att.name.clone().into()
+    let mini = icon == "gift";
+    let icon = if mini { "gamepad" } else { icon };
+    let package = mini
+        .then(|| media.xdc.get(&att.id).cloned().flatten())
+        .flatten()
+        .filter(|_| state == FileState::Local);
+    let title: SharedString = match &package {
+        Some(p) => if p.name.is_empty() { "Mini App".into() } else { p.name.clone().into() },
+        None if att.name.is_empty() => description.into(),
+        None => att.name.clone().into(),
     };
+    let live = mini.then(|| {
+        let key = att.webxdc_topic.clone().unwrap_or_else(|| format!("att:{}", att.id));
+        media.xdc_live.get(&key).cloned().unwrap_or_default()
+    });
     let e = ext(att);
     let kind = if e.is_empty() {
         description.to_string()
@@ -698,7 +717,7 @@ fn file_box(
                 None => kind,
             },
         };
-        text.child(
+        let text = text.child(
             div()
                 .text_size(px(15.))
                 .line_height(px(18.75))
@@ -707,16 +726,19 @@ fn file_box(
                 .overflow_hidden()
                 .text_ellipsis()
                 .child(title),
-        )
-        .child(
-            div()
-                .mt(px(3.))
-                .text_size(px(12.))
-                .line_height(px(15.))
-                .text_color(white_a(0.55))
-                .whitespace_nowrap()
-                .child(sub),
-        )
+        );
+        match live.as_ref().filter(|_| state == FileState::Local && label.is_none()) {
+            Some(live) => text.child(session_line(ctx, live)),
+            None => text.child(
+                div()
+                    .mt(px(3.))
+                    .text_size(px(12.))
+                    .line_height(px(15.))
+                    .text_color(white_a(0.55))
+                    .whitespace_nowrap()
+                    .child(sub),
+            ),
+        }
     };
 
     let button = |icon: &'static str, color: Hsla, border: Hsla, a: Act| {
@@ -805,15 +827,88 @@ fn file_box(
                 .flex()
                 .items_center()
                 .justify_center()
-                .child(
-                    svg()
+                .child(match package.as_ref().and_then(|p| p.icon.clone()) {
+                    Some(path) => img(path)
+                        .size(px(40.))
+                        .rounded(px(8.))
+                        .object_fit(gpui::ObjectFit::Cover)
+                        .into_any_element(),
+                    None => svg()
                         .path(format!("icons/{icon}.svg"))
                         .size(px(32.))
-                        .text_color(glyph_color),
-                ),
+                        .text_color(glyph_color)
+                        .into_any_element(),
+                }),
         )
         .child(text)
         .children(action)
+        .into_any_element()
+}
+
+/// `.file-box-session`: what the Mini App is doing, and who else is in it.
+fn session_line(ctx: &Ctx, live: &crate::media::XdcLive) -> AnyElement {
+    let players = live.peers.len();
+    let label = if live.active {
+        "Playing"
+    } else if players > 0 {
+        "Click to Join"
+    } else {
+        "Click to Play"
+    };
+    let mut peers: Vec<&String> = live.peers.iter().collect();
+    peers.sort();
+    peers.truncate(5);
+    let n = peers.len();
+    div()
+        .mt(px(3.))
+        .flex()
+        .items_center()
+        .gap(px(10.))
+        .text_size(px(12.))
+        .line_height(px(15.))
+        .whitespace_nowrap()
+        .child(
+            div()
+                .text_color(if live.active { c(PRIMARY) } else { white_a(0.55) })
+                .child(label),
+        )
+        .when(players > 0, |d| {
+            d.child(
+                div()
+                    .px(px(8.))
+                    .py(px(2.))
+                    .rounded(px(10.))
+                    .bg(c(PRIMARY).opacity(0.15))
+                    .border(px(0.5))
+                    .border_color(c(PRIMARY).opacity(0.3))
+                    .text_color(c(PRIMARY))
+                    .text_size(px(10.2))
+                    .font_weight(FontWeight::MEDIUM)
+                    .flex()
+                    .items_center()
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .mr(px(4.))
+                            .children(peers.iter().enumerate().map(|(i, npub)| {
+                                div()
+                                    .when(i > 0, |d| d.ml(px(-5.)))
+                                    .size(px(14.))
+                                    .rounded_full()
+                                    .border_1()
+                                    .border_color(c(0x1a1a2e))
+                                    .overflow_hidden()
+                                    .child(crate::ui::avatar(ctx.store, npub, 14.))
+                                    .into_any_element()
+                            }))
+                            .when(n == 0, |d| {
+                                d.child(svg().path("icons/group-placeholder.svg").size(px(14.)))
+                            }),
+                    )
+                    .child(format!("{players} online")),
+            )
+        })
         .into_any_element()
 }
 

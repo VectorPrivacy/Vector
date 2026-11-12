@@ -1,20 +1,57 @@
-//! The account's Iroh node, which calls share with Mini Apps.
+//! The desktop client's Mini App core, compiled from its sources: packages, the `webxdc://`
+//! scheme and bridge script, permissions and the realtime channel. Windows are the host's.
 
-pub mod realtime {
-    use anyhow::{anyhow, Result};
-    use iroh::EndpointAddr;
-    use std::sync::Arc;
+#[path = "../../../../src-tauri/src/miniapps/error.rs"]
+#[allow(dead_code)]
+pub mod error;
+#[cfg(target_os = "linux")]
+#[path = "../../../../src-tauri/src/miniapps/network_isolation.rs"]
+pub mod network_isolation;
+#[path = "../../../../src-tauri/src/miniapps/realtime.rs"]
+#[allow(dead_code)]
+pub mod realtime;
+#[path = "../../../../src-tauri/src/miniapps/rt_ws.rs"]
+#[allow(dead_code)]
+pub mod rt_ws;
+#[path = "../../../../src-tauri/src/miniapps/scheme.rs"]
+#[allow(dead_code)]
+pub mod scheme;
+#[path = "../../../../src-tauri/src/miniapps/state.rs"]
+#[allow(dead_code)]
+pub mod state;
 
-    pub(crate) async fn mesh() -> Result<Arc<vector_core::xdc::mesh::Mesh>, String> {
-        vector_core::xdc::mesh::mesh().await
-    }
+pub use vector_core::webxdc_permissions as permissions;
 
-    pub fn encode_node_addr(addr: &EndpointAddr) -> Result<String> {
-        vector_core::xdc::wire::encode_node_addr(addr).map_err(|e| anyhow!(e))
-    }
+/// Runs first in every frame of a Mini App: engine shims, API removals, permission guards.
+pub const INIT_SCRIPT: &str = include_str!(concat!(env!("OUT_DIR"), "/miniapp_init.js"));
 
-    /// Relay paths only: the sender chose every address in it, and dialling a direct one shows them our IP.
-    pub fn decode_node_addr(s: &str) -> Result<EndpointAddr> {
-        vector_core::xdc::wire::decode_node_addr(s).map_err(|e| anyhow!(e))
-    }
+/// The bridge script `webxdc.js` the pages load, for a host that serves it itself.
+pub async fn bridge_js() -> String {
+    let (npub, name) = scheme::get_user_info().await;
+    scheme::generate_webxdc_bridge_js(&npub, &name)
+}
+
+/// Answers one `webxdc://` request from the Mini App window `label`.
+pub fn serve(
+    label: &str,
+    request: http::Request<Vec<u8>>,
+    respond: impl FnOnce(http::Response<std::borrow::Cow<'static, [u8]>>) + Send + 'static,
+) {
+    let app = *crate::TAURI_APP.get().expect("TAURI_APP set at startup");
+    scheme::miniapp_protocol(
+        tauri::UriSchemeContext::new(label, app),
+        request,
+        tauri::UriSchemeResponder::new(respond),
+    );
+}
+
+/// The process's Mini App state; the host manages it once at startup.
+pub fn apps() -> &'static state::MiniAppsState {
+    tauri::manage(state::MiniAppsState::new())
+}
+
+/// The proxy every Linux Mini App webview is pointed at, so it has no network.
+#[cfg(target_os = "linux")]
+pub fn network_sink() -> Option<&'static url::Url> {
+    network_isolation::proxy_url()
 }

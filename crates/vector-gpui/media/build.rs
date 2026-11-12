@@ -59,4 +59,17 @@ fn main() {
     }
     let dest = std::path::Path::new(&std::env::var("OUT_DIR").unwrap()).join("wav.rs");
     std::fs::write(dest, out).unwrap();
+
+    // The Mini App bridge's guard script is a private constant of the desktop's commands.
+    let cmds = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../../src-tauri/src/miniapps/commands.rs"
+    );
+    println!("cargo:rerun-if-changed={cmds}");
+    let rs = std::fs::read_to_string(cmds).expect("miniapps/commands.rs");
+    let open = "const INIT_SCRIPT: &str = r#\"";
+    let start = rs.find(open).expect("commands.rs lost INIT_SCRIPT") + open.len();
+    let len = rs[start..].find("\"#;").expect("INIT_SCRIPT unterminated");
+    let dest = std::path::Path::new(&std::env::var("OUT_DIR").unwrap()).join("miniapp_init.js");
+    std::fs::write(dest, &rs[start..start + len]).unwrap();
 }

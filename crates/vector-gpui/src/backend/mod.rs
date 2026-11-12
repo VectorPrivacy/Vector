@@ -116,6 +116,10 @@ pub fn start(data_dir: PathBuf) -> mpsc::UnboundedReceiver<UiEvent> {
         let _guard = rt.enter();
         crate::calls::session::install();
     }
+    crate::miniapp::init(|n| match n {
+        crate::miniapp::Notice::Failed(e) => emit("show_toast", serde_json::Value::String(e)),
+        crate::miniapp::Notice::Opened | crate::miniapp::Notice::Closed => {}
+    });
     // spawn-detached: the sweep expires messages for whichever account is live, as on desktop.
     rt.spawn(vector_core::self_destruct::run_sweeper_loop());
     // spawn-detached: the processor serves whichever account is live, as on desktop.

@@ -4,6 +4,41 @@
 #[macro_use]
 extern crate vector_core;
 
+/// The desktop's `log_error!` also toasts; here it is a log line.
+macro_rules! log_error {
+    ($($t:tt)*) => { vector_core::log_warn!($($t)*) };
+}
+
+/// The desktop's global accessors, by the paths its modules name them.
+pub use vector_core::{STATE, my_public_key};
+pub mod db {
+    pub use vector_core::db::miniapps::*;
+}
+pub mod util {
+    pub use vector_core::simd::hex::{bytes_to_hex_16, bytes_to_hex_string};
+}
+/// What `listing_icon` asks of the desktop's image module, from the image crate.
+pub mod shared {
+    pub mod image {
+        use image::DynamicImage;
+
+        pub fn decode_image(bytes: &[u8], _min_long_side: u32) -> Result<DynamicImage, String> {
+            image::load_from_memory(bytes).map_err(|e| e.to_string())
+        }
+        pub fn resize_fit(img: &DynamicImage, w: u32, h: u32, filter: image::imageops::FilterType) -> DynamicImage {
+            img.resize(w, h, filter)
+        }
+        pub fn encode_png(pixels: &[u8], w: u32, h: u32) -> Result<Vec<u8>, String> {
+            let mut out = Vec::new();
+            image::codecs::png::PngEncoder::new(&mut out)
+                .write_image(pixels, w, h, image::ExtendedColorType::Rgba8)
+                .map_err(|e| e.to_string())?;
+            Ok(out)
+        }
+        use image::ImageEncoder;
+    }
+}
+
 #[allow(dead_code)]
 pub mod audio;
 #[path = "../../../../src-tauri/src/audio_codecs.rs"]

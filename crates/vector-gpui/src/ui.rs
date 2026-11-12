@@ -782,6 +782,15 @@ impl VectorApp {
             app.rec.fixture(&state);
             app.rec.can_dictate = std::env::var_os("VECTOR_TRANSCRIPT").is_some();
         }
+        // Fixtures: VECTOR_XDC=<package> launches it solo, through the real host and bridge.
+        if let Ok(path) = std::env::var("VECTOR_XDC") {
+            crate::miniapp::init(|_| {});
+            tauri::async_runtime::spawn(async move {
+                if let Err(e) = crate::miniapp::open(path, "solo".into(), String::new(), None, None).await {
+                    eprintln!("VECTOR_XDC: {e}");
+                }
+            });
+        }
         // Fixtures: VECTOR_CALL=ringing|calling|active|open shows a call with alice in that state.
         if let Ok(state) = std::env::var("VECTOR_CALL") {
             app.fixture_call(&state, cx);
@@ -2163,6 +2172,20 @@ impl VectorApp {
                     self.refresh_rows(true);
                 }
             }
+            "miniapp_realtime_status" => {
+                let topic = payload.get("topic").and_then(Value::as_str).unwrap_or_default();
+                let peers: Vec<String> = payload
+                    .get("peers")
+                    .and_then(|p| serde_json::from_value(p.clone()).ok())
+                    .unwrap_or_default();
+                let active = payload.get("is_active").and_then(Value::as_bool).unwrap_or(false);
+                self.media
+                    .borrow_mut()
+                    .xdc_live
+                    .insert(topic.to_string(), crate::media::XdcLive { active, peers });
+                self.refresh_rows(false);
+                cx.notify();
+            }
             "profile_update" => {
                 if let Ok(p) = serde_json::from_value::<SlimProfile>(payload) {
                     self.store.borrow_mut().profiles.insert(p.id.clone(), p);
@@ -3183,6 +3206,10 @@ impl VectorApp {
         else {
             return;
         };
+        if att.extension.eq_ignore_ascii_case("xdc") {
+            self.launch_miniapp(msg_id, att, cx);
+            return;
+        }
         if !att.resident && !att.path.is_empty() {
             let path = std::path::PathBuf::from(&att.path);
             let path = if path.is_absolute() {
@@ -3222,6 +3249,70 @@ impl VectorApp {
                 this.update(cx, |this, cx| this.notice("Save Failed", e.to_string(), cx))
                     .ok();
             }
+        })
+        .detach();
+    }
+
+    /// Mini App cards' names and icons, read from their packages.
+    fn read_packages(&mut self, list: Vec<(String, crate::media::Source)>, cx: &mut Context<Self>) {
+        for (att, src) in list {
+            let rx = backend::run(async move {
+                let file = match src {
+                    crate::media::Source::File(p) => p.to_string_lossy().into_owned(),
+                    crate::media::Source::Held(h) => crate::miniapp::held_package(h).await?,
+                };
+                crate::miniapp::info(file).await
+            });
+            cx.spawn(async move |this, cx| {
+                let Ok(Ok(info)) = rx.await else { return };
+                this.update(cx, |this, cx| {
+                    this.media.borrow_mut().xdc.insert(att, Some(info));
+                    this.refresh_rows(false);
+                    cx.notify();
+                })
+                .ok();
+            })
+            .detach();
+        }
+    }
+
+    /// A Mini App attachment opens in its own window, keyed to this chat and message.
+    fn launch_miniapp(&mut self, msg_id: String, att: vector_core::Attachment, cx: &mut Context<Self>) {
+        if !self.live {
+            return;
+        }
+        let chat = self.open.as_ref().map(|s| s.to_string()).unwrap_or_default();
+        let file = (!att.resident && !att.path.is_empty()).then(|| {
+            let path = std::path::PathBuf::from(&att.path);
+            if path.is_absolute() {
+                path
+            } else {
+                self.store.borrow().media_root.join(path)
+            }
+        });
+        let hash = vector_core::simd::hex::hex_to_bytes_32_checked(&att.id);
+        let topic = att.webxdc_topic.clone();
+        let key = topic.clone().unwrap_or_else(|| format!("att:{}", att.id));
+        let rx = backend::run(async move {
+            let file = match (file, hash) {
+                (Some(f), _) => f.to_string_lossy().into_owned(),
+                (None, Some(h)) => crate::miniapp::held_package(h).await?,
+                (None, None) => return Err("This app isn't on this device any more".to_string()),
+            };
+            crate::miniapp::open(file, chat, msg_id, None, topic).await
+        });
+        cx.spawn(async move |this, cx| {
+            let res = rx.await;
+            this.update(cx, |this, cx| match res {
+                Ok(Err(e)) => this.show_toast(&e, cx),
+                Ok(Ok(())) => {
+                    this.media.borrow_mut().xdc_live.entry(key).or_default().active = true;
+                    this.refresh_rows(false);
+                    cx.notify();
+                }
+                Err(_) => {}
+            })
+            .ok();
         })
         .detach();
     }
@@ -5488,6 +5579,13 @@ impl VectorApp {
                 let app = app_media.clone();
                 cx.defer(move |cx| {
                     app.update(cx, |app, cx| app.video_work(clips, cx)).ok();
+                });
+            }
+            let packages = std::mem::take(&mut media.borrow_mut().xdc_queue);
+            if !packages.is_empty() && live {
+                let app = app_media.clone();
+                cx.defer(move |cx| {
+                    app.update(cx, |app, cx| app.read_packages(packages, cx)).ok();
                 });
             }
             let probes = std::mem::take(&mut media.borrow_mut().audio.queue);

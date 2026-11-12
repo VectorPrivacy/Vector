@@ -60,11 +60,105 @@ impl PathResolver {
 
 pub trait Manager<R: Runtime> {
     fn path(&self) -> PathResolver;
+    /// What the host handed to [`manage`]; panics when it never did, as Tauri does.
+    fn state<T: Send + Sync + 'static>(&self) -> State<'static, T> {
+        State(managed::<T>().expect("tauri shim: state not managed"))
+    }
 }
 
 impl<R: Runtime> Manager<R> for AppHandle<R> {
     fn path(&self) -> PathResolver {
         PathResolver
+    }
+}
+
+static MANAGED: std::sync::Mutex<Vec<(std::any::TypeId, &'static (dyn std::any::Any + Send + Sync))>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// Process-lifetime state, one value a type, as `Builder::manage` registers it.
+pub fn manage<T: Send + Sync + 'static>(value: T) -> &'static T {
+    let mut all = MANAGED.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((_, v)) = all.iter().find(|(t, _)| *t == std::any::TypeId::of::<T>()) {
+        return v.downcast_ref().expect("same type");
+    }
+    let leaked: &'static T = Box::leak(Box::new(value));
+    all.push((std::any::TypeId::of::<T>(), leaked));
+    leaked
+}
+
+pub fn managed<T: Send + Sync + 'static>() -> Option<&'static T> {
+    let all = MANAGED.lock().unwrap_or_else(|e| e.into_inner());
+    all.iter()
+        .find(|(t, _)| *t == std::any::TypeId::of::<T>())
+        .and_then(|(_, v)| v.downcast_ref())
+}
+
+pub struct State<'a, T>(&'a T);
+
+impl<T> std::ops::Deref for State<'_, T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        self.0
+    }
+}
+
+/// A webview's custom-scheme request: which webview asked.
+pub struct UriSchemeContext<'a, R: Runtime = Wry> {
+    label: &'a str,
+    app: AppHandle<R>,
+}
+
+impl<'a, R: Runtime> UriSchemeContext<'a, R> {
+    pub fn new(label: &'a str, app: AppHandle<R>) -> Self {
+        Self { label, app }
+    }
+    pub fn webview_label(&self) -> &str {
+        self.label
+    }
+    pub fn app_handle(&self) -> &AppHandle<R> {
+        &self.app
+    }
+}
+
+type Respond = Box<dyn FnOnce(http::Response<std::borrow::Cow<'static, [u8]>>) + Send>;
+
+/// Answers a custom-scheme request, from any thread.
+pub struct UriSchemeResponder(Respond);
+
+impl UriSchemeResponder {
+    pub fn new(f: impl FnOnce(http::Response<std::borrow::Cow<'static, [u8]>>) + Send + 'static) -> Self {
+        Self(Box::new(f))
+    }
+    pub fn respond<T: Into<std::borrow::Cow<'static, [u8]>>>(self, response: http::Response<T>) {
+        (self.0)(response.map(Into::into))
+    }
+}
+
+pub mod ipc {
+    use std::marker::PhantomData;
+    use std::sync::Arc;
+
+    /// A stream of messages to one webview's JS callback.
+    pub struct Channel<T> {
+        sink: Arc<dyn Fn(serde_json::Value) -> bool + Send + Sync>,
+        _t: PhantomData<fn(T)>,
+    }
+
+    impl<T> Clone for Channel<T> {
+        fn clone(&self) -> Self {
+            Self { sink: self.sink.clone(), _t: PhantomData }
+        }
+    }
+
+    impl<T: serde::Serialize> Channel<T> {
+        /// `sink` answers false once its webview is gone.
+        pub fn new(sink: impl Fn(serde_json::Value) -> bool + Send + Sync + 'static) -> Self {
+            Self { sink: Arc::new(sink), _t: PhantomData }
+        }
+        pub fn send(&self, data: T) -> Result<(), super::Error> {
+            let v = serde_json::to_value(data).map_err(|e| super::Error(e.to_string()))?;
+            if (self.sink)(v) { Ok(()) } else { Err(super::Error("webview closed".into())) }
+        }
     }
 }
 

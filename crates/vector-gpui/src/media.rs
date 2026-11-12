@@ -130,6 +130,18 @@ pub struct Media {
     /// Custom emoji and pack icons on disk, by URL, and those asked for since the last pump.
     pub custom: HashMap<String, Custom>,
     custom_wants: Vec<(String, bool)>,
+    /// Mini App packages' cards by attachment id: None while read, or unreadable.
+    pub xdc: HashMap<String, Option<crate::miniapp::Info>>,
+    pub xdc_queue: Vec<(String, Source)>,
+    /// Realtime sessions, by topic (or `att:<id>` for an app without one).
+    pub xdc_live: HashMap<String, XdcLive>,
+}
+
+/// A Mini App session as its card reports it.
+#[derive(Clone, Default)]
+pub struct XdcLive {
+    pub active: bool,
+    pub peers: Vec<String>,
 }
 
 /// A custom emoji as a message draws it.
