@@ -10,6 +10,13 @@ publish = false
 name = "vector-gpui"
 path = "src/main.rs"
 
+[features]
+default = ["video"]
+# Video attachments decode through FFmpeg: the system's, or the desktop client's selective
+# static build (scripts/build-ffmpeg.sh) with FFMPEG_DIR set and `video-static`.
+video = ["dep:ffmpeg-next"]
+video-static = ["video", "ffmpeg-next/static"]
+
 [dependencies]
 gpui = { git = "https://github.com/zed-industries/zed", rev = "f8cfc7ed9e57503def9479138894f3139f5400cc" }
 gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "f8cfc7ed9e57503def9479138894f3139f5400cc", default-features = false, features = ["x11", "wayland"] }
@@ -58,6 +65,7 @@ symphonia = { version = "0.5.5", default-features = false, features = ["mp3", "w
 # Calls, devices and the audio engine: the desktop client's own modules (media/).
 vector-media = { package = "vector-gpui-media", path = "media" }
 tauri = { package = "vector-tauri-shim", path = "tauri-shim" }
+ffmpeg-next = { version = "9", default-features = false, features = ["codec", "format"], optional = true }
 
 # Its own workspace: GPUI pins dependency versions the main client must not inherit.
 [workspace]

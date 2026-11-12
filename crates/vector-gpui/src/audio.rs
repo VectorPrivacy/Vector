@@ -85,7 +85,7 @@ pub enum AudioInputSpec {
 }
 
 impl AudioInputSpec {
-    fn open(&self) -> Result<AudioInput, String> {
+    pub(crate) fn open(&self) -> Result<AudioInput, String> {
         match self {
             AudioInputSpec::File(p) => {
                 if p.exists() {
@@ -537,6 +537,12 @@ impl Audio {
             p.started = Some(Instant::now());
             p.playing = true;
             p.look = Look::Live;
+        }
+    }
+
+    pub fn pause_active(&mut self) {
+        if let Some(a) = self.active.clone() {
+            self.pause(&a);
         }
     }
 

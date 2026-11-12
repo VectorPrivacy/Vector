@@ -127,6 +127,30 @@ pub fn attachments(ctx: &Ctx, m: &Message) -> Option<AnyElement> {
                     6.,
                 )
             }
+            Phase::Ready
+                if crate::video::EXTENSIONS.contains(&e.as_str()) && !media.videos.failed(&att.id) =>
+            {
+                let input = match source(ctx, att) {
+                    Source::Held(h) => crate::audio::AudioInputSpec::Held(h),
+                    Source::File(p) => crate::audio::AudioInputSpec::File(p),
+                };
+                media.videos.want_probe(&att.id, &input);
+                match media.videos.clip(&att.id) {
+                    Some(clip) => {
+                        let (on_act, msg, aid) = (ctx.on_act.clone(), m.id.clone(), att.id.clone());
+                        (
+                            crate::video::view(
+                                &att.id,
+                                clip,
+                                m.pending,
+                                std::rc::Rc::new(move |a, w, cx| on_act(&msg, Act::Video(aid.clone(), a), w, cx)),
+                            ),
+                            6.,
+                        )
+                    }
+                    None => (video_placeholder(att), 6.),
+                }
+            }
             Phase::Ready if IMAGES.contains(&e.as_str()) => {
                 match picture(ctx, &mut media, m, att) {
                     Some(el) => (el, 6.),
@@ -164,6 +188,16 @@ pub fn attachments(ctx: &Ctx, m: &Message) -> Option<AnyElement> {
         prev_bottom = bottom;
     }
     Some(col.child(div().h(px(prev_bottom))).into_any_element())
+}
+
+/// Sized from what the sender said while the file's own header is read.
+fn video_placeholder(att: &Attachment) -> AnyElement {
+    let (w, h) = att
+        .img_meta
+        .as_ref()
+        .filter(|i| i.width > 0 && i.height > 0)
+        .map_or((crate::video::MAX_W, 253.), |i| crate::video::fit(i.width, i.height));
+    div().w(px(w)).h(px(h)).rounded(px(8.)).bg(gpui::black()).into_any_element()
 }
 
 fn act(

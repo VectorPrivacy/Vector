@@ -98,6 +98,7 @@ struct Want {
 pub struct Media {
     /// Audio attachments and the engine sources behind them.
     pub audio: crate::audio::Audio,
+    pub videos: crate::video::Videos,
     thumbs: HashMap<(String, u32, u32), Option<Arc<RenderImage>>>,
     images: HashMap<String, Slot>,
     /// Spoiler pictures tapped open, by attachment id.

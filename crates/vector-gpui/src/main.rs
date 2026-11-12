@@ -70,6 +70,9 @@ mod ui;
 mod util;
 mod viewer;
 mod viktor;
+mod video;
+#[cfg(feature = "video")]
+mod yuv;
 
 use std::path::PathBuf;
 

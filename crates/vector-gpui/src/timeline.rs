@@ -58,6 +58,7 @@ pub enum Act {
     Jump(String),
     /// An audio attachment's controls, by attachment.
     Audio(String, crate::audio::Act),
+    Video(String, crate::video::Act),
     /// An invocation line's command name: the composer takes it, to run again.
     Rerun(String),
 }

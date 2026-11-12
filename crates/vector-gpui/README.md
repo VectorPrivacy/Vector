@@ -19,6 +19,11 @@ cargo run --release                 # fat LTO, one codegen unit
 Linux needs the usual GPUI packages: `libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev
 libx11-xcb-dev libvulkan-dev libfontconfig1-dev libfreetype-dev`.
 
+Video attachments decode through FFmpeg (the default `video` feature): the system's
+(`libavcodec-dev libavformat-dev libavutil-dev clang`), or the desktop
+client's selective static build with `FFMPEG_DIR` set and `--features video-static`.
+`--no-default-features` draws every clip as a file.
+
 ## Layout
 
 - `src/theme.rs`: the palette, as the CSS resolves it.

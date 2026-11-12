@@ -2326,6 +2326,9 @@ impl VectorApp {
             self.rec.idle();
         }
         self.read_anchor = self.store.borrow().chat(&id).map(|c| c.last_read.clone());
+        if self.open.as_ref() != Some(&id) {
+            self.media.borrow_mut().videos.stop_all();
+        }
         self.open = Some(id.clone());
         self.commands.close();
         self.load_commands(false, cx);
@@ -2659,7 +2662,11 @@ impl VectorApp {
                 cx.notify();
             }
             Act::OpenFile(att) => self.open_file(id, att, cx),
-            Act::Audio(att, a) => self.audio_act(id, att, a, cx),
+            Act::Audio(att, a) => {
+                self.media.borrow_mut().videos.pause_all();
+                self.audio_act(id, att, a, cx)
+            }
+            Act::Video(att, a) => self.video_act(id, att, a, cx),
             Act::View(open) => {
                 let live = self.live;
                 let viewer = cx.new(|cx| crate::viewer::Viewer::new(open, live, window, cx));
@@ -3026,6 +3033,32 @@ impl VectorApp {
             self.audio_work(vec![w], cx);
         }
         cx.notify();
+    }
+
+    fn video_act(&mut self, msg: String, att: String, act: crate::video::Act, cx: &mut Context<Self>) {
+        let input = self.audio_input(&msg, &att);
+        let mut media = self.media.borrow_mut();
+        if media.videos.act(&att, input, act) {
+            media.audio.pause_active();
+        }
+        drop(media);
+        cx.notify();
+    }
+
+    fn video_work(&mut self, work: Vec<crate::video::Work>, cx: &mut Context<Self>) {
+        for w in work {
+            let rx = crate::video::run(w);
+            cx.spawn(async move |this, cx| {
+                let Ok(crate::video::WorkDone::Probed(att, info)) = rx.await else { return };
+                this.update(cx, |this, cx| {
+                    this.media.borrow_mut().videos.probed(att, info);
+                    this.refresh_rows(false);
+                    cx.notify();
+                })
+                .ok();
+            })
+            .detach();
+        }
     }
 
     fn audio_work(&mut self, work: Vec<crate::audio::Work>, cx: &mut Context<Self>) {
@@ -3475,6 +3508,16 @@ impl Render for VectorApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if self.media.borrow_mut().audio.tick() || self.rec.animating() {
             window.request_animation_frame();
+        }
+        {
+            let mut media = self.media.borrow_mut();
+            media.videos.scale = window.scale_factor();
+            if media.videos.tick() {
+                window.request_animation_frame();
+            }
+            for old in media.videos.retired.drain(..) {
+                let _ = window.drop_image(old);
+            }
         }
         match self.rec.due() {
             Some(crate::recorder::Due::Locked) => self.rec.locked(),
@@ -5395,6 +5438,13 @@ impl VectorApp {
                 for (chat, msg) in metas {
                     let _ = backend::run(backend::unfurl::fetch_msg_metadata(chat, msg));
                 }
+            }
+            let clips = std::mem::take(&mut media.borrow_mut().videos.queue);
+            if !clips.is_empty() {
+                let app = app_media.clone();
+                cx.defer(move |cx| {
+                    app.update(cx, |app, cx| app.video_work(clips, cx)).ok();
+                });
             }
             let probes = std::mem::take(&mut media.borrow_mut().audio.queue);
             if !probes.is_empty() {
