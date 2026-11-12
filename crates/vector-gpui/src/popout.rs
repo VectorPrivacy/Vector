@@ -48,6 +48,12 @@ pub enum Act {
     Seek(f32, bool),
     Prev,
     Next,
+    Songs,
+    Lyrics,
+    Transcribe,
+    Line(Option<u32>),
+    SeekTo(u64),
+    Track(usize),
     Close,
     ShowInChat,
     SoundOnly,
@@ -107,6 +113,10 @@ pub struct Popout {
     pub scrub: Option<f32>,
     /// When a drag of the box last ended: the release is not a click on what lies under it.
     moved: Option<std::time::Instant>,
+    pub tracks_open: bool,
+    /// The box's height as last laid out: panels opening grow it.
+    pub measured: std::rc::Rc<std::cell::Cell<f32>>,
+    last_h: f32,
 }
 
 impl Default for Popout {
@@ -124,6 +134,9 @@ impl Default for Popout {
             enabled: true,
             scrub: None,
             moved: None,
+            tracks_open: false,
+            measured: Default::default(),
+            last_h: 0.,
         }
     }
 }
@@ -144,6 +157,9 @@ impl Popout {
 
     pub fn open(&mut self, item: Item, win: (f32, f32)) {
         self.open_sound = (item.kind == Kind::Video && (win.0 < 640. || win.1 < 560.)).then_some(true);
+        self.tracks_open = false;
+        self.measured.set(0.);
+        self.last_h = 0.;
         self.item = Some(item);
         self.scrub = None;
     }
@@ -183,13 +199,29 @@ impl Popout {
     }
 
     pub fn height(&self, width: f32, aspect: f32) -> f32 {
-        if self.picture() { (width - 2.) / aspect + VIDEO_CHROME } else { SOUND_H }
+        if self.picture() { (width - 2.) / aspect + VIDEO_CHROME } else { self.measured.get().max(SOUND_H) }
     }
 
     /// Kept inside the window.
     pub fn clamp(&mut self, win: (f32, f32), size: (f32, f32)) {
         self.right = self.right.min(win.0 - size.0 - 8.).max(8.);
         self.bottom = self.bottom.min(win.1 - size.1 - 8.).max(8.);
+    }
+
+    /// A height change grows the box toward the open space: in the window's upper half it
+    /// keeps its top edge, in the lower its bottom one.
+    pub fn grew(&mut self, win: (f32, f32)) {
+        let h = self.measured.get();
+        if h <= 0. {
+            return;
+        }
+        if self.last_h > 0. && h != self.last_h && self.gesture.is_none() {
+            let top = win.1 - self.bottom - self.last_h;
+            if top + self.last_h / 2. < win.1 / 2. {
+                self.bottom = (win.1 - top - h).max(8.);
+            }
+        }
+        self.last_h = h;
     }
 
     pub fn dragging(&self) -> bool {
@@ -310,6 +342,9 @@ mod tests {
             enabled: true,
             scrub: None,
             moved: None,
+            tracks_open: false,
+            measured: Default::default(),
+            last_h: 0.,
         }
     }
 

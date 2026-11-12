@@ -96,6 +96,14 @@ impl VectorApp {
                     Kind::Video => self.video_act(item.msg, item.att, crate::video::Act::Seek(f, done), cx),
                 }
             }
+            Act::Songs => self.popout.tracks_open = !self.popout.tracks_open,
+            Act::Lyrics => self.audio_act(item.msg, item.att, crate::audio::Act::Lyrics, cx),
+            Act::Transcribe => self.audio_act(item.msg, item.att, crate::audio::Act::Transcribe, cx),
+            Act::Line(l) => self.audio_act(item.msg, item.att, crate::audio::Act::Line(l), cx),
+            Act::SeekTo(ms) => self.audio_act(item.msg, item.att, crate::audio::Act::SeekTo(ms), cx),
+            Act::Track(i) => {
+                self.audio_act(item.msg, item.att, crate::audio::Act::Album(crate::audio::AlbumAct::Track(i)), cx)
+            }
             Act::Prev | Act::Next => {
                 let step = if matches!(act, Act::Prev) { crate::audio::AlbumAct::Prev } else { crate::audio::AlbumAct::Next };
                 self.audio_act(item.msg, item.att, crate::audio::Act::Album(step), cx);
@@ -148,6 +156,7 @@ impl VectorApp {
         }
         let clip = media.videos.clip(&item.att);
         let aspect = clip.map_or(16. / 9., |c| c.aspect());
+        self.popout.grew(win);
         let width = self.popout.width(win, aspect);
         let height = self.popout.height(width, aspect);
         let (w0, h0) = (width, height);
@@ -163,6 +172,7 @@ impl VectorApp {
         let msg = store.chat(&item.chat).and_then(|c| c.messages.iter().find(|m| m.id == item.msg));
         let att = msg.and_then(|m| m.attachments.iter().find(|a| a.id == item.att));
         let voice = item.kind == Kind::Audio && att.is_some_and(|a| a.name.is_empty());
+        let transcribable = voice && att.is_some_and(|a| crate::transcript::supported(a, true, false));
         let chat_name = match store.community_of(&item.chat) {
             Some(c) => {
                 let ch = c.channel(&item.chat).map(|ch| ch.name.clone()).unwrap_or_default();
@@ -234,7 +244,17 @@ impl VectorApp {
         };
         drop(store);
 
-        let action = |key: &'static str, icon: &'static str, act: Act| {
+        let compact = width < 340.;
+        let lyrics_open = media.audio.sheets.contains_key(&item.att);
+        let has_lyrics = tags.as_ref().is_some_and(|t| t.lyrics.is_some());
+        let transcript = media.audio.transcripts.get(&item.att);
+        let transcript_icon = match transcript.map(|t| (&t.phase, t.open)) {
+            Some((crate::transcript::Phase::Loading, _)) => "icons/loading.svg",
+            Some((crate::transcript::Phase::Ready { .. }, true)) => "icons/file-minus.svg",
+            _ => "icons/file-plus.svg",
+        };
+        let transcript_lit = transcript.is_some_and(|t| t.open && matches!(t.phase, crate::transcript::Phase::Ready { .. }));
+        let action = |key: &'static str, icon: &'static str, act: Act, lit: bool| {
             let on = on.clone();
             div()
                 .id(key)
@@ -250,21 +270,28 @@ impl VectorApp {
                     cx.stop_propagation();
                     on(act.clone(), w, cx)
                 })
-                .child(svg().path(icon).size(px(20.)).text_color(white_a(0.7)))
+                .child(svg().path(icon).size(px(20.)).text_color(if lit { accent } else { white_a(0.7) }))
         };
+        let is_album_now = album.is_some();
         let actions = div()
             .flex()
             .gap(px(4.))
             .flex_none()
+            .when(is_album_now && !compact, |d| {
+                d.child(action("popout-songs", "icons/list-music.svg", Act::Songs, self.popout.tracks_open))
+            })
+            .when(has_lyrics && !compact, |d| d.child(action("popout-lyrics", "icons/align-left.svg", Act::Lyrics, lyrics_open)))
+            .when(transcribable, |d| d.child(action("popout-transcribe", transcript_icon, Act::Transcribe, transcript_lit)))
             .when(item.kind == Kind::Video, |d| {
                 d.child(action(
                     "popout-sound",
                     if sound_only { "icons/video.svg" } else { "icons/volume-max.svg" },
                     Act::SoundOnly,
+                    false,
                 ))
             })
-            .child(action("popout-chat", "icons/chat-bubble.svg", Act::ShowInChat))
-            .child(action("popout-close", "icons/x.svg", Act::Close));
+            .child(action("popout-chat", "icons/chat-bubble.svg", Act::ShowInChat, false))
+            .child(action("popout-close", "icons/x.svg", Act::Close, false));
         let words = div()
             .flex_1()
             .min_w_0()
@@ -313,6 +340,110 @@ impl VectorApp {
         let is_album = album.is_some();
         let scrubbing = self.popout.scrub.is_some();
 
+        let mut panels: Vec<AnyElement> = Vec::new();
+        if let Some(a) = album.filter(|_| self.popout.tracks_open && !compact) {
+            let rows = a.tracks.iter().enumerate().map(|(i, t)| {
+                let on = on.clone();
+                let (main, note) = crate::audio::split_title(&t.title);
+                let len = t.end.unwrap_or(duration).saturating_sub(t.start);
+                let cur = i as isize == a.track;
+                div()
+                    .id(SharedString::from(format!("popout-track-{i}")))
+                    .flex()
+                    .items_center()
+                    .gap(px(10.))
+                    .px(px(4.))
+                    .py(px(6.))
+                    .rounded(px(8.))
+                    .text_size(px(13.12))
+                    .line_height(px(18.37))
+                    .text_color(if cur { accent } else { white_a(0.92) })
+                    .when(cur, |d| d.font_weight(gpui::FontWeight::SEMIBOLD))
+                    .cursor_pointer()
+                    .hover(|s| s.bg(white_a(0.05)))
+                    .on_click(move |_, w, cx| {
+                        cx.stop_propagation();
+                        on(Act::Track(i), w, cx)
+                    })
+                    .child(
+                        div()
+                            .w(px(26.))
+                            .flex_none()
+                            .flex()
+                            .justify_center()
+                            .font_weight(gpui::FontWeight::NORMAL)
+                            .text_color(white_a(0.34))
+                            .child((i + 1).to_string()),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .child(main)
+                            .when(!note.is_empty(), |d| {
+                                d.child(div().ml(px(4.)).font_weight(gpui::FontWeight::NORMAL).opacity(0.5).child(note))
+                            }),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .font_weight(gpui::FontWeight::NORMAL)
+                            .text_color(white_a(0.34))
+                            .child(crate::audio::format_time(len)),
+                    )
+            });
+            panels.push(
+                div()
+                    .id("popout-tracks")
+                    .mt(px(10.))
+                    .max_h(px(200.))
+                    .overflow_y_scroll()
+                    .children(rows)
+                    .into_any_element(),
+            );
+        }
+        if lyrics_open
+            && !compact
+            && let (Some(l), Some(sheet)) = (tags.as_ref().and_then(|t| t.lyrics.as_ref()), media.audio.sheets.get(&item.att))
+        {
+            let on = on.clone();
+            if let Some(v) = crate::lyrics::view(
+                &format!("pop-{}", item.att),
+                l,
+                sheet,
+                pos,
+                playing,
+                Rc::new(move |line, w, cx| on(Act::Line(line), w, cx)),
+            ) {
+                panels.push(div().mt(px(10.)).h(px(200.)).overflow_hidden().child(v).into_any_element());
+            }
+        }
+        if let Some(t) = transcript {
+            let on = on.clone();
+            if let Some(v) = crate::transcript::view(
+                &format!("pop-{}", item.att),
+                t,
+                pos,
+                playing,
+                accent,
+                Rc::new(move |ms, w, cx| on(Act::SeekTo(ms), w, cx)),
+            ) {
+                panels.push(
+                    div()
+                        .id("popout-transcript")
+                        .mt(px(10.))
+                        .max_h(px(180.))
+                        .overflow_y_scroll()
+                        .text_size(px(14.4))
+                        .child(v)
+                        .into_any_element(),
+                );
+            }
+        }
         let body: AnyElement = if picture {
             let pic_w = width - 2.;
             let pic_h = pic_w / aspect;
@@ -444,6 +575,7 @@ impl VectorApp {
                             )
                         }),
                 )
+                .children(panels)
                 .into_any_element()
         };
         drop(media);
@@ -513,6 +645,18 @@ impl VectorApp {
             .size_full()
         };
         let (bw, bh) = (w0, h0);
+        let measured = self.popout.measured.clone();
+        let measure = canvas(
+            move |b: Bounds<Pixels>, window, _| {
+                let h = f32::from(b.size.height);
+                if measured.replace(h) != h {
+                    window.request_animation_frame();
+                }
+            },
+            |_, _, _, _| {},
+        )
+        .absolute()
+        .size_full();
         Some(
             gpui::deferred(
                 div()
@@ -521,7 +665,7 @@ impl VectorApp {
                     .right(px(self.popout.right))
                     .bottom(px(self.popout.bottom))
                     .w(px(bw))
-                    .h(px(bh))
+                    .when(picture, |d| d.h(px(bh)))
                     .bg(c(0x161616))
                     .border_1()
                     .border_color(c(0x363636))
@@ -576,6 +720,7 @@ impl VectorApp {
                     .child(body)
                     .children(grips)
                     .child(tracker)
+                    .child(measure)
                     .text_color(c(TITLE)),
             )
             .with_priority(8)
