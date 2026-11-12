@@ -1232,7 +1232,11 @@
    "muted": false,
    "notify": 2,
    "everyone_pings": true,
-   "community_muted": false
+   "community_muted": false,
+   "wallpaper_path": "media/photo.png",
+   "wallpaper_ts": 1,
+   "wallpaper_blur": 5,
+   "wallpaper_dim": 50
   },
   {
    "id": "npub1uqg0688p4nqh8ca5sddhvd0c63sq6a6gdygz4k6uk76a0z2kfxaqmmg7t4",

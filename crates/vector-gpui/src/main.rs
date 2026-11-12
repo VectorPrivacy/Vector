@@ -58,6 +58,7 @@ mod texttime;
 mod theme;
 mod timeline;
 mod transcript;
+mod wallpaper;
 mod transfer;
 mod ui;
 #[allow(dead_code)]

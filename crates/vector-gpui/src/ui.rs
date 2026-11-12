@@ -112,6 +112,11 @@ pub struct VectorApp {
     send_long: bool,
     /// The open chat's Self-Destruct Timer, in seconds.
     self_destruct: Option<u64>,
+    wallpaper: crate::wallpaper::Wallpaper,
+    /// The chat pane as last painted, which the wallpaper covers.
+    chat_box: Rc<std::cell::Cell<Option<gpui::Bounds<gpui::Pixels>>>>,
+    /// Display → Background Wallpaper.
+    chat_bg: bool,
     rec: crate::recorder::Recorder,
     /// Who a `@` can name in the open chat, gathered once per open panel.
     mention_pool: Option<Rc<Vec<crate::mentions::Item>>>,
@@ -254,10 +259,13 @@ enum MenuAct {
     /// The chat's ⋯: open its Self-Destruct Timer picker, or set the timer.
     SelfDestruct(String),
     SetSelfDestruct(String, Option<u64>),
+    ChangeWallpaper(String),
+    RemoveWallpaper(String),
 }
 
 enum PopupAct {
     Notice,
+    RemoveWallpaper(String),
     DeleteModel(&'static str),
     ModRevoke,
     ModRotate,
@@ -584,6 +592,9 @@ impl VectorApp {
             send_held: None,
             send_long: false,
             self_destruct: None,
+            wallpaper: Default::default(),
+            chat_box: Rc::default(),
+            chat_bg: true,
             rec: Default::default(),
             mention_pool: None,
             tracked: Vec::new(),
@@ -1129,6 +1140,14 @@ impl VectorApp {
                 }
             }
             MenuAct::SelfDestruct(chat) => self.open_self_destruct(chat, at),
+            MenuAct::ChangeWallpaper(chat) => self.pick_wallpaper(chat, cx),
+            MenuAct::RemoveWallpaper(chat) => {
+                let mut popup = kit::Popup::notice("Remove wallpaper?");
+                popup.text = Some("This will remove the wallpaper and revert to the default theme. This change syncs to your contact and your other devices.".into());
+                popup.confirm = "Confirm".into();
+                popup.cancel = Some("Cancel".into());
+                self.popup = Some((popup, PopupAct::RemoveWallpaper(chat)));
+            }
             MenuAct::SetSelfDestruct(chat, secs) => {
                 if self.live && vector_core::self_destruct::set_chat_duration_secs(&chat, secs).is_err() {
                     return;
@@ -1841,16 +1860,17 @@ impl VectorApp {
                 ("web_previews", true),
                 ("emoticon_suggestions", true),
                 ("time_suggestions", true),
+                ("chat_bg_enabled", true),
             ]);
             (
                 backend::storage::auto_download(),
                 b[0],
-                (b[1], b[2]),
+                (b[1], b[2], b[3]),
                 backend::actions::emoji_usage(),
             )
         });
         cx.spawn(async move |this, cx| {
-            let Ok(((on, limit), previews, (emoticons, times), used)) = rx.await else {
+            let Ok(((on, limit), previews, (emoticons, times, chat_bg), used)) = rx.await else {
                 return;
             };
             this.update(cx, |this, cx| {
@@ -1860,6 +1880,7 @@ impl VectorApp {
                 drop(media);
                 this.emoticons = emoticons;
                 this.time_suggestions = times;
+                this.chat_bg = chat_bg;
                 this.emoji_picker.update(cx, |p, cx| p.set_usage(used, cx));
             })
             .ok();
@@ -1958,6 +1979,24 @@ impl VectorApp {
             "call_level" => self.call.apply_level(&payload),
             "call_stats" => self.call.apply_stats(&payload),
             "audio_devices_changed" => self.reload_devices(cx),
+            "wallpaper_updated" => {
+                if let Some(chat) = self.store.borrow_mut().chat_mut(&chat_id) {
+                    chat.wallpaper_path = payload.get("path").and_then(Value::as_str).unwrap_or_default().to_string();
+                    chat.wallpaper_ts = payload.get("ts").and_then(Value::as_u64).unwrap_or(0);
+                    if let Some(b) = payload.get("blur").and_then(Value::as_u64) {
+                        chat.wallpaper_blur = b as u8;
+                    }
+                    if let Some(d) = payload.get("dim").and_then(Value::as_u64) {
+                        chat.wallpaper_dim = d as u8;
+                    }
+                }
+            }
+            "wallpaper_upload_progress" => {
+                if self.wallpaper.busy {
+                    let pct = payload.get("progress").and_then(Value::as_f64).unwrap_or(0.).clamp(0., 100.).round();
+                    self.wallpaper.label = if pct > 0. { format!("Uploading\u{2026} {pct}%") } else { "Uploading\u{2026}".into() };
+                }
+            }
             "message_removed" => {
                 let id = payload
                     .get("id")
@@ -2193,6 +2232,11 @@ impl VectorApp {
             // Fixtures: VECTOR_SELF_DESTRUCT=<secs> sets every chat's timer.
             std::env::var("VECTOR_SELF_DESTRUCT").ok().and_then(|v| v.parse().ok())
         };
+        // Fixtures: VECTOR_WALLPAPER_EDIT=<media path> stages that picture on the chat opened.
+        if let Some(pick) = std::env::var("VECTOR_WALLPAPER_EDIT").ok().filter(|_| !self.live) {
+            let path = self.store.borrow().media_root.join(pick);
+            self.stage_wallpaper(id.to_string(), path, false, 60, cx);
+        }
         self.profile = None;
         self.embed_modal = None;
         self.new_chat = None;
@@ -3114,6 +3158,17 @@ impl VectorApp {
                 }
                 self.set_blocked(npub, false, cx);
             }
+            PopupAct::RemoveWallpaper(chat) => {
+                let rx = backend::run(vector_core::db::scoped(async move {
+                    vector_core::wallpaper::remove_wallpaper(&chat).await
+                }));
+                cx.spawn(async move |this, cx| {
+                    if let Ok(Err(e)) = rx.await {
+                        this.update(cx, |this, cx| this.notice("Wallpaper not removed", e, cx)).ok();
+                    }
+                })
+                .detach();
+            }
             PopupAct::DeleteModel(model) => {
                 let rx = backend::run(backend::transcribe::delete(model.to_string()));
                 cx.spawn(async move |this, cx| {
@@ -3328,6 +3383,10 @@ impl Render for VectorApp {
             None => {}
         }
         self.send_shown = !self.input.read(cx).text().trim().is_empty();
+        self.sync_wallpaper(cx);
+        if self.wallpaper.moving() {
+            window.request_animation_frame();
+        }
         if (self.shortcode.is_some()
             || self.mention.is_some()
             || self.time_pick.is_some()
@@ -4738,6 +4797,7 @@ impl VectorApp {
         &self,
         store: &Store,
         id: &SharedString,
+        papered: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
         let id = id.clone();
@@ -4745,7 +4805,7 @@ impl VectorApp {
             .h(px(61.))
             .flex_shrink_0()
             .relative()
-            .bg(c(CHAT_HEADER_BG))
+            .bg(if papered { ca(22, 22, 22, 0.9) } else { c(CHAT_HEADER_BG) })
             .border_b_1()
             .border_color(c(DIVIDER))
             .flex()
@@ -4833,6 +4893,176 @@ impl VectorApp {
         gpui::point(b.right(), b.bottom() + px(4.))
     }
 
+    /// What the open chat's wallpaper layer should show: a staged pick, else the chat's own
+    /// unless backgrounds are off or it is a request's.
+    fn wallpaper_key(&self) -> Option<crate::wallpaper::Key> {
+        let id = self.open.as_ref()?;
+        let b = self.chat_box.get()?;
+        let size = (f32::from(b.size.width).round() as u32, f32::from(b.size.height).round() as u32);
+        if let Some(p) = self.wallpaper.preview.as_ref().filter(|p| p.chat == id.as_ref()) {
+            return Some(crate::wallpaper::Key { path: p.path.clone(), ts: p.ts, blur: p.blur, dim: p.dim, size });
+        }
+        let store = self.store.borrow();
+        let chat = store.chat(id)?;
+        if !self.chat_bg || chat.wallpaper_path.is_empty() || store.is_request(chat) {
+            return None;
+        }
+        Some(crate::wallpaper::Key {
+            path: store.media_root.join(&chat.wallpaper_path),
+            ts: chat.wallpaper_ts,
+            blur: chat.wallpaper_blur.min(30),
+            dim: chat.wallpaper_dim.min(100),
+            size,
+        })
+    }
+
+    fn sync_wallpaper(&mut self, cx: &mut Context<Self>) {
+        if self.chat_box.get().is_none() && self.open.is_some() {
+            return;
+        }
+        let want = self.wallpaper_key();
+        if let Some(job) = self.wallpaper.want(want) {
+            self.bake_wallpaper(job, cx);
+        }
+    }
+
+    fn bake_wallpaper(&mut self, job: crate::wallpaper::Job, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            let (key, decoded, image) = cx.background_executor().spawn(async move { crate::wallpaper::bake(job) }).await;
+            this.update(cx, |this, cx| {
+                if let Some(next) = this.wallpaper.baked(key, decoded, image) {
+                    this.bake_wallpaper(next, cx);
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// `startWallpaperChange`: pick a picture, stage it, and open the sliders.
+    fn pick_wallpaper(&mut self, chat: String, cx: &mut Context<Self>) {
+        let rx = cx.prompt_for_paths(gpui::PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: None,
+        });
+        let live = self.live;
+        cx.spawn(async move |this, cx| {
+            let Ok(Ok(Some(paths))) = rx.await else { return };
+            let Some(path) = paths.into_iter().next() else { return };
+            let picked = path.to_string_lossy().to_string();
+            let staged = if live {
+                let chat = chat.clone();
+                backend::run(vector_core::db::scoped(async move {
+                    vector_core::wallpaper::prepare_wallpaper_preview(&chat, &picked)
+                        .await
+                        .map(|p| (std::path::PathBuf::from(p.path), p.was_animated, p.recommended_dim))
+                }))
+                .await
+                .unwrap_or_else(|_| Err("cancelled".into()))
+            } else {
+                Ok((path, false, crate::wallpaper::DEFAULT_DIM))
+            };
+            this.update(cx, |this, cx| {
+                match staged {
+                    Ok((path, animated, recommended)) => this.stage_wallpaper(chat, path, animated, recommended, cx),
+                    Err(e) => this.notice("Couldn\u{2019}t use that image", e, cx),
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// `applyWallpaperPreview`: a re-pick keeps the chat's settings; a first takes the
+    /// suggested brightness.
+    fn stage_wallpaper(&mut self, chat: String, path: std::path::PathBuf, animated: bool, recommended: u8, cx: &mut Context<Self>) {
+        use crate::wallpaper::{DEFAULT_BLUR, Preview};
+        let (blur, dim) = match self.store.borrow().chat(&chat).filter(|c| !c.wallpaper_path.is_empty()) {
+            Some(c) => (c.wallpaper_blur, c.wallpaper_dim),
+            None => (DEFAULT_BLUR, recommended),
+        };
+        let ts = chrono::Utc::now().timestamp_millis() as u64;
+        self.wallpaper.preview = Some(Preview { chat, path, blur, dim, ts });
+        self.wallpaper.busy = false;
+        self.wallpaper.label = "Edit Mode is enabled.".into();
+        self.wallpaper.set_editing(true);
+        if animated {
+            let mut popup = kit::Popup::notice("Static wallpapers only");
+            popup.text = Some("Vector wallpapers don\u{2019}t animate. We grabbed the first frame of your image to use instead.".into());
+            self.popup = Some((popup, PopupAct::Notice));
+        }
+        cx.notify();
+    }
+
+    fn wallpaper_slider(&mut self, blur: bool, value: u8, cx: &mut Context<Self>) {
+        if let Some(p) = self.wallpaper.preview.as_mut() {
+            if blur {
+                p.blur = value.min(30);
+            } else {
+                p.dim = value.clamp(10, 100);
+            }
+            cx.notify();
+        }
+    }
+
+    /// `confirmWallpaperChange`: send the staged picture with its settings.
+    fn save_wallpaper(&mut self, cx: &mut Context<Self>) {
+        let Some(p) = self.wallpaper.preview.as_ref() else { return };
+        if self.wallpaper.busy {
+            return;
+        }
+        let (chat, blur, dim) = (p.chat.clone(), p.blur, p.dim);
+        self.wallpaper.busy = true;
+        self.wallpaper.label = "Uploading\u{2026}".into();
+        let rx = if self.live {
+            backend::run(vector_core::db::scoped(async move {
+                vector_core::wallpaper::publish_wallpaper(&chat, blur, dim).await
+            }))
+        } else {
+            let (tx, rx) = futures::channel::oneshot::channel();
+            let _ = tx.send(Ok(()));
+            rx
+        };
+        cx.spawn(async move |this, cx| {
+            let res = rx.await.unwrap_or_else(|_| Err("cancelled".into()));
+            this.update(cx, |this, cx| {
+                this.wallpaper.busy = false;
+                this.wallpaper.label = "Edit Mode is enabled.".into();
+                match res {
+                    Ok(()) => {
+                        this.wallpaper.preview = None;
+                        this.wallpaper.set_editing(false);
+                        if !this.chat_bg {
+                            let mut popup = kit::Popup::notice("Background Wallpaper");
+                            popup.text = Some("Your wallpaper is set. If you want to be able to see it, please enable <b>Settings \u{2192} Display \u{2192} Background Wallpaper</b>.".into());
+                            this.popup = Some((popup, PopupAct::Notice));
+                        }
+                    }
+                    Err(e) => this.notice("Wallpaper not sent", e, cx),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// `cancelWallpaperChange`: drop the staged picture.
+    fn cancel_wallpaper(&mut self, cx: &mut Context<Self>) {
+        let Some(p) = self.wallpaper.preview.take() else { return };
+        self.wallpaper.set_editing(false);
+        if self.live {
+            let chat = p.chat;
+            let _ = backend::run(vector_core::db::scoped(async move {
+                let _ = vector_core::wallpaper::cancel_wallpaper_preview(&chat).await;
+            }));
+        }
+        cx.notify();
+    }
+
     /// Send held for 500ms opens the timer picker rather than sending.
     fn send_press(&mut self, cx: &mut Context<Self>) {
         let n = self.send_held.map_or(0, |n| n + 1);
@@ -4861,8 +5091,17 @@ impl VectorApp {
 
     /// `buildChatMenuItems`: what the open chat's ⋯ offers.
     fn open_chat_menu(&mut self, chat: String, cx: &mut Context<Self>) {
-        let items = vec![kit::MenuItem::new("Self-Destruct Timer", "clock")];
-        let acts = vec![MenuAct::SelfDestruct(chat)];
+        let mut items = vec![kit::MenuItem::new("Self-Destruct Timer", "clock")];
+        let mut acts = vec![MenuAct::SelfDestruct(chat.clone())];
+        let papered = self.store.borrow().chat(&chat).map(|c| !c.wallpaper_path.is_empty());
+        if let Some(papered) = papered.filter(|_| self.store.borrow().community_of(&chat).is_none()) {
+            items.push(kit::MenuItem::new("Change Wallpaper", "image"));
+            acts.push(MenuAct::ChangeWallpaper(chat.clone()));
+            if papered {
+                items.push(kit::MenuItem::new("Remove Wallpaper", "trash"));
+                acts.push(MenuAct::RemoveWallpaper(chat));
+            }
+        }
         self.menu_trail.clear();
         self.menu = Some((self.chat_menu_at(), items, acts));
         cx.notify();
@@ -4903,11 +5142,29 @@ impl VectorApp {
     ) -> impl IntoElement {
         let channel = store.community_of(&id).and_then(|com| com.channel(&id));
         let panel = self.community.as_ref().is_some_and(|v| v.panel);
+        let paper = self.wallpaper.image(self.wallpaper_key().as_ref());
         let header = if let Some(ch) = channel {
             crate::community::header(ch, panel, on_community).into_any_element()
         } else {
-            self.dm_header(store, &id, cx).into_any_element()
+            self.dm_header(store, &id, paper.is_some(), cx).into_any_element()
         };
+        let on_wp: crate::wallpaper::OnAct = {
+            let app = cx.entity().downgrade();
+            Rc::new(move |act, _, cx| {
+                app.update(cx, |app, cx| match act {
+                    crate::wallpaper::Act::Cancel => app.cancel_wallpaper(cx),
+                    crate::wallpaper::Act::Save => app.save_wallpaper(cx),
+                    crate::wallpaper::Act::Slide(blur, v) => app.wallpaper_slider(blur, v, cx),
+                })
+                .ok();
+            })
+        };
+        let staged = self.wallpaper.preview.as_ref().filter(|p| p.chat == id.as_ref());
+        let edit_bar = self.wallpaper.edit_alpha().filter(|_| staged.is_some() || self.wallpaper.preview.is_none()).map(|a| {
+            crate::wallpaper::edit_bar(&self.wallpaper.label, self.wallpaper.busy, a, &on_wp)
+        });
+        let preview_bar = staged.map(|p| crate::wallpaper::preview_bar(p.blur, p.dim, self.wallpaper.dragging.clone(), &on_wp));
+        let chat_box = self.chat_box.clone();
         let rows_store = self.store.clone();
         let rows_id = id.clone();
         let rows = self.rows.clone();
@@ -5030,16 +5287,26 @@ impl VectorApp {
             .flex_1()
             .h_full()
             .min_w_0()
+            .relative()
+            .overflow_hidden()
             .flex()
             .flex_col()
             .bg(c(CHAT_BG))
-            .child(header)
+            .child(
+                gpui::canvas(move |b, _, _| chat_box.set(Some(b)), |_, _, _, _| {})
+                    .absolute()
+                    .size_full(),
+            )
+            .children(paper.clone().map(|image| {
+                gpui::img(gpui::ImageSource::Render(image)).absolute().top_0().left_0().size_full()
+            }))
+            .child(div().relative().flex_shrink_0().child(header).children(edit_bar))
             .child(
                 div()
                     .relative()
                     .flex_1()
                     .min_h_0()
-                    .bg(c(MESSAGES_BG))
+                    .when(paper.is_none(), |d| d.bg(c(MESSAGES_BG)))
                     .pt(px(if request.is_some() { 12. + 56. } else { 12. }))
                     .child(messages)
                     .children(request)
@@ -5058,6 +5325,7 @@ impl VectorApp {
                             )),
                     ),
             )
+            .children(preview_bar)
             .child(composer(
                 self.input.clone(),
                 &self.mode,
@@ -11274,6 +11542,9 @@ impl VectorApp {
                 }
                 if key == "time_suggestions" {
                     self.time_suggestions = value;
+                }
+                if key == "chat_bg_enabled" {
+                    self.chat_bg = value;
                 }
                 if key == "notif_global_mute" && value {
                     backend::sound::purge();
