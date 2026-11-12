@@ -441,6 +441,8 @@ fn blur(
             );
         }
         o.into_any_element()
+    } else if ctx.held {
+        held_box(w, h)
     } else {
         download_box(ctx, m, att, w, h, failed)
     };
@@ -461,6 +463,30 @@ fn blur(
             )
             .into_any_element(),
     )
+}
+
+/// `.thumb-held`: a request's media waits for the chat to be accepted.
+fn held_box(w: f32, h: f32) -> AnyElement {
+    let compact = w < 150. || h < 40.;
+    div()
+        .id("thumb-held")
+        .max_w(px(w * 0.94))
+        .flex()
+        .items_center()
+        .gap(px(8.))
+        .when(compact, |d| d.p(px(7.)).tooltip(crate::kit::tooltip("Accept to view")))
+        .when(!compact, |d| d.pl(px(10.)).pr(px(14.)).py(px(7.)))
+        .border_1()
+        .border_color(c(0x363636))
+        .rounded(px(10.))
+        .bg(ca(12, 12, 12, 0.82))
+        .text_size(px(13.))
+        .line_height(px(18.))
+        .text_color(white_a(0.92))
+        .whitespace_nowrap()
+        .child(svg().path("icons/shield-alert.svg").size(px(18.)).flex_shrink_0().text_color(c(PRIMARY)))
+        .when(!compact, |d| d.child(div().min_w_0().truncate().child("Accept to view")))
+        .into_any_element()
 }
 
 /// `.thumb-download`: the icon tile and two lines, or the tile alone on a small blur.
