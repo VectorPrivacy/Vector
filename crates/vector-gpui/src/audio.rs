@@ -149,6 +149,7 @@ pub struct Audio {
     /// A named file's tags: None once read and found empty.
     tags: HashMap<String, Option<Arc<Tags>>>,
     reading: HashSet<String>,
+    pub sheets: HashMap<String, crate::lyrics::Sheet>,
 }
 
 /// What a file's tags give the card.
@@ -160,6 +161,8 @@ pub struct Tags {
     pub cover: Option<Arc<RenderImage>>,
     /// The art shrunk to a few pixels: scaled up, it is the card's blurred glow.
     pub glow: Option<Arc<RenderImage>>,
+    /// The same for the card with its lyrics open, a taller window on the art.
+    pub glow_tall: Option<Arc<RenderImage>>,
     /// The art's own colour for the controls; white where the art has none.
     pub accent: Option<gpui::Hsla>,
     pub lyrics: Option<vector_media::lyrics::Lyrics>,
@@ -171,6 +174,9 @@ pub enum Act {
     Toggle,
     /// A scrub to this fraction; `done` on release.
     Seek(f32, bool),
+    Lyrics,
+    /// A lyric line clicked (play from it), or None: the reader scrolled, so hold the view.
+    Line(Option<u32>),
 }
 
 /// What the app does for the audio state: the work that needs the engine or a thread.
@@ -228,6 +234,24 @@ impl Audio {
                 if self.players.get(att).is_some_and(|p| p.playing || p.loading) {
                     self.pause(att);
                     None
+                } else {
+                    self.play(msg, att, input)
+                }
+            }
+            Act::Lyrics => {
+                self.sheets.entry(att.to_string()).or_default().toggle();
+                None
+            }
+            Act::Line(None) => {
+                self.sheets.entry(att.to_string()).or_default().hold();
+                None
+            }
+            Act::Line(Some(ms)) => {
+                self.sheets.entry(att.to_string()).or_default().release();
+                let duration = self.duration(att).max(1);
+                let work = self.act(msg, att, input.clone(), Act::Seek(ms as f32 / duration as f32, true));
+                if self.players.get(att).is_some_and(|p| p.playing || p.loading) {
+                    work
                 } else {
                     self.play(msg, att, input)
                 }
@@ -406,6 +430,12 @@ impl Audio {
     /// One frame of the bars; true while any still moves.
     pub fn tick(&mut self) -> bool {
         let mut moving = false;
+        for (att, sheet) in self.sheets.iter_mut() {
+            if let Some(l) = self.tags.get(att).and_then(|t| t.as_ref()).and_then(|t| t.lyrics.as_ref()) {
+                let pos = self.players.get(att).map_or(0, |p| p.position());
+                moving |= sheet.tick(l, pos);
+            }
+        }
         for p in self.players.values_mut() {
             match p.look {
                 Look::Live => {
@@ -506,17 +536,22 @@ fn tags_from(m: vector_media::tags::Meta) -> Tags {
         Arc::new(RenderImage::new(vec![image::Frame::new(crate::media::to_bgra(a.into_rgba8()))]))
     });
     let small = art.as_ref().map(|a| a.resize_exact(24, 24, image::imageops::FilterType::Triangle).into_rgba8());
-    // `.audio-art-glow` covers 160% of a 500x150 card, so the card sees this band of the art.
-    let glow = art.as_ref().map(|a| {
-        let a = a.resize_exact(256, 256, image::imageops::FilterType::Triangle).into_rgba8();
-        let band = image::imageops::crop_imm(&a, 48, 104, 160, 48).to_image();
-        let small = image::imageops::resize(&band, 100, 30, image::imageops::FilterType::Triangle);
-        let mut g = image::imageops::blur(&small, 8.);
-        for px in g.pixels_mut() {
-            saturate(px, 1.4);
-        }
-        Arc::new(RenderImage::new(vec![image::Frame::new(crate::media::to_bgra(g))]))
-    });
+    // `.audio-art-glow` covers 160% of the card, so a 500x150 card sees this band of the
+    // art, and one with its lyrics open (500x422) a taller one.
+    let square = art.as_ref().map(|a| a.resize_exact(256, 256, image::imageops::FilterType::Triangle).into_rgba8());
+    let band = |y: u32, h: u32, out: (u32, u32)| {
+        square.as_ref().map(|a| {
+            let band = image::imageops::crop_imm(a, 48, y, 160, h).to_image();
+            let small = image::imageops::resize(&band, out.0, out.1, image::imageops::FilterType::Triangle);
+            let mut g = image::imageops::blur(&small, 8.);
+            for px in g.pixels_mut() {
+                saturate(px, 1.4);
+            }
+            Arc::new(RenderImage::new(vec![image::Frame::new(crate::media::to_bgra(g))]))
+        })
+    };
+    let glow = band(104, 48, (100, 30));
+    let glow_tall = band(60, 136, (100, 84));
     let accent = cover
         .as_ref()
         .map(|_| small.as_ref().and_then(art_accent).unwrap_or(gpui::hsla(0., 0., 0.949, 1.)));
@@ -527,6 +562,7 @@ fn tags_from(m: vector_media::tags::Meta) -> Tags {
         year: m.year,
         cover,
         glow,
+        glow_tall,
         accent,
         lyrics: m.lyrics,
         chapters: m.chapters,
@@ -609,6 +645,23 @@ pub fn split_title(t: &str) -> (String, String) {
 pub fn format_time(ms: u64) -> String {
     let s = ms / 1000;
     format!("{}:{:02}", s / 60, s % 60)
+}
+
+/// `.audio-art-glow`, crossfading to the taller window as the lyrics open.
+fn glows(tags: Option<&Tags>, open: f32) -> Vec<AnyElement> {
+    let Some(t) = tags else { return Vec::new() };
+    [(t.glow.clone(), 1. - open), (t.glow_tall.clone(), open)]
+        .into_iter()
+        .filter_map(|(g, w)| g.filter(|_| w > 0.).map(|g| (g, w)))
+        .map(|(g, w)| {
+            div()
+                .absolute()
+                .inset_0()
+                .opacity(0.22 * w)
+                .child(gpui::img(g).size_full().rounded(px(11.)).object_fit(gpui::ObjectFit::Fill))
+                .into_any_element()
+        })
+        .collect()
 }
 
 /// The bars, painted per frame, and the scrub across them.
@@ -741,8 +794,46 @@ pub fn view(
     p: Option<&Player>,
     duration: u64,
     tags: Option<&Tags>,
+    sheet: Option<&crate::lyrics::Sheet>,
     on: Rc<dyn Fn(Act, &mut Window, &mut App)>,
 ) -> AnyElement {
+    let lyrics_btn = tags.and_then(|t| t.lyrics.as_ref()).map(|_| {
+        let open = sheet.is_some_and(|s| s.open);
+        let on = on.clone();
+        div()
+            .id(SharedString::from(format!("audio-lyrics-{}", att.id)))
+            .size(px(34.))
+            .ml(px(10.))
+            .flex_shrink_0()
+            .rounded(px(8.))
+            .border_1()
+            .border_color(c(0x363636))
+            .flex()
+            .items_center()
+            .justify_center()
+            .cursor_pointer()
+            .hover(|s| s.bg(white_a(0.07)))
+            .on_click(move |_, w, cx| {
+                cx.stop_propagation();
+                on(Act::Lyrics, w, cx)
+            })
+            .child(svg().path("icons/align-left.svg").size(px(17.)).text_color(if open {
+                tags.and_then(|t| t.accent).unwrap_or(c(PRIMARY))
+            } else {
+                white_a(0.7)
+            }))
+    });
+    let sheet_el = tags.and_then(|t| t.lyrics.as_ref()).zip(sheet).and_then(|(l, s)| {
+        let on = on.clone();
+        crate::lyrics::view(
+            &att.id,
+            l,
+            s,
+            p.map_or(0, |p| p.position()),
+            p.is_some_and(|p| p.playing),
+            Rc::new(move |ms, w, cx| on(Act::Line(ms), w, cx)),
+        )
+    });
     let accent = tags.and_then(|t| t.accent).unwrap_or(c(PRIMARY));
     let art = tags.and_then(|t| t.cover.clone());
     let playing = p.is_some_and(|p| p.playing);
@@ -841,7 +932,8 @@ pub fn view(
         .items_center()
         .child(button)
         .child(middle)
-        .child(time);
+        .child(time)
+        .children(lyrics_btn);
     let body = match (tags, art) {
         (Some(t), Some(art)) => {
             let track = t.title.clone().unwrap_or_else(|| att.name.clone());
@@ -925,16 +1017,8 @@ pub fn view(
         .border_color(c(0x262626))
         .rounded(px(12.))
         .hover(|s| s.bg(c(0x1d1d1d)).border_color(c(0x363636)))
-        .when_some(tags.and_then(|t| t.glow.clone()), |d, glow| {
-            d.child(
-                div().absolute().inset_0().opacity(0.22).child(
-                    gpui::img(glow)
-                        .size_full()
-                        .rounded(px(11.))
-                        .object_fit(gpui::ObjectFit::Fill),
-                ),
-            )
-        })
+        .children(glows(tags, sheet.map_or(0., |s| s.reveal())))
         .child(body)
+        .children(sheet_el)
         .into_any_element()
 }

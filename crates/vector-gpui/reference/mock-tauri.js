@@ -11,7 +11,9 @@
     const fns = {
         audio_probe: ({ path }) => (String(path).includes("loop") ? 12000 : String(path).includes("golden") ? 9000 : 7400),
         get_audio_metadata: ({ path }) => (String(path).includes("golden")
-            ? { title: "Golden Hour", artist: "Mira Vale", album: "Coastlines", cover_art: "/__ref/media/cover.png", lyrics: null, year: null, chapters: [] }
+            ? { title: "Golden Hour", artist: "Mira Vale", album: "Coastlines", cover_art: "/__ref/media/cover.png", lyrics: { synced: true, lines: [
+                [500, "Light on the water"], [2200, "Gold in your hair"], [4000, ""], [5200, "We drove till the coastline"], [7000, "Ran out of air"],
+            ].map(([at_ms, text]) => ({ at_ms, text, words: [] })) }, year: null, chapters: [] }
             : null),
         get_chat_message_count: ({ chatId }) => msgs(chatId).length,
         get_message_views: ({ chatId, limit = 50, offset = 0 }) => msgs(chatId).reverse().slice(offset, offset + limit),

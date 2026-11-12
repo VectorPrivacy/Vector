@@ -26,6 +26,7 @@ mod kit;
 mod linkcard;
 mod login;
 mod markdown;
+mod lyrics;
 mod media;
 mod mentions;
 #[allow(dead_code, clippy::all)]
