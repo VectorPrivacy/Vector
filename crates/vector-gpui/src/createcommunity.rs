@@ -586,8 +586,11 @@ fn button(
     div()
         .id(id)
         .flex_1()
+        .min_w_0()
         .max_w(px(220.))
-        .h(px(41.2))
+        .min_h(px(41.2))
+        .py(px(9.6))
+        .px(px(19.2))
         .flex()
         .items_center()
         .justify_center()
@@ -614,7 +617,7 @@ fn button(
                     }
                 })
         })
-        .child(label)
+        .child(div().min_w_0().text_center().line_height(px(20.)).child(label))
 }
 
 pub fn view(m: &CreateCommunity, store: &Store, width: f32, on: &OnAct, cx: &App) -> AnyElement {
@@ -646,7 +649,8 @@ pub fn view(m: &CreateCommunity, store: &Store, width: f32, on: &OnAct, cx: &App
             .items_center()
             .child(
                 div()
-                    .w(px(420.))
+                    .w_full()
+                    .max_w(px(420.))
                     .flex()
                     .items_center()
                     .gap(px(12.))
@@ -713,7 +717,8 @@ pub fn view(m: &CreateCommunity, store: &Store, width: f32, on: &OnAct, cx: &App
             .child(preview(&name, m.icon.as_ref()))
             .into_any_element(),
         2 => div()
-            .w(px(460.))
+            .w_full()
+            .max_w(px(460.))
             .mx_auto()
             .flex()
             .flex_col()
@@ -907,7 +912,7 @@ pub fn view(m: &CreateCommunity, store: &Store, width: f32, on: &OnAct, cx: &App
         .child(
             div()
                 .flex_shrink_0()
-                .px(px(gutter))
+                .px(px(gutter + 15.))
                 .pt(px(15.))
                 .pb(px(15.))
                 .flex()
