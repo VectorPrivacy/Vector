@@ -273,8 +273,12 @@ pub fn members(voice: &Voice, store: &Store, community: &str, channel: &str, on:
     }
     for p in voice.present(channel) {
         let speaking = live.is_some_and(|s| !p.muted && s.level(&p.npub, me) > SPEAKING);
-        let flag = |path: &'static str, server: bool| {
-            icon(path, 12., if server { c(crate::call::DANGER) } else { white_a(0.45) })
+        let flag = |path: &'static str, server: bool, tip: &'static str| {
+            div()
+                .id(tip)
+                .flex()
+                .tooltip(crate::kit::tooltip(tip))
+                .child(icon(path, 12., if server { c(crate::call::DANGER) } else { white_a(0.45) }))
         };
         let key = SharedString::from(format!("voice-m-{channel}-{}", p.npub));
         list = list.child(
@@ -309,10 +313,16 @@ pub fn members(voice: &Voice, store: &Store, community: &str, channel: &str, on:
                             .items_center()
                             .gap(px(6.))
                             .flex_shrink_0()
-                            .when(p.screen, |d| d.child(live_tag(9., 14., 5.)))
-                            .when(p.camera, |d| d.child(flag("icons/video.svg", false)))
-                            .when(p.muted, |d| d.child(flag("icons/mic-off.svg", p.server_muted)))
-                            .when(p.deafened, |d| d.child(flag("icons/volume-mute.svg", p.server_deafened))),
+                            .when(p.screen, |d| {
+                                d.child(div().id("live").tooltip(crate::kit::tooltip("Sharing their screen")).child(live_tag(9., 14., 5.)))
+                            })
+                            .when(p.camera, |d| d.child(flag("icons/video.svg", false, "Camera on")))
+                            .when(p.muted, |d| {
+                                d.child(flag("icons/mic-off.svg", p.server_muted, if p.server_muted { "Muted by a moderator" } else { "Muted" }))
+                            })
+                            .when(p.deafened, |d| {
+                                d.child(flag("icons/volume-mute.svg", p.server_deafened, if p.server_deafened { "Deafened by a moderator" } else { "Deafened" }))
+                            }),
                     )
                 }),
         );
@@ -346,24 +356,47 @@ fn rtt_quality(ms: u32) -> Option<Quality> {
     (ms > 0).then(|| grade(0., ms as f32))
 }
 
+/// `voiceKeyHint`: the app-wide shortcut for a voice control.
+fn key_hint(key: char) -> String {
+    if cfg!(target_os = "macos") { format!("\u{2318}\u{21e7}{key}") } else { format!("Ctrl+Shift+{key}") }
+}
+
+/// `.call-btn`, or `.call-btn-locked` while a moderator holds it: ours can't lift it.
+fn held_btn(id: &'static str, on_state: bool, held: bool) -> gpui::Stateful<gpui::Div> {
+    if !held {
+        return call_btn(id, on_state);
+    }
+    let mut wash = c(crate::call::DANGER);
+    wash.a = 0.22;
+    crate::call::round_btn(id, 34.).bg(wash).cursor_not_allowed()
+}
+
 fn mic_btn(s: &Session, on: &OnAct) -> impl IntoElement {
     let off = s.mic_off();
-    call_btn("voice-mic", off)
+    let tip = if s.server_muted { "Muted by a moderator".to_string() } else { format!("{} ({})", if off { "Unmute" } else { "Mute" }, key_hint('M')) };
+    let held = s.server_muted;
+    let tint = if held { c(crate::call::DANGER) } else if off { c(ACCENT) } else { white_a(0.88) };
+    held_btn("voice-mic", off, held)
+        .tooltip(crate::kit::tooltip(tip))
         .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .on_click(click(on, Act::Mic))
-        .child(icon(if off { "icons/mic-off.svg" } else { "icons/mic-on.svg" }, 18.7, if off { c(ACCENT) } else { white_a(0.88) }))
+        .child(icon(if off { "icons/mic-off.svg" } else { "icons/mic-on.svg" }, 18.7, tint))
 }
 
 fn deafen_btn(s: &Session, on: &OnAct) -> impl IntoElement {
     let off = s.deafened || s.server_deafened;
-    call_btn("voice-deafen", off)
+    let tip = if s.server_deafened {
+        "Deafened by a moderator".to_string()
+    } else {
+        format!("{} ({})", if s.deafened { "Undeafen" } else { "Deafen" }, key_hint('D'))
+    };
+    let held = s.server_deafened;
+    let tint = if held { c(crate::call::DANGER) } else if off { c(ACCENT) } else { white_a(0.88) };
+    held_btn("voice-deafen", off, held)
+        .tooltip(crate::kit::tooltip(tip))
         .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .on_click(click(on, Act::Deafen))
-        .child(icon(
-            if off { "icons/volume-mute.svg" } else { "icons/volume-max.svg" },
-            18.7,
-            if off { c(ACCENT) } else { white_a(0.88) },
-        ))
+        .child(icon(if off { "icons/volume-mute.svg" } else { "icons/volume-max.svg" }, 18.7, tint))
 }
 
 fn video_btn(
@@ -374,7 +407,14 @@ fn video_btn(
     act: Act,
     on: &OnAct,
 ) -> impl IntoElement {
+    let tip = match (id, state) {
+        ("voice-camera", true) => "Turn your camera off",
+        ("voice-camera", false) => "Turn your camera on",
+        (_, true) => "Stop sharing your screen",
+        (_, false) => "Share your screen",
+    };
     call_btn(id, state)
+        .tooltip(crate::kit::tooltip(tip))
         .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .on_click(click(on, act))
         .child(icon(
@@ -502,6 +542,7 @@ fn screen(
 
 fn leave_btn(on: &OnAct) -> impl IntoElement {
     round_btn("voice-leave", 34.)
+        .tooltip(crate::kit::tooltip("Leave the call"))
         .bg(c(crate::call::DANGER))
         .hover(|d| d.bg(c(0xff4db6)))
         .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
@@ -573,8 +614,10 @@ pub fn stage(
         let level = session.map_or(0., |s| s.level(&p.npub, me));
         let talk = (level * 2.).min(1.);
         let pending = session.is_some() && !connected(&p.npub);
-        let badge = |path: &'static str, server: bool| {
+        let badge = |path: &'static str, server: bool, tip: &'static str| {
             div()
+                .id(tip)
+                .tooltip(crate::kit::tooltip(tip))
                 .size(px(26.))
                 .rounded_full()
                 .border_2()
@@ -614,10 +657,10 @@ pub fn stage(
                 .flex()
                 .gap(px(2.))
                 .when(p.muted, |d| {
-                    d.child(badge("icons/mic-off.svg", p.server_muted))
+                    d.child(badge("icons/mic-off.svg", p.server_muted, if p.server_muted { "Muted by a moderator" } else { "Muted" }))
                 })
                 .when(p.deafened, |d| {
-                    d.child(badge("icons/volume-mute.svg", p.server_deafened))
+                    d.child(badge("icons/volume-mute.svg", p.server_deafened, if p.server_deafened { "Deafened by a moderator" } else { "Deafened" }))
                 })
         });
         let name = if p.npub == me {
@@ -1009,6 +1052,10 @@ pub fn bar(voice: &Voice, store: &Store, pos: Option<Point<Pixels>>, top: f32, o
                         .child(div().truncate().child(status)),
                 ),
         )
+        .when(s.can_video, |d| {
+            d.child(video_btn("voice-camera", "icons/video.svg", 18.7, s.camera, Act::Camera(!s.camera), on))
+                .child(video_btn("voice-share", "ui/call-screen.svg", 20., s.sharing, Act::Share(!s.sharing), on))
+        })
         .child(mic_btn(s, on))
         .child(deafen_btn(s, on))
         .child(leave_btn(on));
