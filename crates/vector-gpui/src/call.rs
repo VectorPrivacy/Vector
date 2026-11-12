@@ -530,6 +530,13 @@ fn mic_btn(call: &Call, on: &OnAct) -> impl IntoElement {
     let off = call.muted || call.mic_off;
     let o = on.clone();
     call_btn("call-mic", off)
+        .tooltip(crate::kit::tooltip(if call.mic_off {
+            "Microphone access is off"
+        } else if call.muted {
+            "Unmute microphone"
+        } else {
+            "Mute microphone"
+        }))
         .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .on_click(move |_, w, cx| o(Act::Mic, w, cx))
         .child(
@@ -547,6 +554,7 @@ fn mic_btn(call: &Call, on: &OnAct) -> impl IntoElement {
 fn hangup_btn(on: &OnAct) -> impl IntoElement {
     let o = on.clone();
     round_btn("call-hangup", 34.)
+        .tooltip(crate::kit::tooltip("Hang up"))
         .bg(c(DANGER))
         .hover(|d| d.bg(c(0xff4db6)))
         .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
@@ -558,6 +566,7 @@ fn hangup_btn(on: &OnAct) -> impl IntoElement {
 fn ring(call: &Call, store: &Store, on: &OnAct) -> AnyElement {
     let (decline, accept) = (on.clone(), on.clone());
     let pulse = round_btn("call-accept", 60.)
+        .tooltip(crate::kit::tooltip("Accept"))
         .bg(c(ACCENT))
         .on_click(move |_, w, cx| accept(Act::Accept, w, cx))
         .child(phone(28., c(0x111111), false))
@@ -629,6 +638,7 @@ fn ring(call: &Call, store: &Store, on: &OnAct) -> AnyElement {
                         .mt(px(18.))
                         .child(
                             round_btn("call-decline", 60.)
+                                .tooltip(crate::kit::tooltip("Decline"))
                                 .bg(c(DANGER))
                                 .on_click(move |_, w, cx| decline(Act::Reject, w, cx))
                                 .child(phone(28., c(0xffffff), true)),
@@ -1093,7 +1103,23 @@ fn panel(call: &Call, proc_: &Processing, seen: &Seen, on: &OnAct) -> impl IntoE
         (_, Some(b)) if b >= 64 => "full quality",
         _ => "",
     };
-    let row = |l: &'static str, v: AnyElement| div().flex().items_center().child(label(l)).child(v);
+    let row = |l: &'static str, v: AnyElement| {
+        let tip = match l {
+            "Lost audio" => Some("Moments the speaker had to fill in because the audio was late or missing"),
+            "Bitrate" => Some("How much data your voice uses. It rises on a clean connection and drops when packets are being lost"),
+            _ => None,
+        };
+        div()
+            .flex()
+            .items_center()
+            .child(
+                div()
+                    .id(l)
+                    .when_some(tip, |d, t| d.tooltip(crate::kit::tooltip(t)))
+                    .child(label(l)),
+            )
+            .child(v)
+    };
     div()
         .id("call-panel")
         .flex()
