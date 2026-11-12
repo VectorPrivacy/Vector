@@ -372,11 +372,20 @@ mod moderation_ops;
 
 impl VectorApp {
     fn base(store: Store, live: bool, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let store: Shared = Rc::new(RefCell::new(store));
         let input = cx.new(|cx| {
-            TextInput::new("Enter message...", cx)
+            let mut t = TextInput::new("Enter message...", cx)
                 .multiline(px(126.))
                 .twemoji()
-                .decorated()
+                .decorated();
+            let names = Rc::downgrade(&store);
+            t.set_npub_labels(Rc::new(move |npub: &str| {
+                names
+                    .upgrade()
+                    .and_then(|s| s.try_borrow().ok().map(|s| s.name(npub)))
+                    .unwrap_or_else(|| crate::commsettings::short_npub(npub))
+            }));
+            t
         });
         cx.subscribe(&input, |app, _, SendText(text), cx| {
             app.send(text.clone(), cx)
@@ -582,7 +591,7 @@ impl VectorApp {
         Self {
             screen: Screen::Main,
             live,
-            store: Rc::new(RefCell::new(store)),
+            store,
             open: None,
             timeline: ListState::new(0, ListAlignment::Top, px(600.)),
             rows: Rc::default(),

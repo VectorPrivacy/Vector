@@ -75,6 +75,8 @@ pub struct TextInput {
     chip: bool,
     /// Markdown and tags styled in place, with the names a tag may carry.
     decorated: Option<Vec<String>>,
+    /// The name a pasted `@npub1…` shows as.
+    npub_label: Option<std::rc::Rc<dyn Fn(&str) -> String>>,
     /// The decorated spans drawn on a chip, in display offsets: (range, fill, radius, side pad).
     chips: std::cell::RefCell<Vec<(Range<usize>, Hsla, f32, f32)>>,
 }
@@ -88,11 +90,37 @@ pub enum Nav {
     Close,
 }
 
-/// An emoji drawn as art: its content bytes, and the placeholder holding its place in what is drawn.
+/// Content drawn as something else: an emoji as art (`src`) over a placeholder, or a pasted
+/// `@npub1…` as the person's name, which the caret steps over whole.
 struct Sub {
     content: Range<usize>,
     display: Range<usize>,
-    src: SharedString,
+    src: Option<SharedString>,
+    label: Option<SharedString>,
+}
+
+/// Each `@npub1…` mention outside code, as `cmpTokenize` finds them.
+fn npub_mentions(text: &str) -> Vec<Range<usize>> {
+    const BECH: &[u8] = b"023456789acdefghjklmnpqrstuvwxyz";
+    let code: Vec<Range<usize>> = crate::decorate::tokenize(text, &[])
+        .into_iter()
+        .filter(|(_, d)| matches!(d, crate::decorate::Deco::Code | crate::decorate::Deco::CodeMark))
+        .map(|(r, _)| r)
+        .collect();
+    let b = text.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while let Some(at) = text[i..].find("@npub1").map(|o| i + o) {
+        let end = at + 6 + 58;
+        let ok = b.len() >= end && b[at + 6..end].iter().all(|c| BECH.contains(c));
+        if ok && !code.iter().any(|r| r.start <= at && at < r.end) {
+            out.push(at..end);
+            i = end;
+        } else {
+            i = at + 1;
+        }
+    }
+    out
 }
 
 /// What an emoji's art occupies in the drawn text: 1.25em (`.cmp-twemoji`), an em space and a quarter-em.
@@ -476,18 +504,22 @@ impl TextInput {
     }
 
     fn previous_boundary(&self, offset: usize) -> usize {
-        self.content
+        let at = self
+            .content
             .grapheme_indices(true)
             .rev()
             .find_map(|(idx, _)| (idx < offset).then_some(idx))
-            .unwrap_or(0)
+            .unwrap_or(0);
+        self.out_of_label(at, false)
     }
 
     fn next_boundary(&self, offset: usize) -> usize {
-        self.content
+        let at = self
+            .content
             .grapheme_indices(true)
             .find_map(|(idx, _)| (idx > offset).then_some(idx))
-            .unwrap_or(self.content.len())
+            .unwrap_or(self.content.len());
+        self.out_of_label(at, true)
     }
 
     fn reset(&mut self, window: &Window, cx: &mut Context<Self>) {
@@ -722,7 +754,7 @@ impl TextInput {
                 let mut at = 0;
                 for sub in subs.iter() {
                     text.push_str(&content[at..sub.content.start]);
-                    text.push_str(EMOJI_SLOT);
+                    text.push_str(sub.label.as_deref().unwrap_or(EMOJI_SLOT));
                     at = sub.content.end;
                 }
                 text.push_str(&content[at..]);
@@ -778,14 +810,18 @@ impl TextInput {
     /// Splits `runs` at each decorated span and styles what falls inside.
     fn decorate(&self, runs: Vec<TextRun>, names: &[String]) -> Vec<TextRun> {
         use crate::decorate::Deco;
-        let spans = crate::decorate::tokenize(&self.content, names);
+        let subs = self.subs();
+        let labels: Vec<&Sub> = subs.iter().filter(|s| s.label.is_some()).collect();
+        let mut spans: Vec<(std::ops::Range<usize>, Deco)> = crate::decorate::tokenize(&self.content, names)
+            .into_iter()
+            .filter(|(r, _)| !labels.iter().any(|s| r.start < s.content.end && s.content.start < r.end))
+            .map(|(r, d)| (self.to_display(r.start)..self.to_display(r.end), d))
+            .chain(labels.iter().map(|s| (s.display.clone(), Deco::Mention)))
+            .collect();
         if spans.is_empty() {
             return runs;
         }
-        let spans: Vec<(std::ops::Range<usize>, Deco)> = spans
-            .into_iter()
-            .map(|(r, d)| (self.to_display(r.start)..self.to_display(r.end), d))
-            .collect();
+        spans.sort_by_key(|(r, _)| r.start);
         *self.chips.borrow_mut() = spans
             .iter()
             .filter_map(|(r, d)| match d {
@@ -956,9 +992,10 @@ impl Element for TextElement {
         let emoji = input
             .subs()
             .iter()
-            .map(|sub| {
+            .filter_map(|sub| Some((sub, sub.src.clone()?)))
+            .map(|(sub, src)| {
                 let p = layout.position(sub.display.start);
-                let mut art = gpui::img(sub.src.clone()).size(side).into_any_element();
+                let mut art = gpui::img(src).size(side).into_any_element();
                 let at = o + point(p.x, p.y + (line_height - side) / 2.);
                 art.prepaint_as_root(
                     at,
@@ -1174,6 +1211,7 @@ impl TextInput {
             nav: false,
             chip: false,
             decorated: None,
+            npub_label: None,
             chips: Default::default(),
         }
     }
@@ -1199,27 +1237,63 @@ impl TextInput {
     }
 
     fn subs(&self) -> std::rc::Rc<[Sub]> {
-        if !self.twemoji || self.look.masked {
+        if (!self.twemoji && self.npub_label.is_none()) || self.look.masked {
             return std::rc::Rc::from([]);
         }
         let mut cache = self.subs.borrow_mut();
-        if cache.0 != self.content {
+        // Names can change under the same text, so a draft holding an npub resolves each time.
+        let named = self.npub_label.is_some() && self.content.contains("@npub1");
+        if cache.0 != self.content || named {
+            let npubs = match self.npub_label.as_ref() {
+                Some(label) if self.content.contains("@npub1") => npub_mentions(&self.content)
+                    .into_iter()
+                    .map(|r| {
+                        let name = label(&self.content[r.start + 1..r.end]);
+                        (r, format!("@{name}"))
+                    })
+                    .collect(),
+                _ => Vec::new(),
+            };
+            let mut found: Vec<(Range<usize>, Option<SharedString>, Option<String>)> =
+                npubs.into_iter().map(|(r, l)| (r, None, Some(l))).collect();
+            if self.twemoji {
+                for (i, g) in self.content.grapheme_indices(true) {
+                    if let Some(src) = crate::emoji::twemoji(g) {
+                        found.push((i..i + g.len(), Some(src), None));
+                    }
+                }
+                found.sort_by_key(|f| f.0.start);
+            }
             let mut subs = Vec::new();
             let mut shift = 0isize;
-            for (i, g) in self.content.grapheme_indices(true) {
-                if let Some(src) = crate::emoji::twemoji(g) {
-                    let start = (i as isize + shift) as usize;
-                    subs.push(Sub {
-                        content: i..i + g.len(),
-                        display: start..start + EMOJI_SLOT.len(),
-                        src,
-                    });
-                    shift += EMOJI_SLOT.len() as isize - g.len() as isize;
-                }
+            for (content, src, label) in found {
+                let shown = label.as_deref().unwrap_or(EMOJI_SLOT).len();
+                let start = (content.start as isize + shift) as usize;
+                shift += shown as isize - content.len() as isize;
+                subs.push(Sub {
+                    content,
+                    display: start..start + shown,
+                    src,
+                    label: label.map(Into::into),
+                });
             }
             *cache = (self.content.clone(), subs.into());
         }
         cache.1.clone()
+    }
+
+    /// Shows a pasted `@npub1…` as `@` and what `label` names it.
+    pub fn set_npub_labels(&mut self, label: std::rc::Rc<dyn Fn(&str) -> String>) {
+        self.npub_label = Some(label);
+        self.subs.borrow_mut().0 = SharedString::default();
+    }
+
+    /// `offset` moved out of any name drawn over an npub, toward `forward`'s side.
+    fn out_of_label(&self, offset: usize, forward: bool) -> usize {
+        self.subs()
+            .iter()
+            .find(|s| s.label.is_some() && s.content.start < offset && offset < s.content.end)
+            .map_or(offset, |s| if forward { s.content.end } else { s.content.start })
     }
 
     /// Wraps, takes Shift+Enter, and scrolls once taller than `max_height`.
@@ -1511,4 +1585,18 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("escape", Cancel, Some("TextInput")),
         KeyBinding::new("tab", Tab, Some("TextInput")),
     ]);
+}
+
+#[cfg(test)]
+mod npub_tests {
+    use super::npub_mentions;
+
+    #[test]
+    fn pasted_npub_mentions_outside_code() {
+        let n = "npub1v84qsqlcs56j8dmh6s22eccnpn2d87fdutxhl7rftseh67wzamhqfv9ft6";
+        let text = format!("hi @{n} and `@{n}` and @npub1bad");
+        let found = npub_mentions(&text);
+        assert_eq!(found.len(), 1);
+        assert_eq!(&text[found[0].clone()], format!("@{n}"));
+    }
 }
