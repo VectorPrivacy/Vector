@@ -186,6 +186,8 @@ pub enum Act {
     /// A scrub to this fraction; `done` on release.
     Seek(f32, bool),
     Lyrics,
+    /// The cover art, opened in the viewer.
+    Art,
     Album(AlbumAct),
     Transcribe,
     CancelDownload,
@@ -205,6 +207,7 @@ pub enum AlbumAct {
     Shuffle,
     Repeat,
     More,
+    Art,
 }
 
 /// What the app does for the audio state: the work that needs the engine or a thread.
@@ -313,6 +316,7 @@ impl Audio {
                 self.sheets.entry(att.to_string()).or_default().toggle();
                 None
             }
+            Act::Art => None,
             Act::Line(None) => {
                 self.sheets.entry(att.to_string()).or_default().hold();
                 None
@@ -424,6 +428,9 @@ impl Audio {
     }
 
     fn album_act(&mut self, msg: &str, att: &str, input: AudioInputSpec, act: AlbumAct) -> Option<Work> {
+        if let AlbumAct::Art = act {
+            return None;
+        }
         if let AlbumAct::More = act {
             if !self.all_tracks.remove(att) {
                 self.all_tracks.insert(att.to_string());
@@ -455,7 +462,7 @@ impl Audio {
                 a.cycle_repeat();
                 (None, false)
             }
-            AlbumAct::More => unreachable!(),
+            AlbumAct::More | AlbumAct::Art => unreachable!(),
         };
         if let Some(ms) = to {
             self.seek_ms(att, ms);
@@ -1107,11 +1114,18 @@ fn album_view(
                 .flex()
                 .gap(px(14.))
                 .when_some(art, |d, art| {
+                    let on = on.clone();
                     d.child(
                         div()
+                            .id(SharedString::from(format!("album-art-{id}")))
                             .size(px(128.))
                             .flex_shrink_0()
                             .rounded(px(10.))
+                            .cursor(gpui::CursorStyle::PointingHand)
+                            .on_click(move |_, w, cx| {
+                                cx.stop_propagation();
+                                on(AlbumAct::Art, w, cx)
+                            })
                             .bg(c(0x262626))
                             .shadow(vec![gpui::BoxShadow {
                                 color: ca(0, 0, 0, 0.35),
@@ -1529,10 +1543,19 @@ pub fn view(
                 .gap(px(14.))
                 .child(
                     div()
+                        .id(SharedString::from(format!("audio-art-{}", att.id)))
                         .size(px(128.))
                         .flex_shrink_0()
                         .rounded(px(10.))
                         .overflow_hidden()
+                        .cursor(gpui::CursorStyle::PointingHand)
+                        .on_click({
+                            let on = on.clone();
+                            move |_, w, cx| {
+                                cx.stop_propagation();
+                                on(Act::Art, w, cx)
+                            }
+                        })
                         .bg(c(0x262626))
                         .shadow(vec![gpui::BoxShadow {
                             color: ca(0, 0, 0, 0.35),

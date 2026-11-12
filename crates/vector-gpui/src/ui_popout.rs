@@ -97,6 +97,7 @@ impl VectorApp {
                 }
             }
             Act::Songs => self.popout.tracks_open = !self.popout.tracks_open,
+            Act::Art => self.view_art(&item.att, window, cx),
             Act::Lyrics => self.audio_act(item.msg, item.att, crate::audio::Act::Lyrics, cx),
             Act::Transcribe => self.audio_act(item.msg, item.att, crate::audio::Act::Transcribe, cx),
             Act::Line(l) => self.audio_act(item.msg, item.att, crate::audio::Act::Line(l), cx),
@@ -226,9 +227,18 @@ impl VectorApp {
             },
             Kind::Audio => match tags.as_ref().and_then(|t| t.cover.clone()) {
                 Some(art) => div()
+                    .id("popout-art")
                     .size(px(44.))
                     .rounded(px(8.))
                     .overflow_hidden()
+                    .cursor(CursorStyle::PointingHand)
+                    .on_click({
+                        let on = on.clone();
+                        move |_, w, cx| {
+                            cx.stop_propagation();
+                            on(Act::Art, w, cx)
+                        }
+                    })
                     .child(img(art).size_full().object_fit(ObjectFit::Cover))
                     .into_any_element(),
                 None => div()
@@ -245,7 +255,7 @@ impl VectorApp {
         drop(store);
 
         let compact = width < 340.;
-        let lyrics_open = media.audio.sheets.contains_key(&item.att);
+        let lyrics_open = media.audio.sheets.get(&item.att).is_some_and(|s| s.open);
         let has_lyrics = tags.as_ref().is_some_and(|t| t.lyrics.is_some());
         let transcript = media.audio.transcripts.get(&item.att);
         let transcript_icon = match transcript.map(|t| (&t.phase, t.open)) {

@@ -2668,6 +2668,9 @@ impl VectorApp {
                 cx.notify();
             }
             Act::OpenFile(att) => self.open_file(id, att, cx),
+            Act::Audio(att, crate::audio::Act::Art | crate::audio::Act::Album(crate::audio::AlbumAct::Art)) => {
+                self.view_art(&att, window, cx)
+            }
             Act::Audio(att, a) => {
                 if matches!(a, crate::audio::Act::Toggle) {
                     self.yield_popout(crate::popout::Kind::Audio, &att);
@@ -3046,6 +3049,14 @@ impl VectorApp {
             self.audio_work(vec![w], cx);
         }
         cx.notify();
+    }
+
+    /// A track's cover art, full size in the viewer.
+    pub(crate) fn view_art(&mut self, att: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(art) = self.media.borrow().audio.tags(att).and_then(|t| t.cover.clone()) else { return };
+        let s = art.size(0);
+        let open = crate::viewer::Open { image: art, w: s.width.0 as u32, h: s.height.0 as u32, full: None };
+        self.on_act(String::new(), timeline::Act::View(open), window, cx);
     }
 
     fn video_act(&mut self, msg: String, att: String, act: crate::video::Act, cx: &mut Context<Self>) {

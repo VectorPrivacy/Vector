@@ -54,6 +54,7 @@ pub enum Act {
     Line(Option<u32>),
     SeekTo(u64),
     Track(usize),
+    Art,
     Close,
     ShowInChat,
     SoundOnly,
