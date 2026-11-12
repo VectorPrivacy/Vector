@@ -5736,12 +5736,13 @@ impl Render for VectorApp {
                 crate::invite::view(m, &store, &filter, &on)
             }))
             .children(self.comm_settings.as_ref().map(|m| {
+                let compact = f32::from(window.viewport_size().width) <= 760.;
                 let app = cx.entity().downgrade();
                 let on: crate::commsettings::OnAct = Rc::new(move |act, window, cx| {
                     app.update(cx, |app, cx| app.on_comm_settings(act, window, cx))
                         .ok();
                 });
-                crate::commsettings::view(m, &store, &on, cx)
+                crate::commsettings::view(m, &store, compact, &on, cx)
             }))
             .children(self.channel_editor.as_ref().map(|m| {
                 let app = cx.entity().downgrade();

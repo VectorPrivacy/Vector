@@ -547,7 +547,7 @@ pub fn cut(p: &Pick, width: f32, height: f32, radius: f32) -> AnyElement {
         .into_any_element()
 }
 
-fn overview(m: &CommSettings, store: &Store, on: &OnAct, cx: &App) -> AnyElement {
+fn overview(m: &CommSettings, store: &Store, compact: bool, on: &OnAct, cx: &App) -> AnyElement {
     let editable = m.can("manage_metadata");
     let name_len = m.name.read(cx).text().chars().count();
     let desc_len = m.description.read(cx).text().chars().count();
@@ -632,6 +632,7 @@ fn overview(m: &CommSettings, store: &Store, on: &OnAct, cx: &App) -> AnyElement
             div().child(heading("Icon & Name")).child(
                 div()
                     .flex()
+                    .when(compact, |d| d.flex_col())
                     .items_start()
                     .gap(px(22.))
                     .child(
@@ -659,7 +660,8 @@ fn overview(m: &CommSettings, store: &Store, on: &OnAct, cx: &App) -> AnyElement
                     )
                     .child(
                         div()
-                            .flex_1()
+                            .when(compact, |d| d.w_full().max_w(px(442.)))
+                            .when(!compact, |d| d.flex_1())
                             .min_w_0()
                             .flex()
                             .flex_col()
@@ -1578,7 +1580,8 @@ pub(crate) fn text_btn(
         .into_any_element()
 }
 
-pub fn view(m: &CommSettings, store: &Store, on: &OnAct, cx: &App) -> impl IntoElement + use<> {
+/// `compact` is the phone sheet (760px or less): full window, the sections a strip of tabs.
+pub fn view(m: &CommSettings, store: &Store, compact: bool, on: &OnAct, cx: &App) -> impl IntoElement + use<> {
     let sections = m.sections();
     let section = sections
         .iter()
@@ -1620,7 +1623,10 @@ pub fn view(m: &CommSettings, store: &Store, on: &OnAct, cx: &App) -> impl IntoE
         anchor: Rc::new(move |(s, x), w, cx| b(Act::Anchor(s, x), w, cx)),
         clear: Rc::new(move |_, w, cx| d(Act::ClearSearch, w, cx)),
     };
-    let nav = crate::settings::section_nav(
+    let nav = if compact {
+        tab_strip(&sections, section.id, on)
+    } else {
+        crate::settings::section_nav(
         &sections,
         section.id,
         &[],
@@ -1632,9 +1638,10 @@ pub fn view(m: &CommSettings, store: &Store, on: &OnAct, cx: &App) -> impl IntoE
         0x0b0b0b,
         &nav_on,
         cx,
-    );
+    )
+    };
     let body = match section.id {
-        "overview" => overview(m, store, on, cx),
+        "overview" => overview(m, store, compact, on, cx),
         "relays" => relays(m, on, cx),
         "bans" => bans(m, store, on, cx),
         "roles" => crate::roles::view(m, store, on, cx),
@@ -1714,10 +1721,8 @@ pub fn view(m: &CommSettings, store: &Store, on: &OnAct, cx: &App) -> impl IntoE
                 .child(
                     div()
                         .w_full()
-                        .max_w(px(720.))
-                        .mx_auto()
-                        .px(px(62.))
-                        .pt(px(12.))
+                        .when(!compact, |d| d.max_w(px(720.)).mx_auto().px(px(62.)).pt(px(12.)))
+                        .when(compact, |d| d.px(px(18.)).pt(px(4.)))
                         .pb(px(140.))
                         .child(body),
                 ),
@@ -1726,13 +1731,10 @@ pub fn view(m: &CommSettings, store: &Store, on: &OnAct, cx: &App) -> impl IntoE
     let card = div()
         .id("cs-card")
         .w_full()
-        .max_w(px(1182.))
         .h_full()
-        .max_h(px(862.))
         .flex()
-        .rounded(px(18.))
-        .border_1()
-        .border_color(c(0x2c2e2f))
+        .when(compact, |d| d.flex_col())
+        .when(!compact, |d| d.max_w(px(1182.)).max_h(px(862.)).rounded(px(18.)).border_1().border_color(c(0x2c2e2f)))
         .bg(c(0x050505))
         .overflow_hidden()
         .font_family(RUBIK)
@@ -1751,13 +1753,62 @@ pub fn view(m: &CommSettings, store: &Store, on: &OnAct, cx: &App) -> impl IntoE
             .flex()
             .items_center()
             .justify_center()
-            .p(px(25.))
+            .when(!compact, |d| d.p(px(25.)))
             .occlude()
             .on_click(move |_, w, cx| dismiss(Act::Close, w, cx))
             .child(card)
             .children(report),
     )
     .with_priority(12)
+}
+
+/// `.cs-nav` on a phone: the sections side by side in a strip that scrolls.
+fn tab_strip(sections: &[Category], current: &str, on: &OnAct) -> AnyElement {
+    let mut strip = div()
+        .id("cs-tabs")
+        .flex()
+        .gap(px(6.))
+        .py(px(10.))
+        .px(px(12.))
+        .overflow_x_scroll();
+    for s in sections {
+        let here = s.id == current;
+        let id = s.id;
+        let on = on.clone();
+        strip = strip.child(
+            div()
+                .id(SharedString::from(format!("cs-tab-{id}")))
+                .flex_shrink_0()
+                .h(px(38.))
+                .px(px(11.))
+                .flex()
+                .items_center()
+                .gap(px(12.))
+                .rounded(px(8.))
+                .text_size(px(15.))
+                .line_height(px(18.))
+                .whitespace_nowrap()
+                .cursor_pointer()
+                .when(here, |d| d.bg(c(0x1b1b1b)).text_color(c(0xffffff)))
+                .when(!here, |d| d.text_color(c(0xb2b2b2)).hover(|d| d.bg(c(0x141414))))
+                .on_click(move |_, w, cx| on(Act::Section(id), w, cx))
+                .child(
+                    svg()
+                        .path(SharedString::from(format!("icons/{}.svg", s.icon)))
+                        .size(px(17.))
+                        .flex_shrink_0()
+                        .text_color(if here { white_a(0.5) } else { c(0x5b6060) }),
+                )
+                .child(s.label),
+        );
+    }
+    div()
+        .flex_shrink_0()
+        .bg(c(0x0b0b0b))
+        .border_b_1()
+        .border_color(c(0x262626))
+        .child(strip)
+        .into_any_element()
 }
 
 const REPORT_KINDS: &[(u64, &str)] = &[

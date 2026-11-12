@@ -659,7 +659,7 @@ pub fn view(m: &CreateCommunity, store: &Store, width: f32, on: &OnAct, cx: &App
                             .on_click(click(on, || Act::PickIcon))
                             .child(match &m.icon {
                                 Some(p) => crate::commsettings::cut(p, 56., 56., 28.),
-                                None => img("icons/group-placeholder.svg")
+                                None => img("ui/group-placeholder-dim.svg")
                                     .size(px(56.))
                                     .rounded_full()
                                     .into_any_element(),
