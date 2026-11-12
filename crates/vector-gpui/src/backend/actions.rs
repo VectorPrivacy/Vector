@@ -1,7 +1,6 @@
 //! Message actions beyond sending: reactions, edits, deletes and retries (DMs; a Community
 //! channel's go through its own service).
 
-use std::path::Path;
 use std::sync::Arc;
 
 use nostr_sdk::prelude::{EventId, PublicKey};

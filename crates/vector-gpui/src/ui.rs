@@ -147,6 +147,7 @@ pub struct VectorApp {
     new_btn: Rc<std::cell::Cell<Option<gpui::Bounds<gpui::Pixels>>>>,
     signer_offline_told: bool,
     call_mic_told: Option<String>,
+    jump_miss: Option<(String, &'static str)>,
     send_btn: Rc<std::cell::Cell<Option<gpui::Bounds<gpui::Pixels>>>>,
     /// A press on Send, by number, while it is held; a long one opened the timer instead.
     send_held: Option<u64>,
@@ -844,6 +845,7 @@ impl VectorApp {
             new_btn: Rc::default(),
             signer_offline_told: false,
             call_mic_told: None,
+            jump_miss: None,
             send_btn: Rc::default(),
             send_held: None,
             send_long: false,
@@ -3446,11 +3448,24 @@ impl VectorApp {
 
     /// `jumpToMessage`: centre the open chat on a message and flash it, loading it first if needed.
     fn jump_to_message(&mut self, id: String, cx: &mut Context<Self>) {
+        self.jump_inner(id, None, cx);
+    }
+
+    /// A jump that says `miss` when the message can't be put on screen.
+    pub(crate) fn jump_or_say(&mut self, id: String, miss: &'static str, cx: &mut Context<Self>) {
+        self.jump_inner(id, Some(miss), cx);
+    }
+
+    fn jump_inner(&mut self, id: String, miss: Option<&'static str>, cx: &mut Context<Self>) {
+        if miss.is_some() {
+            self.jump_miss = miss.map(|m| (id.clone(), m));
+        }
         if let Some(wait) = self.opening.as_mut() {
             *wait = Some(id);
             return;
         }
         if let Some(ix) = self.row_of(&id) {
+            self.jump_miss = None;
             self.land_on(ix, id, cx);
             return;
         }
@@ -3458,7 +3473,7 @@ impl VectorApp {
             return;
         };
         if !self.live {
-            return;
+            return self.jump_missed(&id);
         }
         let rx = backend::run(messaging::messages_around(
             chat.to_string(),
@@ -3467,21 +3482,33 @@ impl VectorApp {
             5000,
         ));
         cx.spawn(async move |this, cx| {
-            let Ok(Ok(views)) = rx.await else { return };
+            let views = rx.await.ok().and_then(Result::ok).unwrap_or_default();
             this.update(cx, |this, cx| {
-                if this.open.as_ref() != Some(&chat) || views.is_empty() {
+                if this.open.as_ref() != Some(&chat) {
                     return;
                 }
-                this.merge_messages(&chat, views);
-                this.history_done.remove(chat.as_ref());
-                this.relayout_keeping_top();
+                if !views.is_empty() {
+                    this.merge_messages(&chat, views);
+                    this.history_done.remove(chat.as_ref());
+                    this.relayout_keeping_top();
+                }
                 if let Some(ix) = this.row_of(&id) {
+                    this.jump_miss = None;
                     this.land_on(ix, id, cx);
+                } else {
+                    this.jump_missed(&id);
+                    cx.notify();
                 }
             })
             .ok();
         })
         .detach();
+    }
+
+    fn jump_missed(&mut self, id: &str) {
+        if let Some((_, say)) = self.jump_miss.take_if(|(j, _)| j == id) {
+            self.toast = Some((say.into(), std::time::Instant::now()));
+        }
     }
 
     fn land_on(&mut self, ix: usize, id: String, cx: &mut Context<Self>) {
@@ -12124,12 +12151,14 @@ impl VectorApp {
             let Ok(at) = rx.await else { return };
             this.update_in(cx, |this, window, cx| {
                 match (at.chat, room) {
-                    (Some(chat), Some(room)) if chat == room => this.jump_to_message(message, cx),
+                    (Some(chat), Some(room)) if chat == room => {
+                        this.jump_or_say(message, "That message can't be shown", cx)
+                    }
                     (Some(chat), None) => {
                         if this.open.as_deref() != Some(chat.as_str()) {
                             this.open_chat(chat.into(), window, cx);
                         }
-                        this.jump_to_message(message, cx);
+                        this.jump_or_say(message, "That message can't be shown", cx);
                     }
                     (_, room) if at.deleted => {
                         let _ = room;

@@ -103,7 +103,7 @@ impl VectorApp {
                 let Some(pin) = self.pins.list.iter().find(|p| p.id == id) else { return };
                 if pin.jumpable {
                     self.pins.open = false;
-                    self.jump_to_message(id, cx);
+                    self.jump_or_say(id, "That message isn't in your local history", cx);
                 } else if self.pins.clips.borrow().get(&id).is_some_and(|c| c.get()) || pin.media.is_some() || pin.content.lines().filter(|l| !l.trim().is_empty()).count() > 1 {
                     self.pins_expand(id, cx);
                 }
