@@ -604,6 +604,7 @@ fn overview(m: &CommSettings, store: &Store, on: &OnAct, cx: &App) -> AnyElement
                             .child(
                                 div()
                                     .id("cs-icon")
+                                    .when(editable, |d| d.tooltip(crate::kit::tooltip("Change icon")))
                                     .group("cs-icon")
                                     .relative()
                                     .size(px(88.))
@@ -639,6 +640,7 @@ fn overview(m: &CommSettings, store: &Store, on: &OnAct, cx: &App) -> AnyElement
                     .child(
                         div()
                             .id("cs-banner")
+                            .when(editable, |d| d.tooltip(crate::kit::tooltip(if has_banner { "Change banner" } else { "Add a banner" })))
                             .group("cs-banner")
                             .relative()
                             .w(px(238.))

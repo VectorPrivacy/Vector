@@ -806,6 +806,7 @@ impl SecurityFlow {
                                 .child(
                                     div()
                                         .id("xfer-copy")
+                                        .tooltip(crate::kit::tooltip("Copy"))
                                         .w(px(38.))
                                         .h(px(37.))
                                         .flex()

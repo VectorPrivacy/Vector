@@ -369,6 +369,7 @@ fn share(m: &CreateCommunity, on: &OnAct) -> impl IntoElement {
         .child(
             div()
                 .id("cg-share-qr")
+                .when(ready, |d| d.tooltip(crate::kit::tooltip("Enlarge QR code")))
                 .size(px(132.))
                 .flex_shrink_0()
                 .rounded(px(12.))

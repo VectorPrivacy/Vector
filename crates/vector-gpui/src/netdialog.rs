@@ -577,6 +577,7 @@ fn relay(
                         .child(
                             div()
                                 .id("relay-logs-copy")
+                                .tooltip(crate::kit::tooltip("Copy logs to clipboard"))
                                 .size(px(24.))
                                 .flex()
                                 .items_center()

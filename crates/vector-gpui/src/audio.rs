@@ -953,8 +953,15 @@ fn album_view(
     };
     let toggle = |key: &str, act: AlbumAct, lit: bool, icon: &'static str| {
         let on = on.clone();
+        let tip = match (key, repeat) {
+            ("shuffle", _) => "Shuffle",
+            (_, crate::album::Repeat::One) => "Repeat one",
+            (_, crate::album::Repeat::All) => "Repeat all",
+            _ => "Repeat",
+        };
         div()
             .id(SharedString::from(format!("album-{key}-{id}")))
+            .tooltip(crate::kit::tooltip(tip))
             .size(px(30.))
             .rounded(px(8.))
             .flex()
@@ -1332,6 +1339,7 @@ pub fn view(
         let on = on.clone();
         div()
             .id(SharedString::from(format!("audio-lyrics-{}", att.id)))
+            .tooltip(crate::kit::tooltip(if open { "Hide lyrics" } else { "Lyrics" }))
             .size(px(34.))
             .ml(px(10.))
             .flex_shrink_0()
