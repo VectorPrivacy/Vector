@@ -638,10 +638,47 @@ impl VectorApp {
         self.attach = None;
         cx.notify();
         let chat = self.open.as_ref().map(|s| s.to_string());
-        match chat.filter(|_| invite) {
-            Some(chat) => self.invite_miniapp(app, chat, cx),
-            None => self.play_solo(app.src, cx),
+        let src = app.src.clone();
+        self.realtime_gate(
+            src,
+            move |this, cx| match chat.filter(|_| invite) {
+                Some(chat) => this.invite_miniapp(app, chat, cx),
+                None => this.play_solo(app.src, cx),
+            },
+            cx,
+        );
+    }
+
+    /// `confirmMiniAppNetwork`: off Clearnet, a multiplayer app connects only once the account agrees.
+    pub(super) fn realtime_gate(
+        &mut self,
+        src: String,
+        then: impl FnOnce(&mut Self, &mut Context<Self>) + 'static,
+        cx: &mut Context<Self>,
+    ) {
+        use vector_core::transport::realtime;
+        if !self.live || !realtime::check().is_err_and(|e| e == realtime::CONSENT_REQUIRED) {
+            return then(self, cx);
         }
+        let rx = backend::run(async move { crate::miniapp::info(src).await.map_or(true, |i| i.uses_realtime) });
+        cx.spawn(async move |this, cx| {
+            let realtime = rx.await.unwrap_or(true);
+            this.update(cx, |this, cx| {
+                if !realtime {
+                    return then(this, cx);
+                }
+                let label = backend::calls::off_clearnet_label().unwrap_or_else(|| "the network in use".into());
+                let mut p = crate::kit::Popup::notice(format!("Connect outside {label}?"));
+                p.icon = None;
+                p.text = Some("Calls and multiplayer Mini Apps connect directly.<br>The people you connect with and the iroh relay can see your IP address.<br>Allowed until you close Vector, switch accounts or change networks.".into());
+                p.confirm = "Connect".into();
+                p.cancel = Some("Cancel".into());
+                this.popup = Some((p, super::PopupAct::RealtimeThen(Box::new(then))));
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     fn play_solo(&mut self, src: String, cx: &mut Context<Self>) {

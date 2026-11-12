@@ -327,6 +327,8 @@ enum PopupAct {
         name: String,
         pivx: bool,
     },
+    /// A multiplayer Mini App launch waiting on consent to connect outside the network.
+    RealtimeThen(Box<dyn FnOnce(&mut VectorApp, &mut Context<VectorApp>)>),
     JoinInvite {
         key: String,
         name: String,
@@ -3292,7 +3294,6 @@ impl VectorApp {
         if !self.live {
             return;
         }
-        let chat = self.open.as_ref().map(|s| s.to_string()).unwrap_or_default();
         let file = (!att.resident && !att.path.is_empty()).then(|| {
             let path = std::path::PathBuf::from(&att.path);
             if path.is_absolute() {
@@ -3302,16 +3303,19 @@ impl VectorApp {
             }
         });
         let hash = vector_core::simd::hex::hex_to_bytes_32_checked(&att.id);
+        let src = match (&file, hash) {
+            (Some(f), _) => f.to_string_lossy().into_owned(),
+            (None, Some(h)) => vector_core::media::MediaRef::held(&h),
+            (None, None) => return self.show_toast("This app isn't on this device any more", cx),
+        };
+        self.realtime_gate(src.clone(), move |this, cx| this.launch_miniapp_now(msg_id, src, att, cx), cx);
+    }
+
+    fn launch_miniapp_now(&mut self, msg_id: String, file: String, att: vector_core::Attachment, cx: &mut Context<Self>) {
+        let chat = self.open.as_ref().map(|s| s.to_string()).unwrap_or_default();
         let topic = att.webxdc_topic.clone();
         let key = topic.clone().unwrap_or_else(|| format!("att:{}", att.id));
-        let rx = backend::run(async move {
-            let file = match (file, hash) {
-                (Some(f), _) => f.to_string_lossy().into_owned(),
-                (None, Some(h)) => vector_core::media::MediaRef::held(&h),
-                (None, None) => return Err("This app isn't on this device any more".to_string()),
-            };
-            crate::miniapp::open(file, chat, msg_id, None, topic).await
-        });
+        let rx = backend::run(crate::miniapp::open(file, chat, msg_id, None, topic));
         cx.spawn(async move |this, cx| {
             let res = rx.await;
             this.update(cx, |this, cx| match res {
@@ -3513,6 +3517,10 @@ impl VectorApp {
                 self.call_go(then, cx);
             }
             PopupAct::RemoveMiniApp { name, pivx } => self.remove_miniapp(name, pivx, cx),
+            PopupAct::RealtimeThen(then) => {
+                backend::calls::allow_realtime();
+                then(self, cx);
+            }
             PopupAct::Logout => {
                 let me = self.store.borrow().my_npub.clone();
                 self.settings = None;
