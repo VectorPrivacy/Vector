@@ -260,6 +260,9 @@ pub struct VectorApp {
     channel_editor: Option<crate::chaneditor::ChannelEditor>,
     /// The menus a submenu was opened from, for its row back.
     menu_trail: Vec<(Vec<kit::MenuItem>, Vec<MenuAct>)>,
+    scanner: Option<qrscan_ops::Scanner>,
+    /// Scanner frames off screen, for the atlas to let go of.
+    retired_frames: Vec<Arc<gpui::RenderImage>>,
     start: Option<crate::startmenu::StartMenu>,
     /// The context menu open: where, its rows, and what each does.
     menu: Option<(gpui::Point<gpui::Pixels>, Vec<kit::MenuItem>, Vec<MenuAct>)>,
@@ -550,6 +553,8 @@ mod publish_ops;
 mod pivx_ops;
 #[path = "ui_chatlist.rs"]
 mod chatlist_ops;
+#[path = "ui_qrscan.rs"]
+mod qrscan_ops;
 #[path = "ui_rail.rs"]
 mod rail_ops;
 #[path = "ui_voice.rs"]
@@ -945,6 +950,8 @@ impl VectorApp {
             create_channel: None,
             channel_editor: None,
             menu_trail: Vec::new(),
+            scanner: None,
+            retired_frames: Vec::new(),
             start: None,
             menu: None,
             menu_sliding: Default::default(),
@@ -5154,6 +5161,12 @@ impl Render for VectorApp {
                 let _ = window.drop_image(old);
             }
         }
+        if let Some(s) = self.scanner.as_mut() {
+            self.retired_frames.append(&mut s.retired);
+        }
+        for old in self.retired_frames.drain(..) {
+            let _ = window.drop_image(old);
+        }
         if self.store.borrow().anyone_typing() {
             window.request_animation_frame();
         }
@@ -5534,6 +5547,7 @@ impl Render for VectorApp {
             )
             .children(self.status_view(&store, window, cx))
             .children(self.qr_view(cx))
+            .children(self.qr_scanner_view(window, cx))
             .children(self.badge_card.as_ref().map(|card| {
                 if card.opened.elapsed().as_secs_f32() < 0.45 {
                     window.request_animation_frame();
@@ -12609,6 +12623,11 @@ impl VectorApp {
 
     /// Escape closes the topmost light overlay; true when it did.
     fn escape_overlay(&mut self) -> bool {
+        if let Some(mut s) = self.scanner.take() {
+            self.retired_frames.extend(s.frame.take());
+            self.retired_frames.append(&mut s.retired);
+            return true;
+        }
         if self.viewer.is_some() || self.model_viewer.is_some() {
             return false;
         }
@@ -13364,10 +13383,6 @@ impl VectorApp {
     }
 
     /// `openQrScanner`: needs a camera decoder this client doesn't carry yet.
-    fn open_qr_scanner(&mut self, _: &mut Window, cx: &mut Context<Self>) {
-        self.show_toast("Scanner unavailable", cx);
-    }
-
     fn open_switcher(&mut self, cx: &mut Context<Self>) {
         let active = self.store.borrow().my_npub.clone();
         if !self.live {

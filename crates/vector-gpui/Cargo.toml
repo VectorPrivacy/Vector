@@ -52,6 +52,8 @@ unicode-linebreak = "0.1"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "tiff", "ico"] }
 fast-thumbhash = "0.2"
 qrcodegen = "1.8"
+# Reading QR codes off the camera.
+rqrr = { version = "0.11", default-features = false }
 # The desktop client's image codecs, compiled from its sources (src/simd.rs, src/shared.rs).
 gif = "0.14"
 libwebp-sys = "0.9"

@@ -21,7 +21,7 @@ use tokio::sync::mpsc;
 pub use vector_core::calls::wire::VideoKind;
 use vector_media::calls::link::{self, LinkConn};
 
-pub use camera::Capture;
+pub use camera::{Capture, open as open_camera};
 use yuv::I420;
 
 /// Frames queued each way before the oldest are dropped, as the webview's socket has.

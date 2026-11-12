@@ -166,6 +166,16 @@ impl SecurityFlow {
         self.show_code(cx);
     }
 
+    /// A code read off the camera: straight to connecting, as if typed.
+    pub fn join_scanned(&mut self, send: bool, code: &str, cx: &mut Context<Self>) {
+        self.open_transfer(send, cx);
+        let Some(x) = self.xfer.as_mut() else { return };
+        x.stage = Stage::Enter;
+        let entry = x.entry.clone();
+        entry.update(cx, |i, cx| i.set_text(&clean_code(code), cx));
+        self.connect(cx);
+    }
+
     /// Leave the current transfer behind: its answers and events no longer count.
     fn abandon(&mut self) {
         if let Some(x) = self.xfer.as_mut() {
