@@ -11,6 +11,9 @@ use gpui::{
 };
 use zeroize::Zeroizing;
 
+#[path = "loginnet.rs"]
+mod loginnet;
+
 use crate::backend::{self, account};
 use crate::composer::{Look, SendText, TextInput};
 use crate::kit::{self, Choice, Popup};
@@ -102,6 +105,8 @@ pub struct LoginView {
     /// Adding a profile over a live account: whether that account was already torn down.
     adding: Option<bool>,
     picker: Option<Picker>,
+    net: loginnet::LoginNet,
+    live: bool,
 }
 
 const DECRYPTING: &str = "Decrypting your keys...";
@@ -158,6 +163,8 @@ impl LoginView {
             born: Instant::now(),
             adding: None,
             picker: None,
+            net: Default::default(),
+            live: false,
         };
         if let Some(security) = unlock {
             view.unlock = true;
@@ -401,14 +408,39 @@ impl LoginView {
         account::abandon_pending();
         self.step = Step::Start;
         self.select_open = false;
+        self.net_refresh(cx);
         cx.notify();
     }
 
+    /// Where the network choice reads from: the backend, or the fixtures' view.
+    pub fn net_setup(&mut self, live: bool, fixture: Option<serde_json::Value>, cx: &mut Context<Self>) {
+        self.live = live;
+        self.net.fixture = fixture;
+        if self.step == Step::Start {
+            self.net_refresh(cx);
+        }
+    }
+
+    /// Add Profile's commit carries the welcome screen's network; anything else waits for it.
+    fn gate(&mut self, cx: &mut Context<Self>) -> Result<Option<(Option<String>, Option<serde_json::Value>)>, ()> {
+        if self.adding == Some(false) {
+            let choice = self.net_choice();
+            self.commit_adding(cx);
+            cx.notify();
+            return Ok(Some(choice));
+        }
+        if let Err(e) = self.net_ready() {
+            self.show_error(e, cx);
+            return Err(());
+        }
+        Ok(None)
+    }
+
     fn create_account(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
-        let reset = self.commit_adding(cx);
+        let Ok(add) = self.gate(cx) else { return };
         let rx = backend::run(async move {
-            if reset {
-                account::reset().await;
+            if let Some((kind, opts)) = add {
+                account::enter_add_mode(kind, opts).await?;
             }
             let npub = account::create().await?;
             account::connect().await;
@@ -418,7 +450,10 @@ impl LoginView {
             let result = rx.await.unwrap_or_else(|_| Err("Backend stopped".into()));
             this.update(cx, |this, cx| match result {
                 Ok(_) => this.open_encryption(cx),
-                Err(e) => this.show_error(e, cx),
+                Err(e) => {
+                    this.net_settle(cx);
+                    this.show_error(e, cx)
+                }
             })
             .ok();
         })
@@ -431,10 +466,10 @@ impl LoginView {
             return;
         }
         self.key.update(cx, |k, cx| k.clear(window, cx));
-        let reset = self.commit_adding(cx);
+        let Ok(add) = self.gate(cx) else { return };
         let rx = backend::run(async move {
-            if reset {
-                account::reset().await;
+            if let Some((kind, opts)) = add {
+                account::enter_add_mode(kind, opts).await?;
             }
             let imported = account::import(key).await?;
             if matches!(imported, account::Imported::Staged(_)) {
@@ -446,7 +481,10 @@ impl LoginView {
             let result = rx.await.unwrap_or_else(|_| Err("Backend stopped".into()));
             this.update_in(cx, |this, window, cx| match result {
                 Ok(imported) => this.imported(imported, window, cx),
-                Err(e) => this.show_error(e, cx),
+                Err(e) => {
+                    this.net_settle(cx);
+                    this.show_error(e, cx)
+                }
             })
             .ok();
         })
@@ -491,8 +529,14 @@ impl LoginView {
         cx: &mut Context<Self>,
     ) -> futures::channel::oneshot::Receiver<Result<(), String>> {
         let (tx, done) = futures::channel::oneshot::channel();
-        let reset = self.commit_adding(cx);
-        let rx = backend::run(backend::transfer::finish(reset));
+        let add = match self.gate(cx) {
+            Ok(add) => add,
+            Err(()) => {
+                let _ = tx.send(Err(self.net_ready().err().unwrap_or_default()));
+                return done;
+            }
+        };
+        let rx = backend::run(backend::transfer::finish(add));
         cx.spawn_in(window, async move |this, cx| {
             let result = rx.await.unwrap_or_else(|_| Err("Backend stopped".into()));
             this.update_in(cx, |this, window, cx| match result {
@@ -966,26 +1010,46 @@ impl LoginView {
                 .flex()
                 .flex_col()
                 .items_center()
-                .gap(px(13.))
                 .child(
-                    lg_btn("lg-create", "Create Account", 1)
-                        .on_click(cx.listener(|this, _, w, cx| this.create_account(w, cx))),
+                    div()
+                        .flex()
+                        .flex_col()
+                        .items_center()
+                        .gap(px(13.))
+                        .relative()
+                        .child(
+                            lg_btn("lg-create", "Create Account", 1)
+                                .when(self.net.hold, |d| d.bg(ca(51, 219, 152, 0.25)).border_color(gpui::transparent_black()))
+                                .on_click(cx.listener(|this, _, w, cx| this.create_account(w, cx))),
+                        )
+                        .child(lg_btn("lg-login", "Login", 2)
+                            .when(self.net.hold, |d| d.border_color(ca(51, 219, 152, 0.25)).text_color(white_a(0.25)))
+                            .on_click(cx.listener(|this, _, w, cx| {
+                            if let Err(e) = this.net_ready() {
+                                return this.show_error(e, cx);
+                            }
+                            this.method = "qr";
+                            this.step = Step::Import;
+                            let _ = w;
+                            cx.notify();
+                        })))
+                        // Held: nothing in the group takes a click or a hover.
+                        .when(self.net.hold, |d| d.child(div().id("lg-held").absolute().inset_0().occlude())),
                 )
-                .child(
-                    lg_btn("lg-login", "Login", 2).on_click(cx.listener(|this, _, w, cx| {
-                        this.method = "qr";
-                        this.step = Step::Import;
-                        let _ = w;
-                        cx.notify();
-                    })),
-                )
+                .children(self.net_row(cx))
+                .children(self.net_line(cx))
                 .when(self.adding.is_some(), |d| {
                     let view = cx.entity();
-                    d.child(lg_back(
-                        "Changed your mind?\u{a0}",
-                        "Go Back",
-                        move |_, cx| view.update(cx, |_, cx| cx.emit(AddProfile::Back)),
-                    ))
+                    let reserve = self.net.shown;
+                    d.child(
+                        lg_back(
+                            "Changed your mind?\u{a0}",
+                            "Go Back",
+                            move |_, cx| view.update(cx, |_, cx| cx.emit(AddProfile::Back)),
+                        )
+                        .when(reserve, |d| d.mt(px(10.)))
+                        .when(self.net.busy, |d| d.opacity(0.4).block_mouse_except_scroll()),
+                    )
                 })
                 .into_any_element(),
             Step::Import => {
@@ -1306,6 +1370,7 @@ impl Render for LoginView {
                 .child(kit::spaced(if self.bg_hidden { "Show Background" } else { "Hide Background" }, 0.8)),
         )
         .children(account_list)
+        .children(self.net_modal(cx))
         .children(self.pill(cx).map(|pill| div().absolute().top(px(118.)).left_0().right_0().flex().justify_center().child(pill)))
         .when_some(self.popup.clone(), |root, p| {
             let entity = cx.entity();

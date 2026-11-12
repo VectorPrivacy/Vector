@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use gpui::{AppContext, Context, Focusable, Window};
 use serde_json::Value;
 
-use super::{PopupAct, VectorApp};
+use super::{PopupAct, Screen, VectorApp};
 use crate::backend::{self, transport as net};
 use crate::composer::{CancelInput, SendText, TextInput};
 use crate::kit;
@@ -17,11 +17,7 @@ const FAST: Duration = Duration::from_millis(1500);
 /// While I2P's panel is on screen: outproxy health and the Clearnet step move with each connection.
 const WATCH: Duration = Duration::from_secs(5);
 
-const LINKS: &[(&str, &str)] = &[
-    ("torAttribution", "https://torproject.org"),
-    ("i2p", "https://i2p.net"),
-    ("bridges", "https://bridges.torproject.org/bridges/en?transport=obfs4"),
-];
+use crate::netinfo::LINKS;
 
 fn json<T: serde::Serialize>(v: T) -> Value {
     serde_json::to_value(v).unwrap_or(Value::Null)
@@ -78,6 +74,9 @@ impl VectorApp {
         let flipped = self.net_view.as_ref().is_none_or(|p| p["kind"] != view["kind"] || p["ready"] != view["ready"]);
         self.net_seq = seq;
         self.net_view = Some(view.clone());
+        if let Screen::Login(login) = &self.screen {
+            login.update(cx, |l, cx| l.on_transport_view(view.clone(), cx));
+        }
         let tor_up = view.get("kind").and_then(Value::as_str) == Some("tor") && view.get("ready").and_then(Value::as_bool) == Some(true);
         if let Some(r) = self.routing() {
             r.view = Some(view.clone());

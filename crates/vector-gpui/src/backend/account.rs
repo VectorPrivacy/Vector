@@ -544,3 +544,36 @@ pub async fn delete(npub: String) -> Result<bool, String> {
     }
     Ok(was_active)
 }
+
+/// Add Profile's commit: the live account goes, and the new one starts on the welcome screen's
+/// network, not the previous account's. Resolves once that network can carry a sign-in.
+pub async fn enter_add_mode(kind: Option<String>, mut opts: Option<serde_json::Value>) -> Result<(), String> {
+    use vector_core::transport::{self, prefs, prelogin, Kind};
+    super::security::refuse_if_migrating()?;
+    let remembered = prelogin::marker().ok().flatten().map(|c| c.kind).unwrap_or(Kind::Clearnet);
+    let kind = kind.unwrap_or_else(|| remembered.as_str().into());
+    // Read while the current account is still live: its router's credentials carry over.
+    let choice = super::transport::add_account_choice(&kind, opts.as_ref());
+    if let Some(o) = opts.as_mut() {
+        prefs::scrub_json(o);
+    }
+    let choice = choice?;
+    let _ = db::clear_active_account_file();
+    reset().await;
+    if let Err(e) = super::transport::apply_prelogin(choice).await {
+        vector_core::log_warn!("[Transport] pre-login start for the new account failed: {e}");
+    }
+    let Some(k) = Kind::parse(&kind).filter(|k| *k != Kind::Clearnet) else { return Ok(()) };
+    // I2P connects after its start returns.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(180);
+    loop {
+        let v = super::transport::transport_get_state();
+        if v.kind == k.as_str() && v.ready {
+            return Ok(());
+        }
+        if v.kind != k.as_str() || !matches!(v.phase, transport::status::Phase::Starting) || std::time::Instant::now() > deadline {
+            return Err(format!("{} isn't connected yet. Try again, or pick another network.", k.label()));
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+}

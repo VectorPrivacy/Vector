@@ -2188,6 +2188,9 @@ impl VectorApp {
             },
         )
         .detach();
+        let fixture = (!self.live).then(|| self.store.borrow().fixture_net.as_ref().and_then(|n| n.get("view").cloned())).flatten();
+        let live = self.live;
+        view.update(cx, |v, cx| v.net_setup(live, fixture, cx));
         self.screen = Screen::Login(view);
         cx.notify();
     }
@@ -4374,6 +4377,7 @@ impl Render for VectorApp {
             crate::netinfo::modal(
                 kind,
                 true,
+                Default::default(),
                 move |_, cx| {
                     a.update(cx, |app, cx| {
                         app.net_info = None;

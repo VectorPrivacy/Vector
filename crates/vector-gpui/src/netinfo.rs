@@ -1,10 +1,51 @@
 //! `NetInfo.svelte` in `NetInfoModal`: what Tor or I2P does for you, the login screen's network
 //! card. In Settings it drops the line pointing at Settings.
 
+use std::rc::Rc;
+
 use gpui::prelude::*;
 use gpui::{AnyElement, App, FontWeight, HighlightStyle, StyledText, Window, div, img, px, svg};
 
 use crate::theme::*;
+
+pub const LINKS: &[(&str, &str)] = &[
+    ("torAttribution", "https://torproject.org"),
+    ("i2p", "https://i2p.net"),
+    ("bridges", "https://bridges.torproject.org/bridges/en?transport=obfs4"),
+];
+
+/// What the login screen adds: a tab per network, and its I2P router setup under the points.
+#[derive(Default)]
+pub struct Extras {
+    pub tabs: Vec<&'static str>,
+    pub on_tab: Option<Rc<dyn Fn(&'static str, &mut Window, &mut App)>>,
+    pub router: Option<AnyElement>,
+}
+
+fn tab_bar(tabs: &[&'static str], on: &'static str, pick: Rc<dyn Fn(&'static str, &mut Window, &mut App)>) -> AnyElement {
+    let mut bar = div().mt(px(-6.)).mb(px(20.)).p(px(3.)).flex().gap(px(4.)).border_1().border_color(c(0x262626)).rounded(px(9.)).bg(c(0x050505));
+    for &k in tabs {
+        let pick = pick.clone();
+        let lit = k == on;
+        bar = bar.child(
+            div()
+                .id(k)
+                .px(px(20.))
+                .py(px(5.))
+                .rounded(px(6.))
+                .text_size(px(13.))
+                .line_height(px(16.))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(c(if lit { 0xffffff } else { 0x8a8a8a }))
+                .when(lit, |d| d.bg(c(0x1c1c1c)))
+                .hover(|d| d.text_color(c(0xffffff)))
+                .cursor_pointer()
+                .on_click(move |_, w, cx| pick(k, w, cx))
+                .child(if k == "i2p" { "I2P" } else { "Tor" }),
+        );
+    }
+    bar.into_any_element()
+}
 
 /// `lead` bold and white, then the rest in the paragraph's own colour.
 fn lead_bold(bold: &str, rest: &str, weight: FontWeight) -> StyledText {
@@ -15,6 +56,7 @@ fn lead_bold(bold: &str, rest: &str, weight: FontWeight) -> StyledText {
 pub fn modal(
     kind: &'static str,
     in_settings: bool,
+    extras: Extras,
     close: impl Fn(&mut Window, &mut App) + 'static + Clone,
     link: impl Fn(&'static str, &mut Window, &mut App) + 'static,
 ) -> AnyElement {
@@ -72,6 +114,11 @@ pub fn modal(
         .text_color(c(0xffffff))
         .text_center()
         .on_click(|_, _, cx| cx.stop_propagation())
+        .when(extras.tabs.len() > 1, |d| d.h(px(640.)).max_h_full().overflow_y_scroll())
+        .children(match (extras.tabs.len() > 1, extras.on_tab) {
+            (true, Some(pick)) => Some(tab_bar(&extras.tabs, kind, pick)),
+            _ => None,
+        })
         .child({
             let close = close.clone();
             div()
@@ -95,7 +142,7 @@ pub fn modal(
         })
         .child(div().mt(px(12.)).text_size(px(22.)).line_height(px(27.)).font_weight(FontWeight::BOLD).child(title))
         .child(div().mt(px(12.)).max_w(px(400.)).text_size(px(15.)).line_height(px(20.)).text_color(accent).child(lead));
-    let mut list = div().mt(px(if i2p { 14. } else { 20. })).flex().flex_col().text_size(px(14.)).line_height(px(20.)).text_color(c(ICON_MUTED));
+    let mut list = div().mt(px(if i2p { 14. } else { 20. })).py(px(4.)).gap(px(4.)).flex().flex_col().text_size(px(14.)).line_height(px(20.)).text_color(c(ICON_MUTED));
     for (b, rest) in points {
         list = list.child(
             div()
@@ -105,7 +152,7 @@ pub fn modal(
                 .child(lead_bold(b, rest, FontWeight::BOLD)),
         );
     }
-    card = card.child(div().flex().justify_center().child(list.text_left()));
+    card = card.child(div().flex().justify_center().child(list.text_left())).children(extras.router);
     card = card.child(
         div()
             .w_full()

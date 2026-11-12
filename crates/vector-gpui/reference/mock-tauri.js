@@ -100,6 +100,7 @@
         miniapp_get_history: () => (FIX.marketplace || []).filter((a) => a.installed).map((a, i) => ({ id: i + 1, name: a.name, src_url: a.local_path, attachment_ref: a.local_path, last_opened_at: Math.floor(FIX.now / 1000) - 3600 * (i * 30 + 2), open_count: 3, categories: a.categories.join(','), marketplace_id: a.id, installed_version: a.installed_version, is_favorite: false })),
         get_compression_status: () => window.__COMPRESSION__ || null,
         // NET_DEMO=<name>: one of the fixtures' transport states.
+        transport_set_prelogin: () => (FIX.net_demo || {})[window.__NET__]?.view || null,
         transport_get_state: () => (FIX.net_demo || {})[window.__NET__]?.view || { supported: ['clearnet'], prelogin: 'clearnet', kind: 'clearnet', phase: 'direct', ready: true, steps: [], detail: null },
         tor_get_state: () => (FIX.net_demo || {})[window.__NET__]?.tor || { enabled: false, running: false, supported: false, status: 'disabled', bootstrap_progress: 0, prelogin: false, multi_circuit: true, socks_proxy: null },
         tor_get_bridges: () => ({ enabled: false, lines: '' }),

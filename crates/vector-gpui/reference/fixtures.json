@@ -4459,6 +4459,120 @@
     "phase": "waiting",
     "ready": false
    }
+  },
+  "login_tor": {
+   "view": {
+    "label": "Tor",
+    "supported": [
+     "clearnet",
+     "tor",
+     "i2p"
+    ],
+    "blocked": true,
+    "progress": 45,
+    "reason": null,
+    "retry_in": null,
+    "since": 0,
+    "prelogin": "tor",
+    "prelogin_armed": false,
+    "realtime_allowed": false,
+    "realtime_active": false,
+    "call_active": false,
+    "config_seq": 1,
+    "steps": [],
+    "detail": {
+     "status": "bootstrapping",
+     "bootstrap_progress": 45,
+     "multi_circuit": true
+    },
+    "kind": "tor",
+    "phase": "starting",
+    "ready": false
+   },
+   "tor": {
+    "enabled": true,
+    "running": false,
+    "supported": true,
+    "status": "bootstrapping 45%",
+    "bootstrap_progress": 45,
+    "prelogin": false,
+    "multi_circuit": true,
+    "socks_proxy": null
+   }
+  },
+  "login_i2p_down": {
+   "view": {
+    "label": "I2P",
+    "supported": [
+     "clearnet",
+     "tor",
+     "i2p"
+    ],
+    "blocked": true,
+    "progress": null,
+    "reason": {
+     "code": "router_unreachable",
+     "text": "Your I2P router isn\u2019t answering on port 7656."
+    },
+    "retry_in": 8,
+    "since": 0,
+    "prelogin": "i2p",
+    "prelogin_armed": false,
+    "realtime_allowed": false,
+    "realtime_active": false,
+    "call_active": false,
+    "config_seq": 1,
+    "steps": [
+     {
+      "id": "router",
+      "label": "Router",
+      "state": "fail",
+      "text": "Not answering"
+     },
+     {
+      "id": "tunnels",
+      "label": "Tunnels",
+      "state": "pending",
+      "text": "Waiting\u2026"
+     },
+     {
+      "id": "exit",
+      "label": "Clearnet",
+      "state": "pending",
+      "text": "Waiting\u2026"
+     }
+    ],
+    "detail": null,
+    "kind": "i2p",
+    "phase": "waiting",
+    "ready": false
+   }
+  },
+  "login_clearnet": {
+   "view": {
+    "label": null,
+    "supported": [
+     "clearnet",
+     "tor",
+     "i2p"
+    ],
+    "blocked": false,
+    "progress": null,
+    "reason": null,
+    "retry_in": null,
+    "since": 0,
+    "prelogin": "clearnet",
+    "prelogin_armed": false,
+    "realtime_allowed": false,
+    "realtime_active": false,
+    "call_active": false,
+    "config_seq": 1,
+    "steps": [],
+    "detail": null,
+    "kind": "clearnet",
+    "phase": "direct",
+    "ready": true
+   }
   }
  }
 }

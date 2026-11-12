@@ -77,13 +77,13 @@ pub fn cancel() {
 
 /// Receiver: sign in with the account that arrived. It stays held until this succeeds, so a
 /// failed sign-in can be tried again.
-pub async fn finish(reset: bool) -> Result<super::account::Imported, String> {
+pub async fn finish(add: Option<(Option<String>, Option<serde_json::Value>)>) -> Result<super::account::Imported, String> {
     let bundle = service::received().ok_or("Nothing has arrived to sign in with")?;
     let nsec = bundle.nsec.clone();
     let seed = bundle.seed.clone().map(Zeroizing::new);
     drop(bundle);
-    if reset {
-        super::account::reset().await;
+    if let Some((kind, opts)) = add {
+        super::account::enter_add_mode(kind, opts).await?;
     }
     let imported = super::account::import(nsec).await?;
     if matches!(imported, super::account::Imported::Staged(_)) {
