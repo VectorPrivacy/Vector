@@ -108,9 +108,24 @@ impl Outgoing {
     }
 }
 
+/// A peer's picture decoder, for the codec its frames name.
+enum Dec {
+    H264(Decoder),
+    Vp8(super::vp8::Vp8),
+}
+
+impl Dec {
+    fn codec(&self) -> VideoCodec {
+        match self {
+            Dec::H264(_) => VideoCodec::H264,
+            Dec::Vp8(_) => VideoCodec::Vp8,
+        }
+    }
+}
+
 #[derive(Default)]
 struct Incoming {
-    dec: Option<Decoder>,
+    dec: Option<Dec>,
     need_key: bool,
     frames: u32,
 }
@@ -163,7 +178,7 @@ impl Worker {
     }
 
     pub fn run(mut self) {
-        self.control(&FromLink::Caps { encode: vec!["h264".into()], decode: vec!["h264".into()] });
+        self.control(&FromLink::Caps { encode: vec!["h264".into()], decode: super::vp8::decode_caps() });
         self.pics().open = true;
         self.wake.ping();
         let mut next_stats = Instant::now() + Duration::from_secs(1);
@@ -406,8 +421,13 @@ impl Worker {
     fn decode(&mut self, member: Option<String>, i: usize, frame: &[u8]) {
         let Some(h) = VideoHeader::parse(frame) else { return };
         let key = h.flags & VIDEO_KEY != 0;
-        if h.codec != VideoCodec::H264 {
-            // Only H.264 is named in our caps; a peer that sends another anyway is told so once.
+        let takes = match h.codec {
+            VideoCodec::H264 => true,
+            VideoCodec::Vp8 => super::vp8::available(),
+            _ => false,
+        };
+        if !takes {
+            // Only what our caps name; a peer that sends another anyway is told so once.
             if key {
                 self.control(&FromLink::Unsupported { codec: h.codec, peer: member.clone() });
             }
@@ -420,12 +440,19 @@ impl Worker {
             },
             None => &mut self.inn[i],
         };
+        if slot.dec.as_ref().is_some_and(|d| d.codec() != h.codec) {
+            slot.reset();
+        }
         if slot.dec.is_none() {
             if !key {
                 slot.need_key = true;
                 return;
             }
-            match Decoder::new() {
+            let made = match h.codec {
+                VideoCodec::Vp8 => super::vp8::Vp8::new().map(Dec::Vp8),
+                _ => Decoder::new().map(Dec::H264).map_err(|e| e.to_string()),
+            };
+            match made {
                 Ok(d) => slot.dec = Some(d),
                 Err(e) => {
                     log::warn!("video decoder: {e}");
@@ -440,19 +467,25 @@ impl Worker {
             return;
         }
         slot.need_key = false;
-        let dec = slot.dec.as_mut().expect("decoder just made");
-        let picture = match dec.decode(&frame[VIDEO_HEADER_LEN..]) {
-            Ok(Some(yuv)) => {
-                let (w, h) = yuv.dimensions();
-                if w * h > MAX_DECODE_PX || w == 0 || h == 0 {
-                    None
-                } else {
-                    let (ys, us, _) = yuv.strides();
-                    Some(Ok(Pic::new(w as u32, h as u32, yuv::to_bgra(yuv.y(), yuv.u(), yuv.v(), (ys, us), w, h))))
+        let picture = match slot.dec.as_mut().expect("decoder just made") {
+            Dec::H264(dec) => match dec.decode(&frame[VIDEO_HEADER_LEN..]) {
+                Ok(Some(yuv)) => {
+                    let (w, h) = yuv.dimensions();
+                    if w * h > MAX_DECODE_PX || w == 0 || h == 0 {
+                        None
+                    } else {
+                        let (ys, us, _) = yuv.strides();
+                        Some(Ok(Pic::new(w as u32, h as u32, yuv::to_bgra(yuv.y(), yuv.u(), yuv.v(), (ys, us), w, h))))
+                    }
                 }
-            }
-            Ok(None) => return,
-            Err(e) => Some(Err(e)),
+                Ok(None) => return,
+                Err(e) => Some(Err(e.to_string())),
+            },
+            Dec::Vp8(dec) => match dec.decode(&frame[VIDEO_HEADER_LEN..], MAX_DECODE_PX) {
+                Ok(Some((w, h, bgra))) => Some(Ok(Pic::new(w, h, bgra))),
+                Ok(None) => return,
+                Err(e) => Some(Err(e)),
+            },
         };
         match picture {
             Some(Ok(Some(pic))) => {
@@ -473,7 +506,7 @@ impl Worker {
                 self.dec_errors += 1;
                 if self.dec_errors >= 8 {
                     log::warn!("video decode: {e}");
-                    self.control(&FromLink::Unsupported { codec: VideoCodec::H264, peer: member.clone() });
+                    self.control(&FromLink::Unsupported { codec: h.codec, peer: member.clone() });
                     self.dec_errors = 0;
                 } else {
                     self.lost(&member, i);

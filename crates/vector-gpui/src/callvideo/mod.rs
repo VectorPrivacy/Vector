@@ -4,6 +4,7 @@
 
 mod camera;
 pub mod screen;
+mod vp8;
 mod worker;
 pub mod yuv;
 
@@ -120,7 +121,7 @@ impl Default for Video {
 
 /// What this device encodes and decodes, told to the core for every offer and answer.
 pub fn announce_caps() {
-    vector_media::calls::session::set_video_caps(vec!["h264".into()], vec!["h264".into()]);
+    vector_media::calls::session::set_video_caps(vec!["h264".into()], vp8::decode_caps());
 }
 
 impl Video {
