@@ -519,7 +519,7 @@ impl VectorApp {
         .detach();
         cx.subscribe(
             &emoji_picker,
-            |app, _, crate::picker::PackMenu(id, own, at), cx| {
+            |app, _, crate::picker::PackMenu(id, own, theme, at), cx| {
                 let mut rows = vec![(
                     kit::MenuItem::new("Share Pack", "share"),
                     MenuAct::PackShare(id.clone()),
@@ -530,11 +530,29 @@ impl VectorApp {
                         MenuAct::PackEdit(id.clone()),
                     ));
                 }
-                rows.push((
-                    kit::MenuItem::new("Remove Pack", "x-user").danger(),
-                    MenuAct::PackRemove(id.clone()),
-                ));
+                if !*theme {
+                    rows.push((
+                        kit::MenuItem::new("Remove Pack", "x-user").danger(),
+                        MenuAct::PackRemove(id.clone()),
+                    ));
+                }
                 app.show_menu(*at, rows, cx);
+            },
+        )
+        .detach();
+        cx.subscribe(
+            &emoji_picker,
+            |app, _, crate::picker::ReorderPacks(ids), _| {
+                if !app.live {
+                    return;
+                }
+                let ids = ids.clone();
+                // The order is already on screen; a failure only needs the log.
+                let _ = backend::run(async move {
+                    if let Err(e) = vector_core::emoji_packs::reorder_emoji_packs(ids) {
+                        vector_core::log_warn!("[EmojiPacks] reorder failed: {e}");
+                    }
+                });
             },
         )
         .detach();
@@ -2803,14 +2821,7 @@ impl VectorApp {
             p.prefetch_gifs(cx);
         });
         if self.live {
-            let packs = backend::run(vector_core::emoji_packs::refresh_subscribed_packs());
-            let p = picker.clone();
-            cx.spawn(async move |_, cx| {
-                let Ok(Ok(packs)) = packs.await else { return };
-                let packs = crate::picker::packs_from_core(packs, str::to_string);
-                p.update(cx, |p, cx| p.set_packs(packs, cx));
-            })
-            .detach();
+            self.load_equipped(true, cx);
             let rx = backend::run(async {
                 (
                     backend::actions::emoji_usage(),
@@ -8983,12 +8994,25 @@ impl VectorApp {
             picker.update(cx, |p, cx| p.set_packs(packs, cx));
             return;
         }
-        let rx =
-            backend::run(async { vector_core::emoji_packs::load_all_packs().unwrap_or_default() });
-        cx.spawn(async move |_, cx| {
-            let Ok(packs) = rx.await else { return };
-            let packs = crate::picker::packs_from_core(packs, str::to_string);
+        self.load_equipped(false, cx);
+    }
+
+    /// The account's packs with the theme's pinned one at its slot, fetching that once if unseen.
+    fn load_equipped(&mut self, refresh: bool, cx: &mut Context<Self>) {
+        let picker = self.emoji_picker.clone();
+        let rx = backend::run(backend::packs::equipped(refresh));
+        cx.spawn(async move |this, cx| {
+            let Ok(Ok(eq)) = rx.await else { return };
+            let mut packs = crate::picker::packs_from_core(eq.packs, str::to_string);
+            if let Some(p) = eq.theme.and_then(|i| packs.get_mut(i)) {
+                p.theme = true;
+            }
             picker.update(cx, |p, cx| p.set_packs(packs, cx));
+            let Some(naddr) = eq.fetch else { return };
+            if !backend::run(backend::packs::fetch_theme(naddr)).await.unwrap_or(false) {
+                return;
+            }
+            this.update(cx, |this, cx| this.load_equipped(false, cx)).ok();
         })
         .detach();
     }
@@ -11865,6 +11889,7 @@ impl VectorApp {
             return;
         };
         cx.notify();
+        let mut pack_reload = false;
         match act {
             Act::Category(id) => {
                 s.open_select = None;
@@ -12024,6 +12049,7 @@ impl VectorApp {
                         s.theme = value.to_string();
                         if self.live {
                             backend::prefs::set_sql("theme", value.to_string());
+                            pack_reload = true;
                         }
                     }
                     "notif-privacy" => {
@@ -12263,6 +12289,9 @@ impl VectorApp {
                 search.update(cx, |input, cx| input.clear(window, cx));
                 window.focus(&search.focus_handle(cx), cx);
             }
+        }
+        if pack_reload {
+            self.reload_picker_packs(cx);
         }
     }
 

@@ -163,3 +163,77 @@ pub async fn gone(urls: Vec<String>) -> Vec<String> {
     .collect()
     .await
 }
+
+/// `THEME_EMOJI_PACKS`: the pack a theme pins, outside the equip slots and the kind-10030 list.
+const THEME_PACKS: &[(&str, &str)] = &[(
+    "vector",
+    "naddr1qqxx7mt2f945yvj0fdg8x3czyzu0jtnpuuw5tp4wdlnfwrmnm58ahzgpp9vfut6p00h5gkam4ykg6qcyqqq82nsstfm4j",
+)];
+
+/// The picker's packs in display order, each cut to the display cap.
+pub struct Equipped {
+    pub packs: Vec<EmojiPack>,
+    /// Where the theme's pinned pack sits, when it is not a subscription.
+    pub theme: Option<usize>,
+    /// The theme pins a pack this account has never cached: fetch it, then load again.
+    pub fetch: Option<String>,
+}
+
+/// Cache-only, so the rail paints before any relay answers.
+pub async fn equipped(refresh: bool) -> Result<Equipped, String> {
+    let mut packs = if refresh {
+        emoji_packs::refresh_subscribed_packs().await?
+    } else {
+        emoji_packs::load_all_packs()?
+    };
+    let cap = emoji_packs::effective_display_cap();
+    for p in &mut packs {
+        p.emojis.truncate(cap);
+    }
+    let theme = super::prefs::sql("theme").unwrap_or_else(|| "vector".into());
+    let naddr = THEME_PACKS
+        .iter()
+        .find(|(t, _)| *t == theme)
+        .map(|(_, n)| *n)
+        .filter(|n| !packs.iter().any(|p| p.id == *n));
+    let cached = naddr
+        .and_then(|n| emoji_packs::parse_naddr(n).ok())
+        .and_then(|a| emoji_packs::load_cached_pack(&a.to_addr_string()).ok().flatten())
+        .filter(|p| !p.emojis.is_empty());
+    let Some(mut pin) = cached else {
+        emoji_packs::set_theme_emoji_tags(Vec::new());
+        return Ok(Equipped {
+            packs,
+            theme: None,
+            fetch: naddr.map(str::to_string),
+        });
+    };
+    pin.emojis.truncate(cap);
+    emoji_packs::set_theme_emoji_tags(
+        pin.emojis
+            .iter()
+            .map(|e| (e.shortcode.clone(), e.url.clone()))
+            .collect(),
+    );
+    let anchor = emoji_packs::get_theme_slot_anchor().unwrap_or_default();
+    let at = if anchor.is_empty() {
+        0
+    } else {
+        packs.iter().position(|p| p.id == anchor).map_or(0, |i| i + 1)
+    };
+    packs.insert(at, pin);
+    Ok(Equipped {
+        packs,
+        theme: Some(at),
+        fetch: None,
+    })
+}
+
+/// Fetches the theme's pack into the cache; true when there is now one to show.
+pub async fn fetch_theme(naddr: String) -> bool {
+    emoji_packs::get_or_fetch_theme_pack(&naddr)
+        .await
+        .ok()
+        .flatten()
+        .is_some_and(|p| !p.emojis.is_empty())
+}

@@ -106,6 +106,7 @@ pub struct PackEmoji {
 }
 
 /// An equipped pack, in the rail's order.
+#[derive(Clone)]
 pub struct Pack {
     pub id: String,
     /// The `d` tag an edit republishes under.
@@ -119,6 +120,8 @@ pub struct Pack {
     /// Revoked (1) or missing (2): shown greyed with why, never offered.
     pub status: u8,
     pub emojis: Vec<Rc<PackEmoji>>,
+    /// The theme's pinned pack: no Remove, and it moves as the `theme_slot` marker.
+    pub theme: bool,
 }
 
 impl Pack {
@@ -185,6 +188,7 @@ pub fn packs_from_core(
             logo: (!p.image_url.is_empty()).then(|| src(&p.image_url)),
             own: p.is_own,
             status: p.status,
+            theme: false,
             emojis: p
                 .emojis
                 .iter()
@@ -254,7 +258,98 @@ pub struct PickedCustom(pub String, pub String, pub bool);
 /// A dead pack's Remove Pack.
 pub struct RemovePack(pub String);
 /// A pack tab or header's context menu, at the pointer.
-pub struct PackMenu(pub String, pub bool, pub gpui::Point<gpui::Pixels>);
+pub struct PackMenu(pub String, pub bool, pub bool, pub gpui::Point<gpui::Pixels>);
+/// The rail's new order, as `reorder_emoji_packs` takes it.
+pub struct ReorderPacks(pub Vec<String>);
+
+/// A pack tab in flight, by its place in the rail.
+#[derive(Clone, Copy)]
+struct PackDrag(usize);
+
+/// `.emoji-pack-tab-ghost`: the tab, shrunk and lifted, centred on the pointer.
+struct TabGhost {
+    logo: Option<String>,
+    letter: String,
+    media: MediaRef,
+    grab: gpui::Point<gpui::Pixels>,
+}
+
+impl Render for TabGhost {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        let size = 30. * 0.85;
+        let face = match &self.logo {
+            Some(src) => {
+                let state = self.media.as_ref().map(|(m, _)| m.borrow_mut().custom(src, true));
+                thumb_of(state, size)
+            }
+            None => letter_plate(&self.letter, 28. * 0.85, 13. * 0.85),
+        };
+        div()
+            .ml(self.grab.x - px(size / 2.))
+            .mt(self.grab.y - px(size / 2.))
+            .size(px(size))
+            .rounded_full()
+            .overflow_hidden()
+            .flex()
+            .items_center()
+            .justify_center()
+            .opacity(0.9)
+            .shadow(vec![gpui::BoxShadow {
+                color: ca(0, 0, 0, 0.55),
+                offset: gpui::point(px(0.), px(8.)),
+                blur_radius: px(20.),
+                spread_radius: px(0.),
+                inset: false,
+            }])
+            .child(face)
+    }
+}
+
+/// `.emoji-pack-tab-letter-plate`: a pack with no logo, by its title's first letter.
+fn letter_plate(letter: &str, size: f32, text: f32) -> AnyElement {
+    div()
+        .size(px(size))
+        .rounded(px(4.))
+        .bg(c(0x2a2a2a))
+        .flex()
+        .items_center()
+        .justify_center()
+        .font_family(INTER)
+        .text_size(px(text))
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(c(0xffffff))
+        .child(letter.to_string())
+        .into_any_element()
+}
+
+/// The rail's drag: the tab lifted, where it would land, and the edge scroll.
+#[derive(Default)]
+struct RailDrag {
+    from: Option<usize>,
+    /// The tab the marker sits on, and whether above it.
+    drop: Option<(usize, bool)>,
+    /// Each tab's vertical extent, as last laid out.
+    tabs: Vec<(f32, f32)>,
+    y: f32,
+    /// Pixels a frame the rail scrolls while the pointer holds an edge.
+    edge: f32,
+}
+
+impl RailDrag {
+    /// `nearestByCentre` on the y axis.
+    fn resolve(&mut self) {
+        self.drop = self
+            .tabs
+            .iter()
+            .enumerate()
+            .filter(|(_, (t, b))| b > t)
+            .min_by(|a, b| {
+                let d = |(t, b): &(f32, f32)| (self.y - (t + b) / 2.).abs();
+                d(a.1).total_cmp(&d(b.1))
+            })
+            .map(|(i, (t, b))| (i, self.y < (t + b) / 2.));
+    }
+}
 /// A kaomoji, typed as text; Shift keeps the panel open. Carries the new recents to keep.
 pub struct PickedText(pub String, pub bool, pub Vec<String>);
 /// A GIF, as the URL its message carries.
@@ -284,6 +379,8 @@ pub struct EmojiPicker {
     media: Option<(Rc<std::cell::RefCell<crate::media::Media>>, bool)>,
     creator: Option<creator::Creator>,
     overlays: creator::Overlays,
+    rail: ScrollHandle,
+    rail_drag: RailDrag,
 }
 
 #[path = "packcreator.rs"]
@@ -298,6 +395,7 @@ impl EventEmitter<Picked> for EmojiPicker {}
 impl EventEmitter<PickedCustom> for EmojiPicker {}
 impl EventEmitter<RemovePack> for EmojiPicker {}
 impl EventEmitter<PackMenu> for EmojiPicker {}
+impl EventEmitter<ReorderPacks> for EmojiPicker {}
 impl EventEmitter<PickedGif> for EmojiPicker {}
 impl EventEmitter<PickedText> for EmojiPicker {}
 impl EventEmitter<Dismissed> for EmojiPicker {}
@@ -360,6 +458,8 @@ impl EmojiPicker {
             media: None,
             creator: None,
             overlays: Default::default(),
+            rail: ScrollHandle::new(),
+            rail_drag: RailDrag::default(),
         };
         this.rebuild();
         this
@@ -1423,8 +1523,74 @@ impl EmojiPicker {
 
     fn pack_menu(&mut self, i: usize, at: gpui::Point<gpui::Pixels>, cx: &mut Context<Self>) {
         if let Some(p) = self.packs.get(i) {
-            cx.emit(PackMenu(p.id.clone(), p.own, at));
+            cx.emit(PackMenu(p.id.clone(), p.own, p.theme, at));
         }
+    }
+
+    /// The edge scroll a held drag keeps running; a finished drag lets go of its marker.
+    fn rail_tick(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let d = &mut self.rail_drag;
+        if !cx.has_active_drag() {
+            if d.from.is_some() {
+                d.from = None;
+                d.drop = None;
+            }
+            d.edge = 0.;
+            return;
+        }
+        if d.edge == 0. {
+            return;
+        }
+        let off = self.rail.offset();
+        let max = self.rail.max_offset().y;
+        let y = (off.y - px(d.edge)).clamp(-max, px(0.));
+        if y == off.y {
+            return;
+        }
+        let moved = f32::from(y - off.y);
+        self.rail.set_offset(gpui::point(off.x, y));
+        for t in &mut d.tabs {
+            t.0 += moved;
+            t.1 += moved;
+        }
+        d.resolve();
+        window.request_animation_frame();
+    }
+
+    /// `_applyPackTabReorder`: the lifted tab lands at the marker, and the order persists.
+    fn drop_pack(&mut self, cx: &mut Context<Self>) {
+        let d = std::mem::take(&mut self.rail_drag);
+        let (Some(from), Some((to, above))) = (d.from, d.drop) else {
+            return;
+        };
+        let n = self.packs.len();
+        if from == to || from >= n || to >= n {
+            return;
+        }
+        let mut order: Vec<usize> = (0..n).collect();
+        order.remove(from);
+        let at = order.iter().position(|&k| k == to).unwrap_or(0) + usize::from(!above);
+        order.insert(at, from);
+        if order.iter().enumerate().all(|(j, &k)| j == k) {
+            return;
+        }
+        let packs: Vec<Pack> = order.iter().map(|&k| self.packs[k].clone()).collect();
+        self.collapsed = self
+            .collapsed
+            .iter()
+            .map(|s| match s {
+                Section::Pack(k) => Section::Pack(order.iter().position(|o| o == k).unwrap_or(*k)),
+                s => *s,
+            })
+            .collect();
+        let ids = packs
+            .iter()
+            .map(|p| if p.theme { "theme_slot".to_string() } else { p.id.clone() })
+            .collect();
+        self.packs = Rc::new(packs);
+        self.rebuild();
+        cx.emit(ReorderPacks(ids));
+        cx.notify();
     }
 
     /// A custom emoji's picture, asked of the shared cache on first sight.
@@ -1660,6 +1826,7 @@ fn thumb_of(state: Option<crate::media::Custom>, size: f32) -> AnyElement {
 
 impl Render for EmojiPicker {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.rail_tick(window, cx);
         let mode_btn = |label: &'static str, mode: Mode, cx: &mut Context<Self>| {
             let active = self.mode == mode;
             div()
@@ -1778,10 +1945,39 @@ impl Render for EmojiPicker {
             .border_color(c(PRIMARY))
             .id("picker-rail")
             .overflow_y_scroll()
+            .track_scroll(&self.rail)
+            .on_drag_move(cx.listener(|this, ev: &gpui::DragMoveEvent<PackDrag>, _, cx| {
+                let PackDrag(from) = *ev.drag(cx);
+                let y = f32::from(ev.event.position.y);
+                let (top, bottom) = (f32::from(ev.bounds.top()), f32::from(ev.bounds.bottom()));
+                const ZONE: f32 = 14.;
+                const MAX: f32 = 9.;
+                let d = &mut this.rail_drag;
+                d.from = Some(from);
+                d.y = y;
+                d.edge = if y < top + ZONE {
+                    -MAX.min((top + ZONE - y) * 0.25)
+                } else if y > bottom - ZONE {
+                    MAX.min((y - (bottom - ZONE)) * 0.25)
+                } else {
+                    0.
+                };
+                let was = d.drop;
+                d.resolve();
+                if was != d.drop || d.edge != 0. {
+                    cx.notify();
+                }
+            }))
             .child(rail_btn("icons/clock.svg", Some(Section::Recents), cx))
             .child(rail_btn("icons/smile-face.svg", Some(Section::All), cx))
             .children(self.packs.iter().enumerate().map(|(i, p)| {
                 let s = Section::Pack(i);
+                let letter = p
+                    .title
+                    .chars()
+                    .next()
+                    .map(|c| c.to_uppercase().to_string())
+                    .unwrap_or_default();
                 let face: AnyElement = match &p.logo {
                     Some(src) => div()
                         .size_full()
@@ -1789,26 +1985,26 @@ impl Render for EmojiPicker {
                         .overflow_hidden()
                         .child(self.thumb(src, 30., true))
                         .into_any_element(),
-                    None => div()
-                        .size(px(28.))
-                        .rounded(px(4.))
-                        .bg(c(0x2a2a2a))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .font_family(INTER)
-                        .text_size(px(13.))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(c(0xffffff))
-                        .child(
-                            p.title
-                                .chars()
-                                .next()
-                                .map(|c| c.to_uppercase().to_string())
-                                .unwrap_or_default(),
-                        )
-                        .into_any_element(),
+                    None => letter_plate(&letter, 28., 13.),
                 };
+                let ghost = (p.logo.clone(), letter, self.media.clone());
+                let marker = self.rail_drag.drop.filter(|(t, _)| *t == i).map(|(_, above)| {
+                    div()
+                        .absolute()
+                        .left(px(4.))
+                        .right(px(4.))
+                        .h(px(3.))
+                        .rounded(px(2.))
+                        .bg(c(PRIMARY))
+                        .shadow(vec![gpui::BoxShadow {
+                            color: c(PRIMARY),
+                            offset: gpui::point(px(0.), px(0.)),
+                            blur_radius: px(8.),
+                            spread_radius: px(0.),
+                            inset: false,
+                        }])
+                        .map(|d| if above { d.top(px(-4.)) } else { d.bottom(px(-4.)) })
+                });
                 div()
                     .id(SharedString::from(format!("picker-tab-{i}")))
                     .relative()
@@ -1833,6 +2029,7 @@ impl Render for EmojiPicker {
                                 .bg(c(PRIMARY)),
                         )
                     })
+                    .when(self.rail_drag.from == Some(i), |d| d.opacity(0.3))
                     .on_click(cx.listener(move |this, _, _, cx| this.go(s, cx)))
                     .on_mouse_down(
                         gpui::MouseButton::Right,
@@ -1840,7 +2037,26 @@ impl Render for EmojiPicker {
                             this.pack_menu(i, ev.position, cx)
                         }),
                     )
+                    .on_drag(PackDrag(i), move |_, grab, _, cx| {
+                        let (logo, letter, media) = ghost.clone();
+                        cx.new(|_| TabGhost {
+                            logo,
+                            letter,
+                            media,
+                            grab,
+                        })
+                    })
+                    .on_drag_move(cx.listener(
+                        move |this, ev: &gpui::DragMoveEvent<PackDrag>, _, _| {
+                            let d = &mut this.rail_drag;
+                            if d.tabs.len() <= i {
+                                d.tabs.resize(i + 1, (0., 0.));
+                            }
+                            d.tabs[i] = (f32::from(ev.bounds.top()), f32::from(ev.bounds.bottom()));
+                        },
+                    ))
                     .child(face)
+                    .children(marker)
             }))
             .child(
                 div()
@@ -1931,6 +2147,7 @@ impl Render for EmojiPicker {
                 inset: false,
             }])
             .on_mouse_down_out(cx.listener(|_, _, _, cx| cx.emit(Dismissed)))
+            .on_drop(cx.listener(|this, _: &PackDrag, _, cx| this.drop_pack(cx)))
             .child(search)
             .child(body)
             .children(overlays)
