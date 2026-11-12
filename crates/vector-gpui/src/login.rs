@@ -609,6 +609,16 @@ impl LoginView {
         }
     }
 
+    /// `encryption_upgrading`: this unlock also moves the key onto a fresh derivation.
+    pub fn upgrading(&mut self, total: u64, completed: u64, cx: &mut Context<Self>) {
+        if !(self.unlock && self.busy) {
+            return;
+        }
+        let pct = if total > 0 { format!(" {}%", completed * 100 / total) } else { String::new() };
+        self.title = format!("Strengthening your encryption…{pct}").into();
+        cx.notify();
+    }
+
     fn set_title(&mut self, title: &'static str, busy: bool, cx: &mut Context<Self>) {
         self.title = title.into();
         self.busy = busy;

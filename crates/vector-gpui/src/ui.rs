@@ -2715,6 +2715,13 @@ impl VectorApp {
             .unwrap_or_default()
             .to_string();
         match name {
+            "encryption_upgrading" => {
+                if let Screen::Login(view) = &self.screen {
+                    let n = |k| payload.get(k).and_then(Value::as_u64).unwrap_or(0);
+                    let (total, completed) = (n("total"), n("completed"));
+                    view.update(cx, |v, cx| v.upgrading(total, completed, cx));
+                }
+            }
             "bunker_state" => {
                 let state = match payload.get("state").and_then(Value::as_str) {
                     Some("online") => "online",
