@@ -135,7 +135,8 @@ fn row(s: &Switcher, r: &Row, last: bool, on: &OnAct) -> AnyElement {
 }
 
 /// The backdrop and the panel, over the column at `left` below a header ending at `top`.
-pub fn view(s: &Switcher, top: f32, left: f32, viewport_h: f32, on: &OnAct) -> AnyElement {
+/// `viewport` is (width, height); `hang` drops it from the slim header's avatar.
+pub fn view(s: &Switcher, top: f32, left: f32, viewport: (f32, f32), hang: bool, on: &OnAct) -> AnyElement {
     let close = {
         let on = on.clone();
         move |_: &gpui::MouseDownEvent, w: &mut Window, cx: &mut App| on(Act::Close, w, cx)
@@ -172,71 +173,65 @@ pub fn view(s: &Switcher, top: f32, left: f32, viewport_h: f32, on: &OnAct) -> A
                 "Add Profile"
             })
     });
+    let panel = div()
+        .id("profile-switcher-panel")
+        .occlude()
+        .flex()
+        .flex_col()
+        .overflow_hidden()
+        .border_color(white_a(0.08))
+        .shadow(vec![gpui::BoxShadow {
+            color: gpui::black().opacity(0.35),
+            offset: gpui::point(px(0.), px(12.)),
+            blur_radius: px(24.),
+            spread_radius: px(0.),
+            inset: false,
+        }])
+        .child(
+            div()
+                .id("profile-switcher-list")
+                .flex_1()
+                .min_h_0()
+                .overflow_y_scroll()
+                .children(s.rows.iter().enumerate().map(|(i, r)| row(s, r, i + 1 == count, on))),
+        )
+        .children(add);
+    let panel = if hang {
+        // `.cc-dropdown`: a menu hanging from the avatar, not a takeover of the list.
+        panel
+            .absolute()
+            .top(px(top))
+            .left(px(left))
+            .w(px(320_f32.min(viewport.0 - 16.)))
+            .max_h(px((viewport.1 * 0.6).min(440.)))
+            .bg(c(0x171717))
+            .border_1()
+            .rounded(px(12.))
+    } else {
+        panel
+            .w_full()
+            .max_w(px(420.))
+            .max_h(px(viewport.1 - 80.))
+            .bg(c(0x161616))
+            .border_l_1()
+            .border_r_1()
+            .border_b_1()
+            .rounded_b(px(12.))
+    }
+    .with_animation(
+        "profile-switcher-in",
+        gpui::Animation::new(std::time::Duration::from_millis(140)).with_easing(gpui::ease_out_quint()),
+        |d, t| d.opacity(t).mt(px(-6. * (1. - t))),
+    );
+    let backdrop = div().absolute().left(px(left)).right_0().bottom_0().on_mouse_down(MouseButton::Left, close);
     div()
         .absolute()
         .inset_0()
-        .child(
-            div()
-                .absolute()
-                .top(px(top))
-                .left(px(left))
-                .right_0()
-                .bottom_0()
-                .bg(gpui::black().opacity(0.45))
-                .on_mouse_down(MouseButton::Left, close),
-        )
-        .child(
-            div()
-                .absolute()
-                .top(px(top))
-                .left(px(left))
-                .right_0()
-                .flex()
-                .justify_center()
-                .child(
-                    div()
-                        .id("profile-switcher-panel")
-                        .occlude()
-                        .w_full()
-                        .max_w(px(420.))
-                        .max_h(px(viewport_h - 80.))
-                        .flex()
-                        .flex_col()
-                        .overflow_hidden()
-                        .bg(c(0x161616))
-                        .border_l_1()
-                        .border_r_1()
-                        .border_b_1()
-                        .border_color(white_a(0.08))
-                        .rounded_b(px(12.))
-                        .shadow(vec![gpui::BoxShadow {
-                            color: gpui::black().opacity(0.35),
-                            offset: gpui::point(px(0.), px(12.)),
-                            blur_radius: px(24.),
-                            spread_radius: px(0.),
-                            inset: false,
-                        }])
-                        .child(
-                            div()
-                                .id("profile-switcher-list")
-                                .flex_1()
-                                .min_h_0()
-                                .overflow_y_scroll()
-                                .children(
-                                    s.rows
-                                        .iter()
-                                        .enumerate()
-                                        .map(|(i, r)| row(s, r, i + 1 == count, on)),
-                                ),
-                        )
-                        .children(add)
-                        .with_animation(
-                            "profile-switcher-in",
-                            gpui::Animation::new(std::time::Duration::from_millis(140))
-                                .with_easing(gpui::ease_out_quint()),
-                            |d, t| d.opacity(t).mt(px(-6. * (1. - t))),
-                        ),
-                ),
-        )
+        .child(if hang { backdrop.top_0().left_0() } else { backdrop.top(px(top)).bg(gpui::black().opacity(0.45)) })
+        .child(if hang {
+            panel.into_any_element()
+        } else {
+            div().absolute().top(px(top)).left(px(left)).right_0().flex().justify_center().child(panel).into_any_element()
+        })
         .into_any_element()
 }

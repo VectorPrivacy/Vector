@@ -5500,7 +5500,10 @@ impl Render for VectorApp {
                 let on: crate::switcher::OnAct = Rc::new(move |act, window, cx| {
                     app.update(cx, |app, cx| app.on_switcher(act, window, cx)).ok();
                 });
-                crate::switcher::view(s, CHROME_H + 52., 8., f32::from(window.viewport_size().height), &on)
+                let vp = window.viewport_size();
+                let hang = self.profile.is_none();
+                let (top, left) = if hang { (CHROME_H + 52., 8.) } else { (CHROME_H + 60., 0.) };
+                crate::switcher::view(s, top, left, (f32::from(vp.width), f32::from(vp.height)), hang, &on)
             }))
             .children(
                 self.switcher
@@ -5516,7 +5519,8 @@ impl Render for VectorApp {
                             s,
                             CHROME_H + 60.,
                             rail_mode.width() + LIST_W,
-                            f32::from(window.viewport_size().height),
+                            (f32::from(window.viewport_size().width), f32::from(window.viewport_size().height)),
+                            false,
                             &on,
                         )
                     }),
@@ -15954,12 +15958,13 @@ impl VectorApp {
         at_cap: bool,
         cx: &mut Context<Self>,
     ) {
-        let Some(p) = self.profile.as_mut() else {
-            return;
-        };
         // A refresh after a removal keeps delete mode.
         let editing = self.switcher.as_ref().is_some_and(|s| s.editing);
-        p.switcher = Some(editing);
+        match self.profile.as_mut() {
+            Some(p) => p.switcher = Some(editing),
+            None if !self.is_slim => return,
+            None => {}
+        }
         self.switcher = Some(crate::switcher::Switcher {
             rows,
             active,
