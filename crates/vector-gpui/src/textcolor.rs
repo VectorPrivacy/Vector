@@ -420,6 +420,177 @@ impl Palette {
     }
 }
 
+/// The spelling offered, from the first English locale: `color` in the US and its
+/// territories (and with no English at all), `colour` elsewhere. Both are always read.
+pub fn color_word() -> &'static str {
+    static WORD: LazyLock<&'static str> = LazyLock::new(|| {
+        let langs = ["LANGUAGE", "LC_ALL", "LC_MESSAGES", "LANG"]
+            .iter()
+            .filter_map(|k| std::env::var(k).ok())
+            .flat_map(|v| v.split(':').map(str::to_string).collect::<Vec<_>>())
+            .map(|l| l.replace('_', "-"));
+        let english = langs.into_iter().find(|l| {
+            let l = l.to_ascii_lowercase();
+            l == "en" || l.starts_with("en-") || l.starts_with("en.")
+        });
+        match english {
+            None => "color",
+            Some(l) => {
+                let region = l.split(['-', '.', '@']).nth(1).unwrap_or("").to_ascii_uppercase();
+                if region.is_empty() || ["US", "PH", "PR", "UM", "AS", "GU", "VI", "LR"].contains(&region.as_str()) {
+                    "color"
+                } else {
+                    "colour"
+                }
+            }
+        }
+    });
+    *WORD
+}
+
+/// The names a command's hint offers as one-tap swatches.
+const CHIP_COLORS: [&str; 12] = ["red", "orange", "yellow", "green", "teal", "blue", "purple", "pink", "brown", "coral", "mint", "white"];
+
+/// A colour as it will render, for a swatch.
+pub fn swatch(hex: &str) -> Hsla {
+    readable(rgb(hex))
+}
+
+/// Suggestions for a colour argument: a spread of examples while it's empty, then the
+/// names that start with (then contain) what's typed, or the typed `#hex`.
+pub fn color_choices(query: &str) -> Vec<(String, Hsla)> {
+    let q = query.trim_matches(|c: char| c.is_ascii_whitespace()).to_ascii_lowercase();
+    let named = |n: &str| vector_core::text_color::hex(n).map(|h| (n.to_string(), swatch(&h)));
+    if q.is_empty() {
+        return CHIP_COLORS.iter().filter_map(|n| named(n)).collect();
+    }
+    if q.starts_with('#') {
+        return vector_core::text_color::hex(&q).map(|h| (q.clone(), swatch(&h))).into_iter().collect();
+    }
+    let mut names: Vec<&str> = vector_core::text_color::named().map(|(n, _)| n).collect();
+    let common = |n: &str| !CHIP_COLORS.contains(&n);
+    names.sort_by(|a, b| (common(a), a.len(), *a).cmp(&(common(b), b.len(), *b)));
+    let starts = names.iter().filter(|n| n.starts_with(&q));
+    let within = names.iter().filter(|n| !n.starts_with(&q) && n.contains(&q));
+    starts.chain(within).take(12).filter_map(|n| named(n)).collect()
+}
+
+/// A colour command's effect as gradient stops, from the colour words typed so far;
+/// a missing colour shows grey.
+pub fn effect_preview(name: &str, words: &[String]) -> Option<Vec<Hsla>> {
+    let at = |w: Option<&String>| {
+        w.and_then(|w| vector_core::text_color::hex(w)).map_or(gpui::rgb(0x464646).into(), |h| swatch(&h))
+    };
+    match name {
+        "rainbow" => Some((0..7).map(|i| readable(hsl(360. * i as f64 / 7., 1., 0.6))).collect()),
+        "gradient" => Some(vec![at(words.first()), at(words.get(1))]),
+        "color" | "colour" => Some(vec![at(words.first()), at(words.first())]),
+        _ => None,
+    }
+}
+
+/// A leading `/rainbow`, `/gradient a b` or `/color c` command (`tcCommand`).
+#[derive(Debug, PartialEq)]
+pub struct Command {
+    /// `rainbow`, `gradient` or `color`.
+    pub name: &'static str,
+    pub typed: String,
+    pub body: Result<(usize, Effect, Vec<String>), String>,
+}
+
+pub fn command(src: &str) -> Option<Command> {
+    let rest = src.strip_prefix('/')?;
+    let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+    let typed = &rest[..end];
+    let name = match typed {
+        "rainbow" => "rainbow",
+        "gradient" => "gradient",
+        "color" | "colour" => "color",
+        _ => return None,
+    };
+    let want = match name {
+        "gradient" => 2,
+        "color" => 1,
+        _ => 0,
+    };
+    let word = color_word();
+    let mut at = 1 + end;
+    let mut colors = Vec::new();
+    let fail = |e: String| Some(Command { name, typed: typed.to_string(), body: Err(e) });
+    for _ in 0..want {
+        let tail = &src[at..];
+        let gap = tail.len() - tail.trim_start().len();
+        let arg_len = tail[gap..].find(char::is_whitespace).unwrap_or(tail.len() - gap);
+        let hex = (gap > 0 && arg_len > 0).then(|| vector_core::text_color::hex(&tail[gap..gap + arg_len])).flatten();
+        let Some(hex) = hex else {
+            return fail(if name == "gradient" {
+                format!("needs two {word}s, like /gradient pink #60a5fa text")
+            } else {
+                format!("needs a {word}, like /{word} pink text")
+            });
+        };
+        colors.push(hex);
+        at += gap + arg_len;
+    }
+    let tail = &src[at..];
+    let gap = tail.len() - tail.trim_start().len();
+    if gap == 0 || tail.trim().is_empty() {
+        return fail(format!("needs some text to {word}"));
+    }
+    let effect = match name {
+        "rainbow" => Effect::Rainbow,
+        "gradient" => Effect::Gradient,
+        _ => Effect::Solid,
+    };
+    Some(Command { name, typed: typed.to_string(), body: Ok((at + gap, effect, colors)) })
+}
+
+/// A colour command rewritten as the markup core reads.
+pub fn command_to_markup(src: &str) -> Option<String> {
+    let c = command(src)?;
+    let (from, _, colors) = c.body.ok()?;
+    let args: String = colors.iter().map(|h| format!(" {h}")).collect();
+    let body = &src[from..];
+    let fence = |l: &str| {
+        let sp = l.bytes().take(3).take_while(|&b| b == b' ').count();
+        l[sp..].starts_with("```")
+    };
+    let lead = if fence(body) { "\n" } else { "" };
+    let gap = if body.rsplit('\n').next().is_some_and(fence) { "\n" } else { "" };
+    Some(format!("<{n}{args}>{lead}{body}{gap}</{n}>", n = c.name))
+}
+
+/// The composer's colour preview (`cmpApplyColor`): byte ranges of markup that recedes,
+/// and each painted glyph's byte offset with its colour. `skip` holds ranges that keep
+/// their own look.
+pub fn composer_paint(src: &str, command_owned: bool, skip: &[std::ops::Range<usize>]) -> (Vec<std::ops::Range<usize>>, Vec<(std::ops::Range<usize>, Hsla)>) {
+    use unicode_segmentation::UnicodeSegmentation;
+    let mut marks = Vec::new();
+    let mut spans: Vec<(std::ops::Range<usize>, ColorSpan)> = Vec::new();
+    let span = |effect, colors| ColorSpan { from: 0, to: 0, effect, colors };
+    if command_owned && let Some(Command { body: Ok((from, effect, colors)), .. }) = command(src) {
+        marks.push(0..from);
+        spans.push((from..src.len(), span(effect, colors)));
+    }
+    for p in vector_core::text_color::markup_pairs(src) {
+        marks.push(p.open.clone());
+        marks.push(p.close.clone());
+        spans.push((p.open.end..p.close.start, span(p.effect, p.colors)));
+    }
+    let skipped = |i: usize| skip.iter().chain(marks.iter()).any(|r| r.contains(&i));
+    let mut paint = Vec::new();
+    for (r, s) in &spans {
+        let glyphs: Vec<(usize, usize)> = src[r.clone()]
+            .grapheme_indices(true)
+            .filter(|(i, g)| !g.chars().all(char::is_whitespace) && !skipped(r.start + i))
+            .map(|(i, g)| (r.start + i, g.len()))
+            .collect();
+        let palette = Palette::new(s, glyphs.len());
+        paint.extend(glyphs.into_iter().enumerate().map(|(k, (at, len))| (at..at + len, palette.at(k))));
+    }
+    (marks, paint)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -464,6 +635,21 @@ mod tests {
             out.push('\n');
         }
         std::fs::write(std::env::var("TC_OUT").unwrap(), out).unwrap();
+    }
+
+    #[test]
+    fn colour_commands() {
+        assert_eq!(command_to_markup("/rainbow hi there").as_deref(), Some("<rainbow>hi there</rainbow>"));
+        assert_eq!(command_to_markup("/gradient pink #fff hi").as_deref(), Some("<gradient #f472b6 #ffffff>hi</gradient>"));
+        assert_eq!(command_to_markup("/colour red x").as_deref(), Some("<color #f04848>x</color>"));
+        assert!(command("/color nope x").unwrap().body.is_err());
+        assert!(command("/rainbow ").unwrap().body.is_err());
+        assert!(command("/rainbows x").is_none());
+        assert_eq!(color_choices("").len(), 12);
+        assert_eq!(color_choices("br")[0].0, "brown");
+        let (marks, paint) = composer_paint("<rainbow>ab c</rainbow>", true, &[]);
+        assert_eq!(marks, vec![0..9, 13..23]);
+        assert_eq!(paint.iter().map(|p| p.0.start).collect::<Vec<_>>(), vec![9, 10, 12]);
     }
 
     #[test]

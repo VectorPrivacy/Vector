@@ -72,6 +72,7 @@ pub struct TextInput {
     subs: std::cell::RefCell<(SharedString, std::rc::Rc<[Sub]>)>,
     /// An autocomplete is open: its keys go to it as `Nav`.
     nav: bool,
+    colors: Option<bool>,
     chip: bool,
     /// Markdown and tags styled in place, with the names a tag may carry.
     decorated: Option<Vec<String>>,
@@ -812,11 +813,29 @@ impl TextInput {
         use crate::decorate::Deco;
         let subs = self.subs();
         let labels: Vec<&Sub> = subs.iter().filter(|s| s.label.is_some()).collect();
-        let mut spans: Vec<(std::ops::Range<usize>, Deco)> = crate::decorate::tokenize(&self.content, names)
+        let tokens: Vec<(std::ops::Range<usize>, Deco)> = crate::decorate::tokenize(&self.content, names)
             .into_iter()
             .filter(|(r, _)| !labels.iter().any(|s| r.start < s.content.end && s.content.start < r.end))
-            .map(|(r, d)| (self.to_display(r.start)..self.to_display(r.end), d))
+            .collect();
+        let (marks, paint) = match self.colors {
+            Some(owned) => {
+                let skip: Vec<std::ops::Range<usize>> = tokens
+                    .iter()
+                    .filter(|(_, d)| matches!(d, Deco::Code | Deco::CodeMark | Deco::Mention | Deco::Spoiler))
+                    .map(|(r, _)| r.clone())
+                    .chain(subs.iter().map(|s| s.content.clone()))
+                    .collect();
+                crate::textcolor::composer_paint(&self.content, owned, &skip)
+            }
+            None => Default::default(),
+        };
+        let disp = |r: &std::ops::Range<usize>| self.to_display(r.start)..self.to_display(r.end);
+        let paint: Vec<(std::ops::Range<usize>, Hsla)> = paint.iter().map(|(r, c)| (disp(r), *c)).collect();
+        let mut spans: Vec<(std::ops::Range<usize>, Deco)> = tokens
+            .iter()
+            .map(|(r, d)| (disp(r), *d))
             .chain(labels.iter().map(|s| (s.display.clone(), Deco::Mention)))
+            .chain(marks.iter().map(|r| (disp(r), Deco::Mark)))
             .collect();
         if spans.is_empty() {
             return runs;
@@ -880,7 +899,28 @@ impl TextInput {
             }
             at = end;
         }
-        out
+        if paint.is_empty() {
+            return out;
+        }
+        let mut painted = Vec::with_capacity(out.len() + paint.len() * 2);
+        let mut at = 0;
+        for run in out {
+            let end = at + run.len;
+            let mut from = at;
+            for (r, color) in paint.iter().filter(|(r, _)| r.start < end && r.end > at) {
+                let (s, e) = (r.start.max(at), r.end.min(end));
+                if s > from {
+                    painted.push(TextRun { len: s - from, ..run.clone() });
+                }
+                painted.push(TextRun { len: e - s, color: Hsla { a: run.color.a, ..*color }, ..run.clone() });
+                from = e;
+            }
+            if end > from {
+                painted.push(TextRun { len: end - from, ..run });
+            }
+            at = end;
+        }
+        painted
     }
 }
 
@@ -1209,6 +1249,7 @@ impl TextInput {
             max_chars: None,
             subs: Default::default(),
             nav: false,
+            colors: None,
             chip: false,
             decorated: None,
             npub_label: None,
@@ -1421,6 +1462,12 @@ impl TextInput {
     }
 
     /// Tab and Escape (not Enter or the arrows) go to a suggestion chip.
+    /// Colour markup previews as it will send; `Some(true)` when a leading colour command
+    /// is Vector's own here.
+    pub fn set_colors(&mut self, colors: Option<bool>) -> bool {
+        std::mem::replace(&mut self.colors, colors) != colors
+    }
+
     pub fn set_chip(&mut self, on: bool) {
         self.chip = on;
     }

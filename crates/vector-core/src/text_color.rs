@@ -143,6 +143,11 @@ pub fn hex(s: &str) -> Option<String> {
     names().get(s.to_ascii_lowercase().as_str()).map(|h| h.to_string())
 }
 
+/// Every colour name and its `#rrggbb`, for a client's suggestions.
+pub fn named() -> impl Iterator<Item = (&'static str, &'static str)> {
+    names().iter().map(|(&k, &v)| (k, v))
+}
+
 /// Every colour name a sender can type: the CSS names, the basic ones tuned for the
 /// dark chat, and a few friendly extras. The JS side reads the same file's contents.
 fn names() -> &'static std::collections::HashMap<&'static str, &'static str> {
@@ -318,15 +323,8 @@ fn scan(content: &str) -> Vec<Markup> {
     out
 }
 
-/// Take the colour markup out of `content`. Returns the plain text and its spans;
-/// a tag without its partner stays as typed, and markup around nothing but
-/// whitespace stays too, so a send is never emptied by its own tags.
-pub fn extract(content: &str) -> (String, Vec<ColorSpan>) {
-    if !content.contains('<') {
-        return (content.to_string(), Vec::new());
-    }
-    let marks = scan(content);
-    // Pair opens with closes like brackets; an unmatched close is left as text.
+/// Opens paired with closes like brackets (an unmatched close stays text), ordered by open.
+fn pair(marks: &[Markup]) -> Vec<(usize, usize)> {
     let mut stack: Vec<usize> = Vec::new();
     let mut pairs: Vec<(usize, usize)> = Vec::new();
     for (idx, m) in marks.iter().enumerate() {
@@ -338,10 +336,46 @@ pub fn extract(content: &str) -> (String, Vec<ColorSpan>) {
             }
         }
     }
+    pairs.sort_by_key(|&(o, _)| marks[o].at);
+    pairs
+}
+
+/// One matched pair of colour tags, in byte ranges of the source: what a composer previews.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MarkupPair {
+    pub open: std::ops::Range<usize>,
+    pub close: std::ops::Range<usize>,
+    pub effect: Effect,
+    pub colors: Vec<String>,
+}
+
+/// Every matched pair of colour tags in `content`, ordered by where each opens.
+pub fn markup_pairs(content: &str) -> Vec<MarkupPair> {
+    if !content.contains('<') {
+        return Vec::new();
+    }
+    let marks = scan(content);
+    pair(&marks)
+        .into_iter()
+        .filter_map(|(o, c)| {
+            let (effect, colors) = marks[o].open.clone()?;
+            Some(MarkupPair { open: marks[o].at..marks[o].end, close: marks[c].at..marks[c].end, effect, colors })
+        })
+        .collect()
+}
+
+/// Take the colour markup out of `content`. Returns the plain text and its spans;
+/// a tag without its partner stays as typed, and markup around nothing but
+/// whitespace stays too, so a send is never emptied by its own tags.
+pub fn extract(content: &str) -> (String, Vec<ColorSpan>) {
+    if !content.contains('<') {
+        return (content.to_string(), Vec::new());
+    }
+    let marks = scan(content);
+    let pairs = pair(&marks);
     if pairs.is_empty() {
         return (content.to_string(), Vec::new());
     }
-    pairs.sort_by_key(|&(o, _)| marks[o].at);
 
     let mut cut: Vec<(usize, usize)> = pairs.iter().flat_map(|&(o, c)| [(marks[o].at, marks[o].end), (marks[c].at, marks[c].end)]).collect();
     cut.sort_unstable();

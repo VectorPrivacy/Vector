@@ -360,3 +360,13 @@ pub async fn send_voice(receiver: String, replied_to: String) -> Result<(), Stri
     .await
     .map(|_| ())
 }
+
+/// The open chat's bot commands, as the `/` picker lists them.
+pub async fn chat_commands(chat: String) -> crate::commands::Snapshot {
+    let snap = vector_core::VectorCore.get_chat_commands(&chat).await;
+    crate::commands::Snapshot {
+        bots: snap.bots,
+        commands: snap.commands.iter().flat_map(|b| crate::commands::bot_commands(&b.bot, &b.commands)).collect(),
+        fresh: snap.fresh,
+    }
+}

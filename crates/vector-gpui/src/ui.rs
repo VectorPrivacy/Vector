@@ -87,6 +87,10 @@ pub struct VectorApp {
     pack_details: Option<crate::packdetails::Details>,
     /// A link that arrived before an account was open.
     pending_link: Option<vector_core::deep_link::DeepLinkAction>,
+    /// The composer's `/` command picker, and each chat's bot commands.
+    commands: crate::commands::Picker,
+    cmd_snaps: HashMap<String, crate::commands::Snapshot>,
+    cmd_loading: HashSet<String>,
     /// The composer's `:shortcode` suggestions.
     shortcode: Option<crate::shortcodes::Popup>,
     /// `:)` and friends suggest their emoji.
@@ -367,6 +371,8 @@ enum CallGo {
 mod art_ops;
 #[path = "ui_chaneditor.rs"]
 mod chaneditor_ops;
+#[path = "ui_commands.rs"]
+mod commands_ops;
 #[path = "ui_moderation.rs"]
 mod moderation_ops;
 
@@ -608,6 +614,9 @@ impl VectorApp {
             media: Rc::default(),
             pack_details: None,
             pending_link: None,
+            commands: Default::default(),
+            cmd_snaps: HashMap::new(),
+            cmd_loading: HashSet::new(),
             shortcode: None,
             emoticons: true,
             mention: None,
@@ -3377,6 +3386,10 @@ impl VectorApp {
 
     fn send(&mut self, text: String, cx: &mut Context<Self>) {
         let Some(id) = self.open.clone() else { return };
+        let Some((text, _bot)) = self.route_command(&text, cx) else {
+            self.input.update(cx, |i, cx| i.set_text(&text, cx));
+            return;
+        };
         let text = crate::mentions::resolve(&text, &std::mem::take(&mut self.tracked));
         self.sync_mentions(cx);
         let mode = std::mem::replace(&mut self.mode, Mode::Normal);
@@ -3427,9 +3440,11 @@ impl VectorApp {
             let Some(chat) = store.chat_mut(&id) else {
                 return;
             };
+            let (text, colors) = vector_core::text_color::extract(&text);
             let msg = Message {
                 id: format!("local-{now}-{}", chat.messages.len()),
                 content: text,
+                text_spans: colors.into_iter().map(vector_core::text_spans::TextSpan::Color).collect(),
                 replied_to: reply,
                 at: now,
                 mine: true,
@@ -5445,7 +5460,7 @@ impl VectorApp {
                 (self.picker_open && !self.picker_status)
                     .then(|| (self.emoji_picker.clone(), self.picker.is_none())),
                 self.attach,
-                self.time_popup(cx).or_else(|| self.mention
+                self.command_popup(cx).or_else(|| self.time_popup(cx)).or_else(|| self.mention
                     .as_ref()
                     .map(|p| {
                         let app = cx.entity().downgrade();
@@ -6103,7 +6118,10 @@ fn attachment_panel(opened: std::time::Instant, cx: &mut Context<VectorApp>) -> 
                     item(1, "attach-folder", "icons/folder.svg", 27., "Folder")
                         .on_click(cx.listener(|app, _, window, cx| app.pick_folder(window, cx))),
                 )
-                .child(item(2, "attach-commands", "ui/slash.svg", 22.5, "Commands"))
+                .child(
+                    item(2, "attach-commands", "ui/slash.svg", 22.5, "Commands")
+                        .on_click(cx.listener(|app, _, window, cx| app.open_commands(window, cx))),
+                )
                 .child(item(
                     3,
                     "attach-miniapps",
@@ -8863,6 +8881,9 @@ impl VectorApp {
             self.send_shown = send;
             self.send_flips += 1;
         }
+        if self.update_commands(&text, cx) {
+            return;
+        }
         let now = self.now_local();
         self.time_chip = None;
         self.input.update(cx, |i, _| i.set_chip(false));
@@ -9137,6 +9158,9 @@ impl VectorApp {
         cx: &mut Context<Self>,
     ) {
         use crate::composer::Nav;
+        if self.command_nav(nav, window, cx) {
+            return;
+        }
         if let Some(p) = self.time_pick.as_mut() {
             let n = p.styles().len();
             match nav {
