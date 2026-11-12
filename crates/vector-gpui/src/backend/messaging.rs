@@ -418,3 +418,18 @@ pub async fn chat_commands(chat: String) -> crate::commands::Snapshot {
         fresh: snap.fresh,
     }
 }
+
+/// `get_system_events`: a chat's saved system lines, oldest first.
+pub fn system_lines(chat_id: &str) -> Vec<crate::data::SysLine> {
+    let tag = |e: &vector_core::StoredEvent, k: &str| e.tags.iter().find(|t| t.len() >= 2 && t[0] == k).map(|t| t[1].clone());
+    vector_core::db::events::get_system_events_for_chat(chat_id)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|e| crate::data::SysLine {
+            kind: tag(&e, "event-type").and_then(|t| t.parse().ok()).unwrap_or(255),
+            npub: tag(&e, "member").unwrap_or_default(),
+            at: e.created_at * 1000,
+            id: e.id,
+        })
+        .collect()
+}

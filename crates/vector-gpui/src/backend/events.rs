@@ -122,6 +122,40 @@ impl InboundEventHandler for Handler {
         });
     }
 
+    fn on_community_presence(
+        &self,
+        chat_id: &str,
+        npub: &str,
+        joined: bool,
+        event_id: &str,
+        created_at: u64,
+        invited_by: Option<&str>,
+        invited_label: Option<&str>,
+    ) {
+        let (chat_id, npub, event_id) = (chat_id.to_string(), npub.to_string(), event_id.to_string());
+        let invited_by = invited_by.map(str::to_string);
+        let invited_label = invited_label.map(str::to_string);
+        db::spawn_bound(async move {
+            presence(&chat_id, &npub, joined, &event_id, created_at, invited_by.as_deref(), invited_label.as_deref()).await;
+        });
+    }
+
+    fn on_voice_presence(&self, channel_id: &str) {
+        vector_core::emit_event("voice_presence", &json!({ "channel_id": channel_id }));
+    }
+
+    fn on_community_webxdc(&self, chat_id: &str, npub: &str, topic_id: &str, node_addr: Option<&str>, event_id: &str, created_at: u64) {
+        self.on_webxdc_signal(chat_id, npub, topic_id, node_addr, event_id, created_at);
+    }
+
+    fn on_webxdc_signal(&self, contact: &str, npub: &str, topic_id: &str, node_addr: Option<&str>, event_id: &str, created_at: u64) {
+        let (chat, npub, topic, event_id) = (contact.to_string(), npub.to_string(), topic_id.to_string(), event_id.to_string());
+        let addr = node_addr.map(str::to_string);
+        db::spawn_bound(async move {
+            crate::miniapp::on_peer_signal(&chat, &npub, &topic, addr.as_deref(), &event_id, created_at).await;
+        });
+    }
+
     fn on_community_dissolved(&self, community_id: &str) {
         vector_core::emit_event(
             "community_refreshed",
@@ -155,4 +189,45 @@ impl InboundEventHandler for Handler {
     fn on_community_self_removed(&self, community_id: &str) {
         vector_core::emit_event("community_kicked", &json!({ "community_id": community_id }));
     }
+}
+
+/// A Community join or leave, saved as its system line and shown. The save dedups by event id,
+/// so relay replays and our own echo stay silent.
+async fn presence(
+    channel_id: &str,
+    npub: &str,
+    joined: bool,
+    event_id: &str,
+    created_at: u64,
+    invited_by: Option<&str>,
+    invited_label: Option<&str>,
+) {
+    use vector_core::stored_event::SystemEventType;
+    let et = if joined { SystemEventType::MemberJoined } else { SystemEventType::MemberLeft };
+    let note = invited_by.map(|by| match invited_label {
+        Some(l) if !l.is_empty() => format!("{by}|{l}"),
+        _ => by.to_string(),
+    });
+    let inserted = db::events::save_system_event_at(event_id, channel_id, et, npub, note.as_deref(), created_at, invited_by, invited_label)
+        .await
+        .unwrap_or(false);
+    if !inserted {
+        return;
+    }
+    let nameless = STATE.lock().await.get_profile(npub).is_none_or(|p| {
+        p.nickname().is_empty() && p.display_name().is_empty() && p.name().is_empty()
+    });
+    if nameless {
+        vector_core::profile::sync::queue_profile_sync(npub.to_string(), vector_core::profile::sync::SyncPriority::High, false);
+    }
+    vector_core::emit_event(
+        "system_event",
+        &json!({
+            "conversation_id": channel_id,
+            "event_id": event_id,
+            "event_type": et.as_u8(),
+            "member_pubkey": npub,
+            "created_at_ms": created_at.saturating_mul(1000),
+        }),
+    );
 }

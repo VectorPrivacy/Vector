@@ -376,7 +376,8 @@ pub fn popup(
             .occlude()
             .child(card),
     )
-    .with_priority(10)
+    // Above every modal a popup can be asked from (Invite People, Community Settings, ...).
+    .with_priority(15)
     .into_any_element()
 }
 

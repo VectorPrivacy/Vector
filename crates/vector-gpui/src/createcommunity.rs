@@ -496,6 +496,14 @@ pub fn listed(
         .filter(|p| matches(&p.id))
         .map(|p| p.id.to_string())
         .collect();
+    // A contact whose profile never loaded is still a contact.
+    if let Some(c) = contacts {
+        people.extend(
+            c.iter()
+                .filter(|n| **n != store.my_npub && !store.profiles.contains_key(n.as_str()) && !skip(n) && matches(n))
+                .cloned(),
+        );
+    }
     let activity = |id: &str| store.chat(id).map(crate::data::last_activity).unwrap_or(0);
     people.sort_by(|a, b| {
         activity(b)

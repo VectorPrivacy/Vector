@@ -2842,6 +2842,29 @@ impl VectorApp {
                 }
                 self.refresh_rows(false);
             }
+            "system_event" => {
+                let Some(chat) = payload.get("conversation_id").and_then(Value::as_str) else { return };
+                let Some(id) = payload.get("event_id").and_then(Value::as_str) else { return };
+                let at = payload.get("created_at_ms").and_then(Value::as_u64).unwrap_or_else(|| self.store.borrow().now_ms());
+                let line = data::SysLine {
+                    id: id.to_string(),
+                    at,
+                    kind: payload.get("event_type").and_then(Value::as_u64).unwrap_or(255) as u8,
+                    npub: payload.get("member_pubkey").and_then(Value::as_str).unwrap_or_default().to_string(),
+                };
+                let added = self.store.borrow_mut().add_system(chat, line);
+                if added && self.open.as_deref() == Some(chat) {
+                    self.refresh_rows(true);
+                }
+                let community = self.store.borrow().community_of(chat).map(|c| c.community_id.clone());
+                if let Some(cid) = community {
+                    if self.community.as_ref().is_some_and(|v| v.id == cid) {
+                        self.reload_roster(cid, cx);
+                    }
+                    self.reload_communities(cx);
+                }
+                cx.notify();
+            }
             "typing-update" => {
                 let Some(chat) = payload.get("conversation_id").and_then(Value::as_str) else { return };
                 let typers: Vec<String> = payload.get("typers").and_then(Value::as_array).map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect()).unwrap_or_default();
@@ -2879,6 +2902,9 @@ impl VectorApp {
                     .as_str()
                     .or_else(|| payload.get("community_id").and_then(Value::as_str))
                     .map(String::from);
+                if let Some(open) = id.clone().filter(|i| self.live && self.community.as_ref().is_some_and(|v| &v.id == i)) {
+                    self.reload_roster(open, cx);
+                }
                 if name == "community_refreshed" && id.is_some() {
                     self.resolve_art(id, cx);
                 }
@@ -3065,6 +3091,12 @@ impl VectorApp {
                     && (self.gap.is_some() || !self.timeline.is_following_tail());
                 if below {
                     self.unread_below += 1;
+                }
+                if name == "message_new" && !msg.mine {
+                    let sender = msg.npub.clone().unwrap_or_else(|| chat_id.clone());
+                    if let Some((who, _)) = self.store.borrow_mut().typing.get_mut(&chat_id) {
+                        who.retain(|n| *n != sender);
+                    }
                 }
                 let known = if name == "message_new" {
                     self.store.borrow_mut().insert_message(&chat_id, msg)
@@ -3265,7 +3297,7 @@ impl VectorApp {
             .open
             .as_ref()
             .and_then(|id| store.chat(id))
-            .map(|c| data::timeline(c, store.now_ms(), self.read_anchor.as_ref(), names.as_deref(), &|m| store.hidden(c, m) == Some(data::Hidden::Blocked)))
+            .map(|c| data::timeline(c, store.system.get(&c.id).map_or(&[][..], Vec::as_slice), self.history_done.contains(&c.id), store.now_ms(), self.read_anchor.as_ref(), names.as_deref(), &|m| store.hidden(c, m) == Some(data::Hidden::Blocked)))
             .unwrap_or_default();
         let gap = self.gap_index(&store);
         if let Some(g) = gap {
@@ -3404,6 +3436,9 @@ impl VectorApp {
         self.commands.close();
         self.load_commands(false, cx);
         self.pivx_merge(id.to_string(), cx);
+        if self.live {
+            self.load_system(id.to_string(), cx);
+        }
         let count = self.rebuild_rows();
         self.timeline = timeline_state(count, cx.entity().downgrade());
         self.jumped = None;
@@ -8180,6 +8215,7 @@ fn timeline_row(ctx: &timeline::Ctx, row: &Row, after_message: bool) -> AnyEleme
             .pb(px(20.))
             .child(divider(div().text_size(px(12.)).text_color(c(TEXT)).child(text.clone()), white_a(0.1), 0.7))
             .into_any_element(),
+        Row::System { index, count } => system_row(ctx, *index, *count),
         Row::Message { index, first, run } => {
             let gap = if !after_message {
                 0.
@@ -8191,6 +8227,24 @@ fn timeline_row(ctx: &timeline::Ctx, row: &Row, after_message: bool) -> AnyEleme
             timeline::message_row(ctx, *index, *first, *run, gap)
         }
     }
+}
+
+/// `SystemEvent.svelte`: the actor's avatar and name, then what they did.
+fn system_row(ctx: &timeline::Ctx, index: usize, count: u32) -> AnyElement {
+    let Some(line) = ctx.store.system.get(&ctx.chat.id).and_then(|l| l.get(index)) else {
+        return div().into_any_element();
+    };
+    let name = ctx.store.chat_name(&line.npub, &ctx.chat.id);
+    let suffix = format!("{}{}", data::system_suffix(line.kind), if count > 1 { format!(" {count} times") } else { String::new() });
+    let label = div()
+        .flex()
+        .items_center()
+        .text_size(px(12.))
+        .text_color(c(TEXT))
+        .child(div().mr(px(5.)).child(crate::ui::avatar(ctx.store, &line.npub, 16.)))
+        .child(div().font_weight(FontWeight::SEMIBOLD).child(name))
+        .child(suffix);
+    divider(label, white_a(0.1), 0.7)
 }
 
 /// `.msg-inline-timestamp`: a centred label with a hairline either side.
@@ -9004,23 +9058,7 @@ impl VectorApp {
             if self.live {
                 let named = backend::community::nicknames(&id);
                 self.store.borrow_mut().nicknames.insert(id.clone(), named);
-                let rx = backend::run(backend::community::roster(id.clone()));
-                cx.spawn(async move |this, cx| {
-                    let read = rx.await;
-                    this.update(cx, |this, cx| {
-                        if let Some(v) = this.community.as_mut().filter(|v| v.id == id) {
-                            if let Ok((members, admins, unlisted)) = read {
-                                v.members = members;
-                                v.admins = admins;
-                                v.unlisted = unlisted;
-                            }
-                            v.loading = false;
-                        }
-                        cx.notify();
-                    })
-                    .ok();
-                })
-                .detach();
+                self.reload_roster(id.clone(), cx);
             }
         }
         self.settings = None;
@@ -9034,6 +9072,48 @@ impl VectorApp {
                 cx.notify();
             }
         }
+    }
+
+    /// The open community's member panel, read again.
+    fn reload_roster(&mut self, id: String, cx: &mut Context<Self>) {
+        let rx = backend::run(backend::community::roster(id.clone()));
+        cx.spawn(async move |this, cx| {
+            let read = rx.await;
+            this.update(cx, |this, cx| {
+                if let Some(v) = this.community.as_mut().filter(|v| v.id == id) {
+                    if let Ok((members, admins, unlisted)) = read {
+                        v.members = members;
+                        v.admins = admins;
+                        v.unlisted = unlisted;
+                    }
+                    v.loading = false;
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// A chat's saved system lines, from the database.
+    fn load_system(&mut self, chat: String, cx: &mut Context<Self>) {
+        let id = chat.clone();
+        let rx = backend::run(async move { messaging::system_lines(&id) });
+        cx.spawn(async move |this, cx| {
+            let Ok(lines) = rx.await else { return };
+            this.update(cx, |this, cx| {
+                let added = {
+                    let mut store = this.store.borrow_mut();
+                    lines.into_iter().fold(false, |any, l| store.add_system(&chat, l) || any)
+                };
+                if added && this.open.as_deref() == Some(chat.as_str()) {
+                    this.refresh_rows(true);
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
     }
 
     fn open_channel(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
@@ -9934,7 +10014,7 @@ impl VectorApp {
                         joins: r.join_count,
                     })
                     .collect();
-                m.public = got.public;
+                m.public = got.public || !m.links.is_empty();
                 m.others = got.others;
                 cx.notify();
             })
@@ -15725,7 +15805,14 @@ impl VectorApp {
                 },
             )
         });
-        cx.subscribe(&filter, |_, _, _: &crate::composer::InputChanged, cx| {
+        cx.subscribe(&filter, |this, input, _: &crate::composer::InputChanged, cx| {
+            // `ccPasteNpub`: a pasted npub enters the list picked.
+            let text = input.read(cx).text().to_string();
+            if let Some(npub) = crate::newchat::extract_npub(&text).filter(|n| *n != this.store.borrow().my_npub)
+                && let Some(m) = this.create_community.as_mut()
+            {
+                m.picked.insert(npub);
+            }
             cx.notify()
         })
         .detach();

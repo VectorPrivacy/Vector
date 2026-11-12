@@ -284,6 +284,8 @@ pub struct Store {
     pub fixture_embeds: HashMap<String, serde_json::Value>,
     /// Who is typing, by chat: their npubs and when the list last changed (ms).
     pub typing: HashMap<String, (Vec<String>, u64)>,
+    /// Each chat's system lines (joins, leaves, wallpaper and Pins changes), oldest first.
+    pub system: HashMap<String, Vec<SysLine>>,
     /// `fetch_emoji_pack_by_naddr`'s answers.
     pub fixture_packs: HashMap<String, vector_core::emoji_packs::EmojiPack>,
     pub fixture_market: Vec<vector_core::webxdc::MarketplaceApp>,
@@ -468,6 +470,7 @@ impl Store {
             fixture_presets: f.policy_presets,
             fixture_embeds: f.embeds,
             typing: HashMap::new(),
+            system: HashMap::new(),
             fixture_packs: f.packs,
             fixture_market: f.marketplace,
             fixture_pivx: f.pivx,
@@ -527,6 +530,7 @@ impl Store {
             fixture_presets: None,
             fixture_embeds: HashMap::new(),
             typing: HashMap::new(),
+            system: HashMap::new(),
             fixture_packs: HashMap::new(),
             fixture_market: Vec::new(),
             fixture_pivx: None,
@@ -554,6 +558,17 @@ impl Store {
             Some(counts) => counts.get(&chat.id).copied().unwrap_or(0) as usize,
             None => unread_count(chat),
         }
+    }
+
+    /// A system line, put in place by time. False when it is already known.
+    pub fn add_system(&mut self, chat_id: &str, line: SysLine) -> bool {
+        let lines = self.system.entry(chat_id.to_string()).or_default();
+        if lines.iter().any(|l| l.id == line.id) {
+            return false;
+        }
+        let at = lines.partition_point(|l| l.at <= line.at);
+        lines.insert(at, line);
+        true
     }
 
     /// A PIVX payment, as the message it shows as in its chat.
@@ -995,6 +1010,38 @@ pub enum Row {
         first: bool,
         run: u32,
     },
+    /// `index` into the chat's system lines; `count` folds back-to-back repeats of a mergeable one.
+    System {
+        index: usize,
+        count: u32,
+    },
+}
+
+/// `SystemEvent.svelte`'s line: who did it, and what (`SystemEventType`).
+#[derive(Clone, Debug)]
+pub struct SysLine {
+    pub id: String,
+    pub at: u64,
+    pub kind: u8,
+    pub npub: String,
+}
+
+/// `systemEventSuffix`.
+pub fn system_suffix(kind: u8) -> &'static str {
+    match kind {
+        0 => " has left",
+        1 => " has joined",
+        2 => " was removed",
+        3 => " changed the wallpaper",
+        4 => " removed the wallpaper",
+        5 => " modified the Pins",
+        _ => "",
+    }
+}
+
+/// `MERGEABLE_SYSTEM_EVENTS`: membership never merges, since who joined is the content.
+fn system_merges(kind: u8) -> bool {
+    matches!(kind, 3..=5)
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -1038,6 +1085,8 @@ pub enum Unread {
 /// message of each day, and the NEW divider where `read_anchor` puts it.
 pub fn timeline(
     chat: &SerializableChat,
+    system: &[SysLine],
+    all_history: bool,
     now_ms: u64,
     read_anchor: Option<&Unread>,
     commands: Option<&HashSet<String>>,
@@ -1052,7 +1101,35 @@ pub fn timeline(
         Some(Unread::After(id)) => at(id).and_then(|r| (r + 1..chat.messages.len()).find(|&i| !chat.messages[i].mine)),
         None => None,
     };
+    // Lines older than the oldest loaded message wait until that history is in.
+    let floor = if all_history { 0 } else { chat.messages.first().map_or(u64::MAX, |m| m.at) };
+    let mut sys = system.iter().enumerate().skip_while(|(_, l)| l.at < floor).peekable();
+    let mut after_system = false;
+    let mut push_system = |rows: &mut Vec<Row>, last_day: &mut Option<chrono::NaiveDate>, upto: u64| {
+        let mut any = false;
+        while let Some((k, l)) = sys.next_if(|(_, l)| l.at <= upto) {
+            let day = local(l.at).date_naive();
+            if *last_day != Some(day) {
+                rows.push(Row::Date { label: day_label(now_ms, l.at), time: clock(l.at) });
+                *last_day = Some(day);
+            }
+            if let Some(Row::System { index, count }) = rows.last_mut()
+                && system[*index].kind == l.kind
+                && system_merges(l.kind)
+            {
+                *count += 1;
+            } else {
+                rows.push(Row::System { index: k, count: 1 });
+            }
+            any = true;
+        }
+        any
+    };
     for (i, m) in chat.messages.iter().enumerate() {
+        if push_system(&mut rows, &mut last_day, m.at) {
+            after_system = true;
+            run_head = None;
+        }
         let day = local(m.at).date_naive();
         if last_day != Some(day) {
             rows.push(Row::Date {
@@ -1066,7 +1143,8 @@ pub fn timeline(
             rows.push(Row::Unread);
         }
         // As `deriveWindow`: a day divider doesn't end a streak.
-        let first = (i == 0 || !collapses(&chat.messages[i - 1], m)) && command(m, commands).is_none();
+        let first = (i == 0 || after_system || !collapses(&chat.messages[i - 1], m)) && command(m, commands).is_none();
+        after_system = false;
         if !blocked(m) {
             run_head = None;
         } else if let Some(Row::Message { index, run, .. }) = run_head.and_then(|h| rows.get_mut(h))
@@ -1079,6 +1157,7 @@ pub fn timeline(
         }
         rows.push(Row::Message { index: i, first, run: 1 });
     }
+    push_system(&mut rows, &mut last_day, u64::MAX);
     rows
 }
 
