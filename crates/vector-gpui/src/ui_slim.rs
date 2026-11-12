@@ -28,6 +28,8 @@ const RAIL_W: f32 = 68.;
 const HEADER_H: f32 = 52.;
 const NAV_H: f32 = 65.;
 const GUTTER: f32 = 16.;
+/// A list row and the gap under it.
+pub(super) const ROW_PITCH: f32 = 72.;
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub(super) enum Filter {
@@ -50,7 +52,10 @@ impl Filter {
 
 #[derive(Clone, PartialEq)]
 enum Item {
+    Archive,
     Chat(String),
+    /// Unfolded under the archive row; the last closes the group with a rule.
+    Archived(String, bool),
     Community(String),
 }
 
@@ -63,7 +68,7 @@ pub(super) struct Slim {
     /// A community's channels stand over the channel on screen.
     pub drawer: bool,
     pub search: Option<Entity<TextInput>>,
-    list: ListState,
+    pub(super) list: ListState,
     keys: RefCell<Vec<Item>>,
     tabs: Rc<RefCell<HashMap<Filter, Bounds<Pixels>>>>,
     /// Where the tab bar slides from: the tab last marked.
@@ -576,6 +581,7 @@ impl VectorApp {
         let searching = !query.is_empty();
         let filter = self.slim.active();
         let mut items: Vec<(Item, u64)> = Vec::new();
+        let mut archived: Vec<(String, u64)> = Vec::new();
         let mut dots: HashMap<Filter, bool> = HashMap::new();
         let mut communities_seen = std::collections::HashSet::new();
         for chat in &store.chats {
@@ -598,7 +604,9 @@ impl VectorApp {
                     Filter::Communities => false,
                 }
             };
-            if keep {
+            if keep && !searching && store.is_archived(chat) {
+                archived.push((chat.id.clone(), at));
+            } else if keep {
                 items.push((Item::Chat(chat.id.clone()), at));
             }
         }
@@ -622,11 +630,29 @@ impl VectorApp {
         items.sort_by(|a, b| {
             let pin = |i: &Item| match i {
                 Item::Chat(id) => store.pin_rank(id).unwrap_or(usize::MAX),
-                Item::Community(_) => usize::MAX,
+                _ => usize::MAX,
             };
             pin(&a.0).cmp(&pin(&b.0)).then(b.1.cmp(&a.1))
         });
-        let items: Vec<Item> = items.into_iter().map(|(i, _)| i).collect();
+        archived.sort_by(|a, b| {
+            let pin = |id: &str| store.pin_rank(id).unwrap_or(usize::MAX);
+            pin(&a.0).cmp(&pin(&b.0)).then(b.1.cmp(&a.1))
+        });
+        let forced = items.is_empty();
+        let shown = self.archive.shown(forced);
+        let has_archive = !archived.is_empty();
+        let mut rows: Vec<Item> = Vec::with_capacity(items.len() + archived.len() + 1);
+        if has_archive && (shown || self.archive.height(false) > 0.5) {
+            rows.push(Item::Archive);
+            if shown && self.archive.expanded {
+                let n = archived.len();
+                rows.extend(archived.iter().enumerate().map(|(k, (id, _))| Item::Archived(id.clone(), k + 1 == n)));
+            }
+        }
+        rows.extend(items.into_iter().map(|(i, _)| i));
+        let items = rows;
+        let archive_row = (items.first() == Some(&Item::Archive))
+            .then(|| self.slim_archive_row(store, &archived, forced, cx));
         {
             let mut last = self.slim.keys.borrow_mut();
             if *last != items {
@@ -634,6 +660,8 @@ impl VectorApp {
                 self.slim.list.reset(items.len());
                 self.slim.list.scroll_to(top);
                 *last = items.clone();
+            } else if items.first() == Some(&Item::Archive) {
+                self.slim.list.remeasure_items(0..1);
             }
         }
         let tabs = (!searching).then(|| self.slim_tabs(filter, &dots, window, cx));
@@ -648,6 +676,7 @@ impl VectorApp {
                 .child("New people who message you show up here.")
         });
         let items = Rc::new(items);
+        let archive_row = Rc::new(std::cell::RefCell::new(archive_row));
         let shared = self.store.clone();
         let view = cx.entity().downgrade();
         div()
@@ -659,14 +688,34 @@ impl VectorApp {
             .children(tabs)
             .children(empty)
             .child(
-                div().flex_1().min_h_0().px(px(8.)).child(
+                div()
+                    .id("cc-list-scroll")
+                    .flex_1()
+                    .min_h_0()
+                    .px(px(8.))
+                    .on_scroll(cx.listener(move |app, e: &gpui::ScrollEvent, _, cx| {
+                        app.archive_wheel(e, forced, has_archive, cx);
+                        app.archive_scrolled(forced);
+                    }))
+                    .child(
                     list(self.slim.list.clone(), move |i, _, _| {
                         let Some(item) = items.get(i) else {
                             return div().into_any_element();
                         };
+                        if *item == Item::Archive {
+                            let row = archive_row.borrow_mut().take().unwrap_or_else(|| div().into_any_element());
+                            return div().pt(px(8.)).child(row).into_any_element();
+                        }
                         let store = shared.borrow();
+                        let (chat_id, rule) = match item {
+                            Item::Chat(id) => (Some(id), false),
+                            Item::Archived(id, last) => (Some(id), *last),
+                            _ => (None, false),
+                        };
                         let row = match item {
-                            Item::Chat(id) => store.chat(id).map(|chat| {
+                            Item::Archive => None,
+                            Item::Chat(_) | Item::Archived(..) => chat_id.and_then(|id| store.chat(id)).map(|chat| {
+                                let id = &chat.id;
                                 let id: SharedString = id.clone().into();
                                 let (open_view, menu_view, menu_id) = (view.clone(), view.clone(), id.to_string());
                                 slim_row(&store, chat)
@@ -700,10 +749,139 @@ impl VectorApp {
                             }),
                         };
                         let top = if i == 0 { 8. } else { 0. };
-                        div().pt(px(top)).pb(px(2.)).children(row).into_any_element()
+                        div()
+                            .pt(px(top))
+                            .pb(px(2.))
+                            .children(row)
+                            .when(rule, |d| d.pb(px(8.)).border_b_1().border_color(white_a(0.06)).mb(px(6.)))
+                            .into_any_element()
                     })
                     .size_full(),
                 ),
+            )
+            .into_any_element()
+    }
+
+    /// `ArchiveRow.svelte` at phone size: the folded chats' names and count.
+    fn slim_archive_row(&self, store: &Store, archived: &[(String, u64)], forced: bool, cx: &mut Context<Self>) -> AnyElement {
+        let f = &self.archive;
+        let shown = f.shown(forced);
+        let names = archived.iter().map(|(id, _)| store.name(id)).collect::<Vec<_>>().join(", ");
+        let unread = archived.iter().any(|(id, _)| store.chat(id).is_some_and(|c| store.unread_count(c) > 0));
+        let expanded = f.expanded;
+        div()
+            .h(px(f.height(shown)))
+            .overflow_hidden()
+            .flex()
+            .flex_col()
+            .justify_end()
+            .child(
+                div()
+                    .id("cc-archive")
+                    .h(px(ROW_PITCH))
+                    .pb(px(2.))
+                    .flex_shrink_0()
+                    .opacity(f.opacity(shown))
+                    .when(shown, |d| {
+                        d.cursor_pointer().on_click(cx.listener(|app, _, _, cx| {
+                            app.archive.expanded = !app.archive.expanded;
+                            cx.notify();
+                        }))
+                    })
+                    .child(
+                        div()
+                            .h(px(70.))
+                            .px(px(9.))
+                            .rounded(px(14.))
+                            .flex()
+                            .items_center()
+                            .hover(|s| s.bg(white_a(0.04)))
+                            .child(
+                                div()
+                                    .size(px(50.))
+                                    .flex_shrink_0()
+                                    .rounded_full()
+                                    .bg(white_a(0.06))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .child(svg().path("icons/archive.svg").size(px(22.)).text_color(c(ACCENT))),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .flex()
+                                    .flex_col()
+                                    .gap(px(3.))
+                                    .child(
+                                        div()
+                                            .pl(px(12.))
+                                            .pr(px(10.))
+                                            .flex()
+                                            .items_center()
+                                            .child(
+                                                div()
+                                                    .min_w_0()
+                                                    .truncate()
+                                                    .font_family(RUBIK)
+                                                    .text_size(px(16.))
+                                                    .line_height(px(20.))
+                                                    .text_color(c(0xb2b2b2))
+                                                    .child("Archived Chats"),
+                                            )
+                                            .child(
+                                                div()
+                                                    .ml_auto()
+                                                    .flex_shrink_0()
+                                                    .min_w(px(16.))
+                                                    .px(px(5.5))
+                                                    .py(px(2.5))
+                                                    .rounded_full()
+                                                    .bg(if unread { c(PRIMARY).into() } else { white_a(0.14) })
+                                                    .text_center()
+                                                    .font_family(INTER)
+                                                    .text_size(px(11.))
+                                                    .line_height(px(11.))
+                                                    .font_weight(FontWeight::BOLD)
+                                                    .text_color(if unread { c(0x000000).into() } else { white_a(0.8) })
+                                                    .child(archived.len().to_string()),
+                                            ),
+                                    )
+                                    .child(
+                                        div()
+                                            .pl(px(12.))
+                                            .pr(px(10.))
+                                            .min_w_0()
+                                            .truncate()
+                                            .font_family(RUBIK)
+                                            .text_size(px(14.))
+                                            .line_height(px(19.))
+                                            .text_color(c(0x737373))
+                                            .child(names),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .w(px(26.))
+                                    .ml(px(2.))
+                                    .flex_shrink_0()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .opacity(0.45)
+                                    .hover(|s| s.opacity(1.))
+                                    .child(
+                                        svg()
+                                            .path("icons/chevron-down.svg")
+                                            .size(px(16.))
+                                            .text_color(white_a(0.75))
+                                            .with_transformation(gpui::Transformation::rotate(gpui::radians(
+                                                if expanded { std::f32::consts::PI } else { 0. },
+                                            ))),
+                                    ),
+                            ),
+                    ),
             )
             .into_any_element()
     }

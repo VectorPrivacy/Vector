@@ -5114,6 +5114,7 @@ impl Render for VectorApp {
         let rail_mode = self.rail_mode(window);
         let slim = f32::from(window.viewport_size().width) < slim_ops::WIDE_MIN;
         self.is_slim = slim;
+        self.archive.slim = slim;
         if let Some(s) = self.settings.as_mut()
             && s.slim != slim
         {

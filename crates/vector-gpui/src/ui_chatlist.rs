@@ -32,11 +32,27 @@ pub(super) struct Fold {
     from_top: bool,
     travel: f32,
     timer: Option<Task<()>>,
+    /// Laid out in the slim list, whose rows are taller.
+    pub slim: bool,
 }
 
 impl Fold {
-    fn height(&self, shown: bool) -> f32 {
-        let target = if shown { ROW_PITCH } else { self.pull.min(ROW_PITCH) };
+    pub(super) fn pitch(&self) -> f32 {
+        if self.slim { super::slim_ops::ROW_PITCH } else { ROW_PITCH }
+    }
+
+    pub(super) fn shown(&self, forced: bool) -> bool {
+        forced || self.revealed
+    }
+
+    /// The row fades in with the pull that draws it down.
+    pub(super) fn opacity(&self, shown: bool) -> f32 {
+        if shown { 1. } else { (self.pull / self.pitch()).min(1.) }
+    }
+
+    pub(super) fn height(&self, shown: bool) -> f32 {
+        let pitch = self.pitch();
+        let target = if shown { pitch } else { self.pull.min(pitch) };
         match self.settle {
             Some((from, at)) => {
                 let t = (at.elapsed().as_secs_f32() / SETTLE).clamp(0., 1.);
@@ -75,8 +91,13 @@ pub(super) fn rows(store: &Store, ids: &[usize], fold: &Fold, others: bool) -> (
 }
 
 impl VectorApp {
+    /// The list the archive row sits atop: the slim one while that layout is up.
+    fn fold_list(&self) -> gpui::ListState {
+        if self.archive.slim { self.slim.list.clone() } else { self.chatlist.clone() }
+    }
+
     fn at_top(&self) -> bool {
-        let top = self.chatlist.logical_scroll_top();
+        let top = self.fold_list().logical_scroll_top();
         top.item_ix == 0 && top.offset_in_item <= px(0.5)
     }
 
@@ -87,17 +108,19 @@ impl VectorApp {
         }
         let dy = -f32::from(e.delta.pixel_delta(px(20.)).y);
         let now = Instant::now();
+        let list = self.fold_list();
         let f = &mut self.archive;
         if f.wheel_at.is_none_or(|t| now - t > GESTURE_GAP) {
-            f.from_top = self.chatlist.logical_scroll_top().item_ix == 0
-                && self.chatlist.logical_scroll_top().offset_in_item <= px(0.5);
+            let top = list.logical_scroll_top();
+            f.from_top = top.item_ix == 0 && top.offset_in_item <= px(0.5);
             f.travel = 0.;
         }
         f.wheel_at = Some(now);
         let shown = forced || f.revealed;
         if dy > 0. && f.revealed && !f.expanded && !forced {
-            if f32::from(self.chatlist.max_offset_for_scrollbar().y) < ROW_PITCH {
-                f.ease_from(ROW_PITCH);
+            let pitch = f.pitch();
+            if f32::from(list.max_offset_for_scrollbar().y) < pitch {
+                f.ease_from(pitch);
                 f.revealed = false;
                 cx.notify();
             }
@@ -119,7 +142,7 @@ impl VectorApp {
         let f = &mut self.archive;
         f.travel -= dy;
         f.settle = None;
-        f.pull = ROW_PITCH * (f.travel / WHEEL_PX).min(1.) * 0.85;
+        f.pull = f.pitch() * (f.travel / WHEEL_PX).min(1.) * 0.85;
         if f.travel >= WHEEL_PX {
             let from = f.pull;
             f.revealed = true;
@@ -149,11 +172,12 @@ impl VectorApp {
         if !f.revealed || f.expanded || forced {
             return;
         }
-        let top = self.chatlist.logical_scroll_top();
+        let list = if f.slim { self.slim.list.clone() } else { self.chatlist.clone() };
+        let top = list.logical_scroll_top();
         if top.item_ix >= 1 {
             f.revealed = false;
             f.settle = None;
-            self.chatlist.scroll_to(ListOffset { item_ix: top.item_ix - 1, offset_in_item: top.offset_in_item });
+            list.scroll_to(ListOffset { item_ix: top.item_ix - 1, offset_in_item: top.offset_in_item });
         }
     }
 
