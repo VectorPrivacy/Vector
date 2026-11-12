@@ -1401,22 +1401,39 @@ function ensureCommunityPreviewActivity(chat) {
 
 
 /**
- * Resolve a just-picked image path to a webview-displayable <img> src. On Android the file picker
- * returns a content:// URI that convertFileSrc can't render (broken preview), so cache_android_file
- * reads it and writes a preview file the asset route can serve; desktop uses the picked path directly. Returns null when
- * no preview is available, so the caller can keep its placeholder instead of showing a broken image.
+ * Pick one picture for an avatar, icon or banner. Resolves `{ path, preview, w, h }`: `path` is
+ * what the upload reads, `preview` an <img> src of it, `w` x `h` the preview's size. Null when
+ * cancelled; a pick that can't be used says why.
  */
-async function pickedImagePreviewSrc(path) {
-    if (!path) return null;
-    if (platformFeatures.os !== 'android') return convertFileSrc(path);
+async function pickImage(title) {
     try {
-        await invoke('cache_android_file', { filePath: path });
-        const previewPath = await invoke('preview_cached_file', { filePath: path });
-        if (previewPath) return convertFileSrc(previewPath);
+        const picked = await window.__TAURI__.dialog.open({
+            title, multiple: false, directory: false,
+            filters: [{ name: 'Image', extensions: ['png', 'jpg', 'jpeg', 'gif', 'webp'] }],
+        });
+        const path = typeof picked === 'string' ? picked : picked?.path;
+        if (!path) return null;
+        const measure = (src) => new Promise((resolve) => {
+            const img = new Image();
+            img.onload = () => resolve({ w: img.naturalWidth, h: img.naturalHeight });
+            img.onerror = () => resolve(null);
+            img.src = src;
+        });
+        // Android hands back a content:// URI the webview can't show. There, and for a pick the
+        // webview can't load, the backend draws a copy or says why it can't.
+        let preview = platformFeatures.os === 'android' ? null : convertFileSrc(path);
+        let size = preview && await measure(preview);
+        if (!size) {
+            preview = convertFileSrc(await invoke('read_image_preview', { path }));
+            size = await measure(preview);
+        }
+        if (!size) throw 'That file isn’t an image Vector can use. Try a PNG, JPG, GIF or WebP.';
+        return { path, preview, ...size };
     } catch (e) {
-        console.error('[preview] cache_android_file failed:', e);
+        console.warn('[pickImage]', e);
+        popupConfirm('Couldn’t Use That Image', escapeHtml(String(e?.message || e)), true, '', 'vector_warning.svg');
+        return null;
     }
-    return null;
 }
 
 /**

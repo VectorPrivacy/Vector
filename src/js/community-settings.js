@@ -132,19 +132,11 @@ function closeCommunitySettings(force = false) {
 async function csPickIcon() {
     const st = VectorSvelte.csState();
     if (!st.canEdit || st.saving) return;
-    const { open } = window.__TAURI__.dialog;
-    const selected = await open({ multiple: false, filters: [{ name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'gif', 'webp'] }] });
-    const filePath = typeof selected === 'string' ? selected : selected?.path;
-    if (!filePath) return;
-    // A picked file can sit outside the asset scope; the backend hands back a copy inside it.
-    const preview = await invoke('read_image_preview', { path: filePath }).then(convertFileSrc, () => null);
-    if (!preview) {
-        showToast('That image could not be read');
-        return;
-    }
-    const cropped = await cropAvatarPick(filePath, preview, 'Crop Icon', 'community');
+    const pick = await pickImage('Choose Community Icon');
+    if (!pick) return;
+    const cropped = await cropAvatarPick(pick.path, pick.preview, 'Crop Icon', 'community');
     if (!cropped) return;
-    VectorSvelte.csSetDraft({ iconPath: filePath, iconPreview: cropped.preview, iconCrop: cropped.crop, iconRemoved: false });
+    VectorSvelte.csSetDraft({ iconPath: pick.path, iconPreview: cropped.preview, iconCrop: cropped.crop, iconRemoved: false });
 }
 
 /** The banner template: 238 x 70, under the community's header. */
@@ -157,16 +149,10 @@ const BANNER_ASPECT = 238 / 70;
 async function csPickBanner() {
     const st = VectorSvelte.csState();
     if (!st.canEdit || st.saving) return;
-    const { open } = window.__TAURI__.dialog;
-    const selected = await open({ multiple: false, filters: [{ name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'gif', 'webp'] }] });
-    const filePath = typeof selected === 'string' ? selected : selected?.path;
-    if (!filePath) return;
-    const preview = await invoke('read_image_preview', { path: filePath }).then(convertFileSrc, () => null);
-    const natural = preview && await csImageSize(preview);
-    if (!natural) {
-        showToast('That image could not be read');
-        return;
-    }
+    const pick = await pickImage('Choose Banner Image');
+    if (!pick) return;
+    const { path: filePath, preview } = pick;
+    const natural = { w: pick.w, h: pick.h };
     let crop = null;
     if (Math.abs(natural.w / natural.h - BANNER_ASPECT) > 0.01) {
         crop = await VectorSvelte.openCropper({
@@ -208,15 +194,6 @@ function csBannerPreviewContext(communityId) {
     };
 }
 
-function csImageSize(src) {
-    return new Promise((resolve) => {
-        const img = new Image();
-        img.onload = () => resolve({ w: img.naturalWidth, h: img.naturalHeight });
-        img.onerror = () => resolve(null);
-        img.src = src;
-    });
-}
-
 /**
  * Publish every unsaved draft: the Overview's, then the Roles'. Each half commits on
  * its own success, so a failure leaves only what failed waiting on the bar.
@@ -244,8 +221,8 @@ async function csSave() {
         csRepaint(communityId);
     } catch (e) {
         console.error('Failed to save community settings:', e);
-        showToast(String(e || 'Failed to save changes'));
         csRepaint(communityId);
+        popupConfirm('Couldn’t Save', escapeHtml(String(e?.message || e || 'Failed to save changes')), true, '', 'vector_warning.svg');
     } finally {
         if (unlisten) unlisten();
         VectorSvelte.csSetSaving(false);

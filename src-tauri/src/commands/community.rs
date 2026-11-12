@@ -2747,15 +2747,15 @@ pub async fn set_community_image(
         // Existence-check BEFORE the expensive read + encrypt + upload.
         vector_core::db::community::load_community_v2(&CommunityId(id_bytes))?.ok_or("Community not found")?;
 
-        // Read the picked file. On Android the file dialog returns a content:// URI that std::fs can't
-        // open, so route it through the JNI content-resolver (the same path upload_avatar uses); desktop
-        // reads the real path directly. Without this, picking an image on Android failed instantly at the
-        // read ("read image: ...") and surfaced as the generic "Failed to update the image" toast — for
-        // the owner too, not just admins.
+        // On Android the file dialog returns a content:// URI, read through the content resolver.
+        let unreadable = |e: &dyn std::fmt::Display| {
+            vector_core::log_warn!("[set_community_image] couldn't read the pick: {e}");
+            crate::message::CANT_OPEN_PICK.to_string()
+        };
         let (raw_bytes, _raw_ext): (Vec<u8>, String) = {
             #[cfg(not(target_os = "android"))]
             {
-                let bytes = std::fs::read(&filepath).map_err(|e| format!("read image: {e}"))?;
+                let bytes = std::fs::read(&filepath).map_err(|e| unreadable(&e))?;
                 let ext = std::path::Path::new(&filepath)
                     .extension()
                     .and_then(|e| e.to_str())
@@ -2765,7 +2765,7 @@ pub async fn set_community_image(
             }
             #[cfg(target_os = "android")]
             {
-                let af = crate::android::filesystem::read_android_uri(filepath.clone())?;
+                let af = crate::android::filesystem::read_android_uri(filepath.clone()).map_err(|e| unreadable(&e))?;
                 ((*af.bytes).clone(), af.extension)
             }
         };
