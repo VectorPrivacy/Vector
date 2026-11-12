@@ -332,12 +332,13 @@ fn act(on: &OnAct, a: impl Fn() -> NetAct + 'static) -> impl Fn(&gpui::ClickEven
     move |_, w, cx| on(Act::Net(a()), w, cx)
 }
 
-pub fn block(r: &Routing, on: &OnAct) -> AnyElement {
+/// `phone`: 520px or less, where the card stacks (`.tor-card`).
+pub fn block(r: &Routing, phone: bool, on: &OnAct) -> AnyElement {
     if r.view.is_none() {
         return div().into_any_element();
     }
     let viewed = r.viewed();
-    let mut col = div().flex().flex_col().child(picker(r, &viewed, on)).child(card(r, &viewed, on));
+    let mut col = div().flex().flex_col().child(picker(r, &viewed, on)).child(card(r, &viewed, phone, on));
     match viewed.as_str() {
         "tor" => col = col.child(tor_options(r, on)),
         "i2p" => col = col.child(i2p_options(r, on)),
@@ -458,7 +459,7 @@ fn net_dot(kind: &str, state: &str) -> AnyElement {
     d.into_any_element()
 }
 
-fn card(r: &Routing, viewed: &str, on: &OnAct) -> AnyElement {
+fn card(r: &Routing, viewed: &str, phone: bool, on: &OnAct) -> AnyElement {
     let v = r.view.as_ref().expect("view");
     let in_use = r.in_use();
     let using = !in_use.is_empty() && viewed == in_use;
@@ -630,9 +631,8 @@ fn card(r: &Routing, viewed: &str, on: &OnAct) -> AnyElement {
         .mb(px(18.))
         .flex()
         .items_center()
-        .gap(px(16.))
-        .py(px(14.))
-        .px(px(16.))
+        .when(phone, |d| d.flex_col().gap(px(10.)).py(px(16.)).px(px(14.)))
+        .when(!phone, |d| d.gap(px(16.)).py(px(14.)).px(px(16.)))
         .rounded(px(14.))
         .bg(bg)
         .border_1()

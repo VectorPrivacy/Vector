@@ -72,8 +72,33 @@ fn danger_head(s: &Settings) -> AnyElement {
 }
 
 fn body(cat: &Category, shown: &[bool], s: &Settings, on: &OnAct) -> AnyElement {
+    let geo = s.slim_geo.clone();
+    let scroll = s.slim_scroll.clone();
+    let id = cat.id;
+    let probe = canvas(
+        move |b, window, _| {
+            let mut g = geo.borrow_mut();
+            g.bodies.insert(id, f32::from(b.size.height));
+            if g.follow != Some(id) {
+                return;
+            }
+            g.follow = None;
+            let (Some(row), view) = (g.rows.get(id).copied(), scroll.bounds()) else { return };
+            let top = f32::from(row.top());
+            let below = f32::from(view.bottom()) - top - f32::from(row.size.height);
+            let want = f32::from(b.size.height).min(f32::from(view.size.height) / 2.);
+            let by = (want - below).min(top - f32::from(view.top()) - 10.);
+            if by > 0. {
+                g.glide = Some((std::time::Instant::now(), f32::from(scroll.offset().y), by));
+                window.request_animation_frame();
+            }
+        },
+        |_, _, _, _| {},
+    )
+    .absolute()
+    .inset_0();
     let many = cat.anchors.len() > 1;
-    let mut page = div().pt(px(2.)).px(px(16.)).pb(px(12.)).flex().flex_col();
+    let mut page = div().relative().pt(px(2.)).px(px(16.)).pb(px(12.)).flex().flex_col().child(probe);
     if cat.danger {
         page = page.child(danger_head(s));
     }
@@ -100,12 +125,19 @@ fn body(cat: &Category, shown: &[bool], s: &Settings, on: &OnAct) -> AnyElement 
     .into_any_element()
 }
 
-fn cat_row(cat: &Category, first: bool, open: bool, on: &OnAct) -> AnyElement {
+fn row_probe(id: &'static str, s: &Settings) -> impl IntoElement {
+    let geo = s.slim_geo.clone();
+    canvas(move |b, _, _| { geo.borrow_mut().rows.insert(id, b); }, |_, _, _, _| {}).absolute().inset_0()
+}
+
+fn cat_row(cat: &Category, first: bool, open: bool, s: &Settings, on: &OnAct) -> AnyElement {
     let ink = if cat.danger { c(crate::timeline::DANGER) } else { c(ROW_INK) };
     let label = if cat.danger { c(crate::timeline::DANGER) } else { c(0xffffff) };
     let id = cat.id;
     div()
         .id(SharedString::from(format!("sm-row-{id}")))
+        .relative()
+        .child(row_probe(id, s))
         .min_h(px(54.))
         .px(px(16.))
         .flex()
@@ -136,9 +168,11 @@ fn cat_row(cat: &Category, first: bool, open: bool, on: &OnAct) -> AnyElement {
 }
 
 /// `.sm-update`: a waiting update, lifted out of the list into a card of its own.
-fn update_row(version: Option<String>, open: bool, on: &OnAct) -> AnyElement {
+fn update_row(version: Option<String>, open: bool, s: &Settings, on: &OnAct) -> AnyElement {
     div()
         .id("sm-row-updates")
+        .relative()
+        .child(row_probe("updates", s))
         .min_h(px(54.))
         .px(px(16.))
         .flex()
@@ -207,7 +241,7 @@ pub fn slim_view(s: &Settings, on: &OnAct, cx: &App) -> AnyElement {
                     .border_color(c(ACCENT))
                     .flex()
                     .flex_col()
-                    .child(update_row(version, open, on))
+                    .child(update_row(version, open, s, on))
                     .when(open, |d| d.child(body(cat, &shown, s, on)))
             });
             continue;
@@ -216,7 +250,7 @@ pub fn slim_view(s: &Settings, on: &OnAct, cx: &App) -> AnyElement {
             continue;
         }
         let open = if q.is_empty() { s.slim_open == Some(cat.id) } else { !s.slim_shut.contains(&cat.id) };
-        card = card.child(cat_row(cat, first, open, on)).when(open, |d| d.child(body(cat, &shown, s, on)));
+        card = card.child(cat_row(cat, first, open, s, on)).when(open, |d| d.child(body(cat, &shown, s, on)));
         first = false;
     }
     let empty = first;
@@ -274,6 +308,10 @@ pub fn slim_view(s: &Settings, on: &OnAct, cx: &App) -> AnyElement {
         .size_full()
         .overflow_y_scroll()
         .track_scroll(&s.slim_scroll)
+        .on_scroll_wheel({
+            let geo = s.slim_geo.clone();
+            move |_, _, _| geo.borrow_mut().glide = None
+        })
         .bg(c(APP_BG))
         .child(
             div()

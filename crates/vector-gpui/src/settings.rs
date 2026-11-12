@@ -805,6 +805,36 @@ pub struct Settings {
     pub slim_scroll: ScrollHandle,
     /// The window is 600px or less: paired controls stack.
     pub narrow: bool,
+    /// 520px or less: hero cards stack.
+    pub phone: bool,
+    pub slim_geo: Rc<std::cell::RefCell<SlimGeo>>,
+}
+
+/// Where the phone list's rows and open bodies landed last frame, so a fold can hold the
+/// tapped row still and then lift it to show its settings.
+#[derive(Default)]
+pub struct SlimGeo {
+    pub rows: HashMap<&'static str, gpui::Bounds<gpui::Pixels>>,
+    pub bodies: HashMap<&'static str, f32>,
+    /// A category just opened: lift it once its body has a height.
+    pub follow: Option<&'static str>,
+    /// `(start, offset y at start, distance)` of the lift under way.
+    pub glide: Option<(std::time::Instant, f32, f32)>,
+}
+
+impl SlimGeo {
+    /// `hold` + `follow`: 320ms, cubic ease-out.
+    pub fn step(&mut self, scroll: &ScrollHandle) -> bool {
+        let Some((t0, from, by)) = self.glide else { return false };
+        let t = (t0.elapsed().as_secs_f32() / 0.32).min(1.);
+        let e = 1. - (1. - t).powi(3);
+        let x = scroll.offset().x;
+        scroll.set_offset(gpui::point(x, px(from - by * e)));
+        if t >= 1. {
+            self.glide = None;
+        }
+        t < 1.
+    }
 }
 
 /// The chart's pointer state: a slice previewed, one picked, a Delete running.
@@ -1253,11 +1283,13 @@ fn line(
     let mut name = div()
         .flex()
         .items_center()
+        .min_w_0()
+        .flex_shrink(1.)
         .gap(px(6.))
         .text_size(px(16.))
         .line_height(px(19.))
         .text_color(c(0xffffff))
-        .child(label);
+        .child(div().min_w_0().flex_shrink(1.).child(label));
     if let Some(help) = help {
         name = name.child(info(
             SharedString::from(format!("{id}-info")),
@@ -1330,9 +1362,8 @@ fn streamer_block(s: &Settings, on: &OnAct) -> AnyElement {
         .mb(px(18.))
         .flex()
         .items_center()
-        .gap(px(16.))
-        .py(px(14.))
-        .px(px(16.))
+        .when(s.phone, |d| d.flex_col().gap(px(10.)).py(px(16.)).px(px(14.)))
+        .when(!s.phone, |d| d.gap(px(16.)).py(px(14.)).px(px(16.)))
         .rounded(px(14.))
         .bg(white_a(0.03))
         .border_1()
@@ -1381,9 +1412,9 @@ fn streamer_block(s: &Settings, on: &OnAct) -> AnyElement {
             s.flipped.contains("streamer_on"),
             click(on, move || Act::Toggle("streamer_on", !live)),
         )));
-    let select = crate::kit::select_with(
+    let select = div().w(px(180.)).min_w(px(110.)).flex_shrink(1.).child(crate::kit::select_with(
         "streamer-notif",
-        180.,
+        f32::INFINITY,
         12.,
         &STREAMER_LEVELS,
         &disabled,
@@ -1397,7 +1428,8 @@ fn streamer_block(s: &Settings, on: &OnAct) -> AnyElement {
             let on = on.clone();
             move |v, w, cx| on(Act::Pick("streamer-notif", v), w, cx)
         },
-    );
+    ))
+    .into_any_element();
     div()
         .flex()
         .flex_col()
@@ -3803,7 +3835,7 @@ fn block(id: &str, s: &Settings, on: &OnAct) -> Option<AnyElement> {
         "servers" => servers_block(s, on),
         "clock" => clock_block(s, on),
         "streamer" => streamer_block(s, on),
-        "routing" => crate::routing::block(&s.net, on),
+        "routing" => crate::routing::block(&s.net, s.phone, on),
         "blocked" => blocked_block(s, on),
         "advanced" => row(s, "advanced", on, false),
         "logs" => line(

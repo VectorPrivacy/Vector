@@ -5136,6 +5136,10 @@ impl Render for VectorApp {
         self.archive.slim = slim;
         if let Some(s) = self.settings.as_mut() {
             s.narrow = f32::from(window.viewport_size().width) <= 600.;
+            s.phone = f32::from(window.viewport_size().width) <= 520.;
+            if s.slim_geo.borrow_mut().step(&s.slim_scroll) {
+                window.request_animation_frame();
+            }
         }
         if let Some(s) = self.settings.as_mut()
             && s.slim != slim
@@ -13557,6 +13561,8 @@ impl VectorApp {
             slim: self.is_slim,
             slim_open: None,
             narrow: false,
+            phone: false,
+            slim_geo: Default::default(),
             slim_shut: Vec::new(),
             slim_scroll: gpui::ScrollHandle::new(),
         });
@@ -15013,7 +15019,21 @@ impl VectorApp {
             Act::Fold(id) => {
                 s.open_select = None;
                 if s.search.read(cx).text().trim().is_empty() {
+                    let prev = s.slim_open;
                     s.slim_open = (s.slim_open != Some(id)).then_some(id);
+                    let mut g = s.slim_geo.borrow_mut();
+                    g.glide = None;
+                    // The tapped row stays put while a category above it folds away.
+                    if let Some(p) = prev.filter(|p| *p != id)
+                        && let (Some(above), Some(here)) = (g.rows.get(p), g.rows.get(id))
+                        && above.top() < here.top()
+                    {
+                        let h = g.bodies.get(p).copied().unwrap_or(0.);
+                        let o = s.slim_scroll.offset();
+                        s.slim_scroll.set_offset(gpui::point(o.x, (o.y + px(h)).min(px(0.))));
+                    }
+                    g.follow = s.slim_open;
+                    drop(g);
                     if s.slim_open.is_some() {
                         s.cat = id;
                         self.mark_settings_seen(None);
