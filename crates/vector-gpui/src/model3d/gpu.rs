@@ -74,6 +74,40 @@ struct Part {
     count: u32,
     material: usize,
     skinned: bool,
+    morph: Option<Morph>,
+}
+
+/// A morphed part keeps its rest vertices, rewritten into `vbuf` with the weights of each frame.
+struct Morph {
+    rest: Vec<Vertex>,
+    targets: Vec<super::scene::Target>,
+}
+
+impl Morph {
+    fn apply(&self, weights: &[f32]) -> Vec<Vertex> {
+        let mut out = self.rest.clone();
+        for (t, &w) in self.targets.iter().zip(weights) {
+            if w == 0. {
+                continue;
+            }
+            for (v, d) in out.iter_mut().zip(&t.pos) {
+                for k in 0..3 {
+                    v.pos[k] += d[k] * w;
+                }
+            }
+            for (v, d) in out.iter_mut().zip(&t.nrm) {
+                for k in 0..3 {
+                    v.nrm[k] += d[k] * w;
+                }
+            }
+        }
+        if self.targets.iter().any(|t| !t.nrm.is_empty()) {
+            for v in &mut out {
+                v.nrm = Vec3::from(v.nrm).normalize_or(Vec3::Y).to_array();
+            }
+        }
+        out
+    }
 }
 
 struct GpuMat {
@@ -111,6 +145,8 @@ pub struct Shot {
     pub pivot: Quat,
     pub distance: f32,
     pub pose: Option<Vec<super::scene::Trs>>,
+    /// Animated morph weights per node; a node the clip leaves alone keeps its own.
+    pub morph: Option<Vec<Option<Vec<f32>>>>,
 }
 
 fn mips(w: u32, h: u32, rgba: &[u8]) -> Vec<(u32, u32, Vec<u8>)> {
@@ -439,12 +475,15 @@ impl Gpu {
                                 weight: p.weights.as_ref().and_then(|c| c.get(i).copied()).unwrap_or([0.; 4]),
                             })
                             .collect();
+                        let morphed = !p.targets.is_empty();
+                        let usage = if morphed { wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST } else { wgpu::BufferUsages::VERTEX };
                         Part {
-                            vbuf: self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("model3d vertices"), contents: bytemuck::cast_slice(&verts), usage: wgpu::BufferUsages::VERTEX }),
+                            vbuf: self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("model3d vertices"), contents: bytemuck::cast_slice(&verts), usage }),
                             ibuf: self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("model3d indices"), contents: bytemuck::cast_slice(&p.idx), usage: wgpu::BufferUsages::INDEX }),
                             count: p.idx.len() as u32,
                             material: p.material.filter(|&m| m < fallback_mat).unwrap_or(fallback_mat),
                             skinned: skinned_mesh[mi] && p.joints.is_some(),
+                            morph: morphed.then(|| Morph { rest: verts, targets: p.targets.clone() }),
                         }
                     })
                     .collect()
@@ -517,7 +556,17 @@ impl Gpu {
         for (ni, node) in scene.nodes.iter().enumerate() {
             let Some(parts) = node.mesh.and_then(|m| model.meshes.get(m)) else { continue };
             let skin = node.skin.filter(|&s| s < palettes.len());
+            let weights = shot
+                .morph
+                .as_ref()
+                .and_then(|m| m.get(ni)?.as_deref())
+                .or(node.weights.as_deref())
+                .or_else(|| node.mesh.map(|m| scene.meshes[m].weights.as_slice()))
+                .unwrap_or_default();
             for part in parts {
+                if let Some(m) = &part.morph {
+                    self.queue.write_buffer(&part.vbuf, 0, bytemuck::cast_slice(&m.apply(weights)));
+                }
                 let skinned = part.skinned && skin.is_some();
                 let m = if skinned { root } else { root * world[ni] };
                 let o = objs.len() as u32;

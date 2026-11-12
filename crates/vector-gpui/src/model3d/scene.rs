@@ -21,11 +21,13 @@ pub struct Node {
     pub s: Vec3,
     pub mesh: Option<usize>,
     pub skin: Option<usize>,
+    /// Morph weights set on the node, over its mesh's own.
+    pub weights: Option<Vec<f32>>,
 }
 
 impl Default for Node {
     fn default() -> Self {
-        Self { parent: None, t: Vec3::ZERO, r: Quat::IDENTITY, s: Vec3::ONE, mesh: None, skin: None }
+        Self { parent: None, t: Vec3::ZERO, r: Quat::IDENTITY, s: Vec3::ONE, mesh: None, skin: None, weights: None }
     }
 }
 
@@ -42,8 +44,17 @@ impl Trs {
     }
 }
 
+#[derive(Default)]
 pub struct Mesh {
     pub prims: Vec<Prim>,
+    pub weights: Vec<f32>,
+}
+
+/// One morph target's offsets; `nrm` is empty when the target moves positions only.
+#[derive(Clone, Default)]
+pub struct Target {
+    pub pos: Vec<[f32; 3]>,
+    pub nrm: Vec<[f32; 3]>,
 }
 
 #[derive(Default)]
@@ -54,6 +65,7 @@ pub struct Prim {
     pub color: Option<Vec<[f32; 4]>>,
     pub joints: Option<Vec<[u16; 4]>>,
     pub weights: Option<Vec<[f32; 4]>>,
+    pub targets: Vec<Target>,
     pub idx: Vec<u32>,
     pub material: Option<usize>,
 }
@@ -78,6 +90,12 @@ impl Prim {
             self.joints = None;
             self.weights = None;
         }
+        for t in &mut self.targets {
+            t.pos.resize(n, [0.; 3]);
+            if t.nrm.len() != n {
+                t.nrm.clear();
+            }
+        }
         if self.nrm.len() == n {
             return;
         }
@@ -88,6 +106,10 @@ impl Prim {
         self.color = self.color.take().map(|c| idx.iter().map(|&i| c[i as usize]).collect());
         self.joints = self.joints.take().map(|c| idx.iter().map(|&i| c[i as usize]).collect());
         self.weights = self.weights.take().map(|c| idx.iter().map(|&i| c[i as usize]).collect());
+        for t in &mut self.targets {
+            t.pos = pick(&t.pos);
+            t.nrm.clear();
+        }
         self.nrm = pos
             .chunks_exact(3)
             .flat_map(|t| {
@@ -195,6 +217,8 @@ pub enum Path {
     T,
     R,
     S,
+    /// Morph weights, as many per key as the mesh has targets.
+    W,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -209,7 +233,7 @@ pub struct Channel {
     pub path: Path,
     pub interp: Interp,
     pub times: Vec<f32>,
-    /// Packed 3 or 4 wide per key; a cubic key is in-tangent, value, out-tangent.
+    /// Packed 3 or 4 wide per key (a weight channel, one per target); a cubic key is in-tangent, value, out-tangent.
     pub values: Vec<f32>,
 }
 

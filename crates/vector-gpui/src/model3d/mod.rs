@@ -178,8 +178,10 @@ fn run(rx: Receiver<Job>, back: Sender<Job>) {
                     slot.target = Some(g.target(w, h));
                 }
                 let Some(target) = &slot.target else { continue };
-                let pose = shot.clip.and_then(|(i, t)| model.scene.clips.get(i).map(|c| anim::pose(&model.scene.rest(), c, t)));
-                match g.render(model, target, &gpu::Shot { pivot: shot.pivot, distance: shot.distance, pose }) {
+                let clip = shot.clip.and_then(|(i, t)| Some((model.scene.clips.get(i)?, t)));
+                let pose = clip.map(|(c, t)| anim::pose(&model.scene.rest(), c, t));
+                let morph = clip.map(|(c, t)| anim::weights(model.scene.nodes.len(), c, t));
+                match g.render(model, target, &gpu::Shot { pivot: shot.pivot, distance: shot.distance, pose, morph }) {
                     Ok(bgra) => {
                         let _ = slot.out.send(Out::Frame { w, h, bgra });
                     }
@@ -230,8 +232,10 @@ mod tests {
             let parsed = t.elapsed();
             let model = g.upload(scene);
             let target = g.target(640, 640);
-            let pose = model.scene.clips.first().map(|c| super::anim::pose(&model.scene.rest(), c, c.duration * 0.3));
-            let shot = super::gpu::Shot { pivot: glam::Quat::IDENTITY, distance: super::fit(model.radius, 1.), pose };
+            let clip = model.scene.clips.first();
+            let pose = clip.map(|c| super::anim::pose(&model.scene.rest(), c, c.duration * 0.3));
+            let morph = clip.map(|c| super::anim::weights(model.scene.nodes.len(), c, c.duration * 0.3));
+            let shot = super::gpu::Shot { pivot: glam::Quat::IDENTITY, distance: super::fit(model.radius, 1.), pose, morph };
             let t2 = std::time::Instant::now();
             let px = g.render(&model, &target, &shot).unwrap();
             eprintln!("{}: parse {parsed:?}, frame {:?}, clips {:?}", p.display(), t2.elapsed(), model.scene.clips.iter().map(|c| (&c.name, c.duration)).collect::<Vec<_>>());

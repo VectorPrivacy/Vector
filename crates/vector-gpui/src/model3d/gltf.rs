@@ -120,6 +120,10 @@ pub fn load(bytes: &[u8]) -> Result<Scene, String> {
                 color: r.read_colors(0).map(|c| c.into_rgba_f32().collect()),
                 joints: r.read_joints(0).map(|j| j.into_u16().collect()),
                 weights: r.read_weights(0).map(|w| w.into_f32().collect()),
+                targets: r
+                    .read_morph_targets()
+                    .map(|(p, n, _)| Target { pos: p.map(|p| p.collect()).unwrap_or_default(), nrm: n.map(|n| n.collect()).unwrap_or_default() })
+                    .collect(),
                 idx: Vec::new(),
                 material: p.material().index(),
             };
@@ -133,7 +137,7 @@ pub fn load(bytes: &[u8]) -> Result<Scene, String> {
             prim.finish();
             prims.push(prim);
         }
-        scene.meshes.push(Mesh { prims });
+        scene.meshes.push(Mesh { prims, weights: mesh.weights().map(<[f32]>::to_vec).unwrap_or_default() });
     }
     for skin in g.skins() {
         let joints: Vec<usize> = skin.joints().map(|j| j.index()).collect();
@@ -166,6 +170,7 @@ pub fn load(bytes: &[u8]) -> Result<Scene, String> {
                 s: Vec3::from(s),
                 mesh: n.mesh().map(|m| m.index()).filter(|_| shown[n.index()]),
                 skin: n.skin().map(|s| s.index()),
+                weights: n.weights().map(<[f32]>::to_vec),
             }
         })
         .collect();
@@ -184,12 +189,13 @@ pub fn load(bytes: &[u8]) -> Result<Scene, String> {
                 gltf::animation::Property::Translation => Path::T,
                 gltf::animation::Property::Rotation => Path::R,
                 gltf::animation::Property::Scale => Path::S,
-                gltf::animation::Property::MorphTargetWeights => continue,
+                gltf::animation::Property::MorphTargetWeights => Path::W,
             };
             let values: Vec<f32> = match r.read_outputs() {
                 Some(gltf::animation::util::ReadOutputs::Translations(v)) => v.flatten().collect(),
                 Some(gltf::animation::util::ReadOutputs::Scales(v)) => v.flatten().collect(),
                 Some(gltf::animation::util::ReadOutputs::Rotations(v)) => v.into_f32().flatten().collect(),
+                Some(gltf::animation::util::ReadOutputs::MorphTargetWeights(v)) => v.into_f32().collect(),
                 _ => continue,
             };
             channels.push(Channel {

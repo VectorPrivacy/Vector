@@ -6,7 +6,7 @@ use super::scene::*;
 fn single(prim: Prim, material: Material) -> Scene {
     let mut s = Scene::default();
     s.materials.push(material);
-    s.meshes.push(Mesh { prims: vec![Prim { material: Some(0), ..prim }] });
+    s.meshes.push(Mesh { prims: vec![Prim { material: Some(0), ..prim }], ..Default::default() });
     s.nodes.push(Node { mesh: Some(0), ..Node::default() });
     s
 }
@@ -93,7 +93,7 @@ pub fn obj(bytes: &[u8]) -> Result<Scene, String> {
     if prims.is_empty() {
         return Err("no geometry".into());
     }
-    s.meshes.push(Mesh { prims });
+    s.meshes.push(Mesh { prims, ..Default::default() });
     s.nodes.push(Node { mesh: Some(0), ..Node::default() });
     Ok(s)
 }

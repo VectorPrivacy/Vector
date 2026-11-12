@@ -78,7 +78,40 @@ pub fn pose(rest: &[Trs], clip: &Clip, t: f32) -> Vec<Trs> {
                     }
                 }
             }
+            Path::W => {}
         }
+    }
+    out
+}
+
+/// Each node's animated morph weights at `t`, where the clip drives any.
+pub fn weights(nodes: usize, clip: &Clip, t: f32) -> Vec<Option<Vec<f32>>> {
+    let mut out = vec![None; nodes];
+    for c in clip.channels.iter().filter(|c| c.path == Path::W && c.node < nodes) {
+        let keys = c.times.len();
+        let per = if c.interp == Interp::Cubic { 3 } else { 1 };
+        if keys == 0 || c.values.len() % (keys * per) != 0 {
+            continue;
+        }
+        let width = c.values.len() / (keys * per);
+        let at = |k: usize, o: usize| &c.values[(k * per + o) * width..(k * per + o + 1) * width];
+        let (a, b, f) = key(&c.times, t);
+        let w = match c.interp {
+            Interp::Step => at(a, 0).to_vec(),
+            Interp::Linear => at(a, 0).iter().zip(at(b, 0)).map(|(x, y)| x + (y - x) * f).collect(),
+            Interp::Cubic if a == b => at(a, 1).to_vec(),
+            Interp::Cubic => {
+                let dt = c.times[b] - c.times[a];
+                let (f2, f3) = (f * f, f * f * f);
+                (0..width)
+                    .map(|j| {
+                        let (p0, m0, p1, m1) = (at(a, 1)[j], at(a, 2)[j] * dt, at(b, 1)[j], at(b, 0)[j] * dt);
+                        p0 * (2. * f3 - 3. * f2 + 1.) + m0 * (f3 - 2. * f2 + f) + p1 * (-2. * f3 + 3. * f2) + m1 * (f3 - f2)
+                    })
+                    .collect()
+            }
+        };
+        out[c.node] = Some(w);
     }
     out
 }

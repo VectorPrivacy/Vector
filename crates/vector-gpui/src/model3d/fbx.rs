@@ -397,7 +397,7 @@ pub fn load(bytes: &[u8]) -> Result<Scene, String> {
             * sp.inverse();
         let (s, r, t) = m.to_scale_rotation_translation();
         let parent = links.iter().find(|(c, p, _)| *c == id && index_of.contains_key(p)).map(|(_, p, _)| index_of[p]);
-        scene.nodes.push(Node { parent, t, r, s, mesh: None, skin: None });
+        scene.nodes.push(Node { parent, t, r, s, ..Node::default() });
         rots.push(Rot { pre, post_inv, order: ord });
     }
 
@@ -588,7 +588,7 @@ pub fn load(bytes: &[u8]) -> Result<Scene, String> {
             }
             p.finish();
         }
-        scene.meshes.push(Mesh { prims });
+        scene.meshes.push(Mesh { prims, ..Default::default() });
         let mesh = scene.meshes.len() - 1;
         if skin_idx.is_some() || scene.nodes[mi].mesh.is_none() {
             scene.nodes[mi].mesh = Some(mesh);
@@ -639,6 +639,7 @@ pub fn load(bytes: &[u8]) -> Result<Scene, String> {
                     Path::T => v3(&mp, "Lcl Translation").unwrap_or(Vec3::ZERO),
                     Path::R => v3(&mp, "Lcl Rotation").unwrap_or(Vec3::ZERO),
                     Path::S => v3(&mp, "Lcl Scaling").unwrap_or(Vec3::ONE),
+                    Path::W => continue,
                 };
                 let default = |k: usize| num(&defaults, ["d|X", "d|Y", "d|Z"][k]).map_or(rest[k], |v| v as f32);
                 let at = |k: usize, t: f64| -> f32 {

@@ -309,7 +309,7 @@ pub fn slim_view(s: &Settings, on: &OnAct, cx: &App) -> AnyElement {
         .size_full()
         .overflow_y_scroll()
         .track_scroll(&s.slim_scroll)
-        .on_scroll_wheel({
+        .on_scroll({
             let geo = s.slim_geo.clone();
             move |_, _, _| geo.borrow_mut().glide = None
         })

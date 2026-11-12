@@ -424,7 +424,6 @@ impl Worker {
         let takes = match h.codec {
             VideoCodec::H264 => true,
             VideoCodec::Vp8 => super::vp8::available(),
-            _ => false,
         };
         if !takes {
             // Only what our caps name; a peer that sends another anyway is told so once.
