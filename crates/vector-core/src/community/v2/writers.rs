@@ -678,6 +678,20 @@ mod tests {
         assert!(verify_writer_cert(&certifier, &d, &sign_writer_cert(&secret, &d).unwrap()));
     }
 
+    /// The scoped certificate test vector CORD-03 §1 publishes, rights = ADD_REACTIONS.
+    #[test]
+    fn a_scoped_certificate_matches_the_published_vector() {
+        let (community, channel, writer, secret) = ([0x01; 32], [0x02; 32], [0x04; 32], [0x05; 32]);
+        let d = scoped_cert_digest(&community, &channel, Epoch(3), &writer, crate::community::roles::Permissions::ADD_REACTIONS);
+        assert_eq!(crate::simd::hex::bytes_to_hex_32(&d), "14129a75435ce645cd6c76d170f4ad61e88f54c0168a2deed48c9213b5eba10c");
+        let certifier = certifier_of(&secret).unwrap();
+        let e = cert_event(nostr_sdk::prelude::PublicKey::from_slice(&certifier).unwrap(), &d);
+        let id = nostr_sdk::prelude::EventId::compute(&e.pubkey, &e.created_at, &e.kind, &e.tags, &e.content);
+        assert_eq!(id.to_hex(), "418f80ff45b3122867c508997774858af6ab99bc12f18afb97ff2c99ad8a7db0");
+        let published: [u8; 64] = crate::simd::hex::hex_string_to_bytes_checked("ec9f4cf12a0f5f09f199fdf776e4416859531e60e70c66ec477711c1f184fad59c913e6378b2be73d632c17223dc70a9acfcc930bd351bac461e2b521682c145").unwrap().try_into().unwrap();
+        assert!(verify_writer_cert(&certifier, &d, &published));
+    }
+
     #[test]
     fn a_writer_certificate_vouches_for_one_member_at_one_epoch_in_one_channel() {
         let secret = [0x31; 32];
