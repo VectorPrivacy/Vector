@@ -4900,6 +4900,16 @@ fn chat_list(
     } else {
         no_messages.then(|| get_started(cx).into_any_element())
     };
+    let pin_keys: Rc<Vec<String>> = Rc::new(
+        rows.iter()
+            .filter_map(|r| match r {
+                chatlist_ops::Row::Chat { idx, archived: false, .. } => store.chats.get(*idx),
+                _ => None,
+            })
+            .filter(|c| store.pin_rank(&c.id).is_some())
+            .map(|c| c.id.clone())
+            .collect(),
+    );
     let rows = Rc::new(rows);
     let archive_row = RefCell::new(archive_row);
     let store = shared.clone();
@@ -4993,7 +5003,7 @@ fn chat_list(
                         let id: SharedString = chat.id.clone().into();
                         let (open_view, menu_view, menu_id) = (view.clone(), view.clone(), chat.id.clone());
                         let pinned = store.pin_rank(&chat.id).is_some();
-                        let row = chat_row(&store, chat, active, pinned)
+                        let mut row = chat_row(&store, chat, active, pinned)
                             .on_click(move |_, window, cx| {
                                 let id = id.clone();
                                 open_view
@@ -5007,6 +5017,10 @@ fn chat_list(
                                 let (id, at) = (menu_id.clone(), e.position);
                                 menu_view.update(cx, |app, cx| app.chat_row_menu(id, at, cx)).ok();
                             });
+                        if pinned && !archived {
+                            let name = store.name(&chat.id).into();
+                            row = chatlist_ops::pin_draggable(row, chat.id.clone(), name, pin_keys.clone(), view.clone());
+                        }
                         if archived && last {
                             div()
                                 .pb(px(6.))

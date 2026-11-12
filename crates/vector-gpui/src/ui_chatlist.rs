@@ -440,6 +440,33 @@ impl VectorApp {
         .detach();
     }
 
+    /// Move a pin to just before `before`, or to the end.
+    pub(super) fn chat_move_pin(&mut self, id: String, before: Option<String>, cx: &mut Context<Self>) {
+        if !self.live {
+            let mut store = self.store.borrow_mut();
+            store.pinned.retain(|p| *p != id);
+            let at = before
+                .and_then(|b| store.pinned.iter().position(|p| *p == b))
+                .unwrap_or(store.pinned.len());
+            store.pinned.insert(at, id);
+            drop(store);
+            return cx.notify();
+        }
+        let rx = backend::run(backend::chatlist::move_pinned(id, before));
+        cx.spawn(async move |this, cx| {
+            let res = rx.await.unwrap_or_else(|_| Err("cancelled".into()));
+            this.update(cx, |this, cx| {
+                match res {
+                    Ok(list) => this.store.borrow_mut().pinned = list,
+                    Err(e) => this.show_toast(&e, cx),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     /// `setChatArchived`: archiving reads it; the archive keeps the newest message seen here.
     pub(super) fn chat_archive(&mut self, id: String, archive: bool, cx: &mut Context<Self>) {
         let at = archive.then(|| self.store.borrow().chat(&id).map(crate::data::last_activity).unwrap_or(0));
@@ -519,4 +546,70 @@ impl VectorApp {
             store.archived = backend::chatlist::archived();
         }
     }
+}
+
+#[derive(Clone)]
+pub(super) struct PinDrag {
+    key: String,
+    name: gpui::SharedString,
+}
+
+struct PinGhost(gpui::SharedString);
+
+impl gpui::Render for PinGhost {
+    fn render(&mut self, _: &mut gpui::Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .w(px(220.))
+            .h(px(50.))
+            .px(px(12.))
+            .flex()
+            .items_center()
+            .rounded(px(10.))
+            .bg(c(0x161616))
+            .opacity(0.92)
+            .shadow_lg()
+            .font_family(RUBIK)
+            .text_size(px(15.))
+            .text_color(c(0xffffff))
+            .child(div().truncate().child(self.0.clone()))
+    }
+}
+
+/// A pinned row lifts to move among the pins shown (`keys`, in order); its top half drops
+/// above it, its bottom half below. Pins this tab hides keep their places.
+pub(super) fn pin_draggable(
+    row: gpui::Stateful<gpui::Div>,
+    key: String,
+    name: gpui::SharedString,
+    keys: std::rc::Rc<Vec<String>>,
+    view: gpui::WeakEntity<VectorApp>,
+) -> gpui::Stateful<gpui::Div> {
+    let mut row = row.relative().on_drag(PinDrag { key: key.clone(), name }, |d: &PinDrag, _, _, cx| {
+        cx.new(|_| PinGhost(d.name.clone()))
+    });
+    for top in [true, false] {
+        let (key, keys, view) = (key.clone(), keys.clone(), view.clone());
+        let zone = div().absolute().left(px(12.)).right(px(12.)).h(gpui::relative(0.5));
+        let zone = if top { zone.top_0() } else { zone.bottom_0() };
+        row = row.child(
+            zone.drag_over::<PinDrag>(move |d, _, _, _| {
+                if top { d.border_t_2() } else { d.border_b_2() }.border_color(c(PRIMARY))
+            })
+            .on_drop(move |d: &PinDrag, _, cx| {
+                if d.key == key {
+                    return;
+                }
+                let rest: Vec<&String> = keys.iter().filter(|k| **k != d.key).collect();
+                let Some(t) = rest.iter().position(|k| **k == key) else { return };
+                let at = t + usize::from(!top);
+                if keys.iter().position(|k| *k == d.key) == Some(at) {
+                    return;
+                }
+                let before = rest.get(at).map(|k| k.to_string());
+                let moved = d.key.clone();
+                view.update(cx, |app, cx| app.chat_move_pin(moved, before, cx)).ok();
+            }),
+        );
+    }
+    row
 }
