@@ -8,7 +8,7 @@
     import { reactionTip, reactionDetails, bindReactionEl } from '../lib/reactionpopups.svelte.js';
     import Avatar from '../ui/Avatar.svelte';
 
-    let { h } = $props();   // h: findMessage(msgId), getProfile, getName, getProfileAvatarSrc, twemojify, bindCachedImg, emojiLabel(emoji)
+    let { h } = $props();   // h: findMessage(msgId), countedReactions(msg), getProfile, getName, getProfileAvatarSrc, twemojify, bindCachedImg, emojiLabel(emoji)
 
     const tip = $derived(reactionTip());
     const details = $derived(reactionDetails());
@@ -27,7 +27,7 @@
         if (!details) return [];
         messageVersion(details.msgId);
         const msg = h.findMessage(details.msgId);
-        return (msg?.reactions || []).filter(r => r.emoji === details.emoji).map(r => {
+        return h.countedReactions(msg).filter(r => r.emoji === details.emoji).map(r => {
             profileVersion(r.author_id);
             const p = h.getProfile(r.author_id);
             return { id: r.author_id, src: h.getProfileAvatarSrc(p), name: h.getName(p || r.author_id) };

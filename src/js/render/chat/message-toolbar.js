@@ -280,7 +280,7 @@ function _dmsgToolbarView(rowEl) {
     const held = !!shown?.resident;
 
     const show = {
-        react: !dissolved && uniqueEmojiCount < 8,
+        react: !dissolved && uniqueEmojiCount < 8 && channelAllowsReact(getChat(strOpenChat)),
         reply: !dissolved,
         // Own text-only messages; a command invocation is a passive render line.
         edit: !dissolved && !_dmsgCommandInfo(msg) && mine && hasContent && !hasAttachments,
@@ -856,7 +856,7 @@ async function _dmsgOpenMessageMenu(rowEl, x, y) {
     const dissolved = rowIsInDissolvedCommunity();
 
     if (!dissolved) {
-        if (uniqueEmojiCount < 8) {
+        if (uniqueEmojiCount < 8 && channelAllowsReact(getChat(strOpenChat))) {
             items.push({ label: 'React', icon: 'smile-face', onClick: () => _dmsgOpenReactionPicker(targetId) });
         }
         items.push({ label: 'Reply', icon: 'reply', onClick: () => _dmsgSelectReply(targetId) });

@@ -909,10 +909,10 @@ async function pickCommunityIcon(chat) {
     const cf = chat?.metadata?.custom_fields;
     if (!cf) return;
     const communityId = cf.community_id;
-    const { open } = window.__TAURI__.dialog;
-    const selected = await open({ multiple: false, filters: [{ name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'gif', 'webp'] }] });
-    const filePath = typeof selected === 'string' ? selected : selected?.path;
-    if (!filePath) return;
+    const pick = await pickImage('Choose Community Icon');
+    if (!pick) return;
+    const cropped = await cropAvatarPick(pick.path, pick.preview, 'Crop Icon', 'community');
+    if (!cropped) return;
     VectorSvelte.setOverview({ upload: { progress: 5 } });
     let unlisten = null;
     try {
@@ -921,14 +921,14 @@ async function pickCommunityIcon(chat) {
                 VectorSvelte.setOverview({ upload: { progress: e.payload.progress || 0 } });
             }
         });
-        await invoke('set_community_image', { communityId, filepath: filePath, isBanner: false });
+        await invoke('set_community_image', { communityId, filepath: pick.path, isBanner: false, crop: cropped.crop });
         cf.icon = '1';
         const cachedPath = await invoke('cache_community_image', { communityId, isBanner: false });
         if (cachedPath) chat.metadata.avatar_cached = cachedPath;
     } catch (err) {
         console.error('Failed to set community image:', err);
-        showToast('Failed to update the image');
         VectorSvelte.setOverview({ upload: null });
+        popupConfirm('Couldn’t Update the Icon', escapeHtml(String(err?.message || err)), true, '', 'vector_warning.svg');
         return;
     } finally {
         if (unlisten) unlisten();
@@ -1038,11 +1038,6 @@ async function renderCommunityOverview(chat, preserveSearch = false) {
                     showContextMenu, attachLongPressContextMenu, showMiniProfile, getProfileAvatarSrc, getProfile,
                     getName, streamHidden, twemojify, renderCustomEmojiShortcodes, showGlobalTooltip, hideGlobalTooltip,
                     memberSectionClosed, setMemberSectionClosed, copyIdItems, memberMenuItems, explainUnlisted,
-                    channelPosters: (id) => {
-                        const open = arrChats.find(c => c.id === strOpenChat);
-                        if (communityIdOfChat(open) !== id) return null;
-                        return new Set((open.messages || []).map(m => (m.mine ? myNpub : m.npub)).filter(Boolean));
-                    },
                 },
                 onChange: ({ members }) => {
                     communityMembersCache.set(communityId, members);

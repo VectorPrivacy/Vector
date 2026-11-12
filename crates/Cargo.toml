@@ -1,5 +1,5 @@
 [workspace]
-members = ["vector-calls", "vector-core", "vector-cli", "concord-cli", "vector-agent", "vector-sdk", "vector-web", "vector-push", "vector-pusher"]
+members = ["vector-calls", "vector-core", "vector-cli", "concord-cli", "vector-agent", "vector-sdk", "vector-media", "vector-web", "vector-push", "vector-pusher", "vector-lab"]
 # Vendored crates (patched in from src-tauri) are packages of their own, not members.
 exclude = ["vendor", "vector-gpui"]
 resolver = "2"
@@ -25,10 +25,11 @@ opt-level = 3
 [patch.crates-io]
 # nostr: SecretKey's Drop used non_secure_erase, which the compiler can optimise away; the fork
 # zeroizes with volatile writes. nostr-sdk: its verification cache re-hashes the event ID, and a
-# gift wrap's ID is checked but not its throwaway-key signature (NIP-59; readers verify the seal).
-nostr = { git = "https://github.com/VectorPrivacy/nostr.git", branch = "vector-v0.45.4" }
-nostr-sdk = { git = "https://github.com/VectorPrivacy/nostr.git", branch = "vector-v0.45.4" }
-nostr-database = { git = "https://github.com/VectorPrivacy/nostr.git", branch = "vector-v0.45.4" }
+# gift wrap's ID is checked but not its throwaway-key signature (NIP-59; readers verify the seal);
+# one shared cache, each entry bound to the signature it verified.
+nostr = { git = "https://github.com/VectorPrivacy/nostr.git", branch = "vector-v0.45.6" }
+nostr-sdk = { git = "https://github.com/VectorPrivacy/nostr.git", branch = "vector-v0.45.6" }
+nostr-database = { git = "https://github.com/VectorPrivacy/nostr.git", branch = "vector-v0.45.6" }
 # saturating-time 0.4.0's SystemTime MIN/MAX probe never terminates on Windows
 # (100ns clock granularity turns sub-1ns probe steps into no-op "successes"),
 # and its saturating ops evaluate those limits eagerly — so tor-netdoc's first

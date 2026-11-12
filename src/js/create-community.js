@@ -27,15 +27,10 @@ function ccPasteNpub(np, picker) {
 }
 
 async function ccPickAvatar() {
-    const { open } = window.__TAURI__.dialog;
-    const file = await open({
-        title: 'Choose Community Icon', multiple: false, directory: false,
-        filters: [{ name: 'Image', extensions: ['png', 'jpeg', 'jpg', 'gif', 'webp'] }],
-    });
-    if (!file) return;
-    // On Android a content:// URI needs cache_android_file's preview file, not convertFileSrc.
-    const cropped = await cropAvatarPick(file, await pickedImagePreviewSrc(file), 'Crop Community Icon', 'community');
-    if (cropped) VectorSvelte.ccSetAvatar(file, cropped.preview, cropped.crop);
+    const pick = await pickImage('Choose Community Icon');
+    if (!pick) return;
+    const cropped = await cropAvatarPick(pick.path, pick.preview, 'Crop Community Icon', 'community');
+    if (cropped) VectorSvelte.ccSetAvatar(pick.path, cropped.preview, cropped.crop);
 }
 
 /**

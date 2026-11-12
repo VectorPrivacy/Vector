@@ -1,0 +1,18 @@
+[package]
+name = "vector-lab"
+version = "0.1.0"
+edition = "2021"
+description = "Live end-to-end checks of Vector bots: throwaway identities and Communities on real relays."
+license = "MIT"
+publish = false
+
+[dependencies]
+vector_sdk = { path = "../vector-sdk" }
+tokio = { version = "1.49", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[features]
+default = ["voice"]
+# The voice scenario: libopus, built with cmake.
+voice = ["vector_sdk/voice"]

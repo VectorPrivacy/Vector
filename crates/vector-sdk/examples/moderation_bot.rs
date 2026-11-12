@@ -30,7 +30,7 @@ async fn main() -> vector_sdk::Result<()> {
     bot.on_event(|bot, event| async move {
         match event {
             // Greet new arrivals in the channel they joined.
-            BotEvent::MemberJoin { channel_id, npub } => {
+            BotEvent::MemberJoin { channel_id, npub, .. } => {
                 let who = &npub[..npub.len().min(12)];
                 let _ = bot.channel(channel_id).send(&format!("👋 Welcome, {who}!")).await;
             }

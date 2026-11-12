@@ -6011,18 +6011,40 @@ button.mini-profile-role-dot:disabled { cursor: default; }
   white-space: nowrap;
 }
 
-/* Edit History Popup */
+/* Edit History: anchored panel on wide screens, bottom sheet on narrow ones. */
 .edit-history-popup {
   position: fixed;
   z-index: 1000;
-  background: #1a1a1a;
+  display: flex;
+  flex-direction: column;
+  width: min(400px, calc(100vw - 20px));
+  max-height: min(70vh, 520px);
+  background: #141414;
+  border: 1px solid rgba(255, 255, 255, 0.06);
   border-radius: 12px;
-  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
-  min-width: 280px;
-  max-width: 400px;
-  max-height: 300px;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.55);
   overflow: hidden;
-  animation: popupFadeIn 0.3s ease-out;
+  animation: popupFadeIn 0.16s ease-out;
+}
+
+.edit-history-popup.sheet {
+  left: 0;
+  right: 0;
+  bottom: 0;
+  width: auto;
+  max-height: 75vh;
+  border-radius: 16px 16px 0 0;
+  border-bottom: none;
+  padding-bottom: env(safe-area-inset-bottom);
+  animation: ehSheetIn 0.22s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+.eh-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 999;
+  background: rgba(0, 0, 0, 0.45);
+  animation: popupFadeIn 0.2s ease-out;
 }
 
 @keyframes popupFadeIn {
@@ -6030,66 +6052,160 @@ button.mini-profile-role-dot:disabled { cursor: default; }
   to { opacity: 1; }
 }
 
-.edit-history-content {
-  padding: 8px;
-  overflow-y: auto;
-  max-height: 280px;
+@keyframes ehSheetIn {
+  from { transform: translateY(100%); }
+  to { transform: translateY(0); }
 }
 
-.edit-history-entry {
-  padding: 8px 10px;
-  background: #0f0f0f;
-  border-radius: 6px;
-  border-left: 3px solid #555;
-  opacity: 0;
-  animation: entryFadeIn 0.2s ease-out forwards;
-  overflow: hidden;
-}
-
-@keyframes entryFadeIn {
-  from { opacity: 0; transform: translateY(-4px); }
-  to { opacity: 1; transform: translateY(0); }
-}
-
-.edit-history-entry + .edit-history-entry {
-  margin-top: 6px;
-}
-
-.edit-history-entry.original {
-  border-left-color: #666;
-}
-
-.edit-history-entry.current {
-  border-left-color: var(--icon-color-primary);
-}
-
-.edit-history-time {
-  font-size: 10px;
-  color: rgba(255, 255, 255, 0.4);
-  line-height: 1.2;
-}
-
-.edit-history-label {
-  font-size: 9px;
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-  color: rgba(255, 255, 255, 0.3);
-  margin-left: 6px;
-}
-
-.edit-history-text {
+.eh-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 8px 6px 14px;
   font-size: 12px;
-  color: rgba(255, 255, 255, 0.85);
-  word-wrap: break-word;
-  overflow-wrap: break-word;
-  word-break: break-word;
-  line-height: 1.3;
-  margin-top: 2px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: rgba(255, 255, 255, 0.5);
+  flex-shrink: 0;
 }
 
-/* Scale custom/twemoji to the text run (mirrors `.dmsg .emoji`) — without this
-   the natural image size blows the row up. */
-.edit-history-text .emoji {
+.eh-close {
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  backdrop-filter: none;
+}
+
+.eh-close:hover { background: rgba(255, 255, 255, 0.07); }
+.eh-close .icon { position: static; width: 14px; height: 14px; background-color: rgba(255, 255, 255, 0.5); }
+
+.edit-history-content {
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 0 14px 12px;
+}
+
+/* A timeline: a thin rail with a dot per revision. */
+.eh-timeline {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.eh-rev {
+  position: relative;
+  padding: 0 0 12px 16px;
+}
+
+.eh-rev::before {
+  content: '';
+  position: absolute;
+  left: 3px;
+  top: 14px;
+  bottom: -2px;
+  width: 1px;
+  background: rgba(255, 255, 255, 0.09);
+}
+
+.eh-rev:last-child { padding-bottom: 0; }
+.eh-rev:last-child::before { display: none; }
+
+.eh-rev::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 5px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.22);
+}
+
+.eh-rev.current::after { background: var(--icon-color-primary); }
+
+.eh-rev-head {
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 16px;
+  color: rgba(255, 255, 255, 0.55);
+  margin-bottom: 3px;
+}
+
+.eh-rev-head span {
+  font-weight: 400;
+  color: rgba(255, 255, 255, 0.32);
+  margin-left: 4px;
+}
+
+.eh-text.dmsg-text {
+  display: block;
+  font-size: 13px;
+  line-height: 1.45;
+  color: rgba(255, 255, 255, 0.85);
+  overflow-wrap: anywhere;
+  cursor: pointer;
+}
+
+/* Message markdown, held compact: a heading reads as a heading, not a banner. */
+.eh-text.dmsg-text h1 { font-size: 1.25em; }
+.eh-text.dmsg-text h2 { font-size: 1.15em; }
+.eh-text.dmsg-text :is(h3, h4, h5, h6) { font-size: 1.05em; }
+.eh-text.dmsg-text :is(h1, h2, h3, h4, h5, h6) { margin: 0.15em 0; }
+.eh-text.dmsg-text hr { margin: 0.5em 0; min-width: 0; opacity: 0.5; }
+.eh-text.dmsg-text :is(p, ul, ol, blockquote, pre) { margin-top: 0.2em; margin-bottom: 0.2em; }
+
+.eh-text.dmsg-text.collapsed {
+  max-height: 4.4em;
+  overflow: hidden;
+  cursor: default;
+}
+
+.eh-text.dmsg-text.collapsed.overflows {
+  cursor: pointer;
+  -webkit-mask-image: linear-gradient(to bottom, #000 55%, transparent);
+  mask-image: linear-gradient(to bottom, #000 55%, transparent);
+}
+
+.eh-text.eh-diff { color: rgba(255, 255, 255, 0.6); }
+
+.eh-ins {
+  text-decoration: none;
+  color: #fff;
+  background: color-mix(in srgb, var(--icon-color-primary) 20%, transparent);
+  border-radius: 3px;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+}
+
+.eh-del {
+  color: color-mix(in srgb, var(--danger-color) 80%, #fff);
+  background: color-mix(in srgb, var(--danger-color) 12%, transparent);
+  text-decoration: line-through;
+  text-decoration-color: color-mix(in srgb, var(--danger-color) 60%, transparent);
+  border-radius: 3px;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+}
+
+/* A line can't strike through a picture: a removed emoji shows faded on the red. */
+.eh-del img { opacity: 0.45; }
+
+.eh-del + .eh-ins { margin-left: 3px; }
+
+.eh-gap {
+  color: rgba(255, 255, 255, 0.35);
+  padding: 0 2px;
+}
+
+/* Scale custom/twemoji to the text run (mirrors `.dmsg .emoji`). */
+.eh-text .emoji {
   width: 1.15em;
   height: 1.15em;
   vertical-align: -0.2em;

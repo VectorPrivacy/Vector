@@ -2743,21 +2743,19 @@ pub async fn set_community_image(
     crop: Option<CropRect>,
 ) -> Result<(), String> {
     vector_core::db::scoped(async move {
-        let session = vector_core::db::current_session();
         let id_bytes = hex_to_id32(&community_id)?;
         // Existence-check BEFORE the expensive read + encrypt + upload.
-        let v2 = vector_core::db::community::load_community_v2(&CommunityId(id_bytes))?
-            .ok_or("Community not found")?;
+        vector_core::db::community::load_community_v2(&CommunityId(id_bytes))?.ok_or("Community not found")?;
 
-        // Read the picked file. On Android the file dialog returns a content:// URI that std::fs can't
-        // open, so route it through the JNI content-resolver (the same path upload_avatar uses); desktop
-        // reads the real path directly. Without this, picking an image on Android failed instantly at the
-        // read ("read image: ...") and surfaced as the generic "Failed to update the image" toast — for
-        // the owner too, not just admins.
+        // On Android the file dialog returns a content:// URI, read through the content resolver.
+        let unreadable = |e: &dyn std::fmt::Display| {
+            vector_core::log_warn!("[set_community_image] couldn't read the pick: {e}");
+            crate::message::CANT_OPEN_PICK.to_string()
+        };
         let (raw_bytes, _raw_ext): (Vec<u8>, String) = {
             #[cfg(not(target_os = "android"))]
             {
-                let bytes = std::fs::read(&filepath).map_err(|e| format!("read image: {e}"))?;
+                let bytes = std::fs::read(&filepath).map_err(|e| unreadable(&e))?;
                 let ext = std::path::Path::new(&filepath)
                     .extension()
                     .and_then(|e| e.to_str())
@@ -2767,7 +2765,7 @@ pub async fn set_community_image(
             }
             #[cfg(target_os = "android")]
             {
-                let af = crate::android::filesystem::read_android_uri(filepath.clone())?;
+                let af = crate::android::filesystem::read_android_uri(filepath.clone()).map_err(|e| unreadable(&e))?;
                 ((*af.bytes).clone(), af.extension)
             }
         };
@@ -2792,25 +2790,7 @@ pub async fn set_community_image(
                 crate::shared::image::UploadImageKind::Avatar
             },
         )?;
-        let bytes = prepared.bytes;
-        let ext = prepared.extension.to_string();
-
-        let plaintext_hash = vector_core::crypto::sha256_hex(&bytes);
-
-        // Encrypt with a fresh random key+nonce (same as file attachments); the key rides in
-        // the members-only metadata edition, so only members can decrypt the blob.
-        let params = vector_core::crypto::generate_encryption_params();
-        let encrypted = vector_core::crypto::encrypt_data(&bytes, &params)?;
-
-        let _client = vector_core::state::nostr_client().ok_or("Nostr client not initialised")?;
-        let signer = vector_core::signer::active_signer().map_err(|e| format!("signer: {e}"))?;
-        let servers = vector_core::state::get_blossom_servers();
-        if servers.is_empty() {
-            return Err("No Blossom servers configured.".to_string());
-        }
-        // Emit upload progress so the avatar shows a ring (parity with profile avatars) instead of freezing
-        // until the new icon appears. `is_encrypted = true` routes the encrypted blob to servers that accept
-        // encrypted types (the same ranking file attachments use).
+        // Upload progress drives the ring on the avatar, as for profile pictures.
         let cid_for_progress = community_id.clone();
         let progress_cb: vector_core::blossom::ProgressCallback = std::sync::Arc::new(move |pct, _bytes| {
             vector_core::emit_event(
@@ -2819,53 +2799,11 @@ pub async fn set_community_image(
             );
             Ok(())
         });
-        let url = vector_core::blossom::upload_blob_with_progress_and_failover(
-            signer,
-            servers,
-            std::sync::Arc::new(encrypted),
-            Some("application/octet-stream"),
-            true,
-            progress_cb,
-            None,
-            None,
-            None,
-        )
-        .await?
-        // Community images are never mirrored, so only the descriptor matters.
-        .url;
-
-
-        // The image is a field of the vsk-0 metadata document. Overlay onto the
-        // FULL held document (`metadata()`) so setting one image can't wipe the
-        // other fields, then persist locally for instant display — the control-fold
-        // echo re-applies the same head idempotently.
-        let mut extra = serde_json::Map::new();
-        extra.insert("ext".into(), serde_json::Value::String(ext.clone()));
-        let img_ref = vector_core::community::v2::control::ImageRef {
-            url: url.clone(),
-            key: params.key.clone(),
-            nonce: params.nonce.clone(),
-            hash: plaintext_hash.clone(),
-            extra,
-        };
-        let mut meta = v2.metadata();
-        if is_banner {
-            meta.banner = Some(img_ref.clone());
-        } else {
-            meta.icon = Some(img_ref.clone());
-        }
-        let transport = LiveTransport::with_timeout(Duration::from_secs(12));
-        vector_core::community::v2::service::edit_community_metadata(&transport, &v2, &meta).await?;
-        if let Some(updated) = vector_core::community::v2::service::persist_community_image(
-            v2.id(),
-            Some(img_ref),
-            is_banner,
-        )
-        .await
-        {
-            vector_core::VectorCore.register_v2_chats(&updated, &session).await;
-        }
-        Ok(())
+        vector_core::VectorCore
+            .publish_community_image(&community_id, prepared.bytes, prepared.extension, is_banner, Some(progress_cb))
+            .await
+            .map(|_| ())
+            .map_err(|e| e.to_string())
     })
     .await
 }
@@ -3319,6 +3257,12 @@ pub fn get_community_mentions(community_id: String) -> Result<serde_json::Value,
 #[tauri::command]
 pub fn get_channel_send_denied(community_id: String, channel_id: String, npubs: Vec<String>) -> Result<Vec<String>, String> {
     vector_core::VectorCore.channel_send_denied(&community_id, &channel_id, &npubs).map_err(|e| e.to_string())
+}
+
+/// Of `npubs`, those who can't react in a channel: their reactions there don't count.
+#[tauri::command]
+pub fn get_channel_react_denied(community_id: String, channel_id: String, npubs: Vec<String>) -> Result<Vec<String>, String> {
+    vector_core::VectorCore.channel_react_denied(&community_id, &channel_id, &npubs).map_err(|e| e.to_string())
 }
 
 /// The Timeouts running in a community: npub → { from, until }.

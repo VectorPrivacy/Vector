@@ -26,7 +26,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
-use vector_sdk::vector_core::net::build_http_client;
+use vector_sdk::net::build_http_client;
 use vector_sdk::{VectorBot, XdcEvent, XdcSession};
 
 const DATA_DIR: &str = "./xdc-oracle-data";

@@ -21,32 +21,21 @@ async fn main() -> vector_sdk::Result<()> {
     println!("── sender online as {}", bot.npub());
 
     println!("── joining via link…");
-    let summary = bot.core().join_community(&invite).await?;
-    let name = summary.get("name").and_then(|v| v.as_str()).unwrap_or("?");
-    println!("── joined \"{name}\"");
+    let community = bot.join(&invite).await?;
+    println!("── joined \"{}\"", community.name().await);
 
     // The join-time fold is owner-only; admin-created channels arrive on the first
     // control follow. Poll the local list until the target channel appears.
     let mut channel_id: Option<String> = None;
     for attempt in 0..10 {
-        for c in bot.core().list_communities().await {
-            if c.get("version").and_then(|v| v.as_u64()) != Some(2) {
-                continue;
-            }
-            let Some(chans) = c.get("channels").and_then(|v| v.as_array()) else { continue };
-            for ch in chans {
-                if ch.get("name").and_then(|n| n.as_str()) == Some(channel_name.as_str()) {
-                    channel_id = ch.get("channel_id").and_then(|i| i.as_str()).map(String::from);
-                }
-            }
-        }
+        channel_id = community.channels().await.into_iter().find(|ch| ch.name() == channel_name).map(|ch| ch.id().to_string());
         if channel_id.is_some() {
             break;
         }
         if attempt == 0 {
             println!("── \"{channel_name}\" not in the join snapshot; syncing for the control fold…");
         }
-        let _ = bot.core().sync_communities().await;
+        let _ = bot.sync_communities().await;
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
     }
     let Some(channel_id) = channel_id else {

@@ -74,7 +74,19 @@ fn respond_to(request: &http::Request<Vec<u8>>) -> Response {
         };
         vector_core::vcache::open_for_page(&path)
     } else {
-        vector_core::simd::hex::hex_to_bytes_32_checked(rest).and_then(|hash| vector_core::media::open(&hash))
+        let hash = vector_core::simd::hex::hex_to_bytes_32_checked(rest);
+        let found = hash.and_then(|hash| vector_core::media::open(&hash));
+        if let (Some(hash), None) = (hash, &found) {
+            // A drawn bubble names only what it was told is held: a miss here is a bubble left blank.
+            vector_core::log_net_fail!(
+                "[Media] {} asked for but not served (memory {}, store {}, pending {})",
+                &rest[..rest.len().min(8)],
+                vector_core::media::ram::cache().contains(&hash),
+                vector_core::media::store::holds(&hash),
+                vector_core::media::pending::holds(&hash)
+            );
+        }
+        found
     };
     let Some(src) = src else {
         return status(StatusCode::NOT_FOUND);

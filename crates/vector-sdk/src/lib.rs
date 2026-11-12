@@ -60,11 +60,17 @@
 //! | Receive messages | [`VectorBot::on_message`] |
 //! | Answer typed slash commands (with a `/` picker) | [`VectorBot::command`] → [`CommandBuilder`] |
 //! | Receive *everything* (joins, reactions, invites…) | [`VectorBot::on_event`] → match on [`BotEvent`] |
-//! | Moderate a community | [`IncomingMessage::member`] → [`Member::kick`] · [`ban`](Member::ban) · [`grant_admin`](Member::grant_admin) |
+//! | Moderate a community | [`IncomingMessage::member`] → [`Member::kick`] · [`ban`](Member::ban) · [`timeout`](Member::timeout) · [`Channel::hide`] |
+//! | Roles and permissions | [`Community::create_role`] → [`Role`] · [`Member::add_role`] · [`Channel::set_overwrite`] · [`Member::can`] |
+//! | Channels and Categories | [`Community::create_channel_with`] · [`create_category`](Community::create_category) · [`Channel::set_topic`] · [`Channel::move_to`] |
+//! | Pins, Nicknames, the Audit Log | [`Channel::pin`] · [`Member::set_nickname`] · [`Community::audit_log`] |
+//! | Hear every change, and who made it | [`BotEvent::CommunityChange`] → [`ChangeKind`] |
+//! | Create, join, preview | [`VectorBot::create_community`] · [`join`](VectorBot::join) · [`preview_link`](VectorBot::preview_link) |
 //! | Manage a community | [`IncomingMessage::community`] / [`VectorBot::community`] → [`Community`] |
 //! | Be invitable safely | [`builder().public()`](VectorBotBuilder::public) / [`whitelist(..)`](VectorBotBuilder::whitelist) |
 //! | Manage profiles | [`fetch_profile`](VectorBot::fetch_profile) · [`update_profile`](VectorBot::update_profile) · [`block`](VectorBot::block) … |
 //! | Join the Mini Apps (WebXDC games and tools) people share, on their realtime channel | `bot.xdc(..).run(..)`, `msg.xdc()` (feature `xdc`; see the `xdc` module) |
+//! | Make HTTP requests over the bot's transport | [`net::build_http_client`] |
 //! | Anything else | [`bot.core()`](VectorBot::core) → the full [`VectorCore`] facade |
 //!
 //! ## Receiving: `on_message` vs `on_event`
@@ -75,9 +81,10 @@
 //! `msg.text()` here — see [Commands](#commands) below.)
 //!
 //! For everything beyond messages, [`on_event`](VectorBot::on_event) delivers the
-//! full stream as a [`BotEvent`] you `match` on — `Message`, `MessageUpdate` (a
-//! reaction/edit landed), `Delete`, `MemberJoin`, `MemberLeave`, `Typing`,
-//! `Invite`, and `Removed` (the bot was kicked/banned):
+//! full stream as a [`BotEvent`] you `match` on: `Message`, `Reaction`, `Edit`, `Delete`
+//! (saying who, and whether a moderator did it), `MemberJoin`, `MemberLeave`, `Typing`,
+//! `CommunityChange` (one per change to Roles, Channels, bans, Timeouts…, with who made it),
+//! `Invite`, `Removed` (the bot was kicked or banned) and `Dissolved`:
 //!
 //! ```no_run
 //! # use vector_sdk::{VectorBot, BotEvent};
@@ -85,7 +92,7 @@
 //! bot.on_event(|bot, event| async move {
 //!     match event {
 //!         BotEvent::Message(msg) if !msg.is_mine() => { let _ = msg.reply("hi").await; }
-//!         BotEvent::MemberJoin { channel_id, npub } => {
+//!         BotEvent::MemberJoin { channel_id, npub, .. } => {
 //!             let _ = bot.channel(channel_id).send(&format!("welcome {}!", &npub[..12])).await;
 //!         }
 //!         _ => {}
@@ -166,8 +173,9 @@
 //! If the bot loses its connection, [`on_message`](VectorBot::on_message) /
 //! [`on_event`](VectorBot::on_event) reconnect on their own and catch up on what was
 //! missed. Your handler fires for messages that arrive while the
-//! bot is running; to read older history, use
-//! [`bot.core().get_messages(...)`](VectorCore).
+//! bot is running; to read older history, use [`Channel::history`] and
+//! [`Channel::sync_before`]. [`VectorBotBuilder::catch_up`] chooses whether the bot
+//! catches up before going live or pages the gap itself.
 //!
 //! ## Identity: bring your own, or let the bot make one
 //!
@@ -197,21 +205,25 @@
 //!
 //! ## Reaching deeper
 //!
-//! Everything not surfaced here — creating communities, reading history, and
-//! lower-level controls — is one hop away via [`VectorBot::core`], which hands you
-//! the full [`VectorCore`] facade.
+//! [`VectorBot::core`] hands you the [`VectorCore`] engine underneath. A bot that needs it,
+//! or one built by copying code out of Vector's app, has found something the SDK is missing:
+//! the guide [Moving your bot onto the SDK](https://github.com/VectorPrivacy/Vector/blob/master/crates/vector-sdk/guides/moving-onto-the-sdk.md)
+//! maps those internals onto SDK calls.
 //!
 //! ## Examples
 //!
 //! Runnable bots live in [`examples/`](https://github.com/VectorPrivacy/Vector/tree/master/crates/vector-sdk/examples):
 //!
-//! - **`echo_bot`** — the minimal hello-world; replies to every message.
-//! - **`slash_command_bot`** — a `/command` router (`/ping`, `/roll`, `/help`…).
-//! - **`ai_bot`** — an LLM chatbot with a typing indicator and threaded replies.
-//! - **`moderation_bot`** — welcomes joiners and auto-bans on a word filter.
-//! - **`whitelist_bot`** — a private bot that only joins communities it trusts.
-//! - **`file_bot`** / **`save_files_bot`** — send a file / receive and decrypt one.
-//! - **`xdc_tictactoe_bot`** / **`xdc_oracle_bot`** — play a shared Mini App live / be the server behind one (feature `xdc`).
+//! - **`echo_bot`**: the minimal hello-world; replies to every message.
+//! - **`slash_command_bot`**: a `/command` router (`/ping`, `/roll`, `/help`…).
+//! - **`ai_bot`**: an LLM chatbot with a typing indicator and threaded replies.
+//! - **`community_admin_bot`**: Roles, a private category channel, `/timeout`, `/role`, `/pin`, `/audit`.
+//! - **`moderation_bot`**: welcomes joiners and auto-bans on a word filter.
+//! - **`whitelist_bot`**: a private bot that only joins communities it trusts.
+//! - **`file_bot`** / **`save_files_bot`**: send a file / receive and decrypt one.
+//! - **`xdc_tictactoe_bot`** / **`xdc_oracle_bot`**: play a shared Mini App live / be the server behind one (feature `xdc`).
+//! - **`voice_whisper_bot`**: a voice assistant: writes down what's said in a call and answers out loud (feature `whisper`).
+//! - **`voice_echo_bot`** / **`voice_radio_bot`**: says back what you say / plays a track in many calls (feature `voice`).
 //!
 //! ```sh
 //! VECTOR_NSEC=nsec1... cargo run -p vector-sdk --example echo_bot
@@ -223,7 +235,7 @@ use std::sync::Arc;
 
 // Curated re-exports so downstream crates can depend only on `vector_sdk`.
 pub use vector_core::{
-    self, Attachment, AttachmentFile, CoreConfig, DeleteOutcome, EditEntry, EventEmitter,
+    self, Attachment, AttachmentFile, CatchUp, CoreConfig, DeleteOutcome, EditEntry, EventEmitter,
     ImageMetadata, InboundEventHandler, LoginResult, Message, NoOpEventHandler, Reaction, Result,
     SendResult, SerializableChat, SiteMetadata, SlimProfile, Status, SyncPriority, VectorCore,
     VectorError,
@@ -238,6 +250,13 @@ pub use vector_core::community::v2::service::ContainmentReport;
 /// Alias for the SDK's error type.
 pub use vector_core::VectorError as Error;
 
+/// HTTP through the bot's own transport: over Tor or I2P when the bot is, refused rather than
+/// sent direct when that network is down. Use it for any request a bot makes (an LLM, an API),
+/// or the request leaks the bot's address around the network it chose.
+pub mod net {
+    pub use vector_core::net::{build_http_client, HttpClient, HttpError, Req, Resp};
+}
+
 /// Re-exported Nostr primitives, so downstreams can depend only on `vector_sdk`.
 pub mod nostr {
     pub use nostr_sdk::prelude::{FromBech32, Keys, PublicKey, SecretKey, ToBech32};
@@ -250,10 +269,24 @@ use nostr_sdk::prelude::{FromBech32 as _, ToBech32 as _};
 mod commands;
 pub use commands::{CommandBuilder, CommandCtx, DISCOVERY_RELAYS};
 
+mod manage;
+pub use manage::{
+    AuditAction, AuditEntry, AuditLog, AuditTarget, Category, CategoryInfo, ChangeKind, ChannelInfo, CommunityChange,
+    InviteLink, LinkPreview, NewChannel, NewCommunity, Overwrite, Permissions, Pin, PostOptions, RelayCheck, RelayMove,
+    Role, RoleInfo, RoleScope, RoleSpec,
+};
+/// Who an overwrite applies to: `Everyone`, a `Role(id)` or a `Member(npub)`.
+pub use vector_core::community::roles::OverwriteTarget;
+
 pub mod policy;
 
 #[cfg(feature = "xdc")]
 pub mod xdc;
+
+#[cfg(feature = "voice")]
+pub mod voice;
+#[cfg(feature = "voice")]
+pub use voice::{Speech, VoiceCall};
 #[cfg(feature = "xdc")]
 pub use xdc::{JoinWhen, Manifest, Xdc, XdcAppBuilder, XdcEvent, XdcFrame, XdcMatch, XdcPeer, XdcSender, XdcSession};
 
@@ -297,6 +330,7 @@ impl InvitePolicy {
 pub struct VectorBot {
     core: VectorCore,
     npub: String,
+    catch_up: CatchUp,
     invite_policy: Arc<InvitePolicy>,
     commands: Arc<commands::CommandRegistry>,
     #[cfg(feature = "xdc")]
@@ -310,6 +344,7 @@ impl VectorBot {
         VectorBot {
             core: VectorCore,
             npub: String::new(),
+            catch_up: CatchUp::Inline,
             invite_policy: Arc::new(InvitePolicy::Manual),
             commands: Arc::new(Default::default()),
             #[cfg(feature = "xdc")]
@@ -414,18 +449,21 @@ impl VectorBot {
     }
 
     /// A unified messaging handle for a chat or channel, **auto-detecting** whether `id` is a DM
-    /// (an `npub`) or a Community channel (a 64-char hex channel id). Send and receive work the
-    /// same way regardless — you never branch on the transport. Infallible; an invalid id surfaces
-    /// as an error when you actually send.
+    /// (an `npub`, or the hex key of someone the bot already has a DM with) or a Community
+    /// channel. Send and receive work the same way regardless — you never branch on the
+    /// transport. Infallible; an invalid id surfaces as an error when you actually send. To start
+    /// a DM with a hex key, use [`dm`](Self::dm).
     pub fn channel(&self, id: impl Into<String>) -> Channel {
         let id = id.into();
-        let kind = channel_kind_for(&id);
-        Channel { core: self.core, id, kind }
+        match channel_kind_for(&id) {
+            ChannelKind::Dm => Channel { core: self.core, id: dm_id(&id), kind: ChannelKind::Dm },
+            kind => Channel { core: self.core, id, kind },
+        }
     }
 
-    /// An explicit DM handle for an `npub` (skips auto-detection).
+    /// An explicit DM handle for an `npub` or hex pubkey (skips auto-detection).
     pub fn dm(&self, npub: impl Into<String>) -> Channel {
-        Channel { core: self.core, id: npub.into(), kind: ChannelKind::Dm }
+        Channel { core: self.core, id: dm_id(&npub.into()), kind: ChannelKind::Dm }
     }
 
     /// A [`Community`] handle by its community id, for management (members, invites, roles,
@@ -448,6 +486,38 @@ impl VectorBot {
                     .map(|id| self.community(id.to_string()))
             })
             .collect()
+    }
+
+    /// Create a Community this bot owns, as [`NewCommunity`] shapes it.
+    ///
+    /// ```no_run
+    /// # async fn f(bot: vector_sdk::VectorBot) -> vector_sdk::Result<()> {
+    /// use vector_sdk::NewCommunity;
+    /// let den = bot.create_community("Bot Den", NewCommunity::default().first_channel("lobby")).await?;
+    /// println!("invite: {}", den.create_invite().await?);
+    /// # Ok(()) }
+    /// ```
+    pub async fn create_community(&self, name: &str, opts: NewCommunity) -> Result<Community> {
+        let summary = self.core.create_community_with(name, &opts).await?;
+        let id = summary.get("community_id").and_then(|i| i.as_str()).ok_or_else(|| VectorError::Other("created community has no id".into()))?;
+        Ok(self.community(id.to_string()))
+    }
+
+    /// Join a Community through a public invite link.
+    pub async fn join(&self, invite_url: &str) -> Result<Community> {
+        let summary = self.core.join_community(invite_url).await?;
+        let id = summary
+            .get("community_id")
+            .or_else(|| summary.get("id"))
+            .and_then(|i| i.as_str())
+            .ok_or_else(|| VectorError::Other("join returned no community id".into()))?;
+        Ok(self.community(id.to_string()))
+    }
+
+    /// What an invite link leads to, before joining: name, description, icon, and whether
+    /// this bot is already in. Check `verified`: when false, what it shows is the link's word.
+    pub async fn preview_link(&self, invite_url: &str) -> Result<LinkPreview> {
+        self.core.preview_public_link(invite_url).await
     }
 
     // ---- receiving ----
@@ -521,7 +591,7 @@ impl VectorBot {
             handler: Arc::new(handler),
         };
         self.prepare_listen(&adapter).await;
-        self.core.listen(Arc::new(adapter)).await
+        self.core.listen_with(Arc::new(adapter), self.catch_up).await
     }
 
     /// Register an async handler for **every** kind of inbound event — messages, reactions/edits,
@@ -535,7 +605,7 @@ impl VectorBot {
     /// bot.on_event(|bot, event| async move {
     ///     match event {
     ///         BotEvent::Message(msg) if !msg.is_mine() => { let _ = msg.reply("hi").await; }
-    ///         BotEvent::MemberJoin { channel_id, npub } => {
+    ///         BotEvent::MemberJoin { channel_id, npub, .. } => {
     ///             let _ = bot.channel(channel_id).send(&format!("welcome {}!", &npub[..12])).await;
     ///         }
     ///         _ => {}
@@ -553,16 +623,41 @@ impl VectorBot {
             handler: Arc::new(handler),
         };
         self.prepare_listen(&adapter).await;
-        self.core.listen(Arc::new(adapter)).await
+        self.core.listen_with(Arc::new(adapter), self.catch_up).await
     }
 
-    /// Shared listen startup: catch up DMs FIRST so any invite delivered while offline is parked,
-    /// THEN apply the invite policy to everything parked (so a restarted private bot still auto-joins
-    /// communities it was invited to). Live invites are handled by the event adapters. Registered
-    /// slash commands publish their interface manifest here so pickers can discover them.
-    async fn prepare_listen(&self, handler: &dyn InboundEventHandler) {
-        let started = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
-        let _ = self.core.sync_dms(None, &vector_core::LiveOnly::from(handler, started)).await;
+    /// [`on_event`](Self::on_event) until Ctrl-C, then disconnect cleanly. The usual way to
+    /// run a bot: it reconnects and catches up on its own, and exits when asked.
+    ///
+    /// ```no_run
+    /// # use vector_sdk::{VectorBot, BotEvent};
+    /// # async fn run(bot: VectorBot) -> vector_sdk::Result<()> {
+    /// bot.run(|_bot, event| async move {
+    ///     if let BotEvent::Message(msg) = event {
+    ///         if !msg.is_mine() { let _ = msg.reply("hi").await; }
+    ///     }
+    /// }).await
+    /// # }
+    /// ```
+    pub async fn run<F, Fut>(&self, handler: F) -> Result<()>
+    where
+        F: Fn(VectorBot, BotEvent) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = ()> + Send + 'static,
+    {
+        tokio::select! {
+            listened = self.on_event(handler) => listened,
+            // A platform without the signal leaves the bot running: the pattern fails, the branch drops out.
+            Ok(()) = tokio::signal::ctrl_c() => {
+                self.logout().await;
+                Ok(())
+            }
+        }
+    }
+
+    /// Shared listen startup: apply the invite policy to what earlier runs parked, and publish
+    /// the slash-command manifest so pickers can discover it. The DM catch-up is `listen`'s own,
+    /// behind a live subscription: an invite it finds reaches the policy as it's parked.
+    async fn prepare_listen(&self, _handler: &dyn InboundEventHandler) {
         #[cfg(feature = "xdc")]
         self.xdc_router().rescan_parked(self.clone()).await;
         self.process_pending_invites().await;
@@ -575,7 +670,7 @@ impl VectorBot {
     /// [`vector_core::xdc::on_signal`], or Mini App sessions can't tell who
     /// their players are.
     pub async fn listen_with(&self, handler: Arc<dyn InboundEventHandler>) -> Result<()> {
-        self.core.listen(handler).await
+        self.core.listen_with(handler, self.catch_up).await
     }
 
     /// Backfill historical DMs via NIP-77 negentropy set reconciliation.
@@ -610,28 +705,29 @@ impl VectorBot {
     /// Update this bot's own profile metadata (broadcasts a kind-0 event). The profile is always
     /// tagged `bot: true` so clients can badge it as a bot — that's the whole point of the SDK. If
     /// you're building a human client, use [`vector_core`]'s `update_profile` directly instead.
-    pub async fn update_profile(&self, name: &str, avatar: &str, banner: &str, about: &str) -> bool {
-        self.core.update_bot_profile(name, avatar, banner, about).await
+    pub async fn update_profile(&self, name: &str, avatar: &str, banner: &str, about: &str) -> Result<()> {
+        done(self.core.update_bot_profile(name, avatar, banner, about).await, "the profile update reached no relay")
     }
 
     /// Set this bot's status (kind-30315).
-    pub async fn set_status(&self, status: &str) -> bool {
-        self.core.update_status(status).await
+    pub async fn set_status(&self, status: &str) -> Result<()> {
+        done(self.core.update_status(status).await, "the status update reached no relay")
     }
 
     /// Block a user (adds them to the mute list).
-    pub async fn block(&self, npub: &str) -> bool {
-        self.core.block_user(npub).await
+    pub async fn block(&self, npub: &str) -> Result<()> {
+        done(self.core.block_user(npub).await, "couldn't block them")
     }
 
     /// Unblock a previously blocked user.
-    pub async fn unblock(&self, npub: &str) -> bool {
-        self.core.unblock_user(npub).await
+    pub async fn unblock(&self, npub: &str) -> Result<()> {
+        done(self.core.unblock_user(npub).await, "couldn't unblock them")
     }
 
-    /// Set a local-only nickname for a user (never broadcast).
-    pub async fn set_nickname(&self, npub: &str, nickname: &str) -> bool {
-        self.core.set_nickname(npub, nickname).await
+    /// Set a local-only nickname for a user, never broadcast. A Community Nickname, which
+    /// everyone there sees, is [`Member::set_nickname`].
+    pub async fn set_nickname(&self, npub: &str, nickname: &str) -> Result<()> {
+        done(self.core.set_nickname(npub, nickname).await, "couldn't set the nickname")
     }
 
     /// List all blocked users.
@@ -789,6 +885,7 @@ pub struct VectorBotBuilder {
     #[cfg(feature = "i2p")]
     i2p: Option<I2pOptions>,
     clearnet: bool,
+    catch_up: Option<CatchUp>,
 }
 
 /// How a bot reaches I2P: the router it uses and what it may reach outside I2P. Requires the
@@ -919,8 +1016,9 @@ impl VectorBotBuilder {
         self.invite_policy(InvitePolicy::Whitelist(normalized))
     }
 
-    /// Override the data directory (SQLite DB + per-account storage). Defaults
-    /// to a per-OS application directory.
+    /// Override the data directory (SQLite DB + per-account storage). Without it, the
+    /// `VECTOR_DATA_DIR` environment variable decides, then a per-OS application directory.
+    /// Give every bot on a machine its own: two sharing one share a database.
     pub fn data_dir(mut self, dir: impl Into<PathBuf>) -> Self {
         self.data_dir = Some(dir.into());
         self
@@ -985,6 +1083,15 @@ impl VectorBotBuilder {
         self
     }
 
+    /// Who fetches what was published while the bot was offline. [`CatchUp::Inline`], the
+    /// default, folds it before going live, so the bot starts from a complete picture.
+    /// [`CatchUp::External`] goes live at once and leaves the gap to the bot, which pages it
+    /// with [`Channel::sync_before`].
+    pub fn catch_up(mut self, mode: CatchUp) -> Self {
+        self.catch_up = Some(mode);
+        self
+    }
+
     /// Initialize core, resolve the identity, log in, and connect to relays.
     ///
     /// If no key was supplied via [`nsec`](Self::nsec) / [`mnemonic`](Self::mnemonic), the bot loads
@@ -1006,7 +1113,10 @@ impl VectorBotBuilder {
         }
         #[cfg(feature = "i2p")]
         let i2p_config = self.i2p.as_ref().map(I2pOptions::config).transpose().map_err(VectorError::Other)?;
-        let data_dir = self.data_dir.unwrap_or_else(default_data_dir);
+        let data_dir = self
+            .data_dir
+            .or_else(|| std::env::var_os("VECTOR_DATA_DIR").filter(|d| !d.is_empty()).map(PathBuf::from))
+            .unwrap_or_else(default_data_dir);
         std::fs::create_dir_all(&data_dir).ok();
 
         vector_core::badges::set_bot(true);
@@ -1105,6 +1215,7 @@ impl VectorBotBuilder {
         Ok(VectorBot {
             core,
             npub: result.npub,
+            catch_up: self.catch_up.unwrap_or(CatchUp::Inline),
             invite_policy: Arc::new(self.invite_policy.unwrap_or(InvitePolicy::Manual)),
             commands: Arc::new(Default::default()),
             #[cfg(feature = "xdc")]
@@ -1343,6 +1454,55 @@ impl Channel {
         }
     }
 
+    /// Send a text message as [`PostOptions`] shapes it: a reply, an expiry, or the one bot a
+    /// command is for. A DM takes a reply; it has no per-message expiry, and a bot address
+    /// means nothing in a 1:1 chat.
+    ///
+    /// ```no_run
+    /// # async fn f(channel: vector_sdk::Channel, msg_id: &str) -> vector_sdk::Result<()> {
+    /// use vector_sdk::PostOptions;
+    /// channel.post("Rules updated, see the pins", PostOptions::default().reply_to(msg_id).expires_in(3600)).await?;
+    /// # Ok(()) }
+    /// ```
+    pub async fn post(&self, text: &str, opts: PostOptions) -> Result<String> {
+        match self.kind {
+            ChannelKind::Dm => {
+                if opts.expires_in_secs.is_some() {
+                    return Err(Error::Other("DMs have no per-message expiry".into()));
+                }
+                match opts.reply_to.as_deref() {
+                    Some(parent) => self.reply(parent, text).await,
+                    None => self.send(text).await,
+                }
+            }
+            ChannelKind::Community => self.core.post_community_message(&self.id, text, &opts).await,
+        }
+    }
+
+    /// Send bytes held in memory as a file named `filename` (its extension sets the type),
+    /// with an optional caption and reply in `opts`. A picture is compressed first (fitted to
+    /// 2560px, re-encoded, its metadata stripped), and its name follows the format it became;
+    /// `PostOptions::default().compress(false)` sends the bytes as they are.
+    pub async fn send_bytes(&self, bytes: Vec<u8>, filename: &str, opts: PostOptions) -> Result<String> {
+        match self.kind {
+            ChannelKind::Dm => self.core.send_file_bytes(&self.id, bytes, filename, &opts).await.map(|r| r.event_id.unwrap_or(r.pending_id)),
+            ChannelKind::Community => self.core.post_community_bytes(&self.id, bytes, filename, &opts).await,
+        }
+    }
+
+    /// [`send_file`](Self::send_file) with a caption, a reply or (in a Community) an expiry.
+    pub async fn send_file_with(&self, path: impl AsRef<std::path::Path>, opts: PostOptions) -> Result<String> {
+        let path = path.as_ref();
+        let bytes = std::fs::read(path).map_err(VectorError::Io)?;
+        let filename = path.file_name().and_then(|n| n.to_str()).unwrap_or("file").to_string();
+        self.send_bytes(bytes, &filename, opts).await
+    }
+
+    /// Withdraw this bot's `emoji` reaction to `message_id`. `Ok(false)` when it had none.
+    pub async fn unreact(&self, message_id: &str, emoji: &str) -> Result<bool> {
+        self.core.remove_my_reaction(message_id, emoji).await
+    }
+
     /// React to a message with a unicode emoji (e.g. `"👍"`).
     pub async fn react(&self, message_id: &str, emoji: &str) -> Result<()> {
         match self.kind {
@@ -1417,16 +1577,10 @@ impl Channel {
     }
 
     /// Send a file from disk as an encrypted attachment — works for DMs and Community channels.
+    /// A picture is compressed first; [`send_file_with`](Self::send_file_with) and
+    /// `PostOptions::default().compress(false)` send it untouched.
     pub async fn send_file(&self, path: impl AsRef<std::path::Path>) -> Result<String> {
-        let path = path.as_ref().to_string_lossy().into_owned();
-        match self.kind {
-            ChannelKind::Dm => self
-                .core
-                .send_file(&self.id, &path)
-                .await
-                .map(|r| r.event_id.unwrap_or(r.pending_id)),
-            ChannelKind::Community => self.core.send_community_file(&self.id, &path).await,
-        }
+        self.send_file_with(path, PostOptions::default()).await
     }
 }
 
@@ -1478,6 +1632,16 @@ impl IncomingMessage {
     /// `MANAGE_MESSAGES`; use [`Channel::delete`] for the bot's own messages.
     pub async fn hide(&self) -> Result<()> {
         self.channel().hide(&self.message.id).await
+    }
+
+    /// Pin *this* message in its Channel (see [`Channel::pin`]).
+    pub async fn pin(&self) -> Result<()> {
+        self.channel().pin(&self.message.id).await
+    }
+
+    /// Withdraw this bot's `emoji` reaction to *this* message.
+    pub async fn unreact(&self, emoji: &str) -> Result<bool> {
+        self.channel().unreact(&self.message.id, emoji).await
     }
 
     /// The [`Community`] this message belongs to — `None` for DMs. Use it for community-level
@@ -1562,14 +1726,16 @@ impl Community {
     /// Falls back to a short id, so a caller always has something to put in
     /// front of a person — a member told a rule matched needs to know WHERE.
     pub async fn name(&self) -> String {
-        self.core
-            .list_communities()
-            .await
-            .into_iter()
-            .find(|v| v.get("community_id").and_then(|i| i.as_str()) == Some(self.id.as_str()))
-            .and_then(|v| v.get("name").and_then(|n| n.as_str()).map(String::from))
+        self.held()
+            .ok()
+            .map(|c| c.name)
             .filter(|n| !n.trim().is_empty())
             .unwrap_or_else(|| self.id.chars().take(12).collect())
+    }
+
+    /// Its description, when it has one.
+    pub fn description(&self) -> Option<String> {
+        self.held().ok()?.description
     }
 
     /// A handle to a member of this community by npub — act on them directly.
@@ -1603,7 +1769,7 @@ impl Community {
     /// refounding** — the rotation that revokes the public invite links instead of
     /// carrying them into the new epoch.
     ///
-    /// This is the difference between a ban and a containment. [`ban_many`] in a
+    /// This is the difference between a ban and a containment. [`ban_many`](Self::ban_many) in a
     /// public community silences the accounts you name and leaves the door open,
     /// which is correct for spammers and useless against a raid: the next wave
     /// walks in through the same link with fresh keys. Here the door closes with
@@ -1682,16 +1848,18 @@ impl Community {
     /// # Ok(()) }
     /// ```
     pub async fn channels(&self) -> Vec<CommunityChannel> {
-        self.core
-            .list_communities()
-            .await
+        let Ok(held) = self.held() else { return Vec::new() };
+        held.layout()
+            .1
             .into_iter()
-            .find(|v| {
-                v.get("community_id").or_else(|| v.get("id")).and_then(|i| i.as_str()) == Some(self.id.as_str())
+            .map(|(ch, _)| CommunityChannel {
+                channel_id: vector_core::simd::hex::bytes_to_hex_32(&ch.id.0),
+                name: ch.name.clone(),
+                private: ch.private,
+                readable: !(ch.private && ch.key.is_none()),
+                epoch: ch.epoch.0,
             })
-            .and_then(|v| v.get("channels").cloned())
-            .and_then(|c| serde_json::from_value::<Vec<CommunityChannel>>(c).ok())
-            .unwrap_or_default()
+            .collect()
     }
 
     /// Whether this community has been DISSOLVED (permanently sealed by its owner).
@@ -1710,15 +1878,7 @@ impl Community {
     /// # Ok(()) }
     /// ```
     pub async fn is_dissolved(&self) -> bool {
-        self.core
-            .list_communities()
-            .await
-            .into_iter()
-            .find(|v| {
-                v.get("community_id").or_else(|| v.get("id")).and_then(|i| i.as_str()) == Some(self.id.as_str())
-            })
-            .and_then(|v| v.get("dissolved").and_then(|d| d.as_bool()))
-            .unwrap_or(false)
+        self.held().is_ok_and(|c| c.dissolved)
     }
 
     /// A handle to one channel of this community by id.
@@ -1831,7 +1991,7 @@ impl Community {
     }
 
     /// Mint a public invite link with an optional absolute expiry (unix ms) and an
-    /// attribution label, surfaced as "joined via <label>".
+    /// attribution label, surfaced as `"joined via <label>"`.
     pub async fn create_invite_with(&self, expires_at_ms: Option<u64>, label: Option<String>) -> Result<String> {
         self.core.create_public_invite(&self.id, expires_at_ms, label).await
     }
@@ -1856,9 +2016,19 @@ impl Community {
         self.core.community_capabilities(&self.id)
     }
 
-    /// The owner + admin npubs (`{ owner, admins: [...] }`).
-    pub fn roles(&self) -> Result<serde_json::Value> {
-        self.core.community_roles(&self.id)
+    /// The owner's npub.
+    pub fn owner(&self) -> Option<String> {
+        self.held().ok()?.owner().ok()?.to_bech32().ok()
+    }
+
+    /// The npubs holding a staff Role: one that manages anything, or moderates.
+    pub fn admins(&self) -> Result<Vec<String>> {
+        let roles = self.core.community_roles(&self.id)?;
+        Ok(roles
+            .get("admins")
+            .and_then(|a| a.as_array())
+            .map(|a| a.iter().filter_map(|n| n.as_str().map(String::from)).collect())
+            .unwrap_or_default())
     }
 }
 
@@ -2091,17 +2261,20 @@ where
     Fut: Future<Output = ()> + Send + 'static,
 {
     fn on_dm_received(&self, chat_id: &str, msg: &Message, _is_new: bool) {
-        self.dispatch(chat_id, msg, false, false);
+        if vector_core::news::is_news(msg.at) {
+            self.dispatch(chat_id, msg, false, false);
+        }
     }
 
     fn on_file_received(&self, chat_id: &str, msg: &Message, _is_new: bool) {
-        self.dispatch(chat_id, msg, true, false);
+        if vector_core::news::is_news(msg.at) {
+            self.dispatch(chat_id, msg, true, false);
+        }
     }
 
     fn on_community_message(&self, chat_id: &str, msg: &Message, is_new: bool) {
-        // The SDK's contract is realtime-only delivery (history flows through
-        // `Channel::history` + cursors) — a relay backfilling from a peer pushes
-        // stale events over the live sub, and those arrive with is_new=false.
+        // News only (see `BotEvent::Ready`): history, including what a relay backfilling
+        // from a peer pushes over the live sub, arrives with is_new=false.
         if !is_new {
             return;
         }
@@ -2164,23 +2337,55 @@ pub enum BotEvent {
     /// joins the stream the moment its own auth completes, gating nobody else.
     /// No longer gated on the slowest relay in the set. Fires even
     /// with `communities: 0`, so "subscribed to nothing" and "still connecting"
-    /// are different observable states. Community messages sent BEFORE this are
-    /// not delivered live; recover them with a sync + [`Channel::history`]. DMs
-    /// sent since the bot began listening are delivered either way.
+    /// are different observable states.
+    ///
+    /// Everything sent since the bot began listening (with a few minutes' allowance for
+    /// senders' clocks) arrives once, however it reaches the bot: live, through a catch-up
+    /// after an outage, or before `Ready`. What was sent earlier is history: read it with
+    /// [`Channel::history`].
     Ready { communities: usize },
     /// A new message (DM or Community channel).
     Message(IncomingMessage),
-    /// A reaction or edit landed on an existing message; `message` is the updated view (inspect
-    /// `.reactions` / `.content`, keyed by `message.id`).
-    MessageUpdate { chat_id: String, message: Message },
-    /// A message was deleted (cooperative delete / moderation tombstone).
-    Delete { chat_id: String, message_id: String },
-    /// A member joined a Community channel.
-    MemberJoin { channel_id: String, npub: String },
-    /// A member left (or was kicked from) a Community channel.
-    MemberLeave { channel_id: String, npub: String },
-    /// A member is typing in a Community channel; `until` is the unix-secs the indicator expires.
+    /// A reaction landed. `message` is the message with it applied; `reaction.author_id` is
+    /// who reacted (an npub). `at` (unix ms, here and below) is when it was sent.
+    Reaction { chat_id: String, message: Message, reaction: Reaction, at: u64 },
+    /// A reaction was withdrawn by its reactor, `by` (an npub). `message` is without it.
+    ReactionRemoved { chat_id: String, message: Message, reaction_id: String, by: String, at: u64 },
+    /// A message was edited by its author. `message.content` is the new text; what it said
+    /// before is in `message.edit_history`.
+    Edit { chat_id: String, message: Message, at: u64 },
+    /// A message was removed by `by` (an npub): its author, or a moderator when `moderated`.
+    /// `by` is `None` when the Community's own rules took back a post held for review, and
+    /// `at` is then when the bot's device judged it.
+    Delete { chat_id: String, message_id: String, by: Option<String>, moderated: bool, at: u64 },
+    /// A member joined a Community. `invited_by` and `invite_label` say which invite brought
+    /// them, when it said so.
+    MemberJoin { community_id: String, channel_id: String, npub: String, invited_by: Option<String>, invite_label: Option<String> },
+    /// A member left a Community. A kick arrives as a [`ChangeKind::MemberKicked`] change.
+    MemberLeave { community_id: String, channel_id: String, npub: String },
+    /// Someone is typing, in a DM or a Community channel; `until` is the unix-secs the indicator expires.
     Typing { chat_id: String, npub: String, until: u64 },
+    /// One change to a Community's settings, Roles, Channels or members, with who made it.
+    /// Match on `change.kind`:
+    ///
+    /// ```no_run
+    /// # use vector_sdk::{BotEvent, ChangeKind};
+    /// # fn f(event: BotEvent) {
+    /// if let BotEvent::CommunityChange { change, .. } = event {
+    ///     match change.kind {
+    ///         ChangeKind::MemberBanned { member } => println!("{member} banned by {:?}", change.by),
+    ///         ChangeKind::RoleCreated { role } => println!("new role {}", role.name),
+    ///         _ => {}
+    ///     }
+    /// }
+    /// # }
+    /// ```
+    CommunityChange { community_id: String, change: CommunityChange },
+    /// A Community was dissolved by its owner: sealed, read-only for good.
+    Dissolved { community_id: String },
+    /// Someone joined, left, muted or went quiet in a voice Channel's call. With the `voice`
+    /// feature, `bot.channel(channel_id).voice_members()` says who is in it now.
+    VoicePresence { channel_id: String },
     /// A Community invite arrived. Already auto-handled per [`InvitePolicy`]; surfaced for visibility
     /// (and for `Manual` policy, so you can decide via [`VectorBot::accept_invite`]).
     Invite { community_id: String },
@@ -2191,9 +2396,9 @@ pub enum BotEvent {
     /// [`Community::channels`] with `is_readable()` false.
     ///
     /// `backfilled` counts the messages that PREDATE the grant and were pulled
-    /// into local state before this event. They are history, not delivery — none
-    /// of them arrive as [`BotEvent::Message`], ever. Read them explicitly and
-    /// decide what deserves acting on:
+    /// into local state before this event. Those sent since the bot began listening
+    /// arrive as [`BotEvent::Message`] too; older ones are history. Read them explicitly
+    /// and decide what deserves acting on:
     ///
     /// ```no_run
     /// # async fn f(bot: &vector_sdk::VectorBot, community_id: &str, channel_id: &str, backfilled: usize) {
@@ -2253,7 +2458,7 @@ where
         #[cfg(feature = "xdc")]
         self.bot.xdc_signal(chat_id, npub, topic, node_addr, event_id, created_at);
         // Same freshness rule as presence: a synced backlog of signals is history.
-        if vector_core::community::is_realtime_fresh(created_at.saturating_mul(1000)) {
+        if vector_core::news::is_news(created_at.saturating_mul(1000)) {
             self.emit(BotEvent::XdcPresence {
                 chat_id: chat_id.to_string(),
                 topic: topic.to_string(),
@@ -2271,30 +2476,67 @@ where
     Fut: Future<Output = ()> + Send + 'static,
 {
     fn on_dm_received(&self, chat_id: &str, msg: &Message, _is_new: bool) {
-        self.message(chat_id, msg, false, false);
+        if vector_core::news::is_news(msg.at) {
+            self.message(chat_id, msg, false, false);
+        }
     }
     fn on_file_received(&self, chat_id: &str, msg: &Message, _is_new: bool) {
-        self.message(chat_id, msg, false, true);
+        if vector_core::news::is_news(msg.at) {
+            self.message(chat_id, msg, false, true);
+        }
     }
     fn on_community_message(&self, chat_id: &str, msg: &Message, is_new: bool) {
-        // Realtime-only by contract (see `BotEvent::Ready`): a relay backfill
-        // replay arrives with is_new=false and never becomes a BotEvent.
+        // News only (see `BotEvent::Ready`): history arrives with is_new=false.
         if !is_new {
             return;
         }
         self.message(chat_id, msg, true, !msg.attachments.is_empty());
     }
-    fn on_reaction_received(&self, chat_id: &str, msg: &Message) {
-        self.emit(BotEvent::MessageUpdate { chat_id: chat_id.to_string(), message: msg.clone() });
+    // A relay can push an old wrap to a live subscription: what's older than listening is history.
+    fn on_reaction_added(&self, chat_id: &str, msg: &Message, reaction: &Reaction, at: u64) {
+        if !vector_core::news::is_news(at) {
+            return;
+        }
+        self.emit(BotEvent::Reaction { chat_id: chat_id.to_string(), message: msg.clone(), reaction: reaction.clone(), at });
     }
-    fn on_community_update(&self, chat_id: &str, _target_id: &str, msg: &Message) {
-        self.emit(BotEvent::MessageUpdate { chat_id: chat_id.to_string(), message: msg.clone() });
+    fn on_reaction_removed(&self, chat_id: &str, msg: &Message, reaction_id: &str, by: &str, at: u64) {
+        if !vector_core::news::is_news(at) {
+            return;
+        }
+        self.emit(BotEvent::ReactionRemoved {
+            chat_id: chat_id.to_string(),
+            message: msg.clone(),
+            reaction_id: reaction_id.to_string(),
+            by: by.to_string(),
+            at,
+        });
     }
-    fn on_message_deleted(&self, chat_id: &str, message_id: &str) {
-        self.emit(BotEvent::Delete { chat_id: chat_id.to_string(), message_id: message_id.to_string() });
+    fn on_message_edited(&self, chat_id: &str, msg: &Message, at: u64) {
+        if !vector_core::news::is_news(at) {
+            return;
+        }
+        self.emit(BotEvent::Edit { chat_id: chat_id.to_string(), message: msg.clone(), at });
     }
-    fn on_community_removed(&self, chat_id: &str, target_id: &str) {
-        self.emit(BotEvent::Delete { chat_id: chat_id.to_string(), message_id: target_id.to_string() });
+    fn on_message_removed(&self, chat_id: &str, message_id: &str, by: Option<&str>, moderated: bool, at: u64) {
+        if !vector_core::news::is_news(at) {
+            return;
+        }
+        self.emit(BotEvent::Delete { chat_id: chat_id.to_string(), message_id: message_id.to_string(), by: by.map(String::from), moderated, at });
+    }
+    fn on_dm_typing(&self, chat_id: &str, npub: &str, until: u64) {
+        self.emit(BotEvent::Typing { chat_id: chat_id.to_string(), npub: npub.to_string(), until });
+    }
+    fn wants_community_changes(&self) -> bool {
+        true
+    }
+    fn on_community_change(&self, community_id: &str, change: &CommunityChange) {
+        self.emit(BotEvent::CommunityChange { community_id: community_id.to_string(), change: change.clone() });
+    }
+    fn on_community_dissolved(&self, community_id: &str) {
+        self.emit(BotEvent::Dissolved { community_id: community_id.to_string() });
+    }
+    fn on_voice_presence(&self, channel_id: &str) {
+        self.emit(BotEvent::VoicePresence { channel_id: channel_id.to_string() });
     }
     fn on_community_presence(
         &self,
@@ -2303,21 +2545,28 @@ where
         joined: bool,
         _event_id: &str,
         created_at: u64,
-        _invited_by: Option<&str>,
-        _invited_label: Option<&str>,
+        invited_by: Option<&str>,
+        invited_label: Option<&str>,
     ) {
         // Presence flows from live arrivals AND from guestbook/history folds — a
         // sync or relay backfill replays joins that happened weeks ago. Member
-        // state still updates (core owns that); only FRESH transitions become
-        // BotEvents, or a welcome bot greets everyone who ever joined.
-        if !vector_core::community::is_realtime_fresh(created_at.saturating_mul(1000)) {
+        // state still updates (core owns that); only news becomes a BotEvent, or a
+        // welcome bot greets everyone who ever joined.
+        if !vector_core::news::is_news(created_at.saturating_mul(1000)) {
             return;
         }
+        let community_id = vector_core::db::community::community_id_for_channel(chat_id).ok().flatten().unwrap_or_default();
         let (channel_id, npub) = (chat_id.to_string(), npub.to_string());
         self.emit(if joined {
-            BotEvent::MemberJoin { channel_id, npub }
+            BotEvent::MemberJoin {
+                community_id,
+                channel_id,
+                npub,
+                invited_by: invited_by.map(String::from),
+                invite_label: invited_label.map(String::from),
+            }
         } else {
-            BotEvent::MemberLeave { channel_id, npub }
+            BotEvent::MemberLeave { community_id, channel_id, npub }
         });
     }
     fn on_community_typing(&self, chat_id: &str, npub: &str, until: u64) {
@@ -2357,13 +2606,59 @@ where
 // Helpers
 // ============================================================================
 
-/// Classify an id: a valid bech32 `npub` is a DM, anything else (a 64-char hex channel
-/// id) is a Community channel.
+/// Classify an id: an `npub` is a DM; a hex id is a Community channel, unless no channel this
+/// bot holds has it and it is the key of someone the bot already has a DM with. About half of
+/// all channel ids are valid keys too, so a hex key with no chat stays a channel (whose send
+/// says it's unknown) rather than becoming a DM to nobody: `bot.dm(hex)` starts one.
 fn channel_kind_for(id: &str) -> ChannelKind {
-    if nostr_sdk::prelude::PublicKey::from_bech32(id).is_ok() {
-        ChannelKind::Dm
+    use nostr_sdk::prelude::PublicKey;
+    if PublicKey::from_bech32(id).is_ok() {
+        return ChannelKind::Dm;
+    }
+    if id.len() == 64 && id.bytes().all(|b| b.is_ascii_hexdigit()) {
+        if vector_core::db::community::community_id_for_channel(&id.to_ascii_lowercase()).ok().flatten().is_some() {
+            return ChannelKind::Community;
+        }
+        let known_dm = PublicKey::from_hex(id)
+            .ok()
+            .and_then(|pk| pk.to_bech32().ok())
+            .is_some_and(|npub| vector_core::db::id_cache::get_chat_id_by_identifier(&npub).is_ok());
+        if known_dm {
+            return ChannelKind::Dm;
+        }
+    }
+    ChannelKind::Community
+}
+
+/// A DM is keyed by the contact's npub: a hex key is converted so it names the same chat.
+fn dm_id(id: &str) -> String {
+    nostr_sdk::prelude::PublicKey::parse(id).ok().and_then(|pk| pk.to_bech32().ok()).unwrap_or_else(|| id.to_string())
+}
+
+/// A core call that reports only success.
+fn done(ok: bool, why: &str) -> Result<()> {
+    if ok {
+        Ok(())
     } else {
-        ChannelKind::Community
+        Err(VectorError::Other(why.to_string()))
+    }
+}
+
+impl std::fmt::Debug for Channel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Channel").field("id", &self.id).field("kind", &self.kind).finish()
+    }
+}
+
+impl std::fmt::Debug for Community {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Community").field("id", &self.id).finish()
+    }
+}
+
+impl std::fmt::Debug for Member {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Member").field("community_id", &self.community_id).field("npub", &self.npub).finish()
     }
 }
 
@@ -2479,9 +2774,12 @@ mod tests {
         // A valid bech32 npub → DM.
         let npub = Keys::generate().public_key().to_bech32().unwrap();
         assert_eq!(channel_kind_for(&npub), ChannelKind::Dm);
-        // A 64-char hex channel id (and a raw-hex pubkey) → Community (not bech32).
-        assert_eq!(channel_kind_for(&"a".repeat(64)), ChannelKind::Community);
-        assert_eq!(channel_kind_for(&Keys::generate().public_key().to_hex()), ChannelKind::Community);
+        // A hex key with no DM and no channel stays a channel: half of all channel ids are keys.
+        let pk = Keys::generate().public_key();
+        assert_eq!(channel_kind_for(&pk.to_hex()), ChannelKind::Community);
+        assert_eq!(dm_id(&pk.to_hex()), pk.to_bech32().unwrap(), "bot.dm(hex) keys the chat by its npub");
+        // Not a key, not a held channel → a channel, whose send reports what's wrong.
+        assert_eq!(channel_kind_for("not-an-id"), ChannelKind::Community);
     }
 
     #[test]

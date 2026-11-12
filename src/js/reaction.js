@@ -99,6 +99,7 @@ function registerReactionPopups() {
                 }
                 return null;
             },
+            countedReactions: (msg) => countedReactions(msg),
             getProfile,
             getName: chatName,
             getProfileAvatarSrc,
@@ -143,7 +144,7 @@ function showReactionHoverTip(reactionEl) {
     if (!emoji || !msgId) return;
     const msg = _reactionMessage(msgId);
     if (!msg) return;
-    const matching = msg.reactions.filter(r => r.emoji === emoji);
+    const matching = countedReactions(msg).filter(r => r.emoji === emoji);
     if (!matching.length) return;
     VectorSvelte.openReactionTip({ emoji, url: _reactionCustomUrl(msg, emoji), names: matching.map(r => chatName(r.author_id)), anchor: reactionEl });
     _startReactionTipWatchdog(reactionEl);

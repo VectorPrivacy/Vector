@@ -1339,6 +1339,7 @@ pub fn run() {
             commands::community::get_community_nicknames,
             commands::community::set_community_nickname,
             commands::community::get_channel_send_denied,
+            commands::community::get_channel_react_denied,
             commands::community::get_community_mentions,
             commands::community::create_community_channel,
             commands::community::delete_community_channel,

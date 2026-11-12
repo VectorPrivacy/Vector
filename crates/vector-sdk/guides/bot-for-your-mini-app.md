@@ -66,11 +66,10 @@ The channel carries bytes, up to 128,000 per message, so encode your JSON as abo
 
 Turn on the `xdc` feature:
 
-```toml
-[dependencies]
-vector_sdk = { version = "0.11", features = ["xdc"] }
-tokio = { version = "1", features = ["full"] }
-serde_json = "1"
+```sh
+cargo add vector_sdk --features xdc
+cargo add tokio --features full
+cargo add serde_json
 ```
 
 Then handle your app by its id:

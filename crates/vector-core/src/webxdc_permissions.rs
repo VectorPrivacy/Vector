@@ -374,7 +374,7 @@ const ALWAYS_SELF: &[&str] = &["autoplay", "gamepad"];
 const GRANTABLE: &[&str] = &["microphone", "camera", "geolocation", "clipboard-read", "clipboard-write", "fullscreen", "autoplay", "display-capture", "midi", "picture-in-picture", "screen-wake-lock", "speaker-selection", "accelerometer", "gyroscope", "magnetometer", "ambient-light-sensor", "bluetooth"];
 
 /// The Permissions-Policy header for a page: every feature denied, except those the user
-/// granted this app (`granted_permissions` is comma-separated) and [`ALWAYS_SELF`].
+/// granted this app (`granted_permissions` is comma-separated) and `ALWAYS_SELF`.
 pub fn build_permissions_policy(granted_permissions: &str) -> String {
     let granted: Vec<&str> = granted_permissions
         .split(',')

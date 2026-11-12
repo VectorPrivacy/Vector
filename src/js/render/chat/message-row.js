@@ -730,14 +730,20 @@ function _dmsgProbeSize(att, msg) {
         .catch(() => {});
 }
 
-/** Hashes refetched after their held copy went: once each per session, then tap-to-load. */
-const _dmsgRefetched = new Set();
+/** Media views recovered per hash this session: a file that keeps failing is left for a tap. */
+const _dmsgRecovered = new Map();
+const _DMSG_RECOVER_MAX = 2;
 
-/** Held media a view could no longer read (evicted while off screen): fetch it again, once. */
+/** A drawn picture or video that couldn't load its bytes: ask for it again, which remounts it on
+ *  a fresh element. One still held answers at once; one memory let go of is fetched again. */
 function _dmsgMediaLost(att, msg) {
-    if (!att.resident || _dmsgRefetched.has(att.id)) return;
-    _dmsgRefetched.add(att.id);
+    if (!att.resident && !att.downloaded) return;
+    const tries = _dmsgRecovered.get(att.id) || 0;
+    if (tries >= _DMSG_RECOVER_MAX) return;
+    _dmsgRecovered.set(att.id, tries + 1);
+    console.warn(`[Media] ${att.id.slice(0, 8)} failed to load, asking again (${tries + 1}/${_DMSG_RECOVER_MAX})`);
     att.resident = false;
+    att.downloaded = false;
     VectorSvelte.touchMessage(msg.id);
     _dmsgStartDownload(att, msg);
 }
@@ -886,7 +892,7 @@ function _dmsgOpenPreviewUrl(strURL) {
 // reactions render their image even when the originating pack is unsubscribed.
 function _dmsgAggregateReactions(msg) {
     const groups = new Map();  // emoji → { count, mine, url }
-    for (const r of (msg.reactions || [])) {
+    for (const r of countedReactions(msg)) {
         const g = groups.get(r.emoji) || { count: 0, mine: false, url: null };
         g.count += 1;
         if (r.author_id === strPubkey) g.mine = true;
@@ -915,7 +921,7 @@ function _dmsgCustomEmojiUrl(emoji, url) {
 
 /** Whether the row can open one more reaction group (the inline "+" shows then). */
 function _dmsgCanAddReactionGroup(msg, uniqueCount) {
-    return uniqueCount > 0 && uniqueCount < MAX_DISPLAYED_REACTIONS && !newReactionGroupBlockReason(msg);
+    return uniqueCount > 0 && uniqueCount < MAX_DISPLAYED_REACTIONS && !newReactionGroupBlockReason(msg) && channelAllowsReact(getChat(strOpenChat));
 }
 
 /** The fields the content builders render from, as one comparable string. A
@@ -1087,7 +1093,7 @@ function _dmsgReactionClick(msgId, emoji) {
                 invoke('revoke_reaction', { reactionId: mine.id })
                     .catch(err => console.error('revoke_reaction failed:', err));
             }
-        } else {
+        } else if (channelAllowsReact(cChat)) {
             // Not yet reacted → add. The provisional debounces double-clicks and
             // keeps the chip reacted through an earlier click's echo.
             const retract = dmsgReactOptimistic(msgId, emoji, null);

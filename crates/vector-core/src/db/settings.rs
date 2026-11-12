@@ -285,7 +285,7 @@ pub async fn set_bunker_url(url: &str) -> Result<(), String> {
 
 /// Read the cached remote signer pubkey (hex). Plaintext on disk — it's
 /// public-key material with no secrecy implications, and keeping it readable
-/// before unlock lets the UI display "Connected to <pubkey>" on the locked
+/// before unlock lets the UI display `"Connected to <pubkey>"` on the locked
 /// account picker without prompting for a password.
 pub fn get_bunker_remote_pubkey() -> Result<Option<String>, String> {
     let conn = super::get_db_connection_guard_static()?;

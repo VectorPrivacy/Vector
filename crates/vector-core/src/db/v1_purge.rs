@@ -515,7 +515,7 @@ const V1_COLUMNS: &[(&str, &str)] = &[
     ("community_channels", "rekeyed_at_server_epoch"),
 ];
 
-/// Drop what [`V1_COLUMNS`] names, and the migration ledger table. Presence-checked, so a
+/// Drop what `V1_COLUMNS` names, and the migration ledger table. Presence-checked, so a
 /// database that never gained one of them passes over it.
 pub fn drop_v1_columns(conn: &Connection) -> Result<(), String> {
     conn.execute_batch("DROP TABLE IF EXISTS community_migrations").map_err(|e| e.to_string())?;

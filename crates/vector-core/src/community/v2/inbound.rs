@@ -144,8 +144,8 @@ pub enum ChatPersist {
     /// edit applied (`edit_event` Some → save the folded MESSAGE_EDIT event, event-sourced
     /// like DMs). Neither rewrites the message's own row.
     Updated { message: Message, edit_event: Option<Box<crate::stored_event::StoredEvent>> },
-    /// A message removed by its author — drop its row.
-    Removed(String),
+    /// A message removed by its author, or by a moderator when `moderated` — drop its row.
+    Removed { id: String, moderated: bool },
     /// A reaction revoked by its reactor — drop the kind-7 row (save is
     /// additive; a lingering row would resurrect the chip on the next load).
     ReactionRemoved { reaction_id: String, message: Message },
@@ -338,7 +338,7 @@ fn apply_chat_to_state_in(
             // A paged-out target isn't in STATE to remove; the caller's persist step
             // drops the stored row either way.
             let _ = state.remove_message(&target_id);
-            Some(ChatPersist::Removed(target_id))
+            Some(ChatPersist::Removed { id: target_id, moderated: author != opened.author })
         }
         ChatEvent::Typing { .. } | ChatEvent::Webxdc { .. } | ChatEvent::VoicePresence { .. } | ChatEvent::VoiceDirective { .. } => None,
     }
@@ -386,7 +386,7 @@ pub async fn awaits_target(event: &ChatEvent) -> bool {
 }
 
 /// Apply an already-opened chat event to STATE + the shared store — the LIVE
-/// counterpart of [`crate::VectorCore::v2_backfill_channel`]'s catch-up persistence.
+/// counterpart of `VectorCore::v2_backfill_channel`'s catch-up persistence.
 /// The dispatcher opened the wrap (so nothing decrypts twice); the returned outcome
 /// is what the caller's callbacks fire from — a duplicate, a non-resident target,
 /// or a forged edit/delete yields `None` and nothing re-fires.
@@ -441,7 +441,7 @@ async fn persist_chat_event_in(
     // edited one a refreshed proof bundle. Fired only from a PERSISTED outcome
     // (the dedup/authorization gates above already passed); non-curators no-op.
     match (&outcome, event) {
-        (ChatPersist::Removed(target), _) => {
+        (ChatPersist::Removed { id: target, .. }, _) => {
             super::service::spawn_pin_duty(channel_id, target, None);
         }
         (ChatPersist::Updated { .. }, ChatEvent::Edit { opened, target, .. }) => {
@@ -464,9 +464,60 @@ pub async fn persist_chat(channel_id: &str, outcome: &ChatPersist) {
             let _ = crate::db::events::save_new_reactions(channel_id, message).await;
         }
         ChatPersist::Updated { edit_event: Some(ev), .. } => save_edit_event(channel_id, ev).await,
-        ChatPersist::Removed(id) => remove_message(id).await,
+        ChatPersist::Removed { id, .. } => remove_message(id).await,
         ChatPersist::ReactionRemoved { reaction_id, .. } => {
             let _ = crate::db::events::delete_event(reaction_id).await;
+        }
+    }
+}
+
+/// Hand an applied outcome to `handler`: the coarse hook a renderer redraws from, then the typed
+/// one naming what happened, only when it is [news](crate::news::is_news). Without a listener,
+/// `live` lets a new message ring; a re-judged or replayed one never does. A listener is told
+/// whatever was sent since it began, however it arrived.
+pub async fn notify_chat_outcome(handler: &dyn InboundEventHandler, channel_id: &str, event: &ChatEvent, outcome: ChatPersist, live: bool) {
+    let by = || event.opened().author.to_bech32().unwrap_or_else(|_| event.opened().author.to_hex());
+    let at = event.opened().at_ms;
+    // Told once: two paths storing one event a moment apart can each think they stored it first.
+    let news = || crate::news::is_news(at) && crate::news::first_telling(event.opened().rumor_id.as_bytes());
+    match outcome {
+        ChatPersist::New(message) => {
+            let fresh = match crate::news::listening_since() {
+                Some(_) => crate::news::is_news(message.at) && crate::news::first_telling_hex(&message.id),
+                None => live && crate::community::is_realtime_fresh(message.at),
+            };
+            handler.on_community_message(channel_id, &message, fresh);
+        }
+        // Both come back out of STATE, whose compact form drops the quoted attachment's
+        // extension, so re-resolve before rendering.
+        ChatPersist::Updated { mut message, edit_event } => {
+            let _ = crate::db::events::populate_reply_context(&mut message).await;
+            handler.on_community_update(channel_id, &message.id, &message);
+            match (edit_event, event) {
+                _ if !news() => {}
+                (Some(_), _) => handler.on_message_edited(channel_id, &message, at),
+                (None, ChatEvent::Reaction { opened, .. }) => {
+                    let id = opened.rumor_id.to_hex();
+                    if let Some(reaction) = message.reactions.iter().find(|r| r.id == id) {
+                        handler.on_reaction_added(channel_id, &message, reaction, at);
+                    }
+                }
+                _ => {}
+            }
+        }
+        // An un-react redraws the PARENT: its chips changed.
+        ChatPersist::ReactionRemoved { reaction_id, mut message } => {
+            let _ = crate::db::events::populate_reply_context(&mut message).await;
+            handler.on_community_update(channel_id, &message.id, &message);
+            if news() {
+                handler.on_reaction_removed(channel_id, &message, &reaction_id, &by(), at);
+            }
+        }
+        ChatPersist::Removed { id, moderated } => {
+            handler.on_community_removed(channel_id, &id);
+            if news() {
+                handler.on_message_removed(channel_id, &id, Some(&by()), moderated, at);
+            }
         }
     }
 }
@@ -494,7 +545,7 @@ pub async fn persist_chat_page(channel_id: &str, outcomes: &[ChatPersist], sessi
             ChatPersist::New(m) => pending.push(m),
             ChatPersist::Updated { message, edit_event: None } => reacted.push(message),
             ChatPersist::Updated { edit_event: Some(ev), .. } => save_edit_event(channel_id, ev).await,
-            ChatPersist::Removed(id) => {
+            ChatPersist::Removed { id, .. } => {
                 flush_page(channel_id, &mut pending, &mut reacted, session).await;
                 remove_message(id).await;
             }
@@ -603,6 +654,10 @@ pub fn dispatch_wrap(
         let group = super::derive::channel_group_key(&secret, &ch.id, epoch);
         if wrap.pubkey != group.pk() {
             continue;
+        }
+        // Dated where a Locked Channel's read address takes nothing: never worth opening.
+        if ch.writers.as_ref().is_some_and(|l| l.read_address_quiet(wrap.created_at.as_secs().saturating_mul(1000))) {
+            return DispatchedV2::Ignored;
         }
         let Ok(event) = chat::open_chat_event(wrap, &group, &ch.id, epoch) else {
             return DispatchedV2::NotOurs;
@@ -813,14 +868,18 @@ fn dispatch_guestbook(ev: guestbook::GuestbookEvent, community: &CommunityV2, ha
                 None => (None, None),
             };
             if let (false, Some(chat)) = (suppressed, chat_id.as_deref()) {
-                handler.on_community_presence(chat, &npub, true, &event_id, at_ms / 1000, by, label);
+                if crate::news::first_telling(&ev.rumor_id) {
+                    handler.on_community_presence(chat, &npub, true, &event_id, at_ms / 1000, by, label);
+                }
             }
             DispatchedV2::Presence { npub, joined: true, event: Box::new(ev) }
         }
         GuestbookEntry::Leave { member, at_ms } => {
             let npub = member.to_bech32().unwrap_or_default();
             if let (false, Some(chat)) = (suppressed, chat_id.as_deref()) {
-                handler.on_community_presence(chat, &npub, false, &event_id, at_ms / 1000, None, None);
+                if crate::news::first_telling(&ev.rumor_id) {
+                    handler.on_community_presence(chat, &npub, false, &event_id, at_ms / 1000, None, None);
+                }
             }
             DispatchedV2::Presence { npub, joined: false, event: Box::new(ev) }
         }
@@ -1233,7 +1292,7 @@ mod tests {
 
         let delete = chat::build_delete_rumor(member.public_key(), &general, epoch, &msg_id, super::super::kind::MESSAGE, 8_000, None);
         let outcome = persist_chat_event(&ingest(expired(&delete), 8), &cid, &me.public_key()).await;
-        assert!(matches!(outcome, Some(ChatPersist::Removed(id)) if id == msg_id), "an expired delete still erases");
+        assert!(matches!(outcome, Some(ChatPersist::Removed { id, .. }) if id == msg_id), "an expired delete still erases");
     }
 
     #[tokio::test]
@@ -1351,6 +1410,109 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_typed_hooks_name_what_happened() {
+        use nostr_sdk::prelude::{Timestamp, UnsignedEvent};
+        #[derive(Default)]
+        struct Typed(std::sync::Mutex<Vec<String>>);
+        impl InboundEventHandler for Typed {
+            fn on_reaction_added(&self, _c: &str, _m: &Message, r: &Reaction, at: u64) {
+                self.0.lock().unwrap().push(format!("react {} {}", r.emoji, at % 100_000));
+            }
+            fn on_reaction_removed(&self, _c: &str, _m: &Message, _id: &str, _by: &str, _at: u64) {
+                self.0.lock().unwrap().push("unreact".into());
+            }
+            fn on_message_edited(&self, _c: &str, m: &Message, _at: u64) {
+                self.0.lock().unwrap().push(format!("edit {}", m.content));
+            }
+            fn on_message_removed(&self, _c: &str, _id: &str, by: Option<&str>, moderated: bool, _at: u64) {
+                self.0.lock().unwrap().push(format!("removed {} {moderated}", &by.unwrap_or_default()[..5]));
+            }
+        }
+        let (_tmp, _guard, me) = init();
+        let relay = MemoryRelay::new();
+        let community = service::create_community(&relay, "Typed", vec!["wss://r".into()], None).await.unwrap();
+        let general = community.channels[0].id;
+        let epoch = community.root_epoch;
+        let cid = crate::simd::hex::bytes_to_hex_32(&general.0);
+        let group = super::super::derive::channel_group_key(&community.community_root, &general, epoch);
+        let member = Keys::generate();
+        let ingest = |rumor: UnsignedEvent, at: u64| {
+            let (wrap, _) = chat::seal_chat_rumor(&rumor, &group, &member, Timestamp::from_secs(at), false).unwrap();
+            chat::open_chat_event(&wrap, &group, &general, epoch).unwrap()
+        };
+        // Recent, so each is news; the reaction lands at a time the hook reports.
+        let t0 = crate::clock::now_ms() / 100_000 * 100_000 - 100_000;
+        let msg = chat::build_message_rumor(member.public_key(), &general, epoch, "hello", None, &[], vec![], t0 + 5_000);
+        let msg_id = msg.id.unwrap().to_hex();
+        let react = chat::build_reaction_rumor(member.public_key(), &general, epoch, &msg_id, &member.public_key().to_hex(), super::super::kind::MESSAGE, "🔥", None, t0 + 6_000);
+        let react_id = react.id.unwrap().to_hex();
+        let rumors = [
+            (msg, t0 + 5_000),
+            (react, t0 + 6_000),
+            (chat::build_edit_rumor(member.public_key(), &general, epoch, &msg_id, "rewritten", &[], None, t0 + 7_000), t0 + 7_000),
+            (chat::build_delete_rumor(member.public_key(), &general, epoch, &react_id, super::super::kind::REACTION, t0 + 8_000, None), t0 + 8_000),
+            (chat::build_delete_rumor(member.public_key(), &general, epoch, &msg_id, super::super::kind::MESSAGE, t0 + 9_000, None), t0 + 9_000),
+        ];
+        let typed = Typed::default();
+        for (rumor, at) in rumors {
+            let event = ingest(rumor, at / 1000);
+            let outcome = persist_chat_event(&event, &cid, &me.public_key()).await.expect("each applies");
+            notify_chat_outcome(&typed, &cid, &event, outcome, false).await;
+        }
+        assert_eq!(*typed.0.lock().unwrap(), vec!["react 🔥 6000", "edit rewritten", "unreact", "removed npub1 false"]);
+    }
+
+    #[tokio::test]
+    async fn a_listener_hears_a_caught_up_message_once_and_never_history() {
+        use nostr_sdk::prelude::{Timestamp, UnsignedEvent};
+        #[derive(Default)]
+        struct Heard(std::sync::Mutex<Vec<(String, bool)>>);
+        impl InboundEventHandler for Heard {
+            fn on_community_message(&self, _c: &str, m: &Message, is_new: bool) {
+                self.0.lock().unwrap().push((m.content.clone(), is_new));
+            }
+        }
+        let (_tmp, _guard, me) = init();
+        let relay = MemoryRelay::new();
+        let community = service::create_community(&relay, "Gap", vec!["wss://r".into()], None).await.unwrap();
+        let general = community.channels[0].id;
+        let epoch = community.root_epoch;
+        let cid = crate::simd::hex::bytes_to_hex_32(&general.0);
+        let group = super::super::derive::channel_group_key(&community.community_root, &general, epoch);
+        let member = Keys::generate();
+        let fetched = |rumor: UnsignedEvent, at_ms: u64| {
+            let (wrap, _) = chat::seal_chat_rumor(&rumor, &group, &member, Timestamp::from_secs(at_ms / 1000), false).unwrap();
+            service::FetchedEvent { event: chat::open_chat_event(&wrap, &group, &general, epoch).unwrap(), epoch, wrap: Some(wrap) }
+        };
+        let now = crate::clock::now_ms();
+        let heard = std::sync::Arc::new(Heard::default());
+        let _listening = crate::news::listen_for_test(heard.clone(), now - 600_000);
+
+        // Sent ten minutes into an outage, then a week before listening began.
+        let gap = chat::build_message_rumor(member.public_key(), &general, epoch, "sent during the gap", None, &[], vec![], now - 300_000);
+        let old = chat::build_message_rumor(member.public_key(), &general, epoch, "last week", None, &[], vec![], now - 7 * 86_400_000);
+        let page = vec![fetched(gap.clone(), now - 300_000), fetched(old, now - 7 * 86_400_000)];
+        crate::VectorCore::v2_ingest_chat_page(&cid, me.public_key(), crate::db::current_session(), page).await;
+        assert_eq!(*heard.0.lock().unwrap(), vec![("sent during the gap".to_string(), true)], "the catch-up delivers news, not history");
+
+        // The live feed or a replay carries it again: already held, so not news twice.
+        let again = fetched(gap, now - 300_000);
+        assert!(persist_chat_event(&again.event, &cid, &me.public_key()).await.is_none());
+        assert_eq!(heard.0.lock().unwrap().len(), 1);
+
+        // Two catch-ups reading one page at once: each may think it stored it first.
+        let racing = chat::build_message_rumor(member.public_key(), &general, epoch, "caught twice", None, &[], vec![], now - 200_000);
+        let page = || vec![fetched(racing.clone(), now - 200_000)];
+        let session = crate::db::current_session();
+        tokio::join!(
+            crate::VectorCore::v2_ingest_chat_page(&cid, me.public_key(), session.clone(), page()),
+            crate::VectorCore::v2_ingest_chat_page(&cid, me.public_key(), session.clone(), page()),
+        );
+        let told = heard.0.lock().unwrap().iter().filter(|(text, news)| text == "caught twice" && *news).count();
+        assert_eq!(told, 1, "told once, whichever stored it");
+    }
+
+    #[tokio::test]
     async fn a_deleted_message_stays_deleted_when_a_relay_serves_it_again() {
         use nostr_sdk::prelude::{Timestamp, UnsignedEvent};
         let (_tmp, _guard, me) = init();
@@ -1370,7 +1532,7 @@ mod tests {
         let original = ingest(msg, 5);
         assert!(matches!(persist_chat_event(&original, &cid, &me.public_key()).await, Some(ChatPersist::New(_))));
         let delete = chat::build_delete_rumor(member.public_key(), &general, epoch, &msg_id, super::super::kind::MESSAGE, 6_000, None);
-        assert!(matches!(persist_chat_event(&ingest(delete, 6), &cid, &me.public_key()).await, Some(ChatPersist::Removed(_))));
+        assert!(matches!(persist_chat_event(&ingest(delete, 6), &cid, &me.public_key()).await, Some(ChatPersist::Removed { .. })));
 
         // A restart forgets this session's set; the durable tombstone is what remains.
         crate::state::clear_message_tombstones();
@@ -1987,7 +2149,7 @@ mod tests {
         let (dw, _) = chat::seal_chat_rumor(&del, &group, &member, Timestamp::from_secs(7), false).unwrap();
         let ev = chat::open_chat_event(&dw, &group, &general, community.root_epoch).unwrap();
         let outcome = persist_chat_event(&ev, &cid, &me.public_key()).await;
-        assert!(matches!(outcome, Some(ChatPersist::Removed(id)) if id == reply_id), "the author's delete removes their thread reply");
+        assert!(matches!(outcome, Some(ChatPersist::Removed { id, .. }) if id == reply_id), "the author's delete removes their thread reply");
     }
 
     #[tokio::test]
@@ -2249,7 +2411,7 @@ mod tests {
         let victim = post_as(&bed, &member, "spam", 1_000, &me.public_key()).await;
         let outcome = delete_as(&bed, &bed.admin, &victim, Some(&bed.admin_citation), 2_000, &me.public_key()).await;
 
-        assert!(matches!(outcome, Some(ChatPersist::Removed(ref id)) if *id == victim), "MANAGE_MESSAGES + outrank removes it");
+        assert!(matches!(outcome, Some(ChatPersist::Removed { ref id, moderated: true }) if *id == victim), "MANAGE_MESSAGES + outrank removes it, as a moderator");
         assert!(crate::state::STATE.lock().await.find_message(&victim).is_none());
     }
 
@@ -2314,7 +2476,7 @@ mod tests {
         let mine = post_as(&bed, &member, "oops", 1_000, &me.public_key()).await;
         let outcome = delete_as(&bed, &member, &mine, None, 2_000, &me.public_key()).await;
 
-        assert!(matches!(outcome, Some(ChatPersist::Removed(ref id)) if *id == mine));
+        assert!(matches!(outcome, Some(ChatPersist::Removed { ref id, moderated: false }) if *id == mine));
     }
 
     #[tokio::test]

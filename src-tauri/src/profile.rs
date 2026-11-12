@@ -262,7 +262,10 @@ pub async fn upload_avatar(
         }
         #[cfg(target_os = "android")]
         {
-            filesystem::read_android_uri(filepath)?
+            filesystem::read_android_uri(filepath).map_err(|e| {
+                vector_core::log_warn!("[upload_avatar] couldn't read the pick: {e}");
+                crate::message::CANT_OPEN_PICK.to_string()
+            })?
         }
     };
 

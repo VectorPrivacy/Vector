@@ -4,6 +4,7 @@ use std::fmt;
 
 /// Unified error type for all vector-core operations.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum VectorError {
     /// Database error
     Db(String),
@@ -19,6 +20,11 @@ pub enum VectorError {
     NotInitialized(String),
     /// Generic error with message
     Other(String),
+    /// The acting account lacks a permission the action needs, checked the way every reader
+    /// will judge it. `needs` holds the missing bits.
+    NotPermitted { needs: crate::community::roles::Permissions, action: String },
+    /// No such Community, Channel, Role, Category, message or member here.
+    NotFound(String),
 }
 
 impl fmt::Display for VectorError {
@@ -31,6 +37,8 @@ impl fmt::Display for VectorError {
             VectorError::Io(err) => write!(f, "I/O error: {}", err),
             VectorError::NotInitialized(msg) => write!(f, "Not initialized: {}", msg),
             VectorError::Other(msg) => write!(f, "{}", msg),
+            VectorError::NotPermitted { needs, action } => write!(f, "{action} needs permission bits {:#x}", needs.0),
+            VectorError::NotFound(what) => write!(f, "not found: {what}"),
         }
     }
 }

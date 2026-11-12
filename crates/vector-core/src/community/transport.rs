@@ -3,7 +3,7 @@
 //! The protocol's send/sync logic is written against this trait, not against the
 //! live Nostr client, so it can be exercised end-to-end by multiple emulated
 //! clients sharing an in-memory relay (no network, fully deterministic). Production
-//! provides an adapter over `NOSTR_CLIENT`; tests use [`MemoryRelay`].
+//! provides an adapter over `NOSTR_CLIENT`; tests use `MemoryRelay`.
 
 use nostr_sdk::prelude::*;
 use crate::ClientRelayExt;
@@ -110,7 +110,7 @@ pub struct Query {
     /// reads. Ignored by the in-memory test relay (inherently full-coverage).
     pub evidence: Evidence,
     /// One page of a newest-first walk, whose caller goes on from the oldest event it is given:
-    /// the answer is cut where the shallowest relay's page ended ([`PageFloor`]).
+    /// the answer is cut where the shallowest relay's page ended (`PageFloor`).
     pub paged: bool,
 }
 

@@ -436,6 +436,261 @@ function cmpSignature(tokens, src) {
     return s;
 }
 
+// macOS formats with Cmd; there Ctrl+B and Ctrl+E are the system's caret moves.
+const CMP_MAC = /Mac|iPhone|iPad|iPod/.test(navigator.platform || navigator.userAgent);
+
+/** Shortcut → markdown mark: B bold, I italic, Shift+X strikethrough, E inline code. */
+function cmpShortcutMark(e) {
+    if (e.altKey || (CMP_MAC ? !e.metaKey || e.ctrlKey : !e.ctrlKey || e.metaKey)) return null;
+    switch (e.code) {
+        case 'KeyB': return e.shiftKey ? null : '**';
+        case 'KeyI': return e.shiftKey ? null : '*';
+        case 'KeyE': return e.shiftKey ? null : '`';
+        case 'KeyX': return e.shiftKey ? '~~' : null;
+    }
+    return null;
+}
+
+/**
+ * Whether `mark` already wraps src[from, to), around it or as the selection's own
+ * ends. Stars are counted as a run, so `***x***` is both bold and italic and
+ * italicising `**x**` makes it `***x***` rather than misreading the bold.
+ */
+function cmpMarkState(src, from, to, mark) {
+    if (mark === '*' || mark === '**') {
+        let before = 0;
+        while (from - before > 0 && src[from - before - 1] === '*') before++;
+        let after = 0;
+        while (to + after < src.length && src[to + after] === '*') after++;
+        let k = Math.min(before, after);
+        let outer = true;
+        if (k === 0) {
+            let lead = 0;
+            while (from + lead < to && src[from + lead] === '*') lead++;
+            let trail = 0;
+            while (to - trail - 1 > from + lead && src[to - trail - 1] === '*') trail++;
+            if (Math.min(lead, trail) > 0) {
+                k = Math.min(lead, trail);
+                outer = false;
+            }
+        }
+        return { active: mark === '**' ? k >= 2 : k === 1 || k >= 3, outer };
+    }
+    const n = mark.length;
+    if (src.slice(from - n, from) === mark && src.slice(to, to + n) === mark) return { active: true, outer: true };
+    const inner = to - from > 2 * n && src.slice(from, from + n) === mark && src.slice(to - n, to) === mark;
+    return { active: inner, outer: !inner };
+}
+
+/**
+ * Toggle `mark` over src[start, end): on every line's text, or off them all when
+ * every line already has it. Marks can't cross a line break, and a mark against
+ * whitespace isn't one, so each line's text is wrapped trimmed. Returns the new
+ * source and the selection over the same text.
+ */
+function cmpToggleMark(src, start, end, mark) {
+    const n = mark.length;
+    const ws = (c) => /\s/.test(c);
+    const segs = [];
+    for (let a = start; a < end;) {
+        let b = src.indexOf('\n', a);
+        if (b === -1 || b > end) b = end;
+        let from = a;
+        let to = b;
+        while (from < to && ws(src[from])) from++;
+        while (to > from && ws(src[to - 1])) to--;
+        if (from < to) segs.push({ from, to });
+        a = b + 1;
+    }
+    if (!segs.length) {
+        return { src: src.slice(0, start) + mark + mark + src.slice(end), start: start + n, end: start + n };
+    }
+    const states = segs.map((g) => cmpMarkState(src, g.from, g.to, mark));
+    const off = states.every((st) => st.active);
+    let shift = 0;
+    let selStart = null;
+    let selEnd = null;
+    segs.forEach((g, i) => {
+        const st = states[i];
+        let from = g.from + shift;
+        let to = g.to + shift;
+        if (off && st.outer) {
+            src = src.slice(0, from - n) + src.slice(from, to) + src.slice(to + n);
+            from -= n;
+            to -= n;
+            shift -= 2 * n;
+        } else if (off) {
+            src = src.slice(0, from) + src.slice(from + n, to - n) + src.slice(to);
+            to -= 2 * n;
+            shift -= 2 * n;
+        } else if (!st.active) {
+            src = src.slice(0, from) + mark + src.slice(from, to) + mark + src.slice(to);
+            if (st.outer) { from += n; to += n; } else { to += 2 * n; }
+            shift += 2 * n;
+        }
+        if (selStart === null) selStart = from;
+        selEnd = to;
+    });
+    return { src, start: selStart, end: selEnd };
+}
+
+const CMP_PASTE_SKIP = new Set(['script', 'style', 'head', 'title', 'meta', 'link', 'template', 'noscript', 'svg', 'iframe', 'object', 'button', 'select']);
+
+/** An element's formatting, inherited from `parent`: its tag, then its inline style. */
+function cmpPasteFormat(node, parent) {
+    const tag = node.localName;
+    const f = { ...parent };
+    if (tag === 'b' || tag === 'strong' || /^h[1-6]$/.test(tag)) f.b = true;
+    if (tag === 'i' || tag === 'em') f.i = true;
+    if (tag === 's' || tag === 'strike' || tag === 'del') f.s = true;
+    if (tag === 'code' || tag === 'kbd' || tag === 'samp' || tag === 'tt') f.code = true;
+    if (tag === 'pre') f.pre = true;
+    if (tag === 'a') {
+        const href = (node.getAttribute('href') || '').trim();
+        if (/^https?:\/\/\S+$/i.test(href)) f.href = href;
+    }
+    // Docs editors style spans rather than using tags, and wrap whole documents in a
+    // <b style="font-weight:normal">, so the inline style has the last word.
+    const st = node.style;
+    if (st) {
+        const w = st.fontWeight;
+        if (w) f.b = w === 'bold' || w === 'bolder' || parseInt(w, 10) >= 600;
+        if (st.fontStyle) f.i = st.fontStyle === 'italic' || st.fontStyle.startsWith('oblique');
+        if (/line-through/.test(st.textDecorationLine || st.textDecoration || '')) f.s = true;
+    }
+    return f;
+}
+
+/**
+ * Rich clipboard text as markdown: what an app copied as styled HTML (bold,
+ * italic, strikethrough, code, links) marked up over the clipboard's own plain
+ * text. The plain text stays the authority on every character and line break;
+ * the HTML only says which characters are styled. Null when nothing is styled or
+ * the two disagree on the text, and the paste goes in plain.
+ */
+function cmpHtmlToMarkdown(html, plain) {
+    if (!html || html.length > 2000000 || plain.length > 200000) return null;
+    // Windows (CF_HTML) brackets the copied part inside a whole document.
+    const a = html.indexOf('<!--StartFragment-->');
+    const b = html.indexOf('<!--EndFragment-->');
+    if (a !== -1 && b > a) html = html.slice(a + 20, b);
+    let doc;
+    try { doc = new DOMParser().parseFromString(html, 'text/html'); } catch (_) { return null; }
+
+    const chars = [];
+    let styled = false;
+    const walk = (node, f) => {
+        for (const child of node.childNodes) {
+            if (child.nodeType === Node.TEXT_NODE) {
+                for (const c of child.nodeValue) chars.push({ c, f });
+                continue;
+            }
+            if (child.nodeType !== Node.ELEMENT_NODE || CMP_PASTE_SKIP.has(child.localName)) continue;
+            if (child.style && (child.style.display === 'none' || child.style.visibility === 'hidden')) continue;
+            if (child.localName === 'img') {
+                // An emoji copied as an image is its alt text in the plain copy.
+                const alt = child.getAttribute('alt') || '';
+                if (alt.length <= 16) for (const c of alt) chars.push({ c, f });
+                continue;
+            }
+            const g = cmpPasteFormat(child, f);
+            if (g.b || g.i || g.s || g.code || g.pre || g.href) styled = true;
+            walk(child, g);
+        }
+    };
+    walk(doc.body, { b: false, i: false, s: false, code: false, pre: false, href: null });
+    if (!styled) return null;
+
+    // Lay the HTML's characters over the plain text's, whitespace aside. A few the
+    // plain copy adds (list bullets, numbering) are stepped over unstyled.
+    const P = Array.from(plain);
+    const fmt = new Array(P.length).fill(null);
+    const ws = (c) => /\s/.test(c);
+    let j = 0;
+    for (const { c, f } of chars) {
+        if (ws(c)) continue;
+        while (j < P.length && ws(P[j])) j++;
+        let k = j;
+        while (k < P.length && k - j < 8 && P[k] !== c) k++;
+        if (P[k] !== c) return null;
+        fmt[k] = f;
+        j = k + 1;
+    }
+
+    const key = (i) => {
+        const f = fmt[i];
+        if (!f) return '';
+        const look = f.pre ? 'pre' : f.code ? 'code' : (f.b ? 'b' : '') + (f.i ? 'i' : '') + (f.s ? 's' : '');
+        return look || f.href ? look + '|' + (f.href || '') : '';
+    };
+    const has = (from, to, text, m) => (P.slice(Math.max(0, from - m.length), from).join('') === m && P.slice(to, to + m.length).join('') === m)
+        || (text.length > 2 * m.length && text.startsWith(m) && text.endsWith(m));
+    const wrap = (text, f, from, to) => {
+        let out = text;
+        if (f.code) {
+            if (!text.includes('`') && !has(from, to, text, '`')) out = '`' + text + '`';
+        } else {
+            const stars = f.b && f.i ? '***' : f.b ? '**' : f.i ? '*' : '';
+            if (stars && !has(from, to, text, stars)) out = stars + out + stars;
+            if (f.s && !has(from, to, text, '~~')) out = '~~' + out + '~~';
+        }
+        if (!f.href) return out;
+        const bare = (u) => u.replace(/^https?:\/\//i, '').replace(/\/$/, '');
+        if (bare(text) === bare(f.href)) return text;
+        const href = f.href.replace(/\)/g, '%29');
+        return /[[\]]/.test(text) ? out + ' (' + href + ')' : '[' + out + '](' + href + ')';
+    };
+
+    const lines = [];
+    let start = 0;
+    for (let i = 0; i <= P.length; i++) {
+        if (i < P.length && P[i] !== '\n') continue;
+        lines.push([start, i]);
+        start = i + 1;
+    }
+    const isPre = ([s, e]) => {
+        let any = false;
+        for (let i = s; i < e; i++) {
+            if (ws(P[i])) continue;
+            if (!fmt[i] || !fmt[i].pre) return false;
+            any = true;
+        }
+        return any;
+    };
+    const out = [];
+    for (let li = 0; li < lines.length; li++) {
+        if (isPre(lines[li])) {
+            // A preformatted block becomes a fence, its lines verbatim.
+            let end = li;
+            while (end + 1 < lines.length && (isPre(lines[end + 1]) || (lines[end + 1][0] === lines[end + 1][1] && end + 2 < lines.length && isPre(lines[end + 2])))) end++;
+            out.push('```');
+            for (let k = li; k <= end; k++) out.push(P.slice(lines[k][0], lines[k][1]).join(''));
+            out.push('```');
+            li = end;
+            continue;
+        }
+        const [s, e] = lines[li];
+        let line = '';
+        for (let i = s; i < e;) {
+            const k = key(i);
+            if (ws(P[i]) || !k) { line += P[i++]; continue; }
+            // A run spans whitespace while the next styled character matches it, but
+            // never ends on whitespace: a mark against a space isn't one.
+            let last = i;
+            for (let x = i + 1; x < e; x++) {
+                if (ws(P[x])) continue;
+                if (key(x) !== k) break;
+                last = x;
+            }
+            line += wrap(P.slice(i, last + 1).join(''), fmt[i], i, last + 1);
+            i = last + 1;
+        }
+        out.push(line);
+    }
+    const md = out.join('\n');
+    return md === plain ? null : md;
+}
+
 function createRichComposer(host, opts = {}) {
     const el = document.createElement('div');
     el.className = 'rich-composer';
@@ -916,13 +1171,28 @@ function createRichComposer(host, opts = {}) {
         return shown !== expect;
     }
 
+    /**
+     * True when a name mention's span no longer holds exactly its name. A caret at
+     * the end of the pill (after deleting the space behind it) types INTO the span,
+     * and the token list alone still reads the same, so nothing would repaint.
+     */
+    function mentionsDrifted(tokens) {
+        const expect = tokens.filter((t) => t.kind === 'mention').map((t) => src.slice(t.from, t.to));
+        const spans = el.querySelectorAll('.cmp-mention:not([data-src])');
+        if (spans.length !== expect.length) return true;
+        for (let i = 0; i < spans.length; i++) {
+            if (spans[i].textContent !== expect[i]) return true;
+        }
+        return false;
+    }
+
     function syncFromDom() {
         const next = readDom();
         src = next;
         const tokens = cmpTokenize(src, opts);
         const sig = cmpSignature(tokens, src);
         if (sig === signature) {
-            if (composing || (!marksDrifted(tokens) && !ansiDrifted(tokens))) return;
+            if (composing || (!marksDrifted(tokens) && !ansiDrifted(tokens) && !mentionsDrifted(tokens))) return;
         } else {
             signature = sig;
         }
@@ -1066,6 +1336,50 @@ function createRichComposer(host, opts = {}) {
         }
     });
 
+    /** Select model range [a, b). */
+    function selectRange(a, b) {
+        const sel = window.getSelection();
+        const p = pointAt(a);
+        const q = pointAt(b);
+        if (!sel || !p || !q) { setCaret(b); return; }
+        const r = document.createRange();
+        r.setStart(p[0], p[1]);
+        r.setEnd(q[0], q[1]);
+        sel.removeAllRanges();
+        sel.addRange(r);
+    }
+
+    /** Toggle a markdown mark over the selection, in the model; the text stays selected. */
+    function applyMark(mark) {
+        const sel = selectionRange() || { start: src.length, end: src.length };
+        const next = cmpToggleMark(src, sel.start, sel.end, mark);
+        src = next.src;
+        rerender(next.end);
+        if (next.start !== next.end) selectRange(next.start, next.end);
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+
+    // Formatting writes markdown into the source. The browser's own bold, italic and
+    // underline would only style the DOM, which is never what gets sent.
+    el.addEventListener('keydown', (e) => {
+        if (composing || e.isComposing) return;
+        const mark = cmpShortcutMark(e);
+        if (!mark) {
+            // Underline has no markdown: swallowed, so it can't show and then vanish.
+            if (e.code === 'KeyU' && !e.shiftKey && !e.altKey && (CMP_MAC ? e.metaKey : e.ctrlKey)) e.preventDefault();
+            return;
+        }
+        e.preventDefault();
+        if (!opts.emojiOnly) applyMark(mark);
+    });
+    el.addEventListener('beforeinput', (e) => {
+        if (!e.inputType || !e.inputType.startsWith('format')) return;
+        e.preventDefault();
+        if (composing || opts.emojiOnly) return;
+        const mark = { formatBold: '**', formatItalic: '*', formatStrikeThrough: '~~' }[e.inputType];
+        if (mark) applyMark(mark);
+    });
+
     el.addEventListener('compositionstart', () => { composing = true; });
     el.addEventListener('compositionend', () => {
         composing = false;
@@ -1095,7 +1409,10 @@ function createRichComposer(host, opts = {}) {
         const raw = dt.getData('text/plain') || dt.getData('text/uri-list').split(/\r?\n/)
             .filter((line) => line && !line.startsWith('#') && !line.startsWith('file:')).join('\n');
         if (!raw) return;
-        const text = raw.replace(/\r\n?/g, '\n');   // Windows clipboards carry CRLF
+        let text = raw.replace(/\r\n?/g, '\n');   // Windows clipboards carry CRLF
+        // Text copied with its styling (a docs app, a web page, another chat) keeps it
+        // as markdown, so what shows here is what sends.
+        if (!opts.emojiOnly) text = cmpHtmlToMarkdown(dt.getData('text/html'), text) ?? text;
         const sel = selectionRange() || { start: src.length, end: src.length };
         src = src.slice(0, sel.start) + text + src.slice(sel.end);
         rerender(sel.start + text.length);

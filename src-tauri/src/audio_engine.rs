@@ -11,7 +11,7 @@
 //!   for a windowed file
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, OnceLock};
 
@@ -150,6 +150,16 @@ const WINDOW_TRIM_SECS: u64 = 12;
 // ============================================================================
 
 static ENGINE: OnceLock<AudioEngine> = OnceLock::new();
+
+/// The most frames one output callback has asked for since its stream opened.
+static OUTPUT_STRIDE: AtomicU32 = AtomicU32::new(0);
+/// Whether the stream's first callback, which fills the device's whole buffer, has passed.
+static OUTPUT_PRIMED: AtomicBool = AtomicBool::new(false);
+
+/// How much a live source must hold to answer the next callback whole (frames at the device rate).
+pub fn output_stride() -> u32 {
+    OUTPUT_STRIDE.load(Ordering::Relaxed)
+}
 
 // ============================================================================
 // Types
@@ -439,6 +449,8 @@ impl AudioEngine {
 
         let shared_for_callback = Arc::clone(shared);
         let channels = device_channels as usize;
+        OUTPUT_STRIDE.store(0, Ordering::Relaxed);
+        OUTPUT_PRIMED.store(false, Ordering::Relaxed);
 
         let stream = device
             .build_output_stream(
@@ -717,6 +729,8 @@ impl AudioEngine {
         let held = self.output_name.lock().unwrap_or_else(|e| e.into_inner()).clone();
         let play_held = || {
             let guard = self.stream.lock().unwrap_or_else(|e| e.into_inner());
+            // A resumed stream refills the device buffer like a fresh one.
+            OUTPUT_PRIMED.store(false, Ordering::Relaxed);
             guard.as_ref().map(|s| s.play())
         };
         if resume_plan(opened, &held, &crate::audio_devices::resolved_output_name()) == Resume::Play {
@@ -1314,6 +1328,9 @@ fn redirect_window(source: &mut AudioSource, frame: u64) {
 fn mixer_callback(output: &mut [f32], shared: &SharedState, channels: usize) {
     // Zero the output buffer
     output.fill(0.0);
+    if OUTPUT_PRIMED.swap(true, Ordering::Relaxed) {
+        OUTPUT_STRIDE.fetch_max((output.len() / channels.max(1)) as u32, Ordering::Relaxed);
+    }
 
     // try_lock: if contended (during add/remove source or decode batch flush),
     // output silence for one buffer (~5ms)

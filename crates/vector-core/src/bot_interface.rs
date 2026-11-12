@@ -647,8 +647,10 @@ pub async fn publish_manifest(manifest: &BotManifest, keys: &Keys, relays: &[Str
 /// signing key need not live across the publish.
 pub async fn publish_manifest_event(event: &Event, relays: &[String]) -> Result<usize, String> {
     let client = crate::state::nostr_client().ok_or("no client connected")?;
+    // Targeted-only, like every Community and Discovery Relay: pooled for reading, an indexer
+    // or a Community relay would carry the account's DM subscription and DM sync too.
     for r in relays {
-        let _ = client.add_managed_relay(r.as_str()).await;
+        let _ = client.add_managed_relay(r.as_str()).capabilities(crate::community_relay_capabilities()).await;
     }
     client.connect().await;
     let out = crate::transport_aware(client.send_event(event))

@@ -142,7 +142,7 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 ///
 /// Leaving it behind is the one way the guard misfires: the new migration
 /// applies on first run, then this build reads its own database as newer and
-/// refuses to open it. The `debug_assert` in [`run_atomic_migration`] and
+/// refuses to open it. The `debug_assert` in `run_atomic_migration` and
 /// `highest_migration_id_matches_the_runner` both catch that before release.
 pub const HIGHEST_MIGRATION_ID: u32 = 127;
 
@@ -272,7 +272,7 @@ fn ensure_column_exists(
 /// - Each migration runs in a transaction (atomic - all or nothing)
 /// - If any migration fails, changes are rolled back - no partial state
 /// - Migrations are tracked in schema_migrations table (idempotent - safe to re-run)
-/// - All errors are logged with [DB] prefix and propagated (no silent failures)
+/// - All errors are logged with `[DB]` prefix and propagated (no silent failures)
 pub fn run_migrations(conn: &mut rusqlite::Connection) -> Result<(), String> {
     // Ensure schema_migrations table exists (bootstrap - must succeed before any migrations)
     conn.execute(

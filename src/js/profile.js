@@ -219,22 +219,15 @@ function enterProfileEditMode() {
 /** Pick a new avatar or banner while editing; it previews in place until save. */
 async function pickProfilePicture(kind) {
     if (!fProfileEditMode) return;
-    const { open } = window.__TAURI__.dialog;
-    const file = await open({
-        title: kind === 'avatar' ? 'Choose Profile Picture' : 'Choose Banner Image',
-        multiple: false,
-        directory: false,
-        filters: [{ name: 'Image', extensions: ['png', 'jpeg', 'jpg', 'gif', 'webp'] }]
-    });
-    if (!file || !fProfileEditMode) return;
-    const preview = await pickedImagePreviewSrc(file) || '';
+    const pick = await pickImage(kind === 'avatar' ? 'Choose Profile Picture' : 'Choose Banner Image');
+    if (!pick || !fProfileEditMode) return;
     if (kind !== 'avatar') {
-        VectorSvelte.setProfileEditPicture(kind, file, preview);
+        VectorSvelte.setProfileEditPicture(kind, pick.path, pick.preview);
         return;
     }
-    const cropped = await cropAvatarPick(file, preview, 'Crop Profile Picture', 'round');
+    const cropped = await cropAvatarPick(pick.path, pick.preview, 'Crop Profile Picture', 'round');
     if (!cropped || !fProfileEditMode) return;
-    VectorSvelte.setProfileEditPicture(kind, file, cropped.preview, cropped.crop);
+    VectorSvelte.setProfileEditPicture(kind, pick.path, cropped.preview, cropped.crop);
 }
 
 /** Upload a picked picture and publish it; the profile keeps showing the pick meanwhile. */

@@ -1,6 +1,6 @@
 [package]
 name = "vector_sdk"
-version = "0.11.0"
+version = "0.12.0"
 edition = "2021"
 description = "Ergonomic Rust SDK for building Vector bots and clients on top of vector-core."
 license = "MIT"
@@ -12,21 +12,35 @@ homepage = "https://vectorapp.io"
 documentation = "https://docs.rs/vector-sdk"
 readme = "README.md"
 
+[package.metadata.docs.rs]
+# Every optional surface documented; tor stays out for docs.rs's build budget.
+features = ["voice", "whisper", "xdc", "i2p"]
+
 [dependencies]
 # The single source of truth — all protocol logic lives here. Tor stays opt-in
 # (vector-core's `tor` feature is off by default) so the SDK's dep tree is light.
 # `version` is set so the crate is publishable once vector-core ships to crates.io;
 # until then the `path` wins for local builds.
-vector-core = { path = "../vector-core", version = "0.10.0", default-features = false }
-# Exact-pinned to match vector-core — the nostr alphas are not inter-compatible.
-nostr-sdk = "=0.45.4"
-tokio = { version = "1.49", features = ["rt", "rt-multi-thread", "macros", "time"] }
+vector-core = { path = "../vector-core", version = "0.11.0", default-features = false }
+vector-media = { path = "../vector-media", version = "0.1.0", optional = true }
+# Caret, as vector-core declares it: one nostr-sdk 0.45 in the tree.
+nostr-sdk = "0.45.6"
+tokio = { version = "1.49", features = ["rt", "rt-multi-thread", "macros", "time", "signal", "process"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+
+# Speech to text for voice bots (`whisper`): whisper.cpp, built with cmake. Metal on macOS.
+[target.'cfg(target_os = "macos")'.dependencies]
+whisper-rs = { version = "0.15.1", features = ["metal"], optional = true }
+
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+whisper-rs = { version = "0.15.1", optional = true }
 
 [dev-dependencies]
 # The examples that ship their own Mini App package it at startup.
 zip = { version = "2.4", default-features = false, features = ["deflate-flate2", "flate2"] }
+# voice_whisper_bot's speech files.
+tempfile = "3"
 
 [features]
 default = []
@@ -36,6 +50,11 @@ tor = ["vector-core/tor"]
 i2p = ["vector-core/i2p"]
 # Mini Apps (WebXDC): join the realtime sessions of shared apps. Pulls in Iroh.
 xdc = ["vector-core/xdc"]
+# Voice Channels: hear and speak, in as many calls at once as you like. Pulls in Iroh and
+# libopus (built from source with cmake).
+voice = ["dep:vector-media", "vector-core/calls"]
+# Transcribe what's said in a call with Whisper (`voice::Transcriber`). Builds whisper.cpp.
+whisper = ["voice", "dep:whisper-rs"]
 
 [[example]]
 name = "echo_bot"
@@ -85,3 +104,18 @@ required-features = ["xdc"]
 [[example]]
 name = "xdc_spy"
 required-features = ["xdc"]
+
+[[example]]
+name = "voice_echo_bot"
+required-features = ["voice"]
+
+[[example]]
+name = "voice_radio_bot"
+required-features = ["voice"]
+
+[[example]]
+name = "voice_whisper_bot"
+required-features = ["whisper"]
+
+[[example]]
+name = "community_admin_bot"

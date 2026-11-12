@@ -531,7 +531,7 @@ pub fn take_bunker_signer() -> Option<NostrConnect> {
 // ============================================================================
 
 /// Parse a `bunker://` URL and return the relay URLs it lists. Used by the
-/// Settings UI to render "Connected via <relay>" without re-bootstrapping.
+/// Settings UI to render `"Connected via <relay>"` without re-bootstrapping.
 /// Returns an empty Vec on any parse failure — the caller treats this as a
 /// display-only signal and renders a generic fallback instead of erroring.
 pub fn parse_bunker_relays(bunker_url: &str) -> Vec<String> {

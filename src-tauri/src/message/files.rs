@@ -924,31 +924,61 @@ pub fn is_directory(path: String) -> bool {
 /// manager, dragged from an arbitrary folder): the webview's asset:// route refuses
 /// those paths by design, so a downscaled copy is written into the app cache, which
 /// it does serve. Image-only (sniffed from magic bytes, never the extension) and
-/// size-capped, so it can't grow into a general file-read primitive.
+/// size-capped, so it can't grow into a general file-read primitive. An Android picker's
+/// content:// URI is read through the content resolver. Errors are worded for the person
+/// who picked the file.
 #[tauri::command]
 pub async fn read_image_preview(app: tauri::AppHandle, path: String) -> Result<String, String> {
-    const MAX_PREVIEW_BYTES: u64 = 32 * 1024 * 1024;
-    let meta = std::fs::metadata(&path).map_err(|e| e.to_string())?;
-    if !meta.is_file() {
-        return Err("not a file".to_string());
-    }
-    if meta.len() > MAX_PREVIEW_BYTES {
-        return Err("file too large for an inline preview".to_string());
-    }
     tokio::task::spawn_blocking(move || {
-        let bytes = vector_core::vcache::read(std::path::Path::new(&path)).map_err(|e| e.to_string())?;
+        let bytes = read_picked_image(&path)?;
         // An explicit list, not a prefix: the sniffer also names SVG (any XML) an image. An SVG
         // passes only as the pixels the preview renders; any other XML fails to render.
         let mime = vector_core::crypto::mime_from_magic_bytes(&bytes);
         if !matches!(mime, "image/png" | "image/jpeg" | "image/gif" | "image/webp" | "image/tiff" | "image/x-icon" | "image/bmp")
             && !vector_core::svg::looks_like_svg(&bytes)
         {
-            return Err("not an image".to_string());
+            return Err(NOT_AN_IMAGE.to_string());
         }
-        write_preview_file(&app, &bytes, false)
+        write_preview_file(&app, &bytes, false).map_err(|e| {
+            vector_core::log_warn!("[Preview] couldn't draw a picked {mime}: {e}");
+            NOT_AN_IMAGE.to_string()
+        })
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+const MAX_PICKED_IMAGE_BYTES: u64 = 32 * 1024 * 1024;
+const NOT_AN_IMAGE: &str = "That file isn’t an image Vector can use. Try a PNG, JPG, GIF or WebP.";
+/// A pick that can't be read, worded for the person who picked it.
+pub(crate) const CANT_OPEN_PICK: &str = "Vector couldn’t open that file. Try picking it again.";
+
+/// A picked image's bytes, from a path or an Android content:// URI, refused past the size cap.
+fn read_picked_image(path: &str) -> Result<zeroize::Zeroizing<Vec<u8>>, String> {
+    let too_large = || format!("That image is over {} MB. Try a smaller one.", MAX_PICKED_IMAGE_BYTES / (1024 * 1024));
+    let unreadable = |e: &dyn std::fmt::Display| {
+        vector_core::log_warn!("[Preview] couldn't read a picked file: {e}");
+        CANT_OPEN_PICK.to_string()
+    };
+    #[cfg(target_os = "android")]
+    if path.starts_with("content://") {
+        if filesystem::get_android_uri_info(path.to_string()).is_ok_and(|i| i.size > MAX_PICKED_IMAGE_BYTES) {
+            return Err(too_large());
+        }
+        let picked = filesystem::read_android_uri(path.to_string()).map_err(|e| unreadable(&e))?;
+        if picked.bytes.len() as u64 > MAX_PICKED_IMAGE_BYTES {
+            return Err(too_large());
+        }
+        return Ok(zeroize::Zeroizing::new(Arc::try_unwrap(picked.bytes).unwrap_or_else(|shared| (*shared).clone())));
+    }
+    let meta = std::fs::metadata(path).map_err(|e| unreadable(&e))?;
+    if !meta.is_file() {
+        return Err(NOT_AN_IMAGE.to_string());
+    }
+    if meta.len() > MAX_PICKED_IMAGE_BYTES {
+        return Err(too_large());
+    }
+    vector_core::vcache::read(std::path::Path::new(path)).map_err(|e| unreadable(&e))
 }
 
 /// The picked image at `path` as it will upload as an avatar with `crop`: cropped, shrunk and

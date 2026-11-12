@@ -23,6 +23,20 @@ use serde::{Deserialize, Serialize};
 #[serde(transparent)]
 pub struct Permissions(pub u64);
 
+/// The bit constants are plain `u64`s, so `Permissions::KICK | Permissions::BAN` converts.
+impl From<u64> for Permissions {
+    fn from(bits: u64) -> Self {
+        Permissions(bits)
+    }
+}
+
+impl std::ops::BitOr for Permissions {
+    type Output = Permissions;
+    fn bitor(self, rhs: Permissions) -> Permissions {
+        Permissions(self.0 | rhs.0)
+    }
+}
+
 impl Permissions {
     pub const MANAGE_ROLES: u64 = 1 << 0;
     pub const MANAGE_CHANNELS: u64 = 1 << 1;
@@ -328,12 +342,24 @@ impl CommunityRoles {
     /// Whether `@everyone`, resolved up to the View Channel step, may post in a Channel: one
     /// where it can't is restricted (CORD-03 §1). A legacy Roster restricts nothing.
     pub fn everyone_sends(&self, channel_hex: &str) -> bool {
-        let Some(everyone) = self.everyone else { return true };
+        self.everyone_in(channel_hex).is_none_or(|p| p & Permissions::SEND_MESSAGES != 0)
+    }
+
+    /// Whether `@everyone`, resolved the same way, may write nothing in a Channel: no post, no
+    /// reaction, no call. Such a Channel is Locked: every write takes its writer key. A legacy
+    /// Roster locks nothing.
+    pub fn everyone_writes_nothing(&self, channel_hex: &str) -> bool {
+        self.everyone_in(channel_hex).is_some_and(|p| p & (Permissions::SEND_MESSAGES | Permissions::ADD_REACTIONS | Permissions::CONNECT) == 0)
+    }
+
+    /// `@everyone`'s bits in a Channel with only its own overwrite applied (its Category's when
+    /// synced), `None` on a legacy Roster.
+    fn everyone_in(&self, channel_hex: &str) -> Option<u64> {
+        let everyone = self.everyone?;
         let channel = channel_hex.to_ascii_lowercase();
         let scope = self.syncs.get(&channel).cloned().unwrap_or(channel);
         let row = self.overwrites.iter().find(|o| o.scope == scope && o.target == OverwriteTarget::Everyone);
-        let p = row.map_or(everyone.0, |o| (everyone.0 & !o.deny.0) | o.allow.0);
-        p & Permissions::SEND_MESSAGES != 0
+        Some(row.map_or(everyone.0, |o| (everyone.0 & !o.deny.0) | o.allow.0))
     }
 
     /// [`Self::channel_permissions_holding`] for the Roles the member holds now.
@@ -525,7 +551,7 @@ impl CommunityRoles {
         out
     }
 
-    /// [`channel_roles`], by id.
+    /// [`channel_roles`](Self::channel_roles), by id.
     pub fn channel_role_ids(&self, channel_hex: &str) -> Vec<String> {
         self.channel_roles(channel_hex).into_iter().map(|r| r.role_id.clone()).collect()
     }
@@ -576,7 +602,7 @@ impl CommunityRoles {
     /// roles plus roles scoped to that channel.
     ///
     /// ⚠️ **Offer-side only.** The fold stays scope-agnostic in every
-    /// implementation (CORD-04 §3, and [`effective_permissions`] is what judges
+    /// implementation (CORD-04 §3, and [`effective_permissions`](Self::effective_permissions) is what judges
     /// inbound authority) — this narrows only what THIS client offers its own
     /// user, never what it honors from others. Tightening the honor path would
     /// retroactively invalidate actions shipped clients already folded.

@@ -8,10 +8,11 @@ repository = "https://github.com/VectorPrivacy/Vector"
 homepage = "https://vectorapp.io"
 keywords = ["nostr", "webpush", "notifications", "vector"]
 categories = ["cryptography", "network-programming"]
+readme = "README.md"
 
 [dependencies]
-# Exact-pinned with the rest of the workspace's nostr family (see vector-core).
-nostr = { version = "=0.45.5", features = ["nip44", "std", "rand", "os-rng"] }
+# Caret at the fork's version, as vector-core declares it (see there).
+nostr = { version = "0.45.7", features = ["nip44", "std", "rand", "os-rng"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 p256 = { version = "0.13", default-features = false, features = ["ecdh", "std"] }

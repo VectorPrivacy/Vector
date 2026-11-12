@@ -203,7 +203,7 @@ pub fn seal_guestbook_rumor(
 }
 
 /// Signer-driven twin of [`seal_guestbook_rumor`] for bunker / NIP-55 accounts:
-/// the encrypted seal signs through a [`VectorSigner`]. `author` is the identity
+/// the encrypted seal signs through a [`VectorSigner`](crate::signer::VectorSigner). `author` is the identity
 /// the signer signs as (must equal `my_public_key()`). Wire-identical output.
 pub async fn seal_guestbook_rumor_signed<S: crate::signer::VectorSigner + ?Sized>(
     signer: &S,

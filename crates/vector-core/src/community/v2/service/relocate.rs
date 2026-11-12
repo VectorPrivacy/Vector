@@ -97,7 +97,7 @@ const LISTING: (u32, u32) = (97, 100);
 /// `relays` as a Community lists them, by the app's one relay rule (`wss://`, or plain `ws://` for
 /// an `.onion` or `.i2p` host, whose network encrypts the link itself): trimmed, one spelling per
 /// relay (an address the list already holds keeps its own), at least one and at most five.
-fn clean_relays(held: &[String], relays: &[String]) -> Result<Vec<String>, String> {
+pub(crate) fn clean_relays(held: &[String], relays: &[String]) -> Result<Vec<String>, String> {
     let held_urls: Vec<(RelayUrl, &String)> = held.iter().filter_map(|r| RelayUrl::parse(r).ok().map(|u| (u, r))).collect();
     let mut out: Vec<String> = Vec::new();
     let mut seen: HashSet<RelayUrl> = HashSet::new();

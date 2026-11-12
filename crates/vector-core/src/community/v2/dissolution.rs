@@ -107,7 +107,7 @@ pub fn seal_dissolved(
 }
 
 /// Signer-driven twin of [`seal_dissolved`] for bunker / NIP-55 accounts: the
-/// plaintext dissolution tombstone signs through a [`VectorSigner`]. `owner_pk`
+/// plaintext dissolution tombstone signs through a [`VectorSigner`](crate::signer::VectorSigner). `owner_pk`
 /// must equal `my_public_key()` (the owner identity the signer signs as).
 pub async fn seal_dissolved_signed<S: crate::signer::VectorSigner + ?Sized>(
     signer: &S,

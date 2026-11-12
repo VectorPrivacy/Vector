@@ -8,6 +8,7 @@
 //! cargo run -p vector_sdk --example v2_typing_probe -- "<channel name>"
 //! ```
 
+// example-uses-core: a protocol probe opens channel wraps itself, below the SDK by design.
 use nostr_sdk::prelude::*;
 use vector_sdk::VectorBot;
 

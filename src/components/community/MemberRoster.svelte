@@ -9,7 +9,7 @@
     // re-read the settled truth → patch state; nothing is re-rendered by hand.
     import MemberRow from '../people/MemberRow.svelte';
     import { untrack } from 'svelte';
-    import { profileVersion, openChatId, chatVersion } from '../lib/signals.svelte.js';
+    import { profileVersion } from '../lib/signals.svelte.js';
     import { advancedState } from '../lib/advanced.svelte.js';
     import { communityNickname } from '../lib/nicknames.svelte.js';
     import { timedOutUntil } from '../lib/timeouts.svelte.js';
@@ -179,13 +179,6 @@
 
     const f = $derived(filter.trim().toLowerCase());
 
-    // Who has posted in the open channel's loaded history: they lead the Members group.
-    const posters = $derived.by(() => {
-        const id = openChatId();
-        if (id) chatVersion(id);
-        return h.channelPosters?.(communityId) || null;
-    });
-
     // Who may read the scoped Private Channel: the owner, and holders of a role scoped
     // to it (CORD-04 §2, the roles scoped to a channel ARE its access list). Unscoped
     // until the graph lands, so a slow read shows everyone rather than a false empty.
@@ -199,7 +192,8 @@
         return out;
     });
 
-    // Row view-models bucketed by section: owner → admins → members, A→Z within a tier.
+    // Row view-models bucketed by section: owner → admins → members, then names A→Z and bare
+    // keys last. The same members list the same in every channel.
     const sections = $derived.by(() => {
         const tierOf = (npub) => (npub === ownerNpub ? 0 : adminSet.has(npub) ? 1 : 2);
         const vms = [];
@@ -219,8 +213,6 @@
                 display,
                 veiled,
                 hasName: !veiled && named,
-                // Members order: posted here, then named, then a bare key.
-                relevance: posters?.has(m.npub) ? 0 : named ? 1 : 2,
                 src: profile ? h.getProfileAvatarSrc(profile) || null : null,
                 isOwner,
                 isAdmin,
@@ -235,7 +227,7 @@
                 tier: tierOf(m.npub),
             });
         }
-        vms.sort((a, b) => a.tier - b.tier || a.display.toLowerCase().localeCompare(b.display.toLowerCase()));
+        vms.sort((a, b) => a.tier - b.tier || a.unnamed - b.unnamed || a.display.toLowerCase().localeCompare(b.display.toLowerCase()));
 
         const buckets = new Map(sectionOrder.map((s) => [s.id, []]));
         for (const vm of vms) {
@@ -243,8 +235,6 @@
             const id = heldBy.get(vm.npub)?.role_id || (vm.isOwner || vm.isAdmin ? 'admin' : 'members');
             (buckets.get(id) || buckets.get('members')).push(vm);
         }
-        // Stable sort: A→Z within each relevance tier is kept from the sort above.
-        buckets.get('members').sort((a, b) => a.tier - b.tier || a.relevance - b.relevance);
         return sectionOrder
             .map((s) => ({ ...s, rows: buckets.get(s.id), counted: buckets.get(s.id).filter((vm) => !vm.unlisted).length }))
             .filter((s) => s.rows.length);

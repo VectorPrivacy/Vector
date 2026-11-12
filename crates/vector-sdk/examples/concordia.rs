@@ -20,6 +20,7 @@
 //! `CONCORDIA_AVATAR=<image path>` on any run to (re)publish the bot profile
 //! with that avatar.
 
+// example-uses-core: !bounce and the profile push drive relay sockets directly, as an ops tool.
 use std::time::{SystemTime, UNIX_EPOCH};
 use vector_sdk::{BotEvent, VectorBot};
 
@@ -73,9 +74,9 @@ async fn main() -> vector_sdk::Result<()> {
             tokio::time::sleep(std::time::Duration::from_secs(10)).await;
             let avatar_path = shellexpand_home(&avatar_path);
             println!("── uploading avatar {avatar_path}…");
-            match bot.core().upload_public_image(&avatar_path).await {
+            match bot.upload_image(&avatar_path).await {
                 Ok(url) => {
-                    let ok = bot.core().update_bot_profile(NAME, &url, "", ABOUT).await;
+                    let ok = bot.update_profile(NAME, &url, "", ABOUT).await.is_ok();
                     println!("── profile publish {}  avatar={url}", if ok { "✅" } else { "FAILED" });
                     if ok {
                         push_profile_to_communities().await;
@@ -90,12 +91,8 @@ async fn main() -> vector_sdk::Result<()> {
     // persisted memberships and need no arguments.
     if let Some(invite) = std::env::args().nth(1).or_else(|| std::env::var("VECTOR_INVITE").ok()) {
         println!("── joining via link…");
-        match bot.core().join_community(&invite).await {
-            Ok(summary) => {
-                let name = summary.get("name").and_then(|v| v.as_str()).unwrap_or("?");
-                let ver = summary.get("version").and_then(|v| v.as_u64()).unwrap_or(0);
-                println!("── joined \"{name}\"  protocol=v{ver}");
-            }
+        match bot.join(&invite).await {
+            Ok(community) => println!("── joined \"{}\"", community.name().await),
             Err(e) => {
                 eprintln!("!! join failed: {e}");
                 return Err(e);
@@ -310,10 +307,12 @@ async fn main() -> vector_sdk::Result<()> {
                     _ => {}
                 }
             }
-            BotEvent::MessageUpdate { message, .. } => {
-                println!("[UPDATE] {} → \"{}\"  ({} reaction(s))", short(message.npub.as_deref().unwrap_or("?")), message.content, message.reactions.len());
+            BotEvent::Reaction { reaction, .. } => println!("[REACT]  {} {}", short(&reaction.author_id), reaction.emoji),
+            BotEvent::Edit { message, .. } => println!("[EDIT]   {} → \"{}\"", short(message.npub.as_deref().unwrap_or("?")), message.content),
+            BotEvent::Delete { message_id, by, moderated, .. } => {
+                println!("[DELETE] message {} by {}{}", short(&message_id), by.as_deref().map(short).unwrap_or_else(|| "the rules".into()), if moderated { " (moderator)" } else { "" })
             }
-            BotEvent::Delete { message_id, .. } => println!("[DELETE] message {}", short(&message_id)),
+            BotEvent::CommunityChange { change, .. } => println!("[CHANGE] {:?} by {}", change.kind, change.by.as_deref().map(short).unwrap_or_else(|| "?".into())),
             BotEvent::MemberJoin { npub, .. } => println!("[JOIN]   {}", short(&npub)),
             BotEvent::MemberLeave { npub, .. } => println!("[LEAVE]  {}", short(&npub)),
             BotEvent::Typing { npub, .. } => println!("[TYPING] {}", short(&npub)),
@@ -418,21 +417,14 @@ async fn diagnostics(bot: &VectorBot, msg: &vector_sdk::IncomingMessage, which: 
     let out = match which {
         "!whoami" => format!("me: {}  ·  community: {}  ·  channel: {}", bot.npub(), cid, msg.chat_id),
         "!caps" => community.capabilities().map(|v| v.to_string()).unwrap_or_else(|e| format!("caps error: {e}")),
-        "!roles" => community.roles().map(|v| v.to_string()).unwrap_or_else(|e| format!("roles error: {e}")),
+        "!roles" => community
+            .roles()
+            .map(|roles| roles.iter().map(|r| format!("{} (#{}, perms {:#x})", r.name, r.position, r.permissions.0)).collect::<Vec<_>>().join(" · "))
+            .unwrap_or_else(|e| format!("roles error: {e}")),
         _ /* !channels / !info */ => {
-            let mut line = format!("community {cid}: (not found in list)");
-            for c in bot.core().list_communities().await {
-                let id = c.get("id").or_else(|| c.get("community_id")).and_then(|v| v.as_str()).unwrap_or("");
-                if id != cid {
-                    continue;
-                }
-                let ver = c.get("version").and_then(|v| v.as_u64()).unwrap_or(0);
-                let owner = c.get("is_owner").and_then(|v| v.as_bool()).unwrap_or(false);
-                let chans: Vec<String> = c.get("channels").and_then(|v| v.as_array())
-                    .map(|a| a.iter().filter_map(|ch| ch.get("name").and_then(|n| n.as_str()).map(String::from)).collect())
-                    .unwrap_or_default();
-                line = format!("protocol=v{ver}  owner={owner}  channels={chans:?}");
-            }
+            let owner = community.owner().is_some_and(|o| o == bot.npub());
+            let chans: Vec<String> = community.channels().await.iter().map(|ch| ch.name().to_string()).collect();
+            let line = format!("owner={owner}  channels={chans:?}");
             line
         }
     };

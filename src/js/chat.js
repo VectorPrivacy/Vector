@@ -987,9 +987,11 @@ function showEditHistory(messageId, targetElement) {
         : msg.edit_history;
     VectorSvelte.setEditHistory(messageId, entries, mergeEmojiTags(msg.emoji_tags, equippedEmojiTags()));
 
-    // The popup places itself against the bubble, above or below depending on room.
+    // The popup places itself against the bubble, above or below depending on room; a bubble
+    // taller than much of the window would leave none, so it goes by the marker clicked.
     const msgBubble = targetElement.closest('.dmsg');
-    const rect = msgBubble ? msgBubble.getBoundingClientRect() : targetElement.getBoundingClientRect();
+    const bubbleRect = msgBubble && msgBubble.getBoundingClientRect();
+    const rect = bubbleRect && bubbleRect.height < window.innerHeight * 0.4 ? bubbleRect : targetElement.getBoundingClientRect();
     VectorSvelte.openEditHistory({ top: rect.top, bottom: rect.bottom, left: rect.left });
 }
 
@@ -1001,9 +1003,70 @@ function hideEditHistory() {
     VectorSvelte.clearEditHistory();
 }
 
+// Diff runs ride through markdown as private-use sentinels, then become <del>/<ins>.
+const EH_DEL = '\u{F0200}', EH_INS = '\u{F0201}', EH_END = '\u{F0202}', EH_GAP = '\u{F0203}';
+const EH_MARKS = /[\u{F0200}-\u{F0203}]/u;
+
+/** A revision's text as the chat renders it: markdown, times, links, mentions and emoji. */
+function renderEditHistoryText(node, source, tags, gaps) {
+    node.innerHTML = parseMarkdown(source.trim());
+    if (EH_MARKS.test(source)) ehMarksToRuns(node, gaps || []);
+    if (source.includes('<t:')) ttRenderCodes(node);
+    linkifyUrls(node);
+    renderMentions(node, false, { allowBare: true });
+    renderGoLinks(node);
+    if (tags && tags.length) renderCustomEmojiShortcodes(node, tags);
+    twemojify(node);
+}
+
+/** Turn the sentinels into runs: a change can cross elements, so each text node takes the mode it sits in. */
+function ehMarksToRuns(root, gaps) {
+    const nodes = [];
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    while (walker.nextNode()) nodes.push(walker.currentNode);
+    let mode = null, gap = 0;
+    for (const t of nodes) {
+        const text = t.nodeValue;
+        if (!mode && !EH_MARKS.test(text)) continue;
+        const frag = document.createDocumentFragment();
+        let buf = '';
+        const flush = () => {
+            if (!buf) return;
+            // Spaces at a change's edges aren't part of it: struck, they read as a dash.
+            const [, lead, body, trail] = mode ? buf.match(/^(\s*)([\s\S]*?)(\s*)$/) : [null, '', buf, ''];
+            if (lead) frag.appendChild(document.createTextNode(lead));
+            if (mode && body) {
+                const el = document.createElement(mode);
+                el.className = mode === 'ins' ? 'eh-ins' : 'eh-del';
+                el.textContent = body;
+                frag.appendChild(el);
+            } else if (body) frag.appendChild(document.createTextNode(body));
+            if (trail) frag.appendChild(document.createTextNode(trail));
+            buf = '';
+        };
+        for (const ch of text) {
+            if (ch === EH_DEL || ch === EH_INS || ch === EH_END) {
+                flush();
+                mode = ch === EH_DEL ? 'del' : ch === EH_INS ? 'ins' : null;
+            } else if (ch === EH_GAP) {
+                flush();
+                const words = gaps[gap++] || 0;
+                const fold = document.createElement('span');
+                fold.className = 'eh-gap';
+                fold.textContent = '…';
+                fold.title = `${words} unchanged word${words === 1 ? '' : 's'}`;
+                frag.appendChild(fold);
+            } else buf += ch;
+        }
+        flush();
+        t.replaceWith(frag);
+    }
+}
+
 VectorSvelte.setScreen('editHistory', {
     h: {
-        renderEmoji: (node, tags) => { renderCustomEmojiShortcodes(node, tags); twemojify(node); },
+        renderText: renderEditHistoryText,
+        marks: { del: EH_DEL, ins: EH_INS, end: EH_END, gap: EH_GAP },
         hide: hideEditHistory,
     },
 });

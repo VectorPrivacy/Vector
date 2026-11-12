@@ -12,7 +12,7 @@
 //! with Soapbox/Armada — the exact same discord.js-style API as a v1 bot; the
 //! SDK routes to v2 under the hood.
 
-use vector_sdk::VectorBot;
+use vector_sdk::{NewCommunity, VectorBot};
 
 #[tokio::main]
 async fn main() -> vector_sdk::Result<()> {
@@ -24,11 +24,7 @@ async fn main() -> vector_sdk::Result<()> {
     // Create-and-invite is opt-in so a restart doesn't spawn a fresh community
     // each time (a real bot persists its community id and reuses it).
     if std::env::var("VECTOR_CREATE").is_ok() {
-        // Creation is one hop through the core facade (the ergonomic surface stays at
-        // the stable published API). A fresh community is created on the modern protocol.
-        let summary = bot.core().create_community_v2("Vector v2 Demo").await?;
-        let id = summary.get("community_id").and_then(|v| v.as_str()).unwrap_or_default().to_string();
-        let community = bot.community(id);
+        let community = bot.create_community("Vector v2 Demo", NewCommunity::default()).await?;
         println!("created v2 community {}", community.id());
 
         let url = community.create_invite().await?;

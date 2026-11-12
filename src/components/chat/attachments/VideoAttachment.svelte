@@ -59,8 +59,11 @@
             el.currentTime = back.time;
             if (back.playing) el.play().catch(() => {});
         };
+        // Bytes memory let go of after the bubble was drawn: fetched again, and the bubble remounts.
+        const onError = () => h.lost(att, msg);
         el.addEventListener('play', onPlay);
         el.addEventListener('pause', onPause);
+        el.addEventListener('error', onError);
         if (adopted) {
             if (!el.paused) claimPlayback(lane, () => el.pause(), 'video');
         } else {
@@ -71,6 +74,7 @@
                 ro.disconnect();
                 el.removeEventListener('play', onPlay);
                 el.removeEventListener('pause', onPause);
+                el.removeEventListener('error', onError);
                 el.removeEventListener('loadedmetadata', onMeta);
                 releasePlayback(lane, 'video');
                 if (!ownsVideo(key, owner)) return;

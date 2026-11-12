@@ -62,6 +62,11 @@ impl ChannelV2 {
     pub fn restricted(&self) -> bool {
         self.writers.as_ref().is_some_and(|l| l.restricted())
     }
+
+    /// Whether every write lands at a writer address now: reactions and calls too.
+    pub fn locked(&self) -> bool {
+        self.writers.as_ref().is_some_and(|l| l.locked())
+    }
 }
 
 /// A Category (CORD-03 §4): a sidebar group Channels file under by their `category`.
@@ -93,6 +98,16 @@ impl ChannelView {
             ChannelView::Chat => "chat",
             ChannelView::Forum => "forum",
             ChannelView::Voice => "voice",
+        }
+    }
+
+    /// A view this build knows by name, or `None`.
+    pub fn try_parse(s: &str) -> Option<ChannelView> {
+        match s {
+            "chat" => Some(ChannelView::Chat),
+            "forum" => Some(ChannelView::Forum),
+            "voice" => Some(ChannelView::Voice),
+            _ => None,
         }
     }
 

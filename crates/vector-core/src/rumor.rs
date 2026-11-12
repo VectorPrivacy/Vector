@@ -373,7 +373,7 @@ fn process_text_message(
 
 /// Extract SHA256 hash from a Blossom URL
 ///
-/// Blossom URLs typically follow the format: https://server.com/<sha256hash>[.ext]
+/// Blossom URLs typically follow the format: `https://server.com/<sha256hash>[.ext]`
 pub fn extract_hash_from_blossom_url(url: &str) -> Option<String> {
     let path = url.split('/').next_back()?;
     let hash_part = path.split('.').next()?;

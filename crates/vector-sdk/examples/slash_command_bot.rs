@@ -41,17 +41,16 @@ async fn main() -> vector_sdk::Result<()> {
         let name = name.clone();
         tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_secs(10)).await;
-            let ok = bot.core().update_bot_profile(&name, "", "", about).await;
-            println!("── profile publish {}", if ok { "✅" } else { "FAILED" });
+            let published = bot.update_profile(&name, "", "", about).await;
+            println!("── profile publish {}", if published.is_ok() { "✅" } else { "FAILED" });
         });
     }
 
     // Optional invite link on first run; later runs come up with memberships.
     if let Some(invite) = std::env::args().nth(1) {
         println!("── joining via link…");
-        let summary = bot.core().join_community(&invite).await?;
-        let cname = summary.get("name").and_then(|v| v.as_str()).unwrap_or("?");
-        println!("── joined \"{cname}\"");
+        let community = bot.join(&invite).await?;
+        println!("── joined \"{}\"", community.name().await);
     }
 
     bot.command("echo", "Repeat your text back")

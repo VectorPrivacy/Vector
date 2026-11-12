@@ -176,7 +176,7 @@ fn agreed(samples: &mut [i64]) -> Option<(i64, usize)> {
 }
 
 /// Ask `relays` for the time and correct the clock by what they agree on. Leaves it alone when
-/// fewer than [`QUORUM`] answer alike, the device's clock is used until they do.
+/// fewer than `QUORUM` answer alike, the device's clock is used until they do.
 pub async fn sync_with(relays: &[String]) {
     let asked = relays.iter().take(8).map(|r| sample(r));
     let mut samples: Vec<i64> = futures_util::future::join_all(asked).await.into_iter().flatten().collect();

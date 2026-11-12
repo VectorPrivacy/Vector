@@ -50,7 +50,7 @@ fn holding() -> Arc<Mutex<HashSet<EventId>>> {
 }
 
 /// Start this account's live session: held wraps are released through `handler`, and the clock
-/// is checked against the relays now, every [`crate::clock::RESYNC`], and whenever a server says
+/// is checked against the relays now, every `clock::RESYNC`, and whenever a server says
 /// it is off.
 pub fn start(handler: Arc<dyn InboundEventHandler>) {
     let first = releaser().write().unwrap_or_else(|e| e.into_inner()).replace(handler).is_none();

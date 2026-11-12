@@ -37,13 +37,12 @@ async fn main() -> vector_sdk::Result<()> {
 
     let t0 = Instant::now();
     let channel = if args.next().as_deref() == Some("community") {
-        let created = me.core().create_community_v2("XDC Probe").await?;
-        let community_id = created["community_id"].as_str().unwrap_or_default().to_string();
-        let channel_id = created["primary_channel"].as_str().unwrap_or_default().to_string();
-        me.community(&community_id).invite(&bot_npub).await?;
-        println!("[{:>5}ms] founded {}, invited the bot; waiting for it to join", t0.elapsed().as_millis(), &community_id[..12]);
+        let community = me.create_community("XDC Probe", vector_sdk::NewCommunity::default()).await?;
+        let channel = community.primary_channel().ok_or("the new community has no channel")?;
+        community.invite(&bot_npub).await?;
+        println!("[{:>5}ms] founded {}, invited the bot; waiting for it to join", t0.elapsed().as_millis(), &community.id()[..12]);
         tokio::time::sleep(Duration::from_secs(20)).await;
-        me.channel(channel_id)
+        channel
     } else {
         me.dm(&bot_npub)
     };
