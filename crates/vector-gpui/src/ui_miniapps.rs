@@ -41,7 +41,7 @@ pub(super) struct MiniPanel {
     search: Entity<TextInput>,
     apps: Vec<GridApp>,
     loaded: bool,
-    opened: std::time::Instant,
+    pub(super) opened: std::time::Instant,
     /// `editMode`: the grid wobbles and each app grows a delete badge.
     edit: Option<std::time::Instant>,
     /// The click that ends the hold which started edit mode.
@@ -369,7 +369,7 @@ impl VectorApp {
                         cx.notify();
                         return;
                     }
-                    app.show_toast("The PIVX Wallet isn't in this build yet", cx)
+                    app.show_pivx_wallet(cx)
                 }))
                 .into_any_element(),
             );

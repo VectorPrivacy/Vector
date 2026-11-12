@@ -40,6 +40,8 @@ struct Fixtures {
     packs: HashMap<String, vector_core::emoji_packs::EmojiPack>,
     #[serde(default)]
     marketplace: Vec<vector_core::webxdc::MarketplaceApp>,
+    #[serde(default)]
+    pivx: Option<serde_json::Value>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -196,6 +198,14 @@ pub struct Store {
     /// `fetch_emoji_pack_by_naddr`'s answers.
     pub fixture_packs: HashMap<String, vector_core::emoji_packs::EmojiPack>,
     pub fixture_market: Vec<vector_core::webxdc::MarketplaceApp>,
+    /// The wallet's balance, price, promos and chat payments, as the mock answers them.
+    pub fixture_pivx: Option<serde_json::Value>,
+    /// PIVX payments shown in chats, by message id.
+    pub pivx: HashMap<String, PivxPay>,
+    /// Each payment bubble's claim state, by gift code.
+    pub pivx_bubbles: HashMap<String, (PivxPhase, String)>,
+    /// The PIVX price and its currency, once fetched.
+    pub pivx_price: Option<(f64, String)>,
     /// Each community's nicknames, npub → name.
     pub nicknames: HashMap<String, HashMap<String, String>>,
     /// Each community's logo and banner as local files, once resolved.
@@ -312,6 +322,10 @@ impl Store {
             fixture_embeds: f.embeds,
             fixture_packs: f.packs,
             fixture_market: f.marketplace,
+            fixture_pivx: f.pivx,
+            pivx: HashMap::new(),
+            pivx_bubbles: HashMap::new(),
+            pivx_price: None,
             nicknames: f.nicknames,
             art: HashMap::new(),
             hidden_banners: Vec::new(),
@@ -351,6 +365,10 @@ impl Store {
             fixture_embeds: HashMap::new(),
             fixture_packs: HashMap::new(),
             fixture_market: Vec::new(),
+            fixture_pivx: None,
+            pivx: HashMap::new(),
+            pivx_bubbles: HashMap::new(),
+            pivx_price: None,
             nicknames: HashMap::new(),
             art: HashMap::new(),
             hidden_banners: Vec::new(),
@@ -363,6 +381,34 @@ impl Store {
             Some(counts) => counts.get(&chat.id).copied().unwrap_or(0) as usize,
             None => unread_count(chat),
         }
+    }
+
+    /// A PIVX payment, as the message it shows as in its chat.
+    pub fn add_pivx(&mut self, chat_id: &str, p: &serde_json::Value) -> bool {
+        use serde_json::Value;
+        let Some(id) = p.get("message_id").and_then(Value::as_str) else { return false };
+        let sender = p.get("sender").and_then(Value::as_str).unwrap_or_default();
+        let npub = if sender.starts_with("npub1") {
+            sender.to_string()
+        } else {
+            nostr_sdk::prelude::PublicKey::from_hex(sender).ok().and_then(|k| nostr_sdk::prelude::ToBech32::to_bech32(&k).ok()).unwrap_or_default()
+        };
+        self.pivx.insert(
+            id.to_string(),
+            PivxPay {
+                gift_code: p.get("gift_code").and_then(Value::as_str).unwrap_or_default().to_string(),
+                amount_piv: p.get("amount_piv").and_then(Value::as_f64).unwrap_or(0.),
+                address: p.get("address").and_then(Value::as_str).map(String::from),
+            },
+        );
+        let msg = vector_core::types::Message {
+            id: id.to_string(),
+            at: p.get("at").and_then(Value::as_u64).unwrap_or(0),
+            mine: p.get("is_mine").and_then(Value::as_bool).unwrap_or(false),
+            npub: Some(npub).filter(|n| !n.is_empty()),
+            ..Default::default()
+        };
+        self.insert_message(chat_id, msg)
     }
 
     /// A message arrived or was sent: appended, or put in place by time.
@@ -1015,4 +1061,20 @@ mod tests {
         assert_eq!(found[1].2.as_deref(), Some(npub));
         assert_eq!(&text[found[1].0..found[1].1], nprofile);
     }
+}
+
+#[derive(Clone, Debug)]
+pub struct PivxPay {
+    pub gift_code: String,
+    pub amount_piv: f64,
+    pub address: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PivxPhase {
+    Syncing,
+    Claimable,
+    Claiming,
+    Claimed,
+    Failed,
 }

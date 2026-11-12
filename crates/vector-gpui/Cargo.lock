@@ -9704,6 +9704,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "bitcoin_hashes 1.2.0",
  "block2 0.6.2",
  "bytes",
  "cc",
@@ -9729,7 +9730,9 @@ dependencies = [
  "rand 0.8.8",
  "rayon",
  "reqwest",
+ "rusqlite",
  "rustfft",
+ "secp256k1",
  "serde",
  "serde_json",
  "symphonia",

@@ -56,6 +56,7 @@ pub struct TextInput {
     /// Wraps and takes newlines, scrolling past this height.
     multiline: Option<Pixels>,
     center: bool,
+    right: bool,
     scroll: ScrollHandle,
     /// The caret moved: scroll it into view on the next paint.
     reveal: bool,
@@ -167,6 +168,7 @@ struct Layout {
     line_height: Pixels,
     /// Centred within this width, each visual row on its own.
     align: Option<Pixels>,
+    right: bool,
 }
 
 impl Layout {
@@ -195,6 +197,7 @@ impl Layout {
             lines,
             line_height,
             align: None,
+            right: false,
         }
     }
 
@@ -216,7 +219,8 @@ impl Layout {
             .get(row)
             .map(x)
             .unwrap_or(line.unwrapped_layout.width);
-        ((aw - (end - start)) / 2.).max(px(0.))
+        let room = (aw - (end - start)).max(px(0.));
+        if self.right { room } else { room / 2. }
     }
 
     fn height(&self) -> Pixels {
@@ -991,7 +995,8 @@ impl Element for TextElement {
         let line_height = window.line_height();
         let wrap = input.multiline.map(|_| bounds.size.width);
         let mut layout = Layout::shape(text, &runs, font_size, wrap, line_height, window);
-        layout.align = input.center.then_some(bounds.size.width);
+        layout.align = (input.center || input.right).then_some(bounds.size.width);
+        layout.right = input.right;
         let (start, end) = if input.content.is_empty() {
             (0, 0)
         } else {
@@ -1106,7 +1111,9 @@ impl Element for TextElement {
             }
         }
         for (_, y, line) in &layout.lines {
-            let align = if layout.align.is_some() {
+            let align = if layout.right {
+                gpui::TextAlign::Right
+            } else if layout.align.is_some() {
                 gpui::TextAlign::Center
             } else {
                 gpui::TextAlign::Left
@@ -1263,6 +1270,7 @@ impl TextInput {
             last_bounds: None,
             multiline: None,
             center: false,
+            right: false,
             scroll: ScrollHandle::new(),
             reveal: false,
             is_selecting: false,
@@ -1366,6 +1374,12 @@ impl TextInput {
     /// `text-align: center`.
     pub fn centered(mut self) -> Self {
         self.center = true;
+        self
+    }
+
+    /// `text-align: right`.
+    pub fn right_aligned(mut self) -> Self {
+        self.right = true;
         self
     }
 

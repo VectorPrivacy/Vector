@@ -37,6 +37,9 @@ tokio-tungstenite = { version = "0.28", default-features = false, features = ["h
 nostr-sdk = "=0.45.4"
 image = { version = "0.25.9", default-features = false, features = ["png", "jpeg", "gif", "webp", "ico", "bmp"] }
 iroh = { version = "1.3", default-features = false, features = ["tls-ring", "fast-apple-datapath"] }
+secp256k1 = { version = "0.30", default-features = false, features = ["std"] }
+bitcoin_hashes = { version = "1.2", default-features = false, features = ["std"] }
+rusqlite = { version = "0.38", features = ["bundled", "fallible_uint"] }
 
 [features]
 default = ["whisper"]

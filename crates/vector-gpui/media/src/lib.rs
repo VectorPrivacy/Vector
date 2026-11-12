@@ -12,13 +12,25 @@ macro_rules! log_error {
 /// The desktop's global accessors, by the paths its modules name them.
 pub use vector_core::{STATE, my_public_key};
 pub mod db {
+    pub use vector_core::db::Session;
+    pub use vector_core::db::events::save_pivx_payment_event;
     pub use vector_core::db::miniapps::*;
+    pub use vector_core::db::settings::{get_sql_setting, set_sql_setting};
+    pub async fn get_pivx_payments_for_chat(id: &str) -> Result<Vec<vector_core::StoredEvent>, String> {
+        vector_core::db::events::get_pivx_payments_for_chat(id)
+    }
+}
+pub mod account_manager {
+    pub use vector_core::db::get_db_connection_guard_static;
 }
 pub mod util {
     pub use vector_core::crypto::mime_from_magic_bytes;
-    pub use vector_core::simd::hex::{bytes_to_hex_16, bytes_to_hex_string};
+    pub use vector_core::simd::hex::{bytes_to_hex_16, bytes_to_hex_string, hex_string_to_bytes};
 }
-pub use vector_core::{blossom, inbox_relays, nostr_client};
+pub use vector_core::{blossom, crypto, inbox_relays, nostr_client, stored_event};
+#[path = "../../../../src-tauri/src/pivx.rs"]
+#[allow(dead_code)]
+pub mod pivx;
 #[path = "../../../../src-tauri/src/net.rs"]
 #[allow(dead_code)]
 pub mod net;

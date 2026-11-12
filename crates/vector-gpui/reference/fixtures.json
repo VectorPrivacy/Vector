@@ -61,11 +61,11 @@
    "lud16": "",
    "banner": "https://example.invalid/bob-banner.png",
    "avatar": "https://example.invalid/bob.png",
-   "about": "Building on Nostr since 2021.\nCoffee first, relays second ⚡",
+   "about": "Building on Nostr since 2021.\nCoffee first, relays second \u26a1",
    "website": "",
    "nip05": "",
    "status": {
-    "title": "Shipping v0.6 🚀",
+    "title": "Shipping v0.6 \ud83d\ude80",
     "purpose": "general",
     "url": ""
    },
@@ -545,19 +545,19 @@
        "id": "d989534175d49bdce27c894467617cf954aa81994482cb551c63b8fe08918b5a",
        "reference_id": "f5e8a64a4803fd9cf5c2f2cc23eb5a66b6126982b1394d53195b86220dda9ed3",
        "author_id": "npub15387nevpzd0u700y2t24ym9l0zxe8fsxx2w7qn47ysn6mndn9gvqqmlahu",
-       "emoji": "❤️"
+       "emoji": "\u2764\ufe0f"
       },
       {
        "id": "78e8fce8c1f9dce779d3287be6a7ec18f29ebbe3a0386710d569e62dbd2da183",
        "reference_id": "f5e8a64a4803fd9cf5c2f2cc23eb5a66b6126982b1394d53195b86220dda9ed3",
        "author_id": "npub1yazve5gvw5em6um2mzg0nh2u4v4dkfas04gqh9yn72wdcssvktsqfmmmv4",
-       "emoji": "❤️"
+       "emoji": "\u2764\ufe0f"
       },
       {
        "id": "06320cad2867c2713b524fa38138aa146bf402abd91c54d1f7eae469adc8187c",
        "reference_id": "f5e8a64a4803fd9cf5c2f2cc23eb5a66b6126982b1394d53195b86220dda9ed3",
        "author_id": "npub15387nevpzd0u700y2t24ym9l0zxe8fsxx2w7qn47ysn6mndn9gvqqmlahu",
-       "emoji": "😂"
+       "emoji": "\ud83d\ude02"
       }
      ],
      "at": 1794268920000,
@@ -727,7 +727,7 @@
     },
     {
      "id": "c045acf2d273a786b030c9bc52f82e5208621ae4f0f7400c6ed71f088498e0d3",
-     "content": "👍",
+     "content": "\ud83d\udc4d",
      "replied_to": "",
      "preview_metadata": null,
      "attachments": [],
@@ -736,7 +736,7 @@
        "id": "c14e0ecfd58555fc3a9db5e78aa7c771b69b7ca246b1a388a2d342ee3ccb1cc9",
        "reference_id": "c045acf2d273a786b030c9bc52f82e5208621ae4f0f7400c6ed71f088498e0d3",
        "author_id": "npub1yazve5gvw5em6um2mzg0nh2u4v4dkfas04gqh9yn72wdcssvktsqfmmmv4",
-       "emoji": "🔥"
+       "emoji": "\ud83d\udd25"
       }
      ],
      "at": 1794362340000,
@@ -873,7 +873,7 @@
     },
     {
      "id": "532819ebaebe89404671ee38eefd39495c7ec8342347bc31de2c67d55229ce4a",
-     "content": "Ooh, tell me more when you can 👀",
+     "content": "Ooh, tell me more when you can \ud83d\udc40",
      "replied_to": "",
      "preview_metadata": null,
      "attachments": [],
@@ -962,7 +962,7 @@
     },
     {
      "id": "a6a17c7ac82f305add533b6fa9860dee624d3df3ac3745a5007ea24ca2047f6a",
-     "content": "Ooh, tell me more when you can 👀",
+     "content": "Ooh, tell me more when you can \ud83d\udc40",
      "replied_to": "",
      "preview_metadata": null,
      "attachments": [],
@@ -976,7 +976,7 @@
     },
     {
      "id": "598b288443e42c9a93f5562409ac78c385fe4d66c95174330c4805b79fa67f52",
-     "content": "The new build is so much faster 🚀",
+     "content": "The new build is so much faster \ud83d\ude80",
      "replied_to": "",
      "preview_metadata": null,
      "attachments": [],
@@ -1051,7 +1051,7 @@
     },
     {
      "id": "af6f12698ed64974e2947593be116ca71c0abfbc0bd4614f55e383e3359bc386",
-     "content": "Ooh, tell me more when you can 👀",
+     "content": "Ooh, tell me more when you can \ud83d\udc40",
      "replied_to": "",
      "preview_metadata": null,
      "attachments": [],
@@ -1168,7 +1168,7 @@
     },
     {
      "id": "0cd834c4a78e321bcf7377b9a94b89995fec1ec2c493563d6af759565ce3adb1",
-     "content": "Ooh, tell me more when you can 👀",
+     "content": "Ooh, tell me more when you can \ud83d\udc40",
      "replied_to": "",
      "preview_metadata": null,
      "attachments": [],
@@ -1257,7 +1257,7 @@
     },
     {
      "id": "6bb9076027cd5db478938eea32df3cd109814cd0842ee2130a86b2d30922fc5a",
-     "content": "Ooh, tell me more when you can 👀",
+     "content": "Ooh, tell me more when you can \ud83d\udc40",
      "replied_to": "",
      "preview_metadata": null,
      "attachments": [],
@@ -1346,7 +1346,7 @@
     },
     {
      "id": "e1ea99b2aa44648632472ac1ba8b433fb7792a754edbe16bb4104676c60aeb32",
-     "content": "Ooh, tell me more when you can 👀",
+     "content": "Ooh, tell me more when you can \ud83d\udc40",
      "replied_to": "",
      "preview_metadata": null,
      "attachments": [],
@@ -1439,7 +1439,7 @@
     },
     {
      "id": "1c13bd769a5602ef0fa2e909d49fad4cc9955d09d41a2a0fd233f53dd7b5ab59",
-     "content": "Ooh, tell me more when you can 👀",
+     "content": "Ooh, tell me more when you can \ud83d\udc40",
      "replied_to": "",
      "preview_metadata": null,
      "attachments": [],
@@ -1528,7 +1528,7 @@
     },
     {
      "id": "8f59f5a85a3503d368364ff444a7e1d38ca8a0be2d207b0c41683a21f96807f5",
-     "content": "Ooh, tell me more when you can 👀",
+     "content": "Ooh, tell me more when you can \ud83d\udc40",
      "replied_to": "",
      "preview_metadata": null,
      "attachments": [],
@@ -1734,7 +1734,7 @@
     },
     {
      "id": "e55c72814cdc85d3ec5df9cf7d0f7856eae78a3f8e67281a81f2ef2adb3660e6",
-     "content": "Glad to be here 👋",
+     "content": "Glad to be here \ud83d\udc4b",
      "replied_to": "",
      "preview_metadata": null,
      "attachments": [],
@@ -2643,7 +2643,7 @@
     "id": "scam_links",
     "name": "Scam Links",
     "description": "Blocks link shorteners and redirectors that scams hide behind.",
-    "example": "claim your airdrop at bit.ly/…",
+    "example": "claim your airdrop at bit.ly/\u2026",
     "caveat": "Only catches the shorteners on the bundled list, plus any domain you add.",
     "dials": [
      {
@@ -2936,7 +2936,7 @@
    {
     "id": "mentions",
     "label": "Mass tagging",
-    "description": "One message naming a crowd. Counts distinct people, so twenty pings at one person is one person — annoying, but not a raid.",
+    "description": "One message naming a crowd. Counts distinct people, so twenty pings at one person is one person \u2014 annoying, but not a raid.",
     "input": "none",
     "input_label": "",
     "input_hint": "",
@@ -3080,7 +3080,7 @@
    "id": "7272727272727272727272727272727272727272727272727272727272727272",
    "author": "npub190vqdjtlpcq27xslcveglfmr4ynfwg7gmw86cnun4acakxrdd6gqnp929a",
    "created_at": 1794355200,
-   "text": "Shipped the new relay picker today. **Tor routing** is on by default for every new account, and it is *so* much faster than I expected 🚀",
+   "text": "Shipped the new relay picker today. **Tor routing** is on by default for every new account, and it is *so* much faster than I expected \ud83d\ude80",
    "bech32": "note1wg33qsaurqr7da6qkg67kag3ajeny4dx5d65x433r9k732t4p49sk04fpd"
   },
   "naddr1qqx8yetvv9uj6er9wd5kwmszyq4aspkf0u8qptc6rlpn9ra8vw5jd9ererdcltz0jwhhrkccd4hfqqcyqqq823cyhyg2k": {
@@ -3654,5 +3654,64 @@
    "update_available": false,
    "requested_permissions": ""
   }
- ]
+ ],
+ "pivx": {
+  "balance": 42.5,
+  "price": {
+   "currency": "usd",
+   "value": 0.21
+  },
+  "deposit_address": "DLabsktzGMnsK5K9uRTMCF6NoYNY6ET4Bb",
+  "promos": [
+   {
+    "gift_code": "PIVX-7QK2M",
+    "address": "DA1",
+    "balance_piv": 25.0,
+    "status": "confirmed",
+    "created_at": 0
+   },
+   {
+    "gift_code": "PIVX-3XN8B",
+    "address": "DA2",
+    "balance_piv": 12.5,
+    "status": "confirmed",
+    "created_at": 0
+   },
+   {
+    "gift_code": "PIVX-9TR4C",
+    "address": "DA3",
+    "balance_piv": 5.0,
+    "status": "confirmed",
+    "created_at": 0
+   }
+  ],
+  "currencies": [
+   "AUD",
+   "CAD",
+   "EUR",
+   "GBP",
+   "JPY",
+   "USD"
+  ],
+  "payments": [
+   {
+    "conversation_id": "npub17jjvuhaxxs9rt2jakz6td5c6d7a2vpfr2erqmwc9xajhmqplt03q63stmv",
+    "message_id": "b100000000000000000000000000000000000000000000000000000000000000",
+    "gift_code": "PIVX-AB12C",
+    "amount_piv": 10.0,
+    "sender": "npub17jjvuhaxxs9rt2jakz6td5c6d7a2vpfr2erqmwc9xajhmqplt03q63stmv",
+    "is_mine": false,
+    "at": 1794362040000
+   },
+   {
+    "conversation_id": "npub17jjvuhaxxs9rt2jakz6td5c6d7a2vpfr2erqmwc9xajhmqplt03q63stmv",
+    "message_id": "b200000000000000000000000000000000000000000000000000000000000000",
+    "gift_code": "PIVX-DE34F",
+    "amount_piv": 2.5,
+    "sender": "npub1yazve5gvw5em6um2mzg0nh2u4v4dkfas04gqh9yn72wdcssvktsqfmmmv4",
+    "is_mine": true,
+    "at": 1794362100000
+   }
+  ]
+ }
 }

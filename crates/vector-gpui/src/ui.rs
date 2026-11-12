@@ -86,6 +86,8 @@ pub struct VectorApp {
     launch: Option<miniapps_ops::Launch>,
     perm_prompt: Option<nexus_ops::PermPrompt>,
     publish: Option<publish_ops::PublishForm>,
+    pivx_wallet: Option<pivx_ops::Wallet>,
+    pivx_dialog: Option<pivx_ops::Dialog>,
     file_preview: Option<Entity<crate::filepreview::FilePreview>>,
     /// The avatar cropper, and the picked file it cuts.
     cropper: Option<(Entity<crate::cropper::Cropper>, std::path::PathBuf)>,
@@ -401,6 +403,8 @@ mod miniapps_ops;
 mod nexus_ops;
 #[path = "ui_publish.rs"]
 mod publish_ops;
+#[path = "ui_pivx.rs"]
+mod pivx_ops;
 
 impl VectorApp {
     fn base(store: Store, live: bool, window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -703,6 +707,8 @@ impl VectorApp {
             nexus: None,
             launch: None,
             perm_prompt: None,
+            pivx_wallet: None,
+            pivx_dialog: None,
             publish: None,
             file_preview: None,
             profile: None,
@@ -2228,6 +2234,7 @@ impl VectorApp {
                 }
             }
             "marketplace_install_progress" | "marketplace_apps_updated" => self.nexus_event(name, &payload, cx),
+            "pivx_payment_received" => self.pivx_received(&payload, cx),
             "miniapp_realtime_status" => {
                 let topic = payload.get("topic").and_then(Value::as_str).unwrap_or_default();
                 let peers: Vec<String> = payload
@@ -2435,6 +2442,7 @@ impl VectorApp {
         self.open = Some(id.clone());
         self.commands.close();
         self.load_commands(false, cx);
+        self.pivx_merge(id.to_string(), cx);
         let count = self.rebuild_rows();
         self.timeline = timeline_state(count, cx.entity().downgrade());
         self.jumped = None;
@@ -2712,6 +2720,7 @@ impl VectorApp {
             }
             Act::Text(t) => self.on_text(id, t, window, cx),
             Act::Jump(target) => self.jump_to_message(target, cx),
+            Act::PivxClaim(code) => self.pivx_claim(code, cx),
             Act::Rerun(name) => self.rerun_command(name, window, cx),
             Act::Embed(a) => self.on_embed(a, window, cx),
             Act::Pack(a) => self.on_pack(a, cx),
@@ -3722,7 +3731,7 @@ impl Render for VectorApp {
                 let _ = window.drop_image(old);
             }
         }
-        if self.mini_animating() || self.nexus.as_ref().is_some_and(|n| n.animating()) {
+        if self.mini_animating() || self.pivx_animating() || self.nexus.as_ref().is_some_and(|n| n.animating()) {
             window.request_animation_frame();
         }
         let popout = self.popout_view(window, cx);
@@ -3730,6 +3739,7 @@ impl Render for VectorApp {
         let pick = self.nexus_picker_view(cx);
         let perm = self.perm_prompt_view(cx);
         let publish = self.publish_view(window, cx);
+        let pivx = self.pivx_dialog_view(window, cx);
         match self.rec.due() {
             Some(crate::recorder::Due::Locked) => self.rec.locked(),
             Some(crate::recorder::Due::Idle) => self.rec.idle(),
@@ -4067,6 +4077,7 @@ impl Render for VectorApp {
             .children(launch)
             .children(pick)
             .children(publish)
+            .children(pivx)
             .children(perm)
             .children(self.toast_view(window))
             .children(
@@ -4962,6 +4973,12 @@ fn preview_line(store: &Store, chat: &SerializableChat, color: gpui::Hsla) -> An
             look: look.clone(),
             kind: crate::inline::Kind::Plain,
         }]
+    } else if store.pivx.contains_key(&m.id) {
+        vec![crate::inline::Atom::Text {
+            text: format!("{prefix}Sent a PIVX Payment").into(),
+            look: look.clone(),
+            kind: crate::inline::Kind::Plain,
+        }]
     } else if m.content.is_empty() && !m.attachments.is_empty() {
         let text = format!(
             "{prefix}Sent a {}",
@@ -5748,7 +5765,7 @@ impl VectorApp {
                 &self.mode,
                 (self.picker_open && !self.picker_status)
                     .then(|| (self.emoji_picker.clone(), self.picker.is_none())),
-                self.attach.map(|o| (o, self.miniapps_view(cx))),
+                self.attach.map(|o| (o, self.pivx_wallet_view(cx).or_else(|| self.miniapps_view(cx)))),
                 self.command_popup(cx).or_else(|| self.time_popup(cx)).or_else(|| self.mention
                     .as_ref()
                     .map(|p| {

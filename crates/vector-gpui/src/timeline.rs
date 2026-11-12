@@ -61,6 +61,8 @@ pub enum Act {
     Video(String, crate::video::Act),
     /// An invocation line's command name: the composer takes it, to run again.
     Rerun(String),
+    /// A PIVX payment's bubble: claim it, by gift code.
+    PivxClaim(String),
 }
 
 pub type OnAct = Rc<dyn Fn(&str, Act, &mut Window, &mut App)>;
@@ -233,6 +235,10 @@ pub fn message_row(ctx: &Ctx, index: usize, first: bool, gap: f32) -> AnyElement
         });
 
     let mut body = div().flex_1().min_w_0().pr(px(12.)).flex().flex_col();
+    if let Some(pay) = ctx.store.pivx.get(&m.id) {
+        body = body.child(pivx_bubble(ctx, m, pay));
+        return row_shell(ctx, m, gap, gutter, body, pinged, replying, failed, hovered, first);
+    }
     if let Some(q) = quote {
         body = body.child(q);
     }
@@ -326,7 +332,23 @@ pub fn message_row(ctx: &Ctx, index: usize, first: bool, gap: f32) -> AnyElement
     if let Some(r) = reactions(ctx, m) {
         body = body.child(r);
     }
+    row_shell(ctx, m, gap, gutter, body, pinged, replying, failed, hovered, first)
+}
 
+#[allow(clippy::too_many_arguments)]
+fn row_shell(
+    ctx: &Ctx,
+    m: &Message,
+    gap: f32,
+    gutter: gpui::Div,
+    body: gpui::Div,
+    pinged: bool,
+    replying: bool,
+    failed: bool,
+    hovered: bool,
+    first: bool,
+) -> AnyElement {
+    let group: SharedString = format!("dmsg-{}", m.id).into();
     div()
         .pt(px(gap))
         .child(
@@ -1437,6 +1459,71 @@ fn invite_card(ctx: &Ctx, m: &Message, key: String) -> AnyElement {
                         }),
                 )
                 .children(button),
+        )
+        .into_any_element()
+}
+
+/// `PivxBubble`: the amount, its fiat line, and the claim state the balance check settles.
+fn pivx_bubble(ctx: &Ctx, m: &Message, pay: &crate::data::PivxPay) -> AnyElement {
+    use crate::data::PivxPhase;
+    let (phase, hint) = match ctx.store.pivx_bubbles.get(&pay.gift_code) {
+        Some((p, h)) => (*p, h.clone()),
+        None => (PivxPhase::Claimable, if m.mine { "Click to reclaim" } else { "Click to claim" }.to_string()),
+    };
+    let fiat = ctx
+        .store
+        .pivx_price
+        .as_ref()
+        .map(|(price, cur)| format!("~{:.2} {cur}", pay.amount_piv * price));
+    let busy = matches!(phase, PivxPhase::Syncing | PivxPhase::Claiming);
+    let open = !busy && phase != PivxPhase::Claimed;
+    let (act, code) = (ctx.on_act.clone(), pay.gift_code.clone());
+    let id = m.id.clone();
+    div()
+        .id(SharedString::from(format!("{}-pivx", m.id)))
+        .flex()
+        .items_center()
+        .p(px(10.))
+        .mt(px(10.))
+        .rounded(px(16.))
+        .border_1()
+        .border_color(c(0x9530f4))
+        .bg(ca(0x95, 0x30, 0xf4, 0x40 as f32 / 255.))
+        .opacity(match phase {
+            PivxPhase::Syncing => 0.6,
+            PivxPhase::Claiming => 0.7,
+            PivxPhase::Claimed => 0.5,
+            _ => 1.,
+        })
+        .when(open, |d| {
+            d.cursor_pointer()
+                .hover(|s| s.bg(ca(0x95, 0x30, 0xf4, 0x60 as f32 / 255.)))
+                .on_click(move |_, w, cx| act(&id, Act::PivxClaim(code.clone()), w, cx))
+        })
+        .child(img("icons/pivx.svg").h(px(50.)).w(px(50.)).mr(px(10.)).flex_shrink_0())
+        .child(
+            div()
+                .ml_auto()
+                .flex()
+                .flex_col()
+                .items_end()
+                .child(
+                    div()
+                        .text_size(px(18.))
+                        .line_height(px(18.))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(c(TEXT))
+                        .child(format!("{:.2} PIV", pay.amount_piv)),
+                )
+                .children(fiat.map(|f| div().text_size(px(11.)).line_height(px(13.)).text_color(c(TEXT)).opacity(0.7).child(f)))
+                .child(
+                    div()
+                        .mt(px(2.))
+                        .text_size(px(11.))
+                        .line_height(px(15.4))
+                        .text_color(c(TEXT))
+                        .child(hint),
+                ),
         )
         .into_any_element()
 }
