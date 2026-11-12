@@ -555,6 +555,8 @@ fn row(cap: &Value, kind: u8, last: bool) -> impl IntoElement {
         div().w(px(14.)).flex_shrink_0().flex().justify_center().text_size(px(12.)).font_weight(FontWeight::BOLD).text_color(c(tint)).child(glyph)
     };
     let context = div()
+        .id(SharedString::from(format!("cap-{mime}-{enc}")))
+        .tooltip(crate::kit::tooltip(if enc { "Tested with encrypted chat data" } else { "Tested with public uploads (avatar, banner, etc.)" }))
         .flex_shrink_0()
         .px(px(5.))
         .py(px(2.))

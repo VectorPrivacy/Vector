@@ -292,6 +292,8 @@ fn name(text: SharedString) -> impl IntoElement {
 /// `.ws-rail-item-voice`: one of its voice calls is in use; the accent when it's ours.
 fn voice_badge(mine: bool) -> impl IntoElement {
     div()
+        .id("rail-voice")
+        .tooltip(crate::kit::tooltip(if mine { "You are in a voice call here" } else { "Someone is in a voice call" }))
         .absolute()
         .left(px(2.))
         .bottom(px(2.))

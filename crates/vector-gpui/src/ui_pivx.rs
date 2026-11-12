@@ -810,7 +810,8 @@ impl VectorApp {
                     .on_click(cx.listener(|app, _, _, cx| app.pivx_send(cx))),
             )
             .child({
-                let b = dock_btn(1, "pivx-deposit-btn", "plus-circle", "Deposit", false, deposit_off, w.deposit_loading);
+                let b = dock_btn(1, "pivx-deposit-btn", "plus-circle", "Deposit", false, deposit_off, w.deposit_loading)
+                    .when(deposit_off, |b| b.tooltip(crate::kit::tooltip("Balance too high - please withdraw first")));
                 if w.deposit_loading { b } else { b.on_click(cx.listener(|app, _, _, cx| app.pivx_deposit(cx))) }
             })
             .child(
