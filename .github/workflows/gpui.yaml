@@ -20,9 +20,10 @@ on:
 permissions:
   contents: read
 
+# A build takes most of an hour; a newer push waits for it rather than cancelling it.
 concurrency:
   group: gpui-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 env:
   RUST_TOOLCHAIN: 1.98.0
@@ -30,6 +31,8 @@ env:
 
 jobs:
   build:
+    # The port's own pull request builds on its pushes already.
+    if: github.event_name != 'pull_request' || github.head_ref != 'gpui'
     strategy:
       fail-fast: false
       matrix:
