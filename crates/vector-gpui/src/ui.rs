@@ -3700,6 +3700,12 @@ impl VectorApp {
                 })
                 .detach();
             }
+            Act::Unreact(emoji) => {
+                if std::mem::take(&mut self.rx_long) {
+                    return;
+                }
+                self.unreact(id, emoji, cx);
+            }
             Act::ReactWith(emoji) => {
                 if std::mem::take(&mut self.rx_long) {
                     return;
@@ -3887,6 +3893,25 @@ impl VectorApp {
                     emoji_url: url,
                 });
             }
+        }
+        cx.notify();
+    }
+
+    fn unreact(&mut self, id: String, emoji: String, cx: &mut Context<Self>) {
+        let Some(chat) = self.open.clone() else { return };
+        let me = self.store.borrow().my_npub.clone();
+        let mut store = self.store.borrow_mut();
+        let Some(m) = store.chat_mut(&chat).and_then(|c| c.messages.iter_mut().find(|m| m.id == id)) else { return };
+        let Some(at) = m.reactions.iter().position(|r| r.emoji == emoji && r.author_id == me) else { return };
+        if self.live {
+            let rid = m.reactions[at].id.clone();
+            drop(store);
+            let rx = backend::run(backend::actions::unreact(rid));
+            self.report(rx, "Reaction Failed", cx);
+        } else {
+            m.reactions.remove(at);
+            drop(store);
+            self.refresh_rows(false);
         }
         cx.notify();
     }

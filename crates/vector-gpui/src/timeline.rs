@@ -49,6 +49,8 @@ pub enum Act {
     React,
     /// A reaction chip, or a quick pick: react with this emoji.
     ReactWith(String),
+    /// Our own reaction chip pressed: take it back.
+    Unreact(String),
     Reply,
     Edit,
     Retry,
@@ -1252,10 +1254,10 @@ fn reactions(ctx: &Ctx, m: &Message) -> Option<AnyElement> {
                 .on_mouse_down(gpui::MouseButton::Left, press)
                 .on_mouse_up(gpui::MouseButton::Left, release)
                 .child(crate::kit::anchor(&ctx.anchors, key))
-                .when(!mine, |d| {
-                    d.cursor_pointer()
-                        .hover(|s| s.bg(white_a(0.1)).opacity(1.))
-                        .on_click(move |_, w, cx| act(&id, Act::ReactWith(e.clone()), w, cx))
+                .cursor_pointer()
+                .when(!mine, |d| d.hover(|s| s.bg(white_a(0.1)).opacity(1.)))
+                .on_click(move |_, w, cx| {
+                    act(&id, if mine { Act::Unreact(e.clone()) } else { Act::ReactWith(e.clone()) }, w, cx)
                 })
                 .flex()
                 .items_center()

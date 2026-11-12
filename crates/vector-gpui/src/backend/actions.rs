@@ -161,9 +161,6 @@ pub async fn unreact(reaction_id: String) -> Result<(), String> {
     if author != db::get_current_account()? {
         return Err("Cannot revoke a reaction that isn't yours".into());
     }
-    if is_community {
-        return Err("Community reactions aren't available in this client yet".into());
-    }
     let updated = STATE
         .lock()
         .await
@@ -174,6 +171,9 @@ pub async fn unreact(reaction_id: String) -> Result<(), String> {
             "message_update",
             &json!({ "old_id": message_id, "message": message, "chat_id": chat_id }),
         );
+    }
+    if is_community {
+        return super::community::control(&chat_id, &reaction_id, super::community::Control::Delete).await;
     }
     let rid = EventId::from_hex(&reaction_id).map_err(|e| format!("Invalid reaction id: {e}"))?;
     let recipient =

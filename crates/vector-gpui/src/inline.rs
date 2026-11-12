@@ -825,6 +825,7 @@ impl Element for Inline {
                             Kind::Mention(_) => (true, None),
                             Kind::Time(hint) if !hint.is_empty() => (false, Some(hint.clone())),
                             Kind::LinkTip(_, tip) => (false, Some(tip.clone())),
+                            Kind::Action(a) if a.as_ref() == "edited" => (false, Some("Click to view edit history".into())),
                             _ => (false, None),
                         };
                         if lift || hint.is_some() {
