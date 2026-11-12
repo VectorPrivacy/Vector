@@ -9,8 +9,12 @@
     };
     const msgs = (id) => (FIX.chats.find((c) => c.id === id)?.messages || []).slice().sort((a, b) => a.at - b.at);
     const fns = {
-        audio_probe: ({ path }) => (String(path).includes("loop") ? 12000 : String(path).includes("golden") ? 9000 : 7400),
-        get_audio_metadata: ({ path }) => (String(path).includes("golden")
+        audio_probe: ({ path }) => (String(path).includes("loop") ? 12000 : String(path).includes("golden") ? 9000 : String(path).includes("northern") ? 32000 : 7400),
+        get_audio_metadata: ({ path }) => String(path).includes("northern")
+            ? { title: "Northern Lines (Deluxe Edition)", artist: "Mira Vale", album: "Northern Lines (Deluxe Edition)", cover_art: "/__ref/media/album-cover.png", lyrics: null, year: 2024,
+                chapters: [[0, 6000, "Arrival"], [6000, 13000, "Glass Harbour"], [13000, 19000, "Signal Fire (Live)"], [19000, 25000, "Cold Front"], [25000, null, "Departure - Remastered 2024"]]
+                    .map(([start_ms, end_ms, title]) => ({ start_ms, end_ms, title })) }
+            : (String(path).includes("golden")
             ? { title: "Golden Hour", artist: "Mira Vale", album: "Coastlines", cover_art: "/__ref/media/cover.png", lyrics: { synced: true, lines: [
                 [500, "Light on the water"], [2200, "Gold in your hair"], [4000, ""], [5200, "We drove till the coastline"], [7000, "Ran out of air"],
             ].map(([at_ms, text]) => ({ at_ms, text, words: [] })) }, year: null, chapters: [] }

@@ -1,3 +1,4 @@
+mod album;
 mod assets;
 use vector_media::{audio_devices, calls, mic_access};
 mod attachments;

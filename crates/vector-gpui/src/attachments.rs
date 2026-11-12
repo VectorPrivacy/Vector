@@ -113,6 +113,7 @@ pub fn attachments(ctx: &Ctx, m: &Message) -> Option<AnyElement> {
                         duration,
                         tags.as_deref(),
                         media.audio.sheets.get(&att.id),
+                        media.audio.all_tracks.contains(&att.id),
                         std::rc::Rc::new(move |a, w, cx| on_act(&msg, Act::Audio(aid.clone(), a), w, cx)),
                     ),
                     6.,

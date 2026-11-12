@@ -74,6 +74,7 @@ pub struct Player {
     lift: f32,
     look: Look,
     last_seek: Option<Instant>,
+    pub album: Option<crate::album::Album>,
 }
 
 /// Where the audio is, kept so a load can run off the UI thread.
@@ -117,6 +118,7 @@ impl Player {
             lift: REST_Y,
             look: Look::Fresh,
             last_seek: None,
+            album: None,
         }
     }
 
@@ -150,6 +152,8 @@ pub struct Audio {
     tags: HashMap<String, Option<Arc<Tags>>>,
     reading: HashSet<String>,
     pub sheets: HashMap<String, crate::lyrics::Sheet>,
+    /// Albums showing every song rather than the first few.
+    pub all_tracks: HashSet<String>,
 }
 
 /// What a file's tags give the card.
@@ -175,8 +179,21 @@ pub enum Act {
     /// A scrub to this fraction; `done` on release.
     Seek(f32, bool),
     Lyrics,
+    Album(AlbumAct),
     /// A lyric line clicked (play from it), or None: the reader scrolled, so hold the view.
     Line(Option<u32>),
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum AlbumAct {
+    /// Play from the first song, or a random one.
+    Play(bool),
+    Track(usize),
+    Next,
+    Prev,
+    Shuffle,
+    Repeat,
+    More,
 }
 
 /// What the app does for the audio state: the work that needs the engine or a thread.
@@ -256,19 +273,21 @@ impl Audio {
                     self.play(msg, att, input)
                 }
             }
+            Act::Album(a) => self.album_act(msg, att, input, a),
             Act::Seek(frac, done) => {
                 let probed = self.probed.get(att).copied().unwrap_or(0);
-                let p = self
-                    .players
-                    .entry(att.to_string())
-                    .or_insert_with(|| Player::new(msg));
+                let p = self.player_mut(msg, att);
                 if p.duration == 0 {
                     p.duration = probed;
                 }
                 if p.duration == 0 {
                     return None;
                 }
-                let ms = (frac.clamp(0., 1.) * p.duration as f32) as u64;
+                let (start, end) = p.album.as_ref().map_or((0, p.duration), |a| a.now(p.duration));
+                let ms = start + (frac.clamp(0., 1.) * end.saturating_sub(start) as f32) as u64;
+                if let Some(a) = p.album.as_mut() {
+                    a.seeked(ms);
+                }
                 if p.playing {
                     p.start_pos = ms;
                     p.started = Some(Instant::now());
@@ -291,6 +310,80 @@ impl Audio {
         }
     }
 
+    /// The player for `att`, knowing its album once the tags have one.
+    fn player_mut(&mut self, msg: &str, att: &str) -> &mut Player {
+        let chapters = self
+            .tags
+            .get(att)
+            .and_then(|t| t.as_ref())
+            .filter(|t| t.chapters.len() > 1)
+            .map(|t| t.chapters.clone());
+        let p = self.players.entry(att.to_string()).or_insert_with(|| Player::new(msg));
+        if p.album.is_none()
+            && let Some(ch) = chapters
+        {
+            p.album = Some(crate::album::Album::new(&ch, p.position()));
+        }
+        p
+    }
+
+    /// Move the playhead to `ms`, playing or not.
+    fn seek_ms(&mut self, att: &str, ms: u64) {
+        let Some(p) = self.players.get_mut(att) else { return };
+        if p.playing {
+            p.start_pos = ms;
+            p.started = Some(Instant::now());
+        } else {
+            p.paused_at = ms;
+            if p.look == Look::Fresh {
+                p.look = Look::Rest;
+            }
+        }
+        if let (Some(id), Ok(e)) = (p.source, engine()) {
+            let _ = e.seek(id, ms);
+        }
+    }
+
+    fn album_act(&mut self, msg: &str, att: &str, input: AudioInputSpec, act: AlbumAct) -> Option<Work> {
+        if let AlbumAct::More = act {
+            if !self.all_tracks.remove(att) {
+                self.all_tracks.insert(att.to_string());
+            }
+            return None;
+        }
+        let probed = self.probed.get(att).copied().unwrap_or(0);
+        let p = self.player_mut(msg, att);
+        if p.duration == 0 {
+            p.duration = probed;
+        }
+        let (pos, duration, playing) = (p.position(), p.duration, p.playing || p.loading);
+        let a = p.album.as_mut()?;
+        let (to, start) = match act {
+            AlbumAct::Play(shuffled) => {
+                a.set_shuffle(shuffled);
+                let i = if shuffled { rand::random::<usize>() % a.tracks.len().max(1) } else { 0 };
+                (a.play_track(i), true)
+            }
+            AlbumAct::Track(i) => (a.play_track(i), true),
+            AlbumAct::Next => (a.next(), false),
+            AlbumAct::Prev => (Some(a.prev(pos, duration)), false),
+            AlbumAct::Shuffle => {
+                let on = !a.shuffle;
+                a.set_shuffle(on);
+                (None, false)
+            }
+            AlbumAct::Repeat => {
+                a.cycle_repeat();
+                (None, false)
+            }
+            AlbumAct::More => unreachable!(),
+        };
+        if let Some(ms) = to {
+            self.seek_ms(att, ms);
+        }
+        if start && !playing { self.play(msg, att, input) } else { None }
+    }
+
     fn claim(&mut self, att: &str) {
         if let Some(prev) = self.active.replace(att.to_string())
             && prev != att
@@ -310,6 +403,8 @@ impl Audio {
             p.duration = probed;
         }
         p.path = Some(input.clone());
+        let _ = self.player_mut(msg, att);
+        let p = self.players.get_mut(att)?;
         match p.source {
             None => {
                 p.loading = true;
@@ -417,11 +512,22 @@ impl Audio {
             "audio_ended" => {
                 p.playing = false;
                 p.paused_at = 0;
-                p.look = Look::Settling;
                 if self.active.as_deref() == Some(att.as_str()) {
                     self.active = None;
                 }
-                Some(att)
+                // The file's end is the last song's end: the listener's way decides what follows.
+                if let Some(ms) = p.album.as_mut().and_then(|a| a.ended()) {
+                    p.paused_at = ms;
+                    let (msg, path) = (p.msg.clone(), p.path.clone());
+                    if let Some(input) = path
+                        && let Some(w) = self.play(&msg, &att, input)
+                    {
+                        self.queue.push(w);
+                    }
+                    return None;
+                }
+                p.look = Look::Settling;
+                (!p.album.is_some()).then_some(att)
             }
             _ => None,
         }
@@ -430,6 +536,28 @@ impl Audio {
     /// One frame of the bars; true while any still moves.
     pub fn tick(&mut self) -> bool {
         let mut moving = false;
+        let mut steps = Vec::new();
+        for (att, p) in self.players.iter_mut() {
+            let pos = p.position();
+            if p.playing
+                && let Some(a) = p.album.as_mut()
+            {
+                match a.tick(pos) {
+                    crate::album::Step::Stay => {}
+                    step => steps.push((att.clone(), step)),
+                }
+            }
+        }
+        for (att, step) in steps {
+            match step {
+                crate::album::Step::Seek(ms) => self.seek_ms(&att, ms),
+                crate::album::Step::Stop(ms) => {
+                    self.pause(&att);
+                    self.seek_ms(&att, ms);
+                }
+                crate::album::Step::Stay => {}
+            }
+        }
         for (att, sheet) in self.sheets.iter_mut() {
             if let Some(l) = self.tags.get(att).and_then(|t| t.as_ref()).and_then(|t| t.lyrics.as_ref()) {
                 let pos = self.players.get(att).map_or(0, |p| p.position());
@@ -647,6 +775,273 @@ pub fn format_time(ms: u64) -> String {
     format!("{}:{:02}", s / 60, s % 60)
 }
 
+/// `.audio-album.is-full`: the art beside the head, then the songs; the caller adds the
+/// controls under them.
+#[allow(clippy::too_many_arguments)]
+fn album_view(
+    att: &vector_core::Attachment,
+    t: &Tags,
+    art: Option<Arc<RenderImage>>,
+    album: Option<&crate::album::Album>,
+    playing: bool,
+    duration: u64,
+    accent: gpui::Hsla,
+    all: bool,
+    on: Rc<dyn Fn(AlbumAct, &mut Window, &mut App)>,
+) -> gpui::Div {
+    let id = &att.id;
+    let line = |d: gpui::Div| d.overflow_hidden().text_ellipsis().whitespace_nowrap();
+    let (main, note) = split_title(t.album.as_deref().or(t.title.as_deref()).unwrap_or(&att.name));
+    let byline = [t.artist.clone(), t.year.map(|y| y.to_string())]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(" \u{b7} ");
+    let n = t.chapters.len();
+    let stats = if duration > 0 {
+        format!("{n} songs \u{b7} {} min", (duration as f64 / 60000.).round())
+    } else {
+        format!("{n} songs")
+    };
+    let shuffle_on = album.is_some_and(|a| a.shuffle);
+    let repeat = album.map_or(crate::album::Repeat::Off, |a| a.repeat);
+    let pill = |key: &str, act: AlbumAct, primary: bool, icon: &'static str, label: &'static str| {
+        let on = on.clone();
+        div()
+            .id(SharedString::from(format!("album-{key}-{id}")))
+            .flex()
+            .items_center()
+            .gap(px(5.))
+            .pl(px(10.))
+            .pr(px(14.))
+            .py(px(6.))
+            .rounded_full()
+            .text_size(px(12.3))
+            .line_height(px(17.22))
+            .font_weight(gpui::FontWeight::SEMIBOLD)
+            .cursor_pointer()
+            .when(primary, |d| d.bg(accent).text_color(c(0x0a0a0a)).hover(|s| s.opacity(0.92)))
+            .when(!primary, |d| {
+                d.border_1()
+                    .border_color(c(0x363636))
+                    .bg(white_a(0.04))
+                    .text_color(white_a(0.92))
+                    .hover(|s| s.bg(white_a(0.09)))
+            })
+            .on_click(move |_, w, cx| {
+                cx.stop_propagation();
+                on(act, w, cx)
+            })
+            .child(
+                svg()
+                    .path(icon)
+                    .size(px(if primary { 16. } else { 14. }))
+                    .text_color(if primary { c(0x0a0a0a) } else { white_a(0.7) }),
+            )
+            .child(label)
+    };
+    let toggle = |key: &str, act: AlbumAct, lit: bool, icon: &'static str| {
+        let on = on.clone();
+        div()
+            .id(SharedString::from(format!("album-{key}-{id}")))
+            .size(px(30.))
+            .rounded(px(8.))
+            .flex()
+            .items_center()
+            .justify_center()
+            .cursor_pointer()
+            .hover(|s| s.bg(white_a(0.07)))
+            .on_click(move |_, w, cx| {
+                cx.stop_propagation();
+                on(act, w, cx)
+            })
+            .child(svg().path(icon).size(px(16.)).text_color(if lit { accent } else { white_a(0.34) }))
+    };
+    let head = div()
+        .flex_1()
+        .min_w_0()
+        .flex()
+        .flex_col()
+        .justify_center()
+        .gap(px(2.))
+        .child(
+            line(div())
+                .text_size(px(15.75))
+                .line_height(px(19.7))
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(white_a(0.92))
+                .child(main)
+                .when(!note.is_empty(), |d| {
+                    d.child(
+                        div()
+                            .ml(px(4.7))
+                            .font_weight(gpui::FontWeight::NORMAL)
+                            .opacity(0.5)
+                            .child(note),
+                    )
+                })
+                .flex(),
+        )
+        .when(!byline.is_empty(), |d| {
+            d.child(line(div()).text_size(px(12.)).line_height(px(15.)).text_color(white_a(0.55)).child(byline))
+        })
+        .child(
+            div()
+                .mt(px(1.))
+                .text_size(px(11.4))
+                .line_height(px(15.96))
+                .text_color(white_a(0.34))
+                .child(stats),
+        )
+        .child(
+            div()
+                .mt(px(10.))
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .child(pill("play", AlbumAct::Play(false), true, "icons/play.svg", "Play"))
+                .child(pill("shuffle-play", AlbumAct::Play(true), false, "icons/shuffle.svg", "Shuffle"))
+                .child(
+                    div()
+                        .ml_auto()
+                        .flex()
+                        .gap(px(2.))
+                        .child(toggle("shuffle", AlbumAct::Shuffle, shuffle_on, "icons/shuffle.svg"))
+                        .child(toggle(
+                            "repeat",
+                            AlbumAct::Repeat,
+                            repeat != crate::album::Repeat::Off,
+                            if repeat == crate::album::Repeat::One { "icons/repeat-one.svg" } else { "icons/repeat.svg" },
+                        )),
+                ),
+        );
+    let current = album.map_or(-1, |a| a.track);
+    let shown = if all { n } else { n.min(4) };
+    let eq = |t: f32| {
+        div().h(px(12.)).flex().items_end().gap(px(2.)).children((0..3).map(move |k| {
+            let p = ((t / 0.9 + k as f32 / 3.).fract() * std::f32::consts::TAU).cos();
+            let scale = 0.3 + 0.7 * (1. - p) / 2.;
+            div().w(px(3.)).h(px(12. * scale)).rounded(px(1.)).bg(accent)
+        }))
+    };
+    let clock = album_clock();
+    let tracks = t.chapters.iter().take(shown).enumerate().map(|(i, ch)| {
+        let (tmain, tnote) = split_title(&ch.title);
+        let len = ch.end_ms.map_or(duration, u64::from).saturating_sub(ch.start_ms as u64);
+        let is_cur = i as isize == current;
+        let on = on.clone();
+        div()
+            .id(SharedString::from(format!("album-track-{i}-{id}")))
+            .w_full()
+            .flex()
+            .items_center()
+            .gap(px(10.))
+            .px(px(6.))
+            .py(px(7.))
+            .rounded(px(8.))
+            .text_size(px(13.2))
+            .line_height(px(18.48))
+            .text_color(if is_cur { accent } else { white_a(0.92) })
+            .when(is_cur, |d| d.font_weight(gpui::FontWeight::SEMIBOLD))
+            .cursor_pointer()
+            .hover(|s| s.bg(white_a(0.05)))
+            .on_click(move |_, w, cx| {
+                cx.stop_propagation();
+                on(AlbumAct::Track(i), w, cx)
+            })
+            .child(
+                div()
+                    .w(px(26.))
+                    .flex_shrink_0()
+                    .flex()
+                    .justify_center()
+                    .font_weight(gpui::FontWeight::NORMAL)
+                    .text_color(white_a(0.34))
+                    .child(if is_cur && playing {
+                        eq(clock).into_any_element()
+                    } else {
+                        (i + 1).to_string().into_any_element()
+                    }),
+            )
+            .child(
+                line(div().flex_1().min_w_0().flex())
+                    .child(tmain)
+                    .when(!tnote.is_empty(), |d| {
+                        d.child(div().ml(px(4.)).font_weight(gpui::FontWeight::NORMAL).opacity(0.5).child(tnote))
+                    }),
+            )
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .font_weight(gpui::FontWeight::NORMAL)
+                    .text_color(white_a(0.34))
+                    .child(format_time(len)),
+            )
+    });
+    let more = (n > 4).then(|| {
+        let on = on.clone();
+        div()
+            .id(SharedString::from(format!("album-more-{id}")))
+            .w_full()
+            .pt(px(7.))
+            .pb(px(3.))
+            .flex()
+            .justify_center()
+            .text_size(px(12.))
+            .line_height(px(16.8))
+            .text_color(white_a(0.55))
+            .cursor_pointer()
+            .hover(|s| s.text_color(white_a(0.92)))
+            .on_click(move |_, w, cx| {
+                cx.stop_propagation();
+                on(AlbumAct::More, w, cx)
+            })
+            .child(if all { "Show fewer".to_string() } else { format!("Show all {n} songs") })
+    });
+    div()
+        .relative()
+        .flex()
+        .flex_col()
+        .gap(px(12.))
+        .child(
+            div()
+                .flex()
+                .gap(px(14.))
+                .when_some(art, |d, art| {
+                    d.child(
+                        div()
+                            .size(px(128.))
+                            .flex_shrink_0()
+                            .rounded(px(10.))
+                            .bg(c(0x262626))
+                            .shadow(vec![gpui::BoxShadow {
+                                color: ca(0, 0, 0, 0.35),
+                                offset: point(px(0.), px(4.)),
+                                blur_radius: px(14.),
+                                spread_radius: px(0.),
+                                inset: false,
+                            }])
+                            .child(gpui::img(art).size_full().rounded(px(10.))),
+                    )
+                })
+                .child(head),
+        )
+        .child(
+            div()
+                .pt(px(4.))
+                .border_t_1()
+                .border_color(white_a(0.06))
+                .children(tracks.map(|t| div().pt(px(4.)).h(px(36.45)).child(t)))
+                .children(more.map(|m| div().pt(px(4.)).pb(px(4.1)).child(m))),
+        )
+}
+
+/// Seconds on a shared clock, for the playing song's bars.
+fn album_clock() -> f32 {
+    static START: OnceLock<Instant> = OnceLock::new();
+    START.get_or_init(Instant::now).elapsed().as_secs_f32()
+}
+
 /// `.audio-art-glow`, crossfading to the taller window as the lyrics open.
 fn glows(tags: Option<&Tags>, open: f32) -> Vec<AnyElement> {
     let Some(t) = tags else { return Vec::new() };
@@ -671,11 +1066,18 @@ fn waveform(
     duration: u64,
     accent: gpui::Hsla,
     tall: f32,
+    span: (u64, u64),
     on_seek: Rc<dyn Fn(f32, bool, &mut Window, &mut App)>,
 ) -> impl IntoElement {
     let look = p.map_or(Look::Fresh, |p| p.look);
     let playing = p.is_some_and(|p| p.playing);
-    let progress = p.map_or(0., |p| p.progress());
+    let progress = p.map_or(0., |p| {
+        if span.1 > span.0 {
+            (p.position().saturating_sub(span.0) as f32 / (span.1 - span.0) as f32).min(1.)
+        } else {
+            p.progress()
+        }
+    });
     let at_zero = p.is_none_or(|p| p.position() == 0);
     let lift = p.map_or(REST_Y, |p| p.lift);
     let display: Rc<[f32]> = p.map_or_else(|| Rc::from([]), |p| Rc::from(p.display.as_slice()));
@@ -795,8 +1197,17 @@ pub fn view(
     duration: u64,
     tags: Option<&Tags>,
     sheet: Option<&crate::lyrics::Sheet>,
+    all_tracks: bool,
     on: Rc<dyn Fn(Act, &mut Window, &mut App)>,
 ) -> AnyElement {
+    let chapters = tags.map(|t| t.chapters.as_slice()).filter(|c| c.len() > 1);
+    let album = p.and_then(|p| p.album.as_ref());
+    let span = match (album, chapters) {
+        (Some(a), _) => a.now(duration),
+        (None, Some(ch)) => (ch[0].start_ms as u64, ch[0].end_ms.map_or(duration, u64::from)),
+        _ => (0, duration),
+    };
+    let track_idx = album.map_or(-1, |a| a.track);
     let lyrics_btn = tags.and_then(|t| t.lyrics.as_ref()).map(|_| {
         let open = sheet.is_some_and(|s| s.open);
         let on = on.clone();
@@ -842,6 +1253,10 @@ pub fn view(
     let pos = if duration == 0 { p.map_or(0, |p| p.position()) } else { pos };
     let id = att.id.clone();
     let toggle = on.clone();
+    let on_album: Rc<dyn Fn(AlbumAct, &mut Window, &mut App)> = {
+        let on = on.clone();
+        Rc::new(move |a, w, cx| on(Act::Album(a), w, cx))
+    };
     let seek: Rc<dyn Fn(f32, bool, &mut Window, &mut App)> =
         Rc::new(move |f, done, w, cx| on(Act::Seek(f, done), w, cx));
     let icon = if loading {
@@ -878,7 +1293,8 @@ pub fn view(
         p,
         duration,
         accent,
-        if att.name.is_empty() || art.is_some() { 30. } else { 20. },
+        if (att.name.is_empty() || art.is_some()) && chapters.is_none() { 30. } else { 20. },
+        span,
         seek,
     );
     // `artist — track`, else the file's name.
@@ -889,7 +1305,9 @@ pub fn view(
         },
         None => att.name.clone(),
     };
-    let middle = if att.name.is_empty() || art.is_some() {
+    let now_title = chapters.map(|ch| split_title(&ch[track_idx.max(0) as usize].title).0);
+    let title = now_title.unwrap_or(title);
+    let middle = if (att.name.is_empty() || art.is_some()) && chapters.is_none() {
         bars.into_any_element()
     } else {
         div()
@@ -923,18 +1341,52 @@ pub fn view(
         .child(
             div()
                 .text_color(if pos > 0 { white_a(0.92) } else { white_a(0.34) })
-                .child(format_time(pos)),
+                .child(format_time(pos.saturating_sub(span.0))),
         )
         .child(div().mx(px(4.)).text_color(white_a(0.34)).child("/"))
-        .child(format_time(duration));
+        .child(format_time(span.1.saturating_sub(span.0)));
+    let skip = |dir: &'static str, icon: &'static str, act: AlbumAct| {
+        let on = on_album.clone();
+        div()
+            .id(SharedString::from(format!("audio-{dir}-{}", att.id)))
+            .size(px(30.))
+            .mx(px(2.))
+            .flex_shrink_0()
+            .rounded(px(8.))
+            .flex()
+            .items_center()
+            .justify_center()
+            .cursor_pointer()
+            .hover(|s| s.bg(white_a(0.07)))
+            .on_click(move |_, w, cx| {
+                cx.stop_propagation();
+                on(act, w, cx)
+            })
+            .child(svg().path(icon).size(px(20.)).text_color(white_a(0.92)))
+    };
     let controls = div()
         .flex()
         .items_center()
+        .when(chapters.is_some(), |d| d.child(skip("prev", "icons/skip-back.svg", AlbumAct::Prev)))
         .child(button)
+        .when(chapters.is_some(), |d| d.child(skip("next", "icons/skip-forward.svg", AlbumAct::Next)))
         .child(middle)
         .child(time)
         .children(lyrics_btn);
     let body = match (tags, art) {
+        (Some(t), art) if chapters.is_some() => album_view(
+            att,
+            t,
+            art,
+            album,
+            p.is_some_and(|p| p.playing),
+            duration,
+            accent,
+            all_tracks,
+            on_album.clone(),
+        )
+        .child(controls)
+        .into_any_element(),
         (Some(t), Some(art)) => {
             let track = t.title.clone().unwrap_or_else(|| att.name.clone());
             let byline = [
