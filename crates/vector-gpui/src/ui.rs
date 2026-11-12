@@ -312,6 +312,7 @@ enum Mode {
 #[derive(Clone)]
 /// What a context menu row does.
 enum MenuAct {
+    FoldRail,
     AddFriend,
     Bookmark,
     AppStore,
@@ -1766,6 +1767,7 @@ impl VectorApp {
                 self.open_chat(me.into(), window, cx);
             }
             MenuAct::AppStore => self.show_nexus(None, window, cx),
+            MenuAct::FoldRail => self.slim_set_rail(false, cx),
             MenuAct::NewCommunity => self.open_create_community(window, cx),
             MenuAct::Sub(label, sub_items, sub_acts) => {
                 acts.insert(ix.min(acts.len()), MenuAct::Nothing);

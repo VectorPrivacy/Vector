@@ -517,6 +517,13 @@ impl VectorApp {
         let tiles = crate::rail::render_slim(store, &store.rail, &self.rail_open, active, RAIL_W - 1.5, &voice, on_community);
         div()
             .id("cc-rail")
+            .on_mouse_down(
+                gpui::MouseButton::Right,
+                cx.listener(|app, e: &gpui::MouseDownEvent, _, cx| {
+                    let rows = vec![(kit::MenuItem::new("Collapse", "chevron-double-left"), super::MenuAct::FoldRail)];
+                    app.show_menu(e.position, rows, cx);
+                }),
+            )
             .w(px(RAIL_W))
             .flex_shrink_0()
             .h_full()
