@@ -2265,6 +2265,8 @@ fn donut(s: &Settings, on: &OnAct) -> AnyElement {
         .border_b_1()
         .border_color(c(0x262626))
         .flex()
+        // `.sm-page` stacks the chart over its legend.
+        .when(crate::theme::is_slim(), |d| d.flex_col())
         .items_center()
         .justify_between()
         .gap(px(48.))

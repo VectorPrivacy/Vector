@@ -23,6 +23,7 @@ fn heading(cat: &'static str, a: &Anchor, on: &OnAct) -> AnyElement {
     let anchor = a.id;
     div()
         .group(group.clone())
+        .h(px(22.))
         .mb(px(12.))
         .flex()
         .items_center()
