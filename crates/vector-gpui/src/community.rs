@@ -222,30 +222,26 @@ fn channel_row(
 /// `.chatlist-community-head-alert`: pulses, since noticing a raid late costs the community.
 fn raid_pip() -> impl IntoElement {
     let danger = c(crate::timeline::DANGER);
+    // A ring, not a box-shadow spread: GPUI keeps a shadow's corner radius as the spread grows.
+    let ring = div().absolute().rounded_full().with_animation(
+        "raid-pulse",
+        gpui::Animation::new(std::time::Duration::from_millis(1900)).repeat(),
+        move |d, t| {
+            let (spread, alpha) = if t < 0.7 {
+                let k = gpui::ease_out_quint()(t / 0.7);
+                (7. * k, 0.7 * (1. - k))
+            } else {
+                (7. * (1. - (t - 0.7) / 0.3), 0.)
+            };
+            d.left(px(-spread)).top(px(-spread)).size(px(8. + 2. * spread)).bg(danger.opacity(alpha))
+        },
+    );
     div()
+        .relative()
         .size(px(8.))
         .flex_shrink_0()
-        .rounded_full()
-        .bg(danger)
-        .with_animation(
-            "raid-pulse",
-            gpui::Animation::new(std::time::Duration::from_millis(1900)).repeat(),
-            move |d, t| {
-                let (spread, alpha) = if t < 0.7 {
-                    let k = gpui::ease_out_quint()(t / 0.7);
-                    (7. * k, 0.7 * (1. - k))
-                } else {
-                    (7. * (1. - (t - 0.7) / 0.3), 0.)
-                };
-                d.shadow(vec![gpui::BoxShadow {
-                    color: danger.opacity(alpha),
-                    offset: gpui::point(px(0.), px(0.)),
-                    blur_radius: px(0.),
-                    spread_radius: px(spread),
-                    inset: false,
-                }])
-            },
-        )
+        .child(ring)
+        .child(div().absolute().inset_0().rounded_full().bg(danger))
 }
 
 /// `#chats` over a Community: its head, then its channels by Category.
@@ -258,6 +254,7 @@ pub fn sidebar(
     on: &OnAct,
     (voice, on_voice, anchors): (&crate::voice::Voice, &crate::voice::OnAct, &crate::kit::Anchors),
     width: f32,
+    slim: bool,
 ) -> AnyElement {
     let row = |ch: &Channel| {
         let open = open == Some(ch.channel_id.as_str());
@@ -459,8 +456,7 @@ pub fn sidebar(
         .h_full()
         .flex()
         .flex_col()
-        .bg(c(LIST_BG))
-        .border_r_1()
+        .when(!slim, |d| d.bg(c(LIST_BG)).border_r_1())
         .border_color(c(DIVIDER))
         .child(head)
         .child(

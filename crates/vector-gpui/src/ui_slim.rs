@@ -19,6 +19,8 @@ use crate::data::{self, Community, Store};
 use crate::kit;
 use crate::theme::*;
 
+/// `--cc-peek` (lib/drawer.js PEEK).
+const DRAWER_PEEK: f32 = 64.;
 /// Narrowest window that gets the multi-pane layout (`WS_MIN_W`).
 pub(super) const WIDE_MIN: f32 = 900.;
 
@@ -282,24 +284,74 @@ impl VectorApp {
                 .into_any_element();
         }
         let header = self.slim_header(store, window, cx);
-        let body = self.slim_body(store, width, on_community, window, cx);
+        let body = self.slim_body(store, if drawer && self.open.is_some() { width - DRAWER_PEEK } else { width }, on_community, window, cx);
         let col = div()
             .flex_1()
             .min_h_0()
             .w_full()
             .flex()
             .flex_col()
-            .bg(c(0x050505))
+            .bg(c(if drawer { 0x0b0b0b } else { 0x050505 }))
             .child(header)
             .child(body);
         if drawer {
             let key = self.community.as_ref().map(|v| v.id.clone()).unwrap_or_default();
-            col.with_animation(
-                SharedString::from(format!("slim-drawer-in-{key}")),
-                gpui::Animation::new(std::time::Duration::from_millis(260)).with_easing(crate::kit::bezier(0.22, 1., 0.36, 1.)),
-                move |d, t| d.relative().left(px(-width * 0.2 * (1. - t))).opacity(0.5 + 0.5 * t),
-            )
-            .into_any_element()
+            let Some(id) = self.open.clone() else {
+                return col
+                    .with_animation(
+                        SharedString::from(format!("slim-drawer-in-{key}")),
+                        gpui::Animation::new(std::time::Duration::from_millis(260)).with_easing(crate::kit::bezier(0.22, 1., 0.36, 1.)),
+                        move |d, t| d.relative().left(px(-width * 0.2 * (1. - t))).opacity(0.5 + 0.5 * t),
+                    )
+                    .into_any_element();
+            };
+            // .cc-drawer-shade + `--cc-peek`: the channel stays on screen beside the drawer.
+            let span = width - DRAWER_PEEK;
+            let drawer_el = div()
+                .absolute()
+                .top_0()
+                .bottom_0()
+                .left_0()
+                .w(px(span))
+                .flex()
+                .shadow(vec![gpui::BoxShadow {
+                    color: gpui::black().opacity(0.5),
+                    offset: gpui::point(px(4.), px(0.)),
+                    blur_radius: px(24.),
+                    spread_radius: px(0.),
+                    inset: false,
+                }])
+                .child(col)
+                .with_animation(
+                    SharedString::from(format!("slim-drawer-in-{key}")),
+                    gpui::Animation::new(std::time::Duration::from_millis(260)).with_easing(crate::kit::bezier(0.22, 1., 0.36, 1.)),
+                    move |d, t| d.left(px(-(span + 32.) * (1. - t))),
+                );
+            let shade = div()
+                .id("cc-drawer-shade")
+                .absolute()
+                .inset_0()
+                .bg(gpui::black().opacity(0.55))
+                .occlude()
+                .on_click(cx.listener(|app, _, _, cx| {
+                    app.slim.drawer = false;
+                    cx.notify();
+                }))
+                .with_animation(
+                    SharedString::from(format!("slim-shade-in-{key}")),
+                    gpui::Animation::new(std::time::Duration::from_millis(260)),
+                    |d, t| d.opacity(t),
+                );
+            return div()
+                .flex_1()
+                .min_h_0()
+                .w_full()
+                .relative()
+                .flex()
+                .child(self.chat_pane(store, id, on_community, window, cx))
+                .child(shade)
+                .child(drawer_el)
+                .into_any_element();
         } else {
             col.child(self.slim_navbar(store, cx)).into_any_element()
         }
@@ -472,6 +524,7 @@ impl VectorApp {
                     on_community,
                     (&self.voice, &self.on_voice_handler(cx), &self.anchors),
                     pane_w,
+                    true,
                 ))
                 .into_any_element(),
             None => self.slim_pane(store, &query, window, cx),

@@ -5423,6 +5423,7 @@ impl Render for VectorApp {
                                 &on_community,
                                 (&self.voice, &self.on_voice_handler(cx), &self.anchors),
                                 LIST_W,
+                                false,
                             )),
                             None => row.child(chat_list(
                                 self,
