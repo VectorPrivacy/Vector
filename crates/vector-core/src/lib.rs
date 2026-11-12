@@ -4915,7 +4915,16 @@ impl VectorCore {
     /// Of `npubs`, those who can't send in a channel by the roster as it stands (CORD-04 §8):
     /// a reader collapses their posts there. Empty on the legacy roster.
     pub fn channel_send_denied(&self, community_id: &str, channel_id: &str, npubs: &[String]) -> Result<Vec<String>> {
-        use crate::community::roles::Permissions;
+        Self::channel_denied(community_id, channel_id, npubs, crate::community::roles::Permissions::SEND_MESSAGES)
+    }
+
+    /// Of `npubs`, those who can't react in a channel by the roster as it stands: a reader
+    /// doesn't count their reactions there. Empty on the legacy roster.
+    pub fn channel_react_denied(&self, community_id: &str, channel_id: &str, npubs: &[String]) -> Result<Vec<String>> {
+        Self::channel_denied(community_id, channel_id, npubs, crate::community::roles::Permissions::ADD_REACTIONS)
+    }
+
+    fn channel_denied(community_id: &str, channel_id: &str, npubs: &[String], perm: u64) -> Result<Vec<String>> {
         let v2 = Self::held_v2(community_id)?;
         let roster = crate::db::community::get_community_roles(community_id).map_err(VectorError::Other)?;
         if roster.everyone.is_none() {
@@ -4929,7 +4938,7 @@ impl VectorCore {
             .iter()
             .filter(|n| {
                 nostr_sdk::prelude::PublicKey::parse(n.as_str())
-                    .is_ok_and(|pk| !roster.channel_permissions(owner.as_deref(), &pk.to_hex(), &chan, private).contains(Permissions::SEND_MESSAGES))
+                    .is_ok_and(|pk| !roster.channel_permissions(owner.as_deref(), &pk.to_hex(), &chan, private).contains(perm))
             })
             .cloned()
             .collect())

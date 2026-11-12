@@ -133,6 +133,7 @@
     "allow-get-community-nicknames",
     "allow-set-community-nickname",
     "allow-get-channel-send-denied",
+    "allow-get-channel-react-denied",
     "allow-get-community-mentions",
     "allow-create-community-channel",
     "allow-delete-community-channel",

@@ -3259,6 +3259,12 @@ pub fn get_channel_send_denied(community_id: String, channel_id: String, npubs: 
     vector_core::VectorCore.channel_send_denied(&community_id, &channel_id, &npubs).map_err(|e| e.to_string())
 }
 
+/// Of `npubs`, those who can't react in a channel: their reactions there don't count.
+#[tauri::command]
+pub fn get_channel_react_denied(community_id: String, channel_id: String, npubs: Vec<String>) -> Result<Vec<String>, String> {
+    vector_core::VectorCore.channel_react_denied(&community_id, &channel_id, &npubs).map_err(|e| e.to_string())
+}
+
 /// The Timeouts running in a community: npub → { from, until }.
 #[tauri::command]
 pub fn get_community_timeouts(community_id: String) -> Result<serde_json::Value, String> {

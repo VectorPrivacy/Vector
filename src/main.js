@@ -1931,6 +1931,11 @@ async function message(pubkey, content, replied_to, bot) {
  */
 function reactToMessageRouted(referenceId, chatId, emoji, emojiUrl) {
     const chat = arrChats.find(c => c.id === chatId);
+    // Refused, so a caller's optimistic chip comes back off.
+    if (chat && !channelAllowsReact(chat)) {
+        showToast("You can't react in this channel");
+        return Promise.reject(new Error('reactions not allowed here'));
+    }
 
     // Group ceiling + per-tier fresh-reaction allowance (joins always pass) —
     // gate BEFORE any optimistic bookkeeping so nothing strands on refusal.

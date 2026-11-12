@@ -892,7 +892,7 @@ function _dmsgOpenPreviewUrl(strURL) {
 // reactions render their image even when the originating pack is unsubscribed.
 function _dmsgAggregateReactions(msg) {
     const groups = new Map();  // emoji → { count, mine, url }
-    for (const r of (msg.reactions || [])) {
+    for (const r of countedReactions(msg)) {
         const g = groups.get(r.emoji) || { count: 0, mine: false, url: null };
         g.count += 1;
         if (r.author_id === strPubkey) g.mine = true;
@@ -921,7 +921,7 @@ function _dmsgCustomEmojiUrl(emoji, url) {
 
 /** Whether the row can open one more reaction group (the inline "+" shows then). */
 function _dmsgCanAddReactionGroup(msg, uniqueCount) {
-    return uniqueCount > 0 && uniqueCount < MAX_DISPLAYED_REACTIONS && !newReactionGroupBlockReason(msg);
+    return uniqueCount > 0 && uniqueCount < MAX_DISPLAYED_REACTIONS && !newReactionGroupBlockReason(msg) && channelAllowsReact(getChat(strOpenChat));
 }
 
 /** The fields the content builders render from, as one comparable string. A
@@ -1093,7 +1093,7 @@ function _dmsgReactionClick(msgId, emoji) {
                 invoke('revoke_reaction', { reactionId: mine.id })
                     .catch(err => console.error('revoke_reaction failed:', err));
             }
-        } else {
+        } else if (channelAllowsReact(cChat)) {
             // Not yet reacted → add. The provisional debounces double-clicks and
             // keeps the chip reacted through an earlier click's echo.
             const retract = dmsgReactOptimistic(msgId, emoji, null);

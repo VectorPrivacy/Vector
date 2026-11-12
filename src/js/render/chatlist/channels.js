@@ -33,9 +33,18 @@ function visibleChannels(channels) {
 
 /** Whether the local user may post in a channel: always on the legacy roster. */
 function channelAllowsSend(chat) {
+    return channelGrants(chat, 1n << 14n);
+}
+
+/** Whether the local user may react in `chat` (ADD_REACTIONS): a DM always may. */
+function channelAllowsReact(chat) {
+    return channelGrants(chat, 1n << 17n);
+}
+
+function channelGrants(chat, bit) {
     const communityId = communityIdOfChat(chat);
     const perms = communityId && communityChannelsCache.get(communityId)?.find(c => c.id === chat.id)?.perms;
-    return perms == null || (BigInt(perms) & (1n << 14n)) !== 0n;
+    return perms == null || (BigInt(perms) & bit) !== 0n;
 }
 
 /** Whether the local user may post in a restricted channel but its writer key hasn't arrived. */
@@ -127,6 +136,47 @@ function setCommunityChannels(communityId, channels, categories) {
 const channelSendDeniedCache = new Map();
 function channelSendDenied(channelId) {
     return channelSendDeniedCache.get(channelId) || null;
+}
+
+/** channelId → the reactors who can't react there, and every reactor asked about, as last read. */
+const channelReactDeniedCache = new Map();
+const channelReactChecked = new Map();
+let channelReactRecheck = null;
+
+/** A message's reactions as the open channel counts them: none by someone who can't react there. */
+function countedReactions(msg) {
+    const all = msg?.reactions || [];
+    if (!all.length) return all;
+    const checked = channelReactChecked.get(strOpenChat);
+    // A reactor nobody has asked about yet counts until the next read.
+    if (checked && !channelReactRecheck && all.some(r => !checked.has(r.author_id))) {
+        const chatId = strOpenChat;
+        channelReactRecheck = setTimeout(async () => {
+            channelReactRecheck = null;
+            const chat = getChat(chatId);
+            if (chat && strOpenChat === chatId && await loadChannelReactDenied(chat)) repaintReactions(chat);
+        }, 250);
+    }
+    const denied = channelReactDeniedCache.get(strOpenChat);
+    return denied?.size ? all.filter(r => !denied.has(r.author_id)) : all;
+}
+
+/** Read who of `chat`'s reactors can't react there. Resolves whether that moved. */
+async function loadChannelReactDenied(chat) {
+    const communityId = communityIdOfChat(chat);
+    if (!communityId) return false;
+    const reactors = [...new Set((chat.messages || []).flatMap(m => (m.reactions || []).map(r => r.author_id)).filter(Boolean))];
+    let denied = [];
+    try { denied = await invoke('get_channel_react_denied', { communityId, channelId: chat.id, npubs: reactors }); } catch { /* the legacy roster: nothing */ }
+    channelReactChecked.set(chat.id, new Set(reactors));
+    const had = [...(channelReactDeniedCache.get(chat.id) || [])].sort().join();
+    channelReactDeniedCache.set(chat.id, new Set(denied));
+    return had !== [...denied].sort().join();
+}
+
+/** Refill every row of `chat` that carries reactions. */
+function repaintReactions(chat) {
+    for (const m of chat.messages || []) if (m.reactions?.length) VectorSvelte.touchMessage(m.id);
 }
 /** Per community: who may mention everyone, and its Roles for mentioning (CORD-04 §8). */
 const communityMentionsCache = new Map();
@@ -225,6 +275,7 @@ async function refreshTimeoutLock(chat) {
     try { denied = await invoke('get_channel_send_denied', { communityId, channelId: chat.id, npubs: authors }); } catch { /* the legacy roster: nothing */ }
     const hadDenied = [...(channelSendDeniedCache.get(chat.id) || [])].join();
     channelSendDeniedCache.set(chat.id, new Set(denied));
+    if (await loadChannelReactDenied(chat) && strOpenChat === chat.id) repaintReactions(chat);
     const changed = timeoutsChanged || hadDenied !== [...channelSendDeniedCache.get(chat.id)].join();
     // Repaint in place: re-opening would read the chat again and drop its "New" divider.
     if (changed && strOpenChat === chat.id) {

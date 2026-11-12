@@ -255,6 +255,19 @@ fn refuse_while_timed_out(community: &CommunityV2, author: &PublicKey) -> Result
     }
 }
 
+/// Refuse a reaction the Roster doesn't let `author` make in `channel_id`: readers don't count
+/// it. Nothing to judge on the legacy roster.
+fn refuse_unless_reacting(community: &CommunityV2, channel_id: &ChannelId, author: &PublicKey) -> Result<(), String> {
+    use crate::community::roles::Permissions;
+    let roster = crate::db::community::get_community_roles(&crate::simd::hex::bytes_to_hex_32(&community.id().0))?;
+    if roster.everyone.is_none() {
+        return Ok(());
+    }
+    let ch = community.channel(channel_id).ok_or("no such channel in this community")?;
+    let held = roster.channel_permissions(Some(&community.owner()?.to_hex()), &author.to_hex(), &crate::simd::hex::bytes_to_hex_32(&channel_id.0), ch.private);
+    if held.contains(Permissions::ADD_REACTIONS) { Ok(()) } else { Err("you can't react in this channel".to_string()) }
+}
+
 /// React to a channel message (kind 7, NIP-25 shape). `target_id_hex` /
 /// `target_author_hex` name the reacted-to message; `target_kind` is its rumor
 /// kind (`kind::MESSAGE`, or `kind::COMMENT` for a threaded reply); `emoji`
@@ -272,6 +285,7 @@ pub async fn send_reaction<T: Transport + ?Sized>(
 ) -> Result<String, String> {
     let (author_pk, group, epoch) = chat_send_context(community, channel_id)?;
     refuse_while_timed_out(community, &author_pk)?;
+    refuse_unless_reacting(community, channel_id, &author_pk)?;
     let at_ms = next_send_ms();
     let rumor =
         chat::build_reaction_rumor(author_pk, channel_id, epoch, target_id_hex, target_author_hex, target_kind, emoji_content, emoji, at_ms);
@@ -28368,6 +28382,32 @@ mod tests {
                 assert!(!f.roles.channel_permissions(Some(&owner_hex), &probe, &news_hex, false).contains(Permissions::SEND_MESSAGES), "{round} {who}: and it binds");
             }
         }
+    }
+
+    #[tokio::test]
+    async fn a_member_without_add_reactions_cant_react() {
+        use crate::community::roles::Permissions;
+        async fn react(relay: &MemoryRelay, community: &CommunityV2, ch: &ChannelId, owner: &str) -> Result<String, String> {
+            send_reaction(relay, community, ch, &"ab".repeat(32), owner, super::super::kind::MESSAGE, "+", None).await
+        }
+        let (_tmp, _guard, owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "Reacts", vec!["wss://r".into()], None).await.unwrap();
+        let held = || crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        let (ch, owner_hex, m) = (community.channels[0].id, owner.public_key().to_hex(), Keys::generate());
+        act_as(&m);
+        assert!(react(&relay, &held(), &ch, &owner_hex).await.is_ok(), "the legacy roster refuses no reaction");
+        act_as(&owner);
+        activate_roles_v2(&relay, &held(), crate::community::v2::roles::EVERYONE_DEFAULT).await.unwrap();
+        act_as(&m);
+        assert!(react(&relay, &held(), &ch, &owner_hex).await.is_ok(), "@everyone reacts by default");
+        act_as(&owner);
+        set_everyone(&relay, &held(), crate::community::v2::roles::EVERYONE_DEFAULT & !Permissions::ADD_REACTIONS).await.unwrap();
+        act_as(&m);
+        let err = react(&relay, &held(), &ch, &owner_hex).await.unwrap_err();
+        assert!(err.contains("can't react"), "{err}");
+        act_as(&owner);
+        assert!(react(&relay, &held(), &ch, &owner_hex).await.is_ok(), "the owner holds everything");
     }
 
     #[tokio::test]

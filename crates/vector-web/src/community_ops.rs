@@ -66,6 +66,7 @@ pub fn dispatch<'a>(cmd: &'a str, a: &'a Args) -> Pin<Box<dyn Future<Output = Op
             "get_community_nicknames" => with_id(a, |id| core(VectorCore.community_nicknames(id))),
             "set_community_nickname" => set_nickname(a).await,
             "get_channel_send_denied" => send_denied(a),
+            "get_channel_react_denied" => react_denied(a),
             "get_community_mentions" => mentions(a),
 
             // --- Images & pins ---
@@ -286,6 +287,11 @@ fn mentions(a: &Args) -> Result<Value, String> {
 fn send_denied(a: &Args) -> Result<Value, String> {
     let (id, channel, npubs) = (a.str("communityId")?, a.str("channelId")?, a.de::<Vec<String>>("npubs")?);
     core(VectorCore.channel_send_denied(&id, &channel, &npubs))
+}
+
+fn react_denied(a: &Args) -> Result<Value, String> {
+    let (id, channel, npubs) = (a.str("communityId")?, a.str("channelId")?, a.de::<Vec<String>>("npubs")?);
+    core(VectorCore.channel_react_denied(&id, &channel, &npubs))
 }
 
 async fn timeout_member(a: &Args) -> Result<Value, String> {
