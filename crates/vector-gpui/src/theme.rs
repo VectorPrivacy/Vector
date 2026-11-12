@@ -61,3 +61,27 @@ pub const ICON_MUTED: u32 = 0xb2b2b2;
 pub const CHROME_HELP: u32 = 0x474747;
 pub const LIST_TIME: u32 = 0x808080;
 pub const PREVIEW_UNREAD: u32 = 0xa0a0a0;
+
+thread_local! {
+    static SLIM: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Set once per frame from the window width, so far-off builders can follow the slim layout.
+pub fn set_slim(slim: bool) {
+    SLIM.with(|s| s.set(slim));
+}
+
+pub fn is_slim() -> bool {
+    SLIM.with(|s| s.get())
+}
+
+/// `.chat-header`: slim's is unseamed, rgba(22,22,22,.9) over the messages; `body.ws` sits it on a seam.
+pub fn chat_header_ground<D: gpui::Styled>(d: D, papered: bool) -> D {
+    if is_slim() {
+        d.h(gpui::px(60.)).bg(gpui::rgb(0x141414))
+    } else if papered {
+        d.bg(gpui::rgba(0x161616e6)).border_b_1().border_color(gpui::rgb(DIVIDER))
+    } else {
+        d.bg(gpui::rgb(CHAT_HEADER_BG)).border_b_1().border_color(gpui::rgb(DIVIDER))
+    }
+}

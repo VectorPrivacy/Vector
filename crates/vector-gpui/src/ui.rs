@@ -5140,6 +5140,7 @@ impl Render for VectorApp {
         let rail_mode = self.rail_mode(window);
         self.vw = f32::from(window.viewport_size().width);
         let slim = self.vw < slim_ops::WIDE_MIN;
+        crate::theme::set_slim(slim);
         self.is_slim = slim;
         self.archive.slim = slim;
         if let Some(s) = self.settings.as_mut() {
@@ -7146,9 +7147,7 @@ impl VectorApp {
             .h(px(61.))
             .flex_shrink_0()
             .relative()
-            .bg(if papered { ca(22, 22, 22, 0.9) } else { c(CHAT_HEADER_BG) })
-            .border_b_1()
-            .border_color(c(DIVIDER))
+            .map(|d| crate::theme::chat_header_ground(d, papered))
             .flex()
             .justify_center()
             .map(|d| {
@@ -7532,6 +7531,7 @@ impl VectorApp {
     ) -> impl IntoElement {
         let channel = store.community_of(&id).and_then(|com| com.channel(&id));
         let lock = store.send_lock(&id);
+        let staged_voice = channel.is_some_and(|ch| ch.is_voice());
         let stage = channel.filter(|ch| ch.is_voice()).and_then(|ch| {
             let com = store.community_of(&id)?;
             Some(crate::voice::stage(
@@ -7805,7 +7805,11 @@ impl VectorApp {
                     .flex_1()
                     .min_h_0()
                     .when(paper.is_none(), |d| d.bg(c(MESSAGES_BG)))
-                    .pt(px(if request.is_some() { 12. + 56. } else { 12. }))
+                    .pt(px({
+                        // Slim's header floats 60px over a list padded 75px; a voice stage takes that place in flow.
+                        let top = if self.is_slim && !staged_voice { 15. } else { 12. };
+                        if request.is_some() { top + 56. } else { top }
+                    }))
                     .children(bar)
                     .children(back)
                     .map(|d| match alone {

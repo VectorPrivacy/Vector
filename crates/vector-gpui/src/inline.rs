@@ -345,6 +345,8 @@ struct Line {
     top: f32,
     height: f32,
     baseline: f32,
+    /// How far the glyphs' own baseline sits above `baseline`: GPUI reports descent negative.
+    sink: f32,
     items: Vec<Placed>,
 }
 
@@ -664,6 +666,7 @@ fn layout(atoms: &[Atom], base: &Look, width: f32, window: &Window) -> Laid {
     let half = |m: &Metrics, lh: f32| (lh - (m.ascent + m.descent)) / 2.;
     let strut_above = strut.ascent + half(&strut, base.line_height);
     let strut_below = strut.descent + half(&strut, base.line_height);
+    let sink = (-strut.descent).max(0.);
     let mut out = Vec::with_capacity(lines.len());
     let mut top = 0f32;
     let mut widest = 0f32;
@@ -678,8 +681,8 @@ fn layout(atoms: &[Atom], base: &Look, width: f32, window: &Window) -> Laid {
                     below = below.max(m.descent + h);
                 }
                 Atom::Image { size, drop, .. } => {
-                    above = above.max(size - drop);
-                    below = below.max(*drop);
+                    above = above.max(size - drop + sink);
+                    below = below.max(drop - sink);
                 }
                 Atom::Ring(_) => {
                     above = above.max(RING - RING_DROP);
@@ -704,6 +707,7 @@ fn layout(atoms: &[Atom], base: &Look, width: f32, window: &Window) -> Laid {
             top,
             height,
             baseline: top + above,
+            sink,
             items,
         });
         top += height;
@@ -980,7 +984,7 @@ impl Element for Inline {
                                 .into_any_element(),
                             None => pic.into_any_element(),
                         };
-                        let origin = bounds.origin + point(px(p.x), px(line.baseline + drop - sz));
+                        let origin = bounds.origin + point(px(p.x), px(line.baseline - line.sink + drop - sz));
                         el.prepaint_as_root(
                             origin,
                             size(px(*sz), px(*sz)).map(Into::into),
