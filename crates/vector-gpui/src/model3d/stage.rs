@@ -164,9 +164,15 @@ pub fn badge() -> gpui::Div {
 }
 
 fn tool(id: &'static str, icon: &'static str, act: Act, on: &OnAct) -> AnyElement {
+    let tip = match act {
+        Act::Open => Some("Full screen"),
+        Act::Reset => Some("Reset view"),
+        _ => None,
+    };
     let on = on.clone();
     div()
         .id(id)
+        .when_some(tip, |d, t| d.tooltip(crate::kit::tooltip(t)))
         .size(px(32.))
         .flex()
         .items_center()

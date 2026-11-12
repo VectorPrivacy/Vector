@@ -5936,6 +5936,7 @@ fn rail(
             d.child(
                 div()
                     .id("ws-rail-collapse")
+                    .tooltip(crate::kit::tooltip(if slim { "Expand the sidebar" } else { "Collapse the sidebar" }))
                     .mt(px(10.))
                     .mb(px(2.))
                     .when(slim, |d| d.w(px(40.)).mx_auto().rounded(px(12.)).justify_center())
@@ -6818,6 +6819,7 @@ impl VectorApp {
                         let chat = id.to_string();
                         div()
                             .id("chat-menu")
+                            .tooltip(crate::kit::tooltip("Chat Options"))
                             .relative()
                             .size(px(40.))
                             .flex()

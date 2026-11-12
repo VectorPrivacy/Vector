@@ -795,6 +795,7 @@ pub fn pane(store: &Store, s: &Screen, on: &OnAct, window: &Window, cx: &App) ->
                     .child(
                         div()
                             .id("profile-npub-copy")
+                            .tooltip(crate::kit::tooltip("Copy npub"))
                             .size(px(28.))
                             .flex_shrink_0()
                             .rounded(px(8.))

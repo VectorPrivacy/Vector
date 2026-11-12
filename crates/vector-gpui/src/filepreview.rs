@@ -744,6 +744,7 @@ impl Render for FilePreview {
                         .child(
                             div()
                                 .id("spoiler-toggle")
+                                .tooltip(crate::kit::tooltip(if self.spoiler { "Remove spoiler" } else { "Mark as spoiler" }))
                                 .absolute()
                                 .bottom(px(8.))
                                 .right(px(8.))

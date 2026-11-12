@@ -705,6 +705,7 @@ fn dictate(busy: bool, on: On) -> AnyElement {
         .group_hover("voice-preview-dictate", |s| s.opacity(if busy { 1. } else { 0.7 }));
     div()
         .id("voice-preview-dictate")
+        .tooltip(crate::kit::tooltip("Turn into text"))
         .size(px(45.))
         .flex_shrink_0()
         .rounded_full()

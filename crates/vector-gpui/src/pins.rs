@@ -392,6 +392,7 @@ pub fn drawer(pins: &Pins, store: &Store, revealed: &HashMap<String, HashSet<u32
 pub fn button(on: OnAct) -> impl IntoElement {
     div()
         .id("pins-btn")
+        .tooltip(crate::kit::tooltip("Pinned Messages"))
         .size(px(40.))
         .flex_shrink_0()
         .flex()

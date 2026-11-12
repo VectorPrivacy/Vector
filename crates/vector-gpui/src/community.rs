@@ -861,9 +861,10 @@ pub fn invite_row(
     accept: Click,
     decline: Click,
 ) -> impl IntoElement {
-    let button = |id: String, icon_path: &'static str, ink: gpui::Hsla, on: Click| {
+    let button = |id: String, icon_path: &'static str, tip: &'static str, ink: gpui::Hsla, on: Click| {
         div()
             .id(SharedString::from(id))
+            .tooltip(crate::kit::tooltip(tip))
             .size(px(28.))
             .flex_shrink_0()
             .rounded_full()
@@ -950,12 +951,14 @@ pub fn invite_row(
                 .child(button(
                     format!("invite-accept-{}", inv.community_id),
                     "icons/check.svg",
+                    "Accept Invite",
                     c(ACCENT),
                     accept,
                 ))
                 .child(button(
                     format!("invite-decline-{}", inv.community_id),
                     "icons/x.svg",
+                    "Decline Invite",
                     c(crate::timeline::DANGER),
                     decline,
                 )),

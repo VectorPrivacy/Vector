@@ -1274,6 +1274,7 @@ fn pill(call: &Call, store: &Store, proc_: &Processing, seen: &Seen, win: gpui::
     };
     let row = div()
         .id("call-pill-row")
+        .tooltip(crate::kit::tooltip("Open the channel"))
         .relative()
         .flex()
         .items_center()
