@@ -34,7 +34,9 @@
                 bottom = null; maxH = Math.min(cap, window.innerHeight - 60); top = Math.max(44, (window.innerHeight - maxH) / 2);
             } else if (up) { top = null; bottom = window.innerHeight - anchor.top + 6; maxH = Math.min(cap, above); }
             else { bottom = null; top = anchor.bottom + 6; maxH = Math.min(cap, below); }
-            left = Math.max(10, Math.min(anchor.left, window.innerWidth - popup.offsetWidth - 10));
+            // The panel's width by its CSS rule: measured here it can still be the sheet's.
+            const width = Math.min(400, window.innerWidth - 20);
+            left = Math.max(10, Math.min(anchor.left, window.innerWidth - width - 10));
             placed = true;
         });
     });
