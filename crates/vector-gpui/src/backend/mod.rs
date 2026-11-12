@@ -9,6 +9,7 @@ pub mod chatlist;
 pub mod badges;
 pub mod bunker;
 pub mod embedvideo;
+pub mod xdcurl;
 pub mod calls;
 pub mod community;
 pub mod device;

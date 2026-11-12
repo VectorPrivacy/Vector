@@ -60,6 +60,9 @@ pub enum Act {
     RevealMedia(String),
     /// A file on this device: show it, or save a held one.
     OpenFile(String),
+    /// A Mini App link: fetch it (or retry), or open what it fetched.
+    XdcUrl(String),
+    OpenXdcUrl(String),
     /// Open a picture full screen.
     View(crate::viewer::Open),
     /// An invite card's button: join its Community, or open it once joined.
@@ -361,7 +364,10 @@ pub fn message_row(ctx: &Ctx, index: usize, first: bool, gap: f32) -> AnyElement
                 )
             })
             .children(crate::embeds::cards(ctx, m))
-            .children(crate::linkcard::card(ctx, m)),
+            .children(crate::attachments::xdc_url_card(ctx, m))
+            .when(!m.attachments.is_empty() || crate::backend::xdcurl::find(&m.content).is_none(), |d| {
+                d.children(crate::linkcard::card(ctx, m))
+            }),
     );
     if let Some(reason) = ctx.fail_reasons.get(&m.id).filter(|_| failed) {
         body = body.child(

@@ -134,6 +134,9 @@ pub struct Media {
     /// Mini App packages' cards by attachment id: None while read, or unreadable.
     pub xdc: HashMap<String, Option<crate::miniapp::Info>>,
     pub xdc_queue: Vec<(String, Source)>,
+    /// Mini Apps shared as links, by message and link, and the cache probes waiting to go.
+    pub xdc_urls: HashMap<String, crate::attachments::XdcUrl>,
+    pub xdc_url_queue: Vec<(String, String)>,
     /// Embedded videos' local copies by URL, the fetches waiting to start, and those to play
     /// once ready.
     pub embed_videos: HashMap<String, crate::embeds::VideoState>,

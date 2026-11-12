@@ -641,6 +641,64 @@ enum FileState {
 }
 
 /// `FileBox`: icon, name and what the file is doing; the box is the action.
+/// A Mini App shared as a link: nothing fetched until asked, then the attachment's own card.
+#[derive(Clone)]
+pub enum XdcUrl {
+    Probing,
+    Absent,
+    Fetching,
+    Failed(String),
+    Ready(crate::backend::xdcurl::Resolved),
+}
+
+pub fn xdc_url_key(msg: &str, url: &str) -> String {
+    format!("{msg}|{url}")
+}
+
+/// The card for a message's `.xdc` link, in the shape of an uploaded Mini App's.
+pub fn xdc_url_card(ctx: &Ctx, m: &Message) -> Option<AnyElement> {
+    if m.pending || m.failed || ctx.held || !m.attachments.is_empty() {
+        return None;
+    }
+    let url = crate::backend::xdcurl::find(&m.content)?.to_string();
+    let key = xdc_url_key(&m.id, &url);
+    let mut media = ctx.media.borrow_mut();
+    let state = match media.xdc_urls.get(&key) {
+        Some(s) => s.clone(),
+        None => {
+            media.xdc_urls.insert(key.clone(), XdcUrl::Probing);
+            media.xdc_url_queue.push((m.id.clone(), url.clone()));
+            XdcUrl::Probing
+        }
+    };
+    let mut att = Attachment { extension: "xdc".into(), name: crate::backend::xdcurl::file_name(&url), id: url.clone(), ..Default::default() };
+    let tap = |a: Act| Some(a);
+    let host = crate::backend::xdcurl::host(&url);
+    let el = match state {
+        XdcUrl::Ready(r) => {
+            att.id = format!("xdcurl:{key}");
+            att.name = r.name.clone();
+            att.webxdc_topic = Some(r.topic.clone());
+            att.downloaded = true;
+            if !media.xdc.contains_key(&att.id) {
+                media.xdc.insert(att.id.clone(), None);
+                media.xdc_queue.push((att.id.clone(), crate::media::Source::File(r.path.clone())));
+            }
+            file_box_on(ctx, &media, m, &att, FileState::Local, None, tap(Act::OpenXdcUrl(url)))
+        }
+        XdcUrl::Fetching => file_box_on(ctx, &media, m, &att, FileState::Downloading, None, None),
+        XdcUrl::Failed(e) => {
+            let label = format!("Failed: {} · Tap to Retry", e.chars().take(48).collect::<String>());
+            file_box_on(ctx, &media, m, &att, FileState::Failed, Some(&label), tap(Act::XdcUrl(url)))
+        }
+        XdcUrl::Probing | XdcUrl::Absent => {
+            let label = format!("Tap to Load · {host}");
+            file_box_on(ctx, &media, m, &att, FileState::Remote, Some(&label), tap(Act::XdcUrl(url)))
+        }
+    };
+    Some(div().mt(px(4.)).flex().flex_col().items_start().child(el).into_any_element())
+}
+
 fn file_box(
     ctx: &Ctx,
     media: &Media,
@@ -649,6 +707,20 @@ fn file_box(
     state: FileState,
     label: Option<&str>,
 ) -> AnyElement {
+    file_box_on(ctx, media, m, att, state, label, None)
+}
+
+/// `tap` takes over the box's click and its button: for a card no attachment backs.
+fn file_box_on(
+    ctx: &Ctx,
+    media: &Media,
+    m: &Message,
+    att: &Attachment,
+    state: FileState,
+    label: Option<&str>,
+    tap: Option<Act>,
+) -> AnyElement {
+    let synthetic = tap.is_some() || m.attachments.iter().all(|a| a.id != att.id);
     let (icon, description) = data::file_type(&att.extension);
     let mini = icon == "gift";
     let icon = if mini { "gamepad" } else { icon };
@@ -789,6 +861,9 @@ fn file_box(
             .child(svg().path(icon).size(px(17.)).text_color(color))
     };
     let action = match (state, label) {
+        (FileState::Remote, _) if synthetic => tap.clone().map(|a| button("icons/download.svg", c(PRIMARY), c(BOX_LINE_HOVER), a)),
+        (FileState::Failed, _) if synthetic => tap.clone().map(|a| button("icons/refresh.svg", c(DANGER), c(DANGER).opacity(0.45), a)),
+        _ if synthetic => None,
         (_, Some(_)) => None,
         (FileState::Downloading, _) if uploading => {
             let done = media
@@ -826,6 +901,7 @@ fn file_box(
         (FileState::Local, _) => None,
     };
     let click = match state {
+        _ if synthetic => tap,
         FileState::Local => Some(Act::OpenFile(att.id.clone())),
         FileState::Remote | FileState::Failed if label.is_none() => {
             Some(Act::Download(att.id.clone()))

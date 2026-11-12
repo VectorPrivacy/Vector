@@ -2619,6 +2619,13 @@ impl VectorApp {
                     self.signer_asks_to_open(url, cx);
                 }
             }
+            "webxdc_url_progress" => {
+                let (Some(url), Some(pct)) = (payload.get("url").and_then(Value::as_str), payload.get("progress").and_then(Value::as_f64)) else { return };
+                if let Some(t) = self.media.borrow_mut().transfers.get_mut(url) {
+                    t.pct = Some(pct as f32);
+                }
+                self.refresh_rows(false);
+            }
             "embed_video_progress" => {
                 let (Some(url), Some(pct)) = (payload.get("url").and_then(Value::as_str), payload.get("progress").and_then(Value::as_i64)) else { return };
                 let mut media = self.media.borrow_mut();
@@ -3523,6 +3530,8 @@ impl VectorApp {
                 cx.notify();
             }
             Act::OpenFile(att) => self.open_file(id, att, cx),
+            Act::XdcUrl(url) => self.fetch_xdc_url(id, url, cx),
+            Act::OpenXdcUrl(url) => self.open_xdc_url(id, url, cx),
             Act::Audio(att, crate::audio::Act::Art | crate::audio::Act::Album(crate::audio::AlbumAct::Art)) => {
                 self.view_art(&att, window, cx)
             }
@@ -4198,6 +4207,86 @@ impl VectorApp {
             })
             .detach();
         }
+    }
+
+    /// Mini App links' cache probes: a link already fetched for its message shows its card.
+    fn probe_xdc_urls(&mut self, list: Vec<(String, String)>, cx: &mut Context<Self>) {
+        for (msg, url) in list {
+            let key = crate::attachments::xdc_url_key(&msg, &url);
+            let rx = backend::run(backend::xdcurl::resolve(url, msg, false));
+            cx.spawn(async move |this, cx| {
+                let found = rx.await.ok().and_then(Result::ok).flatten();
+                this.update(cx, |this, cx| {
+                    let mut media = this.media.borrow_mut();
+                    if matches!(media.xdc_urls.get(&key), Some(crate::attachments::XdcUrl::Probing)) {
+                        media.xdc_urls.insert(key, found.map_or(crate::attachments::XdcUrl::Absent, crate::attachments::XdcUrl::Ready));
+                        drop(media);
+                        this.refresh_rows(false);
+                        cx.notify();
+                    }
+                })
+                .ok();
+            })
+            .detach();
+        }
+    }
+
+    fn fetch_xdc_url(&mut self, msg: String, url: String, cx: &mut Context<Self>) {
+        use crate::attachments::XdcUrl;
+        if !self.live {
+            return;
+        }
+        let key = crate::attachments::xdc_url_key(&msg, &url);
+        {
+            let mut media = self.media.borrow_mut();
+            if matches!(media.xdc_urls.get(&key), Some(XdcUrl::Fetching | XdcUrl::Ready(_))) {
+                return;
+            }
+            media.xdc_urls.insert(key.clone(), XdcUrl::Fetching);
+            media.transfers.insert(url.clone(), Default::default());
+        }
+        self.refresh_rows(false);
+        cx.notify();
+        let rx = backend::run(backend::xdcurl::resolve(url.clone(), msg, true));
+        cx.spawn(async move |this, cx| {
+            let result = rx.await.unwrap_or_else(|_| Err("Backend stopped".into()));
+            this.update(cx, |this, cx| {
+                let mut media = this.media.borrow_mut();
+                media.transfers.remove(&url);
+                let state = match result {
+                    Ok(Some(r)) => XdcUrl::Ready(r),
+                    Ok(None) => XdcUrl::Failed("Not found".into()),
+                    Err(e) => XdcUrl::Failed(e),
+                };
+                media.xdc_urls.insert(key, state);
+                drop(media);
+                this.refresh_rows(false);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// A fetched Mini App link opens as an attachment would, its session keyed to the message.
+    fn open_xdc_url(&mut self, msg: String, url: String, cx: &mut Context<Self>) {
+        let key = crate::attachments::xdc_url_key(&msg, &url);
+        let Some(crate::attachments::XdcUrl::Ready(r)) = self.media.borrow().xdc_urls.get(&key).cloned() else { return };
+        if !self.live {
+            return;
+        }
+        let att = vector_core::Attachment {
+            id: format!("xdcurl:{key}"),
+            extension: "xdc".into(),
+            webxdc_topic: Some(r.topic.clone()),
+            ..Default::default()
+        };
+        let src = r.path.to_string_lossy().into_owned();
+        self.perm_gate(
+            backend::market::Ask::File(src.clone()),
+            move |this, cx| this.realtime_gate(src.clone(), move |this, cx| this.launch_miniapp_now(msg, src, att, cx), cx),
+            cx,
+        );
     }
 
     /// A Mini App attachment opens in its own window, keyed to this chat and message.
@@ -6926,6 +7015,13 @@ impl VectorApp {
                         }
                     })
                     .ok();
+                });
+            }
+            let links = std::mem::take(&mut media.borrow_mut().xdc_url_queue);
+            if !links.is_empty() && live {
+                let app = app_media.clone();
+                cx.defer(move |cx| {
+                    app.update(cx, |app, cx| app.probe_xdc_urls(links, cx)).ok();
                 });
             }
             let packages = std::mem::take(&mut media.borrow_mut().xdc_queue);
