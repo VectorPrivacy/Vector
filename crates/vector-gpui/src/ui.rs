@@ -3027,7 +3027,7 @@ impl VectorApp {
             }
         }
         drop(store);
-        if let Some(edge) = self.edge(&rows) {
+        if let Some(edge) = self.edge() {
             rows.insert(0, Row::Edge(edge));
         }
         self.rows = Rc::new(rows);
@@ -3035,13 +3035,11 @@ impl VectorApp {
     }
 
     /// `updateHistoryEdge`: what sits above the oldest message, once the database has no older.
-    fn edge(&self, rows: &[Row]) -> Option<data::Edge> {
+    fn edge(&self) -> Option<data::Edge> {
         let id = self.open.as_deref()?;
-        let alone = !rows.iter().any(|r| matches!(r, Row::Message { .. }));
         if !self.live {
-            // Fixtures hold a DM's whole history; a channel's is whole only when empty.
-            let community = self.store.borrow().community_of(id).is_some();
-            return (alone || !community).then_some(data::Edge::Start);
+            // Fixtures hold every chat's whole history.
+            return Some(data::Edge::Start);
         }
         if !self.history_done.contains(id) {
             return None;
@@ -8461,7 +8459,19 @@ impl VectorApp {
                 self.nexus = None;
                 self.open_chat(id.into(), window, cx);
             }
-            Act::Channel(id) => self.open_channel(id, window, cx),
+            Act::Channel(id) => {
+                let voice = {
+                    let store = self.store.borrow();
+                    store.community_of(&id).filter(|c| c.channel(&id).is_some_and(|ch| ch.is_voice())).map(|c| c.community_id.clone())
+                };
+                if let Some(community) = voice
+                    && self.voice.session.as_ref().is_none_or(|s| s.channel_id != id)
+                {
+                    self.voice_join(community, id.clone(), cx);
+                }
+                self.open_channel(id, window, cx)
+            }
+            Act::ChannelChat(id) => self.open_channel(id, window, cx),
             Act::Fold(key) => {
                 if let Some(v) = self.community.as_mut()
                     && !v.folded.remove(&key)

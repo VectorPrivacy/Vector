@@ -19,6 +19,8 @@ pub enum Act {
     /// An unread DM from the rail.
     Dm(String),
     Channel(String),
+    /// A voice channel's chat, without joining its call.
+    ChannelChat(String),
     /// A Category or member section folded or unfolded.
     Fold(String),
     Panel,
@@ -197,7 +199,8 @@ fn channel_row(
             d.child(action("icons/settings.svg", open, Some(Rc::new(move || Act::EditChannel(gear.clone())))))
         })
         .when(ch.is_voice(), |d| {
-            d.child(action("icons/chat-bubble.svg", true, None))
+            let chat = ch.channel_id.clone();
+            d.child(action("icons/chat-bubble.svg", open, Some(Rc::new(move || Act::ChannelChat(chat.clone())))))
         })
 }
 

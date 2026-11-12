@@ -209,7 +209,7 @@ impl VectorApp {
         self.toast_err(rx, cx);
     }
 
-    fn voice_join(&mut self, community: String, channel: String, cx: &mut Context<Self>) {
+    pub(super) fn voice_join(&mut self, community: String, channel: String, cx: &mut Context<Self>) {
         if !self.live || self.voice.joining.is_some() {
             return;
         }
