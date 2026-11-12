@@ -639,7 +639,7 @@ pub fn load(bytes: &[u8]) -> Result<Scene, String> {
         let mut morphs: HashMap<usize, Vec<(usize, Vec<f64>, Vec<f64>)>> = HashMap::new();
         for layer in children_of(sid, "AnimationLayer") {
             for cn in children_of(layer, "AnimationCurveNode") {
-                if let Some(&(ni, k)) = links.iter().find(|(c, p, prop)| *c == cn && prop.as_deref() == Some("DeformPercent")).and_then(|(_, p, _)| morph_of.get(p)) {
+                if let Some(&(ni, k)) = links.iter().find(|(c, _, prop)| *c == cn && prop.as_deref() == Some("DeformPercent")).and_then(|(_, p, _)| morph_of.get(p)) {
                     let curve = links.iter().find(|(c, p, _)| *p == cn && class(*c) == Some("AnimationCurve")).map(|(c, _, _)| &by_id[c]);
                     if let Some(node) = curve {
                         let times: Vec<f64> = node.arr_i("KeyTime").iter().map(|&t| t as f64 / TICKS_PER_SECOND).collect();

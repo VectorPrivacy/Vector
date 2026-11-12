@@ -109,7 +109,7 @@ mod tests {
         let mut enc = enc.open().unwrap();
         let mut dec = super::Vp8::new().unwrap();
         let mut seen = Vec::new();
-        let mut drain = |enc: &mut ffmpeg::encoder::Video, dec: &mut super::Vp8, seen: &mut Vec<(u32, u32, Vec<u8>)>| {
+        let drain = |enc: &mut ffmpeg::encoder::Video, dec: &mut super::Vp8, seen: &mut Vec<(u32, u32, Vec<u8>)>| {
             let mut pkt = ffmpeg::Packet::empty();
             while enc.receive_packet(&mut pkt).is_ok() {
                 if let Some(pic) = dec.decode(pkt.data().unwrap(), 1 << 24).unwrap() {

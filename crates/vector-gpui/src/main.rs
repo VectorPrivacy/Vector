@@ -211,6 +211,7 @@ fn main() {
             .add_fonts(assets::fonts())
             .expect("bundled fonts");
         composer::bind_keys(cx);
+        miniapp::attach(cx);
         let bounds = Bounds::centered(None, size(px(args.size.0), px(args.size.1)), cx);
         let window = cx
             .open_window(

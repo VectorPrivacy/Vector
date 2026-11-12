@@ -14,16 +14,18 @@ use vector_media::miniapps::{self as core, realtime, state};
 mod host;
 
 #[cfg(not(target_os = "linux"))]
-mod host {
-    use super::{Event, Spec};
-    pub fn start(_: impl Fn(Event) + Send + Sync + 'static) {}
-    pub fn open(_: Spec) -> Result<(), String> {
-        Err("Mini Apps aren't in this build yet".into())
-    }
-    pub fn focus(_: &str, _: Option<String>) {}
-    pub fn eval(_: &str, _: String) {}
-    pub fn destroy(_: &str) {}
-    pub fn close(_: &str) {}
+#[path = "host_view.rs"]
+mod host;
+
+// Type-checked where it can't run, so a Linux build catches its breakage.
+#[cfg(all(test, target_os = "linux"))]
+#[allow(dead_code)]
+mod host_view;
+
+/// Mini App windows that GPUI itself opens need its loop; a no-op where GTK hosts them.
+pub fn attach(_cx: &mut gpui::App) {
+    #[cfg(not(target_os = "linux"))]
+    host::attach(_cx);
 }
 
 /// A window to open.
@@ -303,7 +305,12 @@ async fn start_isolated(label: &str, store: &str, href: Option<&str>) -> Result<
 }
 
 fn base_url(partition: &str) -> String {
-    format!("webxdc://{partition}.host/")
+    // WebView2 serves a custom scheme as `http://<scheme>.<host>`.
+    if cfg!(windows) {
+        format!("http://webxdc.{partition}.host/")
+    } else {
+        format!("webxdc://{partition}.host/")
+    }
 }
 
 #[derive(Deserialize)]

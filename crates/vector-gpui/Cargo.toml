@@ -109,6 +109,12 @@ objc2-app-kit = { version = "0.3", features = ["NSPasteboard"] }
 [target.'cfg(windows)'.dependencies]
 clipboard-win = "5"
 
+# Elsewhere wry lays the OS webview into a GPUI window of the app's own.
+[target.'cfg(not(target_os = "linux"))'.dependencies.wry]
+version = "=0.57.0"
+default-features = false
+features = ["os-webview"]
+
 # Mini Apps run in the OS webview, through the desktop client's own webview crate.
 [target.'cfg(target_os = "linux")'.dependencies]
 wry = { version = "=0.57.0", default-features = false, features = ["os-webview", "linux-body"] }

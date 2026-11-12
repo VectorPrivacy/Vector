@@ -98,6 +98,11 @@ pub mod isolated {
         core::stop_if(label, id)
     }
 
+    #[cfg(target_os = "macos")]
+    pub fn store_identifier(partition: &str) -> Option<[u8; 16]> {
+        core::store_identifier(partition)
+    }
+
     #[cfg(target_os = "linux")]
     pub fn enable_web_storage(view: &webkit2gtk::WebView) -> usize {
         core::enable_web_storage(view)
