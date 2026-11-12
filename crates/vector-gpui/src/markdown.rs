@@ -23,7 +23,7 @@ pub const MONO: &str = if cfg!(target_os = "macos") {
 
 /// First code point of the markers standing in for spoilers and shrugs while Marked's grammar
 /// parses around them (Supplementary Private Use Area-A: never typed).
-const MARK: u32 = 0xF0000;
+const MARK: u32 = 0xF8000;
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum ParaKind {
@@ -71,6 +71,20 @@ pub struct Ctx<'a> {
     pub tags: &'a [(String, Option<u32>)],
     /// Streamer Mode: text with hidden people's npubs and nprofiles masked, when any are.
     pub mask: Option<&'a dyn Fn(&str) -> Option<String>>,
+    /// Colour spans, indexed by the sentinels `textcolor::mark` put in the source.
+    pub colors: &'a [vector_core::text_color::ColorSpan],
+}
+
+/// Colour painting state: pass one counts each span's glyphs, pass two paints them.
+#[derive(Default)]
+struct Tc {
+    active: Vec<usize>,
+    seen: usize,
+    first: std::collections::HashMap<usize, usize>,
+    last: std::collections::HashMap<usize, usize>,
+    painting: HashSet<usize>,
+    palettes: Option<std::collections::HashMap<usize, crate::textcolor::Palette>>,
+    glyph: usize,
 }
 
 enum Swap {
@@ -291,6 +305,7 @@ struct Builder<'a> {
     code: Option<(SharedString, String)>,
     quote_depth: u32,
     spoilers: u32,
+    tc: Option<Tc>,
 }
 
 impl Builder<'_> {
@@ -556,10 +571,77 @@ impl Builder<'_> {
     }
 
     fn styled(&mut self, t: &str, kind: Kind) {
+        if self.tc.is_none() {
+            return self.styled_as(t, kind, None);
+        }
+        let mut rest = t;
+        loop {
+            let at = rest.char_indices().find_map(|(i, c)| crate::textcolor::edge(c).map(|e| (i, c.len_utf8(), e)));
+            let chunk = at.as_ref().map_or(rest, |&(i, ..)| &rest[..i]);
+            self.painted(chunk, kind.clone());
+            let Some((i, len, e)) = at else { break };
+            let tc = self.tc.as_mut().expect("tc");
+            match e {
+                crate::textcolor::Edge::Open(n) => tc.active.push(n),
+                crate::textcolor::Edge::Shut(n) => {
+                    if let Some(k) = tc.active.iter().rposition(|&x| x == n) {
+                        tc.active.remove(k);
+                    }
+                }
+            }
+            rest = &rest[i + len..];
+        }
+    }
+
+    /// `tcPaint`: plain text under a span gets the top span's colour per glyph; an outer
+    /// gradient flows on under an inner span.
+    fn painted(&mut self, t: &str, kind: Kind) {
+        if t.is_empty() {
+            return;
+        }
+        let tc = self.tc.as_mut().expect("tc");
+        let Some(&top) = tc.active.iter().max().filter(|_| kind == Kind::Plain) else {
+            return self.styled_as(t, kind, None);
+        };
+        let shows = |g: &str| !g.chars().all(char::is_whitespace);
+        let Some(palettes) = &tc.palettes else {
+            for &i in &tc.active {
+                tc.first.entry(i).or_insert(tc.seen);
+            }
+            tc.seen += t.graphemes(true).filter(|g| shows(g)).count();
+            for &i in &tc.active {
+                tc.last.insert(i, tc.seen);
+            }
+            tc.painting.insert(top);
+            return self.styled_as(t, kind, None);
+        };
+        let Some(palette) = palettes.get(&top) else {
+            tc.glyph += t.graphemes(true).filter(|g| shows(g)).count();
+            return self.styled_as(t, kind, None);
+        };
+        let start = tc.first.get(&top).copied().unwrap_or(0);
+        let mut colors = Vec::new();
+        let mut run = None;
+        for g in t.graphemes(true) {
+            if shows(g) {
+                run = Some(palette.at(tc.glyph.saturating_sub(start)));
+                tc.glyph += 1;
+            }
+            colors.push((g, run));
+        }
+        for (g, c) in colors {
+            self.styled_as(g, kind.clone(), c);
+        }
+    }
+
+    fn styled_as(&mut self, t: &str, kind: Kind, paint: Option<Hsla>) {
         if t.is_empty() {
             return;
         }
         let mut look = self.look();
+        if let Some(c) = paint {
+            look.color = Hsla { a: look.color.a, ..c };
+        }
         match kind {
             Kind::Link(_) | Kind::LinkTip(..) => look.color = gpui::rgb(0x59fcb3).into(),
             Kind::Mention(_) | Kind::Tag(None) => {
@@ -1070,7 +1152,7 @@ pub fn shortcodes(t: &str) -> Vec<(usize, usize)> {
 pub fn parse(src: &str, ctx: &Ctx) -> Vec<Block> {
     let mut swaps = Vec::new();
     let chunks = prepare(src, &mut swaps);
-    let mut b = Builder {
+    let builder = |tc| Builder {
         ctx,
         swaps: &swaps,
         stack: vec![Frame::Root(Vec::new())],
@@ -1080,9 +1162,37 @@ pub fn parse(src: &str, ctx: &Ctx) -> Vec<Block> {
         code: None,
         quote_depth: 0,
         spoilers: 0,
+        tc,
     };
+    let colored = !ctx.colors.is_empty() && src.chars().any(crate::textcolor::is_sentinel);
+    let mut tc = None;
+    if colored {
+        let mut b = builder(Some(Tc::default()));
+        run(&mut b, &chunks);
+        let mut t = b.tc.take().unwrap_or_default();
+        t.palettes = Some(
+            t.painting
+                .iter()
+                .filter_map(|&i| {
+                    let n = t.last.get(&i)? - t.first.get(&i)?;
+                    Some((i, crate::textcolor::Palette::new(ctx.colors.get(i)?, n)))
+                })
+                .collect(),
+        );
+        t.active.clear();
+        tc = Some(t);
+    }
+    let mut b = builder(tc);
+    run(&mut b, &chunks);
+    match b.stack.into_iter().next() {
+        Some(Frame::Root(blocks)) => blocks,
+        _ => Vec::new(),
+    }
+}
+
+fn run(b: &mut Builder, chunks: &[(bool, String)]) {
     let opts = Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TABLES;
-    for (sub, text) in &chunks {
+    for (sub, text) in chunks {
         if *sub {
             b.open_para(ParaKind::Sub);
             for ev in Parser::new_ext(text, opts) {
@@ -1143,10 +1253,6 @@ pub fn parse(src: &str, ctx: &Ctx) -> Vec<Block> {
         b.flush_para();
     }
     b.flush_para();
-    match b.stack.into_iter().next() {
-        Some(Frame::Root(blocks)) => blocks,
-        _ => Vec::new(),
-    }
 }
 
 /// Plain text for a one-line preview: markdown and markers dropped (the reply quote's snippet).
@@ -1204,6 +1310,7 @@ mod custom_tests {
             mention: None,
             tags: &[],
             mask: None,
+            colors: &[],
         };
         let blocks = parse("Have you seen this? :grin: and 21:20:30", &ctx);
         let Block::Para(p) = &blocks[0] else { panic!() };
@@ -1229,6 +1336,7 @@ mod custom_tests {
             mention: None,
             tags: &[],
             mask: Some(&mask),
+            colors: &[],
         };
         let kinds = |src: &str| -> Vec<Kind> {
             let blocks = parse(src, &ctx);

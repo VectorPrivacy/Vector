@@ -1035,6 +1035,7 @@ fn rich(
             mention: Some(&|npub: &str| env.store.name(npub)),
             tags: &[],
             mask: Some(&|t: &str| env.store.stream_mask(t)),
+            colors: &[],
             custom: custom
                 .as_ref()
                 .map(|f| f as &dyn Fn(&str) -> Option<crate::media::Custom>),

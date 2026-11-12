@@ -401,7 +401,45 @@ fn content(ctx: &Ctx, m: &Message) -> AnyElement {
     let id = m.id.clone();
     let act = ctx.on_act.clone();
     let click: OnClick = Rc::new(move |t, w, cx| act(&id, Act::Text(t), w, cx));
-    let content = crate::texttime::spans_to_codes(&m.content, &m.text_spans);
+    use vector_core::text_spans::TextSpan;
+    let colors: Vec<vector_core::text_color::ColorSpan> = m
+        .text_spans
+        .iter()
+        .filter_map(|s| match s {
+            TextSpan::Color(c) => Some(c.clone()),
+            _ => None,
+        })
+        .collect();
+    let times: Vec<(usize, usize)> = m
+        .text_spans
+        .iter()
+        .filter_map(|s| match s {
+            TextSpan::Time(t) => Some((t.from as usize, t.to as usize)),
+            _ => None,
+        })
+        .collect();
+    let marked = crate::textcolor::mark(&m.content, &colors, &times);
+    let content = match &marked {
+        Some((text, at)) => {
+            let moved = |x: u32, inclusive: bool| {
+                x + at.iter().filter(|&&a| if inclusive { a <= x as usize } else { a < x as usize }).count() as u32
+            };
+            let spans: Vec<TextSpan> = m
+                .text_spans
+                .iter()
+                .filter_map(|s| match s {
+                    TextSpan::Time(t) => Some(TextSpan::Time(vector_core::text_time::TimeSpan {
+                        from: moved(t.from, true),
+                        to: moved(t.to, false),
+                        ..t.clone()
+                    })),
+                    _ => None,
+                })
+                .collect();
+            std::borrow::Cow::Owned(crate::texttime::spans_to_codes(text, &spans).into_owned())
+        }
+        None => crate::texttime::spans_to_codes(&m.content, &m.text_spans),
+    };
     let mut text = crate::newchat::replace_invite_links(&content, "");
     if let std::borrow::Cow::Owned(s) = crate::packs::strip(&text) {
         text = s.into();
@@ -418,10 +456,15 @@ fn content(ctx: &Ctx, m: &Message) -> AnyElement {
         t.starts_with("-# ")
             || (t.starts_with('#') && t.trim_start_matches('#').starts_with([' ', '\t']))
     });
-    if !headed && let Some(n @ 1..=6) = emoji::only_emoji_count(&text) {
+    let bare: std::borrow::Cow<str> = if marked.is_some() {
+        text.chars().filter(|&c| !crate::textcolor::is_sentinel(c)).collect::<String>().into()
+    } else {
+        text.as_ref().into()
+    };
+    if !headed && let Some(n @ 1..=6) = emoji::only_emoji_count(&bare) {
         let _ = n;
         let mut row = div().flex().items_center().py(px(4.));
-        for g in unicode_segmentation::UnicodeSegmentation::graphemes(text.as_ref(), true) {
+        for g in unicode_segmentation::UnicodeSegmentation::graphemes(bare.as_ref(), true) {
             if let Some(src) = emoji::twemoji(g) {
                 row = row.child(img(src).size(px(50.)).flex_shrink_0());
             }
@@ -445,6 +488,7 @@ fn content(ctx: &Ctx, m: &Message) -> AnyElement {
             mention: Some(&|npub: &str| ctx.store.chat_name(npub, &ctx.chat.id)),
             tags: &chips,
             mask: Some(&|t: &str| ctx.store.stream_mask(t)),
+            colors: if marked.is_some() { &colors } else { &[] },
             custom: custom
                 .as_ref()
                 .map(|f| f as &dyn Fn(&str) -> Option<crate::media::Custom>),

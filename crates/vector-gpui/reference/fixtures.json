@@ -654,6 +654,47 @@
      "edited": false
     },
     {
+     "id": "c011111111111111111111111111111111111111111111111111111111111111",
+     "content": "Colours landed: rainbow text, a **bold gradient** run and a solid one.",
+     "replied_to": "",
+     "preview_metadata": null,
+     "attachments": [],
+     "reactions": [],
+     "at": 1794362310000,
+     "pending": false,
+     "failed": false,
+     "mine": false,
+     "npub": "npub15387nevpzd0u700y2t24ym9l0zxe8fsxx2w7qn47ysn6mndn9gvqqmlahu",
+     "edited": false,
+     "text_spans": [
+      {
+       "kind": "color",
+       "from": 16,
+       "to": 28,
+       "effect": "rainbow"
+      },
+      {
+       "kind": "color",
+       "from": 32,
+       "to": 53,
+       "effect": "gradient",
+       "colors": [
+        "#ff4f8b",
+        "#4fb3ff"
+       ]
+      },
+      {
+       "kind": "color",
+       "from": 60,
+       "to": 69,
+       "effect": "solid",
+       "colors": [
+        "#ffb020"
+       ]
+      }
+     ]
+    },
+    {
      "id": "c045acf2d273a786b030c9bc52f82e5208621ae4f0f7400c6ed71f088498e0d3",
      "content": "👍",
      "replied_to": "",

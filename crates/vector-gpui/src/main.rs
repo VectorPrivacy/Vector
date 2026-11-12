@@ -56,6 +56,7 @@ mod shortcodes;
 mod simd;
 mod startmenu;
 mod switcher;
+mod textcolor;
 mod texttime;
 mod theme;
 mod timeline;
