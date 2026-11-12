@@ -1462,6 +1462,10 @@ impl TextInput {
         self
     }
 
+    pub fn look(&self) -> &Look {
+        &self.look
+    }
+
     pub fn set_look(&mut self, look: Look, cx: &mut Context<Self>) {
         self.look = look;
         cx.notify();

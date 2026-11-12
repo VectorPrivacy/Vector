@@ -646,8 +646,26 @@ pub fn slim_header(
         )
 }
 
+/// The roster's search: `body.ws`'s slim pill, else the boxed field.
+pub fn member_search_look(slim: bool) -> crate::composer::Look {
+    crate::composer::Look {
+        family: INTER,
+        weight: FontWeight::MEDIUM,
+        size: px(if slim { 16. } else { 13. }),
+        line_height: px(if slim { 20. } else { 16. }),
+        color: c(0xffffff),
+        placeholder: c(0x757575),
+        ..Default::default()
+    }
+}
+
 fn status_line(text: &str) -> AnyElement {
-    let look = crate::inline::Look::new(INTER, 11.5, 15.5, white_a(0.38));
+    let slim = crate::theme::is_slim();
+    let look = if slim {
+        crate::inline::Look::new(INTER, 12., 16.2, white_a(0.38))
+    } else {
+        crate::inline::Look::new(INTER, 11.5, 15.5, white_a(0.38))
+    };
     crate::inline::inline(crate::preview::atoms(text, usize::MAX, &look), look)
         .single_line()
         .into_any_element()
@@ -662,13 +680,15 @@ fn member_row(store: &Store, cid: &str, npub: &str, owner: bool, unlisted: Optio
     let key = SharedString::from(format!("roster:{npub}"));
     let (tap, k, n) = (on.clone(), key.clone(), npub.to_string());
     let (menu, m) = (on.clone(), npub.to_string());
+    // Phone widths keep the base roster row; `body.ws` tightens it around a larger avatar.
+    let slim = crate::theme::is_slim();
     div()
         .id(SharedString::from(format!("member-{npub}")))
-        .h(px(40.))
+        .h(px(if slim { 46. } else { 40. }))
         .rounded(px(6.))
         .flex()
         .items_center()
-        .px(px(8.))
+        .px(px(if slim { 10. } else { 8. }))
         .cursor_pointer()
         .hover(|d| d.bg(white_a(0.045)))
         .on_click(move |_, w, cx| tap(Act::Member(n.clone(), k.clone()), w, cx))
@@ -679,12 +699,12 @@ fn member_row(store: &Store, cid: &str, npub: &str, owner: bool, unlisted: Optio
         .child(
             div()
                 .relative()
-                .child(crate::ui::avatar(store, npub, 32.))
+                .child(crate::ui::avatar(store, npub, if slim { 25. } else { 32. }))
                 .child(crate::kit::anchor(anchors, key)),
         )
         .child(
             div()
-                .ml(px(12.))
+                .ml(px(if slim { 10. } else { 12. }))
                 .flex_1()
                 .min_w_0()
                 .flex()
@@ -697,9 +717,9 @@ fn member_row(store: &Store, cid: &str, npub: &str, owner: bool, unlisted: Optio
                         .child(
                             div()
                                 .truncate()
-                                .font_weight(FontWeight::SEMIBOLD)
+                                .font_weight(if slim { FontWeight::NORMAL } else { FontWeight::SEMIBOLD })
                                 .text_size(px(14.))
-                                .line_height(px(18.))
+                                .line_height(px(if slim { 24. } else { 18. }))
                                 .text_color(c(0xf7f4f4))
                                 .child(store.name_in(npub, Some(cid))),
                         )
@@ -734,8 +754,8 @@ fn member_row(store: &Store, cid: &str, npub: &str, owner: bool, unlisted: Optio
                 .children(status.map(|s| {
                     div()
                         .truncate()
-                        .text_size(px(11.5))
-                        .line_height(px(15.5))
+                        .text_size(px(if slim { 12. } else { 11.5 }))
+                        .line_height(px(if slim { 16.2 } else { 15.5 }))
                         .text_color(white_a(0.38))
                         .child(status_line(&s))
                 })),
@@ -792,7 +812,7 @@ pub fn roster<E: ParentElement>(
                         .flex()
                         .items_start()
                         .pt(px(4.))
-                        .px(px(8.))
+                        .px(px(if crate::theme::is_slim() { 6. } else { 8. }))
                         .gap(px(6.))
                         .cursor_pointer()
                         .on_click(click(on, move || Act::Fold(key.to_string())))

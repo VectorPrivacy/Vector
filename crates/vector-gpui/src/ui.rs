@@ -5141,6 +5141,11 @@ impl Render for VectorApp {
         self.vw = f32::from(window.viewport_size().width);
         let slim = self.vw < slim_ops::WIDE_MIN;
         crate::theme::set_slim(slim);
+        if let Some(v) = &self.community
+            && v.search.read(cx).look().size != crate::community::member_search_look(slim).size
+        {
+            v.search.update(cx, |t, cx| t.set_look(crate::community::member_search_look(slim), cx));
+        }
         self.is_slim = slim;
         self.archive.slim = slim;
         if let Some(s) = self.settings.as_mut() {
@@ -8912,15 +8917,7 @@ impl VectorApp {
         };
         if self.community.as_ref().is_none_or(|v| v.id != id) {
             let search = cx.new(|cx| {
-                TextInput::new("Search Members...", cx).with_look(crate::composer::Look {
-                    family: INTER,
-                    weight: FontWeight::MEDIUM,
-                    size: px(13.),
-                    line_height: px(16.),
-                    color: c(0xffffff),
-                    placeholder: c(0x757575),
-                    ..Default::default()
-                })
+                TextInput::new("Search Members...", cx).with_look(crate::community::member_search_look(self.is_slim))
             });
             cx.subscribe(&search, |_, _, _: &crate::composer::InputChanged, cx| {
                 cx.notify()
