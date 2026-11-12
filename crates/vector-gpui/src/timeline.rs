@@ -30,6 +30,10 @@ pub const TEXT_LH: f32 = 21.;
 pub enum Act {
     /// Older history failed to load: ask again.
     RetryHistory,
+    /// An avatar or name tapped: their mini profile, beside what was painted under the key.
+    Mini(String, SharedString),
+    /// Right-clicked: in a community, their member menu.
+    AuthorMenu(String, SharedString, gpui::Point<gpui::Pixels>),
     Text(Target),
     Hover(bool),
     React,
@@ -100,6 +104,7 @@ pub struct Ctx<'a> {
     pub rules: Option<&'a crate::mentions::Rules>,
     /// The command names the chat's bots declare, once known.
     pub commands: Option<&'a HashSet<String>>,
+    pub anchors: &'a crate::kit::Anchors,
 }
 
 /// `_dmsgIsPinged`: a tag of me, an authorised `@everyone`, a Role I hold, or a reply to me.
@@ -192,6 +197,14 @@ fn avatar(store: &Store, npub: &str, size: f32) -> AnyElement {
 }
 
 /// The row of `chat.messages[index]`. `first` heads a streak; `gap` is the space above it.
+fn author_menu(ctx: &Ctx, m: &Message, npub: &str, key: &SharedString) -> impl Fn(&gpui::MouseDownEvent, &mut Window, &mut App) + 'static {
+    let (act, id, npub, key) = (ctx.on_act.clone(), m.id.clone(), npub.to_string(), key.clone());
+    move |e, w, cx| {
+        cx.stop_propagation();
+        act(&id, Act::AuthorMenu(npub.clone(), key.clone(), e.position), w, cx)
+    }
+}
+
 pub fn message_row(ctx: &Ctx, index: usize, first: bool, gap: f32) -> AnyElement {
     let m = &ctx.chat.messages[index];
     let author = author_of(ctx, m);
@@ -212,10 +225,18 @@ pub fn message_row(ctx: &Ctx, index: usize, first: bool, gap: f32) -> AnyElement
         .flex_shrink_0()
         .pr(px(16.))
         .when(first, |g| {
+            let key = SharedString::from(format!("av:{}", m.id));
+            let (act, id, who, k) = (ctx.on_act.clone(), m.id.clone(), author.clone(), key.clone());
             g.child(
                 div()
+                    .id(key.clone())
+                    .relative()
                     .mt(px(if has_quote { 26. } else { 2. }))
-                    .child(avatar(ctx.store, &author, 40.)),
+                    .cursor_pointer()
+                    .on_click(move |_, w, cx| act(&id, Act::Mini(who.clone(), k.clone()), w, cx))
+                    .on_mouse_down(gpui::MouseButton::Right, author_menu(ctx, m, &author, &key))
+                    .child(avatar(ctx.store, &author, 40.))
+                    .child(crate::kit::anchor(ctx.anchors, key)),
             )
         })
         .when(!first, |g| {
@@ -253,8 +274,11 @@ pub fn message_row(ctx: &Ctx, index: usize, first: bool, gap: f32) -> AnyElement
                 .items_center()
                 .gap(px(8.))
                 .min_w_0()
-                .child(
+                .child({
+                    let key = SharedString::from(format!("au:{}", m.id));
+                    let (act, id, who, k) = (ctx.on_act.clone(), m.id.clone(), author.clone(), key.clone());
                     div()
+                        .id(key.clone())
                         .relative()
                         .top(px(1.))
                         .min_w_0()
@@ -265,8 +289,13 @@ pub fn message_row(ctx: &Ctx, index: usize, first: bool, gap: f32) -> AnyElement
                         .text_size(px(15.))
                         .line_height(px(19.5))
                         .text_color(c(0xffffff))
-                        .child(ctx.store.chat_name(&author, &ctx.chat.id)),
-                )
+                        .cursor_pointer()
+                        .hover(|d| d.underline())
+                        .on_click(move |_, w, cx| act(&id, Act::Mini(who.clone(), k.clone()), w, cx))
+                        .on_mouse_down(gpui::MouseButton::Right, author_menu(ctx, m, &author, &key))
+                        .child(ctx.store.chat_name(&author, &ctx.chat.id))
+                        .child(crate::kit::anchor(ctx.anchors, key))
+                })
                 .children(crate::community::author_badge(
                     ctx.store,
                     &ctx.chat.id,

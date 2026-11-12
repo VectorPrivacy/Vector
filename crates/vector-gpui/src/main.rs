@@ -12,6 +12,7 @@ mod commsettings;
 mod community;
 mod rail;
 mod voice;
+mod miniprofile;
 mod cmdform;
 mod commands;
 mod composer;

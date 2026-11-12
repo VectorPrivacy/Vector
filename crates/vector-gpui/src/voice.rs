@@ -133,7 +133,8 @@ pub enum Act {
     Deafen,
     /// Right-click on a member: (community, channel, npub, where).
     Menu(String, String, String, Point<Pixels>),
-    Profile(String),
+    /// A member tapped: their mini profile, beside what was painted under the key.
+    Profile(String, String, SharedString),
     /// The bar's tap: back to the call's channel.
     Open(String, String),
     /// The bar dragged: it shares the 1:1 pill's place.
@@ -165,7 +166,8 @@ fn icon(path: &'static str, size: f32, color: gpui::Hsla) -> gpui::Svg {
 }
 
 /// `.chatlist-voice-member` rows under a voice channel: who is in its call, whether or not we are.
-pub fn members(voice: &Voice, store: &Store, community: &str, channel: &str, me: &str, on: &OnAct) -> AnyElement {
+pub fn members(voice: &Voice, store: &Store, community: &str, channel: &str, on: &OnAct, anchors: &crate::kit::Anchors) -> AnyElement {
+    let me = store.my_npub.as_str();
     let live = voice.session.as_ref().filter(|s| s.channel_id == channel);
     let mut list = div().flex().flex_col();
     if voice.joining.as_deref() == Some(channel) {
@@ -187,10 +189,11 @@ pub fn members(voice: &Voice, store: &Store, community: &str, channel: &str, me:
         let flag = |path: &'static str, server: bool| {
             icon(path, 12., if server { c(crate::call::DANGER) } else { white_a(0.45) })
         };
-        let npub = p.npub.clone();
+        let key = SharedString::from(format!("voice-m-{channel}-{}", p.npub));
         list = list.child(
             div()
-                .id(SharedString::from(format!("voice-m-{channel}-{}", p.npub)))
+                .id(key.clone())
+                .relative()
                 .h(px(28.))
                 .pl(px(34.))
                 .pr(px(8.))
@@ -201,7 +204,8 @@ pub fn members(voice: &Voice, store: &Store, community: &str, channel: &str, me:
                 .text_color(if speaking { c(0xffffff) } else { white_a(0.6) })
                 .cursor_pointer()
                 .hover(|d| d.text_color(white_a(0.85)))
-                .on_click(click(on, Act::Profile(npub)))
+                .on_click(click(on, Act::Profile(p.npub.clone(), community.to_string(), key.clone())))
+                .child(crate::kit::anchor(anchors, key))
                 .on_mouse_down(gpui::MouseButton::Right, menu(on, community, channel, &p.npub))
                 .child(
                     div()

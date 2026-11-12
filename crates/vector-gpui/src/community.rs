@@ -43,6 +43,10 @@ pub enum Act {
     /// The open channel's ⋯.
     ChatMenu,
     EditChannel(String),
+    /// A member tapped: their mini profile, beside what was painted under the key.
+    Member(String, SharedString),
+    /// A member right-clicked: their menu.
+    MemberMenu(String, gpui::Point<gpui::Pixels>),
 }
 
 pub type OnAct = Rc<dyn Fn(Act, &mut Window, &mut App)>;
@@ -234,7 +238,7 @@ pub fn sidebar(
     open: Option<&str>,
     raid: bool,
     on: &OnAct,
-    (voice, on_voice): (&crate::voice::Voice, &crate::voice::OnAct),
+    (voice, on_voice, anchors): (&crate::voice::Voice, &crate::voice::OnAct, &crate::kit::Anchors),
 ) -> AnyElement {
     let row = |ch: &Channel| {
         let open = open == Some(ch.channel_id.as_str());
@@ -242,7 +246,7 @@ pub fn sidebar(
         if !ch.is_voice() || (voice.present(&ch.channel_id).is_empty() && voice.joining.as_deref() != Some(ch.channel_id.as_str())) {
             return vec![row];
         }
-        let who = crate::voice::members(voice, store, &com.community_id, &ch.channel_id, &store.my_npub, on_voice);
+        let who = crate::voice::members(voice, store, &com.community_id, &ch.channel_id, on_voice, anchors);
         vec![row, who]
     };
     let head = div()
@@ -558,20 +562,35 @@ fn status_line(text: &str) -> AnyElement {
         .into_any_element()
 }
 
-fn member_row(store: &Store, cid: &str, npub: &str, owner: bool) -> impl IntoElement {
+fn member_row(store: &Store, cid: &str, npub: &str, owner: bool, on: &OnAct, anchors: &crate::kit::Anchors) -> impl IntoElement {
     let status = store
         .profiles
         .get(npub)
         .map(|p| p.status.title.clone())
         .filter(|t| !t.is_empty());
+    let key = SharedString::from(format!("roster:{npub}"));
+    let (tap, k, n) = (on.clone(), key.clone(), npub.to_string());
+    let (menu, m) = (on.clone(), npub.to_string());
     div()
+        .id(SharedString::from(format!("member-{npub}")))
         .h(px(40.))
         .rounded(px(6.))
         .flex()
         .items_center()
         .px(px(8.))
+        .cursor_pointer()
         .hover(|d| d.bg(white_a(0.045)))
-        .child(crate::ui::avatar(store, npub, 32.))
+        .on_click(move |_, w, cx| tap(Act::Member(n.clone(), k.clone()), w, cx))
+        .on_mouse_down(gpui::MouseButton::Right, move |e, w, cx| {
+            cx.stop_propagation();
+            menu(Act::MemberMenu(m.clone(), e.position), w, cx)
+        })
+        .child(
+            div()
+                .relative()
+                .child(crate::ui::avatar(store, npub, 32.))
+                .child(crate::kit::anchor(anchors, key)),
+        )
         .child(
             div()
                 .ml(px(12.))
@@ -612,6 +631,7 @@ pub fn members_panel(
     view: &View,
     com: &Community,
     on: &OnAct,
+    anchors: &crate::kit::Anchors,
     cx: &App,
 ) -> impl IntoElement {
     let query = view.search.read(cx).text().trim().to_lowercase();
@@ -688,7 +708,7 @@ pub fn members_panel(
                 )
                 .when(!closed, |d| {
                     d.children(list.into_iter().map(|n| {
-                        member_row(store, &com.community_id, n, owner == Some(n.as_str()))
+                        member_row(store, &com.community_id, n, owner == Some(n.as_str()), on, anchors)
                     }))
                 })
         })

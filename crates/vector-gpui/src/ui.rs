@@ -234,6 +234,10 @@ pub struct VectorApp {
     menu_sliding: Rc<Cell<Option<usize>>>,
     voice: crate::voice::Voice,
     voice_ticking: bool,
+    mini_profile: Option<crate::miniprofile::Mini>,
+    anchors: kit::Anchors,
+    /// The role a member's change is under way for.
+    role_busy: Option<String>,
 }
 
 #[derive(Clone, PartialEq)]
@@ -329,9 +333,27 @@ enum MenuAct {
         to: Option<String>,
     },
     ViewProfile(String),
+    MemberNickname(String, String),
+    /// View Profile atop a member's menu: (npub, community, anchor key).
+    MemberMini(String, String, SharedString),
+    MemberTimeout(String, String, u64),
+    /// Kick, or (true) ban, once confirmed.
+    MemberRemove(String, String, bool),
+    /// Give (`on`) or take a role; the menu stays open and repaints.
+    MemberRole {
+        community: String,
+        npub: String,
+        role: String,
+        on: bool,
+    },
 }
 
 enum PopupAct {
+    RemoveMember {
+        community: String,
+        npub: String,
+        ban: bool,
+    },
     RailRename(String),
     NexusUninstall(String),
     Notice,
@@ -451,6 +473,10 @@ mod chatlist_ops;
 mod rail_ops;
 #[path = "ui_voice.rs"]
 mod voice_ops;
+#[path = "ui_miniprofile.rs"]
+mod miniprofile_ops;
+#[path = "ui_members.rs"]
+mod members_ops;
 
 impl VectorApp {
     fn base(store: Store, live: bool, window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -807,6 +833,9 @@ impl VectorApp {
             menu_sliding: Default::default(),
             voice: Default::default(),
             voice_ticking: false,
+            mini_profile: None,
+            anchors: Default::default(),
+            role_busy: None,
         }
     }
 
@@ -1505,8 +1534,16 @@ impl VectorApp {
                 cx,
             ),
             MenuAct::StartTogglePin(key) => self.start_pin(key, cx),
+            act @ (MenuAct::MemberNickname(..) | MenuAct::MemberMini(..) | MenuAct::MemberTimeout(..) | MenuAct::MemberRemove(..)) => {
+                self.member_menu_act(act, window, cx);
+            }
             act @ (MenuAct::VoiceVolume(..) | MenuAct::VoiceModerate { .. } | MenuAct::ViewProfile(_)) => {
                 self.voice_menu_act(act, cx);
+            }
+            MenuAct::MemberRole { community, npub, role, on } => {
+                acts.insert(ix.min(acts.len()), MenuAct::Nothing);
+                self.menu = Some((at, items, acts));
+                self.member_role(community, npub, role, on, cx);
             }
             MenuAct::VoiceSlide(npub) => {
                 acts.insert(ix.min(acts.len()), MenuAct::VoiceSlide(npub));
@@ -2891,7 +2928,10 @@ impl VectorApp {
             Target::Code(text) => {
                 cx.write_to_clipboard(gpui::ClipboardItem::new_string(text.to_string()))
             }
-            Target::Mention(npub) => self.open_profile(npub.to_string(), cx),
+            Target::Mention(npub) => {
+                let at = gpui::Bounds::new(window.mouse_position(), gpui::size(px(0.), px(0.)));
+                self.show_mini(npub.to_string(), None, Some(at), cx)
+            }
         }
     }
 
@@ -2914,6 +2954,11 @@ impl VectorApp {
     ) {
         use timeline::Act;
         match act {
+            Act::Mini(npub, key) => {
+                let at = self.anchors.borrow().get(&key).copied();
+                self.show_mini(npub, None, at, cx);
+            }
+            Act::AuthorMenu(npub, key, at) => self.author_menu(npub, key, at, cx),
             Act::RetryHistory => {
                 if let Some(open) = self.open.clone() {
                     self.history_net.remove(open.as_ref());
@@ -3795,6 +3840,7 @@ impl VectorApp {
                 backend::calls::allow_realtime();
                 then(self, cx);
             }
+            PopupAct::RemoveMember { community, npub, ban } => self.remove_member(community, npub, ban, cx),
             PopupAct::Logout => {
                 let me = self.store.borrow().my_npub.clone();
                 self.settings = None;
@@ -4143,7 +4189,7 @@ impl Render for VectorApp {
                                     .get(&com.community_id)
                                     .is_some_and(|r| r.0 || r.1 > 0),
                                 &on_community,
-                                (&self.voice, &self.on_voice_handler(cx)),
+                                (&self.voice, &self.on_voice_handler(cx), &self.anchors),
                             )),
                             None => row.child(chat_list(
                                 self,
@@ -4236,6 +4282,7 @@ impl Render for VectorApp {
                                         view,
                                         com,
                                         &on_community,
+                                        &self.anchors,
                                         cx,
                                     ))
                                     .into_any_element(),
@@ -4346,6 +4393,13 @@ impl Render for VectorApp {
                 };
                 crate::call::render(&self.call, &self.store.borrow(), &proc_, CHROME_H, &on)
             })
+            .children(self.mini_profile.as_ref().map(|m| {
+                let app = cx.entity().downgrade();
+                let on: crate::miniprofile::OnAct = Rc::new(move |act, window, cx| {
+                    app.update(cx, |app, cx| app.on_mini(act, window, cx)).ok();
+                });
+                crate::miniprofile::render(m, &store, window.viewport_size(), &self.anchors, &on)
+            }))
             .children({
                 // The call's own stage on screen carries the same controls.
                 let on_stage = self.voice.session.as_ref().is_some_and(|s| self.open.as_deref() == Some(s.channel_id.as_str()));
@@ -6076,6 +6130,7 @@ impl VectorApp {
             [Row::Edge(edge)] => store.chat(&id).map(|chat| history_edge(store, chat, &on_act, *edge)),
             _ => None,
         };
+        let anchors = self.anchors.clone();
         let messages = list(self.timeline.clone(), move |i, window, cx| {
             let rows_store = rows_store.borrow();
             let (Some(chat), Some(row)) = (rows_store.chat(&rows_id), rows.get(i)) else {
@@ -6084,6 +6139,7 @@ impl VectorApp {
             let revealed = revealed.borrow();
             let fail_reasons = fail_reasons.borrow();
             let ctx = timeline::Ctx {
+                anchors: &anchors,
                 rules: rules.as_deref(),
                 store: &rows_store,
                 chat,
@@ -7455,6 +7511,16 @@ impl VectorApp {
             Act::EditChannel(channel) => {
                 if let Some(id) = self.community.as_ref().map(|v| v.id.clone()) {
                     self.open_channel_editor(id, channel, false, window, cx);
+                }
+            }
+            Act::Member(npub, key) => {
+                let community = self.community.as_ref().map(|v| v.id.clone());
+                let at = self.anchors.borrow().get(&key).copied();
+                self.show_mini(npub, community, at, cx);
+            }
+            Act::MemberMenu(npub, at) => {
+                if let Some(community) = self.community.as_ref().map(|v| v.id.clone()) {
+                    self.member_menu(community, npub, at, cx);
                 }
             }
         }
@@ -10797,6 +10863,7 @@ impl VectorApp {
             return false;
         }
         if self.menu.take().is_some()
+            || self.mini_profile.take().is_some()
             || self.perm_prompt.take().is_some()
             || self.publish.take_if(|f| !f.busy()).is_some()
             || self.launch.take().is_some()

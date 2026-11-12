@@ -112,7 +112,10 @@ impl VectorApp {
                 self.voice_set(None, Some(on), cx);
             }
             Act::Menu(community, channel, npub, at) => self.voice_menu(community, channel, npub, at, cx),
-            Act::Profile(npub) => self.open_profile(npub, cx),
+            Act::Profile(npub, community, key) => {
+                let at = self.anchors.borrow().get(&key).copied();
+                self.show_mini(npub, Some(community), at, cx);
+            }
             Act::Open(community, channel) => {
                 if self.community.as_ref().map(|c| c.id.as_str()) != Some(community.as_str()) {
                     self.open_community(community, window, cx);

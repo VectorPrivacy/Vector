@@ -491,6 +491,24 @@ pub fn rich(html: &str) -> gpui::StyledText {
     gpui::StyledText::new(text).with_highlights(bold.into_iter().map(|r| (r, strong)))
 }
 
+/// Text safe inside a popup's `<b>`/`<br>` markup.
+pub fn escape(text: &str) -> String {
+    text.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+}
+
+/// Where tappable things were last painted, by key: what a popover anchors beside.
+pub type Anchors = std::rc::Rc<std::cell::RefCell<std::collections::HashMap<SharedString, gpui::Bounds<gpui::Pixels>>>>;
+
+/// Records its parent's bounds under `key` as it paints.
+pub fn anchor(anchors: &Anchors, key: SharedString) -> impl IntoElement {
+    let anchors = anchors.clone();
+    gpui::canvas(move |b, _, _| {
+        anchors.borrow_mut().insert(key, b);
+    }, |_, _, _, _| {})
+    .absolute()
+    .inset_0()
+}
+
 /// One row of a `.context-menu`.
 #[derive(Clone, Default)]
 pub struct MenuItem {

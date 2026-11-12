@@ -1078,6 +1078,44 @@ pub async fn set_role_holders(
     .await
 }
 
+/// `setMemberRole`: give (`on`) or take one role, the member's set re-read right before the
+/// write since a Grant replaces it whole.
+pub async fn set_member_role(community_id: String, npub: String, role_id: String, on: bool) -> Result<(), String> {
+    db::scoped(async move {
+        let view = roles_view(&community_id)?;
+        let mut held: Vec<String> = view["roles"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|r| r["holders"].as_array().is_some_and(|h| h.iter().any(|x| x.as_str() == Some(npub.as_str()))))
+            .filter_map(|r| r["role_id"].as_str().map(String::from))
+            .collect();
+        held.retain(|r| *r != role_id);
+        if on {
+            held.push(role_id);
+        }
+        VectorCore.set_member_roles(&community_id, &npub, held).await.map_err(|e| e.to_string())?;
+        super::emit("community_refreshed", community_id);
+        Ok(())
+    })
+    .await
+}
+
+/// `get_community_timeouts`: npub → { from, until }.
+pub fn timeouts(community_id: &str) -> serde_json::Value {
+    VectorCore.community_timeouts(community_id).unwrap_or_default()
+}
+
+/// Time a member out for `seconds` (at most 28 days); 0 lifts it.
+pub async fn timeout(community_id: String, npub: String, seconds: u64) -> Result<(), String> {
+    db::scoped(async move { VectorCore.timeout_member(&community_id, &npub, seconds).await.map_err(|e| e.to_string()) }).await
+}
+
+/// A cooperative kick: they can rejoin with a new invite.
+pub async fn kick(community_id: String, npub: String) -> Result<(), String> {
+    db::scoped(async move { VectorCore.kick_member(&community_id, &npub).await.map_err(|e| e.to_string()) }).await
+}
+
 /// `get_community_nicknames`: npub → nickname.
 pub fn nicknames(community_id: &str) -> std::collections::HashMap<String, String> {
     VectorCore
