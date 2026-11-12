@@ -233,3 +233,59 @@ pub fn render(bar: &Bar, window: &mut Window, on: OnEv) -> AnyElement {
         .children(label)
         .into_any_element()
 }
+
+/// `.scroll-return-bar`: back to the newest message, with the count of those waiting below.
+pub fn return_button(unread: u32, on: Rc<dyn Fn(&mut Window, &mut App)>) -> AnyElement {
+    let lit = unread > 0;
+    let label = match unread {
+        0 => "Jump to present".to_string(),
+        1 => "1 new message".to_string(),
+        n if n > 99 => "99+ new messages".to_string(),
+        n => format!("{n} new messages"),
+    };
+    let ink = if lit { c(PRIMARY) } else { c(0xffffff) };
+    div()
+        .absolute()
+        .left_0()
+        .right_0()
+        .bottom(px(42.))
+        .flex()
+        .justify_center()
+        .child(
+            div()
+                .id("chat-scroll-return")
+                .occlude()
+                .h(px(32.))
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .pl(px(12.))
+                .pr(px(16.))
+                .rounded_full()
+                .border_1()
+                .border_color(if lit { ca(0x33, 0xdb, 0x98, 0.45) } else { white_a(0.1) })
+                .bg(c(0x141414))
+                .shadow(vec![gpui::BoxShadow {
+                    color: ca(0, 0, 0, 0.5),
+                    offset: point(px(0.), px(4.)),
+                    blur_radius: px(16.),
+                    spread_radius: px(0.),
+                    inset: false,
+                }])
+                .font_family(INTER)
+                .text_size(px(13.))
+                .font_weight(FontWeight::MEDIUM)
+                .whitespace_nowrap()
+                .text_color(ink)
+                .cursor_pointer()
+                .hover(move |d| {
+                    let d = d.bg(c(0x1c1c1c));
+                    if lit { d } else { d.border_color(white_a(0.2)) }
+                })
+                .active(|d| d.opacity(0.75))
+                .on_click(move |_, w, cx| on(w, cx))
+                .child(gpui::svg().path("icons/chevron-down.svg").size(px(14.)).text_color(ink))
+                .child(label),
+        )
+        .into_any_element()
+}

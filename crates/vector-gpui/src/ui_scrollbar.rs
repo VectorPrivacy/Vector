@@ -101,6 +101,12 @@ impl VectorApp {
             }
             visible += f32::from(b.bottom().min(bottom) - b.top().max(edge)) / h;
         }
+        let from_end = f32::from(list.max_offset_for_scrollbar().y + list.scroll_px_offset_for_scrollbar().y);
+        let following = list.is_following_tail() || from_end < 2.;
+        if following && self.gap.is_none() {
+            self.unread_below = 0;
+        }
+        self.return_shown = self.gap.is_some() || (!following && from_end > 500.);
         let Some((i, into)) = top else { return };
         let gap = self.gap_index(&store);
         let mut j = match gap {

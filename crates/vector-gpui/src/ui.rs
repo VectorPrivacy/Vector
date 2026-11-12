@@ -246,6 +246,9 @@ pub struct VectorApp {
     /// A seek's run and its newest message, while a gap lies between it and the held tail.
     gap: Option<(String, String)>,
     paging_newer: bool,
+    /// Messages that arrived below a reader scrolled up.
+    unread_below: u32,
+    return_shown: bool,
     secret_guard: Option<crate::secretguard::Guard>,
     /// The next send has been through the secret guard.
     secret_pass: bool,
@@ -870,6 +873,8 @@ impl VectorApp {
             bar: Default::default(),
             gap: None,
             paging_newer: false,
+            unread_below: 0,
+            return_shown: false,
             secret_guard: None,
             secret_pass: false,
             anchors: Default::default(),
@@ -2408,6 +2413,13 @@ impl VectorApp {
                 else {
                     return;
                 };
+                let below = name == "message_new"
+                    && !msg.mine
+                    && self.open.as_deref() == Some(chat_id.as_str())
+                    && (self.gap.is_some() || !self.timeline.is_following_tail());
+                if below {
+                    self.unread_below += 1;
+                }
                 let known = if name == "message_new" {
                     self.store.borrow_mut().insert_message(&chat_id, msg)
                 } else {
@@ -2718,6 +2730,8 @@ impl VectorApp {
         }
         self.drop_gap();
         self.bar.reset();
+        self.unread_below = 0;
+        self.return_shown = false;
         self.read_anchor = self.store.borrow().chat(&id).map(|c| c.last_read.clone());
         if self.open.as_ref() != Some(&id) {
             self.leave_media(id.as_ref(), window);
@@ -6453,6 +6467,20 @@ impl VectorApp {
             crate::pins::drawer(&self.pins, store, &self.revealed.borrow(), clock, max_h, &self.pins_on(cx))
         });
         let bar = (alone.is_none() && drawer.is_none()).then(|| crate::scrollbar::render(&self.bar, window, self.bar_on(cx)));
+        let back = (self.return_shown && alone.is_none() && drawer.is_none()).then(|| {
+            let app = cx.entity().downgrade();
+            crate::scrollbar::return_button(
+                self.unread_below,
+                Rc::new(move |_, cx| {
+                    app.update(cx, |app, cx| {
+                        app.unread_below = 0;
+                        app.to_tail();
+                        cx.notify();
+                    })
+                    .ok();
+                }),
+            )
+        });
         let request = store
             .chat(&id)
             .is_some_and(|chat| store.is_request(chat))
@@ -6484,6 +6512,7 @@ impl VectorApp {
                     .when(paper.is_none(), |d| d.bg(c(MESSAGES_BG)))
                     .pt(px(if request.is_some() { 12. + 56. } else { 12. }))
                     .children(bar)
+                    .children(back)
                     .map(|d| match alone {
                         Some(edge) => d.child(div().size_full().flex().flex_col().justify_center().child(edge)),
                         None => d.child(messages),
