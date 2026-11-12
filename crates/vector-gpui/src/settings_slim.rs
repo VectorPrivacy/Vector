@@ -258,7 +258,7 @@ pub fn slim_view(s: &Settings, on: &OnAct, cx: &App) -> AnyElement {
         div()
             .id(SharedString::from(format!("sm-foot-{key}")))
             .text_size(px(15.))
-            .line_height(px(18.))
+            .line_height(px(24.))
             .text_color(c(0x5b6060))
             .hover(|d| d.text_color(c(0xffffff)))
             .cursor_pointer()
