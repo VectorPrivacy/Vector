@@ -423,12 +423,14 @@ impl Gpu {
                 mipmap_filter: wgpu::MipmapFilterMode::Linear,
                 ..Default::default()
             });
-            let flags = (m.normal_tex.is_some() as u32) << 2 | (m.vertex_colors as u32) << 5 | (m.unlit as u32) << 6;
+            let (normal, bump) = (m.normal_tex.is_some() && m.bump.is_none(), m.normal_tex.is_some() && m.bump.is_some());
+            let flags = (normal as u32) << 2 | (m.vertex_colors as u32) << 5 | (m.unlit as u32) << 6 | (bump as u32) << 7;
+            let normal_scale = m.bump.map_or(m.normal_scale, |b| [b, b]);
             let u = MatU {
                 base: m.base,
                 emissive: [m.emissive[0], m.emissive[1], m.emissive[2], 0.],
                 pbr: [m.metallic, m.roughness, m.occlusion, if let Alpha::Mask(c) = m.alpha { c } else { -1. }],
-                misc: [m.normal_scale[0], m.normal_scale[1], flags as f32, if m.alpha == Alpha::Blend { 0. } else { 1. }],
+                misc: [normal_scale[0], normal_scale[1], flags as f32, if m.alpha == Alpha::Blend { 0. } else { 1. }],
                 uv0: [m.uv_transform[0], m.uv_transform[1], m.uv_transform[2], 0.],
                 uv1: [m.uv_transform[3], m.uv_transform[4], 0., 0.],
             };

@@ -452,7 +452,14 @@ pub fn load(bytes: &[u8]) -> Result<Scene, String> {
             let t = texture(*c, scene);
             match prop {
                 "DiffuseColor" | "Diffuse" => m.base_tex = t,
-                "NormalMap" => m.normal_tex = t,
+                "NormalMap" => {
+                    m.normal_tex = t;
+                    m.bump = None;
+                }
+                "Bump" if m.normal_tex.is_none() => {
+                    m.normal_tex = t;
+                    m.bump = t.map(|_| num(&p, "BumpFactor").unwrap_or(1.) as f32);
+                }
                 "EmissiveColor" | "Emissive" => m.emissive_tex = t,
                 _ => {}
             }

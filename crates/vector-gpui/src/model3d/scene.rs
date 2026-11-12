@@ -153,6 +153,8 @@ pub struct Material {
     pub mr_tex: Option<TexRef>,
     pub normal_tex: Option<TexRef>,
     pub normal_scale: [f32; 2],
+    /// `normal_tex` is a height map at this scale, perturbing the normal as three.js's bump map.
+    pub bump: Option<f32>,
     pub occlusion_tex: Option<TexRef>,
     pub occlusion: f32,
     pub emissive: [f32; 3],
@@ -175,6 +177,7 @@ impl Default for Material {
             mr_tex: None,
             normal_tex: None,
             normal_scale: [1., 1.],
+            bump: None,
             occlusion_tex: None,
             occlusion: 1.,
             emissive: [0.; 3],

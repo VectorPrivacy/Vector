@@ -142,6 +142,8 @@ fn fs(i: Out, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
     let q1 = -dpdy(i.world);
     let st0 = dpdx(i.uv);
     let st1 = -dpdy(i.uv);
+    let hx = textureSample(t_normal, smp, i.uv + dpdx(i.uv)).x;
+    let hy = textureSample(t_normal, smp, i.uv + dpdy(i.uv)).x;
     let flags = u32(mat.misc.z);
     let face = select(-1.0, 1.0, front);
     var geo = normalize(i.nrm) * face;
@@ -172,6 +174,14 @@ fn fs(i: Out, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
         let det = max(dot(t, t), dot(b, b));
         let scale = select(face * inverseSqrt(det), 0.0, det == 0.0);
         n = normalize(t * (map_n.x * scale) + b * (map_n.y * scale) + geo * map_n.z);
+    } else if ((flags & 128u) != 0u) {
+        let dh = vec2<f32>(hx - n_s.x, hy - n_s.x) * mat.misc.x;
+        let sx = normalize(dpdx(i.world));
+        let sy = normalize(dpdy(i.world));
+        let r1 = cross(sy, geo);
+        let r2 = cross(geo, sx);
+        let det = dot(sx, r1) * face;
+        n = normalize(abs(det) * geo - sign(det) * (dh.x * r1 + dh.y * r2));
     }
 
     let metal = clamp(mat.pbr.x * mr_s.b, 0.0, 1.0);

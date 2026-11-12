@@ -92,6 +92,7 @@ pub fn load(bytes: &[u8]) -> Result<Scene, String> {
             mr_tex: pbr.metallic_roughness_texture().and_then(|i| tex(i.texture())),
             // Derivative tangents read green the other way up.
             normal_scale: [ns, -ns],
+            bump: None,
             normal_tex: normal.and_then(|n| tex(n.texture())),
             occlusion: occ.as_ref().map_or(1., |o| o.strength()),
             occlusion_tex: occ.and_then(|o| tex(o.texture())),
