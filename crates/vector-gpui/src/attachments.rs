@@ -696,7 +696,7 @@ pub fn xdc_url_card(ctx: &Ctx, m: &Message) -> Option<AnyElement> {
             file_box_on(ctx, &media, m, &att, FileState::Remote, Some(&label), tap(Act::XdcUrl(url)))
         }
     };
-    Some(div().mt(px(4.)).flex().flex_col().items_start().child(el).into_any_element())
+    Some(div().flex().flex_col().items_start().child(el).into_any_element())
 }
 
 fn file_box(
