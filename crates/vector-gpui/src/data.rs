@@ -38,6 +38,8 @@ struct Fixtures {
     embeds: HashMap<String, serde_json::Value>,
     #[serde(default)]
     packs: HashMap<String, vector_core::emoji_packs::EmojiPack>,
+    #[serde(default)]
+    marketplace: Vec<vector_core::webxdc::MarketplaceApp>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -193,6 +195,7 @@ pub struct Store {
     pub fixture_embeds: HashMap<String, serde_json::Value>,
     /// `fetch_emoji_pack_by_naddr`'s answers.
     pub fixture_packs: HashMap<String, vector_core::emoji_packs::EmojiPack>,
+    pub fixture_market: Vec<vector_core::webxdc::MarketplaceApp>,
     /// Each community's nicknames, npub → name.
     pub nicknames: HashMap<String, HashMap<String, String>>,
     /// Each community's logo and banner as local files, once resolved.
@@ -308,6 +311,7 @@ impl Store {
             fixture_presets: f.policy_presets,
             fixture_embeds: f.embeds,
             fixture_packs: f.packs,
+            fixture_market: f.marketplace,
             nicknames: f.nicknames,
             art: HashMap::new(),
             hidden_banners: Vec::new(),
@@ -346,6 +350,7 @@ impl Store {
             fixture_presets: None,
             fixture_embeds: HashMap::new(),
             fixture_packs: HashMap::new(),
+            fixture_market: Vec::new(),
             nicknames: HashMap::new(),
             art: HashMap::new(),
             hidden_banners: Vec::new(),

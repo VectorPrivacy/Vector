@@ -41,6 +41,7 @@ mod message;
 mod moderation;
 mod netdialog;
 mod newchat;
+mod nexus;
 mod packdetails;
 mod packs;
 mod picker;

@@ -82,6 +82,7 @@ pub struct VectorApp {
     attach: Option<std::time::Instant>,
     /// The attachment panel's Mini Apps view, while it shows.
     mini: Option<miniapps_ops::MiniPanel>,
+    nexus: Option<crate::nexus::Nexus>,
     launch: Option<miniapps_ops::Launch>,
     file_preview: Option<Entity<crate::filepreview::FilePreview>>,
     /// The avatar cropper, and the picked file it cuts.
@@ -283,9 +284,11 @@ enum MenuAct {
         category: bool,
     },
     CopyId(String, &'static str),
+    NexusLink(String),
 }
 
 enum PopupAct {
+    NexusUninstall(String),
     Notice,
     OpenWeb(String),
     DeleteChannel {
@@ -391,6 +394,8 @@ mod moderation_ops;
 mod popout_ops;
 #[path = "ui_miniapps.rs"]
 mod miniapps_ops;
+#[path = "ui_nexus.rs"]
+mod nexus_ops;
 
 impl VectorApp {
     fn base(store: Store, live: bool, window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -690,6 +695,7 @@ impl VectorApp {
             cropper: None,
             attach: None,
             mini: None,
+            nexus: None,
             launch: None,
             file_preview: None,
             profile: None,
@@ -794,6 +800,21 @@ impl VectorApp {
         if let Ok(state) = std::env::var("VECTOR_REC") {
             app.rec.fixture(&state);
             app.rec.can_dictate = std::env::var_os("VECTOR_TRANSCRIPT").is_some();
+        }
+        // Fixtures: VECTOR_NEXUS=discover|library|all|<app id> opens the App Store there.
+        if let Ok(at) = std::env::var("VECTOR_NEXUS") {
+            use crate::nexus::View;
+            let view = match at.as_str() {
+                "discover" => Some(View::Discover),
+                "library" => Some(View::Library),
+                "all" => Some(View::All),
+                "" | "default" => None,
+                _ => Some(View::Discover),
+            };
+            app.show_nexus(view, window, cx);
+            if !matches!(at.as_str(), "discover" | "library" | "all" | "" | "default") {
+                app.on_nexus(crate::nexus::Act::Details(at), window, cx);
+            }
         }
         // Fixtures: VECTOR_XDC=<package> launches it solo, through the real host and bridge.
         if let Ok(path) = std::env::var("VECTOR_XDC") {
@@ -1323,6 +1344,10 @@ impl VectorApp {
                 cx.write_to_clipboard(gpui::ClipboardItem::new_string(id));
                 self.toast = Some((format!("Copied {what} ID").into(), std::time::Instant::now()));
             }
+            MenuAct::NexusLink(id) => {
+                cx.write_to_clipboard(gpui::ClipboardItem::new_string(format!("https://vectorapp.io/go#nexus/{id}")));
+                self.toast = Some(("Copied App Link".into(), std::time::Instant::now()));
+            }
             MenuAct::Copy(text) => {
                 cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
                 self.toast = Some(("Copied".into(), std::time::Instant::now()));
@@ -1716,7 +1741,8 @@ impl VectorApp {
                         self.open_chat(me.into(), window, cx);
                     }
                     "settings" => self.open_settings("appearance", window, cx),
-                    _ => self.show_toast("Mini Apps aren't in this build yet", cx),
+                    "miniapps" => self.show_nexus(None, window, cx),
+                    _ => {}
                 }
             }
             Act::Open(key) => {
@@ -2185,6 +2211,7 @@ impl VectorApp {
                     self.refresh_rows(true);
                 }
             }
+            "marketplace_install_progress" | "marketplace_apps_updated" => self.nexus_event(name, &payload, cx),
             "miniapp_realtime_status" => {
                 let topic = payload.get("topic").and_then(Value::as_str).unwrap_or_default();
                 let peers: Vec<String> = payload
@@ -3517,6 +3544,7 @@ impl VectorApp {
                 self.call_go(then, cx);
             }
             PopupAct::RemoveMiniApp { name, pivx } => self.remove_miniapp(name, pivx, cx),
+            PopupAct::NexusUninstall(id) => self.nexus_uninstall_confirmed(id, cx),
             PopupAct::RealtimeThen(then) => {
                 backend::calls::allow_realtime();
                 then(self, cx);
@@ -3672,7 +3700,7 @@ impl Render for VectorApp {
                 let _ = window.drop_image(old);
             }
         }
-        if self.mini_animating() {
+        if self.mini_animating() || self.nexus.as_ref().is_some_and(|n| n.animating()) {
             window.request_animation_frame();
         }
         let popout = self.popout_view(window, cx);
@@ -3829,7 +3857,11 @@ impl Render for VectorApp {
                                 .child(crate::settings::view(settings, width, &on, cx)),
                         )
                     })
-                    .when(self.settings.is_none(), |row| {
+                    .when(self.settings.is_none() && self.nexus.is_some(), |row| {
+                        let width = f32::from(window.viewport_size().width) - RAIL_W;
+                        row.child(div().flex_1().min_w_0().h_full().children(self.nexus_view(width, cx)))
+                    })
+                    .when(self.settings.is_none() && self.nexus.is_none(), |row| {
                         match self
                             .community
                             .as_ref()
@@ -3854,7 +3886,7 @@ impl Render for VectorApp {
                             )),
                         }
                     })
-                    .when(self.settings.is_none(), |row| {
+                    .when(self.settings.is_none() && self.nexus.is_none(), |row| {
                         row.child(match (&self.profile, self.open.clone()) {
                             _ if self.create_community.is_some() => {
                                 let app = cx.entity().downgrade();

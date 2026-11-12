@@ -109,8 +109,7 @@ impl VectorApp {
                 });
             }
             apps.sort_by(|a, b| b.last.cmp(&a.last));
-            let hidden = vector_core::db::get_sql_setting(PIVX_HIDDEN.into()).ok().flatten().as_deref() == Some("true");
-            (apps, hidden)
+            (apps, backend::device::get(PIVX_HIDDEN).as_deref() == Some("true"))
         });
         cx.spawn(async move |this, cx| {
             let Ok((apps, hidden)) = rx.await else { return };
@@ -232,11 +231,7 @@ impl VectorApp {
         if let Some(m) = self.mini.as_mut() {
             m.pivx_hidden = hidden;
         }
-        if self.live {
-            let _ = backend::run(async move {
-                vector_core::db::set_sql_setting(PIVX_HIDDEN.into(), hidden.to_string())
-            });
-        }
+        backend::device::set(PIVX_HIDDEN, hidden.to_string());
         cx.notify();
     }
 
@@ -321,7 +316,7 @@ impl VectorApp {
         if !searching {
             tiles.push(
                 tile(0, "mini-nexus".into(), svg().path("icons/nexus.svg").size(px(26.)).text_color(c(PRIMARY)).into_any_element(), "App Store".into(), true)
-                    .on_click(cx.listener(|app, _, _, cx| app.show_toast("The App Store isn't in this build yet", cx)))
+                    .on_click(cx.listener(|app, _, window, cx| app.show_nexus(Some(crate::nexus::View::Discover), window, cx)))
                     .into_any_element(),
             );
         }
