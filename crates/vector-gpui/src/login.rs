@@ -13,6 +13,8 @@ use zeroize::Zeroizing;
 
 #[path = "loginnet.rs"]
 mod loginnet;
+#[path = "loginsigner.rs"]
+mod signer;
 
 use crate::backend::{self, account};
 use crate::composer::{Look, SendText, TextInput};
@@ -106,6 +108,7 @@ pub struct LoginView {
     adding: Option<bool>,
     picker: Option<Picker>,
     net: loginnet::LoginNet,
+    signer: signer::Signer,
     live: bool,
 }
 
@@ -131,9 +134,18 @@ impl LoginView {
         });
         let password = cx.new(|cx| {
             TextInput::new("Enter Password...", cx)
-                .with_look(field)
+                .with_look(field.clone())
                 .keep_on_submit()
         });
+        let bunker_url = cx.new(|cx| {
+            TextInput::new("bunker:// from Amber, etc.", cx)
+                .with_look(Look { masked: false, masked_size: None, ..field.clone() })
+                .keep_on_submit()
+        });
+        cx.subscribe_in(&bunker_url, window, |this, _, _: &SendText, window, cx| {
+            this.signer_connect(window, cx)
+        })
+        .detach();
         cx.subscribe_in(&key, window, |this, _, _: &SendText, window, cx| {
             this.import_key(window, cx)
         })
@@ -164,6 +176,7 @@ impl LoginView {
             adding: None,
             picker: None,
             net: Default::default(),
+            signer: signer::Signer::new(bunker_url),
             live: false,
         };
         if let Some(security) = unlock {
@@ -405,6 +418,9 @@ impl LoginView {
     }
 
     fn back_to_start(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.method == "signer" {
+            self.signer_leave(cx);
+        }
         account::abandon_pending();
         self.step = Step::Start;
         self.select_open = false;
@@ -960,13 +976,14 @@ impl LoginView {
         let pick = move |v: &'static str, window: &mut Window, cx: &mut App| {
             entity.update(cx, |this, cx| {
                 this.select_open = false;
-                if v == "signer" {
-                    this.show_error("Remote signers aren't available in this client yet.", cx);
-                } else {
-                    this.method = v;
-                    if v == "key" {
-                        window.focus(&this.key.focus_handle(cx), cx);
-                    }
+                if this.method == "signer" && v != "signer" {
+                    this.signer_leave(cx);
+                }
+                this.method = v;
+                if v == "key" {
+                    window.focus(&this.key.focus_handle(cx), cx);
+                } else if v == "signer" {
+                    window.focus(&this.signer.url.focus_handle(cx), cx);
                 }
                 cx.notify();
             })
@@ -1055,7 +1072,9 @@ impl LoginView {
             Step::Import => {
                 let back = cx.entity();
                 let mut block = div().flex().flex_col().items_center();
-                if self.method == "key" {
+                if self.method == "signer" {
+                    block = block.child(self.signer_block(cx));
+                } else if self.method == "key" {
                     block = block
                         .child(lg_title("Enter Your Private Key".into(), true, 0xffffff))
                         .child(self.field(
@@ -1371,6 +1390,7 @@ impl Render for LoginView {
         )
         .children(account_list)
         .children(self.net_modal(cx))
+        .children(self.signer_qr(cx))
         .children(self.pill(cx).map(|pill| div().absolute().top(px(118.)).left_0().right_0().flex().justify_center().child(pill)))
         .when_some(self.popup.clone(), |root, p| {
             let entity = cx.entity();

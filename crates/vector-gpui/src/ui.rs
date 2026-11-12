@@ -1098,7 +1098,11 @@ impl VectorApp {
             app.open_profile(npub, cx);
         }
         if let Ok(mode) = std::env::var("VECTOR_LOGIN") {
-            app.show_login((mode != "welcome").then_some("pin"), window, cx);
+            let signer = mode.strip_prefix("signer");
+            app.show_login((mode != "welcome" && signer.is_none()).then_some("pin"), window, cx);
+            if let (Some(rest), Screen::Login(view)) = (signer, &app.screen) {
+                view.clone().update(cx, |v, cx| v.fixture_signer(rest, window, cx));
+            }
         }
         if let Ok(n) = std::env::var("VECTOR_BADGE_CARD").map(|v| v.parse::<usize>().unwrap_or(1))
             && let Some(p) = app.profile.as_ref()

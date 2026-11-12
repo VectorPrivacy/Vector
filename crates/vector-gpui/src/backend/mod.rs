@@ -7,6 +7,7 @@ pub mod archive;
 pub mod attachments;
 pub mod chatlist;
 pub mod badges;
+pub mod bunker;
 pub mod calls;
 pub mod community;
 pub mod device;

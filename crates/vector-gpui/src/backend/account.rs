@@ -43,7 +43,7 @@ pub enum Imported {
 
 /// An account on disk is real once its setup committed: a stored key, or a keyless signer's
 /// identity. One abandoned before that holds neither.
-fn is_committed(npub: &str) -> bool {
+pub(super) fn is_committed(npub: &str) -> bool {
     if !db::get_accounts()
         .unwrap_or_default()
         .iter()
@@ -205,14 +205,14 @@ fn touch_last_active() {
     let _ = db::set_sql_setting("last_active".into(), now.to_string());
 }
 
-fn install_client() {
+pub(super) fn install_client() {
     let client = vector_core::nostr_client_builder()
         .monitor(Monitor::new(1024))
         .build();
     state::set_nostr_client_if_absent(client);
 }
 
-async fn insert_own_profile(npub: &str) {
+pub(super) async fn insert_own_profile(npub: &str) {
     let mut profile = Profile::new();
     profile.flags.set_mine(true);
     STATE.lock().await.insert_or_replace_profile(npub, profile);
@@ -326,14 +326,29 @@ pub async fn commit(
         }
     }
     let security = password.as_ref().map(|_| security_type);
-    db::settings::commit_account_setup(
-        &stored_key,
-        password.is_some(),
-        security,
-        stored_seed.as_deref(),
-        None,
-        kdf_row.as_deref(),
-    )?;
+    if vector_core::signer_kind() == SignerKind::Bunker {
+        let (url, remote_hex) = state::pending_bunker_setup()
+            .ok_or("Bunker setup state missing — re-run Connect Remote Signer")?;
+        db::settings::commit_bunker_account_setup(
+            &stored_key,
+            password.is_some(),
+            security,
+            &seal(&url)?,
+            &remote_hex,
+            None,
+            kdf_row.as_deref(),
+        )?;
+        state::clear_pending_bunker_setup();
+    } else {
+        db::settings::commit_account_setup(
+            &stored_key,
+            password.is_some(),
+            security,
+            stored_seed.as_deref(),
+            None,
+            kdf_row.as_deref(),
+        )?;
+    }
     if let Some(k) = &key {
         vector_core::ENCRYPTION_KEY.set(**k, &[&MY_SECRET_KEY]);
     }
@@ -372,6 +387,16 @@ fn stamp_fresh_account_profile() {
             }
         }
     });
+}
+
+/// The account staged for its security step, if any.
+pub(super) fn pending() -> Option<String> {
+    PENDING_ACCOUNT.lock().unwrap().clone()
+}
+
+pub(super) fn set_pending(npub: String) {
+    *FRESH_ACCOUNT_NPUB.lock().unwrap() = None;
+    *PENDING_ACCOUNT.lock().unwrap() = Some(npub);
 }
 
 /// Forget an account that was started but never committed.
@@ -413,7 +438,8 @@ pub async fn unlock(password: Option<Zeroizing<String>>) -> Result<String, Strin
 
     let kind =
         SignerKind::from_setting_str(&db::get_signer_type().unwrap_or_else(|_| "local".into()));
-    if !matches!(kind, SignerKind::Local) {
+    let bunker = matches!(kind, SignerKind::Bunker);
+    if !matches!(kind, SignerKind::Local | SignerKind::Bunker) {
         return Err(
             "This account signs with an external signer, which this client cannot use yet.".into(),
         );
@@ -441,6 +467,11 @@ pub async fn unlock(password: Option<Zeroizing<String>>) -> Result<String, Strin
     let keys = Keys::parse(&nsec).map_err(|_| "Invalid stored key".to_string())?;
     nsec.zeroize();
     store_identity(&keys);
+    // A bunker account's stored key is only its client keypair: the identity is the signer's.
+    if bunker {
+        let remote = super::bunker::reconnect(&keys).await?;
+        state::set_my_public_key(remote);
+    }
     drop(keys);
     super::transport::wait_for_active_network().await;
     install_client();
