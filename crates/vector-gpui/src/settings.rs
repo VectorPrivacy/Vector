@@ -3285,6 +3285,8 @@ pub struct AudioView {
     pub direct: bool,
     pub testing: bool,
     pub level: f32,
+    /// A call is up: the bench shows its mic instead of a test.
+    pub call: Option<f32>,
 }
 
 /// `.vselect-tag`: the pill that marks the system default.
@@ -3657,7 +3659,10 @@ fn calls_block(s: &Settings, on: &OnAct) -> AnyElement {
             .items_center()
             .gap(px(22.))
             .mb(px(16.))
-            .child(
+            .when_some(a.call, |d, _| {
+                d.child(div().flex_none().text_size(px(14.)).text_color(c(0xb2b2b2)).child("On a call"))
+            })
+            .when(a.call.is_none(), |d| d.child(
                 div()
                     .id("mic-test")
                     .w(px(86.))
@@ -3674,8 +3679,11 @@ fn calls_block(s: &Settings, on: &OnAct) -> AnyElement {
                     .cursor_pointer()
                     .on_click(click(on, || Act::MicTest))
                     .child(if a.testing { "Stop Test" } else { "Test Mic" }),
-            )
-            .child(voice_meter(a.level, a.testing)),
+            ))
+            .child(match a.call {
+                Some(level) => voice_meter(level, true),
+                None => voice_meter(a.level, a.testing),
+            }),
     );
     // `.st-group`'s 36px margin swallows the bench's 16.
     col = col.child(div().mt(px(20.)).child(group_label("Microphone", true)));

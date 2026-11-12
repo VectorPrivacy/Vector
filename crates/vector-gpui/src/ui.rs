@@ -2776,8 +2776,12 @@ impl VectorApp {
             "call_state" => {
                 self.call.apply_state(&payload);
                 self.call_started(cx);
+                self.sync_call_meter();
             }
-            "call_level" => self.call.apply_level(&payload),
+            "call_level" => {
+                self.call.apply_level(&payload);
+                self.sync_call_meter();
+            }
             "call_stats" => self.call.apply_stats(&payload),
             "audio_devices_changed" => self.reload_devices(cx),
             "synced_settings_updated" => {
@@ -4441,6 +4445,13 @@ impl VectorApp {
             .ok();
         })
         .detach();
+    }
+
+    fn sync_call_meter(&mut self) {
+        let live = self.call.live_mic();
+        if let Some(a) = self.settings.as_mut().and_then(|s| s.audio.as_mut()) {
+            a.call = live;
+        }
     }
 
     fn notice(&mut self, title: &str, text: String, cx: &mut Context<Self>) {
@@ -13507,6 +13518,7 @@ impl VectorApp {
                     direct: false,
                     testing: false,
                     level: 0.,
+                    call: self.call.live_mic(),
                 });
             }
             return;
@@ -13535,6 +13547,7 @@ impl VectorApp {
                         direct,
                         testing,
                         level: 0.,
+                        call: this.call.live_mic(),
                     });
                     cx.notify();
                 }
@@ -13612,6 +13625,7 @@ impl VectorApp {
             self.call.expanded = state == "open" || state == "video-open";
             self.call.maximized = (state == "video-max").then_some(1);
         }
+        self.sync_call_meter();
         cx.notify();
     }
 

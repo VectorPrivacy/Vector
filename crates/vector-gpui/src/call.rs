@@ -286,6 +286,11 @@ impl Call {
         false
     }
 
+    /// The mic's level while a call is up, for the audio settings' meter.
+    pub fn live_mic(&self) -> Option<f32> {
+        (self.id.is_some() && self.phase.is_some_and(|p| p != Phase::Ended)).then_some(self.levels.0)
+    }
+
     pub fn apply_level(&mut self, l: &Value) {
         if l.get("id").and_then(Value::as_str) != self.id.as_deref() {
             return;
