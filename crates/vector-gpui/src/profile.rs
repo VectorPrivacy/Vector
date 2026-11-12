@@ -552,8 +552,8 @@ pub fn pane(store: &Store, s: &Screen, on: &OnAct, window: &Window, cx: &App) ->
             1.,
         ));
     body = body.child(status_line);
-    // #profile-badges
-    {
+    // #profile-badges: empty, its margin collapses into the options'.
+    if s.badges.invites > 0 || s.badges.fawkes || s.badges.bug > 0 || s.badges.v2026 {
         let b = s.badges;
         let badge = |id: &'static str, src: SharedString, first: bool, which: Badge| {
             div()

@@ -5020,7 +5020,7 @@ impl Render for VectorApp {
                                 self,
                                 &self.store,
                                 &store,
-                                self.open.clone(),
+                                self.open.clone().or_else(|| self.profile.as_ref().and_then(|p| p.back.clone())),
                                 (self.requests_tab, self.tab_slid, no_messages),
                                 cx,
                             )),
