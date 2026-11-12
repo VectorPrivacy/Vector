@@ -12,6 +12,7 @@ pub mod embedvideo;
 pub mod xdcurl;
 pub mod calls;
 pub mod community;
+pub mod community_files;
 pub mod device;
 pub mod events;
 pub mod gifs;

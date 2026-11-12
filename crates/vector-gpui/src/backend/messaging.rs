@@ -235,7 +235,18 @@ pub async fn send_file(
     precompressed: Option<crate::message::types::CachedCompressedImage>,
 ) -> Result<(), String> {
     if !receiver.starts_with("npub1") {
-        return Err("Files can't be sent to a Community channel from this client yet".into());
+        return super::community_files::send_file(
+            receiver,
+            String::new(),
+            path,
+            name_override,
+            compress,
+            keep_metadata,
+            replied_to,
+            precompressed,
+        )
+        .await
+        .map(|_| ());
     }
     let reply = (!replied_to.is_empty()).then_some(replied_to.as_str());
     let config = file_send_config(&receiver);
@@ -347,9 +358,6 @@ pub async fn messages_around(
 
 /// The stopped recording, encoded once and sent as a nameless `.wav`.
 pub async fn send_voice(receiver: String, replied_to: String) -> Result<(), String> {
-    if !receiver.starts_with("npub1") {
-        return Err("Voice messages can't be sent to a Community channel from this client yet".into());
-    }
     let pending = vector_media::voice::AudioRecorder::global()
         .take_pending()
         .ok_or("No pending recording")?;
@@ -357,6 +365,9 @@ pub async fn send_voice(receiver: String, replied_to: String) -> Result<(), Stri
     let wav = tokio::task::spawn_blocking(move || pending.encode_wav())
         .await
         .map_err(|e| e.to_string())??;
+    if !receiver.starts_with("npub1") {
+        return super::community_files::send_voice(receiver, wav, replied_to).await;
+    }
     let reply = (!replied_to.is_empty()).then_some(replied_to.as_str());
     let config = file_send_config(&receiver);
     vector_core::sending::send_file_dm_with_meta(

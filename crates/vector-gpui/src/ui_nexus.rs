@@ -647,20 +647,38 @@ impl VectorApp {
         cx.notify();
     }
 
-    /// `nexusChatChoices`: the DMs you're talking in, newest first.
-    fn pick_chats(&self) -> Vec<(String, String, &'static str, Option<std::path::PathBuf>)> {
+    /// `nexusChatChoices`: the DMs you're talking in and the channels you can post in, newest first.
+    fn pick_chats(&self) -> Vec<(String, String, String, Option<std::path::PathBuf>, bool)> {
         let store = self.store.borrow();
-        let mut dms: Vec<(u64, &vector_core::SerializableChat)> = store
-            .chats
-            .iter()
-            .filter(|ch| ch.id.starts_with("npub1") && ch.id != store.my_npub && !ch.messages.is_empty())
-            .filter(|ch| !store.is_request(ch) && !store.profiles.get(&ch.id).is_some_and(|p| p.is_blocked))
-            .map(|ch| (crate::data::last_activity(ch), ch))
-            .collect();
-        dms.sort_by(|a, b| b.0.cmp(&a.0));
-        dms.into_iter()
-            .map(|(_, ch)| (ch.id.clone(), store.name(&ch.id), "Direct message", store.avatar_path(&ch.id)))
-            .collect()
+        let mut out: Vec<(u64, (String, String, String, Option<std::path::PathBuf>, bool))> = Vec::new();
+        for ch in &store.chats {
+            if ch.id == store.my_npub {
+                continue;
+            }
+            if let Some(com) = store.community_of(&ch.id) {
+                let Some(channel) = com.channel(&ch.id) else { continue };
+                if channel.is_voice() || store.send_lock(&ch.id).is_some() {
+                    continue;
+                }
+                let name = if com.name.is_empty() { "Community".to_string() } else { com.name.clone() };
+                let room = if channel.name.is_empty() { "general" } else { channel.name.as_str() };
+                out.push((
+                    crate::data::last_activity(ch),
+                    (ch.id.clone(), name, format!("#{room}"), store.icon(&com.community_id), true),
+                ));
+            } else if ch.id.starts_with("npub1")
+                && !ch.messages.is_empty()
+                && !store.is_request(ch)
+                && !store.profiles.get(&ch.id).is_some_and(|p| p.is_blocked)
+            {
+                out.push((
+                    crate::data::last_activity(ch),
+                    (ch.id.clone(), store.name(&ch.id), "Direct message".into(), store.avatar_path(&ch.id), false),
+                ));
+            }
+        }
+        out.sort_by(|a, b| b.0.cmp(&a.0));
+        out.into_iter().map(|(_, c)| c).collect()
     }
 
     /// `sendAppToChat`: the invite goes out, the chat opens, and the game opens from it.
@@ -778,7 +796,7 @@ impl VectorApp {
                     .child(if q.is_empty() { "No chats yet: start one to play together" } else { "No chats match" }),
             );
         }
-        for (chat, name, sub, avatar) in chats {
+        for (chat, name, sub, avatar, is_group) in chats {
             let group = SharedString::from(format!("nx-pick-{chat}"));
             let me = me.clone();
             let target = chat.clone();
@@ -804,12 +822,20 @@ impl VectorApp {
                             .justify_center()
                             .flex_shrink_0()
                             .size(px(40.))
-                            .rounded_full()
+                            .map(|d| if is_group { d.rounded(px(8.8)) } else { d.rounded_full() })
                             .overflow_hidden()
                             .bg(c(0x1b1b1b))
                             .child(match avatar {
-                                Some(p) => gpui::img(p).size_full().rounded_full().object_fit(gpui::ObjectFit::Cover).into_any_element(),
-                                None => gpui::svg().path("icons/user-circle.svg").size(px(22.)).text_color(c(0x6f6f6f)).into_any_element(),
+                                Some(p) => gpui::img(p)
+                                    .size_full()
+                                    .map(|d| if is_group { d.rounded(px(8.8)) } else { d.rounded_full() })
+                                    .object_fit(gpui::ObjectFit::Cover)
+                                    .into_any_element(),
+                                None => gpui::svg()
+                                    .path(if is_group { "icons/users-multi.svg" } else { "icons/user-circle.svg" })
+                                    .size(px(22.))
+                                    .text_color(c(0x6f6f6f))
+                                    .into_any_element(),
                             }),
                     )
                     .child(

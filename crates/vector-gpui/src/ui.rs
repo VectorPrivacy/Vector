@@ -1188,7 +1188,11 @@ impl VectorApp {
             };
             app.show_nexus(view, window, cx);
             if !matches!(at.as_str(), "discover" | "library" | "all" | "" | "default") {
-                app.on_nexus(crate::nexus::Act::Details(at), window, cx);
+                app.on_nexus(crate::nexus::Act::Details(at.clone()), window, cx);
+                // VECTOR_NEXUS_PICK=1 opens its Play with Friends picker.
+                if std::env::var_os("VECTOR_NEXUS_PICK").is_some() {
+                    app.on_nexus(crate::nexus::Act::PlayWith(at), window, cx);
+                }
             }
         }
         // Fixtures: VECTOR_XDC=<package> launches it solo, through the real host and bridge.
