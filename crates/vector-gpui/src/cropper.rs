@@ -296,7 +296,8 @@ fn button(id: &'static str, label: &'static str, primary: bool) -> gpui::Statefu
 }
 
 impl Render for Cropper {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let narrow = f32::from(window.viewport_size().width) <= 640.;
         let me = cx.entity().downgrade();
         let (i, b, round) = (self.img, self.crop, self.round);
         let ready = i.w > 0.;
@@ -382,9 +383,9 @@ impl Render for Cropper {
         let stage = div()
             .id("crop-stage")
             .relative()
-            .flex_1()
+            .when(narrow, |d| d.flex_none().w_full().h(px(260.)))
+            .when(!narrow, |d| d.flex_1().h(px(320.)))
             .min_w_0()
-            .h(px(320.))
             .overflow_hidden()
             .rounded(px(12.))
             .bg(c(0x050505))
@@ -463,10 +464,10 @@ impl Render for Cropper {
             .child(
                 div()
                     .flex()
-                    .flex_col()
+                    .when(!narrow, |d| d.flex_col().w(px(120.)))
+                    .when(narrow, |d| d.justify_center())
                     .items_center()
                     .gap(px(12.))
-                    .w(px(120.))
                     .child(chip(96.))
                     .child(chip(48.))
                     .when(aspect <= 1., |d| d.child(chip(24.))),
@@ -507,7 +508,7 @@ impl Render for Cropper {
                         )
                     }),
             )
-            .child(div().flex().gap(px(16.)).child(stage).child(preview))
+            .child(div().flex().when(narrow, |d| d.flex_col()).gap(px(16.)).child(stage).child(preview))
             .child(
                 div()
                     .flex()
