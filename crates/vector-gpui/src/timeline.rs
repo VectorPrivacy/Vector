@@ -123,6 +123,8 @@ pub struct Ctx<'a> {
     pub anchors: &'a crate::kit::Anchors,
     /// The message column's width, for media to fit; 0 before the list has laid out.
     pub content_w: f32,
+    /// The window's width: what `100vw` reads.
+    pub vw: f32,
 }
 
 /// `_dmsgIsPinged`: a tag of me, an authorised `@everyone`, a Role I hold, or a reply to me.
