@@ -251,6 +251,7 @@ impl VectorApp {
                 return view;
             }
             let back = cx.listener(|app, _: &gpui::ClickEvent, _, cx| app.slim_back(cx));
+            let anim = SharedString::from(format!("slim-chat-in-{id}"));
             return div()
                 .flex_1()
                 .min_h_0()
@@ -273,6 +274,11 @@ impl VectorApp {
                         .on_click(back)
                         .child(svg().path("icons/chevron-double-left.svg").size(px(30.)).text_color(c(ACCENT))),
                 )
+                .with_animation(
+                    anim,
+                    gpui::Animation::new(std::time::Duration::from_millis(280)).with_easing(crate::kit::bezier(0.22, 1., 0.36, 1.)),
+                    move |d, t| d.left(px(width * 0.35 * (1. - t))).opacity(0.4 + 0.6 * t),
+                )
                 .into_any_element();
         }
         let header = self.slim_header(store, window, cx);
@@ -287,7 +293,13 @@ impl VectorApp {
             .child(header)
             .child(body);
         if drawer {
-            col.into_any_element()
+            let key = self.community.as_ref().map(|v| v.id.clone()).unwrap_or_default();
+            col.with_animation(
+                SharedString::from(format!("slim-drawer-in-{key}")),
+                gpui::Animation::new(std::time::Duration::from_millis(260)).with_easing(crate::kit::bezier(0.22, 1., 0.36, 1.)),
+                move |d, t| d.relative().left(px(-width * 0.2 * (1. - t))).opacity(0.5 + 0.5 * t),
+            )
+            .into_any_element()
         } else {
             col.child(self.slim_navbar(store, cx)).into_any_element()
         }
