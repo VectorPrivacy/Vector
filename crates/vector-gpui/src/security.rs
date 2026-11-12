@@ -893,6 +893,31 @@ pub(crate) fn overlay(
     .into_any_element()
 }
 
+/// An overlay whose backdrop answers a press outside the card.
+pub(crate) fn overlay_dismiss(
+    id: &'static str,
+    priority: usize,
+    dismiss: impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static,
+    card: gpui::Stateful<gpui::Div>,
+) -> AnyElement {
+    gpui::deferred(
+        div()
+            .id(id)
+            .absolute()
+            .inset_0()
+            .p(px(16.))
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(ca(0, 0, 0, 0.88))
+            .occlude()
+            .on_click(dismiss)
+            .child(card.on_click(|_, _, cx| cx.stop_propagation())),
+    )
+    .with_priority(priority)
+    .into_any_element()
+}
+
 pub(crate) fn card(id: &'static str) -> gpui::Stateful<gpui::Div> {
     div()
         .id(id)
@@ -926,6 +951,18 @@ pub(crate) fn head(
     title: SharedString,
     close: Option<Box<dyn Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App)>>,
 ) -> impl IntoElement {
+    head_tinted(glyph, title, c(ACCENT), ca(89, 252, 179, 0.1), c(0xffffff), close)
+}
+
+/// A head in another colour: the glyph, its badge's fill, and the title.
+pub(crate) fn head_tinted(
+    glyph: &'static str,
+    title: SharedString,
+    tint: gpui::Hsla,
+    badge: gpui::Hsla,
+    title_color: gpui::Hsla,
+    close: Option<Box<dyn Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App)>>,
+) -> impl IntoElement {
     div()
         .flex()
         .items_center()
@@ -935,11 +972,11 @@ pub(crate) fn head(
                 .size(px(34.))
                 .flex_shrink_0()
                 .rounded(px(10.))
-                .bg(ca(89, 252, 179, 0.1))
+                .bg(badge)
                 .flex()
                 .items_center()
                 .justify_center()
-                .child(svg().path(glyph).size(px(18.)).text_color(c(ACCENT))),
+                .child(svg().path(glyph).size(px(18.)).text_color(tint)),
         )
         .child(
             div()
@@ -947,6 +984,7 @@ pub(crate) fn head(
                 .text_size(px(18.))
                 .line_height(px(22.))
                 .font_weight(FontWeight::BOLD)
+                .text_color(title_color)
                 .child(title),
         )
         .children(close.map(|close| {

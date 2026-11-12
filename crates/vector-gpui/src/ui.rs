@@ -237,6 +237,9 @@ pub struct VectorApp {
     mini_profile: Option<crate::miniprofile::Mini>,
     pins: crate::pins::Pins,
     edit_history: Option<crate::edithistory::EditHistory>,
+    secret_guard: Option<crate::secretguard::Guard>,
+    /// The next send has been through the secret guard.
+    secret_pass: bool,
     anchors: kit::Anchors,
     /// The role a member's change is under way for.
     role_busy: Option<String>,
@@ -487,6 +490,8 @@ mod members_ops;
 mod pins_ops;
 #[path = "ui_msgmenu.rs"]
 mod msgmenu_ops;
+#[path = "ui_secretguard.rs"]
+mod secretguard_ops;
 
 impl VectorApp {
     fn base(store: Store, live: bool, window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -846,6 +851,8 @@ impl VectorApp {
             mini_profile: None,
             pins: Default::default(),
             edit_history: None,
+            secret_guard: None,
+            secret_pass: false,
             anchors: Default::default(),
             role_busy: None,
         }
@@ -3964,6 +3971,13 @@ impl VectorApp {
 
     fn send(&mut self, text: String, cx: &mut Context<Self>) {
         let Some(id) = self.open.clone() else { return };
+        // Notes to self are yours alone.
+        if !std::mem::take(&mut self.secret_pass)
+            && id.as_ref() != self.store.borrow().my_npub
+            && let Some(kind) = vector_core::secrets::detect(&text)
+        {
+            return self.open_secret_guard(kind, text, id.to_string(), cx);
+        }
         let Some((text, bot)) = self.route_command(&text, cx) else {
             self.input.update(cx, |i, cx| i.set_text(&text, cx));
             return;
@@ -4463,6 +4477,13 @@ impl Render for VectorApp {
                     .ok();
                 });
                 crate::edithistory::render(h, &store, &self.media, window.viewport_size(), &close)
+            }))
+            .children(self.secret_guard.as_ref().map(|g| {
+                let app = cx.entity().downgrade();
+                let on: crate::secretguard::OnAnswer = Rc::new(move |a, window, cx| {
+                    app.update(cx, |app, cx| app.secret_answer(a, window, cx)).ok();
+                });
+                crate::secretguard::render(g, &on)
             }))
             .children(self.mini_profile.as_ref().map(|m| {
                 let app = cx.entity().downgrade();
@@ -10945,6 +10966,7 @@ impl VectorApp {
         if self.menu.take().is_some()
             || self.mini_profile.take().is_some()
             || self.edit_history.take().is_some()
+            || self.secret_guard.take().is_some()
             || self.perm_prompt.take().is_some()
             || self.publish.take_if(|f| !f.busy()).is_some()
             || self.launch.take().is_some()
