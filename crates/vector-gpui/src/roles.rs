@@ -1157,6 +1157,7 @@ fn editor(m: &CommSettings, store: &Store, on: &OnAct, cx: &App) -> AnyElement {
                 let remove: AnyElement = if editable {
                     div()
                         .id(SharedString::from(format!("role-rm-{npub}")))
+                        .tooltip(crate::kit::tooltip("Remove from role"))
                         .ml_auto()
                         .size(px(28.))
                         .flex()

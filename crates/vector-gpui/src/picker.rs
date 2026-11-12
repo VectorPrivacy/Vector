@@ -1500,6 +1500,7 @@ impl EmojiPicker {
                 d.child(
                     div()
                         .id(SharedString::from(format!("picker-pack-edit-{i}")))
+                        .tooltip(crate::kit::tooltip("Edit Pack"))
                         .ml_auto()
                         .px(px(4.))
                         .flex_shrink_0()
@@ -1897,6 +1898,7 @@ impl Render for EmojiPicker {
             let on = s.is_some() && active == s;
             div()
                 .id(icon)
+                .when(s.is_none(), |d| d.tooltip(crate::kit::tooltip("Create new pack")))
                 .relative()
                 .size(px(30.))
                 .my(px(3.))
@@ -2007,6 +2009,7 @@ impl Render for EmojiPicker {
                 });
                 div()
                     .id(SharedString::from(format!("picker-tab-{i}")))
+                    .tooltip(crate::kit::tooltip(p.title.clone()))
                     .relative()
                     .flex_shrink_0()
                     .size(px(30.))

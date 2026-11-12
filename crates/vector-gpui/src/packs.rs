@@ -347,6 +347,7 @@ fn card(ctx: &Ctx, m: &Message, naddr: String) -> AnyElement {
                 .child(
                     div()
                         .id(SharedString::from(format!("{key}-copy")))
+                        .tooltip(crate::kit::tooltip("Copy share link"))
                         .w(px(28.))
                         .h_full()
                         .flex_shrink_0()
