@@ -11,6 +11,10 @@ on:
       - 'crates/vector-calls/**'
       - 'src-tauri/src/**'
       - '.github/workflows/gpui.yaml'
+  pull_request:
+    paths:
+      - 'crates/vector-gpui/**'
+      - '.github/workflows/gpui.yaml'
   workflow_dispatch:
 
 concurrency:
