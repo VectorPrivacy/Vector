@@ -4098,5 +4098,367 @@
     }
    ]
   }
+ },
+ "net_demo": {
+  "i2p_config": {
+   "sam_port": 7656,
+   "sam_user": null,
+   "sam_auth": false,
+   "exit": "allow",
+   "outproxies": [
+    {
+     "id": "stormycloud",
+     "name": "StormyCloud",
+     "address": "5d4s7pcvfdpftfk7npc7hllyujhufsdprtrf4o53i44rgsa2xbwa.b32.i2p",
+     "port": 80,
+     "enabled": true,
+     "builtin": true
+    },
+    {
+     "id": "acetone",
+     "name": "Acetone",
+     "address": "proxy4uwdijqxac2bvdx4fuhem6njmiwukuk2gelejv2nzxka2xq.b32.i2p",
+     "port": 3128,
+     "enabled": true,
+     "builtin": true
+    }
+   ],
+   "defaults": [
+    {
+     "id": "stormycloud",
+     "name": "StormyCloud",
+     "address": "5d4s7pcvfdpftfk7npc7hllyujhufsdprtrf4o53i44rgsa2xbwa.b32.i2p",
+     "port": 80,
+     "enabled": true,
+     "builtin": true
+    },
+    {
+     "id": "acetone",
+     "name": "Acetone",
+     "address": "proxy4uwdijqxac2bvdx4fuhem6njmiwukuk2gelejv2nzxka2xq.b32.i2p",
+     "port": 3128,
+     "enabled": true,
+     "builtin": true
+    }
+   ],
+   "customized": false
+  },
+  "clearnet": {
+   "view": {
+    "label": null,
+    "supported": [
+     "clearnet",
+     "tor",
+     "i2p"
+    ],
+    "blocked": false,
+    "progress": null,
+    "reason": null,
+    "retry_in": null,
+    "since": 0,
+    "prelogin": "clearnet",
+    "prelogin_armed": false,
+    "realtime_allowed": false,
+    "realtime_active": false,
+    "call_active": false,
+    "config_seq": 1,
+    "steps": [],
+    "detail": null,
+    "kind": "clearnet",
+    "phase": "direct",
+    "ready": true
+   }
+  },
+  "tor": {
+   "view": {
+    "label": "Tor",
+    "supported": [
+     "clearnet",
+     "tor",
+     "i2p"
+    ],
+    "blocked": false,
+    "progress": null,
+    "reason": null,
+    "retry_in": null,
+    "since": 0,
+    "prelogin": "clearnet",
+    "prelogin_armed": false,
+    "realtime_allowed": false,
+    "realtime_active": false,
+    "call_active": false,
+    "config_seq": 1,
+    "steps": [],
+    "detail": {
+     "status": "connected",
+     "bootstrap_progress": 100,
+     "multi_circuit": true
+    },
+    "kind": "tor",
+    "phase": "ready",
+    "ready": true
+   },
+   "tor": {
+    "enabled": true,
+    "running": true,
+    "supported": true,
+    "status": "connected",
+    "bootstrap_progress": 100,
+    "prelogin": false,
+    "multi_circuit": true,
+    "socks_proxy": null
+   },
+   "circuits": {
+    "host": null,
+    "hops": [],
+    "circuits": 4,
+    "hosts": 6
+   }
+  },
+  "tor_single": {
+   "view": {
+    "label": "Tor",
+    "supported": [
+     "clearnet",
+     "tor",
+     "i2p"
+    ],
+    "blocked": false,
+    "progress": null,
+    "reason": null,
+    "retry_in": null,
+    "since": 0,
+    "prelogin": "clearnet",
+    "prelogin_armed": false,
+    "realtime_allowed": false,
+    "realtime_active": false,
+    "call_active": false,
+    "config_seq": 1,
+    "steps": [],
+    "detail": {
+     "status": "connected",
+     "bootstrap_progress": 100,
+     "multi_circuit": false
+    },
+    "kind": "tor",
+    "phase": "ready",
+    "ready": true
+   },
+   "tor": {
+    "enabled": true,
+    "running": true,
+    "supported": true,
+    "status": "connected",
+    "bootstrap_progress": 100,
+    "prelogin": false,
+    "multi_circuit": false,
+    "socks_proxy": null
+   },
+   "circuits": {
+    "host": "jskitty.com",
+    "hops": [
+     {
+      "position": "Guard",
+      "address": "185.220.101.4:443",
+      "fingerprint": "A1B2C3D4E5F60718293A4B5C6D7E8F9012345678",
+      "is_bridge": false
+     },
+     {
+      "position": "Middle",
+      "address": "94.23.172.32:9001",
+      "fingerprint": "1122334455667788990011223344556677889900",
+      "is_bridge": false
+     },
+     {
+      "position": "Exit",
+      "address": "199.249.230.87:443",
+      "fingerprint": "FFEEDDCCBBAA99887766554433221100FFEEDDCC",
+      "is_bridge": false
+     }
+    ],
+    "circuits": 1,
+    "hosts": 3
+   }
+  },
+  "tor_boot": {
+   "view": {
+    "label": "Tor",
+    "supported": [
+     "clearnet",
+     "tor",
+     "i2p"
+    ],
+    "blocked": true,
+    "progress": 45,
+    "reason": null,
+    "retry_in": null,
+    "since": 0,
+    "prelogin": "clearnet",
+    "prelogin_armed": false,
+    "realtime_allowed": false,
+    "realtime_active": false,
+    "call_active": false,
+    "config_seq": 1,
+    "steps": [],
+    "detail": {
+     "status": "bootstrapping",
+     "bootstrap_progress": 45,
+     "multi_circuit": true
+    },
+    "kind": "tor",
+    "phase": "starting",
+    "ready": false
+   },
+   "tor": {
+    "enabled": true,
+    "running": false,
+    "supported": true,
+    "status": "bootstrapping 45%",
+    "bootstrap_progress": 45,
+    "prelogin": false,
+    "multi_circuit": true,
+    "socks_proxy": null
+   }
+  },
+  "i2p": {
+   "view": {
+    "label": "I2P",
+    "supported": [
+     "clearnet",
+     "tor",
+     "i2p"
+    ],
+    "blocked": false,
+    "progress": null,
+    "reason": null,
+    "retry_in": null,
+    "since": 0,
+    "prelogin": "clearnet",
+    "prelogin_armed": false,
+    "realtime_allowed": false,
+    "realtime_active": false,
+    "call_active": false,
+    "config_seq": 1,
+    "steps": [
+     {
+      "id": "router",
+      "label": "Router",
+      "state": "ok",
+      "text": "SAM 3.3 on port 7656"
+     },
+     {
+      "id": "tunnels",
+      "label": "Tunnels",
+      "state": "ok",
+      "text": "Ready"
+     },
+     {
+      "id": "exit",
+      "label": "Clearnet",
+      "state": "ok",
+      "text": "Via StormyCloud"
+     }
+    ],
+    "detail": {
+     "b32": null
+    },
+    "kind": "i2p",
+    "phase": "ready",
+    "ready": true
+   }
+  },
+  "i2p_start": {
+   "view": {
+    "label": "I2P",
+    "supported": [
+     "clearnet",
+     "tor",
+     "i2p"
+    ],
+    "blocked": true,
+    "progress": null,
+    "reason": null,
+    "retry_in": null,
+    "since": 0,
+    "prelogin": "clearnet",
+    "prelogin_armed": false,
+    "realtime_allowed": false,
+    "realtime_active": false,
+    "call_active": false,
+    "config_seq": 1,
+    "steps": [
+     {
+      "id": "router",
+      "label": "Router",
+      "state": "ok",
+      "text": "SAM 3.3 on port 7656"
+     },
+     {
+      "id": "tunnels",
+      "label": "Tunnels",
+      "state": "pending",
+      "text": "Building\u2026 12s"
+     },
+     {
+      "id": "exit",
+      "label": "Clearnet",
+      "state": "pending",
+      "text": "Waiting\u2026"
+     }
+    ],
+    "detail": null,
+    "kind": "i2p",
+    "phase": "starting",
+    "ready": false
+   }
+  },
+  "i2p_down": {
+   "view": {
+    "label": "I2P",
+    "supported": [
+     "clearnet",
+     "tor",
+     "i2p"
+    ],
+    "blocked": true,
+    "progress": null,
+    "reason": {
+     "code": "router_unreachable",
+     "text": "Your I2P router isn\u2019t answering on port 7656."
+    },
+    "retry_in": 8,
+    "since": 0,
+    "prelogin": "clearnet",
+    "prelogin_armed": false,
+    "realtime_allowed": false,
+    "realtime_active": false,
+    "call_active": false,
+    "config_seq": 1,
+    "steps": [
+     {
+      "id": "router",
+      "label": "Router",
+      "state": "fail",
+      "text": "Not answering"
+     },
+     {
+      "id": "tunnels",
+      "label": "Tunnels",
+      "state": "pending",
+      "text": "Waiting\u2026"
+     },
+     {
+      "id": "exit",
+      "label": "Clearnet",
+      "state": "pending",
+      "text": "Waiting\u2026"
+     }
+    ],
+    "detail": null,
+    "kind": "i2p",
+    "phase": "waiting",
+    "ready": false
+   }
+  }
  }
 }

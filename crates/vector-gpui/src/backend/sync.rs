@@ -104,6 +104,7 @@ async fn hydrate() {
 /// Paint from the database, then catch up behind it. `init` is a login.
 pub async fn fetch_messages(init: bool) {
     if init {
+        super::transport::set_account_booted(true);
         vector_core::transport::prelogin::commit();
         hydrate().await;
         db::spawn_bound(super::market::preload());

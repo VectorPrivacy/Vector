@@ -11,7 +11,10 @@ name = "vector-gpui"
 path = "src/main.rs"
 
 [features]
-default = ["video"]
+default = ["video", "tor", "i2p"]
+# Embedded Tor (Arti) and I2P through the user's router: the networks Routing offers.
+tor = ["vector-core/tor"]
+i2p = ["vector-core/i2p"]
 # Video attachments decode through FFmpeg: the system's, or the desktop client's selective
 # static build (scripts/build-ffmpeg.sh) with FFMPEG_DIR set and `video-static`.
 video = ["dep:ffmpeg-next"]

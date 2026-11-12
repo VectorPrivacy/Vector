@@ -50,6 +50,7 @@ mod mentions;
 mod message;
 mod moderation;
 mod netdialog;
+mod netglyph;
 mod newchat;
 mod nexus;
 mod packdetails;

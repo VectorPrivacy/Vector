@@ -30,6 +30,7 @@ pub mod storage;
 pub mod transcribe;
 pub mod sync;
 pub mod transfer;
+pub mod transport;
 pub mod unfurl;
 pub mod updates;
 pub mod upload;
@@ -129,6 +130,10 @@ pub fn start(data_dir: PathBuf) -> mpsc::UnboundedReceiver<UiEvent> {
         crate::miniapp::Notice::Failed(e) => emit("show_toast", serde_json::Value::String(e)),
         crate::miniapp::Notice::Opened | crate::miniapp::Notice::Closed => {}
     });
+    {
+        let _guard = rt.enter();
+        transport::spawn_ready_listener();
+    }
     // spawn-detached: the sweep expires messages for whichever account is live, as on desktop.
     rt.spawn(vector_core::self_destruct::run_sweeper_loop());
     // spawn-detached: the processor serves whichever account is live, as on desktop.

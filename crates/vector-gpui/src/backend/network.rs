@@ -93,6 +93,14 @@ pub fn is_default_relay(url: &str) -> bool {
         .any(|r| r.eq_ignore_ascii_case(normalized))
 }
 
+/// A default relay or one the account added.
+pub fn is_own_relay(url: &str) -> bool {
+    use vector_core::transport::aliases::normalize_host;
+    let Ok(host) = normalize_host(url) else { return false };
+    let same = |u: &str| normalize_host(u).is_ok_and(|h| h == host);
+    DEFAULT_RELAYS.iter().any(|d| same(d)) || load_custom_relays().unwrap_or_default().iter().any(|c| same(&c.url))
+}
+
 fn validate_relay_url(url: &str) -> Result<String, String> {
     vector_core::transport::validate_relay_url(url)
 }

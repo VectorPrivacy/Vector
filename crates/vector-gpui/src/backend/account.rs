@@ -294,10 +294,21 @@ pub async fn commit(
     let stored_seed = seed.as_deref().map(|s| seal(s)).transpose()?;
     let kdf_row = kdf.as_ref().and_then(|k| k.descriptor());
 
-    if let Some(npub) = PENDING_ACCOUNT.lock().unwrap().take() {
-        db::init_database(&npub)?;
+    let pending = PENDING_ACCOUNT.lock().unwrap().take();
+    if let Some(npub) = pending {
+        // The welcome screen's network carries on into the new account's first session.
+        if !super::transport::running_prelogin() {
+            super::transport::stop_and_join_if_running().await;
+        }
+        if let Err(e) = db::init_database(&npub) {
+            let _ = super::transport::sync_to_active_account().await;
+            return Err(e);
+        }
         db::set_current_account(npub.clone())?;
         db::write_active_account_file(&npub)?;
+        if let Err(e) = super::transport::sync_to_active_account().await {
+            vector_core::log_warn!("[Account] network start for new account failed: {e}");
+        }
     }
     let security = password.as_ref().map(|_| security_type);
     db::settings::commit_account_setup(
@@ -362,8 +373,27 @@ pub async fn unlock(password: Option<Zeroizing<String>>) -> Result<String, Strin
         return pk.to_bech32().map_err(|e| e.to_string());
     }
     {
-        use vector_core::transport::{self, prefs, prelogin};
-        transport::set_preference(prelogin::effective(&prefs::stored_kind()));
+        use vector_core::transport::{self, kinds, prefs, prelogin, Kind};
+        let effective = prelogin::effective(&prefs::stored_kind());
+        transport::set_preference(effective);
+        // A welcome-screen instance is kept only where its kind adopts on unlock (Tor never does:
+        // its guards are install-level).
+        let adopt = transport::host::active().is_some_and(|a| {
+            a.started_prelogin()
+                && Some(a.kind) == effective
+                && kinds::factory(a.kind).is_some_and(|f| {
+                    f.adopt_on_unlock() && f.compatible(a.transport().as_ref(), &prelogin::config_for(a.kind))
+                })
+        });
+        if !adopt {
+            super::transport::stop_prelogin_service().await;
+        }
+        // Started now, awaited once the key has opened: a wrong password never waits on tunnels.
+        if effective.is_some_and(|k| k != Kind::Clearnet)
+            && let Err(e) = super::transport::start_for_active_account().await
+        {
+            vector_core::log_warn!("[Login] network auto-start failed: {e}");
+        }
     }
 
     let kind =
@@ -397,6 +427,7 @@ pub async fn unlock(password: Option<Zeroizing<String>>) -> Result<String, Strin
     nsec.zeroize();
     store_identity(&keys);
     drop(keys);
+    super::transport::wait_for_active_network().await;
     install_client();
 
     let npub = vector_core::my_public_key()
@@ -457,6 +488,8 @@ pub async fn reset() {
     }
     state::clear_pending_bunker_setup();
     vector_core::transport::prelogin::cancel_start();
+    super::transport::stop_and_join_if_running().await;
+    super::transport::set_account_booted(false);
     db::clear_current_account_in_memory();
     abandon_pending();
     state::set_encryption_enabled(false);
