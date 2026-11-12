@@ -178,6 +178,33 @@ impl VectorApp {
         self.update_commands(&draft, cx);
     }
 
+    /// The background manifest refresh landed: swap the chat's list in.
+    pub(super) fn on_commands_updated(&mut self, payload: &serde_json::Value, cx: &mut Context<Self>) {
+        let Some(chat) = payload.get("chat_id").and_then(|v| v.as_str()) else { return };
+        let bots = payload.get("bots").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+        let commands = payload
+            .get("commands")
+            .and_then(|v| v.as_array())
+            .into_iter()
+            .flatten()
+            .filter_map(|b| {
+                let bot = b.get("bot")?.as_str()?;
+                let specs: Vec<vector_core::bot_interface::CommandSpec> = serde_json::from_value(b.get("commands")?.clone()).ok()?;
+                Some(crate::commands::bot_commands(bot, &specs))
+            })
+            .flatten()
+            .collect();
+        self.cmd_snaps.insert(chat.to_string(), Snapshot { bots, commands, fresh: true });
+        if self.open.as_deref() == Some(chat) {
+            self.refresh_rows(false);
+            if self.commands.view.is_some() {
+                let text = self.input.read(cx).text().to_string();
+                self.update_commands(&text, cx);
+            }
+            cx.notify();
+        }
+    }
+
     /// The command names the open chat's bots declare, for invocation lines.
     pub(super) fn command_names(&self) -> Option<std::rc::Rc<std::collections::HashSet<String>>> {
         let snap = self.cmd_snaps.get(self.open.as_deref()?)?;

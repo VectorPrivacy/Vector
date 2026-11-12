@@ -2260,6 +2260,7 @@ impl VectorApp {
                 }
             }
             "unread_counts_stale" => self.refresh_unread(cx),
+            "chat_commands_updated" => self.on_commands_updated(&payload, cx),
             "sync_progress" => self.syncing = true,
             "sync_finished" => {
                 self.syncing = false;
