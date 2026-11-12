@@ -44,6 +44,12 @@ impl AppHandle {
 }
 
 static LOCAL_DATA: OnceLock<PathBuf> = OnceLock::new();
+static DATA: OnceLock<PathBuf> = OnceLock::new();
+
+/// Where `app_data_dir` points: set once by the host.
+pub fn set_data_dir(dir: PathBuf) {
+    let _ = DATA.set(dir);
+}
 
 /// Where `app_local_data_dir` points: set once by the host.
 pub fn set_local_data_dir(dir: PathBuf) {
@@ -53,6 +59,9 @@ pub fn set_local_data_dir(dir: PathBuf) {
 pub struct PathResolver;
 
 impl PathResolver {
+    pub fn app_data_dir(&self) -> Result<PathBuf, Error> {
+        DATA.get().cloned().ok_or_else(|| Error("app data directory not set".into()))
+    }
     pub fn app_local_data_dir(&self) -> Result<PathBuf, Error> {
         LOCAL_DATA.get().cloned().ok_or_else(|| Error("app data directory not set".into()))
     }

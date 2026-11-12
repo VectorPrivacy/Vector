@@ -15,8 +15,14 @@ pub mod db {
     pub use vector_core::db::miniapps::*;
 }
 pub mod util {
+    pub use vector_core::crypto::mime_from_magic_bytes;
     pub use vector_core::simd::hex::{bytes_to_hex_16, bytes_to_hex_string};
 }
+pub use vector_core::{blossom, inbox_relays, nostr_client};
+#[path = "../../../../src-tauri/src/net.rs"]
+#[allow(dead_code)]
+pub mod net;
+pub mod image_cache;
 /// What `listing_icon` asks of the desktop's image module, from the image crate.
 pub mod shared {
     pub mod image {
@@ -78,8 +84,14 @@ pub mod voice;
 #[doc(hidden)]
 pub mod simd_audio;
 
+#[path = "../../../../src-tauri/src/simd/html_meta.rs"]
+#[allow(dead_code)]
+#[doc(hidden)]
+pub mod simd_html_meta;
+
 pub mod simd {
     pub use super::simd_audio as audio;
+    pub use super::simd_html_meta as html_meta;
 }
 
 /// Where the engine's events go: set once by the host before any sound plays.

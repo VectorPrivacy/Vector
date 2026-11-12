@@ -77,6 +77,9 @@
             return { size: (window.__FILE_SIZES__ || {})[name] || 0, name, extension: name.split('.').pop() };
         },
         blossom_upload_verdict: () => ({ likely: true, reasons: [] }),
+        marketplace_get_cached_apps: () => FIX.marketplace || [], marketplace_fetch_apps: () => FIX.marketplace || [],
+        marketplace_get_trusted_publisher: () => 'npub1jskittyvector000000000000000000000000000000000000000000',
+        miniapp_get_history: () => (FIX.marketplace || []).filter((a) => a.installed).map((a, i) => ({ id: i + 1, name: a.name, src_url: a.local_path, attachment_ref: a.local_path, last_opened_at: Math.floor(FIX.now / 1000) - 3600 * (i * 30 + 2), open_count: 3, categories: a.categories.join(','), marketplace_id: a.id, installed_version: a.installed_version, is_favorite: false })),
         get_compression_status: () => window.__COMPRESSION__ || null,
         file_has_metadata: () => false,
         list_accounts_with_metadata: () => FIX.profiles.slice(0, 3).map((p, i) => ({

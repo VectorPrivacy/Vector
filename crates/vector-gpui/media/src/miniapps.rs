@@ -4,6 +4,9 @@
 #[path = "../../../../src-tauri/src/miniapps/error.rs"]
 #[allow(dead_code)]
 pub mod error;
+#[path = "../../../../src-tauri/src/miniapps/marketplace.rs"]
+#[allow(dead_code)]
+pub mod marketplace;
 #[cfg(target_os = "linux")]
 #[path = "../../../../src-tauri/src/miniapps/network_isolation.rs"]
 pub mod network_isolation;

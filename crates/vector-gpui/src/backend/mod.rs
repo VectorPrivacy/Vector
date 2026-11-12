@@ -13,6 +13,7 @@ pub mod events;
 pub mod gifs;
 pub mod images;
 pub mod inline;
+pub mod market;
 pub mod messaging;
 pub mod mic;
 pub mod network;
@@ -111,6 +112,9 @@ pub fn start(data_dir: PathBuf) -> mpsc::UnboundedReceiver<UiEvent> {
     });
     tauri::async_runtime::set(rt.handle().clone());
     tauri::set_local_data_dir(models_home());
+    if let Ok(dir) = vector_core::db::get_app_data_dir() {
+        tauri::set_data_dir(dir.clone());
+    }
     let _ = vector_media::TAURI_APP.set(tauri::AppHandle::new(engine_sink));
     {
         let _guard = rt.enter();

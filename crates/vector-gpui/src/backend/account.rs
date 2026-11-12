@@ -449,7 +449,9 @@ pub async fn reset() {
     let _serial = RESET_LOCK.lock().await;
     super::attachments::cancel_all();
     super::messaging::cancel_all_uploads();
+    crate::miniapp::end_for_account_swap().await;
     vector_core::VectorCore.swap_session().await;
+    super::market::reset().await;
     if let Some(bunker) = vector_core::drain_bunker_state() {
         let _ = bunker.shutdown().await;
     }
