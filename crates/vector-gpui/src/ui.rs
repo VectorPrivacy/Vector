@@ -2824,6 +2824,14 @@ impl VectorApp {
                 self.sync_call_meter();
             }
             "call_stats" => self.call.apply_stats(&payload),
+            "call_video_refused" => {
+                use crate::callvideo::VideoKind;
+                for (k, kind) in [VideoKind::Camera, VideoKind::Screen].into_iter().enumerate() {
+                    self.video.stop(kind);
+                    self.call.video_mine[k] = false;
+                }
+                self.show_toast("They cannot receive video from this device", cx);
+            }
             "audio_devices_changed" => self.reload_devices(cx),
             "synced_settings_updated" => {
                 if let Some(view) = payload
@@ -4056,6 +4064,12 @@ impl VectorApp {
         let Some(chat) = self.open.clone() else {
             return;
         };
+        if self.store.borrow().chat(&chat).is_some_and(|c| self.store.borrow().is_request(c)) {
+            if !auto {
+                self.show_toast("Accept the request to download files", cx);
+            }
+            return;
+        }
         {
             let mut media = self.media.borrow_mut();
             if !media.started.insert(att_id.clone()) {
