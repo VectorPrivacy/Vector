@@ -6652,6 +6652,34 @@ impl VectorApp {
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
         let id = id.clone();
+        let notes = store.my_npub.as_str() == id.as_ref();
+        let subtext = if notes {
+            "Encrypted Notes to Self".to_string()
+        } else if store.stream_hidden(&id) {
+            String::new()
+        } else {
+            store.profiles.get(id.as_ref()).map(|p| p.status.title.clone()).unwrap_or_default()
+        };
+        let name_row = div()
+            .id("chat-header-info")
+            .when(!notes, |d| {
+                let id = id.to_string();
+                d.cursor_pointer().on_click(cx.listener(move |app, _, _, cx| app.open_profile(id.clone(), cx)))
+            })
+            .flex()
+            .items_center()
+            .gap(px(6.))
+            .child(if notes { div().into_any_element() } else { avatar(store, &id, 22.).into_any_element() })
+            .child(
+                div()
+                    .font_family(RUBIK)
+                    .font_weight(FontWeight::BOLD)
+                    .text_size(px(18.72))
+                    .line_height(px(24.))
+                    .text_color(c(TEXT))
+                    .child(if notes { "Notes".to_string() } else { store.name(&id) }),
+            );
+        let menu = !notes || store.chat(&id).is_some();
         div()
             .h(px(61.))
             .flex_shrink_0()
@@ -6660,37 +6688,36 @@ impl VectorApp {
             .border_b_1()
             .border_color(c(DIVIDER))
             .flex()
-            .items_center()
             .justify_center()
-            .child(
-                div()
-                    .id("chat-header-info")
-                    .cursor_pointer()
-                    .on_click({
-                        let id = id.to_string();
-                        cx.listener(move |app, _, _, cx| app.open_profile(id.clone(), cx))
-                    })
-                    .mt(px(5.))
-                    .flex()
-                    .items_center()
-                    .gap(px(6.))
-                    .child(avatar(store, &id, 22.))
-                    .child(
+            .map(|d| {
+                if subtext.is_empty() {
+                    d.items_center().child(name_row.mt(px(5.)))
+                } else {
+                    d.child(
                         div()
-                            .font_family(RUBIK)
-                            .font_weight(FontWeight::BOLD)
-                            .text_size(px(18.72))
-                            .text_color(c(TEXT))
-                            .child(store.name(&id)),
-                    ),
-            )
+                            .pt(px(9.))
+                            .max_w(gpui::relative(0.6))
+                            .flex()
+                            .flex_col()
+                            .items_center()
+                            .child(name_row)
+                            .child(
+                                div()
+                                    .max_w_full()
+                                    .overflow_hidden()
+                                    .opacity(0.8)
+                                    .child(crate::inline::emoji_line(&subtext, crate::inline::Look::new(INTER, 14., 24., c(TEXT)), 17., 1.)),
+                            ),
+                    )
+                }
+            })
             .child(
                 div()
                     .absolute()
                     .right(px(10.))
                     .top(px(10.))
                     .flex()
-                    .when(store.my_npub.as_str() != id.as_ref(), |d| {
+                    .when(!notes, |d| {
                         let peer = id.to_string();
                         d.child(
                             div()
@@ -6711,7 +6738,7 @@ impl VectorApp {
                                 ),
                         )
                     })
-                    .child({
+                    .when(menu, |d| d.child({
                         let probe = self.chat_menu_btn.clone();
                         let chat = id.to_string();
                         div()
@@ -6734,7 +6761,7 @@ impl VectorApp {
                                     .size(px(28.))
                                     .text_color(c(ICON_MUTED)),
                             )
-                    }),
+                    })),
             )
     }
 
