@@ -166,6 +166,8 @@ pub struct Audio {
     pub transcripts: crate::transcript::Transcripts,
     /// Auto-transcribe is on and its model is here; None until read, and after a settings change.
     pub auto_transcribe: Option<bool>,
+    /// Cards whose content box measured 380px or less last frame (the album's container query).
+    pub narrow: Rc<std::cell::RefCell<HashSet<String>>>,
 }
 
 /// What a file's tags give the card.
@@ -898,8 +900,10 @@ fn album_view(
     duration: u64,
     accent: gpui::Hsla,
     all: bool,
+    narrow: bool,
     on: Rc<dyn Fn(AlbumAct, &mut Window, &mut App)>,
 ) -> gpui::Div {
+    let art_px = if narrow { 64. } else { 128. };
     let id = &att.id;
     let line = |d: gpui::Div| d.overflow_hidden().text_ellipsis().whitespace_nowrap();
     let (main, note) = split_title(t.album.as_deref().or(t.title.as_deref()).unwrap_or(&att.name));
@@ -1130,7 +1134,7 @@ fn album_view(
                     d.child(
                         div()
                             .id(SharedString::from(format!("album-art-{id}")))
-                            .size(px(128.))
+                            .size(px(art_px))
                             .flex_shrink_0()
                             .rounded(px(10.))
                             .cursor(gpui::CursorStyle::PointingHand)
@@ -1324,8 +1328,27 @@ pub fn view(
     sheet: Option<&crate::lyrics::Sheet>,
     all_tracks: bool,
     transcripts: Option<&crate::transcript::Transcripts>,
+    narrow_set: &Rc<std::cell::RefCell<HashSet<String>>>,
     on: Rc<dyn Fn(Act, &mut Window, &mut App)>,
 ) -> AnyElement {
+    let narrow = narrow_set.borrow().contains(&att.id);
+    let probe = {
+        let set = narrow_set.clone();
+        let id = att.id.clone();
+        gpui::canvas(
+            move |b, window, _| {
+                let now = f32::from(b.size.width) - 26. <= 380.;
+                let mut set = set.borrow_mut();
+                if now != set.contains(&id) {
+                    if now { set.insert(id.clone()); } else { set.remove(&id); }
+                    window.refresh();
+                }
+            },
+            |_, _, _, _| {},
+        )
+        .absolute()
+        .inset_0()
+    };
     let chapters = tags.map(|t| t.chapters.as_slice()).filter(|c| c.len() > 1);
     let album = p.and_then(|p| p.album.as_ref());
     let span = match (album, chapters) {
@@ -1535,6 +1558,7 @@ pub fn view(
             duration,
             accent,
             all_tracks,
+            narrow,
             on_album.clone(),
         )
         .child(controls)
@@ -1550,14 +1574,44 @@ pub fn view(
             .collect::<Vec<_>>()
             .join(" \u{b7} ");
             let line = |d: gpui::Div| d.overflow_hidden().text_ellipsis().whitespace_nowrap();
+            let words = div()
+                .flex_1()
+                .flex()
+                .flex_col()
+                .justify_center()
+                .gap(px(2.))
+                .child(
+                    line(div())
+                        .text_size(px(15.75))
+                        .line_height(px(19.7))
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .text_color(white_a(0.92))
+                        .child(track),
+                )
+                .when(!byline.is_empty(), |d| {
+                    d.child(
+                        line(div())
+                            .text_size(px(12.))
+                            .line_height(px(15.))
+                            .text_color(white_a(0.55))
+                            .child(byline),
+                    )
+                });
+            let art_px = if narrow { 64. } else { 128. };
+            let (beside, under) = if narrow { (Some(words), None) } else { (None, Some(words)) };
             div()
                 .relative()
                 .flex()
-                .gap(px(14.))
+                .when(narrow, |d| d.flex_col().gap(px(10.)))
+                .when(!narrow, |d| d.gap(px(14.)))
                 .child(
                     div()
+                        .flex()
+                        .gap(px(14.))
+                        .child(
+                    div()
                         .id(SharedString::from(format!("audio-art-{}", att.id)))
-                        .size(px(128.))
+                        .size(px(art_px))
                         .flex_shrink_0()
                         .rounded(px(10.))
                         .overflow_hidden()
@@ -1578,40 +1632,13 @@ pub fn view(
                             inset: false,
                         }])
                         .child(gpui::img(art).size_full().rounded(px(10.))),
-                )
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .flex()
-                        .flex_col()
-                        .child(
-                            div()
-                                .flex_1()
-                                .flex()
-                                .flex_col()
-                                .justify_center()
-                                .gap(px(2.))
-                                .child(
-                                    line(div())
-                                        .text_size(px(15.75))
-                                        .line_height(px(19.7))
-                                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                                        .text_color(white_a(0.92))
-                                        .child(track),
-                                )
-                                .when(!byline.is_empty(), |d| {
-                                    d.child(
-                                        line(div())
-                                            .text_size(px(12.))
-                                            .line_height(px(15.))
-                                            .text_color(white_a(0.55))
-                                            .child(byline),
-                                    )
-                                }),
                         )
-                        .child(controls),
+                        .children(beside.map(|w| div().flex_1().min_w_0().flex().child(w.min_w_0()))),
                 )
+                .map(|d| match under {
+                    None => d.child(controls),
+                    Some(w) => d.child(div().flex_1().min_w_0().flex().flex_col().child(w).child(controls)),
+                })
                 .into_any_element()
         }
         _ => controls.into_any_element(),
@@ -1630,6 +1657,7 @@ pub fn view(
         .border_color(c(0x262626))
         .rounded(px(12.))
         .hover(|s| s.bg(c(0x1d1d1d)).border_color(c(0x363636)))
+        .child(probe)
         .children(glows(tags, sheet.map_or(0., |s| s.reveal())))
         .child(body)
         .children(sheet_el)

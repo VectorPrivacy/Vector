@@ -122,6 +122,7 @@ pub fn attachments(ctx: &Ctx, m: &Message) -> Option<AnyElement> {
                         media.audio.sheets.get(&att.id),
                         media.audio.all_tracks.contains(&att.id),
                         transcribable.then_some(&media.audio.transcripts),
+                        &media.audio.narrow,
                         std::rc::Rc::new(move |a, w, cx| on_act(&msg, Act::Audio(aid.clone(), a), w, cx)),
                     ),
                     6.,
@@ -197,7 +198,7 @@ pub fn attachments(ctx: &Ctx, m: &Message) -> Option<AnyElement> {
             }
         };
         let top: f32 = if i == 0 { 0. } else { 4f32.max(prev_bottom) };
-        col = col.child(div().mt(px(top)).child(el));
+        col = col.child(div().mt(px(top)).max_w_full().child(el));
         prev_bottom = bottom;
     }
     Some(col.child(div().h(px(prev_bottom))).into_any_element())
