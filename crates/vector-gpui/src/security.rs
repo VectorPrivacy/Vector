@@ -1199,20 +1199,21 @@ impl SecurityFlow {
             }
             Mode::Pin => {
                 let focused = self.pin_focus.is_focused(window);
+                let small = f32::from(window.viewport_size().width) <= 380.;
                 let mut row = div()
                     .id("cred-pins")
                     .track_focus(&self.pin_focus)
                     .on_key_down(cx.listener(Self::pin_key))
                     .flex()
                     .justify_center()
-                    .gap(px(8.));
+                    .gap(px(if small { 6. } else { 8. }));
                 for i in 0..6 {
                     let filled = i < p.pin.len();
                     let active = focused && i == p.pin.len().min(5);
                     row = row.child(
                         div()
-                            .w(px(44.))
-                            .h(px(54.))
+                            .w(px(if small { 38. } else { 44. }))
+                            .h(px(if small { 48. } else { 54. }))
                             .rounded(px(10.))
                             .border_1()
                             .border_color(if active { c(ACCENT) } else { c(0x2c2e2f) })
@@ -1220,7 +1221,7 @@ impl SecurityFlow {
                             .flex()
                             .items_center()
                             .justify_center()
-                            .text_size(px(24.))
+                            .text_size(px(if small { 20. } else { 24. }))
                             .font_weight(FontWeight::BOLD)
                             .when(filled, |d| d.child("\u{2022}")),
                     );
@@ -1279,7 +1280,7 @@ impl SecurityFlow {
         Some(overlay("cred-overlay", 14, card.child(row)))
     }
 
-    fn keys_card(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+    fn keys_card(&self, window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         let k = self.keys.as_ref()?;
         let me = cx.entity().downgrade();
         let on = move |f: fn(&mut SecurityFlow, &mut Context<SecurityFlow>)| {
@@ -1417,10 +1418,11 @@ impl SecurityFlow {
         };
         if !words.is_empty() {
             let mut grid = div().flex().flex_col().gap(px(16.)).px(px(14.)).py(px(16.));
-            for (r, chunk) in words.chunks(3).enumerate() {
+            let cols = if f32::from(window.viewport_size().width) <= 360. { 2 } else { 3 };
+            for (r, chunk) in words.chunks(cols).enumerate() {
                 let mut line = div().flex().gap(px(10.));
                 for (i, w) in chunk.iter().enumerate() {
-                    let n = r * 3 + i + 1;
+                    let n = r * cols + i + 1;
                     let cell = div()
                         .flex_1()
                         .min_w_0()
@@ -1682,7 +1684,7 @@ impl SecurityFlow {
 
 impl Render for SecurityFlow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let keys = self.keys_card(cx);
+        let keys = self.keys_card(window, cx);
         let migration = self.migration_card(window);
         let prompt = self.prompt_card(window, cx);
         let xfer = self.xfer_card(window, cx);
