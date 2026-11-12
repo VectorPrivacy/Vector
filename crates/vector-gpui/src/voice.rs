@@ -560,6 +560,7 @@ pub fn stage(
     community: &str,
     channel: &str,
     me: &str,
+    slim: bool,
     on: &OnAct,
 ) -> AnyElement {
     let session = voice.in_call(channel);
@@ -885,9 +886,15 @@ pub fn stage(
                         0. => 558.,
                         w => w,
                     };
-                    let hi: f32 = if small { 150. } else { 240. };
-                    let cols = (((w + 10.) / (hi + 10.)).floor() as usize).max(1);
-                    let col = hi.min(w);
+                    let (cols, col, tall) = if slim && !small {
+                        // `minmax(130px, 1fr)`: as many 130 tracks as fit, stretched to fill.
+                        let cols = (((w + 10.) / 140.).floor() as usize).max(1);
+                        let col = (w - 10. * (cols - 1) as f32) / cols as f32;
+                        (cols, col, 3. / 4.)
+                    } else {
+                        let hi: f32 = if small { 150. } else { 240. };
+                        (((((w + 10.) / (hi + 10.)).floor() as usize).max(1)), hi.min(w), if slim { 3. / 4. } else { 10. / 16. })
+                    };
                     let record = voice.grid_w.clone();
                     let mut grid = div().mt(px(10.)).relative().flex().flex_col().items_center().gap(px(10.)).child(
                         gpui::canvas(move |b, _, _| record.set(f32::from(b.size.width)), |_, _, _, _| {})
@@ -899,7 +906,7 @@ pub fn stage(
                         let row: Vec<_> = tiles
                             .by_ref()
                             .take(cols)
-                            .map(|t| t.w(px(col)).h(px((col * 10. / 16.).round())))
+                            .map(|t| t.w(px(col)).h(px((col * tall).round())))
                             .collect();
                         grid = grid.child(
                             div()

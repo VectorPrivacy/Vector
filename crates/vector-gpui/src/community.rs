@@ -623,7 +623,7 @@ pub fn slim_header(
                                 .text_size(px(18.72))
                                 .line_height(px(24.))
                                 .text_color(c(TEXT))
-                                .child(format!("#{}", ch.name)),
+                                .child(if ch.is_voice() { ch.name.clone() } else { format!("#{}", ch.name) }),
                         ),
                 )
                 .children(topic.map(|t| {

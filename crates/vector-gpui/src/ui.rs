@@ -7533,6 +7533,7 @@ impl VectorApp {
                 &com.community_id,
                 &ch.channel_id,
                 &store.my_npub,
+                self.is_slim,
                 &self.on_voice_handler(cx),
             ))
         });
