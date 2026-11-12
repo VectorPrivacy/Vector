@@ -36,6 +36,17 @@ pub struct Spec {
     pub farewell: String,
     /// The sink every request is pointed at: the app has no network.
     pub proxy: Option<(String, u16)>,
+    pub isolated: Option<Isolated>,
+}
+
+/// A cross-origin isolated app: served from its loopback host, in a data store of its own.
+pub struct Isolated {
+    pub id: u64,
+    pub port: u16,
+    pub boot_url: String,
+    pub data_dir: PathBuf,
+    /// The null proxy's URI; the app's own origin and the realtime socket bypass it.
+    pub sink: String,
 }
 
 /// What a window reports.
@@ -164,8 +175,12 @@ pub async fn open(
         .await
         .map_err(|_| "The Mini App took too long to load".to_string())?
         .map_err(|e| e.to_string())?;
-        if package.cross_origin_isolated {
-            return Err(format!("{} needs threaded WebAssembly, which isn't in this build yet", package.name));
+        let store = partition(&package.hash_hex()).await;
+        if package.cross_origin_isolated
+            && let Some(other) = core::isolated::window_for_partition(&store, &label)
+        {
+            host::focus(&other, None);
+            return Ok(());
         }
         let realtime_topic = topic_id.as_deref().and_then(|t| realtime::decode_topic_id(t).ok());
         let instance = state::MiniAppInstance {
@@ -197,7 +212,25 @@ pub async fn open(
             });
         }
 
-        let base = base_url(&partition(&package.hash_hex()).await);
+        let isolated = if package.cross_origin_isolated {
+            match start_isolated(&label, &store, href.as_deref()).await {
+                Ok(Some(i)) => Some(i),
+                Ok(None) => {
+                    apps.remove_instance_if(&label, instance.instance_id).await;
+                    return Ok(());
+                }
+                Err(e) => {
+                    apps.remove_instance_if(&label, instance.instance_id).await;
+                    return Err(format!("Mini App loopback host: {e}"));
+                }
+            }
+        } else {
+            None
+        };
+        let base = match &isolated {
+            Some(i) => format!("{}/", core::isolated::origin(i.port)),
+            None => base_url(&store),
+        };
         let url = match &href {
             Some(h) => format!("{base}{}", h.trim_start_matches('/')),
             None => base.clone(),
@@ -224,8 +257,13 @@ pub async fn open(
             init: format!("{IPC_SHIM}\n{init}"),
             farewell: format!("{base}webxdc.js"),
             proxy,
+            isolated,
         };
+        let isolated_id = spec.isolated.as_ref().map(|i| i.id);
         if let Err(e) = host::open(spec) {
+            if let Some(id) = isolated_id {
+                core::isolated::stop_if(&label, id);
+            }
             apps.remove_instance_if(&label, instance.instance_id).await;
             return Err(e);
         }
@@ -240,6 +278,28 @@ pub async fn open(
         Ok(())
     })
     .await
+}
+
+/// Starts the app's loopback host; None when another window already serves its store.
+async fn start_isolated(label: &str, store: &str, href: Option<&str>) -> Result<Option<Isolated>, String> {
+    let app = *vector_media::TAURI_APP.get().ok_or("The app isn't ready yet")?;
+    #[cfg(target_os = "linux")]
+    let sink = core::network_sink().ok_or("Network isolation unavailable for Mini Apps")?.to_string();
+    #[cfg(not(target_os = "linux"))]
+    let sink = String::new();
+    let data_dir = tauri::Manager::path(&app)
+        .app_data_dir()
+        .map_err(|e| e.0)?
+        .join("miniapp-isolated")
+        .join(store);
+    match core::isolated::start(&app, label, store, href).await {
+        Ok(s) => Ok(Some(Isolated { id: s.id, port: s.port, boot_url: s.boot_url.to_string(), data_dir, sink })),
+        Err(core::isolated::StartError::AlreadyOpen(other)) => {
+            host::focus(&other, None);
+            Ok(None)
+        }
+        Err(core::isolated::StartError::Failed(e)) => Err(e),
+    }
 }
 
 fn base_url(partition: &str) -> String {

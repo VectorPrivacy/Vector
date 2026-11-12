@@ -7,6 +7,9 @@ pub mod error;
 #[path = "../../../../src-tauri/src/miniapps/marketplace.rs"]
 #[allow(dead_code)]
 pub mod marketplace;
+#[path = "../../../../src-tauri/src/miniapps/isolated.rs"]
+#[allow(dead_code)]
+mod isolated_core;
 #[cfg(target_os = "linux")]
 #[path = "../../../../src-tauri/src/miniapps/network_isolation.rs"]
 pub mod network_isolation;
@@ -57,4 +60,51 @@ pub fn apps() -> &'static state::MiniAppsState {
 #[cfg(target_os = "linux")]
 pub fn network_sink() -> Option<&'static url::Url> {
     network_isolation::proxy_url()
+}
+
+/// The loopback host cross-origin isolated apps are served from.
+pub mod isolated {
+    use super::isolated_core as core;
+
+    pub struct Started {
+        pub id: u64,
+        pub port: u16,
+        pub boot_url: url::Url,
+    }
+
+    pub enum StartError {
+        /// Another window already serves this app's store.
+        AlreadyOpen(String),
+        Failed(String),
+    }
+
+    pub async fn start(app: &tauri::AppHandle, label: &str, partition: &str, href: Option<&str>) -> Result<Started, StartError> {
+        match core::start(app, label, partition, href).await {
+            Ok(s) => Ok(Started { id: s.id, port: s.port, boot_url: s.boot_url }),
+            Err(core::StartError::AlreadyOpen(l)) => Err(StartError::AlreadyOpen(l)),
+            Err(core::StartError::Failed(e)) => Err(StartError::Failed(e)),
+        }
+    }
+
+    pub fn origin(port: u16) -> String {
+        core::origin(port)
+    }
+
+    pub fn window_for_partition(partition: &str, except_label: &str) -> Option<String> {
+        core::window_for_partition(partition, except_label)
+    }
+
+    pub fn stop_if(label: &str, id: u64) {
+        core::stop_if(label, id)
+    }
+
+    #[cfg(target_os = "linux")]
+    pub fn enable_web_storage(view: &webkit2gtk::WebView) -> usize {
+        core::enable_web_storage(view)
+    }
+
+    /// The realtime WebSocket's port, which an isolated app reaches past its proxy.
+    pub fn rt_ws_port() -> Option<u16> {
+        super::scheme::rt_ws_port()
+    }
 }

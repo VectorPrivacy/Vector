@@ -2235,6 +2235,11 @@ impl VectorApp {
             }
             "marketplace_install_progress" | "marketplace_apps_updated" => self.nexus_event(name, &payload, cx),
             "pivx_payment_received" => self.pivx_received(&payload, cx),
+            "show_toast" => {
+                if let Some(text) = payload.as_str() {
+                    self.show_toast(text, cx);
+                }
+            }
             "miniapp_realtime_status" => {
                 let topic = payload.get("topic").and_then(Value::as_str).unwrap_or_default();
                 let peers: Vec<String> = payload

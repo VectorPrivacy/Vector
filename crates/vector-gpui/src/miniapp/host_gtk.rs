@@ -7,13 +7,15 @@ use std::sync::OnceLock;
 
 use gtk::glib;
 use gtk::prelude::*;
-use wry::{WebViewBuilder, WebViewBuilderExtUnix};
+use wry::{WebContext, WebViewBuilder, WebViewBuilderExtUnix, WebViewExtUnix};
 
 use super::{Event, Spec};
 
 struct Open {
     window: gtk::Window,
     view: wry::WebView,
+    /// An isolated app's data store; it must outlive the view.
+    _context: Option<WebContext>,
 }
 
 thread_local! {
@@ -81,7 +83,13 @@ fn build(spec: Spec) -> Result<(), String> {
     let (own_scheme, own_host) = origin(&spec.url);
     let ipc_label = spec.label.clone();
     let scheme_label = spec.label.clone();
-    let mut builder = WebViewBuilder::new()
+    let mut context = spec.isolated.as_ref().map(|i| WebContext::new(Some(i.data_dir.clone())));
+    let mut builder = match context.as_mut() {
+        Some(c) => WebViewBuilder::new_with_web_context(c),
+        None => WebViewBuilder::new(),
+    };
+    let blank_first = spec.isolated.is_some();
+    builder = builder
         .with_initialization_script_for_main_only(spec.init.clone(), false)
         .with_asynchronous_custom_protocol("webxdc".into(), move |_, request, responder| {
             vector_media::miniapps::serve(&scheme_label, request, move |response| {
@@ -92,21 +100,39 @@ fn build(spec: Spec) -> Result<(), String> {
             emit(Event::Ipc(ipc_label.clone(), request.into_body()));
         })
         .with_navigation_handler(move |url| {
-            let ok = origin(&url) == (own_scheme.clone(), own_host.clone());
+            let ok = origin(&url) == (own_scheme.clone(), own_host.clone()) || (blank_first && url == "about:blank");
             if !ok {
                 vector_core::log_warn!("[MiniApp] blocked navigation to {url}");
             }
             ok
         })
         .with_devtools(cfg!(debug_assertions))
-        .with_url(&spec.url);
-    if let Some((host, port)) = &spec.proxy {
+        .with_url(if blank_first { "about:blank" } else { &spec.url });
+    if let Some((host, port)) = spec.proxy.as_ref().filter(|_| !blank_first) {
         builder = builder.with_proxy_config(wry::ProxyConfig::Socks5(wry::ProxyEndpoint {
             host: host.clone(),
             port: port.to_string(),
         }));
     }
     let view = builder.build_gtk(&body).map_err(|e| e.to_string())?;
+    // Blank first: the null proxy, with this origin exempt, must be in place before the app runs.
+    if let Some(i) = &spec.isolated {
+        use webkit2gtk::{NetworkProxyMode, NetworkProxySettings, WebContextExt, WebViewExt, WebsiteDataManagerExt};
+        let inner = view.webview();
+        vector_media::miniapps::isolated::enable_web_storage(&inner);
+        let Some(manager) = inner.context().and_then(|c| c.website_data_manager()) else {
+            unsafe { window.destroy() };
+            return Err("could not isolate the Mini App's network".into());
+        };
+        let mut hosts = vec![format!("localhost:{}", i.port)];
+        if let Some(rt) = vector_media::miniapps::isolated::rt_ws_port() {
+            hosts.push(format!("127.0.0.1:{rt}"));
+        }
+        let hosts: Vec<&str> = hosts.iter().map(String::as_str).collect();
+        let mut settings = NetworkProxySettings::new(Some(i.sink.as_str()), &hosts);
+        manager.set_network_proxy_settings(NetworkProxyMode::Custom, Some(&mut settings));
+        view.load_url(&i.boot_url).map_err(|e| e.to_string())?;
+    }
 
     // A first close leaves the page instead, so unload handlers can send a last update.
     let leaving = std::rc::Rc::new(std::cell::Cell::new(false));
@@ -129,13 +155,17 @@ fn build(spec: Spec) -> Result<(), String> {
         glib::Propagation::Stop
     });
     let label = spec.label.clone();
+    let isolated = spec.isolated.as_ref().map(|i| i.id);
     window.connect_destroy(move |_| {
+        if let Some(id) = isolated {
+            vector_media::miniapps::isolated::stop_if(&label, id);
+        }
         OPEN.with(|o| o.borrow_mut().remove(&label));
         emit(Event::Closed(label.clone()));
     });
     window.show_all();
     window.present();
-    OPEN.with(|o| o.borrow_mut().insert(spec.label, Open { window, view }));
+    OPEN.with(|o| o.borrow_mut().insert(spec.label, Open { window, view, _context: context }));
     Ok(())
 }
 

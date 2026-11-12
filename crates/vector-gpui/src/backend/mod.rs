@@ -155,6 +155,7 @@ pub fn fixture_runtime() {
     });
     tauri::async_runtime::set(rt.handle().clone());
     tauri::set_local_data_dir(models_home());
+    tauri::set_data_dir(std::env::temp_dir().join("vector-gpui-fixtures"));
     let _ = vector_media::TAURI_APP.set(tauri::AppHandle::new(crate::audio::engine_event));
 }
 

@@ -5,6 +5,7 @@ use std::marker::PhantomData;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
+pub use url::Url;
 pub use vector_tauri_shim_macros::command;
 
 #[derive(Debug)]

@@ -10,6 +10,7 @@ publish = false
 path = "src/lib.rs"
 
 [dependencies]
+url = "2.5.7"
 vector-tauri-shim-macros = { path = "macros" }
 serde = "1"
 serde_json = "1"

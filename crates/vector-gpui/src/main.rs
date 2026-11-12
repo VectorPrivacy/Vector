@@ -124,8 +124,31 @@ fn args() -> Args {
     a
 }
 
+/// Mini App webviews: before GTK or any thread starts, as the desktop client does.
+#[cfg(target_os = "linux")]
+fn webkit_env() {
+    let user_chose = std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_some()
+        || std::env::var_os("WEBKIT_DMABUF_RENDERER_FORCE_SHM").is_some();
+    // SAFETY: single-threaded here; the getters read the linked WebKitGTK's version.
+    unsafe {
+        if !user_chose {
+            // DMA-BUF hand-off garbles on some GPUs; shared memory keeps acceleration on 2.54+.
+            let webkit = (webkit2gtk::ffi::webkit_get_major_version(), webkit2gtk::ffi::webkit_get_minor_version());
+            if webkit >= (2, 54) {
+                std::env::set_var("WEBKIT_DMABUF_RENDERER_FORCE_SHM", "1");
+            } else {
+                std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
+            }
+        }
+        // WebKitGTK keeps SharedArrayBuffer off even in a cross-origin isolated page unless JSC enables it.
+        std::env::set_var("JSC_useSharedArrayBuffer", "1");
+    }
+}
+
 fn main() {
     env_logger::init();
+    #[cfg(target_os = "linux")]
+    webkit_env();
     let args = args();
     let fixtures = args.fixtures.as_ref().map(|f| {
         let store = data::Store::from_fixtures(f).expect("fixtures");

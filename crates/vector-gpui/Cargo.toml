@@ -73,6 +73,7 @@ url = "2.5.7"
 [target.'cfg(target_os = "linux")'.dependencies]
 wry = { version = "=0.57.0", default-features = false, features = ["os-webview", "linux-body"] }
 gtk = "0.18"
+webkit2gtk = { version = "2.0", features = ["v2_40"] }
 
 # Its own workspace: GPUI pins dependency versions the main client must not inherit.
 [workspace]
