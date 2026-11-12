@@ -194,7 +194,9 @@ pub fn cards(ctx: &Ctx, m: &Message) -> Vec<AnyElement> {
 fn card(ctx: &Ctx, m: &Message, naddr: String) -> AnyElement {
     let state = ctx.media.borrow_mut().packs.get(&naddr);
     let key = format!("pk-{}-{naddr}", m.id);
-    let grid_w = CARD_W - 12. - META_W;
+    let meta_w = if ctx.vw <= 480. { 120. } else { META_W };
+    let card_w = if ctx.content_w > 0. { (CARD_W + 22.).min(ctx.content_w) - 22. } else { CARD_W };
+    let grid_w = card_w - 12. - meta_w;
     let (cols, rows) = layout(grid_w);
     let cell_w = (grid_w - GAP * (cols - 1) as f32) / cols as f32;
     let send = {
@@ -218,10 +220,10 @@ fn card(ctx: &Ctx, m: &Message, naddr: String) -> AnyElement {
                     .items_center()
                     .gap(px(6.))
                     .child(skel().size(px(22.)).rounded_full())
-                    .child(skel().w(px(META_W * 0.6)).h(px(14.)).rounded(px(4.)))
+                    .child(skel().w(px(meta_w * 0.6)).h(px(14.)).rounded(px(4.)))
                     .into_any_element(),
                 skel()
-                    .w(px(META_W * 0.38))
+                    .w(px(meta_w * 0.38))
                     .h(px(11.))
                     .mt(px(6.))
                     .rounded(px(4.))
@@ -458,7 +460,7 @@ fn card(ctx: &Ctx, m: &Message, naddr: String) -> AnyElement {
     div()
         .mt(px(8.))
         .w_full()
-        .max_w(px(CARD_W + 22.))
+        .max_w(px(card_w + 22.))
         .p(px(10.))
         .rounded(px(10.))
         .border_1()
@@ -469,7 +471,7 @@ fn card(ctx: &Ctx, m: &Message, naddr: String) -> AnyElement {
         .child(div().flex_shrink_0().child(grid))
         .child(
             div()
-                .w(px(META_W))
+                .w(px(meta_w))
                 .flex_shrink_0()
                 .flex()
                 .flex_col()
