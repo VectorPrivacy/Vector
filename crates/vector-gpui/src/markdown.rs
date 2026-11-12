@@ -459,7 +459,7 @@ impl Builder<'_> {
                 Some(npub) => self.pill(npub),
                 None => {
                     let url: SharedString = t[start..end].to_string().into();
-                    self.styled(&t[start..end], Kind::Link(url));
+                    self.styled(&glued(&t[start..end]), Kind::Link(url));
                 }
             }
             last = end;
@@ -643,7 +643,12 @@ impl Builder<'_> {
             look.color = Hsla { a: look.color.a, ..c };
         }
         match kind {
-            Kind::Link(_) | Kind::LinkTip(..) => look.color = gpui::rgb(0x59fcb3).into(),
+            Kind::Link(_) | Kind::LinkTip(..) => {
+                look.color = gpui::rgb(crate::theme::PRIMARY).into();
+                if look.weight < gpui::FontWeight::MEDIUM {
+                    look.weight = gpui::FontWeight::MEDIUM;
+                }
+            }
             Kind::Mention(_) | Kind::Tag(None) => {
                 look.color = gpui::rgb(crate::theme::PRIMARY).into();
                 look.weight = gpui::FontWeight::MEDIUM;
@@ -1278,6 +1283,20 @@ pub fn flatten(src: &str) -> String {
 #[allow(dead_code)]
 pub fn base_color(l: &Look) -> Hsla {
     l.color
+}
+
+/// A bare URL as a webview wraps it: whole onto the next line, then split anywhere only when
+/// it overflows that. Word joiners hold it together at the punctuation UAX #14 breaks after.
+fn glued(url: &str) -> String {
+    let mut out = String::with_capacity(url.len() + url.len() / 4);
+    let mut chars = url.chars().peekable();
+    while let Some(c) = chars.next() {
+        out.push(c);
+        if !c.is_alphanumeric() && chars.peek().is_some() {
+            out.push('\u{2060}');
+        }
+    }
+    out
 }
 
 #[cfg(test)]
