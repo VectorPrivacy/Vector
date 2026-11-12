@@ -58,6 +58,8 @@ pub struct TextInput {
     center: bool,
     right: bool,
     scroll: ScrollHandle,
+    /// How far a one-line field's text is scrolled left to keep the caret in view.
+    hscroll: std::cell::Cell<Pixels>,
     /// The caret moved: scroll it into view on the next paint.
     reveal: bool,
     is_selecting: bool,
@@ -743,6 +745,8 @@ struct TextElement {
 }
 
 struct PrepaintState {
+    /// The text's box, shifted left by a one-line field's scroll.
+    text: Bounds<Pixels>,
     layout: Option<Layout>,
     emoji: Vec<gpui::AnyElement>,
     cursor: Option<PaintQuad>,
@@ -1010,6 +1014,23 @@ impl Element for TextElement {
         } else {
             input.to_display(input.cursor_offset())
         };
+        let field = bounds;
+        let bounds = if input.multiline.is_none() && layout.align.is_none() {
+            let w = bounds.size.width - px(2.);
+            let text_w = layout.lines.first().map(|(_, _, l)| l.width()).unwrap_or_default();
+            let x = layout.position(caret).x;
+            let mut sx = input.hscroll.get();
+            if x - sx > w {
+                sx = x - w;
+            } else if x < sx {
+                sx = x;
+            }
+            sx = sx.min((text_w - w).max(px(0.))).max(px(0.));
+            input.hscroll.set(sx);
+            Bounds::new(field.origin - point(sx, px(0.)), size(field.size.width + sx, field.size.height))
+        } else {
+            field
+        };
         let o = bounds.origin;
         let (cursor, selections) = if start == end {
             let p = layout.position(caret);
@@ -1066,6 +1087,7 @@ impl Element for TextElement {
             })
             .collect();
         PrepaintState {
+            text: bounds,
             layout: Some(layout),
             emoji,
             cursor,
@@ -1089,53 +1111,61 @@ impl Element for TextElement {
             ElementInputHandler::new(bounds, self.input.clone()),
             cx,
         );
-        for quad in prepaint.selections.drain(..) {
-            window.paint_quad(quad);
-        }
-        let layout = prepaint.layout.take().unwrap();
-        // A chip spans the text's 18px content box, not the 21px line.
-        let inset = ((layout.line_height - px(18.)) / 2.).max(px(0.));
-        for (range, fill, radius, pad) in self.input.read(cx).chips.borrow().iter() {
-            let (a, b) = (layout.position(range.start), layout.position(range.end));
-            let rows = if a.y == b.y {
-                vec![(a.x, b.x, a.y)]
-            } else {
-                vec![(a.x, bounds.size.width, a.y), (px(0.), b.x, b.y)]
-            };
-            for (x0, x1, y) in rows {
-                let quad = Bounds::new(
-                    bounds.origin + point(x0 - px(*pad), y + inset),
-                    gpui::size(x1 - x0 + px(2. * pad), layout.line_height - inset * 2.),
-                );
-                window.paint_quad(gpui::fill(quad, *fill).corner_radii(gpui::Corners::all(px(*radius))));
+        let field = bounds;
+        let bounds = prepaint.text;
+        let mask = gpui::ContentMask {
+            bounds: Bounds::new(field.origin - point(px(0.), px(40.)), size(field.size.width, field.size.height + px(80.))),
+        };
+        let (layout, caret) = window.with_content_mask(Some(mask), |window| {
+            for quad in prepaint.selections.drain(..) {
+                window.paint_quad(quad);
             }
-        }
-        for (_, y, line) in &layout.lines {
-            let align = if layout.right {
-                gpui::TextAlign::Right
-            } else if layout.align.is_some() {
-                gpui::TextAlign::Center
-            } else {
-                gpui::TextAlign::Left
-            };
-            line.paint(
-                bounds.origin + point(px(0.), *y),
-                layout.line_height,
-                align,
-                layout.align.map(|_| bounds),
-                window,
-                cx,
-            )
-            .ok();
-        }
-        for art in &mut prepaint.emoji {
-            art.paint(window, cx);
-        }
-        let caret = prepaint.cursor.take();
-        let focused = focus_handle.is_focused(window);
-        if focused && let Some(cursor) = caret.clone() {
-            window.paint_quad(cursor);
-        }
+            let layout = prepaint.layout.take().unwrap();
+            // A chip spans the text's 18px content box, not the 21px line.
+            let inset = ((layout.line_height - px(18.)) / 2.).max(px(0.));
+            for (range, fill, radius, pad) in self.input.read(cx).chips.borrow().iter() {
+                let (a, b) = (layout.position(range.start), layout.position(range.end));
+                let rows = if a.y == b.y {
+                    vec![(a.x, b.x, a.y)]
+                } else {
+                    vec![(a.x, bounds.size.width, a.y), (px(0.), b.x, b.y)]
+                };
+                for (x0, x1, y) in rows {
+                    let quad = Bounds::new(
+                        bounds.origin + point(x0 - px(*pad), y + inset),
+                        gpui::size(x1 - x0 + px(2. * pad), layout.line_height - inset * 2.),
+                    );
+                    window.paint_quad(gpui::fill(quad, *fill).corner_radii(gpui::Corners::all(px(*radius))));
+                }
+            }
+            for (_, y, line) in &layout.lines {
+                let align = if layout.right {
+                    gpui::TextAlign::Right
+                } else if layout.align.is_some() {
+                    gpui::TextAlign::Center
+                } else {
+                    gpui::TextAlign::Left
+                };
+                line.paint(
+                    bounds.origin + point(px(0.), *y),
+                    layout.line_height,
+                    align,
+                    layout.align.map(|_| bounds),
+                    window,
+                    cx,
+                )
+                .ok();
+            }
+            for art in &mut prepaint.emoji {
+                art.paint(window, cx);
+            }
+            let caret = prepaint.cursor.take();
+            let focused = focus_handle.is_focused(window);
+            if focused && let Some(cursor) = caret.clone() {
+                window.paint_quad(cursor);
+            }
+            (layout, caret)
+        });
         self.input.update(cx, |input, cx| {
             input.last_layout = Some(layout);
             input.last_bounds = Some(bounds);
@@ -1268,6 +1298,7 @@ impl TextInput {
             marked_range: None,
             last_layout: None,
             last_bounds: None,
+            hscroll: Default::default(),
             multiline: None,
             center: false,
             right: false,

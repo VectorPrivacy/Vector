@@ -391,6 +391,9 @@ impl gpui::Render for Tip {
         _: &mut gpui::Context<Self>,
     ) -> impl gpui::IntoElement {
         use gpui::{ParentElement, Styled};
+        if self.0.is_empty() {
+            return gpui::div();
+        }
         gpui::div()
             .px(gpui::px(8.))
             .py(gpui::px(4.))
@@ -405,11 +408,29 @@ impl gpui::Render for Tip {
     }
 }
 
+thread_local! {
+    static PRESSES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// A press anywhere. A tooltip still waiting to show when one lands stays hidden, as a
+/// browser's does: GPUI's delayed show ignores whatever the press opened over it.
+pub fn note_press() {
+    PRESSES.with(|p| p.set(p.get() + 1));
+}
+
+fn presses() -> u64 {
+    PRESSES.with(|p| p.get())
+}
+
 pub fn tooltip(
     text: impl Into<gpui::SharedString>,
 ) -> impl Fn(&mut gpui::Window, &mut gpui::App) -> gpui::AnyView + 'static {
     let text = text.into();
-    move |_, cx| cx.new(|_| Tip(text.clone())).into()
+    let at = presses();
+    move |_, cx| {
+        let shown = if presses() == at { text.clone() } else { SharedString::default() };
+        cx.new(|_| Tip(shown)).into()
+    }
 }
 
 /// `countdownTip`: a hover label counting down each second to `until` (unix seconds), from
@@ -419,7 +440,11 @@ pub fn countdown_tip(
     now: u64,
     label: fn(i64) -> String,
 ) -> impl Fn(&mut gpui::Window, &mut gpui::App) -> gpui::AnyView + 'static {
+    let at = presses();
     move |_, cx| {
+        if presses() != at {
+            return cx.new(|_| Tip(SharedString::default())).into();
+        }
         let start = std::time::Instant::now();
         cx.new(|cx: &mut gpui::Context<Tip>| {
             cx.spawn(async move |tip, cx| loop {

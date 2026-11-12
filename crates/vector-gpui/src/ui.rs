@@ -5931,6 +5931,17 @@ impl Render for VectorApp {
                     },
                 )
             }))
+            .child(
+                gpui::canvas(|_, _, _| {}, |_, _, window, _| {
+                    window.on_mouse_event(|_: &gpui::MouseDownEvent, phase, _, _| {
+                        if phase.capture() {
+                            kit::note_press();
+                        }
+                    })
+                })
+                .absolute()
+                .size_0(),
+            )
     }
 }
 

@@ -329,7 +329,9 @@ impl LoginView {
     }
 
     /// SAM credentials for a router that asks for them: both, or neither to remove them.
-    fn set_sam_auth(&mut self, user: &str, password: &str, cx: &mut Context<Self>) -> bool {
+    /// None signs out of the SAM bridge.
+    fn set_sam_auth(&mut self, auth: Option<(&str, &str)>, cx: &mut Context<Self>) -> bool {
+        let (user, password) = auth.unwrap_or_default();
         let u = user.trim();
         if u.is_empty() != password.is_empty() {
             self.net.sam_error = "Enter both a username and a password.".into();
@@ -474,7 +476,7 @@ impl LoginView {
         if u.is_empty() || p.is_empty() {
             return;
         }
-        if self.set_sam_auth(&u, &p, cx) {
+        if self.set_sam_auth(Some((&u, &p)), cx) {
             self.close_sam_form(cx);
         }
     }
@@ -676,7 +678,7 @@ impl LoginView {
                     .gap(px(12.))
                     .child(SharedString::from(format!("Signs in as {}.", n.sam_user)))
                     .child(link("lg-sam-remove", "Remove").on_click(cx.listener(|this, _, _, cx| {
-                        this.set_sam_auth("", "", cx);
+                        this.set_sam_auth(None, cx);
                     }))),
             );
         } else if n.sam_open {
