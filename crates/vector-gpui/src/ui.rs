@@ -15660,12 +15660,15 @@ impl VectorApp {
                     return self.on_create_community(Act::Finish, window, cx);
                 }
                 let picked: Vec<String> = m.picked.iter().cloned().collect();
+                let n = picked.len();
                 m.busy = true;
                 m.error = None;
-                m.progress = Some((format!("Inviting {}", picked.len()), 0.));
+                m.progress = Some(("Getting ready".into(), 0.05));
+                let (step, mut steps) = futures::channel::mpsc::unbounded::<usize>();
                 let rx = backend::run(async move {
                     let mut failed = 0usize;
-                    for npub in picked {
+                    for (i, npub) in picked.into_iter().enumerate() {
+                        step.unbounded_send(i).ok();
                         if backend::community::invite(id.clone(), npub).await.is_err() {
                             failed += 1;
                         }
@@ -15673,22 +15676,51 @@ impl VectorApp {
                     failed
                 });
                 cx.spawn_in(window, async move |this, cx| {
+                    use futures::StreamExt;
+                    while let Some(i) = steps.next().await {
+                        let live = this.update(cx, |this, cx| {
+                            if let Some(m) = this.create_community.as_mut() {
+                                m.progress = Some((
+                                    format!("Inviting {} of {n}", i + 1),
+                                    (i as f32 / n as f32).max(0.05),
+                                ));
+                                cx.notify();
+                            }
+                        });
+                        if live.is_err() {
+                            return;
+                        }
+                    }
                     let Ok(failed) = rx.await else { return };
+                    let done = this.update(cx, |this, cx| {
+                        let m = this.create_community.as_mut()?;
+                        let label = if failed == n { "Invites failed" } else { "Invites sent" };
+                        m.progress = Some((label.into(), 1.));
+                        cx.notify();
+                        Some(())
+                    });
+                    if !matches!(done, Ok(Some(()))) {
+                        return;
+                    }
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_millis(350))
+                        .await;
                     this.update_in(cx, |this, window, cx| {
                         let Some(m) = this.create_community.as_mut() else {
                             return;
                         };
                         m.busy = false;
                         m.progress = None;
-                        if failed == 0 {
-                            this.on_create_community(Act::Finish, window, cx);
-                        } else {
-                            m.error = Some(format!(
-                                "{failed} invite{} didn't send. Try again, or invite them later.",
-                                if failed == 1 { "" } else { "s" }
-                            ));
-                            cx.notify();
+                        if failed > 0 {
+                            this.show_toast(
+                                &format!(
+                                    "{failed} invite{} failed to send",
+                                    if failed == 1 { "" } else { "s" }
+                                ),
+                                cx,
+                            );
                         }
+                        this.on_create_community(Act::Finish, window, cx);
                     })
                     .ok();
                 })
