@@ -78,6 +78,10 @@ gltf = { version = "1.4", default-features = false, features = ["utils", "names"
 tobj = { version = "4", default-features = false }
 fbxcel = { version = "0.9", features = ["tree"] }
 pollster = "0.4"
+# Call video: H.264 both ways (the codec WebCodecs peers send), and the camera.
+openh264 = "0.9"
+bytes = "1"
+nokhwa = { version = "0.10", features = ["input-native"] }
 
 # The same wgpu GPUI draws with on Linux; elsewhere its default backends (Metal, DX12).
 [target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies.wgpu]

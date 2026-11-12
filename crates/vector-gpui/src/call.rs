@@ -5,12 +5,13 @@
 use std::cell::Cell;
 use std::collections::VecDeque;
 use std::rc::Rc;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use gpui::{
     AnimationExt, AnyElement, App, Bounds, BoxShadow, Hsla, InteractiveElement, IntoElement,
     ParentElement, Pixels, Point, SharedString, StatefulInteractiveElement, Styled, Window, canvas,
-    div, point, prelude::FluentBuilder, px, svg,
+    div, point, prelude::FluentBuilder, px, svg, RenderImage,
 };
 use serde_json::Value;
 
@@ -51,7 +52,7 @@ impl Quality {
         }
     }
 
-    fn label(self) -> &'static str {
+    pub(crate) fn label(self) -> &'static str {
         match self {
             Quality::Excellent => "Excellent",
             Quality::Good => "Good",
@@ -126,6 +127,21 @@ pub struct Call {
     graph: Rc<Cell<Option<Bounds<Pixels>>>>,
     drag: Rc<Cell<Option<Drag>>>,
     sliding: Rc<Cell<bool>>,
+    /// What each side sends on video, camera then screen.
+    pub video_mine: [bool; 2],
+    pub video_peer: [bool; 2],
+    /// The peer named a decoder, so video can go their way at all.
+    pub peer_decodes: bool,
+    pub paused_by_peer: bool,
+    video_stats: [Option<(u32, u32, u32, u32)>; 2],
+    /// One of their pictures filling the window.
+    pub maximized: Option<usize>,
+    /// The full view's controls show until then.
+    pub max_controls: Option<Instant>,
+    /// The panel's quality and frame rate per picture; None is adaptive.
+    pub prefs: [(Option<u32>, Option<u32>); 2],
+    /// The panel's open dropdown: the picture, and whether it is the frame rate.
+    pub pref_open: Option<(usize, bool)>,
 }
 
 impl Default for Call {
@@ -158,6 +174,15 @@ impl Default for Call {
             graph: Rc::default(),
             drag: Rc::default(),
             sliding: Rc::default(),
+            video_mine: [false; 2],
+            video_peer: [false; 2],
+            peer_decodes: false,
+            paused_by_peer: false,
+            video_stats: [None; 2],
+            maximized: None,
+            max_controls: None,
+            prefs: [(None, None); 2],
+            pref_open: None,
         }
     }
 }
@@ -193,6 +218,9 @@ impl Call {
             self.quality = None;
             self.levels = (0., 0.);
             self.hover = None;
+            self.video_stats = [None; 2];
+            self.maximized = None;
+            self.prefs = [(None, None); 2];
         }
         self.id = Some(id);
         self.peer = str_of("peer");
@@ -208,6 +236,18 @@ impl Call {
         self.video_offered = bool_of("video_offered");
         self.peer_away = bool_of("peer_away");
         self.stalled = bool_of("stalled");
+        let tracks = |k: &str| {
+            let t = s.get(k);
+            let on = |n: &str| t.and_then(|t| t.get(n)).and_then(Value::as_bool).unwrap_or(false);
+            [on("camera"), on("screen")]
+        };
+        self.video_mine = tracks("video_mine");
+        self.video_peer = tracks("video_peer");
+        self.peer_decodes = s.get("peer_decodes").and_then(Value::as_array).is_some_and(|a| !a.is_empty());
+        self.paused_by_peer = bool_of("paused_by_peer");
+        if self.maximized.is_some_and(|k| !self.video_peer[k]) {
+            self.maximized = None;
+        }
         self.ended_at = (self.phase == Some(Phase::Ended)).then(Instant::now);
         if self.phase != Some(Phase::Active) && self.phase != Some(Phase::Ended) {
             self.expanded = false;
@@ -216,6 +256,9 @@ impl Call {
 
     pub fn clear(&mut self) {
         self.id = None;
+        self.video_mine = [false; 2];
+        self.video_peer = [false; 2];
+        self.maximized = None;
         self.phase = None;
         self.stats = None;
         self.history.clear();
@@ -274,6 +317,11 @@ impl Call {
             self.history.pop_front();
         }
         self.stats = Some(next);
+        for (i, k) in ["camera", "screen"].iter().enumerate() {
+            let t = st.get("video").and_then(|v| v.get(k));
+            let n = |f: &str| t.and_then(|t| t.get(f)).and_then(Value::as_u64).unwrap_or(0) as u32;
+            self.video_stats[i] = t.map(|_| (n("width"), n("height"), n("fps"), n("kbps")));
+        }
         let recent: Vec<_> = self.history.iter().rev().take(10).collect();
         let n = recent.len() as f32;
         self.quality = (n > 0.).then(|| {
@@ -282,6 +330,14 @@ impl Call {
                 recent.iter().map(|r| r.rtt).sum::<f32>() / n,
             )
         });
+    }
+
+    pub fn quality(&self) -> Option<Quality> {
+        self.quality
+    }
+
+    pub fn video_stats(&self, k: usize) -> Option<(u32, u32, u32, u32)> {
+        self.video_stats[k]
     }
 
     pub fn live(&self) -> bool {
@@ -376,6 +432,23 @@ pub enum Act {
     Volume(f32),
     Audio(Switch, bool),
     Hover(Option<usize>),
+    /// One of our pictures on or off: camera 0, screen 1.
+    Video(usize, bool),
+    Maximize(Option<usize>),
+    WakeControls,
+    /// A picture's quality (false) or frame rate (true), None for adaptive.
+    Pref(usize, bool, Option<u32>),
+    PrefOpen(Option<(usize, bool)>),
+}
+
+/// The pictures this frame shows, from the video worker.
+#[derive(Default)]
+pub struct Seen {
+    pub peer: [Option<(Arc<RenderImage>, u32, u32)>; 2],
+    pub mine: [Option<Arc<RenderImage>>; 2],
+    pub dec_fps: [u32; 2],
+    /// This device encodes and the peer decodes.
+    pub can_send: bool,
 }
 
 pub type OnAct = Rc<dyn Fn(Act, &mut Window, &mut App)>;
@@ -566,7 +639,7 @@ fn section(title: &'static str) -> impl IntoElement {
         .child(title.to_uppercase())
 }
 
-fn label(text: &'static str) -> impl IntoElement {
+pub(crate) fn label(text: &'static str) -> impl IntoElement {
     div()
         .w(px(84.))
         .flex_shrink_0()
@@ -587,7 +660,7 @@ fn value(text: impl Into<SharedString>) -> gpui::Div {
         .when(!text.is_empty(), |d| d.child(text))
 }
 
-fn hint(text: impl Into<SharedString>) -> impl IntoElement {
+pub(crate) fn hint(text: impl Into<SharedString>) -> impl IntoElement {
     div()
         .text_size(px(11.))
         .font_weight(gpui::FontWeight::NORMAL)
@@ -977,7 +1050,7 @@ fn graph(call: &Call, on: &OnAct) -> AnyElement {
         .into_any_element()
 }
 
-fn panel(call: &Call, proc_: &Processing, on: &OnAct) -> impl IntoElement {
+fn panel(call: &Call, proc_: &Processing, seen: &Seen, on: &OnAct) -> impl IntoElement {
     let live = call.live();
     let stats = call.stats.as_ref();
     let lost = call.lost_pct();
@@ -1020,6 +1093,7 @@ fn panel(call: &Call, proc_: &Processing, on: &OnAct) -> impl IntoElement {
                     .child(meter(call.levels.0, live)),
             )
         })
+        .children(crate::callpics::panel_blocks(call, on))
         .child(section("Voice processing"))
         .child(
             div()
@@ -1081,13 +1155,14 @@ fn panel(call: &Call, proc_: &Processing, on: &OnAct) -> impl IntoElement {
                     )
                     .when(!bitrate_hint.is_empty(), |d| d.child(hint(bitrate_hint)))
                     .into_any_element(),
-                )),
+                ))
+                .children(crate::callpics::peer_lines(call, seen)),
         )
         .child(graph(call, on))
 }
 
 /// The pill: its row drags or, tapped, opens the panel.
-fn pill(call: &Call, store: &Store, proc_: &Processing, top: f32, on: &OnAct) -> AnyElement {
+fn pill(call: &Call, store: &Store, proc_: &Processing, seen: &Seen, win: gpui::Size<Pixels>, top: f32, on: &OnAct) -> AnyElement {
     let live = call.live();
     let ended = call.phase == Some(Phase::Ended);
     let talk = if live && !call.peer_muted {
@@ -1217,14 +1292,17 @@ fn pill(call: &Call, store: &Store, proc_: &Processing, top: f32, on: &OnAct) ->
                 )
                 .child(status),
         )
-        .when(!ended, |d| d.child(mic_btn(call, on)).child(hangup_btn(on)));
+        .when(!ended, |d| d.children(crate::callpics::buttons(call, seen, on)).child(mic_btn(call, on)).child(hangup_btn(on)));
+    let pictures = crate::callpics::showing(call);
+    let wide = (f32::from(win.width) - 24.).min(480.);
     let body = div()
         .id("call-pill")
         .relative()
         .flex()
         .flex_col()
-        .when(call.expanded, |d| d.w(px(OPEN_W)))
-        .when(!call.expanded, |d| d.max_w(px(PILL_MAX_W)))
+        .when(pictures, |d| d.w(px(wide + 2.)))
+        .when(!pictures && call.expanded, |d| d.w(px(OPEN_W)))
+        .when(!pictures && !call.expanded, |d| d.max_w(px(PILL_MAX_W)))
         .rounded(px(16.))
         .bg(ca(20, 20, 20, 0.95))
         .border_1()
@@ -1241,7 +1319,11 @@ fn pill(call: &Call, store: &Store, proc_: &Processing, top: f32, on: &OnAct) ->
         .when(ended, |d| d.opacity(0.7))
         .child(watch)
         .child(row)
-        .when(call.expanded && !ended, |d| d.child(panel(call, proc_, on)));
+        .when(pictures && crate::callpics::max_open(call).is_none(), |d| {
+            let max_h = (f32::from(win.height) * 0.5).min(420.);
+            d.child(crate::callpics::pictures(call, store, seen, wide, max_h, on))
+        })
+        .when(call.expanded && !ended, |d| d.child(panel(call, proc_, seen, on)));
     match call.pos {
         Some(p) => div()
             .absolute()
@@ -1299,6 +1381,8 @@ pub fn render(
     call: &Call,
     store: &Store,
     proc_: &Processing,
+    seen: &Seen,
+    win: gpui::Size<Pixels>,
     chrome: f32,
     on: &OnAct,
 ) -> Option<AnyElement> {
@@ -1308,12 +1392,14 @@ pub fn render(
         gpui::deferred(ring(call, store, on))
             .with_priority(15)
             .into_any_element()
+    } else if let Some(max) = crate::callpics::maximized(call, seen, chrome, mic_btn(call, on).into_any_element(), hangup_btn(on).into_any_element(), on) {
+        gpui::deferred(div().absolute().inset_0().child(max)).with_priority(7).into_any_element()
     } else {
         gpui::deferred(
             div()
                 .absolute()
                 .inset_0()
-                .child(pill(call, store, proc_, chrome + 10., on)),
+                .child(pill(call, store, proc_, seen, win, chrome + 10., on)),
         )
         .with_priority(7)
         .into_any_element()

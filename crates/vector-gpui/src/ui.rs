@@ -231,6 +231,7 @@ pub struct VectorApp {
     /// A volume change waits on its throttle.
     audio_save_pending: bool,
     call: crate::call::Call,
+    video: crate::callvideo::Video,
     /// The processing switches the call panel shows, read when a call first appears.
     call_audio: Option<vector_core::calls::settings::AudioSettings>,
     call_ticking: bool,
@@ -881,6 +882,7 @@ impl VectorApp {
             update_url: None,
             audio_save_pending: false,
             call: crate::call::Call::at(Self::saved_pill_pos()),
+            video: Default::default(),
             call_audio: None,
             call_ticking: false,
             community: None,
@@ -913,6 +915,51 @@ impl VectorApp {
     }
 
     /// A 3D model's frame landed: paint it.
+    fn listen_video(&mut self, cx: &mut Context<Self>) {
+        let Some((mut rx, pending)) = self.video.take_wake() else { return };
+        cx.spawn(async move |this, cx| {
+            use futures::StreamExt;
+            while rx.next().await.is_some() {
+                pending.store(false, std::sync::atomic::Ordering::Release);
+                if this.update(cx, |_, cx| cx.notify()).is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// The call's video, each frame: the link follows the call, stopped captures are told,
+    /// and the newest pictures are handed to the overlay.
+    fn call_video(&mut self, window: &mut Window, cx: &mut Context<Self>) -> crate::call::Seen {
+        let key = (self.call.live() && self.call.peer_decodes).then(|| self.call.id.clone()).flatten();
+        self.video.follow(key.as_deref());
+        use crate::callvideo::VideoKind;
+        let kinds = [VideoKind::Camera, VideoKind::Screen];
+        for (k, kind) in kinds.into_iter().enumerate() {
+            // The call stopped a picture of ours: the capture stops with it.
+            if self.video.capturing(kind) && !self.call.video_mine[k] && !self.video.starting[k] {
+                self.video.stop(kind);
+            }
+        }
+        let lost: Vec<_> = std::mem::take(&mut self.video.pics().lost);
+        for kind in lost {
+            self.on_call(crate::call::Act::Video(kind.index(), false), window, cx);
+        }
+        let mut p = self.video.pics();
+        for old in p.retired.drain(..) {
+            let _ = window.drop_image(old);
+        }
+        let seen = crate::call::Seen {
+            peer: std::array::from_fn(|k| p.peer[k].as_ref().map(|x| (x.image.clone(), x.w, x.h))),
+            mine: std::array::from_fn(|k| p.mine[k].as_ref().map(|x| x.image.clone())),
+            dec_fps: p.dec_fps,
+            can_send: self.call.peer_decodes,
+        };
+        drop(p);
+        seen
+    }
+
     fn listen_models(&mut self, cx: &mut Context<Self>) {
         let Some(mut rx) = self.media.borrow_mut().models.take_wake() else { return };
         cx.spawn(async move |this, cx| {
@@ -935,6 +982,7 @@ impl VectorApp {
     ) -> Self {
         let mut app = Self::base(store, false, window, cx);
         app.listen_models(cx);
+        app.listen_video(cx);
         app.reload_picker_packs(cx);
         if let Some(v) = app.net_initial() {
             app.on_transport_view(v, cx);
@@ -1014,7 +1062,8 @@ impl VectorApp {
                 }
             });
         }
-        // Fixtures: VECTOR_CALL=ringing|calling|active|open shows a call with alice in that state.
+        // Fixtures: VECTOR_CALL=ringing|calling|active|open|video|video-open|video-max shows a call with alice in that state
+        // (VECTOR_CALL_PICS=1 fills the pictures from reference/media).
         if let Ok(state) = std::env::var("VECTOR_CALL") {
             app.fixture_call(&state, cx);
         }
@@ -1303,6 +1352,8 @@ impl VectorApp {
     ) -> Self {
         let mut app = Self::base(Store::live(), true, window, cx);
         app.listen_models(cx);
+        app.listen_video(cx);
+        crate::callvideo::announce_caps();
         app.screen = Screen::Booting;
         cx.spawn_in(window, async move |this, cx| {
             while let Some(ev) = events.next().await {
@@ -4732,7 +4783,8 @@ impl Render for VectorApp {
                     echo_cancel: a.echo_cancel,
                     noise_suppress: a.noise_suppress,
                 };
-                crate::call::render(&self.call, &self.store.borrow(), &proc_, CHROME_H, &on)
+                let seen = self.call_video(window, cx);
+                crate::call::render(&self.call, &self.store.borrow(), &proc_, &seen, window.viewport_size(), CHROME_H, &on)
             })
             .children(self.edit_history.as_ref().map(|h| {
                 let app = cx.entity().downgrade();
@@ -11254,6 +11306,9 @@ impl VectorApp {
         if self.viewer.is_some() || self.model_viewer.is_some() {
             return false;
         }
+        if self.call.maximized.take().is_some() || self.call.pref_open.take().is_some() {
+            return true;
+        }
         if self.menu.take().is_some()
             || self.net_info.take().is_some()
             || self.mini_profile.take().is_some()
@@ -12632,7 +12687,13 @@ impl VectorApp {
             "calling" => ("ringing", true),
             _ => ("active", true),
         };
-        self.call.apply_state(&serde_json::json!({ "id": "fixture", "peer": alice, "outgoing": outgoing, "phase": phase, "active_ms": 83_000, "volume": 1.0 }));
+        let video = state.starts_with("video");
+        self.call.apply_state(&serde_json::json!({ "id": "fixture", "peer": alice, "outgoing": outgoing, "phase": phase, "active_ms": 83_000, "volume": 1.0,
+            "video_mine": { "camera": video, "screen": false }, "video_peer": { "camera": video, "screen": video }, "peer_decodes": if video { vec!["h264"] } else { vec![] } }));
+        if video && std::env::var("VECTOR_CALL_PICS").is_ok() {
+            let load = |f: &str| image::open(format!("reference/media/{f}")).ok().map(|i| i.to_rgba8());
+            self.video.show_fixture([load("portrait.png"), load("cover.png")], [load("photo.png"), None]);
+        }
         if phase == "active" {
             for (i, rtt) in [
                 62, 58, 64, 71, 66, 60, 59, 63, 120, 95, 70, 64, 61, 60, 58, 62, 66, 63, 61, 60,
@@ -12641,11 +12702,13 @@ impl VectorApp {
             .enumerate()
             {
                 let concealed = if i == 9 { 3 } else { 0 } + if i > 9 { 3 } else { 0 };
-                self.call.apply_stats(&serde_json::json!({ "id": "fixture", "rtt_ms": rtt, "path": "relay", "bitrate_kbps": 64, "received": (i + 1) * 50, "concealed": concealed }));
+                self.call.apply_stats(&serde_json::json!({ "id": "fixture", "rtt_ms": rtt, "path": "relay", "bitrate_kbps": 64, "received": (i + 1) * 50, "concealed": concealed,
+                    "video": { "camera": { "fps": 30, "kbps": 780, "width": 1280, "height": 720 }, "screen": { "fps": 0, "kbps": 0, "width": 0, "height": 0 } } }));
             }
             self.call
                 .apply_level(&serde_json::json!({ "id": "fixture", "mic": 0.62, "peer": 0.7 }));
-            self.call.expanded = state == "open";
+            self.call.expanded = state == "open" || state == "video-open";
+            self.call.maximized = (state == "video-max").then_some(1);
         }
         cx.notify();
     }
@@ -12807,8 +12870,84 @@ impl VectorApp {
                 }
                 self.call.hover = i;
             }
+            Act::Video(k, on) => self.call_set_video(k, on, cx),
+            Act::Maximize(m) => {
+                self.call.maximized = m;
+                self.call.max_controls = m.map(|_| std::time::Instant::now() + std::time::Duration::from_millis(2500));
+            }
+            Act::WakeControls => {
+                let shown = self.call.max_controls.is_some_and(|t| t > std::time::Instant::now());
+                self.call.max_controls = Some(std::time::Instant::now() + std::time::Duration::from_millis(2500));
+                if shown {
+                    return;
+                }
+            }
+            Act::PrefOpen(o) => self.call.pref_open = o,
+            Act::Pref(k, fps, v) => {
+                self.call.pref_open = None;
+                let p = &mut self.call.prefs[k];
+                if fps { p.1 = v } else { p.0 = v }
+                let (rung, rate) = *p;
+                let kind = [crate::callvideo::VideoKind::Camera, crate::callvideo::VideoKind::Screen][k];
+                if self.live
+                    && let Err(e) = backend::calls::set_video_prefs(kind, rung, rate)
+                {
+                    self.show_toast(&e, cx);
+                }
+            }
         }
         cx.notify();
+    }
+
+    /// One of our pictures on or off. Opening a camera can wait on a system prompt, so it
+    /// runs off the UI thread; the call hears of it only once the camera is open.
+    fn call_set_video(&mut self, k: usize, on: bool, cx: &mut Context<Self>) {
+        use crate::callvideo::VideoKind;
+        let kind = [VideoKind::Camera, VideoKind::Screen][k];
+        if !on {
+            let had = self.video.capturing(kind) || self.call.video_mine[k];
+            self.video.stop(kind);
+            self.call.video_mine[k] = false;
+            if had {
+                self.call_cmd(backend::calls::set_video(kind, false), cx);
+            }
+            return;
+        }
+        if self.video.capturing(kind) || self.video.starting[k] {
+            return;
+        }
+        if kind == VideoKind::Screen {
+            self.show_toast("Screen sharing is not available on this system", cx);
+            return;
+        }
+        let Some(open) = self.video.camera_opener(kind) else {
+            self.show_toast("Could not open the camera", cx);
+            return;
+        };
+        self.video.starting[k] = true;
+        let live = self.live;
+        cx.spawn(async move |this, cx| {
+            let cap = cx.background_executor().spawn(async move { open() }).await;
+            let told = match &cap {
+                Ok(_) if live => backend::run(backend::calls::set_video(kind, true))
+                    .await
+                    .unwrap_or_else(|_| Err("Not in a call".into())),
+                _ => Ok(()),
+            };
+            this.update(cx, |this, cx| {
+                this.video.starting[k] = false;
+                match (cap, told) {
+                    (Ok(cap), Ok(())) => {
+                        this.video.attach(kind, cap);
+                        this.call.video_mine[k] = true;
+                    }
+                    (Err(e), _) | (_, Err(e)) => this.show_toast(&e, cx),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     fn call_cmd(

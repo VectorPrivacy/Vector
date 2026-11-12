@@ -62,3 +62,13 @@ pub async fn mic_test_start() -> Result<(), String> {
 pub fn mic_test_stop() {
     session::mic_test_stop();
 }
+
+/// One of our pictures starts or stops; the codec is the first of ours the peer decodes.
+pub async fn set_video(kind: vector_core::calls::wire::VideoKind, on: bool) -> Result<(), String> {
+    vector_core::db::scoped(session::set_video(kind, on)).await
+}
+
+/// The panel's quality and frame rate for a picture; None leaves it to the ladder.
+pub fn set_video_prefs(kind: vector_core::calls::wire::VideoKind, rung: Option<u32>, fps: Option<u32>) -> Result<(), String> {
+    session::set_video_prefs(kind, rung.map(|r| r as usize), fps)
+}
