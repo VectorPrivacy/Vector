@@ -1738,6 +1738,7 @@ fn details(n: &Nexus, app: &MarketplaceApp, publisher: Option<&(SharedString, Op
                         .child(
                             div()
                                 .id("nx-copy-link")
+                                .tooltip(crate::kit::tooltip("Copy Link"))
                                 .cursor_pointer()
                                 .opacity(0.)
                                 .hover(|s| s.opacity(1.))

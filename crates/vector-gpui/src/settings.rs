@@ -800,6 +800,8 @@ pub struct Blocked {
 }
 
 pub enum Act {
+    /// Copy the Vector link to `category/anchor`.
+    CopyPlace(&'static str, &'static str),
     Category(&'static str),
     Anchor(&'static str, &'static str),
     Toggle(&'static str, bool),
@@ -4145,15 +4147,34 @@ pub fn view(s: &Settings, width: f32, on: &OnAct, cx: &App) -> AnyElement {
                 .pt(px(30.))
                 .pb(px(34.))
                 .when(i > 0, |d| d.border_t_1().border_color(c(0x262626)))
-                .child(
+                .child({
+                    let group = SharedString::from(format!("cs-h-{}", a.id));
+                    let (cat_id, anchor) = (cat.id, a.id);
                     div()
+                        .group(group.clone())
                         .mb(px(20.))
+                        .flex()
+                        .items_center()
                         .text_size(px(24.))
                         .line_height(px(28.))
                         .font_weight(FontWeight::BOLD)
                         .text_color(c(0xffffff))
-                        .child(a.label),
-                )
+                        .child(a.label)
+                        .child(
+                            div()
+                                .id(SharedString::from(format!("cs-link-{}", a.id)))
+                                .tooltip(crate::kit::tooltip("Copy Link"))
+                                .ml(px(6.))
+                                .p(px(5.))
+                                .rounded(px(6.))
+                                .cursor_pointer()
+                                .opacity(0.)
+                                .group_hover(group, |d| d.opacity(0.55))
+                                .hover(|d| d.opacity(1.))
+                                .on_click(click(on, move || Act::CopyPlace(cat_id, anchor)))
+                                .child(svg().path("icons/share.svg").size(px(14.)).text_color(c(0xffffff))),
+                        )
+                })
                 .children(block(a.id, s, on))
                 .with_animation(
                     SharedString::from(format!("cs-in-{}", a.id)),

@@ -14497,6 +14497,12 @@ impl VectorApp {
         cx.notify();
         let mut pack_reload = false;
         match act {
+            Act::CopyPlace(cat, anchor) => {
+                cx.write_to_clipboard(gpui::ClipboardItem::new_string(format!(
+                    "https://vectorapp.io/go#settings/{cat}/{anchor}"
+                )));
+                self.show_toast("Copied Settings Link", cx);
+            }
             Act::Category(id) => {
                 s.open_select = None;
                 s.jumped = None;
