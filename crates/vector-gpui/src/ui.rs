@@ -3039,8 +3039,9 @@ impl VectorApp {
         let id = self.open.as_deref()?;
         let alone = !rows.iter().any(|r| matches!(r, Row::Message { .. }));
         if !self.live {
-            // Fixtures: an empty chat is its whole history.
-            return alone.then_some(data::Edge::Start);
+            // Fixtures hold a DM's whole history; a channel's is whole only when empty.
+            let community = self.store.borrow().community_of(id).is_some();
+            return (alone || !community).then_some(data::Edge::Start);
         }
         if !self.history_done.contains(id) {
             return None;
@@ -7546,7 +7547,7 @@ fn timeline_state(count: usize, app: gpui::WeakEntity<VectorApp>) -> ListState {
 
 fn timeline_row(ctx: &timeline::Ctx, row: &Row, after_message: bool) -> AnyElement {
     match row {
-        Row::Edge(edge) => history_edge(ctx.store, ctx.chat, &ctx.on_act, *edge),
+        Row::Edge(edge) => div().w_full().flex().justify_center().child(history_edge(ctx.store, ctx.chat, &ctx.on_act, *edge)).into_any_element(),
         Row::Date { label, time } => divider(
             div()
                 .flex()
