@@ -7604,6 +7604,8 @@ impl VectorApp {
             _ => None,
         };
         let anchors = self.anchors.clone();
+        // 3px border, 12px padding and the 56px gutter on the left; 12px and the body's 12px on the right.
+        let content_w = (f32::from(self.timeline.viewport_bounds().size.width) - 95.).max(0.);
         let messages = list(self.timeline.clone(), move |i, window, cx| {
             let rows_store = rows_store.borrow();
             let (Some(chat), Some(row)) = (rows_store.chat(&rows_id), rows.get(i)) else {
@@ -7631,6 +7633,7 @@ impl VectorApp {
                     .as_ref()
                     .map(|(id, t)| (id.as_str(), t.elapsed().as_secs_f32())),
                 commands: cmd_names.as_deref(),
+                content_w,
             };
             if ctx.jumped.is_some_and(|(id, _)| {
                 chat.messages

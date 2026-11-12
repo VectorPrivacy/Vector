@@ -144,14 +144,14 @@ pub fn attachments(ctx: &Ctx, m: &Message) -> Option<AnyElement> {
                                 &att.id,
                                 clip,
                                 m.pending,
-                                None,
+                                clip.info.as_ref().map(|i| within(ctx, crate::video::fit(i.w, i.h))),
                                 8.,
                                 std::rc::Rc::new(move |a, w, cx| on_act(&msg, Act::Video(aid.clone(), a), w, cx)),
                             ),
                             6.,
                         )
                     }
-                    None => (video_placeholder(att), 6.),
+                    None => (video_placeholder(ctx, att), 6.),
                 }
             }
             Phase::Ready if crate::model3d::supports(&e) => (model(ctx, &mut media, m, att), 6.),
@@ -234,13 +234,22 @@ fn model(ctx: &Ctx, media: &mut Media, m: &Message, att: &Attachment) -> AnyElem
         .into_any_element()
 }
 
+/// A fitted size scaled down, aspect kept, to the row it sits in.
+fn within(ctx: &Ctx, (w, h): (f32, f32)) -> (f32, f32) {
+    if ctx.content_w > 0. && w > ctx.content_w {
+        (ctx.content_w, h * ctx.content_w / w)
+    } else {
+        (w, h)
+    }
+}
+
 /// Sized from what the sender said while the file's own header is read.
-fn video_placeholder(att: &Attachment) -> AnyElement {
-    let (w, h) = att
+fn video_placeholder(ctx: &Ctx, att: &Attachment) -> AnyElement {
+    let (w, h) = within(ctx, att
         .img_meta
         .as_ref()
         .filter(|i| i.width > 0 && i.height > 0)
-        .map_or((crate::video::MAX_W, 253.), |i| crate::video::fit(i.width, i.height));
+        .map_or((crate::video::MAX_W, 253.), |i| crate::video::fit(i.width, i.height)));
     div().w(px(w)).h(px(h)).rounded(px(8.)).bg(gpui::black()).into_any_element()
 }
 
@@ -265,7 +274,7 @@ fn picture(ctx: &Ctx, media: &mut Media, m: &Message, att: &Attachment) -> Optio
     let veiled = spoiler(att) && !media.revealed.contains(&att.id);
     if veiled
         && let Some(meta) = meta
-        && let (w, h) = blur_size(meta)
+        && let (w, h) = within(ctx, blur_size(meta))
         && let Some(thumb) = media.thumb(&meta.thumbhash, device(ctx, w, h))
     {
         return Some(
@@ -312,7 +321,7 @@ fn picture(ctx: &Ctx, media: &mut Media, m: &Message, att: &Attachment) -> Optio
     };
     let want = match meta {
         Some(i) => {
-            let (w, h) = media::fit(i.width, i.height);
+            let (w, h) = within(ctx, media::fit(i.width, i.height));
             max(w, h)
         }
         None => max(media::MAX_W, media::MAX_H),
@@ -321,7 +330,7 @@ fn picture(ctx: &Ctx, media: &mut Media, m: &Message, att: &Attachment) -> Optio
     let upload = media.transfers.get(&m.id).and_then(|t| t.pct);
     match media.image(&att.id, source(ctx, att), &ext(att), want) {
         Slot::Ready { image, w, h } => {
-            let (fw, fh) = media::fit(w, h);
+            let (fw, fh) = within(ctx, media::fit(w, h));
             let (hash, path) = match source(ctx, att) {
                 Source::Held(h) => (Some(h), None),
                 Source::File(p) => (None, Some(p)),
@@ -367,7 +376,7 @@ fn picture(ctx: &Ctx, media: &mut Media, m: &Message, att: &Attachment) -> Optio
         // Holds the size it will draw, so the row doesn't grow under the reader.
         Slot::Loading => Some(match meta {
             Some(i) => {
-                let (w, h) = media::fit(i.width, i.height);
+                let (w, h) = within(ctx, media::fit(i.width, i.height));
                 div().w(px(w)).h(px(h)).into_any_element()
             }
             None => div().into_any_element(),
@@ -407,7 +416,7 @@ fn blur(
         .img_meta
         .as_ref()
         .filter(|i| i.width > 0 && i.height > 0)?;
-    let (w, h) = blur_size(meta);
+    let (w, h) = within(ctx, blur_size(meta));
     let thumb = media.thumb(&meta.thumbhash, device(ctx, w, h))?;
     let downloading = phase == Phase::Downloading;
     let running = media.transfers.contains_key(&att.id);
