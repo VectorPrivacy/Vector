@@ -3135,5 +3135,69 @@
    "updated_at": 1794300000,
    "status": 0
   }
+ },
+ "channel_perms": {
+  "activated": true,
+  "category": "e70d362ac4e73ce2887e5395680c76b7b3c93e43b69587845448f3b9d03ff48c",
+  "synced": null,
+  "can_manage": true,
+  "grantable": "18446744073709551615",
+  "roles": [
+   {
+    "role_id": "1111111111111111111111111111111111111111111111111111111111111111",
+    "name": "Mods",
+    "color": 5897395,
+    "position": 1
+   },
+   {
+    "role_id": "2222222222222222222222222222222222222222222222222222222222222222",
+    "name": "Helpers",
+    "color": 3718648,
+    "position": 2
+   },
+   {
+    "role_id": "3333333333333333333333333333333333333333333333333333333333333333",
+    "name": "Designers",
+    "color": 0,
+    "position": 3
+   }
+  ],
+  "overwrites": [
+   {
+    "kind": "everyone",
+    "id": null,
+    "npub": null,
+    "allow": "0",
+    "deny": "16384"
+   },
+   {
+    "kind": "role",
+    "id": "1111111111111111111111111111111111111111111111111111111111111111",
+    "npub": null,
+    "allow": "16416",
+    "deny": "0"
+   },
+   {
+    "kind": "member",
+    "id": "2bd806c97f0e00af1a1fc3328fa763a9269723c8db8fac4f93af71db186d6e90",
+    "npub": "npub190vqdjtlpcq27xslcveglfmr4ynfwg7gmw86cnun4acakxrdd6gqnp929a",
+    "allow": "65536",
+    "deny": "131072"
+   }
+  ],
+  "members": [
+   {
+    "id": "2bd806c97f0e00af1a1fc3328fa763a9269723c8db8fac4f93af71db186d6e90",
+    "npub": "npub190vqdjtlpcq27xslcveglfmr4ynfwg7gmw86cnun4acakxrdd6gqnp929a"
+   },
+   {
+    "id": "81b637d8fcd2c6da6359e6963113a1170de795e4b725b84d1e0b4cfd9ec58ce9",
+    "npub": "npub1sxmr0k8u6trd5c6eu6trzyapzux7090ykujmsng7pdx0m8k93n5sd02fwn"
+   },
+   {
+    "id": "4c26d9074c27d89ede59270c0ac14b71e071b15239519f75474b2f3ba63481f5",
+    "npub": "npub1fsndjp6vylvfahjeyuxq4s2tw8s8rv2j89ge7a28fvhnhf35s86sg3uctf"
+   }
+  ]
  }
 }

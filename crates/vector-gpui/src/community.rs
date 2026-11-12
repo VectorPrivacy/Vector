@@ -29,6 +29,10 @@ pub enum Act {
     Create,
     /// Invite People, for the open Community.
     Invite,
+    CategoryMenu(String, gpui::Point<gpui::Pixels>),
+    /// The open channel's ⋯.
+    ChatMenu,
+    EditChannel(String),
 }
 
 pub type OnAct = Rc<dyn Fn(Act, &mut Window, &mut App)>;
@@ -179,7 +183,7 @@ fn channel_row(
     } else {
         white_a(0.55)
     };
-    let action = |path: &'static str, shown: bool, act: Option<fn() -> Act>| {
+    let action = |path: &'static str, shown: bool, act: Option<Rc<dyn Fn() -> Act>>| {
         div()
             .id(path)
             .when_some(act, |d, act| {
@@ -238,9 +242,10 @@ fn channel_row(
             d.child(action("icons/chat-bubble.svg", false, None))
         })
         .when(!ch.is_voice() && owner, |d| {
+            let gear = ch.channel_id.clone();
             d.gap(px(8.))
-                .child(action("icons/add-user.svg", open, Some(|| Act::Invite)))
-                .child(action("icons/settings.svg", open, None))
+                .child(action("icons/add-user.svg", open, Some(Rc::new(|| Act::Invite))))
+                .child(action("icons/settings.svg", open, Some(Rc::new(move || Act::EditChannel(gear.clone())))))
         })
 }
 
@@ -414,6 +419,10 @@ pub fn sidebar(
                     .gap(px(2.))
                     .cursor_pointer()
                     .on_click(click(on, move || Act::Fold(key.clone())))
+                    .on_mouse_down(gpui::MouseButton::Right, {
+                        let (on, id) = (on.clone(), cat.category_id.clone());
+                        move |e, w, cx| on(Act::CategoryMenu(id.clone(), e.position), w, cx)
+                    })
                     .child(
                         crate::kit::spaced(cat.name.to_uppercase(), 0.99)
                             .font_weight(FontWeight::BOLD)
@@ -490,7 +499,12 @@ pub fn sidebar(
 
 /// The conversation header over a channel: its glyph and name, its topic past a hairline,
 /// then the menu and the member panel's toggle.
-pub fn header(ch: &Channel, panel: bool, on: &OnAct) -> impl IntoElement {
+pub fn header(
+    ch: &Channel,
+    panel: bool,
+    probe: Rc<std::cell::Cell<Option<gpui::Bounds<gpui::Pixels>>>>,
+    on: &OnAct,
+) -> impl IntoElement {
     div()
         .h(px(61.))
         .flex_shrink_0()
@@ -543,10 +557,19 @@ pub fn header(ch: &Channel, panel: bool, on: &OnAct) -> impl IntoElement {
         )
         .child(
             div()
+                .id("chat-menu")
+                .relative()
                 .size(px(40.))
                 .flex()
                 .items_center()
                 .justify_center()
+                .cursor_pointer()
+                .on_click(click(on, || Act::ChatMenu))
+                .child(
+                    gpui::canvas(move |b, _, _| probe.set(Some(b)), |_, _, _, _| {})
+                        .absolute()
+                        .size_full(),
+                )
                 .child(icon("ui/menu-dots.svg", 28., c(ICON_MUTED))),
         )
         .child(

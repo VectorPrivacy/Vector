@@ -195,6 +195,7 @@ pub struct VectorApp {
     /// The open Community, whose channels replace the chat list.
     community: Option<crate::community::View>,
     create_channel: Option<crate::createchannel::CreateChannel>,
+    channel_editor: Option<crate::chaneditor::ChannelEditor>,
     /// The menus a submenu was opened from, for its row back.
     menu_trail: Vec<(Vec<kit::MenuItem>, Vec<MenuAct>)>,
     start: Option<crate::startmenu::StartMenu>,
@@ -261,10 +262,26 @@ enum MenuAct {
     SetSelfDestruct(String, Option<u64>),
     ChangeWallpaper(String),
     RemoveWallpaper(String),
+    EditChannel {
+        community: String,
+        channel: String,
+        category: bool,
+    },
+    DeleteChannel {
+        community: String,
+        channel: String,
+        category: bool,
+    },
+    CopyId(String, &'static str),
 }
 
 enum PopupAct {
     Notice,
+    DeleteChannel {
+        community: String,
+        channel: String,
+        category: bool,
+    },
     RemoveWallpaper(String),
     DeleteModel(&'static str),
     ModRevoke,
@@ -347,6 +364,8 @@ enum CallGo {
 
 #[path = "ui_art.rs"]
 mod art_ops;
+#[path = "ui_chaneditor.rs"]
+mod chaneditor_ops;
 #[path = "ui_moderation.rs"]
 mod moderation_ops;
 
@@ -652,6 +671,7 @@ impl VectorApp {
             call_ticking: false,
             community: None,
             create_channel: None,
+            channel_editor: None,
             menu_trail: Vec::new(),
             start: None,
             menu: None,
@@ -754,6 +774,19 @@ impl VectorApp {
                     Ok("category") => app.open_create_channel(id.clone(), None, true, window, cx),
                     Ok("invite") => app.open_invite(id.clone(), window, cx),
                     _ => {}
+                }
+                // VECTOR_CHANNEL_EDITOR=overview|permissions opens Channel Settings on VECTOR_CHANNEL, or dev.
+                if let Ok(section) = std::env::var("VECTOR_CHANNEL_EDITOR") {
+                    let name = std::env::var("VECTOR_CHANNEL").unwrap_or_else(|_| "dev".into());
+                    let channel = app.store.borrow().community(&id).and_then(|c| {
+                        c.channels.iter().find(|ch| ch.name == name).map(|ch| ch.channel_id.clone())
+                    });
+                    if let Some(channel) = channel {
+                        app.open_channel_editor(id.clone(), channel, false, window, cx);
+                        if section == "permissions" {
+                            app.on_channel_editor(crate::chaneditor::Act::Section("permissions"), window, cx);
+                        }
+                    }
                 }
                 // VECTOR_MODERATION=members|policies|<preset id> opens the console there.
                 if let Ok(tab) = std::env::var("VECTOR_MODERATION") {
@@ -1214,6 +1247,16 @@ impl VectorApp {
             MenuAct::CreatorDelete(idx) => self
                 .emoji_picker
                 .update(cx, |p, cx| p.creator_remove(idx, cx)),
+            MenuAct::EditChannel { community, channel, category } => {
+                self.open_channel_editor(community, channel, category, window, cx)
+            }
+            MenuAct::DeleteChannel { community, channel, category } => {
+                self.ask_delete_channel(community, channel, category, cx)
+            }
+            MenuAct::CopyId(id, what) => {
+                cx.write_to_clipboard(gpui::ClipboardItem::new_string(id));
+                self.toast = Some((format!("Copied {what} ID").into(), std::time::Instant::now()));
+            }
             MenuAct::Copy(text) => {
                 cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
                 self.toast = Some(("Copied".into(), std::time::Instant::now()));
@@ -3098,6 +3141,9 @@ impl VectorApp {
         }
         match act {
             PopupAct::Notice => {}
+            PopupAct::DeleteChannel { community, channel, category } => {
+                self.delete_channel(community, channel, category, cx)
+            }
             PopupAct::LeaveCommunity { id, name, owner } => {
                 if owner
                     && popup
@@ -3421,7 +3467,16 @@ impl Render for VectorApp {
         }
         self.scan_invites(cx);
         let root = div()
-            .capture_key_down(cx.listener(|app, e: &gpui::KeyDownEvent, _, cx| {
+            .capture_key_down(cx.listener(|app, e: &gpui::KeyDownEvent, window, cx| {
+                if e.keystroke.key == "escape"
+                    && app.menu.is_none()
+                    && app.popup.is_none()
+                    && app.channel_editor.is_some()
+                {
+                    app.on_channel_editor(crate::chaneditor::Act::Close, window, cx);
+                    cx.stop_propagation();
+                    return;
+                }
                 if e.keystroke.key == "escape" && app.escape_overlay() {
                     cx.stop_propagation();
                     cx.notify();
@@ -3807,6 +3862,14 @@ impl Render for VectorApp {
                         .ok();
                 });
                 crate::commsettings::view(m, &store, &on, cx)
+            }))
+            .children(self.channel_editor.as_ref().map(|m| {
+                let app = cx.entity().downgrade();
+                let on: crate::chaneditor::OnAct = Rc::new(move |act, window, cx| {
+                    app.update(cx, |app, cx| app.on_channel_editor(act, window, cx))
+                        .ok();
+                });
+                crate::chaneditor::view(m, &store, &on, cx)
             }))
             .children(self.moderation.as_ref().map(|m| {
                 let app = cx.entity().downgrade();
@@ -5113,6 +5176,17 @@ impl VectorApp {
     fn open_chat_menu(&mut self, chat: String, cx: &mut Context<Self>) {
         let mut items = vec![kit::MenuItem::new("Self-Destruct Timer", "clock")];
         let mut acts = vec![MenuAct::SelfDestruct(chat.clone())];
+        let community = self.store.borrow().community_of(&chat).map(|c| c.community_id.clone());
+        if let Some(community) = community
+            && self.community_caps(&community).contains("manage_channels")
+        {
+            items.push(kit::MenuItem::new("Edit Channel", "edit"));
+            acts.push(MenuAct::EditChannel {
+                community,
+                channel: chat.clone(),
+                category: false,
+            });
+        }
         let papered = self.store.borrow().chat(&chat).map(|c| !c.wallpaper_path.is_empty());
         if let Some(papered) = papered.filter(|_| self.store.borrow().community_of(&chat).is_none()) {
             items.push(kit::MenuItem::new("Change Wallpaper", "image"));
@@ -5164,7 +5238,7 @@ impl VectorApp {
         let panel = self.community.as_ref().is_some_and(|v| v.panel);
         let paper = self.wallpaper.image(self.wallpaper_key().as_ref());
         let header = if let Some(ch) = channel {
-            crate::community::header(ch, panel, on_community).into_any_element()
+            crate::community::header(ch, panel, self.chat_menu_btn.clone(), on_community).into_any_element()
         } else {
             self.dm_header(store, &id, paper.is_some(), cx).into_any_element()
         };
@@ -6405,6 +6479,21 @@ impl VectorApp {
                     self.open_create_channel(id, Some(category), false, window, cx);
                 }
             }
+            Act::CategoryMenu(category, at) => {
+                if let Some(id) = self.community.as_ref().map(|v| v.id.clone()) {
+                    self.category_menu(id, category, at, cx);
+                }
+            }
+            Act::ChatMenu => {
+                if let Some(chat) = self.open.clone() {
+                    self.open_chat_menu(chat.to_string(), cx);
+                }
+            }
+            Act::EditChannel(channel) => {
+                if let Some(id) = self.community.as_ref().map(|v| v.id.clone()) {
+                    self.open_channel_editor(id, channel, false, window, cx);
+                }
+            }
         }
         cx.notify();
     }
@@ -6697,11 +6786,110 @@ impl VectorApp {
             rows.push((kit::MenuItem::divider(), MenuAct::Nothing));
         }
         rows.extend(self.notify_rows(&channel, Some(&community)));
+        let manage = self.community_caps(&community).contains("manage_channels");
+        if manage {
+            rows.push((kit::MenuItem::divider(), MenuAct::Nothing));
+            rows.push((
+                kit::MenuItem::new("Edit Channel", "edit"),
+                MenuAct::EditChannel {
+                    community: community.clone(),
+                    channel: channel.clone(),
+                    category: false,
+                },
+            ));
+        }
         rows.push((
             kit::MenuItem::new("Copy Link", "share"),
             MenuAct::Copy(format!("https://vectorapp.io/c/{community}/{channel}")),
         ));
+        if self.advanced() && !self.store.borrow().stream_hidden(&channel) {
+            rows.push((
+                kit::MenuItem::new("Copy Channel ID", "channel-hash"),
+                MenuAct::CopyId(channel.clone(), "Channel"),
+            ));
+        }
+        let primary = self
+            .store
+            .borrow()
+            .community(&community)
+            .is_some_and(|c| c.primary_channel.as_deref() == Some(channel.as_str()));
+        if manage && !primary {
+            rows.push((kit::MenuItem::divider(), MenuAct::Nothing));
+            rows.push((
+                kit::MenuItem::new("Delete Channel", "x").danger(),
+                MenuAct::DeleteChannel {
+                    community,
+                    channel,
+                    category: false,
+                },
+            ));
+        }
         self.show_menu(at, rows, cx);
+    }
+
+    /// `openCategoryMenu`: what a manager can do with a Category.
+    fn category_menu(
+        &mut self,
+        community: String,
+        category: String,
+        at: gpui::Point<gpui::Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.community_caps(&community).contains("manage_channels") {
+            return;
+        }
+        let rows = vec![
+            (
+                kit::MenuItem::new("Create Channel", "plus"),
+                MenuAct::CreateChannel {
+                    community: community.clone(),
+                    category: Some(category.clone()),
+                },
+            ),
+            (
+                kit::MenuItem::new("Edit Category", "edit"),
+                MenuAct::EditChannel {
+                    community: community.clone(),
+                    channel: category.clone(),
+                    category: true,
+                },
+            ),
+            (kit::MenuItem::divider(), MenuAct::Nothing),
+            (
+                kit::MenuItem::new("Delete Category", "x").danger(),
+                MenuAct::DeleteChannel {
+                    community,
+                    channel: category,
+                    category: true,
+                },
+            ),
+        ];
+        self.show_menu(at, rows, cx);
+    }
+
+    fn community_caps(&self, id: &str) -> HashSet<String> {
+        if self.live {
+            backend::community::capabilities(id)
+        } else {
+            [
+                "manage_metadata",
+                "manage_channels",
+                "change_nickname",
+                "ban",
+                "manage_roles",
+                "view_audit_log",
+            ]
+            .map(String::from)
+            .into()
+        }
+    }
+
+    fn advanced(&self) -> bool {
+        if self.live {
+            backend::prefs::synced_settings().advanced
+        } else {
+            std::env::var_os("VECTOR_ADVANCED").is_some()
+        }
     }
 
     fn open_create_channel(

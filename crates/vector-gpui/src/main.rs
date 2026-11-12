@@ -7,6 +7,7 @@ mod audit;
 mod backend;
 mod badgecard;
 mod call;
+mod chaneditor;
 mod commsettings;
 mod community;
 mod composer;

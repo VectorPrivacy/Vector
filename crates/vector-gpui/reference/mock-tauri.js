@@ -60,6 +60,7 @@
         fetch_nostr_embed: ({ reference }) => { const e = (FIX.embeds || {})[reference]; if (!e) throw 'Not found on any relay'; return e; }, cache_url_image: ({ url }) => url, list_emoji_packs: () => Object.values(FIX.packs || {}), refresh_emoji_packs: () => Object.values(FIX.packs || {}), get_theme_slot_anchor: () => '', fetch_emoji_pack_by_naddr: ({ naddr }) => { const p = (FIX.packs || {})[naddr]; if (!p) throw 'Pack not found'; return p; }, get_or_cache_image: ({ url }) => url.replace('https://ref.invalid/', ''),
         policy_presets: () => FIX.policy_presets, list_community_policies: () => ({ policies: [], using_builtin: true }),
         get_community_roles_view: () => FIX.roles_view,
+        get_channel_permissions: () => FIX.channel_perms,
         get_community_audit_log: () => FIX.audit || { entries: [], compacted: false },
         create_community: ({ name }) => ({ community_id: 'f'.repeat(64), channel_id: 'e'.repeat(64), channel_name: 'general', owner_npub: FIX.npub, name }),
         create_public_invite: () => 'https://vectorapp.io/invite/' + 'Ab3'.repeat(20),

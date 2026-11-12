@@ -127,7 +127,7 @@ pub fn tokenize(src: &str, names: &[String]) -> Vec<(Range<usize>, Deco)> {
         let line_start = i == 0 || src.as_bytes()[i - 1] == b'\n';
         let c = src[i..].chars().next().unwrap_or(' ');
         let prev = src[..i].chars().next_back();
-        let mut wrap = |out: &mut Vec<(Range<usize>, Deco)>, end: usize, mark: usize, body: Deco| {
+        let wrap = |out: &mut Vec<(Range<usize>, Deco)>, end: usize, mark: usize, body: Deco| {
             out.push((i..i + mark, Deco::Mark));
             out.push((i + mark..end - mark, body));
             out.push((end - mark..end, Deco::Mark));

@@ -25,6 +25,8 @@ struct Fixtures {
     #[serde(default)]
     roles_view: Option<serde_json::Value>,
     #[serde(default)]
+    channel_perms: Option<serde_json::Value>,
+    #[serde(default)]
     nicknames: HashMap<String, HashMap<String, String>>,
     #[serde(default)]
     moderation: Option<serde_json::Value>,
@@ -179,6 +181,7 @@ pub struct Store {
     /// The fixtures' Audit Log, as `get_community_audit_log` answers.
     pub fixture_audit: Option<serde_json::Value>,
     pub fixture_roles: Option<serde_json::Value>,
+    pub fixture_channel_perms: Option<serde_json::Value>,
     /// `get_moderation_intel` and `policy_presets`, as they answer.
     pub fixture_moderation: Option<serde_json::Value>,
     pub fixture_presets: Option<serde_json::Value>,
@@ -295,6 +298,7 @@ impl Store {
             invites: f.invites.into_iter().map(Invite::from).collect(),
             fixture_audit: f.audit,
             fixture_roles: f.roles_view,
+            fixture_channel_perms: f.channel_perms,
             fixture_moderation: f.moderation,
             fixture_presets: f.policy_presets,
             fixture_embeds: f.embeds,
@@ -331,6 +335,7 @@ impl Store {
             invites: Vec::new(),
             fixture_audit: None,
             fixture_roles: None,
+            fixture_channel_perms: None,
             fixture_moderation: None,
             fixture_presets: None,
             fixture_embeds: HashMap::new(),

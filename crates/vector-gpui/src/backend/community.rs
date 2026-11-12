@@ -1294,3 +1294,106 @@ pub fn hidden_banners() -> Vec<String> {
 pub fn set_banner_hidden(community_id: &str, hidden: bool) -> Result<Vec<String>, String> {
     vector_core::synced_prefs::set_banner_hidden(community_id, hidden).map(|l| l.ids)
 }
+
+/// `get_channel_permissions`: a channel's or Category's overwrites, read locally.
+pub fn channel_permissions(community_id: &str, channel_id: &str) -> Result<Value, String> {
+    VectorCore
+        .channel_permissions_view(community_id, channel_id)
+        .map_err(|e| e.to_string())
+}
+
+/// What one Save of Channel Settings publishes: the details, then the open overwrite.
+pub struct ChannelSave {
+    pub details: Option<ChannelDetails>,
+    /// (kind, target id, allow, deny), bits as decimal strings.
+    pub overwrite: Option<(String, Option<String>, String, String)>,
+}
+
+pub struct ChannelDetails {
+    pub name: String,
+    pub topic: Option<String>,
+    pub view: String,
+    pub category: bool,
+}
+
+pub async fn save_channel(community_id: String, channel_id: String, save: ChannelSave) -> Result<(), String> {
+    db::scoped(async move {
+        let (id, ch) = (community_id.as_str(), channel_id.as_str());
+        if let Some(d) = save.details {
+            if d.category {
+                VectorCore.rename_category(id, ch, &d.name).await.map_err(|e| e.to_string())?;
+            } else {
+                VectorCore
+                    .edit_channel_details(id, ch, &d.name, d.topic.as_deref(), &d.view)
+                    .await
+                    .map_err(|e| e.to_string())?;
+            }
+        }
+        if let Some((kind, target, allow, deny)) = save.overwrite {
+            VectorCore
+                .set_channel_overwrite(id, ch, &kind, target.as_deref(), &allow, &deny)
+                .await
+                .map_err(|e| e.to_string())?;
+        }
+        reregister(id).await;
+        Ok(())
+    })
+    .await
+}
+
+pub async fn set_channel_private(community_id: String, channel_id: String, private: bool) -> Result<(), String> {
+    db::scoped(async move {
+        VectorCore
+            .set_channel_private(&community_id, &channel_id, private)
+            .await
+            .map_err(|e| e.to_string())?;
+        reregister(&community_id).await;
+        Ok(())
+    })
+    .await
+}
+
+/// Sync a channel to `category`'s permissions, or (none) back to its own.
+pub async fn set_channel_sync(community_id: String, channel_id: String, category: Option<String>) -> Result<(), String> {
+    db::scoped(async move {
+        VectorCore
+            .set_channel_sync(&community_id, &channel_id, category.as_deref())
+            .await
+            .map_err(|e| e.to_string())?;
+        reregister(&community_id).await;
+        Ok(())
+    })
+    .await
+}
+
+/// The primary channel anchors the community's row and history, so it can't go.
+pub async fn delete_channel(community_id: String, channel_id: String) -> Result<(), String> {
+    db::scoped_result(async move {
+        let community = load(&community_id)?;
+        let ch = ChannelId(id32(&channel_id)?);
+        if community.primary_channel().is_some_and(|p| p.id.0 == ch.0) {
+            return Err("The community's first channel can't be deleted".to_string());
+        }
+        let name = community
+            .channel(&ch)
+            .map(|c| c.name.clone())
+            .ok_or("Channel not found in Community")?;
+        let transport = LiveTransport::with_timeout(Duration::from_secs(12));
+        vector_core::community::v2::service::delete_channel(&transport, &community, &ch, &name).await?;
+        reregister(&community_id).await;
+        Ok(())
+    })
+    .await
+}
+
+pub async fn delete_category(community_id: String, category_id: String) -> Result<(), String> {
+    db::scoped(async move {
+        VectorCore
+            .delete_category(&community_id, &category_id)
+            .await
+            .map_err(|e| e.to_string())?;
+        reregister(&community_id).await;
+        Ok(())
+    })
+    .await
+}
