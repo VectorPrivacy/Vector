@@ -4306,7 +4306,7 @@ impl Render for VectorApp {
                 let on: crate::netdialog::OnAct = std::rc::Rc::new(move |act, window, cx| {
                     app.update(cx, |app, cx| app.on_net(act, window, cx)).ok();
                 });
-                crate::netdialog::view(d, &on, cx)
+                crate::netdialog::view(d, &on, window, cx)
             });
         let popup = self.popup.as_ref().map(|(p, _)| {
             let app = cx.entity().downgrade();
@@ -11947,6 +11947,74 @@ impl VectorApp {
         cx.notify();
     }
 
+    /// `renderBlossomInfo`: what is held paints first, then the document, then the stats it moved.
+    fn load_server_dialog(&mut self, url: String, enabled: bool, cx: &mut Context<Self>) {
+        use crate::serverinfo::Load;
+        fn with(app: &mut VectorApp, url: &str, f: impl FnOnce(&mut crate::netdialog::NetDialog)) {
+            let Some(d) = app.settings.as_mut().and_then(|s| s.dialog.as_mut()) else { return };
+            if matches!(d, crate::netdialog::NetDialog::Server { info, .. } if info.url == url) {
+                f(d);
+            }
+        }
+        if !self.live {
+            let demo = self.store.borrow().fixture_servers.get(&url).cloned().unwrap_or_default();
+            with(self, &url, |d| {
+                let crate::netdialog::NetDialog::Server { stats, doc, caps, .. } = d else { return };
+                *stats = Some(demo["stats"].clone()).filter(|v| v.is_object());
+                *doc = Load::Ok(Some(demo["info"].clone()).filter(|v| v.is_object()));
+                *caps = Load::Ok(demo["caps"].as_array().cloned().unwrap_or_default());
+            });
+            return;
+        }
+        let (u, e) = (url.clone(), enabled);
+        let rx = backend::run(async move {
+            let caps = backend::network::server_caps(u.clone()).await;
+            let snap = backend::network::server_snapshot(u.clone(), e).await;
+            (caps, snap)
+        });
+        let (u, e) = (url.clone(), enabled);
+        let fresh = backend::run(async move {
+            let doc = backend::network::server_info(u.clone()).await;
+            let stats = backend::network::server_stats(u, e).await;
+            (doc, stats)
+        });
+        cx.spawn(async move |this, cx| {
+            if let Ok((caps, (held, stats, status))) = rx.await {
+                this.update(cx, |app, cx| {
+                    with(app, &url, |d| {
+                        let crate::netdialog::NetDialog::Server { info, stats: s, doc, caps: c, .. } = d else { return };
+                        *c = match caps {
+                            Ok(list) => Load::Ok(list),
+                            Err(_) => Load::Error,
+                        };
+                        *s = stats;
+                        info.status = status;
+                        if held.is_some() {
+                            *doc = Load::Ok(held);
+                        }
+                    });
+                    cx.notify();
+                })
+                .ok();
+            }
+            let Ok((doc, (stats, status))) = fresh.await else { return };
+            this.update(cx, |app, cx| {
+                with(app, &url, |d| {
+                    let crate::netdialog::NetDialog::Server { info, stats: s, doc: dd, .. } = d else { return };
+                    *dd = match doc {
+                        Ok(v) => Load::Ok(v),
+                        Err(_) => Load::Error,
+                    };
+                    *s = stats;
+                    info.status = status;
+                });
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     fn on_net(&mut self, act: crate::netdialog::Act, _window: &mut Window, cx: &mut Context<Self>) {
         use crate::netdialog::{Act, NetDialog};
         let Some(s) = self.settings.as_mut() else {
@@ -12091,7 +12159,8 @@ impl VectorApp {
                     self.popup = Some((popup, PopupAct::RemoveRelay { url }));
                 }
             }
-            (Act::ServerAction, NetDialog::Server { info }) => {
+            (Act::ChartHover(i), NetDialog::Server { chart, .. }) => chart.hover = i,
+            (Act::ServerAction, NetDialog::Server { info, .. }) => {
                 let url = info.url.clone();
                 if info.is_custom {
                     let mut popup = kit::Popup::notice("Remove media server?");
@@ -13266,7 +13335,15 @@ impl VectorApp {
             }
             Act::OpenServer(url) => {
                 let Some(info) = s.servers.iter().flatten().find(|r| r.url == url).cloned() else { return };
-                s.dialog = Some(crate::netdialog::NetDialog::Server { info });
+                let (enabled, url) = (info.enabled, info.url.clone());
+                s.dialog = Some(crate::netdialog::NetDialog::Server {
+                    info,
+                    stats: None,
+                    doc: crate::serverinfo::Load::Loading,
+                    caps: crate::serverinfo::Load::Loading,
+                    chart: Default::default(),
+                });
+                self.load_server_dialog(url, enabled, cx);
             }
             Act::DonutHover(at) => s.donut.hover = at,
             Act::DonutPick(i) => s.donut.picked = if s.donut.picked == Some(i) { None } else { Some(i) },

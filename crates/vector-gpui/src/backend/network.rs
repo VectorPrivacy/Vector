@@ -929,3 +929,41 @@ pub async fn toggle_server(url: String, enabled: bool) -> Result<(), String> {
     })
     .await
 }
+
+/// What a media server's dialog paints before asking the network: the held document, this
+/// device's history with it, and the status they imply.
+pub async fn server_snapshot(url: String, enabled: bool) -> (Option<Value>, Option<Value>, vector_core::blossom_stats::ServerStatus) {
+    db::scoped(async move {
+        let info = vector_core::blossom_info::cached(&url).and_then(|i| serde_json::to_value(i).ok());
+        let stats = vector_core::blossom_stats::stats_for(&url).and_then(|s| serde_json::to_value(s).ok());
+        (info, stats, vector_core::blossom_stats::status_for(&url, enabled))
+    })
+    .await
+}
+
+/// The server's information document for this account, refetched past half a minute.
+pub async fn server_info(url: String) -> Result<Option<Value>, String> {
+    db::scoped(async move {
+        let signer = vector_core::signer::active_signer()?;
+        let info = vector_core::blossom_info::refresh(&signer, &url, Duration::from_secs(30)).await?;
+        Ok(info.and_then(|i| serde_json::to_value(i).ok()))
+    })
+    .await
+}
+
+pub async fn server_stats(url: String, enabled: bool) -> (Option<Value>, vector_core::blossom_stats::ServerStatus) {
+    db::scoped(async move {
+        let stats = vector_core::blossom_stats::stats_for(&url).and_then(|s| serde_json::to_value(s).ok());
+        (stats, vector_core::blossom_stats::status_for(&url, enabled))
+    })
+    .await
+}
+
+/// What uploads have taught us this server takes.
+pub async fn server_caps(url: String) -> Result<Vec<Value>, String> {
+    db::scoped(async move {
+        let list = vector_core::blossom_capabilities::list_for_server(&url)?;
+        Ok(list.into_iter().filter_map(|c| serde_json::to_value(c).ok()).collect())
+    })
+    .await
+}

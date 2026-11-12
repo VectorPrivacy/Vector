@@ -3970,5 +3970,133 @@
     "edited": null
    }
   ]
+ },
+ "server_demo": {
+  "https://magnitude.vectorapp.io": {
+   "status": {
+    "state": "online",
+    "label": "Online",
+    "tone": "connected",
+    "latency_ms": 84
+   },
+   "stats": {
+    "latency_ms": 84.3,
+    "mbps": 23.4,
+    "best_mbps": 41.2,
+    "uploads": 37,
+    "bytes_total": 851443712,
+    "last_ok_at": null,
+    "last_fail_at": null,
+    "last_fail_kind": null,
+    "recent": [
+     [
+      12.1,
+      3145728
+     ],
+     [
+      18.4,
+      9437184
+     ],
+     [
+      9.7,
+      1048576
+     ],
+     [
+      26.0,
+      23068672
+     ],
+     [
+      41.2,
+      50331648
+     ],
+     [
+      22.5,
+      12582912
+     ],
+     [
+      30.8,
+      32505856
+     ],
+     [
+      23.4,
+      8388608
+     ]
+    ]
+   },
+   "info": {
+    "name": "Magnitude",
+    "software": null,
+    "version": null,
+    "description": null,
+    "buds": [
+     1,
+     2
+    ],
+    "extensions": [],
+    "max_blob": null,
+    "mime": [],
+    "capacity_used": null,
+    "capacity_limit": null,
+    "fetched_at": 0,
+    "caller": {
+     "tier": "badged",
+     "max_blob": 536870912,
+     "storage_used": 1300234240,
+     "storage_limit": 10737418240,
+     "blobs": 214,
+     "daily_used": 1981808640,
+     "daily_limit": 2147483648,
+     "allowed": true,
+     "reasons": [],
+     "plan_title": "Premium",
+     "plan_description": "Thanks for backing Vector."
+    }
+   },
+   "caps": []
+  },
+  "https://blossom.ditto.pub": {
+   "status": {
+    "state": "untested",
+    "label": "Untested",
+    "tone": "disabled",
+    "latency_ms": null
+   },
+   "stats": null,
+   "info": null,
+   "caps": [
+    {
+     "mime_type": "image/png",
+     "is_encrypted": true,
+     "outcome": 1,
+     "max_accepted_size": 12582912,
+     "min_rejected_size": null,
+     "updated_at": 0
+    },
+    {
+     "mime_type": "image/jpeg",
+     "is_encrypted": false,
+     "outcome": 1,
+     "max_accepted_size": 5242880,
+     "min_rejected_size": null,
+     "updated_at": 0
+    },
+    {
+     "mime_type": "video/mp4",
+     "is_encrypted": true,
+     "outcome": 3,
+     "max_accepted_size": 0,
+     "min_rejected_size": 104857600,
+     "updated_at": 0
+    },
+    {
+     "mime_type": "application/x-msdownload",
+     "is_encrypted": true,
+     "outcome": 2,
+     "max_accepted_size": 0,
+     "min_rejected_size": null,
+     "updated_at": 0
+    }
+   ]
+  }
  }
 }

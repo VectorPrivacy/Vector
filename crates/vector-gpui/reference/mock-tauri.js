@@ -82,6 +82,10 @@
             return { size: (window.__FILE_SIZES__ || {})[name] || 0, name, extension: name.split('.').pop() };
         },
         blossom_upload_verdict: () => ({ likely: true, reasons: [] }),
+        get_blossom_server_snapshot: ({ url }) => { const d = FIX.server_demo?.[url] || {}; return { info: d.info || null, stats: d.stats || null, status: d.status }; },
+        get_blossom_server_info: ({ url }) => FIX.server_demo?.[url]?.info || null,
+        get_blossom_server_stats: ({ url }) => { const d = FIX.server_demo?.[url] || {}; return { stats: d.stats || null, status: d.status }; },
+        get_blossom_server_capabilities: ({ url }) => FIX.server_demo?.[url]?.caps || [],
         pivx_get_wallet_balance: () => FIX.pivx?.balance ?? 0,
         pivx_get_price: () => FIX.pivx?.price ? { value: FIX.pivx.price.value, currency: FIX.pivx.price.currency } : null,
         pivx_get_preferred_currency: () => (FIX.pivx?.price?.currency || 'usd').toUpperCase(),

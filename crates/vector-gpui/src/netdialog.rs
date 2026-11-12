@@ -26,6 +26,10 @@ pub enum NetDialog {
     },
     Server {
         info: vector_core::blossom_servers::BlossomServerInfo,
+        stats: Option<serde_json::Value>,
+        doc: crate::serverinfo::Load<Option<serde_json::Value>>,
+        caps: crate::serverinfo::Load<Vec<serde_json::Value>>,
+        chart: crate::serverinfo::Chart,
     },
 }
 
@@ -40,6 +44,8 @@ pub enum Act {
     RelayAction,
     CopyLogs,
     ServerAction,
+    /// The upload under the pointer on the media server's speed chart.
+    ChartHover(Option<usize>),
 }
 
 pub type OnAct = Rc<dyn Fn(Act, &mut Window, &mut App)>;
@@ -595,7 +601,16 @@ fn relay(
     card("relay-info", body, on)
 }
 
-fn server(info: &vector_core::blossom_servers::BlossomServerInfo, on: &OnAct) -> AnyElement {
+fn server(
+    info: &vector_core::blossom_servers::BlossomServerInfo,
+    stats: Option<&serde_json::Value>,
+    doc: &crate::serverinfo::Load<Option<serde_json::Value>>,
+    caps: &crate::serverinfo::Load<Vec<serde_json::Value>>,
+    chart: &crate::serverinfo::Chart,
+    window: &mut Window,
+    on: &OnAct,
+) -> AnyElement {
+    use crate::serverinfo::{self as si, Load};
     let state = if info.enabled {
         info.status.state
     } else {
@@ -619,13 +634,15 @@ fn server(info: &vector_core::blossom_servers::BlossomServerInfo, on: &OnAct) ->
     } else {
         "Enable"
     };
-    let mut body = div().p(px(20.)).flex().flex_col().gap(px(15.)).child(
+    let host = crate::settings::host(&info.url);
+    let bare = host.to_string();
+    let mut body = div().pt(px(16.)).px(px(20.)).pb(px(20.)).flex().flex_col().gap(px(10.)).child(
         div()
             .truncate()
             .text_size(px(13.))
             .line_height(px(24.))
             .text_color(white_a(0.5))
-            .child(crate::settings::host(&info.url)),
+            .child(host),
     );
     if let Some(text) = notice {
         let tone = if info.enabled {
@@ -633,14 +650,22 @@ fn server(info: &vector_core::blossom_servers::BlossomServerInfo, on: &OnAct) ->
         } else {
             "disabled"
         };
+        let (edge, fill) = match tone {
+            "connecting" => (ca(255, 193, 7, 0.35), ca(255, 193, 7, 0.06)),
+            "disconnected" => (ca(255, 82, 82, 0.35), ca(255, 82, 82, 0.06)),
+            _ => (white_a(0.08), white_a(0.03)),
+        };
         body = body.child(
             div()
                 .flex()
                 .items_center()
                 .gap(px(10.))
-                .p(px(12.))
+                .px(px(12.))
+                .py(px(10.))
                 .rounded(px(10.))
-                .bg(white_a(0.04))
+                .border_1()
+                .border_color(edge)
+                .bg(fill)
                 .child(pill(if tone == "connected" {
                     "connected"
                 } else {
@@ -656,6 +681,24 @@ fn server(info: &vector_core::blossom_servers::BlossomServerInfo, on: &OnAct) ->
                 ),
         );
     }
+    let hover_on = on.clone();
+    body = body.children(stats.and_then(|st| {
+        si::performance(st, chart, window, Rc::new(move |i, w, cx| hover_on(Act::ChartHover(i), w, cx)))
+    }));
+    let personal = matches!(doc, Load::Ok(Some(d)) if d["caller"].is_object());
+    body = match doc {
+        Load::Loading => body.child(si::skeleton()),
+        _ if personal => body.children(match doc {
+            Load::Ok(Some(d)) => si::account(d, &bare),
+            _ => None,
+        }),
+        _ => body
+            .children(match doc {
+                Load::Ok(Some(d)) => si::account(d, &bare),
+                _ => None,
+            })
+            .child(si::learned(caps)),
+    };
     body = body.child(
         div()
             .mt(px(10.))
@@ -682,7 +725,7 @@ fn server(info: &vector_core::blossom_servers::BlossomServerInfo, on: &OnAct) ->
     card("server-info", body, on)
 }
 
-pub fn view(d: &NetDialog, on: &OnAct, cx: &App) -> AnyElement {
+pub fn view(d: &NetDialog, on: &OnAct, window: &mut Window, cx: &App) -> AnyElement {
     match d {
         NetDialog::AddRelay { input, mode } => add_relay(input, mode, on, cx),
         NetDialog::Relay {
@@ -692,6 +735,6 @@ pub fn view(d: &NetDialog, on: &OnAct, cx: &App) -> AnyElement {
             mode_open,
             copied,
         } => relay(row, metrics, logs, *mode_open, *copied, on),
-        NetDialog::Server { info } => server(info, on),
+        NetDialog::Server { info, stats, doc, caps, chart } => server(info, stats.as_ref(), doc, caps, chart, window, on),
     }
 }

@@ -60,6 +60,8 @@ struct Fixtures {
     /// Each channel's pins, which VECTOR_PINS=1 applies.
     #[serde(default)]
     pins_demo: HashMap<String, serde_json::Value>,
+    #[serde(default)]
+    server_demo: HashMap<String, serde_json::Value>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -213,6 +215,8 @@ pub struct Store {
     /// Fixtures: `{ present: { channel: [member] }, session }` under VECTOR_VOICE.
     pub fixture_voice: Option<serde_json::Value>,
     pub fixture_pins: HashMap<String, serde_json::Value>,
+    /// Media servers' dialogs, by URL: `info`, `stats`, `status` and `caps`.
+    pub fixture_servers: HashMap<String, serde_json::Value>,
     pub fixture_presets: Option<serde_json::Value>,
     /// `fetch_nostr_embed`'s answers, by reference.
     pub fixture_embeds: HashMap<String, serde_json::Value>,
@@ -358,6 +362,7 @@ impl Store {
                 Some(serde_json::json!({ "present": demo.get(&k)?, "session": session }))
             }),
             fixture_pins: if std::env::var_os("VECTOR_PINS").is_some() { f.pins_demo } else { HashMap::new() },
+            fixture_servers: f.server_demo,
             fixture_presets: f.policy_presets,
             fixture_embeds: f.embeds,
             fixture_packs: f.packs,
@@ -406,6 +411,7 @@ impl Store {
             fixture_moderation: None,
             fixture_voice: None,
             fixture_pins: HashMap::new(),
+            fixture_servers: HashMap::new(),
             fixture_presets: None,
             fixture_embeds: HashMap::new(),
             fixture_packs: HashMap::new(),

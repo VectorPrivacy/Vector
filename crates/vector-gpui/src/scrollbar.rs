@@ -175,7 +175,7 @@ pub fn render(bar: &Bar, window: &mut Window, on: OnEv) -> AnyElement {
         .w(px(22.))
         .when(!bar.shown, |d| d.invisible())
         .when(bar.shown, |d| d.occlude())
-        .on_scroll_wheel(move |e, w, cx| wheel(Ev::Wheel(f32::from(e.delta.pixel_delta(w.line_height()).y)), w, cx))
+        .on_scroll(move |e, w, cx| wheel(Ev::Wheel(f32::from(e.delta.pixel_delta(w.line_height()).y)), w, cx))
         .child(
             gpui::canvas(
                 move |b, _, _| probe.set(Some(b)),
