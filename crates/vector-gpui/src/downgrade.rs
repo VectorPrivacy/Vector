@@ -71,7 +71,8 @@ pub fn render(current: &str, required: &str) -> AnyElement {
         div().text_size(px(size)).line_height(px(lh)).text_center().text_color(ca(246, 246, 246, o)).child(text)
     };
     let card = div()
-        .w(px(410.))
+        .w_full()
+        .max_w(px(410.))
         .flex()
         .flex_col()
         .items_center()

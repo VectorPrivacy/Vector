@@ -151,7 +151,8 @@ pub fn view(m: &CreateChannel, on: &OnAct, window: &Window, cx: &App) -> impl In
     let private = on.clone();
     let card = div()
         .id("ccm-card")
-        .w(px(440.))
+        .w_full()
+        .max_w(px(440.))
         .flex()
         .flex_col()
         .pt(px(18.))
