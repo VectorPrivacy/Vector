@@ -599,6 +599,9 @@ pub fn slim_header(
         .justify_center()
         .child(
             div()
+                .id("slim-chat-title")
+                .cursor_pointer()
+                .on_click(click(on, || Act::Panel))
                 .pt(px(if topic.is_some() { 8. } else { 18. }))
                 .max_w(gpui::relative(0.6))
                 .flex()
@@ -745,8 +748,9 @@ fn member_row(store: &Store, cid: &str, npub: &str, owner: bool, unlisted: Optio
         )
 }
 
-/// `#group-overview`: the roster, filtered by the search, by rank.
-pub fn members_panel(
+/// The roster's sections, filtered by the search, by rank, or why there are none.
+pub fn roster<E: ParentElement>(
+    d: E,
     store: &Store,
     open: &str,
     view: &View,
@@ -754,7 +758,7 @@ pub fn members_panel(
     on: &OnAct,
     anchors: &crate::kit::Anchors,
     cx: &App,
-) -> impl IntoElement {
+) -> E {
     let query = view.search.read(cx).text().trim().to_lowercase();
     let owner = com.owner_npub.as_deref();
     let matches = |n: &&String| {
@@ -840,6 +844,39 @@ pub fn members_panel(
     };
     let admin_section = section("sec-admin", "ADMIN", admins);
     let gap = admin_section.is_some();
+    let members = section("sec-members", "MEMBERS", rest).map(|s| s.when(gap, |d| d.mt(px(12.))));
+    if admin_section.is_some() || members.is_some() {
+        return d.children(admin_section).children(members);
+    }
+    let (text, italic) = match (view.loading, query.is_empty()) {
+        (true, true) => ("Loading members…", false),
+        (_, true) => ("No one has spoken yet. Members appear here once they post.", true),
+        _ => ("No matches.", true),
+    };
+    d.child(
+        div()
+            .mt(px(16.))
+            .p(px(14.))
+            .text_center()
+            .text_size(if italic { px(16.) } else { px(12.5) })
+            .line_height(px(if italic { 24. } else { 18. }))
+            .text_color(c(TEXT))
+            .opacity(if italic { 0.5 } else { 0.4 })
+            .when(italic, |d| d.italic())
+            .child(text),
+    )
+}
+
+/// `#group-overview`: the search over the roster.
+pub fn members_panel(
+    store: &Store,
+    open: &str,
+    view: &View,
+    com: &Community,
+    on: &OnAct,
+    anchors: &crate::kit::Anchors,
+    cx: &App,
+) -> impl IntoElement {
     div()
         .id("group-overview")
         .w(px(240.))
@@ -888,29 +925,7 @@ pub fn members_panel(
                 .min_h_0()
                 .overflow_y_scroll()
                 .px(px(8.))
-                .map(|d| {
-                    let members = section("sec-members", "MEMBERS", rest).map(|s| s.when(gap, |d| d.mt(px(12.))));
-                    if admin_section.is_some() || members.is_some() {
-                        return d.children(admin_section).children(members);
-                    }
-                    let (text, italic) = match (view.loading, query.is_empty()) {
-                        (true, true) => ("Loading members…", false),
-                        (_, true) => ("No one has spoken yet. Members appear here once they post.", true),
-                        _ => ("No matches.", true),
-                    };
-                    d.child(
-                        div()
-                            .mt(px(16.))
-                            .p(px(14.))
-                            .text_center()
-                            .text_size(if italic { px(16.) } else { px(12.5) })
-                            .line_height(px(if italic { 24. } else { 18. }))
-                            .text_color(c(TEXT))
-                            .opacity(if italic { 0.5 } else { 0.4 })
-                            .when(italic, |d| d.italic())
-                            .child(text),
-                    )
-                }),
+                .map(|d| roster(d, store, open, view, com, on, anchors, cx)),
         )
 }
 

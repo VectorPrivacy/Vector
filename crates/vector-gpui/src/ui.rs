@@ -8987,6 +8987,12 @@ impl VectorApp {
                     v.folded.insert(key);
                 }
             }
+            Act::Panel if self.is_slim => {
+                self.slim.details = match self.slim.details.take() {
+                    Some(_) => None,
+                    None => self.open.as_ref().map(|id| id.to_string()),
+                };
+            }
             Act::Panel => {
                 if let Some(v) = self.community.as_mut() {
                     v.panel = !v.panel;

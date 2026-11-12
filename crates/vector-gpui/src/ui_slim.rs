@@ -67,6 +67,8 @@ pub(super) struct Slim {
     pub filter: Filter,
     /// A community's channels stand over the channel on screen.
     pub drawer: bool,
+    /// The channel whose community details slide over it.
+    pub details: Option<String>,
     pub search: Option<Entity<TextInput>>,
     pub(super) list: ListState,
     keys: RefCell<Vec<Item>>,
@@ -83,6 +85,7 @@ impl Slim {
             hidden: crate::backend::device::get("cc_rail_hidden").is_some_and(|v| v == "true"),
             filter: Filter::Messages,
             drawer: false,
+            details: None,
             search: None,
             list: ListState::new(0, ListAlignment::Top, px(400.)),
             keys: RefCell::new(Vec::new()),
@@ -241,6 +244,11 @@ impl VectorApp {
         }
         let drawer = self.slim.drawer && self.community.is_some();
         if let Some(id) = self.open.clone().filter(|_| !drawer) {
+            if self.slim.details.as_deref() == Some(&*id)
+                && let Some(view) = self.slim_details(store, &id, window, cx)
+            {
+                return view;
+            }
             let back = cx.listener(|app, _: &gpui::ClickEvent, _, cx| app.slim_back(cx));
             return div()
                 .flex_1()
@@ -767,6 +775,279 @@ impl VectorApp {
                 ),
             )
             .into_any_element()
+    }
+
+    /// `CommunityOverview.svelte` slid over a channel: the community, the channel, and its roster.
+    fn slim_details(&mut self, store: &Store, chat: &str, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let view = self.community.as_ref()?;
+        let com = store.community(&view.id)?;
+        let ch = com.channel(chat)?;
+        let cid = com.community_id.clone();
+        let caps = self.community_caps(&cid);
+        let me = store.my_npub.clone();
+        let owner = com.owner_npub.as_deref() == Some(me.as_str());
+        let raid = caps.contains("ban") && self.raid.get(&cid).is_some_and(|r| r.0);
+        let muted = self.live
+            && super::backend::prefs::notify_views(Some(cid.clone()), vec![cid.clone()])
+                .iter()
+                .any(|v| v.scope_id == cid && v.muted);
+        let n = view.members.len();
+        let app = cx.entity().downgrade();
+        let on: crate::community::OnAct = Rc::new(move |act, window, cx| {
+            app.update(cx, |app, cx| app.on_community(act, window, cx)).ok();
+        });
+        let button = |id: &'static str, icon: &'static str, ink: u32, edge: gpui::Hsla, label: &'static str| {
+            div()
+                .id(id)
+                .h(px(41.2))
+                .px(px(20.))
+                .rounded(px(8.))
+                .border_1()
+                .border_color(edge)
+                .flex()
+                .items_center()
+                .gap(px(6.))
+                .cursor_pointer()
+                .hover(|d| d.bg(white_a(0.04)))
+                .child(svg().path(icon).size(px(16.)).flex_shrink_0().text_color(c(ink)))
+                .child(div().font_weight(FontWeight::SEMIBOLD).text_size(px(16.)).text_color(c(0xffffff)).child(label))
+        };
+        let mut actions = div().flex().justify_center().gap(px(6.));
+        if caps.contains("create_invite") || !self.live {
+            let id = cid.clone();
+            actions = actions.child(
+                button("group-invite-member-btn", "icons/add-user.svg", ACCENT, ca(90, 252, 180, 0.65), "Invite")
+                    .on_click(cx.listener(move |app, _, window, cx| app.open_invite(id.clone(), window, cx))),
+            );
+        }
+        if raid {
+            let id = cid.clone();
+            actions = actions.child(
+                button("group-moderate-btn", "icons/vector_warning.svg", crate::timeline::DANGER, c(crate::timeline::DANGER), "Moderate")
+                    .on_click(cx.listener(move |app, _, window, cx| app.open_moderation(id.clone(), window, cx))),
+            );
+        } else if caps.contains("manage_channels") {
+            let (id, channel) = (cid.clone(), ch.channel_id.clone());
+            actions = actions.child(
+                button("group-edit-channel-btn", "icons/edit.svg", ACCENT, ca(90, 252, 180, 0.65), "Edit Channel").on_click(
+                    cx.listener(move |app, _, window, cx| app.open_channel_editor(id.clone(), channel.clone(), false, window, cx)),
+                ),
+            );
+        }
+        if !owner {
+            let (id, name) = (cid.clone(), com.name.clone());
+            actions = actions.child(
+                button("group-leave-btn", "icons/x-user.svg", crate::timeline::DANGER, white_a(0.1), "Leave")
+                    .bg(white_a(0.06))
+                    .on_click(cx.listener(move |app, _, window, cx| {
+                        app.ask_leave_community(id.clone(), name.clone(), false, window, cx)
+                    })),
+            );
+        }
+        let notify_id = cid.clone();
+        let notify = div()
+            .id("group-mute-btn")
+            .absolute()
+            .top(px(50.))
+            .right(px(26.))
+            .size(px(58.))
+            .rounded(px(12.))
+            .border_2()
+            .border_color(c(0x393b3c))
+            .bg(c(0x030303))
+            .flex()
+            .flex_col()
+            .items_center()
+            .pt(px(6.))
+            .cursor_pointer()
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(move |app, e: &gpui::MouseDownEvent, _, cx| {
+                    let rows = app.notify_rows(&notify_id, Some(&notify_id));
+                    app.show_menu(e.position, rows, cx);
+                }),
+            )
+            .child(svg().path(if muted { "icons/volume-mute.svg" } else { "icons/bell.svg" }).size(px(30.)).text_color(c(0xffffff)))
+            .child(div().mt(px(-4.)).text_size(px(10.)).line_height(px(16.)).text_color(c(0xb2b2b2)).child(if muted { "Muted" } else { "Notify" }));
+        let manage = caps.contains("manage_metadata");
+        let settings_id = cid.clone();
+        let face = div()
+            .id("group-overview-avatar")
+            .group("group-overview-avatar")
+            .relative()
+            .mt(px(40.))
+            .mx_auto()
+            .size(px(100.))
+            .when(manage, |d| {
+                d.cursor_pointer().on_click(cx.listener(move |app, _, window, cx| {
+                    app.open_comm_settings(settings_id.clone(), "overview", window, cx)
+                }))
+            })
+            .child(crate::community::logo(store, &cid, 100., 50.).size(px(100.)).rounded_full())
+            .when(manage, |d| {
+                d.child(
+                    div()
+                        .absolute()
+                        .right_0()
+                        .bottom_0()
+                        .size(px(30.))
+                        .rounded_full()
+                        .bg(gpui::black().opacity(0.7))
+                        .opacity(0.)
+                        .group_hover("group-overview-avatar", |d| d.opacity(1.))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(svg().path("icons/edit.svg").size(px(16.)).text_color(c(0xffffff))),
+                )
+            });
+        let topic = ch.topic.clone().filter(|t| !t.is_empty());
+        let roster = crate::community::roster(
+            div().id("group-overview-members").p(px(6.)).rounded(px(8.)).border_1().border_color(ca(57, 57, 57, 0.5)),
+            store,
+            chat,
+            view,
+            com,
+            &on,
+            &self.anchors,
+            cx,
+        );
+        let search = div()
+            .relative()
+            .h(px(62.))
+            .flex()
+            .items_center()
+            .child(
+                div()
+                    .w_full()
+                    .h(px(42.))
+                    .rounded(px(8.))
+                    .border_1()
+                    .border_color(ca(57, 57, 57, 0.5))
+                    .pl(px(44.))
+                    .pr(px(12.))
+                    .flex()
+                    .items_center()
+                    .child(div().flex_1().min_w_0().child(view.search.clone())),
+            )
+            .child(svg().path("icons/search.svg").absolute().left(px(12.)).top(px(19.)).size(px(24.)).text_color(white_a(0.4)));
+        let header = div()
+            .h(px(60.))
+            .flex_shrink_0()
+            .relative()
+            .bg(ca(22, 22, 22, 0.9))
+            .flex()
+            .justify_center()
+            .child(
+                div()
+                    .pt(px(3.))
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .child(
+                        div()
+                            .mt(px(5.))
+                            .flex()
+                            .items_center()
+                            .gap(px(6.))
+                            .child(crate::community::logo(store, &cid, 22., 11.).size(px(22.)).rounded_full())
+                            .child(
+                                div()
+                                    .truncate()
+                                    .font_family(RUBIK)
+                                    .font_weight(FontWeight::BOLD)
+                                    .text_size(px(18.72))
+                                    .line_height(px(24.))
+                                    .text_color(c(TEXT))
+                                    .child(com.name.clone()),
+                            ),
+                    )
+                    .when(n > 0, |d| {
+                        d.child(
+                            div()
+                                .text_size(px(14.))
+                                .line_height(px(24.))
+                                .text_color(c(TEXT))
+                                .opacity(0.8)
+                                .child(format!("{n} Member{}", if n == 1 { "" } else { "s" })),
+                        )
+                    }),
+            )
+            .child(
+                div()
+                    .id("group-overview-back-btn")
+                    .absolute()
+                    .left(px(5.))
+                    .top(px(10.))
+                    .size(px(40.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .cursor_pointer()
+                    .on_click(cx.listener(|app, _, _, cx| {
+                        app.slim.details = None;
+                        cx.notify();
+                    }))
+                    .child(svg().path("icons/chevron-double-left.svg").size(px(30.)).text_color(c(ACCENT))),
+            );
+        let _ = window;
+        let body = div()
+            .id("group-overview-scroll")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .relative()
+            .child(notify)
+            .child(face)
+            .child(
+                div()
+                    .mt(px(8.))
+                    .px(gpui::relative(0.05))
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .child(
+                        div()
+                            .max_w_full()
+                            .truncate()
+                            .font_weight(FontWeight::BOLD)
+                            .text_size(px(18.72))
+                            .line_height(px(24.))
+                            .text_color(c(TEXT))
+                            .child(format!("{}{}", if ch.view == "voice" { "" } else { "#" }, ch.name)),
+                    )
+                    .children(topic.map(|t| {
+                        div().mt(px(10.)).text_center().text_size(px(14.)).line_height(px(24.)).text_color(c(TEXT)).child(t)
+                    })),
+            )
+            .child(
+                div()
+                    .mt(px(40.))
+                    .mb(px(30.))
+                    .mx(gpui::relative(0.05))
+                    .flex()
+                    .flex_col()
+                    .child(actions)
+                    .child(div().mt(px(10.)).child(search))
+                    .child(roster),
+            );
+        Some(
+            div()
+                .flex_1()
+                .min_h_0()
+                .w_full()
+                .flex()
+                .flex_col()
+                .bg(c(0x030303))
+                .child(header)
+                .child(body)
+                .with_animation(
+                    "group-overview-in",
+                    gpui::Animation::new(std::time::Duration::from_millis(260)).with_easing(crate::kit::bezier(0.22, 1., 0.36, 1.)),
+                    |d, t| d.ml(px(40. * (1. - t))).opacity(t),
+                )
+                .into_any_element(),
+        )
     }
 
     /// `ArchiveRow.svelte` at phone size: the folded chats' names and count.
