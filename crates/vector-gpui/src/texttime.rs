@@ -7,7 +7,7 @@ use chrono::{DateTime, Datelike, Duration, Local, NaiveDate, TimeZone};
 use regex::{Captures, Regex};
 use std::rc::Rc;
 
-use gpui::{
+use gpui::{StatefulInteractiveElement, 
     AnyElement, App, InteractiveElement, IntoElement, ParentElement, Styled, Window, div,
     px, svg, AnimationExt,
 };
@@ -704,6 +704,11 @@ pub fn chip_view(chip: &Chip, now: f64, left: f32, accept: Rc<dyn Fn(&mut Window
                 .font_family(INTER)
                 .text_size(px(13.))
                 .cursor_pointer()
+                .tooltip(crate::kit::tooltip(format!(
+                    "{}: {}",
+                    if s.style == 'R' { "Make it a countdown" } else { "Show in everyone\u{2019}s time" },
+                    full(s.unix, s.style == 'D')
+                )))
                 .group("time-suggest")
                 .on_mouse_down(gpui::MouseButton::Left, move |_, w, cx| {
                     cx.stop_propagation();

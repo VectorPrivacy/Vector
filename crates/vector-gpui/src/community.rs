@@ -13,6 +13,8 @@ use crate::data::{Channel, Community, Store};
 use crate::theme::*;
 
 pub enum Act {
+    /// A member list's warning mark: why they're listed apart.
+    Unlisted(String),
     Open(String),
     /// Back to Messages.
     Home,
@@ -58,6 +60,8 @@ pub struct View {
     pub id: String,
     pub members: Vec<String>,
     pub admins: Vec<String>,
+    /// Seen posting outside the Guestbook: npub → `no_join` | `departed`. Listed, never counted.
+    pub unlisted: std::collections::HashMap<String, String>,
     /// No roster yet, cached or read.
     pub loading: bool,
     pub panel: bool,
@@ -569,7 +573,7 @@ fn status_line(text: &str) -> AnyElement {
         .into_any_element()
 }
 
-fn member_row(store: &Store, cid: &str, npub: &str, owner: bool, on: &OnAct, anchors: &crate::kit::Anchors) -> impl IntoElement {
+fn member_row(store: &Store, cid: &str, npub: &str, owner: bool, unlisted: Option<&str>, on: &OnAct, anchors: &crate::kit::Anchors) -> impl IntoElement {
     let status = store
         .profiles
         .get(npub)
@@ -619,8 +623,33 @@ fn member_row(store: &Store, cid: &str, npub: &str, owner: bool, on: &OnAct, anc
                                 .text_color(c(0xf7f4f4))
                                 .child(store.name_in(npub, Some(cid))),
                         )
-                        .when(owner, |d| d.child(div().ml(px(5.)).flex().child(icon("icons/crown.svg", 15., c(OWNER)))))
-                        .children(crate::timeline::timeout_mark(store, Some(cid), npub)),
+                        .when(owner, |d| {
+                            d.child(
+                                div()
+                                    .id("rank")
+                                    .ml(px(5.))
+                                    .flex()
+                                    .tooltip(crate::kit::tooltip("Owner"))
+                                    .child(icon("icons/crown.svg", 15., c(OWNER))),
+                            )
+                        })
+                        .children(crate::timeline::timeout_mark(store, Some(cid), npub))
+                        .children(unlisted.map(|why| {
+                            let label = if why == "departed" { "Posting after leaving" } else { "Never announced joining" };
+                            let (tap, why) = (on.clone(), why.to_string());
+                            div()
+                                .id("unlisted")
+                                .flex()
+                                .p(px(8.))
+                                .m(px(-8.))
+                                .cursor_pointer()
+                                .tooltip(crate::kit::tooltip(label))
+                                .on_click(move |_, w, cx| {
+                                    cx.stop_propagation();
+                                    tap(Act::Unlisted(why.clone()), w, cx)
+                                })
+                                .child(icon("icons/vector_warning.svg", 14., c(0xfbbf24)))
+                        })),
                 )
                 .children(status.map(|s| {
                     div()
@@ -636,6 +665,7 @@ fn member_row(store: &Store, cid: &str, npub: &str, owner: bool, on: &OnAct, anc
 /// `#group-overview`: the roster, filtered by the search, by rank.
 pub fn members_panel(
     store: &Store,
+    open: &str,
     view: &View,
     com: &Community,
     on: &OnAct,
@@ -653,18 +683,22 @@ pub fn members_panel(
             || n.contains(&query)
     };
     let is_admin = |n: &str| owner == Some(n) || view.admins.iter().any(|a| a == n);
-    let admins: Vec<&String> = view
-        .members
-        .iter()
-        .filter(|n| is_admin(n))
-        .filter(matches)
-        .collect();
-    let rest: Vec<&String> = view
-        .members
-        .iter()
-        .filter(|n| !is_admin(n))
-        .filter(matches)
-        .collect();
+    let everyone = || view.members.iter().chain(view.unlisted.keys().filter(|n| !view.members.contains(n)));
+    // Owner, then admins, A to Z; Members lead with who posted in the open channel, then the named.
+    let posters: HashSet<&str> = store.chat(open).map(|c| c.messages.iter().filter_map(|m| m.npub.as_deref()).collect()).unwrap_or_default();
+    let named = |n: &str| {
+        store.profiles.get(n).is_some_and(|p| !p.name.is_empty() || !p.display_name.is_empty())
+            || store.nicknames.get(&com.community_id).is_some_and(|k| k.contains_key(n))
+    };
+    let key = |n: &&String| {
+        let tier = if owner == Some(n.as_str()) { 0 } else if is_admin(n) { 1 } else { 2 };
+        let relevance = if tier < 2 { 0 } else if posters.contains(n.as_str()) { 0 } else if named(n) { 1 } else { 2 };
+        (tier, relevance, store.name_in(n, Some(&com.community_id)).to_lowercase())
+    };
+    let mut admins: Vec<&String> = everyone().filter(|n| is_admin(n)).filter(matches).collect();
+    let mut rest: Vec<&String> = everyone().filter(|n| !is_admin(n)).filter(matches).collect();
+    admins.sort_by_cached_key(key);
+    rest.sort_by_cached_key(key);
     let section = |key: &'static str, label: &'static str, list: Vec<&String>| {
         let closed = view.folded.contains(key);
         (!list.is_empty()).then(|| {
@@ -695,7 +729,7 @@ pub fn members_panel(
                                 .text_size(px(11.))
                                 .line_height(px(24.))
                                 .text_color(white_a(0.32))
-                                .child(list.len().to_string()),
+                                .child(list.iter().filter(|n| !view.unlisted.contains_key(n.as_str())).count().to_string()),
                         )
                         .child(
                             div()
@@ -716,7 +750,7 @@ pub fn members_panel(
                 )
                 .when(!closed, |d| {
                     d.children(list.into_iter().map(|n| {
-                        member_row(store, &com.community_id, n, owner == Some(n.as_str()), on, anchors)
+                        member_row(store, &com.community_id, n, owner == Some(n.as_str()), view.unlisted.get(n.as_str()).map(String::as_str), on, anchors)
                     }))
                 })
         })

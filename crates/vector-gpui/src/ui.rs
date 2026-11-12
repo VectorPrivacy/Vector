@@ -5160,9 +5160,10 @@ impl Render for VectorApp {
                                     .min_w_0()
                                     .h_full()
                                     .flex()
-                                    .child(self.chat_pane(&store, id, &on_community, window, cx))
+                                    .child(self.chat_pane(&store, id.clone(), &on_community, window, cx))
                                     .child(crate::community::members_panel(
                                         &store,
+                                        &id,
                                         view,
                                         com,
                                         &on_community,
@@ -8509,6 +8510,7 @@ impl VectorApp {
             .detach();
             self.community = Some(crate::community::View {
                 id: id.clone(),
+                unlisted: self.store.borrow().fixture_unlisted.get(&id).cloned().unwrap_or_default(),
                 loading: self.live && members.is_empty(),
                 members,
                 admins: Vec::new(),
@@ -8520,14 +8522,15 @@ impl VectorApp {
             if self.live {
                 let named = backend::community::nicknames(&id);
                 self.store.borrow_mut().nicknames.insert(id.clone(), named);
-                let rx = backend::run(backend::community::members(id.clone()));
+                let rx = backend::run(backend::community::roster(id.clone()));
                 cx.spawn(async move |this, cx| {
                     let read = rx.await;
                     this.update(cx, |this, cx| {
                         if let Some(v) = this.community.as_mut().filter(|v| v.id == id) {
-                            if let Ok((members, admins)) = read {
+                            if let Ok((members, admins, unlisted)) = read {
                                 v.members = members;
                                 v.admins = admins;
+                                v.unlisted = unlisted;
                             }
                             v.loading = false;
                         }
@@ -8687,6 +8690,19 @@ impl VectorApp {
                 let community = self.community.as_ref().map(|v| v.id.clone());
                 let at = self.anchors.borrow().get(&key).copied();
                 self.show_mini(npub, community, at, cx);
+            }
+            Act::Unlisted(why) => {
+                let departed = why == "departed";
+                self.notice(
+                    if departed { "Departed Member" } else { "Unannounced Member" },
+                    if departed {
+                        "They left or were removed, yet are still posting. This may be suspicious, keep an eye on them."
+                    } else {
+                        "They joined and are posting without ever publishing a join event. This may be suspicious, keep an eye on them."
+                    }
+                    .into(),
+                    cx,
+                );
             }
             Act::MemberMenu(npub, at) => {
                 if let Some(community) = self.community.as_ref().map(|v| v.id.clone()) {
