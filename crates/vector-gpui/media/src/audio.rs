@@ -1,5 +1,13 @@
 //! What the shared audio engine and call modules read from the desktop client's `audio.rs`.
 
+use symphonia::core::audio::SampleBuffer;
+use symphonia::core::codecs::{DecoderOptions, CODEC_TYPE_NULL};
+use symphonia::core::errors::Error as SymphoniaError;
+use symphonia::core::formats::FormatOptions;
+use symphonia::core::io::MediaSourceStream;
+use symphonia::core::meta::MetadataOptions;
+use symphonia::core::probe::Hint;
+
 include!(concat!(env!("OUT_DIR"), "/wav.rs"));
 
 /// Nothing caches the device rate here: notification sounds ask the device each time.

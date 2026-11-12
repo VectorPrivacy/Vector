@@ -30,7 +30,7 @@ fn main() {
         .warnings(false)
         .compile("speexdsp_calls");
 
-    // audio.rs is mostly Tauri commands; these three functions are plain Rust.
+    // audio.rs is mostly Tauri commands; these functions are plain Rust.
     let src = concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/../../../src-tauri/src/audio.rs"
@@ -42,6 +42,8 @@ fn main() {
         "fn wav_fast_decode(",
         "pub fn wav_fast_decode_for_engine(",
         "fn wav_channel_count(",
+        "pub fn decode_for_whisper(",
+        "pub(crate) fn symphonia_decode_mono(",
     ] {
         let start = rs
             .lines()

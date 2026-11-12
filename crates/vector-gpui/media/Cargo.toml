@@ -24,9 +24,16 @@ rand = "0.8"
 bytes = "1"
 async-trait = "0.1"
 lofty = "0.24"
+rayon = "1"
+reqwest = { version = "0.13", default-features = false, features = ["stream"] }
 iroh = { version = "1.3", default-features = false, features = ["tls-ring", "fast-apple-datapath"] }
 
+[features]
+default = ["whisper"]
+whisper = ["dep:whisper-rs"]
+
 [target.'cfg(target_os = "macos")'.dependencies]
+whisper-rs = { version = "0.15.1", features = ["metal"], optional = true }
 objc2 = "0.6"
 objc2-foundation = { version = "0.3", features = ["NSString", "NSArray", "NSError", "NSProcessInfo"] }
 objc2-core-foundation = "0.3.2"
@@ -41,3 +48,10 @@ windows-sys = { version = "0.61", features = ["Win32_System_Power", "Win32_UI_Wi
 
 [build-dependencies]
 cc = "1"
+
+# Vulkan on x86-64 Windows and Linux; ARM transcribes on the CPU, as the desktop client does.
+[target.'cfg(all(any(windows, target_os = "linux"), target_arch = "x86_64"))'.dependencies]
+whisper-rs = { version = "0.15.1", features = ["vulkan"], optional = true }
+
+[target.'cfg(all(any(windows, target_os = "linux"), not(target_arch = "x86_64")))'.dependencies]
+whisper-rs = { version = "0.15.1", optional = true }

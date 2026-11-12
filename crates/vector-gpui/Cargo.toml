@@ -75,6 +75,8 @@ panic = "abort"
 strip = true
 
 [patch.crates-io]
+# whisper.cpp 1.9.5 with scripts/whisper/patches, as the desktop client builds it.
+whisper-rs-sys = { git = "https://github.com/VectorPrivacy/whisper-rs.git", rev = "97540c4ce03944e54aa2da3381a64947b4a824cb" }
 nostr = { git = "https://github.com/VectorPrivacy/nostr.git", branch = "vector-v0.45.4" }
 nostr-sdk = { git = "https://github.com/VectorPrivacy/nostr.git", branch = "vector-v0.45.4" }
 nostr-database = { git = "https://github.com/VectorPrivacy/nostr.git", branch = "vector-v0.45.4" }

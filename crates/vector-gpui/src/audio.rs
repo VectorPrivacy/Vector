@@ -154,6 +154,9 @@ pub struct Audio {
     pub sheets: HashMap<String, crate::lyrics::Sheet>,
     /// Albums showing every song rather than the first few.
     pub all_tracks: HashSet<String>,
+    pub transcripts: crate::transcript::Transcripts,
+    /// Auto-transcribe is on and its model is here; None until read, and after a settings change.
+    pub auto_transcribe: Option<bool>,
 }
 
 /// What a file's tags give the card.
@@ -180,6 +183,10 @@ pub enum Act {
     Seek(f32, bool),
     Lyrics,
     Album(AlbumAct),
+    Transcribe,
+    CancelDownload,
+    /// A transcript section clicked: to this millisecond.
+    SeekTo(u64),
     /// A lyric line clicked (play from it), or None: the reader scrolled, so hold the view.
     Line(Option<u32>),
 }
@@ -201,6 +208,7 @@ pub enum Work {
     Probe(String, AudioInputSpec),
     Load(String, AudioInputSpec),
     Tags(String, AudioInputSpec),
+    Transcribe(String, AudioInputSpec),
 }
 
 impl Audio {
@@ -220,6 +228,34 @@ impl Audio {
         }
     }
 
+    pub fn transcribed(&mut self, att: &str, res: Result<vector_media::whisper::TranscriptionResult, String>) {
+        use crate::transcript::{Phase, Section};
+        if self.transcripts.download.as_ref().is_some_and(|d| d.until.is_none()) {
+            self.transcripts.download_done(res.is_ok());
+        }
+        let phase = match res {
+            Ok(r) => Phase::Ready {
+                sections: r
+                    .sections
+                    .into_iter()
+                    .map(|s| Section { text: s.text.trim().to_string(), at: s.at.max(0) as u64 })
+                    .filter(|s| !s.text.is_empty())
+                    .collect(),
+                lang: r.lang,
+                language: r.language,
+            },
+            Err(e) => Phase::Error(e),
+        };
+        self.transcripts.landed(att, phase);
+    }
+
+    /// Read, and found to be music: it has its own words, or none to transcribe.
+    pub fn tags_read(&self, att: &str) -> Option<bool> {
+        self.tags.get(att).map(|t| {
+            t.as_ref().is_some_and(|t| t.title.is_some() || t.artist.is_some() || t.album.is_some() || t.lyrics.is_some())
+        })
+    }
+
     pub fn tags(&self, att: &str) -> Option<&Arc<Tags>> {
         self.tags.get(att).and_then(|t| t.as_ref())
     }
@@ -233,6 +269,20 @@ impl Audio {
     pub fn want_probe(&mut self, att: &str, input: &AudioInputSpec) {
         if !self.probed.contains_key(att) && self.probing.insert(att.to_string()) {
             self.queue.push(Work::Probe(att.to_string(), input.clone()));
+        }
+    }
+
+    /// `autoTranscribe`: a fresh voice message from someone else transcribes itself.
+    pub fn want_transcript(&mut self, att: &str, input: &AudioInputSpec) {
+        if self.transcripts.get(att).is_some() || self.transcripts.download.is_some() {
+            return;
+        }
+        let on = *self.auto_transcribe.get_or_insert_with(|| {
+            crate::backend::transcribe::auto_transcribe()
+                && crate::backend::transcribe::downloaded(&crate::backend::transcribe::choice().0)
+        });
+        if on && self.transcripts.toggle(att).is_some() {
+            self.queue.push(Work::Transcribe(att.to_string(), input.clone()));
         }
     }
 
@@ -274,6 +324,31 @@ impl Audio {
                 }
             }
             Act::Album(a) => self.album_act(msg, att, input, a),
+            Act::Transcribe => {
+                self.transcripts.toggle(att)?;
+                let (model, _) = crate::backend::transcribe::choice();
+                if !crate::backend::transcribe::downloaded(&model) {
+                    self.transcripts.download = Some(crate::transcript::Download {
+                        pct: 0,
+                        text: "Downloading model...".into(),
+                        failed: false,
+                        until: None,
+                    });
+                }
+                Some(Work::Transcribe(att.to_string(), input))
+            }
+            Act::CancelDownload => {
+                crate::backend::transcribe::cancel_download();
+                None
+            }
+            Act::SeekTo(ms) => {
+                let p = self.player_mut(msg, att);
+                if let Some(a) = p.album.as_mut() {
+                    a.seeked(ms);
+                }
+                self.seek_ms(att, ms);
+                None
+            }
             Act::Seek(frac, done) => {
                 let probed = self.probed.get(att).copied().unwrap_or(0);
                 let p = self.player_mut(msg, att);
@@ -486,6 +561,13 @@ impl Audio {
 
     /// An engine event; returns the attachment that just ended.
     pub fn on_event(&mut self, name: &str, v: &serde_json::Value) -> Option<String> {
+        if name == "whisper_download_progress" {
+            let pct = v.get("progress").and_then(|p| p.as_f64()).unwrap_or(0.) as u32;
+            if self.transcripts.download.as_ref().is_some_and(|d| d.until.is_none()) {
+                self.transcripts.progress(pct);
+            }
+            return None;
+        }
         let id = v.get("id").and_then(|i| i.as_u64())? as u32;
         let att = self.sources.get(&id)?.clone();
         let p = self.players.get_mut(&att)?;
@@ -535,7 +617,7 @@ impl Audio {
 
     /// One frame of the bars; true while any still moves.
     pub fn tick(&mut self) -> bool {
-        let mut moving = false;
+        let mut moving = self.transcripts.tick();
         let mut steps = Vec::new();
         for (att, p) in self.players.iter_mut() {
             let pos = p.position();
@@ -636,6 +718,12 @@ pub fn run(work: Work) -> futures::channel::oneshot::Receiver<WorkDone> {
                     .and_then(|i| engine()?.load_from_file(&i))
                     .map(|r| (r.id, r.duration_ms)),
             ),
+            Work::Transcribe(att, input) => {
+                let res = input.open().and_then(|i| {
+                    tauri::async_runtime::block_on(crate::backend::transcribe::transcribe(i))
+                });
+                WorkDone::Transcribed(att, res)
+            }
             Work::Tags(att, input) => WorkDone::Tags(
                 att,
                 input
@@ -655,6 +743,7 @@ pub enum WorkDone {
     Probed(String, u64),
     Loaded(String, Result<(u32, u64), String>),
     Tags(String, Option<Tags>),
+    Transcribed(String, Result<vector_media::whisper::TranscriptionResult, String>),
 }
 
 fn tags_from(m: vector_media::tags::Meta) -> Tags {
@@ -1198,6 +1287,7 @@ pub fn view(
     tags: Option<&Tags>,
     sheet: Option<&crate::lyrics::Sheet>,
     all_tracks: bool,
+    transcripts: Option<&crate::transcript::Transcripts>,
     on: Rc<dyn Fn(Act, &mut Window, &mut App)>,
 ) -> AnyElement {
     let chapters = tags.map(|t| t.chapters.as_slice()).filter(|c| c.len() > 1);
@@ -1257,8 +1347,10 @@ pub fn view(
         let on = on.clone();
         Rc::new(move |a, w, cx| on(Act::Album(a), w, cx))
     };
-    let seek: Rc<dyn Fn(f32, bool, &mut Window, &mut App)> =
-        Rc::new(move |f, done, w, cx| on(Act::Seek(f, done), w, cx));
+    let seek: Rc<dyn Fn(f32, bool, &mut Window, &mut App)> = {
+        let on = on.clone();
+        Rc::new(move |f, done, w, cx| on(Act::Seek(f, done), w, cx))
+    };
     let icon = if loading {
         "icons/loading.svg"
     } else if playing {
@@ -1307,7 +1399,29 @@ pub fn view(
     };
     let now_title = chapters.map(|ch| split_title(&ch[track_idx.max(0) as usize].title).0);
     let title = now_title.unwrap_or(title);
-    let middle = if (att.name.is_empty() || art.is_some()) && chapters.is_none() {
+    let transcript = transcripts.and_then(|t| t.get(&att.id));
+    let downloading = transcripts
+        .and_then(|t| t.download.as_ref())
+        .filter(|_| transcript.is_some_and(|t| matches!(t.phase, crate::transcript::Phase::Loading)));
+    let transcribe_btn = transcripts.map(|_| {
+        let on = on.clone();
+        crate::transcript::button(&att.id, transcript, accent, Rc::new(move |w, cx| on(Act::Transcribe, w, cx)))
+    });
+    let transcript_el = transcript.and_then(|t| {
+        let on = on.clone();
+        crate::transcript::view(
+            &att.id,
+            t,
+            p.map_or(0, |p| p.position()),
+            p.is_some_and(|p| p.playing),
+            accent,
+            Rc::new(move |ms, w, cx| on(Act::SeekTo(ms), w, cx)),
+        )
+    });
+    let middle = if let Some(d) = downloading {
+        let on = on.clone();
+        crate::transcript::download_view(d, Rc::new(move |w, cx| on(Act::CancelDownload, w, cx)))
+    } else if (att.name.is_empty() || art.is_some()) && chapters.is_none() {
         bars.into_any_element()
     } else {
         div()
@@ -1372,7 +1486,8 @@ pub fn view(
         .when(chapters.is_some(), |d| d.child(skip("next", "icons/skip-forward.svg", AlbumAct::Next)))
         .child(middle)
         .child(time)
-        .children(lyrics_btn);
+        .children(lyrics_btn)
+        .children(transcribe_btn);
     let body = match (tags, art) {
         (Some(t), art) if chapters.is_some() => album_view(
             att,
@@ -1472,5 +1587,6 @@ pub fn view(
         .children(glows(tags, sheet.map_or(0., |s| s.reveal())))
         .child(body)
         .children(sheet_el)
+        .children(transcript_el)
         .into_any_element()
 }

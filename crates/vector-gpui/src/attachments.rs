@@ -103,6 +103,13 @@ pub fn attachments(ctx: &Ctx, m: &Message) -> Option<AnyElement> {
                 if !att.name.is_empty() {
                     media.audio.want_tags(&att.id, &input);
                 }
+                let transcribable = media
+                    .audio
+                    .tags_read(&att.id)
+                    .map_or(att.name.is_empty(), |music| crate::transcript::supported(att, true, music));
+                if transcribable && !m.mine && m.at + 60_000 > std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64) {
+                    media.audio.want_transcript(&att.id, &input);
+                }
                 let duration = media.audio.duration(&att.id);
                 let tags = media.audio.tags(&att.id).cloned();
                 let (on_act, msg, aid) = (ctx.on_act.clone(), m.id.clone(), att.id.clone());
@@ -114,6 +121,7 @@ pub fn attachments(ctx: &Ctx, m: &Message) -> Option<AnyElement> {
                         tags.as_deref(),
                         media.audio.sheets.get(&att.id),
                         media.audio.all_tracks.contains(&att.id),
+                        transcribable.then_some(&media.audio.transcripts),
                         std::rc::Rc::new(move |a, w, cx| on_act(&msg, Act::Audio(aid.clone(), a), w, cx)),
                     ),
                     6.,

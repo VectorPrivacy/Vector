@@ -30,6 +30,10 @@ pub mod tags;
 #[allow(dead_code)]
 pub mod mic_access;
 pub mod miniapps;
+#[cfg(feature = "whisper")]
+#[path = "../../../../src-tauri/src/whisper.rs"]
+#[allow(dead_code)]
+pub mod whisper;
 #[path = "../../../../src-tauri/src/voice.rs"]
 #[allow(dead_code, unexpected_cfgs)]
 pub mod voice;

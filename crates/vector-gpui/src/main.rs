@@ -27,6 +27,7 @@ mod kit;
 mod linkcard;
 mod login;
 mod markdown;
+mod langnames;
 mod lyrics;
 mod media;
 mod mentions;
@@ -56,6 +57,7 @@ mod switcher;
 mod texttime;
 mod theme;
 mod timeline;
+mod transcript;
 mod transfer;
 mod ui;
 #[allow(dead_code)]

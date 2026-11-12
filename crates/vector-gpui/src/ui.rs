@@ -2876,6 +2876,7 @@ impl VectorApp {
                         crate::audio::WorkDone::Probed(att, ms) => media.audio.probed(att, ms),
                         crate::audio::WorkDone::Loaded(att, res) => media.audio.loaded(&att, res),
                         crate::audio::WorkDone::Tags(att, tags) => media.audio.read_tags(att, tags),
+                        crate::audio::WorkDone::Transcribed(att, res) => media.audio.transcribed(&att, res),
                     }
                     drop(media);
                     cx.notify();

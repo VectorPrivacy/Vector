@@ -2444,6 +2444,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "fs_extra"
+version = "1.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "42703706b716c37f96a77aea830392ad231f44c9e9a67872fa5548707e11b11c"
+
+[[package]]
 name = "futures"
 version = "0.3.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8995,6 +9001,8 @@ dependencies = [
  "objc2-screen-capture-kit",
  "opus",
  "rand 0.8.8",
+ "rayon",
+ "reqwest",
  "rustfft",
  "serde",
  "serde_json",
@@ -9002,6 +9010,7 @@ dependencies = [
  "tokio",
  "vector-core",
  "vector-tauri-shim",
+ "whisper-rs",
  "windows-sys 0.61.2",
 ]
 
@@ -9029,7 +9038,12 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "vector-tauri-shim-macros",
 ]
+
+[[package]]
+name = "vector-tauri-shim-macros"
+version = "0.1.0"
 
 [[package]]
 name = "version_check"
@@ -9531,6 +9545,27 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bae2f2b2b816647a1cab1acc91f5bd20812d53cb344382635ec2181940c8034f"
 dependencies = [
  "libc",
+]
+
+[[package]]
+name = "whisper-rs"
+version = "0.15.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "71ea5d2401f30f51d08126a2d133fee4c1955136519d7ac6cf6f5ac0a91e6bc8"
+dependencies = [
+ "libc",
+ "whisper-rs-sys",
+]
+
+[[package]]
+name = "whisper-rs-sys"
+version = "0.14.1"
+source = "git+https://github.com/VectorPrivacy/whisper-rs.git?rev=97540c4ce03944e54aa2da3381a64947b4a824cb#97540c4ce03944e54aa2da3381a64947b4a824cb"
+dependencies = [
+ "bindgen",
+ "cfg-if",
+ "cmake",
+ "fs_extra",
 ]
 
 [[package]]

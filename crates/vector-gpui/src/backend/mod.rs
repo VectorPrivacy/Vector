@@ -21,6 +21,7 @@ pub mod prefs;
 pub mod security;
 pub mod sound;
 pub mod storage;
+pub mod transcribe;
 pub mod sync;
 pub mod transfer;
 pub mod unfurl;
@@ -109,6 +110,7 @@ pub fn start(data_dir: PathBuf) -> mpsc::UnboundedReceiver<UiEvent> {
             .expect("tokio runtime")
     });
     tauri::async_runtime::set(rt.handle().clone());
+    tauri::set_local_data_dir(models_home());
     let _ = vector_media::TAURI_APP.set(tauri::AppHandle::new(engine_sink));
     {
         let _guard = rt.enter();
@@ -122,7 +124,7 @@ pub fn start(data_dir: PathBuf) -> mpsc::UnboundedReceiver<UiEvent> {
 }
 
 fn engine_sink(event: &str, payload: serde_json::Value) {
-    if event.starts_with("audio_") && event != "audio_devices_changed" {
+    if (event.starts_with("audio_") && event != "audio_devices_changed") || event.starts_with("whisper_") {
         crate::audio::engine_event(event, payload);
     } else {
         emit(event, payload);
@@ -141,7 +143,14 @@ pub fn fixture_runtime() {
             .expect("tokio runtime")
     });
     tauri::async_runtime::set(rt.handle().clone());
+    tauri::set_local_data_dir(models_home());
     let _ = vector_media::TAURI_APP.set(tauri::AppHandle::new(crate::audio::engine_event));
+}
+
+/// The desktop client's local data folder: Whisper models live under it, so one download
+/// serves both clients.
+fn models_home() -> PathBuf {
+    dirs::data_local_dir().unwrap_or_else(std::env::temp_dir).join("io.vectorapp")
 }
 
 /// Run `fut` on core's runtime; the receiver resolves with its output. Like a Tauri command,

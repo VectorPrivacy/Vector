@@ -36,6 +36,7 @@ await page.addInitScript(`window.__VECTOR_FIXTURES__ = ${JSON.stringify(fixtures
 await page.addInitScript(`window.__OPEN_NAME__ = ${JSON.stringify(process.env.OPEN || '')};`);
 await page.addInitScript(`window.__CREATOR__ = ${JSON.stringify(process.env.CREATOR || "")};`);
 await page.addInitScript(`window.__TYPE__ = ${JSON.stringify(process.env.TYPE || "")};`);
+await page.addInitScript(`window.__REF_TRANSCRIPT__ = ${JSON.stringify(!!process.env.TRANSCRIPT)};`);
 await page.addInitScript(`window.__MOCK_MODE__ = ${JSON.stringify(process.env.MOCK_MODE || 'app')};`);
 await page.addInitScript({ path: join(HERE, 'mock-tauri.js') });
 await page.goto(`http://localhost:${port}/`);
