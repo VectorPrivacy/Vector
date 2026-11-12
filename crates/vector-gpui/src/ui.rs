@@ -89,6 +89,7 @@ pub struct VectorApp {
     /// The message whose reaction menu is open.
     picker: Option<String>,
     popup: Option<(kit::Popup, PopupAct)>,
+    rekey: Option<crate::rekey::Rekey>,
     fail_reasons: Rc<RefCell<HashMap<String, String>>>,
     media: Rc<RefCell<crate::media::Media>>,
     emoji_picker: Entity<crate::picker::EmojiPicker>,
@@ -404,6 +405,7 @@ enum MenuAct {
 }
 
 enum PopupAct {
+    MoveRelays { id: String, relays: Vec<String> },
     /// A moderator's hide of someone else's message, once confirmed.
     Hide(String),
     RemoveMember {
@@ -818,6 +820,7 @@ impl VectorApp {
             hovered: None,
             picker: None,
             popup: None,
+            rekey: None,
             fail_reasons: Rc::default(),
             media: Rc::default(),
             pack_details: None,
@@ -1336,6 +1339,12 @@ impl VectorApp {
         if !app.live {
             app.load_rail();
             app.load_voice_calls(cx);
+        }
+        // Fixtures: VECTOR_REKEY=<pct> shows the relay move's progress ring.
+        if let Some(pct) = std::env::var("VECTOR_REKEY").ok().and_then(|p| p.parse::<f32>().ok()) {
+            let mut r = crate::rekey::Rekey::new("Moving to new relays");
+            r.set(pct, Some("Copying history".into()));
+            app.rekey = Some(r);
         }
         // Fixtures: VECTOR_START opens the Main Menu.
         if std::env::var("VECTOR_START").is_ok() {
@@ -2827,6 +2836,13 @@ impl VectorApp {
                 self.sync_call_meter();
             }
             "call_stats" => self.call.apply_stats(&payload),
+            "community_relay_move" => {
+                if let Some(r) = self.rekey.as_mut() {
+                    let pct = payload.get("pct").and_then(Value::as_f64).unwrap_or(0.) as f32;
+                    let label = payload.get("label").and_then(Value::as_str).map(str::to_string);
+                    r.set(pct, label);
+                }
+            }
             "call_video_refused" => {
                 use crate::callvideo::VideoKind;
                 for (k, kind) in [VideoKind::Camera, VideoKind::Screen].into_iter().enumerate() {
@@ -4536,6 +4552,7 @@ impl VectorApp {
         }
         match act {
             PopupAct::Notice => {}
+            PopupAct::MoveRelays { id, relays } => self.move_relays(id, relays, cx),
             PopupAct::NetKeepRealtime(_) => {}
             PopupAct::NetUse(kind) => self.use_network(kind, None, true, cx),
             PopupAct::NetI2pOnly => self.set_i2p_only(true, cx),
@@ -5085,6 +5102,12 @@ impl Render for VectorApp {
         root.children(net_dialog)
             .children(net_info.map(|p| gpui::deferred(p).with_priority(14)))
             .children(popup.map(|p| gpui::deferred(p).with_priority(15)))
+            .children(self.rekey.as_ref().map(|r| {
+                if r.animating() {
+                    window.request_animation_frame();
+                }
+                gpui::deferred(crate::rekey::view(r)).with_priority(16)
+            }))
             .child(self.security.clone())
             .child(chrome(window, false, rail_mode.collapsed).children(self.update_banner(cx)))
             .child(
@@ -9590,15 +9613,9 @@ impl VectorApp {
         };
         m.busy = true;
         m.revoking = Some(token.clone());
-        m.status = Some((
-            if privatize {
-                "Making community private…"
-            } else {
-                "Revoking…"
-            }
-            .into(),
-            false,
-        ));
+        if !privatize {
+            m.status = Some(("Revoking…".into(), false));
+        }
         if !self.live {
             m.links.retain(|l| l.token != token);
             m.public = !m.links.is_empty();
@@ -9611,9 +9628,23 @@ impl VectorApp {
             m.community.clone(),
             token,
         ));
+        if privatize {
+            self.rekey = Some(crate::rekey::Rekey::new("Making community private"));
+        }
         cx.spawn(async move |this, cx| {
             let res = rx.await;
+            if privatize && matches!(res, Ok(Ok(_))) {
+                this.update(cx, |this, cx| {
+                    if let Some(r) = this.rekey.as_mut() {
+                        r.set(100., Some("Community is now private".into()));
+                    }
+                    cx.notify();
+                })
+                .ok();
+                cx.background_executor().timer(std::time::Duration::from_millis(700)).await;
+            }
             this.update(cx, |this, cx| {
+                this.rekey = None;
                 if let Some(m) = this.invite.as_mut() {
                     m.busy = false;
                     m.revoking = None;
@@ -10805,7 +10836,6 @@ impl VectorApp {
         let rx = backend::run({
             let id = id.clone();
             async move {
-                let mut warnings = Vec::new();
                 if name_change.is_some() || description_change.is_some() {
                     backend::community::edit_metadata(id.clone(), name_change, description_change)
                         .await?;
@@ -10831,15 +10861,7 @@ impl VectorApp {
                     Some(v) => Some(backend::community::set_voice_relays(id.clone(), v).await?),
                     None => None,
                 };
-                let relays = match relays {
-                    Some(r) => {
-                        let (moved, warn) = backend::community::move_relays(id.clone(), r).await?;
-                        warnings = warn;
-                        Some(moved)
-                    }
-                    None => None,
-                };
-                Ok::<_, String>((voice, relays, warnings))
+                Ok::<_, String>(voice)
             }
         });
         cx.spawn(async move |this, cx| {
@@ -10870,7 +10892,7 @@ impl VectorApp {
                 }
                 let live = this.comm_settings.as_mut().filter(|m| m.community == id);
                 match res {
-                    Ok((voice, relays, warnings)) => {
+                    Ok(voice) => {
                         if let Some(m) = live {
                             m.saving = false;
                             m.progress = None;
@@ -10881,20 +10903,17 @@ impl VectorApp {
                             if let Some(v) = voice {
                                 m.voice = v;
                             }
-                            if let Some(r) = relays {
-                                m.relays = r;
-                            }
                             m.saved = crate::commsettings::Saved {
                                 name: m.name.read(cx).text().trim().to_string(),
                                 description: m.description.read(cx).text().trim().to_string(),
-                                relays: m.relays.clone(),
+                                relays: m.saved.relays.clone(),
                                 voice: m.voice.clone(),
                             };
                         }
-                        if let Some(w) = warnings.first() {
-                            this.show_toast(w, cx);
-                        }
                         this.reload_communities(cx);
+                        if let Some(r) = relays {
+                            this.check_relays(id.clone(), r, cx);
+                        }
                     }
                     Err(e) => {
                         if let Some(m) = live {
@@ -10909,6 +10928,94 @@ impl VectorApp {
             .ok();
         })
         .detach();
+    }
+
+    /// `csMoveRelays`, first half: check the new relays. One that can't hold a Community stops
+    /// the move; a throttling or single-network one waits on a yes.
+    fn check_relays(&mut self, id: String, relays: Vec<String>, cx: &mut Context<Self>) {
+        self.set_relay_saving(true);
+        self.rekey = Some(crate::rekey::Rekey::new("Checking the new relays"));
+        let rx = backend::run(backend::community::check_relays(id.clone(), relays.clone()));
+        cx.spawn(async move |this, cx| {
+            let res = rx.await.unwrap_or_else(|_| Err("Save failed".into()));
+            this.update(cx, |this, cx| {
+                this.rekey = None;
+                this.set_relay_saving(false);
+                cx.notify();
+                let checks = match res {
+                    Ok(c) => c,
+                    Err(e) => return this.show_toast(&e, cx),
+                };
+                if let Some(bad) = checks.iter().find(|c| !c.ok) {
+                    let mut popup = kit::Popup::notice("This relay can't host the community");
+                    let why = bad.reason.clone().unwrap_or_else(|| format!("{} can't hold this community.", bad.relay));
+                    popup.text = Some(kit::escape(&why).into());
+                    this.popup = Some((popup, PopupAct::Notice));
+                    return;
+                }
+                let cautions = relay_cautions(&checks, &relays);
+                if cautions.is_empty() {
+                    return this.move_relays(id, relays, cx);
+                }
+                let mut popup = kit::Popup::notice("Before this community moves");
+                popup.text = Some(format!("{}<br><br>Move anyway?", cautions.join("<br><br>")).into());
+                popup.confirm = "Move Anyway".into();
+                popup.cancel = Some("Cancel".into());
+                this.popup = Some((popup, PopupAct::MoveRelays { id, relays }));
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// `csMoveRelays`, second half: give the new relays the whole Community, then announce it.
+    fn move_relays(&mut self, id: String, relays: Vec<String>, cx: &mut Context<Self>) {
+        self.set_relay_saving(true);
+        self.rekey = Some(crate::rekey::Rekey::new("Moving to new relays"));
+        cx.notify();
+        let rx = backend::run(backend::community::move_relays(id.clone(), relays));
+        cx.spawn(async move |this, cx| {
+            let res = rx.await.unwrap_or_else(|_| Err("Save failed".into()));
+            let ok = res.is_ok();
+            this.update(cx, |this, cx| {
+                if ok && let Some(r) = this.rekey.as_mut() {
+                    r.set(100., Some("Everyone will follow the community to its new relays".into()));
+                }
+                cx.notify();
+            })
+            .ok();
+            if ok {
+                cx.background_executor().timer(std::time::Duration::from_millis(700)).await;
+            }
+            this.update(cx, |this, cx| {
+                this.rekey = None;
+                this.set_relay_saving(false);
+                cx.notify();
+                match res {
+                    Ok((moved, warnings)) => {
+                        if let Some(m) = this.comm_settings.as_mut().filter(|m| m.community == id) {
+                            m.relays = moved.clone();
+                            m.saved.relays = moved;
+                        }
+                        this.reload_communities(cx);
+                        if !warnings.is_empty() {
+                            let mut popup = kit::Popup::notice("Moved, with a few gaps");
+                            popup.text = Some(warnings.iter().map(|w| kit::escape(w)).collect::<Vec<_>>().join("<br><br>").into());
+                            this.popup = Some((popup, PopupAct::Notice));
+                        }
+                    }
+                    Err(e) => this.show_toast(&e, cx),
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn set_relay_saving(&mut self, on: bool) {
+        if let Some(m) = self.comm_settings.as_mut() {
+            m.saving = on;
+        }
     }
 
     /// `promptCommunityNickname`: yours, or a member's beneath you.
@@ -16829,4 +16936,33 @@ fn start_key_link(key: &str) -> Option<String> {
         "settings" | "nexus" | "requests" => Some(format!("{PLACE}{key}")),
         _ => None,
     }
+}
+
+/// What would make a relay move worse than it looks, each said once.
+fn relay_cautions(checks: &[vector_core::community::v2::service::RelayCheck], relays: &[String]) -> Vec<String> {
+    let named = |list: Vec<&str>| list.iter().map(|r| format!("<b>{}</b>", kit::escape(r))).collect::<Vec<_>>().join(", ");
+    let mut out = Vec::new();
+    let throttled: Vec<&str> = checks.iter().filter(|c| c.rate_limited).map(|c| c.relay.as_str()).collect();
+    if !throttled.is_empty() {
+        out.push(format!(
+            "{} slowed down a short burst of test events. A community on a rate-limited relay can drop posts and fall out of sync when it's busy.",
+            named(throttled)
+        ));
+    }
+    for (net, others, tld) in [("Tor", "Standard or I2P", ".onion"), ("I2P", "Standard or Tor", ".i2p")] {
+        let only: Vec<&str> = checks.iter().filter(|c| c.only_on == Some(net)).map(|c| c.relay.as_str()).collect();
+        if only.is_empty() {
+            continue;
+        }
+        let host = |r: &str| url::Url::parse(r).ok().and_then(|u| u.host_str().map(str::to_ascii_lowercase)).unwrap_or_default();
+        let no_other_way_in = relays.iter().all(|r| host(r).ends_with(tld));
+        let n = only.len();
+        out.push(format!(
+            "{} can only be reached over {net}. Members using Vector over {others} won't reach {}{}.",
+            named(only),
+            if n == 1 { "it" } else { "them" },
+            if no_other_way_in { ", and with no other relay left they'd lose this community" } else { "" },
+        ));
+    }
+    out
 }

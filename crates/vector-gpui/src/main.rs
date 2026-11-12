@@ -17,6 +17,7 @@ mod pins;
 mod edithistory;
 mod payaddr;
 mod reactpop;
+mod rekey;
 mod relayinfo;
 mod golinks;
 mod scrollbar;

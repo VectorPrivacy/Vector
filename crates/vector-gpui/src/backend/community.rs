@@ -859,22 +859,26 @@ pub async fn set_voice_relays(
     .await
 }
 
-/// A relay that can't host the Community, by name and why; else the moved list and its gaps.
+/// Whether each new relay can hold the Community, and what would make the move worse.
+pub async fn check_relays(
+    community_id: String,
+    relays: Vec<String>,
+) -> Result<Vec<vector_core::community::v2::service::RelayCheck>, String> {
+    db::scoped(async move {
+        VectorCore
+            .check_community_relays(&community_id, &relays)
+            .await
+            .map_err(|e| e.to_string())
+    })
+    .await
+}
+
+/// Hand the Community and its history to `relays`, then announce it: the moved list and its gaps.
 pub async fn move_relays(
     community_id: String,
     relays: Vec<String>,
 ) -> Result<(Vec<String>, Vec<String>), String> {
     db::scoped(async move {
-        let checks = VectorCore
-            .check_community_relays(&community_id, &relays)
-            .await
-            .map_err(|e| e.to_string())?;
-        if let Some(bad) = checks.iter().find(|c| !c.ok) {
-            return Err(bad
-                .reason
-                .clone()
-                .unwrap_or_else(|| format!("{} can't hold this community.", bad.relay)));
-        }
         let moved = VectorCore
             .move_community_relays(&community_id, &relays)
             .await
