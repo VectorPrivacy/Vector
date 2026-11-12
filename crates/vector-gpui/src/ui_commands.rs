@@ -349,6 +349,7 @@ impl VectorApp {
             Rc::new(move |v, w, cx| {
                 app2.update(cx, |app, cx| app.choose_command(v, w, cx)).ok();
             }),
+            self.vw,
         )
     }
 }

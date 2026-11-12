@@ -150,6 +150,8 @@ pub struct VectorApp {
     jump_miss: Option<(String, &'static str)>,
     /// The window is narrower than widescreen: the slim layout.
     is_slim: bool,
+    /// The window's width as of this frame, for helpers that don't take a `Window`.
+    vw: f32,
     slim: slim_ops::Slim,
     send_btn: Rc<std::cell::Cell<Option<gpui::Bounds<gpui::Pixels>>>>,
     /// A press on Send, by number, while it is held; a long one opened the timer instead.
@@ -863,6 +865,7 @@ impl VectorApp {
             call_mic_told: None,
             jump_miss: None,
             is_slim: false,
+            vw: 0.,
             slim: slim_ops::Slim::new(),
             send_btn: Rc::default(),
             send_held: None,
@@ -1574,6 +1577,10 @@ impl VectorApp {
         }
         if std::env::var("VECTOR_STATUS").is_ok() {
             app.open_status(window, cx);
+        }
+        if let Ok(draft) = std::env::var("VECTOR_DRAFT") {
+            app.input.update(cx, |t, cx| t.set_text(&draft, cx));
+            app.update_commands(&draft, cx);
         }
         if let Ok(files) = std::env::var("VECTOR_SEND") {
             app.open_paths_preview(files.split(':').map(Into::into).collect(), window, cx);
@@ -5131,7 +5138,8 @@ impl Render for VectorApp {
         let me = cx.entity().downgrade();
         cx.defer(move |cx| crate::relayinfo::pump(me, cx));
         let rail_mode = self.rail_mode(window);
-        let slim = f32::from(window.viewport_size().width) < slim_ops::WIDE_MIN;
+        self.vw = f32::from(window.viewport_size().width);
+        let slim = self.vw < slim_ops::WIDE_MIN;
         self.is_slim = slim;
         self.archive.slim = slim;
         if let Some(s) = self.settings.as_mut() {

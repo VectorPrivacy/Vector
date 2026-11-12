@@ -636,15 +636,19 @@ pub fn view(
     bot_face: &dyn Fn(&str) -> (SharedString, Option<std::path::PathBuf>),
     pick: Rc<dyn Fn(usize, &mut Window, &mut App)>,
     choose: Rc<dyn Fn(String, &mut Window, &mut App)>,
+    vw: f32,
 ) -> Option<AnyElement> {
+    let narrow = vw <= 520.;
     let view = p.view.as_ref()?;
     let panel = div()
         .id("command-selector")
         .absolute()
         .bottom(px(-1.))
-        .left_0()
+        // `AnchoredPanel`'s `viewportInset`: 10px clear of a phone's edges.
+        .when(vw < 900., |d| d.left(px(10.)))
+        .when(vw >= 900., |d| d.left_0())
         .w_full()
-        .max_w(px(422.))
+        .max_w(px(422f32.min(vw - 18.)))
         .max_h(px(328.))
         .overflow_y_scroll()
         .bg(c(PANEL_BG))
@@ -765,10 +769,14 @@ pub fn view(
                         .when(!r.cmd.description.is_empty(), |d| {
                             d.child(
                                 div()
-                                    .flex_1()
                                     .min_w_0()
-                                    .truncate()
-                                    .text_right()
+                                    .map(|d| {
+                                        if narrow {
+                                            d.flex_basis(gpui::relative(1.)).mt(px(-1.)).line_height(px(15.)).line_clamp(2)
+                                        } else {
+                                            d.flex_1().truncate().text_right()
+                                        }
+                                    })
                                     .text_size(px(12.))
                                     .text_color(ca(255, 255, 255, 0.45))
                                     .child(r.cmd.description.clone()),
