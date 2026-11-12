@@ -376,7 +376,9 @@ fn links(m: &Invite, store: &Store, on: &OnAct) -> impl IntoElement {
         )
 }
 
-pub fn view(m: &Invite, store: &Store, filter: &str, on: &OnAct) -> impl IntoElement + use<> {
+pub fn view(m: &Invite, store: &Store, filter: &str, (vw, vh): (f32, f32), on: &OnAct) -> impl IntoElement + use<> {
+    let narrow = vw - 40. < 530.;
+    let phone = vw <= 500.;
     let people =
         crate::createcommunity::listed(store, m.contacts.as_ref(), filter, &m.picked, |n| {
             m.excluded.contains(n)
@@ -386,13 +388,11 @@ pub fn view(m: &Invite, store: &Store, filter: &str, on: &OnAct) -> impl IntoEle
     let cta_live = !m.busy;
     let card = div()
         .id("cmt-modal")
-        .w(px(530.))
-        .max_h(gpui::relative(1.))
+        .w(px(if narrow { vw - 40. } else { 530. }))
+        .map(|d| if narrow { d.max_h(px(vh * 0.85 + 38.)) } else { d.max_h(gpui::relative(1.)) })
         .flex()
         .flex_col()
-        .pt(px(23.))
-        .pb(px(23.))
-        .px(px(25.))
+        .map(|d| if phone { d.py(px(19.)).px(px(15.)) } else { d.pt(px(23.)).pb(px(23.)).px(px(25.)) })
         .rounded(px(12.))
         .border_1()
         .border_color(white_a(0.08))
@@ -588,8 +588,7 @@ pub fn view(m: &Invite, store: &Store, filter: &str, on: &OnAct) -> impl IntoEle
             .flex()
             .items_center()
             .justify_center()
-            .py(px(37.))
-            .px(px(16.))
+            .map(|d| if narrow { d.p(px(20.)) } else { d.py(px(37.)).px(px(16.)) })
             .occlude()
             .on_click(move |_, w, cx| {
                 if !busy {

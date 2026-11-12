@@ -5751,7 +5751,7 @@ impl Render for VectorApp {
                         .ok();
                 });
                 let filter = m.filter.read(cx).text().to_string();
-                crate::invite::view(m, &store, &filter, &on)
+                crate::invite::view(m, &store, &filter, (f32::from(window.viewport_size().width), f32::from(window.viewport_size().height)), &on)
             }))
             .children(self.comm_settings.as_ref().map(|m| {
                 let compact = f32::from(window.viewport_size().width) <= 760.;
