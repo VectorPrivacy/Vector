@@ -473,6 +473,21 @@ pub async fn unlock(password: Option<Zeroizing<String>>) -> Result<String, Strin
         state::set_my_public_key(remote);
     }
     drop(keys);
+    finish_unlock().await
+}
+
+/// A bunker account whose signer was re-paired during unlock: the vault already holds its
+/// client key and the stored link is the new pairing.
+pub async fn resume_bunker_unlock() -> Result<String, String> {
+    // owned-key: the NIP-46 client keypair, which the login session owns for its life.
+    let keys = MY_SECRET_KEY.to_keys().ok_or("No client keypair loaded")?;
+    let remote = super::bunker::reconnect(&keys).await?;
+    drop(keys);
+    state::set_my_public_key(remote);
+    finish_unlock().await
+}
+
+async fn finish_unlock() -> Result<String, String> {
     super::transport::wait_for_active_network().await;
     install_client();
 

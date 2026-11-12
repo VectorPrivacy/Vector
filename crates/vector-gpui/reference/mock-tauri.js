@@ -28,8 +28,11 @@
             ['large-v3', 'Highest Quality - Slowest', 1080, 2400, true],
         ].map(([name, display_name, size, ram_required, supports_translate]) => ({ model: { name, display_name, size, ram_required, supports_translate }, downloaded: name === 'small' && window.__TYPE__ !== 'missing' })),
         get_device_memory: () => 2 * 1024 * 1024 * 1024,
+        reauthorize_bunker: () => 'nostrconnect://4f3c1b7a9e2d8f6c5b4a3e2d1c0b9a8f7e6d5c4b3a2918f7e6d5c4b3a291807?relay=wss%3A%2F%2Fjskitty.com%2Fnostr&secret=8c1e4a&name=Vector',
+        get_pending_reauth_result: null,
         start_nostrconnect_session: () => 'nostrconnect://4f3c1b7a9e2d8f6c5b4a3e2d1c0b9a8f7e6d5c4b3a2918f7e6d5c4b3a291807?relay=wss%3A%2F%2Fjskitty.com%2Fnostr&secret=8c1e4a&name=Vector',
         check_account_downgrade: () => (window.__TYPE__ === 'downgrade' ? { db_schema: 90, supported_schema: 87, last_app_version: '0.6.0-2' } : null),
+        get_bunker_status: () => (window.__SIGNER__ ? { remote_npub: window.__SIGNER__, remote_pubkey_hex: '' } : null),
         get_sql_setting: (a) => ((window.__SQL__ || {})[a?.key] ?? null),
         transcribe: () => ({ lang: 'ru', language: 'ru', confidence: 0.9, sections: [
             [0, 'Привет, это Ана.'], [1800, 'Я буду дома около семи,'], [4200, 'купи, пожалуйста, хлеб по дороге.'],

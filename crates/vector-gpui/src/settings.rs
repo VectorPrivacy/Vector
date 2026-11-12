@@ -757,6 +757,8 @@ pub struct Settings {
     pub dialog: Option<crate::netdialog::NetDialog>,
     /// The credential Local Encryption uses: `pin` or `password`.
     pub sec_kind: String,
+    /// A remote-signer account: the signer's npub and its connection state.
+    pub signer: Option<(String, &'static str)>,
     /// The fold over Private Keys.
     pub sec_advanced: bool,
     /// The release check, mirrored from the app's own.
@@ -821,6 +823,7 @@ pub enum Act {
     ClearSound,
     ChangeCredential,
     ShowKeys,
+    Reauthorize,
     Transfer,
     SecAdvanced,
     CheckUpdates,
@@ -2645,6 +2648,78 @@ fn advanced_fold(open: bool, on: &OnAct) -> AnyElement {
         .into_any_element()
 }
 
+/// `.remote-signer-card`: who signs for this account, and a way to re-pair it.
+fn signer_card(npub: &str, dot: &str, on: &OnAct) -> AnyElement {
+    let short = if npub.len() > 18 { format!("{}…{}", &npub[..12], &npub[npub.len() - 6..]) } else { npub.to_string() };
+    let (fill, glow) = match dot {
+        "online" => (c(0x2ecc71), Some(ca(46, 204, 113, 0.55))),
+        "offline" => (c(0xe74c3c), Some(ca(231, 76, 60, 0.45))),
+        "connecting" => (c(0xf1c40f), Some(ca(241, 196, 15, 0.6))),
+        _ => (c(0x9aa0a6), None),
+    };
+    let dot = div().size(px(8.)).flex_none().rounded_full().bg(fill).when_some(glow, |d, g| {
+        d.shadow(vec![gpui::BoxShadow { color: g, offset: gpui::point(px(0.), px(0.)), blur_radius: px(6.), spread_radius: px(0.), inset: false }])
+    });
+    // Its top margin collapses into the heading's.
+    div()
+        .mb(px(16.))
+        .py(px(12.))
+        .px(px(14.))
+        .rounded(px(10.))
+        .bg(white_a(0.03))
+        .border_1()
+        .border_color(white_a(0.08))
+        .flex()
+        .flex_col()
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .gap(px(12.))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(8.))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_size(px(15.2))
+                        .child(dot)
+                        .child("Remote Signer"),
+                )
+                .child(
+                    st_btn("signer-reauth", "Re-authorize", || Act::Reauthorize, on),
+                ),
+        )
+        .child(
+            div()
+                .mt(px(10.))
+                .flex()
+                .items_baseline()
+                .gap(px(10.))
+                .text_size(px(13.6))
+                .line_height(px(24.))
+                .child(div().w(px(70.)).flex_none().text_color(white_a(0.45)).child("Signer key"))
+                .child(
+                    div()
+                        .flex_1()
+                        .font_family(crate::markdown::MONO)
+                        .text_size(px(10.6))
+                        .text_color(white_a(0.85))
+                        .child(short),
+                ),
+        )
+        .child(
+            div()
+                .mt(px(10.))
+                .text_size(px(12.5))
+                .line_height(px(17.5))
+                .text_color(white_a(0.45))
+                .child("Your identity key lives on your signer app. Vector only holds a device pairing key."),
+        )
+        .into_any_element()
+}
+
 fn security_block(s: &Settings, on: &OnAct) -> AnyElement {
     let enabled = s.on.get("encryption").copied().unwrap_or(false);
     let switch = toggle(
@@ -2653,7 +2728,11 @@ fn security_block(s: &Settings, on: &OnAct) -> AnyElement {
         s.flipped.contains("encryption"),
         click(on, move || Act::Toggle("encryption", !enabled)),
     );
-    let mut col = div().flex().flex_col().child(toggle_row(
+    let mut col = div()
+        .flex()
+        .flex_col()
+        .children(s.signer.as_ref().map(|(npub, dot)| signer_card(npub, dot, on)))
+        .child(toggle_row(
         "encryption",
         "Local Encryption",
         Some(Box::new(click(on, || Act::Help("encryption")))),
@@ -2673,6 +2752,10 @@ fn security_block(s: &Settings, on: &OnAct) -> AnyElement {
             st_btn("change-cred-btn", "Change", || Act::ChangeCredential, on),
             on,
         ));
+    }
+    // An external signer keeps the identity key off this device, so Export and transfer go.
+    if s.signer.is_some() {
+        return col.into_any_element();
     }
     col = col.child(st_row(
         "transfer",

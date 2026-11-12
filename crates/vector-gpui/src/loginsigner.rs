@@ -121,7 +121,11 @@ impl LoginView {
     }
 
     fn signer_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Ok(add) = self.gate(cx) else { return };
+        let reauth = self.reauth.is_some();
+        let add = if reauth { None } else {
+            let Ok(add) = self.gate(cx) else { return };
+            add
+        };
         self.signer.session += 1;
         let session = self.signer.session;
         self.signer.link = None;
@@ -135,7 +139,7 @@ impl LoginView {
             if let Some((kind, opts)) = add {
                 account::enter_add_mode(kind, opts).await?;
             }
-            bunker::start_session(tx).await
+            if reauth { bunker::reauthorize(tx).await } else { bunker::start_session(tx).await }
         });
         cx.spawn_in(window, async move |this, cx| {
             let started = rx.await.unwrap_or_else(|_| Err("Backend stopped".into()));
@@ -181,6 +185,11 @@ impl LoginView {
                                 this.signer.link = None;
                                 this.signer.qr = None;
                                 this.signer.qr_open = false;
+                                if let Some(at_unlock) = this.reauth {
+                                    this.signer.status = Some(("Signer reconnected.".into(), Tone::Online));
+                                    this.reauthorized(at_unlock, window, cx);
+                                    return false;
+                                }
                                 this.signer.status = Some(("Connected. Choosing security…".into(), Tone::Online));
                                 if matches!(imported, account::Imported::Staged(_)) {
                                     backend::run(account::connect());
@@ -253,10 +262,14 @@ impl LoginView {
         let _ = &mut cx;
     }
 
-    /// Fixtures: `VECTOR_LOGIN=signer`, `signer-qr` (a live link), `signer-error`.
+    /// Fixtures: `VECTOR_LOGIN=signer`, `signer-qr` (a live link), `signer-error`, `signer-reauth`.
     pub fn fixture_signer(&mut self, mode: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.step = super::Step::Import;
         self.method = "signer";
+        if mode == "-reauth" {
+            self.reauth = Some(false);
+            return self.fixture_signer("-qr", window, cx);
+        }
         match mode {
             "-qr" => {
                 let link = "nostrconnect://".to_string() + &"7e".repeat(32) + "?relay=wss%3A%2F%2Frelay.damus.io&secret=3f9a1c&name=Vector";
@@ -279,10 +292,81 @@ impl LoginView {
         self.signer.qr = None;
         self.signer.deadline = None;
         self.signer.status = None;
-        if !self.signer.busy {
+        // A re-pair never staged anything, and the account it serves stays signed in.
+        if !self.signer.busy && self.reauth.is_none() {
             backend::run(bunker::cancel());
         }
         cx.notify();
+    }
+
+    /// Re-pair this account's signer: from Settings, or at an unlock the signer refused.
+    pub fn start_reauth(&mut self, at_unlock: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.popup = None;
+        self.reauth_from = self.step;
+        self.reauth = Some(at_unlock);
+        self.step = super::Step::Import;
+        self.method = "signer";
+        self.signer.status = None;
+        self.signer_open_qr(window, cx);
+    }
+
+    pub(super) fn end_reauth(&mut self, cx: &mut Context<Self>) {
+        self.signer_leave(cx);
+        match self.reauth.take() {
+            Some(false) => cx.emit(super::ReauthClosed),
+            _ => {
+                self.step = self.reauth_from;
+                self.method = "qr";
+            }
+        }
+        cx.notify();
+    }
+
+    fn reauthorized(&mut self, at_unlock: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if !at_unlock {
+            self.reauth = None;
+            self.method = "qr";
+            cx.emit(super::ReauthClosed);
+            return;
+        }
+        self.signer.busy = true;
+        let rx = backend::run(async {
+            let npub = account::resume_bunker_unlock().await?;
+            account::connect().await;
+            Ok::<_, String>(npub)
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let result = rx.await.unwrap_or_else(|_| Err("Backend stopped".into()));
+            this.update_in(cx, |this, _, cx| {
+                this.signer.busy = false;
+                match result {
+                    Ok(npub) => {
+                        this.reauth = None;
+                        cx.emit(super::LoggedIn { npub });
+                    }
+                    Err(e) => this.signer.status = Some((e.into(), Tone::Error)),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// An unlock the remote signer didn't answer: offer to re-pair it, keeping the account.
+    pub fn offer_reauth(&mut self, error: &str, cx: &mut Context<Self>) -> bool {
+        if !(error.contains("Remote signer unreachable") || error.to_lowercase().contains("bunker")) {
+            return false;
+        }
+        let escaped = error.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
+        let mut popup = crate::kit::Popup::notice("Signer unreachable");
+        popup.text = Some(format!("Your remote signer didn't respond. If you've reset or revoked Vector's permissions in your signer app, re-pair below without losing your account data.<br><br>{escaped}").into());
+        popup.confirm = "Re-authorize Signer".into();
+        popup.cancel = Some("Cancel".into());
+        self.popup = Some(popup);
+        self.popup_reauth = true;
+        cx.notify();
+        true
     }
 
     pub(super) fn signer_block(&self, cx: &mut Context<Self>) -> gpui::Div {
@@ -302,7 +386,11 @@ impl LoginView {
             .flex()
             .flex_col()
             .items_center()
-            .child(super::lg_title("Login with Remote Signer".into(), true, 0xffffff))
+            .child(super::lg_title(
+                if self.reauth.is_some() { "Reconnect Your Remote Signer" } else { "Login with Remote Signer" }.into(),
+                true,
+                0xffffff,
+            ))
             .child(row)
             .when_some(self.signer.line().filter(|_| !self.signer.qr_open), |d, (text, tone)| {
                 d.child(div().max_w(px(340.)).mt(px(12.)).text_center().text_size(px(12.)).line_height(px(24.)).text_color(c(tone_color(tone))).child(text))

@@ -163,6 +163,85 @@ pub async fn start_session(updates: UnboundedSender<Update>) -> Result<String, S
     Ok(uri)
 }
 
+/// Re-pair the signer of this bunker account, keeping its client key: a `nostrconnect://` link
+/// for the signer, reporting through `updates`. The live signer keeps working until the new
+/// pairing has proved it is the same identity. Before a session exists (an unlock the signer
+/// refused) nothing is installed: the unlock runs again on the stored link.
+pub async fn reauthorize(updates: UnboundedSender<Update>) -> Result<String, String> {
+    if vector_core::db::get_signer_type().ok().as_deref() != Some("bunker") {
+        return Err("This account is not a remote-signer account.".into());
+    }
+    let expected = vector_core::db::get_bunker_remote_pubkey()
+        .ok()
+        .flatten()
+        .ok_or("Bunker account missing cached remote pubkey")?
+        .to_ascii_lowercase();
+    // owned-key: the NIP-46 client keypair, which the NostrConnect session owns for its life.
+    let client_keys = MY_SECRET_KEY.to_keys().ok_or("No client keypair loaded — please return to the login screen and try again")?;
+    let (nc, uri) = vector_core::build_nostrconnect_session(client_keys, relays()?, Duration::from_secs(120))?;
+    let pairing = vector_core::signer::track_pairing(&nc);
+    let session = vector_core::db::current_session();
+    vector_core::db::spawn_bound(async move {
+        let done = |r: Result<Imported, String>| {
+            let _ = updates.unbounded_send(Update::Done(r));
+        };
+        let storage_url = match nc.bunker_uri().await {
+            Ok(uri) => uri.to_string(),
+            Err(e) => {
+                let _ = nc.shutdown().await;
+                return done(Err(failed(&pairing, e.to_string())));
+            }
+        };
+        let _ = updates.unbounded_send(Update::Awaiting);
+        let remote = match nc.get_public_key_async().await {
+            Ok(pk) => pk,
+            Err(e) => {
+                let _ = nc.shutdown().await;
+                return done(Err(failed(&pairing, format!("Signer didn't return your pubkey. Check the signer app for an approval prompt. ({e})"))));
+            }
+        };
+        if remote.to_hex() != expected {
+            let _ = nc.shutdown().await;
+            return done(Err("Signer returned a different identity. Re-authorize is only for the original account — logout to switch accounts.".into()));
+        }
+        if !session.is_live() {
+            let _ = nc.shutdown().await;
+            return;
+        }
+        if let Err(e) = vector_core::db::set_bunker_url(&storage_url).await {
+            let _ = nc.shutdown().await;
+            return done(Err(format!("Failed to persist bunker URL: {e}")));
+        }
+        let npub = match remote.to_bech32() {
+            Ok(n) => n,
+            Err(e) => {
+                let _ = nc.shutdown().await;
+                return done(Err(e.to_string()));
+            }
+        };
+        let at_unlock = state::nostr_client().is_none();
+        let old = match pairing.install(nc) {
+            Ok(old) => old,
+            Err(_) => return done(Err(vector_core::signer::NETWORK_CHANGED.to_string())),
+        };
+        if let Some(old) = old {
+            let _ = old.shutdown().await;
+        }
+        if at_unlock {
+            if let Some(b) = vector_core::take_bunker_signer() {
+                let _ = b.shutdown().await;
+            }
+            vector_core::set_bunker_state(BunkerConnectionState::Idle);
+        } else {
+            state::set_my_public_key(remote);
+            vector_core::set_signer_kind(SignerKind::Bunker);
+            vector_core::set_bunker_state(BunkerConnectionState::Online);
+        }
+        done(Ok(Imported::Existing(npub)));
+    });
+    Ok(uri)
+}
+
 /// The signer of a stored bunker account, reconnected at unlock: the identity it returns must be
 /// the one on record. Returns that identity.
 pub async fn reconnect(client_keys: &Keys) -> Result<PublicKey, String> {

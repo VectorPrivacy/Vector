@@ -28,6 +28,10 @@ pub struct LoggedIn {
 
 impl EventEmitter<LoggedIn> for LoginView {}
 
+/// A re-pair started from Settings ended, either way.
+pub struct ReauthClosed;
+impl EventEmitter<ReauthClosed> for LoginView {}
+
 /// Add Profile's milestones: the live account torn down for the new one, or the user backing out.
 pub enum AddProfile {
     Committed,
@@ -109,6 +113,11 @@ pub struct LoginView {
     picker: Option<Picker>,
     net: loginnet::LoginNet,
     signer: signer::Signer,
+    /// Re-pairing this account's signer: `true` when an unlock is waiting on it.
+    reauth: Option<bool>,
+    reauth_from: Step,
+    /// The open popup offers that re-pair.
+    popup_reauth: bool,
     live: bool,
 }
 
@@ -177,6 +186,9 @@ impl LoginView {
             picker: None,
             net: Default::default(),
             signer: signer::Signer::new(bunker_url),
+            reauth: None,
+            reauth_from: Step::Start,
+            popup_reauth: false,
             live: false,
         };
         if let Some(security) = unlock {
@@ -414,6 +426,7 @@ impl LoginView {
 
     fn show_error(&mut self, title: impl Into<SharedString>, cx: &mut Context<Self>) {
         self.popup = Some(Popup::notice(title));
+        self.popup_reauth = false;
         cx.notify();
     }
 
@@ -798,7 +811,9 @@ impl LoginView {
                         false,
                         cx,
                     );
-                    this.show_error(e, cx);
+                    if !this.offer_reauth(&e, cx) {
+                        this.show_error(e, cx);
+                    }
                 }
             })
             .ok();
@@ -1092,6 +1107,13 @@ impl LoginView {
                                 .text_size(px(18.))
                                 .on_click(cx.listener(|_, _, _, cx| cx.emit(OpenTransfer))),
                         );
+                }
+                if self.reauth.is_some() {
+                    return block
+                        .child(lg_back("Changed your mind?\u{a0}", "Go Back", move |_, cx| {
+                            back.update(cx, |this, cx| this.end_reauth(cx))
+                        }))
+                        .into_any_element();
                 }
                 block
                     .child(self.sign_in_with(cx))
@@ -1394,9 +1416,12 @@ impl Render for LoginView {
         .children(self.pill(cx).map(|pill| div().absolute().top(px(118.)).left_0().right_0().flex().justify_center().child(pill)))
         .when_some(self.popup.clone(), |root, p| {
             let entity = cx.entity();
-            root.child(kit::popup(&p, move |_, _, cx| {
+            root.child(kit::popup(&p, move |yes, window, cx| {
                 entity.update(cx, |this, cx| {
                     this.popup = None;
+                    if std::mem::take(&mut this.popup_reauth) && yes {
+                        this.start_reauth(true, window, cx);
+                    }
                     cx.notify();
                 })
             }))

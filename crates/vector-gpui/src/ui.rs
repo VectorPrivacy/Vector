@@ -26,7 +26,7 @@ use crate::composer::{CancelInput, SendText, TextInput};
 use crate::data::{self, Row, Store};
 use crate::inline::Target;
 use crate::kit;
-use crate::login::{LoggedIn, LoginView};
+use crate::login::{LoggedIn, LoginView, ReauthClosed};
 use crate::theme::*;
 use crate::timeline;
 use chrono::TimeZone;
@@ -53,6 +53,8 @@ pub struct VectorApp {
     screen: Screen,
     /// This build is older than the account's database: (this build, the one it needs).
     downgrade: Option<(String, String)>,
+    /// Re-pairing the remote signer from Settings: the signer form over everything.
+    reauth: Option<Entity<LoginView>>,
     /// The transport's view, as the backend last reported it.
     net_view: Option<Value>,
     net_seq: Option<u64>,
@@ -777,6 +779,7 @@ impl VectorApp {
         Self {
             screen: Screen::Main,
             downgrade: None,
+            reauth: None,
             net_view: None,
             net_seq: None,
             net_config: None,
@@ -2412,6 +2415,45 @@ impl VectorApp {
         cx.notify();
     }
 
+    /// The signer form over the app, re-pairing this account's signer in place.
+    fn open_reauth(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let view = cx.new(|cx| LoginView::new(None, window, cx));
+        cx.subscribe_in(&view, window, |this, _, _: &ReauthClosed, _, cx| {
+            this.reauth = None;
+            if let Some(s) = this.settings.as_mut()
+                && let Some((_, dot)) = s.signer.as_mut()
+            {
+                *dot = vector_core::bunker_state().as_label();
+            }
+            cx.notify();
+        })
+        .detach();
+        view.update(cx, |v, cx| v.start_reauth(false, window, cx));
+        self.reauth = Some(view);
+        cx.notify();
+    }
+
+    /// The signer asks for a page to approve on. Only http(s), and off Clearnet only once
+    /// confirmed, since the browser loads it outside the account's network.
+    fn signer_asks_to_open(&mut self, url: &str, cx: &mut Context<Self>) {
+        let Ok(parsed) = url::Url::parse(url) else { return };
+        if !matches!(parsed.scheme(), "http" | "https") {
+            return;
+        }
+        let target = parsed.to_string();
+        let off_clearnet = vector_core::transport::preference().is_some_and(|k| k != vector_core::transport::Kind::Clearnet);
+        if !off_clearnet {
+            return cx.open_url(&target);
+        }
+        let mut popup = kit::Popup::notice("Approve in your signer");
+        popup.icon = None;
+        popup.text = Some(format!("Your signer asked you to open this page. It opens in your browser, outside your private network.<br><code>{}</code>", target.replace('&', "&amp;").replace('<', "&lt;")).into());
+        popup.confirm = "Open".into();
+        popup.cancel = Some("Cancel".into());
+        self.popup = Some((popup, PopupAct::OpenWeb(target)));
+        cx.notify();
+    }
+
     /// An account kept without encryption opens straight away.
     fn unlock_plain(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let rx = backend::run(async {
@@ -2426,6 +2468,9 @@ impl VectorApp {
                 Err(e) => {
                     log::error!("unlock failed: {e}");
                     this.show_login(None, window, cx);
+                    if let Screen::Login(view) = &this.screen {
+                        view.clone().update(cx, |v, cx| v.offer_reauth(&e, cx));
+                    }
                 }
             })
             .ok();
@@ -2540,6 +2585,22 @@ impl VectorApp {
             .unwrap_or_default()
             .to_string();
         match name {
+            "bunker_state" => {
+                let state = match payload.get("state").and_then(Value::as_str) {
+                    Some("online") => "online",
+                    Some("offline") => "offline",
+                    Some("connecting") => "connecting",
+                    _ => "idle",
+                };
+                if let Some((_, dot)) = self.settings.as_mut().and_then(|s| s.signer.as_mut()) {
+                    *dot = state;
+                }
+            }
+            "bunker_auth_url" => {
+                if let Some(url) = payload.get("url").and_then(Value::as_str) {
+                    self.signer_asks_to_open(url, cx);
+                }
+            }
             "media_import_progress" => {
                 let n = |k: &str| payload.get(k).and_then(Value::as_u64).unwrap_or(0);
                 let plain = payload.get("plain").and_then(Value::as_bool).unwrap_or(false);
@@ -4607,6 +4668,11 @@ impl Render for VectorApp {
                     .child(self.security.clone());
             }
             Screen::Main => {}
+        }
+        if let Some(view) = &self.reauth {
+            return root
+                .child(div().absolute().inset_0().child(view.clone()))
+                .child(div().absolute().top_0().left_0().right_0().child(chrome(window, true, false)));
         }
         let store = self.store.clone();
         let store = store.borrow();
@@ -12298,6 +12364,12 @@ impl VectorApp {
             clock: None,
             dialog: None,
             sec_kind: self.security.read(cx).kind().to_string(),
+            signer: if self.live {
+                backend::bunker::status()
+            } else {
+                std::env::var("VECTOR_SIGNER").ok()
+            }
+            .map(|npub| (npub, vector_core::bunker_state().as_label())),
             sec_advanced: false,
             updates: self.updates.clone(),
             audio: None,
@@ -14044,6 +14116,7 @@ impl VectorApp {
             Act::PickSound => self.pick_sound(cx),
             Act::ChangeCredential => self.security.update(cx, |f, cx| f.change(cx)),
             Act::ShowKeys => self.security.update(cx, |f, cx| f.show_keys(cx)),
+            Act::Reauthorize => self.open_reauth(window, cx),
             Act::Transfer => self.security.update(cx, |f, cx| f.open_transfer(true, cx)),
             Act::SecAdvanced => s.sec_advanced = !s.sec_advanced,
             Act::CheckUpdates => {
