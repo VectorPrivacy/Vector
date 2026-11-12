@@ -880,7 +880,7 @@ impl Render for FilePreview {
                     .items_center()
                     .child("Keep Metadata")
                     .when(self.keep_metadata, |d| {
-                        d.child(img("icons/warning.svg").ml(px(4.)).size(px(14.)))
+                        d.child(img("icons/warning_pink.png").ml(px(4.)).size(px(14.)))
                     })
                     .into_any_element();
                 d.child(

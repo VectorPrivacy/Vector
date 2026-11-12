@@ -94,6 +94,8 @@ pub struct Nexus {
     pub now_ms: i64,
     /// The spotlight turn a wake is already set for.
     pub spot_armed: Option<Instant>,
+    /// Play with Friends: the app going out, and the chat search.
+    pub picker: Option<(String, Entity<TextInput>)>,
 }
 
 pub enum Act {
@@ -361,6 +363,7 @@ impl Nexus {
             root,
             now_ms: chrono::Utc::now().timestamp_millis(),
             spot_armed: None,
+            picker: None,
         }
     }
 
@@ -502,6 +505,10 @@ fn rise(id: impl Into<SharedString>, el: impl IntoElement, delay: f32, dur: f32,
 }
 
 /// `AppIcon`: the icon, or its initial on a grey tile.
+pub fn app_icon(n: &Nexus, app: &MarketplaceApp, size: f32) -> gpui::Div {
+    icon(n, app, size)
+}
+
 fn icon(n: &Nexus, app: &MarketplaceApp, size: f32) -> gpui::Div {
     let radius = size * 0.225;
     let base = div()

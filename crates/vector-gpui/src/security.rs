@@ -963,7 +963,7 @@ pub(crate) fn head(
                 .on_click(close)
                 .child(
                     svg()
-                        .path("icons/x-mark.svg")
+                        .path("ui/x-mark.svg")
                         .size(px(9.))
                         .text_color(white_a(0.4))
                         .group_hover("vcard-x", |d| d.text_color(c(0xffffff))),

@@ -586,7 +586,7 @@ impl VectorApp {
                     .on_click(close)
                     .child(
                         svg()
-                            .path("icons/x-mark.svg")
+                            .path("ui/x-mark.svg")
                             .size(px(9.))
                             .text_color(white_a(0.4))
                             .group_hover("ma-launch-x", |d| d.text_color(c(0xffffff))),
@@ -688,7 +688,7 @@ impl VectorApp {
     }
 
     /// `inviteMiniAppToChat`: send the package, then open it from the message the send surfaces.
-    fn invite_miniapp(&mut self, app: GridApp, chat: String, cx: &mut Context<Self>) {
+    pub(super) fn invite_miniapp(&mut self, app: GridApp, chat: String, cx: &mut Context<Self>) {
         let Some(vector_core::media::MediaRef::File(path)) = vector_core::media::MediaRef::parse(&app.src)
         else {
             self.play_solo(app.src, cx);

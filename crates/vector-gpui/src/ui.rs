@@ -3705,6 +3705,7 @@ impl Render for VectorApp {
         }
         let popout = self.popout_view(window, cx);
         let launch = self.launch_view(cx);
+        let pick = self.nexus_picker_view(cx);
         match self.rec.due() {
             Some(crate::recorder::Due::Locked) => self.rec.locked(),
             Some(crate::recorder::Due::Idle) => self.rec.idle(),
@@ -4040,6 +4041,7 @@ impl Render for VectorApp {
             .children(self.pack_details_view(cx))
             .children(popout)
             .children(launch)
+            .children(pick)
             .children(self.toast_view(window))
             .children(
                 self.viewer

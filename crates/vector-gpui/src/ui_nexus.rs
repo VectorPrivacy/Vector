@@ -1,7 +1,7 @@
 //! The Nexus's side of the app (`js/marketplace.js`): opening it, its actions, and the
 //! catalogue and download events.
 
-use gpui::{AnyElement, Context, FontWeight, SharedString, Window, prelude::*, px};
+use gpui::{AnyElement, Context, Focusable, FontWeight, SharedString, Window, div, prelude::*, px};
 use serde_json::Value;
 
 use super::{VectorApp, backend};
@@ -247,7 +247,7 @@ impl VectorApp {
                 let to = (at + dir * (w * 0.8).max(160.)).clamp(0., max);
                 h.set_offset(gpui::point(px(-to), px(0.)));
             }
-            Act::PlayWith(_) => self.show_toast("Play with Friends isn't in this build yet", cx),
+            Act::PlayWith(id) => self.play_with(id, window, cx),
             Act::Publisher(npub) => {
                 self.nexus = None;
                 self.open_profile(npub, cx);
@@ -482,6 +482,285 @@ impl VectorApp {
             app.update(cx, |app, cx| app.on_nexus(act, window, cx)).ok();
         });
         Some(crate::nexus::view(n, publisher.as_ref(), width, &on, cx))
+    }
+
+    /// `openPlayWith`: install it if needed, then choose who to play with.
+    fn play_with(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(app) = self.nexus.as_ref().and_then(|n| n.app(&id)).cloned() else { return };
+        if !crate::nexus::is_installed(&app) {
+            self.nexus_card(id.clone(), cx);
+            cx.spawn_in(window, async move |this, cx| {
+                loop {
+                    cx.background_executor().timer(std::time::Duration::from_millis(200)).await;
+                    let state = this
+                        .update(cx, |this, _| {
+                            let n = this.nexus.as_ref()?;
+                            Some((n.actions.contains_key(&id), n.app(&id).is_some_and(crate::nexus::is_installed)))
+                        })
+                        .ok()
+                        .flatten();
+                    match state {
+                        Some((true, _)) => continue,
+                        Some((false, true)) => {
+                            this.update_in(cx, |this, window, cx| this.open_picker(id.clone(), window, cx)).ok();
+                        }
+                        _ => {}
+                    }
+                    return;
+                }
+            })
+            .detach();
+            return;
+        }
+        self.open_picker(id, window, cx);
+    }
+
+    fn open_picker(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
+        let search = cx.new(|cx| {
+            TextInput::new("Search chats", cx).with_look(crate::composer::Look {
+                family: RUBIK,
+                size: px(15.),
+                line_height: px(18.),
+                weight: FontWeight::NORMAL,
+                color: c(0xffffff),
+                placeholder: c(0x7a7a7a),
+                ..Default::default()
+            })
+        });
+        cx.subscribe(&search, |_, _, _: &InputChanged, cx| cx.notify()).detach();
+        cx.subscribe(&search, |app, _, _: &crate::composer::CancelInput, cx| {
+            if let Some(n) = app.nexus.as_mut() {
+                n.picker = None;
+            }
+            cx.notify();
+        })
+        .detach();
+        window.focus(&search.read(cx).focus_handle(cx), cx);
+        if let Some(n) = self.nexus.as_mut() {
+            n.picker = Some((id, search));
+        }
+        cx.notify();
+    }
+
+    /// `nexusChatChoices`: the DMs you're talking in, newest first.
+    fn pick_chats(&self) -> Vec<(String, String, &'static str, Option<std::path::PathBuf>)> {
+        let store = self.store.borrow();
+        let mut dms: Vec<(u64, &vector_core::SerializableChat)> = store
+            .chats
+            .iter()
+            .filter(|ch| ch.id.starts_with("npub1") && ch.id != store.my_npub && !ch.messages.is_empty())
+            .filter(|ch| !store.is_request(ch) && !store.profiles.get(&ch.id).is_some_and(|p| p.is_blocked))
+            .map(|ch| (crate::data::last_activity(ch), ch))
+            .collect();
+        dms.sort_by(|a, b| b.0.cmp(&a.0));
+        dms.into_iter()
+            .map(|(_, ch)| (ch.id.clone(), store.name(&ch.id), "Direct message", store.avatar_path(&ch.id)))
+            .collect()
+    }
+
+    /// `sendAppToChat`: the invite goes out, the chat opens, and the game opens from it.
+    fn send_app_to(&mut self, chat: String, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(n) = self.nexus.as_mut() else { return };
+        let Some((id, _)) = n.picker.take() else { return };
+        let Some(app) = n.app(&id).cloned() else { return };
+        let icon = n.icon_path(&app);
+        let Some(path) = app.local_path.clone() else {
+            return self.show_toast("Install it first", cx);
+        };
+        self.nexus = None;
+        self.open_chat(chat.clone().into(), window, cx);
+        let grid = super::miniapps_ops::GridApp {
+            name: app.name.clone(),
+            src: path,
+            icon,
+            categories: app.categories.join(","),
+            last: 0,
+        };
+        self.invite_miniapp(grid, chat, cx);
+    }
+
+    pub(super) fn nexus_picker_view(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let n = self.nexus.as_ref()?;
+        let (id, search) = n.picker.as_ref()?;
+        let app = n.app(id)?;
+        let q = search.read(cx).text().trim().to_lowercase();
+        let chats: Vec<_> = self
+            .pick_chats()
+            .into_iter()
+            .filter(|c| q.is_empty() || c.1.to_lowercase().contains(&q) || c.2.to_lowercase().contains(&q))
+            .collect();
+        let me = cx.entity().downgrade();
+        let close = {
+            let me = me.clone();
+            move |_: &gpui::ClickEvent, _: &mut Window, cx: &mut gpui::App| {
+                me.update(cx, |a, cx| {
+                    if let Some(n) = a.nexus.as_mut() {
+                        n.picker = None;
+                    }
+                    cx.notify();
+                })
+                .ok();
+            }
+        };
+        let head = div()
+            .flex()
+            .items_center()
+            .gap(px(12.))
+            .child(crate::nexus::app_icon(n, app, 40.))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .child(
+                        div()
+                            .text_size(px(18.))
+                            .line_height(px(22.))
+                            .font_weight(FontWeight::BOLD)
+                            .child("Play with Friends"),
+                    )
+                    .child(
+                        div()
+                            .truncate()
+                            .text_size(px(13.))
+                            .line_height(px(19.5))
+                            .text_color(white_a(0.55))
+                            .child(format!("Send {} to a chat, and it opens for you", app.name)),
+                    ),
+            )
+            .child(
+                div()
+                    .id("nx-pick-x")
+                    .group("nx-pick-x")
+                    .self_start()
+                    .w(px(23.7))
+                    .h(px(22.))
+                    .flex()
+                    .justify_center()
+                    .pt(px(6.))
+                    .cursor_pointer()
+                    .on_click(close)
+                    .child(
+                        gpui::svg()
+                            .path("ui/x-mark.svg")
+                            .size(px(9.))
+                            .text_color(white_a(0.4))
+                            .group_hover("nx-pick-x", |d| d.text_color(c(0xffffff))),
+                    ),
+            );
+        let field = div()
+            .relative()
+            .flex_shrink_0()
+            .h(px(40.))
+            .rounded(px(10.))
+            .bg(c(0x1b1b1b))
+            .pl(px(38.))
+            .pr(px(12.))
+            .flex()
+            .items_center()
+            .child(div().flex_1().min_w_0().child(search.clone()))
+            .child(gpui::svg().path("icons/search.svg").absolute().left(px(12.)).top(px(11.5)).size(px(17.)).text_color(c(0x8a8a8a)));
+        let mut list = div().id("nx-pick-list").flex_1().min_h_0().mx(px(-8.)).overflow_y_scroll().flex().flex_col();
+        if chats.is_empty() {
+            list = list.child(
+                div()
+                    .py(px(28.))
+                    .text_center()
+                    .text_size(px(14.))
+                    .text_color(c(0x6f6f6f))
+                    .child(if q.is_empty() { "No chats yet: start one to play together" } else { "No chats match" }),
+            );
+        }
+        for (chat, name, sub, avatar) in chats {
+            let group = SharedString::from(format!("nx-pick-{chat}"));
+            let me = me.clone();
+            let target = chat.clone();
+            list = list.child(
+                div()
+                    .id(group.clone())
+                    .group(group.clone())
+                    .flex()
+                    .items_center()
+                    .gap(px(12.))
+                    .w_full()
+                    .p(px(8.))
+                    .rounded(px(12.))
+                    .cursor_pointer()
+                    .hover(|s| s.bg(c(0x1a1a1a)))
+                    .on_click(move |_, window, cx| {
+                        me.update(cx, |a, cx| a.send_app_to(target.clone(), window, cx)).ok();
+                    })
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .flex_shrink_0()
+                            .size(px(40.))
+                            .rounded_full()
+                            .overflow_hidden()
+                            .bg(c(0x1b1b1b))
+                            .child(match avatar {
+                                Some(p) => gpui::img(p).size_full().rounded_full().object_fit(gpui::ObjectFit::Cover).into_any_element(),
+                                None => gpui::svg().path("icons/user-circle.svg").size(px(22.)).text_color(c(0x6f6f6f)).into_any_element(),
+                            }),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .flex_1()
+                            .min_w_0()
+                            .child(div().truncate().text_size(px(15.)).line_height(px(19.)).child(name))
+                            .child(div().text_size(px(12.)).line_height(px(16.)).text_color(c(0x7a7a7a)).child(sub)),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(13.))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(c(PRIMARY))
+                            .opacity(0.)
+                            .group_hover(group, |s| s.opacity(1.))
+                            .child("Send"),
+                    ),
+            );
+        }
+        let card = crate::security::card("nx-pick")
+            .w(px(420.))
+            .max_h(px(620.))
+            .gap(px(12.))
+            .pb(px(10.))
+            .overflow_hidden()
+            .font_family(RUBIK)
+            .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .child(head)
+            .child(field)
+            .child(list);
+        let backdrop = cx.listener(|a, _: &gpui::MouseDownEvent, _, cx| {
+            if let Some(n) = a.nexus.as_mut() {
+                n.picker = None;
+            }
+            cx.notify();
+        });
+        Some(
+            gpui::deferred(
+                div()
+                    .id("nx-pick-overlay")
+                    .absolute()
+                    .inset_0()
+                    .p(px(16.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .bg(ca(0, 0, 0, 0.88))
+                    .occlude()
+                    .on_mouse_down(gpui::MouseButton::Left, backdrop)
+                    .child(card),
+            )
+            .with_priority(9)
+            .into_any_element(),
+        )
     }
 
     /// When the spotlight next turns, so the frame loop can rest until then.
