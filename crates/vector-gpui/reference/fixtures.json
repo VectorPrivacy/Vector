@@ -4365,7 +4365,101 @@
     "kind": "i2p",
     "phase": "ready",
     "ready": true
-   }
+   },
+   "routes": [
+    {
+     "url": "wss://jskitty.com/nostr",
+     "host": "jskitty.com",
+     "kind": "i2p",
+     "class": "twin",
+     "via": "nostrakjf3mw7a2xqzlh4vpcdg6ytb5neiu4rs7k2o3pqfvxhcj5kn5a.b32.i2p",
+     "text": "Through its I2P address",
+     "last_error": null
+    },
+    {
+     "url": "wss://asia.vectorapp.io/nostr",
+     "host": "asia.vectorapp.io",
+     "kind": "i2p",
+     "class": "exit",
+     "via": "StormyCloud",
+     "text": "Through the StormyCloud outproxy",
+     "last_error": null
+    },
+    {
+     "url": "wss://nostr.computingcache.com",
+     "host": "nostr.computingcache.com",
+     "kind": "i2p",
+     "class": "exit",
+     "via": "StormyCloud",
+     "text": "Through the StormyCloud outproxy",
+     "last_error": null
+    },
+    {
+     "url": "wss://relay.example.org",
+     "host": "relay.example.org",
+     "kind": "i2p",
+     "class": "refused",
+     "via": null,
+     "text": "I2P-Only is on, so this server is off.",
+     "last_error": null
+    },
+    {
+     "url": "https://magnitude.vectorapp.io",
+     "host": "magnitude.vectorapp.io",
+     "kind": "i2p",
+     "class": "twin",
+     "via": "nostrakjf3mw7a2xqzlh4vpcdg6ytb5neiu4rs7k2o3pqfvxhcj5kn5a.b32.i2p",
+     "text": "Through its I2P address",
+     "last_error": null
+    },
+    {
+     "url": "https://blossom.ditto.pub",
+     "host": "blossom.ditto.pub",
+     "kind": "i2p",
+     "class": "blocked",
+     "via": null,
+     "text": "Blocked: The outproxy didn\u2019t answer.",
+     "last_error": "The outproxy didn\u2019t answer."
+    }
+   ],
+   "aliases": [
+    {
+     "host": "jskitty.com",
+     "twins": {
+      "i2p": "nostrakjf3mw7a2xqzlh4vpcdg6ytb5neiu4rs7k2o3pqfvxhcj5kn5a.b32.i2p"
+     },
+     "source": "builtin",
+     "check": {
+      "state": "ok",
+      "at": null,
+      "text": null
+     }
+    },
+    {
+     "host": "magnitude.vectorapp.io",
+     "twins": {
+      "i2p": "nostrakjf3mw7a2xqzlh4vpcdg6ytb5neiu4rs7k2o3pqfvxhcj5kn5a.b32.i2p"
+     },
+     "source": "user",
+     "check": {
+      "state": "ok",
+      "at": null,
+      "text": null
+     }
+    },
+    {
+     "host": "nostr.computingcache.com",
+     "twins": {
+      "i2p": "nostrakjf3mw7a2xqzlh4vpcdg6ytb5neiu4rs7k2o3pqfvxhcj5kn5a.b32.i2p"
+     },
+     "source": "user",
+     "check": {
+      "state": "failed",
+      "at": null,
+      "text": "This address doesn\u2019t serve nostr.computingcache.com. Vector won\u2019t use it."
+     }
+    }
+   ]
   },
   "i2p_start": {
    "view": {

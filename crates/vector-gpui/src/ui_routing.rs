@@ -72,6 +72,7 @@ impl VectorApp {
         let seq = view.get("config_seq").and_then(Value::as_u64);
         let config_moved = seq != self.net_seq;
         let flipped = self.net_view.as_ref().is_none_or(|p| p["kind"] != view["kind"] || p["ready"] != view["ready"]);
+        let rerouted = flipped || config_moved || self.net_view.as_ref().is_some_and(|p| p["phase"] != view["phase"]);
         self.net_seq = seq;
         self.net_view = Some(view.clone());
         if let Screen::Login(login) = &self.screen {
@@ -89,6 +90,12 @@ impl VectorApp {
             self.load_net_config(cx);
         } else if flipped {
             self.check_stranded(cx);
+        }
+        if let Some(book) = self.book() {
+            book.view = Some(view.clone());
+        }
+        if rerouted {
+            self.refresh_routes(cx);
         }
         if let Some(at) = self.net_renewed {
             let in_use = view.get("kind").and_then(Value::as_str) == Some("i2p") && view.get("ready").and_then(Value::as_bool) == Some(true);
@@ -203,6 +210,7 @@ impl VectorApp {
         let config = if self.live { Some(json(net::i2p_get_config())) } else { self.store.borrow().fixture_i2p.clone() };
         self.net_config = config.clone();
         self.check_stranded(cx);
+        self.load_aliases(cx);
         let Some(r) = self.routing() else { return };
         r.config = config.clone();
         let port = config.as_ref().and_then(|c| c.get("sam_port")).and_then(Value::as_u64);
@@ -961,3 +969,170 @@ fn apply_circuits(r: &mut Routing, c: &Value) {
     r.circuits.hops = c.get("hops").and_then(Value::as_array).cloned().unwrap_or_default();
 }
 
+
+impl VectorApp {
+    fn book(&mut self) -> Option<&mut crate::routes::RouteBook> {
+        self.settings.as_mut().map(|s| &mut s.book)
+    }
+
+    /// The listed relays' and servers' urls, and the open dialog's.
+    fn route_urls(&self) -> Vec<String> {
+        let Some(s) = self.settings.as_ref() else { return Vec::new() };
+        let mut urls: Vec<String> = s.relays.iter().flatten().map(|r| r.url.clone()).chain(s.servers.iter().flatten().map(|v| v.url.clone())).collect();
+        if let Some(u) = s.dialog.as_ref().and_then(|d| d.url()) {
+            if !urls.iter().any(|x| x == u) {
+                urls.push(u.to_string());
+            }
+        }
+        urls
+    }
+
+    /// The lists arrived: read routes for rows not read yet, and the addresses once.
+    pub(super) fn routes_settle(&mut self, cx: &mut Context<Self>) {
+        let urls = self.route_urls();
+        let Some(book) = self.settings.as_ref().map(|s| &s.book) else { return };
+        let first = book.view.is_none();
+        if first || urls.iter().any(|u| !book.routes.contains_key(&u.to_lowercase())) {
+            self.refresh_routes(cx);
+        }
+        if first {
+            self.load_aliases(cx);
+        }
+    }
+
+    /// Read the route each listed server takes now; re-read whenever the network changes.
+    pub(super) fn refresh_routes(&mut self, cx: &mut Context<Self>) {
+        let urls = self.route_urls();
+        if urls.is_empty() {
+            return;
+        }
+        let views: Vec<Value> = if self.live {
+            net::transport_get_routes(urls.clone()).into_iter().map(json).collect()
+        } else {
+            let fx = self.store.borrow().fixture_net.clone().unwrap_or(Value::Null);
+            let kind = fx["view"]["kind"].as_str().unwrap_or("clearnet").to_string();
+            urls.iter()
+                .map(|u| {
+                    fx["routes"].as_array().and_then(|l| l.iter().find(|r| r["url"] == u.as_str())).cloned().unwrap_or_else(|| {
+                        let host = url::Url::parse(u).ok().and_then(|p| p.host_str().map(str::to_string)).unwrap_or_default();
+                        serde_json::json!({ "url": u, "host": host, "kind": kind, "class": "direct", "text": "Direct" })
+                    })
+                })
+                .collect()
+        };
+        let view = self.net_view.clone();
+        let Some(book) = self.book() else { return };
+        book.view = view;
+        for v in views {
+            if let Some(u) = v.get("url").and_then(Value::as_str) {
+                book.routes.insert(u.to_lowercase(), v);
+            }
+        }
+        cx.notify();
+    }
+
+    pub(super) fn load_aliases(&mut self, cx: &mut Context<Self>) {
+        let aliases: Vec<Value> = if self.live {
+            net::transport_get_aliases().into_iter().map(json).collect()
+        } else {
+            self.store.borrow().fixture_net.as_ref().and_then(|n| n["aliases"].as_array().cloned()).unwrap_or_default()
+        };
+        let config = self.net_config.clone();
+        let Some(s) = self.settings.as_mut() else { return };
+        s.book.aliases = aliases;
+        s.book.config = config;
+        let book = s.book.clone();
+        if let Some(a) = s.dialog.as_mut().and_then(|d| d.alias()) {
+            a.sync(&book, cx);
+        }
+        cx.notify();
+    }
+
+    /// A relay or server dialog opened: its route now, and over Tor its circuit.
+    pub(super) fn dialog_route(&mut self, url: String, cx: &mut Context<Self>) {
+        self.refresh_routes(cx);
+        let tor_up = self.net_view.as_ref().is_some_and(|v| v["kind"] == "tor" && v["ready"] == true);
+        let circuit = (self.live && tor_up).then(|| net::tor_get_host_circuit(url).ok().flatten()).flatten().map(|h| h.into_iter().map(json).collect::<Vec<_>>());
+        if let Some(d) = self.settings.as_mut().and_then(|s| s.dialog.as_mut()) {
+            match d {
+                crate::netdialog::NetDialog::Relay { circuit: c, .. } | crate::netdialog::NetDialog::Server { circuit: c, .. } => *c = circuit,
+                _ => {}
+            }
+        }
+    }
+
+    pub(super) fn alias_act(&mut self, act: crate::routes::AliasAct, window: &mut Window, cx: &mut Context<Self>) {
+        use crate::routes::{AliasAct, Tone};
+        if let AliasAct::Help(key) = act {
+            return self.settings_act(crate::settings::Act::Help(key), window, cx);
+        }
+        let live = self.live;
+        let Some(s) = self.settings.as_mut() else { return };
+        let book = s.book.clone();
+        let Some(a) = s.dialog.as_mut().and_then(|d| d.alias()) else { return };
+        let Some(host) = a.host() else { return };
+        let (kind, url) = (a.kind.to_string(), a.url.clone());
+        let typed = a.typed(cx);
+        if !live || a.busy {
+            return;
+        }
+        a.busy = true;
+        a.note = None;
+        cx.notify();
+        enum Done {
+            Saved,
+            Found(Value),
+            Checked,
+        }
+        let rx = match act {
+            AliasAct::Save => {
+                let address = (!typed.is_empty()).then_some(typed);
+                backend::run(async move { net::transport_set_alias(host, kind, address).await.map(|_| Done::Saved) })
+            }
+            AliasAct::Remove => backend::run(async move { net::transport_set_alias(host, kind, None).await.map(|_| Done::Saved) }),
+            AliasAct::Find => backend::run(async move { net::transport_find_alias(url).await.map(Done::Found) }),
+            AliasAct::Check => backend::run(async move { net::transport_check_alias(host).await.map(|_| Done::Checked) }),
+            AliasAct::Help(_) => return,
+        };
+        let _ = book;
+        cx.spawn(async move |this, cx| {
+            let res = rx.await.unwrap_or_else(|_| Err("Backend stopped".into()));
+            this.update(cx, |app, cx| {
+                app.load_aliases(cx);
+                let Some(s) = app.settings.as_mut() else { return };
+                let book = s.book.clone();
+                let Some(a) = s.dialog.as_mut().and_then(|d| d.alias()) else { return };
+                a.busy = false;
+                match res {
+                    Err(e) => a.note = Some((e, Tone::Error)),
+                    Ok(Done::Saved) => {
+                        a.editing = false;
+                        a.sync(&book, cx);
+                    }
+                    Ok(Done::Checked) => {}
+                    // A listed address is checked on the spot; it fills the field and the user decides.
+                    Ok(Done::Found(r)) => match r["found"].as_str() {
+                        None => a.note = Some((r["text"].as_str().unwrap_or("").to_string(), Tone::Muted)),
+                        Some(found) => {
+                            a.editing = true;
+                            let found = found.to_string();
+                            a.input.update(cx, |i, cx| i.set_text(&found, cx));
+                            let host = a.host().unwrap_or_default();
+                            a.note = Some(match r["check"]["state"].as_str() {
+                                Some("ok") => ("Found and checked. Save to use it.".into(), Tone::Ok),
+                                Some("failed") => (
+                                    r["check"]["text"].as_str().map_or_else(|| format!("This address doesn't serve {host}. Vector won't use it."), str::to_string),
+                                    Tone::Error,
+                                ),
+                                _ => ("Found it. Save to use it.".into(), Tone::Muted),
+                            });
+                        }
+                    },
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+}

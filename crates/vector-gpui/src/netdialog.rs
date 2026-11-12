@@ -23,6 +23,8 @@ pub enum NetDialog {
         logs: Vec<RelayLog>,
         mode_open: bool,
         copied: bool,
+        alias: Option<crate::routes::Alias>,
+        circuit: Option<Vec<serde_json::Value>>,
     },
     Server {
         info: vector_core::blossom_servers::BlossomServerInfo,
@@ -30,7 +32,26 @@ pub enum NetDialog {
         doc: crate::serverinfo::Load<Option<serde_json::Value>>,
         caps: crate::serverinfo::Load<Vec<serde_json::Value>>,
         chart: crate::serverinfo::Chart,
+        alias: Option<crate::routes::Alias>,
+        circuit: Option<Vec<serde_json::Value>>,
     },
+}
+
+impl NetDialog {
+    pub fn alias(&mut self) -> Option<&mut crate::routes::Alias> {
+        match self {
+            NetDialog::Relay { alias, .. } | NetDialog::Server { alias, .. } => alias.as_mut(),
+            NetDialog::AddRelay { .. } => None,
+        }
+    }
+
+    pub fn url(&self) -> Option<&str> {
+        match self {
+            NetDialog::Relay { row, .. } => Some(&row.url),
+            NetDialog::Server { info, .. } => Some(&info.url),
+            NetDialog::AddRelay { .. } => None,
+        }
+    }
 }
 
 pub enum Act {
@@ -46,6 +67,7 @@ pub enum Act {
     ServerAction,
     /// The upload under the pointer on the media server's speed chart.
     ChartHover(Option<usize>),
+    Alias(crate::routes::AliasAct),
 }
 
 pub type OnAct = Rc<dyn Fn(Act, &mut Window, &mut App)>;
@@ -381,15 +403,23 @@ fn ago(secs: u64) -> String {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn relay(
     row: &RelayRow,
     metrics: &RelayMetrics,
     logs: &[RelayLog],
     mode_open: bool,
     copied: bool,
+    net: (&crate::routes::RouteBook, Option<&crate::routes::Alias>, Option<&[serde_json::Value]>),
     on: &OnAct,
+    cx: &App,
 ) -> AnyElement {
+    let (book, alias, circuit) = net;
     let status = if row.enabled { row.status } else { "disabled" };
+    // The header says what the list says: the network's word for a relay it holds back.
+    let tag = book.tag(&row.url).filter(|_| row.enabled);
+    // A relay the network holds back has no live ping: an old reading would say it answers.
+    let held = book.route_of(&row.url).is_some_and(|r| r["class"] == "refused" || r["class"] == "blocked");
     let ping_color = match metrics.ping_ms {
         None => c(0x59fcb3),
         Some(ms) if ms < 200 => c(0x59fcb3),
@@ -399,9 +429,11 @@ fn relay(
     };
     let ping = metrics
         .ping_ms
+        .filter(|_| !held)
         .map(|ms| format!("{ms}ms"))
         .unwrap_or_else(|| "--".into());
-    let checked = metrics.last_check.map(ago).unwrap_or_else(|| "--".into());
+    let checked = metrics.last_check.filter(|_| !held).map(ago).unwrap_or_else(|| "--".into());
+    let ping_color = if held { c(0x59fcb3) } else { ping_color };
     let metric_label = |t: &'static str| {
         div()
             .text_size(px(11.))
@@ -493,7 +525,10 @@ fn relay(
                         .text_color(white_a(0.5))
                         .child(crate::settings::host(&row.url)),
                 )
-                .child(pill(status)),
+                .child(match &tag {
+                    Some(t) => tag_pill(t),
+                    None => pill(status),
+                }),
         )
         .child(
             div()
@@ -520,6 +555,8 @@ fn relay(
                 )
                 .child(mode),
         )
+        .children(crate::routes::connection(book, &row.url, circuit))
+        .children(alias.and_then(|a| alias_field(a, book, on, cx)))
         .child(
             div()
                 .flex()
@@ -601,15 +638,19 @@ fn relay(
     card("relay-info", body, on)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn server(
     info: &vector_core::blossom_servers::BlossomServerInfo,
     stats: Option<&serde_json::Value>,
     doc: &crate::serverinfo::Load<Option<serde_json::Value>>,
     caps: &crate::serverinfo::Load<Vec<serde_json::Value>>,
     chart: &crate::serverinfo::Chart,
+    net: (&crate::routes::RouteBook, Option<&crate::routes::Alias>, Option<&[serde_json::Value]>),
     window: &mut Window,
     on: &OnAct,
+    cx: &App,
 ) -> AnyElement {
+    let (book, alias, circuit) = net;
     use crate::serverinfo::{self as si, Load};
     let state = if info.enabled {
         info.status.state
@@ -699,6 +740,9 @@ fn server(
             })
             .child(si::learned(caps)),
     };
+    body = body
+        .children(crate::routes::connection(book, &info.url, circuit))
+        .children(alias.and_then(|a| alias_field(a, book, on, cx)));
     body = body.child(
         div()
             .mt(px(10.))
@@ -725,7 +769,7 @@ fn server(
     card("server-info", body, on)
 }
 
-pub fn view(d: &NetDialog, on: &OnAct, window: &mut Window, cx: &App) -> AnyElement {
+pub fn view(d: &NetDialog, book: &crate::routes::RouteBook, on: &OnAct, window: &mut Window, cx: &App) -> AnyElement {
     match d {
         NetDialog::AddRelay { input, mode } => add_relay(input, mode, on, cx),
         NetDialog::Relay {
@@ -734,7 +778,38 @@ pub fn view(d: &NetDialog, on: &OnAct, window: &mut Window, cx: &App) -> AnyElem
             logs,
             mode_open,
             copied,
-        } => relay(row, metrics, logs, *mode_open, *copied, on),
-        NetDialog::Server { info, stats, doc, caps, chart } => server(info, stats.as_ref(), doc, caps, chart, window, on),
+            alias,
+            circuit,
+        } => relay(row, metrics, logs, *mode_open, *copied, (book, alias.as_ref(), circuit.as_deref()), on, cx),
+        NetDialog::Server { info, stats, doc, caps, chart, alias, circuit } => {
+            server(info, stats.as_ref(), doc, caps, chart, (book, alias.as_ref(), circuit.as_deref()), window, on, cx)
+        }
     }
+}
+
+fn alias_field(a: &crate::routes::Alias, book: &crate::routes::RouteBook, on: &OnAct, cx: &App) -> Option<AnyElement> {
+    let on = on.clone();
+    crate::routes::alias_field(a, book, move |act, w, cx| on(Act::Alias(act), w, cx), cx)
+}
+
+/// `.relay-status-small` in a held route's tone.
+fn tag_pill(t: &crate::routes::Tag) -> AnyElement {
+    let (fg, bg, border) = crate::routes::tag_colors(t.cls);
+    div()
+        .id("relay-tag")
+        .flex_shrink_0()
+        .h(px(30.))
+        .px(px(8.))
+        .flex()
+        .items_center()
+        .rounded(px(20.))
+        .border_1()
+        .border_color(border)
+        .bg(bg)
+        .text_size(px(10.))
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(fg)
+        .tooltip(crate::kit::tooltip(t.title.clone()))
+        .child(crate::kit::spaced(t.text.to_uppercase(), 0.5))
+        .into_any_element()
 }

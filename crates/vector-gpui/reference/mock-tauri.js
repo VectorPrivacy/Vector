@@ -108,8 +108,8 @@
         tor_check_obfs4_proxy: () => ({ installed: false, path: null }),
         tor_get_circuits: () => (FIX.net_demo || {})[window.__NET__]?.circuits || { host: null, hops: [], circuits: 0, hosts: 0 },
         i2p_get_config: () => (FIX.net_demo || {})[window.__NET__]?.i2p || FIX.net_demo?.i2p_config,
-        transport_get_aliases: () => [],
-        transport_get_routes: (a) => (a?.urls || []).map((u) => ({ url: u, host: new URL(u).host, kind: (FIX.net_demo || {})[window.__NET__]?.view?.kind || 'clearnet', class: 'direct', text: '' })),
+        transport_get_aliases: () => (FIX.net_demo || {})[window.__NET__]?.aliases || [],
+        transport_get_routes: (a) => (a?.urls || []).map((u) => ((FIX.net_demo || {})[window.__NET__]?.routes || []).find((r) => r.url === u) || ({ url: u, host: new URL(u).hostname, kind: (FIX.net_demo || {})[window.__NET__]?.view?.kind || 'clearnet', class: 'direct', text: 'Direct' })),
         file_has_metadata: () => false,
         list_accounts_with_metadata: () => FIX.profiles.slice(0, 3).map((p, i) => ({
             npub: p.id, display_name: p.nickname || p.display_name || p.name || null,

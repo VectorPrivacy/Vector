@@ -4347,13 +4347,13 @@ impl Render for VectorApp {
         let net_dialog = self
             .settings
             .as_ref()
-            .and_then(|s| s.dialog.as_ref())
-            .map(|d| {
+            .and_then(|s| s.dialog.as_ref().map(|d| (d, &s.book)))
+            .map(|(d, book)| {
                 let app = cx.entity().downgrade();
                 let on: crate::netdialog::OnAct = std::rc::Rc::new(move |act, window, cx| {
                     app.update(cx, |app, cx| app.on_net(act, window, cx)).ok();
                 });
-                crate::netdialog::view(d, &on, window, cx)
+                crate::netdialog::view(d, book, &on, window, cx)
             });
         let popup = self.popup.as_ref().map(|(p, _)| {
             let app = cx.entity().downgrade();
@@ -12010,6 +12010,7 @@ impl VectorApp {
             seen: seen.into_iter().collect(),
             jumped: None,
             net: Default::default(),
+            book: Default::default(),
         });
         self.load_routing(window, cx);
         self.load_blocked(cx);
@@ -12234,6 +12235,7 @@ impl VectorApp {
                 }
             }
             (Act::ChartHover(i), NetDialog::Server { chart, .. }) => chart.hover = i,
+            (Act::Alias(a), _) => return self.alias_act(a, _window, cx),
             (Act::ServerAction, NetDialog::Server { info, .. }) => {
                 let url = info.url.clone();
                 if info.is_custom {
@@ -12353,6 +12355,8 @@ impl VectorApp {
                 let (relays, servers) = fixture_network();
                 s.relays = Some(relays);
                 s.servers = Some(servers);
+                self.routes_settle(cx);
+                let Some(s) = self.settings.as_mut() else { return };
                 s.clock = Some(vector_core::clock::Status {
                     decentralised: true,
                     measured_offset_ms: 0,
@@ -12386,8 +12390,10 @@ impl VectorApp {
                     s.relays = Some(relays);
                     s.servers = Some(servers);
                     s.clock = Some(clock);
+                    let network = s.cat == "network";
+                    this.routes_settle(cx);
                     cx.notify();
-                    s.cat == "network"
+                    network
                 })
                 .unwrap_or(false);
             if again {
@@ -13405,7 +13411,10 @@ impl VectorApp {
             }
             Act::OpenRelay(url) => {
                 let Some(row) = s.relays.iter().flatten().find(|r| r.url == url).cloned() else { return };
-                s.dialog = Some(crate::netdialog::NetDialog::Relay { row, metrics: Default::default(), logs: Vec::new(), mode_open: false, copied: false });
+                let alias = crate::routes::Alias::new(&s.book, &row.url, true, cx);
+                let url = row.url.clone();
+                s.dialog = Some(crate::netdialog::NetDialog::Relay { row, metrics: Default::default(), logs: Vec::new(), mode_open: false, copied: false, alias, circuit: None });
+                self.dialog_route(url, cx);
                 self.refresh_relay_dialog(cx);
             }
             Act::OpenServer(url) => {
@@ -13417,7 +13426,10 @@ impl VectorApp {
                     doc: crate::serverinfo::Load::Loading,
                     caps: crate::serverinfo::Load::Loading,
                     chart: Default::default(),
+                    alias: crate::routes::Alias::new(&s.book, &url, false, cx),
+                    circuit: None,
                 });
+                self.dialog_route(url.clone(), cx);
                 self.load_server_dialog(url, enabled, cx);
             }
             Act::DonutHover(at) => s.donut.hover = at,

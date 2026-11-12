@@ -760,6 +760,8 @@ pub struct Settings {
     /// The anchor a nav click scrolled to, until the reader scrolls.
     pub jumped: Option<&'static str>,
     pub net: crate::routing::Routing,
+    /// How each listed relay and server is reached on the network in use.
+    pub book: crate::routes::RouteBook,
 }
 
 /// The chart's pointer state: a slice previewed, one picked, a Delete running.
@@ -2447,11 +2449,15 @@ fn relays_block(s: &Settings, on: &OnAct) -> AnyElement {
                 on,
             )
             .child(content)
-            .child(
-                div()
-                    .ml(px(10.))
-                    .child(relay_status(r.status, said(r.status))),
-            ),
+            .child({
+                let right = div().ml(px(10.)).flex().items_center();
+                match s.book.tag(&r.url).filter(|_| r.enabled) {
+                    Some(t) => right.child(crate::routes::tag_status(&t)),
+                    None => right
+                        .children(s.book.badge(&r.url).filter(|_| r.enabled).map(|b| div().mr(px(8.)).child(crate::routes::badge(&b))))
+                        .child(relay_status(r.status, said(r.status))),
+                }
+            }),
         );
     }
     col.into_any_element()
@@ -2485,7 +2491,13 @@ fn servers_block(s: &Settings, on: &OnAct) -> AnyElement {
                     .child(host(&sv.url)),
             );
         let mut right = div().flex().items_center();
-        if let Some(ms) = sv.status.latency_ms.filter(|_| sv.enabled) {
+        let tag = s.book.tag(&sv.url).filter(|_| sv.enabled);
+        if let Some(t) = &tag {
+            right = right.child(crate::routes::tag_status(t));
+        } else if let Some(b) = s.book.badge(&sv.url).filter(|_| sv.enabled) {
+            right = right.child(crate::routes::badge(&b));
+        }
+        if let Some(ms) = sv.status.latency_ms.filter(|_| sv.enabled && tag.is_none()) {
             right = right.child(
                 div()
                     .mr(px(8.))
@@ -2496,7 +2508,9 @@ fn servers_block(s: &Settings, on: &OnAct) -> AnyElement {
                     .child(format!("{ms} ms")),
             );
         }
-        right = right.child(relay_status(sv.status.tone, sv.status.label));
+        if tag.is_none() {
+            right = right.child(relay_status(sv.status.tone, sv.status.label));
+        }
         col = col.child(
             net_row(
                 SharedString::from(format!("server-{}", sv.url)),
