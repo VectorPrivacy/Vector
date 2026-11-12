@@ -47,6 +47,10 @@ pub struct PickAccount(pub String);
 pub struct OpenTransfer;
 impl EventEmitter<OpenTransfer> for LoginView {}
 
+/// The ⓘ beside "Sign in with": what each way means.
+pub struct MethodInfo;
+impl EventEmitter<MethodInfo> for LoginView {}
+
 impl EventEmitter<PickAccount> for LoginView {}
 
 /// The pre-login account pill (`#login-account-picker`) and its list of the other accounts.
@@ -1019,10 +1023,16 @@ impl LoginView {
                     .line_height(px(19.))
                     .child("Sign in with")
                     .child(
-                        svg()
-                            .path("icons/info.svg")
-                            .size(px(18.))
-                            .text_color(c(0x333333)),
+                        div()
+                            .id("lg-method-info")
+                            .cursor_pointer()
+                            .on_click(cx.listener(|_, _, _, cx| cx.emit(MethodInfo)))
+                            .child(
+                                svg()
+                                    .path("icons/info.svg")
+                                    .size(px(18.))
+                                    .text_color(c(0x333333)),
+                            ),
                     ),
             )
             .child(kit::select(

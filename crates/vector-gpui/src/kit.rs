@@ -318,7 +318,7 @@ pub fn popup(
         .flex()
         .flex_col()
         .p(px(30.))
-        .mx(px(10.))
+        .max_w_full()
         .border_1()
         .border_color(c(PRIMARY))
         .rounded(px(8.))
@@ -342,6 +342,7 @@ pub fn popup(
             .flex()
             .items_center()
             .justify_center()
+            .px(px(10.))
             .bg(ca(0, 0, 0, 0.85))
             .occlude()
             .child(card),

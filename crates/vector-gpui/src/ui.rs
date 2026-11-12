@@ -2489,6 +2489,19 @@ impl VectorApp {
             |this, _, e: &crate::login::AddProfile, window, cx| this.on_add_profile(e, window, cx),
         )
         .detach();
+        cx.subscribe(&view, |this, _, _: &crate::login::MethodInfo, cx| {
+            let mut p = kit::Popup::notice("Ways to Sign In");
+            p.icon = None;
+            p.text = Some(
+                "<b>QR Code</b><br>Use a device you're already signed in on. There, open Settings and choose Sign in on Another Device, then scan the code this device shows or type it in. Both devices confirm a number, so your keys pass between them without anyone else being able to read them.\
+                 <br><br><b>Private Key</b><br>Paste your nsec or type your seed phrase. Good when you have your key backed up and no other device to hand.\
+                 <br><br><b>Remote Signer</b><br>Keep your key in a signer app such as Amber or nsec.app, which approves what Vector signs. Paste its bunker:// link, or pair it by scanning the code Vector shows."
+                    .into(),
+            );
+            this.popup = Some((p, PopupAct::Notice));
+            cx.notify();
+        })
+        .detach();
         cx.subscribe(&view, |this, _, _: &crate::login::OpenTransfer, cx| {
             this.security.update(cx, |f, cx| f.open_transfer(false, cx))
         })
@@ -5030,7 +5043,14 @@ impl Render for VectorApp {
                             .right_0()
                             .child(chrome(window, true, false)),
                     )
-                    .child(self.security.clone());
+                    .child(self.security.clone())
+                    .children(self.popup.as_ref().map(|(p, _)| {
+                        let app = cx.entity().downgrade();
+                        gpui::deferred(kit::popup(p, move |yes, window, cx| {
+                            app.update(cx, |app, cx| app.answer_popup(yes, window, cx)).ok();
+                        }))
+                        .with_priority(15)
+                    }));
             }
             Screen::Main => {}
         }
