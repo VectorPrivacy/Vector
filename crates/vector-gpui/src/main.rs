@@ -16,6 +16,7 @@ mod createcommunity;
 mod crop;
 mod cropper;
 mod data;
+mod decorate;
 mod deeplink;
 mod embeds;
 mod emoji;

@@ -73,6 +73,10 @@ pub struct TextInput {
     /// An autocomplete is open: its keys go to it as `Nav`.
     nav: bool,
     chip: bool,
+    /// Markdown and tags styled in place, with the names a tag may carry.
+    decorated: Option<Vec<String>>,
+    /// The decorated spans drawn on a chip, in display offsets: (range, fill, radius, side pad).
+    chips: std::cell::RefCell<Vec<(Range<usize>, Hsla, f32, f32)>>,
 }
 
 /// A key an open autocomplete takes from the field.
@@ -763,7 +767,84 @@ impl TextInput {
             .collect(),
             None => vec![run],
         };
+        self.chips.borrow_mut().clear();
+        let runs = match self.decorated.as_ref().filter(|_| !self.content.is_empty() && !self.look.masked) {
+            Some(names) => self.decorate(runs, names),
+            None => runs,
+        };
         (text, runs, style.font_size.to_pixels(window.rem_size()))
+    }
+
+    /// Splits `runs` at each decorated span and styles what falls inside.
+    fn decorate(&self, runs: Vec<TextRun>, names: &[String]) -> Vec<TextRun> {
+        use crate::decorate::Deco;
+        let spans = crate::decorate::tokenize(&self.content, names);
+        if spans.is_empty() {
+            return runs;
+        }
+        let spans: Vec<(std::ops::Range<usize>, Deco)> = spans
+            .into_iter()
+            .map(|(r, d)| (self.to_display(r.start)..self.to_display(r.end), d))
+            .collect();
+        *self.chips.borrow_mut() = spans
+            .iter()
+            .filter_map(|(r, d)| match d {
+                Deco::Mention => Some((r.clone(), Hsla::from(gpui::Rgba { r: 89. / 255., g: 252. / 255., b: 179. / 255., a: 0.13 }), 4., 2.)),
+                Deco::Code => Some((r.clone(), gpui::hsla(0., 0., 1., 0.08), 3., 2.)),
+                Deco::Spoiler => Some((r.clone(), gpui::hsla(0., 0., 1., 0.16), 3., 0.)),
+                _ => None,
+            })
+            .collect();
+        let mut out = Vec::with_capacity(runs.len() + spans.len() * 2);
+        let mut at = 0;
+        for run in runs {
+            let end = at + run.len;
+            let mut from = at;
+            for (r, d) in spans.iter().filter(|(r, _)| r.start < end && r.end > at) {
+                let (s, e) = (r.start.max(at), r.end.min(end));
+                if s > from {
+                    out.push(TextRun { len: s - from, ..run.clone() });
+                }
+                let mut styled = TextRun { len: e - s, ..run.clone() };
+                let base = run.color;
+                match d {
+                    Deco::Mark => styled.color = base.opacity(0.4),
+                    Deco::CodeMark => {
+                        styled.color = base.opacity(0.4);
+                        styled.font.family = crate::markdown::MONO.into();
+                    }
+                    Deco::Bold | Deco::Header => styled.font.weight = gpui::FontWeight::BOLD,
+                    Deco::Italic => {
+                        styled.font.style = gpui::FontStyle::Italic;
+                        styled.color = base.opacity(0.7);
+                    }
+                    Deco::BoldItalic => {
+                        styled.font.weight = gpui::FontWeight::BOLD;
+                        styled.font.style = gpui::FontStyle::Italic;
+                    }
+                    Deco::Strike => {
+                        styled.strikethrough = Some(gpui::StrikethroughStyle {
+                            thickness: px(1.),
+                            color: Some(base),
+                        })
+                    }
+                    Deco::Spoiler => {}
+                    Deco::Code => styled.font.family = crate::markdown::MONO.into(),
+                    Deco::Mention => {
+                        styled.color = gpui::rgb(0x59fcb3).into();
+                        styled.font.weight = gpui::FontWeight::MEDIUM;
+                    }
+                    Deco::Subtext => styled.color = base.opacity(0.75),
+                }
+                out.push(styled);
+                from = e;
+            }
+            if end > from {
+                out.push(TextRun { len: end - from, ..run });
+            }
+            at = end;
+        }
+        out
     }
 }
 
@@ -916,6 +997,23 @@ impl Element for TextElement {
             window.paint_quad(quad);
         }
         let layout = prepaint.layout.take().unwrap();
+        // A chip spans the text's 18px content box, not the 21px line.
+        let inset = ((layout.line_height - px(18.)) / 2.).max(px(0.));
+        for (range, fill, radius, pad) in self.input.read(cx).chips.borrow().iter() {
+            let (a, b) = (layout.position(range.start), layout.position(range.end));
+            let rows = if a.y == b.y {
+                vec![(a.x, b.x, a.y)]
+            } else {
+                vec![(a.x, bounds.size.width, a.y), (px(0.), b.x, b.y)]
+            };
+            for (x0, x1, y) in rows {
+                let quad = Bounds::new(
+                    bounds.origin + point(x0 - px(*pad), y + inset),
+                    gpui::size(x1 - x0 + px(2. * pad), layout.line_height - inset * 2.),
+                );
+                window.paint_quad(gpui::fill(quad, *fill).corner_radii(gpui::Corners::all(px(*radius))));
+            }
+        }
         for (_, y, line) in &layout.lines {
             let align = if layout.align.is_some() {
                 gpui::TextAlign::Center
@@ -1075,6 +1173,22 @@ impl TextInput {
             subs: Default::default(),
             nav: false,
             chip: false,
+            decorated: None,
+            chips: Default::default(),
+        }
+    }
+
+    /// Styles markdown, headers and tags in place, as the rich composer does.
+    pub fn decorated(mut self) -> Self {
+        self.decorated = Some(Vec::new());
+        self
+    }
+
+    /// The names a picked tag shows as, so `@Name` pills.
+    pub fn set_mentions(&mut self, names: Vec<String>, cx: &mut Context<Self>) {
+        if self.decorated.as_ref() != Some(&names) {
+            self.decorated = Some(names);
+            cx.notify();
         }
     }
 

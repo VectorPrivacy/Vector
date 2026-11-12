@@ -356,6 +356,7 @@ impl VectorApp {
             TextInput::new("Enter message...", cx)
                 .multiline(px(126.))
                 .twemoji()
+                .decorated()
         });
         cx.subscribe(&input, |app, _, SendText(text), cx| {
             app.send(text.clone(), cx)
@@ -2264,6 +2265,7 @@ impl VectorApp {
         self.jumped = None;
         self.opening = self.live.then_some(None);
         self.tracked.clear();
+        self.sync_mentions(cx);
         self.chip_passed.clear();
         self.close_popups(cx);
         window.focus(&self.input.read(cx).focus_handle(cx), cx);
@@ -3315,6 +3317,7 @@ impl VectorApp {
     fn send(&mut self, text: String, cx: &mut Context<Self>) {
         let Some(id) = self.open.clone() else { return };
         let text = crate::mentions::resolve(&text, &std::mem::take(&mut self.tracked));
+        self.sync_mentions(cx);
         let mode = std::mem::replace(&mut self.mode, Mode::Normal);
         if let Mode::Edit { id: msg_id } = &mode {
             if self.live {
@@ -8898,9 +8901,15 @@ impl VectorApp {
                 .any(|(n, k)| *n == item.name && *k == item.npub)
         {
             self.tracked.push((item.name, item.npub));
+            self.sync_mentions(cx);
         }
         self.mention = None;
         cx.notify();
+    }
+
+    fn sync_mentions(&mut self, cx: &mut Context<Self>) {
+        let names = self.tracked.iter().map(|(n, _)| n.clone()).collect();
+        self.input.update(cx, |i, cx| i.set_mentions(names, cx));
     }
 
     fn set_shortcode(&mut self, popup: Option<crate::shortcodes::Popup>, cx: &mut Context<Self>) {
