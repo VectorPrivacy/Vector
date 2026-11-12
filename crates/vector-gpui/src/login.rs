@@ -300,7 +300,8 @@ impl LoginView {
     }
 
     /// `.login-account-list`: the other accounts, below the pill over a dimmed screen.
-    fn account_list(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+    /// `top`: just under the account pill, which follows the lockup's height.
+    fn account_list(&self, top: f32, cx: &mut Context<Self>) -> Option<AnyElement> {
         let p = self.picker.as_ref().filter(|p| p.open)?;
         let rows = p
             .rows
@@ -388,16 +389,18 @@ impl LoginView {
                 .child(
                     div()
                         .absolute()
-                        .top(px(170.))
+                        .top(px(top))
                         .left_0()
                         .right_0()
+                        .px(px(24.))
                         .flex()
                         .justify_center()
                         .child(
                             div()
                                 .id("login-account-list")
                                 .occlude()
-                                .w(px(420.))
+                                .w_full()
+                                .max_w(px(420.))
                                 .flex()
                                 .flex_col()
                                 .overflow_hidden()
@@ -1307,7 +1310,7 @@ impl Render for LoginView {
         let toggle_row = if stacked { 34. } else { 0. };
         let aggro = self.wrong.is_some();
         let stage = self.stage(window, cx);
-        let account_list = self.account_list(cx);
+        let account_list = self.account_list(51. + lock_h + 23. + 52., cx);
         let link = |id: &'static str, label: &'static str, url: &'static str| {
             div()
                 .id(id)
