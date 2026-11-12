@@ -1212,6 +1212,14 @@ impl EmojiPicker {
         let icon_btn = |id: &'static str, icon: &'static str, size: f32, color: gpui::Hsla| {
             div()
                 .id(id)
+                .when_some(
+                    match id {
+                        "creator-done" => Some("Save Pack"),
+                        "creator-delete" => Some("Remove Pack"),
+                        _ => None,
+                    },
+                    |d, t| d.tooltip(crate::kit::tooltip(t)),
+                )
                 .size(px(28.))
                 .flex_shrink_0()
                 .rounded(px(6.))

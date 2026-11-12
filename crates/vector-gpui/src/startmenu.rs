@@ -589,6 +589,7 @@ fn results(sm: &StartMenu, store: &Store, query: &str, on: &OnAct) -> AnyElement
             row = row.child(
                 div()
                     .id(SharedString::from(format!("stm-msg-{ix}")))
+                    .tooltip(crate::kit::tooltip("Message"))
                     .p(px(6.))
                     .rounded(px(8.))
                     .opacity(if selected { 1. } else { 0.35 })
@@ -607,6 +608,7 @@ fn results(sm: &StartMenu, store: &Store, query: &str, on: &OnAct) -> AnyElement
             row = row.child(
                 div()
                     .id(SharedString::from(format!("stm-pin-{ix}")))
+                    .tooltip(crate::kit::tooltip(if pinned { "Unpin" } else { "Pin to Main Menu" }))
                     .p(px(6.))
                     .rounded(px(8.))
                     .opacity(if selected || pinned { 1. } else { 0.35 })
@@ -841,6 +843,12 @@ fn audio(
         .child(
             div()
                 .id(id)
+                .tooltip(crate::kit::tooltip(match (kind, off) {
+                    ("output", true) => "Undeafen",
+                    ("output", false) => "Deafen",
+                    (_, true) => "Unmute",
+                    (_, false) => "Mute",
+                }))
                 .p(px(7.))
                 .rounded(px(10.))
                 .cursor_pointer()
@@ -859,6 +867,7 @@ fn audio(
         .child(
             div()
                 .id(SharedString::from(format!("{id}-more")))
+                .tooltip(crate::kit::tooltip(if kind == "output" { "Output device" } else { "Input device" }))
                 .px(px(4.))
                 .py(px(7.))
                 .rounded(px(10.))
@@ -1037,6 +1046,7 @@ pub fn render(sm: &StartMenu, store: &Store, window: &Window, on: &OnAct, cx: &A
     let view_btn = |id: &'static str, icon: &'static str, on_: bool, want: bool| {
         div()
             .id(id)
+            .tooltip(crate::kit::tooltip(if want { "List" } else { "Grid" }))
             .p(px(4.))
             .cursor_pointer()
             .on_click(click(on, move || Act::View(want)))
@@ -1352,6 +1362,7 @@ pub fn render(sm: &StartMenu, store: &Store, window: &Window, on: &OnAct, cx: &A
         .child(
             div()
                 .id("stm-me")
+                .tooltip(crate::kit::tooltip("Close"))
                 .flex()
                 .items_center()
                 .gap(px(14.))
