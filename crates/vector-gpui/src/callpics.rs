@@ -8,7 +8,7 @@ use gpui::{
     Styled, StyledImage, div, img, prelude::FluentBuilder, px, svg,
 };
 
-use crate::call::{Act, Call, OnAct, Quality, Seen, call_btn, dot, label};
+use crate::call::{Act, Call, OnAct, Quality, Seen, call_btn, dot, label, toggle};
 use crate::data::Store;
 use crate::theme::{ACCENT, c, ca, white_a};
 
@@ -406,7 +406,63 @@ pub fn panel_blocks(call: &Call, on: &OnAct) -> Vec<AnyElement> {
                         .flex_col()
                         .gap(px(6.))
                         .child(row("Quality", compact_select(("call-q", k), q_label, call.pref_open == Some((k, false)), q, (k, false), on)))
-                        .child(row("Frame rate", compact_select(("call-f", k), f_label, call.pref_open == Some((k, true)), f, (k, true), on))),
+                        .child(row("Frame rate", compact_select(("call-f", k), f_label, call.pref_open == Some((k, true)), f, (k, true), on)))
+                        .when(k == 1, |d| {
+                            let change = on.clone();
+                            d.child(row(
+                                "Window",
+                                div()
+                                    .id("call-change-screen")
+                                    .px(px(10.))
+                                    .py(px(3.))
+                                    .rounded(px(6.))
+                                    .border_1()
+                                    .border_color(c(0x333333))
+                                    .bg(c(0x262626))
+                                    .hover(|d| d.bg(c(0x333333)))
+                                    .text_size(px(12.))
+                                    .text_color(c(0xffffff))
+                                    .cursor_pointer()
+                                    .on_click(move |_, w, cx| change(Act::ChangeScreen, w, cx))
+                                    .child("Change…")
+                                    .into_any_element(),
+                            ))
+                            .child(row(
+                                "Sound",
+                                if call.share_audio_native {
+                                    div()
+                                        .flex()
+                                        .flex_1()
+                                        .items_center()
+                                        .justify_between()
+                                        .gap(px(8.))
+                                        .text_size(px(12.5))
+                                        .text_color(c(0xf6f6f6))
+                                        .child(div().flex().items_center().gap(px(8.)).child(if call.share_audio_mine { "Sharing" } else { "Not shared" }).when(
+                                            call.share_audio_denied && !call.share_audio_mine,
+                                            |d| {
+                                                d.child(
+                                                    div()
+                                                        .px(px(7.))
+                                                        .py(px(1.))
+                                                        .rounded_full()
+                                                        .border_1()
+                                                        .border_color(ca(255, 196, 0, 0.45))
+                                                        .bg(ca(255, 196, 0, 0.12))
+                                                        .text_color(c(0xffc400))
+                                                        .text_size(px(10.5))
+                                                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                                                        .child("System permission required"),
+                                                )
+                                            },
+                                        ))
+                                        .child(toggle("call-share-audio", call.share_audio_mine, Act::ShareAudio(!call.share_audio_mine), on))
+                                        .into_any_element()
+                                } else {
+                                    div().truncate().text_size(px(12.)).text_color(c(0xb2b2b2)).child("Not offered by this window").into_any_element()
+                                },
+                            ))
+                        }),
                 )
                 .into_any_element()
         })

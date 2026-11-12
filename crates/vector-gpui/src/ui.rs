@@ -232,6 +232,7 @@ pub struct VectorApp {
     audio_save_pending: bool,
     call: crate::call::Call,
     video: crate::callvideo::Video,
+    screen_pick: Option<crate::screenpick::Picker>,
     /// The processing switches the call panel shows, read when a call first appears.
     call_audio: Option<vector_core::calls::settings::AudioSettings>,
     call_ticking: bool,
@@ -883,6 +884,7 @@ impl VectorApp {
             audio_save_pending: false,
             call: crate::call::Call::at(Self::saved_pill_pos()),
             video: Default::default(),
+            screen_pick: None,
             call_audio: None,
             call_ticking: false,
             community: None,
@@ -4786,6 +4788,13 @@ impl Render for VectorApp {
                 let seen = self.call_video(window, cx);
                 crate::call::render(&self.call, &self.store.borrow(), &proc_, &seen, window.viewport_size(), CHROME_H, &on)
             })
+            .children(self.screen_pick.as_ref().map(|p| {
+                let app = cx.entity().downgrade();
+                let on: crate::screenpick::OnAct = Rc::new(move |act, _, cx| {
+                    app.update(cx, |app, cx| app.on_screen_pick(act, cx)).ok();
+                });
+                crate::screenpick::render(p, window.viewport_size(), &on)
+            }))
             .children(self.edit_history.as_ref().map(|h| {
                 let app = cx.entity().downgrade();
                 let close: crate::edithistory::OnClose = Rc::new(move |_, cx| {
@@ -11306,6 +11315,10 @@ impl VectorApp {
         if self.viewer.is_some() || self.model_viewer.is_some() {
             return false;
         }
+        if self.screen_pick.is_some() {
+            self.close_screen_pick();
+            return true;
+        }
         if self.call.maximized.take().is_some() || self.call.pref_open.take().is_some() {
             return true;
         }
@@ -12883,6 +12896,15 @@ impl VectorApp {
                 }
             }
             Act::PrefOpen(o) => self.call.pref_open = o,
+            Act::ChangeScreen => {
+                if self.video.capturing(crate::callvideo::VideoKind::Screen) {
+                    self.open_screen_pick(true, cx);
+                }
+            }
+            Act::ShareAudio(on) => {
+                self.call.share_audio_mine = on;
+                self.call_cmd(backend::calls::set_share_audio(on), cx);
+            }
             Act::Pref(k, fps, v) => {
                 self.call.pref_open = None;
                 let p = &mut self.call.prefs[k];
@@ -12917,7 +12939,7 @@ impl VectorApp {
             return;
         }
         if kind == VideoKind::Screen {
-            self.show_toast("Screen sharing is not available on this system", cx);
+            self.open_screen_pick(false, cx);
             return;
         }
         let Some(open) = self.video.camera_opener(kind) else {
@@ -12948,6 +12970,79 @@ impl VectorApp {
             .ok();
         })
         .detach();
+    }
+
+    /// The screen picker; its sources are found off the UI thread, a grab apiece.
+    fn open_screen_pick(&mut self, change: bool, cx: &mut Context<Self>) {
+        if self.screen_pick.is_some() {
+            return;
+        }
+        self.screen_pick = Some(crate::screenpick::Picker::new(change));
+        cx.spawn(async move |this, cx| {
+            let found = cx.background_executor().spawn(async { crate::callvideo::screen::sources() }).await;
+            this.update(cx, |this, cx| {
+                if let Some(p) = this.screen_pick.as_mut() {
+                    p.fill(found);
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn close_screen_pick(&mut self) {
+        if let Some(p) = self.screen_pick.take() {
+            self.video.pics().retired.extend(p.images());
+        }
+    }
+
+    fn on_screen_pick(&mut self, act: crate::screenpick::Act, cx: &mut Context<Self>) {
+        use crate::callvideo::VideoKind;
+        use crate::screenpick::Act;
+        let Some(p) = self.screen_pick.as_mut() else { return };
+        match act {
+            Act::Select(i) => p.selected = Some(i),
+            Act::Cancel => self.close_screen_pick(),
+            Act::Share => {
+                let Some(target) = p.chosen() else { return };
+                let change = p.change;
+                self.close_screen_pick();
+                let Some(open) = self.video.screen_opener(target) else {
+                    self.show_toast("Could not share the screen", cx);
+                    return;
+                };
+                if !change {
+                    self.video.starting[1] = true;
+                }
+                let live = self.live;
+                cx.spawn(async move |this, cx| {
+                    let cap = cx.background_executor().spawn(async move { open() }).await;
+                    let told = match &cap {
+                        Ok(_) if live && !change => backend::run(backend::calls::set_video(VideoKind::Screen, true))
+                            .await
+                            .unwrap_or_else(|_| Err("Not in a call".into())),
+                        _ => Ok(()),
+                    };
+                    this.update(cx, |this, cx| {
+                        this.video.starting[1] = false;
+                        match (cap, told) {
+                            (Ok(cap), Ok(())) if change => this.video.replace(VideoKind::Screen, cap),
+                            (Ok(cap), Ok(())) => {
+                                this.video.attach(VideoKind::Screen, cap);
+                                this.call.video_mine[1] = true;
+                            }
+                            (Err(e), _) | (_, Err(e)) => this.show_toast(&e, cx),
+                        }
+                        cx.notify();
+                    })
+                    .ok();
+                })
+                .detach();
+            }
+        }
+        cx.notify();
     }
 
     fn call_cmd(

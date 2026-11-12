@@ -83,6 +83,10 @@ openh264 = "0.9"
 bytes = "1"
 nokhwa = { version = "0.10", features = ["input-native"] }
 
+# Screen sharing: X11 read directly; macOS and Windows through xcap.
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+xcap = "0.9"
+
 # The same wgpu GPUI draws with on Linux; elsewhere its default backends (Metal, DX12).
 [target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies.wgpu]
 git = "https://github.com/gfx-rs/wgpu"
@@ -99,6 +103,7 @@ rev = "cddb2f5d80dc0009b2ef6767635140cacf90a007"
 wry = { version = "=0.57.0", default-features = false, features = ["os-webview", "linux-body"] }
 gtk = "0.18"
 webkit2gtk = { version = "2.0", features = ["v2_40"] }
+x11rb = { version = "0.13", features = ["randr"] }
 
 # Its own workspace: GPUI pins dependency versions the main client must not inherit.
 [workspace]

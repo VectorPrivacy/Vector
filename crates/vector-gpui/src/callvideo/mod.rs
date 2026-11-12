@@ -3,6 +3,7 @@
 //! the newest picture of each track, already BGRA.
 
 mod camera;
+pub mod screen;
 mod worker;
 pub mod yuv;
 
@@ -200,6 +201,16 @@ impl Video {
     pub fn camera_opener(&self, kind: VideoKind) -> Option<impl FnOnce() -> Result<Capture, String> + Send + 'static> {
         let tx = self.tx.clone()?;
         Some(move || camera::open(kind, tx))
+    }
+
+    pub fn screen_opener(&self, target: screen::Target) -> Option<impl FnOnce() -> Result<Capture, String> + Send + 'static> {
+        let tx = self.tx.clone()?;
+        Some(move || screen::open(target, tx))
+    }
+
+    /// Another window or screen for a share already running; the send never stops.
+    pub fn replace(&mut self, kind: VideoKind, cap: Capture) {
+        self.captures[kind.index()] = Some(cap);
     }
 
     pub fn attach(&mut self, kind: VideoKind, cap: Capture) {

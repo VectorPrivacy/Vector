@@ -72,3 +72,8 @@ pub async fn set_video(kind: vector_core::calls::wire::VideoKind, on: bool) -> R
 pub fn set_video_prefs(kind: vector_core::calls::wire::VideoKind, rung: Option<u32>, fps: Option<u32>) -> Result<(), String> {
     session::set_video_prefs(kind, rung.map(|r| r as usize), fps)
 }
+
+/// The shared screen's sound, captured by this platform itself.
+pub async fn set_share_audio(on: bool) -> Result<(), String> {
+    vector_core::db::scoped(session::set_share_audio(on, true)).await
+}

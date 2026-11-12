@@ -14,7 +14,7 @@ use super::yuv::I420;
 use super::{In, clock_us};
 
 pub struct Capture {
-    stop: Arc<AtomicBool>,
+    pub(super) stop: Arc<AtomicBool>,
 }
 
 impl Drop for Capture {

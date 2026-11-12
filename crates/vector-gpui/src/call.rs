@@ -142,6 +142,10 @@ pub struct Call {
     pub prefs: [(Option<u32>, Option<u32>); 2],
     /// The panel's open dropdown: the picture, and whether it is the frame rate.
     pub pref_open: Option<(usize, bool)>,
+    pub share_audio_mine: bool,
+    /// This platform captures a screen's sound itself.
+    pub share_audio_native: bool,
+    pub share_audio_denied: bool,
 }
 
 impl Default for Call {
@@ -183,6 +187,9 @@ impl Default for Call {
             max_controls: None,
             prefs: [(None, None); 2],
             pref_open: None,
+            share_audio_mine: false,
+            share_audio_native: false,
+            share_audio_denied: false,
         }
     }
 }
@@ -245,6 +252,9 @@ impl Call {
         self.video_peer = tracks("video_peer");
         self.peer_decodes = s.get("peer_decodes").and_then(Value::as_array).is_some_and(|a| !a.is_empty());
         self.paused_by_peer = bool_of("paused_by_peer");
+        self.share_audio_mine = bool_of("share_audio_mine");
+        self.share_audio_native = bool_of("share_audio_native");
+        self.share_audio_denied = bool_of("share_audio_denied");
         if self.maximized.is_some_and(|k| !self.video_peer[k]) {
             self.maximized = None;
         }
@@ -439,6 +449,8 @@ pub enum Act {
     /// A picture's quality (false) or frame rate (true), None for adaptive.
     Pref(usize, bool, Option<u32>),
     PrefOpen(Option<(usize, bool)>),
+    ChangeScreen,
+    ShareAudio(bool),
 }
 
 /// The pictures this frame shows, from the video worker.
@@ -684,7 +696,6 @@ fn switch(
     which: Switch,
     on: &OnAct,
 ) -> impl IntoElement {
-    let o = on.clone();
     div()
         .flex()
         .items_center()
@@ -693,33 +704,38 @@ fn switch(
         .text_size(px(12.5))
         .text_color(c(0xf6f6f6))
         .child(label_text)
+        .child(toggle(id, on_state, Act::Audio(which, !on_state), on))
+}
+
+/// The neon toggle itself; a tap sends `act`.
+pub(crate) fn toggle(id: &'static str, on_state: bool, act: Act, on: &OnAct) -> impl IntoElement {
+    let o = on.clone();
+    div()
+        .id(id)
+        .relative()
+        .flex_shrink_0()
+        .w(px(40.))
+        .h(px(19.2))
+        .rounded(px(9.6))
+        .cursor_pointer()
+        .bg(if on_state {
+            gpui::linear_gradient(
+                90.,
+                gpui::linear_color_stop(c(0x33db98), 0.),
+                gpui::linear_color_stop(c(0x00ff9d), 1.),
+            )
+        } else {
+            c(0x1a1a1a).into()
+        })
+        .on_click(move |_, w, cx| o(act.clone(), w, cx))
         .child(
             div()
-                .id(id)
-                .relative()
-                .w(px(40.))
-                .h(px(19.2))
-                .rounded(px(9.6))
-                .cursor_pointer()
-                .bg(if on_state {
-                    gpui::linear_gradient(
-                        90.,
-                        gpui::linear_color_stop(c(0x33db98), 0.),
-                        gpui::linear_color_stop(c(0x00ff9d), 1.),
-                    )
-                } else {
-                    c(0x1a1a1a).into()
-                })
-                .on_click(move |_, w, cx| o(Act::Audio(which, !on_state), w, cx))
-                .child(
-                    div()
-                        .absolute()
-                        .top(px(1.6))
-                        .left(px(if on_state { 22.4 } else { 1.6 }))
-                        .size(px(16.))
-                        .rounded_full()
-                        .bg(if on_state { c(0xffffff) } else { c(0x333333) }),
-                ),
+                .absolute()
+                .top(px(1.6))
+                .left(px(if on_state { 22.4 } else { 1.6 }))
+                .size(px(16.))
+                .rounded_full()
+                .bg(if on_state { c(0xffffff) } else { c(0x333333) }),
         )
 }
 

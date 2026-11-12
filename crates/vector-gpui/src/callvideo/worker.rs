@@ -256,6 +256,7 @@ impl Worker {
         spec.fps = r.fps;
         if kind == VideoKind::Screen {
             spec.max_h = r.height;
+            super::screen::FPS.store(r.fps, std::sync::atomic::Ordering::Relaxed);
         } else {
             spec.target = (r.width, r.height);
         }
