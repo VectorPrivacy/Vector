@@ -146,6 +146,7 @@ pub struct VectorApp {
     chat_menu_btn: Rc<std::cell::Cell<Option<gpui::Bounds<gpui::Pixels>>>>,
     new_btn: Rc<std::cell::Cell<Option<gpui::Bounds<gpui::Pixels>>>>,
     signer_offline_told: bool,
+    call_mic_told: Option<String>,
     send_btn: Rc<std::cell::Cell<Option<gpui::Bounds<gpui::Pixels>>>>,
     /// A press on Send, by number, while it is held; a long one opened the timer instead.
     send_held: Option<u64>,
@@ -842,6 +843,7 @@ impl VectorApp {
             chat_menu_btn: Rc::default(),
             new_btn: Rc::default(),
             signer_offline_told: false,
+            call_mic_told: None,
             send_btn: Rc::default(),
             send_held: None,
             send_long: false,
@@ -2844,6 +2846,15 @@ impl VectorApp {
                 self.call.apply_state(&payload);
                 self.call_started(cx);
                 self.sync_call_meter();
+                // Once per call: it went ahead without a microphone, so say why it is muted.
+                if self.call.mic_off
+                    && self.call.phase == Some(crate::call::Phase::Active)
+                    && self.call.id.is_some()
+                    && self.call_mic_told != self.call.id
+                {
+                    self.call_mic_told = self.call.id.clone();
+                    self.show_toast("You're muted: Vector doesn't have access to your microphone.", cx);
+                }
             }
             "call_level" => {
                 self.call.apply_level(&payload);
