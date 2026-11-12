@@ -1818,6 +1818,13 @@ impl VectorApp {
                     }
                     ["nexus"] => self.show_nexus(None, window, cx),
                     ["app", id] => self.open_app_pin(id.to_string(), window, cx),
+                    ["c", id, rest @ ..] if self.store.borrow().community(id).is_some() => {
+                        self.open_community(id.to_string(), window, cx);
+                        if let Some(ch) = rest.first() {
+                            self.open_channel(ch.to_string(), window, cx);
+                        }
+                    }
+                    ["c", ..] => self.show_toast("You're not in this community", cx),
                     _ => self.show_toast("This pin opens something not in this build yet", cx),
                 }
             }
@@ -4941,7 +4948,7 @@ fn chat_list(
                 .flex_1()
                 .min_h_0()
                 .pt(px(6.))
-                .on_scroll_wheel(cx.listener(move |app, e: &gpui::ScrollWheelEvent, _, cx| {
+                .on_scroll(cx.listener(move |app, e: &gpui::ScrollEvent, _, cx| {
                     app.archive_wheel(e, forced, has_archive, cx);
                     app.archive_scrolled(forced);
                 }))
@@ -7240,10 +7247,17 @@ impl VectorApp {
             }
             rows.push((item, MenuAct::Moderation(id.clone())));
         }
+        rows.extend(self.start_pin_row(format!("c/{id}")));
         rows.push((
             kit::MenuItem::new("Copy Link", "share"),
             MenuAct::Copy(format!("https://vectorapp.io/c/{id}")),
         ));
+        if self.advanced() && !self.store.borrow().stream_hidden(&id) {
+            rows.push((
+                kit::MenuItem::new("Copy Community ID", "channel-hash"),
+                MenuAct::CopyId(id.clone(), "Community"),
+            ));
+        }
         rows.push((kit::MenuItem::divider(), MenuAct::Nothing));
         rows.push((
             kit::MenuItem::new(
@@ -7295,6 +7309,7 @@ impl VectorApp {
                 },
             ));
         }
+        rows.extend(self.start_pin_row(format!("c/{community}/{channel}")));
         rows.push((
             kit::MenuItem::new("Copy Link", "share"),
             MenuAct::Copy(format!("https://vectorapp.io/c/{community}/{channel}")),

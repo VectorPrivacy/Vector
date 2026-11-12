@@ -275,7 +275,7 @@ pub fn view(id: &str, l: &Lyrics, sheet: &Sheet, pos: u64, playing: bool, on: On
                     .when(!l.synced, |d| d.py(px(4.)))
                     .overflow_y_scroll()
                     .track_scroll(scroll)
-                    .on_scroll_wheel(move |_, w, cx| hold(None, w, cx))
+                    .on_scroll(move |_, w, cx| hold(None, w, cx))
                     .children(lines),
             )
             .into_any_element(),

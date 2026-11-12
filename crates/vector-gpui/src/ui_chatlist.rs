@@ -81,7 +81,7 @@ impl VectorApp {
     }
 
     /// A pull past the top draws the archive down; a scroll back tucks it away.
-    pub(super) fn archive_wheel(&mut self, e: &gpui::ScrollWheelEvent, forced: bool, has: bool, cx: &mut Context<Self>) {
+    pub(super) fn archive_wheel(&mut self, e: &gpui::ScrollEvent, forced: bool, has: bool, cx: &mut Context<Self>) {
         if !has {
             return;
         }
@@ -319,6 +319,18 @@ impl VectorApp {
         backend::device::get("ws_nav").as_deref() != Some("navbar")
     }
 
+    /// `startPinItems`: the Main Menu toggle for a pinnable place, while the Main Menu is in use.
+    pub(super) fn start_pin_row(&self, key: String) -> Option<(kit::MenuItem, MenuAct)> {
+        self.start_menu_on().then(|| {
+            let item = if self.start_pinned(&key) {
+                kit::MenuItem::new("Unpin", "pin").danger()
+            } else {
+                kit::MenuItem::new("Pin to Main Menu", "pin")
+            };
+            (item, MenuAct::StartTogglePin(key))
+        })
+    }
+
     /// `_showChatRowContextMenu` for a DM row.
     pub(super) fn chat_row_menu(&mut self, id: String, at: Point<Pixels>, cx: &mut Context<Self>) {
         let (unread, muted, can_unread, pinned, archived, me) = {
@@ -346,19 +358,11 @@ impl VectorApp {
             kit::MenuItem::new(if archived { "Unarchive" } else { "Archive" }, "archive"),
             MenuAct::ChatArchive(id.clone(), !archived),
         ));
-        if !me && self.start_menu_on() {
-            let key = format!("dm/{id}");
-            rows.push((
-                if self.start_pinned(&key) {
-                    kit::MenuItem::new("Unpin", "pin").danger()
-                } else {
-                    kit::MenuItem::new("Pin to Main Menu", "pin")
-                },
-                MenuAct::StartTogglePin(key),
-            ));
+        if !me {
+            rows.extend(self.start_pin_row(format!("dm/{id}")));
         }
         if self.advanced() && !self.store.borrow().stream_hidden(&id) {
-            rows.push((kit::MenuItem::new("Copy User ID", "copy"), MenuAct::CopyId(id.clone(), "User")));
+            rows.push((kit::MenuItem::new("Copy User ID", "channel-hash"), MenuAct::CopyId(id.clone(), "User")));
         }
         rows.push((kit::MenuItem::divider(), MenuAct::Nothing));
         rows.push((kit::MenuItem::new("Block", "x-user").danger(), MenuAct::ChatBlock(id)));

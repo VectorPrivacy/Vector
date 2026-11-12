@@ -282,12 +282,27 @@ fn resolve(key: &str, store: &Store) -> Resolved {
                 None => r(id.to_string(), "Mini App", icon("grid-fill"), true),
             }
         }
-        ["c", ..] => r(
-            "Community".into(),
-            "A community you're not in",
-            icon("users-multi"),
-            true,
-        ),
+        ["c", id, rest @ ..] => {
+            let Some(com) = store.community(id) else {
+                return r(
+                    "Community".into(),
+                    "A community you're not in",
+                    icon("users-multi"),
+                    true,
+                );
+            };
+            if let Some(ch) = rest.first() {
+                return match com.channel(ch) {
+                    Some(c) => r(format!("#{}", c.name), &com.name, icon("channel-hash"), false),
+                    None => r("Channel".into(), &com.name, icon("channel-hash"), true),
+                };
+            }
+            let glyph = match store.icon(id) {
+                Some(p) => Glyph::Picture(p, false),
+                None => Glyph::Initial(initial(&com.name), false),
+            };
+            r(com.name.clone(), "Community", glyph, false)
+        }
         _ => r(key.into(), "", icon("share"), true),
     }
 }
@@ -342,6 +357,16 @@ pub fn hits(sm: &StartMenu, store: &Store, query: &str) -> Vec<Hit> {
         .filter(|ch| ch.id.starts_with("npub1") && ch.id != store.my_npub && !store.is_request(ch))
         .filter(|ch| !store.profiles.get(&ch.id).is_some_and(|p| p.is_blocked))
         .map(|ch| (crate::data::last_activity(ch), format!("dm/{}", ch.id)))
+        .chain(store.communities.iter().filter(|c| !c.dissolved).map(|c| {
+            let recent = c
+                .channels
+                .iter()
+                .filter_map(|ch| store.chat(&ch.channel_id))
+                .map(crate::data::last_activity)
+                .max()
+                .unwrap_or(0);
+            (recent, format!("c/{}", c.community_id))
+        }))
         .collect();
     dms.sort_by(|a, b| b.0.cmp(&a.0));
     let mut places = Vec::new();
@@ -393,6 +418,11 @@ pub fn hits(sm: &StartMenu, store: &Store, query: &str) -> Vec<Hit> {
                 places
                     .into_iter()
                     .chain(dms.into_iter().map(|(_, k)| k))
+                    .chain(store.communities.iter().filter(|c| !c.dissolved).flat_map(|c| {
+                        c.channels
+                            .iter()
+                            .map(move |ch| format!("c/{}/{}", c.community_id, ch.channel_id))
+                    }))
                     .chain(apps.iter().map(|a| format!("app/{}", a.0)))
                     .map(hit),
             )

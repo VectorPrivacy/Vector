@@ -828,7 +828,7 @@ impl Settings {
     }
 }
 
-fn click_wheel(on: &OnAct) -> impl Fn(&gpui::ScrollWheelEvent, &mut Window, &mut App) + 'static {
+fn click_wheel(on: &OnAct) -> impl Fn(&gpui::ScrollEvent, &mut Window, &mut App) + 'static {
     let on = on.clone();
     move |_, w, cx| on(Act::Scrolled, w, cx)
 }
@@ -4003,7 +4003,7 @@ pub fn view(s: &Settings, width: f32, on: &OnAct, cx: &App) -> AnyElement {
                 .min_h_0()
                 .overflow_y_scroll()
                 .track_scroll(&s.scroll)
-                .when(s.jumped.is_some(), |d| d.on_scroll_wheel(click_wheel(on)))
+                .when(s.jumped.is_some(), |d| d.on_scroll(click_wheel(on)))
                 .pt(px(12.))
                 .children(blocks)
                 .child(div().h(px(140.))),
