@@ -362,11 +362,12 @@ fn pill(id: &'static str, primary: bool) -> gpui::Stateful<gpui::Div> {
         .when(!primary, |d| d.bg(white_a(0.06)).text_color(c(0xffffff)))
 }
 
-fn share(m: &CreateCommunity, on: &OnAct) -> impl IntoElement {
+fn share(m: &CreateCommunity, narrow: bool, on: &OnAct) -> impl IntoElement {
     let ready = m.link.is_some();
     div()
         .w_full()
         .flex()
+        .when(narrow, |d| d.flex_col().items_center().text_center())
         .gap(px(20.))
         .p(px(19.))
         .rounded(px(14.))
@@ -391,9 +392,10 @@ fn share(m: &CreateCommunity, on: &OnAct) -> impl IntoElement {
                 .min_w_0()
                 .flex()
                 .flex_col()
+                .when(narrow, |d| d.w_full().items_center())
                 .child(crate::kit::spaced("INVITE LINK", 0.99).font_weight(FontWeight::BOLD).text_size(px(11.)).line_height(px(24.)).text_color(c(0x8a8a8a)))
                 .child(match (&m.link, &m.link_error) {
-                    (Some(link), _) => div().mt(px(10.)).truncate().font_weight(FontWeight::MEDIUM).text_size(px(15.)).line_height(px(24.)).text_color(c(0xffffff)).child(pretty(link)),
+                    (Some(link), _) => div().mt(px(10.)).map(|d| if narrow { d.flex_none().whitespace_nowrap() } else { d.truncate() }).font_weight(FontWeight::MEDIUM).text_size(px(15.)).line_height(px(24.)).text_color(c(0xffffff)).child(pretty(link)),
                     (None, Some(e)) => div().mt(px(10.)).text_size(px(13.)).line_height(px(18.)).text_color(c(crate::timeline::DANGER)).child(format!("Couldn't create the link. {e}")),
                     (None, None) => div().mt(px(10.)).text_size(px(13.)).line_height(px(24.)).text_color(white_a(0.55)).child(m.progress.as_ref().map(|p| p.0.clone()).unwrap_or_else(|| "Getting ready".into())),
                 })
@@ -735,7 +737,7 @@ pub fn view(m: &CreateCommunity, store: &Store, width: f32, on: &OnAct, cx: &App
                 on,
             ))
             .into_any_element(),
-        _ if m.public => share(m, on).into_any_element(),
+        _ if m.public => share(m, width <= 520., on).into_any_element(),
         _ => invite_list(m, store, on, cx).into_any_element(),
     };
     let n = m.picked.len();
