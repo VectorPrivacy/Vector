@@ -126,6 +126,13 @@ async fn reconcile_mirror() {
     vector_core::traits::emit_event_json("notify_prefs_changed", json!({ "chats": resolved }));
 }
 
+/// Adopting a sibling's list: bring the mirror and the counts along, publishing nothing back.
+pub(crate) async fn reconcile_local() {
+    reconcile_mirror().await;
+    reseed_unread().await;
+    vector_core::emit_event("unread_counts_stale", &json!({ "chats": [] }));
+}
+
 async fn reseed_unread() {
     let counts = db::events::unread_counts().await.unwrap_or_default();
     STATE.lock().await.unread_seed(counts);

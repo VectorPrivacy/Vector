@@ -11,7 +11,7 @@ use gpui::AnimationExt;
 use gpui::{
     AnyElement, Context, Entity, Focusable, FontWeight, IntoElement, ListAlignment, ListState,
     MouseButton, ParentElement, Render, SharedString, Styled, Window, WindowControlArea, div, img,
-    linear_color_stop, linear_gradient, list, prelude::*, px, svg, uniform_list,
+    linear_color_stop, linear_gradient, list, prelude::*, px, svg,
 };
 use vector_core::chat::SerializableChat;
 use vector_core::types::Message;
@@ -192,6 +192,9 @@ pub struct VectorApp {
     /// The list shows Requests rather than Messages; `tab_slid` once a pick moved the bar.
     requests_tab: bool,
     tab_slid: bool,
+    chatlist: ListState,
+    chatlist_keys: RefCell<Vec<(u8, String)>>,
+    archive: chatlist_ops::Fold,
     /// The request senders last asked about for shared Communities.
     mutuals_asked: Vec<String>,
     /// Viktor, while the Messages list is empty.
@@ -268,6 +271,11 @@ enum MenuAct {
     NotifyMute(String, i64),
     SuppressEveryone(String, bool),
     ChannelRead(String),
+    ChatRead(String),
+    ChatUnread(String),
+    ChatPin(String, bool),
+    ChatArchive(String, bool),
+    ChatBlock(String),
     PackShare(String),
     PackEdit(String),
     PackRemove(String),
@@ -405,6 +413,8 @@ mod nexus_ops;
 mod publish_ops;
 #[path = "ui_pivx.rs"]
 mod pivx_ops;
+#[path = "ui_chatlist.rs"]
+mod chatlist_ops;
 
 impl VectorApp {
     fn base(store: Store, live: bool, window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -731,6 +741,9 @@ impl VectorApp {
             invite_scan: None,
             adding: None,
             requests_tab: false,
+            chatlist: ListState::new(0, ListAlignment::Top, px(400.)),
+            chatlist_keys: RefCell::new(Vec::new()),
+            archive: Default::default(),
             tab_slid: false,
             mutuals_asked: Vec::new(),
             viktor: None,
@@ -1299,6 +1312,17 @@ impl VectorApp {
                     })
                     .detach();
                 }
+            }
+            MenuAct::ChatRead(id) => self.chat_mark_read(id, cx),
+            MenuAct::ChatUnread(id) => self.chat_mark_unread(id, cx),
+            MenuAct::ChatPin(id, pin) => self.chat_pin(id, pin, cx),
+            MenuAct::ChatArchive(id, archive) => self.chat_archive(id, archive, cx),
+            MenuAct::ChatBlock(npub) => {
+                let mut popup = kit::Popup::notice("Block User");
+                popup.text = Some("Are you sure you want to block this user? You will no longer receive DMs from them.".into());
+                popup.confirm = "Confirm".into();
+                popup.cancel = Some("Cancel".into());
+                self.popup = Some((popup, PopupAct::Block { npub }));
             }
             MenuAct::ChannelRead(id) => {
                 if self.live {
@@ -2012,6 +2036,7 @@ impl VectorApp {
         let _ = backend::run(async {
             sync::fetch_messages(true).await;
             sync::notifs();
+            backend::selfsync::start();
         });
         let rx = backend::run(async {
             let b = backend::prefs::sql_bools(&[
@@ -2082,6 +2107,7 @@ impl VectorApp {
                     store.chats = boot.chats;
                     store.resort();
                 }
+                self.load_chatlist_prefs();
                 self.refresh_unread(cx);
                 self.reload_communities(cx);
                 self.reload_invites(cx);
@@ -2120,6 +2146,30 @@ impl VectorApp {
             }
             "community_invite_received" | "community_invites_purged" => self.reload_invites(cx),
             "emoji_packs_updated" => self.reload_subscribed_packs(cx),
+            "pinned_chats_updated" | "archived_chats_updated" => self.chatlist_event(name, &payload, cx),
+            "chat_muted" => {
+                let muted = payload.get("value").and_then(Value::as_bool).unwrap_or(false);
+                if let Some(chat) = self.store.borrow_mut().chat_mut(&chat_id) {
+                    chat.muted = muted;
+                }
+            }
+            "profile_nick_changed" => {
+                let id = payload.get("profile_id").and_then(Value::as_str).unwrap_or_default();
+                let nick = payload.get("value").and_then(Value::as_str).unwrap_or_default().to_string();
+                if let Some(p) = self.store.borrow_mut().profiles.get_mut(id) {
+                    p.nickname = nick;
+                }
+            }
+            "hidden_banners_updated" => {
+                if let Some(ids) = payload.get("ids").and_then(|v| serde_json::from_value(v.clone()).ok()) {
+                    self.store.borrow_mut().hidden_banners = ids;
+                }
+            }
+            "start_layout_updated" => {
+                if let (Some(sm), Ok(layout)) = (self.start.as_mut(), serde_json::from_value(payload.clone())) {
+                    sm.layout = layout;
+                }
+            }
             "transfer_state" => self
                 .security
                 .update(cx, |f, cx| f.transfer_state(&payload, cx)),
@@ -3736,7 +3786,8 @@ impl Render for VectorApp {
                 let _ = window.drop_image(old);
             }
         }
-        if self.mini_animating() || self.pivx_animating() || self.nexus.as_ref().is_some_and(|n| n.animating()) {
+        self.revoke_outlived_archives();
+        if self.mini_animating() || self.pivx_animating() || self.archive.animating() || self.nexus.as_ref().is_some_and(|n| n.animating()) {
             window.request_animation_frame();
         }
         let popout = self.popout_view(window, cx);
@@ -3918,6 +3969,7 @@ impl Render for VectorApp {
                                 &on_community,
                             )),
                             None => row.child(chat_list(
+                                self,
                                 &self.store,
                                 &store,
                                 self.open.clone(),
@@ -4671,6 +4723,7 @@ fn rail(
 // ── #chats ──────────────────────────────────────────────────────────────────────────────
 
 fn chat_list(
+    app: &VectorApp,
     shared: &Shared,
     store: &Store,
     open: Option<SharedString>,
@@ -4790,6 +4843,13 @@ fn chat_list(
     } else {
         Vec::new()
     };
+    let (rows, forced) = chatlist_ops::rows(store, &ids, &app.archive, !invites.is_empty());
+    app.sync_chatlist(&rows, store);
+    let archive_row = rows
+        .first()
+        .filter(|r| **r == chatlist_ops::Row::Archive)
+        .map(|_| app.archive_row(store, &ids, forced, cx));
+    let has_archive = rows.first() == Some(&chatlist_ops::Row::Archive) || ids.iter().any(|&i| store.is_archived(&store.chats[i]));
     let empty = if !ids.is_empty() || !invites.is_empty() {
         None
     } else if requests {
@@ -4808,10 +4868,11 @@ fn chat_list(
     } else {
         no_messages.then(|| get_started(cx).into_any_element())
     };
-    let count = ids.len();
-    let ids = Rc::new(ids);
+    let rows = Rc::new(rows);
+    let archive_row = RefCell::new(archive_row);
     let store = shared.clone();
     let view = cx.entity().downgrade();
+    let state = app.chatlist.clone();
     div()
         .w(px(LIST_W))
         .flex_shrink_0()
@@ -4875,28 +4936,56 @@ fn chat_list(
             d.child(div().pt(px(6.)).flex().flex_col().children(invites))
         })
         .child(
-            div().flex_1().min_h_0().pt(px(6.)).child(
-                uniform_list("chatlist", count, move |range, _, _| {
-                    let store = store.borrow();
-                    range
-                        .filter_map(|i| ids.get(i).and_then(|&i| store.chats.get(i)))
-                        .map(|chat| {
-                            let active = open.as_ref().is_some_and(|o| *o == chat.id);
-                            let id: SharedString = chat.id.clone().into();
-                            let view = view.clone();
-                            chat_row(&store, chat, active).on_click(move |_, window, cx| {
+            div()
+                .id("chatlist-scroll")
+                .flex_1()
+                .min_h_0()
+                .pt(px(6.))
+                .on_scroll_wheel(cx.listener(move |app, e: &gpui::ScrollWheelEvent, _, cx| {
+                    app.archive_wheel(e, forced, has_archive, cx);
+                    app.archive_scrolled(forced);
+                }))
+                .child(
+                    list(state, move |i, _, _| {
+                        let Some(row) = rows.get(i).copied() else {
+                            return div().into_any_element();
+                        };
+                        let chatlist_ops::Row::Chat { idx, archived, last } = row else {
+                            return archive_row.borrow_mut().take().unwrap_or_else(|| div().into_any_element());
+                        };
+                        let store = store.borrow();
+                        let Some(chat) = store.chats.get(idx) else {
+                            return div().into_any_element();
+                        };
+                        let active = open.as_ref().is_some_and(|o| *o == chat.id);
+                        let id: SharedString = chat.id.clone().into();
+                        let (open_view, menu_view, menu_id) = (view.clone(), view.clone(), chat.id.clone());
+                        let pinned = store.pin_rank(&chat.id).is_some();
+                        let row = chat_row(&store, chat, active, pinned)
+                            .on_click(move |_, window, cx| {
                                 let id = id.clone();
-                                view.update(cx, |app, cx| {
-                                    app.open_chat(id, window, cx);
-                                    cx.notify();
-                                })
-                                .ok();
+                                open_view
+                                    .update(cx, |app, cx| {
+                                        app.open_chat(id, window, cx);
+                                        cx.notify();
+                                    })
+                                    .ok();
                             })
-                        })
-                        .collect()
-                })
-                .size_full(),
-            ),
+                            .on_mouse_down(MouseButton::Right, move |e, _, cx| {
+                                let (id, at) = (menu_id.clone(), e.position);
+                                menu_view.update(cx, |app, cx| app.chat_row_menu(id, at, cx)).ok();
+                            });
+                        if archived && last {
+                            div()
+                                .pb(px(6.))
+                                .child(div().pb(px(6.)).border_b_1().border_color(white_a(0.06)).child(row))
+                                .into_any_element()
+                        } else {
+                            row.into_any_element()
+                        }
+                    })
+                    .size_full(),
+                ),
         )
 }
 
@@ -5021,7 +5110,7 @@ fn preview_line(store: &Store, chat: &SerializableChat, color: gpui::Hsla) -> An
         .into_any_element()
 }
 
-fn chat_row(store: &Store, chat: &SerializableChat, active: bool) -> gpui::Stateful<gpui::Div> {
+fn chat_row(store: &Store, chat: &SerializableChat, active: bool, pinned: bool) -> gpui::Stateful<gpui::Div> {
     let unread = store.unread_count(chat) > 0 && !active;
     let (name_color, name_weight) = match (unread, active) {
         (true, _) => (c(0xffffff), FontWeight::BOLD),
@@ -5073,13 +5162,26 @@ fn chat_row(store: &Store, chat: &SerializableChat, active: bool) -> gpui::State
                                 .h(px(20.))
                                 .pl(px(10.))
                                 .pr(px(15.))
-                                .truncate()
-                                .font_family(RUBIK)
-                                .text_size(px(15.))
-                                .line_height(px(20.))
-                                .font_weight(name_weight)
-                                .text_color(name_color)
-                                .child(store.name(&chat.id)),
+                                .flex()
+                                .items_center()
+                                .gap(px(6.))
+                                .child(
+                                    div()
+                                        .min_w_0()
+                                        .truncate()
+                                        .font_family(RUBIK)
+                                        .text_size(px(15.))
+                                        .line_height(px(20.))
+                                        .font_weight(name_weight)
+                                        .text_color(name_color)
+                                        .child(store.name(&chat.id)),
+                                )
+                                .when(store.profiles.get(&chat.id).is_some_and(|p| p.bot), |d| {
+                                    d.child(svg().path("icons/bot.svg").size(px(14.)).flex_shrink_0().text_color(c(ACCENT)))
+                                })
+                                .when(pinned, |d| {
+                                    d.child(svg().path("icons/pin.svg").size(px(14.)).flex_shrink_0().text_color(c(ACCENT)))
+                                }),
                         )
                         .child(
                             div()

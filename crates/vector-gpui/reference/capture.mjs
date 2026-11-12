@@ -23,6 +23,8 @@ const port = server.address().port;
 const fixtures = JSON.parse(readFileSync(process.env.FIXTURES || join(HERE, 'fixtures.json'), 'utf8'));
 // REQUESTS=<n>: the last n chats lose our side, so they wait under Requests.
 const requests = +process.env.REQUESTS || 0;
+// CHATLIST_DEMO=1: pins and archived chats from the fixtures' demo block.
+if (process.env.CHATLIST_DEMO) Object.assign(fixtures, fixtures.chatlist_demo);
 if (requests) for (const chat of fixtures.chats.slice(-requests)) chat.messages = chat.messages.filter((m) => !m.mine);
 
 const browser = await chromium.launch();

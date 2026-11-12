@@ -3713,5 +3713,15 @@
     "at": 1794362100000
    }
   ]
+ },
+ "chatlist_demo": {
+  "pinned": [
+   "npub1fsndjp6vylvfahjeyuxq4s2tw8s8rv2j89ge7a28fvhnhf35s86sg3uctf",
+   "npub1wajx7kj0x9nxxa38405e3eapgu87wtvtgv8svld04p3x8u0j872qnta00x"
+  ],
+  "archived": {
+   "npub1v84qsqlcs56j8dmh6s22eccnpn2d87fdutxhl7rftseh67wzamhqfv9ft6": 1794290400000,
+   "npub10j7vkrzv4t0elnd4rmj902pge3e2gkresvd4h9u2ut3valzyjuzsz7ad26": 1794268800000
+  }
  }
 }

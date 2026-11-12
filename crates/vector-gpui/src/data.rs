@@ -10,6 +10,12 @@ use serde::Deserialize;
 use vector_core::chat::SerializableChat;
 use vector_core::profile::SlimProfile;
 
+#[derive(Deserialize, Default)]
+struct ChatlistDemo {
+    pinned: Vec<String>,
+    archived: HashMap<String, u64>,
+}
+
 #[derive(Deserialize)]
 struct Fixtures {
     now: u64,
@@ -42,6 +48,9 @@ struct Fixtures {
     marketplace: Vec<vector_core::webxdc::MarketplaceApp>,
     #[serde(default)]
     pivx: Option<serde_json::Value>,
+    /// Pins and archived chats, which VECTOR_CHATLIST_DEMO=1 applies.
+    #[serde(default)]
+    chatlist_demo: Option<ChatlistDemo>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -212,6 +221,10 @@ pub struct Store {
     pub art: HashMap<String, Art>,
     pub hidden_banners: Vec<String>,
     pub streamer: Streamer,
+    /// Pinned chat-list rows in pin order: a DM's npub or a community's id.
+    pub pinned: Vec<String>,
+    /// Archived DMs: chat id → the newest message time when archived.
+    pub archived: HashMap<String, u64>,
 }
 
 /// What Streamer Mode shows for a hidden person's name: fixed length, so it says nothing.
@@ -292,6 +305,10 @@ fn hsl(h: f32, s: f32, l: f32) -> (u8, u8, u8) {
 impl Store {
     pub fn from_fixtures(path: &Path) -> anyhow::Result<Self> {
         let f: Fixtures = serde_json::from_slice(&std::fs::read(path)?)?;
+        let demo = match std::env::var_os("VECTOR_CHATLIST_DEMO") {
+            Some(_) => f.chatlist_demo.unwrap_or_default(),
+            None => ChatlistDemo::default(),
+        };
         let mut chats = f.chats;
         // VECTOR_REQUESTS=<n>: the last n chats lose our side, so they wait under Requests.
         let requests = std::env::var("VECTOR_REQUESTS")
@@ -329,6 +346,8 @@ impl Store {
             nicknames: f.nicknames,
             art: HashMap::new(),
             hidden_banners: Vec::new(),
+            pinned: demo.pinned,
+            archived: demo.archived,
             // Fixtures: VECTOR_STREAMER=1 goes live under the mock's seed.
             streamer: {
                 let mut st = Streamer::default();
@@ -373,6 +392,8 @@ impl Store {
             art: HashMap::new(),
             hidden_banners: Vec::new(),
             streamer: Default::default(),
+            pinned: Vec::new(),
+            archived: HashMap::new(),
         }
     }
 
@@ -569,6 +590,16 @@ impl Store {
     }
 
     /// Whether the chat gets a row: a DM once it has content and its sender isn't blocked.
+    /// `chatIsArchived`: archived, and nothing said since the archiving device's newest message.
+    pub fn is_archived(&self, chat: &SerializableChat) -> bool {
+        chat.chat_type == vector_core::ChatType::DirectMessage
+            && self.archived.get(&chat.id).is_some_and(|&at| last_activity(chat) <= at)
+    }
+
+    pub fn pin_rank(&self, id: &str) -> Option<usize> {
+        self.pinned.iter().position(|p| p == id)
+    }
+
     pub fn listed(&self, chat: &SerializableChat) -> bool {
         chat.chat_type == vector_core::ChatType::DirectMessage
             && !chat.messages.is_empty()
