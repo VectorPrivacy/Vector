@@ -1298,6 +1298,13 @@ impl LoginView {
 impl Render for LoginView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let wide = window.viewport_size().width >= px(900.);
+        let vw = f32::from(window.viewport_size().width);
+        // `.lg-lockup`: min(429.72px, 100vw - 48px), height following.
+        let lock_w = 429.72f32.min(vw - 48.);
+        let lock_h = 44. * lock_w / 429.72;
+        // Under 640 the background toggle joins the footer's column, a grid row of its own.
+        let stacked = vw <= 640.;
+        let toggle_row = if stacked { 34. } else { 0. };
         let aggro = self.wrong.is_some();
         let stage = self.stage(window, cx);
         let account_list = self.account_list(cx);
@@ -1365,17 +1372,17 @@ impl Render for LoginView {
 
         root.child(
             // .lg-head
-            div().absolute().top(px(51.)).left_0().right_0().flex().justify_center().child(img("icons/login/lockup.svg").w(px(429.72)).h(px(44.))),
+            div().absolute().top(px(51.)).left_0().right_0().flex().justify_center().child(img("icons/login/lockup.svg").w(px(lock_w)).h(px(lock_h))),
         )
         .child(
             // .lg-stage: centred in the window.
-            div().absolute().inset_0().flex().flex_col().items_center().justify_center().px(px(16.)).py(px(24.)).child(stage),
+            div().absolute().top_0().left_0().right_0().bottom(px(toggle_row)).flex().flex_col().items_center().justify_center().px(px(16.)).py(px(24.)).child(stage),
         )
         .child(
             // .lg-foot
             div()
                 .absolute()
-                .bottom(px(25.))
+                .bottom(px(if stacked { toggle_row + 6. } else { 25. }))
                 .left_0()
                 .right_0()
                 .flex()
@@ -1412,8 +1419,7 @@ impl Render for LoginView {
             div()
                 .id("lg-bg-toggle")
                 .absolute()
-                .right(px(12.))
-                .bottom(px(14.))
+                .map(|d| if stacked { d.left(px((vw - 114.) / 2.)).bottom(px(10.)) } else { d.right(px(12.)).bottom(px(14.)) })
                 .w(px(114.))
                 .h(px(24.))
                 .p(px(4.))
@@ -1441,7 +1447,7 @@ impl Render for LoginView {
         .children(account_list)
         .children(self.net_modal(cx))
         .children(self.signer_qr(cx))
-        .children(self.pill(cx).map(|pill| div().absolute().top(px(118.)).left_0().right_0().flex().justify_center().child(pill)))
+        .children(self.pill(cx).map(|pill| div().absolute().top(px(51. + lock_h + 23.)).left_0().right_0().px(px(24.)).flex().justify_center().child(pill)))
         .when_some(self.popup.clone(), |root, p| {
             let entity = cx.entity();
             root.child(kit::popup(&p, move |yes, window, cx| {
