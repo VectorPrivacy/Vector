@@ -170,8 +170,14 @@ fn kinds(pin: &Pin) -> Vec<Atom> {
 }
 
 fn control(id: SharedString, path: &'static str, hover: u32, on: &OnAct, act: Act) -> impl IntoElement {
+    let tip = match &act {
+        Act::Open(_) => "Reveal in folder",
+        _ if path == "icons/x.svg" => "Unpin",
+        _ => "Show more",
+    };
     div()
         .id(id.clone())
+        .tooltip(crate::kit::tooltip(tip))
         .group(id.clone())
         .size(px(22.))
         .flex_shrink_0()
