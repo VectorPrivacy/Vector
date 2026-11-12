@@ -25,6 +25,11 @@ const fixtures = JSON.parse(readFileSync(process.env.FIXTURES || join(HERE, 'fix
 const requests = +process.env.REQUESTS || 0;
 // CHATLIST_DEMO=1: pins and archived chats from the fixtures' demo block.
 if (process.env.CHATLIST_DEMO) Object.assign(fixtures, fixtures.chatlist_demo);
+// VOICE_DEMO=present|joined: who is in the Lounge's call, and (joined) our own session in it.
+if (process.env.VOICE_DEMO) fixtures.voice = {
+    present: fixtures.voice_demo[process.env.VOICE_DEMO === 'joined' ? 'joined' : 'present'],
+    session: process.env.VOICE_DEMO === 'joined' ? fixtures.voice_demo.session : null,
+};
 if (requests) for (const chat of fixtures.chats.slice(-requests)) chat.messages = chat.messages.filter((m) => !m.mine);
 
 const browser = await chromium.launch();

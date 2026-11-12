@@ -52,6 +52,7 @@
             if (!hash || !FIX.thumbs?.[hash]) throw 'No thumbhash';
             return FIX.thumbs[hash];
         },
+        voice_present: ({ channelId }) => FIX.voice?.present?.[channelId] || [], voice_state: () => FIX.voice?.session || null, voice_powers: () => ({ mute: true, deafen: true, move: true }),
         get_system_events: () => [], pivx_get_chat_payments: () => [], get_message_delete_meta_bulk: () => [],
         get_chat_commands: ({ chatId }) => { const b = (FIX.bot_commands || {})[chatId] || []; return { bots: b.length, commands: b, fresh: true }; }, list_communities: () => FIX.communities || [], get_community: ({ communityId }) => (FIX.communities || []).find((c) => c.community_id === communityId), get_hidden_banners: () => [], cache_community_image: ({ communityId, isBanner }) => { const c = (FIX.communities || []).find((x) => x.community_id === communityId); return (isBanner ? c?.banner : c?.icon) || null; },
         get_community_capabilities: () => Object.fromEntries(['manage_metadata','manage_channels','create_invite','kick','ban','manage_messages','manage_roles','manage_admin_role','pin_messages','control_write','moderate_members','view_audit_log','manage_nicknames','change_nickname'].map((k) => [k, true])),

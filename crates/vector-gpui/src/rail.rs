@@ -152,6 +152,7 @@ pub fn render(
     layout: &RailLayout,
     open: &HashSet<String>,
     active: Option<&str>,
+    voice: &HashMap<String, bool>,
     on: &OnAct,
 ) -> AnyElement {
     let rows = rows(store, layout);
@@ -174,7 +175,7 @@ pub fn render(
                     child: false,
                 };
                 let open_now = active == Some(com.community_id.as_str());
-                list = list.child(item(store, com, open_now, !open_now && unread(com), 8., zones, on));
+                list = list.child(item(store, com, open_now, !open_now && unread(com), 8., voice.get(&com.community_id).copied(), zones, on));
             }
             Row::Folder { id, name, hue, members } => {
                 let is_open = open.contains(id);
@@ -238,7 +239,7 @@ pub fn render(
                             child: true,
                         };
                         let open_now = active == Some(com.community_id.as_str());
-                        band = band.child(item(store, com, open_now, !open_now && unread(com), 4., zones, on));
+                        band = band.child(item(store, com, open_now, !open_now && unread(com), 4., voice.get(&com.community_id).copied(), zones, on));
                     }
                 }
                 list = list.child(band);
@@ -288,6 +289,28 @@ fn name(text: SharedString) -> impl IntoElement {
         .child(text)
 }
 
+/// `.ws-rail-item-voice`: one of its voice calls is in use; the accent when it's ours.
+fn voice_badge(mine: bool) -> impl IntoElement {
+    div()
+        .absolute()
+        .left(px(2.))
+        .bottom(px(2.))
+        .size(px(17.))
+        .rounded_full()
+        .border_2()
+        .border_color(c(0x0c0c0c))
+        .bg(if mine { c(crate::theme::ACCENT) } else { c(0x1c1c1c) })
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(
+            gpui::svg()
+                .path("icons/volume-max.svg")
+                .size(px(8.))
+                .text_color(if mine { c(0x000000) } else { white_a(0.7) }),
+        )
+}
+
 fn row_shell(id: SharedString, inset: f32) -> gpui::Stateful<gpui::Div> {
     div()
         .id(id)
@@ -303,7 +326,8 @@ fn row_shell(id: SharedString, inset: f32) -> gpui::Stateful<gpui::Div> {
         .hover(|d| d.bg(white_a(0.045)))
 }
 
-fn item(store: &Store, com: &Community, open: bool, unread: bool, inset: f32, zones: Zones, on: &OnAct) -> AnyElement {
+#[allow(clippy::too_many_arguments)]
+fn item(store: &Store, com: &Community, open: bool, unread: bool, inset: f32, voice: Option<bool>, zones: Zones, on: &OnAct) -> AnyElement {
     let id = com.community_id.clone();
     let source = RailDrag::Item { key: id.clone() };
     let el = bars(
@@ -325,7 +349,8 @@ fn item(store: &Store, com: &Community, open: bool, unread: bool, inset: f32, zo
         }
     })
     .child(logo(store, &com.community_id, 26., 4.9))
-    .child(name(com.name.clone().into()));
+    .child(name(com.name.clone().into()))
+    .children(voice.map(voice_badge));
     draggable(el, source, com.name.clone().into(), zones, on)
 }
 
@@ -446,6 +471,7 @@ pub fn render_slim(
     open: &HashSet<String>,
     active: Option<&str>,
     rail_w: f32,
+    voice: &HashMap<String, bool>,
     on: &OnAct,
 ) -> AnyElement {
     let rows = rows(store, layout);
@@ -470,7 +496,7 @@ pub fn render_slim(
                     child: false,
                 };
                 let open_now = active == Some(com.community_id.as_str());
-                list = list.child(tile(store, com, open_now, !open_now && unread(com), edge, zones, on));
+                list = list.child(tile(store, com, open_now, !open_now && unread(com), edge, voice.get(&com.community_id).copied(), zones, on));
             }
             Row::Folder { id, name, hue, members } => {
                 let is_open = open.contains(id);
@@ -564,7 +590,7 @@ pub fn render_slim(
                             child: true,
                         };
                         let open_now = active == Some(com.community_id.as_str());
-                        inner = inner.child(tile(store, com, open_now, !open_now && unread(com), edge, zones, on));
+                        inner = inner.child(tile(store, com, open_now, !open_now && unread(com), edge, voice.get(&com.community_id).copied(), zones, on));
                     }
                     band = band.child(inner);
                 }
@@ -592,7 +618,8 @@ fn ring(id: SharedString) -> gpui::Stateful<gpui::Div> {
         .hover(|d| d.bg(white_a(0.045)))
 }
 
-fn tile(store: &Store, com: &Community, open: bool, unread: bool, edge: f32, zones: Zones, on: &OnAct) -> AnyElement {
+#[allow(clippy::too_many_arguments)]
+fn tile(store: &Store, com: &Community, open: bool, unread: bool, edge: f32, voice: Option<bool>, zones: Zones, on: &OnAct) -> AnyElement {
     let id = com.community_id.clone();
     let el = bars(ring(SharedString::from(format!("rail-c-{id}"))), -edge - 3., 6., open, unread)
         .on_click({
@@ -606,6 +633,7 @@ fn tile(store: &Store, com: &Community, open: bool, unread: bool, edge: f32, zon
                 on(Act::RailMenu(Some(id.clone()), None, e.position), w, cx)
             }
         })
-        .child(logo(store, &com.community_id, 45., 8.5).bg(gpui::rgba(0x090909e6)));
+        .child(logo(store, &com.community_id, 45., 8.5).bg(gpui::rgba(0x090909e6)))
+        .children(voice.map(voice_badge));
     draggable(el, RailDrag::Item { key: id }, com.name.clone().into(), zones, on)
 }

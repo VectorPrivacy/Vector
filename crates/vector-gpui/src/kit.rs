@@ -504,6 +504,8 @@ pub struct MenuItem {
     pub hint: Option<SharedString>,
     /// A colour choice: its dot leads the row.
     pub swatch: Option<gpui::Hsla>,
+    /// A live value from 0 to 1 and how it reads: applies as it moves, the menu stays open.
+    pub slider: Option<(f32, SharedString)>,
 }
 
 #[derive(Clone, Copy, Default, PartialEq)]
@@ -567,10 +569,122 @@ impl MenuItem {
         self.checked = on;
         self
     }
+    pub fn slider(label: impl Into<SharedString>, value: f32, shown: impl Into<SharedString>) -> Self {
+        Self {
+            label: label.into(),
+            slider: Some((value.clamp(0., 1.), shown.into())),
+            ..Default::default()
+        }
+    }
     pub fn swatch(mut self, color: gpui::Hsla) -> Self {
         self.swatch = Some(color);
         self
     }
+}
+
+type OnSlide = std::rc::Rc<dyn Fn(usize, f32, &mut Window, &mut App)>;
+
+/// `.context-menu-slider`: the label and its value over an `.st-slider`.
+fn menu_slider(
+    ix: usize,
+    value: f32,
+    label: SharedString,
+    shown: SharedString,
+    on: OnSlide,
+    sliding: std::rc::Rc<std::cell::Cell<Option<usize>>>,
+) -> AnyElement {
+    let bounds = std::rc::Rc::new(std::cell::Cell::new(gpui::Bounds::<gpui::Pixels>::default()));
+    let at = |b: gpui::Bounds<gpui::Pixels>, x: gpui::Pixels| {
+        ((x - b.origin.x - px(10.)) / (b.size.width - px(20.)).max(px(1.))).clamp(0., 1.)
+    };
+    let down = {
+        let (on, bounds, sliding) = (on.clone(), bounds.clone(), sliding.clone());
+        move |e: &gpui::MouseDownEvent, w: &mut Window, cx: &mut App| {
+            cx.stop_propagation();
+            sliding.set(Some(ix));
+            on(ix, at(bounds.get(), e.position.x), w, cx);
+        }
+    };
+    let record = bounds.clone();
+    let track = gpui::canvas(
+        move |b, _, _| record.set(b),
+        move |_, _, window, _| {
+            if sliding.get() != Some(ix) {
+                return;
+            }
+            let (on, bounds, s) = (on.clone(), bounds.clone(), sliding.clone());
+            window.on_mouse_event(move |e: &gpui::MouseMoveEvent, phase, w, cx| {
+                if phase != gpui::DispatchPhase::Bubble || s.get() != Some(ix) {
+                    return;
+                }
+                if !e.dragging() {
+                    s.set(None);
+                    return;
+                }
+                on(ix, at(bounds.get(), e.position.x), w, cx);
+            });
+            let s = sliding.clone();
+            window.on_mouse_event(move |_: &gpui::MouseUpEvent, _, _, _| s.set(None));
+        },
+    )
+    .absolute()
+    .inset_0();
+    let fill = crate::theme::c(crate::theme::PRIMARY);
+    div()
+        .pt(px(9.))
+        .pb(px(11.))
+        .px(px(14.))
+        .min_w(px(190.))
+        .child(
+            div()
+                .flex()
+                .justify_between()
+                .mb(px(9.))
+                .text_size(px(14.))
+                .line_height(px(24.))
+                .text_color(c(0xb2b2b2))
+                .child(label)
+                .child(div().text_color(c(0xffffff)).child(shown)),
+        )
+        .child(
+            div()
+                .id(("ctx-slider", ix))
+                .relative()
+                .w_full()
+                .h(px(20.))
+                .cursor_pointer()
+                .on_mouse_down(gpui::MouseButton::Left, down)
+                .child(track)
+                .child(
+                    div()
+                        .absolute()
+                        .left_0()
+                        .right_0()
+                        .top(px(7.))
+                        .h(px(6.))
+                        .rounded(px(3.))
+                        .bg(c(0x1a1a1a))
+                        .child(div().h_full().rounded(px(3.)).bg(fill).w(gpui::relative(value))),
+                )
+                .child(
+                    div()
+                        .absolute()
+                        .top_0()
+                        .left(gpui::relative(value))
+                        .ml(px(-10. * value * 2. + 0.))
+                        .size(px(20.))
+                        .rounded_full()
+                        .bg(c(0xffffff))
+                        .shadow(vec![gpui::BoxShadow {
+                            color: ca(0, 0, 0, 0.35),
+                            offset: gpui::point(px(0.), px(1.)),
+                            blur_radius: px(4.),
+                            spread_radius: px(0.),
+                            inset: false,
+                        }]),
+                ),
+        )
+        .into_any_element()
 }
 
 /// `ContextMenu.svelte`: rows at the press, kept inside the window. A press elsewhere closes it.
@@ -578,9 +692,12 @@ pub fn context_menu(
     at: gpui::Point<gpui::Pixels>,
     items: &[MenuItem],
     on_pick: impl Fn(usize, &mut Window, &mut App) + 'static,
+    on_slide: impl Fn(usize, f32, &mut Window, &mut App) + 'static,
+    sliding: std::rc::Rc<std::cell::Cell<Option<usize>>>,
     on_close: impl Fn(&mut Window, &mut App) + 'static,
 ) -> AnyElement {
     let on_pick = std::rc::Rc::new(on_pick);
+    let on_slide = std::rc::Rc::new(on_slide);
     let mut list = div()
         .id("context-menu")
         .min_w(px(160.))
@@ -621,6 +738,10 @@ pub fn context_menu(
                 continue;
             }
             _ => {}
+        }
+        if let Some((value, shown)) = &item.slider {
+            list = list.child(menu_slider(ix, *value, item.label.clone(), shown.clone(), on_slide.clone(), sliding.clone()));
+            continue;
         }
         let pick = on_pick.clone();
         let danger = c(crate::timeline::DANGER);

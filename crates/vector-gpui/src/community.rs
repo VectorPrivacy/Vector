@@ -185,14 +185,15 @@ fn channel_row(
                 .when(unread, |d| d.font_weight(FontWeight::MEDIUM))
                 .child(ch.name.clone()),
         )
-        .when(ch.is_voice(), |d| {
-            d.child(action("icons/chat-bubble.svg", false, None))
+        .when(owner && !ch.private, |d| {
+            d.child(action("icons/add-user.svg", open, Some(Rc::new(|| Act::Invite))))
         })
-        .when(!ch.is_voice() && owner, |d| {
+        .when(owner, |d| {
             let gear = ch.channel_id.clone();
-            d.gap(px(8.))
-                .child(action("icons/add-user.svg", open, Some(Rc::new(|| Act::Invite))))
-                .child(action("icons/settings.svg", open, Some(Rc::new(move || Act::EditChannel(gear.clone())))))
+            d.child(action("icons/settings.svg", open, Some(Rc::new(move || Act::EditChannel(gear.clone())))))
+        })
+        .when(ch.is_voice(), |d| {
+            d.child(action("icons/chat-bubble.svg", true, None))
         })
 }
 
@@ -233,7 +234,17 @@ pub fn sidebar(
     open: Option<&str>,
     raid: bool,
     on: &OnAct,
+    (voice, on_voice): (&crate::voice::Voice, &crate::voice::OnAct),
 ) -> AnyElement {
+    let row = |ch: &Channel| {
+        let open = open == Some(ch.channel_id.as_str());
+        let row = channel_row(store, ch, open, com.is_owner, on).into_any_element();
+        if !ch.is_voice() || (voice.present(&ch.channel_id).is_empty() && voice.joining.as_deref() != Some(ch.channel_id.as_str())) {
+            return vec![row];
+        }
+        let who = crate::voice::members(voice, store, &com.community_id, &ch.channel_id, &store.my_npub, on_voice);
+        vec![row, who]
+    };
     let head = div()
         .id("chatlist-community-head")
         .h(px(61.))
@@ -332,9 +343,7 @@ pub fn sidebar(
                 .flex()
                 .flex_col()
                 .gap(px(2.))
-                .children(loose.iter().map(|ch| {
-                    channel_row(store, ch, open == Some(ch.channel_id.as_str()), owner, on)
-                }))
+                .children(loose.iter().flat_map(|ch| row(ch)))
                 .into_any_element(),
         );
     }
@@ -415,9 +424,7 @@ pub fn sidebar(
                 .child(head)
                 .when(!closed, |d| {
                     d.child(div().pb(px(2.)).flex().flex_col().gap(px(2.)).children(
-                        inside.iter().map(|ch| {
-                            channel_row(store, ch, open == Some(ch.channel_id.as_str()), owner, on)
-                        }),
+                        inside.iter().flat_map(|ch| row(ch)),
                     ))
                 })
                 .into_any_element(),

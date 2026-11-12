@@ -11,6 +11,7 @@ mod chaneditor;
 mod commsettings;
 mod community;
 mod rail;
+mod voice;
 mod cmdform;
 mod commands;
 mod composer;

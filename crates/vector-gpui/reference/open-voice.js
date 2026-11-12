@@ -1,5 +1,5 @@
-// Settings at Audio, scrolled to its Voice section.
+// Opens the fixture community, then its Lounge voice channel (run with VOICE_DEMO=present|joined).
 (() => {
-    setTimeout(() => openSettings(), 300);
-    setTimeout(() => [...document.querySelectorAll('.cs-section')].find((b) => b.textContent.trim().startsWith('Audio'))?.click(), 800);
+    setTimeout(() => [...document.querySelectorAll('*')].find((e) => e.children.length === 0 && e.textContent.trim() === 'Vector Devs')?.closest('[class*="rail"], div')?.click(), 400);
+    setTimeout(() => [...document.querySelectorAll('.chatlist-channel-name')].find((e) => e.textContent.trim() === 'Lounge')?.click(), 1100);
 })();

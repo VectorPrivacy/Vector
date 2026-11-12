@@ -2,7 +2,7 @@
 //! offset is the Tauri layout's own (measured from `reference/` renders); the comment on a
 //! block names the CSS selector it reproduces.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -227,6 +227,10 @@ pub struct VectorApp {
     start: Option<crate::startmenu::StartMenu>,
     /// The context menu open: where, its rows, and what each does.
     menu: Option<(gpui::Point<gpui::Pixels>, Vec<kit::MenuItem>, Vec<MenuAct>)>,
+    /// The menu slider being dragged.
+    menu_sliding: Rc<Cell<Option<usize>>>,
+    voice: crate::voice::Voice,
+    voice_ticking: bool,
 }
 
 #[derive(Clone, PartialEq)]
@@ -311,6 +315,17 @@ enum MenuAct {
     RailRename(String),
     RailHue(String, Option<u16>),
     RailUngroup(String),
+    VoiceVolume(String, f32),
+    /// A voice member's volume slider: its moves land in `on_menu_slide`.
+    VoiceSlide(String),
+    VoiceModerate {
+        community: String,
+        channel: String,
+        npub: String,
+        action: &'static str,
+        to: Option<String>,
+    },
+    ViewProfile(String),
 }
 
 enum PopupAct {
@@ -431,6 +446,8 @@ mod pivx_ops;
 mod chatlist_ops;
 #[path = "ui_rail.rs"]
 mod rail_ops;
+#[path = "ui_voice.rs"]
+mod voice_ops;
 
 impl VectorApp {
     fn base(store: Store, live: bool, window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -782,6 +799,9 @@ impl VectorApp {
             menu_trail: Vec::new(),
             start: None,
             menu: None,
+            menu_sliding: Default::default(),
+            voice: Default::default(),
+            voice_ticking: false,
         }
     }
 
@@ -960,6 +980,7 @@ impl VectorApp {
         }
         if !app.live {
             app.load_rail();
+            app.load_voice_calls(cx);
         }
         // Fixtures: VECTOR_START opens the Main Menu.
         if std::env::var("VECTOR_START").is_ok() {
@@ -1479,6 +1500,13 @@ impl VectorApp {
                 cx,
             ),
             MenuAct::StartTogglePin(key) => self.start_pin(key, cx),
+            act @ (MenuAct::VoiceVolume(..) | MenuAct::VoiceModerate { .. } | MenuAct::ViewProfile(_)) => {
+                self.voice_menu_act(act, cx);
+            }
+            MenuAct::VoiceSlide(npub) => {
+                acts.insert(ix.min(acts.len()), MenuAct::VoiceSlide(npub));
+                self.menu = Some((at, items, acts));
+            }
             act @ (MenuAct::RailRead(_) | MenuAct::RailRename(_) | MenuAct::RailHue(..) | MenuAct::RailUngroup(_)) => {
                 self.rail_menu_act(act, window, cx)
             }
@@ -2148,6 +2176,7 @@ impl VectorApp {
                 }
                 self.load_chatlist_prefs();
                 self.load_rail();
+                self.load_voice_calls(cx);
                 self.refresh_unread(cx);
                 self.reload_communities(cx);
                 self.reload_invites(cx);
@@ -2206,6 +2235,7 @@ impl VectorApp {
                 }
             }
             "rail_layout_updated" => self.rail_event(&payload, cx),
+            "voice_state" | "voice_levels" | "voice_presence" => self.voice_event(name, &payload, cx),
             "start_layout_updated" => {
                 if let (Some(sm), Ok(layout)) = (self.start.as_mut(), serde_json::from_value(payload.clone())) {
                     sm.layout = layout;
@@ -3883,6 +3913,9 @@ impl Render for VectorApp {
                     cx.stop_propagation();
                     cx.notify();
                 }
+                if app.voice_key(e, cx) {
+                    cx.stop_propagation();
+                }
             }))
             .size_full()
             .relative()
@@ -3969,6 +4002,7 @@ impl Render for VectorApp {
                         &self.rail_open,
                         self.open.as_ref(),
                         self.community.as_ref().map(|v| v.id.as_str()),
+                        &store.communities.iter().filter_map(|c| Some((c.community_id.clone(), self.voice.badge(&store, &c.community_id)?))).collect(),
                         rail_mode,
                         &on_community,
                         {
@@ -4020,6 +4054,7 @@ impl Render for VectorApp {
                                     .get(&com.community_id)
                                     .is_some_and(|r| r.0 || r.1 > 0),
                                 &on_community,
+                                (&self.voice, &self.on_voice_handler(cx)),
                             )),
                             None => row.child(chat_list(
                                 self,
@@ -4222,6 +4257,16 @@ impl Render for VectorApp {
                 };
                 crate::call::render(&self.call, &self.store.borrow(), &proc_, CHROME_H, &on)
             })
+            .children({
+                // The call's own stage on screen carries the same controls.
+                let on_stage = self.voice.session.as_ref().is_some_and(|s| self.open.as_deref() == Some(s.channel_id.as_str()));
+                (self.call.id.is_none() && !on_stage)
+                    .then(|| {
+                        crate::voice::bar(&self.voice, &store, self.call.pos, CHROME_H + 10., &self.on_voice_handler(cx))
+                            .map(|bar| gpui::deferred(div().absolute().inset_0().child(bar)).with_priority(7))
+                    })
+                    .flatten()
+            })
             .children(
                 self.invite_details
                     .as_ref()
@@ -4324,12 +4369,17 @@ impl Render for VectorApp {
             .children(self.menu.as_ref().map(|(at, items, _)| {
                 let pick = cx.entity().downgrade();
                 let close = pick.clone();
+                let slide = pick.clone();
                 kit::context_menu(
                     *at,
                     items,
                     move |ix, window, cx| {
                         pick.update(cx, |app, cx| app.on_menu(ix, window, cx)).ok();
                     },
+                    move |ix, v, _, cx| {
+                        slide.update(cx, |app, cx| app.on_menu_slide(ix, v, cx)).ok();
+                    },
+                    self.menu_sliding.clone(),
                     move |_, cx| {
                         close
                             .update(cx, |app, cx| {
@@ -4548,6 +4598,7 @@ fn rail(
     folders: &HashSet<String>,
     open: Option<&SharedString>,
     active: Option<&str>,
+    voice: &HashMap<String, bool>,
     mode: RailMode,
     on_c: &crate::community::OnAct,
     on_me: impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static,
@@ -4704,7 +4755,7 @@ fn rail(
             .when(dms_slim.is_some(), |d| {
                 d.child(div().pt(px(6.)).child(div().mx(px(16.)).h(px(1.)).bg(c(DIVIDER))))
             })
-            .child(crate::rail::render_slim(store, &store.rail, folders, active, RAIL_SLIM_W, on_c))
+            .child(crate::rail::render_slim(store, &store.rail, folders, active, RAIL_SLIM_W, voice, on_c))
             .child(
                 div()
                     .id("rail-create-community")
@@ -4727,7 +4778,7 @@ fn rail(
         .pt(px(6.))
         .child(div().mx(px(16.)).h(px(1.)).bg(c(DIVIDER)))
         .child(div().pt(px(16.)).child(rail_label("Communities")))
-        .child(crate::rail::render(store, &store.rail, folders, active, on_c))
+        .child(crate::rail::render(store, &store.rail, folders, active, voice, on_c))
         .child(
             div()
                 .id("rail-create-community")
@@ -5854,6 +5905,13 @@ impl VectorApp {
         self.menu = Some((at, items, acts));
     }
 
+    fn on_voice_handler(&self, cx: &mut Context<Self>) -> crate::voice::OnAct {
+        let app = cx.entity().downgrade();
+        Rc::new(move |act, window, cx| {
+            app.update(cx, |app, cx| app.on_voice(act, window, cx)).ok();
+        })
+    }
+
     fn chat_pane(
         &self,
         store: &Store,
@@ -5862,6 +5920,10 @@ impl VectorApp {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let channel = store.community_of(&id).and_then(|com| com.channel(&id));
+        let stage = channel.filter(|ch| ch.is_voice()).and_then(|ch| {
+            let com = store.community_of(&id)?;
+            Some(crate::voice::stage(&self.voice, store, &com.community_id, &ch.channel_id, &store.my_npub, &self.on_voice_handler(cx)))
+        });
         let panel = self.community.as_ref().is_some_and(|v| v.panel);
         let paper = self.wallpaper.image(self.wallpaper_key().as_ref());
         let header = if let Some(ch) = channel {
@@ -6046,6 +6108,7 @@ impl VectorApp {
                 gpui::img(gpui::ImageSource::Render(image)).absolute().top_0().left_0().size_full()
             }))
             .child(div().relative().flex_shrink_0().child(header).children(edit_bar))
+            .children(stage)
             .child(
                 div()
                     .relative()
@@ -7114,6 +7177,7 @@ impl VectorApp {
             .detach();
         }
         self.open_chat(id.clone().into(), window, cx);
+        self.voice_present(&id);
         if self.live {
             let _ = backend::run(backend::community::sync_channel(id, None));
         }

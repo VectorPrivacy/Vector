@@ -19,7 +19,7 @@ use crate::theme::{ACCENT, c, ca, white_a};
 
 const HISTORY: usize = 60;
 /// The Vector theme's `--danger-color`.
-const DANGER: u32 = 0xff2ea9;
+pub(crate) const DANGER: u32 = 0xff2ea9;
 const OPEN_W: f32 = 300.;
 const PILL_MAX_W: f32 = 320.;
 /// How long an ended call stays up to read why.
@@ -42,7 +42,7 @@ pub enum Quality {
 }
 
 impl Quality {
-    fn color(self) -> Hsla {
+    pub(crate) fn color(self) -> Hsla {
         match self {
             Quality::Excellent => c(0x59fcb3),
             Quality::Good => c(0xfce459),
@@ -61,7 +61,7 @@ impl Quality {
     }
 }
 
-fn grade(lost: f32, rtt: f32) -> Quality {
+pub(crate) fn grade(lost: f32, rtt: f32) -> Quality {
     if lost < 0.5 && rtt < 150. {
         Quality::Excellent
     } else if lost < 2. && rtt < 300. {
@@ -90,10 +90,10 @@ struct Sample {
 }
 
 #[derive(Clone, Copy)]
-struct Drag {
-    start: Point<Pixels>,
-    origin: Point<Pixels>,
-    moved: bool,
+pub(crate) struct Drag {
+    pub(crate) start: Point<Pixels>,
+    pub(crate) origin: Point<Pixels>,
+    pub(crate) moved: bool,
 }
 
 /// The one call, mirrored from the backend's `call_state` events.
@@ -387,14 +387,14 @@ pub struct Processing {
     pub noise_suppress: bool,
 }
 
-fn accent_mix(pct: f32) -> Hsla {
+pub(crate) fn accent_mix(pct: f32) -> Hsla {
     let mut a = c(ACCENT);
     a.a = pct.clamp(0., 1.);
     a
 }
 
 /// The phone glyph; hung up, it turns about its own box.
-fn phone(size: f32, color: Hsla, down: bool) -> impl IntoElement {
+pub(crate) fn phone(size: f32, color: Hsla, down: bool) -> impl IntoElement {
     let s = svg().path("ui/call.svg").size(px(size)).text_color(color);
     if down {
         s.with_transformation(gpui::Transformation::rotate(gpui::radians(
@@ -405,7 +405,7 @@ fn phone(size: f32, color: Hsla, down: bool) -> impl IntoElement {
     }
 }
 
-fn round_btn(id: &'static str, size: f32) -> gpui::Stateful<gpui::Div> {
+pub(crate) fn round_btn(id: &'static str, size: f32) -> gpui::Stateful<gpui::Div> {
     div()
         .id(id)
         .size(px(size))
@@ -418,7 +418,7 @@ fn round_btn(id: &'static str, size: f32) -> gpui::Stateful<gpui::Div> {
 }
 
 /// `.call-btn`: 34px, a faint wash; on, the accent's.
-fn call_btn(id: &'static str, on_state: bool) -> gpui::Stateful<gpui::Div> {
+pub(crate) fn call_btn(id: &'static str, on_state: bool) -> gpui::Stateful<gpui::Div> {
     round_btn(id, 34.)
         .bg(if on_state {
             accent_mix(0.22)
@@ -595,7 +595,7 @@ fn hint(text: impl Into<SharedString>) -> impl IntoElement {
         .child(text.into())
 }
 
-fn dot(q: Quality) -> impl IntoElement {
+pub(crate) fn dot(q: Quality) -> impl IntoElement {
     div()
         .size(px(7.))
         .flex_shrink_0()

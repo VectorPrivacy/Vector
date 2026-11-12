@@ -54,6 +54,9 @@ struct Fixtures {
     /// More communities for the rail, which VECTOR_RAIL_DEMO=1 adds.
     #[serde(default)]
     rail_demo: Vec<Community>,
+    /// Who is in each voice call, and ours: VECTOR_VOICE=present|joined picks one.
+    #[serde(default)]
+    voice_demo: Option<serde_json::Value>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -204,6 +207,8 @@ pub struct Store {
     pub fixture_bot_commands: Option<serde_json::Value>,
     /// `get_moderation_intel` and `policy_presets`, as they answer.
     pub fixture_moderation: Option<serde_json::Value>,
+    /// Fixtures: `{ present: { channel: [member] }, session }` under VECTOR_VOICE.
+    pub fixture_voice: Option<serde_json::Value>,
     pub fixture_presets: Option<serde_json::Value>,
     /// `fetch_nostr_embed`'s answers, by reference.
     pub fixture_embeds: HashMap<String, serde_json::Value>,
@@ -343,6 +348,11 @@ impl Store {
             fixture_channel_perms: f.channel_perms,
             fixture_bot_commands: f.bot_commands,
             fixture_moderation: f.moderation,
+            fixture_voice: std::env::var("VECTOR_VOICE").ok().and_then(|k| {
+                let demo = f.voice_demo.as_ref()?;
+                let session = (k == "joined").then(|| demo.get("session").cloned()).flatten();
+                Some(serde_json::json!({ "present": demo.get(&k)?, "session": session }))
+            }),
             fixture_presets: f.policy_presets,
             fixture_embeds: f.embeds,
             fixture_packs: f.packs,
@@ -389,6 +399,7 @@ impl Store {
             fixture_channel_perms: None,
             fixture_bot_commands: None,
             fixture_moderation: None,
+            fixture_voice: None,
             fixture_presets: None,
             fixture_embeds: HashMap::new(),
             fixture_packs: HashMap::new(),

@@ -3741,5 +3741,147 @@
    "community_id": "a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4",
    "name": "Bookworms"
   }
- ]
+ ],
+ "voice_demo": {
+  "present": {
+   "58e6267876fd6c4acb7fbc37091bb920e4f325e24df4887b8048d0ccf7137f2f": [
+    {
+     "npub": "npub190vqdjtlpcq27xslcveglfmr4ynfwg7gmw86cnun4acakxrdd6gqnp929a",
+     "muted": false,
+     "deafened": false,
+     "server_muted": false,
+     "server_deafened": false,
+     "screen": false,
+     "camera": false,
+     "elsewhere": false
+    },
+    {
+     "npub": "npub1sxmr0k8u6trd5c6eu6trzyapzux7090ykujmsng7pdx0m8k93n5sd02fwn",
+     "muted": true,
+     "deafened": false,
+     "server_muted": false,
+     "server_deafened": false,
+     "screen": false,
+     "camera": false,
+     "elsewhere": false
+    },
+    {
+     "npub": "npub1fsndjp6vylvfahjeyuxq4s2tw8s8rv2j89ge7a28fvhnhf35s86sg3uctf",
+     "muted": true,
+     "deafened": true,
+     "server_muted": false,
+     "server_deafened": true,
+     "screen": false,
+     "camera": false,
+     "elsewhere": false
+    }
+   ]
+  },
+  "joined": {
+   "58e6267876fd6c4acb7fbc37091bb920e4f325e24df4887b8048d0ccf7137f2f": [
+    {
+     "npub": "npub1yazve5gvw5em6um2mzg0nh2u4v4dkfas04gqh9yn72wdcssvktsqfmmmv4",
+     "muted": false,
+     "deafened": false,
+     "server_muted": false,
+     "server_deafened": false,
+     "screen": false,
+     "camera": false,
+     "elsewhere": false
+    },
+    {
+     "npub": "npub190vqdjtlpcq27xslcveglfmr4ynfwg7gmw86cnun4acakxrdd6gqnp929a",
+     "muted": false,
+     "deafened": false,
+     "server_muted": false,
+     "server_deafened": false,
+     "screen": false,
+     "camera": false,
+     "elsewhere": false
+    },
+    {
+     "npub": "npub1sxmr0k8u6trd5c6eu6trzyapzux7090ykujmsng7pdx0m8k93n5sd02fwn",
+     "muted": true,
+     "deafened": false,
+     "server_muted": false,
+     "server_deafened": false,
+     "screen": false,
+     "camera": false,
+     "elsewhere": false
+    },
+    {
+     "npub": "npub1fsndjp6vylvfahjeyuxq4s2tw8s8rv2j89ge7a28fvhnhf35s86sg3uctf",
+     "muted": true,
+     "deafened": true,
+     "server_muted": false,
+     "server_deafened": true,
+     "screen": false,
+     "camera": false,
+     "elsewhere": false
+    }
+   ]
+  },
+  "session": {
+   "community_id": "ca848c275e2117470342c641ada0ae4639dd0472ab4a5ec654a189bf1f689087",
+   "channel_id": "58e6267876fd6c4acb7fbc37091bb920e4f325e24df4887b8048d0ccf7137f2f",
+   "peers": [
+    {
+     "npub": "npub190vqdjtlpcq27xslcveglfmr4ynfwg7gmw86cnun4acakxrdd6gqnp929a",
+     "pubkey": "1111111111111111111111111111111111111111111111111111111111111111",
+     "volume": 1.0,
+     "connected": true,
+     "direct": true,
+     "rtt_ms": 38,
+     "level": 0.6,
+     "muted": false,
+     "deafened": false,
+     "server_muted": false,
+     "server_deafened": false,
+     "screen": false,
+     "camera": false
+    },
+    {
+     "npub": "npub1sxmr0k8u6trd5c6eu6trzyapzux7090ykujmsng7pdx0m8k93n5sd02fwn",
+     "pubkey": "2222222222222222222222222222222222222222222222222222222222222222",
+     "volume": 1.0,
+     "connected": true,
+     "direct": true,
+     "rtt_ms": 64,
+     "level": 0.0,
+     "muted": true,
+     "deafened": false,
+     "server_muted": false,
+     "server_deafened": false,
+     "screen": false,
+     "camera": false
+    },
+    {
+     "npub": "npub1fsndjp6vylvfahjeyuxq4s2tw8s8rv2j89ge7a28fvhnhf35s86sg3uctf",
+     "pubkey": "3333333333333333333333333333333333333333333333333333333333333333",
+     "volume": 1.0,
+     "connected": true,
+     "direct": false,
+     "rtt_ms": 120,
+     "level": 0.0,
+     "muted": true,
+     "deafened": true,
+     "server_muted": false,
+     "server_deafened": true,
+     "screen": false,
+     "camera": false
+    }
+   ],
+   "muted": false,
+   "deafened": false,
+   "audio": true,
+   "mic_level": 0.0,
+   "mic": true,
+   "server_muted": false,
+   "server_deafened": false,
+   "sharing": false,
+   "viewers": 0,
+   "camera": false,
+   "can_video": false
+  }
+ }
 }
