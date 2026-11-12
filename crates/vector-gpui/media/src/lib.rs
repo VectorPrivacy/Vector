@@ -31,6 +31,8 @@ pub use vector_core::{blossom, crypto, inbox_relays, nostr_client, stored_event}
 #[path = "../../../../src-tauri/src/pivx.rs"]
 #[allow(dead_code)]
 pub mod pivx;
+#[path = "../../../../src-tauri/src/commands/players.rs"]
+pub mod players;
 #[path = "../../../../src-tauri/src/net.rs"]
 #[allow(dead_code)]
 pub mod net;

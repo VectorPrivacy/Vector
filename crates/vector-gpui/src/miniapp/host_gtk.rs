@@ -9,7 +9,7 @@ use gtk::glib;
 use gtk::prelude::*;
 use wry::{WebContext, WebViewBuilder, WebViewBuilderExtUnix, WebViewExtUnix};
 
-use super::{Event, Spec};
+use super::{Event, PLAYER, PlayerSpec, Spec};
 
 struct Open {
     window: gtk::Window,
@@ -166,6 +166,58 @@ fn build(spec: Spec) -> Result<(), String> {
     window.show_all();
     window.present();
     OPEN.with(|o| o.borrow_mut().insert(spec.label, Open { window, view, _context: context }));
+    Ok(())
+}
+
+pub fn player(spec: PlayerSpec) -> Result<(), String> {
+    on_gtk(move || {
+        let reused = OPEN.with(|o| match o.borrow().get(PLAYER) {
+            Some(open) => {
+                let _ = open.view.load_url(&spec.url);
+                open.window.set_title(&spec.title);
+                open.window.resize(spec.size.0 as i32, spec.size.1 as i32);
+                open.window.present();
+                true
+            }
+            None => false,
+        });
+        if reused {
+            return;
+        }
+        if let Err(e) = build_player(spec) {
+            vector_core::log_warn!("[Player] window failed: {e}");
+            emit(Event::Failed(PLAYER.into(), e));
+        }
+    })
+}
+
+/// Its own ephemeral context: no Mini App's null proxy, and nothing kept between plays.
+fn build_player(spec: PlayerSpec) -> Result<(), String> {
+    let window = gtk::Window::new(gtk::WindowType::Toplevel);
+    window.set_title(&spec.title);
+    window.set_default_size(spec.size.0 as i32, spec.size.1 as i32);
+    let body = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    window.add(&body);
+    let own = origin(&spec.url);
+    let view = WebViewBuilder::new()
+        .with_incognito(true)
+        .with_initialization_script_for_main_only(super::PLAYER_SHIM.to_string(), true)
+        .with_ipc_handler(|request| emit(Event::Player(request.into_body())))
+        .with_navigation_handler(move |url| origin(&url) == own)
+        .with_new_window_req_handler(|url, _| {
+            emit(Event::Browse(url));
+            wry::NewWindowResponse::Deny
+        })
+        .with_url(&spec.url)
+        .build_gtk(&body)
+        .map_err(|e| e.to_string())?;
+    window.connect_destroy(|_| {
+        OPEN.with(|o| o.borrow_mut().remove(PLAYER));
+        emit(Event::Closed(PLAYER.into()));
+    });
+    window.show_all();
+    window.present();
+    OPEN.with(|o| o.borrow_mut().insert(PLAYER.into(), Open { window, view, _context: None }));
     Ok(())
 }
 

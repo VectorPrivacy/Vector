@@ -133,6 +133,8 @@ pub fn start(data_dir: PathBuf) -> mpsc::UnboundedReceiver<UiEvent> {
     }
     crate::miniapp::init(|n| match n {
         crate::miniapp::Notice::Failed(e) => emit("show_toast", serde_json::Value::String(e)),
+        crate::miniapp::Notice::Refused(msg, code) => emit("player_refused", serde_json::json!({ "msg": msg, "code": code })),
+        crate::miniapp::Notice::Browse(url) => emit("player_browse", serde_json::Value::String(url)),
         crate::miniapp::Notice::Opened | crate::miniapp::Notice::Closed => {}
     });
     {

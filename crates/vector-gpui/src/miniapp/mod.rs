@@ -56,13 +56,55 @@ pub enum Event {
     Ipc(String, String),
     Closed(String),
     Failed(String, String),
+    /// The player window's page: `{ vectorPlayer: 'ended' | 'error', code }`.
+    Player(String),
+    /// A page asked for a new window: it opens in the browser instead.
+    Browse(String),
 }
 
-/// What the main window hears: a Mini App window came or went.
+/// What the main window hears: a Mini App window came or went, or the player's news.
 pub enum Notice {
     Opened,
     Closed,
     Failed(String),
+    /// YouTube refused to play message `.0`'s video here, with its error code.
+    Refused(String, i64),
+    Browse(String),
+}
+
+/// The link cards' player window: the loopback page that frames the video, at `size`.
+pub struct PlayerSpec {
+    pub title: String,
+    pub url: String,
+    pub size: (f32, f32),
+}
+
+/// The window the link cards play in.
+pub const PLAYER: &str = "player";
+
+static PLAYING: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// Message `msg`'s video or track in the player window, in place of whatever plays there.
+pub fn play(msg: String, title: String, url: String, audio: bool) -> Result<(), String> {
+    if let Ok(mut p) = PLAYING.lock() {
+        *p = Some(msg);
+    }
+    let title = if title.is_empty() { "Player".to_string() } else { title };
+    host::player(PlayerSpec { title, url, size: if audio { (520., 166.) } else { (640., 360.) } })
+}
+
+/// Listens for the player's `ended` and `error` relays, which post to the page's own window.
+const PLAYER_SHIM: &str = "addEventListener('message',function(e){var d=e.data;if(d&&(d.vectorPlayer==='ended'||d.vectorPlayer==='error'))window.ipc.postMessage(JSON.stringify(d))});";
+
+fn on_player(body: &str) {
+    let Ok(news) = serde_json::from_str::<serde_json::Value>(body) else { return };
+    let msg = PLAYING.lock().ok().and_then(|p| p.clone());
+    if news.get("vectorPlayer").and_then(|v| v.as_str()) == Some("error")
+        && let Some(msg) = msg
+    {
+        notify(Notice::Refused(msg, news.get("code").and_then(|c| c.as_i64()).unwrap_or(0)));
+    }
+    host::close(PLAYER);
 }
 
 /// `window.__TAURI__.core` over wry's message port: the desktop bridge script speaks it as is.
@@ -105,16 +147,20 @@ pub fn init(notices: impl Fn(Notice) + Send + Sync + 'static) {
             // spawn-detached: an IPC call from a Mini App window is a command, unbound as one.
             tauri::async_runtime::spawn(answer(label, body));
         }
+        Event::Closed(label) if label == PLAYER => {}
         Event::Closed(label) => {
             // spawn-detached: unbound, as the desktop's window-destroyed handler.
             tauri::async_runtime::spawn(async move { teardown(&label).await });
             notify(Notice::Closed);
         }
+        Event::Failed(label, e) if label == PLAYER => notify(Notice::Failed(e)),
         Event::Failed(label, e) => {
             // spawn-detached: unbound, as the desktop's window-destroyed handler.
             tauri::async_runtime::spawn(async move { teardown(&label).await });
             notify(Notice::Failed(e));
         }
+        Event::Player(body) => on_player(&body),
+        Event::Browse(url) => notify(Notice::Browse(url)),
     });
 }
 

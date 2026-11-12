@@ -309,6 +309,10 @@ pub struct Store {
     pub art: HashMap<String, Art>,
     pub hidden_banners: Vec<String>,
     pub streamer: Streamer,
+    /// The synced setting that switches the link cards' players off.
+    pub players_off: bool,
+    /// Why YouTube refused to play a card's video here, by message: it then opens on YouTube.
+    pub player_refused: HashMap<String, String>,
     /// Pinned chat-list rows in pin order: a DM's npub or a community's id.
     pub pinned: Vec<String>,
     /// Archived DMs: chat id → the newest message time when archived.
@@ -393,6 +397,12 @@ fn hsl(h: f32, s: f32, l: f32) -> (u8, u8, u8) {
 }
 
 impl Store {
+    /// The player loads outside `vector_core::transport`, so only a settled Clearnet allows it.
+    pub fn players_available(&self) -> bool {
+        !self.players_off
+            && (std::env::var_os("VECTOR_PLAYERS").is_some() || vector_core::transport::preference() == Some(vector_core::transport::Kind::Clearnet))
+    }
+
     pub fn from_fixtures(path: &Path) -> anyhow::Result<Self> {
         let mut f: Fixtures = serde_json::from_slice(&std::fs::read(path)?)?;
         let demo = match std::env::var_os("VECTOR_CHATLIST_DEMO") {
@@ -474,6 +484,8 @@ impl Store {
             pinned: demo.pinned,
             archived: demo.archived,
             rail: Default::default(),
+            players_off: std::env::var_os("VECTOR_PLAYERS").is_none(),
+            player_refused: HashMap::new(),
             // Fixtures: VECTOR_STREAMER=1 goes live under the mock's seed.
             streamer: {
                 let mut st = Streamer::default();
@@ -529,6 +541,8 @@ impl Store {
             art: HashMap::new(),
             hidden_banners: Vec::new(),
             streamer: Default::default(),
+            players_off: false,
+            player_refused: HashMap::new(),
             pinned: Vec::new(),
             archived: HashMap::new(),
             rail: Default::default(),

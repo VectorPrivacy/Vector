@@ -8,6 +8,7 @@ description = "The desktop client's audio engine, devices and call media, compil
 publish = false
 
 [dependencies]
+sha2 = "0.10.9"
 tauri = { package = "vector-tauri-shim", path = "../tauri-shim" }
 vector-core = { path = "../../vector-core", features = ["calls", "xdc"] }
 anyhow = "1"

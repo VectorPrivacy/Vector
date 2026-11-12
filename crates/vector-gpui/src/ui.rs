@@ -2627,6 +2627,24 @@ impl VectorApp {
 
     /// The signer asks for a page to approve on. Only http(s), and off Clearnet only once
     /// confirmed, since the browser loads it outside the account's network.
+    /// A link card's video or track, in the player window.
+    fn play_link(&mut self, msg: String, p: crate::linkcard::Play, cx: &mut Context<Self>) {
+        let audio = p.provider == "soundcloud";
+        let title = p.title.clone();
+        let rx = backend::run(async move {
+            vector_media::players::player_url(p.provider.to_string(), p.id, (p.start > 0).then_some(p.start)).await
+        });
+        cx.spawn(async move |this, cx| {
+            let Ok(got) = rx.await else { return };
+            this.update(cx, |this, cx| match got.and_then(|url| crate::miniapp::play(msg, title, url, audio)) {
+                Ok(()) => {}
+                Err(e) => this.show_toast(&e, cx),
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     fn signer_asks_to_open(&mut self, url: &str, cx: &mut Context<Self>) {
         let Ok(parsed) = url::Url::parse(url) else { return };
         if !matches!(parsed.scheme(), "http" | "https") {
@@ -2711,6 +2729,7 @@ impl VectorApp {
                 this.chat_bg = chat_bg;
                 this.popout.enabled = floating;
                 this.store.borrow_mut().streamer.set(&synced.streamer);
+                this.store.borrow_mut().players_off = synced.players_off;
                 this.emoji_picker.update(cx, |p, cx| p.set_usage(used, cx));
             })
             .ok();
@@ -2955,7 +2974,25 @@ impl VectorApp {
                 self.show_toast("They cannot receive video from this device", cx);
             }
             "audio_devices_changed" => self.reload_devices(cx),
+            "player_refused" => {
+                let msg = payload.get("msg").and_then(Value::as_str).unwrap_or_default().to_string();
+                let why = match payload.get("code").and_then(Value::as_i64).unwrap_or(0) {
+                    101 | 150 | 152 => "Its owner only allows it on YouTube",
+                    100 => "Removed or made private on YouTube",
+                    _ => "YouTube won't play it in other apps",
+                };
+                self.store.borrow_mut().player_refused.insert(msg, why.into());
+                cx.notify();
+            }
+            "player_browse" => {
+                if let Some(url) = payload.as_str().filter(|u| u.starts_with("https://")) {
+                    cx.open_url(url);
+                }
+            }
             "synced_settings_updated" => {
+                if let Some(on) = payload.get("players").and_then(Value::as_bool) {
+                    self.store.borrow_mut().players_off = !on;
+                }
                 if let Some(view) = payload
                     .get("streamer")
                     .cloned()
@@ -3786,6 +3823,7 @@ impl VectorApp {
                 }
             }
             Act::Text(t) => self.on_text(id, t, window, cx),
+            Act::Play(p) => self.play_link(id.to_string(), p, cx),
             Act::Jump(target) => self.jump_to_message(target, cx),
             Act::PivxClaim(code) => self.pivx_claim(code, cx),
             Act::Rerun(name) => self.rerun_command(name, window, cx),
@@ -13504,6 +13542,7 @@ impl VectorApp {
             None
         };
         on.insert("advanced", synced.as_ref().is_some_and(|s| s.advanced));
+        on.insert("players", !self.store.borrow().players_off);
         on.insert(
             "streamer_on",
             synced.as_ref().is_some_and(|s| s.streamer.on),
@@ -15191,6 +15230,7 @@ impl VectorApp {
                         let rx = backend::run(async move {
                             backend::prefs::edit_synced(|| match key {
                                 "advanced" => sp::set_advanced(value),
+                                "players" => sp::set_players(value),
                                 "streamer_on" => sp::set_streamer_on(value),
                                 _ => sp::set_streamer_wallpapers(value),
                             })
@@ -15531,9 +15571,11 @@ impl VectorApp {
             let Ok(Ok(view)) = rx.await else { return };
             this.update(cx, |this, cx| {
                 this.store.borrow_mut().streamer.set(&view.streamer);
+                this.store.borrow_mut().players_off = view.players_off;
                 if let Some(s) = this.settings.as_mut() {
                     let stuck = match key {
                         "advanced" => view.advanced,
+                        "players" => !view.players_off,
                         "streamer_on" => view.streamer.on,
                         _ => view.streamer.hide_wallpapers,
                     };

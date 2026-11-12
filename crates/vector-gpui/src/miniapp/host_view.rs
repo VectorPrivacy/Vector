@@ -15,7 +15,7 @@ use gpui::{
 };
 use wry::{WebContext, WebViewBuilder};
 
-use super::{Event, Spec};
+use super::{Event, PLAYER, PlayerSpec, Spec};
 
 type Job = Box<dyn FnOnce(&mut App) + Send>;
 
@@ -224,6 +224,71 @@ fn build(spec: Spec, cx: &mut App) -> Result<(), String> {
         window.activate_window();
     });
     OPEN.with(|o| o.borrow_mut().insert(spec.label, handle));
+    Ok(())
+}
+
+pub fn player(spec: PlayerSpec) -> Result<(), String> {
+    on_ui(move |cx| {
+        if let Some(handle) = OPEN.with(|o| o.borrow().get(PLAYER).copied()) {
+            let done = handle.update(cx, |page, window, _| {
+                if let Some(v) = &page.view {
+                    let _ = v.load_url(&spec.url);
+                }
+                window.set_window_title(&spec.title);
+                window.resize(size(px(spec.size.0), px(spec.size.1)));
+                window.activate_window();
+            });
+            if done.is_ok() {
+                return;
+            }
+        }
+        if let Err(e) = build_player(spec, cx) {
+            vector_core::log_warn!("[Player] window failed: {e}");
+            emit(Event::Failed(PLAYER.into(), e));
+        }
+    })
+}
+
+fn build_player(spec: PlayerSpec, cx: &mut App) -> Result<(), String> {
+    let opts = WindowOptions {
+        titlebar: Some(TitlebarOptions { title: Some(spec.title.clone().into()), ..Default::default() }),
+        window_bounds: Some(WindowBounds::Windowed(Bounds::centered(None, size(px(spec.size.0), px(spec.size.1)), cx))),
+        ..Default::default()
+    };
+    let mut failed = None;
+    let handle = cx
+        .open_window(opts, |window, cx| {
+            let own = origin(&spec.url);
+            let made = WebViewBuilder::new()
+                .with_incognito(true)
+                .with_initialization_script_for_main_only(super::PLAYER_SHIM.to_string(), true)
+                .with_ipc_handler(|request| emit(Event::Player(request.into_body())))
+                .with_navigation_handler(move |url| origin(&url) == own)
+                .with_new_window_req_handler(|url, _| {
+                    emit(Event::Browse(url));
+                    wry::NewWindowResponse::Deny
+                })
+                .with_bounds(fill(window))
+                .with_url(&spec.url)
+                .build_as_child(window);
+            let view = made.map_err(|e| failed = Some(e.to_string())).ok();
+            let laid = Cell::new((f32::from(window.viewport_size().width), f32::from(window.viewport_size().height)));
+            cx.new(|cx| {
+                cx.on_release(|_, _| {
+                    OPEN.with(|o| o.borrow_mut().remove(PLAYER));
+                    emit(Event::Closed(PLAYER.into()));
+                })
+                .detach();
+                Page { view, _context: None, farewell: String::new(), leaving: Cell::new(true), laid }
+            })
+        })
+        .map_err(|e| e.to_string())?;
+    if let Some(e) = failed {
+        let _ = handle.update(cx, |_, window, _| window.remove_window());
+        return Err(e);
+    }
+    let _ = handle.update(cx, |_, window, _| window.activate_window());
+    OPEN.with(|o| o.borrow_mut().insert(PLAYER.into(), handle));
     Ok(())
 }
 

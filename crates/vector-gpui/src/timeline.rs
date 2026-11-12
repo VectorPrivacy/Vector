@@ -28,6 +28,8 @@ pub const TEXT_LH: f32 = 21.;
 /// What the user did to a message.
 #[derive(Clone)]
 pub enum Act {
+    /// A link card's play button: its video or track in the player window.
+    Play(crate::linkcard::Play),
     /// A collapsed post, or a run of them, tapped open.
     Unveil(Vec<String>),
     /// Older history failed to load: ask again.

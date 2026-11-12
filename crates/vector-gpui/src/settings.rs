@@ -333,6 +333,8 @@ pub const PRIVACY: [Toggle; 4] = [
     ),
 ];
 
+pub const PLAYERS: Toggle = t("players", "Video Players", "players", Home::Synced, "");
+
 pub const OTHER: [Toggle; 4] = [
     t(
         "streamer_on",
@@ -417,6 +419,7 @@ pub fn toggles() -> impl Iterator<Item = &'static Toggle> {
     DISPLAY
         .iter()
         .chain(PRIVACY.iter())
+        .chain(std::iter::once(&PLAYERS))
         .chain(NOTIFY.iter())
         .chain(STORAGE.iter())
         .chain(OTHER.iter())
@@ -1268,7 +1271,9 @@ fn privacy_block(s: &Settings, on: &OnAct) -> AnyElement {
     div()
         .flex()
         .flex_col()
-        .children(PRIVACY.iter().map(|t| row(s, t.key, on, false)))
+        .child(row(s, PRIVACY[0].key, on, false))
+        .child(row(s, PLAYERS.key, on, false))
+        .children(PRIVACY[1..].iter().map(|t| row(s, t.key, on, false)))
         .into_any_element()
 }
 

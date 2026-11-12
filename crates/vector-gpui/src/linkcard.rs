@@ -11,11 +11,54 @@ use crate::timeline::{Act, Ctx, TEXT_LH, TEXT_SIZE};
 
 const MAX_W: f32 = 480.;
 
+/// What a card's play button asks for: the player window, on `provider`'s `id`.
+#[derive(Clone)]
+pub struct Play {
+    pub provider: &'static str,
+    pub id: String,
+    pub start: u32,
+    pub title: String,
+}
+
 /// A link a card can play: a YouTube video or a SoundCloud track.
 struct Playable {
     youtube: bool,
     id: String,
     href: Option<String>,
+    /// Seconds into a YouTube video its link starts at.
+    start: u32,
+}
+
+/// `90`, `90s` or `1h2m3s` in seconds; anything else, or past six digits, is the start.
+fn youtube_seconds(t: &str) -> u32 {
+    let mut total: u64 = 0;
+    let mut num = String::new();
+    let mut seen = Vec::new();
+    for ch in t.chars() {
+        if ch.is_ascii_digit() {
+            num.push(ch);
+            continue;
+        }
+        let unit = match ch {
+            'h' => 3600,
+            'm' => 60,
+            's' => 1,
+            _ => return 0,
+        };
+        if num.is_empty() || seen.iter().any(|&u| u <= unit) {
+            return 0;
+        }
+        seen.push(unit);
+        total += num.parse::<u64>().unwrap_or(0) * unit;
+        num.clear();
+    }
+    if !num.is_empty() {
+        if seen.contains(&1) {
+            return 0;
+        }
+        total += num.parse::<u64>().unwrap_or(0);
+    }
+    if total <= 999_999 { total as u32 } else { 0 }
 }
 
 fn host(u: &reqwest::Url) -> String {
@@ -53,10 +96,16 @@ fn playable(href: &str) -> Option<Playable> {
                 .bytes()
                 .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
     }) {
+        let start = u
+            .query_pairs()
+            .find(|(k, _)| k == "t")
+            .or_else(|| u.query_pairs().find(|(k, _)| k == "start"))
+            .map_or(0, |(_, v)| youtube_seconds(&v));
         return Some(Playable {
             youtube: true,
             id,
             href: None,
+            start,
         });
     }
     const PAGES: [&str; 21] = [
@@ -113,6 +162,7 @@ fn playable(href: &str) -> Option<Playable> {
             .collect::<Vec<_>>()
             .join("/"),
         href: None,
+        start: 0,
     })
 }
 
@@ -137,6 +187,7 @@ fn video(m: &Message, meta: &SiteMetadata) -> Option<Playable> {
             youtube: p.youtube,
             id: p.id.clone(),
             href: p.href.clone(),
+            start: p.start,
         }),
     };
     let youtube_host = reqwest::Url::parse(&meta.domain).is_ok_and(|u| {
@@ -159,6 +210,7 @@ fn video(m: &Message, meta: &SiteMetadata) -> Option<Playable> {
                 youtube: p.youtube,
                 id: p.id.clone(),
                 href: p.href.clone(),
+                start: p.start,
             });
     }
     let card = card?;
@@ -359,7 +411,7 @@ pub fn card(ctx: &Ctx, m: &Message) -> Option<AnyElement> {
                 .child(
                     div()
                         .min_w_0()
-                        .child(title.unwrap_or_else(|| "Link Preview".into())),
+                        .child(title.clone().unwrap_or_else(|| "Link Preview".into())),
                 ),
         );
     if !description.is_empty() {
@@ -397,10 +449,30 @@ pub fn card(ctx: &Ctx, m: &Message) -> Option<AnyElement> {
                     .object_fit(gpui::ObjectFit::Cover),
             );
         }
-        let _ = v;
+        let refused = ctx.store.player_refused.get(&m.id).cloned();
+        let playable = refused.is_none() && ctx.store.players_available();
+        let service = if audio { "SoundCloud" } else { "YouTube" };
+        let label = refused.unwrap_or_else(|| if playable { format!("Plays from {service}") } else { "Opens in your browser".into() });
+        let play = {
+            let (act, id, req) = (
+                ctx.on_act.clone(),
+                m.id.clone(),
+                Play { provider: if v.youtube { "youtube" } else { "soundcloud" }, id: v.id.clone(), start: v.start, title: title.clone().unwrap_or_default().to_string() },
+            );
+            let open = open.clone();
+            move |e: &gpui::ClickEvent, w: &mut gpui::Window, cx: &mut gpui::App| {
+                cx.stop_propagation();
+                if playable {
+                    act(&id, Act::Play(req.clone()), w, cx);
+                } else {
+                    open(e, w, cx);
+                }
+            }
+        };
         frame = frame.child(
             div()
                 .id("play")
+                .on_click(play)
                 .group("play")
                 .absolute()
                 .inset_0()
@@ -423,8 +495,8 @@ pub fn card(ctx: &Ctx, m: &Message) -> Option<AnyElement> {
                         .border_color(white_a(0.15))
                         .child(
                             svg()
-                                .path("icons/external.svg")
-                                .size(px(22.))
+                                .path(if playable { "icons/play.svg" } else { "icons/external.svg" })
+                                .size(px(if playable { 26. } else { 22. }))
                                 .text_color(c(0xffffff)),
                         ),
                 )
@@ -437,7 +509,7 @@ pub fn card(ctx: &Ctx, m: &Message) -> Option<AnyElement> {
                         .text_size(px(12.))
                         .line_height(px(16.8))
                         .text_color(c(0xffffff))
-                        .child("Opens in your browser"),
+                        .child(label),
                 ),
         );
         card = card.child(frame);
