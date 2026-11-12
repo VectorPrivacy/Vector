@@ -41,8 +41,10 @@ pub fn view(
     max_display: usize,
     media: &mut Media,
     src: &dyn Fn(&str) -> String,
+    narrow: bool,
     on: On,
 ) -> AnyElement {
+    let cols = if narrow { 5 } else { 6 };
     let state = media.packs.get(&d.naddr);
     let body: AnyElement = match &state {
         State::Loading => div()
@@ -151,7 +153,7 @@ pub fn view(
             while it.peek().is_some() {
                 let mut row = div().flex().gap(px(6.));
                 let mut k = 0;
-                for t in it.by_ref().take(6) {
+                for t in it.by_ref().take(cols) {
                     row = row.child(
                         div()
                             .flex_1()
@@ -163,7 +165,7 @@ pub fn view(
                     );
                     k += 1;
                 }
-                for _ in k..6 {
+                for _ in k..cols {
                     row = row.child(div().flex_1().min_w_0().p(px(6.)));
                 }
                 grid = grid.child(row);
@@ -248,7 +250,7 @@ pub fn view(
                         .p(px(12.))
                         .rounded(px(12.))
                         .bg(ca(0, 0, 0, 0.35))
-                        .max_h(px(240.))
+                        .max_h(px(264.))
                         .overflow_y_scroll()
                         .track_scroll(&d.scroll)
                         .child(grid),
@@ -301,7 +303,7 @@ pub fn view(
                 .id("pack-details-card")
                 .relative()
                 .w_full()
-                .max_w(px(442.))
+                .when(!narrow, |d| d.max_w(px(442.)))
                 .bg(c(0x141414))
                 .border_1()
                 .border_color(white_a(0.08))
@@ -342,7 +344,7 @@ pub fn view(
                                 .text_color(c(0xffffff)),
                         ),
                 )
-                .child(div().pt(px(28.)).px(px(24.)).pb(px(20.)).child(body)),
+                .child(div().map(|d| if narrow { d.pt(px(24.)).px(px(18.)).pb(px(18.)) } else { d.pt(px(28.)).px(px(24.)).pb(px(20.)) }).child(body)),
         )
         .into_any_element()
 }

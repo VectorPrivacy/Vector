@@ -5596,7 +5596,7 @@ impl Render for VectorApp {
                 ))
                 .with_priority(12)
             }))
-            .children(self.pack_details_view(cx))
+            .children(self.pack_details_view(f32::from(window.viewport_size().width) <= 480., cx))
             .children(popout)
             .children(launch)
             .children(pick)
@@ -12379,7 +12379,7 @@ impl VectorApp {
         cx.notify();
     }
 
-    fn pack_details_view(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+    fn pack_details_view(&mut self, narrow: bool, cx: &mut Context<Self>) -> Option<AnyElement> {
         let d = self.pack_details.as_ref()?;
         let app = cx.entity().downgrade();
         let on: crate::packdetails::On = Rc::new(move |act, _, cx| {
@@ -12410,7 +12410,7 @@ impl VectorApp {
                 timeline::emoji_source(&store, u)
             }
         };
-        let el = crate::packdetails::view(d, cap, &mut self.media.borrow_mut(), &src, on);
+        let el = crate::packdetails::view(d, cap, &mut self.media.borrow_mut(), &src, narrow, on);
         crate::media::pump(&self.media, cx.entity().downgrade(), live, cx);
         Some(gpui::deferred(el).with_priority(13).into_any_element())
     }
