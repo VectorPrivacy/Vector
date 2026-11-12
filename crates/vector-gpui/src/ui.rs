@@ -305,6 +305,8 @@ enum Mode {
 #[derive(Clone)]
 /// What a context menu row does.
 enum MenuAct {
+    StartDetails(String),
+    StartCopyLink(String),
     NewMessage,
     NewCommunity,
     BannerHidden(String, bool),
@@ -1711,6 +1713,14 @@ impl VectorApp {
                 acts.insert(ix.min(acts.len()), MenuAct::Nothing);
                 self.menu = Some((at, items, acts));
             }
+            MenuAct::StartDetails(id) => {
+                self.start = None;
+                self.nexus_show_app(id, window, cx);
+            }
+            MenuAct::StartCopyLink(link) => {
+                cx.write_to_clipboard(gpui::ClipboardItem::new_string(link));
+                self.show_toast("Copied Link", cx);
+            }
             MenuAct::NewMessage => self.open_new_chat(window, cx),
             MenuAct::NewCommunity => self.open_create_community(window, cx),
             MenuAct::Sub(label, sub_items, sub_acts) => {
@@ -2145,11 +2155,17 @@ impl VectorApp {
                     .unzip(),
                     (Some(key), None) => {
                         let mut rows = Vec::new();
+                        if let Some(app) = key.strip_prefix("app/") {
+                            rows.push((kit::MenuItem::new("View Details", "info"), MenuAct::StartDetails(app.to_string())));
+                        }
                         if in_folder.is_some() {
                             rows.push((
                                 kit::MenuItem::new("Move out of Folder", "chevron-left"),
                                 MenuAct::StartMoveOut(key.clone()),
                             ));
+                        }
+                        if let Some(link) = start_key_link(&key) {
+                            rows.push((kit::MenuItem::new("Copy Link", "share"), MenuAct::StartCopyLink(link)));
                         }
                         rows.push((
                             kit::MenuItem::new("Unpin", "pin").danger(),
@@ -16745,4 +16761,22 @@ fn sync_report_fixture(f: Option<serde_json::Value>) -> (Result<serde_json::Valu
         Ok(f["epoch"].clone())
     };
     (Ok(f["control"].clone()), epoch)
+}
+
+/// `startKeyLink`: a pin's link to share, when it names a place a link can carry.
+fn start_key_link(key: &str) -> Option<String> {
+    const PLACE: &str = "https://vectorapp.io/go#";
+    let mut parts = key.split('/');
+    match parts.next()? {
+        "c" => {
+            let community = parts.next()?;
+            Some(match parts.next() {
+                Some(ch) if !ch.is_empty() => format!("{PLACE}c/{community}/{ch}"),
+                _ => format!("{PLACE}c/{community}"),
+            })
+        }
+        "app" => Some(format!("{PLACE}nexus/{}", parts.next()?)),
+        "settings" | "nexus" | "requests" => Some(format!("{PLACE}{key}")),
+        _ => None,
+    }
 }
