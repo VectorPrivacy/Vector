@@ -566,7 +566,10 @@ impl Builder<'_> {
             let Some(c) = custom(code) else { continue };
             let size = self.look().size;
             match c {
-                crate::media::Custom::Missing(_) => continue,
+                crate::media::Custom::Missing(why) => {
+                    self.twemoji_text(&t[last..start], kind.clone());
+                    self.missing_emoji(&t[start..end], &why);
+                }
                 crate::media::Custom::Ready(image) => {
                     self.twemoji_text(&t[last..start], kind.clone());
                     self.atoms.push(Atom::Image {
@@ -583,6 +586,18 @@ impl Builder<'_> {
             last = end;
         }
         self.twemoji_text(&t[last..], kind);
+    }
+
+    /// `.emoji-unavailable`: the `:shortcode:` itself, dimmed, telling why when clicked.
+    fn missing_emoji(&mut self, code: &str, why: &str) {
+        let mut look = self.look();
+        look.color.a *= 0.6;
+        look.underline = true;
+        self.atoms.push(Atom::Text {
+            text: code.to_string().into(),
+            look,
+            kind: crate::inline::Kind::Action(format!("{}{why}", crate::inline::EMOJI_MISSING).into()),
+        });
     }
 
     /// Text with its emoji swapped for twemoji images.

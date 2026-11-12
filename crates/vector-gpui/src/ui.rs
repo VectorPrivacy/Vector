@@ -3528,6 +3528,17 @@ impl VectorApp {
                 self.show_mini(npub.to_string(), None, Some(at), cx)
             }
             Target::Action(a) if a.as_ref() == "edited" => self.show_edit_history(msg_id, window, cx),
+            Target::Action(a) if a.starts_with(crate::inline::EMOJI_MISSING) => {
+                let why = &a[crate::inline::EMOJI_MISSING.len()..];
+                let text = if why.is_empty() {
+                    "This emoji couldn't be loaded (the host may be offline, or the file was removed).".to_string()
+                } else {
+                    format!("This emoji couldn't be loaded ({}).", kit::escape(why))
+                };
+                let mut p = kit::Popup::notice("Emoji unavailable");
+                p.text = Some(text.into());
+                self.popup = Some((p, PopupAct::Notice));
+            }
             Target::Action(_) => {}
         }
     }

@@ -31,6 +31,7 @@ pub struct Look {
     pub italic: bool,
     pub color: Hsla,
     pub strike: bool,
+    pub underline: bool,
 }
 
 impl Look {
@@ -43,6 +44,7 @@ impl Look {
             italic: false,
             color,
             strike: false,
+            underline: false,
         }
     }
 
@@ -66,7 +68,11 @@ impl Look {
             font: self.font(),
             color,
             background_color: None,
-            underline: None,
+            underline: self.underline.then(|| gpui::UnderlineStyle {
+                thickness: px(1.),
+                color: Some(color),
+                wavy: false,
+            }),
             strikethrough: self.strike.then(|| StrikethroughStyle {
                 thickness: px(1.),
                 color: Some(color),
@@ -79,6 +85,9 @@ const RING: f32 = 16.;
 const RING_GAP: f32 = 6.;
 /// `vertical-align: middle` for a 16px box beside 15px text.
 const RING_DROP: f32 = 4.5;
+
+/// `Kind::Action` for an emoji that couldn't load; the reason follows.
+pub const EMOJI_MISSING: &str = "emoji-missing:";
 
 /// What a run is, beyond its look: what clicking it does and the box drawn behind it.
 #[derive(Clone, PartialEq)]
@@ -923,6 +932,7 @@ impl Element for Inline {
                             Kind::Time(hint) if !hint.is_empty() => (false, Some(hint.clone())),
                             Kind::LinkTip(_, tip) => (false, Some(tip.clone())),
                             Kind::Action(a) if a.as_ref() == "edited" => (false, Some("Click to view edit history".into())),
+                            Kind::Action(a) if a.starts_with(EMOJI_MISSING) => (false, Some("Emoji unavailable (tap for details)".into())),
                             _ => (false, None),
                         };
                         if lift || hint.is_some() {
