@@ -1,6 +1,6 @@
 //! FBX 7.x, binary or ASCII, read the way three.js's FBXLoader reads it: models with their
 //! pivots folded into TRS, polygon meshes fanned into triangles, clusters as skins, and each
-//! animation stack as a clip. Textures come only from embedded video content.
+//! animation stack as a clip, blend shapes as morph targets. Textures come only from embedded video content.
 
 use std::collections::HashMap;
 
@@ -473,6 +473,8 @@ pub fn load(bytes: &[u8]) -> Result<Scene, String> {
         i
     };
 
+    // Blend shape channel → (node, target), for its DeformPercent curves.
+    let mut morph_of: HashMap<i64, (usize, usize)> = HashMap::new();
     for g in objects.kids("Geometry") {
         let Some(gid) = g.attrs.first().and_then(|a| a.int()) else { continue };
         if g.attrs.get(2).and_then(|a| a.str()) != Some("Mesh") {
@@ -529,6 +531,23 @@ pub fn load(bytes: &[u8]) -> Result<Scene, String> {
             }
         }
 
+        // Morph targets: the first shape of each blend shape channel, as offsets per control point.
+        let mut shapes: Vec<(i64, Vec<Vec3>)> = Vec::new();
+        for bs in links.iter().filter(|(c, p, _)| *p == gid && class(*c) == Some("Deformer") && sub(*c) == "BlendShape").map(|(c, _, _)| *c) {
+            for ch in children_of(bs, "Deformer") {
+                let Some(&shape) = children_of(ch, "Geometry").first() else { continue };
+                let node = by_id[&shape];
+                let mut d = vec![Vec3::ZERO; cps.len()];
+                let v = node.arr_f("Vertices");
+                for (k, &cp) in node.arr_i("Indexes").iter().enumerate() {
+                    if let (Some(slot), Some(o)) = (d.get_mut(cp as usize), v.get(k * 3..k * 3 + 3)) {
+                        *slot = geo.transform_vector3(Vec3::new(o[0] as f32, o[1] as f32, o[2] as f32));
+                    }
+                }
+                shapes.push((ch, d));
+            }
+        }
+
         let mut buckets: HashMap<usize, Prim> = HashMap::new();
         let mut poly: Vec<(usize, usize)> = Vec::new();
         let mut poly_i = 0;
@@ -551,10 +570,13 @@ pub fn load(bytes: &[u8]) -> Result<Scene, String> {
                     scene.materials.len() - 1
                 }),
             };
-            let prim = buckets.entry(mat).or_insert_with(|| Prim { material: Some(mat), ..Default::default() });
+            let prim = buckets.entry(mat).or_insert_with(|| Prim { material: Some(mat), targets: vec![Target::default(); shapes.len()], ..Default::default() });
             let push = |prim: &mut Prim, &(pv, cp): &(usize, usize)| {
                 let Some(&p) = cps.get(cp) else { return };
                 prim.pos.push(p.to_array());
+                for (t, (_, d)) in prim.targets.iter_mut().zip(&shapes) {
+                    t.pos.push(d[cp].to_array());
+                }
                 if let Some(n) = normals.as_ref().and_then(|l| l.get(pv, poly_i, cp, 3)) {
                     prim.nrm.push((nmat * Vec3::new(n[0] as f32, n[1] as f32, n[2] as f32)).normalize_or_zero().to_array());
                 }
@@ -595,13 +617,18 @@ pub fn load(bytes: &[u8]) -> Result<Scene, String> {
             }
             p.finish();
         }
-        scene.meshes.push(Mesh { prims, ..Default::default() });
+        scene.meshes.push(Mesh { prims, weights: vec![0.; shapes.len()] });
         let mesh = scene.meshes.len() - 1;
-        if skin_idx.is_some() || scene.nodes[mi].mesh.is_none() {
+        let at = if skin_idx.is_some() || scene.nodes[mi].mesh.is_none() {
             scene.nodes[mi].mesh = Some(mesh);
             scene.nodes[mi].skin = skin_idx;
+            mi
         } else {
             scene.nodes.push(Node { parent: Some(mi), mesh: Some(mesh), ..Node::default() });
+            scene.nodes.len() - 1
+        };
+        for (k, (ch, _)) in shapes.iter().enumerate() {
+            morph_of.insert(*ch, (at, k));
         }
     }
 
@@ -609,8 +636,20 @@ pub fn load(bytes: &[u8]) -> Result<Scene, String> {
     for stack in objects.kids("AnimationStack") {
         let Some(sid) = stack.attrs.first().and_then(|a| a.int()) else { continue };
         let mut channels = Vec::new();
+        let mut morphs: HashMap<usize, Vec<(usize, Vec<f64>, Vec<f64>)>> = HashMap::new();
         for layer in children_of(sid, "AnimationLayer") {
             for cn in children_of(layer, "AnimationCurveNode") {
+                if let Some(&(ni, k)) = links.iter().find(|(c, p, prop)| *c == cn && prop.as_deref() == Some("DeformPercent")).and_then(|(_, p, _)| morph_of.get(p)) {
+                    let curve = links.iter().find(|(c, p, _)| *p == cn && class(*c) == Some("AnimationCurve")).map(|(c, _, _)| &by_id[c]);
+                    if let Some(node) = curve {
+                        let times: Vec<f64> = node.arr_i("KeyTime").iter().map(|&t| t as f64 / TICKS_PER_SECOND).collect();
+                        let values = node.arr_f("KeyValueFloat");
+                        if !times.is_empty() && times.len() == values.len() {
+                            morphs.entry(ni).or_default().push((k, times, values));
+                        }
+                    }
+                    continue;
+                }
                 let Some((_, target, Some(prop))) = links.iter().find(|(c, p, prop)| *c == cn && index_of.contains_key(p) && prop.is_some()) else { continue };
                 let ni = index_of[target];
                 let path = match prop.as_str() {
@@ -675,6 +714,28 @@ pub fn load(bytes: &[u8]) -> Result<Scene, String> {
                 }
                 channels.push(Channel { node: ni, path, interp: Interp::Linear, times: times.iter().map(|&t| t as f32).collect(), values });
             }
+        }
+        for (ni, curves) in morphs {
+            let width = scene.nodes[ni].mesh.map_or(0, |m| scene.meshes[m].weights.len());
+            let mut times: Vec<f64> = curves.iter().flat_map(|(_, t, _)| t.iter().copied()).collect();
+            times.sort_by(f64::total_cmp);
+            times.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
+            let mut values = vec![0f32; times.len() * width];
+            for (k, ts, vs) in curves.iter().filter(|c| c.0 < width) {
+                for (i, &t) in times.iter().enumerate() {
+                    let j = ts.partition_point(|&x| x <= t);
+                    let v = if j == 0 {
+                        vs[0]
+                    } else if j >= ts.len() {
+                        vs[ts.len() - 1]
+                    } else {
+                        let (t0, t1) = (ts[j - 1], ts[j]);
+                        vs[j - 1] + (vs[j] - vs[j - 1]) * if t1 > t0 { (t - t0) / (t1 - t0) } else { 0. }
+                    };
+                    values[i * width + k] = v as f32 / 100.;
+                }
+            }
+            channels.push(Channel { node: ni, path: Path::W, interp: Interp::Linear, times: times.iter().map(|&t| t as f32).collect(), values });
         }
         let duration = super::anim::duration(&channels);
         scene.clips.push(Clip { name: object_name(stack), duration, channels });
