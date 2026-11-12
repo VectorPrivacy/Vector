@@ -1049,6 +1049,7 @@ mod custom_tests {
             base: Look::new("Rubik", 15., 21., gpui::white()),
             revealed: &revealed,
             custom: Some(&f),
+            now: 0.,
         };
         let blocks = parse("Have you seen this? :grin: and 21:20:30", &ctx);
         let Block::Para(p) = &blocks[0] else { panic!() };
