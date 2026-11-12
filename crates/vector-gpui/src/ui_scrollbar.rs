@@ -107,6 +107,10 @@ impl VectorApp {
             self.unread_below = 0;
         }
         self.return_shown = self.gap.is_some() || (!following && from_end > 500.);
+        let fade = if self.gap.is_some() { 1. } else { (from_end / 15.).clamp(0., 1.) };
+        if (fade - self.typing_fade).abs() > 0.01 {
+            self.typing_fade = fade;
+        }
         let Some((i, into)) = top else { return };
         let gap = self.gap_index(&store);
         let mut j = match gap {

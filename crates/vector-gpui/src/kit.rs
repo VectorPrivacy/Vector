@@ -38,8 +38,11 @@ fn mix(a: Hsla, b: Hsla, t: f32) -> Hsla {
 /// `.startup-subtext-gradient`: a `linear-gradient(to right, #2b976c 13.87%, #59fcb3 60%)` at
 /// 200% size, breathing across the text over 6s. Each glyph takes the colour under its middle.
 pub fn gradient_text(text: &str, spacing: f32, phase: f32) -> gpui::Div {
-    let from = c(ACCENT_DEEP);
-    let to = c(ACCENT);
+    gradient_text_in(text, spacing, phase, c(ACCENT_DEEP), c(ACCENT))
+}
+
+/// [`gradient_text`] between two other colours.
+pub fn gradient_text_in(text: &str, spacing: f32, phase: f32, from: gpui::Hsla, to: gpui::Hsla) -> gpui::Div {
     let count = text.graphemes(true).count().max(1) as f32;
     // background-position swings 0% → 100% → 0%: the visible half of the 200% strip slides.
     let swing = 0.5 - 0.5 * (phase * std::f32::consts::TAU).cos();

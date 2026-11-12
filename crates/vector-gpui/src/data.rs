@@ -226,6 +226,8 @@ pub struct Store {
     pub fixture_presets: Option<serde_json::Value>,
     /// `fetch_nostr_embed`'s answers, by reference.
     pub fixture_embeds: HashMap<String, serde_json::Value>,
+    /// Who is typing, by chat: their npubs and when the list last changed (ms).
+    pub typing: HashMap<String, (Vec<String>, u64)>,
     /// `fetch_emoji_pack_by_naddr`'s answers.
     pub fixture_packs: HashMap<String, vector_core::emoji_packs::EmojiPack>,
     pub fixture_market: Vec<vector_core::webxdc::MarketplaceApp>,
@@ -377,6 +379,7 @@ impl Store {
             fixture_i2p: f.net_demo.get("i2p_config").cloned(),
             fixture_presets: f.policy_presets,
             fixture_embeds: f.embeds,
+            typing: HashMap::new(),
             fixture_packs: f.packs,
             fixture_market: f.marketplace,
             fixture_pivx: f.pivx,
@@ -428,6 +431,7 @@ impl Store {
             fixture_i2p: None,
             fixture_presets: None,
             fixture_embeds: HashMap::new(),
+            typing: HashMap::new(),
             fixture_packs: HashMap::new(),
             fixture_market: Vec::new(),
             fixture_pivx: None,
@@ -513,6 +517,22 @@ impl Store {
                 let at = chat.messages.partition_point(|m| m.at <= msg.at);
                 chat.messages.insert(at, msg);
             }
+        }
+    }
+
+    pub fn anyone_typing(&self) -> bool {
+        self.typing.keys().any(|c| !self.typers(c).is_empty())
+    }
+
+    /// Who is typing in `chat` now, minus anyone blocked.
+    pub fn typers(&self, chat: &str) -> Vec<String> {
+        match self.typing.get(chat) {
+            Some((who, at)) if self.now_ms().saturating_sub(*at) <= TYPING_TTL_MS => who
+                .iter()
+                .filter(|n| !self.profiles.get(*n).is_some_and(|p| p.is_blocked))
+                .cloned()
+                .collect(),
+            _ => Vec::new(),
         }
     }
 
@@ -722,6 +742,21 @@ pub fn unread_count(chat: &SerializableChat) -> usize {
         return chat.messages.iter().filter(|m| !m.mine).count();
     };
     chat.messages[i + 1..].iter().filter(|m| !m.mine).count()
+}
+
+/// Typing lapses this long after the last word of it.
+pub const TYPING_TTL_MS: u64 = 30_000;
+
+/// `generateTypingText`: a DM already knows who; a group names up to three.
+pub fn typing_text(typers: &[String], group: bool, name: impl Fn(&str) -> String) -> Option<String> {
+    Some(match typers {
+        [] => return None,
+        _ if !group => "Typing...".into(),
+        [a] => format!("{} is typing...", name(a)),
+        [a, b] => format!("{} and {} are typing...", name(a), name(b)),
+        [a, b, c] => format!("{}, {}, and {} are typing...", name(a), name(b), name(c)),
+        _ => "Several people are typing...".into(),
+    })
 }
 
 /// The preview line: `chatPreviewText` (render/chatlist/preview.js).

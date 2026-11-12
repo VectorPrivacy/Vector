@@ -272,6 +272,11 @@ pub struct VectorApp {
     /// Messages that arrived below a reader scrolled up.
     unread_below: u32,
     return_shown: bool,
+    /// The typing strip's shadow: none while pinned, full a few pixels up the history.
+    typing_fade: f32,
+    /// When this client last told the open chat it was typing, and the draft's length then.
+    typing_sent: Option<(String, std::time::Instant)>,
+    draft_len: usize,
     secret_guard: Option<crate::secretguard::Guard>,
     /// The next send has been through the secret guard.
     secret_pass: bool,
@@ -570,7 +575,8 @@ impl VectorApp {
         cx.subscribe(&input, |app, _, _: &CancelInput, cx| app.cancel_mode(cx))
             .detach();
         cx.subscribe(&input, |app, _, _: &crate::composer::InputChanged, cx| {
-            app.update_shortcode(cx)
+            app.update_shortcode(cx);
+            app.typed(cx);
         })
         .detach();
         cx.subscribe_in(
@@ -923,6 +929,9 @@ impl VectorApp {
             paging_newer: false,
             unread_below: 0,
             return_shown: false,
+            typing_fade: 0.,
+            typing_sent: None,
+            draft_len: 0,
             secret_guard: None,
             secret_pass: false,
             anchors: Default::default(),
@@ -1331,6 +1340,25 @@ impl VectorApp {
                 f.open_transfer(send, cx);
                 f.transfer_state(&payload, cx);
             });
+        }
+        // Fixtures: VECTOR_TYPING=<n> has each DM's contact typing, and n members in each group.
+        if let Some(n) = std::env::var("VECTOR_TYPING").ok().and_then(|v| v.parse::<usize>().ok()) {
+            let mut store = app.store.borrow_mut();
+            let now = store.now_ms();
+            let me = store.my_npub.clone();
+            let mut others: Vec<String> = store.profiles.keys().filter(|k| **k != me).cloned().collect();
+            others.sort();
+            let typing: Vec<(String, Vec<String>)> = store
+                .chats
+                .iter()
+                .map(|c| {
+                    let who = if c.chat_type == vector_core::ChatType::DirectMessage { vec![c.id.clone()] } else { others.iter().take(n).cloned().collect() };
+                    (c.id.clone(), who)
+                })
+                .collect();
+            for (id, who) in typing {
+                store.typing.insert(id, (who, now));
+            }
         }
         // Fixtures: VECTOR_EMBED_VIDEO=idle|loading|failed|ready gives the video embed a file of its
         // own, in that state.
@@ -2625,6 +2653,15 @@ impl VectorApp {
                     t.pct = Some(pct as f32);
                 }
                 self.refresh_rows(false);
+            }
+            "typing-update" => {
+                let Some(chat) = payload.get("conversation_id").and_then(Value::as_str) else { return };
+                let typers: Vec<String> = payload.get("typers").and_then(Value::as_array).map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect()).unwrap_or_default();
+                let mut store = self.store.borrow_mut();
+                let now = store.now_ms();
+                store.typing.insert(chat.to_string(), (typers, now));
+                drop(store);
+                cx.notify();
             }
             "embed_video_progress" => {
                 let (Some(url), Some(pct)) = (payload.get("url").and_then(Value::as_str), payload.get("progress").and_then(Value::as_i64)) else { return };
@@ -4592,6 +4629,38 @@ impl VectorApp {
         }
     }
 
+    /// A draft that grew tells the open chat we are typing, once per lapse. Not while editing,
+    /// not for a `/` command, not to a request still waiting, and not to ourselves.
+    fn typed(&mut self, cx: &mut Context<Self>) {
+        let input = self.input.read(cx);
+        let (len, slash) = (input.text().len(), input.text().starts_with('/'));
+        let grew = len > std::mem::replace(&mut self.draft_len, len);
+        let Some(chat) = self.open.as_ref().map(|s| s.to_string()) else { return };
+        if !self.live || !grew || slash || matches!(self.mode, Mode::Edit { .. }) {
+            return;
+        }
+        if self.typing_sent.as_ref().is_some_and(|(id, at)| *id == chat && at.elapsed().as_millis() < data::TYPING_TTL_MS as u128) {
+            return;
+        }
+        {
+            let store = self.store.borrow();
+            if chat == store.my_npub || store.chats.iter().find(|c| c.id == chat).is_none_or(|c| store.is_request(c)) {
+                return;
+            }
+        }
+        self.typing_sent = Some((chat.clone(), std::time::Instant::now()));
+        let _ = backend::run(async move {
+            if !backend::prefs::sql_bools(&[("send_typing_indicators", true)])[0] {
+                return;
+            }
+            if chat.starts_with("npub1") {
+                let _ = vector_core::VectorCore.send_typing(&chat).await;
+            } else {
+                let _ = vector_core::VectorCore.send_community_typing(&chat).await;
+            }
+        });
+    }
+
     fn cancel_mode(&mut self, cx: &mut Context<Self>) {
         if matches!(self.mode, Mode::Edit { .. }) {
             self.input.update(cx, |input, cx| input.set_text("", cx));
@@ -4714,6 +4783,9 @@ impl Render for VectorApp {
             for old in media.models.retired.drain(..) {
                 let _ = window.drop_image(old);
             }
+        }
+        if self.store.borrow().anyone_typing() {
+            window.request_animation_frame();
         }
         self.revoke_outlived_archives();
         if self.mini_animating() || self.pivx_animating() || self.archive.animating() || self.nexus.as_ref().is_some_and(|n| n.animating()) {
@@ -6241,7 +6313,86 @@ fn get_started(cx: &mut Context<VectorApp>) -> impl IntoElement {
 
 /// `.chatlist-contact` (ChatlistRow.svelte).
 /// The chat list's last-message line (`chatPreviewText`).
+/// `.typing-strip`: who is typing in the open chat, in the room the last row keeps clear
+/// above the composer.
+fn typing_strip(store: &Store, chat: &str, fade: f32) -> Option<AnyElement> {
+    const FACES: usize = 3;
+    let typers = store.typers(chat);
+    if typers.is_empty() {
+        return None;
+    }
+    let t = crate::attachments::EPOCH.elapsed().as_secs_f32();
+    let dots = (0..3).map(|i| {
+        // `typing-wave`: up 1.5px and fully lit at 30% of each 1.2s beat.
+        let p = ((t - i as f32 * 0.15) / 1.2).rem_euclid(1.);
+        let k = if p < 0.3 { p / 0.3 } else if p < 0.6 { 1. - (p - 0.3) / 0.3 } else { 0. };
+        let k = k * k * (3. - 2. * k);
+        div().size(px(4.)).rounded_full().bg(white_a(0.7)).opacity(0.45 + 0.55 * k).mt(px(-1.5 * k))
+    });
+    let names: Vec<String> = if typers.len() > 3 { Vec::new() } else { typers.iter().map(|n| store.name(n)).collect() };
+    let mut text = div().min_w_0().flex().overflow_hidden().whitespace_nowrap();
+    if names.is_empty() {
+        text = text.child("Several people are typing");
+    } else {
+        for (i, name) in names.iter().enumerate() {
+            if i > 0 {
+                text = text.child(if i == names.len() - 1 { "\u{a0}and\u{a0}" } else { ",\u{a0}" });
+            }
+            text = text.child(div().font_weight(FontWeight::SEMIBOLD).text_color(c(0xffffff)).child(name.clone()));
+        }
+        text = text.child(if names.len() == 1 { "\u{a0}is typing" } else { "\u{a0}are typing" });
+    }
+    Some(
+        div()
+            .absolute()
+            .bottom_0()
+            .left_0()
+            .right_0()
+            .h(px(58.))
+            .pt(px(32.))
+            .px(px(16.))
+            .flex()
+            .items_start()
+            .gap(px(7.))
+            .text_size(px(12.5))
+            .line_height(px(18.))
+            .text_color(white_a(0.55))
+            .when(fade > 0., |d| {
+                d.child(
+                    div().absolute().top_0().bottom_0().left_0().right(px(10.)).opacity(fade).bg(gpui::linear_gradient(
+                        180.,
+                        gpui::linear_color_stop(ca(3, 3, 3, 0.), 0.),
+                        gpui::linear_color_stop(c(0x030303), 1.),
+                    )),
+                )
+            })
+            .child(div().flex().flex_shrink_0().children(typers.iter().take(FACES).enumerate().map(|(i, n)| {
+                div()
+                    .size(px(18.))
+                    .rounded_full()
+                    .shadow(vec![gpui::BoxShadow { color: c(0x030303), offset: gpui::point(px(0.), px(0.)), blur_radius: px(0.), spread_radius: px(1.), inset: false }])
+                    .when(i > 0, |d| d.ml(px(-6.)))
+                    .child(avatar(store, n, 18.))
+            })))
+            .child(div().h(px(18.)).flex().items_center().gap(px(3.)).flex_shrink_0().children(dots))
+            .child(text)
+            .into_any_element(),
+    )
+}
+
 fn preview_line(store: &Store, chat: &SerializableChat, color: gpui::Hsla) -> AnyElement {
+    let typers = store.typers(&chat.id);
+    let group = chat.chat_type != vector_core::ChatType::DirectMessage;
+    if let Some(text) = data::typing_text(&typers, group, |n| store.name(n)) {
+        // `.typing-indicator-text`: white into grey, breathing over 6s.
+        let phase = (crate::attachments::EPOCH.elapsed().as_secs_f32() / 6.).fract();
+        return div()
+            .overflow_hidden()
+            .text_size(px(13.))
+            .line_height(px(18.))
+            .child(crate::kit::gradient_text_in(&text, 0., phase, c(0xffffff), c(0x808080)))
+            .into_any_element();
+    }
     let look = crate::inline::Look::new(RUBIK, 13., 18., color);
     let Some(m) = chat.messages.last() else {
         return crate::inline::inline(Vec::new(), look).into_any_element();
@@ -7114,6 +7265,7 @@ impl VectorApp {
                     })
                     .children(request)
                     .children(drawer)
+                    .children(typing_strip(store, &id, self.typing_fade).inspect(|_| window.request_animation_frame()))
                     // `.fadeout-bottom-msgs`: rows dim into the composer.
                     .child(
                         div()
