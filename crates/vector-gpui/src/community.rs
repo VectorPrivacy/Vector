@@ -16,6 +16,8 @@ pub enum Act {
     Open(String),
     /// Back to Messages.
     Home,
+    /// An unread DM from the rail.
+    Dm(String),
     Channel(String),
     /// A Category or member section folded or unfolded.
     Fold(String),

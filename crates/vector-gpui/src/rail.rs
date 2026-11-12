@@ -249,15 +249,15 @@ pub fn render(
 }
 
 /// The open bar, or the grey unread one, at the rail's edge.
-fn bars(d: gpui::Stateful<gpui::Div>, left: f32, open: bool, unread: bool) -> gpui::Stateful<gpui::Div> {
+fn bars(d: gpui::Stateful<gpui::Div>, left: f32, inset: f32, open: bool, unread: bool) -> gpui::Stateful<gpui::Div> {
     d.when(open, |d| {
         d.child(
             div()
                 .absolute()
                 .left(px(-left))
-                .top(px(3.))
+                .top(px(inset))
+                .bottom(px(inset))
                 .w(px(4.))
-                .h(px(25.))
                 .rounded_r(px(4.))
                 .bg(c(PRIMARY)),
         )
@@ -267,7 +267,8 @@ fn bars(d: gpui::Stateful<gpui::Div>, left: f32, open: bool, unread: bool) -> gp
             div()
                 .absolute()
                 .left(px(-left))
-                .top(px(10.5))
+                .top(gpui::relative(0.5))
+                .mt(px(-5.))
                 .w(px(4.))
                 .h(px(10.))
                 .rounded_r(px(4.))
@@ -308,6 +309,7 @@ fn item(store: &Store, com: &Community, open: bool, unread: bool, inset: f32, zo
     let el = bars(
         row_shell(SharedString::from(format!("rail-c-{id}")), inset),
         inset,
+        3.,
         open,
         unread,
     )
@@ -368,6 +370,7 @@ fn folder_head(
     let el = bars(
         row_shell(SharedString::from(format!("rail-f-{id}")), 4.),
         8.,
+        3.,
         active,
         unread,
     )
@@ -434,4 +437,175 @@ fn draggable(
         );
     }
     el.into_any_element()
+}
+
+/// The collapsed rail's Communities: 45px tiles, folders as tiles of their members.
+pub fn render_slim(
+    store: &Store,
+    layout: &RailLayout,
+    open: &HashSet<String>,
+    active: Option<&str>,
+    rail_w: f32,
+    on: &OnAct,
+) -> AnyElement {
+    let rows = rows(store, layout);
+    let unread = |c: &Community| {
+        c.channels
+            .iter()
+            .any(|ch| store.chat(&ch.channel_id).is_some_and(|chat| store.unread_count(chat) > 0))
+    };
+    // The open bar reaches from the rail's edge.
+    let edge = (45. - rail_w) / 2.;
+    let mut list = div().flex().flex_col().gap(px(GAP)).py(px(6.));
+    for (ix, row) in rows.iter().enumerate() {
+        let next = before(rows.get(ix + 1));
+        match row {
+            Row::Item(com) => {
+                let zones = Zones {
+                    before: before(Some(row)),
+                    into: Some(RailDrop::Combine {
+                        with_key: com.community_id.clone(),
+                    }),
+                    after: next,
+                    child: false,
+                };
+                let open_now = active == Some(com.community_id.as_str());
+                list = list.child(tile(store, com, open_now, !open_now && unread(com), edge, zones, on));
+            }
+            Row::Folder { id, name, hue, members } => {
+                let is_open = open.contains(id);
+                let label = if name.is_empty() {
+                    members.iter().map(|c| c.name.as_str()).collect::<Vec<_>>().join(", ")
+                } else {
+                    name.clone()
+                };
+                let holds_active = members.iter().any(|c| active == Some(c.community_id.as_str()));
+                let any_unread = members.iter().any(|c| active != Some(c.community_id.as_str()) && unread(c));
+                let tint = tint(*hue);
+                let zones = Zones {
+                    before: before(Some(row)),
+                    into: Some(RailDrop::IntoFolder {
+                        folder_id: id.clone(),
+                        before_key: is_open.then(|| members[0].community_id.clone()),
+                    }),
+                    after: if is_open {
+                        RailDrop::IntoFolder {
+                            folder_id: id.clone(),
+                            before_key: Some(members[0].community_id.clone()),
+                        }
+                    } else {
+                        next.clone()
+                    },
+                    child: false,
+                };
+                let fid = id.clone();
+                let tile_el = div()
+                    .relative()
+                    .size(px(45.))
+                    .rounded(px(8.5))
+                    .when(!is_open, |d| {
+                        d.bg(tint.opacity(0.26)).child(
+                            div().absolute().inset(px(6.)).flex().flex_wrap().gap(px(3.)).children(
+                                members.iter().take(4).map(|c| logo(store, &c.community_id, 15., 4.5)),
+                            ),
+                        )
+                    })
+                    .when(is_open, |d| {
+                        d.flex().items_center().justify_center().child(
+                            svg().path("icons/folder.svg").size(px(27.)).mt(px(-1.6)).text_color(tint),
+                        )
+                    });
+                let head = bars(
+                    ring(SharedString::from(format!("rail-f-{id}"))),
+                    -edge - 3.,
+                    6.,
+                    !is_open && holds_active,
+                    !is_open && any_unread,
+                )
+                .on_click({
+                    let (on, fid) = (on.clone(), fid.clone());
+                    move |_, w, cx| on(Act::RailFolder(fid.clone()), w, cx)
+                })
+                .on_mouse_down(gpui::MouseButton::Right, {
+                    let (on, fid) = (on.clone(), fid.clone());
+                    move |e, w, cx| {
+                        cx.stop_propagation();
+                        on(Act::RailMenu(None, Some(fid.clone()), e.position), w, cx)
+                    }
+                })
+                .child(tile_el);
+                let head = draggable(head, RailDrag::Folder { id: fid }, label.into(), zones, on);
+                let mut band = div()
+                    .w(px(53.))
+                    .mx_auto()
+                    .flex_shrink_0()
+                    .rounded(px(12.))
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .when(is_open, |d| d.bg(tint.opacity(0.09)).mt(px(-4.)).pt(px(4.)).pb(px(4.)))
+                    .child(head);
+                if is_open {
+                    let mut inner = div().pt(px(GAP)).flex().flex_col().gap(px(GAP));
+                    for (i, com) in members.iter().enumerate() {
+                        let zones = Zones {
+                            before: RailDrop::IntoFolder {
+                                folder_id: id.clone(),
+                                before_key: Some(com.community_id.clone()),
+                            },
+                            into: None,
+                            after: match members.get(i + 1) {
+                                Some(n) => RailDrop::IntoFolder {
+                                    folder_id: id.clone(),
+                                    before_key: Some(n.community_id.clone()),
+                                },
+                                None => next.clone(),
+                            },
+                            child: true,
+                        };
+                        let open_now = active == Some(com.community_id.as_str());
+                        inner = inner.child(tile(store, com, open_now, !open_now && unread(com), edge, zones, on));
+                    }
+                    band = band.child(inner);
+                }
+                list = list.child(band);
+            }
+        }
+    }
+    list.into_any_element()
+}
+
+/// Rings stand 3px out from their tile, with 2px between neighbours.
+const GAP: f32 = 8.;
+
+/// A tile's hover ring, drawn as a plate 3px out from the tile it holds.
+fn ring(id: SharedString) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(id)
+        .relative()
+        .m(px(-3.))
+        .p(px(3.))
+        .rounded(px(11.5))
+        .mx_auto()
+        .flex_shrink_0()
+        .cursor_pointer()
+        .hover(|d| d.bg(white_a(0.045)))
+}
+
+fn tile(store: &Store, com: &Community, open: bool, unread: bool, edge: f32, zones: Zones, on: &OnAct) -> AnyElement {
+    let id = com.community_id.clone();
+    let el = bars(ring(SharedString::from(format!("rail-c-{id}"))), -edge - 3., 6., open, unread)
+        .on_click({
+            let (on, id) = (on.clone(), id.clone());
+            move |_, w, cx| on(Act::Open(id.clone()), w, cx)
+        })
+        .on_mouse_down(gpui::MouseButton::Right, {
+            let (on, id) = (on.clone(), id.clone());
+            move |e, w, cx| {
+                cx.stop_propagation();
+                on(Act::RailMenu(Some(id.clone()), None, e.position), w, cx)
+            }
+        })
+        .child(logo(store, &com.community_id, 45., 8.5).bg(gpui::rgba(0x090909e6)));
+    draggable(el, RailDrag::Item { key: id }, com.name.clone().into(), zones, on)
 }

@@ -33,6 +33,10 @@ use chrono::TimeZone;
 
 const CHROME_H: f32 = 32.;
 pub(crate) const RAIL_W: f32 = 201.;
+/// The collapsed rail, its border included.
+pub(crate) const RAIL_SLIM_W: f32 = 73.;
+/// Narrower than this, the rail can't afford its labels.
+const RAIL_AUTO_COLLAPSE_W: f32 = 1080.;
 pub(crate) const LIST_W: f32 = 239.;
 const ROW_PITCH: f32 = 54.;
 
@@ -196,6 +200,8 @@ pub struct VectorApp {
     chatlist_keys: RefCell<Vec<(u8, String)>>,
     /// Rail folders open on this device.
     rail_open: HashSet<String>,
+    /// The user's choice to collapse the rail; a narrow window collapses it regardless.
+    rail_pref: bool,
     archive: chatlist_ops::Fold,
     /// The request senders last asked about for shared Communities.
     mutuals_asked: Vec<String>,
@@ -754,6 +760,7 @@ impl VectorApp {
             chatlist: ListState::new(0, ListAlignment::Top, px(400.)),
             chatlist_keys: RefCell::new(Vec::new()),
             rail_open: HashSet::new(),
+            rail_pref: backend::device::get("ws_rail_collapsed").as_deref() == Some("true"),
             archive: Default::default(),
             tab_slid: false,
             mutuals_asked: Vec::new(),
@@ -1845,6 +1852,14 @@ impl VectorApp {
                     _ => self.show_toast("This pin opens something not in this build yet", cx),
                 }
             }
+        }
+    }
+
+    fn rail_mode(&self, window: &Window) -> RailMode {
+        let locked = f32::from(window.viewport_size().width) < RAIL_AUTO_COLLAPSE_W;
+        RailMode {
+            collapsed: self.rail_pref || locked,
+            locked,
         }
     }
 
@@ -3803,6 +3818,7 @@ impl VectorApp {
 
 impl Render for VectorApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let rail_mode = self.rail_mode(window);
         if self.media.borrow_mut().audio.tick() || self.rec.animating() {
             window.request_animation_frame();
         }
@@ -3879,7 +3895,7 @@ impl Render for VectorApp {
             .line_height(px(24.));
         match &self.screen {
             Screen::Booting => {
-                return root.child(div().absolute().inset_0().child(chrome(window, true)));
+                return root.child(div().absolute().inset_0().child(chrome(window, true, false)));
             }
             Screen::Login(view) => {
                 return root
@@ -3890,7 +3906,7 @@ impl Render for VectorApp {
                             .top_0()
                             .left_0()
                             .right_0()
-                            .child(chrome(window, true)),
+                            .child(chrome(window, true, false)),
                     )
                     .child(self.security.clone());
             }
@@ -3941,7 +3957,7 @@ impl Render for VectorApp {
         root.children(net_dialog)
             .children(popup.map(|p| gpui::deferred(p).with_priority(15)))
             .child(self.security.clone())
-            .child(chrome(window, false).children(self.update_banner(cx)))
+            .child(chrome(window, false, rail_mode.collapsed).children(self.update_banner(cx)))
             .child(
                 div()
                     .flex()
@@ -3953,6 +3969,7 @@ impl Render for VectorApp {
                         &self.rail_open,
                         self.open.as_ref(),
                         self.community.as_ref().map(|v| v.id.as_str()),
+                        rail_mode,
                         &on_community,
                         {
                             let app = cx.entity().downgrade();
@@ -3963,6 +3980,11 @@ impl Render for VectorApp {
                                 .ok();
                             }
                         },
+                        cx.listener(|app, _: &gpui::ClickEvent, _, cx| {
+                            app.rail_pref = !app.rail_pref;
+                            backend::device::set("ws_rail_collapsed", app.rail_pref.to_string());
+                            cx.notify();
+                        }),
                     ))
                     .when_some(self.settings.as_ref(), |row, settings| {
                         let app = cx.entity().downgrade();
@@ -3970,7 +3992,7 @@ impl Render for VectorApp {
                             app.update(cx, |app, cx| app.on_settings(act, window, cx))
                                 .ok();
                         });
-                        let width = f32::from(window.viewport_size().width) - RAIL_W;
+                        let width = f32::from(window.viewport_size().width) - rail_mode.width();
                         row.child(
                             div()
                                 .flex_1()
@@ -3980,7 +4002,7 @@ impl Render for VectorApp {
                         )
                     })
                     .when(self.settings.is_none() && self.nexus.is_some(), |row| {
-                        let width = f32::from(window.viewport_size().width) - RAIL_W;
+                        let width = f32::from(window.viewport_size().width) - rail_mode.width();
                         row.child(div().flex_1().min_w_0().h_full().children(self.nexus_view(width, cx)))
                     })
                     .when(self.settings.is_none() && self.nexus.is_none(), |row| {
@@ -4021,7 +4043,7 @@ impl Render for VectorApp {
                                         .ok();
                                     });
                                 let width =
-                                    f32::from(window.viewport_size().width) - RAIL_W - LIST_W;
+                                    f32::from(window.viewport_size().width) - rail_mode.width() - LIST_W;
                                 div()
                                     .flex_1()
                                     .min_w_0()
@@ -4042,7 +4064,7 @@ impl Render for VectorApp {
                                         .ok();
                                 });
                                 let width =
-                                    f32::from(window.viewport_size().width) - RAIL_W - LIST_W;
+                                    f32::from(window.viewport_size().width) - rail_mode.width() - LIST_W;
                                 let nc = self.new_chat.as_ref().unwrap();
                                 let invite = crate::newchat::invite_key(nc.filter.read(cx).text())
                                     .map(|k| {
@@ -4114,7 +4136,7 @@ impl Render for VectorApp {
                         crate::switcher::view(
                             s,
                             CHROME_H + 60.,
-                            RAIL_W + LIST_W,
+                            rail_mode.width() + LIST_W,
                             f32::from(window.viewport_size().height),
                             &on,
                         )
@@ -4362,7 +4384,7 @@ impl VectorApp {
 // ── #window-chrome ──────────────────────────────────────────────────────────────────────
 
 /// The title strip; over the login screens it is only its controls, on the same art.
-fn chrome(window: &Window, login: bool) -> gpui::Div {
+fn chrome(window: &Window, login: bool, mark_only: bool) -> gpui::Div {
     let maximized = window.is_maximized();
     let ctl = |id: &'static str, icon: &'static str, area: WindowControlArea, hover: u32| {
         div()
@@ -4411,14 +4433,14 @@ fn chrome(window: &Window, login: bool) -> gpui::Div {
                                     .w(px(12.))
                                     .h(px(20.)),
                             )
-                            .child(
+                            .when(!mark_only, |d| d.child(
                                 img("ui/logo-typeface.svg")
                                     .absolute()
                                     .left(px(32.))
                                     .top(px(9.5))
                                     .w(px(92.))
                                     .h(px(12.)),
-                            ),
+                            )),
                     )
                 }),
         )
@@ -4494,14 +4516,44 @@ fn rail_label(text: &'static str) -> impl IntoElement {
         .child(text)
 }
 
+/// A corner dot cut out of what it sits on by a ring in the rail's colour.
+fn slim_badge(color: gpui::Hsla) -> gpui::Div {
+    div()
+        .absolute()
+        .size(px(14.))
+        .rounded_full()
+        .bg(c(0x090909))
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(div().size(px(10.)).rounded_full().bg(color))
+}
+
+/// `(collapsed, locked)`: whether the rail is down to tiles, and whether the window forced it.
+#[derive(Clone, Copy)]
+struct RailMode {
+    collapsed: bool,
+    locked: bool,
+}
+
+impl RailMode {
+    fn width(self) -> f32 {
+        if self.collapsed { RAIL_SLIM_W } else { RAIL_W }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn rail(
     store: &Store,
     folders: &HashSet<String>,
     open: Option<&SharedString>,
     active: Option<&str>,
+    mode: RailMode,
     on_c: &crate::community::OnAct,
     on_me: impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static,
+    on_collapse: impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static,
 ) -> impl IntoElement {
+    let slim = mode.collapsed;
     let unread: Vec<&SerializableChat> = store
         .chats
         .iter()
@@ -4511,6 +4563,7 @@ fn rail(
                 && open.is_none_or(|o| *o != c.id)
                 && !store.is_request(c)
         })
+        .take(3)
         .collect();
     let any_unread = store
         .chats
@@ -4519,7 +4572,29 @@ fn rail(
 
     // .ws-rail-messages.is-home
     let home = active.is_none();
-    let messages = div().pt(px(16.)).px(px(8.)).child(
+    let messages = if slim {
+        let on = on_c.clone();
+        div()
+            .h(px(61.))
+            .flex()
+            .items_center()
+            .border_b_1()
+            .border_color(c(DIVIDER))
+            .child(
+                div()
+                    .id("ws-rail-messages")
+                    .relative()
+                    .size(px(45.))
+                    .mx_auto()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .when(!home, |d| d.cursor_pointer())
+                    .on_click(move |_, window, cx| on(crate::community::Act::Home, window, cx))
+                    .child(svg().path("ui/rail-mail.svg").w(px(33.)).h(px(27.)).text_color(c(0xffffff)))
+                    .when(any_unread, |d| d.child(slim_badge(c(PRIMARY)).top(px(2.)).left(px(32.)))),
+            )
+    } else { div().pt(px(16.)).px(px(8.)).child(
         div()
             .id("ws-rail-messages")
             .h(px(40.))
@@ -4563,16 +4638,36 @@ fn rail(
                         )
                     }),
             ),
-    );
+    ) };
 
     // #ws-rail-dms
-    let dms = (!unread.is_empty()).then(|| {
+    let dms_slim = (slim && !unread.is_empty()).then(|| {
+        div().mt(px(6.)).flex().flex_col().gap(px(8.)).children(unread.iter().map(|chat| {
+            let id = chat.id.clone();
+            let on = on_c.clone();
+            div()
+                .id(SharedString::from(format!("rail-{}", chat.id)))
+                .relative()
+                .size(px(45.))
+                .mx_auto()
+                .rounded_full()
+                .cursor_pointer()
+                .on_click(move |_, w, cx| on(crate::community::Act::Dm(id.clone()), w, cx))
+                .child(avatar(store, &chat.id, 45.))
+                .child(slim_badge(white_a(0.9)).top(px(-2.)).right(px(-2.)))
+        }))
+    });
+    let dms = (!slim && !unread.is_empty()).then(|| {
         div()
             .mt(px(10.))
             .child(rail_label("New Messages"))
             .children(unread.iter().map(|chat| {
+                let (id, on) = (chat.id.clone(), on_c.clone());
                 div()
                     .id(SharedString::from(format!("rail-{}", chat.id)))
+                    .cursor_pointer()
+                    .hover(|d| d.bg(white_a(0.045)))
+                    .on_click(move |_, w, cx| on(crate::community::Act::Dm(id.clone()), w, cx))
                     .mx(px(8.))
                     .h(px(31.))
                     .rounded(px(10.))
@@ -4602,7 +4697,32 @@ fn rail(
     });
 
     // #ws-rail-spaces
-    let spaces = div()
+    let spaces = if slim {
+        let on = on_c.clone();
+        div()
+            .mt(px(6.))
+            .when(dms_slim.is_some(), |d| {
+                d.child(div().pt(px(6.)).child(div().mx(px(16.)).h(px(1.)).bg(c(DIVIDER))))
+            })
+            .child(crate::rail::render_slim(store, &store.rail, folders, active, RAIL_SLIM_W, on_c))
+            .child(
+                div()
+                    .id("rail-create-community")
+                    .size(px(45.))
+                    .mx_auto()
+                    .rounded(px(8.5))
+                    .border_1()
+                    .border_dashed()
+                    .border_color(white_a(0.22))
+                    .cursor_pointer()
+                    .hover(|d| d.bg(white_a(0.04)))
+                    .on_click(move |_, w, cx| on(crate::community::Act::Create, w, cx))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(svg().path("ui/plus-thin.svg").size(px(20.)).text_color(c(PRIMARY))),
+            )
+    } else { div()
         .mt(px(10.))
         .pt(px(6.))
         .child(div().mx(px(16.)).h(px(1.)).bg(c(DIVIDER)))
@@ -4648,14 +4768,16 @@ fn rail(
                         .text_color(white_a(0.55))
                         .child("Create Community"),
                 ),
-        );
+        ) };
 
+    let on_me = Rc::new(on_me);
+    let (on_me1, on_me2) = (on_me.clone(), on_me);
     let me = store.me();
     let my_name = me.map(|p| store.name(&p.id)).unwrap_or_default();
     let status = me.map(|p| p.status.title.clone()).filter(|t| !t.is_empty());
 
     div()
-        .w(px(RAIL_W))
+        .w(px(mode.width()))
         .flex_shrink_0()
         .h_full()
         .flex()
@@ -4672,49 +4794,85 @@ fn rail(
                 .border_color(c(DIVIDER))
                 .child(messages)
                 .children(dms)
+                .children(dms_slim)
                 .child(spaces),
         )
-        .child(
+        .when(mode.locked, |d| d.child(div().mt(px(10.)).mb(px(2.))))
+        .when(!mode.locked, |d| {
             // #ws-rail-collapse
-            div()
-                .mt(px(10.))
-                .mb(px(2.))
-                .mx(px(8.))
-                .h(px(40.))
-                .rounded(px(6.))
-                .opacity(0.4)
-                .flex()
-                .items_center()
-                .child(
+            d.child(
+                div()
+                    .id("ws-rail-collapse")
+                    .mt(px(10.))
+                    .mb(px(2.))
+                    .when(slim, |d| d.w(px(40.)).mx_auto().rounded(px(12.)).justify_center())
+                    .when(!slim, |d| d.mx(px(8.)).rounded(px(6.)))
+                    .h(px(40.))
+                    .opacity(0.4)
+                    .hover(move |d| {
+                        let d = d.opacity(1.);
+                        if slim { d } else { d.bg(white_a(0.045)) }
+                    })
+                    .cursor_pointer()
+                    .on_click(on_collapse)
+                    .flex()
+                    .items_center()
+                    .child(
+                        div()
+                            .when(!slim, |d| d.ml(px(14.)))
+                            .size(px(28.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(
+                                svg()
+                                    .path("icons/chevron-double-left.svg")
+                                    .size(px(28.))
+                                    .text_color(c(0xffffff))
+                                    .when(slim, |s| {
+                                        s.with_transformation(gpui::Transformation::rotate(gpui::radians(
+                                            std::f32::consts::PI,
+                                        )))
+                                    }),
+                            ),
+                    )
+                    .when(!slim, |d| {
+                        d.child(
+                            div()
+                                .ml(px(11.))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_size(px(14.))
+                                .text_color(c(TEXT))
+                                .child("Collapse"),
+                        )
+                    }),
+            )
+        })
+        .when(slim, |d| {
+            // #ws-rail-account, collapsed: the avatar alone, where the expanded chip puts it.
+            d.child(
+                div().pt(px(8.)).pb(px(8.)).child(
                     div()
-                        .ml(px(14.))
-                        .size(px(28.))
+                        .id("ws-rail-account")
+                        .cursor_pointer()
+                        .on_click(move |e, w, cx| on_me1(e, w, cx))
+                        .w(px(40.))
+                        .h(px(54.))
+                        .mx_auto()
                         .flex()
                         .items_center()
                         .justify_center()
-                        .child(
-                            svg()
-                                .path("icons/chevron-double-left.svg")
-                                .size(px(28.))
-                                .text_color(c(0xffffff)),
-                        ),
-                )
-                .child(
-                    div()
-                        .ml(px(11.))
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_size(px(14.))
-                        .text_color(c(TEXT))
-                        .child("Collapse"),
+                        .child(avatar(store, &store.my_npub, 38.)),
                 ),
-        )
-        .child(
+            )
+        })
+        .when(!slim, |d| d.child(
             // #ws-rail-account .account
             div().p(px(8.)).pt(px(8.)).child(
                 div()
                     .id("ws-rail-account")
                     .cursor_pointer()
-                    .on_click(on_me)
+                    .on_click(move |e, w, cx| on_me2(e, w, cx))
                     .h(px(54.))
                     .rounded(px(12.))
                     .bg(c(RAIL_TILE))
@@ -4749,7 +4907,7 @@ fn rail(
                             ),
                     ),
             ),
-        )
+        ))
 }
 
 // ── #chats ──────────────────────────────────────────────────────────────────────────────
@@ -6972,6 +7130,12 @@ impl VectorApp {
         match act {
             Act::Open(id) => self.open_community(id, window, cx),
             Act::Home => self.leave_community(),
+            Act::Dm(id) => {
+                self.leave_community();
+                self.settings = None;
+                self.nexus = None;
+                self.open_chat(id.into(), window, cx);
+            }
             Act::Channel(id) => self.open_channel(id, window, cx),
             Act::Fold(key) => {
                 if let Some(v) = self.community.as_mut()
@@ -6989,7 +7153,7 @@ impl VectorApp {
                 if let Some(id) = self.community.as_ref().map(|v| v.id.clone()) {
                     self.community_menu(
                         id,
-                        gpui::point(px(RAIL_W - 1.), px(CHROME_H + 61. + 4.)),
+                        gpui::point(px(self.rail_mode(window).width() - 1.), px(CHROME_H + 61. + 4.)),
                         cx,
                     );
                 }
