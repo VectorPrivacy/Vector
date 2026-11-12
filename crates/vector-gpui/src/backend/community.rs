@@ -57,6 +57,7 @@ pub fn summarize(c: &CommunityV2) -> Value {
             "my_permissions": mine.get(&ch.id.0).map(|p| p.to_string()),
             "restricted": ch.restricted(),
             "can_post": vector_core::community::v2::service::can_post(c, &ch.id),
+            "public_until": ch.public_until(),
         })).collect::<Vec<_>>(),
         "categories": VectorCore::categories_json(c),
         "primary_channel": c.primary_channel().map(|ch| bytes_to_hex_32(&ch.id.0)),
@@ -1115,6 +1116,11 @@ pub async fn set_member_role(community_id: String, npub: String, role_id: String
         Ok(())
     })
     .await
+}
+
+/// `get_channel_send_denied`: which of `npubs` can't send in the channel.
+pub fn send_denied(community_id: &str, channel_id: &str, npubs: &[String]) -> std::collections::HashSet<String> {
+    VectorCore.channel_send_denied(community_id, channel_id, npubs).unwrap_or_default().into_iter().collect()
 }
 
 /// `get_community_timeouts`: npub → { from, until }.

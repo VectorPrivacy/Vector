@@ -28,6 +28,8 @@ pub const TEXT_LH: f32 = 21.;
 /// What the user did to a message.
 #[derive(Clone)]
 pub enum Act {
+    /// A collapsed post, or a run of them, tapped open.
+    Unveil(Vec<String>),
     /// Older history failed to load: ask again.
     RetryHistory,
     /// An avatar or name tapped: their mini profile, beside what was painted under the key.
@@ -217,10 +219,11 @@ fn author_menu(ctx: &Ctx, m: &Message, npub: &str, key: &SharedString) -> impl F
     }
 }
 
-pub fn message_row(ctx: &Ctx, index: usize, first: bool, gap: f32) -> AnyElement {
+pub fn message_row(ctx: &Ctx, index: usize, first: bool, run: u32, gap: f32) -> AnyElement {
     let m = &ctx.chat.messages[index];
     let author = author_of(ctx, m);
-    let quote = (!m.replied_to.is_empty())
+    let hidden = ctx.store.hidden(ctx.chat, m);
+    let quote = (!m.replied_to.is_empty() && hidden.is_none())
         .then(|| reply_quote(ctx, m))
         .flatten();
     let has_quote = quote.is_some();
@@ -313,6 +316,11 @@ pub fn message_row(ctx: &Ctx, index: usize, first: bool, gap: f32) -> AnyElement
                     &ctx.chat.id,
                     &author,
                 ))
+                .children(timeout_mark(
+                    ctx.store,
+                    ctx.store.community_of(&ctx.chat.id).map(|c| c.community_id.as_str()),
+                    &author,
+                ))
                 .child(
                     div()
                         .flex_shrink_0()
@@ -321,6 +329,40 @@ pub fn message_row(ctx: &Ctx, index: usize, first: bool, gap: f32) -> AnyElement
                         .child(data::clock(m.at)),
                 ),
         );
+    }
+    if let Some(why) = hidden {
+        let ids: Vec<String> = if run > 1 {
+            ctx.chat.messages[index..]
+                .iter()
+                .filter(|o| o.npub == m.npub && ctx.store.hidden(ctx.chat, o) == Some(data::Hidden::Blocked))
+                .take(run as usize)
+                .map(|o| o.id.clone())
+                .collect()
+        } else {
+            vec![m.id.clone()]
+        };
+        let (act, id) = (ctx.on_act.clone(), m.id.clone());
+        let label: SharedString = if run > 1 { format!("{run} blocked messages").into() } else { why.label().into() };
+        let icon = if matches!(why, data::Hidden::NoSend | data::Hidden::TimedOut) { "icons/clock.svg" } else { "icons/cancel.svg" };
+        body = body.child(
+            div().flex().child(
+                div()
+                    .id(SharedString::from(format!("unveil:{}", m.id)))
+                    .flex()
+                    .items_center()
+                    .gap(px(5.))
+                    .cursor_pointer()
+                    .italic()
+                    .font_family(RUBIK)
+                    .text_size(px(15.))
+                    .line_height(px(21.))
+                    .text_color(white_a(0.3))
+                    .on_click(move |_, w, cx| act(&id, Act::Unveil(ids.clone()), w, cx))
+                    .child(svg().path(icon).size(px(14.)).flex_shrink_0().text_color(white_a(0.3)))
+                    .child(label),
+            ),
+        );
+        return row_shell(ctx, m, gap, gutter, body, false, replying, failed, hovered, first);
     }
     body = body.child(
         div()
@@ -1062,6 +1104,21 @@ fn table(
         t = t.child(d);
     }
     t.into_any_element()
+}
+
+/// `.dmsg-author-timeout` / `.member-timeout`: a running Timeout beside a name.
+pub fn timeout_mark(store: &Store, community: Option<&str>, npub: &str) -> Option<AnyElement> {
+    let t = store.timeout(community?, npub)?;
+    Some(
+        div()
+            .id(SharedString::from(format!("to:{npub}")))
+            .flex_shrink_0()
+            .child(svg().path("icons/clock-snooze.svg").size(px(14.)).text_color(c(DANGER)))
+            .tooltip(crate::kit::countdown_tip(t.until, store.now_ms() / 1000, |left| {
+                if left > 0 { format!("Timeout ends in {}", countdown(left as u64)) } else { "Timeout ending".into() }
+            }))
+            .into_any_element(),
+    )
 }
 
 /// `fmtCountdown`: days and hours, hours and minutes, or m:ss.

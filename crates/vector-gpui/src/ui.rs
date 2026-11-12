@@ -79,6 +79,8 @@ pub struct VectorApp {
     syncing: bool,
     /// Spoilers revealed, by message.
     revealed: Rc<RefCell<HashMap<String, HashSet<u32>>>>,
+    /// Reads Timeouts again as the soonest one ends.
+    timeout_expiry: Option<gpui::Task<()>>,
     started: std::time::Instant,
     /// What the composer is doing beyond a fresh message.
     mode: Mode,
@@ -542,6 +544,8 @@ mod ui_routing;
 mod pins_ops;
 #[path = "ui_msgmenu.rs"]
 mod msgmenu_ops;
+#[path = "ui_timeouts.rs"]
+mod timeouts_ops;
 #[path = "ui_secretguard.rs"]
 mod secretguard_ops;
 
@@ -802,6 +806,7 @@ impl VectorApp {
             input,
             syncing: false,
             revealed: Rc::default(),
+            timeout_expiry: None,
             started: std::time::Instant::now(),
             mode: Mode::Normal,
             hovered: None,
@@ -2710,6 +2715,18 @@ impl VectorApp {
                 }
                 self.reload_communities(cx);
             }
+            "community_timeouts" => {
+                if let Some(id) = payload.get("community_id").and_then(Value::as_str) {
+                    self.refresh_timeouts(id, cx);
+                }
+            }
+            "community_nicknames" if self.live => {
+                if let Some(id) = payload.get("community_id").and_then(Value::as_str) {
+                    let named = backend::community::nicknames(id);
+                    self.store.borrow_mut().nicknames.insert(id.to_string(), named);
+                    self.refresh_rows(false);
+                }
+            }
             "community_invite_received" | "community_invites_purged" => self.reload_invites(cx),
             "emoji_packs_updated" => self.reload_subscribed_packs(cx),
             "pinned_chats_updated" | "archived_chats_updated" => self.chatlist_event(name, &payload, cx),
@@ -3023,7 +3040,7 @@ impl VectorApp {
             .open
             .as_ref()
             .and_then(|id| store.chat(id))
-            .map(|c| data::timeline(c, store.now_ms(), self.read_anchor.as_deref(), names.as_deref()))
+            .map(|c| data::timeline(c, store.now_ms(), self.read_anchor.as_deref(), names.as_deref(), &|m| store.hidden(c, m) == Some(data::Hidden::Blocked)))
             .unwrap_or_default();
         let gap = self.gap_index(&store);
         if let Some(g) = gap {
@@ -3111,6 +3128,9 @@ impl VectorApp {
     }
 
     fn open_chat(&mut self, id: SharedString, window: &mut Window, cx: &mut Context<Self>) {
+        if self.open.as_ref() != Some(&id) {
+            self.store.borrow_mut().unveiled.clear();
+        }
         let elsewhere = self.community.as_ref().is_some_and(|v| {
             self.store
                 .borrow()
@@ -3505,6 +3525,10 @@ impl VectorApp {
     ) {
         use timeline::Act;
         match act {
+            Act::Unveil(ids) => {
+                self.store.borrow_mut().unveiled.extend(ids);
+                self.refresh_rows(false);
+            }
             Act::Mini(npub, key) => {
                 let at = self.anchors.borrow().get(&key).copied();
                 self.show_mini(npub, None, at, cx);
@@ -7640,7 +7664,7 @@ fn timeline_row(ctx: &timeline::Ctx, row: &Row, after_message: bool) -> AnyEleme
             .pb(px(20.))
             .child(divider(div().text_size(px(12.)).text_color(c(TEXT)).child(text.clone()), white_a(0.1), 0.7))
             .into_any_element(),
-        Row::Message { index, first } => {
+        Row::Message { index, first, run } => {
             let gap = if !after_message {
                 0.
             } else if *first {
@@ -7648,7 +7672,7 @@ fn timeline_row(ctx: &timeline::Ctx, row: &Row, after_message: bool) -> AnyEleme
             } else {
                 1.
             };
-            timeline::message_row(ctx, *index, *first, gap)
+            timeline::message_row(ctx, *index, *first, *run, gap)
         }
     }
 }
@@ -8526,6 +8550,10 @@ impl VectorApp {
         }
         self.open_chat(id.clone().into(), window, cx);
         self.voice_present(&id);
+        let community = self.store.borrow().community_of(&id).map(|c| c.community_id.clone());
+        if let Some(community) = community {
+            self.refresh_timeouts(&community, cx);
+        }
         if self.live {
             let _ = backend::run(backend::community::sync_channel(id, None));
         }

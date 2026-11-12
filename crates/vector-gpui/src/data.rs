@@ -161,6 +161,7 @@ pub struct Channel {
     pub channel_id: String,
     pub name: String,
     pub private: bool,
+    #[serde(default = "yes")]
     pub readable: bool,
     pub category_id: Option<String>,
     pub topic: Option<String>,
@@ -169,6 +170,28 @@ pub struct Channel {
     pub restricted: bool,
     pub can_post: bool,
     pub my_permissions: Option<String>,
+    /// When a Private Channel stopped being public, in ms.
+    pub public_until: Option<u64>,
+}
+
+/// Why a post collapses to a one-line placeholder.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Hidden {
+    Blocked,
+    Unauthorized,
+    NoSend,
+    TimedOut,
+}
+
+impl Hidden {
+    pub fn label(self) -> &'static str {
+        match self {
+            Hidden::Blocked => "Blocked message",
+            Hidden::Unauthorized => "Unauthorized poster",
+            Hidden::NoSend => "Posted where they can't send",
+            Hidden::TimedOut => "Sent while timed out",
+        }
+    }
 }
 
 /// A running Timeout, in unix seconds.
@@ -179,9 +202,20 @@ pub struct Timeout {
     pub until: u64,
 }
 
+fn yes() -> bool {
+    true
+}
+
 impl Channel {
     pub fn is_voice(&self) -> bool {
         self.view == "voice"
+    }
+
+    /// Listed: a private channel only with its current key, and only with View.
+    pub fn visible(&self) -> bool {
+        const VIEW_CHANNEL: u64 = 1 << 13;
+        !(self.private && !self.readable)
+            && self.my_permissions.as_deref().and_then(|p| p.parse::<u64>().ok()).is_none_or(|p| p & VIEW_CHANNEL != 0)
     }
 }
 
@@ -202,7 +236,7 @@ impl Community {
         self.primary_channel
             .as_deref()
             .and_then(|id| self.channel(id))
-            .or_else(|| self.channels.iter().find(|c| !c.is_voice() && c.readable))
+            .or_else(|| self.channels.iter().find(|c| !c.is_voice() && c.visible()))
     }
 }
 
@@ -262,6 +296,8 @@ pub struct Store {
     pub timeouts: HashMap<String, HashMap<String, Timeout>>,
     /// Per channel, the authors seen there who can't send in it.
     pub send_denied: HashMap<String, HashSet<String>>,
+    /// Collapsed posts tapped open in the open chat.
+    pub unveiled: HashSet<String>,
     /// Each community's logo and banner as local files, once resolved.
     pub art: HashMap<String, Art>,
     pub hidden_banners: Vec<String>,
@@ -411,6 +447,7 @@ impl Store {
             nicknames: f.nicknames,
             timeouts: f.timeouts,
             send_denied: f.send_denied,
+            unveiled: HashSet::new(),
             art: HashMap::new(),
             hidden_banners: Vec::new(),
             pinned: demo.pinned,
@@ -466,6 +503,7 @@ impl Store {
             nicknames: HashMap::new(),
             timeouts: HashMap::new(),
             send_denied: HashMap::new(),
+            unveiled: HashSet::new(),
             art: HashMap::new(),
             hidden_banners: Vec::new(),
             streamer: Default::default(),
@@ -762,6 +800,29 @@ impl Store {
         Some(format!("You're timed out until {}", until.format("%a %I:%M %p")))
     }
 
+    /// `_dmsgPostedTimedOut` and a blocked group author: why `m` shows collapsed, if it does.
+    pub fn hidden(&self, chat: &SerializableChat, m: &vector_core::Message) -> Option<Hidden> {
+        if m.mine || self.unveiled.contains(&m.id) {
+            return None;
+        }
+        let npub = m.npub.as_deref()?;
+        if chat.chat_type != vector_core::ChatType::DirectMessage && self.profiles.get(npub).is_some_and(|p| p.is_blocked) {
+            return Some(Hidden::Blocked);
+        }
+        if m.unauthorized {
+            return Some(Hidden::Unauthorized);
+        }
+        let community = self.community_of(&chat.id)?;
+        let was_public = community.channel(&chat.id).and_then(|c| c.public_until).is_some_and(|u| m.at < u);
+        if !m.writer && !was_public && self.send_denied.get(&chat.id).is_some_and(|d| d.contains(npub)) {
+            return Some(Hidden::NoSend);
+        }
+        let t = self.timeouts.get(&community.community_id)?.get(npub)?;
+        let inside = |ms: u64| ms / 1000 >= t.from && ms / 1000 < t.until;
+        let edited = m.edit_history.as_ref().filter(|h| h.len() > 1).and_then(|h| h.last()).is_some_and(|e| inside(e.edited_at));
+        (inside(m.at) || edited).then_some(Hidden::TimedOut)
+    }
+
     /// What closes the timeline: a blocked contact, or a community its owner dissolved.
     pub fn end_notice(&self, chat: &str) -> Option<String> {
         if self.chat(chat).is_some_and(|c| c.chat_type == vector_core::ChatType::DirectMessage)
@@ -891,10 +952,12 @@ pub enum Row {
     Unread,
     /// Under the last message: why nothing new will arrive.
     Notice(String),
-    /// `first` heads a streak (avatar and header); otherwise a continuation.
+    /// `first` heads a streak (avatar and header); otherwise a continuation. `run` counts one
+    /// author's blocked messages folded into this row.
     Message {
         index: usize,
         first: bool,
+        run: u32,
     },
 }
 
@@ -935,9 +998,11 @@ pub fn timeline(
     now_ms: u64,
     read_anchor: Option<&str>,
     commands: Option<&HashSet<String>>,
+    blocked: &dyn Fn(&vector_core::Message) -> bool,
 ) -> Vec<Row> {
     let mut rows = Vec::with_capacity(chat.messages.len() + 2);
     let mut last_day = None;
+    let mut run_head: Option<usize> = None;
     let read_at = read_anchor.and_then(|a| chat.messages.iter().position(|m| m.id == a));
     for (i, m) in chat.messages.iter().enumerate() {
         let day = local(m.at).date_naive();
@@ -947,13 +1012,24 @@ pub fn timeline(
                 time: clock(m.at),
             });
             last_day = Some(day);
+            run_head = None;
         }
         if read_at.is_some_and(|r| i == r + 1) && !m.mine {
             rows.push(Row::Unread);
         }
         // As `deriveWindow`: a day divider doesn't end a streak.
         let first = (i == 0 || !collapses(&chat.messages[i - 1], m)) && command(m, commands).is_none();
-        rows.push(Row::Message { index: i, first });
+        if !blocked(m) {
+            run_head = None;
+        } else if let Some(Row::Message { index, run, .. }) = run_head.and_then(|h| rows.get_mut(h))
+            && chat.messages[*index].npub == m.npub
+        {
+            *run += 1;
+            continue;
+        } else {
+            run_head = Some(rows.len());
+        }
+        rows.push(Row::Message { index: i, first, run: 1 });
     }
     rows
 }

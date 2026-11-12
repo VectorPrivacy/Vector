@@ -381,6 +381,30 @@ pub fn tooltip(
     move |_, cx| cx.new(|_| Tip(text.clone())).into()
 }
 
+/// `countdownTip`: a hover label counting down each second to `until` (unix seconds), from
+/// `now` (unix seconds) at build.
+pub fn countdown_tip(
+    until: u64,
+    now: u64,
+    label: fn(i64) -> String,
+) -> impl Fn(&mut gpui::Window, &mut gpui::App) -> gpui::AnyView + 'static {
+    move |_, cx| {
+        let start = std::time::Instant::now();
+        cx.new(|cx: &mut gpui::Context<Tip>| {
+            cx.spawn(async move |tip, cx| loop {
+                cx.background_executor().timer(std::time::Duration::from_secs(1)).await;
+                let left = until as i64 - (now + start.elapsed().as_secs()) as i64;
+                if tip.update(cx, |t, cx| { t.0 = label(left).into(); cx.notify(); }).is_err() {
+                    break;
+                }
+            })
+            .detach();
+            Tip(label(until as i64 - now as i64).into())
+        })
+        .into()
+    }
+}
+
 /// A plain `<input>`: Inter 500 16px, Chromium's placeholder grey.
 pub fn field_look() -> crate::composer::Look {
     crate::composer::Look {

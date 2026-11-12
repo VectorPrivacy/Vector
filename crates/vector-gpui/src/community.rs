@@ -341,7 +341,7 @@ pub fn sidebar(
     let loose: Vec<&Channel> = com
         .channels
         .iter()
-        .filter(|ch| ch.category_id.is_none())
+        .filter(|ch| ch.category_id.is_none() && ch.visible())
         .collect();
     let mut sections = Vec::new();
     if !loose.is_empty() {
@@ -360,7 +360,7 @@ pub fn sidebar(
         let inside: Vec<&Channel> = com
             .channels
             .iter()
-            .filter(|ch| ch.category_id.as_deref() == Some(cat.category_id.as_str()))
+            .filter(|ch| ch.category_id.as_deref() == Some(cat.category_id.as_str()) && ch.visible())
             .collect();
         let closed = view.folded.contains(&cat.category_id);
         let key = cat.category_id.clone();
@@ -609,7 +609,7 @@ fn member_row(store: &Store, cid: &str, npub: &str, owner: bool, on: &OnAct, anc
                     div()
                         .flex()
                         .items_center()
-                        .gap(px(9.))
+                        .gap(px(4.))
                         .child(
                             div()
                                 .truncate()
@@ -619,7 +619,8 @@ fn member_row(store: &Store, cid: &str, npub: &str, owner: bool, on: &OnAct, anc
                                 .text_color(c(0xf7f4f4))
                                 .child(store.name_in(npub, Some(cid))),
                         )
-                        .when(owner, |d| d.child(icon("icons/crown.svg", 15., c(OWNER)))),
+                        .when(owner, |d| d.child(div().ml(px(5.)).flex().child(icon("icons/crown.svg", 15., c(OWNER)))))
+                        .children(crate::timeline::timeout_mark(store, Some(cid), npub)),
                 )
                 .children(status.map(|s| {
                     div()
