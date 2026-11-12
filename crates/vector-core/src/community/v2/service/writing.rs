@@ -402,7 +402,7 @@ async fn mint_over<T: Transport + ?Sized>(transport: &T, community: &CommunityV2
 /// Whether a reader folding what the relays serve now lands past the head this device holds: the
 /// fold's own rules decide, so an edition every reader refuses moves nothing. Read without
 /// persisting, so it never waits on a follow the caller may be inside.
-async fn ledger_moved_since<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, ch: &ChannelV2) -> Result<bool, String> {
+pub(super) async fn ledger_moved_since<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, ch: &ChannelV2) -> Result<bool, String> {
     let eid = super::super::derive::writers_locator(community.id(), &ch.id);
     let held = crate::db::community::get_edition_head(&hex(&community.id().0), &hex(&eid))?;
     Ok(match (held, super::writers_head_on_relays(transport, community, &eid).await?) {
@@ -573,13 +573,23 @@ fn chains_from_head(community: &CommunityV2, ch: &ChannelV2, base: &Ledger) -> R
 
 /// Append `spell` to `base` as `ch`'s ledger, dated now, once the edition passes the rules every
 /// reader holds it to: an edition they'd refuse would leave this device alone on it.
-pub(super) async fn publish_ledger<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, ch: &ChannelV2, base: &Ledger, spell: Spell, from: Option<u64>, locked: bool) -> Result<(), String> {
+async fn publish_ledger<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, ch: &ChannelV2, base: &Ledger, spell: Spell, from: Option<u64>, locked: bool) -> Result<(), String> {
     let at = entry_time(ch).await;
     let next = match spell {
         Spell::Writer { .. } => base.appended_writer(at, spell, locked),
         _ => base.appended_from(at, spell, from),
     }
     .ok_or("this channel's writer ledger can't take that")?;
+    publish_next(transport, community, ch, base, next).await
+}
+
+/// Seal `ch`'s history as `seal` in an edition over `base`.
+pub(super) async fn publish_seal<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, ch: &ChannelV2, base: &Ledger, seal: writers::SealRef) -> Result<(), String> {
+    let next = base.appended_seal(entry_time(ch).await, seal).ok_or("this channel's writer ledger can't take that")?;
+    publish_next(transport, community, ch, base, next).await
+}
+
+async fn publish_next<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, ch: &ChannelV2, base: &Ledger, next: Ledger) -> Result<(), String> {
     if !crate::db::current_session().is_live() {
         return Err("account changed while moving a channel's writers".to_string());
     }
@@ -1022,13 +1032,18 @@ async fn duty_for<T: Transport + ?Sized>(transport: &T, held: &CommunityV2, ch: 
             }
             return Ok(());
         }
-        // A Locked window's history is sealed once: by its minter, or failing them, any manager.
-        let unsealed = ch.locked() && ledger.sealed().is_none_or(|s| s.window != epoch);
+        // A run of Locked windows is sealed as it begins and again once its first minutes pass: by
+        // whoever minted its live window, or failing them, any manager by rank.
         let mine = ledger.minter(epoch) == Some(me.to_bytes());
-        if unsealed && (mine || now.saturating_sub(began) > SEAL_BACKSTOP_MS) && due(&ch.id, Lane::Seal) {
+        let waited = ledger.run_start().is_some_and(|start| now.saturating_sub(start) > SEAL_BACKSTOP_MS);
+        if ledger.seal_target(now).is_some() && (mine || waited) && due(&ch.id, Lane::Seal) {
             acted(&ch.id, &[Lane::Seal]);
+            if !mine {
+                rank_wait(posters).await?;
+            }
             match super::sealing::seal_history(transport, held, ch).await {
-                Ok(n) => crate::log_info!("[v2:writers {}] sealed {n} posts before the lock", &hex(&ch.id.0)[..8]),
+                Ok(Some(n)) => crate::log_info!("[v2:writers {}] sealed {n} posts before the lock", &hex(&ch.id.0)[..8]),
+                Ok(None) => {}
                 Err(e) => crate::log_warn!("[v2:writers {}] sealing failed (retried later): {e}", &hex(&ch.id.0)[..8]),
             }
             return Ok(());
@@ -1121,17 +1136,22 @@ pub(super) enum Backstop {
     StoodDown,
 }
 
+/// Wait by this device's rank, so the highest manager acts first; managers of one rank spread out too.
+async fn rank_wait(posters: &Posters<'_>) -> Result<(), String> {
+    let me_hex = me_pk()?.to_hex();
+    let steps = if me_hex == posters.owner_hex { 0 } else { posters.roster.highest_position(&me_hex).map_or(10, |p| p.saturating_add(1).min(10)) };
+    if steps > 0 {
+        let spread = rand::random::<u64>() % RANK_STAGGER_MS;
+        crate::rt::time::sleep(std::time::Duration::from_millis(RANK_STAGGER_MS * steps as u64 + spread)).await;
+    }
+    Ok(())
+}
+
 /// A manager's mint or reopen on another's behalf: wait by rank so the highest acts first, read
 /// the Control Plane again, and act only if the ledger is where this pass saw it and the roster,
 /// read whole again, agrees with the one the pass judged by.
 async fn backstop<T: Transport + ?Sized>(transport: &T, held: &CommunityV2, ch: &ChannelV2, posters: &Posters<'_>, act: Act<'_>) -> Result<Backstop, String> {
-    let me_hex = me_pk()?.to_hex();
-    let steps = if me_hex == posters.owner_hex { 0 } else { posters.roster.highest_position(&me_hex).map_or(10, |p| p.saturating_add(1).min(10)) };
-    if steps > 0 {
-        // Managers of one rank spread out too.
-        let spread = rand::random::<u64>() % RANK_STAGGER_MS;
-        crate::rt::time::sleep(std::time::Duration::from_millis(RANK_STAGGER_MS * steps as u64 + spread)).await;
-    }
+    rank_wait(posters).await?;
     if !crate::db::current_session().is_live() {
         return Ok(Backstop::Moved);
     }
@@ -1331,7 +1351,7 @@ impl Judge {
         let open = self.ledger.read_address_takes(o.at_ms);
         let kind = o.rumor.kind.as_u16();
         match wepoch {
-            None => !chat::rides_writer_address(kind, self.ledger.locked_at(o.at_ms)) || open,
+            None => !chat::rides_writer_address(kind, self.ledger.locked_at(o.at_ms) || self.ledger.read_address_quiet(o.at_ms)) || (open && !self.ledger.read_address_quiet(o.at_ms)),
             Some(e) => {
                 let (cid, author) = (self.community.id().0, o.author.to_bytes());
                 let certified = match self.ledger.certifier(e) {
@@ -1341,9 +1361,18 @@ impl Judge {
                     }
                     None => true,
                 };
+                // Open only past this window's start: dated before it, the key it rides wasn't given yet.
+                let open = open && self.ledger.writer_start(e).is_some_and(|s| o.at_ms >= s);
                 open || (certified && self.ledger.writer_address_takes(e, o.at_ms) && !self.ledger.stopped(e, &o.author.to_bytes(), o.at_ms) && !self.away_in(e, &o.author, o.at_ms) && !self.departed(&o.author, o.at_ms))
             }
         }
+    }
+
+    /// Whether `event`, carried at writer `wepoch`'s address or the read address, stands by the
+    /// ledger or by the Roster.
+    pub(crate) fn admits(&self, event: &chat::ChatEvent, wepoch: Option<Epoch>) -> bool {
+        let o = event.opened();
+        self.stands_by_ledger(event, wepoch) || self.vouched_by_roster(&o.author.to_hex(), o.at_ms, wepoch, o.rumor.kind.as_u16())
     }
 
     pub(crate) fn sort(&self, mut event: chat::ChatEvent, wepoch: Option<Epoch>) -> Arrival {
@@ -1352,7 +1381,7 @@ impl Judge {
         if self.banned.contains(&o.author.to_hex()) {
             return Arrival::Dropped;
         }
-        if self.stands_by_ledger(&event, wepoch) || self.vouched_by_roster(&o.author.to_hex(), o.at_ms, wepoch, o.rumor.kind.as_u16()) {
+        if self.admits(&event, wepoch) {
             return Arrival::Stands(event);
         }
         // Nothing at a Locked window's read address can come to stand: it isn't kept, even marked.

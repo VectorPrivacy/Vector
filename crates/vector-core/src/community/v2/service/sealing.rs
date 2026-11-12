@@ -1,105 +1,109 @@
-//! A Locked Channel's sealed history (CORD-03 §1, [`super::super::seal`]): building it once the
-//! lock lands, and walking it as a reader scrolls back past the lock.
+//! A Locked Channel's sealed history (CORD-03 §1, [`super::super::seal`]): building it as a run of
+//! Locked windows begins and once its first minutes pass, and walking it as a reader scrolls back.
 
 use super::*;
+use crate::community::roles::Permissions;
 use crate::community::v2::seal::{self, SealPage};
-use crate::community::v2::{kind, writers};
-use crate::community::v2::writers::{Sealed, Spell};
+use crate::community::v2::writers::SealRef;
 
 /// How many wraps one read of a read address asks for while sealing.
-const SEAL_READ_PAGE: usize = 500;
+const SEAL_READ_PAGE: usize = 200;
+
+/// What one second is read with while sealing when a page of it shares that second.
+const SEAL_WALL_LIMIT: usize = 5_000;
 
 /// Most ids one fetch names: well inside what relays take in an `ids` filter.
 const IDS_PER_FETCH: usize = 200;
+
+/// Pages a session keeps opened; past it they are read again.
+const PAGE_CACHE_MAX: usize = 4096;
 
 fn hex(b: &[u8; 32]) -> String {
     crate::simd::hex::bytes_to_hex_32(b)
 }
 
-/// Seal what stood at `ch`'s read addresses before its live Locked window: every read address is
-/// read whole up to the lock, each wrap judged as it would be on arrival, and the ids that stand go
-/// out as pages at the window's writer address, then the ledger entry naming the first. Returns how
-/// many ids the seal names.
-pub(crate) async fn seal_history<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, ch: &ChannelV2) -> Result<usize, String> {
-    use nostr_sdk::prelude::AsyncGetPublicKey;
-    let ledger = ch.writers.clone().ok_or("this channel keeps no writer ledger")?;
-    if !ledger.locked() {
-        return Err("this channel isn't locked".to_string());
+/// Whether this device holds the key to every plane `ch`'s history was written on: a seal it made
+/// would otherwise leave out what it couldn't open, for every reader, and a page rides its plane.
+pub(super) fn reads_whole_history(community: &CommunityV2, ch: &ChannelV2, planes: &[(ReadPlane, Epoch)]) -> bool {
+    let has = |e: u64, public: bool| planes.iter().any(|(p, ep)| ep.0 == e && p.group().is_some() && matches!(p, ReadPlane::Public(..)) == public);
+    let roots = |public: bool| (0..=community.root_epoch.0).all(|e| has(e, public));
+    if ch.private {
+        (1..=ch.epoch.0).all(|e| has(e, false)) && (ch.public_until().is_none() || roots(true))
+    } else {
+        roots(false)
     }
-    let (window, _) = ledger.current_writer().ok_or("this channel has no live writer epoch")?;
-    if ledger.sealed().is_some_and(|s| s.window == window) {
-        return Ok(0);
-    }
-    // What the seal holds ends where this read begins: anything later stays the read address's.
-    let before = ledger.writer_start(window).unwrap_or(0).saturating_add(writers::ENTRY_SKEW_MS).min(now_ms());
-    let me = me_pk()?;
-    // The hash chain from the ledger entry vouches for the pages; a certificate only names the sealer.
-    let cert = writing::my_cert_for(community, ch, window, kind::SEAL_PAGE);
-    let (_, _, writer) = writing::live_writer(community, ch).ok_or("this device holds no key to this channel's writer address")?;
-    let signer = crate::signer::active_signer()?;
-    if signer.get_public_key_async().await.map_err(|e| e.to_string())? != me {
-        return Err("the active signer isn't this account".to_string());
-    }
+}
 
+/// Seal `ch` as far as its live run of Locked windows is owed now. See [`seal_history_at`].
+pub(crate) async fn seal_history<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, ch: &ChannelV2) -> Result<Option<usize>, String> {
+    seal_history_at(transport, community, ch, now_ms()).await
+}
+
+/// Seal `ch` as far as its live run of Locked windows is owed at `now`: read what its read
+/// addresses hold by date since the last seal, skipping every quiet span, judge each wrap as on
+/// arrival, and publish the ids that stand as pages whose oldest names the last seal's first, then
+/// the ledger edition naming the newest. Returns how many ids it added, `None` when nothing is owed.
+pub(crate) async fn seal_history_at<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, ch: &ChannelV2, now: u64) -> Result<Option<usize>, String> {
+    let ledger = ch.writers.clone().ok_or("this channel keeps no writer ledger")?;
+    let (Some(until), Some(run)) = (ledger.seal_target(now), ledger.seal_run()) else { return Ok(None) };
     let planes = read_planes(community, ch);
-    let judge = writing::Judge::of(community, ch);
-    let mut ids: Vec<([u8; 32], u64)> = Vec::new();
-    for (plane, _) in &planes {
-        let mut until = Some(before / 1000 + 1);
-        loop {
-            let q = Query { evidence: crate::community::transport::Evidence::Full, paged: false, ..plane_page(plane.address().to_hex(), SEAL_READ_PAGE, until) };
-            let evs = match plane.group() {
-                Some(group) => transport.fetch_plane(group.keys(), &q, &community.relays).await?.events,
-                None => transport.fetch(&q, &community.relays).await?,
-            };
-            for wrap in &evs {
-                let Some((event, None)) = open_on_planes(ch, &planes, wrap) else { continue };
-                let at = event.opened().at_ms;
-                if at >= before {
-                    continue;
+    // Another manager holding every key seals it instead.
+    if !reads_whole_history(community, ch, &planes) {
+        crate::log_debug!("[v2:writers {}] can't read all of its history, so not sealing it", &hex(&ch.id.0)[..8]);
+        return Ok(None);
+    }
+    // Who may post decides what stands, so the memberlist is read whole first.
+    writing::read_whole(transport, community).await?;
+    let cid_hex = hex(&community.id().0);
+    let held = crate::db::community::load_community_v2(community.id())?.ok_or("this community is gone")?;
+    let judge = writing::Judge::of(&held, ch);
+    let roster = crate::db::community::get_community_roles(&cid_hex).unwrap_or_default();
+    let owner = community.owner()?.to_hex();
+    let prev = ledger.seal.clone();
+
+    let mut ids: Vec<([u8; 32], u64, usize)> = Vec::new();
+    // Each stretch the read address took things in, newest first, down to the last seal.
+    let mut top = until.saturating_sub(1);
+    while let Some((floor, range_top)) = ledger.read_range(top) {
+        for (i, (plane, epoch)) in planes.iter().enumerate() {
+            read_whole_range(transport, community, plane, floor, range_top, |wrap| {
+                let Some(event) = plane.open(&wrap, &ch.id, *epoch) else { return };
+                let o = event.opened();
+                let (at, author, kind) = (o.at_ms, o.author.to_hex(), o.rumor.kind.as_u16());
+                if at < floor || at > range_top {
+                    return;
+                }
+                // A reaction its author couldn't make no reader counts, so none is kept.
+                if kind == super::super::kind::REACTION && !roster.channel_permissions(Some(&owner), &author, &hex(&ch.id.0), ch.private).contains(Permissions::ADD_REACTIONS) {
+                    return;
                 }
                 if matches!(writing::sort_arrival(judge.as_ref(), event, None), writing::Arrival::Stands(_)) {
-                    ids.push((wrap.id.to_bytes(), at));
+                    ids.push((wrap.id.to_bytes(), at, i));
                 }
-            }
-            if evs.len() < SEAL_READ_PAGE {
-                break;
-            }
-            // Inclusive, so the next read starts at the page's oldest second; one that holds more
-            // than a page is stepped past.
-            let oldest = evs.iter().map(|e| e.created_at.as_secs()).min().unwrap_or(0);
-            until = Some(if Some(oldest) == until { oldest.saturating_sub(1) } else { oldest });
-            if oldest == 0 {
-                break;
-            }
+            })
+            .await?;
         }
+        let Some(below) = floor.checked_sub(1) else { break };
+        top = below;
     }
+
     let mut pages = seal::paginate(ids);
-    let count: usize = pages.iter().map(|p| p.ids.len()).sum();
-    let (read_secret, read) = community.channel_secret(ch);
-    let at_writer = GroupKey::from_parts(writer.keys().clone(), *channel_group_key(&read_secret, &ch.id, read).conv_key());
-    // Built oldest first, so each names the one after it.
-    let mut next: Option<([u8; 32], [u8; 32])> = None;
+    let added: usize = pages.iter().map(|(p, _)| p.ids.len()).sum();
+    // Dated inside what the seal covers, so no read by date ever meets them.
+    let dated = until.saturating_sub(1);
+    // Built oldest first, so each names the one after it; the oldest names the last seal's first.
+    let mut next: Option<([u8; 32], Epoch)> = prev.as_ref().and_then(|s| s.page.map(|p| (p, s.read)));
     let mut wraps = Vec::with_capacity(pages.len());
-    for page in pages.iter_mut().rev() {
+    for (page, i) in pages.iter_mut().rev() {
+        let (plane, epoch) = &planes[*i];
+        let group = plane.group().ok_or("a page's read plane has no key here")?;
         page.next = next;
-        let now = now_ms();
-        let rumor = seal::page_rumor(me, &ch.id, read, window, cert, page, now);
-        let (wrap, _) = stream::seal_and_wrap_signed(&signer, me, &rumor, stream::SealForm::Encrypted, &at_writer, stream::KIND_WRAP, Timestamp::from_secs(now / 1000), &[])
-            .await
-            .map_err(|e| e.to_string())?;
-        next = Some((wrap.id.to_bytes(), seal::content_hash(&page.content())));
+        let wrap = seal::page_wrap(page, &ch.id, *epoch, group, dated)?;
+        next = Some((wrap.id.to_bytes(), *epoch));
         wraps.push(wrap);
     }
     for wrap in &wraps {
-        let mut tries = 0;
-        while let Err(e) = transport.publish(wrap, &community.relays).await {
-            tries += 1;
-            if tries >= 3 {
-                return Err(e);
-            }
-            crate::rt::time::sleep(std::time::Duration::from_millis(500 * tries)).await;
-        }
+        transport.publish_durable(wrap, &community.relays).await?;
     }
     if !crate::db::current_session().is_live() {
         return Err("account changed while sealing a channel".to_string());
@@ -107,100 +111,180 @@ pub(crate) async fn seal_history<T: Transport + ?Sized>(transport: &T, community
     let fresh = crate::db::community::load_community_v2(community.id())?.ok_or("this community is gone")?;
     let ch = fresh.channel(&ch.id).cloned().ok_or("no such channel")?;
     let base = ch.writers.clone().ok_or("this channel keeps no writer ledger")?;
-    if base.current_writer().map(|(e, _)| e) != Some(window) {
+    // Another manager, or a lock moving under the read, makes this seal no longer the one owed.
+    if base.seal_target(now) != Some(until) || writing::ledger_moved_since(transport, &fresh, &ch).await? {
         return Err("this channel's writer ledger moved; nothing sealed".to_string());
     }
-    let (page, hash) = next.unwrap_or(([0; 32], [0; 32]));
-    writing::publish_ledger(transport, &fresh, &ch, &base, Spell::Seal { page, hash, read, window, until: before, count: count as u64 }, None, false).await?;
-    Ok(count)
+    let sealed = SealRef {
+        page: next.map(|(p, _)| p),
+        read: next.map_or(Epoch(0), |(_, r)| r),
+        until,
+        run,
+        count: prev.map_or(0, |s| s.count) + added as u64,
+        extra: Default::default(),
+    };
+    writing::publish_seal(transport, &fresh, &ch, &base, sealed).await?;
+    Ok(Some(added))
+}
+
+/// Each wrap `plane` holds dated from `floor` to `top` (unix ms), handed to `each` a page at a
+/// time, read whole: every page answered by every relay, or an error. A seal can't leave out what
+/// a slow relay held.
+async fn read_whole_range<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, plane: &ReadPlane, floor: u64, top: u64, mut each: impl FnMut(Event)) -> Result<(), String> {
+    let mut seen: std::collections::HashSet<nostr_sdk::prelude::EventId> = std::collections::HashSet::new();
+    let mut cursor = top / 1000;
+    let read = |q: Query| async move {
+        match plane.group() {
+            Some(group) => {
+                let page = transport.fetch_plane(group.keys(), &q, &community.relays).await?;
+                if !page.is_complete() {
+                    return Err("a relay didn't answer the whole read; nothing sealed".to_string());
+                }
+                Ok(page.events)
+            }
+            None => transport.fetch(&q, &community.relays).await,
+        }
+    };
+    loop {
+        let q = Query { since: Some(floor / 1000), evidence: crate::community::transport::Evidence::Full, ..plane_page(plane.address().to_hex(), SEAL_READ_PAGE, Some(cursor)) };
+        let evs = read(q.clone()).await?;
+        let full = evs.len() >= SEAL_READ_PAGE;
+        let oldest = evs.iter().map(|e| e.created_at.as_secs()).min();
+        let mut fresh = false;
+        for e in evs {
+            if seen.insert(e.id) {
+                fresh = true;
+                each(e);
+            }
+        }
+        let Some(oldest) = oldest else { break };
+        // Inclusive, so the next read starts at the page's oldest second. A page all in one
+        // second, or one that brought nothing new from it, is that second read on its own with
+        // room to spare, then stepped past.
+        let next = if oldest == cursor && (full || !fresh) {
+            for e in read(Query { since: Some(oldest), limit: Some(SEAL_WALL_LIMIT), ..q }).await? {
+                if seen.insert(e.id) {
+                    each(e);
+                }
+            }
+            oldest.saturating_sub(1)
+        } else if fresh {
+            oldest
+        } else {
+            break;
+        };
+        if next < floor / 1000 || oldest == 0 {
+            break;
+        }
+        cursor = next;
+    }
+    Ok(())
 }
 
 struct SealPages;
-type PageCache = std::sync::Mutex<std::collections::HashMap<[u8; 32], SealPage>>;
+type PageCache = std::sync::Mutex<std::collections::HashMap<[u8; 32], (SealPage, PublicKey)>>;
 
-/// A page of `sealed`, by the link that names it, from this session's cache or the relays.
-/// `None` when no relay serves the page it names.
-async fn load_page<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, ch: &ChannelV2, sealed: &Sealed, link: ([u8; 32], [u8; 32])) -> Result<Option<SealPage>, String> {
+/// The page `link` names, with the address of the plane it rides, from this session's cache or the
+/// relays. `None` when no relay serves it, or this device holds no plane of the read epoch it
+/// opens under. A Channel made private has public epochs alongside its own, so each plane of that
+/// epoch is tried.
+async fn load_page<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, ch: &ChannelV2, link: ([u8; 32], Epoch)) -> Result<Option<(SealPage, PublicKey)>, String> {
     let cache = crate::db::current_session().scoped::<SealPages, PageCache>();
     if let Some(p) = cache.lock().unwrap_or_else(|e| e.into_inner()).get(&link.0) {
         return Ok(Some(p.clone()));
     }
-    let Some((plane, _)) = read_planes(community, ch).into_iter().find(|(_, e)| *e == sealed.read) else { return Ok(None) };
-    let writer = PublicKey::from_slice(&sealed.writer).map_err(|e| e.to_string())?;
     let q = Query { ids: vec![hex(&link.0)], evidence: crate::community::transport::Evidence::Quorum, ..Default::default() };
-    let page = transport.fetch(&q, &community.relays).await?.iter().find_map(|w| seal::open_page(w, &writer, sealed.window, plane.conv(), &ch.id, sealed.read, &link.1).map(|(p, _)| p));
-    if let Some(p) = &page {
-        cache.lock().unwrap_or_else(|e| e.into_inner()).insert(link.0, p.clone());
+    for (plane, _) in read_planes(community, ch).into_iter().filter(|(_, e)| *e == link.1) {
+        // Asked as the plane's key where this device holds it: a gating relay serves a plane only so.
+        let fetched = match plane.group() {
+            Some(group) => transport.fetch_plane(group.keys(), &q, &community.relays).await?.events,
+            None => transport.fetch(&q, &community.relays).await?,
+        };
+        if let Some(page) = fetched.iter().find_map(|w| seal::open_page(w, &link.0, &ch.id, link.1, &plane.address(), plane.conv())) {
+            let mut cache = cache.lock().unwrap_or_else(|e| e.into_inner());
+            if cache.len() >= PAGE_CACHE_MAX {
+                cache.clear();
+            }
+            cache.insert(link.0, (page.clone(), plane.address()));
+            return Ok(Some((page, plane.address())));
+        }
     }
-    Ok(page)
+    Ok(None)
 }
 
 /// A reader's place in a seal: the ids it handed out, newest first.
 pub(crate) struct SealWalk {
-    sealed: Sealed,
-    /// Pages opened so far, newest first.
-    pages: Vec<SealPage>,
+    next: Option<([u8; 32], Epoch)>,
+    /// The page being handed out, the address of the plane its ids ride, and how far into it.
+    page: Option<(SealPage, PublicKey)>,
     given: usize,
     /// Where the walk starts: pages wholly newer than this (unix ms) are passed over.
     until_ms: u64,
-    done: bool,
+    /// A page it was owed that no relay served or that wouldn't open: what lies past it is
+    /// unread, not absent.
+    broken: bool,
+}
+
+/// What one step of a walk handed out: the ids with the address of the plane each rides, and the
+/// oldest date the pages they came from reach, which is where a reader goes on from whether or
+/// not the ids are still served.
+pub(crate) struct SealStep {
+    pub ids: Vec<([u8; 32], PublicKey)>,
+    pub bottom_ms: Option<u64>,
 }
 
 impl SealWalk {
-    pub(crate) fn new(sealed: Sealed, until_ms: u64) -> Self {
-        SealWalk { sealed, pages: Vec::new(), given: 0, until_ms, done: sealed.page == [0; 32] }
+    pub(crate) fn new(seal: &SealRef, until_ms: u64) -> Self {
+        SealWalk { next: seal.page.map(|p| (p, seal.read)), page: None, given: 0, until_ms, broken: false }
     }
 
     pub(crate) fn done(&self) -> bool {
-        self.done
+        self.next.is_none() && self.page.as_ref().is_none_or(|(p, _)| self.given >= p.ids.len())
+    }
+
+    pub(crate) fn broken(&self) -> bool {
+        self.broken
     }
 
     /// The next `n` sealed ids, newest first, opening pages only as far as they reach.
-    pub(crate) async fn next<T: Transport + ?Sized>(&mut self, transport: &T, community: &CommunityV2, ch: &ChannelV2, n: usize) -> Result<Vec<[u8; 32]>, String> {
-        let mut out = Vec::with_capacity(n);
-        while out.len() < n && !self.done {
-            let loaded: usize = self.pages.iter().map(|p| p.ids.len()).sum();
-            if self.given < loaded {
-                let flat = self.pages.iter().flat_map(|p| p.ids.iter()).skip(self.given).take(n - out.len());
-                let before = out.len();
-                out.extend(flat.copied());
-                self.given += out.len() - before;
-                continue;
+    pub(crate) async fn next<T: Transport + ?Sized>(&mut self, transport: &T, community: &CommunityV2, ch: &ChannelV2, n: usize) -> Result<SealStep, String> {
+        let mut step = SealStep { ids: Vec::with_capacity(n), bottom_ms: None };
+        while step.ids.len() < n {
+            if let Some((page, address)) = &self.page {
+                if self.given < page.ids.len() {
+                    let take = (n - step.ids.len()).min(page.ids.len() - self.given);
+                    step.ids.extend(page.ids[self.given..self.given + take].iter().map(|id| (*id, *address)));
+                    self.given += take;
+                    step.bottom_ms = Some(page.oldest);
+                    continue;
+                }
             }
-            let link = match self.pages.last() {
-                None => (self.sealed.page, self.sealed.hash),
-                Some(p) => match p.next {
-                    Some(link) => link,
-                    None => {
-                        self.done = true;
-                        break;
-                    }
-                },
+            let Some(link) = self.next else { break };
+            // A failed read keeps the walk's place for the next.
+            let Some((page, address)) = load_page(transport, community, ch, link).await? else {
+                self.next = None;
+                self.broken = true;
+                break;
             };
-            match load_page(transport, community, ch, &self.sealed, link).await? {
-                Some(page) => {
-                    // A page wholly newer than where the walk starts holds nothing it needs.
-                    if page.oldest > self.until_ms {
-                        self.given += page.ids.len();
-                    }
-                    self.pages.push(page);
-                }
-                None => {
-                    self.done = true;
-                    break;
-                }
-            }
+            self.next = page.next;
+            // A page wholly newer than where the walk starts holds nothing it needs.
+            self.given = if page.oldest > self.until_ms { page.ids.len() } else { 0 };
+            self.page = Some((page, address));
         }
-        Ok(out)
+        Ok(step)
     }
 }
 
-/// Fetch `ids` from `community`'s relays, a batch at a time.
-pub(crate) async fn fetch_ids<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, ids: &[[u8; 32]], evidence: crate::community::transport::Evidence) -> Result<Vec<Event>, String> {
+/// Fetch `ids` from `community`'s relays, a batch at a time, asked as `plane` where this device
+/// holds its key.
+pub(crate) async fn fetch_ids<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, plane: Option<&GroupKey>, ids: &[[u8; 32]], evidence: crate::community::transport::Evidence) -> Result<Vec<Event>, String> {
     let mut out = Vec::with_capacity(ids.len());
     for batch in ids.chunks(IDS_PER_FETCH) {
         let q = Query { ids: batch.iter().map(hex).collect(), evidence, ..Default::default() };
-        out.extend(transport.fetch(&q, &community.relays).await?);
+        out.extend(match plane {
+            Some(group) => transport.fetch_plane(group.keys(), &q, &community.relays).await?.events,
+            None => transport.fetch(&q, &community.relays).await?,
+        });
     }
     Ok(out)
 }
