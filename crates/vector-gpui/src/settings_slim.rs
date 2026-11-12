@@ -65,7 +65,7 @@ fn danger_head(s: &Settings) -> AnyElement {
             div()
                 .mt(px(4.))
                 .text_size(px(12.))
-                .line_height(px(15.))
+                .line_height(px(24.))
                 .text_color(c(crate::timeline::DANGER))
                 .child("Irreversible Actions"),
         )
