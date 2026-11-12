@@ -32,6 +32,27 @@ pub struct Media {
     pub width: Option<u32>,
     pub height: Option<u32>,
     pub poster: Option<String>,
+    #[serde(default)]
+    pub size: Option<u64>,
+    #[serde(default)]
+    pub duration: Option<f64>,
+    #[serde(default)]
+    pub sha256: Option<String>,
+    #[serde(default)]
+    pub fallbacks: Vec<String>,
+}
+
+/// An embedded video's local copy: fetching (percent, -1 while the size is unknown), ready
+/// for the player, or why it failed.
+pub enum VideoState {
+    Loading(i64),
+    Ready(crate::audio::AudioInputSpec),
+    Failed(String),
+}
+
+/// The player's key for an embedded video.
+pub fn clip_id(url: &str) -> String {
+    format!("embed:{url}")
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -126,6 +147,9 @@ pub enum Act {
     Back,
     Close,
     Push(String, Option<String>),
+    /// A tap on a video's poster: fetch then play, or stop a fetch.
+    Video(Media),
+    Clip(String, crate::video::Act),
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1050,9 +1074,55 @@ fn rich(
     crate::timeline::stack(&blocks, key, &click, env.clock, lh)
 }
 
-/// `.ne-video`: a poster with its play button; the clip or page opens outside the app.
+/// The state of `v`'s local copy, starting the fetch on sight when it falls under the
+/// auto-download limit.
+fn video_state(env: &Env, v: &Media) -> (Option<i64>, Option<crate::audio::AudioInputSpec>, Option<String>) {
+    let mut media = env.media.borrow_mut();
+    if !media.embed_videos.contains_key(&v.url)
+        && media.auto_download.on
+        && v.size.is_some_and(|n| n > 0 && n <= media.auto_download.limit)
+    {
+        media.embed_videos.insert(v.url.clone(), VideoState::Loading(-1));
+        media.embed_video_queue.push(v.clone());
+    }
+    match media.embed_videos.get(&v.url) {
+        Some(VideoState::Loading(p)) => (Some(*p), None, None),
+        Some(VideoState::Ready(spec)) => (None, Some(spec.clone()), None),
+        Some(VideoState::Failed(e)) => (None, None, Some(e.clone())),
+        None => (None, None, None),
+    }
+}
+
+fn duration(secs: f64) -> String {
+    let s = secs.max(0.).round() as u64;
+    if s >= 3600 { format!("{}:{:02}:{:02}", s / 3600, s / 60 % 60, s % 60) } else { format!("{}:{:02}", s / 60, s % 60) }
+}
+
+/// `.ne-video`: a poster with its play button. A video fetches, then plays in place; a page
+/// opens outside the app.
 fn poster(env: &Env, e: &Embed, key: &str, open: Option<String>, send: &Send) -> AnyElement {
     let short = e.class == "short";
+    let video = e.video.clone();
+    let (loading, ready, failed) = video.as_ref().map_or((None, None, None), |v| video_state(env, v));
+    let (w, h) = if short { (202.5, 360.) } else {
+        let ratio = video.as_ref().and_then(|v| Some(v.width? as f32 / v.height.filter(|h| *h > 0)? as f32)).unwrap_or(16. / 9.);
+        (CARD_W, (CARD_W / ratio).min(CARD_W * 1.25))
+    };
+    if let (Some(v), Some(spec)) = (video.as_ref(), ready) {
+        let id = clip_id(&v.url);
+        let mut media = env.media.borrow_mut();
+        media.videos.want_probe(&id, &spec);
+        if let Some(clip) = media.videos.clip(&id) {
+            let s = send.clone();
+            let cid = id.clone();
+            return div()
+                .w_full()
+                .flex()
+                .justify_center()
+                .child(crate::video::view(&id, clip, false, Some((w, h)), 8., Rc::new(move |a, win, cx| s(Act::Clip(cid.clone(), a), win, cx))))
+                .into_any_element();
+        }
+    }
     let art = e
         .image
         .as_deref()
@@ -1072,7 +1142,10 @@ fn poster(env: &Env, e: &Embed, key: &str, open: Option<String>, send: &Send) ->
                 .into_any_element(),
             Pic::Gone => div().into_any_element(),
         });
-    let badge = open.as_deref().filter(|_| e.video.is_none()).map(host);
+    let badge = match &video {
+        Some(v) => v.duration.filter(|_| failed.is_none()).map(duration),
+        None => open.as_deref().map(host),
+    };
     let s = send.clone();
     let frame = div()
         .id(SharedString::from(format!("{key}-poster")))
@@ -1089,14 +1162,20 @@ fn poster(env: &Env, e: &Embed, key: &str, open: Option<String>, send: &Send) ->
             if short {
                 d.h(px(360.)).w(px(202.5)).mx_auto()
             } else {
-                d.w_full().h(px(CARD_W * 9. / 16.))
+                d.w_full().h(px(h))
             }
         })
-        .when_some(open, |d, u| {
-            d.on_click(move |_, w, cx| {
+        .map(|d| match video.clone() {
+            Some(v) => d.on_click(move |_, w, cx| {
                 cx.stop_propagation();
-                s(Act::OpenUrl(u.clone()), w, cx)
-            })
+                s(Act::Video(v.clone()), w, cx)
+            }),
+            None => d.when_some(open, |d, u| {
+                d.on_click(move |_, w, cx| {
+                    cx.stop_propagation();
+                    s(Act::OpenUrl(u.clone()), w, cx)
+                })
+            }),
         })
         .children(art)
         .child(
@@ -1106,17 +1185,32 @@ fn poster(env: &Env, e: &Embed, key: &str, open: Option<String>, send: &Send) ->
                 .rounded_full()
                 .border_1()
                 .border_color(white_a(0.15))
-                .bg(ca(0, 0, 0, 0.6))
+                .bg(ca(0, 0, 0, if loading.is_some() || failed.is_some() { 0.62 } else { 0.6 }))
                 .flex()
                 .items_center()
                 .justify_center()
-                .child(
-                    svg()
-                        .path("icons/play.svg")
-                        .size(px(26.))
-                        .text_color(c(0xffffff)),
-                ),
+                .map(|d| match (loading, failed.is_some()) {
+                    (Some(p), _) => d.child(crate::attachments::spinner(39., 3.3, 1., if p > 0 { p as f32 / 100. } else { 0.25 }, white_a(0.15), c(PRIMARY))),
+                    (None, true) => d.child(div().text_size(px(22.)).line_height(px(22.)).font_weight(FontWeight::EXTRA_BOLD).text_color(c(0xffffff)).child("!")),
+                    _ => d.child(svg().path("icons/play.svg").size(px(26.)).text_color(c(0xffffff))),
+                }),
         )
+        .children(failed.map(|_| {
+            div()
+                .absolute()
+                .left(px(8.))
+                .right(px(8.))
+                .bottom(px(8.))
+                .px(px(6.))
+                .py(px(4.))
+                .rounded(px(6.))
+                .bg(ca(0, 0, 0, 0.72))
+                .text_color(c(0xffb4b4))
+                .text_size(px(11.))
+                .line_height(px(14.3))
+                .text_center()
+                .child("Couldn't download the video. Tap to try again.")
+        }))
         .children(badge.map(|b| {
             div()
                 .absolute()

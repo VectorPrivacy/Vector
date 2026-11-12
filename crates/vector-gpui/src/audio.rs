@@ -82,6 +82,8 @@ pub struct Player {
 pub enum AudioInputSpec {
     File(std::path::PathBuf),
     Held([u8; 32]),
+    /// A sealed cache file, and the type of its bytes.
+    Sealed(std::path::PathBuf, &'static str),
 }
 
 impl AudioInputSpec {
@@ -94,6 +96,9 @@ impl AudioInputSpec {
                     Err("Audio file not found".into())
                 }
             }
+            AudioInputSpec::Sealed(p, mime) => vector_core::vcache::open(p, mime)
+                .map(AudioInput::Held)
+                .ok_or_else(|| "Video file not found".into()),
             AudioInputSpec::Held(h) => vector_core::media::open(h)
                 .map(AudioInput::Held)
                 .ok_or_else(|| "Audio file not found".into()),

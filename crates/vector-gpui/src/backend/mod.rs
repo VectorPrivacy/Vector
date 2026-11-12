@@ -8,6 +8,7 @@ pub mod attachments;
 pub mod chatlist;
 pub mod badges;
 pub mod bunker;
+pub mod embedvideo;
 pub mod calls;
 pub mod community;
 pub mod device;

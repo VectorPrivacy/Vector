@@ -1332,6 +1332,24 @@ impl VectorApp {
                 f.transfer_state(&payload, cx);
             });
         }
+        // Fixtures: VECTOR_EMBED_VIDEO=idle|loading|failed|ready gives the video embed a file of its
+        // own, in that state.
+        if let Ok(state) = std::env::var("VECTOR_EMBED_VIDEO") {
+            let url = "https://cdn.example.org/vector-tour.mp4".to_string();
+            if let Some((_, v)) = app.store.borrow_mut().fixture_embeds.iter_mut().find(|(_, v)| v["class"] == "video") {
+                v["link"] = Value::Null;
+                v["video"] = serde_json::json!({ "url": url, "is_video": true, "width": 1280, "height": 720, "size": 48_000_000u64, "duration": 83.0, "poster": null, "sha256": null, "fallbacks": [] });
+            }
+            use crate::embeds::VideoState;
+            let clip = std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/reference/media/clip.mp4"));
+            let mut media = app.media.borrow_mut();
+            match state.as_str() {
+                "loading" => drop(media.embed_videos.insert(url, VideoState::Loading(42))),
+                "failed" => drop(media.embed_videos.insert(url, VideoState::Failed("Media server returned an error status".into()))),
+                "ready" => drop(media.embed_videos.insert(url, VideoState::Ready(crate::audio::AudioInputSpec::File(clip)))),
+                _ => {}
+            }
+        }
         // Fixtures: VECTOR_EMBED=post|article|video expands that fixture embed.
         if let Ok(class) = std::env::var("VECTOR_EMBED") {
             let found = {
@@ -2599,6 +2617,18 @@ impl VectorApp {
             "bunker_auth_url" => {
                 if let Some(url) = payload.get("url").and_then(Value::as_str) {
                     self.signer_asks_to_open(url, cx);
+                }
+            }
+            "embed_video_progress" => {
+                let (Some(url), Some(pct)) = (payload.get("url").and_then(Value::as_str), payload.get("progress").and_then(Value::as_i64)) else { return };
+                let mut media = self.media.borrow_mut();
+                if let Some(crate::embeds::VideoState::Loading(p)) = media.embed_videos.get_mut(url)
+                    && *p != pct
+                    && pct < 100
+                {
+                    *p = pct;
+                    drop(media);
+                    self.refresh_rows(false);
                 }
             }
             "media_import_progress" => {
@@ -3982,7 +4012,19 @@ impl VectorApp {
             cx.spawn(async move |this, cx| {
                 let Ok(crate::video::WorkDone::Probed(att, info)) = rx.await else { return };
                 this.update(cx, |this, cx| {
-                    this.media.borrow_mut().videos.probed(att, info);
+                    let mut media = this.media.borrow_mut();
+                    let ok = info.is_some();
+                    media.videos.probed(att.clone(), info);
+                    // A video fetched by a tap plays as soon as it can.
+                    if let Some(url) = att.strip_prefix("embed:")
+                        && media.embed_autoplay.remove(url)
+                        && ok
+                        && let Some(crate::embeds::VideoState::Ready(spec)) = media.embed_videos.get(url)
+                    {
+                        let spec = spec.clone();
+                        media.videos.act(&att, Some(spec), crate::video::Act::Toggle);
+                    }
+                    drop(media);
                     this.refresh_rows(false);
                     cx.notify();
                 })
@@ -6872,6 +6914,18 @@ impl VectorApp {
                 let app = app_media.clone();
                 cx.defer(move |cx| {
                     app.update(cx, |app, cx| app.video_work(clips, cx)).ok();
+                });
+            }
+            let videos = std::mem::take(&mut media.borrow_mut().embed_video_queue);
+            if !videos.is_empty() {
+                let app = app_media.clone();
+                cx.defer(move |cx| {
+                    app.update(cx, |app, cx| {
+                        for v in videos {
+                            app.fetch_embed_video(v, cx);
+                        }
+                    })
+                    .ok();
                 });
             }
             let packages = std::mem::take(&mut media.borrow_mut().xdc_queue);
@@ -11653,8 +11707,68 @@ impl VectorApp {
                 }
             }
             Act::Close => self.embed_modal = None,
+            Act::Video(v) => {
+                let mut media = self.media.borrow_mut();
+                match media.embed_videos.get(&v.url) {
+                    Some(crate::embeds::VideoState::Loading(_)) => {
+                        media.embed_autoplay.remove(&v.url);
+                        let url = v.url.clone();
+                        drop(media);
+                        let _ = backend::run(async move { backend::embedvideo::cancel(&url) });
+                    }
+                    Some(crate::embeds::VideoState::Ready(_)) => {}
+                    _ => {
+                        media.embed_videos.insert(v.url.clone(), crate::embeds::VideoState::Loading(-1));
+                        media.embed_autoplay.insert(v.url.clone());
+                        drop(media);
+                        self.fetch_embed_video(v, cx);
+                    }
+                }
+            }
+            Act::Clip(id, a) => {
+                let url = id.strip_prefix("embed:").unwrap_or(&id);
+                let mut media = self.media.borrow_mut();
+                let input = match media.embed_videos.get(url) {
+                    Some(crate::embeds::VideoState::Ready(spec)) => Some(spec.clone()),
+                    _ => None,
+                };
+                media.videos.act(&id, input, a);
+            }
         }
         cx.notify();
+    }
+
+    fn fetch_embed_video(&mut self, v: crate::embeds::Media, cx: &mut Context<Self>) {
+        let url = v.url.clone();
+        let rx = backend::run(backend::embedvideo::fetch(v.url, v.size, v.sha256, v.fallbacks));
+        cx.spawn(async move |this, cx| {
+            let result = rx.await.unwrap_or_else(|_| Err("Backend stopped".into()));
+            this.update(cx, |this, cx| {
+                use crate::embeds::VideoState;
+                let mut media = this.media.borrow_mut();
+                match result {
+                    Ok(backend::embedvideo::Fetched::Held(h)) => {
+                        media.embed_videos.insert(url, VideoState::Ready(crate::audio::AudioInputSpec::Held(h)));
+                    }
+                    Ok(backend::embedvideo::Fetched::Sealed(p, mime)) => {
+                        media.embed_videos.insert(url, VideoState::Ready(crate::audio::AudioInputSpec::Sealed(p, mime)));
+                    }
+                    Err(e) if backend::embedvideo::is_cancel(&e) => {
+                        media.embed_videos.remove(&url);
+                        media.embed_autoplay.remove(&url);
+                    }
+                    Err(e) => {
+                        media.embed_autoplay.remove(&url);
+                        media.embed_videos.insert(url, VideoState::Failed(e));
+                    }
+                }
+                drop(media);
+                this.refresh_rows(false);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     fn scan_invites(&mut self, cx: &mut Context<Self>) {
