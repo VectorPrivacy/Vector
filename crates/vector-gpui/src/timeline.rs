@@ -32,6 +32,12 @@ pub enum Act {
     RetryHistory,
     /// An avatar or name tapped: their mini profile, beside what was painted under the key.
     Mini(String, SharedString),
+    /// A reaction chip hovered, or left.
+    ReactionHover(String, bool),
+    /// A reaction chip right-clicked: who reacted.
+    ReactionDetails(String),
+    /// A reaction chip pressed (true) or released; a long press opens its details.
+    ReactionPress(String, bool),
     /// Right-click on a message: its menu, at the pointer.
     MessageMenu(gpui::Point<gpui::Pixels>),
     /// Right-clicked: in a community, their member menu.
@@ -1149,9 +1155,35 @@ fn reactions(ctx: &Ctx, m: &Message) -> Option<AnyElement> {
                 .into_any_element(),
         };
         let (act, id, e) = (ctx.on_act.clone(), m.id.clone(), emoji_str.to_string());
+        let hover = {
+            let (act, id, e) = (act.clone(), id.clone(), e.clone());
+            move |h: &bool, w: &mut Window, cx: &mut App| act(&id, Act::ReactionHover(e.clone(), *h), w, cx)
+        };
+        let details = {
+            let (act, id, e) = (act.clone(), id.clone(), e.clone());
+            move |_: &gpui::MouseDownEvent, w: &mut Window, cx: &mut App| {
+                cx.stop_propagation();
+                act(&id, Act::ReactionDetails(e.clone()), w, cx)
+            }
+        };
+        let press = {
+            let (act, id, e) = (act.clone(), id.clone(), e.clone());
+            move |_: &gpui::MouseDownEvent, w: &mut Window, cx: &mut App| act(&id, Act::ReactionPress(e.clone(), true), w, cx)
+        };
+        let release = {
+            let (act, id, e) = (act.clone(), id.clone(), e.clone());
+            move |_: &gpui::MouseUpEvent, w: &mut Window, cx: &mut App| act(&id, Act::ReactionPress(e.clone(), false), w, cx)
+        };
+        let key = crate::reactpop::chip_key(&m.id, emoji_str);
         row = row.child(
             div()
                 .id(SharedString::from(format!("{}-r-{emoji_str}", m.id)))
+                .relative()
+                .on_hover(hover)
+                .on_mouse_down(gpui::MouseButton::Right, details)
+                .on_mouse_down(gpui::MouseButton::Left, press)
+                .on_mouse_up(gpui::MouseButton::Left, release)
+                .child(crate::kit::anchor(&ctx.anchors, key))
                 .when(!mine, |d| {
                     d.cursor_pointer()
                         .hover(|s| s.bg(white_a(0.1)).opacity(1.))

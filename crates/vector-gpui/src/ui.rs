@@ -237,6 +237,11 @@ pub struct VectorApp {
     mini_profile: Option<crate::miniprofile::Mini>,
     pins: crate::pins::Pins,
     edit_history: Option<crate::edithistory::EditHistory>,
+    reaction_tip: Option<crate::reactpop::Pop>,
+    reaction_details: Option<crate::reactpop::Pop>,
+    rx_hover: Option<(String, String)>,
+    rx_gen: u64,
+    rx_long: bool,
     secret_guard: Option<crate::secretguard::Guard>,
     /// The next send has been through the secret guard.
     secret_pass: bool,
@@ -851,6 +856,11 @@ impl VectorApp {
             mini_profile: None,
             pins: Default::default(),
             edit_history: None,
+            reaction_tip: None,
+            reaction_details: None,
+            rx_hover: None,
+            rx_gen: 0,
+            rx_long: false,
             secret_guard: None,
             secret_pass: false,
             anchors: Default::default(),
@@ -2682,6 +2692,9 @@ impl VectorApp {
         self.embed_modal = None;
         self.new_chat = None;
         self.edit_history = None;
+        self.reaction_tip = None;
+        self.reaction_details = None;
+        self.rx_hover = None;
         if self.open.as_ref() != Some(&id) && self.rec.state != crate::recorder::State::Idle {
             if let Some(src) = self.rec.source {
                 let _ = crate::audio::engine().map(|e| e.stop(src));
@@ -2966,6 +2979,37 @@ impl VectorApp {
 
     /// `showEditHistory`: against the message's row, its revisions' emoji from its tags and
     /// the equipped packs.
+    fn reaction_popups(&self, store: &crate::data::Store, window: &Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let pane = self.chat_box.get().unwrap_or_else(|| gpui::Bounds::new(gpui::Point::default(), window.viewport_size()));
+        let custom = |pop: &crate::reactpop::Pop| {
+            let url = self.message(&pop.msg)?.reactions.iter().find(|r| r.emoji == pop.emoji)?.emoji_url.clone()?;
+            match self.media.borrow_mut().custom(&timeline::emoji_source(store, &url), false) {
+                crate::media::Custom::Ready(i) => Some(gpui::ImageSource::from(i)),
+                _ => None,
+            }
+        };
+        let anchor = |pop: &crate::reactpop::Pop| self.anchors.borrow().get(&pop.key).copied();
+        let mut out = Vec::new();
+        if let Some(pop) = &self.reaction_details {
+            if let Some(a) = anchor(pop) {
+                let app = cx.entity().downgrade();
+                let close: Rc<dyn Fn(&mut Window, &mut gpui::App)> = Rc::new(move |_, cx| {
+                    app.update(cx, |app, cx| {
+                        app.reaction_details = None;
+                        cx.notify();
+                    })
+                    .ok();
+                });
+                out.extend(crate::reactpop::details(pop, store, custom(pop), a, pane, close));
+            }
+        } else if let Some(pop) = &self.reaction_tip {
+            if let Some(a) = anchor(pop) {
+                out.extend(crate::reactpop::tip(pop, store, custom(pop), a, pane));
+            }
+        }
+        out
+    }
+
     fn show_edit_history(&mut self, id: String, window: &Window, cx: &mut Context<Self>) {
         let Some(m) = self.message(&id) else { return };
         let Some(entries) = m.edit_history.clone().filter(|e| !e.is_empty()) else { return };
@@ -3127,7 +3171,60 @@ impl VectorApp {
                 cx.notify();
             }
             Act::React => self.toggle_picker(Some(id), window, cx),
+            Act::ReactionHover(emoji, on) => {
+                self.rx_gen += 1;
+                if !on {
+                    self.rx_hover = None;
+                    if self.reaction_tip.take().is_some() {
+                        cx.notify();
+                    }
+                    return;
+                }
+                self.rx_hover = Some((id.clone(), emoji.clone()));
+                let at = self.rx_gen;
+                cx.spawn(async move |this, cx| {
+                    cx.background_executor().timer(std::time::Duration::from_millis(500)).await;
+                    this.update(cx, |this, cx| {
+                        if this.rx_gen == at && this.reaction_details.is_none() && this.rx_hover.as_ref() == Some(&(id.clone(), emoji.clone())) {
+                            this.reaction_tip = Some(crate::reactpop::Pop::new(id, emoji));
+                            cx.notify();
+                        }
+                    })
+                    .ok();
+                })
+                .detach();
+            }
+            Act::ReactionDetails(emoji) => {
+                self.rx_gen += 1;
+                self.reaction_tip = None;
+                self.reaction_details = Some(crate::reactpop::Pop::new(id, emoji));
+                cx.notify();
+            }
+            Act::ReactionPress(emoji, down) => {
+                self.rx_gen += 1;
+                if !down {
+                    return;
+                }
+                self.rx_long = false;
+                let at = self.rx_gen;
+                cx.spawn(async move |this, cx| {
+                    cx.background_executor().timer(std::time::Duration::from_millis(500)).await;
+                    this.update(cx, |this, cx| {
+                        if this.rx_gen == at {
+                            this.rx_long = true;
+                            this.reaction_tip = None;
+                            this.reaction_details = Some(crate::reactpop::Pop::new(id, emoji));
+                            cx.notify();
+                        }
+                    })
+                    .ok();
+                })
+                .detach();
+            }
             Act::ReactWith(emoji) => {
+                if std::mem::take(&mut self.rx_long) {
+                    return;
+                }
                 // Joining a custom reaction sends the picture it was made with.
                 let url = self.message(&id).and_then(|m| {
                     m.reactions
@@ -4478,6 +4575,7 @@ impl Render for VectorApp {
                 });
                 crate::edithistory::render(h, &store, &self.media, window.viewport_size(), &close)
             }))
+            .children(self.reaction_popups(&store, window, cx))
             .children(self.secret_guard.as_ref().map(|g| {
                 let app = cx.entity().downgrade();
                 let on: crate::secretguard::OnAnswer = Rc::new(move |a, window, cx| {
@@ -10966,6 +11064,7 @@ impl VectorApp {
         if self.menu.take().is_some()
             || self.mini_profile.take().is_some()
             || self.edit_history.take().is_some()
+            || self.reaction_details.take().is_some()
             || self.secret_guard.take().is_some()
             || self.perm_prompt.take().is_some()
             || self.publish.take_if(|f| !f.busy()).is_some()

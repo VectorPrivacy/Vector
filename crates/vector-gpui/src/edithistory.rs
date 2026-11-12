@@ -41,7 +41,7 @@ fn atoms(text: &str, tags: &[(String, String)], store: &Store, media: &std::cell
     let look = Look::new(INTER, 12., 15.6, white_a(0.85));
     let size = look.size * 1.15;
     let mut out = Vec::new();
-    let mut plain = |t: &str, out: &mut Vec<Atom>| {
+    let plain = |t: &str, out: &mut Vec<Atom>| {
         let mut start = 0;
         for (i, g) in t.grapheme_indices(true) {
             if let Some(src) = crate::emoji::twemoji(g) {
