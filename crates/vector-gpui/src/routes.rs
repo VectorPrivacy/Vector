@@ -120,7 +120,8 @@ impl RouteBook {
 }
 
 /// `.st-page .relay-status.{refused,blocked,connecting}` in the list, icon and words.
-pub fn tag_status(t: &Tag) -> AnyElement {
+/// `short`: a phone row's form, `.tag-short` in place of `.tag-long`.
+pub fn tag_status(t: &Tag, short: bool) -> AnyElement {
     let (color, icon) = match t.cls {
         "refused" => (c(0x8fd8e8), "icons/shield-filled.svg"),
         "blocked" => (c(crate::timeline::DANGER), "icons/cancel.svg"),
@@ -137,12 +138,29 @@ pub fn tag_status(t: &Tag) -> AnyElement {
         .text_color(color)
         .tooltip(crate::kit::tooltip(t.title.clone()))
         .child(svg().path(icon).size(px(16.)).flex_shrink_0().text_color(color))
-        .child(t.text.clone())
+        .child(match t.short.filter(|_| short) {
+            Some(s) => SharedString::from(s),
+            None => SharedString::from(t.text.clone()),
+        })
         .into_any_element()
 }
 
 /// `.relay-route-badge`: a twin rides inside the network; a dashed one failed its check.
-pub fn badge(b: &Badge) -> AnyElement {
+/// `dot`: a phone row's 8px dot, its words left to the tooltip.
+pub fn badge(b: &Badge, dot: bool) -> AnyElement {
+    if dot {
+        return div()
+            .id(SharedString::from(format!("badge-{}", b.title)))
+            .flex_shrink_0()
+            .mr(px(2.))
+            .size(px(8.))
+            .rounded_full()
+            .border_1()
+            .when(!b.failed, |d| d.bg(c(0x5fd4ea)).border_color(ca(64, 200, 228, 0.3)))
+            .when(b.failed, |d| d.border_dashed().border_color(white_a(0.2)))
+            .tooltip(crate::kit::tooltip(b.title.clone()))
+            .into_any_element();
+    }
     div()
         .id(SharedString::from(format!("badge-{}", b.title)))
         .flex_shrink_0()

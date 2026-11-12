@@ -2513,7 +2513,11 @@ fn relays_block(s: &Settings, on: &OnAct) -> AnyElement {
         on,
     ));
     for r in s.relays.iter().flatten() {
-        let mut content = div().flex_1().min_w_0().flex().items_center().gap(px(12.));
+        let mut content = div()
+            .map(|d| if s.phone { d.flex_grow(1.).flex_shrink(1.).flex_basis(gpui::relative(0.4)).min_w(gpui::relative(0.4)) } else { d.flex_1().min_w_0() })
+            .flex()
+            .items_center()
+            .gap(px(12.));
         if !r.is_default && r.mode != "both" {
             content = content.child(
                 div()
@@ -2577,9 +2581,9 @@ fn relays_block(s: &Settings, on: &OnAct) -> AnyElement {
             .child({
                 let right = div().ml(px(10.)).flex().items_center();
                 match s.book.tag(&r.url).filter(|_| r.enabled) {
-                    Some(t) => right.child(crate::routes::tag_status(&t)),
+                    Some(t) => right.child(crate::routes::tag_status(&t, s.phone)),
                     None => right
-                        .children(s.book.badge(&r.url).filter(|_| r.enabled).map(|b| div().mr(px(8.)).child(crate::routes::badge(&b))))
+                        .children(s.book.badge(&r.url).filter(|_| r.enabled).map(|b| div().mr(px(8.)).child(crate::routes::badge(&b, s.phone))))
                         .child(relay_status(r.status, said(r.status))),
                 }
             }),
@@ -2618,9 +2622,9 @@ fn servers_block(s: &Settings, on: &OnAct) -> AnyElement {
         let mut right = div().flex().items_center();
         let tag = s.book.tag(&sv.url).filter(|_| sv.enabled);
         if let Some(t) = &tag {
-            right = right.child(crate::routes::tag_status(t));
+            right = right.child(crate::routes::tag_status(t, s.phone));
         } else if let Some(b) = s.book.badge(&sv.url).filter(|_| sv.enabled) {
-            right = right.child(crate::routes::badge(&b));
+            right = right.child(crate::routes::badge(&b, s.phone));
         }
         if let Some(ms) = sv.status.latency_ms.filter(|_| sv.enabled && tag.is_none()) {
             right = right.child(
