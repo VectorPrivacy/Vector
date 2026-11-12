@@ -102,6 +102,11 @@ pub struct Nexus {
     pub me: String,
     /// A link's app the catalogue doesn't hold yet: its page opens when it arrives.
     pub awaited: Option<String>,
+    /// A phone: no nav column, a back header over a search and a strip of chips.
+    pub slim: bool,
+    /// The page is 600px or less (`@container nx`): one column, smaller cards.
+    pub narrow: bool,
+    pub chips: ScrollHandle,
 }
 
 pub enum Act {
@@ -376,6 +381,9 @@ impl Nexus {
             perms: None,
             me: String::new(),
             awaited: None,
+            slim: false,
+            narrow: false,
+            chips: ScrollHandle::new(),
         }
     }
 
@@ -564,6 +572,10 @@ fn icon(n: &Nexus, app: &MarketplaceApp, size: f32) -> gpui::Div {
 
 /// `AppAction`: Install, Update, or Play / Open once it's here; the download's ring meanwhile.
 fn app_action(n: &Nexus, app: &MarketplaceApp, lg: bool, on: &OnAct, key: &str) -> AnyElement {
+    action_button(n, app, lg, on, key).into_any_element()
+}
+
+fn action_button(n: &Nexus, app: &MarketplaceApp, lg: bool, on: &OnAct, key: &str) -> gpui::Stateful<gpui::Div> {
     let action = n.actions.get(&app.id);
     let downloading = action.is_some_and(|a| matches!(a.kind, Kind::Installing | Kind::Updating));
     let busy = action.is_some_and(|a| a.kind != Kind::Failed);
@@ -626,7 +638,6 @@ fn app_action(n: &Nexus, app: &MarketplaceApp, lg: bool, on: &OnAct, key: &str) 
                 d.child(label)
             }
         })
-        .into_any_element()
 }
 
 fn btn(id: impl Into<SharedString>, label: impl Into<SharedString>, accent: bool) -> gpui::Stateful<gpui::Div> {
@@ -1087,11 +1098,11 @@ fn tile(n: &Nexus, app: &MarketplaceApp, sub: Option<String>, on: &OnAct, key: &
         .flex_col()
         .items_start()
         .flex_shrink_0()
-        .w(px(100.))
+        .w(px(if n.narrow { 84. } else { 100. }))
         .cursor_pointer()
         .on_click(click(on, move || Act::Details(id.clone())))
         .on_mouse_down(gpui::MouseButton::Right, move |e, w, cx| on2(Act::Menu(menu_id.clone(), e.position), w, cx))
-        .child(icon(n, app, 84.).group_hover(group, |s| {
+        .child(icon(n, app, if n.narrow { 72. } else { 84. }).group_hover(group, |s| {
             s.top(px(-3.)).shadow(vec![gpui::BoxShadow {
                 color: ca(0, 0, 0, 0.55),
                 offset: gpui::point(px(0.), px(10.)),
@@ -1125,6 +1136,7 @@ fn tile(n: &Nexus, app: &MarketplaceApp, sub: Option<String>, on: &OnAct, key: &
 
 /// `Shelf`: a titled row that scrolls sideways, with See All and arrows.
 fn shelf(
+    narrow: bool,
     key: &'static str,
     title: &str,
     glyph_name: Option<&str>,
@@ -1187,7 +1199,7 @@ fn shelf(
             })
     };
     div()
-        .mt(px(36.))
+        .mt(px(if narrow { 30. } else { 36. }))
         .child(head)
         .child(
             div()
@@ -1247,13 +1259,25 @@ fn spotlight(n: &Nexus, apps: &[&MarketplaceApp], on: &OnAct) -> Option<AnyEleme
         let id = id.clone();
         soft("nx-spot-details", None, "Details", false).on_click(click(on, move || Act::Details(id.clone())))
     };
+    let narrow = n.narrow;
+    let art_size = if narrow { 76. } else { 132. };
+    let art = || {
+        div()
+        .flex_shrink_0()
+        .shadow(vec![gpui::BoxShadow {
+            color: ca(0, 0, 0, 0.6),
+            offset: gpui::point(px(0.), px(20.)),
+            blur_radius: px(40.),
+            spread_radius: px(0.),
+            inset: false,
+        }])
+        .rounded(px(art_size * 0.225))
+        .child(icon(n, shown, art_size))
+    };
     let body = div()
         .flex()
-        .items_center()
-        .gap(px(28.))
-        .pt(px(32.))
-        .px(px(36.))
-        .pb(px(44.))
+        .when(narrow, |d| d.flex_col().items_start().gap(px(14.)).pt(px(20.)).px(px(18.)).pb(px(40.)).child(art()))
+        .when(!narrow, |d| d.items_center().gap(px(28.)).pt(px(32.)).px(px(36.)).pb(px(44.)))
         .child(
             div()
                 .flex_1()
@@ -1261,7 +1285,7 @@ fn spotlight(n: &Nexus, apps: &[&MarketplaceApp], on: &OnAct) -> Option<AnyEleme
                 .child(
                     div()
                         .h(px(13.))
-                        .mt(px(7.))
+                        .mt(px(if narrow { 14. } else { 7. }))
                         .flex()
                         .text_size(px(11.))
                         .line_height(px(13.))
@@ -1274,10 +1298,10 @@ fn spotlight(n: &Nexus, apps: &[&MarketplaceApp], on: &OnAct) -> Option<AnyEleme
                 )
                 .child(
                     div()
-                        .mt(px(14.))
+                        .mt(px(if narrow { 12. } else { 14. }))
                         .mb(px(6.))
-                        .text_size(px(34.))
-                        .line_height(px(38.))
+                        .text_size(px(if narrow { 25. } else { 34. }))
+                        .line_height(px(if narrow { 29. } else { 38. }))
                         .font_weight(FontWeight::BOLD)
                         .text_color(c(0xffffff))
                         .child(shown.name.clone()),
@@ -1302,21 +1326,14 @@ fn spotlight(n: &Nexus, apps: &[&MarketplaceApp], on: &OnAct) -> Option<AnyEleme
                         .child(second),
                 ),
         )
-        .child(
-            div()
-                .flex_shrink_0()
-                .shadow(vec![gpui::BoxShadow {
-                    color: ca(0, 0, 0, 0.6),
-                    offset: gpui::point(px(0.), px(20.)),
-                    blur_radius: px(40.),
-                    spread_radius: px(0.),
-                    inset: false,
-                }])
-                .rounded(px(132. * 0.225))
-                .child(icon(n, shown, 132.)),
-        );
+        .when(!narrow, |d| d.child(art()));
     let body = rise(SharedString::from(format!("nx-spot-{}", shown.id)), body, 0., 0.5, 8.);
-    let mut dots = div().absolute().left(px(36.)).bottom(px(18.)).flex().gap(px(6.));
+    let mut dots = div()
+        .absolute()
+        .left(px(if narrow { 18. } else { 36. }))
+        .bottom(px(if narrow { 16. } else { 18. }))
+        .flex()
+        .gap(px(6.));
     if apps.len() > 1 {
         for i in 0..apps.len() {
             dots = dots.child(
@@ -1337,6 +1354,7 @@ fn spotlight(n: &Nexus, apps: &[&MarketplaceApp], on: &OnAct) -> Option<AnyEleme
             );
         }
     }
+    let radius = if narrow { 18. } else { 20. };
     let (on_in, on_out) = (on.clone(), on.clone());
     let menu_id = shown.id.clone();
     let on_menu = on.clone();
@@ -1345,8 +1363,8 @@ fn spotlight(n: &Nexus, apps: &[&MarketplaceApp], on: &OnAct) -> Option<AnyEleme
             .id("nx-spot")
             .relative()
             .overflow_hidden()
-            .min_h(px(250.))
-            .rounded(px(20.))
+            .when(!narrow, |d| d.min_h(px(250.)))
+            .rounded(px(radius))
             .bg(c(0x0b0b0b))
             .cursor_pointer()
             .on_hover(move |hovered, w, cx| {
@@ -1354,23 +1372,35 @@ fn spotlight(n: &Nexus, apps: &[&MarketplaceApp], on: &OnAct) -> Option<AnyEleme
             })
             .on_click(click(on, move || Act::Details(id.clone())))
             .on_mouse_down(gpui::MouseButton::Right, move |e, w, cx| on_menu(Act::Menu(menu_id.clone(), e.position), w, cx))
-            .child(
-                div().absolute().inset_0().rounded(px(20.)).bg(gpui::linear_gradient(
+            .child(div().absolute().inset_0().rounded(px(radius)).bg(if narrow {
+                gpui::linear_gradient(
+                    180.,
+                    gpui::linear_color_stop(wash.opacity(0.6), 0.),
+                    gpui::linear_color_stop(ca(3, 3, 3, 0.), 0.7),
+                )
+            } else {
+                gpui::linear_gradient(
                     90.,
                     gpui::linear_color_stop(ca(3, 3, 3, 0.), 0.3),
                     gpui::linear_color_stop(wash.opacity(0.6), 0.85),
-                )),
-            )
-            .child(
-                div().absolute().inset_0().rounded(px(20.)).bg(gpui::linear_gradient(
+                )
+            }))
+            .child(div().absolute().inset_0().rounded(px(radius)).bg(if narrow {
+                gpui::linear_gradient(
+                    180.,
+                    gpui::linear_color_stop(ca(3, 3, 3, 0.3), 0.),
+                    gpui::linear_color_stop(ca(3, 3, 3, 0.9), 0.65),
+                )
+            } else {
+                gpui::linear_gradient(
                     90.,
                     gpui::linear_color_stop(ca(3, 3, 3, 0.94), 0.),
                     gpui::linear_color_stop(ca(3, 3, 3, 0.2), 1.),
-                )),
-            )
+                )
+            }))
             .child(body)
             .child(dots)
-            .child(div().absolute().inset_0().rounded(px(20.)).border_1().border_color(c(LINE_2)))
+            .child(div().absolute().inset_0().rounded(px(radius)).border_1().border_color(c(LINE_2)))
             .into_any_element(),
     )
 }
@@ -1396,7 +1426,7 @@ fn discover(n: &Nexus, width: f32, on: &OnAct) -> Vec<AnyElement> {
     for (key, title, g, tag, apps) in picks.into_iter().filter(|p| !p.4.is_empty()) {
         let tiles = apps.iter().map(|a| tile(n, a, None, on, key)).collect();
         let h = n.shelves.get(key).cloned().unwrap_or_default();
-        out.push(shelf(key, title, Some(g), Some(Act::Show(View::Category(tag.into()))), tiles, &h, on));
+        out.push(shelf(n.narrow, key, title, Some(g), Some(Act::Show(View::Category(tag.into()))), tiles, &h, on));
     }
     let recent: Vec<(&MarketplaceApp, i64)> = n
         .played
@@ -1407,17 +1437,18 @@ fn discover(n: &Nexus, width: f32, on: &OnAct) -> Vec<AnyElement> {
     if !recent.is_empty() {
         let tiles = recent.iter().map(|(a, at)| tile(n, a, Some(played_ago(*at, n.now_ms)), on, "recent")).collect();
         let h = n.shelves.get("recent").cloned().unwrap_or_default();
-        out.push(shelf("recent", "Jump Back In", None, Some(Act::Show(View::Library)), tiles, &h, on));
+        out.push(shelf(n.narrow, "recent", "Jump Back In", None, Some(Act::Show(View::Library)), tiles, &h, on));
     }
     if !together.is_empty() {
         let tiles = together.iter().map(|a| tile(n, a, None, on, "together")).collect();
         let h = n.shelves.get("together").cloned().unwrap_or_default();
-        out.push(shelf("together", "Play Together", None, Some(Act::Show(View::Category("multiplayer".into()))), tiles, &h, on));
+        out.push(shelf(n.narrow, "together", "Play Together", None, Some(Act::Show(View::Category("multiplayer".into()))), tiles, &h, on));
     }
     let arrivals: Vec<AnyElement> = newest.iter().take(6).enumerate().map(|(i, a)| row(n, a, i, None, on, "new")).collect();
+    let gap = if n.narrow { 30. } else { 36. };
     out.push(
         div()
-            .mt(px(36.))
+            .mt(px(gap))
             .child(
                 div()
                     .flex()
@@ -1435,7 +1466,7 @@ fn discover(n: &Nexus, width: f32, on: &OnAct) -> Vec<AnyElement> {
         let tiles = tools.iter().map(|a| tile(n, a, None, on, "tools")).collect();
         let h = n.shelves.get("tools").cloned().unwrap_or_default();
         let more = (tools.len() > 6).then(|| Act::Show(View::Category("app".into())));
-        out.push(shelf("tools", "Apps & Tools", None, more, tiles, &h, on));
+        out.push(shelf(n.narrow, "tools", "Apps & Tools", None, more, tiles, &h, on));
     }
     let cats: Vec<(String, usize)> = tag_counts(fit.iter().copied())
         .into_iter()
@@ -1443,27 +1474,28 @@ fn discover(n: &Nexus, width: f32, on: &OnAct) -> Vec<AnyElement> {
         .take(8)
         .collect();
     if !cats.is_empty() {
-        let cols = (((width + 10.) / (210. + 10.)).floor() as usize).max(1);
-        let mut grid = div().flex().flex_col().gap(px(10.));
+        let narrow = n.narrow;
+        let (cols, cat_gap, face) = if narrow { (2, 8., 28.) } else { ((((width + 10.) / (210. + 10.)).floor() as usize).max(1), 10., 34.) };
+        let mut grid = div().flex().flex_col().gap(px(cat_gap));
         let mut it = cats.iter().peekable();
         while it.peek().is_some() {
-            let mut line = div().flex().gap(px(10.));
+            let mut line = div().flex().gap(px(cat_gap));
             for _ in 0..cols {
                 let cell = it.next().map(|(tag, count)| {
                     let group = SharedString::from(format!("nx-cat-{tag}"));
                     let v = View::Category(tag.clone());
                     let mut faces = div().flex().flex_shrink_0();
-                    for (k, a) in newest.iter().filter(|a| in_category(a, tag)).take(3).enumerate() {
+                    for (k, a) in newest.iter().filter(|a| in_category(a, tag)).take(if narrow { 2 } else { 3 }).enumerate() {
                         let (dx, dy) = [(-4., 0.), (0., -3.), (4., 0.)][k];
                         faces = faces.child(
                             div()
                                 .relative()
                                 .when(k > 0, |d| d.ml(px(-10.)))
-                                .rounded(px(34. * 0.225 + 2.))
+                                .rounded(px(face * 0.225 + 2.))
                                 .border_2()
                                 .border_color(c(RAISE))
                                 .group_hover(group.clone(), move |s| s.left(px(dx)).top(px(dy)).border_color(c(RAISE_2)))
-                                .child(icon(n, a, 34.)),
+                                .child(icon(n, a, face)),
                         );
                     }
                     div()
@@ -1473,9 +1505,9 @@ fn discover(n: &Nexus, width: f32, on: &OnAct) -> Vec<AnyElement> {
                         .items_center()
                         .justify_between()
                         .gap(px(12.))
-                        .h(px(68.))
-                        .pl(px(16.))
-                        .pr(px(14.))
+                        .h(px(if narrow { 62. } else { 68. }))
+                        .pl(px(if narrow { 12. } else { 16. }))
+                        .pr(px(if narrow { 10. } else { 14. }))
                         .rounded(px(14.))
                         .bg(c(RAISE))
                         .border_1()
@@ -1513,7 +1545,7 @@ fn discover(n: &Nexus, width: f32, on: &OnAct) -> Vec<AnyElement> {
         }
         out.push(
             div()
-                .mt(px(36.))
+                .mt(px(gap))
                 .child(div().flex().items_center().mb(px(12.)).child(h3("Browse by Category")))
                 .child(grid)
                 .into_any_element(),
@@ -1701,26 +1733,29 @@ fn details(n: &Nexus, app: &MarketplaceApp, publisher: Option<&(SharedString, Op
         .clone()
         .or_else(|| publisher.map(|p| p.0.to_string()))
         .unwrap_or_else(|| "Unknown maker".into());
-    let mut actions = div().flex().flex_wrap().gap(px(10.)).mt(px(16.)).child(app_action(n, app, true, on, "detail"));
+    let narrow = n.narrow;
+    let fill = |d: gpui::Stateful<gpui::Div>| d.when(narrow, |d| d.flex_1().min_w_0());
+    let mut actions = div()
+        .flex()
+        .flex_wrap()
+        .gap(px(10.))
+        .mt(px(if narrow { 18. } else { 16. }))
+        .child(fill(action_button(n, app, true, on, "detail")));
     if is_multiplayer(app) {
         let id = app.id.clone();
-        let b = soft("nx-d-friends", Some("users-multi"), "Play with Friends", busy);
+        let b = fill(soft("nx-d-friends", Some("users-multi"), "Play with Friends", busy));
         actions = actions.child(if busy { b } else { b.on_click(click(on, move || Act::PlayWith(id.clone()))) });
     }
     if !n.me.is_empty() && app.publisher == n.me {
         let id = app.id.clone();
-        actions = actions.child(soft("nx-d-edit", Some("edit"), "Edit Listing", false).on_click(click(on, move || Act::EditListing(id.clone()))));
+        actions = actions.child(
+            fill(soft("nx-d-edit", Some("edit"), "Edit Listing", false))
+                .when(narrow, |d| d.flex_basis(gpui::relative(1.)))
+                .on_click(click(on, move || Act::EditListing(id.clone()))),
+        );
     }
     let copy_id = app.id.clone();
-    let head = div()
-        .flex()
-        .items_center()
-        .gap(px(24.))
-        .pt(px(6.))
-        .pb(px(24.))
-        .child(icon(n, app, 112.))
-        .child(
-            div()
+    let id_block = div()
                 .flex_1()
                 .min_w_0()
                 .flex()
@@ -1730,8 +1765,8 @@ fn details(n: &Nexus, app: &MarketplaceApp, publisher: Option<&(SharedString, Op
                         .flex()
                         .items_center()
                         .gap(px(8.))
-                        .text_size(px(30.))
-                        .line_height(px(34.))
+                        .text_size(px(if narrow { 23. } else { 30. }))
+                        .line_height(px(if narrow { 28. } else { 34. }))
                         .font_weight(FontWeight::BOLD)
                         .text_color(c(0xffffff))
                         .child(app.name.clone())
@@ -1746,12 +1781,27 @@ fn details(n: &Nexus, app: &MarketplaceApp, publisher: Option<&(SharedString, Op
                                 .child(glyph("share", 16., c(DIM))),
                         ),
                 )
-                .child(div().mt(px(4.)).text_size(px(14.)).text_color(c(PRIMARY)).child(maker))
-                .child(actions),
-        );
+                .child(div().mt(px(4.)).text_size(px(14.)).text_color(c(PRIMARY)).child(maker));
+    let head = if narrow {
+        div()
+            .pt(px(6.))
+            .pb(px(20.))
+            .child(div().flex().items_center().gap(px(16.)).child(icon(n, app, 88.)).child(id_block))
+            .child(actions)
+    } else {
+        div()
+            .flex()
+            .items_center()
+            .gap(px(24.))
+            .pt(px(6.))
+            .pb(px(24.))
+            .child(icon(n, app, 112.))
+            .child(id_block.child(actions))
+    };
     let fact = |k: &str, v: String, s: Option<String>, first: bool| {
         div()
-            .flex_1()
+            .when(narrow, |d| d.w_1_2())
+            .when(!narrow, |d| d.flex_1())
             .min_w_0()
             .flex()
             .flex_col()
@@ -1785,6 +1835,7 @@ fn details(n: &Nexus, app: &MarketplaceApp, publisher: Option<&(SharedString, Op
     let game = is_game(app);
     let facts = div()
         .flex()
+        .when(narrow, |d| d.flex_wrap().gap_y(px(14.)))
         .py(px(14.))
         .border_t_1()
         .border_b_1()
@@ -1796,7 +1847,7 @@ fn details(n: &Nexus, app: &MarketplaceApp, publisher: Option<&(SharedString, Op
             true,
         ))
         .child(fact("Size", crate::media::format_bytes_with(app.size as f64, 1, false), None, false))
-        .child(fact("Released", publish_date(app.published_at), None, false))
+        .child(fact("Released", publish_date(app.published_at), None, narrow))
         .child(fact(
             if game { "Players" } else { "Kind" },
             if game { if is_multiplayer(app) { "Multiplayer" } else { "Solo" } } else { "App" }.into(),
@@ -2109,9 +2160,16 @@ pub fn view(
             View::Discover => None,
         }
     };
-    let main_w = width - crate::ui::LIST_W;
-    let inner = main_w.min(PAGE_MAX) - 64.;
-    let mut page = div().w_full().max_w(px(PAGE_MAX)).mx_auto().pt(px(24.)).px(px(32.)).pb(px(72.));
+    let main_w = if n.slim { width } else { width - crate::ui::LIST_W };
+    let pad = if n.narrow { 16. } else { 32. };
+    let inner = main_w.min(PAGE_MAX) - pad * 2.;
+    let mut page = div()
+        .w_full()
+        .max_w(px(PAGE_MAX))
+        .mx_auto()
+        .pt(px(if n.narrow { 16. } else { 24. }))
+        .px(px(pad))
+        .pb(px(if n.narrow { 56. } else { 72. }));
     if n.loading && n.apps.is_empty() {
         page = page.child(empty("nexus", "Opening the App Store".into(), "", None, on, true));
     } else if !n.error.is_empty() && n.apps.is_empty() {
@@ -2129,8 +2187,8 @@ pub fn view(
                     .mb(px(18.))
                     .child(
                         div()
-                            .text_size(px(28.))
-                            .line_height(px(32.))
+                            .text_size(px(if n.narrow { 24. } else { 28. }))
+                            .line_height(px(if n.narrow { 28. } else { 32. }))
                             .font_weight(FontWeight::BOLD)
                             .text_color(c(0xffffff))
                             .child(t),
@@ -2147,22 +2205,27 @@ pub fn view(
     let page = page.with_animation(
         SharedString::from(format!("nx-page-{:?}", n.turned)),
         gpui::Animation::new(std::time::Duration::from_millis(if app.is_some() { 340 } else { 320 })),
-        |d, t| {
-            let e = crate::kit::bezier(0.22, 1., 0.36, 1.)(t);
-            d.opacity(e).mt(px(8. * (1. - e)))
+        {
+            let push = n.slim && app.is_some();
+            move |d, t| {
+                let e = crate::kit::bezier(0.22, 1., 0.36, 1.)(t);
+                if push { d.opacity(e).ml(px(32. * (1. - e))) } else { d.opacity(e).mt(px(8. * (1. - e))) }
+            }
         },
     );
-    let back = app.is_some();
+    let back = app.is_some() || n.slim;
+    let title = if n.slim { app.map(|a| a.name.clone()).unwrap_or_else(|| "App Store".into()) } else { title };
+    let closes = app.is_none();
     let top = div()
-        .h(px(50.))
+        .h(px(if n.slim { 56. } else { 50. }))
         .flex_shrink_0()
         .flex()
         .items_center()
         .gap(px(6.))
-        .pl(px(if back { 12. } else { 28. }))
-        .pr(px(14.))
+        .pl(px(if n.slim { 10. } else if back { 12. } else { 28. }))
+        .pr(px(if n.slim { 10. } else { 14. }))
         .border_b_1()
-        .border_color(c(0x171717))
+        .border_color(c(if n.slim { 0x191919 } else { 0x171717 }))
         .when(back, |d| {
             d.child(
                 div()
@@ -2175,7 +2238,7 @@ pub fn view(
                     .rounded_full()
                     .cursor_pointer()
                     .hover(|s| s.bg(c(0x151515)))
-                    .on_click(click(on, || Act::CloseDetails))
+                    .on_click(click(on, move || if closes { Act::Close } else { Act::CloseDetails }))
                     .child(glyph("chevron-left", 20., c(0xb2b2b2)).group_hover("nx-top-back", |s| s.text_color(c(0xffffff)))),
             )
         })
@@ -2184,8 +2247,9 @@ pub fn view(
                 .flex_1()
                 .min_w_0()
                 .truncate()
-                .text_size(px(16.))
+                .text_size(px(if n.slim { 17. } else { 16. }))
                 .line_height(px(19.))
+                .when(n.slim, |d| d.text_center().font_weight(FontWeight::BOLD))
                 .text_color(c(0xffffff))
                 .child(title),
         )
@@ -2222,6 +2286,7 @@ pub fn view(
         .flex()
         .flex_col()
         .child(top)
+        .children((n.slim && app.is_none()).then(|| slim_head(n, &q, on)))
         .child(
             div()
                 .id("nx-scroll")
@@ -2236,7 +2301,7 @@ pub fn view(
         .flex()
         .bg(c(BG))
         .font_family(RUBIK)
-        .child(nav(n, on, cx))
+        .when(!n.slim, |d| d.child(nav(n, on, cx)))
         .child(main)
         .with_animation(
             SharedString::from(format!("nx-open-{:?}", n.opened)),
@@ -2247,6 +2312,99 @@ pub fn view(
             },
         )
         .into_any_element()
+}
+
+/// `.nx-mhead`: on a phone, the search, then the pages and busiest categories as one strip.
+fn slim_head(n: &Nexus, q: &str, on: &OnAct) -> AnyElement {
+    let searching = !q.is_empty();
+    let fit: Vec<&MarketplaceApp> = n.apps.iter().filter(|a| n.shows(a)).collect();
+    let updates = n.apps.iter().filter(|a| a.update_available).count();
+    let mut chips: Vec<(View, String, usize)> = vec![(View::Discover, "Discover".into(), 0), (View::Library, "Library".into(), 0)];
+    if updates > 0 {
+        chips.push((View::Updates, "Updates".into(), updates));
+    }
+    chips.push((View::All, "All".into(), 0));
+    if n.apps.iter().any(|a| !is_game(a)) {
+        chips.push((View::Category("app".into()), "Apps & Tools".into(), 0));
+    }
+    for (tag, _) in tag_counts(fit.iter().copied()).into_iter().filter(|(_, c)| *c > 1).take(10) {
+        let label = tag_label(&tag);
+        chips.push((View::Category(tag), label, 0));
+    }
+    let lit = |d: gpui::Stateful<gpui::Div>, on: bool| {
+        if on { d.bg(c(PRIMARY).opacity(0.16)).text_color(c(PRIMARY)) } else { d }
+    };
+    let fit_only = n.fit_only;
+    let fit_glyph = if n.device.touch && !n.device.keys { "touch" } else { "keyboard" };
+    let mut strip = div()
+        .id("nx-mchips")
+        .flex()
+        .gap(px(8.))
+        .py(px(12.))
+        .px(px(16.))
+        .overflow_x_scroll()
+        .track_scroll(&n.chips)
+        .border_b_1()
+        .border_color(c(0x191919))
+        .child(
+            lit(chip("nx-chip-fit", "Fits This Device".into()), fit_only)
+                .gap(px(6.))
+                .child(glyph(fit_glyph, 15., if fit_only { c(PRIMARY) } else { c(DIM) }))
+                .on_click(click(on, move || Act::FitOnly(!fit_only))),
+        )
+        .child(div().flex_shrink_0().w(px(1.)).my(px(6.)).mx(px(2.)).bg(c(LINE_2)));
+    for (i, (v, label, count)) in chips.into_iter().enumerate() {
+        let here = !searching && n.view == v;
+        let mut el = lit(chip(SharedString::from(format!("nx-mchip-{i}")), label), here).gap(px(6.));
+        if count > 0 {
+            el = el.child(
+                div()
+                    .h(px(18.))
+                    .min_w(px(18.))
+                    .px(px(5.))
+                    .rounded(px(10.))
+                    .bg(c(PRIMARY))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_size(px(11.))
+                    .font_weight(FontWeight::BOLD)
+                    .text_color(c(0x000000))
+                    .child(count.to_string()),
+            );
+        }
+        strip = strip.child(el.on_click(click(on, move || Act::Show(v.clone()))));
+    }
+    let clear = on.clone();
+    let search = div()
+        .relative()
+        .mt(px(12.))
+        .mx(px(16.))
+        .h(px(44.))
+        .rounded(px(10.))
+        .border_1()
+        .border_color(c(0x2c2c2c))
+        .bg(c(0x0e0e0e))
+        .pl(px(41.))
+        .pr(px(if searching { 43. } else { 13. }))
+        .flex()
+        .items_center()
+        .child(div().flex_1().min_w_0().child(n.search.clone()))
+        .child(glyph("search", 19., c(0x8a8a8a)).absolute().left(px(12.)).top(px(11.5)))
+        .when(searching, |d| {
+            d.child(
+                div()
+                    .id("nx-msearch-clear")
+                    .absolute()
+                    .right(px(9.))
+                    .top(px(9.))
+                    .size(px(24.))
+                    .cursor_pointer()
+                    .on_click(move |_, w, cx| clear(Act::ClearSearch, w, cx))
+                    .child(svg().path("ui/search-clear.svg").size_full().text_color(c(0x8a8a8a))),
+            )
+        });
+    div().flex_shrink_0().flex().flex_col().child(search).child(strip).into_any_element()
 }
 
 /// The details page's Permissions section: what the app may use, switchable any time.

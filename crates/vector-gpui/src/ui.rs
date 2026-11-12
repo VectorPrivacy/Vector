@@ -5217,7 +5217,7 @@ impl Render for VectorApp {
                     cx.stop_propagation();
                     return;
                 }
-                if e.keystroke.key == "escape" && app.escape_overlay() {
+                if e.keystroke.key == "escape" && (app.escape_overlay() || app.nexus_escape(window, cx)) {
                     cx.stop_propagation();
                     cx.notify();
                 }

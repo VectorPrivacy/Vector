@@ -14,14 +14,7 @@ impl VectorApp {
     pub(super) fn show_nexus(&mut self, view: Option<View>, window: &mut Window, cx: &mut Context<Self>) {
         if self.nexus.is_none() {
             let search = cx.new(|cx| {
-                TextInput::new("Search the App Store", cx).with_look(crate::composer::Look {
-                    family: RUBIK,
-                    size: px(14.),
-                    line_height: px(17.),
-                    weight: FontWeight::NORMAL,
-                    placeholder: c(0xb2b2b2),
-                    ..crate::kit::field_look()
-                })
+                TextInput::new("Search the App Store", cx).with_look(nexus_search_look(false))
             });
             cx.subscribe_in(&search, window, |app, _, _: &InputChanged, _, cx| {
                 if let Some(n) = app.nexus.as_mut() {
@@ -257,6 +250,22 @@ impl VectorApp {
             _ => return,
         }
         cx.notify();
+    }
+
+    /// Escape leaves an app's page; on a phone, with none open, the App Store itself.
+    pub(super) fn nexus_escape(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let Some(n) = self.nexus.as_ref() else { return false };
+        if self.menu.is_some() || self.popup.is_some() || n.search.focus_handle(cx).is_focused(window) {
+            return false;
+        }
+        if n.details.is_some() {
+            self.on_nexus(Act::CloseDetails, window, cx);
+        } else if self.is_slim && self.settings.is_none() {
+            self.on_nexus(Act::Close, window, cx);
+        } else {
+            return false;
+        }
+        true
     }
 
     pub(super) fn close_nexus(&mut self, cx: &mut Context<Self>) {
@@ -574,6 +583,14 @@ impl VectorApp {
                 this.update(cx, |_, cx| cx.notify()).ok();
             })
             .detach();
+        }
+        let slim = self.is_slim;
+        if let Some(n) = self.nexus.as_mut() {
+            n.narrow = (if slim { width } else { width - crate::ui::LIST_W }) <= 600.;
+            if n.slim != slim {
+                n.slim = slim;
+                n.search.update(cx, |t, cx| t.set_look(nexus_search_look(slim), cx));
+            }
         }
         let n = self.nexus.as_ref()?;
         let publisher = n.details.as_deref().and_then(|id| n.app(id)).and_then(|a| {
@@ -1122,5 +1139,16 @@ impl VectorApp {
             .with_priority(10)
             .into_any_element(),
         )
+    }
+}
+
+fn nexus_search_look(slim: bool) -> crate::composer::Look {
+    crate::composer::Look {
+        family: RUBIK,
+        size: px(if slim { 16. } else { 14. }),
+        line_height: px(if slim { 20. } else { 17. }),
+        weight: FontWeight::NORMAL,
+        placeholder: c(if slim { 0x6f6f6f } else { 0xb2b2b2 }),
+        ..crate::kit::field_look()
     }
 }
