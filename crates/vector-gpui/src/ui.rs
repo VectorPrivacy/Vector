@@ -297,6 +297,8 @@ pub struct VectorApp {
     scanner: Option<qrscan_ops::Scanner>,
     /// Scanner frames off screen, for the atlas to let go of.
     retired_frames: Vec<Arc<gpui::RenderImage>>,
+    /// When decoded pictures off screen were last let go.
+    swept: std::time::Instant,
     start: Option<crate::startmenu::StartMenu>,
     /// The context menu open: where, its rows, and what each does.
     menu: Option<(gpui::Point<gpui::Pixels>, Vec<kit::MenuItem>, Vec<MenuAct>)>,
@@ -1025,6 +1027,7 @@ impl VectorApp {
             menu_trail: Vec::new(),
             scanner: None,
             retired_frames: Vec::new(),
+            swept: std::time::Instant::now(),
             start: None,
             menu: None,
             menu_sliding: Default::default(),
@@ -5671,6 +5674,14 @@ impl Render for VectorApp {
         }
         if let Some(s) = self.scanner.as_mut() {
             self.retired_frames.append(&mut s.retired);
+        }
+        if self.swept.elapsed() > std::time::Duration::from_secs(15) {
+            self.swept = std::time::Instant::now();
+            const IDLE: std::time::Duration = std::time::Duration::from_secs(90);
+            let gone = self.media.borrow_mut().sweep(IDLE);
+            self.retired_frames.extend(gone);
+            cx.evict_idle_images(IDLE, Some(window));
+            crate::trim::soon();
         }
         for old in self.retired_frames.drain(..) {
             let _ = window.drop_image(old);

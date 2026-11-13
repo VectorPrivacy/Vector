@@ -947,6 +947,8 @@ pub struct App {
 
     // assets
     pub(crate) loading_assets: FxHashMap<(TypeId, u64), Box<dyn Any>>,
+    /// When each cached asset was last asked for, so idle decoded images can be let go.
+    asset_used: FxHashMap<(TypeId, u64), std::time::Instant>,
     asset_source: Arc<dyn AssetSource>,
     pub(crate) svg_renderer: SvgRenderer,
     http_client: Arc<dyn HttpClient>,
@@ -1037,6 +1039,7 @@ impl App {
                 hang_monitor: None,
                 svg_renderer: SvgRenderer::new(asset_source.clone()),
                 loading_assets: Default::default(),
+                asset_used: Default::default(),
                 asset_source,
                 http_client,
                 globals_by_type: Default::default(),
@@ -3144,6 +3147,7 @@ impl App {
 
     pub(crate) fn asset_entry<A: Asset>(&mut self, source: &A::Source) -> &CachedLoad<A::Output> {
         let asset_id = (TypeId::of::<A>(), hash(source));
+        self.asset_used.insert(asset_id, std::time::Instant::now());
         if !self.loading_assets.contains_key(&asset_id) {
             let future = A::load(source.clone(), self);
             let entry = CachedLoad::new(future, self);
@@ -3208,6 +3212,42 @@ impl App {
     /// Returns `true` if the platform file picker supports selecting a mix of files and directories.
     pub fn can_select_mixed_files_and_dirs(&self) -> bool {
         self.platform.can_select_mixed_files_and_dirs()
+    }
+
+    /// Drops decoded images no element has asked for in `idle`, from the cache and from every
+    /// window's atlas; one drawn again later is decoded again.
+    pub fn evict_idle_images(&mut self, idle: Duration, mut current_window: Option<&mut Window>) {
+        type Loaded = Result<Arc<RenderImage>, crate::ImageCacheError>;
+        let kinds = [
+            TypeId::of::<crate::ImgResourceLoader>(),
+            TypeId::of::<crate::AssetLogger<crate::ImageDecoder>>(),
+        ];
+        let now = std::time::Instant::now();
+        let stale: Vec<_> = self
+            .asset_used
+            .iter()
+            .filter(|(k, at)| kinds.contains(&k.0) && now.duration_since(**at) > idle)
+            .map(|(k, _)| *k)
+            .collect();
+        let mut images = Vec::new();
+        for key in stale {
+            let loaded = self
+                .loading_assets
+                .get(&key)
+                .and_then(|e| e.downcast_ref::<CachedLoad<Loaded>>())
+                .map(|load| load.get());
+            match loaded {
+                // Still loading: its waiters need it.
+                Some(None) => continue,
+                Some(Some(Ok(image))) => images.push(image),
+                _ => {}
+            }
+            self.loading_assets.remove(&key);
+            self.asset_used.remove(&key);
+        }
+        for image in images {
+            self.drop_image(image, current_window.as_deref_mut());
+        }
     }
 
     /// Removes an image from the sprite atlas on all windows.

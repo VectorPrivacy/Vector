@@ -148,6 +148,8 @@ pub struct Media {
     pub embed_preview_queue: Vec<crate::embeds::Media>,
     /// Realtime sessions, by topic (or `att:<id>` for an app without one).
     pub xdc_live: HashMap<String, XdcLive>,
+    /// When each decoded picture was last drawn, so one off screen for long is let go.
+    used: HashMap<(u8, String), std::time::Instant>,
 }
 
 /// A Mini App session as its card reports it.
@@ -188,6 +190,7 @@ impl Media {
         if hash.is_empty() {
             return None;
         }
+        self.used.insert((0, format!("{hash}\u{0}{}\u{0}{}", px.0, px.1)), std::time::Instant::now());
         self.thumbs
             .entry((hash.to_string(), px.0, px.1))
             .or_insert_with(|| decode_thumbhash(hash, px).map(Arc::new))
@@ -196,6 +199,7 @@ impl Media {
 
     /// An attachment's picture; the first ask queues its decode at `max` device pixels.
     pub fn image(&mut self, key: &str, source: Source, ext: &str, max: (u32, u32)) -> Slot {
+        self.used.insert((1, key.to_string()), std::time::Instant::now());
         if let Some(s) = self.images.get(key) {
             return s.clone();
         }
@@ -218,6 +222,7 @@ impl Media {
 impl Media {
     /// A linked picture; the first ask fetches it.
     pub fn linked(&mut self, url: &str) -> Linked {
+        self.used.insert((2, url.to_string()), std::time::Instant::now());
         if let Some(l) = self.linked.get(url) {
             return l.clone();
         }
@@ -226,8 +231,56 @@ impl Media {
         Linked::Loading(None)
     }
 
+    /// Decoded pictures not drawn for `idle`, taken out of the caches for their atlas
+    /// textures to be dropped; one drawn again later is decoded again.
+    pub fn sweep(&mut self, idle: std::time::Duration) -> Vec<Arc<RenderImage>> {
+        let now = std::time::Instant::now();
+        let stale: Vec<(u8, String)> = self
+            .used
+            .iter()
+            .filter(|(_, at)| now.duration_since(**at) > idle)
+            .map(|(k, _)| k.clone())
+            .collect();
+        let mut out = Vec::new();
+        for key in stale {
+            let image = match key.0 {
+                0 => {
+                    let mut parts = key.1.split('\u{0}');
+                    let (Some(h), Some(w), Some(t)) = (parts.next(), parts.next(), parts.next()) else { continue };
+                    let (Ok(w), Ok(t)) = (w.parse(), t.parse()) else { continue };
+                    self.thumbs.remove(&(h.to_string(), w, t)).flatten()
+                }
+                1 => match self.images.get(&key.1) {
+                    Some(Slot::Ready { .. }) => match self.images.remove(&key.1) {
+                        Some(Slot::Ready { image, .. }) => Some(image),
+                        _ => None,
+                    },
+                    _ => continue,
+                },
+                2 => match self.linked.get(&key.1) {
+                    Some(Linked::Ready { .. }) => match self.linked.remove(&key.1) {
+                        Some(Linked::Ready { image, .. }) => Some(image),
+                        _ => None,
+                    },
+                    _ => continue,
+                },
+                _ => match self.custom.get(&key.1) {
+                    Some(Custom::Ready(_)) => match self.custom.remove(&key.1) {
+                        Some(Custom::Ready(image)) => Some(image),
+                        _ => None,
+                    },
+                    _ => continue,
+                },
+            };
+            self.used.remove(&key);
+            out.extend(image);
+        }
+        out
+    }
+
     /// A custom emoji (`icon`: a pack's logo); the first ask fetches it.
     pub fn custom(&mut self, url: &str, icon: bool) -> Custom {
+        self.used.insert((3, url.to_string()), std::time::Instant::now());
         if let Some(c) = self.custom.get(url) {
             return c.clone();
         }

@@ -588,7 +588,8 @@ impl ImageSource {
 }
 
 #[derive(Clone)]
-enum ImageDecoder {}
+#[doc(hidden)]
+pub enum ImageDecoder {}
 
 impl Asset for ImageDecoder {
     type Source = Arc<Image>;
