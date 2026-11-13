@@ -30,6 +30,7 @@ mod host {
     use crate::wire::{self, FromHost, Open, ToHost};
 
     const PLAYER: &str = "player";
+    const CRASHED: &str = "Mini App Crashed Unexpectedly";
 
     struct Window {
         window: gtk::Window,
@@ -228,6 +229,17 @@ mod host {
             let mut settings = NetworkProxySettings::new(Some(i.sink.as_str()), &hosts);
             manager.set_network_proxy_settings(NetworkProxyMode::Custom, Some(&mut settings));
             view.load_url(&i.boot_url).map_err(|e| e.to_string())?;
+        }
+
+        // A crashed page would leave a blank window: it goes, and the app says why.
+        {
+            use webkit2gtk::WebViewExt;
+            let label = spec.label.clone();
+            let w = window.clone();
+            view.webview().connect_web_process_terminated(move |_, _| {
+                send(&FromHost::Failed { label: label.clone(), error: CRASHED.into() }, &[]);
+                unsafe { w.destroy() };
+            });
         }
 
         // A first close leaves the page instead, so unload handlers can send a last update.

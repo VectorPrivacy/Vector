@@ -73,7 +73,7 @@ fn launch() -> Result<Host, String> {
     Ok(Host { stdin: BufWriter::new(stdin), open: HashMap::new(), generation })
 }
 
-/// The host exited: every window it held is closed.
+/// The host exited: every window it held is closed, and a crash says so once.
 fn gone(generation: u64) {
     let labels: Vec<_> = match HOST.lock() {
         Ok(mut h) if h.as_ref().is_some_and(|h| h.generation == generation) => {
@@ -81,8 +81,17 @@ fn gone(generation: u64) {
         }
         _ => return,
     };
+    let mut told = false;
     for (label, isolated) in labels {
-        closed(label, isolated);
+        if told {
+            closed(label, isolated);
+            continue;
+        }
+        told = true;
+        if let Some(id) = isolated {
+            vector_media::miniapps::isolated::stop_if(&label, id);
+        }
+        emit(Event::Failed(label, "Mini App Crashed Unexpectedly".into()));
     }
 }
 
