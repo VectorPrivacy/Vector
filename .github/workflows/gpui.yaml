@@ -169,6 +169,15 @@ jobs:
             libxkbcommon-x11-dev libwayland-dev libx11-xcb-dev libxcb1-dev libfontconfig-dev libfreetype-dev \
             libvulkan-dev libssl-dev libzstd-dev clang cmake xdg-utils
 
+      # whisper builds its Vulkan backend on Linux, which needs glslc, as in the Tauri release.
+      - name: Vulkan SDK (Linux)
+        if: startsWith(matrix.platform, 'ubuntu')
+        run: |
+          wget -qO - https://packages.lunarg.com/lunarg-signing-key-pub.asc | sudo tee /etc/apt/trusted.gpg.d/lunarg.asc > /dev/null
+          sudo wget -qO /etc/apt/sources.list.d/lunarg-vulkan-jammy.list https://packages.lunarg.com/vulkan/lunarg-vulkan-jammy.list
+          sudo apt-get update
+          sudo apt-get install -y vulkan-sdk
+
       - name: Cache FFmpeg (macOS)
         if: startsWith(matrix.platform, 'macos')
         id: ffmpeg-cache
