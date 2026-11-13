@@ -166,10 +166,11 @@ fn option(
         .child(
             div()
                 .mt(px(-2. + inset))
-                .w(px(50.))
+                .w_full()
                 .text_size(px(12.))
                 .line_height(px(24.))
                 .text_center()
+                .whitespace_nowrap()
                 .child(label),
         )
 }
