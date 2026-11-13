@@ -6,7 +6,8 @@ use std::time::Instant;
 
 use gpui::prelude::*;
 use gpui::AnimationExt as _;
-use gpui::{AnyElement, Entity, FontWeight, Hsla, SharedString, div, img, point, px, svg};
+use gpui::{AnyElement, Entity, FontWeight, Hsla, SharedString, div, point, px, svg};
+use crate::pic::img;
 use serde_json::Value;
 
 use crate::composer::TextInput;

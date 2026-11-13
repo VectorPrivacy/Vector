@@ -3,7 +3,8 @@
 
 use std::time::{Duration, Instant};
 
-use gpui::{AnyElement, Context, Entity, FontWeight, SharedString, Task, Window, div, img, prelude::*, px, svg};
+use gpui::{AnyElement, Context, Entity, FontWeight, SharedString, Task, Window, div, prelude::*, px, svg};
+use crate::pic::img;
 use serde_json::Value;
 
 use super::{VectorApp, backend};

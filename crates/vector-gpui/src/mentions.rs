@@ -4,10 +4,8 @@
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use gpui::{
-    AnyElement, App, FontWeight, IntoElement, ParentElement, SharedString, Styled, StyledImage,
-    Window, div, img, px, svg,
-};
+use gpui::{AnyElement, App, FontWeight, IntoElement, ParentElement, SharedString, Styled, StyledImage, Window, div, px, svg};
+use crate::pic::img;
 use serde::Deserialize;
 use vector_core::SerializableChat;
 

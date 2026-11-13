@@ -27,6 +27,9 @@ pub struct Assets;
 
 impl AssetSource for Assets {
     fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
+        if let Some(file) = path.strip_prefix(crate::pic::SEALED) {
+            return Ok(Some(Cow::Owned(crate::pic::read(file)?)));
+        }
         let file = if let Some(p) = path.strip_prefix("icons/") {
             SharedIcons::get(p)
         } else if let Some(p) = path.strip_prefix("ui/") {

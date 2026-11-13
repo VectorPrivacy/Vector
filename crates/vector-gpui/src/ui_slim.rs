@@ -7,10 +7,8 @@ use std::rc::Rc;
 
 use gpui::prelude::*;
 use gpui::{AnimationExt, Focusable};
-use gpui::{
-    AnyElement, Bounds, Context, Entity, FontWeight, ListAlignment, ListState, Pixels,
-    SharedString, Window, div, img, list, px, svg,
-};
+use gpui::{AnyElement, Bounds, Context, Entity, FontWeight, ListAlignment, ListState, Pixels, SharedString, Window, div, list, px, svg};
+use crate::pic::img;
 use vector_core::chat::SerializableChat;
 
 use super::{MenuAct, VectorApp, avatar, preview_line_at, slim_badge};

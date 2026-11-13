@@ -5,7 +5,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use futures::StreamExt;
-use gpui::{AnyElement, ClipboardItem, Context, Entity, Focusable, FontWeight, InteractiveElement, IntoElement, ParentElement, RenderImage, SharedString, StatefulInteractiveElement, Styled, Window, div, img, prelude::FluentBuilder, px};
+use gpui::{AnyElement, ClipboardItem, Context, Entity, Focusable, FontWeight, InteractiveElement, IntoElement, ParentElement, RenderImage, SharedString, StatefulInteractiveElement, Styled, Window, div, prelude::FluentBuilder, px};
+use crate::pic::img;
 
 use super::LoginView;
 use crate::backend::{self, account, bunker};

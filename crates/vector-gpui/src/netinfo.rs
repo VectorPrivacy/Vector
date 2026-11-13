@@ -4,7 +4,8 @@
 use std::rc::Rc;
 
 use gpui::prelude::*;
-use gpui::{AnyElement, App, FontWeight, HighlightStyle, StyledText, Window, div, img, px, svg};
+use gpui::{AnyElement, App, FontWeight, HighlightStyle, StyledText, Window, div, px, svg};
+use crate::pic::img;
 
 use crate::theme::*;
 

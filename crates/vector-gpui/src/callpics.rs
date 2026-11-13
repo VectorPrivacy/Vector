@@ -3,10 +3,8 @@
 
 use std::time::Instant;
 
-use gpui::{
-    AnyElement, InteractiveElement, IntoElement, ObjectFit, ParentElement, StatefulInteractiveElement,
-    Styled, StyledImage, div, img, prelude::FluentBuilder, px, svg,
-};
+use gpui::{AnyElement, InteractiveElement, IntoElement, ObjectFit, ParentElement, StatefulInteractiveElement, Styled, StyledImage, div, prelude::FluentBuilder, px, svg};
+use crate::pic::img;
 
 use crate::call::{Act, Call, OnAct, Quality, Seen, call_btn, dot, label, toggle};
 use crate::data::Store;

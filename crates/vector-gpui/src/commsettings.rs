@@ -6,9 +6,8 @@ use std::collections::HashSet;
 use std::rc::Rc;
 
 use gpui::prelude::*;
-use gpui::{
-    AnyElement, App, Entity, FontWeight, ScrollHandle, SharedString, Window, div, img, px, svg,
-};
+use gpui::{AnyElement, App, Entity, FontWeight, ScrollHandle, SharedString, Window, div, px, svg};
+use crate::pic::img;
 
 use crate::composer::TextInput;
 use crate::data::Store;
@@ -743,7 +742,7 @@ fn relay_row(
         .bg(c(0x0c0c0c))
         .when(!first, |d| d.border_t_1().border_color(c(0x1e1e1e)))
         .child(match pic {
-            Some(pic) => gpui::img(pic)
+            Some(pic) => crate::pic::img(pic)
                 .size(px(22.))
                 .mx(px(-3.))
                 .flex_shrink_0()

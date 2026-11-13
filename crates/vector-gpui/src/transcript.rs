@@ -266,7 +266,7 @@ pub fn view(
                             .gap(px(6.))
                             .min_w_0()
                             .text_color(white_a(0.55))
-                            .children(crate::emoji::twemoji(&flag).map(|p| gpui::img(p).size(px(14.))))
+                            .children(crate::emoji::twemoji(&flag).map(|p| crate::pic::img(p).size(px(14.))))
                             .child(name),
                     )
             });

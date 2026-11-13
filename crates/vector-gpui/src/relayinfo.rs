@@ -74,7 +74,7 @@ pub fn pump<V: 'static>(app: WeakEntity<V>, cx: &mut App) {
                     let path = v["icon"].as_str().map(|p| root.join(p));
                     let icon = cx
                         .background_executor()
-                        .spawn(async move { path.and_then(|p| std::fs::read(p).ok()) })
+                        .spawn(async move { path.and_then(|p| crate::pic::read(p).ok()) })
                         .await;
                     Some((v["name"].as_str().map(String::from), icon, v["auth"].as_bool() == Some(true)))
                 }

@@ -77,10 +77,11 @@ pub fn cached_avatar(url: &str) -> Option<String> {
 fn cached(url: &str, kind: Kind) -> Option<String> {
     let dir = cache_dir(kind)?;
     let key = cache_key(url);
-    ["jpg", "png", "webp", "gif"]
+    // Every extension the desktop client writes a cache file with.
+    ["jpg", "png", "webp", "gif", "ico", "svg", "bmp"]
         .iter()
         .map(|ext| dir.join(format!("{key}.{ext}")))
-        .find(|p| p.is_file())
+        .find(|p| vector_core::vcache::readable(p))
         .map(|p| p.to_string_lossy().into_owned())
 }
 
@@ -125,9 +126,7 @@ async fn cache(url: &str, kind: Kind) -> Result<String, String> {
     let path = cache_dir(kind)
         .ok_or("No cache directory")?
         .join(format!("{}.{ext}", cache_key(url)));
-    tokio::fs::write(&path, &bytes)
-        .await
-        .map_err(|e| e.to_string())?;
+    vector_core::vcache::write(&path, &bytes)?;
     Ok(path.to_string_lossy().into_owned())
 }
 
@@ -245,7 +244,7 @@ fn precache_as(url: &str, bytes: &[u8], kind: Kind) {
     } else {
         (bytes, ext)
     };
-    let _ = std::fs::write(dir.join(format!("{}.{ext}", cache_key(url))), bytes);
+    let _ = vector_core::vcache::write(&dir.join(format!("{}.{ext}", cache_key(url))), bytes);
 }
 
 /// A community's logo or banner: downloaded, decrypted and checked against its committed hash.
@@ -278,8 +277,6 @@ pub async fn community_image(
     let path = cache_dir(kind)
         .ok_or("No cache directory")?
         .join(format!("{}.{ext}", cache_key(&image.url)));
-    tokio::fs::write(&path, &plain)
-        .await
-        .map_err(|e| e.to_string())?;
+    vector_core::vcache::write(&path, &plain)?;
     Ok(path.to_string_lossy().into_owned())
 }

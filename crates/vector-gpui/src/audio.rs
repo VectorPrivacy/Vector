@@ -1150,7 +1150,7 @@ fn album_view(
                                 spread_radius: px(0.),
                                 inset: false,
                             }])
-                            .child(gpui::img(art).size_full().rounded(px(10.))),
+                            .child(crate::pic::img(art).size_full().rounded(px(10.))),
                     )
                 })
                 .child(head),
@@ -1182,7 +1182,7 @@ pub(crate) fn glows(tags: Option<&Tags>, open: f32) -> Vec<AnyElement> {
                 .absolute()
                 .inset_0()
                 .opacity(0.22 * w)
-                .child(gpui::img(g).size_full().rounded(px(11.)).object_fit(gpui::ObjectFit::Fill))
+                .child(crate::pic::img(g).size_full().rounded(px(11.)).object_fit(gpui::ObjectFit::Fill))
                 .into_any_element()
         })
         .collect()
@@ -1631,7 +1631,7 @@ pub fn view(
                             spread_radius: px(0.),
                             inset: false,
                         }])
-                        .child(gpui::img(art).size_full().rounded(px(10.))),
+                        .child(crate::pic::img(art).size_full().rounded(px(10.))),
                         )
                         .children(beside.map(|w| div().flex_1().min_w_0().flex().child(w.min_w_0()))),
                 )

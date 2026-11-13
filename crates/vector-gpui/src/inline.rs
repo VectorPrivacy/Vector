@@ -10,13 +10,8 @@ use std::cell::{Cell, RefCell};
 use std::ops::Range;
 use std::rc::Rc;
 
-use gpui::{
-    AnyElement, App, Bounds, Corners, CursorStyle, Edges, Element, ElementId, Font, FontStyle,
-    FontWeight, GlobalElementId, Hitbox, HitboxBehavior, Hsla, InspectorElementId, IntoElement,
-    LayoutId, MouseButton, MouseDownEvent, MouseUpEvent, Pixels, ShapedLine, SharedString, Size,
-    StrikethroughStyle, Style, Styled, TextAlign, TextRun, Window, fill, img, outline, point, px,
-    size, div, InteractiveElement, StatefulInteractiveElement, ParentElement, prelude::FluentBuilder,
-};
+use gpui::{AnyElement, App, Bounds, Corners, CursorStyle, Edges, Element, ElementId, Font, FontStyle, FontWeight, GlobalElementId, Hitbox, HitboxBehavior, Hsla, InspectorElementId, IntoElement, LayoutId, MouseButton, MouseDownEvent, MouseUpEvent, Pixels, ShapedLine, SharedString, Size, StrikethroughStyle, Style, Styled, TextAlign, TextRun, Window, fill, outline, point, px, size, div, InteractiveElement, StatefulInteractiveElement, ParentElement, prelude::FluentBuilder};
+use crate::pic::img;
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::theme::*;

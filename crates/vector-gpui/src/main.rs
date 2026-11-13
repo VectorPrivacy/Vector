@@ -80,6 +80,7 @@ mod nexus;
 mod packdetails;
 mod packs;
 mod paste_md;
+mod pic;
 mod picker;
 mod policies;
 mod popout;

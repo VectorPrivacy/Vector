@@ -4,10 +4,8 @@
 use std::rc::Rc;
 
 use gpui::prelude::*;
-use gpui::{
-    AnyElement, App, FontWeight, Hsla, MouseButton, ObjectFit, SharedString, Window, div, img, px,
-    svg,
-};
+use gpui::{AnyElement, App, FontWeight, Hsla, MouseButton, ObjectFit, SharedString, Window, div, px, svg};
+use crate::pic::img;
 
 use crate::data::Store;
 use crate::theme::*;

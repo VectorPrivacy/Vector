@@ -136,7 +136,7 @@ impl VectorApp {
             let decoded = cx
                 .background_executor()
                 .spawn(async move {
-                    std::fs::read(&file)
+                    crate::pic::read(&file)
                         .ok()
                         .and_then(|b| crate::media::decode(&b, &ext, (2048, 2048)))
                 })
@@ -166,7 +166,7 @@ impl VectorApp {
     /// Fixtures: a file's icon for the Community being created, through the cropper.
     pub(super) fn fixture_new_icon(&mut self, path: std::path::PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         let Some(ext) = backend::upload::picture_ext(&path) else { return };
-        let Some((image, w, h)) = std::fs::read(&path)
+        let Some((image, w, h)) = crate::pic::read(&path)
             .ok()
             .and_then(|b| crate::media::decode(&b, &ext, (2048, 2048)))
         else {

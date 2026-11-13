@@ -7,9 +7,8 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui::prelude::*;
-use gpui::{
-    AnyElement, App, Entity, FontWeight, RenderImage, SharedString, Window, div, img, px, svg,
-};
+use gpui::{AnyElement, App, Entity, FontWeight, RenderImage, SharedString, Window, div, px, svg};
+use crate::pic::img;
 
 use crate::composer::TextInput;
 use crate::data::Store;

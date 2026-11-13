@@ -6,7 +6,8 @@ use std::rc::Rc;
 
 use gpui::AnimationExt;
 use gpui::prelude::*;
-use gpui::{AnyElement, App, Entity, FontWeight, SharedString, Window, div, img, px, svg};
+use gpui::{AnyElement, App, Entity, FontWeight, SharedString, Window, div, px, svg};
+use crate::pic::img;
 
 use crate::composer::TextInput;
 use crate::data::{Channel, Community, Store};
@@ -1153,7 +1154,7 @@ pub fn invite_row(
         .cursor_pointer()
         .on_click(open)
         .child(
-            gpui::img("icons/group-placeholder.svg")
+            crate::pic::img("icons/group-placeholder.svg")
                 .size(px(40.))
                 .rounded(px(7.56))
                 .flex_shrink_0(),

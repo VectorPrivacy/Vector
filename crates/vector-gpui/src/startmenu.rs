@@ -6,7 +6,8 @@ use std::rc::Rc;
 
 use gpui::AnimationExt;
 use gpui::prelude::*;
-use gpui::{AnyElement, App, Entity, FontWeight, SharedString, Window, div, img, px, svg};
+use gpui::{AnyElement, App, Entity, FontWeight, SharedString, Window, div, px, svg};
+use crate::pic::img;
 use vector_core::rail_layout::{RailAnchor, RailDrag, RailDrop, RailLayout, RailNode};
 
 use crate::composer::TextInput;

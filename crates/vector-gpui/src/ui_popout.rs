@@ -2,10 +2,8 @@
 
 use std::rc::Rc;
 
-use gpui::{
-    AnyElement, Bounds, Context, CursorStyle, HitboxBehavior, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, ObjectFit, Pixels, SharedString, Window, canvas, div, img, prelude::*, px, svg,
-};
+use gpui::{AnyElement, Bounds, Context, CursorStyle, HitboxBehavior, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ObjectFit, Pixels, SharedString, Window, canvas, div, prelude::*, px, svg};
+use crate::pic::img;
 
 use crate::popout::{Act, Corner, Item, Kind};
 use crate::theme::*;

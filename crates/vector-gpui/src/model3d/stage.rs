@@ -7,7 +7,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use gpui::prelude::*;
-use gpui::{AnyElement, App, Bounds, FontWeight, MouseButton, MouseMoveEvent, MouseUpEvent, Pixels, RenderImage, ScrollDelta, ScrollEvent, Window, canvas, div, img, px, svg};
+use gpui::{AnyElement, App, Bounds, FontWeight, MouseButton, MouseMoveEvent, MouseUpEvent, Pixels, RenderImage, ScrollDelta, ScrollEvent, Window, canvas, div, px, svg};
+use crate::pic::img;
 
 use super::view::{Phase, View};
 use super::{Src, supports};

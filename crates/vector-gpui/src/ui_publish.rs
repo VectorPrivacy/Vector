@@ -444,7 +444,7 @@ impl VectorApp {
             .border_1()
             .border_color(white_a(0.07))
             .child(match &f.icon {
-                Some(p) => gpui::img(p.clone())
+                Some(p) => crate::pic::img(p.clone())
                     .size_full()
                     .rounded(px(11.))
                     .object_fit(gpui::ObjectFit::Cover)

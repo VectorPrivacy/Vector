@@ -1,11 +1,8 @@
 //! The structured command composer (`CommandComposer.svelte`): one pill per argument in
 //! place of the draft, so quoting is the code's job and never the user's.
 
-use gpui::{
-    AnyElement, App, Context, Entity, EventEmitter, FocusHandle, Focusable, FontWeight, InteractiveElement,
-    IntoElement, KeyDownEvent, ParentElement, Render, SharedString, StatefulInteractiveElement, Styled, Window,
-    div, img, prelude::*, px,
-};
+use gpui::{AnyElement, App, Context, Entity, EventEmitter, FocusHandle, Focusable, FontWeight, InteractiveElement, IntoElement, KeyDownEvent, ParentElement, Render, SharedString, StatefulInteractiveElement, Styled, Window, div, prelude::*, px};
+use crate::pic::img;
 
 use crate::commands::{Arg, ArgType, Cmd, arg_error};
 use crate::composer::{CancelInput, Edge, InputChanged, Look, Nav, SendText, TextInput};

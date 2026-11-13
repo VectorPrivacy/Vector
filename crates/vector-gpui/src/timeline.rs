@@ -6,10 +6,8 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
 
-use gpui::{
-    AnyElement, App, FontWeight, IntoElement, ParentElement, SharedString, Styled, Window, div,
-    img, prelude::*, px, svg,
-};
+use gpui::{AnyElement, App, FontWeight, IntoElement, ParentElement, SharedString, Styled, Window, div, prelude::*, px, svg};
+use crate::pic::img;
 use pulldown_cmark::Alignment;
 use vector_core::chat::SerializableChat;
 use vector_core::types::Message;

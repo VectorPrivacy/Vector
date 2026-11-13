@@ -1,7 +1,8 @@
 //! The OpenGraph card under a message with a link (`LinkPreview.svelte`): favicon and title,
 //! the description with its line breaks, then the picture, or a video's frame that opens it.
 
-use gpui::{AnyElement, IntoElement, ParentElement, Styled, div, img, prelude::*, px, svg};
+use gpui::{AnyElement, IntoElement, ParentElement, Styled, div, prelude::*, px, svg};
+use crate::pic::img;
 use vector_core::types::{Message, SiteMetadata};
 
 use crate::inline::Target;

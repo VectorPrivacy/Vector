@@ -1,10 +1,8 @@
 //! Small pieces many screens share: letter-spaced and gradient text, the `.vselect`
 //! dropdown, the popup dialog and Vector's buttons.
 
-use gpui::{
-    AnyElement, App, ElementId, FontWeight, Hsla, IntoElement, ParentElement, SharedString, Styled,
-    Window, div, img, prelude::*, px,
-};
+use gpui::{AnyElement, App, ElementId, FontWeight, Hsla, IntoElement, ParentElement, SharedString, Styled, Window, div, prelude::*, px};
+use crate::pic::img;
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::theme::*;
@@ -499,8 +497,8 @@ pub fn sharp_svg(path: impl Into<SharedString>, size: f32, window: &Window, cx: 
             .clone()
     });
     match image {
-        Some(image) => gpui::img(image).size(px(size)),
-        None => gpui::img(path).size(px(size)),
+        Some(image) => crate::pic::img(image).size(px(size)),
+        None => crate::pic::img(path).size(px(size)),
     }
 }
 

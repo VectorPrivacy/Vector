@@ -6,7 +6,8 @@ use std::rc::Rc;
 use std::time::Instant;
 
 use gpui::prelude::*;
-use gpui::{AnyElement, App, Bounds, Hsla, Pixels, Point, SharedString, Size, Window, div, img, point, px, svg};
+use gpui::{AnyElement, App, Bounds, Hsla, Pixels, Point, SharedString, Size, Window, div, point, px, svg};
+use crate::pic::img;
 use serde_json::Value;
 
 use crate::data::Store;

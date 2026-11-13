@@ -6,10 +6,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use gpui::prelude::*;
-use gpui::{
-    AnyElement, Context, Entity, FocusHandle, Focusable, FontWeight, KeyDownEvent, RenderImage,
-    SharedString, Window, div, img, px, svg,
-};
+use gpui::{AnyElement, Context, Entity, FocusHandle, Focusable, FontWeight, KeyDownEvent, RenderImage, SharedString, Window, div, px, svg};
+use crate::pic::img;
 use serde_json::Value;
 
 use crate::backend;

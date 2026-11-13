@@ -2,11 +2,8 @@
 
 use std::path::PathBuf;
 
-use gpui::{
-    Focusable,
-    AnyElement, Context, Entity, FontWeight, ObjectFit, SharedString, Window, div, img, prelude::*, px,
-    svg,
-};
+use gpui::{Focusable, AnyElement, Context, Entity, FontWeight, ObjectFit, SharedString, Window, div, prelude::*, px, svg};
+use crate::pic::img;
 
 use super::{VectorApp, backend};
 use crate::composer::{CancelInput, InputChanged, TextInput};

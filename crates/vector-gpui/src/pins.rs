@@ -8,7 +8,8 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 use gpui::prelude::*;
-use gpui::{AnyElement, App, FontWeight, SharedString, Window, div, img, px, svg};
+use gpui::{AnyElement, App, FontWeight, SharedString, Window, div, px, svg};
+use crate::pic::img;
 use serde_json::Value;
 
 use crate::data::Store;

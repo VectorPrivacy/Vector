@@ -3,10 +3,8 @@
 
 use std::rc::Rc;
 
-use gpui::{
-    AnyElement, App, FontWeight, Hsla, InteractiveElement, IntoElement, ParentElement, SharedString,
-    StatefulInteractiveElement, Styled, Window, div, img, prelude::*, px,
-};
+use gpui::{AnyElement, App, FontWeight, Hsla, InteractiveElement, IntoElement, ParentElement, SharedString, StatefulInteractiveElement, Styled, Window, div, prelude::*, px};
+use crate::pic::img;
 
 use crate::textcolor;
 use crate::theme::*;

@@ -5,10 +5,8 @@
 use std::rc::Rc;
 use std::sync::Arc;
 
-use gpui::{
-    AnyElement, App, FontWeight, InteractiveElement, IntoElement, ObjectFit, ParentElement, RenderImage,
-    StatefulInteractiveElement, Styled, StyledImage, Window, div, img, prelude::FluentBuilder, px,
-};
+use gpui::{AnyElement, App, FontWeight, InteractiveElement, IntoElement, ObjectFit, ParentElement, RenderImage, StatefulInteractiveElement, Styled, StyledImage, Window, div, prelude::FluentBuilder, px};
+use crate::pic::img;
 
 use crate::callvideo::screen::{Source, Target};
 use crate::theme::{APP_BG, INTER, PRIMARY, TEXT, c, ca, white_a};

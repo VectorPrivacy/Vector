@@ -597,7 +597,7 @@ fn link_card(p: &Preview, member: impl Fn(&str) -> bool) -> impl IntoElement {
                 },
             ])
             .child(
-                gpui::img(path)
+                crate::pic::img(path)
                     .size(px(88. - 2. * pad))
                     .rounded(px(22.))
                     .object_fit(if pad > 0. { gpui::ObjectFit::Contain } else { gpui::ObjectFit::Cover }),

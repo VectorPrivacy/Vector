@@ -6,10 +6,8 @@ use std::f32::consts::TAU;
 use std::sync::LazyLock;
 use std::time::Instant;
 
-use gpui::{
-    AnyElement, Bounds, FontWeight, Hsla, IntoElement, ParentElement, PathBuilder, Pixels,
-    SharedString, Styled, canvas, div, img, point, prelude::*, px, svg,
-};
+use gpui::{AnyElement, Bounds, FontWeight, Hsla, IntoElement, ParentElement, PathBuilder, Pixels, SharedString, Styled, canvas, div, point, prelude::*, px, svg};
+use crate::pic::img;
 use vector_core::types::{Attachment, Message};
 
 use crate::data;

@@ -1230,7 +1230,7 @@ impl Element for TextElement {
             .filter_map(|sub| Some((sub, sub.src.clone()?)))
             .map(|(sub, src)| {
                 let p = layout.position(sub.display.start);
-                let mut art = gpui::img(src).size(side).into_any_element();
+                let mut art = crate::pic::img(src).size(side).into_any_element();
                 let at = o + point(p.x, p.y + (line_height - side) / 2.);
                 art.prepaint_as_root(
                     at,

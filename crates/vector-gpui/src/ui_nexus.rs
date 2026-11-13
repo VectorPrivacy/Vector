@@ -843,7 +843,7 @@ impl VectorApp {
                             .overflow_hidden()
                             .bg(c(0x1b1b1b))
                             .child(match avatar {
-                                Some(p) => gpui::img(p)
+                                Some(p) => crate::pic::img(p)
                                     .size_full()
                                     .map(|d| if is_group { d.rounded(px(8.8)) } else { d.rounded_full() })
                                     .object_fit(gpui::ObjectFit::Cover)

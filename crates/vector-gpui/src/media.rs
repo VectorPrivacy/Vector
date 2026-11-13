@@ -268,7 +268,7 @@ pub fn pump<V: 'static>(
             } else {
                 let path = w.path.clone();
                 cx.background_executor()
-                    .spawn(async move { path.and_then(|p| std::fs::read(p).ok()) })
+                    .spawn(async move { path.and_then(|p| crate::pic::read(p).ok()) })
                     .await
             };
             let (ext, max) = (w.ext.clone(), w.max);
@@ -309,7 +309,7 @@ pub fn pump<V: 'static>(
                 Ok(path) => {
                     let bytes = cx
                         .background_executor()
-                        .spawn(async move { std::fs::read(&path).map(|b| (b, path)) })
+                        .spawn(async move { crate::pic::read(&path).map(|b| (b, path)) })
                         .await;
                     match bytes {
                         Ok((b, path)) => {
@@ -351,7 +351,7 @@ pub fn pump<V: 'static>(
                 (Some(rx), _) => rx.await.ok().flatten(),
                 (None, Some(path)) => {
                     cx.background_executor()
-                        .spawn(async move { std::fs::read(path).ok() })
+                        .spawn(async move { crate::pic::read(path).ok() })
                         .await
                 }
                 _ => None,

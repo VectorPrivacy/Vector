@@ -6,7 +6,8 @@ use std::rc::Rc;
 
 use gpui::AnimationExt;
 use gpui::prelude::*;
-use gpui::{AnyElement, App, FontWeight, MouseButton, SharedString, Window, div, img, px, svg};
+use gpui::{AnyElement, App, FontWeight, MouseButton, SharedString, Window, div, px, svg};
+use crate::pic::img;
 
 use crate::markdown::MONO;
 use crate::theme::*;

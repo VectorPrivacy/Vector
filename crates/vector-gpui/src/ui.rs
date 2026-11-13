@@ -8,11 +8,8 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui::AnimationExt;
-use gpui::{
-    AnyElement, Context, Entity, Focusable, FontWeight, IntoElement, ListAlignment, ListState,
-    MouseButton, ParentElement, Render, SharedString, Styled, Window, WindowControlArea, div, img,
-    linear_color_stop, linear_gradient, list, prelude::*, px, svg,
-};
+use gpui::{AnyElement, Context, Entity, Focusable, FontWeight, IntoElement, ListAlignment, ListState, MouseButton, ParentElement, Render, SharedString, Styled, Window, WindowControlArea, div, linear_color_stop, linear_gradient, list, prelude::*, px, svg};
+use crate::pic::img;
 use vector_core::chat::SerializableChat;
 use vector_core::types::Message;
 
@@ -1658,7 +1655,7 @@ impl VectorApp {
                 app.on_profile(crate::profile::Act::Edit, window, cx);
                 true
             }
-            && let Some((image, w, h)) = std::fs::read(&file)
+            && let Some((image, w, h)) = crate::pic::read(&file)
                 .ok()
                 .and_then(|b| crate::media::decode(&b, "png", (2048, 2048)))
         {
@@ -6783,8 +6780,10 @@ fn rail(
         .child(
             // #ws-rail-shortcuts
             div()
+                .id("ws-rail-shortcuts")
                 .flex_1()
                 .min_h_0()
+                .overflow_y_scroll()
                 .border_b_1()
                 .border_color(c(DIVIDER))
                 .child(messages)
@@ -8291,7 +8290,7 @@ impl VectorApp {
                     .size_full(),
             )
             .children(paper.clone().map(|image| {
-                gpui::img(gpui::ImageSource::Render(image)).absolute().top_0().left_0().size_full()
+                crate::pic::img(gpui::ImageSource::Render(image)).absolute().top_0().left_0().size_full()
             }))
             .child(div().relative().flex_shrink_0().child(header).children(edit_bar))
             .children(stage)
@@ -16938,7 +16937,7 @@ impl VectorApp {
             let decoded = cx
                 .background_executor()
                 .spawn(async move {
-                    std::fs::read(&file)
+                    crate::pic::read(&file)
                         .ok()
                         .and_then(|b| crate::media::decode(&b, &ext, (2048, 2048)))
                 })
@@ -17015,7 +17014,7 @@ impl VectorApp {
             let preview = cx
                 .background_executor()
                 .spawn(async move {
-                    let bytes = std::fs::read(&file).map_err(|e| e.to_string())?;
+                    let bytes = crate::pic::read(&file).map_err(|e| e.to_string())?;
                     let (out, ext) = backend::upload::prepared(bytes, false, Some(c2))?;
                     crate::media::decode(&out, ext, (512, 512))
                         .map(|(i, _, _)| i)

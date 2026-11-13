@@ -9,10 +9,8 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use gpui::prelude::*;
-use gpui::{
-    AnyElement, App, Bounds, BoxShadow, ObjectFit, Pixels, Point, RenderImage, SharedString,
-    StyledImage, Window, canvas, div, img, point, px, svg,
-};
+use gpui::{AnyElement, App, Bounds, BoxShadow, ObjectFit, Pixels, Point, RenderImage, SharedString, StyledImage, Window, canvas, div, point, px, svg};
+use crate::pic::img;
 use serde::Deserialize;
 
 use crate::call::{Quality, accent_mix, call_btn, dot, grade, phone, round_btn};

@@ -7,11 +7,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use gpui::prelude::*;
-use gpui::{
-    AnimationExt, Bounds, Context, EventEmitter, FocusHandle, KeyDownEvent, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, RenderImage, ScrollDelta,
-    ScrollEvent, Window, canvas, div, img, point, px, svg,
-};
+use gpui::{AnimationExt, Bounds, Context, EventEmitter, FocusHandle, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, RenderImage, ScrollDelta, ScrollEvent, Window, canvas, div, point, px, svg};
+use crate::pic::img;
 
 use image::Frame;
 
@@ -85,7 +82,7 @@ impl Viewer {
                 } else {
                     let path = full.path.clone();
                     cx.background_executor()
-                        .spawn(async move { path.and_then(|p| std::fs::read(p).ok()) })
+                        .spawn(async move { path.and_then(|p| crate::pic::read(p).ok()) })
                         .await
                 };
                 let Some(bytes) = bytes else { return };

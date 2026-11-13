@@ -4,7 +4,8 @@
 use std::sync::LazyLock;
 
 use gpui::prelude::*;
-use gpui::{AnyElement, FontWeight, SharedString, div, img, px};
+use gpui::{AnyElement, FontWeight, SharedString, div, px};
+use crate::pic::img;
 use regex::Regex;
 
 use crate::theme::*;

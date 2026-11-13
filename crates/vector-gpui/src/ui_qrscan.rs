@@ -8,7 +8,8 @@ use std::time::{Duration, Instant};
 use futures::StreamExt;
 use futures::channel::mpsc::{UnboundedSender, unbounded};
 use gpui::prelude::*;
-use gpui::{AnyElement, Context, RenderImage, Task, Window, div, img, px};
+use gpui::{AnyElement, Context, RenderImage, Task, Window, div, px};
+use crate::pic::img;
 
 use super::VectorApp;
 use crate::callvideo::{self, In, VideoKind};

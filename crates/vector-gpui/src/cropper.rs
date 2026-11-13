@@ -5,11 +5,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::prelude::*;
-use gpui::{
-    AnimationExt, Bounds, Context, EventEmitter, FocusHandle, Hsla, KeyDownEvent, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathBuilder, Pixels, Point, RenderImage,
-    SharedString, Window, canvas, div, img, point, px,
-};
+use gpui::{AnimationExt, Bounds, Context, EventEmitter, FocusHandle, Hsla, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathBuilder, Pixels, Point, RenderImage, SharedString, Window, canvas, div, point, px};
+use crate::pic::img;
 use vector_core::image_crop::CropRect;
 
 use crate::theme::{PRIMARY, RUBIK, c};

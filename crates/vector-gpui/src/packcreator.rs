@@ -7,11 +7,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use futures::channel::oneshot;
-use gpui::{
-    AnyElement, Context, Entity, ExternalPaths, FontWeight, IntoElement, ParentElement,
-    RenderImage, ScrollHandle, SharedString, Styled, Window, div, img, linear_color_stop,
-    linear_gradient, prelude::*, px, svg,
-};
+use gpui::{AnyElement, Context, Entity, ExternalPaths, FontWeight, IntoElement, ParentElement, RenderImage, ScrollHandle, SharedString, Styled, Window, div, linear_color_stop, linear_gradient, prelude::*, px, svg};
+use crate::pic::img;
 use vector_core::image_crop::CropRect;
 
 use super::*;

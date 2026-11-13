@@ -5,10 +5,8 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use gpui::{
-    AnyElement, FontWeight, IntoElement, ParentElement, SharedString, Styled, div, img, prelude::*,
-    px, svg,
-};
+use gpui::{AnyElement, FontWeight, IntoElement, ParentElement, SharedString, Styled, div, prelude::*, px, svg};
+use crate::pic::img;
 use vector_core::emoji_packs::EmojiPack;
 use vector_core::types::Message;
 

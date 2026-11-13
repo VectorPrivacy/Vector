@@ -1,7 +1,8 @@
 //! `.downgrade-block`: a full takeover for a build older than the account's database. There is
 //! no way past it: continuing would write an older schema over a newer one.
 
-use gpui::{AnyElement, FontWeight, InteractiveElement, IntoElement, ParentElement, StatefulInteractiveElement, Styled, div, img, prelude::FluentBuilder, px};
+use gpui::{AnyElement, FontWeight, InteractiveElement, IntoElement, ParentElement, StatefulInteractiveElement, Styled, div, prelude::FluentBuilder, px};
+use crate::pic::img;
 
 use crate::theme::{INTER, TEXT, c, ca, white_a};
 use crate::timeline::DANGER;

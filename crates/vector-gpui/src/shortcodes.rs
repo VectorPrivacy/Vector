@@ -2,10 +2,8 @@
 
 use std::rc::Rc;
 
-use gpui::{
-    AnyElement, App, FontWeight, InteractiveElement, IntoElement, ParentElement, SharedString,
-    Styled, Window, div, img, prelude::*, px,
-};
+use gpui::{AnyElement, App, FontWeight, InteractiveElement, IntoElement, ParentElement, SharedString, Styled, Window, div, prelude::*, px};
+use crate::pic::img;
 
 use crate::media::{Custom, Media};
 use crate::picker::{Cell, EmojiPicker};

@@ -7,10 +7,8 @@ use std::rc::Rc;
 
 use gpui::AnimationExt;
 use gpui::prelude::*;
-use gpui::{
-    AnyElement, App, Entity, FontWeight, PathBuilder, ScrollHandle, SharedString, Window, canvas,
-    div, img, px, svg,
-};
+use gpui::{AnyElement, App, Entity, FontWeight, PathBuilder, ScrollHandle, SharedString, Window, canvas, div, px, svg};
+use crate::pic::img;
 
 use crate::composer::TextInput;
 use crate::theme::*;
@@ -2581,7 +2579,7 @@ fn relays_block(s: &Settings, on: &OnAct) -> AnyElement {
                     .items_center()
                     .justify_center()
                     .child(match info.as_ref().and_then(|m| m.icon.clone()) {
-                        Some(pic) => gpui::img(pic)
+                        Some(pic) => crate::pic::img(pic)
                             .size_full()
                             .rounded(px(5.))
                             .object_fit(gpui::ObjectFit::Cover)

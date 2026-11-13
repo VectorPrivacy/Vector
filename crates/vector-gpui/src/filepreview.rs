@@ -10,11 +10,8 @@ use std::time::Duration;
 use futures::FutureExt;
 use futures::future::Shared;
 use gpui::prelude::*;
-use gpui::{
-    AnimationExt, Context, Entity, EventEmitter, FocusHandle, Focusable, FontWeight, KeyDownEvent,
-    MouseButton, RenderImage, SharedString, Task, Window, div, img, linear_color_stop,
-    linear_gradient, px, svg,
-};
+use gpui::{AnimationExt, Context, Entity, EventEmitter, FocusHandle, Focusable, FontWeight, KeyDownEvent, MouseButton, RenderImage, SharedString, Task, Window, div, linear_color_stop, linear_gradient, px, svg};
+use crate::pic::img;
 
 use crate::composer::{CancelInput, InputChanged, SendText, TextInput};
 use crate::message::types::CachedCompressedImage;
@@ -330,7 +327,7 @@ impl FilePreview {
                 let decoded = cx
                     .background_executor()
                     .spawn(async move {
-                        std::fs::read(&file)
+                        crate::pic::read(&file)
                             .ok()
                             .and_then(|b| crate::media::decode(&b, &e, (1600, 1600)))
                     })

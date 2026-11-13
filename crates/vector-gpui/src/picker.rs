@@ -7,11 +7,8 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
 
-use gpui::{
-    AnyElement, App, Context, Entity, EventEmitter, FocusHandle, Focusable, FontWeight,
-    IntoElement, ListAlignment, ListOffset, ListState, ParentElement, Render, ScrollHandle,
-    SharedString, Styled, Window, div, img, list, prelude::*, px, svg,
-};
+use gpui::{AnyElement, App, Context, Entity, EventEmitter, FocusHandle, Focusable, FontWeight, IntoElement, ListAlignment, ListOffset, ListState, ParentElement, Render, ScrollHandle, SharedString, Styled, Window, div, list, prelude::*, px, svg};
+use crate::pic::img;
 
 use crate::composer::{CancelInput, InputChanged, Look, SendText, TextInput};
 use gpui::AnimationExt;

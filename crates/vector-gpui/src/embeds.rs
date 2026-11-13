@@ -8,10 +8,8 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use gpui::{
-    AnyElement, FontWeight, IntoElement, ParentElement, RenderImage, SharedString, Styled, div,
-    img, prelude::*, px, svg,
-};
+use gpui::{AnyElement, FontWeight, IntoElement, ParentElement, RenderImage, SharedString, Styled, div, prelude::*, px, svg};
+use crate::pic::img;
 use serde::Deserialize;
 use vector_core::types::Message;
 

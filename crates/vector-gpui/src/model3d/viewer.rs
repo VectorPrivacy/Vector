@@ -5,10 +5,8 @@ use std::time::Duration;
 
 use futures::StreamExt;
 use gpui::prelude::*;
-use gpui::{
-    AnimationExt, Bounds, Context, EventEmitter, FocusHandle, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels,
-    ScrollEvent, Window, canvas, div, img, px, svg,
-};
+use gpui::{AnimationExt, Bounds, Context, EventEmitter, FocusHandle, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, ScrollEvent, Window, canvas, div, px, svg};
+use crate::pic::img;
 
 use super::Src;
 use super::stage::wheel_y;

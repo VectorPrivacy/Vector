@@ -4,11 +4,8 @@
 
 use std::time::Instant;
 
-use gpui::{
-    AnimationExt, AnyElement, App, Context, Entity, EventEmitter, FocusHandle, Focusable,
-    FontWeight, IntoElement, KeyDownEvent, ObjectFit, ParentElement, Render, SharedString, Styled,
-    Window, div, img, linear_color_stop, linear_gradient, prelude::*, px, svg,
-};
+use gpui::{AnimationExt, AnyElement, App, Context, Entity, EventEmitter, FocusHandle, Focusable, FontWeight, IntoElement, KeyDownEvent, ObjectFit, ParentElement, Render, SharedString, Styled, Window, div, linear_color_stop, linear_gradient, prelude::*, px, svg};
+use crate::pic::img;
 use zeroize::Zeroizing;
 
 #[path = "loginnet.rs"]

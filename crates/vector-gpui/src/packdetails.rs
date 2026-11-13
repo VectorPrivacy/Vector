@@ -3,10 +3,8 @@
 
 use std::rc::Rc;
 
-use gpui::{
-    AnyElement, App, FontWeight, InteractiveElement, IntoElement, ParentElement, ScrollHandle,
-    StatefulInteractiveElement, Styled, Window, div, img, prelude::*, px, svg,
-};
+use gpui::{AnyElement, App, FontWeight, InteractiveElement, IntoElement, ParentElement, ScrollHandle, StatefulInteractiveElement, Styled, Window, div, prelude::*, px, svg};
+use crate::pic::img;
 
 use crate::media::{Custom, Media};
 use crate::packs::State;

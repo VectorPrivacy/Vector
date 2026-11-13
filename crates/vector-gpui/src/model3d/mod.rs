@@ -35,7 +35,7 @@ pub enum Src {
 impl Src {
     fn read(&self) -> Result<Vec<u8>, String> {
         match self {
-            Src::File(p) => std::fs::read(p).map_err(|e| e.to_string()),
+            Src::File(p) => crate::pic::read(p).map_err(|e| e.to_string()),
             Src::Held(s) => {
                 let mut buf = vec![0u8; s.len() as usize];
                 let mut at = 0;
@@ -254,7 +254,7 @@ mod tests {
                 continue;
             }
             let t = std::time::Instant::now();
-            let scene = match super::parse(&std::fs::read(&p).unwrap(), &ext) {
+            let scene = match super::parse(&crate::pic::read(&p).unwrap(), &ext) {
                 Ok(s) => s,
                 Err(e) => {
                     eprintln!("{}: {e}", p.display());

@@ -7,10 +7,8 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::Instant;
 
-use gpui::{
-    AnimationExt, AnyElement, App, Entity, FontWeight, Hsla, ObjectFit, ScrollHandle, SharedString, Window, div, img,
-    prelude::*, px, svg,
-};
+use gpui::{AnimationExt, AnyElement, App, Entity, FontWeight, Hsla, ObjectFit, ScrollHandle, SharedString, Window, div, prelude::*, px, svg};
+use crate::pic::img;
 
 use crate::backend::market::MarketplaceApp;
 use crate::composer::TextInput;

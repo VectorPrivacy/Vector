@@ -9,11 +9,8 @@ use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use gpui::{
-    AnyElement, App, Bounds, CursorStyle, HitboxBehavior, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, ObjectFit, Pixels, RenderImage, SharedString, Window, canvas, div, img, prelude::*, px,
-    svg,
-};
+use gpui::{AnyElement, App, Bounds, CursorStyle, HitboxBehavior, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ObjectFit, Pixels, RenderImage, SharedString, Window, canvas, div, prelude::*, px, svg};
+use crate::pic::img;
 use vector_media::audio_engine::AudioInput;
 
 use crate::audio::AudioInputSpec;

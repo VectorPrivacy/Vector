@@ -4,7 +4,8 @@
 use std::time::{Duration, Instant};
 
 use gpui::prelude::*;
-use gpui::{Context, SharedString, Task, Window, div, img, px};
+use gpui::{Context, SharedString, Task, Window, div, px};
+use crate::pic::img;
 
 const SMILE: &str = "icons/viktor-smile.gif";
 const EXCLAIM: &str = "icons/viktor-exclaim.gif";

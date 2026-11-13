@@ -6,7 +6,8 @@ use std::cell::Cell;
 use std::rc::Rc;
 
 use gpui::prelude::*;
-use gpui::{AnyElement, App, Bounds, FontWeight, ImageSource, Pixels, SharedString, Size, Window, div, img, point, px};
+use gpui::{AnyElement, App, Bounds, FontWeight, ImageSource, Pixels, SharedString, Size, Window, div, point, px};
+use crate::pic::img;
 
 use crate::data::Store;
 use crate::theme::*;
