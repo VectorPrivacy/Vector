@@ -227,16 +227,16 @@ fn small_option(
 
 /// Status or bio text as the desktop client draws it: emoji, the profile's `:shortcode:`s, and
 /// (`mentions`) npubs as pills.
-fn rich(
+pub(crate) fn rich(
     store: &Store,
-    media: &std::cell::RefCell<crate::media::Media>,
+    media: Option<&std::cell::RefCell<crate::media::Media>>,
     text: &str,
     tags: &[vector_core::types::EmojiTag],
     look: crate::inline::Look,
     mentions: bool,
 ) -> crate::inline::Inline {
     let revealed = std::collections::HashSet::new();
-    let custom = crate::timeline::custom_emoji(store, media, tags);
+    let custom = media.and_then(|media| crate::timeline::custom_emoji(store, media, tags));
     let name_of = |npub: &str| store.name(npub);
     let atoms = crate::markdown::plain(
         text,
@@ -357,7 +357,7 @@ pub fn pane(
                 )
                 .when(!status.is_empty(), |d| {
                     d.child(div().w_full().flex().justify_center().opacity(0.8).child(
-                        rich(store, media, &status, &p.status.emoji_tags, crate::inline::Look::new(INTER, 14., 21., c(TEXT)), false)
+                        rich(store, Some(media), &status, &p.status.emoji_tags, crate::inline::Look::new(INTER, 14., 21., c(TEXT)), false)
                             .single_line(),
                     ))
                 })
@@ -582,7 +582,7 @@ pub fn pane(
         .child(
             rich(
                 store,
-                media,
+                Some(media),
                 &status_text,
                 if status.is_empty() { &[] } else { &p.status.emoji_tags },
                 crate::inline::Look::new(INTER, 14., 21., c(TEXT)),
@@ -803,7 +803,7 @@ pub fn pane(
                         .items_center()
                         .children(about.split('\n').enumerate().map(|(i, line)| {
                             let on = on.clone();
-                            rich(store, media, line, &[], crate::inline::Look::new(INTER, 14., 24., c(TEXT)), true)
+                            rich(store, Some(media), line, &[], crate::inline::Look::new(INTER, 14., 24., c(TEXT)), true)
                                 .id(("profile-description", i))
                                 .on_click(Rc::new(move |t, w, cx| {
                                     if let crate::inline::Target::Mention(npub) = t {

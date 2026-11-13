@@ -414,8 +414,21 @@ pub fn render(m: &Mini, store: &Store, window: Size<Pixels>, anchors: &crate::ki
                     .text_size(px(12.5))
                     .line_height(px(17.5))
                     .text_color(white_a(0.78))
-                    .line_clamp(4)
-                    .child(about),
+                    .max_h(px(17.5 * 4.))
+                    .overflow_hidden()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .children(about.split('\n').enumerate().map(|(i, line)| {
+                        let on = on.clone();
+                        crate::profile::rich(store, None, line, &[], crate::inline::Look::new(INTER, 12.5, 17.5, white_a(0.78)), true)
+                            .id(("mini-profile-about", i))
+                            .on_click(Rc::new(move |t, w, cx| {
+                                if let crate::inline::Target::Mention(npub) = t {
+                                    on(Act::View(npub.to_string()), w, cx)
+                                }
+                            }))
+                    })),
             )
         })
         .children(roles)
