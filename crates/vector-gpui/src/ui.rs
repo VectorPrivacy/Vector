@@ -2953,6 +2953,27 @@ impl VectorApp {
             }
             "rail_layout_updated" => self.rail_event(&payload, cx),
             "voice_state" | "voice_levels" | "voice_presence" => self.voice_event(name, &payload, cx),
+            "channel_purged" => {
+                if let Some(ch) = payload.get("channel_id").and_then(Value::as_str) {
+                    self.store.borrow_mut().chats.retain(|c| c.id != ch);
+                    self.history_done.remove(ch);
+                    if self.open.as_deref() == Some(ch) {
+                        self.open = None;
+                        messaging::set_active_chat(None);
+                    }
+                    cx.notify();
+                }
+            }
+            "community_banlist_changed" => {
+                if let Some(cid) = payload.get("community_id").and_then(Value::as_str) {
+                    self.reread_community(cid, cx);
+                }
+            }
+            "call_mic_state" => {
+                if let (Some(sm), Ok(mic)) = (self.start.as_mut(), serde_json::from_value(payload.clone())) {
+                    sm.mic = mic;
+                }
+            }
             "community_pins_updated" => {
                 if payload.get("channel_id").and_then(Value::as_str) == Some(self.pins.channel.as_str()) {
                     self.pins_refresh(cx);
@@ -13236,6 +13257,53 @@ impl VectorApp {
                     this.reload_invites(cx);
                 }
                 Err(_) => {}
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// A community's channels read again from the database, whose queries hide a banned author.
+    fn reread_community(&mut self, community_id: &str, cx: &mut Context<Self>) {
+        if !self.live {
+            return;
+        }
+        let channels: Vec<String> = {
+            let store = self.store.borrow();
+            store
+                .chats
+                .iter()
+                .filter(|c| store.community_of(&c.id).is_some_and(|m| m.community_id == community_id))
+                .map(|c| c.id.clone())
+                .collect()
+        };
+        if channels.is_empty() {
+            return;
+        }
+        let rx = backend::run(async move {
+            let mut out = Vec::with_capacity(channels.len());
+            for id in channels {
+                let views = messaging::message_views(id.clone(), 200, 0).await;
+                out.push((id, views));
+            }
+            out
+        });
+        cx.spawn(async move |this, cx| {
+            let Ok(read) = rx.await else { return };
+            this.update(cx, |this, cx| {
+                for (id, views) in read {
+                    let Ok(mut views) = views else { continue };
+                    views.reverse();
+                    this.history_done.remove(&id);
+                    if let Some(chat) = this.store.borrow_mut().chat_mut(&id) {
+                        chat.messages = views;
+                    }
+                    if this.open.as_deref() == Some(id.as_str()) {
+                        this.relayout_keeping_top();
+                    }
+                }
+                this.store.borrow_mut().resort();
+                cx.notify();
             })
             .ok();
         })
