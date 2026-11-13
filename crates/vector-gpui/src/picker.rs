@@ -380,6 +380,9 @@ pub struct EmojiPicker {
     creator: Option<creator::Creator>,
     overlays: creator::Overlays,
     rail: ScrollHandle,
+    /// The section the rail last saw, and whether it's still easing its tab into view.
+    rail_seen: Option<Section>,
+    rail_chase: bool,
     rail_drag: RailDrag,
 }
 
@@ -461,6 +464,8 @@ impl EmojiPicker {
             creator: None,
             overlays: Default::default(),
             rail: ScrollHandle::new(),
+            rail_seen: None,
+            rail_chase: false,
             rail_drag: RailDrag::default(),
         };
         this.rebuild();
@@ -1556,6 +1561,7 @@ impl EmojiPicker {
                 d.drop = None;
             }
             d.edge = 0.;
+            self.rail_follow(window);
             return;
         }
         if d.edge == 0. {
@@ -1574,6 +1580,48 @@ impl EmojiPicker {
             t.1 += moved;
         }
         d.resolve();
+        window.request_animation_frame();
+    }
+
+    /// The rail eases after the section scrolled to once its tab leaves view; a rail scrolled
+    /// by hand stays put until the section changes again.
+    fn rail_follow(&mut self, window: &mut Window) {
+        let active = if self.query.is_empty() { self.active() } else { None };
+        if active != self.rail_seen {
+            self.rail_seen = active;
+            self.rail_chase = active.is_some();
+        }
+        if !self.rail_chase {
+            return;
+        }
+        let ix = match active {
+            Some(Section::Recents) => 0,
+            Some(Section::All) => 1,
+            Some(Section::Pack(i)) => 2 + i,
+            _ => return,
+        };
+        let (Some(item), view) = (self.rail.bounds_for_item(ix), self.rail.bounds()) else { return };
+        const PAD: f32 = 6.;
+        let off = f32::from(self.rail.offset().y);
+        let (top, bottom) = (f32::from(item.top()), f32::from(item.bottom()));
+        let want = if top < f32::from(view.top()) + PAD {
+            off + f32::from(view.top()) + PAD - top
+        } else if bottom > f32::from(view.bottom()) - PAD {
+            off - (bottom - f32::from(view.bottom()) + PAD)
+        } else {
+            self.rail_chase = false;
+            return;
+        };
+        let want = want.clamp(-f32::from(self.rail.max_offset().y), 0.);
+        let gap = want - off;
+        if gap.abs() < 0.5 {
+            self.rail.set_offset(gpui::point(self.rail.offset().x, px(want)));
+            self.rail_chase = false;
+            return;
+        }
+        let step = gap * 0.22;
+        let step = if step.abs() < 0.5 { 0.5f32.copysign(gap) } else { step };
+        self.rail.set_offset(gpui::point(self.rail.offset().x, px(off + step)));
         window.request_animation_frame();
     }
 
