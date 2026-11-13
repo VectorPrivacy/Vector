@@ -172,6 +172,8 @@ tempfile = "3"
 
 # gpui_linux at the same rev, plus file references on the clipboard (text/uri-list) for X11 and Wayland.
 [patch."https://github.com/zed-industries/zed"]
+# gpui at the same rev: animated images redraw when their next frame is due, not every vsync.
+gpui = { path = "vendor/gpui" }
 gpui_linux = { path = "vendor/gpui_linux" }
 # gpui_wgpu at the same rev, bringing up one GPU API (Vulkan, else GL) instead of both.
 gpui_wgpu = { path = "vendor/gpui_wgpu" }
