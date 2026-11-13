@@ -20,6 +20,8 @@ pub(super) enum Art {
     Banner,
     /// The icon of a Community not made yet.
     NewIcon,
+    /// The icon picked from the slim overview, saved as soon as it is cropped.
+    OverviewIcon,
 }
 
 impl VectorApp {
@@ -40,6 +42,63 @@ impl VectorApp {
         self.choose_art(if banner { Art::Banner } else { Art::Icon }, window, cx);
     }
 
+    /// The slim overview's icon: picked, cropped and saved, its ring filling meanwhile.
+    pub(super) fn pick_overview_icon(&mut self, community: String, window: &mut Window, cx: &mut Context<Self>) {
+        if self.overview_icon.is_some() {
+            return;
+        }
+        self.overview_icon = Some((community, None));
+        self.choose_art(Art::OverviewIcon, window, cx);
+    }
+
+    fn save_overview_icon(&mut self, pick: Pick, cx: &mut Context<Self>) {
+        let Some((id, _)) = self.overview_icon.as_mut().map(|o| {
+            o.1 = Some(5);
+            (o.0.clone(), ())
+        }) else {
+            return;
+        };
+        if !self.live {
+            self.overview_icon = None;
+            return;
+        }
+        let (tx, mut progress) = futures::channel::mpsc::unbounded::<u8>();
+        let rx = backend::run(backend::community::set_image(id.clone(), pick.path, false, pick.crop, move |p| {
+            let _ = tx.unbounded_send(p);
+        }));
+        cx.spawn(async move |this, cx| {
+            use futures::StreamExt;
+            while let Some(p) = progress.next().await {
+                let going = this
+                    .update(cx, |this, cx| {
+                        if let Some(o) = this.overview_icon.as_mut().filter(|o| o.0 == id) {
+                            o.1 = Some(p.max(5));
+                            cx.notify();
+                        }
+                    })
+                    .is_ok();
+                if !going {
+                    break;
+                }
+            }
+            let res = rx.await.unwrap_or_else(|_| Err("The upload stopped".into()));
+            this.update(cx, |this, cx| {
+                this.overview_icon = None;
+                match res {
+                    Ok(()) => {
+                        this.resolve_art(Some(id.clone()), cx);
+                        this.reload_communities(cx);
+                    }
+                    Err(e) => this.notice_plain("Couldn’t Update the Icon", &e, cx),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+        cx.notify();
+    }
+
     pub(super) fn pick_new_community_icon(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.create_community.as_ref().is_some_and(|m| !m.busy) {
             self.choose_art(Art::NewIcon, window, cx);
@@ -51,22 +110,27 @@ impl VectorApp {
             files: true,
             directories: false,
             multiple: false,
-            prompt: Some(if art == Art::NewIcon { "Choose Community Icon" } else { "Choose Image" }.into()),
+            prompt: Some(if matches!(art, Art::NewIcon | Art::OverviewIcon) { "Choose Community Icon" } else { "Choose Image" }.into()),
         });
         let window = window.window_handle();
         cx.spawn(async move |this, cx| {
-            let Ok(Ok(Some(paths))) = rx.await else {
-                return;
-            };
-            let Some(path) = paths.into_iter().next() else {
-                return;
-            };
-            let Some(ext) = backend::upload::picture_ext(&path) else {
+            let gone = |this: &gpui::WeakEntity<VectorApp>, cx: &mut gpui::AsyncApp, toast: Option<&'static str>| {
                 this.update(cx, |this, cx| {
-                    this.show_toast("That image could not be read", cx)
+                    if art == Art::OverviewIcon {
+                        this.overview_icon = None;
+                    }
+                    if let Some(t) = toast {
+                        this.show_toast(t, cx);
+                    }
+                    cx.notify();
                 })
                 .ok();
-                return;
+            };
+            let Some(path) = rx.await.ok().and_then(Result::ok).flatten().and_then(|p| p.into_iter().next()) else {
+                return gone(&this, cx, None);
+            };
+            let Some(ext) = backend::upload::picture_ext(&path) else {
+                return gone(&this, cx, Some("That image could not be read"));
             };
             let file = path.clone();
             let decoded = cx
@@ -78,11 +142,7 @@ impl VectorApp {
                 })
                 .await;
             let Some((image, w, h)) = decoded else {
-                this.update(cx, |this, cx| {
-                    this.show_toast("That image could not be read", cx)
-                })
-                .ok();
-                return;
+                return gone(&this, cx, Some("That image could not be read"));
             };
             let pick = Pick {
                 path,
@@ -133,7 +193,7 @@ impl VectorApp {
                 (w, h),
                 match art {
                     Art::Banner => "Crop Banner",
-                    Art::Icon => "Crop Icon",
+                    Art::Icon | Art::OverviewIcon => "Crop Icon",
                     Art::NewIcon => "Crop Community Icon",
                 },
                 "Drag to move, or drag a corner to resize.",
@@ -148,8 +208,16 @@ impl VectorApp {
                 return;
             };
             cx.notify();
-            let Answer::Crop(crop) = answer else { return };
+            let Answer::Crop(crop) = answer else {
+                if art == Art::OverviewIcon {
+                    this.overview_icon = None;
+                }
+                return;
+            };
             pick.set_crop(crop.clone());
+            if art == Art::OverviewIcon {
+                return this.save_overview_icon(pick, cx);
+            }
             if art == Art::NewIcon {
                 if let Some(m) = this.create_community.as_mut() {
                     m.icon = Some(pick);

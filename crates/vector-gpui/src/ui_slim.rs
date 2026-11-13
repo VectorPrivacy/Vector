@@ -960,6 +960,7 @@ impl VectorApp {
             .child(div().mt(px(-4.)).text_size(px(10.)).line_height(px(16.)).text_color(c(0xb2b2b2)).child(if muted { "Muted" } else { "Notify" }));
         let manage = caps.contains("manage_metadata");
         let settings_id = cid.clone();
+        let uploading = self.overview_icon.as_ref().filter(|o| o.0 == cid).and_then(|o| o.1);
         let face = div()
             .id("group-overview-avatar")
             .group("group-overview-avatar")
@@ -969,7 +970,7 @@ impl VectorApp {
             .size(px(100.))
             .when(manage, |d| {
                 d.cursor_pointer().on_click(cx.listener(move |app, _, window, cx| {
-                    app.open_comm_settings(settings_id.clone(), "overview", window, cx)
+                    app.pick_overview_icon(settings_id.clone(), window, cx)
                 }))
             })
             .child(crate::community::logo(store, &cid, 100., 50.).size(px(100.)).rounded_full())
@@ -982,12 +983,15 @@ impl VectorApp {
                         .size(px(30.))
                         .rounded_full()
                         .bg(gpui::black().opacity(0.7))
-                        .opacity(0.)
+                        .opacity(if uploading.is_some() { 1. } else { 0. })
                         .group_hover("group-overview-avatar", |d| d.opacity(1.))
                         .flex()
                         .items_center()
                         .justify_center()
-                        .child(svg().path("icons/edit.svg").size(px(16.)).text_color(c(0xffffff))),
+                        .child(match uploading {
+                            Some(p) => div().size(px(20.)).child(crate::attachments::spinner(20., 2.5, 1., p as f32 / 100., white_a(0.2), c(PRIMARY))).into_any_element(),
+                            None => svg().path("icons/edit.svg").size(px(16.)).text_color(c(0xffffff)).into_any_element(),
+                        }),
                 )
             });
         let topic = ch.topic.clone().filter(|t| !t.is_empty());

@@ -215,6 +215,8 @@ pub struct VectorApp {
     invite: Option<crate::invite::Invite>,
     comm_settings: Option<crate::commsettings::CommSettings>,
     /// The cropper over a Community's art, and the pick it is cutting.
+    /// The slim overview's icon on its way: the community, and the upload's percent once begun.
+    overview_icon: Option<(String, Option<u8>)>,
     comm_crop: Option<(
         Entity<crate::cropper::Cropper>,
         art_ops::Art,
@@ -957,6 +959,7 @@ impl VectorApp {
             invite: None,
             comm_settings: None,
             comm_crop: None,
+            overview_icon: None,
             moderation: None,
             raid: HashMap::new(),
             embed_modal: None,
