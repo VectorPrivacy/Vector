@@ -7,10 +7,9 @@ use std::rc::Rc;
 
 use gpui::prelude::*;
 use gpui::{AnyElement, App, Bounds, Pixels, SharedString, Size, Window, div, point, px};
-use unicode_segmentation::UnicodeSegmentation;
 
 use crate::data::Store;
-use crate::inline::{Atom, Kind, Look, inline};
+use crate::inline::{Atom, Kind, Look};
 use crate::theme::*;
 
 pub struct EditHistory {
@@ -40,109 +39,183 @@ fn when(ms: u64) -> String {
         .unwrap_or_default()
 }
 
-/// The words as written: no markdown, emoji and `:shortcode:`s drawn.
-fn atoms(text: &str, tags: &[(String, String)], store: &Store, media: &std::cell::RefCell<crate::media::Media>, look: &Look) -> Vec<Atom> {
-    let look = look.clone();
-    let size = look.size * 1.15;
-    let mut out = Vec::new();
-    let plain = |t: &str, out: &mut Vec<Atom>| {
-        let mut start = 0;
-        for (i, g) in t.grapheme_indices(true) {
-            if let Some(src) = crate::emoji::twemoji(g) {
-                if i > start {
-                    out.push(Atom::Text { text: t[start..i].to_string().into(), look: look.clone(), kind: Kind::Plain });
-                }
-                out.push(Atom::Image { src: src.into(), size, drop: look.size * 0.2, tip: None });
-                start = i + g.len();
-            }
+// Diff runs ride through markdown as private-use sentinels, then become their looks.
+const DEL: char = '\u{F0200}';
+const INS: char = '\u{F0201}';
+const END: char = '\u{F0202}';
+const GAP: char = '\u{F0203}';
+
+/// A line's block marker (`#`, `>`, `-`, `1.`) at the start of `text`, kept outside a change so
+/// a changed heading or quote still parses.
+fn block_marker(text: &str) -> usize {
+    let b = text.as_bytes();
+    let mut i = b.iter().take_while(|c| matches!(c, b' ' | b'\t')).count();
+    let ws = |i: usize| matches!(b.get(i), Some(b' ' | b'\t'));
+    match b.get(i) {
+        Some(b'#') => {
+            let n = b[i..].iter().take_while(|c| **c == b'#').count();
+            if n <= 6 && ws(i + n) { i + n + 1 } else { 0 }
         }
-        if start < t.len() {
-            out.push(Atom::Text { text: t[start..].to_string().into(), look: look.clone(), kind: Kind::Plain });
+        Some(b'>') => {
+            i += 1;
+            if ws(i) { i + 1 } else { i }
         }
-    };
-    let mut last = 0;
-    for (a, b) in crate::markdown::shortcodes(text) {
-        let code = &text[a + 1..b - 1];
-        let Some((_, url)) = tags.iter().find(|(c, _)| c == code) else { continue };
-        let custom = media.borrow_mut().custom(&crate::timeline::emoji_source(store, url), false);
-        let atom = match custom {
-            crate::media::Custom::Ready(image) => Atom::Image { src: image.into(), size, drop: look.size * 0.2, tip: None },
-            crate::media::Custom::Pending => Atom::Gap(size),
-            crate::media::Custom::Missing(_) => continue,
-        };
-        plain(&text[last..a], &mut out);
-        out.push(atom);
-        last = b;
+        Some(b'-' | b'*' | b'+') if ws(i + 1) => i + 2,
+        Some(c) if c.is_ascii_digit() => {
+            let n = b[i..].iter().take_while(|c| c.is_ascii_digit()).count();
+            if matches!(b.get(i + n), Some(b'.' | b')')) && ws(i + n + 1) { i + n + 2 } else { 0 }
+        }
+        _ => 0,
     }
-    plain(&text[last..], &mut out);
-    out
 }
 
-/// A revision's words with each run in its diff look: removed struck on red, added on mint,
-/// unchanged dimmed, folds as an ellipsis.
-fn diff_atoms(runs: &[crate::textdiff::Run], tags: &[(String, String)], store: &Store, media: &std::cell::RefCell<crate::media::Media>) -> Vec<Atom> {
+/// The diff as one markdown source, changes and folds marked with sentinels.
+fn diff_source(runs: &[crate::textdiff::Run]) -> String {
     use crate::textdiff::{Op, Run};
-    let mut out = Vec::new();
+    let mut src = String::new();
     for run in runs {
         match run {
-            Run::Gap { lines, .. } => {
-                let mut look = text_look();
-                look.color = white_a(0.35);
-                if *lines {
-                    out.push(Atom::Break);
-                }
-                out.push(Atom::Text { text: " … ".into(), look, kind: Kind::Plain });
-                if *lines {
-                    out.push(Atom::Break);
-                }
-            }
-            Run::Text(op, text) => {
-                let mut look = text_look();
-                match op {
-                    Op::Eq => look.color = white_a(0.6),
-                    Op::Ins => {
-                        look.color = c(0xffffff);
-                        look.bg = Some(c(PRIMARY).opacity(0.2));
-                    }
-                    Op::Del => {
-                        look.color = c(0xff6dc3);
-                        look.bg = Some(c(crate::call::DANGER).opacity(0.12));
-                        look.strike = true;
-                    }
-                }
-                // Spaces at a change's edges aren't part of it: struck, they read as a dash.
-                let body = if *op == Op::Eq { text.as_str() } else { text.trim() };
-                let lead = &text[..text.len() - text.trim_start().len()];
-                let trail = &text[text.trim_end().len()..];
-                if *op != Op::Eq && !lead.is_empty() && !body.is_empty() {
-                    out.extend(atoms_in(lead, tags, store, media, text_look()));
-                }
-                out.extend(atoms_in(if body.is_empty() { text } else { body }, tags, store, media, look));
-                if *op != Op::Eq && !trail.is_empty() && !body.is_empty() {
-                    out.extend(atoms_in(trail, tags, store, media, text_look()));
-                }
+            Run::Gap { lines: true, .. } => src.extend(['\n', GAP, '\n']),
+            Run::Gap { .. } => src.extend([' ', GAP, ' ']),
+            Run::Text(Op::Eq, t) => src.push_str(t),
+            Run::Text(op, t) => {
+                let lead = if src.is_empty() || src.ends_with('\n') { block_marker(t) } else { 0 };
+                src.push_str(&t[..lead]);
+                src.push(if *op == Op::Ins { INS } else { DEL });
+                src.push_str(&t[lead..]);
+                src.push(END);
             }
         }
     }
-    out
+    src
 }
 
 fn text_look() -> Look {
     Look::new(INTER, 13., 18.85, white_a(0.85))
 }
 
-/// Text with its line breaks kept.
-fn atoms_in(text: &str, tags: &[(String, String)], store: &Store, media: &std::cell::RefCell<crate::media::Media>, look: Look) -> Vec<Atom> {
-    let mut out = Vec::new();
-    for (i, line) in text.split('\n').enumerate() {
-        if i > 0 {
-            out.push(Atom::Break);
+#[derive(Clone, Copy, PartialEq)]
+enum Mode {
+    Eq,
+    Ins,
+    Del,
+}
+
+/// Splits each text atom at the sentinels; a change can cross blocks, so the mode carries on.
+fn mark_atoms(atoms: &[Atom], mode: &mut Mode) -> Vec<Atom> {
+    let mut out = Vec::with_capacity(atoms.len());
+    for atom in atoms {
+        let Atom::Text { text, look, kind } = atom else {
+            out.push(atom.clone());
+            continue;
+        };
+        let mut buf = String::new();
+        let flush = |buf: &mut String, mode: Mode, out: &mut Vec<Atom>| {
+            if buf.is_empty() {
+                return;
+            }
+            let push = |t: &str, look: Look, out: &mut Vec<Atom>| {
+                if !t.is_empty() {
+                    out.push(Atom::Text { text: t.to_string().into(), look, kind: kind.clone() });
+                }
+            };
+            let mut changed = look.clone();
+            match mode {
+                Mode::Eq => {
+                    push(buf, look.clone(), out);
+                    buf.clear();
+                    return;
+                }
+                Mode::Ins => {
+                    changed.color = c(0xffffff);
+                    changed.bg = Some(c(PRIMARY).opacity(0.2));
+                }
+                Mode::Del => {
+                    changed.color = c(0xff6dc3);
+                    changed.bg = Some(c(crate::call::DANGER).opacity(0.12));
+                    changed.strike = true;
+                }
+            }
+            // Spaces at a change's edges aren't part of it: struck, they read as a dash.
+            let body = buf.trim();
+            let lead = &buf[..buf.len() - buf.trim_start().len()];
+            let trail = if body.is_empty() { "" } else { &buf[buf.trim_end().len()..] };
+            push(lead, look.clone(), out);
+            push(body, changed, out);
+            push(trail, look.clone(), out);
+            buf.clear();
+        };
+        for ch in text.chars() {
+            match ch {
+                DEL | INS | END => {
+                    flush(&mut buf, *mode, &mut out);
+                    *mode = match ch {
+                        DEL => Mode::Del,
+                        INS => Mode::Ins,
+                        _ => Mode::Eq,
+                    };
+                }
+                GAP => {
+                    flush(&mut buf, *mode, &mut out);
+                    let mut dim = look.clone();
+                    dim.color = white_a(0.35);
+                    dim.strike = false;
+                    dim.bg = None;
+                    out.push(Atom::Text { text: "…".into(), look: dim, kind: Kind::Plain });
+                }
+                _ => buf.push(ch),
+            }
         }
-        if !line.is_empty() {
-            out.extend(atoms(line, tags, store, media, &look));
-        }
+        flush(&mut buf, *mode, &mut out);
     }
     out
+}
+
+fn mark_blocks(blocks: &mut [crate::markdown::Block], mode: &mut Mode) {
+    use crate::markdown::Block;
+    let para = |p: &mut crate::markdown::Para, mode: &mut Mode| p.atoms = mark_atoms(&p.atoms, mode).into();
+    for b in blocks {
+        match b {
+            Block::Para(p) => para(p, mode),
+            Block::Quote(inner) => mark_blocks(inner, mode),
+            Block::List { items, .. } => items.iter_mut().for_each(|i| mark_blocks(i, mode)),
+            Block::Table { head, rows, .. } => {
+                head.iter_mut().chain(rows.iter_mut().flatten()).for_each(|p| para(p, mode));
+            }
+            Block::Code { text, .. } => {
+                if text.contains([DEL, INS, END, GAP]) {
+                    *text = text.replace([DEL, INS, END, GAP], "").into();
+                }
+            }
+            Block::Rule => {}
+        }
+    }
+}
+
+/// A revision as the chat renders it: markdown, mentions, emoji; diff sentinels drawn as runs.
+fn rendered(source: &str, tags: &[(String, String)], store: &Store, media: &std::cell::RefCell<crate::media::Media>, base: Look, key: &str) -> AnyElement {
+    let revealed = std::collections::HashSet::new();
+    let custom = |code: &str| {
+        let (_, url) = tags.iter().find(|(c, _)| c == code)?;
+        Some(media.borrow_mut().custom(&crate::timeline::emoji_source(store, url), false))
+    };
+    let mut blocks = crate::markdown::parse(
+        source.trim(),
+        &crate::markdown::Ctx {
+            base,
+            revealed: &revealed,
+            now: store.now_ms() as f64 / 1000.,
+            mention: Some(&|npub: &str| store.name_in(npub, None)),
+            tags: &[],
+            mask: None,
+            colors: &[],
+            go: None,
+            custom: Some(&custom),
+        },
+    );
+    mark_blocks(&mut blocks, &mut Mode::Eq);
+    let click: crate::inline::OnClick = Rc::new(|_, _, _| {});
+    crate::timeline::stack(&blocks, key, &click, 0., 18.85)
 }
 
 pub fn render(
@@ -183,7 +256,7 @@ pub fn render(
                 .id(("eh-text", i))
                 .cursor_pointer()
                 .on_click(move |_, w, cx| toggle(i, w, cx))
-                .child(inline(diff_atoms(&runs, &h.tags, store, media), text_look()))
+                .child(rendered(&diff_source(&runs), &h.tags, store, media, { let mut l = text_look(); l.color = white_a(0.6); l }, &format!("eh-{i}")))
         } else {
             // The original: a short preview, whole on a click once it's cut short.
             let long = texts[0].len() > 140 || texts[0].matches('\n').count() > 2;
@@ -193,7 +266,7 @@ pub fn render(
                 .relative()
                 .when(collapsed, |d| d.max_h(px(13. * 4.4)).overflow_hidden())
                 .when(long, |d| d.cursor_pointer().on_click(move |_, w, cx| toggle(i, w, cx)))
-                .child(inline(atoms_in(&texts[0], &h.tags, store, media, text_look()), text_look()))
+                .child(rendered(&texts[0], &h.tags, store, media, text_look(), "eh-0"))
                 .when(collapsed, |d| {
                     d.child(div().absolute().left_0().right_0().bottom_0().h(px(26.)).bg(gpui::linear_gradient(
                         180.,
