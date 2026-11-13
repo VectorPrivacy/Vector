@@ -104,10 +104,12 @@ rev = "cddb2f5d80dc0009b2ef6767635140cacf90a007"
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
 objc2-foundation = { version = "0.3", features = ["NSString", "NSArray", "NSURL"] }
-objc2-app-kit = { version = "0.3", features = ["NSPasteboard"] }
+objc2-app-kit = { version = "0.3", features = ["NSPasteboard", "NSApplication", "NSDockTile", "NSResponder"] }
 
 [target.'cfg(windows)'.dependencies]
 clipboard-win = "5"
+raw-window-handle = "0.6"
+windows = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Com", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
 
 # Elsewhere wry lays the OS webview into a GPUI window of the app's own.
 [target.'cfg(not(target_os = "linux"))'.dependencies.wry]

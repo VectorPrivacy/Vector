@@ -539,6 +539,7 @@ static RESET_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 /// Tear the live account down to a fresh boot: its client, database, keys and transfers.
 pub async fn reset() {
     let _serial = RESET_LOCK.lock().await;
+    super::emit("unread_total", 0);
     if let Some(npub) = vector_core::my_public_key().and_then(|pk| nostr_sdk::prelude::ToBech32::to_bech32(&pk).ok()) {
         super::notify::account_gone(&npub);
     }

@@ -88,6 +88,9 @@ impl vector_core::EventEmitter for Emitter {
         {
             notify::deleted(id);
         }
+        if event == "unread_counts_stale" {
+            notify::recount();
+        }
         send(UiEvent::Core(event.to_string(), payload));
     }
 }

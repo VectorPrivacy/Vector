@@ -211,6 +211,20 @@ pub async fn community(chat_id: &str, msg: &Message) {
     );
 }
 
+/// What the dock or taskbar badge shows: chats that ring for everything, as on desktop.
+pub fn recount() {
+    let Some(rt) = super::RT.get() else { return };
+    let _runtime = rt.enter();
+    db::spawn_bound(async {
+        if !STATE.lock().await.unread_seeded {
+            let counts = db::events::unread_counts().await.unwrap_or_default();
+            STATE.lock().await.unread_seed(counts);
+        }
+        let total = STATE.lock().await.sum_unread();
+        vector_core::emit_event("unread_total", &json!(total));
+    });
+}
+
 /// The chat was read: its notifications go.
 pub fn read(chat_id: &str) {
     native_notify::remove_chat(chat_id);

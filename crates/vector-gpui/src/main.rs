@@ -5,6 +5,7 @@ mod attachments;
 mod audio;
 mod audit;
 mod backend;
+mod badge;
 mod badgecard;
 mod call;
 mod chaneditor;

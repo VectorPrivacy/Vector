@@ -121,6 +121,8 @@ pub struct VectorApp {
     pack_details: Option<crate::packdetails::Details>,
     /// A link that arrived before an account was open.
     pending_link: Option<vector_core::deep_link::DeepLinkAction>,
+    /// The unread count last put on the app's icon.
+    badge: u32,
     /// The composer's `/` command picker, and each chat's bot commands.
     commands: crate::commands::Picker,
     cmd_snaps: HashMap<String, crate::commands::Snapshot>,
@@ -864,6 +866,7 @@ impl VectorApp {
             media: Rc::default(),
             pack_details: None,
             pending_link: None,
+            badge: 0,
             commands: Default::default(),
             cmd_snaps: HashMap::new(),
             cmd_loading: HashSet::new(),
@@ -3138,6 +3141,13 @@ impl VectorApp {
             "marketplace_install_progress" | "marketplace_apps_updated" => self.nexus_event(name, &payload, cx),
             "pivx_payment_received" => self.pivx_received(&payload, cx),
             "notify_reveal" => _window.activate_window(),
+            "unread_total" => {
+                let total = payload.as_u64().unwrap_or(0) as u32;
+                if self.badge != total {
+                    self.badge = total;
+                    crate::badge::set(_window, total);
+                }
+            }
             "deep_link_action" => {
                 let field = |k: &str| payload.get(k).and_then(Value::as_str).map(str::to_string);
                 let a = vector_core::deep_link::DeepLinkAction {
