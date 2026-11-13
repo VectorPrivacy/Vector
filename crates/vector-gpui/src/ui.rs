@@ -83,6 +83,8 @@ pub struct VectorApp {
     revealed: Rc<RefCell<HashMap<String, HashSet<u32>>>>,
     /// Reads Timeouts again as the soonest one ends.
     timeout_expiry: Option<gpui::Task<()>>,
+    /// Fetches the open profile again every 30 s while the window has focus.
+    profile_poll: Option<gpui::Task<()>>,
     started: std::time::Instant,
     /// What the composer is doing beyond a fresh message.
     mode: Mode,
@@ -856,6 +858,7 @@ impl VectorApp {
             syncing: false,
             revealed: Rc::default(),
             timeout_expiry: None,
+            profile_poll: None,
             started: std::time::Instant::now(),
             mode: Mode::Normal,
             hovered: None,
@@ -13370,6 +13373,19 @@ impl VectorApp {
         self.new_chat = None;
         if self.live {
             backend::prefs::refresh(npub.clone());
+            let watched = npub.clone();
+            self.profile_poll = Some(cx.spawn(async move |this, cx| {
+                loop {
+                    cx.background_executor().timer(std::time::Duration::from_secs(30)).await;
+                    let open = this.update(cx, |this, _| this.profile.as_ref().is_some_and(|p| p.npub == watched));
+                    if !open.unwrap_or(false) {
+                        return;
+                    }
+                    if backend::notify::focused() {
+                        backend::prefs::refresh(watched.clone());
+                    }
+                }
+            }));
         }
         self.profile = Some(crate::profile::Screen::new(npub.clone(), back));
         cx.notify();

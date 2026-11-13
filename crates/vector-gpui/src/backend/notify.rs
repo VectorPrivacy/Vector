@@ -16,6 +16,10 @@ pub fn set_focused(focused: bool) {
     FOCUSED.store(focused, Ordering::Relaxed);
 }
 
+pub fn focused() -> bool {
+    FOCUSED.load(Ordering::Relaxed)
+}
+
 /// Hooks the notifier up to this client. macOS and Windows register with the OS here, on the
 /// main thread, so a click that launches Vector finds it; Linux waits for its first message.
 pub fn install() {
