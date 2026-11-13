@@ -33,10 +33,6 @@ pub enum Spell {
     /// From here on the live epoch's certificate for `writer` vouches for nothing: a writer the
     /// Channel no longer lets post. Moves no window.
     Stop { writer: [u8; 32] },
-    /// What stood at the read address before `until` (unix ms), sealed while writer epoch
-    /// `window`'s Locked window held: the wrap id and content hash of its first page, the read
-    /// epoch its pages open under, and how many ids they name. Moves no window.
-    Seal { page: [u8; 32], hash: [u8; 32], read: Epoch, window: Epoch, until: u64, count: u64 },
     /// An entry of a kind this build doesn't know, carried verbatim: it moves nothing.
     Other,
 }
@@ -59,6 +55,9 @@ pub struct Entry {
 
 /// The field a stop carries when it records a departure that came before it was written.
 const STOP_FROM: &str = "from";
+
+/// The field of the entry a seal's edition appends: how many ids the seal names.
+const SEALED: &str = "sealed";
 
 /// The field a writer entry carries when its window is Locked: every write rides its address,
 /// reactions and calls included. A reader that predates it carries it verbatim and reads the
@@ -97,6 +96,8 @@ pub struct Ledger {
     pub channel: [u8; 32],
     pub entries: Vec<Entry>,
     pub retired: Vec<Retired>,
+    /// The newest seal of its history.
+    pub seal: Option<SealRef>,
     /// Unknown top-level fields, carried through our own editions (CORD-02 §6).
     pub extra: serde_json::Map<String, serde_json::Value>,
 }
@@ -122,37 +123,43 @@ fn epoch_of(v: &serde_json::Value) -> Option<Epoch> {
     v.as_u64().filter(|n| *n > 0 && *n < MAX_EPOCH).map(Epoch)
 }
 
-/// The fields a seal entry carries.
-const SEAL_FIELDS: &[&str] = &["seal", "hash", "read", "window", "until", "count"];
-
-/// A seal entry, when `e` is a whole one and names no field of another kind.
-fn parse_seal(e: &serde_json::Map<String, serde_json::Value>, _keys: &mut KeyCheck) -> Option<Spell> {
-    if ["open", "epoch", "writer", "root", "by", "stop"].iter().any(|k| e.contains_key(*k)) {
-        return None;
-    }
-    Some(Spell::Seal {
-        page: hex32(e.get("seal")?)?,
-        hash: hex32(e.get("hash")?)?,
-        read: Epoch(e.get("read")?.as_u64()?),
-        window: epoch_of(e.get("window")?)?,
-        until: e.get("until")?.as_u64()?,
-        count: e.get("count")?.as_u64()?,
-    })
+/// A Channel's sealed history (CORD-03 §1): what its read address held before `until` (unix ms)
+/// is exactly the wrap ids its pages list, from the first, `page`, opened under read epoch `read`.
+/// `run` is when the run of Locked windows it was made in began. It rides the ledger's top level,
+/// where the cap never reaches.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SealRef {
+    /// `None` for a seal of nothing.
+    pub page: Option<[u8; 32]>,
+    pub read: Epoch,
+    pub until: u64,
+    pub run: u64,
+    pub count: u64,
+    /// Fields this build doesn't know, carried through its own editions (CORD-02 §6).
+    pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
-/// A Locked window's sealed history, as a reader walks it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Sealed {
-    /// The first page's wrap id and content hash.
-    pub page: [u8; 32],
-    pub hash: [u8; 32],
-    /// The read epoch every page opens under.
-    pub read: Epoch,
-    /// The writer epoch whose address carries the pages.
-    pub window: Epoch,
-    pub writer: [u8; 32],
-    /// What the seal holds: everything at the read address before this (unix ms).
-    pub before: u64,
+impl SealRef {
+    fn parse(v: &serde_json::Value) -> Option<Self> {
+        let mut o = v.as_object()?.clone();
+        let page = match o.remove("page")? {
+            serde_json::Value::Null => None,
+            p => Some(hex32(&p)?),
+        };
+        let read = Epoch(o.remove("read")?.as_u64()?);
+        let (until, run, count) = (o.remove("until")?.as_u64()?, o.remove("run")?.as_u64()?, o.remove("count")?.as_u64()?);
+        (until <= run.saturating_add(ENTRY_SKEW_MS)).then_some(SealRef { page, read, until, run, count, extra: o })
+    }
+
+    fn to_json(&self) -> serde_json::Value {
+        let mut o = self.extra.clone();
+        o.insert("page".into(), self.page.map_or(serde_json::Value::Null, |p| crate::simd::hex::bytes_to_hex_32(&p).into()));
+        o.insert("read".into(), self.read.0.into());
+        o.insert("until".into(), self.until.into());
+        o.insert("run".into(), self.run.into());
+        o.insert("count".into(), self.count.into());
+        serde_json::Value::Object(o)
+    }
 }
 
 impl Ledger {
@@ -194,15 +201,6 @@ impl Ledger {
         for e in raw {
             let serde_json::Value::Object(mut e) = e else { return None };
             let at = e.remove("at")?.as_u64()?;
-            // A seal names none of the fields below; one this reader can't read stays an entry
-            // it carries and ignores, as an older reader does.
-            if let Some(seal) = parse_seal(&e, keys) {
-                for k in SEAL_FIELDS {
-                    e.remove(*k);
-                }
-                entries.push(Entry { at, spell: seal, extra: e });
-                continue;
-            }
             let stop = e.remove("stop");
             let spell = match (e.remove("open"), e.remove("epoch"), e.remove("writer"), e.remove("root"), e.remove("by")) {
                 (None, None, None, None, None) if stop.is_some() => Spell::Stop { writer: keys.writer_pk(stop.as_ref()?)? },
@@ -219,7 +217,12 @@ impl Ledger {
             };
             entries.push(Entry { at, spell, extra: e });
         }
-        let ledger = Ledger { channel, entries, retired, extra: top };
+        // A seal this reader can't read is carried as it came.
+        let seal = top.get("seal").and_then(SealRef::parse);
+        if seal.is_some() {
+            top.remove("seal");
+        }
+        let ledger = Ledger { channel, entries, retired, seal, extra: top };
         ledger.well_formed().then_some(ledger)
     }
 
@@ -257,14 +260,6 @@ impl Ledger {
                     Spell::Stop { writer } => {
                         o.insert("stop".into(), crate::simd::hex::bytes_to_hex_32(&writer).into());
                     }
-                    Spell::Seal { page, hash, read, window, until, count } => {
-                        o.insert("seal".into(), crate::simd::hex::bytes_to_hex_32(&page).into());
-                        o.insert("hash".into(), crate::simd::hex::bytes_to_hex_32(&hash).into());
-                        o.insert("read".into(), read.0.into());
-                        o.insert("window".into(), window.0.into());
-                        o.insert("until".into(), until.into());
-                        o.insert("count".into(), count.into());
-                    }
                     Spell::Other => {}
                 }
                 serde_json::Value::Object(o)
@@ -272,6 +267,9 @@ impl Ledger {
             .collect();
         let mut top = self.extra.clone();
         top.insert("channel".into(), crate::simd::hex::bytes_to_hex_32(&self.channel).into());
+        if let Some(seal) = &self.seal {
+            top.insert("seal".into(), seal.to_json());
+        }
         top.insert("ledger".into(), entries.into());
         if !self.retired.is_empty() {
             let retired: Vec<serde_json::Value> = self
@@ -308,43 +306,93 @@ impl Ledger {
         self.entries.iter().rev().find(|e| e.at <= at_ms && e.spell.moves()).is_some_and(Entry::locked)
     }
 
-    /// Whether nothing a reader needs sits at the read address at `at_ms`: inside a Locked window,
-    /// past the minutes a client that hadn't read the lock may still have used it.
-    pub fn read_address_quiet(&self, at_ms: u64) -> bool {
-        self.entries.iter().rev().find(|e| e.at <= at_ms && e.spell.moves()).is_some_and(|e| e.locked() && at_ms >= e.at.saturating_add(ENTRY_SKEW_MS))
+    /// The dates the read address holds nothing a reader needs: each run of Locked windows from
+    /// ten minutes past its start (a client that hadn't read the lock may still use it until then),
+    /// and the seal's stretch from its end to the first window after it that isn't Locked, which
+    /// holds the run even once its early entries retire. Sorted, disjoint; `None` while running.
+    pub fn quiet_spans(&self) -> Vec<(u64, Option<u64>)> {
+        let moves: Vec<&Entry> = self.entries.iter().filter(|e| e.spell.moves()).collect();
+        let end_after = |at: u64| moves.iter().find(|e| e.at > at && !e.locked()).map(|e| e.at);
+        let mut spans: Vec<(u64, Option<u64>)> = moves
+            .iter()
+            .enumerate()
+            .filter(|(i, e)| e.locked() && (*i == 0 || !moves[i - 1].locked()))
+            .map(|(_, e)| (e.at.saturating_add(ENTRY_SKEW_MS), end_after(e.at)))
+            .collect();
+        // The seal's run, from its first ten minutes on, whatever entries of it remain.
+        if let Some(seal) = &self.seal {
+            let from = seal.run.saturating_add(ENTRY_SKEW_MS);
+            spans.push((from, end_after(seal.run)));
+        }
+        spans.retain(|(from, to)| to.is_none_or(|t| t > *from));
+        spans.sort_by_key(|s| s.0);
+        let mut out: Vec<(u64, Option<u64>)> = Vec::with_capacity(spans.len());
+        for (from, to) in spans {
+            match out.last_mut() {
+                Some(last) if last.1.is_none_or(|end| end >= from) => {
+                    last.1 = last.1.zip(to).map(|(a, b)| a.max(b));
+                }
+                _ => out.push((from, to)),
+            }
+        }
+        out
     }
 
-    /// The newest a read of the read address needs for a page ending at `until_ms`: inside a
-    /// Locked window, only its first minutes.
-    pub fn read_address_until(&self, until_ms: u64) -> u64 {
-        match self.entries.iter().rev().find(|e| e.at <= until_ms && e.spell.moves()) {
-            Some(e) if e.locked() => until_ms.min(e.at.saturating_add(ENTRY_SKEW_MS)),
-            _ => until_ms,
+    /// Whether nothing a reader needs sits at the read address at `at_ms`.
+    pub fn read_address_quiet(&self, at_ms: u64) -> bool {
+        self.quiet_spans().iter().any(|(from, to)| *from <= at_ms && to.is_none_or(|t| at_ms < t))
+    }
+
+    /// The dates at or below `top_ms` the read address is read by, as `(floor, top)`: the top
+    /// lowered out of any quiet span, the floor the nearest quiet span below or the seal's end.
+    /// `None` when nothing above the seal is left.
+    pub fn read_range(&self, top_ms: u64) -> Option<(u64, u64)> {
+        let spans = self.quiet_spans();
+        let mut top = top_ms;
+        if let Some((from, _)) = spans.iter().find(|(from, to)| *from <= top && to.is_none_or(|t| top < t)) {
+            top = from.checked_sub(1)?;
+        }
+        let below = spans.iter().filter_map(|(_, to)| *to).filter(|t| *t <= top).max().unwrap_or(0);
+        let floor = below.max(self.seal.as_ref().map_or(0, |s| s.until));
+        (floor <= top).then_some((floor, top))
+    }
+
+    /// When the live run of Locked windows began, while the live window is Locked.
+    pub fn run_start(&self) -> Option<u64> {
+        let moves: Vec<&Entry> = self.entries.iter().filter(|e| e.spell.moves()).collect();
+        let tail = moves.iter().rev().take_while(|e| e.locked()).last()?;
+        Some(tail.at)
+    }
+
+    /// Where the live run of Locked windows is owed a seal to at `now_ms`, if anywhere: up to its
+    /// start once it begins, then across its first ten minutes once they pass. A seal made in an
+    /// earlier run, one a window that wasn't Locked has followed since, is this run's no longer.
+    pub fn seal_target(&self, now_ms: u64) -> Option<u64> {
+        let start = self.run_start()?;
+        let in_run = self.seal.as_ref().filter(|s| !self.entries.iter().any(|e| e.spell.moves() && e.at > s.run && !e.locked()));
+        match in_run {
+            None => Some(start),
+            Some(s) if s.until < s.run.saturating_add(ENTRY_SKEW_MS) && now_ms >= s.run.saturating_add(ENTRY_SKEW_MS) => Some(s.run.saturating_add(ENTRY_SKEW_MS)),
+            _ => None,
         }
     }
 
-    /// The newest seal of a Locked window the ledger still holds whole: what a reader fetches from
-    /// the read address before that window, by id and nothing else.
-    pub fn sealed(&self) -> Option<Sealed> {
-        self.entries.iter().rev().find_map(|e| match e.spell {
-            Spell::Seal { page, hash, read, window, until, .. } => {
-                let w = self.entries.iter().find(|w| w.locked() && matches!(w.spell, Spell::Writer { epoch, .. } if epoch == window))?;
-                let Spell::Writer { pk, .. } = w.spell else { return None };
-                Some(Sealed { page, hash, read, window, writer: pk, before: until.min(w.at.saturating_add(ENTRY_SKEW_MS)) })
-            }
-            _ => None,
-        })
+    /// When the run the next seal belongs to began: the live seal's own, while it still holds the
+    /// run, else the live run's start.
+    pub fn seal_run(&self) -> Option<u64> {
+        let start = self.run_start()?;
+        Some(self.seal.as_ref().filter(|s| !self.entries.iter().any(|e| e.spell.moves() && e.at > s.run && !e.locked())).map_or(start, |s| s.run))
     }
 
-    /// Every Locked window the ledger holds, as `[from, to)` with `None` for one still open:
-    /// nothing a reader needs is dated inside one at the read address.
-    pub fn locked_windows(&self) -> Vec<(u64, Option<u64>)> {
-        self.entries
-            .iter()
-            .enumerate()
-            .filter(|(_, e)| e.locked())
-            .map(|(i, e)| (e.at, self.entries[i + 1..].iter().find(|n| n.spell.moves()).map(|n| n.at)))
-            .collect()
+    /// This ledger sealed by `seal`: the edition appends a marker entry the cap may drop, and the
+    /// seal itself rides the top level.
+    pub fn appended_seal(&self, at: u64, seal: SealRef) -> Option<Self> {
+        let at = self.entries.last().map_or(at, |last| at.max(last.at));
+        let mut extra = serde_json::Map::new();
+        extra.insert(SEALED.into(), seal.count.into());
+        let mut next = self.with(Entry { at, spell: Spell::Other, extra })?;
+        next.seal = Some(seal);
+        Some(next)
     }
 
     /// The writer epoch taking posts now.
@@ -636,13 +684,64 @@ mod tests {
         assert!(back.extends(&Ledger::parse(&with(&Ledger::new(&CH), 100, w(1, 1), false).to_json()).unwrap()), "and is part of what verbatim compares");
         let l = l.appended(300, Spell::Open).unwrap();
         assert!(!l.locked() && !l.locked_at(300) && l.locked_at(250));
-        assert_eq!(l.locked_windows(), vec![(200, Some(300))]);
         // Only the flag set to true locks: anything else reads as a window that gates posting.
         let odd = l.to_json().replace("\"locked\":true", "\"locked\":\"yes\"");
-        assert!(Ledger::parse(&odd).unwrap().locked_windows().is_empty());
+        assert!(!Ledger::parse(&odd).unwrap().locked_at(250));
         // A stop sits inside the window without ending it.
         let l = with(&Ledger::new(&CH), 100, w(1, 1), true).appended(150, Spell::Stop { writer: pk(9) }).unwrap();
         assert!(l.locked() && l.locked_at(160));
+    }
+
+    const MIN: u64 = 60_000;
+
+    #[test]
+    fn a_run_of_locked_windows_is_one_quiet_stretch_from_ten_minutes_in() {
+        let with = |l: &Ledger, at: u64, s: Spell, locked: bool| l.appended_writer(at, s, locked).unwrap();
+        let l = with(&Ledger::new(&CH), 100 * MIN, w(1, 1), false);
+        let l = with(&l, 200 * MIN, w(2, 2), true);
+        // A fresh epoch while still Locked, as a member losing their rights takes: the same run.
+        let l = with(&l, 300 * MIN, w(3, 3), true);
+        assert_eq!(l.quiet_spans(), vec![(210 * MIN, None)]);
+        assert_eq!(l.run_start(), Some(200 * MIN));
+        assert!(l.read_address_quiet(250 * MIN) && l.read_address_quiet(305 * MIN) && !l.read_address_quiet(205 * MIN));
+        // Read from below the run: down from its first ten minutes, never inside it.
+        assert_eq!(l.read_range(400 * MIN), Some((0, 210 * MIN - 1)));
+        assert_eq!(l.read_range(150 * MIN), Some((0, 150 * MIN)));
+        let l = l.appended(500 * MIN, Spell::Open).unwrap();
+        assert_eq!(l.quiet_spans(), vec![(210 * MIN, Some(500 * MIN))]);
+        assert_eq!(l.read_range(600 * MIN), Some((500 * MIN, 600 * MIN)), "above the run, down to where it ended");
+        assert_eq!(l.read_range(499 * MIN), Some((0, 210 * MIN - 1)), "and past it, from below it");
+        assert_eq!(l.run_start(), None);
+    }
+
+    #[test]
+    fn a_seal_holds_its_stretch_past_the_cap() {
+        let mut l = Ledger::new(&CH).appended_writer(200 * MIN, w(1, 1), true).unwrap();
+        assert_eq!(l.seal_target(201 * MIN), Some(200 * MIN), "sealed to its start at once");
+        let first = SealRef { page: Some([6; 32]), read: Epoch(2), until: 200 * MIN, run: 200 * MIN, count: 4, extra: Default::default() };
+        l = l.appended_seal(200 * MIN, first).unwrap();
+        assert_eq!(l.seal_target(205 * MIN), None, "then nothing until its first minutes pass");
+        assert_eq!(l.seal_target(210 * MIN), Some(210 * MIN), "then across them");
+        assert_eq!(l.read_range(209 * MIN), Some((200 * MIN, 209 * MIN)), "its first minutes still read by date meanwhile");
+        let seal = SealRef { page: Some([7; 32]), read: Epoch(2), until: 210 * MIN, run: 200 * MIN, count: 5, extra: Default::default() };
+        l = l.appended_seal(211 * MIN, seal.clone()).unwrap();
+        assert_eq!(l.seal_target(10_000 * MIN), None);
+        assert_eq!(Ledger::parse(&l.to_json()).unwrap(), l, "the seal round-trips at the top level");
+        assert_eq!(l.read_range(400 * MIN), None, "everything below the seal is read by id");
+        // Fresh epochs, still Locked, until the run's first entries and the seal's own marker go.
+        for e in 2..=70u64 {
+            l = l.appended_writer((211 + e) * MIN, w(e, (e % 200) as u8 + 1), true).unwrap();
+        }
+        assert!(l.retired.iter().any(|r| r.epoch == Epoch(1)), "the run's first window retired");
+        assert!(!l.entries.iter().any(|e| e.extra.contains_key(SEALED)), "and the seal's marker with it");
+        assert_eq!(l.seal, Some(seal));
+        assert!(l.seal_target(10_000 * MIN).is_none() && l.read_address_quiet(212 * MIN), "the seal still holds the stretch");
+        assert_eq!(l.read_range(10_000 * MIN), None);
+        // Opened and Locked again, the new run is the seal's no longer.
+        let l = l.appended(400 * MIN, Spell::Open).unwrap().appended_writer(500 * MIN, w(71, 9), true).unwrap();
+        assert_eq!(l.seal_target(10_000 * MIN), Some(500 * MIN));
+        assert_eq!(l.quiet_spans(), vec![(210 * MIN, Some(400 * MIN)), (510 * MIN, None)]);
+        assert_eq!(l.read_range(10_000 * MIN), Some((400 * MIN, 510 * MIN - 1)), "only what came between the runs");
     }
 
     #[test]

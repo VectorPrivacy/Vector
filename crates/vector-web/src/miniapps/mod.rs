@@ -216,8 +216,8 @@ async fn prepare(a: &Args) -> Result<Value, String> {
     }
 
     let granted = db::miniapps::get_miniapp_granted_permissions(&pkg.file_hash).unwrap_or_default();
-    // The frame grants what the header allows: autoplay and gamepads, plus the user's grants.
-    let mut allow = vec!["autoplay".to_string(), "gamepad".to_string()];
+    // The frame grants what the header allows: autoplay, gamepads and WebXR, plus the user's grants.
+    let mut allow = vec!["autoplay".to_string(), "gamepad".to_string(), "xr-spatial-tracking".to_string()];
     for p in vector_core::webxdc_permissions::parse_permissions(&granted) {
         let name = p.policy_name().to_string();
         if !allow.contains(&name) {

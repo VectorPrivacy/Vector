@@ -655,13 +655,19 @@ pub fn dispatch_wrap(
         if wrap.pubkey != group.pk() {
             continue;
         }
-        // Dated where a Locked Channel's read address takes nothing: never worth opening.
-        if ch.writers.as_ref().is_some_and(|l| l.read_address_quiet(wrap.created_at.as_secs().saturating_mul(1000))) {
+        // Dated where a Locked Channel's read address takes nothing, or below its seal, which
+        // names all that stands there: never worth opening.
+        let below_seal = |at_ms: u64| ch.writers.as_ref().and_then(|l| l.seal.as_ref()).is_some_and(|s| at_ms < s.until);
+        let wrapped_ms = wrap.created_at.as_secs().saturating_mul(1000);
+        if ch.writers.as_ref().is_some_and(|l| l.read_address_quiet(wrapped_ms)) || below_seal(wrapped_ms.saturating_add(999)) {
             return DispatchedV2::Ignored;
         }
         let Ok(event) = chat::open_chat_event(wrap, &group, &ch.id, epoch) else {
             return DispatchedV2::NotOurs;
         };
+        if below_seal(event.opened().at_ms) {
+            return DispatchedV2::Ignored;
+        }
         return dispatch_judged(event, community, ch, None, my_pubkey, handler);
     }
 
@@ -725,7 +731,10 @@ fn dispatch_judged(event: ChatEvent, community: &CommunityV2, ch: &super::commun
     if matches!(event, ChatEvent::Message { .. }) && crate::early::is_early(at_ms) {
         return DispatchedV2::Early { at_ms };
     }
-    // Being in a call is CONNECT, not SEND: a Channel's writers' rules don't judge it.
+    // A call's signals ride where the Channel's writes do: in a Locked one, only with Connect.
+    if matches!(event, ChatEvent::VoicePresence { .. } | ChatEvent::VoiceDirective { .. }) && super::service::Judge::of(community, ch).is_some_and(|j| !j.admits(&event, wepoch)) {
+        return DispatchedV2::Ignored;
+    }
     if let ChatEvent::VoicePresence { opened, heard } = event {
         if author_is_banned_here(&channel_id, Some(&community.id().0), &opened.author) {
             return DispatchedV2::Ignored;

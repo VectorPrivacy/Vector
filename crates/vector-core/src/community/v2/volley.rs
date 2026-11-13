@@ -46,6 +46,8 @@ struct Job {
     group: GroupKey,
     epoch: Epoch,
     since: Option<u64>,
+    /// Where a read address's newest stretch ends below a quiet one (unix seconds).
+    until: Option<u64>,
     relay_set: usize,
     /// The address fetched: the read plane's, or a restricted Channel's live writer.
     address: PublicKey,
@@ -220,11 +222,22 @@ pub async fn paint_all(targets: Vec<PaintTarget>) -> (Vec<(String, usize)>, Voll
                         group: group.clone(),
                         epoch,
                         since: t.since,
+                        until: None,
                         relay_set,
                         address,
                         writer: Some((wepoch, keys)),
                         judge: judge.clone(),
                     });
+                }
+                // The read address only where it took anything: a Locked run's quiet span is skipped,
+                // and nothing at all is asked of it when everything since the paint is quiet.
+                let now = crate::clock::now_secs().saturating_mul(1000);
+                let range = ch.writers.as_ref().map_or(Some((0, now)), |l| l.read_range(now));
+                let Some((floor, top)) = range else { continue };
+                let since = t.since.max((floor > 0).then_some(floor / 1000));
+                let until = (top < now).then_some(top / 1000);
+                if since.zip(until).is_some_and(|(s, u)| s > u) {
+                    continue;
                 }
                 plane_index.insert(group.pk(), jobs.len());
                 jobs.push(Job {
@@ -234,7 +247,8 @@ pub async fn paint_all(targets: Vec<PaintTarget>) -> (Vec<(String, usize)>, Voll
                     address: group.pk(),
                     group,
                     epoch,
-                    since: t.since,
+                    since,
+                    until,
                     relay_set,
                     writer: None,
                     judge,
@@ -286,6 +300,7 @@ pub async fn paint_all(targets: Vec<PaintTarget>) -> (Vec<(String, usize)>, Voll
                                 kinds: vec![stream::KIND_WRAP],
                                 authors: vec![j.address.to_hex()],
                                 since: j.since,
+                                until: j.until,
                                 limit: Some(50),
                                 ..Default::default()
                             }
@@ -459,6 +474,7 @@ pub async fn paint_all(targets: Vec<PaintTarget>) -> (Vec<(String, usize)>, Voll
                     kinds: vec![stream::KIND_WRAP],
                     authors: vec![j.address.to_hex()],
                     since: j.since,
+                    until: j.until,
                     limit: Some(50),
                     // Declared intent — fetch_plane does not consult evidence
                     // yet (#370); its 4s transport bound is the effective limit.
