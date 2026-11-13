@@ -433,7 +433,11 @@ impl TextInput {
         }
         if let Some(text) = item.and_then(|item| item.text()) {
             let text = if self.multiline.is_some() {
-                text.replace("\r\n", "\n")
+                let text = text.replace("\r\n", "\n");
+                // Styled copies keep their styling as markdown, so what shows here is what sends.
+                crate::paste_md::clipboard_html()
+                    .and_then(|html| crate::paste_md::html_to_markdown(&html, &text))
+                    .unwrap_or(text)
             } else {
                 text.replace('\n', " ")
             };

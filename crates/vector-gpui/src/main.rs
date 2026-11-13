@@ -79,6 +79,7 @@ mod newchat;
 mod nexus;
 mod packdetails;
 mod packs;
+mod paste_md;
 mod picker;
 mod policies;
 mod popout;

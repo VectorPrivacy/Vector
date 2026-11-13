@@ -361,6 +361,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "arboard"
+version = "3.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "aeb9553e62312c8756a5979254fc6d7da8bbeb5986a1e17037fab932f7037917"
+dependencies = [
+ "clipboard-win",
+ "log",
+ "objc2 0.6.5",
+ "objc2-app-kit 0.3.2",
+ "objc2-foundation 0.3.2",
+ "parking_lot",
+ "percent-encoding",
+ "windows-sys 0.61.2",
+ "x11rb",
+]
+
+[[package]]
 name = "arc-swap"
 version = "1.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -13094,6 +13111,7 @@ name = "vector-gpui"
 version = "0.5.1"
 dependencies = [
  "anyhow",
+ "arboard",
  "base64 0.22.1",
  "bip39",
  "bytemuck",
@@ -13104,6 +13122,7 @@ dependencies = [
  "cpal",
  "crc32fast",
  "dirs 6.0.0",
+ "dom_query",
  "env_logger",
  "fast-thumbhash",
  "fast_image_resize",

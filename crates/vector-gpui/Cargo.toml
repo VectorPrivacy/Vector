@@ -87,6 +87,8 @@ pollster = "0.4"
 openh264 = "0.9"
 bytes = "1"
 nokhwa = { version = "0.10", features = ["input-native"] }
+arboard = { version = "3.7", default-features = false }
+dom_query = "0.28"
 
 # Screen sharing: X11 read directly; macOS and Windows through xcap.
 [target.'cfg(not(target_os = "linux"))'.dependencies]
