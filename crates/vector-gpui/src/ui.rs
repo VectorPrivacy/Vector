@@ -117,6 +117,7 @@ pub struct VectorApp {
     model_viewer: Option<(Entity<crate::model3d::viewer::ModelViewer>, String, String)>,
     /// The attachment panel is open, and since when (its items fade in from then).
     attach: Option<std::time::Instant>,
+    attach_dismissed: Option<std::time::Instant>,
     /// The attachment panel's Mini Apps view, while it shows.
     mini: Option<miniapps_ops::MiniPanel>,
     nexus: Option<crate::nexus::Nexus>,
@@ -958,6 +959,7 @@ impl VectorApp {
             model_viewer: None,
             cropper: None,
             attach: None,
+            attach_dismissed: None,
             mini: None,
             nexus: None,
             launch: None,
@@ -9221,6 +9223,7 @@ fn attachment_panel(
                     .border_color(c(DIVIDER))
                     .rounded(px(12.))
                     .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .on_mouse_down_out(cx.listener(|app, _, _, cx| app.dismiss_attach(cx)))
                     .child(view),
             )
             .into_any_element();
@@ -9295,6 +9298,7 @@ fn attachment_panel(
                 .flex()
                 .gap(px(12.))
                 .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .on_mouse_down_out(cx.listener(|app, _, _, cx| app.dismiss_attach(cx)))
                 .child(
                     item(0, "attach-file", "icons/file.svg", 26., "File")
                         .on_click(cx.listener(|app, _, window, cx| app.pick_file(window, cx))),
@@ -9316,8 +9320,22 @@ fn attachment_panel(
 }
 
 impl VectorApp {
+    /// A press outside the panel closes it; the + button's click that follows must not reopen it.
+    fn dismiss_attach(&mut self, cx: &mut Context<Self>) {
+        if self.attach.is_none() || self.popup.is_some() {
+            return;
+        }
+        self.attach = None;
+        self.mini = None;
+        self.attach_dismissed = Some(std::time::Instant::now());
+        cx.notify();
+    }
+
     fn toggle_attach(&mut self, cx: &mut Context<Self>) {
         self.mini = None;
+        if self.attach_dismissed.take().is_some_and(|t| t.elapsed().as_millis() < 600) {
+            return;
+        }
         self.attach = match self.attach {
             Some(_) => None,
             None => {
