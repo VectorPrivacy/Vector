@@ -49,6 +49,7 @@ mod kit;
 mod linkcard;
 mod login;
 mod markdown;
+mod marks;
 mod langnames;
 mod lyrics;
 mod media;
