@@ -65,6 +65,8 @@ pub struct FilePreview {
     blur: Option<Arc<RenderImage>>,
     compress_offered: bool,
     compress: bool,
+    /// A picked video plays here through the app's clips, under its own key.
+    media: Option<std::rc::Rc<std::cell::RefCell<crate::media::Media>>>,
     /// Send pressed mid-encode: the name it sends under once the encode lands.
     held: Option<String>,
     compress_info: SharedString,
@@ -175,6 +177,64 @@ fn clean_stem(s: &str) -> String {
 }
 
 impl FilePreview {
+    pub fn with_media(mut self, media: std::rc::Rc<std::cell::RefCell<crate::media::Media>>) -> Self {
+        self.media = Some(media);
+        self
+    }
+
+    fn clip_key(&self) -> String {
+        format!("fp:{}", self.path.display())
+    }
+
+    /// `.file-preview-video`: the clip, muted, sized as a picture would be.
+    fn clip_view(&self, room: f32, max_h: f32, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        let media = self.media.as_ref()?;
+        if !crate::video::EXTENSIONS.contains(&self.ext.as_str()) {
+            return None;
+        }
+        let key = self.clip_key();
+        let spec = crate::audio::AudioInputSpec::File(self.path.clone());
+        let mut m = media.borrow_mut();
+        if m.videos.failed(&key) {
+            return None;
+        }
+        m.videos.want_probe(&key, &spec);
+        let (mine, rest): (Vec<_>, Vec<_>) = std::mem::take(&mut m.videos.queue)
+            .into_iter()
+            .partition(|crate::video::Work::Probe(k, ..)| *k == key);
+        m.videos.queue = rest;
+        for work in mine {
+            let (rx, media) = (crate::video::run(work), media.clone());
+            cx.spawn(async move |this, cx| {
+                let Ok(crate::video::WorkDone::Probed(key, info)) = rx.await else { return };
+                let mut m = media.borrow_mut();
+                let ok = info.is_some();
+                m.videos.probed(key.clone(), info);
+                if ok && !m.videos.clip(&key).is_some_and(|c| c.muted) {
+                    m.videos.act(&key, None, crate::video::Act::Mute);
+                }
+                drop(m);
+                this.update(cx, |_, cx| cx.notify()).ok();
+            })
+            .detach();
+        }
+        let clip = m.videos.clip(&key)?;
+        let (w, h) = clip.info.as_ref().map_or((16., 9.), |i| crate::video::fit(i.w, i.h));
+        let s = (room / w).min(max_h / h).min(1.);
+        let (on_media, me, k, path) = (media.clone(), cx.entity().downgrade(), key.clone(), self.path.clone());
+        Some(crate::video::view(
+            &key,
+            clip,
+            false,
+            Some((w * s, h * s)),
+            8.,
+            std::rc::Rc::new(move |a, _, cx| {
+                on_media.borrow_mut().videos.act(&k, Some(crate::audio::AudioInputSpec::File(path.clone())), a);
+                me.update(cx, |_, cx| cx.notify()).ok();
+            }),
+        ))
+    }
+
     pub fn new(
         path: PathBuf,
         receiver: String,
@@ -320,6 +380,7 @@ impl FilePreview {
             compress_offered,
             compress: true,
             held: None,
+            media: None,
             compress_info: "Compressing...".into(),
             compressed,
             cancel,
@@ -382,6 +443,7 @@ impl FilePreview {
             compress_offered: false,
             compress: false,
             held: None,
+            media: None,
             compress_info: SharedString::default(),
             compressed: None,
             cancel,
@@ -517,7 +579,14 @@ impl FilePreview {
 
     fn close(&mut self, cx: &mut Context<Self>) {
         self.stop_compressing();
+        self.forget_clip();
         cx.emit(Event::Close(self.path.clone()));
+    }
+
+    fn forget_clip(&self) {
+        if let Some(m) = &self.media {
+            m.borrow_mut().videos.forget(&self.clip_key());
+        }
     }
 
     fn stop_compressing(&self) {
@@ -571,6 +640,7 @@ impl FilePreview {
     }
 
     fn dispatch(&mut self, name: String, compress: bool, cx: &mut Context<Self>) {
+        self.forget_clip();
         cx.emit(Event::Send(Send {
             path: self.path.clone(),
             receiver: self.receiver.clone(),
@@ -829,6 +899,7 @@ impl Render for FilePreview {
                 None if IMAGE_EXTS.contains(&self.ext.as_str()) => {
                     div().h(px(100.)).into_any_element()
                 }
+                None if let Some(v) = self.clip_view(500f32.min(f32::from(window.viewport_size().width) - 40.) - 48., max_h, cx) => v,
                 None => div()
                     .size(px(120.))
                     .mb(px(8.))

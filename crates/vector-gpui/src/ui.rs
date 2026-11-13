@@ -9269,8 +9269,9 @@ impl VectorApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let media = self.media.clone();
         self.open_preview(window, cx, move |chat, reply, window, cx| {
-            crate::filepreview::FilePreview::new(path, chat, reply, window, cx)
+            crate::filepreview::FilePreview::new(path, chat, reply, window, cx).with_media(media)
         });
     }
 
