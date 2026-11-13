@@ -13148,6 +13148,7 @@ dependencies = [
  "symphonia",
  "sysinfo 0.31.4",
  "tar",
+ "tempfile",
  "tobj",
  "tokio",
  "unicode-linebreak",

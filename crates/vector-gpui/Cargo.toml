@@ -163,6 +163,8 @@ khronos-egl = { git = "https://github.com/zed-industries/khronos-egl", rev = "42
 [dev-dependencies]
 # The shared simd module checks its quantiser against this reference.
 color_quant = "1.1"
+# The desktop's video encoder tests, built in with it.
+tempfile = "3"
 
 # gpui_linux at the same rev, plus file references on the clipboard (text/uri-list) for X11 and Wayland.
 [patch."https://github.com/zed-industries/zed"]
