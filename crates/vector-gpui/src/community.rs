@@ -668,7 +668,7 @@ pub fn slim_header(
     on: &OnAct,
 ) -> impl IntoElement {
     let face = match store.icon(&com.community_id) {
-        Some(path) => img(path).size(px(22.)).rounded_full().flex_shrink_0().into_any_element(),
+        Some(path) => img(path).object_fit(gpui::ObjectFit::Cover).size(px(22.)).rounded_full().flex_shrink_0().into_any_element(),
         None => img("icons/group-placeholder.svg").size(px(22.)).rounded_full().flex_shrink_0().into_any_element(),
     };
     let topic = ch.topic.clone().filter(|t| !t.is_empty());
@@ -854,7 +854,16 @@ fn member_row(store: &Store, cid: &str, npub: &str, owner: bool, colour: Option<
                         .text_size(px(if slim { 12. } else { 11.5 }))
                         .line_height(px(if slim { 16.2 } else { 15.5 }))
                         .text_color(white_a(0.38))
-                        .child(status_line(&s))
+                        .child(if crate::profile::status_has_emoji(store, npub) {
+                            let look = if slim {
+                                crate::inline::Look::new(INTER, 12., 16.2, white_a(0.38))
+                            } else {
+                                crate::inline::Look::new(INTER, 11.5, 15.5, white_a(0.38))
+                            };
+                            crate::profile::status(store, npub, look).into_any_element()
+                        } else {
+                            status_line(&s)
+                        })
                 })),
         )
 }

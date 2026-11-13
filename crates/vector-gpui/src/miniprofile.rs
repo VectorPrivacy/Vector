@@ -233,12 +233,11 @@ pub fn render(m: &Mini, store: &Store, window: Size<Pixels>, anchors: &crate::ki
             .border_color(white_a(0.08))
             .child(div().size(px(7.)).flex_shrink_0().rounded_full().bg(c(ACCENT)))
             .child(
-                div().min_w_0().overflow_hidden().child(crate::inline::emoji_line(
-                    &status,
-                    crate::inline::Look::new(INTER, 11.5, 24., white_a(0.92)),
-                    13.,
-                    2.,
-                )),
+                div().min_w_0().overflow_hidden().child(if crate::profile::status_has_emoji(store, npub) {
+                    crate::profile::status(store, npub, crate::inline::Look::new(INTER, 11.5, 24., white_a(0.92))).into_any_element()
+                } else {
+                    crate::inline::emoji_line(&status, crate::inline::Look::new(INTER, 11.5, 24., white_a(0.92)), 13., 2.).into_any_element()
+                }),
             )
     });
     let action = |id: &'static str, label: &'static str, primary: bool, act: Act| {

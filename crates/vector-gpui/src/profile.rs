@@ -227,6 +227,20 @@ fn small_option(
 
 /// Status or bio text as the desktop client draws it: emoji, the profile's `:shortcode:`s, and
 /// (`mentions`) npubs as pills.
+/// Whether `npub`'s status carries `:shortcode:`s that [`status`] draws.
+pub(crate) fn status_has_emoji(store: &Store, npub: &str) -> bool {
+    store.profiles.get(npub).is_some_and(|p| !p.status.emoji_tags.is_empty())
+}
+
+/// A status line with the profile's own `:shortcode:`s.
+pub(crate) fn status(store: &Store, npub: &str, look: crate::inline::Look) -> crate::inline::Inline {
+    let media = crate::media::shared();
+    let p = store.profiles.get(npub);
+    let text = p.map(|p| p.status.title.trim()).unwrap_or_default();
+    let tags = p.map(|p| p.status.emoji_tags.as_slice()).unwrap_or_default();
+    rich(store, Some(&media), text, tags, look, false).single_line()
+}
+
 pub(crate) fn rich(
     store: &Store,
     media: Option<&std::cell::RefCell<crate::media::Media>>,

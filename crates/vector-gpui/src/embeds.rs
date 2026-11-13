@@ -869,7 +869,7 @@ pub type Send = Rc<dyn Fn(Act, &mut gpui::Window, &mut gpui::App)>;
 /// `EmbedAuthor.svelte`: avatar and name open their profile; then how long ago.
 fn author(env: &Env, e: &Embed, key: &str, send: &Send) -> AnyElement {
     let avatar = match env.store.avatar_path(&e.author) {
-        Some(p) => img(p),
+        Some(p) => img(p).object_fit(gpui::ObjectFit::Cover),
         None => img("icons/user-placeholder.svg"),
     };
     let (s, npub) = (send.clone(), e.author.clone());

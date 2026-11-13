@@ -651,7 +651,7 @@ fn back(on: &OnAct) -> impl IntoElement {
 
 fn glyph(g: &Glyph, size: f32) -> AnyElement {
     match g {
-        Glyph::Picture(p, round) => img(p.clone())
+        Glyph::Picture(p, round) => img(p.clone()).object_fit(gpui::ObjectFit::Cover)
             .size(px(size))
             .flex_shrink_0()
             .when(*round, |d| d.rounded_full())

@@ -505,3 +505,12 @@ pub fn format_bytes_with(n: f64, decimals: usize, pad: bool) -> String {
     };
     format!("{s} {}", UNITS[i])
 }
+
+thread_local! {
+    static SHARED: std::rc::Rc<std::cell::RefCell<Media>> = std::rc::Rc::default();
+}
+
+/// The window's one media cache, for renderers that aren't handed it.
+pub fn shared() -> std::rc::Rc<std::cell::RefCell<Media>> {
+    SHARED.with(|m| m.clone())
+}

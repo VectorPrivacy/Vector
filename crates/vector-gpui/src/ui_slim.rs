@@ -1466,7 +1466,7 @@ fn community_row(store: &Store, com: &Community) -> gpui::Stateful<gpui::Div> {
     let latest = community_latest(store, com);
     let color = if unread { c(0xb2b2b2) } else { c(0x737373) };
     let face = match store.icon(&com.community_id) {
-        Some(path) => img(path).size(px(52.)).rounded(px(52. * 0.188_889)).flex_shrink_0().into_any_element(),
+        Some(path) => img(path).object_fit(gpui::ObjectFit::Cover).size(px(52.)).rounded(px(52. * 0.188_889)).flex_shrink_0().into_any_element(),
         None => img("icons/group-placeholder.svg").size(px(52.)).rounded(px(52. * 0.188_889)).flex_shrink_0().into_any_element(),
     };
     let preview = match latest {

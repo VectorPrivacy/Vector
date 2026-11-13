@@ -292,6 +292,7 @@ pub fn view(p: &Popup, pick: Rc<dyn Fn(usize, &mut Window, &mut App)>) -> AnyEle
                         || gpui::ImageSource::from("icons/user-placeholder.svg"),
                         gpui::ImageSource::from,
                     ))
+                    .object_fit(gpui::ObjectFit::Cover)
                     .size(px(30.))
                     .flex_shrink_0()
                     .rounded_full()

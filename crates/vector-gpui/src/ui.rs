@@ -899,7 +899,7 @@ impl VectorApp {
             popup: None,
             rekey: None,
             fail_reasons: Rc::default(),
-            media: Rc::default(),
+            media: crate::media::shared(),
             pack_details: None,
             pending_link: None,
             badge: 0,
@@ -6516,7 +6516,7 @@ fn chrome(window: &Window, login: bool, mark_only: bool) -> gpui::Div {
 
 pub(crate) fn avatar(store: &Store, npub: &str, size: f32) -> AnyElement {
     match store.avatar_path(npub) {
-        Some(path) => img(path)
+        Some(path) => img(path).object_fit(gpui::ObjectFit::Cover)
             .size(px(size))
             .rounded_full()
             .flex_shrink_0()
@@ -7025,7 +7025,16 @@ fn rail(
                                     .text_size(px(12.))
                                     .line_height(px(16.))
                                     .text_color(white_a(0.4))
-                                    .child(status.unwrap_or_else(|| "Set a Status".into())),
+                                    .child(match status {
+                                        Some(_) if crate::profile::status_has_emoji(store, &store.my_npub) => crate::profile::status(
+                                            store,
+                                            &store.my_npub,
+                                            crate::inline::Look::new(INTER, 12., 16., white_a(0.4)),
+                                        )
+                                        .into_any_element(),
+                                        Some(s) => s.into_any_element(),
+                                        None => "Set a Status".into_any_element(),
+                                    }),
                             ),
                     ),
             ),
@@ -7787,7 +7796,11 @@ impl VectorApp {
                                     .max_w_full()
                                     .overflow_hidden()
                                     .opacity(0.8)
-                                    .child(crate::inline::emoji_line(&subtext, crate::inline::Look::new(INTER, 14., 24., c(TEXT)), 17., 1.)),
+                                    .child(if !notes && crate::profile::status_has_emoji(store, &id) {
+                                        crate::profile::status(store, &id, crate::inline::Look::new(INTER, 14., 24., c(TEXT))).into_any_element()
+                                    } else {
+                                        crate::inline::emoji_line(&subtext, crate::inline::Look::new(INTER, 14., 24., c(TEXT)), 17., 1.).into_any_element()
+                                    }),
                             ),
                     )
                 }

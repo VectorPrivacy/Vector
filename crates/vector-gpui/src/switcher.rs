@@ -51,7 +51,7 @@ fn on_click(
 fn row(s: &Switcher, r: &Row, last: bool, on: &OnAct) -> AnyElement {
     let active = r.npub == s.active;
     let avatar = match &r.avatar {
-        Some(path) => img(path.clone())
+        Some(path) => img(path.clone()).object_fit(gpui::ObjectFit::Cover)
             .size(px(28.))
             .rounded_full()
             .flex_shrink_0()

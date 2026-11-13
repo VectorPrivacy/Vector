@@ -241,7 +241,7 @@ impl LoginView {
             None => "Select Profile".into(),
         };
         let avatar = match me.and_then(|r| r.avatar.clone()) {
-            Some(path) => img(path)
+            Some(path) => img(path).object_fit(gpui::ObjectFit::Cover)
                 .size(px(44.))
                 .rounded_full()
                 .flex_shrink_0()
@@ -307,7 +307,7 @@ impl LoginView {
             .map(|r| {
                 let npub = r.npub.clone();
                 let avatar = match &r.avatar {
-                    Some(path) => img(path.clone())
+                    Some(path) => img(path.clone()).object_fit(gpui::ObjectFit::Cover)
                         .size(px(28.))
                         .rounded_full()
                         .flex_shrink_0()

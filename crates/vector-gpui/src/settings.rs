@@ -1479,7 +1479,7 @@ fn blocked_block(s: &Settings, on: &OnAct) -> AnyElement {
         .children(list.iter().map(|u| {
             let npub = u.npub.clone();
             let avatar = match &u.avatar {
-                Some(p) => img(p.clone())
+                Some(p) => img(p.clone()).object_fit(gpui::ObjectFit::Cover)
                     .size(px(30.))
                     .rounded_full()
                     .flex_shrink_0()

@@ -699,7 +699,7 @@ impl SecurityFlow {
         };
         let identity = || {
             let face = match &x.avatar {
-                Some(a) => img(a.clone())
+                Some(a) => img(a.clone()).object_fit(gpui::ObjectFit::Cover)
                     .size(px(44.))
                     .rounded_full()
                     .into_any_element(),

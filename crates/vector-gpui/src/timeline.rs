@@ -213,7 +213,7 @@ pub fn base_look() -> Look {
 
 fn avatar(store: &Store, npub: &str, size: f32) -> AnyElement {
     match store.avatar_path(npub) {
-        Some(path) => img(path)
+        Some(path) => img(path).object_fit(gpui::ObjectFit::Cover)
             .size(px(size))
             .rounded_full()
             .flex_shrink_0()
@@ -506,6 +506,56 @@ fn author_of(ctx: &Ctx, m: &Message) -> String {
     }
 }
 
+enum Jumbo {
+    Stock(SharedString),
+    /// A tagged `:shortcode:`, drawn once it has loaded.
+    Custom(Option<std::sync::Arc<gpui::RenderImage>>),
+}
+
+/// `.dmsg-emoji-only`: one to six emoji, stock or the message's own `:shortcode:`s, and nothing else.
+fn jumbo(ctx: &Ctx, m: &Message, text: &str) -> Option<Vec<Jumbo>> {
+    let custom = custom_emoji(ctx.store, ctx.media, &m.emoji_tags);
+    let mut out = Vec::new();
+    let mut rest = text;
+    while !rest.is_empty() {
+        let (stock, code, after) = match rest.find(':') {
+            Some(i) => {
+                let tail = &rest[i + 1..];
+                let end = tail.find(':');
+                let code = end.map(|e| &tail[..e]).filter(|c| {
+                    !c.is_empty()
+                        && c.chars().all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '~' | '-'))
+                        && m.emoji_tags.iter().any(|t| t.shortcode == *c)
+                });
+                match code {
+                    Some(c) => (&rest[..i], Some(c), &tail[c.len() + 1..]),
+                    // A colon that opens no known shortcode is text.
+                    None => return None,
+                }
+            }
+            None => (rest, None, ""),
+        };
+        emoji::only_emoji_count(stock)?;
+        for g in unicode_segmentation::UnicodeSegmentation::graphemes(stock, true) {
+            if let Some(src) = emoji::twemoji(g) {
+                out.push(Jumbo::Stock(src));
+            }
+        }
+        if let Some(code) = code {
+            match custom.as_ref().and_then(|f| f(code))? {
+                crate::media::Custom::Ready(image) => out.push(Jumbo::Custom(Some(image))),
+                crate::media::Custom::Pending => out.push(Jumbo::Custom(None)),
+                crate::media::Custom::Missing(_) => return None,
+            }
+        }
+        if out.len() > 6 {
+            return None;
+        }
+        rest = after;
+    }
+    (!out.is_empty()).then_some(out)
+}
+
 /// A message's NIP-30 tags as the renderer asks for them: a web URL through the emoji cache,
 /// a fixture's path from beside its file.
 pub fn custom_emoji<'a>(
@@ -662,13 +712,18 @@ fn content(ctx: &Ctx, m: &Message) -> AnyElement {
     } else {
         text.as_ref().into()
     };
-    if !headed && let Some(n @ 1..=6) = emoji::only_emoji_count(&bare) {
-        let _ = n;
+    if !headed && let Some(glyphs) = jumbo(ctx, m, &bare) {
         let mut row = div().flex().items_center().py(px(4.));
-        for g in unicode_segmentation::UnicodeSegmentation::graphemes(bare.as_ref(), true) {
-            if let Some(src) = emoji::twemoji(g) {
-                row = row.child(img(src).size(px(50.)).flex_shrink_0());
-            }
+        for glyph in glyphs {
+            row = row.child(match glyph {
+                Jumbo::Stock(src) => img(src).size(px(50.)).flex_shrink_0().into_any_element(),
+                Jumbo::Custom(Some(image)) => img(gpui::ImageSource::Render(image))
+                    .size(px(50.))
+                    .object_fit(gpui::ObjectFit::Contain)
+                    .flex_shrink_0()
+                    .into_any_element(),
+                Jumbo::Custom(None) => div().size(px(50.)).flex_shrink_0().into_any_element(),
+            });
         }
         return div()
             .flex()
@@ -742,7 +797,7 @@ fn content(ctx: &Ctx, m: &Message) -> AnyElement {
                             on_act(&mid, Act::View(open.clone()), win, cx)
                         })
                         .child(
-                            img(image.clone())
+                            img(image.clone()).object_fit(gpui::ObjectFit::Cover)
                                 .w_full()
                                 .aspect_ratio(w / h.max(1.))
                                 .rounded(px(8.))
