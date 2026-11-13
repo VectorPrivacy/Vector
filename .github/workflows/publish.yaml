@@ -395,6 +395,8 @@ jobs:
   # entries out and never holds back the Tauri release.
   build-gpui:
     needs: release
+    permissions:
+      contents: read
     uses: ./.github/workflows/gpui.yaml
     with:
       release_tag: ${{ needs.release.outputs.tag }}
