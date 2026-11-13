@@ -135,10 +135,11 @@ fn install_at(bundle: &Path, app: &Path) -> Result<(), String> {
 }
 
 #[cfg(windows)]
-fn install_at(bundle: &Path, _dir: &Path) -> Result<(), String> {
-    // NSIS, passive: progress only, and it starts the app again when done.
+fn install_at(bundle: &Path, dir: &Path) -> Result<(), String> {
+    // NSIS (scripts/installer.nsi): no pages, start the app again when done, into this copy's
+    // folder. `/D=` must come last and unquoted.
     std::process::Command::new(bundle)
-        .args(["/P", "/R"])
+        .args(["/P".into(), "/R".into(), format!("/D={}", dir.display())])
         .spawn()
         .map(|_| ())
         .map_err(|e| format!("Couldn't start the installer: {e}"))

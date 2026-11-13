@@ -19,7 +19,11 @@ if (!dir || !tag || !repo) {
 const ARCH = { x64: 'x86_64', amd64: 'x86_64', x86_64: 'x86_64', aarch64: 'aarch64', arm64: 'aarch64' };
 
 // Bundle name -> the updater targets it serves. `<os>-<arch>` alone is what older clients read.
+// The GPUI client's come first: their names would otherwise match the Tauri rules.
 const RULES = [
+    [/^Vector-GPUI_(aarch64|x64)\.app\.tar\.gz$/, (a) => [`darwin-${a}-gpui`]],
+    [/^Vector-GPUI_(amd64|aarch64)\.AppImage$/, (a) => [`linux-${a}-gpui`]],
+    [/^Vector-GPUI_(x64|arm64)-setup\.exe$/, (a) => [`windows-${a}-gpui`]],
     [/^Vector_(aarch64|x64)\.app\.tar\.gz$/, (a) => [`darwin-${a}`, `darwin-${a}-app`]],
     [/_(amd64|aarch64)\.AppImage$/, (a) => [`linux-${a}`, `linux-${a}-appimage`]],
     [/_(amd64|arm64)\.deb$/, (a) => [`linux-${a}-deb`]],
@@ -28,7 +32,8 @@ const RULES = [
     [/_(x64|arm64)-setup\.exe$/, (a) => [`windows-${a}-nsis`]],
 ];
 
-// Every desktop build the matrix ships: a release missing one must not go out quietly.
+// Every desktop build the matrix ships: a release missing one must not go out quietly. The GPUI
+// bundles are optional while that client is in testing.
 const EXPECTED = [
     'darwin-aarch64', 'darwin-aarch64-app', 'darwin-x86_64', 'darwin-x86_64-app',
     'linux-aarch64', 'linux-aarch64-appimage', 'linux-aarch64-deb', 'linux-aarch64-rpm',

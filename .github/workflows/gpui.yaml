@@ -16,6 +16,12 @@ on:
       - 'crates/vector-gpui/**'
       - '.github/workflows/gpui.yaml'
   workflow_dispatch:
+  # A release (publish.yaml) builds the updater bundles here, then signs and uploads them itself.
+  workflow_call:
+    inputs:
+      release_tag:
+        type: string
+        required: true
 
 permissions:
   contents: read
@@ -32,7 +38,7 @@ env:
 jobs:
   build:
     # The port's own pull request builds on its pushes already.
-    if: github.event_name != 'pull_request' || github.head_ref != 'gpui'
+    if: ${{ !inputs.release_tag && (github.event_name != 'pull_request' || github.head_ref != 'gpui') }}
     strategy:
       fail-fast: false
       matrix:
@@ -113,7 +119,7 @@ jobs:
   # Release builds to try the port on a Mac or a PC: a push whose message carries [package].
   # Thin LTO keeps a cold build near an hour; unsigned, so first launch needs the OS's override.
   package:
-    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && contains(github.event.head_commit.message, '[package]'))
+    if: inputs.release_tag || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && contains(github.event.head_commit.message, '[package]'))
     strategy:
       fail-fast: false
       matrix:
@@ -221,6 +227,11 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force -Path "$env:RUNNER_TEMP\pkg" | Out-Null
           Copy-Item "$env:CARGO_TARGET_DIR\${{ matrix.out }}\vector-gpui.exe" "$env:RUNNER_TEMP\pkg\Vector GPUI.exe"
+          $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.*)"' | Select-Object -First 1).Matches.Groups[1].Value
+          & "${env:ProgramFiles(x86)}\NSIS\makensis.exe" /V2 `
+            "/DSOURCE=$env:RUNNER_TEMP\pkg\Vector GPUI.exe" "/DICON=$env:GITHUB_WORKSPACE\src-tauri\icons\icon.ico" `
+            "/DVERSION=$version" "/DOUTFILE=$env:RUNNER_TEMP\pkg\Vector-GPUI_x64-setup.exe" scripts\installer.nsi
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - uses: actions/upload-artifact@v4
         with:

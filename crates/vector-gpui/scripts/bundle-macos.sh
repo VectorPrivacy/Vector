@@ -1,6 +1,7 @@
 #!/bin/bash
 # Wraps a release binary in an ad-hoc signed .app, zipped with ditto so the bundle keeps its
-# permissions and signature through an artifact upload.
+# permissions and signature through an artifact upload, plus the .app.tar.gz the in-app updater
+# unpacks (backend/install.rs).
 # Usage: scripts/bundle-macos.sh <binary> <out-dir>
 set -euo pipefail
 
@@ -43,4 +44,11 @@ PLIST
 codesign --force --sign - --entitlements "$tauri/Entitlements.plist" "$app"
 codesign --verify --strict "$app"
 ditto -c -k --keepParent "$app" "$out/Vector-GPUI-macOS.zip"
+case "$(lipo -archs "$bin")" in
+  arm64) arch=aarch64 ;;
+  x86_64) arch=x64 ;;
+  *) echo "one architecture per bundle" >&2; exit 1 ;;
+esac
+# No AppleDouble ._ entries: the updater takes the first .app it unpacks.
+COPYFILE_DISABLE=1 tar -C "$out" -czf "$out/Vector-GPUI_$arch.app.tar.gz" "Vector GPUI.app"
 rm -rf "$app"
