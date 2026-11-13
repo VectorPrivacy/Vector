@@ -54,6 +54,8 @@ pub struct Wallpaper {
     decoded: Vec<((PathBuf, u64), Arc<image::RgbaImage>)>,
     /// The slider being dragged: blur when true.
     pub dragging: Rc<Cell<Option<bool>>>,
+    /// A picture that would not decode, not retried every frame.
+    failed: Option<Key>,
 }
 
 /// The work to start: bake `key` from its picture, decoded already or not.
@@ -79,7 +81,7 @@ impl Wallpaper {
             self.queued = None;
             return None;
         };
-        if self.shown.as_ref().is_some_and(|(k, _)| *k == want) || self.running.as_ref() == Some(&want) {
+        if self.shown.as_ref().is_some_and(|(k, _)| *k == want) || self.running.as_ref() == Some(&want) || self.failed.as_ref() == Some(&want) {
             self.queued = None;
             return None;
         }
@@ -111,8 +113,9 @@ impl Wallpaper {
                 self.decoded.remove(0);
             }
         }
-        if let Some(image) = image {
-            self.shown = Some((key, image));
+        match image {
+            Some(image) => self.shown = Some((key, image)),
+            None => self.failed = Some(key),
         }
         let next = self.queued.take()?;
         Some(self.start(next))
@@ -151,7 +154,13 @@ pub fn bake(job: Job) -> (Key, Option<Arc<image::RgbaImage>>, Option<Arc<RenderI
     let (w, h) = (key.size.0.max(1), key.size.1.max(1));
     let src = match decoded {
         Some(d) => Some(d),
-        None => image::open(&key.path).ok().map(|i| Arc::new(shrink(i.to_rgba8(), w, h))),
+        None => match image::ImageReader::open(&key.path).and_then(|r| r.with_guessed_format()).map_err(|e| e.to_string()).and_then(|r| r.decode().map_err(|e| e.to_string())) {
+            Ok(i) => Some(Arc::new(shrink(i.to_rgba8(), w, h))),
+            Err(e) => {
+                vector_core::log_warn!("[Wallpaper] {} unreadable: {e}", key.path.display());
+                None
+            }
+        },
     };
     let Some(src) = src else { return (key, None, None) };
     let (sw, sh) = (src.width() as f32, src.height() as f32);

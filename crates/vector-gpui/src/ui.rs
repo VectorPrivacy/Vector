@@ -8813,13 +8813,25 @@ fn system_row(ctx: &timeline::Ctx, index: usize, count: u32) -> AnyElement {
     };
     let name = ctx.store.chat_name(&line.npub, &ctx.chat.id);
     let suffix = format!("{}{}", data::system_suffix(line.kind), if count > 1 { format!(" {count} times") } else { String::new() });
+    let open = {
+        let (act, id, npub) = (ctx.on_act.clone(), line.id.clone(), line.npub.clone());
+        move |_: &gpui::ClickEvent, w: &mut Window, cx: &mut gpui::App| {
+            cx.stop_propagation();
+            act(&id, timeline::Act::Text(crate::inline::Target::Mention(npub.clone().into())), w, cx)
+        }
+    };
+    let group = SharedString::from(format!("sys-{}", line.id));
     let label = div()
+        .id(SharedString::from(format!("system-event-{}", line.id)))
+        .group(group.clone())
         .flex()
         .items_center()
         .text_size(px(12.))
         .text_color(c(TEXT))
+        .cursor_pointer()
+        .on_click(open)
         .child(div().mr(px(5.)).child(crate::ui::avatar(ctx.store, &line.npub, 16.)))
-        .child(div().font_weight(FontWeight::SEMIBOLD).child(name))
+        .child(div().font_weight(FontWeight::SEMIBOLD).group_hover(group, |d| d.underline()).child(name))
         .child(suffix);
     divider(label, white_a(0.1), 0.7)
 }
