@@ -481,7 +481,7 @@ fn screen(
         .rounded(px(10.))
         .overflow_hidden()
         .bg(c(0x000000))
-        .child(div().relative().w(px(w)).h(px(h)).children(image.map(|i| {
+        .child(div().relative().w(px(w)).max_w_full().h(px(h)).children(image.map(|i| {
             img(i)
                 .absolute()
                 .inset_0()
@@ -905,7 +905,16 @@ pub fn stage(
                     };
                     let record = voice.grid_w.clone();
                     let mut grid = div().mt(px(10.)).relative().flex().flex_col().items_center().gap(px(10.)).child(
-                        gpui::canvas(move |b, _, _| record.set(f32::from(b.size.width)), |_, _, _, _| {})
+                        // The grid lays out from last frame's width, so a change is redrawn at once.
+                        gpui::canvas(
+                            move |b, window, _| {
+                                let w = f32::from(b.size.width);
+                                if (record.replace(w) - w).abs() > 0.5 {
+                                    window.refresh();
+                                }
+                            },
+                            |_, _, _, _| {},
+                        )
                             .absolute()
                             .size_full(),
                     );
@@ -914,11 +923,13 @@ pub fn stage(
                         let row: Vec<_> = tiles
                             .by_ref()
                             .take(cols)
-                            .map(|t| t.w(px(col)).h(px((col * tall).round())))
+                            .map(|t| t.w(px(col)).h(px((col * tall).round())).flex_shrink(1.).min_w_0())
                             .collect();
+                        // Capped at the grid, so a stale wider width squeezes for a frame instead of spilling left.
                         grid = grid.child(
                             div()
                                 .w(px(col * cols as f32 + 10. * (cols - 1) as f32))
+                                .max_w_full()
                                 .flex()
                                 .gap(px(10.))
                                 .children(row),
