@@ -54,6 +54,8 @@ mod lyrics;
 mod media;
 mod model3d;
 mod trim;
+#[cfg(target_os = "linux")]
+mod vkselect;
 mod callvideo;
 mod callpics;
 mod downgrade;
@@ -154,6 +156,8 @@ fn args() -> Args {
 }
 
 fn main() {
+    #[cfg(target_os = "linux")]
+    vkselect::narrow();
     env_logger::init();
     let args = args();
     let fixtures = args.fixtures.as_ref().map(|f| {
