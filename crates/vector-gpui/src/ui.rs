@@ -8251,6 +8251,11 @@ impl VectorApp {
         // 3px border, 12px padding and the 56px gutter on the left; 12px and the body's 12px on the right.
         let content_w = (f32::from(self.timeline.viewport_bounds().size.width) - 95.).max(0.);
         let vw = f32::from(window.viewport_size().width);
+        // Slim's header floats 60px over a list padded 75px; a voice stage takes that place in flow.
+        let top_pad = {
+            let top = if self.is_slim && !staged_voice { 15. } else { 12. };
+            if store.chat(&id).is_some_and(|chat| store.is_request(chat)) { top + 56. } else { top }
+        };
         let messages = list(self.timeline.clone(), move |i, window, cx| {
             let rows_store = rows_store.borrow();
             let (Some(chat), Some(row)) = (rows_store.chat(&rows_id), rows.get(i)) else {
@@ -8301,6 +8306,8 @@ impl VectorApp {
             } else {
                 el
             };
+            // The list's top padding scrolls with it, so rows pass under the header's fade.
+            let el = if i == 0 { div().pt(px(top_pad)).child(el).into_any_element() } else { el };
             crate::media::pump(&media, app_media.clone(), live, cx);
             let packs = std::mem::take(&mut media.borrow_mut().packs.queue);
             if !packs.is_empty() {
@@ -8390,6 +8397,7 @@ impl VectorApp {
         })
         .size_full();
 
+        let drawer_open = self.pins.open && self.pins.button(&id).is_some();
         let drawer = (self.pins.open && self.pins.button(&id).is_some()).then(|| {
             let pane_h = self.chat_box.get().map_or(800., |b| f32::from(b.size.height));
             // `max(200px, 40vh)`, the window being the pane plus its chrome.
@@ -8440,11 +8448,7 @@ impl VectorApp {
                     .flex_1()
                     .min_h_0()
                     .when(paper.is_none(), |d| d.bg(c(MESSAGES_BG)))
-                    .pt(px({
-                        // Slim's header floats 60px over a list padded 75px; a voice stage takes that place in flow.
-                        let top = if self.is_slim && !staged_voice { 15. } else { 12. };
-                        if request.is_some() { top + 56. } else { top }
-                    }))
+                    .when(alone.is_some(), |d| d.pt(px(top_pad)))
                     .map(|d| match alone {
                         // Auto margins centre it until it no longer fits, then it scrolls from its top.
                         Some(edge) => d.child(div().id("chat-start").size_full().flex().flex_col().overflow_y_scroll().child(div().my_auto().child(edge))),
@@ -8469,7 +8473,23 @@ impl VectorApp {
                                 gpui::linear_color_stop(ca(3, 3, 3, 0.), 0.8),
                                 gpui::linear_color_stop(ca(3, 3, 3, 0.5), 1.),
                             )),
-                    ),
+                    )
+                    // `.fadeout-top-msgs`: rows dim under the header.
+                    .when(!drawer_open, |d| {
+                        d.child(
+                            div()
+                                .absolute()
+                                .top_0()
+                                .left_0()
+                                .right_0()
+                                .h(px(40.))
+                                .bg(gpui::linear_gradient(
+                                    180.,
+                                    gpui::linear_color_stop(ca(3, 3, 3, 0.5), 0.),
+                                    gpui::linear_color_stop(ca(3, 3, 3, 0.), 0.2),
+                                )),
+                        )
+                    }),
             )
             .children(preview_bar)
             .child(composer(
