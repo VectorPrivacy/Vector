@@ -43,7 +43,7 @@ fn running(miniapp_id: &str) -> Result<crate::miniapps::state::MiniAppInstance, 
 /// Permissions Policy for Mini Apps (Android document responses).
 /// Autoplay is allowed (self) for video streaming in Mini Apps.
 /// Must be on the document response to take effect (not subresource responses).
-const PERMISSIONS_POLICY_HEADER: &str = "accelerometer=(), ambient-light-sensor=(), autoplay=(self), battery=(), bluetooth=(), camera=(), clipboard-read=(), clipboard-write=(), display-capture=(), fullscreen=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), midi=(), payment=(), picture-in-picture=(), screen-wake-lock=(), speaker-selection=(), usb=(), web-share=(), xr-spatial-tracking=()";
+const PERMISSIONS_POLICY_HEADER: &str = "accelerometer=(), ambient-light-sensor=(), autoplay=(self), battery=(), bluetooth=(), camera=(), clipboard-read=(), clipboard-write=(), display-capture=(), fullscreen=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), midi=(), payment=(), picture-in-picture=(), screen-wake-lock=(), speaker-selection=(), usb=(), web-share=(), xr-spatial-tracking=(self)";
 
 // ============================================================================
 // MiniAppManager Callbacks

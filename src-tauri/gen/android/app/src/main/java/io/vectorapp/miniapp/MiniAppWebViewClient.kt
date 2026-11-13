@@ -51,7 +51,7 @@ class MiniAppWebViewClient(
          * Permissions Policy that denies all sensitive APIs by default.
          * Mini Apps must request permissions through the Vector permission system.
          */
-        private const val PERMISSIONS_POLICY = """accelerometer=(), ambient-light-sensor=(), autoplay=(self), battery=(), bluetooth=(), camera=(), clipboard-read=(), clipboard-write=(), display-capture=(), fullscreen=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), midi=(), payment=(), picture-in-picture=(), screen-wake-lock=(), speaker-selection=(), usb=(), web-share=(), xr-spatial-tracking=()"""
+        private const val PERMISSIONS_POLICY = """accelerometer=(), ambient-light-sensor=(), autoplay=(self), battery=(), bluetooth=(), camera=(), clipboard-read=(), clipboard-write=(), display-capture=(), fullscreen=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), midi=(), payment=(), picture-in-picture=(), screen-wake-lock=(), speaker-selection=(), usb=(), web-share=(), xr-spatial-tracking=(self)"""
 
         init {
             System.loadLibrary("vector_lib")

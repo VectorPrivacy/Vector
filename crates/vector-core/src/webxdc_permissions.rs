@@ -367,8 +367,9 @@ const POLICY_FEATURES: &[&str] = &[
     "xr-spatial-tracking",
 ];
 
-/// Open to the app's own origin whatever it was granted.
-const ALWAYS_SELF: &[&str] = &["autoplay", "gamepad"];
+/// Open to the app's own origin whatever it was granted. WebXR's immersive sessions already
+/// take a user gesture and the browser's own consent prompt.
+const ALWAYS_SELF: &[&str] = &["autoplay", "gamepad", "xr-spatial-tracking"];
 
 /// The features a user's grant opens to the app's own origin; a grant's name is its feature's.
 const GRANTABLE: &[&str] = &["microphone", "camera", "geolocation", "clipboard-read", "clipboard-write", "fullscreen", "autoplay", "display-capture", "midi", "picture-in-picture", "screen-wake-lock", "speaker-selection", "accelerometer", "gyroscope", "magnetometer", "ambient-light-sensor", "bluetooth"];
@@ -424,7 +425,7 @@ mod tests {
         let entries: Vec<&str> = policy.split(", ").collect();
         assert_eq!(entries.len(), POLICY_FEATURES.len());
         for feature in POLICY_FEATURES {
-            let open = ["camera", "geolocation", "autoplay", "gamepad"].contains(feature);
+            let open = ["camera", "geolocation", "autoplay", "gamepad", "xr-spatial-tracking"].contains(feature);
             let expected = format!("{feature}={}", if open { "(self)" } else { "()" });
             assert!(entries.contains(&expected.as_str()), "{expected}");
         }
