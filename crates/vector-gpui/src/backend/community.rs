@@ -79,13 +79,15 @@ pub fn list() -> Vec<Value> {
 
 /// The roster as npubs, and which of them hold the admin role.
 pub async fn members(community_id: String) -> (Vec<String>, Vec<String>) {
-    let (members, admins, _) = roster(community_id).await;
+    let (members, admins, _, _) = roster(community_id).await;
     (members, admins)
 }
 
 /// The roster panel's read: counted members, admins, and who posts outside the Guestbook
 /// (npub → `no_join` | `departed`), shown but never counted.
-pub async fn roster(community_id: String) -> (Vec<String>, Vec<String>, std::collections::HashMap<String, String>) {
+pub async fn roster(
+    community_id: String,
+) -> (Vec<String>, Vec<String>, std::collections::HashMap<String, String>, Option<Value>) {
     let mut members = Vec::new();
     let mut unlisted = std::collections::HashMap::new();
     for m in VectorCore.get_community_members(&community_id).await {
@@ -107,7 +109,8 @@ pub async fn roster(community_id: String) -> (Vec<String>, Vec<String>, std::col
     } else {
         Vec::new()
     };
-    (members, admins, unlisted)
+    let graph = is_held(&community_id).then(|| VectorCore.community_role_graph(&community_id).ok()).flatten();
+    (members, admins, unlisted, graph)
 }
 
 /// A channel's newest page, or the page before `before_ms`; whether its start is reached.

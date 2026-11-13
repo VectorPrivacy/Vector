@@ -176,6 +176,10 @@ pub struct VectorApp {
     mention_pool: Option<Rc<Vec<crate::mentions::Item>>>,
     /// The draft's picked mentions: the name shown, and what it sends as.
     tracked: Vec<(String, String)>,
+    /// What the composer held when an edit began: it comes back when the edit ends.
+    edit_held: Option<(String, Mode)>,
+    /// Each chat's composer as it was left, until it is opened again. Runtime only.
+    drafts: HashMap<String, Draft>,
     /// Each Community's taggable Roles and @everyone rule.
     mention_rules: HashMap<String, crate::mentions::Rules>,
     /// The draft has text: Send stands where the mic does.
@@ -304,6 +308,13 @@ pub struct VectorApp {
     anchors: kit::Anchors,
     /// The role a member's change is under way for.
     role_busy: Option<String>,
+}
+
+struct Draft {
+    text: String,
+    mode: Mode,
+    held: Option<(String, Mode)>,
+    tracked: Vec<(String, String)>,
 }
 
 #[derive(Clone, PartialEq)]
@@ -902,6 +913,8 @@ impl VectorApp {
             rec: Default::default(),
             mention_pool: None,
             tracked: Vec::new(),
+            edit_held: None,
+            drafts: HashMap::new(),
             mention_rules: HashMap::new(),
             send_shown: false,
             send_flips: 0,
@@ -3091,7 +3104,11 @@ impl VectorApp {
                 }
                 if matches!(&self.mode, Mode::Reply { id: r, .. } | Mode::Edit { id: r } if *r == id)
                 {
+                    let editing = matches!(self.mode, Mode::Edit { .. });
                     self.mode = Mode::Normal;
+                    if editing {
+                        self.unhold_edit(cx);
+                    }
                 }
                 self.store.borrow_mut().resort();
                 if self.open.as_deref() == Some(chat_id.as_str()) {
@@ -3486,8 +3503,10 @@ impl VectorApp {
         self.read_anchor = self.store.borrow().chat(&id).map(|c| {
             if c.unread_from.is_empty() { data::Unread::After(c.last_read.clone()) } else { data::Unread::At(c.unread_from.clone()) }
         });
-        if self.open.as_ref() != Some(&id) {
+        let switching = self.open.as_ref() != Some(&id);
+        if switching {
             self.leave_media(id.as_ref(), window);
+            self.stash_draft(cx);
         }
         self.open = Some(id.clone());
         self.commands.close();
@@ -3501,6 +3520,9 @@ impl VectorApp {
         self.jumped = None;
         self.opening = self.live.then_some(None);
         self.tracked.clear();
+        if switching {
+            self.restore_draft(&id, cx);
+        }
         self.sync_mentions(cx);
         let community = self.store.borrow().community_of(&id).map(|c| c.community_id.clone());
         if let Some(cid) = community.filter(|c| self.live && !self.mention_rules.contains_key(c)) {
@@ -4113,6 +4135,13 @@ impl VectorApp {
             }
             Act::Edit => {
                 let Some(m) = self.message(&id) else { return };
+                // A half-typed message, or a reply being drafted, waits out the edit.
+                if !matches!(self.mode, Mode::Edit { .. }) {
+                    let text = self.input.read(cx).text().to_string();
+                    let reply = matches!(self.mode, Mode::Reply { .. });
+                    self.edit_held = (!text.trim().is_empty() || reply)
+                        .then(|| (text, if reply { self.mode.clone() } else { Mode::Normal }));
+                }
                 self.mode = Mode::Edit { id };
                 self.input
                     .update(cx, |input, cx| input.set_text(&m.content, cx));
@@ -4268,7 +4297,15 @@ impl VectorApp {
         };
         if self.live {
             let rx = backend::run(backend::actions::react(chat.to_string(), id, emoji, url));
-            self.report(rx, "Reaction Failed", cx);
+            cx.spawn(async move |this, cx| {
+                if let Ok(Err(e)) = rx.await {
+                    this.update(cx, |this, cx| {
+                        this.show_toast(&format!("Reaction not sent: {e}"), cx);
+                    })
+                    .ok();
+                }
+            })
+            .detach();
         } else {
             let me = self.store.borrow().my_npub.clone();
             if let Some(m) = self
@@ -5196,11 +5233,56 @@ impl VectorApp {
 
     fn cancel_mode(&mut self, cx: &mut Context<Self>) {
         if matches!(self.mode, Mode::Edit { .. }) {
-            self.input.update(cx, |input, cx| input.set_text("", cx));
+            self.mode = Mode::Normal;
+            self.unhold_edit(cx);
+        } else {
+            self.mode = Mode::Normal;
         }
-        self.mode = Mode::Normal;
         self.picker = None;
         cx.notify();
+    }
+
+    /// The composer goes back to what it held before the edit, a reply while its target exists.
+    fn unhold_edit(&mut self, cx: &mut Context<Self>) {
+        let (text, mode) = self.edit_held.take().unwrap_or((String::new(), Mode::Normal));
+        self.input.update(cx, |input, cx| input.set_text(&text, cx));
+        if let Mode::Reply { id, .. } = &mode
+            && self.message(id).is_some()
+        {
+            self.mode = mode;
+        }
+    }
+
+    /// The open chat's composer kept as its draft, and cleared for the next.
+    fn stash_draft(&mut self, cx: &mut Context<Self>) {
+        let Some(open) = self.open.clone() else { return };
+        let text = self.input.read(cx).text().to_string();
+        let mode = std::mem::replace(&mut self.mode, Mode::Normal);
+        let held = self.edit_held.take();
+        if text.is_empty() && mode == Mode::Normal {
+            self.drafts.remove(open.as_ref());
+        } else {
+            self.drafts.insert(open.to_string(), Draft { text, mode, held, tracked: std::mem::take(&mut self.tracked) });
+        }
+        self.input.update(cx, |input, cx| input.set_text("", cx));
+    }
+
+    /// `id`'s draft back in the composer; a drafted reply only while its target exists.
+    fn restore_draft(&mut self, id: &str, cx: &mut Context<Self>) {
+        if !self.input.read(cx).text().is_empty() {
+            return;
+        }
+        let Some(d) = self.drafts.remove(id) else { return };
+        self.input.update(cx, |input, cx| input.set_text(&d.text, cx));
+        self.tracked = d.tracked;
+        self.edit_held = d.held;
+        let target = match &d.mode {
+            Mode::Reply { id, .. } | Mode::Edit { id } => Some(id.clone()),
+            Mode::Normal => None,
+        };
+        if target.is_some_and(|t| self.message(&t).is_some()) {
+            self.mode = d.mode;
+        }
     }
 
     fn send(&mut self, text: String, cx: &mut Context<Self>) {
@@ -5232,6 +5314,7 @@ impl VectorApp {
                 m.content = text;
                 m.edited = true;
             }
+            self.unhold_edit(cx);
             self.refresh_rows(false);
             cx.notify();
             return;
@@ -5248,11 +5331,29 @@ impl VectorApp {
                 let _ =
                     backend::run(async move { backend::actions::bump_emoji_batch(used, custom) });
             }
-            let rx = backend::run(messaging::send(receiver, text, reply, bot));
+            let unsent = |store: &Store, chat: &str| -> HashSet<String> {
+                store
+                    .chat(chat)
+                    .map(|c| c.messages.iter().filter(|m| m.mine && (m.pending || m.failed)).map(|m| m.id.clone()).collect())
+                    .unwrap_or_default()
+            };
+            let before = unsent(&self.store.borrow(), &receiver);
+            let words = text.clone();
+            let rx = backend::run(messaging::send(receiver.clone(), text, reply, bot));
             cx.spawn(async move |this, cx| {
                 if let Ok(Err(e)) = rx.await {
                     log::warn!("send failed: {e}");
-                    this.update(cx, |_, cx| cx.notify()).ok();
+                    this.update(cx, |this, cx| {
+                        // A failed bubble offers its own retry; refused before one painted, the words go back.
+                        if unsent(&this.store.borrow(), &receiver).is_subset(&before) {
+                            this.show_toast(&format!("Not sent: {e}"), cx);
+                            if this.open.as_deref() == Some(receiver.as_str()) && this.input.read(cx).text().is_empty() {
+                                this.input.update(cx, |i, cx| i.set_text(&words, cx));
+                            }
+                        }
+                        cx.notify()
+                    })
+                    .ok();
                 }
             })
             .detach();
@@ -9121,6 +9222,7 @@ impl VectorApp {
                 panel: true,
                 search,
                 folded: HashSet::new(),
+                graph: self.store.borrow().fixture_graphs.get(&id).map(crate::community::Graph::parse),
             });
             self.check_raid(id.clone(), cx);
             if self.live {
@@ -9149,10 +9251,11 @@ impl VectorApp {
             let read = rx.await;
             this.update(cx, |this, cx| {
                 if let Some(v) = this.community.as_mut().filter(|v| v.id == id) {
-                    if let Ok((members, admins, unlisted)) = read {
+                    if let Ok((members, admins, unlisted, graph)) = read {
                         v.members = members;
                         v.admins = admins;
                         v.unlisted = unlisted;
+                        v.graph = graph.as_ref().map(crate::community::Graph::parse);
                     }
                     v.loading = false;
                 }
@@ -13253,8 +13356,14 @@ impl VectorApp {
                             .filter_map(|v| serde_json::from_value(v).ok())
                             .collect();
                         this.update_in(cx, |this, window, cx| {
+                            // Kicked or banned before the join landed: the community is gone again.
+                            let landed = list.iter().any(|c| c.community_id == community);
                             this.store.borrow_mut().communities = list;
-                            this.open_community(community, window, cx);
+                            if landed {
+                                this.open_community(community, window, cx);
+                            } else {
+                                this.show_toast("You were removed from this community by an admin", cx);
+                            }
                             cx.notify();
                         })
                         .ok();
@@ -16019,11 +16128,15 @@ impl VectorApp {
         m.link_error = None;
         m.progress = Some(("Making your link".into(), 0.5));
         let side = (114. * window.scale_factor()).round() as u32;
-        let rx = backend::run(backend::community::create_public_invite(id, None));
+        let rx = backend::run(backend::community::create_public_invite(id.clone(), None));
         cx.spawn(async move |this, cx| {
             let Ok(res) = rx.await else { return };
             this.update(cx, |this, cx| {
-                let Some(m) = this.create_community.as_mut() else {
+                let still_here = this.create_community.as_ref().and_then(|m| m.created.as_ref()).is_some_and(|c| c.0 == id);
+                let Some(m) = this.create_community.as_mut().filter(|_| still_here) else {
+                    if res.is_ok() {
+                        this.show_toast("Invite link ready in Invite People", cx);
+                    }
                     return;
                 };
                 m.progress = None;
@@ -17578,7 +17691,7 @@ impl VectorApp {
                         app.rec.idle();
                         if matches!(app.mode, Mode::Edit { .. }) {
                             app.mode = Mode::Normal;
-                            app.input.update(cx, |i, cx| i.set_text("", cx));
+                            app.unhold_edit(cx);
                         }
                         app.input.update(cx, |i, cx| {
                             let now = i.text().trim().to_string();

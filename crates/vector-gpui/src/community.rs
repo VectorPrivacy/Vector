@@ -69,6 +69,93 @@ pub struct View {
     pub panel: bool,
     pub search: Entity<TextInput>,
     pub folded: HashSet<String>,
+    /// Who holds which role, once read: the roster's sections and name colours.
+    pub graph: Option<Graph>,
+}
+
+struct GraphRole {
+    id: String,
+    name: String,
+    position: i64,
+    color: u32,
+    channel: Option<String>,
+    display: bool,
+}
+
+/// `get_community_role_graph`: every role with its rank, who holds which, and on the new roles
+/// each Private Channel's readers.
+#[derive(Default)]
+pub struct Graph {
+    activated: bool,
+    roles: Vec<GraphRole>,
+    grants: std::collections::HashMap<String, Vec<String>>,
+    readers: std::collections::HashMap<String, HashSet<String>>,
+}
+
+impl Graph {
+    pub fn parse(v: &serde_json::Value) -> Self {
+        let text = |v: &serde_json::Value| v.as_str().map(str::to_string);
+        let list = |v: &serde_json::Value| v.as_array().into_iter().flatten().filter_map(text).collect::<Vec<_>>();
+        Graph {
+            activated: v["activated"].as_bool().unwrap_or(false),
+            roles: v["roles"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|r| {
+                    Some(GraphRole {
+                        id: text(&r["role_id"])?,
+                        name: text(&r["name"]).unwrap_or_default(),
+                        position: r["position"].as_i64().unwrap_or(i64::MAX),
+                        color: r["color"].as_u64().unwrap_or(0) as u32,
+                        channel: text(&r["channel_id"]).map(|c| c.to_ascii_lowercase()),
+                        display: r["display"].as_bool().unwrap_or(false),
+                    })
+                })
+                .collect(),
+            grants: v["grants"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|g| Some((text(&g["npub"])?, list(&g["role_ids"]))))
+                .collect(),
+            readers: v["readers"]
+                .as_object()
+                .into_iter()
+                .flatten()
+                .map(|(k, v)| (k.to_ascii_lowercase(), list(v).into_iter().collect()))
+                .collect(),
+        }
+    }
+
+    /// Heads a section: on the new roles only a role shown separately; rank still counts them all.
+    fn heads(&self, r: &GraphRole) -> bool {
+        !self.activated || r.display
+    }
+
+    /// Their highest role (lowest position) among those `pick` admits.
+    fn highest(&self, npub: &str, pick: impl Fn(&GraphRole) -> bool) -> Option<&GraphRole> {
+        self.grants
+            .get(npub)?
+            .iter()
+            .filter_map(|id| self.roles.iter().find(|r| &r.id == id))
+            .filter(|r| pick(r))
+            .min_by_key(|r| r.position)
+    }
+
+    /// Who may read Private Channel `channel`: the owner, and on the old roles the holders of a
+    /// role scoped to it.
+    fn readers(&self, channel: &str, owner: Option<&str>) -> HashSet<String> {
+        let mut out: HashSet<String> = owner.map(str::to_string).into_iter().collect();
+        if self.activated {
+            out.extend(self.readers.get(channel).into_iter().flatten().cloned());
+        } else {
+            let access: HashSet<&str> =
+                self.roles.iter().filter(|r| r.channel.as_deref() == Some(channel)).map(|r| r.id.as_str()).collect();
+            out.extend(self.grants.iter().filter(|(_, ids)| ids.iter().any(|i| access.contains(i.as_str()))).map(|(n, _)| n.clone()));
+        }
+        out
+    }
 }
 
 const OWNER: u32 = 0xfce459;
@@ -671,7 +758,7 @@ fn status_line(text: &str) -> AnyElement {
         .into_any_element()
 }
 
-fn member_row(store: &Store, cid: &str, npub: &str, owner: bool, unlisted: Option<&str>, on: &OnAct, anchors: &crate::kit::Anchors) -> impl IntoElement {
+fn member_row(store: &Store, cid: &str, npub: &str, owner: bool, colour: Option<u32>, unlisted: Option<&str>, on: &OnAct, anchors: &crate::kit::Anchors) -> impl IntoElement {
     let status = store
         .profiles
         .get(npub)
@@ -720,7 +807,7 @@ fn member_row(store: &Store, cid: &str, npub: &str, owner: bool, unlisted: Optio
                                 .font_weight(if slim { FontWeight::NORMAL } else { FontWeight::SEMIBOLD })
                                 .text_size(px(14.))
                                 .line_height(px(if slim { 24. } else { 18. }))
-                                .text_color(c(0xf7f4f4))
+                                .text_color(c(colour.unwrap_or(0xf7f4f4)))
                                 .child(store.name_in(npub, Some(cid))),
                         )
                         .when(owner, |d| {
@@ -731,6 +818,15 @@ fn member_row(store: &Store, cid: &str, npub: &str, owner: bool, unlisted: Optio
                                     .flex()
                                     .tooltip(crate::kit::tooltip("Owner"))
                                     .child(icon("icons/crown.svg", 15., c(OWNER))),
+                            )
+                        })
+                        .when(store.profiles.get(npub).is_some_and(|p| p.bot) && !store.stream_hidden(npub), |d| {
+                            d.child(
+                                div()
+                                    .id("bot")
+                                    .flex()
+                                    .tooltip(crate::kit::tooltip("Bot"))
+                                    .child(svg().path("icons/bot.svg").size(px(14.)).flex_shrink_0().text_color(c(ACCENT))),
                             )
                         })
                         .children(crate::timeline::timeout_mark(store, Some(cid), npub))
@@ -784,29 +880,58 @@ pub fn roster<E: ParentElement>(
             || n.contains(&query)
     };
     let is_admin = |n: &str| owner == Some(n) || view.admins.iter().any(|a| a == n);
-    let everyone = || view.members.iter().chain(view.unlisted.keys().filter(|n| !view.members.contains(n)));
-    // Owner, then admins, A to Z; Members lead with who posted in the open channel, then the named.
-    let posters: HashSet<&str> = store.chat(open).map(|c| c.messages.iter().filter_map(|m| m.npub.as_deref()).collect()).unwrap_or_default();
+    let graph = view.graph.as_ref();
+    // A Private Channel lists only who may read it; unscoped until the graph lands.
+    let scope = graph
+        .zip(com.channel(open).filter(|ch| ch.private))
+        .map(|(g, ch)| g.readers(&ch.channel_id.to_ascii_lowercase(), owner));
+    let everyone = || {
+        view.members
+            .iter()
+            .chain(view.unlisted.keys().filter(|n| !view.members.contains(n)))
+            .filter(|n| scope.as_ref().is_none_or(|s| s.contains(n.as_str())))
+    };
     let named = |n: &str| {
         store.profiles.get(n).is_some_and(|p| !p.name.is_empty() || !p.display_name.is_empty())
             || store.nicknames.get(&com.community_id).is_some_and(|k| k.contains_key(n))
     };
+    // Owner, then admins, then members; names A to Z and bare keys last, the same in every channel.
     let key = |n: &&String| {
         let tier = if owner == Some(n.as_str()) { 0 } else if is_admin(n) { 1 } else { 2 };
-        let relevance = if tier < 2 { 0 } else if posters.contains(n.as_str()) { 0 } else if named(n) { 1 } else { 2 };
-        (tier, relevance, store.name_in(n, Some(&com.community_id)).to_lowercase())
+        let unnamed = !store.stream_hidden(n) && !named(n);
+        (tier, unnamed, store.name_in(n, Some(&com.community_id)).to_lowercase())
     };
-    let mut admins: Vec<&String> = everyone().filter(|n| is_admin(n)).filter(matches).collect();
-    let mut rest: Vec<&String> = everyone().filter(|n| !is_admin(n)).filter(matches).collect();
-    admins.sort_by_cached_key(key);
-    rest.sort_by_cached_key(key);
-    let section = |key: &'static str, label: &'static str, list: Vec<&String>| {
-        let closed = view.folded.contains(key);
+    let mut everyone: Vec<&String> = everyone().filter(matches).collect();
+    everyone.sort_by_cached_key(key);
+    let mut order: Vec<(String, String)> = Vec::new();
+    if let Some(g) = graph {
+        let mut heads: Vec<&GraphRole> = g.roles.iter().filter(|r| g.heads(r)).collect();
+        heads.sort_by_key(|r| r.position);
+        order.extend(heads.into_iter().map(|r| (format!("sec-role:{}", r.id), r.name.clone())));
+    }
+    if order.is_empty() && !graph.is_some_and(|g| g.activated) {
+        order.push(("sec-admin".into(), "Admin".into()));
+    }
+    order.push(("sec-members".into(), "Members".into()));
+    let mut buckets: Vec<Vec<&String>> = vec![Vec::new(); order.len()];
+    for n in everyone {
+        // A role the graph no longer defines must not drop its holder off the roster.
+        let want = match graph.and_then(|g| g.highest(n, |r| g.heads(r))) {
+            Some(r) => format!("sec-role:{}", r.id),
+            None if is_admin(n) => "sec-admin".into(),
+            None => "sec-members".into(),
+        };
+        let ix = order.iter().position(|(k, _)| *k == want).unwrap_or(order.len() - 1);
+        buckets[ix].push(n);
+    }
+    let colour = |n: &str| graph.filter(|g| g.activated).and_then(|g| g.highest(n, |r| r.color != 0)).map(|r| r.color);
+    let section = |key: String, label: String, list: Vec<&String>| {
+        let closed = view.folded.contains(&key);
         (!list.is_empty()).then(|| {
             div()
                 .child(
                     div()
-                        .id(key)
+                        .id(SharedString::from(key.clone()))
                         .h(px(36.))
                         .rounded(px(6.))
                         .flex()
@@ -815,9 +940,9 @@ pub fn roster<E: ParentElement>(
                         .px(px(if crate::theme::is_slim() { 6. } else { 8. }))
                         .gap(px(6.))
                         .cursor_pointer()
-                        .on_click(click(on, move || Act::Fold(key.to_string())))
+                        .on_click(click(on, move || Act::Fold(key.clone())))
                         .child(
-                            crate::kit::spaced(label, 0.99)
+                            crate::kit::spaced(label.to_uppercase(), 0.99)
                                 .font_weight(FontWeight::BOLD)
                                 .text_size(px(11.))
                                 .line_height(px(24.))
@@ -851,16 +976,20 @@ pub fn roster<E: ParentElement>(
                 )
                 .when(!closed, |d| {
                     d.children(list.into_iter().map(|n| {
-                        member_row(store, &com.community_id, n, owner == Some(n.as_str()), view.unlisted.get(n.as_str()).map(String::as_str), on, anchors)
+                        member_row(store, &com.community_id, n, owner == Some(n.as_str()), colour(n), view.unlisted.get(n.as_str()).map(String::as_str), on, anchors)
                     }))
                 })
         })
     };
-    let admin_section = section("sec-admin", "ADMIN", admins);
-    let gap = admin_section.is_some();
-    let members = section("sec-members", "MEMBERS", rest).map(|s| s.when(gap, |d| d.mt(px(12.))));
-    if admin_section.is_some() || members.is_some() {
-        return d.children(admin_section).children(members);
+    let sections: Vec<_> = order
+        .into_iter()
+        .zip(buckets)
+        .filter_map(|((key, label), list)| section(key, label, list))
+        .enumerate()
+        .map(|(i, s)| s.when(i > 0, |d| d.mt(px(12.))))
+        .collect();
+    if !sections.is_empty() {
+        return d.children(sections);
     }
     let (text, italic) = match (view.loading, query.is_empty()) {
         (true, true) => ("Loading members…", false),

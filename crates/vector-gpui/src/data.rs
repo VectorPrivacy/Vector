@@ -45,6 +45,8 @@ struct Fixtures {
     #[serde(default)]
     unlisted: HashMap<String, HashMap<String, String>>,
     #[serde(default)]
+    role_graphs: HashMap<String, serde_json::Value>,
+    #[serde(default)]
     moderation: Option<serde_json::Value>,
     #[serde(default)]
     policy_presets: Option<serde_json::Value>,
@@ -305,6 +307,8 @@ pub struct Store {
     pub send_denied: HashMap<String, HashSet<String>>,
     /// Fixtures' members seen posting outside the Guestbook, by community.
     pub fixture_unlisted: HashMap<String, HashMap<String, String>>,
+    /// Fixtures' role graphs, by community.
+    pub fixture_graphs: HashMap<String, serde_json::Value>,
     /// Collapsed posts tapped open in the open chat.
     pub unveiled: HashSet<String>,
     /// Each community's logo and banner as local files, once resolved.
@@ -482,6 +486,7 @@ impl Store {
             send_denied: f.send_denied,
             unveiled: HashSet::new(),
             fixture_unlisted: f.unlisted,
+            fixture_graphs: f.role_graphs,
             art: HashMap::new(),
             hidden_banners: Vec::new(),
             pinned: demo.pinned,
@@ -542,6 +547,7 @@ impl Store {
             send_denied: HashMap::new(),
             unveiled: HashSet::new(),
             fixture_unlisted: HashMap::new(),
+            fixture_graphs: HashMap::new(),
             art: HashMap::new(),
             hidden_banners: Vec::new(),
             streamer: Default::default(),
