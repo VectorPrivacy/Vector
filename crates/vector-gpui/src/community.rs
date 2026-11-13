@@ -53,6 +53,8 @@ pub enum Act {
     Member(String, SharedString),
     /// A member right-clicked: their menu.
     MemberMenu(String, gpui::Point<gpui::Pixels>),
+    /// A roster section head's menu: a role's carries its id.
+    SectionMenu(String, gpui::Point<gpui::Pixels>),
 }
 
 pub type OnAct = Rc<dyn Fn(Act, &mut Window, &mut App)>;
@@ -938,7 +940,14 @@ pub fn roster<E: ParentElement>(
                         .px(px(if crate::theme::is_slim() { 6. } else { 8. }))
                         .gap(px(6.))
                         .cursor_pointer()
-                        .on_click(click(on, move || Act::Fold(key.clone())))
+                        .on_click(click(on, { let key = key.clone(); move || Act::Fold(key.clone()) }))
+                        .on_mouse_down(gpui::MouseButton::Right, {
+                            let (on, key) = (on.clone(), key.clone());
+                            move |e, w, cx| {
+                                cx.stop_propagation();
+                                on(Act::SectionMenu(key.clone(), e.position), w, cx)
+                            }
+                        })
                         .child(
                             crate::kit::spaced(label.to_uppercase(), 0.99)
                                 .font_weight(FontWeight::BOLD)

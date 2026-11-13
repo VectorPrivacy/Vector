@@ -9288,7 +9288,7 @@ impl VectorApp {
                 admins: Vec::new(),
                 panel: true,
                 search,
-                folded: HashSet::new(),
+                folded: folded_sections(&id),
             });
             self.check_raid(id.clone(), cx);
             if self.live {
@@ -9432,10 +9432,14 @@ impl VectorApp {
             }
             Act::ChannelChat(id) => self.open_channel(id, window, cx),
             Act::Fold(key) => {
-                if let Some(v) = self.community.as_mut()
-                    && !v.folded.remove(&key)
-                {
-                    v.folded.insert(key);
+                if let Some(v) = self.community.as_mut() {
+                    let closing = !v.folded.remove(&key);
+                    if closing {
+                        v.folded.insert(key.clone());
+                    }
+                    if self.live {
+                        remember_fold(&v.id, &key, closing);
+                    }
                 }
             }
             Act::MessagesMenu(at) => self.messages_menu(at, cx),
@@ -9528,6 +9532,13 @@ impl VectorApp {
             Act::MemberMenu(npub, at) => {
                 if let Some(community) = self.community.as_ref().map(|v| v.id.clone()) {
                     self.member_menu(community, npub, at, cx);
+                }
+            }
+            // The Admin / Members fallbacks are not roles: nothing to copy.
+            Act::SectionMenu(key, at) => {
+                if let Some(role) = key.strip_prefix("sec-role:").filter(|_| self.advanced()) {
+                    let rows = vec![(kit::MenuItem::new("Copy Role ID", "channel-hash"), MenuAct::CopyId(role.to_string(), "Role"))];
+                    self.show_menu(at, rows, cx);
                 }
             }
         }
@@ -17941,4 +17952,48 @@ fn settings_search_look(slim: bool) -> crate::composer::Look {
         placeholder: c(if slim { 0x6f6f6f } else { 0xb2b2b2 }),
         ..kit::field_look()
     }
+}
+
+/// Device keys holding folded channel categories and roster sections, as `<community>:<id>`.
+const CHANNEL_FOLDS: &str = "ws_channel_sections_closed";
+const MEMBER_FOLDS: &str = "ws_member_sections_closed";
+
+/// A roster section's key here (`sec-…`) and the id the desktop stores it under.
+fn member_fold_id(key: &str) -> Option<&str> {
+    key.strip_prefix("sec-role:").or_else(|| key.strip_prefix("sec-"))
+}
+
+fn folds(store: &str) -> HashSet<String> {
+    backend::device::get(store).and_then(|v| serde_json::from_str(&v).ok()).unwrap_or_default()
+}
+
+/// The sections folded in `community` last time, kept across restarts.
+fn folded_sections(community: &str) -> HashSet<String> {
+    let prefix = format!("{community}:");
+    let mut out: HashSet<String> =
+        folds(CHANNEL_FOLDS).into_iter().filter_map(|k| k.strip_prefix(&prefix).map(str::to_string)).collect();
+    for id in folds(MEMBER_FOLDS).into_iter().filter_map(|k| k.strip_prefix(&prefix).map(str::to_string)) {
+        out.insert(match id.as_str() {
+            "admin" | "members" => format!("sec-{id}"),
+            _ => format!("sec-role:{id}"),
+        });
+    }
+    out
+}
+
+fn remember_fold(community: &str, key: &str, closing: bool) {
+    let (store, id) = match member_fold_id(key) {
+        Some(id) => (MEMBER_FOLDS, id),
+        None => (CHANNEL_FOLDS, key),
+    };
+    let mut set = folds(store);
+    let entry = format!("{community}:{id}");
+    if closing {
+        set.insert(entry);
+    } else {
+        set.remove(&entry);
+    }
+    let mut list: Vec<_> = set.into_iter().collect();
+    list.sort();
+    backend::device::set(store, &serde_json::to_string(&list).unwrap_or_default());
 }
