@@ -109,3 +109,118 @@ jobs:
       - name: Tests
         shell: bash
         run: cargo test --locked ${{ matrix.features }} --bin vector-gpui
+
+  # Release builds to try the port on a Mac or a PC: a push whose message carries [package].
+  # Thin LTO keeps a cold build near an hour; unsigned, so first launch needs the OS's override.
+  package:
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && contains(github.event.head_commit.message, '[package]'))
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-26-intel
+            target: aarch64-apple-darwin
+            features: '--no-default-features --features video-static,tor,i2p'
+          - platform: windows-2022
+            target: x86_64-pc-windows-msvc
+            features: '--no-default-features --features tor,i2p'
+    runs-on: ${{ matrix.platform }}
+    env:
+      CARGO_PROFILE_RELEASE_LTO: thin
+      CARGO_PROFILE_RELEASE_CODEGEN_UNITS: '16'
+    defaults:
+      run:
+        working-directory: crates/vector-gpui
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          targets: ${{ matrix.target }}
+
+      - name: Prepare the runner (Windows)
+        if: startsWith(matrix.platform, 'windows')
+        shell: pwsh
+        run: |
+          Set-MpPreference -DisableRealtimeMonitoring $true
+          $drive = Split-Path -Qualifier $env:GITHUB_WORKSPACE
+          echo "CARGO_TARGET_DIR=$drive\t" >> $env:GITHUB_ENV
+
+      - name: Cache FFmpeg (macOS)
+        if: startsWith(matrix.platform, 'macos')
+        id: ffmpeg-cache
+        uses: actions/cache@v5
+        with:
+          path: src-tauri/native-deps/ffmpeg/${{ matrix.target }}
+          key: ffmpeg-${{ matrix.target }}-${{ hashFiles('scripts/build-ffmpeg.sh') }}
+
+      - name: Build FFmpeg (macOS)
+        if: startsWith(matrix.platform, 'macos') && steps.ffmpeg-cache.outputs.cache-hit != 'true'
+        working-directory: .
+        run: |
+          brew install nasm
+          scripts/build-ffmpeg.sh ${{ matrix.target }}
+
+      # An Intel host building for arm64: ggml's native CPU probe would read the host.
+      - name: macOS environment
+        if: startsWith(matrix.platform, 'macos')
+        run: |
+          echo "FFMPEG_DIR=$GITHUB_WORKSPACE/src-tauri/native-deps/ffmpeg/${{ matrix.target }}" >> "$GITHUB_ENV"
+          echo "SDKROOT=$(xcrun --sdk macosx --show-sdk-path)" >> "$GITHUB_ENV"
+          echo "GGML_NATIVE=OFF" >> "$GITHUB_ENV"
+          echo "MACOSX_DEPLOYMENT_TARGET=11.0" >> "$GITHUB_ENV"
+
+      - name: Cache Vulkan (Windows)
+        if: startsWith(matrix.platform, 'windows')
+        id: vulkan-cache
+        uses: actions/cache@v5
+        with:
+          path: C:\vcpkg\installed
+          key: vulkan-x64-windows-headers-loader-spirv-tools-glslc
+
+      - name: Install Vulkan SDK (Windows)
+        if: startsWith(matrix.platform, 'windows') && steps.vulkan-cache.outputs.cache-hit != 'true'
+        shell: pwsh
+        working-directory: .
+        run: |
+          vcpkg install vulkan:x64-windows vulkan-headers:x64-windows vulkan-loader:x64-windows spirv-tools:x64-windows
+          Invoke-WebRequest -Uri "https://jskitty.com/glslc.exe" -OutFile "glslc.exe"
+          $vcpkgBin = "C:\vcpkg\installed\x64-windows\bin"
+          New-Item -ItemType Directory -Force -Path $vcpkgBin
+          Move-Item "glslc.exe" "$vcpkgBin\glslc.exe" -Force
+
+      - name: Vulkan environment (Windows)
+        if: startsWith(matrix.platform, 'windows')
+        shell: pwsh
+        run: |
+          $vcpkgBin = "C:\vcpkg\installed\x64-windows\bin"
+          echo "VULKAN_SDK=C:\vcpkg\installed\x64-windows" >> $env:GITHUB_ENV
+          echo "CMAKE_PREFIX_PATH=C:\vcpkg\installed\x64-windows" >> $env:GITHUB_ENV
+          echo "$vcpkgBin" >> $env:GITHUB_PATH
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: crates/vector-gpui -> ${{ startsWith(matrix.platform, 'windows') && '../../../../t' || 'target' }}
+          key: package-${{ matrix.target }}
+
+      - name: Build
+        shell: bash
+        run: cargo build --release --locked --target ${{ matrix.target }} ${{ matrix.features }}
+
+      - name: Bundle (macOS)
+        if: startsWith(matrix.platform, 'macos')
+        run: scripts/bundle-macos.sh target/${{ matrix.target }}/release/vector-gpui "$RUNNER_TEMP/pkg"
+
+      - name: Bundle (Windows)
+        if: startsWith(matrix.platform, 'windows')
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path "$env:RUNNER_TEMP\pkg" | Out-Null
+          Copy-Item "$env:CARGO_TARGET_DIR\${{ matrix.target }}\release\vector-gpui.exe" "$env:RUNNER_TEMP\pkg\Vector GPUI.exe"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vector-gpui-${{ matrix.target }}
+          path: ${{ runner.temp }}/pkg
+          retention-days: 14
