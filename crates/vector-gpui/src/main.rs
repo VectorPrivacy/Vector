@@ -22,6 +22,7 @@ mod voice;
 mod miniprofile;
 mod pins;
 mod edithistory;
+mod textdiff;
 mod payaddr;
 mod reactpop;
 mod rekey;

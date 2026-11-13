@@ -4074,6 +4074,7 @@ impl VectorApp {
             tags,
             size,
             scroll: Default::default(),
+            open: Default::default(),
         });
         cx.notify();
     }
@@ -6189,7 +6190,19 @@ impl Render for VectorApp {
                     })
                     .ok();
                 });
-                crate::edithistory::render(h, &store, &self.media, window.viewport_size(), &close)
+                let app = cx.entity().downgrade();
+                let toggle: crate::edithistory::OnToggle = Rc::new(move |i, _, cx| {
+                    app.update(cx, |app, cx| {
+                        if let Some(h) = app.edit_history.as_mut()
+                            && !h.open.remove(&i)
+                        {
+                            h.open.insert(i);
+                        }
+                        cx.notify();
+                    })
+                    .ok();
+                });
+                crate::edithistory::render(h, &store, &self.media, window.viewport_size(), &close, &toggle)
             }))
             .children(self.reaction_popups(&store, window, cx))
             .children(self.secret_guard.as_ref().map(|g| {

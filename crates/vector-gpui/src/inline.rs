@@ -27,6 +27,8 @@ pub struct Look {
     pub color: Hsla,
     pub strike: bool,
     pub underline: bool,
+    /// A highlight behind the glyphs.
+    pub bg: Option<Hsla>,
 }
 
 impl Look {
@@ -40,6 +42,7 @@ impl Look {
             color,
             strike: false,
             underline: false,
+            bg: None,
         }
     }
 
@@ -1069,6 +1072,9 @@ impl Element for Inline {
                             size(px(x1 - x0), px(m.ascent + m.descent + pad_y * 2.)),
                         )
                     };
+                    if let Some(bg) = look.bg {
+                        window.paint_quad(fill(boxed(1.), bg).corner_radii(Corners::all(px(3.))));
+                    }
                     match kind {
                         Kind::Code => {
                             let b = boxed(3.);
