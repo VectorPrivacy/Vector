@@ -52,7 +52,9 @@ impl AssetSource for Assets {
 }
 
 pub fn fonts() -> Vec<Cow<'static, [u8]>> {
+    // CoreText refuses anything that isn't a font, so the folder's README must not reach it.
     Fonts::iter()
+        .filter(|name| name.ends_with(".ttf") || name.ends_with(".otf"))
         .filter_map(|name| Fonts::get(&name).map(|f| f.data))
         .collect()
 }
