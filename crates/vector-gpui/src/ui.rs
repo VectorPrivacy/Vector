@@ -111,6 +111,8 @@ pub struct VectorApp {
     picker_closed: std::time::Instant,
     /// Bumped by each hover, so a stale leave doesn't hide the toolbar.
     hover_gen: u64,
+    /// How many of the hovered message's hitboxes (row, toolbar) hold the pointer.
+    hover_in: u8,
     viewer: Option<Entity<crate::viewer::Viewer>>,
     model_viewer: Option<(Entity<crate::model3d::viewer::ModelViewer>, String, String)>,
     /// The attachment panel is open, and since when (its items fade in from then).
@@ -951,6 +953,7 @@ impl VectorApp {
             picker_status: false,
             picker_closed: std::time::Instant::now(),
             hover_gen: 0,
+            hover_in: 0,
             viewer: None,
             model_viewer: None,
             cropper: None,
@@ -4140,11 +4143,19 @@ impl VectorApp {
                 self.hover_gen += 1;
                 if self.hovered.as_deref() != Some(id.as_str()) {
                     self.hovered = Some(id);
+                    self.hover_in = 1;
                     cx.notify();
+                } else {
+                    self.hover_in = self.hover_in.saturating_add(1);
                 }
             }
             Act::Hover(false) => {
+                if self.hovered.as_deref() == Some(id.as_str()) {
+                    self.hover_in = self.hover_in.saturating_sub(1);
+                }
+                // The row and its toolbar report in either order: only the last one out clears.
                 if self.hovered.as_deref() == Some(id.as_str())
+                    && self.hover_in == 0
                     && self.picker.as_deref() != Some(id.as_str())
                 {
                     // The toolbar overhangs the row: give the pointer a moment to reach it.
@@ -4152,11 +4163,12 @@ impl VectorApp {
                     let generation = self.hover_gen;
                     cx.spawn(async move |this, cx| {
                         cx.background_executor()
-                            .timer(std::time::Duration::from_millis(100))
+                            .timer(std::time::Duration::from_millis(250))
                             .await;
                         this.update(cx, |this, cx| {
                             if this.hovered.as_deref() == Some(gen_id.as_str())
                                 && this.hover_gen == generation
+                                && this.hover_in == 0
                             {
                                 this.hovered = None;
                                 cx.notify();
