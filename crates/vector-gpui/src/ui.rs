@@ -188,6 +188,8 @@ pub struct VectorApp {
     tracked: Vec<(String, String)>,
     /// What the composer held when an edit began: it comes back when the edit ends.
     edit_held: Option<(String, Mode)>,
+    /// Holds focus when no field does, so the app-wide keys still arrive.
+    root_focus: gpui::FocusHandle,
     /// `wsLastDm`: where the Messages button lands.
     last_dm: Option<String>,
     /// Each chat's composer as it was left, until it is opened again. Runtime only.
@@ -935,6 +937,7 @@ impl VectorApp {
             tracked: Vec::new(),
             edit_held: None,
             last_dm: None,
+            root_focus: cx.focus_handle(),
             drafts: HashMap::new(),
             mention_rules: HashMap::new(),
             send_shown: false,
@@ -5673,7 +5676,11 @@ impl Render for VectorApp {
             });
         }
         self.scan_invites(cx);
+        if window.focused(cx).is_none() {
+            window.focus(&self.root_focus, cx);
+        }
         let root = div()
+            .track_focus(&self.root_focus)
             .capture_key_down(cx.listener(|app, e: &gpui::KeyDownEvent, window, cx| {
                 if e.keystroke.key == "escape"
                     && app.menu.is_none()
@@ -5681,6 +5688,19 @@ impl Render for VectorApp {
                     && app.channel_editor.is_some()
                 {
                     app.on_channel_editor(crate::chaneditor::Act::Close, window, cx);
+                    cx.stop_propagation();
+                    return;
+                }
+                // `/` finds an app in the Nexus, unless something is being typed into.
+                if e.keystroke.key == "/"
+                    && !e.keystroke.modifiers.modified()
+                    && app.menu.is_none()
+                    && app.popup.is_none()
+                    && let Some(n) = app.nexus.as_ref()
+                    && !window.context_stack().iter().any(|k| k.contains("TextInput"))
+                {
+                    let focus = n.search.focus_handle(cx);
+                    window.focus(&focus, cx);
                     cx.stop_propagation();
                     return;
                 }
