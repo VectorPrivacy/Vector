@@ -10,16 +10,18 @@ use serde::Deserialize;
 use vector_media::miniapps::{self as core, realtime, state};
 
 #[cfg(target_os = "linux")]
-#[path = "host_gtk.rs"]
+#[path = "host_proc.rs"]
 mod host;
+
+#[cfg(target_os = "linux")]
+mod wire;
 
 #[cfg(not(target_os = "linux"))]
 #[path = "host_view.rs"]
 mod host;
 
-/// Runs `f` on the GTK thread, starting it if need be.
 #[cfg(target_os = "linux")]
-pub use host::on_gtk;
+pub use host::on_glib;
 
 // Type-checked where it can't run, so a Linux build catches its breakage.
 #[cfg(all(test, target_os = "linux"))]

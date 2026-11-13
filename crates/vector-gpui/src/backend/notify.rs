@@ -58,14 +58,14 @@ fn init() {
 }
 
 /// The freedesktop server's signals arrive on the thread that subscribed, which must run a
-/// GLib main loop: the GTK thread the Mini App windows use.
+/// GLib main loop.
 fn ready() {
     #[cfg(target_os = "linux")]
     {
         static DONE: OnceLock<()> = OnceLock::new();
         DONE.get_or_init(|| {
             let (tx, rx) = std::sync::mpsc::channel();
-            let posted = crate::miniapp::on_gtk(move || {
+            let posted = crate::miniapp::on_glib(move || {
                 init();
                 let _ = tx.send(());
             });
