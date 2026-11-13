@@ -109,8 +109,8 @@ rev = "cddb2f5d80dc0009b2ef6767635140cacf90a007"
 [target.'cfg(target_os = "macos")'.dependencies]
 tar = { version = "0.4", default-features = false }
 objc2 = "0.6"
-objc2-foundation = { version = "0.3", features = ["NSString", "NSArray", "NSURL"] }
-objc2-app-kit = { version = "0.3", features = ["NSPasteboard", "NSApplication", "NSDockTile", "NSResponder", "NSWindow", "NSView", "NSButton", "NSControl"] }
+objc2-foundation = { version = "0.3", features = ["NSString", "NSArray", "NSURL", "NSEnumerator"] }
+objc2-app-kit = { version = "0.3", features = ["NSPasteboard", "NSPasteboardItem", "NSApplication", "NSDockTile", "NSResponder", "NSWindow", "NSView", "NSButton", "NSControl"] }
 raw-window-handle = "0.6"
 
 [target.'cfg(windows)'.dependencies]

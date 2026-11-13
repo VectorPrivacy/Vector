@@ -410,6 +410,11 @@ impl TextInput {
     }
 
     fn paste(&mut self, _: &Paste, window: &mut Window, cx: &mut Context<Self>) {
+        let files = crate::fileclip::read(cx);
+        if !files.is_empty() {
+            cx.emit(Pasted::Paths(files));
+            return;
+        }
         let item = cx.read_from_clipboard();
         if item.as_ref().and_then(|i| i.text()).is_none() {
             for entry in item.iter().flat_map(|i| i.entries()) {

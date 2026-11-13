@@ -31,6 +31,41 @@ pub fn purge() {
     }
 }
 
+/// Files on the clipboard, if it holds any: an app that copies a file often puts its path as
+/// text beside it, and the file is what was meant.
+#[cfg(not(target_os = "macos"))]
+pub fn read(cx: &mut gpui::App) -> Vec<PathBuf> {
+    cx.read_from_clipboard()
+        .iter()
+        .flat_map(|i| i.entries())
+        .find_map(|e| match e {
+            gpui::ClipboardEntry::ExternalPaths(p) if !p.paths().is_empty() => Some(p.paths().to_vec()),
+            _ => None,
+        })
+        .unwrap_or_default()
+}
+
+#[cfg(target_os = "macos")]
+#[allow(unused_unsafe)]
+pub fn read(_cx: &mut gpui::App) -> Vec<PathBuf> {
+    use objc2_app_kit::NSPasteboard;
+    use objc2_foundation::{NSString, NSURL};
+
+    let kind = NSString::from_str("public.file-url");
+    let pb = unsafe { NSPasteboard::generalPasteboard() };
+    let Some(items) = (unsafe { pb.pasteboardItems() }) else { return Vec::new() };
+    items
+        .iter()
+        .filter_map(|item| {
+            let url = unsafe { item.stringForType(&kind) }?;
+            let url = unsafe { NSURL::URLWithString(&url) }?;
+            let path = unsafe { url.path() }?;
+            Some(PathBuf::from(path.to_string()))
+        })
+        .filter(|p| p.exists())
+        .collect()
+}
+
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 pub fn write(paths: Vec<PathBuf>, cx: &mut gpui::App) -> Result<(), String> {
     cx.write_to_clipboard(gpui::ClipboardItem {
