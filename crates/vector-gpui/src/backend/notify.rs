@@ -23,9 +23,8 @@ pub fn focused() -> bool {
 /// Hooks the notifier up to this client. macOS and Windows register with the OS here, on the
 /// main thread, so a click that launches Vector finds it; Linux waits for its first message.
 pub fn install() {
-    // Its own identity: the Windows activator registered under the desktop client's would
-    // send that client's toast clicks here.
-    tauri::set_config(tauri::Config { identifier: "io.vectorapp.gpui".into(), product_name: Some("Vector".into()) });
+    // The Tauri client's identity: this client replaces it, so its toast clicks land here.
+    tauri::set_config(tauri::Config { identifier: "io.vectorapp".into(), product_name: Some("Vector".into()) });
     tauri::set_window(tauri::WindowHooks {
         focused: || FOCUSED.load(Ordering::Relaxed),
         reveal: || super::emit("notify_reveal", serde_json::Value::Null),

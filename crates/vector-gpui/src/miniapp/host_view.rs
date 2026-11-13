@@ -127,6 +127,24 @@ fn origin(url: &str) -> (String, String) {
     }
 }
 
+/// The store every non-isolated app shares: the Tauri client's (WebView2 under
+/// app_local_data_dir), so their storage carries over. macOS keys its default store on the
+/// bundle identifier, which the two clients share.
+#[cfg(windows)]
+fn shared_context() -> &'static mut WebContext {
+    thread_local! {
+        static SHARED: Cell<*mut WebContext> = const { Cell::new(std::ptr::null_mut()) };
+    }
+    SHARED.with(|c| {
+        if c.get().is_null() {
+            let dir = dirs::data_local_dir().map(|d| d.join("io.vectorapp"));
+            c.set(Box::into_raw(Box::new(WebContext::new(dir))));
+        }
+        // SAFETY: leaked once on the UI thread; each builder's borrow ends at its build.
+        unsafe { &mut *c.get() }
+    })
+}
+
 fn webview(spec: &Spec, window: &Window) -> Result<(wry::WebView, Option<WebContext>), String> {
     let first = match &spec.isolated {
         Some(i) => i.boot_url.clone(),
@@ -141,6 +159,9 @@ fn webview(spec: &Spec, window: &Window) -> Result<(wry::WebView, Option<WebCont
     let mut context: Option<WebContext> = None;
     let mut builder = match context.as_mut() {
         Some(c) => WebViewBuilder::new_with_web_context(c),
+        #[cfg(windows)]
+        None => WebViewBuilder::new_with_web_context(shared_context()),
+        #[cfg(not(windows))]
         None => WebViewBuilder::new(),
     };
     #[cfg(target_os = "macos")]

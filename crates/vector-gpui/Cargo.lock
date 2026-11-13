@@ -13163,6 +13163,7 @@ dependencies = [
  "wry",
  "x11rb",
  "xcap",
+ "zbus 5.19.0",
  "zeroize",
  "zip",
 ]

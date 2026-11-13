@@ -96,12 +96,12 @@ impl vector_core::EventEmitter for Emitter {
     }
 }
 
-/// Where accounts live: a directory of its own, so this client never shares a database with a
-/// running Tauri client. `--data-dir` points it anywhere else.
+/// Where accounts live: the Tauri client's own folder (its app_data_dir), so either client
+/// resumes the other's accounts. `--data-dir` points it anywhere else.
 pub fn default_data_dir() -> PathBuf {
     dirs::data_dir()
         .unwrap_or_else(std::env::temp_dir)
-        .join("io.vectorapp.gpui")
+        .join("io.vectorapp")
 }
 
 /// Start core: the runtime, the emitter, the profile processor and the remembered account.

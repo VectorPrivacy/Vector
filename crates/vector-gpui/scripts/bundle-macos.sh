@@ -23,7 +23,7 @@ cat > "$app/Contents/Info.plist" <<PLIST
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>CFBundleIdentifier</key><string>io.vectorapp.gpui</string>
+  <key>CFBundleIdentifier</key><string>io.vectorapp</string>
   <key>CFBundleName</key><string>Vector GPUI</string>
   <key>CFBundleDisplayName</key><string>Vector GPUI</string>
   <key>CFBundleExecutable</key><string>vector-gpui</string>

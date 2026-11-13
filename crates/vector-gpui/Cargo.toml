@@ -113,7 +113,7 @@ objc2-app-kit = { version = "0.3", features = ["NSPasteboard", "NSApplication", 
 [target.'cfg(windows)'.dependencies]
 clipboard-win = "5"
 raw-window-handle = "0.6"
-windows = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Com", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
+windows = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_System_Com", "Win32_System_DataExchange", "Win32_System_LibraryLoader", "Win32_System_Threading", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
 
 # Elsewhere wry lays the OS webview into a GPUI window of the app's own.
 [target.'cfg(not(target_os = "linux"))'.dependencies.wry]
@@ -127,6 +127,7 @@ wry = { version = "=0.57.0", default-features = false, features = ["os-webview",
 gtk = "0.18"
 webkit2gtk = { version = "2.0", features = ["v2_40"] }
 x11rb = { version = "0.13", features = ["randr"] }
+zbus = { version = "5.19", features = ["blocking-api"] }
 libc = "0.2"
 # The windows' own device, which 3D models draw with too.
 gpui_wgpu = { git = "https://github.com/zed-industries/zed", rev = "f8cfc7ed9e57503def9479138894f3139f5400cc" }

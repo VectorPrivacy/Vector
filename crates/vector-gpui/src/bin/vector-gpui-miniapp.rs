@@ -41,6 +41,20 @@ mod host {
 
     thread_local! {
         static OPEN: RefCell<HashMap<String, Window>> = RefCell::new(HashMap::new());
+        static SHARED: std::cell::Cell<*mut WebContext> = const { std::cell::Cell::new(std::ptr::null_mut()) };
+    }
+
+    /// The store every non-isolated app shares: the Tauri client's (its webviews default to
+    /// app_local_data_dir), so their storage carries over between the clients.
+    fn shared_context() -> &'static mut WebContext {
+        SHARED.with(|c| {
+            if c.get().is_null() {
+                let dir = dirs::data_local_dir().map(|d| d.join("io.vectorapp"));
+                c.set(Box::into_raw(Box::new(WebContext::new(dir))));
+            }
+            // SAFETY: leaked once on the GTK thread; each builder's borrow ends at its build.
+            unsafe { &mut *c.get() }
+        })
     }
 
     static OUT: Mutex<Option<std::io::Stdout>> = Mutex::new(None);
@@ -189,7 +203,7 @@ mod host {
         let mut context = spec.isolated.as_ref().map(|i| WebContext::new(Some(i.data_dir.clone())));
         let mut builder = match context.as_mut() {
             Some(c) => WebViewBuilder::new_with_web_context(c),
-            None => WebViewBuilder::new(),
+            None => WebViewBuilder::new_with_web_context(shared_context()),
         };
         let blank_first = spec.isolated.is_some();
         builder = builder
