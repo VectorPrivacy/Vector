@@ -375,6 +375,7 @@ pub struct EmojiPicker {
     kaomoji_recents: Vec<String>,
     gifs: Gifs,
     packs: Rc<Vec<Pack>>,
+    custom_map: std::cell::RefCell<(Rc<Vec<Pack>>, Rc<std::collections::HashMap<String, String>>)>,
     media: Option<(Rc<std::cell::RefCell<crate::media::Media>>, bool)>,
     creator: Option<creator::Creator>,
     overlays: creator::Overlays,
@@ -455,6 +456,7 @@ impl EmojiPicker {
             kaomoji_recents: Vec::new(),
             gifs: Gifs::default(),
             packs: Rc::default(),
+            custom_map: Default::default(),
             media: None,
             creator: None,
             overlays: Default::default(),
@@ -507,6 +509,22 @@ impl EmojiPicker {
     }
 
     /// `extractMessageEmojis`' custom half: each distinct `:code:` a live pack names.
+    /// Every live pack emoji by shortcode, rebuilt only when the packs change.
+    pub fn custom_map(&self, store: &crate::data::Store) -> Rc<std::collections::HashMap<String, String>> {
+        let mut cache = self.custom_map.borrow_mut();
+        if !Rc::ptr_eq(&cache.0, &self.packs) {
+            let map = self
+                .packs
+                .iter()
+                .filter(|p| !p.dead())
+                .flat_map(|p| p.emojis.iter())
+                .map(|e| (e.code.clone(), crate::timeline::emoji_source(store, &e.url)))
+                .collect();
+            *cache = (self.packs.clone(), Rc::new(map));
+        }
+        cache.1.clone()
+    }
+
     pub fn customs_in(&self, text: &str) -> Vec<(String, String)> {
         let mut out: Vec<(String, String)> = Vec::new();
         for (a, b) in crate::markdown::shortcodes(text) {

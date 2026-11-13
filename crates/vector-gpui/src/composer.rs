@@ -97,6 +97,8 @@ pub struct TextInput {
     decorated: Option<Vec<String>>,
     /// The name a pasted `@npub1…` shows as.
     npub_label: Option<std::rc::Rc<dyn Fn(&str) -> String>>,
+    /// Pack emoji by shortcode, drawn as their art.
+    customs: std::rc::Rc<std::collections::HashMap<String, String>>,
     /// The decorated spans drawn on a chip, in display offsets: (range, fill, radius, side pad).
     chips: std::cell::RefCell<Vec<(Range<usize>, Hsla, f32, f32)>>,
     /// Earlier states for Undo, and what Undo took back for Redo.
@@ -120,7 +122,7 @@ pub enum Nav {
 struct Sub {
     content: Range<usize>,
     display: Range<usize>,
-    src: Option<SharedString>,
+    src: Option<gpui::ImageSource>,
     label: Option<SharedString>,
 }
 
@@ -1492,6 +1494,7 @@ impl TextInput {
             chip: false,
             decorated: None,
             npub_label: None,
+            customs: Default::default(),
             chips: Default::default(),
             undo: Vec::new(),
             redo: Vec::new(),
@@ -1537,12 +1540,28 @@ impl TextInput {
                     .collect(),
                 _ => Vec::new(),
             };
-            let mut found: Vec<(Range<usize>, Option<SharedString>, Option<String>)> =
+            let mut found: Vec<(Range<usize>, Option<gpui::ImageSource>, Option<String>)> =
                 npubs.into_iter().map(|(r, l)| (r, None, Some(l))).collect();
+            let mut settled = true;
             if self.twemoji {
                 for (i, g) in self.content.grapheme_indices(true) {
                     if let Some(src) = crate::emoji::twemoji(g) {
-                        found.push((i..i + g.len(), Some(src), None));
+                        found.push((i..i + g.len(), Some(src.into()), None));
+                    }
+                }
+                if !self.customs.is_empty() && self.content.contains(':') {
+                    let media = crate::media::shared();
+                    for (a, b) in crate::markdown::shortcodes(&self.content) {
+                        let Some(url) = self.customs.get(&self.content[a + 1..b - 1]) else { continue };
+                        match media.borrow_mut().custom(url, false) {
+                            crate::media::Custom::Ready(image) => found.push((a..b, Some(gpui::ImageSource::Render(image)), None)),
+                            // Held as a blank slot until it lands, then drawn.
+                            crate::media::Custom::Pending => {
+                                settled = false;
+                                found.push((a..b, None, None));
+                            }
+                            crate::media::Custom::Missing(_) => {}
+                        }
                     }
                 }
                 found.sort_by_key(|f| f.0.start);
@@ -1560,9 +1579,18 @@ impl TextInput {
                     label: label.map(Into::into),
                 });
             }
-            *cache = (self.content.clone(), subs.into());
+            *cache = (if settled { self.content.clone() } else { SharedString::default() }, subs.into());
         }
         cache.1.clone()
+    }
+
+    /// The pack emoji this field draws as art, by shortcode.
+    pub fn set_customs(&mut self, customs: std::rc::Rc<std::collections::HashMap<String, String>>, cx: &mut Context<Self>) {
+        if *self.customs != *customs {
+            self.customs = customs;
+            self.subs.borrow_mut().0 = SharedString::default();
+            cx.notify();
+        }
     }
 
     /// Shows a pasted `@npub1…` as `@` and what `label` names it.

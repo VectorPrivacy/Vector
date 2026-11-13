@@ -5600,6 +5600,11 @@ impl Render for VectorApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let me = cx.entity().downgrade();
         cx.defer(move |cx| crate::relayinfo::pump(me, cx));
+        let customs = self.emoji_picker.read(cx).custom_map(&self.store.borrow());
+        for input in std::iter::once(self.input.clone()).chain(self.status.clone()) {
+            let customs = customs.clone();
+            input.update(cx, |i, cx| i.set_customs(customs, cx));
+        }
         let rail_mode = self.rail_mode(window);
         self.vw = f32::from(window.viewport_size().width);
         let slim = self.vw < slim_ops::WIDE_MIN;
