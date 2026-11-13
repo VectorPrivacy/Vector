@@ -120,9 +120,12 @@ jobs:
         include:
           - platform: macos-26-intel
             target: aarch64-apple-darwin
-            features: '--no-default-features --features video-static,tor,i2p'
+            out: aarch64-apple-darwin/release
+            features: '--target aarch64-apple-darwin --no-default-features --features video-static,tor,i2p'
           - platform: windows-2022
             target: x86_64-pc-windows-msvc
+            # The host's own target: a target directory level pushes whisper's Vulkan shader build past MAX_PATH.
+            out: release
             features: '--no-default-features --features tor,i2p'
     runs-on: ${{ matrix.platform }}
     env:
@@ -206,18 +209,18 @@ jobs:
 
       - name: Build
         shell: bash
-        run: cargo build --release --locked --target ${{ matrix.target }} ${{ matrix.features }}
+        run: cargo build --release --locked ${{ matrix.features }}
 
       - name: Bundle (macOS)
         if: startsWith(matrix.platform, 'macos')
-        run: scripts/bundle-macos.sh target/${{ matrix.target }}/release/vector-gpui "$RUNNER_TEMP/pkg"
+        run: scripts/bundle-macos.sh target/${{ matrix.out }}/vector-gpui "$RUNNER_TEMP/pkg"
 
       - name: Bundle (Windows)
         if: startsWith(matrix.platform, 'windows')
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path "$env:RUNNER_TEMP\pkg" | Out-Null
-          Copy-Item "$env:CARGO_TARGET_DIR\${{ matrix.target }}\release\vector-gpui.exe" "$env:RUNNER_TEMP\pkg\Vector GPUI.exe"
+          Copy-Item "$env:CARGO_TARGET_DIR\${{ matrix.out }}\vector-gpui.exe" "$env:RUNNER_TEMP\pkg\Vector GPUI.exe"
 
       - uses: actions/upload-artifact@v4
         with:
