@@ -890,6 +890,7 @@ pub enum Act {
     Transfer,
     SecAdvanced,
     CheckUpdates,
+    RestartUpdate,
     Beta(bool),
     /// `mic` or `speaker`, 0..1, while a slider moves.
     Volume(&'static str, f32),
@@ -2887,6 +2888,10 @@ pub enum UpdPhase {
     /// A manual check that found nothing; it fades back to idle.
     NoUpdates,
     Available,
+    /// The bundle coming down, in percent.
+    Downloading(u8),
+    /// Downloaded and verified: Restart Now puts it in place.
+    Ready,
     Error(String),
 }
 
@@ -2934,7 +2939,7 @@ fn upd_card(lead: Option<(&str, gpui::Hsla)>, rest: &str) -> AnyElement {
 fn updates_block(s: &Settings, on: &OnAct) -> AnyElement {
     let u = &s.updates;
     let current = crate::backend::updates::Version::current();
-    let found = if u.phase == UpdPhase::Available {
+    let found = if matches!(u.phase, UpdPhase::Available | UpdPhase::Downloading(_)) {
         u.found.as_ref()
     } else {
         None
@@ -3073,9 +3078,10 @@ fn updates_block(s: &Settings, on: &OnAct) -> AnyElement {
     let (label, enabled) = match u.phase {
         UpdPhase::Checking => ("Checking...", false),
         UpdPhase::Available => ("Download Update", true),
+        UpdPhase::Downloading(_) => ("Downloading...", false),
         _ => ("Check for Updates", true),
     };
-    col = col.child(
+    col = col.when(u.phase != UpdPhase::Ready, |col| col.child(
         div()
             .id("check-updates-btn")
             .h(px(37.))
@@ -3094,9 +3100,10 @@ fn updates_block(s: &Settings, on: &OnAct) -> AnyElement {
             .when(enabled, |d| {
                 d.cursor_pointer().on_click(click(on, || Act::CheckUpdates))
             }),
-    );
+    ));
     let status = match &u.phase {
         UpdPhase::Checking => Some(("Checking for updates...".to_string(), white_a(0.8))),
+        UpdPhase::Ready => Some(("Update ready! Restart to apply.".to_string(), white_a(0.8))),
         UpdPhase::Error(e) => Some((e.clone(), c(0xff5252))),
         UpdPhase::NoUpdates if current.preview.is_some() => Some((
             "No newer build yet. You'll be offered the official build as soon as it releases."
@@ -3116,7 +3123,69 @@ fn updates_block(s: &Settings, on: &OnAct) -> AnyElement {
                 .child(text),
         );
     }
+    if let UpdPhase::Downloading(pct) = u.phase {
+        col = col.child(div().mt(px(20.)).w_full().child(progress_bar(pct)));
+    }
+    if u.phase == UpdPhase::Ready {
+        col = col.child(
+            div()
+                .id("restart-update-btn")
+                .mt(px(10.))
+                .h(px(37.))
+                .px(px(24.))
+                .flex()
+                .items_center()
+                .rounded(px(8.))
+                .bg(gpui::linear_gradient(
+                    135.,
+                    gpui::linear_color_stop(c(0x59fcb3), 0.),
+                    gpui::linear_color_stop(c(0x2b976c), 1.),
+                ))
+                .text_size(px(16.))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(c(0xffffff))
+                .cursor_pointer()
+                .on_click(click(on, || Act::RestartUpdate))
+                .child("Restart Now"),
+        );
+    }
     col.into_any_element()
+}
+
+/// `.progress-bar-track`: a filled bar with its percent at the right.
+fn progress_bar(pct: u8) -> impl IntoElement {
+    div()
+        .relative()
+        .w_full()
+        .h(px(12.))
+        .rounded(px(6.))
+        .overflow_hidden()
+        .bg(ca(30, 30, 30, 0.8))
+        .child(
+            div()
+                .h_full()
+                .w(gpui::relative(pct.min(100) as f32 / 100.))
+                .rounded(px(6.))
+                .bg(gpui::linear_gradient(
+                    90.,
+                    gpui::linear_color_stop(c(0x59fcb3), 0.),
+                    gpui::linear_color_stop(c(0x00d4ff), 1.),
+                )),
+        )
+        .child(
+            div()
+                .absolute()
+                .right(px(10.))
+                .top(px(-6.))
+                .h(px(24.))
+                .flex()
+                .items_center()
+                .font_family(crate::markdown::MONO)
+                .text_size(px(11.))
+                .font_weight(FontWeight::BOLD)
+                .text_color(c(0xffffff))
+                .child(format!("{pct}%")),
+        )
 }
 
 pub struct VoiceView {

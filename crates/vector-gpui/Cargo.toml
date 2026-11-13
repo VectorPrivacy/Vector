@@ -65,6 +65,8 @@ simd-adler32 = "0.3"
 memchr = "2"
 zip = { version = "2.4", default-features = false, features = ["deflate-flate2", "flate2"] }
 flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"] }
+# In-app updates: the release key's signature on each bundle.
+minisign-verify = "0.2"
 # Notification sounds: decode, resample, play.
 cpal = "0.16"
 symphonia = { version = "0.5.5", default-features = false, features = ["mp3", "wav", "flac", "pcm", "aac", "isomp4", "ogg", "vorbis", "opt-simd"] }
@@ -103,6 +105,7 @@ rev = "cddb2f5d80dc0009b2ef6767635140cacf90a007"
 
 # File references on the clipboard, which GPUI writes only as text there.
 [target.'cfg(target_os = "macos")'.dependencies]
+tar = { version = "0.4", default-features = false }
 objc2 = "0.6"
 objc2-foundation = { version = "0.3", features = ["NSString", "NSArray", "NSURL"] }
 objc2-app-kit = { version = "0.3", features = ["NSPasteboard", "NSApplication", "NSDockTile", "NSResponder"] }

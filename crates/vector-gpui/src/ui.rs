@@ -254,6 +254,10 @@ pub struct VectorApp {
     /// The release check, and where its find is installed from.
     updates: crate::settings::Updates,
     update_url: Option<String>,
+    /// This build's bundle in the release found, when it can replace itself.
+    update_asset: Option<backend::install::Asset>,
+    /// The verified bundle, waiting on Restart Now.
+    update_bundle: Option<std::path::PathBuf>,
     /// A volume change waits on its throttle.
     audio_save_pending: bool,
     call: crate::call::Call,
@@ -977,6 +981,8 @@ impl VectorApp {
                 ..Default::default()
             },
             update_url: None,
+            update_asset: None,
+            update_bundle: None,
             audio_save_pending: false,
             call: crate::call::Call::at(Self::saved_pill_pos()),
             video: Default::default(),
@@ -1422,11 +1428,12 @@ impl VectorApp {
         if std::env::var("VECTOR_START").is_ok() {
             app.toggle_start(window, cx);
         }
-        // Fixtures: VECTOR_UPDATES=latest|avail shows what a check found.
+        // Fixtures: VECTOR_UPDATES=latest|avail|downloading|ready shows what a check found.
         match std::env::var("VECTOR_UPDATES").as_deref() {
             Ok("latest") => app.set_updates(|u| u.latest = true),
-            Ok("avail") => app.set_updates(|u| {
-                u.phase = crate::settings::UpdPhase::Available;
+            Ok("ready") => app.set_updates(|u| u.phase = crate::settings::UpdPhase::Ready),
+            Ok(phase @ ("avail" | "downloading")) => app.set_updates(|u| {
+                u.phase = if phase == "avail" { crate::settings::UpdPhase::Available } else { crate::settings::UpdPhase::Downloading(42) };
                 u.found = Some((
                     "v0.5.2".into(),
                     "- Faster sync\n- Fixed a crash when opening large images".into(),
@@ -2438,9 +2445,65 @@ impl VectorApp {
     }
 
     /// A silent check only ever announces a find; a manual one says how it went.
+    fn download_update(&mut self, asset: backend::install::Asset, cx: &mut Context<Self>) {
+        use crate::settings::UpdPhase;
+        self.set_updates(|u| u.phase = UpdPhase::Downloading(0));
+        let (tx, mut pct) = futures::channel::mpsc::unbounded::<u8>();
+        let rx = backend::run(backend::install::download(asset, move |got, total| {
+            if total > 0 {
+                let _ = tx.unbounded_send((got * 100 / total).min(100) as u8);
+            }
+        }));
+        cx.spawn(async move |this, cx| {
+            use futures::StreamExt;
+            while let Some(p) = pct.next().await {
+                let going = this
+                    .update(cx, |this, cx| {
+                        let going = matches!(this.updates.phase, UpdPhase::Downloading(_));
+                        if going {
+                            this.set_updates(|u| u.phase = UpdPhase::Downloading(p));
+                            cx.notify();
+                        }
+                        going
+                    })
+                    .unwrap_or(false);
+                if !going {
+                    break;
+                }
+            }
+            let res = rx.await.unwrap_or_else(|_| Err("The download stopped".into()));
+            this.update(cx, |this, cx| {
+                match res {
+                    Ok(path) => {
+                        this.update_bundle = Some(path);
+                        this.set_updates(|u| u.phase = UpdPhase::Ready);
+                    }
+                    Err(e) => this.set_updates(|u| u.phase = UpdPhase::Error(e)),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// The verified bundle into place, then this copy makes way for it.
+    fn restart_update(&mut self, cx: &mut Context<Self>) {
+        let Some(bundle) = self.update_bundle.clone() else { return };
+        match backend::install::install(&bundle).and_then(|_| backend::install::relaunch()) {
+            Ok(()) => cx.quit(),
+            Err(e) => {
+                self.update_bundle = None;
+                self.set_updates(|u| u.phase = crate::settings::UpdPhase::Error(e));
+                cx.notify();
+            }
+        }
+    }
+
     fn check_updates(&mut self, silent: bool, cx: &mut Context<Self>) {
         use crate::settings::UpdPhase;
-        if self.updates.phase == UpdPhase::Checking {
+        if matches!(self.updates.phase, UpdPhase::Checking | UpdPhase::Downloading(_) | UpdPhase::Ready) {
             return;
         }
         if !silent {
@@ -2465,6 +2528,7 @@ impl VectorApp {
                     match result {
                         Ok(Some(release)) => {
                             this.update_url = Some(backend::updates::release_page(release.version));
+                            this.update_asset = release.asset;
                             this.set_updates(|u| {
                                 u.phase = UpdPhase::Available;
                                 u.latest = false;
@@ -15794,13 +15858,16 @@ impl VectorApp {
             Act::SecAdvanced => s.sec_advanced = !s.sec_advanced,
             Act::CheckUpdates => {
                 if self.updates.phase == crate::settings::UpdPhase::Available {
-                    if let Some(url) = self.update_url.clone() {
+                    if let Some(asset) = self.update_asset.clone() {
+                        self.download_update(asset, cx);
+                    } else if let Some(url) = self.update_url.clone() {
                         self.open_web(&url, cx);
                     }
                 } else if self.live {
                     self.check_updates(false, cx);
                 }
             }
+            Act::RestartUpdate => self.restart_update(cx),
             Act::Volume(key, v) => {
                 if let Some(a) = s.audio.as_mut() {
                     if key == "mic" {

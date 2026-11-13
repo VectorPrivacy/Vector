@@ -38,6 +38,7 @@ pub mod sync;
 pub mod transfer;
 pub mod transport;
 pub mod unfurl;
+pub mod install;
 pub mod updates;
 pub mod upload;
 

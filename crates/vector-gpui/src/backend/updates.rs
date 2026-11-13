@@ -70,6 +70,8 @@ impl PartialOrd for Version {
 pub struct Release {
     pub version: Version,
     pub notes: String,
+    /// This build's bundle, when the release ships one and this copy can replace itself.
+    pub asset: Option<super::install::Asset>,
 }
 
 /// A stable follower never takes a preview, whatever the manifest says.
@@ -127,10 +129,11 @@ pub async fn check(preview_channel: bool) -> Result<Option<Release>, String> {
         .unwrap_or("")
         .trim()
         .to_string();
-    Ok(Some(Release { version, notes }))
+    let asset = super::install::supported().then(|| super::install::asset(&manifest)).flatten();
+    Ok(Some(Release { version, notes, asset }))
 }
 
-/// Where a release is installed from until this build ships its own installer.
+/// Where a release is installed from when this copy can't update itself.
 pub fn release_page(version: Version) -> String {
     let [a, b, c] = version.core;
     match version.preview {
