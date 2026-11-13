@@ -74,6 +74,7 @@ impl InboundEventHandler for Handler {
             }
             let marked = auto_mark_if_active(&chat_id, &msg.id).await;
             refresh_unread(&chat_id, marked).await;
+            super::notify::direct(&chat_id, &msg).await;
         });
     }
 
@@ -88,12 +89,15 @@ impl InboundEventHandler for Handler {
         );
     }
 
-    fn on_community_message(&self, chat_id: &str, msg: &Message, _is_new: bool) {
+    fn on_community_message(&self, chat_id: &str, msg: &Message, is_new: bool) {
         vector_core::traits::emit_message_new(chat_id, msg);
         let (chat_id, msg) = (chat_id.to_string(), msg.clone());
         db::spawn_bound(async move {
             let marked = auto_mark_if_active(&chat_id, &msg.id).await;
             refresh_unread(&chat_id, marked).await;
+            if is_new {
+                super::notify::community(&chat_id, &msg).await;
+            }
         });
     }
 

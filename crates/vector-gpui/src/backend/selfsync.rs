@@ -142,7 +142,9 @@ async fn apply_blocks(list: IdList) {
     let currently: Vec<String> =
         vector_core::profile::sync::get_blocked_users().await.into_iter().map(|p| p.id).collect();
     for npub in list.ids.iter().filter(|n| !currently.contains(n)) {
-        vector_core::profile::sync::block_user(npub.clone(), handler).await;
+        if vector_core::profile::sync::block_user(npub.clone(), handler).await {
+            super::notify::blocked(npub);
+        }
     }
     for npub in currently.iter().filter(|n| !list.contains(n)) {
         vector_core::profile::sync::unblock_user(npub.clone(), handler).await;

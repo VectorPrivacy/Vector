@@ -1647,6 +1647,11 @@ impl VectorApp {
         app.listen_models(cx);
         app.listen_video(cx);
         crate::callvideo::announce_caps();
+        backend::notify::set_focused(window.is_window_active());
+        cx.observe_window_activation(window, |_, window, _| {
+            backend::notify::set_focused(window.is_window_active())
+        })
+        .detach();
         app.screen = Screen::Booting;
         cx.spawn_in(window, async move |this, cx| {
             while let Some(ev) = events.next().await {
@@ -3132,6 +3137,18 @@ impl VectorApp {
             }
             "marketplace_install_progress" | "marketplace_apps_updated" => self.nexus_event(name, &payload, cx),
             "pivx_payment_received" => self.pivx_received(&payload, cx),
+            "notify_reveal" => _window.activate_window(),
+            "deep_link_action" => {
+                let field = |k: &str| payload.get(k).and_then(Value::as_str).map(str::to_string);
+                let a = vector_core::deep_link::DeepLinkAction {
+                    action_type: field("action_type").unwrap_or_default(),
+                    target: field("target").unwrap_or_default(),
+                    message: field("message"),
+                    call: None,
+                    account: field("account").filter(|a| !a.is_empty()),
+                };
+                self.take_link(a, _window, cx);
+            }
             "show_toast" => {
                 if let Some(text) = payload.as_str() {
                     self.show_toast(text, cx);
@@ -12268,6 +12285,11 @@ impl VectorApp {
         let Some(a) = vector_core::deep_link::parse_deep_link(url) else {
             return;
         };
+        self.take_link(a, window, cx);
+    }
+
+    /// An action from outside the window: taken now, or once an account is open.
+    fn take_link(&mut self, a: vector_core::deep_link::DeepLinkAction, window: &mut Window, cx: &mut Context<Self>) {
         window.activate_window();
         if matches!(self.screen, Screen::Main) {
             self.open_deep_link(a, window, cx);

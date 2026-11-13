@@ -539,6 +539,9 @@ static RESET_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 /// Tear the live account down to a fresh boot: its client, database, keys and transfers.
 pub async fn reset() {
     let _serial = RESET_LOCK.lock().await;
+    if let Some(npub) = vector_core::my_public_key().and_then(|pk| nostr_sdk::prelude::ToBech32::to_bech32(&pk).ok()) {
+        super::notify::account_gone(&npub);
+    }
     super::attachments::cancel_all();
     super::messaging::cancel_all_uploads();
     crate::miniapp::end_for_account_swap().await;
@@ -575,6 +578,7 @@ pub async fn delete(npub: String) -> Result<bool, String> {
     if !accounts().iter().any(|a| a.npub == npub) {
         return Err(format!("Unknown account: {npub}"));
     }
+    super::notify::account_gone(&npub);
     let was_active = db::get_current_account().is_ok_and(|a| a == npub);
     if was_active {
         let _ = db::clear_active_account_file();

@@ -69,6 +69,11 @@ fn sniff(bytes: &[u8]) -> Option<&'static str> {
     head.windows(4).any(|w| w == b"<svg").then_some("svg")
 }
 
+/// An avatar already on disk, without fetching it.
+pub fn cached_avatar(url: &str) -> Option<String> {
+    cached(url, Kind::Avatar)
+}
+
 fn cached(url: &str, kind: Kind) -> Option<String> {
     let dir = cache_dir(kind)?;
     let key = cache_key(url);

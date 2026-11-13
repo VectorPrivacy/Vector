@@ -52,12 +52,15 @@ whisper = ["dep:whisper-rs"]
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2"
 glib = "0.18"
+gtk = "0.18"
+gdk = "0.18"
 webkit2gtk = { version = "2.0", features = ["v2_40"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 whisper-rs = { version = "0.15.1", features = ["metal"], optional = true }
 objc2 = "0.6"
-objc2-foundation = { version = "0.3", features = ["NSString", "NSArray", "NSError", "NSProcessInfo"] }
+objc2-foundation = { version = "0.3", features = ["NSString", "NSArray", "NSError", "NSProcessInfo", "NSBundle", "NSDictionary", "NSSet", "NSURL"] }
+objc2-user-notifications = { version = "0.3.1", features = ["block2", "UNUserNotificationCenter", "UNNotification", "UNNotificationAction", "UNNotificationAttachment", "UNNotificationCategory", "UNNotificationContent", "UNNotificationRequest", "UNNotificationResponse", "UNNotificationTrigger"] }
 objc2-core-foundation = "0.3.2"
 block2 = "0.6"
 dispatch2 = "0.3"
@@ -67,6 +70,8 @@ objc2-core-audio-types = "0.3.2"
 objc2-core-graphics = { version = "0.3.2", features = ["CGWindow"] }
 
 [target.'cfg(windows)'.dependencies]
+windows = { version = "0.61", features = ["Data_Xml_Dom", "Foundation", "UI_Notifications", "Win32_Foundation", "Win32_Security", "Win32_System_Com", "Win32_System_Registry", "Win32_UI_Notifications"] }
+windows-core = "0.61"
 windows-sys = { version = "0.61", features = ["Win32_System_Power", "Win32_UI_WindowsAndMessaging"] }
 
 [build-dependencies]

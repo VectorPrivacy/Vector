@@ -17,6 +17,10 @@ mod host;
 #[path = "host_view.rs"]
 mod host;
 
+/// Runs `f` on the GTK thread, starting it if need be.
+#[cfg(target_os = "linux")]
+pub use host::on_gtk;
+
 // Type-checked where it can't run, so a Linux build catches its breakage.
 #[cfg(all(test, target_os = "linux"))]
 #[allow(dead_code)]

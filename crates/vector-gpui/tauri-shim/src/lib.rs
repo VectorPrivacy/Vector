@@ -70,6 +70,10 @@ impl PathResolver {
 
 pub trait Manager<R: Runtime> {
     fn path(&self) -> PathResolver;
+    /// The host's one window, whatever the label.
+    fn get_webview_window(&self, _label: &str) -> Option<WebviewWindow> {
+        WINDOW.get().map(|hooks| WebviewWindow(hooks))
+    }
     /// What the host handed to [`manage`]; panics when it never did, as Tauri does.
     fn state<T: Send + Sync + 'static>(&self) -> State<'static, T> {
         State(managed::<T>().expect("tauri shim: state not managed"))
@@ -79,6 +83,90 @@ pub trait Manager<R: Runtime> {
 impl<R: Runtime> Manager<R> for AppHandle<R> {
     fn path(&self) -> PathResolver {
         PathResolver
+    }
+}
+
+/// What the host's window answers and does for modules that ask Tauri's.
+pub struct WindowHooks {
+    pub focused: fn() -> bool,
+    /// Shown, unminimized and focused.
+    pub reveal: fn(),
+}
+
+static WINDOW: OnceLock<WindowHooks> = OnceLock::new();
+
+pub fn set_window(hooks: WindowHooks) {
+    let _ = WINDOW.set(hooks);
+}
+
+pub struct WebviewWindow(&'static WindowHooks);
+
+impl WebviewWindow {
+    pub fn is_focused(&self) -> Result<bool, Error> {
+        Ok((self.0.focused)())
+    }
+    pub fn show(&self) -> Result<(), Error> {
+        (self.0.reveal)();
+        Ok(())
+    }
+    pub fn unminimize(&self) -> Result<(), Error> {
+        Ok(())
+    }
+    pub fn set_focus(&self) -> Result<(), Error> {
+        Ok(())
+    }
+}
+
+/// The bundle's identity, as `tauri.conf.json` gives it.
+pub struct Config {
+    pub identifier: String,
+    pub product_name: Option<String>,
+}
+
+static CONFIG: OnceLock<Config> = OnceLock::new();
+
+pub fn set_config(config: Config) {
+    let _ = CONFIG.set(config);
+}
+
+impl<R: Runtime> AppHandle<R> {
+    pub fn config(&self) -> &'static Config {
+        CONFIG.get_or_init(|| Config { identifier: "io.vectorapp".into(), product_name: Some("Vector".into()) })
+    }
+}
+
+/// `tauri-plugin-notification`'s plain notification, for a platform with no native backend:
+/// the GPUI client has no plugin to fall back on, so it shows nothing.
+pub trait NotificationExt {
+    fn notification(&self) -> Notifications {
+        Notifications
+    }
+}
+
+impl<R: Runtime> NotificationExt for AppHandle<R> {}
+
+pub struct Notifications;
+
+impl Notifications {
+    pub fn builder(&self) -> NotificationBuilder {
+        NotificationBuilder
+    }
+}
+
+pub struct NotificationBuilder;
+
+impl NotificationBuilder {
+    pub fn title(self, _: &str) -> Self {
+        self
+    }
+    pub fn body(self, _: &str) -> Self {
+        self
+    }
+    pub fn large_body(self, _: &str) -> Self {
+        self
+    }
+    pub fn show(self) -> Result<(), Error> {
+        Err(Error("no notification backend on this platform".into()))
     }
 }
 

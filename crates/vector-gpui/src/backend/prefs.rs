@@ -261,8 +261,9 @@ pub async fn set_suppress_everyone(
 }
 
 pub async fn block(npub: String) -> bool {
-    let ok = vector_core::profile::sync::block_user(npub, &super::sync::ProfileHandler).await;
+    let ok = vector_core::profile::sync::block_user(npub.clone(), &super::sync::ProfileHandler).await;
     if ok {
+        super::notify::blocked(&npub);
         reseed_unread().await;
         publish_projection(Pref::Blocks);
     }

@@ -26,6 +26,7 @@ pub mod voice;
 pub mod messaging;
 pub mod mic;
 pub mod network;
+pub mod notify;
 pub mod packs;
 pub mod prefs;
 pub mod security;
@@ -81,6 +82,12 @@ struct Emitter;
 
 impl vector_core::EventEmitter for Emitter {
     fn emit(&self, event: &str, payload: serde_json::Value) {
+        // Every way a message leaves a chat ends in `message_removed`.
+        if event == "message_removed"
+            && let Some(id) = payload.get("id").and_then(|v| v.as_str())
+        {
+            notify::deleted(id);
+        }
         send(UiEvent::Core(event.to_string(), payload));
     }
 }
@@ -127,6 +134,7 @@ pub fn start(data_dir: PathBuf) -> mpsc::UnboundedReceiver<UiEvent> {
         tauri::set_data_dir(dir.clone());
     }
     let _ = vector_media::TAURI_APP.set(tauri::AppHandle::new(engine_sink));
+    notify::install();
     {
         let _guard = rt.enter();
         crate::calls::session::install();

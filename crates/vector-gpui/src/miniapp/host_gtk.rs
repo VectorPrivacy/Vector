@@ -57,7 +57,7 @@ fn context() -> Result<&'static glib::MainContext, String> {
         .ok_or_else(|| "Mini Apps need GTK and WebKitGTK on this system".to_string())
 }
 
-fn on_gtk(f: impl FnOnce() + Send + 'static) -> Result<(), String> {
+pub fn on_gtk(f: impl FnOnce() + Send + 'static) -> Result<(), String> {
     context()?.invoke(f);
     Ok(())
 }

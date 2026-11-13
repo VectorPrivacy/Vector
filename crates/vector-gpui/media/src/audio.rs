@@ -35,3 +35,11 @@ pub fn resample_mono_i16(samples: &[i16], from_rate: u32, to_rate: u32) -> Resul
     let resampled = crate::simd::audio::linear_resample_mono(&f, from_rate, to_rate);
     Ok(crate::simd::audio::f32_to_i16(&resampled))
 }
+
+/// The host plays the chosen sound, having read whether it is muted.
+pub fn play_notification_if_enabled(_: &tauri::AppHandle) -> Result<(), String> {
+    if let Some(h) = crate::notify_host::get() {
+        (h.sound)();
+    }
+    Ok(())
+}

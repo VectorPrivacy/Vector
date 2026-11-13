@@ -110,3 +110,98 @@ pub mod simd {
 
 /// Where the engine's events go: set once by the host before any sound plays.
 pub static TAURI_APP: std::sync::OnceLock<tauri::AppHandle> = std::sync::OnceLock::new();
+
+extern crate tauri as tauri_plugin_notification;
+
+/// What the host does for a notification's buttons, by the paths the desktop's notifier names.
+pub mod notify_host {
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::sync::OnceLock;
+
+    pub type Fut<T> = Pin<Box<dyn Future<Output = T> + Send>>;
+
+    pub struct Host {
+        pub mark_read: fn(String) -> Fut<bool>,
+        /// A mute of `ms`, in `set_notify_mute`'s units (negative is indefinite).
+        pub mute: fn(String, i64) -> Fut<Result<(), String>>,
+        pub reply: fn(String, String) -> Fut<Result<String, String>>,
+        /// The chat, at the message if there is one, for the account it was shown for.
+        pub open: fn(String, Option<String>, Option<String>),
+        pub sound: fn(),
+    }
+
+    static HOST: OnceLock<Host> = OnceLock::new();
+
+    pub fn set(host: Host) {
+        let _ = HOST.set(host);
+    }
+
+    pub(crate) fn get() -> Option<&'static Host> {
+        HOST.get()
+    }
+}
+
+pub mod chat {
+    pub async fn mark_as_read_headless(chat_id: &str) -> bool {
+        match crate::notify_host::get() {
+            Some(h) => (h.mark_read)(chat_id.to_string()).await,
+            None => false,
+        }
+    }
+}
+
+pub mod commands {
+    pub mod messaging {
+        /// The host recounts on the read itself.
+        pub async fn update_unread_counter(_: tauri::AppHandle) -> Result<(), String> {
+            Ok(())
+        }
+    }
+    pub mod notify {
+        pub async fn set_notify_mute(scope_id: String, duration_ms: i64) -> Result<(), String> {
+            match crate::notify_host::get() {
+                Some(h) => (h.mute)(scope_id, duration_ms).await,
+                None => Err("not ready".into()),
+            }
+        }
+    }
+}
+
+pub mod message {
+    pub async fn send_text_reply_headless(chat_id: &str, content: &str) -> Result<String, String> {
+        match crate::notify_host::get() {
+            Some(h) => (h.reply)(chat_id.to_string(), content.to_string()).await,
+            None => Err("not ready".into()),
+        }
+    }
+}
+
+pub mod deep_link {
+    pub fn open_chat_from_notification<R: tauri::Runtime>(
+        _: &tauri::AppHandle<R>,
+        chat_id: &str,
+        message: Option<&str>,
+        account: Option<&str>,
+    ) {
+        if let Some(h) = crate::notify_host::get() {
+            (h.open)(chat_id.to_string(), message.map(str::to_string), account.map(str::to_string));
+        }
+    }
+}
+
+#[path = "../../../../src-tauri/src/services/notification_service.rs"]
+#[allow(dead_code)]
+#[doc(hidden)]
+pub mod notification_service;
+#[path = "../../../../src-tauri/src/services/native_notify/mod.rs"]
+#[allow(dead_code)]
+#[doc(hidden)]
+pub mod native_notify;
+
+/// The desktop's OS notifications: its notification service and one backend per platform.
+pub mod services {
+    pub use super::native_notify;
+    pub use super::notification_service;
+    pub use super::notification_service::{show_notification_generic, strip_content_for_preview, NotificationData};
+}
