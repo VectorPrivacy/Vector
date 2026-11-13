@@ -69,8 +69,6 @@ pub struct View {
     pub panel: bool,
     pub search: Entity<TextInput>,
     pub folded: HashSet<String>,
-    /// Who holds which role, once read: the roster's sections and name colours.
-    pub graph: Option<Graph>,
 }
 
 struct GraphRole {
@@ -880,7 +878,7 @@ pub fn roster<E: ParentElement>(
             || n.contains(&query)
     };
     let is_admin = |n: &str| owner == Some(n) || view.admins.iter().any(|a| a == n);
-    let graph = view.graph.as_ref();
+    let graph = store.role_graphs.get(&com.community_id);
     // A Private Channel lists only who may read it; unscoped until the graph lands.
     let scope = graph
         .zip(com.channel(open).filter(|ch| ch.private))
@@ -1070,9 +1068,18 @@ pub fn members_panel(
         )
 }
 
-/// Owner and admin marks after an author's name in a channel.
+/// An author's name colour in a channel: their topmost coloured role, on the new roles.
+pub fn author_colour(store: &Store, chat_id: &str, npub: &str) -> Option<u32> {
+    let g = store.role_graphs.get(&store.community_of(chat_id)?.community_id)?;
+    g.activated.then(|| g.highest(npub, |r| r.color != 0)).flatten().map(|r| r.color)
+}
+
+/// The Owner chip after an author's name in a channel; on the new roles the name's colour stands instead.
 pub fn author_badge(store: &Store, chat_id: &str, npub: &str) -> Option<AnyElement> {
     let com = store.community_of(chat_id)?;
+    if store.role_graphs.get(&com.community_id).is_some_and(|g| g.activated) {
+        return None;
+    }
     let owner = com.owner_npub.as_deref() == Some(npub);
     owner.then(|| {
         crate::kit::spaced("OWNER", 0.5)

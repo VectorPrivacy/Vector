@@ -307,8 +307,8 @@ pub struct Store {
     pub send_denied: HashMap<String, HashSet<String>>,
     /// Fixtures' members seen posting outside the Guestbook, by community.
     pub fixture_unlisted: HashMap<String, HashMap<String, String>>,
-    /// Fixtures' role graphs, by community.
-    pub fixture_graphs: HashMap<String, serde_json::Value>,
+    /// Each community's role graph, once read: roster sections and name colours.
+    pub role_graphs: HashMap<String, crate::community::Graph>,
     /// Collapsed posts tapped open in the open chat.
     pub unveiled: HashSet<String>,
     /// Each community's logo and banner as local files, once resolved.
@@ -486,7 +486,7 @@ impl Store {
             send_denied: f.send_denied,
             unveiled: HashSet::new(),
             fixture_unlisted: f.unlisted,
-            fixture_graphs: f.role_graphs,
+            role_graphs: f.role_graphs.iter().map(|(k, v)| (k.clone(), crate::community::Graph::parse(v))).collect(),
             art: HashMap::new(),
             hidden_banners: Vec::new(),
             pinned: demo.pinned,
@@ -547,7 +547,7 @@ impl Store {
             send_denied: HashMap::new(),
             unveiled: HashSet::new(),
             fixture_unlisted: HashMap::new(),
-            fixture_graphs: HashMap::new(),
+            role_graphs: HashMap::new(),
             art: HashMap::new(),
             hidden_banners: Vec::new(),
             streamer: Default::default(),

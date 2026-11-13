@@ -321,7 +321,7 @@ pub fn message_row(ctx: &Ctx, index: usize, first: bool, run: u32, gap: f32) -> 
                         .font_weight(FontWeight::BOLD)
                         .text_size(px(15.))
                         .line_height(px(19.5))
-                        .text_color(c(0xffffff))
+                        .text_color(c(crate::community::author_colour(ctx.store, &ctx.chat.id, &author).unwrap_or(0xffffff)))
                         .cursor_pointer()
                         .hover(|d| d.underline())
                         .on_click(move |_, w, cx| act(&id, Act::Mini(who.clone(), k.clone()), w, cx))

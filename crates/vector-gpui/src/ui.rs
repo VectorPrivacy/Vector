@@ -9222,7 +9222,6 @@ impl VectorApp {
                 panel: true,
                 search,
                 folded: HashSet::new(),
-                graph: self.store.borrow().fixture_graphs.get(&id).map(crate::community::Graph::parse),
             });
             self.check_raid(id.clone(), cx);
             if self.live {
@@ -9255,7 +9254,9 @@ impl VectorApp {
                         v.members = members;
                         v.admins = admins;
                         v.unlisted = unlisted;
-                        v.graph = graph.as_ref().map(crate::community::Graph::parse);
+                        if let Some(g) = graph.as_ref().map(crate::community::Graph::parse) {
+                            this.store.borrow_mut().role_graphs.insert(id.clone(), g);
+                        }
                     }
                     v.loading = false;
                 }
