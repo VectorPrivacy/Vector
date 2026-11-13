@@ -40,6 +40,7 @@ mod crop;
 mod cropper;
 mod data;
 mod decorate;
+mod chrome;
 mod deeplink;
 mod embeds;
 mod emoji;
@@ -207,13 +208,14 @@ fn main() {
             .open_window(
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
-                    titlebar: None,
+                    titlebar: chrome::titlebar(),
                     window_decorations: Some(WindowDecorations::Client),
                     window_min_size: Some(size(px(385.), px(575.))),
                     app_id: Some("io.vectorapp.gpui".into()),
                     ..Default::default()
                 },
                 |window, cx| {
+                    chrome::hide_native_controls(window);
                     cx.new(|cx| match (fixtures, events) {
                         (Some((store, open)), _) => {
                             ui::VectorApp::fixtures(store, open, window, cx)

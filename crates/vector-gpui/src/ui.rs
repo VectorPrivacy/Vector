@@ -6364,6 +6364,15 @@ fn chrome(window: &Window, login: bool, mark_only: bool) -> gpui::Div {
             .text_color(white_a(0.7))
             .hover(move |s| s.bg(c(hover)).text_color(c(0xffffff)))
             .window_control_area(area)
+            // macOS has no hit-test for control areas: the click acts here.
+            .when(cfg!(target_os = "macos"), |d| {
+                d.on_click(move |_, window, _| match area {
+                    WindowControlArea::Min => window.minimize_window(),
+                    WindowControlArea::Max => window.zoom_window(),
+                    WindowControlArea::Close => window.remove_window(),
+                    WindowControlArea::Drag => {}
+                })
+            })
             .child(svg().path(icon).size(px(10.)).text_color(white_a(0.7)))
     };
     div()
@@ -6417,12 +6426,16 @@ fn chrome(window: &Window, login: bool, mark_only: bool) -> gpui::Div {
                 .h_full()
                 .child(
                     div()
+                        .id("chrome-help")
                         .w(px(37.))
                         .mr(px(8.))
                         .h_full()
                         .flex()
                         .items_center()
                         .justify_center()
+                        .cursor_pointer()
+                        .on_click(|_, _, cx| cx.open_url("https://docs.vectorapp.io"))
+                        .tooltip(crate::kit::tooltip("Help"))
                         .child(
                             svg()
                                 .path("ui/chrome-help.svg")
