@@ -226,9 +226,12 @@ fn channel_row(
 ) -> impl IntoElement {
     let id = ch.channel_id.clone();
     let group = SharedString::from(format!("ch-{}", ch.channel_id));
-    let unread = !open && channel_unread(store, ch) > 0;
+    let muted = store.chat(&ch.channel_id).is_some_and(|chat| chat.muted);
+    let unread = !open && !muted && channel_unread(store, ch) > 0;
     let ink = if open || unread {
         c(0xffffff)
+    } else if muted {
+        white_a(0.3)
     } else {
         white_a(0.55)
     };
