@@ -400,14 +400,45 @@ pub fn decode_thumbhash(hash: &str, px: (u32, u32)) -> Option<RenderImage> {
     Some(RenderImage::new(vec![Frame::new(to_bgra(buf))]))
 }
 
-/// An animated GIF's frames, each scaled to `to` when that is smaller.
+/// An animation's frames (GIF, animated WebP or APNG, sniffed from the bytes, not the name),
+/// each scaled to `to` when that is smaller. `None` for anything that doesn't animate.
 fn gif_frames(bytes: &[u8], to: impl Fn(u32, u32) -> (u32, u32)) -> Option<(Vec<Frame>, u32, u32)> {
-    let dec = image::codecs::gif::GifDecoder::new(Cursor::new(bytes)).ok()?;
-    let (w, h) = dec.dimensions();
+    if bytes.starts_with(b"GIF8") {
+        let dec = image::codecs::gif::GifDecoder::new(Cursor::new(bytes)).ok()?;
+        let (w, h) = dec.dimensions();
+        return frames_of(dec.into_frames(), w, h, &to);
+    }
+    if bytes.len() > 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        let dec = image::codecs::webp::WebPDecoder::new(Cursor::new(bytes)).ok()?;
+        if !dec.has_animation() {
+            return None;
+        }
+        let (w, h) = dec.dimensions();
+        return frames_of(dec.into_frames(), w, h, &to);
+    }
+    // An APNG declares itself with `acTL` before its first `IDAT`.
+    if bytes.starts_with(b"\x89PNG") {
+        let head = &bytes[..bytes.len().min(64 * 1024)];
+        let idat = head.windows(4).position(|w| w == b"IDAT").unwrap_or(head.len());
+        if !head[..idat].windows(4).any(|w| w == b"acTL") {
+            return None;
+        }
+        let dec = image::codecs::png::PngDecoder::new(Cursor::new(bytes)).ok()?;
+        let (w, h) = dec.dimensions();
+        return frames_of(dec.apng().ok()?.into_frames(), w, h, &to);
+    }
+    None
+}
+
+fn frames_of(
+    frames: image::Frames<'_>,
+    w: u32,
+    h: u32,
+    to: &impl Fn(u32, u32) -> (u32, u32),
+) -> Option<(Vec<Frame>, u32, u32)> {
     let (tw, th) = to(w, h);
     let scale = tw < w || th < h;
-    let frames = dec
-        .into_frames()
+    let frames = frames
         .map(|f| {
             f.map(|f| {
                 let delay = f.delay();
@@ -437,7 +468,7 @@ pub fn decode_gif_cover(bytes: &[u8], side: u32) -> Option<RenderImage> {
 /// A picture as frames no larger than `max`, with its natural size.
 pub fn decode(bytes: &[u8], ext: &str, max: (u32, u32)) -> Option<(RenderImage, u32, u32)> {
     let _trim = crate::trim::OnDrop;
-    if ext == "gif"
+    if ext != "svg"
         && let Some((frames, w, h)) = gif_frames(bytes, |w, h| {
             let s = (max.0 as f32 / w.max(1) as f32)
                 .min(max.1 as f32 / h.max(1) as f32)
@@ -513,4 +544,28 @@ thread_local! {
 /// The window's one media cache, for renderers that aren't handed it.
 pub fn shared() -> std::rc::Rc<std::cell::RefCell<Media>> {
     SHARED.with(|m| m.clone())
+}
+
+#[cfg(test)]
+mod tests {
+    use image::codecs::gif::GifEncoder;
+    use image::{Delay, Frame, RgbaImage};
+
+    #[test]
+    fn an_animation_is_sniffed_whatever_its_name() {
+        let mut gif = Vec::new();
+        {
+            let mut enc = GifEncoder::new(&mut gif);
+            for v in [0u8, 255] {
+                let buf = RgbaImage::from_pixel(4, 4, image::Rgba([v, v, v, 255]));
+                enc.encode_frame(Frame::from_parts(buf, 0, 0, Delay::from_numer_denom_ms(100, 1))).unwrap();
+            }
+        }
+        let (img, w, h) = super::decode(&gif, "", (64, 64)).unwrap();
+        assert_eq!((w, h), (4, 4));
+        assert_eq!(img.frame_count(), 2);
+        let mut png = Vec::new();
+        RgbaImage::new(4, 4).write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
+        assert_eq!(super::decode(&png, "png", (64, 64)).unwrap().0.frame_count(), 1);
+    }
 }
