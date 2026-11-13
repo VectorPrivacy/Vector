@@ -113,6 +113,8 @@ struct Slot {
     wake: futures::channel::mpsc::UnboundedSender<()>,
     model: Option<gpu::Model>,
     target: Option<gpu::Target>,
+    /// The scene while the GPU is let go, uploaded again by the next frame asked for.
+    parked: Option<scene::Scene>,
 }
 
 fn engine() -> &'static Sender<Job> {
@@ -131,22 +133,32 @@ fn engine() -> &'static Sender<Job> {
 fn run(rx: Receiver<Job>, back: Sender<Job>) {
     let mut gpu: Option<Result<gpu::Gpu, String>> = None;
     let mut slots: HashMap<u64, Slot> = HashMap::new();
-    while let Ok(job) = rx.recv() {
+    loop {
+        // A GPU device holds tens of MB of driver memory; it goes after a while with no frame asked for.
+        let job = match rx.recv_timeout(std::time::Duration::from_secs(20)) {
+            Ok(job) => job,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                if gpu.as_ref().is_some_and(|g| g.is_ok()) {
+                    for slot in slots.values_mut() {
+                        slot.target = None;
+                        if let Some(model) = slot.model.take() {
+                            slot.parked = Some(model.scene);
+                        }
+                    }
+                    gpu = None;
+                }
+                continue;
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+        };
         match job {
             Job::Load { id, src, ext, out, wake } => {
-                let g = gpu.get_or_insert_with(|| {
-                    let g = gpu::Gpu::new();
-                    if let Err(e) = &g {
-                        log::warn!("[3D] no GPU for models: {e}");
-                    }
-                    g
-                });
-                if g.is_err() {
+                if bring_up(&mut gpu).is_err() {
                     let _ = out.send(Out::Unavailable);
                     let _ = wake.unbounded_send(());
                     continue;
                 }
-                slots.insert(id, Slot { out, wake, model: None, target: None });
+                slots.insert(id, Slot { out, wake, model: None, target: None, parked: None });
                 let back = back.clone();
                 let ext = ext.to_ascii_lowercase();
                 rayon::spawn(move || {
@@ -155,7 +167,8 @@ fn run(rx: Receiver<Job>, back: Sender<Job>) {
                 });
             }
             Job::Parsed { id, scene } => {
-                let (Some(slot), Some(Ok(g))) = (slots.get_mut(&id), gpu.as_ref()) else { continue };
+                let Some(slot) = slots.get_mut(&id) else { continue };
+                let Ok(g) = bring_up(&mut gpu) else { continue };
                 match scene {
                     Ok(scene) => {
                         let model = g.upload(scene);
@@ -171,7 +184,13 @@ fn run(rx: Receiver<Job>, back: Sender<Job>) {
                 let _ = slot.wake.unbounded_send(());
             }
             Job::Render { id, shot } => {
-                let (Some(slot), Some(Ok(g))) = (slots.get_mut(&id), gpu.as_mut()) else { continue };
+                let Some(slot) = slots.get_mut(&id) else { continue };
+                let Ok(g) = bring_up(&mut gpu) else { continue };
+                if slot.model.is_none()
+                    && let Some(scene) = slot.parked.take()
+                {
+                    slot.model = Some(g.upload(scene));
+                }
                 let Some(model) = &slot.model else { continue };
                 let (w, h) = (shot.w.clamp(1, 4096), shot.h.clamp(1, 4096));
                 if slot.target.as_ref().is_none_or(|t| t.size() != (w, h)) {
@@ -194,6 +213,18 @@ fn run(rx: Receiver<Job>, back: Sender<Job>) {
             }
         }
     }
+}
+
+fn bring_up(gpu: &mut Option<Result<gpu::Gpu, String>>) -> Result<&mut gpu::Gpu, ()> {
+    gpu.get_or_insert_with(|| {
+        let g = gpu::Gpu::new();
+        if let Err(e) = &g {
+            log::warn!("[3D] no GPU for models: {e}");
+        }
+        g
+    })
+    .as_mut()
+    .map_err(|_| ())
 }
 
 fn next_id() -> u64 {
