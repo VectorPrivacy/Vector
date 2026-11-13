@@ -16489,8 +16489,16 @@ impl VectorApp {
             AddProfile::Back => {
                 let back = back.clone();
                 self.adding = None;
-                let _ = account::set_active(&back);
-                self.reboot(window, cx);
+                // The account being returned to keeps its own network.
+                let rx = backend::run(backend::transport::prelogin_abandon());
+                cx.spawn_in(window, async move |this, cx| {
+                    let _ = rx.await;
+                    let _ = this.update_in(cx, |this, window, cx| {
+                        let _ = account::set_active(&back);
+                        this.reboot(window, cx);
+                    });
+                })
+                .detach();
             }
         }
     }
