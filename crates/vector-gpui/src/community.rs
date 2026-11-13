@@ -1383,3 +1383,47 @@ pub fn invite_details(
     )
     .with_priority(13)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::Graph;
+
+    fn graph(activated: bool) -> Graph {
+        Graph::parse(&serde_json::json!({
+            "activated": activated,
+            "roles": [
+                {"role_id": "core", "name": "Core", "position": 1, "color": 0x59fcb3, "channel_id": null, "display": true},
+                {"role_id": "art", "name": "Art", "position": 3, "color": 0xffb35c, "channel_id": "ABCD", "display": false},
+                {"role_id": "mod", "name": "Mods", "position": 2, "color": 0, "channel_id": null, "display": true},
+            ],
+            "grants": [
+                {"npub": "a", "role_ids": ["art", "core"]},
+                {"npub": "b", "role_ids": ["mod", "art"]},
+                {"npub": "c", "role_ids": ["art"]},
+            ],
+            "readers": {"ABCD": ["b"]},
+        }))
+    }
+
+    #[test]
+    fn highest_role_picks_the_lowest_position() {
+        let g = graph(true);
+        assert_eq!(g.highest("a", |r| g.heads(r)).map(|r| r.id.as_str()), Some("core"));
+        assert_eq!(g.highest("b", |r| g.heads(r)).map(|r| r.id.as_str()), Some("mod"));
+        assert!(g.highest("c", |r| g.heads(r)).is_none());
+        // A colourless role passes its colour down to the next one.
+        assert_eq!(g.highest("b", |r| r.color != 0).map(|r| r.color), Some(0xffb35c));
+    }
+
+    #[test]
+    fn private_readers_follow_the_roles_in_use() {
+        let owner = Some("o");
+        let new = graph(true).readers("abcd", owner);
+        assert_eq!(new, ["o", "b"].iter().map(|s| s.to_string()).collect());
+        let old = graph(false).readers("abcd", owner);
+        assert_eq!(old, ["o", "a", "b", "c"].iter().map(|s| s.to_string()).collect());
+        // The old roles head a section with every role, shown separately or not.
+        let g = graph(false);
+        assert_eq!(g.highest("c", |r| g.heads(r)).map(|r| r.id.as_str()), Some("art"));
+    }
+}
