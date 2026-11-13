@@ -158,7 +158,31 @@ pub fn start(data_dir: PathBuf) -> mpsc::UnboundedReceiver<UiEvent> {
     rt.spawn(vector_core::profile::sync::start_profile_sync_processor(
         Arc::new(sync::ProfileHandler),
     ));
+    // spawn-detached: housekeeping for whichever account is live, on the desktop's 45 s beat.
+    rt.spawn(async {
+        let mut beat = tokio::time::interval(std::time::Duration::from_secs(45));
+        loop {
+            beat.tick().await;
+            maintenance().await;
+        }
+    });
     rx
+}
+
+/// Retry profiles that never loaded, then let go of what sat idle: decoded sounds, the
+/// Whisper model, and messages of chats the timeline isn't showing (it pages from the
+/// database, so core keeps only each chat's tail).
+async fn maintenance() {
+    vector_core::profile::sync::sync_all_profiles().await;
+    let mut freed = false;
+    if let Ok(engine) = vector_media::audio_engine::AudioEngine::get() {
+        freed |= engine.evict_idle() > 0;
+    }
+    freed |= vector_media::whisper::check_ctx_ttl();
+    freed |= vector_core::STATE.lock().await.trim_unheld_chats() > 0;
+    if freed {
+        crate::trim::soon();
+    }
 }
 
 fn engine_sink(event: &str, payload: serde_json::Value) {
