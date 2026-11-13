@@ -383,7 +383,8 @@ fn metrics(look: &Look, window: &Window) -> Metrics {
     let s = px(look.size);
     Metrics {
         ascent: ts.ascent(id, s).into(),
-        descent: ts.descent(id, s).into(),
+        // CoreText and DirectWrite report it below the baseline as negative.
+        descent: f32::from(ts.descent(id, s)).abs(),
     }
 }
 
