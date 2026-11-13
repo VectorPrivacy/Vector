@@ -2,6 +2,7 @@
 //! the communities this device holds, dragged to rearrange.
 
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 
 use gpui::prelude::*;
 use gpui::{AnyElement, Hsla, SharedString, Window, div, px, svg};
@@ -97,27 +98,80 @@ pub fn tint(hue: Option<u16>) -> Hsla {
 #[derive(Clone)]
 pub struct Drag {
     pub source: RailDrag,
-    name: SharedString,
+    look: Look,
 }
 
-struct Ghost(SharedString);
+/// What the pointer carries: the row's label wide, its square tile slim.
+#[derive(Clone)]
+enum Look {
+    Row(SharedString, Option<PathBuf>),
+    FolderRow(SharedString, Hsla),
+    Tile(Option<PathBuf>),
+    Folder(Hsla, Vec<Option<PathBuf>>),
+}
+
+struct Ghost(Look);
+
+fn ghost_logo(path: &Option<PathBuf>, size: f32, radius: f32) -> gpui::Stateful<gpui::Img> {
+    match path {
+        Some(p) => crate::pic::img(p.clone()).object_fit(gpui::ObjectFit::Cover),
+        None => crate::pic::img("icons/group-placeholder.svg"),
+    }
+    .size(px(size))
+    .rounded(px(radius))
+    .flex_shrink_0()
+}
+
+fn ghost_row() -> gpui::Div {
+    div()
+        .w(px(crate::ui::RAIL_W - 16.))
+        .h(px(31.))
+        .px(px(8.))
+        .gap(px(10.))
+        .flex()
+        .items_center()
+        .rounded(px(10.))
+        .bg(c(0x161616))
+        .opacity(0.92)
+        .shadow_lg()
+        .font_family(RUBIK)
+        .text_size(px(14.))
+        .text_color(c(0xffffff))
+}
 
 impl Render for Ghost {
     fn render(&mut self, _: &mut Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
-        div()
-            .w(px(crate::ui::RAIL_W - 16.))
-            .h(px(31.))
-            .px(px(8.))
-            .flex()
-            .items_center()
-            .rounded(px(10.))
-            .bg(c(0x161616))
-            .opacity(0.92)
-            .shadow_lg()
-            .font_family(RUBIK)
-            .text_size(px(14.))
-            .text_color(c(0xffffff))
-            .child(div().truncate().child(self.0.clone()))
+        match &self.0 {
+            Look::Row(name, path) => ghost_row().child(ghost_logo(path, 26., 4.9)).child(div().truncate().child(name.clone())),
+            Look::FolderRow(name, tint) => ghost_row()
+                .child(svg().path("icons/folder.svg").size(px(26.)).flex_shrink_0().text_color(*tint))
+                .child(div().truncate().child(name.clone())),
+            Look::Tile(path) => div()
+                .size(px(45.))
+                .rounded(px(8.5))
+                .bg(gpui::rgba(0x090909e6))
+                .opacity(0.92)
+                .shadow_lg()
+                .child(ghost_logo(path, 45., 8.5)),
+            Look::Folder(tint, icons) => div()
+                .relative()
+                .size(px(45.))
+                .rounded(px(8.5))
+                .bg(c(0x090909))
+                .opacity(0.92)
+                .shadow_lg()
+                .child(
+                    div().absolute().inset_0().rounded(px(8.5)).bg(tint.opacity(0.26)).child(
+                        div()
+                            .absolute()
+                            .inset(px(6.))
+                            .flex()
+                            .flex_wrap()
+                            .gap(px(3.))
+                            .children(icons.iter().map(|p| ghost_logo(p, 15., 4.5))),
+                    ),
+                ),
+        }
     }
 }
 
@@ -377,7 +431,7 @@ fn item(store: &Store, com: &Community, open: bool, unread: bool, inset: f32, vo
     .child(logo(store, &com.community_id, 26., 4.9))
     .child(toned_name(com.name.clone().into(), group, open, community_unread(store, com), community_muted(store, com)))
     .children(voice.map(voice_badge));
-    draggable(el, source, com.name.clone().into(), zones, on)
+    draggable(el, source, Look::Row(com.name.clone().into(), store.icon(&com.community_id)), zones, on)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -441,23 +495,23 @@ fn folder_head(
     })
     .child(tile)
     .child(toned_name(label.to_string().into(), group, active, any_unread, all_muted));
-    draggable(el, RailDrag::Folder { id: fid }, label.to_string().into(), zones, on)
+    draggable(el, RailDrag::Folder { id: fid }, Look::FolderRow(label.to_string().into(), tint), zones, on)
 }
 
 /// A drag lifts the row; its top and bottom bands drop beside it, its middle drops onto it.
 fn draggable(
     el: gpui::Stateful<gpui::Div>,
     source: RailDrag,
-    label: SharedString,
+    look: Look,
     zones: Zones,
     on: &OnAct,
 ) -> AnyElement {
     let mut el = el.on_drag(
         Drag {
             source: source.clone(),
-            name: label,
+            look,
         },
-        |d: &Drag, _, _, cx| cx.new(|_| Ghost(d.name.clone())),
+        |d: &Drag, _, _, cx| cx.new(|_| Ghost(d.look.clone())),
     );
     let child = zones.child;
     for (band, drop) in [("into", zones.into), ("before", Some(zones.before)), ("after", Some(zones.after))] {
@@ -589,7 +643,8 @@ pub fn render_slim(
                     }
                 })
                 .child(tile_el);
-                let head = draggable(head, RailDrag::Folder { id: fid }, label.into(), zones, on);
+                let look = Look::Folder(tint, members.iter().take(4).map(|c| store.icon(&c.community_id)).collect());
+                let head = draggable(head, RailDrag::Folder { id: fid }, look, zones, on);
                 let mut band = div()
                     .w(px(53.))
                     .mx_auto()
@@ -664,5 +719,5 @@ fn tile(store: &Store, com: &Community, open: bool, unread: bool, edge: f32, voi
         })
         .child(logo(store, &com.community_id, 45., 8.5).bg(gpui::rgba(0x090909e6)))
         .children(voice.map(voice_badge));
-    draggable(el, RailDrag::Item { key: id }, com.name.clone().into(), zones, on)
+    draggable(el, RailDrag::Item { key: id.clone() }, Look::Tile(store.icon(&id)), zones, on)
 }
