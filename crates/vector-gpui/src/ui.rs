@@ -4500,33 +4500,44 @@ impl VectorApp {
         let Some(chat) = self.open.clone() else {
             return;
         };
+        // Shown at once; the relay's echo replaces the message, this guess with it.
+        let me = self.store.borrow().my_npub.clone();
+        let local = format!("local-{}", vector_core::simd::hex::bytes_to_hex_string(&rand::random::<[u8; 8]>()));
+        if let Some(m) = self
+            .store
+            .borrow_mut()
+            .chat_mut(&chat)
+            .and_then(|c| c.messages.iter_mut().find(|m| m.id == id))
+        {
+            m.reactions.push(vector_core::types::Reaction {
+                id: local.clone(),
+                reference_id: id.clone(),
+                author_id: me,
+                emoji: emoji.clone(),
+                emoji_url: url.clone(),
+            });
+        }
+        self.refresh_rows(false);
         if self.live {
-            let rx = backend::run(backend::actions::react(chat.to_string(), id, emoji, url));
+            let rx = backend::run(backend::actions::react(chat.to_string(), id.clone(), emoji, url));
             cx.spawn(async move |this, cx| {
                 if let Ok(Err(e)) = rx.await {
                     this.update(cx, |this, cx| {
+                        if let Some(m) = this
+                            .store
+                            .borrow_mut()
+                            .chat_mut(&chat)
+                            .and_then(|c| c.messages.iter_mut().find(|m| m.id == id))
+                        {
+                            m.reactions.retain(|r| r.id != local);
+                        }
+                        this.refresh_rows(false);
                         this.show_toast(&format!("Reaction not sent: {e}"), cx);
                     })
                     .ok();
                 }
             })
             .detach();
-        } else {
-            let me = self.store.borrow().my_npub.clone();
-            if let Some(m) = self
-                .store
-                .borrow_mut()
-                .chat_mut(&chat)
-                .and_then(|c| c.messages.iter_mut().find(|m| m.id == id))
-            {
-                m.reactions.push(vector_core::types::Reaction {
-                    id: format!("local-{}", m.reactions.len()),
-                    reference_id: id.clone(),
-                    author_id: me,
-                    emoji,
-                    emoji_url: url,
-                });
-            }
         }
         cx.notify();
     }
