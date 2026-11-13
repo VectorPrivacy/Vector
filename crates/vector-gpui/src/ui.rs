@@ -2187,6 +2187,28 @@ impl VectorApp {
         );
     }
 
+    /// A place the Main Menu or the sidebar's tabs go to.
+    fn nav_to(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let me = self.store.borrow().my_npub.clone();
+        match id {
+            "profile" => self.open_profile(me, cx),
+            "chat" => {
+                self.settings = None;
+                self.profile = None;
+                self.nexus = None;
+            }
+            "bookmarks" => {
+                self.settings = None;
+                self.store.borrow_mut().ensure_dm(&me);
+                self.open_chat(me.into(), window, cx);
+            }
+            "settings" => self.open_settings("appearance", window, cx),
+            "miniapps" => self.show_nexus(None, window, cx),
+            _ => {}
+        }
+        cx.notify();
+    }
+
     fn on_start(
         &mut self,
         act: crate::startmenu::Act,
@@ -2393,22 +2415,7 @@ impl VectorApp {
             }
             Act::Nav(id) => {
                 self.start = None;
-                let me = self.store.borrow().my_npub.clone();
-                match id {
-                    "profile" => self.open_profile(me, cx),
-                    "chat" => {
-                        self.settings = None;
-                        self.profile = None;
-                    }
-                    "bookmarks" => {
-                        self.settings = None;
-                        self.store.borrow_mut().ensure_dm(&me);
-                        self.open_chat(me.into(), window, cx);
-                    }
-                    "settings" => self.open_settings("appearance", window, cx),
-                    "miniapps" => self.show_nexus(None, window, cx),
-                    _ => {}
-                }
+                self.nav_to(id, window, cx);
             }
             Act::Open(key) => {
                 self.start = None;
@@ -5866,6 +5873,32 @@ impl Render for VectorApp {
                             backend::device::set("ws_rail_collapsed", app.rail_pref.to_string());
                             cx.notify();
                         }),
+                        (!self.start_menu_on()).then(|| {
+                            let app = cx.entity().downgrade();
+                            let me = store.my_npub.clone();
+                            Navbar {
+                                active: if self.settings.is_some() {
+                                    "settings"
+                                } else if self.nexus.is_some() {
+                                    "miniapps"
+                                } else if self.profile.as_ref().is_some_and(|p| p.npub == me) {
+                                    "profile"
+                                } else if self.open.as_deref() == Some(me.as_str()) {
+                                    "bookmarks"
+                                } else {
+                                    "chat"
+                                },
+                                chat_badge: store
+                                    .chats
+                                    .iter()
+                                    .filter(|c| store.listed(c) && !store.is_request(c) && store.community_of(&c.id).is_none() && store.unread_count(c) > 0)
+                                    .count(),
+                                update_dot: false,
+                                on: Rc::new(move |id, window, cx| {
+                                    app.update(cx, |app, cx| app.nav_to(id, window, cx)).ok();
+                                }),
+                            }
+                        }),
                     ))
                     .when_some(self.settings.as_ref(), |row, settings| {
                         let app = cx.entity().downgrade();
@@ -6531,6 +6564,78 @@ impl RailMode {
     }
 }
 
+/// Main Menu off: the sidebar's own tabs (`#navbar`'s Profile, Chat, Bookmarks, Mini Apps,
+/// Settings), and your row opens your profile instead of the menu.
+pub(crate) struct Navbar {
+    pub active: &'static str,
+    pub chat_badge: usize,
+    pub update_dot: bool,
+    pub on: Rc<dyn Fn(&'static str, &mut Window, &mut gpui::App)>,
+}
+
+const NAV_TABS: [(&str, &str, &str); 5] = [
+    ("profile", "Profile", "icons/user-circle.svg"),
+    ("chat", "Chat", "icons/chats.svg"),
+    ("bookmarks", "Bookmarks", "icons/bookmark-fill.svg"),
+    ("miniapps", "Mini Apps", "icons/grid-fill.svg"),
+    ("settings", "Settings", "icons/settings.svg"),
+];
+
+fn nav_tabs(nav: &Navbar, slim: bool) -> impl IntoElement {
+    div().pt(px(6.)).flex().flex_col().gap(px(2.)).children(NAV_TABS.iter().map(|&(id, label, icon)| {
+        let on = nav.on.clone();
+        let active = nav.active == id;
+        let badge = (id == "chat" && nav.chat_badge > 0).then_some(nav.chat_badge);
+        let dot = id == "settings" && nav.update_dot;
+        div()
+            .id(SharedString::from(format!("{id}-btn")))
+            .relative()
+            .mx(px(8.))
+            .h(px(40.))
+            .flex_shrink_0()
+            .rounded(px(6.))
+            .flex()
+            .items_center()
+            .gap(px(11.))
+            .pl(px(if slim { 6. } else { 14. }))
+            .pr(px(10.))
+            .cursor_pointer()
+            .when(active, |d| d.bg(white_a(0.045)))
+            .hover(|d| d.bg(white_a(0.045)))
+            .when(slim, |d| d.tooltip(crate::kit::tooltip(label)))
+            .on_click(move |_, w, cx| on(id, w, cx))
+            .child(svg().path(icon).size(px(28.)).flex_shrink_0().text_color(c(0xffffff)))
+            .when(!slim, |d| {
+                d.child(
+                    div()
+                        .font_family(RUBIK)
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_size(px(14.))
+                        .text_color(c(0xffffff))
+                        .whitespace_nowrap()
+                        .child(label),
+                )
+            })
+            .children(badge.filter(|_| !slim).map(|n| {
+                div()
+                    .ml_auto()
+                    .min_w(px(19.))
+                    .px(px(6.))
+                    .rounded(px(10.))
+                    .bg(c(PRIMARY))
+                    .text_color(c(0x000000))
+                    .text_size(px(11.))
+                    .font_weight(FontWeight::BOLD)
+                    .line_height(px(19.))
+                    .text_center()
+                    .child(if n > 99 { "99+".to_string() } else { n.to_string() })
+            }))
+            .when(dot || (slim && badge.is_some()), |d| {
+                d.child(div().absolute().top(px(16.)).right(px(10.)).size(px(8.)).rounded_full().bg(c(PRIMARY)))
+            })
+    }))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn rail(
     store: &Store,
@@ -6542,6 +6647,7 @@ fn rail(
     on_c: &crate::community::OnAct,
     on_me: impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static,
     on_collapse: impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static,
+    navbar: Option<Navbar>,
 ) -> impl IntoElement {
     let slim = mode.collapsed;
     let unread: Vec<&SerializableChat> = store
@@ -6645,7 +6751,7 @@ fn rail(
     ) };
 
     // #ws-rail-dms
-    let dms_slim = (slim && !unread.is_empty()).then(|| {
+    let dms_slim = (slim && navbar.is_none() && !unread.is_empty()).then(|| {
         div().mt(px(6.)).flex().flex_col().gap(px(8.)).children(unread.iter().map(|chat| {
             let id = chat.id.clone();
             let on = on_c.clone();
@@ -6661,7 +6767,7 @@ fn rail(
                 .child(slim_badge(white_a(0.9)).top(px(-2.)).right(px(-2.)))
         }))
     });
-    let dms = (!slim && !unread.is_empty()).then(|| {
+    let dms = (!slim && navbar.is_none() && !unread.is_empty()).then(|| {
         div()
             .mt(px(10.))
             .child(rail_label("New Messages"))
@@ -6774,7 +6880,13 @@ fn rail(
                 ),
         ) };
 
-    let on_me = Rc::new(on_me);
+    let on_me: Rc<dyn Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App)> = match &navbar {
+        Some(n) => {
+            let on = n.on.clone();
+            Rc::new(move |_, w, cx| on("profile", w, cx))
+        }
+        None => Rc::new(on_me),
+    };
     let (on_me1, on_me2) = (on_me.clone(), on_me);
     let me = store.me();
     let my_name = me.map(|p| store.name(&p.id)).unwrap_or_default();
@@ -6803,6 +6915,7 @@ fn rail(
                 .children(dms_slim)
                 .child(spaces),
         )
+        .children(navbar.as_ref().map(|n| nav_tabs(n, slim)))
         .when(mode.locked, |d| d.child(div().mt(px(10.)).mb(px(2.))))
         .when(!mode.locked, |d| {
             // #ws-rail-collapse
@@ -8317,13 +8430,14 @@ impl VectorApp {
                         let top = if self.is_slim && !staged_voice { 15. } else { 12. };
                         if request.is_some() { top + 56. } else { top }
                     }))
-                    .children(bar)
-                    .children(back)
                     .map(|d| match alone {
                         // Auto margins centre it until it no longer fits, then it scrolls from its top.
                         Some(edge) => d.child(div().id("chat-start").size_full().flex().flex_col().overflow_y_scroll().child(div().my_auto().child(edge))),
                         None => d.child(messages),
                     })
+                    // After the list: painted over its media and toolbars, and hit first.
+                    .children(bar)
+                    .children(back)
                     .children(request)
                     .children(drawer)
                     .children(typing_strip(store, &id, self.typing_fade).inspect(|_| window.request_animation_frame()))
