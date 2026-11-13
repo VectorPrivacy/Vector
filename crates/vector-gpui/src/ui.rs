@@ -12924,7 +12924,16 @@ impl VectorApp {
         match a.action_type.as_str() {
             "profile" => self.open_profile(a.target, cx),
             "chat" => {
-                if self.open.as_deref() != Some(a.target.as_str()) {
+                let community = self.store.borrow().community_of(&a.target).map(|c| c.community_id.clone());
+                if let Some(community) = community {
+                    if self.community.as_ref().map(|c| c.id.as_str()) != Some(community.as_str()) {
+                        self.open_community(community, window, cx);
+                    }
+                    if self.open.as_deref() != Some(a.target.as_str()) {
+                        self.open_channel(a.target, window, cx);
+                    }
+                } else if self.open.as_deref() != Some(a.target.as_str()) {
+                    self.leave_community();
                     self.open_chat(a.target.into(), window, cx);
                 }
                 if let Some(m) = a.message {
