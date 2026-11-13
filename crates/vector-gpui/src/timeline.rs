@@ -1403,7 +1403,16 @@ fn reply_quote(ctx: &Ctx, m: &Message) -> Option<AnyElement> {
             let mut look = Look::new(RUBIK, 13., 16.9, white_a(0.45));
             look.weight = FontWeight::NORMAL;
             let text = ctx.store.resolve_mentions(&text, ctx.store.community_of(&ctx.chat.id).map(|c| c.community_id.as_str()));
-            let atoms = crate::preview::reply_atoms(&text, &look);
+            let mut atoms = crate::preview::reply_atoms(&text, &look);
+            // Only the parent's own tags: a reader's pack would turn plain text into emoji.
+            let tags = parent
+                .map(|p| p.emoji_tags.as_slice())
+                .filter(|t| !t.is_empty())
+                .or(m.replied_to_emoji_tags.as_deref())
+                .unwrap_or_default();
+            if let Some(custom) = custom_emoji(ctx.store, ctx.media, tags) {
+                atoms = crate::preview::with_customs(atoms, &custom);
+            }
             div()
                 .flex_1()
                 .min_w_0()
@@ -1412,10 +1421,22 @@ fn reply_quote(ctx: &Ctx, m: &Message) -> Option<AnyElement> {
                 .child(inline(atoms, look))
                 .into_any_element()
         }
-        None => div()
-            .text_color(white_a(0.45))
-            .child("Attachment")
-            .into_any_element(),
+        None => {
+            let ext = m
+                .replied_to_attachment_extension
+                .clone()
+                .or_else(|| parent.and_then(|p| p.attachments.first()).map(|a| a.extension.clone()))
+                .filter(|e| !e.is_empty());
+            let (icon, label) = ext.as_deref().map_or(("attachment", "Attachment"), crate::data::file_type);
+            div()
+                .flex()
+                .items_center()
+                .gap(px(5.))
+                .text_color(white_a(0.45))
+                .child(svg().path(SharedString::from(format!("icons/{icon}.svg"))).size(px(18.)).flex_shrink_0().text_color(white_a(0.45)))
+                .child(label)
+                .into_any_element()
+        }
     };
     let elbow = div()
         .absolute()

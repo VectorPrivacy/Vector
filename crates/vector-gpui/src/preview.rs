@@ -320,3 +320,37 @@ pub fn atoms(content: &str, max: usize, look: &Look) -> Vec<Atom> {
     flush(&mut buf, &mut out, bold, italic, strike, spoiler);
     out
 }
+
+/// `:shortcode:`s the message tagged, drawn as their pictures; the rest left as written.
+pub fn with_customs(atoms: Vec<Atom>, custom: &dyn Fn(&str) -> Option<crate::media::Custom>) -> Vec<Atom> {
+    let mut out = Vec::with_capacity(atoms.len());
+    for atom in atoms {
+        let Atom::Text { text, look, kind } = &atom else {
+            out.push(atom);
+            continue;
+        };
+        let spans = crate::markdown::shortcodes(text);
+        if spans.is_empty() {
+            out.push(atom);
+            continue;
+        }
+        let size = look.size * 1.15;
+        let mut last = 0;
+        for (a, b) in spans {
+            let image = match custom(&text[a + 1..b - 1]) {
+                Some(crate::media::Custom::Ready(image)) => Atom::Image { src: image.into(), size, drop: look.size * 0.2, tip: None },
+                Some(crate::media::Custom::Pending) => Atom::Gap(size),
+                _ => continue,
+            };
+            if a > last {
+                out.push(Atom::Text { text: text[last..a].to_string().into(), look: look.clone(), kind: kind.clone() });
+            }
+            out.push(image);
+            last = b;
+        }
+        if last < text.len() {
+            out.push(Atom::Text { text: text[last..].to_string().into(), look: look.clone(), kind: kind.clone() });
+        }
+    }
+    out
+}

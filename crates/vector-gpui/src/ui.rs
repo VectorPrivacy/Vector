@@ -346,6 +346,8 @@ enum Mode {
         id: String,
         name: String,
         snippet: String,
+        /// The parent's custom emoji: shortcode, then picture URL.
+        tags: Vec<(String, String)>,
     },
     Edit {
         id: String,
@@ -4327,6 +4329,7 @@ impl VectorApp {
                         .unwrap_or_else(|| self.open.as_deref().unwrap_or_default().to_string())
                 };
                 let name = self.store.borrow().name(&author);
+                let tags = m.emoji_tags.iter().map(|t| (t.shortcode.clone(), crate::timeline::emoji_source(&self.store.borrow(), &t.url))).collect();
                 let snippet = if !m.content.is_empty() {
                     self.store.borrow().resolve_mentions(&m.content, None)
                 } else if let Some(a) = m.attachments.first() {
@@ -4334,7 +4337,7 @@ impl VectorApp {
                 } else {
                     String::new()
                 };
-                self.mode = Mode::Reply { id, name, snippet };
+                self.mode = Mode::Reply { id, name, snippet, tags };
                 window.focus(&self.input.read(cx).focus_handle(cx), cx);
                 cx.notify();
             }
@@ -8926,9 +8929,17 @@ fn composer(
             linear_color_stop(c(ACCENT), 0.),
             linear_color_stop(c(ACCENT_DEEP), 1.),
         ));
-    if let Mode::Reply { name, snippet, .. } = mode {
+    if let Mode::Reply { name, snippet, tags, .. } = mode {
         let look = crate::inline::Look::new(INTER, 13., 18., white_a(0.45));
-        let atoms = crate::preview::reply_atoms(snippet, &look);
+        let mut atoms = crate::preview::reply_atoms(snippet, &look);
+        if !tags.is_empty() {
+            let media = crate::media::shared();
+            let custom = |code: &str| {
+                let (_, url) = tags.iter().find(|(c, _)| c == code)?;
+                Some(media.borrow_mut().custom(url, false))
+            };
+            atoms = crate::preview::with_customs(atoms, &custom);
+        }
         boxed = boxed.child(
             div()
                 .absolute()
