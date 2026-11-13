@@ -9576,9 +9576,15 @@ impl VectorApp {
             }
         }
         match act {
-            Act::Open(id) => self.open_community(id, window, cx),
+            Act::Open(id) => {
+                self.settings = None;
+                self.nexus = None;
+                self.open_community(id, window, cx)
+            }
             Act::Home => {
                 self.leave_community();
+                self.settings = None;
+                self.nexus = None;
                 if !self.is_slim {
                     self.open_dm_home(window, cx);
                 }
