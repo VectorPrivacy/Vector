@@ -5981,7 +5981,7 @@ impl Render for VectorApp {
                                     app.update(cx, |app, cx| app.on_profile(act, window, cx))
                                         .ok();
                                 });
-                                crate::profile::pane(&store, p, &on, window, cx)
+                                crate::profile::pane(&store, &self.media, p, &on, window, cx)
                             }
                             (None, Some(id)) => match self
                                 .community
@@ -13831,6 +13831,10 @@ impl VectorApp {
         };
         let npub = p.npub.clone();
         match act {
+            Act::Mention(who) => {
+                let at = gpui::Bounds::new(window.mouse_position(), gpui::size(px(0.), px(0.)));
+                self.show_mini(who, None, Some(at), cx)
+            }
             Act::Back => {
                 let back = p.back.clone();
                 self.profile = None;

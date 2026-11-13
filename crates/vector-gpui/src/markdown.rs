@@ -1202,6 +1202,50 @@ pub fn shortcodes(t: &str) -> Vec<(usize, usize)> {
     out
 }
 
+/// Text that isn't markdown (a bio, a status) as `renderMentions(.., { allowBare })` leaves it:
+/// npubs and our own profile links as pills, emoji and `:shortcode:`s drawn, lines kept.
+pub fn plain(src: &str, ctx: &Ctx) -> Vec<Atom> {
+    let mut b = Builder {
+        ctx,
+        swaps: &[],
+        stack: vec![Frame::Root(Vec::new())],
+        atoms: Vec::new(),
+        para: None,
+        flags: Flags::default(),
+        code: None,
+        quote_depth: 0,
+        spoilers: 0,
+        tc: None,
+    };
+    for (i, line) in src.split('\n').enumerate() {
+        if i > 0 {
+            b.atoms.push(Atom::Break);
+        }
+        let mut hits: Vec<(usize, usize, String)> = find_urls(line)
+            .into_iter()
+            .filter_map(|(a, e)| profile_link(&line[a..e]).map(|n| (a, e, n.to_ascii_lowercase())))
+            .collect();
+        for (a, e, n) in find_npubs(line) {
+            if !hits.iter().any(|&(ha, he, _)| a < he && e > ha) {
+                hits.push((a, e, n.to_string()));
+            }
+        }
+        hits.sort_by_key(|h| h.0);
+        let mut last = 0;
+        for (a, e, npub) in hits {
+            b.emoji_text(&line[last..a], Kind::Plain);
+            if ctx.mention.is_some() {
+                b.pill(&npub);
+            } else {
+                b.emoji_text(&line[a..e], Kind::Plain);
+            }
+            last = e;
+        }
+        b.emoji_text(&line[last..], Kind::Plain);
+    }
+    b.atoms
+}
+
 pub fn parse(src: &str, ctx: &Ctx) -> Vec<Block> {
     let mut swaps = Vec::new();
     let chunks = prepare(src, &mut swaps);

@@ -242,7 +242,7 @@ impl VectorApp {
             let on: crate::profile::OnAct = Rc::new(move |act, window, cx| {
                 app.update(cx, |app, cx| app.on_profile(act, window, cx)).ok();
             });
-            let pane = crate::profile::pane(store, p, &on, window, cx);
+            let pane = crate::profile::pane(store, &self.media, p, &on, window, cx);
             return screen(div().flex_1().min_h_0().flex().child(pane).into_any_element())
                 .child(self.slim_navbar(store, cx))
                 .into_any_element();

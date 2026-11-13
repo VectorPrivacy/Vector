@@ -12,7 +12,7 @@ use crate::theme::*;
 use crate::timeline::DANGER;
 
 /// What the screen asks the app to do.
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub enum Act {
     Back,
     Message,
@@ -35,6 +35,8 @@ pub enum Act {
     Pick(bool),
     /// Open a badge's card.
     Badge(Badge),
+    /// A mention in the bio: that person's mini profile.
+    Mention(String),
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -104,7 +106,8 @@ impl Screen {
 
     fn copied(&self, which: Act) -> bool {
         self.copied
-            .is_some_and(|(w, t)| w == which && t.elapsed().as_millis() < 2000)
+            .as_ref()
+            .is_some_and(|(w, t)| *w == which && t.elapsed().as_millis() < 2000)
     }
 }
 
@@ -117,7 +120,7 @@ fn click(on: &OnAct, a: Act) -> impl Fn(&gpui::ClickEvent, &mut Window, &mut App
     let on = on.clone();
     move |_, w, cx| {
         cx.stop_propagation();
-        on(a, w, cx)
+        on(a.clone(), w, cx)
     }
 }
 
@@ -222,7 +225,44 @@ fn small_option(
     }
 }
 
-pub fn pane(store: &Store, s: &Screen, on: &OnAct, window: &Window, cx: &App) -> AnyElement {
+/// Status or bio text as the desktop client draws it: emoji, the profile's `:shortcode:`s, and
+/// (`mentions`) npubs as pills.
+fn rich(
+    store: &Store,
+    media: &std::cell::RefCell<crate::media::Media>,
+    text: &str,
+    tags: &[vector_core::types::EmojiTag],
+    look: crate::inline::Look,
+    mentions: bool,
+) -> crate::inline::Inline {
+    let revealed = std::collections::HashSet::new();
+    let custom = crate::timeline::custom_emoji(store, media, tags);
+    let name_of = |npub: &str| store.name(npub);
+    let atoms = crate::markdown::plain(
+        text,
+        &crate::markdown::Ctx {
+            base: look.clone(),
+            revealed: &revealed,
+            custom: custom.as_ref().map(|f| f as &dyn Fn(&str) -> Option<crate::media::Custom>),
+            now: store.now_ms() as f64 / 1000.,
+            mention: if mentions { Some(&name_of) } else { None },
+            tags: &[],
+            mask: Some(&|t: &str| store.stream_mask(t)),
+            colors: &[],
+            go: None,
+        },
+    );
+    crate::inline::inline(atoms, look)
+}
+
+pub fn pane(
+    store: &Store,
+    media: &std::cell::RefCell<crate::media::Media>,
+    s: &Screen,
+    on: &OnAct,
+    window: &Window,
+    cx: &App,
+) -> AnyElement {
     let Some(p) = store.profiles.get(&s.npub) else {
         return div().flex_1().h_full().bg(c(APP_BG)).into_any_element();
     };
@@ -317,12 +357,8 @@ pub fn pane(store: &Store, s: &Screen, on: &OnAct, window: &Window, cx: &App) ->
                 )
                 .when(!status.is_empty(), |d| {
                     d.child(div().w_full().flex().justify_center().opacity(0.8).child(
-                        crate::inline::emoji_line(
-                            &status,
-                            crate::inline::Look::new(INTER, 14., 21., c(TEXT)),
-                            15.,
-                            1.,
-                        ),
+                        rich(store, media, &status, &p.status.emoji_tags, crate::inline::Look::new(INTER, 14., 21., c(TEXT)), false)
+                            .single_line(),
                     ))
                 })
                 .into_any_element()
@@ -543,12 +579,17 @@ pub fn pane(store: &Store, s: &Screen, on: &OnAct, window: &Window, cx: &App) ->
         .flex()
         .justify_center()
         .when(status_text.is_empty(), |d| d.h_0())
-        .child(crate::inline::emoji_line(
-            &status_text,
-            crate::inline::Look::new(INTER, 14., 21., c(TEXT)),
-            15.,
-            1.,
-        ));
+        .child(
+            rich(
+                store,
+                media,
+                &status_text,
+                if status.is_empty() { &[] } else { &p.status.emoji_tags },
+                crate::inline::Look::new(INTER, 14., 21., c(TEXT)),
+                false,
+            )
+            .single_line(),
+        );
     body = body.child(status_line);
     // #profile-badges: empty, its margin collapses into the options'.
     if s.badges.invites > 0 || s.badges.fawkes || s.badges.bug > 0 || s.badges.v2026 {
@@ -750,10 +791,27 @@ pub fn pane(store: &Store, s: &Screen, on: &OnAct, window: &Window, cx: &App) ->
                 .text_size(px(14.))
                 .line_height(px(24.))
                 .opacity(if placeholder { 0.5 } else { 0.8 })
+                .flex()
+                .justify_center()
                 .child(if placeholder {
-                    "No description yet".to_string()
+                    "No description yet".into_any_element()
                 } else {
-                    about
+                    // Line by line, each centred, as `text-align: center` lays the desktop's out.
+                    div()
+                        .flex()
+                        .flex_col()
+                        .items_center()
+                        .children(about.split('\n').enumerate().map(|(i, line)| {
+                            let on = on.clone();
+                            rich(store, media, line, &[], crate::inline::Look::new(INTER, 14., 24., c(TEXT)), true)
+                                .id(("profile-description", i))
+                                .on_click(Rc::new(move |t, w, cx| {
+                                    if let crate::inline::Target::Mention(npub) = t {
+                                        on(Act::Mention(npub.to_string()), w, cx)
+                                    }
+                                }))
+                        }))
+                        .into_any_element()
                 }),
         )
         .child(
