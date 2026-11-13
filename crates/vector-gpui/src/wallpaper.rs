@@ -154,7 +154,7 @@ pub fn bake(job: Job) -> (Key, Option<Arc<image::RgbaImage>>, Option<Arc<RenderI
     let (w, h) = (key.size.0.max(1), key.size.1.max(1));
     let src = match decoded {
         Some(d) => Some(d),
-        None => match image::ImageReader::open(&key.path).and_then(|r| r.with_guessed_format()).map_err(|e| e.to_string()).and_then(|r| r.decode().map_err(|e| e.to_string())) {
+        None => match crate::pic::read(&key.path).map_err(|e| e.to_string()).and_then(|b| image::load_from_memory(&b).map_err(|e| e.to_string())) {
             Ok(i) => Some(Arc::new(shrink(i.to_rgba8(), w, h))),
             Err(e) => {
                 vector_core::log_warn!("[Wallpaper] {} unreadable: {e}", key.path.display());
