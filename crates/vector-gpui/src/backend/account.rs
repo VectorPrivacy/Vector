@@ -118,7 +118,17 @@ pub fn boot() -> BootInfo {
         };
     };
     state::init_encryption_enabled();
-    let encrypted = state::is_encryption_enabled_fast();
+    let mut encrypted = state::is_encryption_enabled_fast();
+    // An account older than the `encryption_enabled` row holds ciphertext with no flag: route it to
+    // the PIN screen and record it, as the desktop client does (PIN predates passwords).
+    if !encrypted && db::get_pkey().ok().flatten().is_some_and(|k| !k.starts_with("nsec1")) {
+        let _ = db::set_sql_setting("encryption_enabled".into(), "true".into());
+        if db::get_sql_setting("security_type".into()).ok().flatten().is_none() {
+            let _ = db::set_sql_setting("security_type".into(), "pin".into());
+        }
+        state::set_encryption_enabled(true);
+        encrypted = true;
+    }
     let security_type = if encrypted {
         db::get_sql_setting("security_type".into())
             .ok()
