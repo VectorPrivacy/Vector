@@ -484,7 +484,7 @@ impl Nexus {
 
 /// The spotlight's colour for an icon: the mean of its more saturated pixels.
 pub fn wash_of(path: &std::path::Path) -> Option<Hsla> {
-    let img = image::open(path).ok()?.thumbnail(24, 24).into_rgb8();
+    let img = image::load_from_memory(&crate::pic::read(path).ok()?).ok()?.thumbnail(24, 24).into_rgb8();
     let (mut r, mut g, mut b, mut n) = (0u32, 0u32, 0u32, 0u32);
     for p in img.pixels() {
         let [pr, pg, pb] = p.0;
