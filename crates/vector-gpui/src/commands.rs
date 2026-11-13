@@ -649,6 +649,8 @@ pub fn view(
         .max_w(px(422f32.min(vw - 18.)))
         .max_h(px(328.))
         .overflow_y_scroll()
+        // The wheel belongs to the list, never the chat behind it.
+        .occlude()
         .bg(c(PANEL_BG))
         .border_1()
         .border_color(c(PRIMARY))
