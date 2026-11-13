@@ -889,6 +889,7 @@ fn editor(m: &CommSettings, store: &Store, on: &OnAct, cx: &App) -> AnyElement {
                     click(on, || CsAct::Role(Act::Custom)),
                 )
                 .when(!custom, |d| d.border_1().border_color(c(0x333333)))
+                .tooltip(crate::kit::tooltip("Custom colour"))
                 .flex()
                 .items_center()
                 .justify_center()

@@ -376,6 +376,7 @@ impl LoginView {
             .flex_none()
             .rounded(px(7.))
             .cursor_pointer()
+            .tooltip(crate::kit::tooltip("Pair with a QR code"))
             .on_click(cx.listener(|this, _, w, cx| this.signer_open_qr(w, cx)))
             .child(img("icons/login/qr.svg").size(px(40.)));
         let row = self

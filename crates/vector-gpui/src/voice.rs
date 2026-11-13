@@ -609,7 +609,17 @@ pub fn stage(
             )
         })
         .when_some(rtt_quality(ping), |d, q| {
-            d.child(div().ml_auto().flex().items_center().gap(px(5.)).child(dot(q)).child(format!("{ping} ms")))
+            d.child(
+                div()
+                    .id("voice-stage-ping")
+                    .ml_auto()
+                    .flex()
+                    .items_center()
+                    .gap(px(5.))
+                    .tooltip(crate::kit::tooltip("Round trip to the slowest link in the call"))
+                    .child(dot(q))
+                    .child(format!("{ping} ms")),
+            )
         });
     let tiles = people.iter().map(|p| {
         let level = session.map_or(0., |s| s.level(&p.npub, me));

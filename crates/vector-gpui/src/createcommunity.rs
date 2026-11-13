@@ -670,6 +670,7 @@ pub fn view(m: &CreateCommunity, store: &Store, width: f32, on: &OnAct, cx: &App
                             .flex_shrink_0()
                             .cursor_pointer()
                             .when(m.icon.is_none(), |d| d.opacity(0.7).hover(|s| s.opacity(1.)))
+                            .tooltip(crate::kit::tooltip("Choose community icon"))
                             .on_click(click(on, || Act::PickIcon))
                             .child(match &m.icon {
                                 Some(p) => crate::commsettings::cut(p, 56., 56., 28.),

@@ -586,7 +586,7 @@ impl VectorApp {
         }
         let slim = self.is_slim;
         if let Some(n) = self.nexus.as_mut() {
-            n.narrow = (if slim { width } else { width - crate::ui::LIST_W }) <= 600.;
+            n.narrow = (if slim { width } else { width - crate::ui::list_w() }) <= 600.;
             if n.slim != slim {
                 n.slim = slim;
                 n.search.update(cx, |t, cx| t.set_look(nexus_search_look(slim), cx));

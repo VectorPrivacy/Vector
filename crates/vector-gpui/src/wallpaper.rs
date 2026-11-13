@@ -254,7 +254,13 @@ pub fn preview_bar(blur: u8, dim: u8, dragging: Rc<Cell<Option<bool>>>, on: &OnA
             .items_center()
             .gap(px(12.))
             .h(px(20.))
-            .child(svg().path(icon).size(px(20.)).flex_shrink_0().text_color(white_a(0.72)))
+            .child(
+                div()
+                    .id(if is_blur { "wp-blur-icon" } else { "wp-dim-icon" })
+                    .flex_shrink_0()
+                    .tooltip(crate::kit::tooltip(if is_blur { "Blur" } else { "Brightness" }))
+                    .child(svg().path(icon).size(px(20.)).text_color(white_a(0.72))),
+            )
             .child(
                 canvas(
                     move |b, window, _| window.insert_hitbox(b, gpui::HitboxBehavior::Normal),

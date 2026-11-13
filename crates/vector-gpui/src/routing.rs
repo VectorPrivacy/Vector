@@ -411,7 +411,7 @@ fn picker(r: &Routing, viewed: &str, on: &OnAct) -> AnyElement {
                 move || NetAct::View(k.clone())
             }));
         if k == in_use {
-            pill = pill.child(net_dot(&k, dot_kind));
+            pill = pill.child(div().id("net-dot-in-use").flex_shrink_0().tooltip(crate::kit::tooltip("In use")).child(net_dot(&k, dot_kind)));
         }
         pills = pills.child(pill.child(div().whitespace_nowrap().overflow_hidden().text_ellipsis().child(label(&k).to_string())));
     }

@@ -4287,7 +4287,7 @@ fn nav(
         &s.search,
         head,
         Some(footer),
-        crate::ui::LIST_W,
+        crate::ui::list_w(),
         LIST_BG,
         &nav_on,
         cx,
@@ -4300,7 +4300,7 @@ pub fn view(s: &Settings, width: f32, on: &OnAct, cx: &App) -> AnyElement {
     let fresh = s.fresh_ids(&cats);
     let cat = cats.iter().find(|c| c.id == s.cat).unwrap_or(&cats[0]);
     let active = s.active_anchor(cat);
-    let pane = width - crate::ui::LIST_W;
+    let pane = width - crate::ui::list_w();
     let gutter = crate::kit::page_gutter(pane);
     let blocks = cat.anchors.iter().enumerate().map(|(i, a)| {
         // `.cs-content.st-page`: a 720px column at the pane's left, inside its gutters.

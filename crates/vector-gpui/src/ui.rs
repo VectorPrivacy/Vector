@@ -37,7 +37,17 @@ pub(crate) const RAIL_W: f32 = 201.;
 pub(crate) const RAIL_SLIM_W: f32 = 73.;
 /// Narrower than this, the rail can't afford its labels.
 const RAIL_AUTO_COLLAPSE_W: f32 = 1080.;
-pub(crate) const LIST_W: f32 = 239.;
+/// The list pane's default width, its border included.
+const LIST_W_DEFAULT: f32 = 240.;
+static LIST_W_BITS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new((LIST_W_DEFAULT - 1.).to_bits());
+/// The list pane's live width less its border, as the last frame laid it out.
+pub(crate) fn list_w() -> f32 {
+    f32::from_bits(LIST_W_BITS.load(std::sync::atomic::Ordering::Relaxed))
+}
+/// `wsClampListWidth`: a width restored from a bigger monitor can't crush the conversation.
+fn clamp_list_w(want: f32, vw: f32, rail: f32) -> f32 {
+    want.min(480.).min((vw - rail - 380.).max(200.)).max(200.).round()
+}
 const ROW_PITCH: f32 = 54.;
 
 type Shared = Rc<RefCell<Store>>;
@@ -246,6 +256,8 @@ pub struct VectorApp {
     rail_open: HashSet<String>,
     /// The user's choice to collapse the rail; a narrow window collapses it regardless.
     rail_pref: bool,
+    list_pref: f32,
+    list_drag: Rc<Cell<Option<(f32, f32)>>>,
     archive: chatlist_ops::Fold,
     /// The request senders last asked about for shared Communities.
     mutuals_asked: Vec<String>,
@@ -973,6 +985,8 @@ impl VectorApp {
             chatlist_keys: RefCell::new(Vec::new()),
             rail_open: HashSet::new(),
             rail_pref: backend::device::get("ws_rail_collapsed").as_deref() == Some("true"),
+            list_pref: backend::device::get("ws_list_width").and_then(|v| v.parse().ok()).unwrap_or(LIST_W_DEFAULT),
+            list_drag: Rc::default(),
             archive: Default::default(),
             tab_slid: false,
             mutuals_asked: Vec::new(),
@@ -2430,6 +2444,94 @@ impl VectorApp {
                 }
             }
         }
+    }
+
+    /// `#ws-list-resize`: drag the list pane's trailing edge; a double-click restores the default.
+    fn list_resizer(&self, rail: f32, list: f32, cx: &mut Context<Self>) -> impl IntoElement {
+        use gpui::{Bounds, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, canvas, point, size};
+        let (app, drag) = (cx.entity().downgrade(), self.list_drag.clone());
+        let hot = Rc::new(Cell::new(false));
+        div()
+            .id("ws-list-resize")
+            .absolute()
+            .top_0()
+            .bottom_0()
+            .left(px(rail + list - 6.))
+            .w(px(11.))
+            .tooltip(kit::tooltip("Drag to resize (double-click to reset)"))
+            .child(
+                canvas(
+                    |b, window, _| window.insert_hitbox(b, gpui::HitboxBehavior::BlockMouse),
+                    move |b: Bounds<Pixels>, hitbox, window, _| {
+                        let lit = drag.get().is_some() || hitbox.is_hovered(window);
+                        hot.set(hitbox.is_hovered(window));
+                        if lit {
+                            let line = Bounds::new(point(b.origin.x + px(5.), b.origin.y), size(px(1.), b.size.height));
+                            window.paint_quad(gpui::fill(line, c(ACCENT).opacity(0.7)));
+                        }
+                        window.set_cursor_style(gpui::CursorStyle::ResizeColumn, &hitbox);
+                        if drag.get().is_some() {
+                            window.set_window_cursor_style(gpui::CursorStyle::ResizeColumn);
+                        }
+                        {
+                            let (app, drag, hitbox) = (app.clone(), drag.clone(), hitbox.clone());
+                            window.on_mouse_event(move |e: &MouseDownEvent, phase, window, cx| {
+                                if !phase.bubble() || e.button != gpui::MouseButton::Left || !hitbox.is_hovered(window) {
+                                    return;
+                                }
+                                if e.click_count >= 2 {
+                                    drag.set(None);
+                                    app.update(cx, |app, cx| {
+                                        app.list_pref = LIST_W_DEFAULT;
+                                        backend::device::set("ws_list_width", "");
+                                        cx.notify();
+                                    })
+                                    .ok();
+                                } else {
+                                    drag.set(Some((f32::from(e.position.x), list)));
+                                    window.refresh();
+                                }
+                                cx.stop_propagation();
+                            });
+                        }
+                        {
+                            let (app, drag, hot, hitbox) = (app.clone(), drag.clone(), hot.clone(), hitbox.clone());
+                            window.on_mouse_event(move |e: &MouseMoveEvent, phase, window, cx| {
+                                if !phase.bubble() {
+                                    return;
+                                }
+                                let Some((x0, w0)) = drag.get() else {
+                                    if hot.get() != hitbox.is_hovered(window) {
+                                        window.refresh();
+                                    }
+                                    return;
+                                };
+                                let want = w0 + f32::from(e.position.x) - x0;
+                                app.update(cx, |app, cx| {
+                                    app.list_pref = want;
+                                    cx.notify();
+                                })
+                                .ok();
+                            });
+                        }
+                        let app = app.clone();
+                        let drag = drag.clone();
+                        window.on_mouse_event(move |_: &MouseUpEvent, phase, window, cx| {
+                            if !phase.bubble() || drag.take().is_none() {
+                                return;
+                            }
+                            app.update(cx, |app, cx| {
+                                let w = clamp_list_w(app.list_pref, app.vw, app.rail_mode(window).width());
+                                app.list_pref = w;
+                                backend::device::set("ws_list_width", w.to_string());
+                                cx.notify();
+                            })
+                            .ok();
+                        });
+                    },
+                )
+                .size_full(),
+            )
     }
 
     fn rail_mode(&self, window: &Window) -> RailMode {
@@ -5469,6 +5571,8 @@ impl Render for VectorApp {
         self.vw = f32::from(window.viewport_size().width);
         let slim = self.vw < slim_ops::WIDE_MIN;
         crate::theme::set_slim(slim);
+        let list_full = clamp_list_w(self.list_pref, self.vw, rail_mode.width());
+        LIST_W_BITS.store((list_full - 1.).to_bits(), std::sync::atomic::Ordering::Relaxed);
         if let Some(v) = &self.community
             && v.search.read(cx).look().size != crate::community::member_search_look(slim).size
         {
@@ -5698,6 +5802,8 @@ impl Render for VectorApp {
                     .flex_row()
                     .flex_1()
                     .min_h_0()
+                    .relative()
+                    .child(gpui::deferred(self.list_resizer(rail_mode.width(), list_full, cx)).with_priority(1))
                     .child(rail(
                         &store,
                         &self.rail_open,
@@ -5756,7 +5862,7 @@ impl Render for VectorApp {
                                     .is_some_and(|r| r.0 || r.1 > 0),
                                 &on_community,
                                 (&self.voice, &self.on_voice_handler(cx), &self.anchors),
-                                LIST_W,
+                                list_w(),
                                 false,
                             )),
                             None => row.child(chat_list(
@@ -5781,7 +5887,7 @@ impl Render for VectorApp {
                                         .ok();
                                     });
                                 let width =
-                                    f32::from(window.viewport_size().width) - rail_mode.width() - LIST_W;
+                                    f32::from(window.viewport_size().width) - rail_mode.width() - list_w();
                                 div()
                                     .flex_1()
                                     .min_w_0()
@@ -5802,7 +5908,7 @@ impl Render for VectorApp {
                                         .ok();
                                 });
                                 let width =
-                                    f32::from(window.viewport_size().width) - rail_mode.width() - LIST_W;
+                                    f32::from(window.viewport_size().width) - rail_mode.width() - list_w();
                                 let nc = self.new_chat.as_ref().unwrap();
                                 let invite = crate::newchat::invite_key(nc.filter.read(cx).text())
                                     .map(|k| {
@@ -5891,7 +5997,7 @@ impl Render for VectorApp {
                         crate::switcher::view(
                             s,
                             CHROME_H + 60.,
-                            rail_mode.width() + LIST_W,
+                            rail_mode.width() + list_w(),
                             (f32::from(window.viewport_size().width), f32::from(window.viewport_size().height)),
                             false,
                             &on,
@@ -6829,7 +6935,7 @@ fn chat_list(
             }))
     };
     // .cc-tab-bar: slides between the halves, but never on the first paint.
-    let half = (LIST_W - 23.) / 2.;
+    let half = (list_w() - 23.) / 2.;
     let to = if requests { half } else { 0. };
     let bar = div()
         .absolute()
@@ -6922,7 +7028,7 @@ fn chat_list(
     let notice = app.net_view.as_ref().and_then(|v| crate::routing::notice(v, app.net_stranded));
     let noticed = notice.is_some();
     div()
-        .w(px(LIST_W))
+        .w(px(list_w()))
         .flex_shrink_0()
         .h_full()
         .flex()
@@ -7281,7 +7387,7 @@ fn chat_row(store: &Store, chat: &SerializableChat, active: bool, pinned: bool) 
     div()
         .id(SharedString::from(format!("row-{}", chat.id)))
         .h(px(ROW_PITCH))
-        .w(px(230.))
+        .w(px(list_w() - 9.))
         .pb(px(4.))
         .child(
             div()

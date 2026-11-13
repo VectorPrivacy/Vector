@@ -917,7 +917,7 @@ fn nav(n: &Nexus, on: &OnAct, cx: &App) -> AnyElement {
     );
     let has_query = !q.is_empty();
     div()
-        .w(px(crate::ui::LIST_W))
+        .w(px(crate::ui::list_w()))
         .h_full()
         .flex_shrink_0()
         .flex()
@@ -2160,7 +2160,7 @@ pub fn view(
             View::Discover => None,
         }
     };
-    let main_w = if n.slim { width } else { width - crate::ui::LIST_W };
+    let main_w = if n.slim { width } else { width - crate::ui::list_w() };
     let pad = if n.narrow { 16. } else { 32. };
     let inner = main_w.min(PAGE_MAX) - pad * 2.;
     let mut page = div()
