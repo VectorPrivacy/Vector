@@ -15,7 +15,7 @@ pub fn titlebar() -> Option<gpui::TitlebarOptions> {
 pub fn hide_native_controls(window: &gpui::Window) {
     use objc2_app_kit::{NSView, NSWindowButton};
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-    let Ok(handle) = window.window_handle() else { return };
+    let Ok(handle) = HasWindowHandle::window_handle(window) else { return };
     let RawWindowHandle::AppKit(h) = handle.as_raw() else { return };
     // SAFETY: AppKit's handle is the window's live content view, used on the main thread.
     let view: &NSView = unsafe { h.ns_view.cast().as_ref() };
