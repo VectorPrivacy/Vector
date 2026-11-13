@@ -195,6 +195,8 @@ pub struct ChannelEditor {
     pub add_query: Entity<TextInput>,
 }
 
+const LOCK_BITS: [u32; 3] = [14, 17, 19];
+
 pub enum Act {
     Close,
     Section(&'static str),
@@ -205,6 +207,7 @@ pub enum Act {
     Sync(bool),
     Target(String),
     Bit(u32, Tri),
+    Lock(bool),
     ToggleAdd,
     CloseAdd,
     Pick(String),
@@ -299,6 +302,23 @@ impl ChannelEditor {
         self.draft = (allow, deny);
     }
 
+    /// Whether @everyone may post, react and join calls nowhere here, so every write takes the
+    /// channel's writer key and nothing anyone else sends reaches its readers.
+    pub fn locked(&self) -> bool {
+        let deny = if self.target == "everyone" {
+            self.draft.1
+        } else {
+            self.perms.as_ref().map_or(0, |p| p.stored("everyone").1)
+        };
+        LOCK_BITS.iter().all(|b| deny & (1 << b) != 0)
+    }
+
+    pub fn can_lock(&self) -> bool {
+        let Some(p) = self.perms.as_ref() else { return false };
+        let (allow, deny) = p.stored("everyone");
+        LOCK_BITS.iter().all(|b| p.grantable & (1 << b) != 0 || (allow | deny) & (1 << b) != 0)
+    }
+
     /// A bit you lack can't be set, but one already set may be cleared.
     pub fn can_touch(&self, bit: u32) -> bool {
         let Some(p) = self.perms.as_ref() else { return false };
@@ -370,8 +390,12 @@ impl ChannelEditor {
         if self.syncable() {
             permissions.push(anchor("ch-sync", "Category Sync", "sync category inherit"));
         }
+        let own = self.perms_open() && !self.perms.as_ref().is_some_and(|p| p.synced);
+        if own {
+            permissions.push(anchor("ch-lock", "Lockdown", "lock lockdown locked spam read only announcements"));
+        }
         permissions.push(anchor("ch-targets", "Roles & Members", "roles members everyone overwrite who"));
-        if self.perms_open() && !self.perms.as_ref().is_some_and(|p| p.synced) {
+        if own {
             permissions.extend(GROUPS.iter().map(|(id, title, keys, _)| anchor(id, title, keys)));
         }
         vec![
@@ -757,6 +781,43 @@ fn permissions(m: &ChannelEditor, store: &Store, on: &OnAct, cx: &App) -> Vec<An
     if p.synced {
         return out;
     }
+    let locked = m.locked();
+    let can_lock = m.can_lock() && !m.busy;
+    out.push(
+        block(
+            out.is_empty(),
+            div().child(heading("Lockdown")).child(
+                div()
+                    .mb(px(12.))
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(12.))
+                    .child(div().flex_1().min_w_0().text_size(px(14.)).line_height(px(21.)).text_color(c(0x9a9a9a)).child(if locked {
+                        "Locked. Only the roles and members you allow can post, react or join calls here."
+                    } else {
+                        "Only the roles and members you allow can post, react or join calls, and nothing anyone else sends reaches its readers."
+                    }))
+                    .child(
+                        div()
+                            .id("ce-lock")
+                            .h(px(34.))
+                            .px(px(14.))
+                            .flex_shrink_0()
+                            .flex()
+                            .items_center()
+                            .rounded(px(8.))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_size(px(14.))
+                            .text_color(c(PRIMARY))
+                            .when(!can_lock, |d| d.opacity(0.45))
+                            .when(can_lock, |d| d.cursor_pointer().hover(|d| d.underline()).on_click(click(on, move || Act::Lock(!locked))))
+                            .child(if locked { "Unlock".to_string() } else { format!("Lock {}", if m.is_category { "Category" } else { "Channel" }) }),
+                    ),
+            ),
+        )
+        .into_any_element(),
+    );
     let first = out.is_empty();
     let targets = m.targets(store);
     let (roles, members) = m.addable(store, cx);

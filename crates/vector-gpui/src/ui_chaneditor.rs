@@ -7,7 +7,7 @@ use gpui::{Context, Focusable, FontWeight, Window, px};
 
 use super::{PopupAct, VectorApp};
 use crate::backend;
-use crate::chaneditor::{Act, ChannelEditor, Perms, Saved};
+use crate::chaneditor::{Act, ChannelEditor, Perms, Saved, Tri};
 use crate::composer::{CancelInput, InputChanged, SendText, TextInput};
 use crate::kit;
 use crate::theme::*;
@@ -285,6 +285,24 @@ impl VectorApp {
             Act::Bit(bit, to) => {
                 if m.can_touch(bit) && !m.busy {
                     m.set_bit(bit, to);
+                }
+            }
+            Act::Lock(on) => {
+                if m.busy || !m.can_lock() {
+                    return;
+                }
+                if m.target != "everyone" {
+                    if m.overwrite_dirty() {
+                        self.warn_channel_editor(true, cx);
+                        return;
+                    }
+                    if let Some(p) = m.perms.as_ref() {
+                        m.draft = p.stored("everyone");
+                        m.target = "everyone".into();
+                    }
+                }
+                for b in [14, 17, 19] {
+                    m.set_bit(b, if on { Tri::Deny } else { Tri::Inherit });
                 }
             }
             Act::ToggleAdd => {
