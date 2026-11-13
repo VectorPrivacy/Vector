@@ -18126,10 +18126,15 @@ impl VectorApp {
     }
 
     fn rec_start(&mut self, press: u64, cx: &mut Context<Self>) {
-        let rx = rec_thread(|| {
-            futures::executor::block_on(vector_media::mic_access::require())?;
-            crate::audio::engine()?;
-            vector_media::voice::AudioRecorder::global().start()
+        // The macOS access prompt runs on Tokio's blocking pool, so it asks from the runtime.
+        let rx = backend::run(async {
+            vector_media::mic_access::require().await?;
+            rec_thread(|| {
+                crate::audio::engine()?;
+                vector_media::voice::AudioRecorder::global().start()
+            })
+            .await
+            .unwrap_or_else(|e| Err(e.to_string()))
         });
         cx.spawn(async move |this, cx| {
             let done = rx.await.unwrap_or_else(|e| Err(e.to_string()));
