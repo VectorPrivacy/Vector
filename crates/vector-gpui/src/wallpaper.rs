@@ -146,13 +146,14 @@ impl Wallpaper {
 
 /// Decode, cover the pane (scaled 2% so the blurred edge falls outside), blur and dim.
 pub fn bake(job: Job) -> (Key, Option<Arc<image::RgbaImage>>, Option<Arc<RenderImage>>) {
+    let _trim = crate::trim::OnDrop;
     let Job { key, decoded } = job;
+    let (w, h) = (key.size.0.max(1), key.size.1.max(1));
     let src = match decoded {
         Some(d) => Some(d),
-        None => image::open(&key.path).ok().map(|i| Arc::new(i.to_rgba8())),
+        None => image::open(&key.path).ok().map(|i| Arc::new(shrink(i.to_rgba8(), w, h))),
     };
     let Some(src) = src else { return (key, None, None) };
-    let (w, h) = (key.size.0.max(1), key.size.1.max(1));
     let (sw, sh) = (src.width() as f32, src.height() as f32);
     let scale = (w as f32 / sw).max(h as f32 / sh) * 1.02;
     let (cw, ch) = ((w as f32 / scale).min(sw), (h as f32 / scale).min(sh));
@@ -171,6 +172,18 @@ pub fn bake(job: Job) -> (Key, Option<Arc<image::RgbaImage>>, Option<Arc<RenderI
     let frame = image::Frame::new(crate::media::to_bgra(out));
     let image = Arc::new(RenderImage::new(vec![frame]));
     (key, Some(src), Some(image))
+}
+
+/// The decoded picture is kept for re-bakes; a photo far larger than the pane it covers
+/// keeps only what a blurred cover of that pane can show.
+fn shrink(img: image::RgbaImage, w: u32, h: u32) -> image::RgbaImage {
+    let (sw, sh) = (img.width() as f32, img.height() as f32);
+    let keep = (w as f32 / sw).max(h as f32 / sh) * 1.5;
+    if keep >= 1. {
+        return img;
+    }
+    let (nw, nh) = ((sw * keep).round().max(1.) as u32, (sh * keep).round().max(1.) as u32);
+    image::imageops::resize(&img, nw, nh, image::imageops::FilterType::Triangle)
 }
 
 pub type OnAct = Rc<dyn Fn(Act, &mut gpui::Window, &mut gpui::App)>;

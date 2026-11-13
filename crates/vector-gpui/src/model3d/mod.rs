@@ -146,6 +146,7 @@ fn run(rx: Receiver<Job>, back: Sender<Job>) {
                         }
                     }
                     gpu = None;
+                    crate::trim::soon();
                 }
                 continue;
             }

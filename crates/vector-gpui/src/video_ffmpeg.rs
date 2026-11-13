@@ -271,6 +271,7 @@ fn target(size: (u32, u32), scale: f32) -> (u32, u32) {
 }
 
 pub fn probe(input: AudioInput, scale: f32) -> Option<Info> {
+    let _trim = crate::trim::OnDrop;
     let reader: Box<dyn ReadSeek> = Box::new(Reader(input.open().ok()?));
     let (mut v, audio) = Video::open(reader, 1)?;
     let (w, h) = v.size();

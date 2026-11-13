@@ -13103,6 +13103,7 @@ dependencies = [
  "gtk",
  "http",
  "image",
+ "libc",
  "libwebp-sys",
  "log",
  "memchr",

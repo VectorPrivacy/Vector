@@ -124,6 +124,7 @@ wry = { version = "=0.57.0", default-features = false, features = ["os-webview",
 gtk = "0.18"
 webkit2gtk = { version = "2.0", features = ["v2_40"] }
 x11rb = { version = "0.13", features = ["randr"] }
+libc = "0.2"
 
 # Its own workspace: GPUI pins dependency versions the main client must not inherit.
 [workspace]

@@ -436,6 +436,7 @@ pub fn decode_gif_cover(bytes: &[u8], side: u32) -> Option<RenderImage> {
 
 /// A picture as frames no larger than `max`, with its natural size.
 pub fn decode(bytes: &[u8], ext: &str, max: (u32, u32)) -> Option<(RenderImage, u32, u32)> {
+    let _trim = crate::trim::OnDrop;
     if ext == "gif"
         && let Some((frames, w, h)) = gif_frames(bytes, |w, h| {
             let s = (max.0 as f32 / w.max(1) as f32)

@@ -53,6 +53,7 @@ mod langnames;
 mod lyrics;
 mod media;
 mod model3d;
+mod trim;
 mod callvideo;
 mod callpics;
 mod downgrade;
