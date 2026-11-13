@@ -278,15 +278,38 @@ fn bars(d: gpui::Stateful<gpui::Div>, left: f32, inset: f32, open: bool, unread:
     })
 }
 
-fn name(text: SharedString) -> impl IntoElement {
+/// `.is-quiet` (nothing new) and `.is-muted` dim a community's name until it's hovered or open.
+fn toned_name(text: SharedString, group: SharedString, open: bool, unread: bool, muted: bool) -> impl IntoElement {
+    let tone = if open {
+        c(0xffffff)
+    } else if muted {
+        white_a(0.42)
+    } else if !unread {
+        c(0xb2b2b2)
+    } else {
+        c(0xffffff)
+    };
     div()
         .flex_1()
         .min_w_0()
         .truncate()
         .font_family(RUBIK)
         .text_size(px(14.))
-        .text_color(c(0xffffff))
+        .text_color(tone)
+        .group_hover(group, |s| s.text_color(c(0xffffff)))
         .child(text)
+}
+
+fn community_unread(store: &Store, com: &Community) -> bool {
+    com.channels
+        .iter()
+        .any(|ch| store.chat(&ch.channel_id).is_some_and(|chat| store.unread_count(chat) > 0))
+}
+
+fn community_muted(store: &Store, com: &Community) -> bool {
+    com.channels
+        .iter()
+        .any(|ch| store.chat(&ch.channel_id).is_some_and(|chat| chat.community_muted))
 }
 
 /// `.ws-rail-item-voice`: one of its voice calls is in use; the accent when it's ours.
@@ -332,8 +355,9 @@ fn row_shell(id: SharedString, inset: f32) -> gpui::Stateful<gpui::Div> {
 fn item(store: &Store, com: &Community, open: bool, unread: bool, inset: f32, voice: Option<bool>, zones: Zones, on: &OnAct) -> AnyElement {
     let id = com.community_id.clone();
     let source = RailDrag::Item { key: id.clone() };
+    let group = SharedString::from(format!("rail-c-{id}"));
     let el = bars(
-        row_shell(SharedString::from(format!("rail-c-{id}")), inset),
+        row_shell(group.clone(), inset).group(group.clone()),
         inset,
         3.,
         open,
@@ -351,7 +375,7 @@ fn item(store: &Store, com: &Community, open: bool, unread: bool, inset: f32, vo
         }
     })
     .child(logo(store, &com.community_id, 26., 4.9))
-    .child(name(com.name.clone().into()))
+    .child(toned_name(com.name.clone().into(), group, open, community_unread(store, com), community_muted(store, com)))
     .children(voice.map(voice_badge));
     draggable(el, source, com.name.clone().into(), zones, on)
 }
@@ -394,8 +418,11 @@ fn folder_head(
             )
         });
     let fid = id.to_string();
+    let group = SharedString::from(format!("rail-f-{id}"));
+    let any_unread = members.iter().any(|c| community_unread(store, c));
+    let all_muted = !members.is_empty() && members.iter().all(|c| community_muted(store, c));
     let el = bars(
-        row_shell(SharedString::from(format!("rail-f-{id}")), 4.),
+        row_shell(group.clone(), 4.).group(group.clone()),
         8.,
         3.,
         active,
@@ -413,7 +440,7 @@ fn folder_head(
         }
     })
     .child(tile)
-    .child(name(label.to_string().into()));
+    .child(toned_name(label.to_string().into(), group, active, any_unread, all_muted));
     draggable(el, RailDrag::Folder { id: fid }, label.to_string().into(), zones, on)
 }
 

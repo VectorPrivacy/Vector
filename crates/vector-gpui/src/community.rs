@@ -163,7 +163,7 @@ const OWNER: u32 = 0xfce459;
 const LABEL: u32 = 0x8a8a8a;
 
 /// The community's logo, or the group placeholder until it has one.
-pub fn logo(store: &Store, id: &str, size: f32, radius: f32) -> gpui::Img {
+pub fn logo(store: &Store, id: &str, size: f32, radius: f32) -> gpui::Stateful<gpui::Img> {
     match store.icon(id) {
         Some(path) => img(path).object_fit(gpui::ObjectFit::Cover),
         None => img("icons/group-placeholder.svg"),
@@ -175,7 +175,7 @@ pub fn logo(store: &Store, id: &str, size: f32, radius: f32) -> gpui::Img {
 }
 
 /// `.banner-art`: a banner cut to the 238 x 70 template at `width`, grey until it paints.
-pub fn banner_art(path: std::path::PathBuf, width: f32) -> gpui::Img {
+pub fn banner_art(path: std::path::PathBuf, width: f32) -> gpui::Stateful<gpui::Img> {
     img(path)
         .w(px(width))
         .h(px(width * 70. / 238.))

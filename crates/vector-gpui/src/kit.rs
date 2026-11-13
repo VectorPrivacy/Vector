@@ -497,8 +497,8 @@ pub fn sharp_svg(path: impl Into<SharedString>, size: f32, window: &Window, cx: 
             .clone()
     });
     match image {
-        Some(image) => crate::pic::img(image).size(px(size)),
-        None => crate::pic::img(path).size(px(size)),
+        Some(image) => crate::pic::img_plain(image).size(px(size)),
+        None => crate::pic::img_plain(path).size(px(size)),
     }
 }
 
