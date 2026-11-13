@@ -23,6 +23,8 @@ pub struct BootInfo {
     pub signer: String,
     /// The remembered account's database is newer than this build: nothing may open it.
     pub downgrade: Option<vector_core::db::DowngradeBlock>,
+    /// The remembered account's database would not open.
+    pub load_error: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -78,14 +80,14 @@ pub fn boot() -> BootInfo {
             security_type: "pin".into(),
             signer: "local".into(),
             downgrade: Some(block),
+            load_error: None,
         };
     }
+    let mut load_error = None;
     let account = match db::get_current_account() {
         Ok(npub) => Some(npub),
         Err(_) => match db::read_active_account_file().ok().flatten() {
-            Some(npub) if is_committed(&npub) => (db::set_current_account(npub.clone()).is_ok()
-                && db::init_database(&npub).is_ok())
-            .then_some(npub),
+            Some(npub) if is_committed(&npub) => opened(&npub, &mut load_error).then_some(npub),
             Some(_) => {
                 let _ = db::clear_active_account_file();
                 None
@@ -98,9 +100,7 @@ pub fn boot() -> BootInfo {
                     .filter(|n| is_committed(n))
                     .collect();
                 match committed.as_slice() {
-                    [only] => (db::set_current_account(only.clone()).is_ok()
-                        && db::init_database(only).is_ok())
-                    .then(|| only.clone()),
+                    [only] => opened(only, &mut load_error).then(|| only.clone()),
                     _ => None,
                 }
             }
@@ -114,6 +114,7 @@ pub fn boot() -> BootInfo {
             security_type: "pin".into(),
             signer: "local".into(),
             downgrade: None,
+            load_error,
         };
     };
     state::init_encryption_enabled();
@@ -133,6 +134,18 @@ pub fn boot() -> BootInfo {
         security_type,
         signer,
         downgrade: None,
+        load_error: None,
+    }
+}
+
+/// Make `npub` the account in use and open its database; why not, kept for the user.
+fn opened(npub: &str, error: &mut Option<String>) -> bool {
+    match db::set_current_account(npub.to_string()).and_then(|_| db::init_database(npub)) {
+        Ok(_) => true,
+        Err(e) => {
+            *error = Some(e);
+            false
+        }
     }
 }
 

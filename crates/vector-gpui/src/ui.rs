@@ -2520,6 +2520,9 @@ impl VectorApp {
                     }
                     (None, _) => this.show_login(None, window, cx),
                 }
+                if let Some(e) = info.load_error {
+                    this.notice("Loading Error", kit::escape(&e).into(), cx);
+                }
             })
             .ok();
         })
