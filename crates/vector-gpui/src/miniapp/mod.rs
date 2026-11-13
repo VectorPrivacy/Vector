@@ -183,9 +183,28 @@ fn icon_dir() -> Option<PathBuf> {
     Some(dir)
 }
 
-/// Browser storage keys on origin, so the partition is the origin's host.
+/// Browser storage keys on origin, so the partition is the origin's host: the desktop client's
+/// exactly, or an app's storage stays behind with it. A Nexus app keys on its id, surviving updates.
 async fn partition(file_hash: &str) -> String {
-    file_hash[..32.min(file_hash.len())].to_ascii_lowercase()
+    let reserved = core::marketplace::MARKETPLACE_STATE.read().await.get_app_by_hash(file_hash).map(|a| a.id.clone());
+    match reserved {
+        Some(id) if core::marketplace::is_safe_app_id(&id) => {
+            let mut sanitized: String = id
+                .to_ascii_lowercase()
+                .chars()
+                .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+                .collect();
+            sanitized.truncate(24);
+            let sanitized = sanitized.trim_matches('-');
+            let tag = vector_core::crypto::sha256_hex(id.as_bytes());
+            if sanitized.is_empty() {
+                format!("app-{}", &tag[..8])
+            } else {
+                format!("{}-{}", sanitized, &tag[..8])
+            }
+        }
+        _ => file_hash[..32.min(file_hash.len())].to_ascii_lowercase(),
+    }
 }
 
 /// `miniapp_open`: one window per message (or per package, solo), focused when already open.
