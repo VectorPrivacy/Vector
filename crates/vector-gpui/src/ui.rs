@@ -9407,7 +9407,7 @@ impl VectorApp {
                 loading: self.live && members.is_empty(),
                 members,
                 admins: Vec::new(),
-                panel: true,
+                panel: !self.live || backend::prefs::sql("ws_members_open").as_deref() != Some("false"),
                 search,
                 folded: folded_sections(&id),
             });
@@ -9578,6 +9578,9 @@ impl VectorApp {
             Act::Panel => {
                 if let Some(v) = self.community.as_mut() {
                     v.panel = !v.panel;
+                    if self.live {
+                        backend::prefs::set_sql("ws_members_open", v.panel.to_string());
+                    }
                 }
             }
             Act::HeadMenu => {
