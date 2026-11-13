@@ -140,10 +140,14 @@ impl VectorApp {
     }
 
     fn slim_query(&self, cx: &gpui::App) -> String {
+        self.slim_raw_query(cx).to_lowercase()
+    }
+
+    fn slim_raw_query(&self, cx: &gpui::App) -> String {
         self.slim
             .search
             .as_ref()
-            .map(|s| s.read(cx).text().trim().to_lowercase())
+            .map(|s| s.read(cx).text().trim().to_string())
             .unwrap_or_default()
     }
 
@@ -753,7 +757,7 @@ impl VectorApp {
             }
         }
         let tabs = (!searching).then(|| self.slim_tabs(filter, &dots, window, cx));
-        let empty = (items.is_empty() && !searching && filter == Filter::Requests).then(|| {
+        let note = |text: String| {
             div()
                 .mx(px(24.))
                 .my(px(28.))
@@ -761,7 +765,19 @@ impl VectorApp {
                 .line_height(px(20.))
                 .text_center()
                 .text_color(white_a(0.45))
-                .child("New people who message you show up here.")
+                .child(text)
+                .into_any_element()
+        };
+        let empty = items.is_empty().then(|| {
+            if searching {
+                note(format!("No chats match \"{}\"", self.slim_raw_query(cx)))
+            } else {
+                match filter {
+                    Filter::Requests => note("New people who message you show up here.".into()),
+                    Filter::Communities => note("Communities you join live here.".into()),
+                    Filter::All | Filter::Messages => super::get_started(cx).into_any_element(),
+                }
+            }
         });
         let items = Rc::new(items);
         let archive_row = Rc::new(std::cell::RefCell::new(archive_row));
