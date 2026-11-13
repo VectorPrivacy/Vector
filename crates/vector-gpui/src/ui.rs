@@ -5676,7 +5676,7 @@ impl Render for VectorApp {
             let _ = window.drop_image(old);
         }
         if self.store.borrow().anyone_typing() {
-            window.request_animation_frame();
+            gpui::wake_window_in(window, cx, std::time::Duration::from_millis(33));
         }
         self.revoke_outlived_archives();
         if self.mini_animating() || self.pivx_animating() || self.archive.animating() || self.nexus.as_ref().is_some_and(|n| n.animating()) {
@@ -8490,7 +8490,7 @@ impl VectorApp {
                     .children(back)
                     .children(request)
                     .children(drawer)
-                    .children(typing_strip(store, &id, self.typing_fade).inspect(|_| window.request_animation_frame()))
+                    .children(typing_strip(store, &id, self.typing_fade).inspect(|_| gpui::wake_window_in(window, cx, std::time::Duration::from_millis(33))))
                     // `.fadeout-bottom-msgs`: rows dim into the composer.
                     .child(
                         div()

@@ -1192,7 +1192,7 @@ impl Element for Inline {
             el.paint(window, cx);
         }
         if shimmering {
-            window.request_animation_frame();
+            gpui::wake_window_in(window, cx, std::time::Duration::from_millis(33));
         }
 
         if pre.hits.is_empty() {

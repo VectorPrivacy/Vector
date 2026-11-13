@@ -300,6 +300,7 @@ impl Element for Img {
                 cx,
                 |mut style, window, cx| {
                     let mut replacement_id = None;
+                    let mut next_frame_in = None;
 
                     match self.source.use_data(
                         self.image_cache
@@ -319,18 +320,22 @@ impl Element for Img {
                                         let current_time = Instant::now();
                                         if let Some(last_frame_time) = state.last_frame_time {
                                             let elapsed = current_time - last_frame_time;
-                                            let frame_duration =
-                                                Duration::from(data.delay(state.frame_index));
+                                            let frame_duration = frame_delay(&data, state.frame_index);
 
                                             if elapsed >= frame_duration {
                                                 state.frame_index =
                                                     (state.frame_index + 1) % frame_count;
-                                                state.last_frame_time =
-                                                    Some(current_time - (elapsed - frame_duration));
+                                                // A late frame resyncs rather than racing to catch up.
+                                                let over = (elapsed - frame_duration).min(frame_duration);
+                                                state.last_frame_time = Some(current_time - over);
                                             }
                                         } else {
                                             state.last_frame_time = Some(current_time);
                                         }
+                                        let since = current_time - state.last_frame_time.unwrap_or(current_time);
+                                        next_frame_in = Some(
+                                            frame_delay(&data, state.frame_index).saturating_sub(since),
+                                        );
                                     } else {
                                         state.last_frame_time = None;
                                     }
@@ -376,11 +381,9 @@ impl Element for Img {
                             }
 
                             if global_id.is_some()
-                                && data.frame_count() > 1
-                                && window.is_window_active()
-                                && !cx.reduce_motion()
+                                && let Some(due) = next_frame_in
                             {
-                                window.request_animation_frame();
+                                wake_window_in(window, cx, due);
                             }
                         }
                         Some(_err) => {
@@ -907,4 +910,51 @@ mod tests {
                 .into_any_element()
         });
     }
+}
+
+/// A frame's delay as browsers play it: 10ms or less means 100ms, so a GIF saved with no
+/// delay doesn't spin at the display's refresh rate.
+fn frame_delay(data: &RenderImage, index: usize) -> Duration {
+    let delay = Duration::from(data.delay(index));
+    if delay <= Duration::from_millis(10) {
+        Duration::from_millis(100)
+    } else {
+        delay
+    }
+}
+
+thread_local! {
+    /// Each window's earliest pending animation wake, so every image on screen shares one timer.
+    static WAKES: std::cell::RefCell<collections::FxHashMap<crate::WindowId, Instant>> =
+        Default::default();
+}
+
+/// Redraw `window` once `due` has passed, instead of on every vsync until then.
+pub fn wake_window_in(window: &mut Window, cx: &mut App, due: Duration) {
+    let at = Instant::now() + due.max(Duration::from_millis(8));
+    let id = window.window_handle().window_id();
+    let sooner = WAKES.with(|w| {
+        let mut w = w.borrow_mut();
+        let now = Instant::now();
+        match w.get(&id) {
+            Some(pending) if *pending > now && *pending <= at => false,
+            _ => {
+                w.insert(id, at);
+                true
+            }
+        }
+    });
+    if !sooner {
+        return;
+    }
+    window
+        .spawn(cx, async move |cx| {
+            cx.background_executor().timer(at - Instant::now()).await;
+            let current = WAKES.with(|w| w.borrow().get(&id).copied());
+            if current == Some(at) {
+                WAKES.with(|w| w.borrow_mut().remove(&id));
+                cx.update(|window, _| window.refresh()).ok();
+            }
+        })
+        .detach();
 }
