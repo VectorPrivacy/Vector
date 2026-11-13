@@ -113,12 +113,39 @@ pub async fn fetch_messages(init: bool) {
     }
     db::spawn_bound(async move {
         super::emit("sync_progress", serde_json::json!({ "mode": "Syncing" }));
-        dms(false).await;
+        if dms(false).await.reached_none() {
+            watch_unreachable();
+        }
         super::emit("sync_finished", ());
         if init {
             db::spawn_bound(merge_media_servers());
             db::spawn_bound(vector_core::badges::refresh_own());
             db::spawn_bound(vector_core::profile::sync::stamp_vector_client_after_sync());
+        }
+    });
+}
+
+/// Warn that the relays are unreachable once none has connected in a long grace: a slow
+/// network is not an offline one.
+fn watch_unreachable() {
+    use nostr_sdk::prelude::RelayStatus;
+    let Some(pool) = state::nostr_client() else { return };
+    db::spawn_bound(async move {
+        let grace = vector_core::relay_connect_timeout(Duration::from_secs(30));
+        let deadline = std::time::Instant::now() + grace;
+        loop {
+            let relays = pool.relays().await;
+            if relays.values().any(|r| r.status() == RelayStatus::Connected) {
+                return;
+            }
+            if std::time::Instant::now() >= deadline {
+                vector_core::emit_event(
+                    "show_toast",
+                    &format!("Couldn't reach any of your {} relays, new messages may be missing", relays.len()),
+                );
+                return;
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
         }
     });
 }

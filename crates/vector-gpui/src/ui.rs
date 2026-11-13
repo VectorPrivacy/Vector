@@ -3188,6 +3188,12 @@ impl VectorApp {
                     self.show_toast(text, cx);
                 }
             }
+            "badges_updated" => {
+                let me = self.store.borrow().my_npub.clone();
+                if self.profile.as_ref().is_some_and(|p| p.npub == me) {
+                    self.load_profile_badges(me, cx);
+                }
+            }
             "miniapp_realtime_status" => {
                 let topic = payload.get("topic").and_then(Value::as_str).unwrap_or_default();
                 let peers: Vec<String> = payload
@@ -13410,6 +13416,11 @@ impl VectorApp {
             }
             return;
         }
+        self.load_profile_badges(npub, cx);
+    }
+
+    /// The open profile's badges, read again when ours change.
+    fn load_profile_badges(&mut self, npub: String, cx: &mut Context<Self>) {
         let mine = npub == self.store.borrow().my_npub;
         let rx = backend::run(backend::badges::of(npub.clone(), mine));
         cx.spawn(async move |this, cx| {
