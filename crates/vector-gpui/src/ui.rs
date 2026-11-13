@@ -188,6 +188,8 @@ pub struct VectorApp {
     tracked: Vec<(String, String)>,
     /// What the composer held when an edit began: it comes back when the edit ends.
     edit_held: Option<(String, Mode)>,
+    /// `wsLastDm`: where the Messages button lands.
+    last_dm: Option<String>,
     /// Each chat's composer as it was left, until it is opened again. Runtime only.
     drafts: HashMap<String, Draft>,
     /// Each Community's taggable Roles and @everyone rule.
@@ -932,6 +934,7 @@ impl VectorApp {
             mention_pool: None,
             tracked: Vec::new(),
             edit_held: None,
+            last_dm: None,
             drafts: HashMap::new(),
             mention_rules: HashMap::new(),
             send_shown: false,
@@ -3642,6 +3645,14 @@ impl VectorApp {
         });
         if elsewhere {
             self.community = None;
+        }
+        {
+            let store = self.store.borrow();
+            if let Some(com) = store.community_of(&id) {
+                remember_channel(&store.my_npub, &com.community_id, &id, &store.communities);
+            } else if store.chat(&id).is_some_and(|c| c.chat_type == vector_core::ChatType::DirectMessage) {
+                self.last_dm = Some(id.to_string());
+            }
         }
         self.self_destruct = if self.live {
             vector_core::self_destruct::chat_duration_secs(&id)
@@ -9376,8 +9387,9 @@ impl VectorApp {
             let Some(com) = store.community(&id) else {
                 return;
             };
+            let last = last_channels(&store.my_npub).remove(&id).filter(|ch| com.channel(ch).is_some_and(|c| !c.is_voice() && c.visible()));
             (
-                com.landing().map(|c| c.channel_id.clone()),
+                last.or_else(|| com.landing().map(|c| c.channel_id.clone())),
                 com.members.clone(),
             )
         };
@@ -9520,7 +9532,12 @@ impl VectorApp {
         }
         match act {
             Act::Open(id) => self.open_community(id, window, cx),
-            Act::Home => self.leave_community(),
+            Act::Home => {
+                self.leave_community();
+                if !self.is_slim {
+                    self.open_dm_home(window, cx);
+                }
+            }
             Act::Dm(id) => {
                 self.leave_community();
                 self.settings = None;
@@ -13617,6 +13634,27 @@ impl VectorApp {
     }
 
     /// Back to Messages: the chat list returns in place of the channels.
+    /// `wsOpenDmHome`: the last DM, else the newest with messages, else the bare list.
+    fn open_dm_home(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let target = {
+            let store = self.store.borrow();
+            self.last_dm.clone().filter(|id| store.chat(id).is_some()).or_else(|| {
+                store
+                    .chats
+                    .iter()
+                    .find(|c| c.chat_type == vector_core::ChatType::DirectMessage && c.id != store.my_npub && !c.messages.is_empty())
+                    .map(|c| c.id.clone())
+            })
+        };
+        match target {
+            Some(id) => self.open_chat(id.into(), window, cx),
+            None => {
+                self.open = None;
+                cx.notify();
+            }
+        }
+    }
+
     fn leave_community(&mut self) {
         if self.community.take().is_some() {
             self.open = None;
@@ -18088,6 +18126,23 @@ fn folded_sections(community: &str) -> HashSet<String> {
         });
     }
     out
+}
+
+/// `ws_last_channel:<npub>`: the channel each community reopens to.
+fn last_channels(me: &str) -> HashMap<String, String> {
+    backend::device::get(&format!("ws_last_channel:{me}")).and_then(|v| serde_json::from_str(&v).ok()).unwrap_or_default()
+}
+
+fn remember_channel(me: &str, community: &str, channel: &str, communities: &[crate::data::Community]) {
+    let mut last = last_channels(me);
+    if last.get(community).map(String::as_str) == Some(channel) {
+        return;
+    }
+    last.insert(community.to_string(), channel.to_string());
+    last.retain(|id, _| communities.iter().any(|c| &c.community_id == id));
+    if let Ok(v) = serde_json::to_string(&last) {
+        backend::device::set(&format!("ws_last_channel:{me}"), v);
+    }
 }
 
 fn remember_fold(community: &str, key: &str, closing: bool) {
