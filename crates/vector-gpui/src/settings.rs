@@ -769,6 +769,8 @@ pub struct Settings {
     pub donut: Donut,
     /// The auto-download size limit, in bytes.
     pub auto_limit: u64,
+    /// `video_quality`; the row shows only where an encoder is.
+    pub video_quality: String,
     pub clearing: bool,
     /// Kept files moving, as "N of M", and whether out to plain files.
     pub moving: Option<(String, bool)>,
@@ -2309,6 +2311,13 @@ const LIMITS: [crate::kit::Choice; 6] = [
     },
 ];
 
+const VIDEO_QUALITIES: [crate::kit::Choice; 4] = [
+    crate::kit::Choice { value: "small", label: "Small" },
+    crate::kit::Choice { value: "balanced", label: "Balanced" },
+    crate::kit::Choice { value: "high", label: "High" },
+    crate::kit::Choice { value: "original", label: "Original" },
+];
+
 fn storage_block(s: &Settings, on: &OnAct) -> AnyElement {
     let auto = s.on.get("auto_download_enabled").copied().unwrap_or(true);
     let limit = s.auto_limit.to_string();
@@ -2354,6 +2363,26 @@ fn storage_block(s: &Settings, on: &OnAct) -> AnyElement {
         // The next group's 15px top margin outweighs the line's 10.
         .child(div().mt(px(5.)).child(row(s, "keep_media", on, false)))
         .when(shows_plain(s), |d| d.child(div().mt(px(5.)).child(row(s, "keep_unencrypted", on, false))))
+        .when(crate::message::video_compression::available(), |d| {
+            let select = crate::kit::select_with(
+                "video-quality",
+                120.,
+                12.,
+                &VIDEO_QUALITIES,
+                &[],
+                &s.video_quality,
+                s.open_select == Some("video-quality"),
+                {
+                    let on = on.clone();
+                    move |w, cx| on(Act::Select("video-quality"), w, cx)
+                },
+                {
+                    let on = on.clone();
+                    move |v, w, cx| on(Act::Pick("video-quality", v), w, cx)
+                },
+            );
+            d.child(line("video-quality", "Video Quality", Some("videoQuality"), select, on))
+        })
         .when_some(s.moving.as_ref(), |d, (count, plain)| {
             d.child(line(
                 "moving",

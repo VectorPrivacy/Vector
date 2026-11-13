@@ -714,3 +714,29 @@ fn scrubber(id: &str, frac: f32, seekable: bool, dragging: bool, on: OnAct) -> i
             .size_full(),
         )
 }
+
+#[cfg(feature = "video")]
+#[path = "../../../src-tauri/src/video.rs"]
+mod encode;
+
+#[cfg(feature = "video")]
+pub use encode::{Quality, compress};
+
+/// Hardware H.264 only: a system FFmpeg's own `mpeg4` encoder makes clips phones play badly.
+#[cfg(feature = "video")]
+pub fn available() -> bool {
+    static OK: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *OK.get_or_init(|| {
+        let test = std::env::var_os("VECTOR_VIDEO_TEST_ENCODER").is_some();
+        encode::available()
+            && (test
+                || ["h264_videotoolbox", "h264_mediacodec", "h264_mf"]
+                    .iter()
+                    .any(|n| ffmpeg_next::encoder::find_by_name(n).is_some()))
+    })
+}
+
+#[cfg(not(feature = "video"))]
+pub fn available() -> bool {
+    false
+}

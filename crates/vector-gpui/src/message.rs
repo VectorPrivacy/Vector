@@ -25,23 +25,34 @@ pub mod types {
     }
 }
 
-/// No video encoder in this client yet: a video sends as picked.
-pub mod video_compression {
-    pub fn is_video_extension(_: &str) -> bool {
-        false
-    }
+#[path = "../../../src-tauri/src/message/video_compression.rs"]
+pub mod video_compression;
 
-    pub fn compress_file(_: &str) -> Result<super::types::CachedCompressedImage, String> {
-        Err("Video compression isn't available".into())
+pub mod files {
+    /// Encodes write here, inside the account's directory rather than the shared temp dir.
+    pub(crate) fn private_temp_dir() -> std::path::PathBuf {
+        let dir = vector_core::db::current_account_dir()
+            .map(|d| d.join("outgoing").join("work"))
+            .unwrap_or_else(|_| std::env::temp_dir());
+        let _ = std::fs::create_dir_all(&dir);
+        dir
     }
+}
 
-    pub fn renamed(name: &str, ext: &str) -> String {
-        let stem = std::path::Path::new(name)
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or(name);
-        format!("{stem}.{ext}")
-    }
+/// `video_quality`: `small`, `balanced` (the default), `high` or `original`.
+pub fn video_quality() -> String {
+    vector_core::db::settings::get_sql_setting(video_compression::QUALITY_SETTING.into())
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| "balanced".into())
+}
+
+/// `compressVideo`: an encoder, a preset that compresses, and a clip worth the wait.
+pub fn offers_video_compression(ext: &str, size: u64) -> bool {
+    video_compression::is_video_extension(ext)
+        && size > 1024 * 1024
+        && video_compression::available()
+        && video_quality() != "original"
 }
 
 /// The share of `original` a compression saves, in whole percent.

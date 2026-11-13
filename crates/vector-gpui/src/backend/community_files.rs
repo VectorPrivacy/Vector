@@ -68,6 +68,11 @@ async fn prepare(
         .and_then(|e| e.to_str())
         .unwrap_or("")
         .to_lowercase();
+    if let Some(pc) = smaller_video(&extension, compress, precompressed.as_ref()) {
+        let name = crate::message::video_compression::renamed(&name, &pc.extension);
+        let bytes = Arc::try_unwrap(pc.bytes.clone()).unwrap_or_else(|a| (*a).clone());
+        return prepare_bytes(bytes, &name, false, false, None).await;
+    }
     if !IMAGE_EXTS.contains(&extension.as_str()) {
         return prepare_path(path.to_path_buf(), name).await;
     }
@@ -79,6 +84,20 @@ async fn prepare(
     .map_err(|e| e.to_string())?
     .map_err(|e| format!("read attachment: {e}"))?;
     prepare_bytes(bytes, &name, compress, keep_metadata, precompressed).await
+}
+
+/// The preview's encode of a video, when it came out smaller; otherwise the original streams.
+pub(crate) fn smaller_video<'a>(
+    extension: &str,
+    compress: bool,
+    precompressed: Option<&'a CachedCompressedImage>,
+) -> Option<&'a CachedCompressedImage> {
+    precompressed.filter(|pc| {
+        compress
+            && crate::message::video_compression::is_video_extension(extension)
+            && !pc.is_original_on_disk()
+            && pc.compressed_size < pc.original_size
+    })
 }
 
 /// A file that needs no processing: hashed where it lies and sealed file to file.

@@ -1,6 +1,9 @@
 // A release build is a GUI app: no console window behind it.
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
+#[macro_use]
+extern crate vector_core;
+
 mod album;
 mod assets;
 use vector_media::{audio_devices, calls, mic_access};

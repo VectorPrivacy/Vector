@@ -291,6 +291,22 @@ pub async fn send_file(
             name = clean;
         }
     }
+    if let Some(pc) = super::community_files::smaller_video(&extension, compress, precompressed.as_ref()) {
+        let name = crate::message::video_compression::renamed(&name, &pc.extension);
+        return vector_core::sending::send_file_dm_with_meta(
+            &receiver,
+            pc.bytes.clone(),
+            &name,
+            &pc.extension,
+            None,
+            None,
+            reply,
+            &config,
+            Arc::new(Callback),
+        )
+        .await
+        .map(|_| ());
+    }
     if !IMAGE_EXTS.contains(&extension.as_str()) {
         match std::fs::metadata(&path) {
             Ok(m) if m.len() > 0 => {}

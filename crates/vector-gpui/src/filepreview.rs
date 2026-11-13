@@ -65,6 +65,8 @@ pub struct FilePreview {
     blur: Option<Arc<RenderImage>>,
     compress_offered: bool,
     compress: bool,
+    /// Send pressed mid-encode: the name it sends under once the encode lands.
+    held: Option<String>,
     compress_info: SharedString,
     compressed: Option<Compressed>,
     cancel: Arc<AtomicBool>,
@@ -203,7 +205,8 @@ impl FilePreview {
         }
         let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
         let is_image = IMAGE_EXTS.contains(&ext.as_str());
-        let compress_offered = is_image && size > MIN_COMPRESS_SIZE;
+        let video = crate::message::offers_video_compression(&ext, size);
+        let compress_offered = video || (is_image && size > MIN_COMPRESS_SIZE);
         let cancel = Arc::new(AtomicBool::new(false));
 
         let compressed = compress_offered.then(|| {
@@ -213,9 +216,35 @@ impl FilePreview {
             });
             let shared = task.shared();
             let watch = shared.clone();
+            if video {
+                let file = path.to_string_lossy().into_owned();
+                cx.spawn(async move |this, cx| loop {
+                    cx.background_executor().timer(std::time::Duration::from_millis(200)).await;
+                    let done = crate::message::video_compression::progress(&file);
+                    let Ok(going) = this.update(cx, |p, cx| {
+                        if p.compressed.as_ref().is_some_and(|c| c.peek().is_some()) {
+                            return false;
+                        }
+                        if let Some(f) = done {
+                            p.compress_info = format!("Compressing... {}%", (f * 100.) as u32).into();
+                            cx.notify();
+                        }
+                        true
+                    }) else {
+                        return;
+                    };
+                    if !going {
+                        return;
+                    }
+                })
+                .detach();
+            }
             cx.spawn(async move |this, cx| {
                 let done = watch.await;
                 this.update(cx, |p, cx| {
+                    if let Some(name) = p.held.take() {
+                        p.dispatch(name, p.compress, cx);
+                    }
                     p.compress_info = match &done {
                         Some(c) if crate::message::savings_percent(c) > 0 => format!(
                             "~{} ({}% smaller)",
@@ -290,6 +319,7 @@ impl FilePreview {
             blur: None,
             compress_offered,
             compress: true,
+            held: None,
             compress_info: "Compressing...".into(),
             compressed,
             cancel,
@@ -351,6 +381,7 @@ impl FilePreview {
             blur: None,
             compress_offered: false,
             compress: false,
+            held: None,
             compress_info: SharedString::default(),
             compressed: None,
             cancel,
@@ -485,8 +516,15 @@ impl FilePreview {
     }
 
     fn close(&mut self, cx: &mut Context<Self>) {
-        self.cancel.store(true, Ordering::Relaxed);
+        self.stop_compressing();
         cx.emit(Event::Close(self.path.clone()));
+    }
+
+    fn stop_compressing(&self) {
+        self.cancel.store(true, Ordering::Relaxed);
+        if self.compressed.as_ref().is_some_and(|c| c.peek().is_none()) {
+            crate::message::video_compression::cancel(&self.path.to_string_lossy());
+        }
     }
 
     fn send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -520,8 +558,19 @@ impl FilePreview {
         };
         let compress = self.compress_offered && self.compress;
         if !compress {
-            self.cancel.store(true, Ordering::Relaxed);
+            self.stop_compressing();
         }
+        // A video encode can run long and the chat shows nothing until it lands.
+        let encoding = compress && !IMAGE_EXTS.contains(&self.ext.as_str()) && self.compressed.as_ref().is_some_and(|c| c.peek().is_none());
+        if encoding {
+            self.held = Some(name);
+            cx.notify();
+            return;
+        }
+        self.dispatch(name, compress, cx);
+    }
+
+    fn dispatch(&mut self, name: String, compress: bool, cx: &mut Context<Self>) {
         cx.emit(Event::Send(Send {
             path: self.path.clone(),
             receiver: self.receiver.clone(),
@@ -872,7 +921,7 @@ impl Render for FilePreview {
                 d.child(
                     option(
                         "fp-compress",
-                        "Compress Image".into_any_element(),
+                        if IMAGE_EXTS.contains(&self.ext.as_str()) { "Compress Image" } else { "Compress Video" }.into_any_element(),
                         self.compress_info.clone(),
                         self.compress,
                     )
@@ -946,8 +995,8 @@ impl Render for FilePreview {
                     .on_click(cx.listener(|p, _, _, cx| p.close(cx))),
             )
             .child(
-                button("fp-send", if zipping { "Compressing..." } else { "Send" })
-                    .when(zipping, |d| d.opacity(0.5).cursor_default())
+                button("fp-send", if zipping { "Compressing..." } else if self.held.is_some() { "Sending when ready" } else { "Send" })
+                    .when(zipping || self.held.is_some(), |d| d.opacity(0.5).cursor_default())
                     .bg(linear_gradient(
                         90.,
                         linear_color_stop(c(0x33db98), 0.),

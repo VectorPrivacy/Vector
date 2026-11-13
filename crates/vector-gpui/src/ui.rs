@@ -14186,6 +14186,7 @@ impl VectorApp {
                 None
             }
             .unwrap_or(10_485_760),
+            video_quality: crate::message::video_quality(),
             clearing: false,
             moving: None,
             notif_sound: if self.live {
@@ -15860,6 +15861,12 @@ impl VectorApp {
                         s.notif_privacy = value.to_string();
                         if self.live {
                             backend::prefs::set_sql("notif_content_privacy", value.to_string());
+                        }
+                    }
+                    "video-quality" => {
+                        s.video_quality = value.to_string();
+                        if self.live {
+                            backend::prefs::set_sql(crate::message::video_compression::QUALITY_SETTING, value.to_string());
                         }
                     }
                     "auto-limit" => {

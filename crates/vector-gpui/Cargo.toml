@@ -73,7 +73,7 @@ symphonia = { version = "0.5.5", default-features = false, features = ["mp3", "w
 # Calls, devices and the audio engine: the desktop client's own modules (media/).
 vector-media = { package = "vector-gpui-media", path = "media" }
 tauri = { package = "vector-tauri-shim", path = "tauri-shim" }
-ffmpeg-next = { version = "9", default-features = false, features = ["codec", "format"], optional = true }
+ffmpeg-next = { version = "9", default-features = false, features = ["codec", "format", "software-resampling"], optional = true }
 http = "1.3"
 url = "2.5.7"
 # 3D model attachments: parsed here, drawn offscreen on the GPU (src/model3d).
