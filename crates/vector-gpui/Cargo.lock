@@ -13100,6 +13100,7 @@ dependencies = [
  "gltf",
  "gpui",
  "gpui_platform",
+ "gpui_wgpu",
  "gtk",
  "http",
  "image",

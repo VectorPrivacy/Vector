@@ -21,6 +21,20 @@ pub struct WgpuContext {
     errors: Arc<DeviceErrorState>,
 }
 
+type Shared = (std::sync::Weak<wgpu::Device>, std::sync::Weak<wgpu::Queue>, Arc<DeviceErrorState>);
+static SHARED: std::sync::Mutex<Option<Shared>> = std::sync::Mutex::new(None);
+
+/// The device the windows draw with, for the process's other renderers, so they don't bring
+/// up a second one; `None` once it is lost or gone.
+pub fn shared_device() -> Option<(wgpu::Device, wgpu::Queue)> {
+    let shared = SHARED.lock().ok()?;
+    let (device, queue, errors) = shared.as_ref()?;
+    if errors.device_lost() {
+        return None;
+    }
+    Some(((*device.upgrade()?).clone(), (*queue.upgrade()?).clone()))
+}
+
 /// Errors reported by wgpu's device-wide callbacks.
 ///
 /// A device has exactly one lost callback and one uncaptured-error callback, so this
@@ -309,12 +323,16 @@ impl WgpuContext {
             adapter.get_info().backend
         );
         let backend = WgpuBackend::Native(adapter.get_info().backend);
+        let (device, queue) = (Arc::new(device), Arc::new(queue));
+        if let Ok(mut shared) = SHARED.lock() {
+            *shared = Some((Arc::downgrade(&device), Arc::downgrade(&queue), Arc::clone(&errors)));
+        }
 
         Self {
             instance,
             adapter,
-            device: Arc::new(device),
-            queue: Arc::new(queue),
+            device,
+            queue,
             backend,
             dual_source_blending,
             color_texture_format,

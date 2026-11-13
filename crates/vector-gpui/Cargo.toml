@@ -125,6 +125,8 @@ gtk = "0.18"
 webkit2gtk = { version = "2.0", features = ["v2_40"] }
 x11rb = { version = "0.13", features = ["randr"] }
 libc = "0.2"
+# The windows' own device, which 3D models draw with too.
+gpui_wgpu = { git = "https://github.com/zed-industries/zed", rev = "f8cfc7ed9e57503def9479138894f3139f5400cc" }
 
 # Its own workspace: GPUI pins dependency versions the main client must not inherit.
 [workspace]

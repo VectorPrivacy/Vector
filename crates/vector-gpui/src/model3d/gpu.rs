@@ -172,6 +172,10 @@ fn mips(w: u32, h: u32, rgba: &[u8]) -> Vec<(u32, u32, Vec<u8>)> {
 
 impl Gpu {
     pub fn new() -> Result<Self, String> {
+        #[cfg(target_os = "linux")]
+        if let Some((device, queue)) = gpui_wgpu::shared_device() {
+            return Ok(Self::with(device, queue));
+        }
         pollster::block_on(async {
             // The platform's own API first; GL only without one, as bringing up both costs memory.
             let mut adapter = Err(String::from("no GPU adapter"));
