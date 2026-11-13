@@ -167,7 +167,8 @@ struct Video {
 }
 
 impl Video {
-    fn open(reader: Box<dyn ReadSeek>) -> Option<(Video, Option<usize>)> {
+    /// `threads`: 0 for FFmpeg's choice. A poster wants one: each frame thread holds its own buffers.
+    fn open(reader: Box<dyn ReadSeek>, threads: usize) -> Option<(Video, Option<usize>)> {
         let src = Source::open(reader)?;
         let stream = src.input.streams().best(ffmpeg::media::Type::Video)?;
         let index = stream.index();
@@ -175,7 +176,7 @@ impl Video {
         let tb = f64::from(stream.time_base());
         let rot = rotation(&stream);
         let mut ctx = ffmpeg::codec::context::Context::from_parameters(stream.parameters()).ok()?;
-        ctx.set_threading(ffmpeg::threading::Config { kind: ffmpeg::threading::Type::Frame, count: 0 });
+        ctx.set_threading(ffmpeg::threading::Config { kind: ffmpeg::threading::Type::Frame, count: threads });
         let decoder = ctx.decoder().video().ok()?;
         Some((Video { src, index, decoder, tb, rot }, audio))
     }
@@ -271,7 +272,7 @@ fn target(size: (u32, u32), scale: f32) -> (u32, u32) {
 
 pub fn probe(input: AudioInput, scale: f32) -> Option<Info> {
     let reader: Box<dyn ReadSeek> = Box::new(Reader(input.open().ok()?));
-    let (mut v, audio) = Video::open(reader)?;
+    let (mut v, audio) = Video::open(reader, 1)?;
     let (w, h) = v.size();
     if w == 0 || h == 0 {
         return None;
@@ -299,7 +300,7 @@ pub fn probe(input: AudioInput, scale: f32) -> Option<Info> {
 /// generation so stale ones are known on arrival.
 pub fn decode(input: AudioInput, size: (u32, u32), from: u64, cmds: Receiver<Cmd>, out: SyncSender<Out>) -> Option<()> {
     let reader: Box<dyn ReadSeek> = Box::new(Reader(input.open().ok()?));
-    let (mut v, _) = Video::open(reader)?;
+    let (mut v, _) = Video::open(reader, 0)?;
     let rot = v.rot;
     let mut epoch = 0u32;
     let mut skip = from;
