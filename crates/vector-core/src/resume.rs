@@ -96,7 +96,7 @@ pub fn paused() -> HashMap<String, Checkpoint> {
 /// Remove abandoned partials and their checkpoints.
 pub fn sweep_stale(dir: &Path) {
     let Ok(entries) = std::fs::read_dir(dir) else { return };
-    let now = std::time::SystemTime::now();
+    let now = web_time::SystemTime::now();
     for entry in entries.flatten() {
         let stale = entry
             .metadata()
