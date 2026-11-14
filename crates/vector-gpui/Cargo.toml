@@ -151,6 +151,15 @@ codegen-units = 1
 panic = "abort"
 strip = true
 
+# Day-to-day optimised builds: every core, incremental, close to release speed.
+[profile.fastrel]
+inherits = "release"
+lto = false
+codegen-units = 16
+incremental = true
+debug = "line-tables-only"
+strip = false
+
 [patch.crates-io]
 # whisper.cpp 1.9.5 with scripts/whisper/patches, as the desktop client builds it.
 whisper-rs-sys = { git = "https://github.com/VectorPrivacy/whisper-rs.git", rev = "97540c4ce03944e54aa2da3381a64947b4a824cb" }
