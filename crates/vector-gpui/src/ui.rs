@@ -7776,6 +7776,14 @@ fn preview_line_at(store: &Store, chat: &SerializableChat, color: gpui::Hsla, si
                 Some(media.borrow_mut().custom(&timeline::emoji_source(store, &tag.url), false))
             };
             atoms = crate::preview::with_customs(atoms, &custom);
+            // Emoji alone close up, as the timeline's jumbo row does: chained ones form a picture.
+            let only_emoji = atoms.iter().all(|a| match a {
+                crate::inline::Atom::Text { text, .. } => text.trim().is_empty(),
+                _ => true,
+            });
+            if only_emoji {
+                atoms.retain(|a| !matches!(a, crate::inline::Atom::Text { .. }));
+            }
         }
         v.extend(atoms);
         v
@@ -8395,6 +8403,13 @@ impl VectorApp {
 
     /// The chat list, or the open Community's channels.
     fn side_pane(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let el = self.side_pane_inner(cx);
+        // Previews ask for custom emoji too; start what they asked for.
+        crate::media::pump(&crate::media::shared(), cx.entity().downgrade(), self.live, cx);
+        el
+    }
+
+    fn side_pane_inner(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let store = self.store.clone();
         let store = store.borrow();
         let on_community = self.on_community_act(cx);
