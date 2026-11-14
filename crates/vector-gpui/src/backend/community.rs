@@ -1141,6 +1141,11 @@ pub fn send_denied(community_id: &str, channel_id: &str, npubs: &[String]) -> st
     VectorCore.channel_send_denied(community_id, channel_id, npubs).unwrap_or_default().into_iter().collect()
 }
 
+/// `get_channel_react_denied`: which of `npubs` can't react in the channel.
+pub fn react_denied(community_id: &str, channel_id: &str, npubs: &[String]) -> std::collections::HashSet<String> {
+    VectorCore.channel_react_denied(community_id, channel_id, npubs).unwrap_or_default().into_iter().collect()
+}
+
 /// `get_community_timeouts`: npub → { from, until }.
 pub fn timeouts(community_id: &str) -> serde_json::Value {
     VectorCore.community_timeouts(community_id).unwrap_or_default()

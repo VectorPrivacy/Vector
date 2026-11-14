@@ -91,6 +91,8 @@ pub struct VectorApp {
     revealed: Rc<RefCell<HashMap<String, HashSet<u32>>>>,
     /// Reads Timeouts again as the soonest one ends.
     timeout_expiry: Option<gpui::Task<()>>,
+    /// A pending read of who can't react in the open channel.
+    react_recheck: Option<gpui::Task<()>>,
     /// Fetches the open profile again every 30 s while the window has focus.
     profile_poll: Option<gpui::Task<()>>,
     started: std::time::Instant,
@@ -895,6 +897,7 @@ impl VectorApp {
             syncing: false,
             revealed: Rc::default(),
             timeout_expiry: None,
+            react_recheck: None,
             profile_poll: None,
             started: std::time::Instant::now(),
             mode: Mode::Normal,
@@ -3386,6 +3389,7 @@ impl VectorApp {
                 }
                 if self.open.as_deref() == Some(chat_id.as_str()) {
                     self.refresh_rows(true);
+                    self.check_reactors(cx);
                 }
             }
             "marketplace_install_progress" | "marketplace_apps_updated" => self.nexus_event(name, &payload, cx),
@@ -4524,6 +4528,9 @@ impl VectorApp {
         let Some(chat) = self.open.clone() else {
             return;
         };
+        if !self.store.borrow().can_react(&chat) {
+            return self.show_toast("You can't react in this channel", cx);
+        }
         // Shown at once; the relay's echo replaces the message, this guess with it.
         let me = self.store.borrow().my_npub.clone();
         let local = format!("local-{}", vector_core::simd::hex::bytes_to_hex_string(&rand::random::<[u8; 8]>()));

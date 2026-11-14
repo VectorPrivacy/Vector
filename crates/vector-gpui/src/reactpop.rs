@@ -96,9 +96,8 @@ fn shell(pop: &Pop, at: (f32, f32), body: gpui::Stateful<gpui::Div>) -> AnyEleme
 
 pub fn tip(pop: &Pop, store: &Store, custom: Option<ImageSource>, anchor: Bounds<Pixels>, pane: Bounds<Pixels>) -> Option<AnyElement> {
     let (chat, msg) = find(store, &pop.msg)?;
-    let who: Vec<String> = msg
-        .reactions
-        .iter()
+    let who: Vec<String> = store
+        .counted(chat, msg)
         .filter(|r| r.emoji == pop.emoji)
         .map(|r| store.chat_name(&r.author_id, chat))
         .collect();
@@ -154,7 +153,7 @@ pub fn details(
     on_close: Rc<dyn Fn(&mut Window, &mut App)>,
 ) -> Option<AnyElement> {
     let (chat, msg) = find(store, &pop.msg)?;
-    let reactors: Vec<&str> = msg.reactions.iter().filter(|r| r.emoji == pop.emoji).map(|r| r.author_id.as_str()).collect();
+    let reactors: Vec<&str> = store.counted(chat, msg).filter(|r| r.emoji == pop.emoji).map(|r| r.author_id.as_str()).collect();
     if reactors.is_empty() {
         return None;
     }

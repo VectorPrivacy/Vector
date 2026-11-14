@@ -43,6 +43,8 @@ struct Fixtures {
     #[serde(default)]
     send_denied: HashMap<String, HashSet<String>>,
     #[serde(default)]
+    react_denied: HashMap<String, HashSet<String>>,
+    #[serde(default)]
     unlisted: HashMap<String, HashMap<String, String>>,
     #[serde(default)]
     role_graphs: HashMap<String, serde_json::Value>,
@@ -305,6 +307,10 @@ pub struct Store {
     pub timeouts: HashMap<String, HashMap<String, Timeout>>,
     /// Per channel, the authors seen there who can't send in it.
     pub send_denied: HashMap<String, HashSet<String>>,
+    /// Per channel, the reactors seen there who can't react in it: their reactions don't count.
+    pub react_denied: HashMap<String, HashSet<String>>,
+    /// Per channel, every reactor asked about.
+    pub react_checked: HashMap<String, HashSet<String>>,
     /// Fixtures' members seen posting outside the Guestbook, by community.
     pub fixture_unlisted: HashMap<String, HashMap<String, String>>,
     /// Each community's role graph, once read: roster sections and name colours.
@@ -484,6 +490,8 @@ impl Store {
             nicknames: f.nicknames,
             timeouts: f.timeouts,
             send_denied: f.send_denied,
+            react_denied: f.react_denied,
+            react_checked: HashMap::new(),
             unveiled: HashSet::new(),
             fixture_unlisted: f.unlisted,
             role_graphs: f.role_graphs.iter().map(|(k, v)| (k.clone(), crate::community::Graph::parse(v))).collect(),
@@ -545,6 +553,8 @@ impl Store {
             nicknames: HashMap::new(),
             timeouts: HashMap::new(),
             send_denied: HashMap::new(),
+            react_denied: HashMap::new(),
+            react_checked: HashMap::new(),
             unveiled: HashSet::new(),
             fixture_unlisted: HashMap::new(),
             role_graphs: HashMap::new(),
@@ -841,6 +851,22 @@ impl Store {
     pub fn timeout(&self, community: &str, npub: &str) -> Option<Timeout> {
         let now = self.now_ms() / 1000;
         self.timeouts.get(community)?.get(npub).copied().filter(|t| t.until > now)
+    }
+
+    /// `channelAllowsReact`: whether I may react in `chat`; a DM always may.
+    pub fn can_react(&self, chat: &str) -> bool {
+        const ADD_REACTIONS: u64 = 1 << 17;
+        self.community_of(chat)
+            .and_then(|c| c.channel(chat))
+            .and_then(|ch| ch.my_permissions.as_deref())
+            .and_then(|p| p.parse::<u64>().ok())
+            .is_none_or(|p| p & ADD_REACTIONS != 0)
+    }
+
+    /// `countedReactions`: `m`'s reactions less any by someone who can't react in `chat`.
+    pub fn counted<'a>(&'a self, chat: &str, m: &'a vector_core::Message) -> impl Iterator<Item = &'a vector_core::types::Reaction> {
+        let denied = self.react_denied.get(chat).filter(|d| !d.is_empty());
+        m.reactions.iter().filter(move |r| denied.is_none_or(|d| !d.contains(&r.author_id)))
     }
 
     /// Why the composer can't send in `chat`, as its placeholder.

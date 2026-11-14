@@ -1257,11 +1257,8 @@ fn marks(m: &Message) -> Option<AnyElement> {
 
 /// `.dmsg-reactions`: one chip per emoji in first-seen order, then the add button.
 fn reactions(ctx: &Ctx, m: &Message) -> Option<AnyElement> {
-    if m.reactions.is_empty() {
-        return None;
-    }
     let mut groups: Vec<(&str, usize, bool, Option<&str>)> = Vec::new();
-    for r in &m.reactions {
+    for r in ctx.store.counted(&ctx.chat.id, m) {
         let mine = r.author_id == ctx.store.my_npub;
         match groups.iter_mut().find(|g| g.0 == r.emoji) {
             Some(g) => {
@@ -1271,6 +1268,9 @@ fn reactions(ctx: &Ctx, m: &Message) -> Option<AnyElement> {
             }
             None => groups.push((&r.emoji, 1, mine, r.emoji_url.as_deref())),
         }
+    }
+    if groups.is_empty() {
+        return None;
     }
     let mut row = div()
         .flex()
@@ -1351,6 +1351,9 @@ fn reactions(ctx: &Ctx, m: &Message) -> Option<AnyElement> {
                 .child(glyph)
                 .child(count.to_string()),
         );
+    }
+    if !ctx.store.can_react(&ctx.chat.id) {
+        return Some(row.into_any_element());
     }
     let (act, id) = (ctx.on_act.clone(), m.id.clone());
     row = row.child(
@@ -1513,7 +1516,7 @@ fn toolbar(ctx: &Ctx, m: &Message, first: bool) -> Option<AnyElement> {
         ));
     } else {
         let unique: HashSet<&str> = m.reactions.iter().map(|r| r.emoji.as_str()).collect();
-        if unique.len() < 8 {
+        if unique.len() < 8 && ctx.store.can_react(&ctx.chat.id) {
             acts.push(("icons/smile-face.svg", "Add reaction", Act::React, false));
         }
         acts.push(("icons/reply.svg", "Reply", Act::Reply, false));

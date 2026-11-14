@@ -51,7 +51,7 @@ impl VectorApp {
         let mut rows: Vec<(kit::MenuItem, MenuAct)> = Vec::new();
         if !dissolved {
             let unique: std::collections::HashSet<&str> = m.reactions.iter().map(|r| r.emoji.as_str()).collect();
-            if unique.len() < 8 {
+            if unique.len() < 8 && self.store.borrow().can_react(&chat) {
                 rows.push((kit::MenuItem::new("React", "smile-face"), act(MsgAct::Act(timeline::Act::React))));
             }
             rows.push((kit::MenuItem::new("Reply", "reply"), act(MsgAct::Act(timeline::Act::Reply))));
