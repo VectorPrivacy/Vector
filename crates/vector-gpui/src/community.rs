@@ -72,6 +72,7 @@ pub struct View {
     pub panel: bool,
     pub search: Entity<TextInput>,
     pub folded: HashSet<String>,
+    pub scroll: gpui::ScrollHandle,
 }
 
 struct GraphRole {
@@ -165,7 +166,7 @@ const LABEL: u32 = 0x8a8a8a;
 /// The community's logo, or the group placeholder until it has one.
 pub fn logo(store: &Store, id: &str, size: f32, radius: f32) -> gpui::Stateful<gpui::Img> {
     match store.icon(id) {
-        Some(path) => img(path).object_fit(gpui::ObjectFit::Cover).face(),
+        Some(path) => crate::pic::img_fit(path, size).object_fit(gpui::ObjectFit::Cover).face(),
         None => img("icons/group-placeholder.svg"),
     }
     .size(px(size))
@@ -176,7 +177,7 @@ pub fn logo(store: &Store, id: &str, size: f32, radius: f32) -> gpui::Stateful<g
 
 /// `.banner-art`: a banner cut to the 238 x 70 template at `width`, grey until it paints.
 pub fn banner_art(path: std::path::PathBuf, width: f32) -> gpui::Stateful<gpui::Img> {
-    img(path)
+    crate::pic::img_fit(path, width)
         .w(px(width))
         .h(px(width * 70. / 238.))
         .aspect_ratio(238. / 70.)
@@ -882,6 +883,7 @@ pub fn roster<E: ParentElement>(
     com: &Community,
     on: &OnAct,
     anchors: &crate::kit::Anchors,
+    visible: Option<(f32, f32)>,
     cx: &App,
 ) -> E {
     let query = view.search.read(cx).text().trim().to_lowercase();
@@ -940,8 +942,25 @@ pub fn roster<E: ParentElement>(
         buckets[ix].push(n);
     }
     let colour = |n: &str| graph.filter(|g| g.activated).and_then(|g| g.highest(n, |r| r.color != 0)).map(|r| r.color);
+    // Rows outside the viewport (plus a screen of slack) are spacers: a big roster otherwise
+    // rebuilds and lays out every member on each frame.
+    let row_h = if crate::theme::is_slim() { 46. } else { 40. };
+    let top = std::cell::Cell::new(0f32);
     let section = |key: String, label: String, list: Vec<&String>| {
         let closed = view.folded.contains(&key);
+        let rows_at = top.get() + if top.get() > 0. { 12. } else { 0. } + 36.;
+        if !list.is_empty() {
+            top.set(rows_at + if closed { 0. } else { list.len() as f32 * row_h });
+        }
+        let (skip, take) = match visible {
+            Some((from, height)) => {
+                let lo = ((from - height - rows_at) / row_h).floor().max(0.) as usize;
+                let hi = ((from + 2. * height - rows_at) / row_h).ceil().max(0.) as usize;
+                (lo.min(list.len()), hi.min(list.len()).saturating_sub(lo.min(list.len())))
+            }
+            None => (0, list.len()),
+        };
+        let after = list.len() - skip - take;
         (!list.is_empty()).then(|| {
             div()
                 .child(
@@ -997,9 +1016,11 @@ pub fn roster<E: ParentElement>(
                         ),
                 )
                 .when(!closed, |d| {
-                    d.children(list.into_iter().map(|n| {
-                        member_row(store, &com.community_id, n, owner == Some(n.as_str()), colour(n), view.unlisted.get(n.as_str()).map(String::as_str), on, anchors)
-                    }))
+                    d.when(skip > 0, |d| d.child(div().h(px(skip as f32 * row_h))))
+                        .children(list.into_iter().skip(skip).take(take).map(|n| {
+                            member_row(store, &com.community_id, n, owner == Some(n.as_str()), colour(n), view.unlisted.get(n.as_str()).map(String::as_str), on, anchors)
+                        }))
+                        .when(after > 0, |d| d.child(div().h(px(after as f32 * row_h))))
                 })
         })
     };
@@ -1087,8 +1108,13 @@ pub fn members_panel(
                 .flex_1()
                 .min_h_0()
                 .overflow_y_scroll()
+                .track_scroll(&view.scroll)
                 .px(px(8.))
-                .map(|d| roster(d, store, open, view, com, on, anchors, cx)),
+                .map(|d| {
+                    let height = f32::from(view.scroll.bounds().size.height);
+                    let visible = (height > 0.).then(|| (-f32::from(view.scroll.offset().y), height));
+                    roster(d, store, open, view, com, on, anchors, visible, cx)
+                }),
         )
 }
 

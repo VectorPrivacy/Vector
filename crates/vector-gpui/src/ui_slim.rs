@@ -1001,6 +1001,7 @@ impl VectorApp {
             com,
             &on,
             &self.anchors,
+            None,
             cx,
         );
         let search = div()

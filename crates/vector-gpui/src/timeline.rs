@@ -213,7 +213,7 @@ pub fn base_look() -> Look {
 
 fn avatar(store: &Store, npub: &str, size: f32) -> AnyElement {
     match store.avatar_path(npub) {
-        Some(path) => img(path).object_fit(gpui::ObjectFit::Cover)
+        Some(path) => crate::pic::img_fit(path, size).object_fit(gpui::ObjectFit::Cover)
             .face()
             .size(px(size))
             .rounded_full()

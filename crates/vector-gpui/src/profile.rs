@@ -509,7 +509,7 @@ pub fn pane(
             .rounded_full()
             .object_fit(ObjectFit::Cover)
             .into_any_element(),
-        Some(path) => img(path)
+        Some(path) => crate::pic::img_fit(path, 175.)
             .size(px(175.))
             .rounded_full()
             .object_fit(ObjectFit::Cover)

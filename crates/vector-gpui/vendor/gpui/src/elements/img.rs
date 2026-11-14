@@ -7,6 +7,7 @@ use crate::{
     decode_webp_image, px,
 };
 use anyhow::Result;
+use smallvec::SmallVec;
 
 use futures::Future;
 use gpui_util::ResultExt;
@@ -676,6 +677,7 @@ impl Asset for ImageAssetLoader {
         let svg_renderer = cx.svg_renderer();
         let asset_source = cx.asset_source().clone();
         async move {
+            let mut fit = None;
             let bytes = match source.clone() {
                 Resource::Path(uri) => fs::read(uri.as_ref())?,
                 Resource::Uri(uri) => {
@@ -701,6 +703,13 @@ impl Asset for ImageAssetLoader {
                     body
                 }
                 Resource::Embedded(path) => {
+                    let path = match path.rsplit_once(FIT) {
+                        Some((name, n)) if n.parse::<u32>().is_ok() => {
+                            fit = n.parse().ok();
+                            SharedString::from(name.to_string())
+                        }
+                        _ => path,
+                    };
                     let data = asset_source.load(&path).ok().flatten();
                     if let Some(data) = data {
                         data.to_vec()
@@ -718,6 +727,10 @@ impl Asset for ImageAssetLoader {
                     ImageFormat::WebP => decode_webp_image(&bytes)?,
                     _ => decode_static_image(&bytes, format)?,
                 };
+                let data = match fit {
+                    Some(max) => fit_frames(data, max),
+                    None => data,
+                };
 
                 Ok(Arc::new(RenderImage::new(data)))
             } else {
@@ -727,6 +740,44 @@ impl Asset for ImageAssetLoader {
             }
         }
     }
+}
+
+/// Suffix on an embedded asset's name, `#fit=N`: decoded pictures are shrunk to fit N pixels.
+pub const FIT: &str = "#fit=";
+
+/// Shrinks frames whose longer side passes `max`; a picture shown small never holds its full size.
+fn fit_frames(frames: SmallVec<[image::Frame; 1]>, max: u32) -> SmallVec<[image::Frame; 1]> {
+    let Some(first) = frames.first() else {
+        return frames;
+    };
+    let (w, h) = first.buffer().dimensions();
+    if w.max(h) <= max || max == 0 {
+        return frames;
+    }
+    let scale = max as f64 / w.max(h) as f64;
+    let (nw, nh) = (
+        ((w as f64 * scale).round() as u32).max(1),
+        ((h as f64 * scale).round() as u32).max(1),
+    );
+    frames
+        .into_iter()
+        .map(|frame| {
+            let delay = frame.delay();
+            let (left, top) = (frame.left(), frame.top());
+            let buffer = image::imageops::resize(
+                frame.buffer(),
+                nw,
+                nh,
+                image::imageops::FilterType::Triangle,
+            );
+            image::Frame::from_parts(
+                buffer,
+                (left as f64 * scale) as u32,
+                (top as f64 * scale) as u32,
+                delay,
+            )
+        })
+        .collect()
 }
 
 /// An error that can occur when interacting with the image cache.

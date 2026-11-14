@@ -6558,7 +6558,7 @@ fn chrome(window: &Window, login: bool, mark_only: bool) -> gpui::Div {
 
 pub(crate) fn avatar(store: &Store, npub: &str, size: f32) -> AnyElement {
     match store.avatar_path(npub) {
-        Some(path) => img(path).object_fit(gpui::ObjectFit::Cover)
+        Some(path) => crate::pic::img_fit(path, size).object_fit(gpui::ObjectFit::Cover)
             .face()
             .size(px(size))
             .rounded_full()
@@ -9688,6 +9688,7 @@ impl VectorApp {
                 panel: !self.live || backend::prefs::sql("ws_members_open").as_deref() != Some("false"),
                 search,
                 folded: folded_sections(&id),
+                scroll: gpui::ScrollHandle::new(),
             });
             self.check_raid(id.clone(), cx);
             if self.live {
