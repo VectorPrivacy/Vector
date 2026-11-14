@@ -1,0 +1,85 @@
+[package]
+name = "vector-gpui-media"
+version = "0.1.0"
+# The desktop client's modules compile in unchanged, so this crate keeps its edition.
+edition = "2021"
+license = "MIT"
+description = "The desktop client's audio engine, devices and call media, compiled from its sources for the GPUI client."
+publish = false
+
+[dependencies]
+sha2 = "0.10.9"
+tauri = { package = "vector-tauri-shim", path = "../tauri-shim" }
+vector-core = { path = "../../vector-core", features = ["calls", "xdc"] }
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+log = "0.4"
+tokio = { version = "1.49.0", features = ["rt-multi-thread", "sync", "time", "macros"] }
+futures-util = "0.3"
+cpal = "0.16"
+symphonia = { version = "0.5.5", default-features = false, features = ["mp3", "wav", "flac", "pcm", "aac", "isomp4", "ogg", "vorbis", "opt-simd"] }
+opus = "0.4"
+rustfft = "6.2"
+rand = "0.8"
+bytes = "1"
+async-trait = "0.1"
+lofty = "0.24"
+rayon = "1"
+reqwest = { version = "0.13", default-features = false, features = ["stream"] }
+iroh-gossip = { version = "0.101", default-features = false, features = ["net"] }
+memchr = "2"
+toml = "0.8.23"
+zip = { version = "2.4", default-features = false, features = ["deflate-flate2", "flate2"] }
+http = "1.3"
+url = "2.5.7"
+fast-thumbhash = "0.2"
+tokio-tungstenite = { version = "0.28", default-features = false, features = ["handshake"] }
+nostr-sdk = "=0.45.6"
+image = { version = "0.25.9", default-features = false, features = ["png", "jpeg", "gif", "webp", "ico", "bmp"] }
+iroh = { version = "1.3", default-features = false, features = ["tls-ring", "fast-apple-datapath"] }
+secp256k1 = { version = "0.30", default-features = false, features = ["std"] }
+bitcoin_hashes = { version = "1.2", default-features = false, features = ["std"] }
+rusqlite = { version = "0.38", features = ["bundled", "fallible_uint"] }
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
+
+[features]
+default = ["whisper"]
+whisper = ["dep:whisper-rs"]
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
+glib = "0.18"
+gtk = "0.18"
+gdk = "0.18"
+webkit2gtk = { version = "2.0", features = ["v2_40"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+whisper-rs = { version = "0.15.1", features = ["metal"], optional = true }
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSString", "NSArray", "NSError", "NSProcessInfo", "NSBundle", "NSDictionary", "NSSet", "NSURL"] }
+objc2-user-notifications = { version = "0.3.1", features = ["block2", "UNUserNotificationCenter", "UNNotification", "UNNotificationAction", "UNNotificationAttachment", "UNNotificationCategory", "UNNotificationContent", "UNNotificationRequest", "UNNotificationResponse", "UNNotificationTrigger"] }
+objc2-core-foundation = "0.3.2"
+block2 = "0.6"
+dispatch2 = "0.3"
+objc2-screen-capture-kit = { version = "0.3.2", features = ["SCStream", "SCShareableContent", "SCError", "block2", "dispatch2", "objc2-core-media", "objc2-core-graphics"] }
+objc2-core-media = { version = "0.3.2", features = ["CMSampleBuffer", "CMBlockBuffer", "objc2-core-audio-types"] }
+objc2-core-audio-types = "0.3.2"
+objc2-core-graphics = { version = "0.3.2", features = ["CGWindow"] }
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.61", features = ["Data_Xml_Dom", "Foundation", "UI_Notifications", "Win32_Foundation", "Win32_Security", "Win32_System_Com", "Win32_System_Registry", "Win32_UI_Notifications"] }
+windows-core = "0.61"
+windows-sys = { version = "0.61", features = ["Win32_System_Power", "Win32_UI_WindowsAndMessaging"] }
+
+[build-dependencies]
+cc = "1"
+
+# Vulkan on x86-64 Windows and Linux; ARM transcribes on the CPU, as the desktop client does.
+[target.'cfg(all(any(windows, target_os = "linux"), target_arch = "x86_64"))'.dependencies]
+whisper-rs = { version = "0.15.1", features = ["vulkan"], optional = true }
+
+[target.'cfg(all(any(windows, target_os = "linux"), not(target_arch = "x86_64")))'.dependencies]
+whisper-rs = { version = "0.15.1", optional = true }

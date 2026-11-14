@@ -391,8 +391,56 @@ jobs:
   # One file that vouches for every download: SHA256SUMS.txt over the release's assets, signed
   # with the updater key the app already trusts (minisign), and a build-provenance attestation per
   # asset so `gh attestation verify` ties each file to this workflow and commit.
+  # The GPUI client's updater bundles. Optional: a failure here leaves its `*-gpui` manifest
+  # entries out and never holds back the Tauri release.
+  build-gpui:
+    needs: release
+    permissions:
+      contents: read
+    uses: ./.github/workflows/gpui.yaml
+    with:
+      release_tag: ${{ needs.release.outputs.tag }}
+
+  publish-gpui:
+    needs: [release, build-gpui]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      TAG: ${{ needs.release.outputs.tag }}
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          sparse-checkout: crates/vector-gpui/Cargo.toml
+          sparse-checkout-cone-mode: false
+
+      # The app compares its own version against the manifest's, so a mismatch would loop updates.
+      - name: Version matches the release
+        run: |
+          V=$(grep -m1 '^version' crates/vector-gpui/Cargo.toml | sed 's/version = "\(.*\)"/\1/')
+          [ "${TAG#"${TAG_PREFIX}"v}" = "$V" ] || { echo "vector-gpui is $V, the release is $TAG"; exit 1; }
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: vector-gpui-*
+          path: pkg
+          merge-multiple: true
+
+      - name: Sign with the updater key
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          ls -l pkg
+          for f in pkg/Vector-GPUI_*; do npx --yes @tauri-apps/cli@2.12.2 signer sign "$f"; done
+
+      - name: Upload to the release
+        run: gh release upload "$TAG" pkg/Vector-GPUI_* --clobber --repo "$GITHUB_REPOSITORY"
+
   checksums:
-    needs: [release, publish-tauri, publish-android, publish-android-fdroid]
+    needs: [release, publish-tauri, publish-android, publish-android-fdroid, publish-gpui]
+    if: ${{ !cancelled() && needs.publish-tauri.result == 'success' && needs.publish-android.result == 'success' && needs.publish-android-fdroid.result == 'success' }}
     runs-on: ubuntu-latest
     permissions:
       contents: write

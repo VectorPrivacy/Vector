@@ -1,0 +1,272 @@
+name: GPUI build
+
+# The GPUI client on the platforms the cloud box can't build for. Its own workspace and lockfile,
+# so nothing here touches the Tauri client's build.
+on:
+  push:
+    branches: [gpui]
+    paths:
+      - 'crates/vector-gpui/**'
+      - 'crates/vector-core/**'
+      - 'crates/vector-calls/**'
+      - 'src-tauri/src/**'
+      - '.github/workflows/gpui.yaml'
+  pull_request:
+    paths:
+      - 'crates/vector-gpui/**'
+      - '.github/workflows/gpui.yaml'
+  workflow_dispatch:
+  # A release (publish.yaml) builds the updater bundles here, then signs and uploads them itself.
+  workflow_call:
+    inputs:
+      release_tag:
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+# A build takes most of an hour; a newer push waits for it rather than cancelling it.
+concurrency:
+  group: gpui-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  RUST_TOOLCHAIN: 1.98.0
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    # The port's own pull request builds on its pushes already.
+    if: ${{ !inputs.release_tag && (github.event_name != 'pull_request' || github.head_ref != 'gpui') }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The arm64 pool rarely takes a job; the release builds use this one too.
+          - platform: macos-26-intel
+            features: ''
+          # No system FFmpeg on the runner: video attachments draw as files here for now.
+          - platform: windows-2022
+            features: '--no-default-features --features tor,i2p'
+    runs-on: ${{ matrix.platform }}
+    defaults:
+      run:
+        working-directory: crates/vector-gpui
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+
+      - name: Prepare the runner (Windows)
+        if: startsWith(matrix.platform, 'windows')
+        shell: pwsh
+        run: |
+          Set-MpPreference -DisableRealtimeMonitoring $true
+          $drive = Split-Path -Qualifier $env:GITHUB_WORKSPACE
+          echo "CARGO_TARGET_DIR=$drive\t" >> $env:GITHUB_ENV
+
+      - name: FFmpeg (macOS)
+        if: startsWith(matrix.platform, 'macos')
+        run: |
+          brew install ffmpeg@7 pkg-config
+          echo "PKG_CONFIG_PATH=$(brew --prefix ffmpeg@7)/lib/pkgconfig" >> "$GITHUB_ENV"
+
+      # Whisper transcribes on Vulkan on x64 Windows, as the desktop client does.
+      - name: Cache Vulkan (Windows)
+        if: startsWith(matrix.platform, 'windows')
+        id: vulkan-cache
+        uses: actions/cache@v5
+        with:
+          path: C:\vcpkg\installed
+          key: vulkan-x64-windows-headers-loader-spirv-tools-glslc
+
+      - name: Install Vulkan SDK (Windows)
+        if: startsWith(matrix.platform, 'windows') && steps.vulkan-cache.outputs.cache-hit != 'true'
+        shell: pwsh
+        working-directory: .
+        run: |
+          vcpkg install vulkan:x64-windows vulkan-headers:x64-windows vulkan-loader:x64-windows spirv-tools:x64-windows
+          Invoke-WebRequest -Uri "https://jskitty.com/glslc.exe" -OutFile "glslc.exe"
+          $vcpkgBin = "C:\vcpkg\installed\x64-windows\bin"
+          New-Item -ItemType Directory -Force -Path $vcpkgBin
+          Move-Item "glslc.exe" "$vcpkgBin\glslc.exe" -Force
+
+      - name: Vulkan environment (Windows)
+        if: startsWith(matrix.platform, 'windows')
+        shell: pwsh
+        run: |
+          $vcpkgBin = "C:\vcpkg\installed\x64-windows\bin"
+          echo "VULKAN_SDK=C:\vcpkg\installed\x64-windows" >> $env:GITHUB_ENV
+          echo "CMAKE_PREFIX_PATH=C:\vcpkg\installed\x64-windows" >> $env:GITHUB_ENV
+          echo "$vcpkgBin" >> $env:GITHUB_PATH
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: crates/vector-gpui -> ${{ startsWith(matrix.platform, 'windows') && '../../../../t' || 'target' }}
+          key: ${{ matrix.platform }}
+
+      - name: Build
+        shell: bash
+        run: cargo build --locked ${{ matrix.features }}
+
+      - name: Tests
+        shell: bash
+        run: cargo test --locked ${{ matrix.features }} --bin vector-gpui
+
+  # Release builds to try the port on a Mac or a PC: a push whose message carries [package].
+  # Thin LTO keeps a cold build near an hour; unsigned, so first launch needs the OS's override.
+  package:
+    if: inputs.release_tag || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && contains(github.event.head_commit.message, '[package]'))
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-26-intel
+            target: aarch64-apple-darwin
+            out: aarch64-apple-darwin/release
+            features: '--target aarch64-apple-darwin --no-default-features --features video-static,tor,i2p'
+          - platform: windows-2022
+            target: x86_64-pc-windows-msvc
+            # The host's own target: a target directory level pushes whisper's Vulkan shader build past MAX_PATH.
+            out: release
+            features: '--no-default-features --features tor,i2p'
+          # The Tauri client's Linux release host: its glibc is the floor the AppImage runs on.
+          - platform: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            out: release
+            features: '--no-default-features --features video-static,tor,i2p'
+    runs-on: ${{ matrix.platform }}
+    env:
+      CARGO_PROFILE_RELEASE_LTO: thin
+      CARGO_PROFILE_RELEASE_CODEGEN_UNITS: '16'
+    defaults:
+      run:
+        working-directory: crates/vector-gpui
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          targets: ${{ matrix.target }}
+
+      - name: Prepare the runner (Windows)
+        if: startsWith(matrix.platform, 'windows')
+        shell: pwsh
+        run: |
+          Set-MpPreference -DisableRealtimeMonitoring $true
+          $drive = Split-Path -Qualifier $env:GITHUB_WORKSPACE
+          echo "CARGO_TARGET_DIR=$drive\t" >> $env:GITHUB_ENV
+
+      - name: Install dependencies (Linux)
+        if: startsWith(matrix.platform, 'ubuntu')
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev patchelf libasound2-dev \
+            libxkbcommon-x11-dev libwayland-dev libx11-xcb-dev libxcb1-dev libfontconfig-dev libfreetype-dev \
+            libvulkan-dev libssl-dev libzstd-dev clang cmake xdg-utils
+
+      # whisper builds its Vulkan backend on Linux, which needs glslc, as in the Tauri release.
+      - name: Vulkan SDK (Linux)
+        if: startsWith(matrix.platform, 'ubuntu')
+        run: |
+          wget -qO - https://packages.lunarg.com/lunarg-signing-key-pub.asc | sudo tee /etc/apt/trusted.gpg.d/lunarg.asc > /dev/null
+          sudo wget -qO /etc/apt/sources.list.d/lunarg-vulkan-jammy.list https://packages.lunarg.com/vulkan/lunarg-vulkan-jammy.list
+          sudo apt-get update
+          sudo apt-get install -y vulkan-sdk
+
+      - name: Cache FFmpeg (macOS, Linux)
+        if: startsWith(matrix.platform, 'macos') || startsWith(matrix.platform, 'ubuntu')
+        id: ffmpeg-cache
+        uses: actions/cache@v5
+        with:
+          path: src-tauri/native-deps/ffmpeg/${{ matrix.target }}
+          key: ffmpeg-${{ matrix.target }}-${{ hashFiles('scripts/build-ffmpeg.sh') }}
+
+      - name: Build FFmpeg (macOS, Linux)
+        if: (startsWith(matrix.platform, 'macos') || startsWith(matrix.platform, 'ubuntu')) && steps.ffmpeg-cache.outputs.cache-hit != 'true'
+        working-directory: .
+        run: |
+          if [ "$RUNNER_OS" = macOS ]; then brew install nasm; else sudo apt-get install -y nasm; fi
+          scripts/build-ffmpeg.sh ${{ matrix.target }}
+
+      - name: Linux environment
+        if: startsWith(matrix.platform, 'ubuntu')
+        run: echo "FFMPEG_DIR=$GITHUB_WORKSPACE/src-tauri/native-deps/ffmpeg/${{ matrix.target }}" >> "$GITHUB_ENV"
+
+      # An Intel host building for arm64: ggml's native CPU probe would read the host.
+      - name: macOS environment
+        if: startsWith(matrix.platform, 'macos')
+        run: |
+          echo "FFMPEG_DIR=$GITHUB_WORKSPACE/src-tauri/native-deps/ffmpeg/${{ matrix.target }}" >> "$GITHUB_ENV"
+          echo "SDKROOT=$(xcrun --sdk macosx --show-sdk-path)" >> "$GITHUB_ENV"
+          echo "GGML_NATIVE=OFF" >> "$GITHUB_ENV"
+          echo "MACOSX_DEPLOYMENT_TARGET=11.0" >> "$GITHUB_ENV"
+
+      - name: Cache Vulkan (Windows)
+        if: startsWith(matrix.platform, 'windows')
+        id: vulkan-cache
+        uses: actions/cache@v5
+        with:
+          path: C:\vcpkg\installed
+          key: vulkan-x64-windows-headers-loader-spirv-tools-glslc
+
+      - name: Install Vulkan SDK (Windows)
+        if: startsWith(matrix.platform, 'windows') && steps.vulkan-cache.outputs.cache-hit != 'true'
+        shell: pwsh
+        working-directory: .
+        run: |
+          vcpkg install vulkan:x64-windows vulkan-headers:x64-windows vulkan-loader:x64-windows spirv-tools:x64-windows
+          Invoke-WebRequest -Uri "https://jskitty.com/glslc.exe" -OutFile "glslc.exe"
+          $vcpkgBin = "C:\vcpkg\installed\x64-windows\bin"
+          New-Item -ItemType Directory -Force -Path $vcpkgBin
+          Move-Item "glslc.exe" "$vcpkgBin\glslc.exe" -Force
+
+      - name: Vulkan environment (Windows)
+        if: startsWith(matrix.platform, 'windows')
+        shell: pwsh
+        run: |
+          $vcpkgBin = "C:\vcpkg\installed\x64-windows\bin"
+          echo "VULKAN_SDK=C:\vcpkg\installed\x64-windows" >> $env:GITHUB_ENV
+          echo "CMAKE_PREFIX_PATH=C:\vcpkg\installed\x64-windows" >> $env:GITHUB_ENV
+          echo "$vcpkgBin" >> $env:GITHUB_PATH
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: crates/vector-gpui -> ${{ startsWith(matrix.platform, 'windows') && '../../../../t' || 'target' }}
+          key: package-${{ matrix.target }}
+
+      - name: Build
+        shell: bash
+        run: cargo build --release --locked ${{ matrix.features }}
+
+      - name: Bundle (macOS)
+        if: startsWith(matrix.platform, 'macos')
+        run: scripts/bundle-macos.sh target/${{ matrix.out }}/vector-gpui "$RUNNER_TEMP/pkg"
+
+      - name: Bundle (Windows)
+        if: startsWith(matrix.platform, 'windows')
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path "$env:RUNNER_TEMP\pkg" | Out-Null
+          Copy-Item "$env:CARGO_TARGET_DIR\${{ matrix.out }}\vector-gpui.exe" "$env:RUNNER_TEMP\pkg\Vector GPUI.exe"
+          $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.*)"' | Select-Object -First 1).Matches.Groups[1].Value
+          & "${env:ProgramFiles(x86)}\NSIS\makensis.exe" /V2 `
+            "/DSOURCE=$env:RUNNER_TEMP\pkg\Vector GPUI.exe" "/DICON=$env:GITHUB_WORKSPACE\src-tauri\icons\icon.ico" `
+            "/DVERSION=$version" "/DOUTFILE=$env:RUNNER_TEMP\pkg\Vector-GPUI_x64-setup.exe" scripts\installer.nsi
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Bundle (Linux)
+        if: startsWith(matrix.platform, 'ubuntu')
+        env:
+          TOOLS: ${{ runner.temp }}/appimage-tools
+        run: scripts/bundle-appimage.sh target/${{ matrix.out }} "$RUNNER_TEMP/pkg"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vector-gpui-${{ matrix.target }}
+          path: ${{ runner.temp }}/pkg
+          retention-days: 14

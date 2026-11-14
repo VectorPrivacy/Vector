@@ -1,0 +1,4923 @@
+{
+ "now": 1794362400000,
+ "npub": "npub1yazve5gvw5em6um2mzg0nh2u4v4dkfas04gqh9yn72wdcssvktsqfmmmv4",
+ "profiles": [
+  {
+   "id": "npub1yazve5gvw5em6um2mzg0nh2u4v4dkfas04gqh9yn72wdcssvktsqfmmmv4",
+   "name": "jskitty",
+   "display_name": "JSKitty",
+   "nickname": "",
+   "lud06": "",
+   "lud16": "",
+   "banner": "",
+   "avatar": "",
+   "about": "",
+   "website": "",
+   "nip05": "",
+   "status": {
+    "title": "",
+    "purpose": "",
+    "url": ""
+   },
+   "last_updated": 1794362400,
+   "mine": true,
+   "bot": false,
+   "is_blocked": false,
+   "avatar_cached": "",
+   "banner_cached": "",
+   "stream_consent": false
+  },
+  {
+   "id": "npub190vqdjtlpcq27xslcveglfmr4ynfwg7gmw86cnun4acakxrdd6gqnp929a",
+   "name": "alice",
+   "display_name": "Alice",
+   "nickname": "",
+   "lud06": "",
+   "lud16": "",
+   "banner": "",
+   "avatar": "https://example.invalid/alice.png",
+   "about": "",
+   "website": "",
+   "nip05": "",
+   "status": {
+    "title": "",
+    "purpose": "",
+    "url": ""
+   },
+   "last_updated": 1794362400,
+   "mine": false,
+   "bot": false,
+   "is_blocked": false,
+   "avatar_cached": "avatars/alice.png",
+   "banner_cached": "",
+   "stream_consent": false
+  },
+  {
+   "id": "npub1sxmr0k8u6trd5c6eu6trzyapzux7090ykujmsng7pdx0m8k93n5sd02fwn",
+   "name": "bob",
+   "display_name": "Bob Nakamoto",
+   "nickname": "",
+   "lud06": "",
+   "lud16": "",
+   "banner": "https://example.invalid/bob-banner.png",
+   "avatar": "https://example.invalid/bob.png",
+   "about": "Building on Nostr since 2021.\nCoffee first, relays second \u26a1",
+   "website": "",
+   "nip05": "",
+   "status": {
+    "title": "Shipping v0.6 \ud83d\ude80",
+    "purpose": "general",
+    "url": ""
+   },
+   "last_updated": 1794362400,
+   "mine": false,
+   "bot": false,
+   "is_blocked": false,
+   "avatar_cached": "avatars/bob.png",
+   "banner_cached": "media/photo.png",
+   "stream_consent": false
+  },
+  {
+   "id": "npub1fsndjp6vylvfahjeyuxq4s2tw8s8rv2j89ge7a28fvhnhf35s86sg3uctf",
+   "name": "carol",
+   "display_name": "Carol",
+   "nickname": "",
+   "lud06": "",
+   "lud16": "",
+   "banner": "",
+   "avatar": "https://example.invalid/carol.png",
+   "about": "",
+   "website": "",
+   "nip05": "",
+   "status": {
+    "title": "",
+    "purpose": "",
+    "url": ""
+   },
+   "last_updated": 1794362400,
+   "mine": false,
+   "bot": false,
+   "is_blocked": false,
+   "avatar_cached": "avatars/carol.png",
+   "banner_cached": "",
+   "stream_consent": false
+  },
+  {
+   "id": "npub1v84qsqlcs56j8dmh6s22eccnpn2d87fdutxhl7rftseh67wzamhqfv9ft6",
+   "name": "dave",
+   "display_name": "Dave the Builder",
+   "nickname": "",
+   "lud06": "",
+   "lud16": "",
+   "banner": "",
+   "avatar": "https://example.invalid/dave.png",
+   "about": "",
+   "website": "",
+   "nip05": "",
+   "status": {
+    "title": "",
+    "purpose": "",
+    "url": ""
+   },
+   "last_updated": 1794362400,
+   "mine": false,
+   "bot": false,
+   "is_blocked": false,
+   "avatar_cached": "avatars/dave.png",
+   "banner_cached": "",
+   "stream_consent": false
+  },
+  {
+   "id": "npub10j7vkrzv4t0elnd4rmj902pge3e2gkresvd4h9u2ut3valzyjuzsz7ad26",
+   "name": "erin",
+   "display_name": "Erin",
+   "nickname": "",
+   "lud06": "",
+   "lud16": "",
+   "banner": "",
+   "avatar": "https://example.invalid/erin.png",
+   "about": "",
+   "website": "",
+   "nip05": "",
+   "status": {
+    "title": "",
+    "purpose": "",
+    "url": ""
+   },
+   "last_updated": 1794362400,
+   "mine": false,
+   "bot": false,
+   "is_blocked": false,
+   "avatar_cached": "avatars/erin.png",
+   "banner_cached": "",
+   "stream_consent": false
+  },
+  {
+   "id": "npub1wajx7kj0x9nxxa38405e3eapgu87wtvtgv8svld04p3x8u0j872qnta00x",
+   "name": "frank",
+   "display_name": "Frank",
+   "nickname": "",
+   "lud06": "",
+   "lud16": "",
+   "banner": "",
+   "avatar": "https://example.invalid/frank.png",
+   "about": "",
+   "website": "",
+   "nip05": "",
+   "status": {
+    "title": "",
+    "purpose": "",
+    "url": ""
+   },
+   "last_updated": 1794362400,
+   "mine": false,
+   "bot": false,
+   "is_blocked": false,
+   "avatar_cached": "avatars/frank.png",
+   "banner_cached": "",
+   "stream_consent": false
+  },
+  {
+   "id": "npub1uqg0688p4nqh8ca5sddhvd0c63sq6a6gdygz4k6uk76a0z2kfxaqmmg7t4",
+   "name": "grace",
+   "display_name": "Grace Hopper",
+   "nickname": "",
+   "lud06": "",
+   "lud16": "",
+   "banner": "",
+   "avatar": "https://example.invalid/grace.png",
+   "about": "",
+   "website": "",
+   "nip05": "",
+   "status": {
+    "title": "",
+    "purpose": "",
+    "url": ""
+   },
+   "last_updated": 1794362400,
+   "mine": false,
+   "bot": false,
+   "is_blocked": false,
+   "avatar_cached": "avatars/grace.png",
+   "banner_cached": "",
+   "stream_consent": false
+  },
+  {
+   "id": "npub1qk3nrfl57xffl2k29zdxd7vdtgzm8p7ee045lrpdmqsy56cz8g2qqxdt9s",
+   "name": "heidi",
+   "display_name": "Heidi",
+   "nickname": "",
+   "lud06": "",
+   "lud16": "",
+   "banner": "",
+   "avatar": "https://example.invalid/heidi.png",
+   "about": "",
+   "website": "",
+   "nip05": "",
+   "status": {
+    "title": "",
+    "purpose": "",
+    "url": ""
+   },
+   "last_updated": 1794362400,
+   "mine": false,
+   "bot": false,
+   "is_blocked": false,
+   "avatar_cached": "avatars/heidi.png",
+   "banner_cached": "",
+   "stream_consent": false
+  },
+  {
+   "id": "npub15387nevpzd0u700y2t24ym9l0zxe8fsxx2w7qn47ysn6mndn9gvqqmlahu",
+   "name": "vee",
+   "display_name": "Vee",
+   "nickname": "",
+   "lud06": "",
+   "lud16": "",
+   "banner": "",
+   "avatar": "https://example.invalid/alice.png",
+   "about": "",
+   "website": "",
+   "nip05": "",
+   "status": {
+    "title": "",
+    "purpose": "",
+    "url": ""
+   },
+   "last_updated": 1794362400,
+   "mine": false,
+   "bot": false,
+   "is_blocked": false,
+   "avatar_cached": "avatars/alice.png",
+   "banner_cached": "",
+   "stream_consent": false
+  },
+  {
+   "id": "npub17jjvuhaxxs9rt2jakz6td5c6d7a2vpfr2erqmwc9xajhmqplt03q63stmv",
+   "name": "mo",
+   "display_name": "Mo",
+   "nickname": "",
+   "lud06": "",
+   "lud16": "",
+   "banner": "",
+   "avatar": "https://example.invalid/grace.png",
+   "about": "",
+   "website": "",
+   "nip05": "",
+   "status": {
+    "title": "",
+    "purpose": "",
+    "url": ""
+   },
+   "last_updated": 1794362400,
+   "mine": false,
+   "bot": false,
+   "is_blocked": false,
+   "avatar_cached": "avatars/grace.png",
+   "banner_cached": "",
+   "stream_consent": false
+  },
+  {
+   "id": "npub19ayt3q02wpelr3hsswefdgmqh4xfeag7m2kt58xecdxc4c7ejnkq92s7dr",
+   "name": "lin",
+   "display_name": "Lin",
+   "nickname": "",
+   "lud06": "",
+   "lud16": "",
+   "banner": "",
+   "avatar": "https://example.invalid/bob.png",
+   "about": "",
+   "website": "",
+   "nip05": "",
+   "status": {
+    "title": "",
+    "purpose": "",
+    "url": ""
+   },
+   "last_updated": 1794362400,
+   "mine": false,
+   "bot": false,
+   "is_blocked": false,
+   "avatar_cached": "avatars/bob.png",
+   "banner_cached": "",
+   "stream_consent": false
+  },
+  {
+   "id": "npub1yn2tjm6cmfk54pgjxyam6q4z36lse22aa3hyeph00r887q083zkq7g4t6h",
+   "name": "ana",
+   "display_name": "Ana",
+   "nickname": "",
+   "lud06": "",
+   "lud16": "",
+   "banner": "",
+   "avatar": "https://example.invalid/alice.png",
+   "about": "",
+   "website": "",
+   "nip05": "",
+   "status": {
+    "title": "",
+    "purpose": "",
+    "url": ""
+   },
+   "last_updated": 1794362400,
+   "mine": false,
+   "bot": false,
+   "is_blocked": false,
+   "avatar_cached": "avatars/alice.png",
+   "banner_cached": "",
+   "stream_consent": false
+  }
+ ],
+ "chats": [
+  {
+   "id": "npub17jjvuhaxxs9rt2jakz6td5c6d7a2vpfr2erqmwc9xajhmqplt03q63stmv",
+   "chat_type": "DirectMessage",
+   "participants": [
+    "npub17jjvuhaxxs9rt2jakz6td5c6d7a2vpfr2erqmwc9xajhmqplt03q63stmv"
+   ],
+   "messages": [
+    {
+     "id": "4ea02ec455165f1c969e1dada2376504061579f9493eecd1e5c9c2db25cd6a72",
+     "content": "Look at this sunset",
+     "replied_to": "",
+     "preview_metadata": null,
+     "attachments": [
+      {
+       "id": "3c347d8660df388374fbb5c2dcf925ad0140321118943c11980d6f654e6032cc",
+       "key": "",
+       "nonce": "",
+       "extension": "png",
+       "name": "",
+       "url": "https://example.invalid/photo",
+       "path": "media/photo.png",
+       "size": 170552,
+       "img_meta": {
+        "thumbhash": "U(^ /twg4<&F@NQS~xhD@CSA",
+        "width": 1600,
+        "height": 1000
+       },
+       "downloading": false,
+       "downloaded": true
+      }
+     ],
+     "reactions": [],
+     "at": 1794359280000,
+     "pending": false,
+     "failed": false,
+     "mine": false,
+     "npub": "npub17jjvuhaxxs9rt2jakz6td5c6d7a2vpfr2erqmwc9xajhmqplt03q63stmv",
+     "edited": false
+    },
+    {
+     "id": "6c2c34d5ddfb1e38ab0a04a0cefdad531df3e6842d71bc129fc499edcaacc7d2",
+     "content": "",
+     "replied_to": "",
+     "preview_metadata": null,
+     "attachments": [
+      {
+       "id": "a30b567bc5ffc67f0b27fb734b72684405d29cc58802f8c84fd1e697e3bed61e",
+       "key": "",
+       "nonce": "",
+       "extension": "png",
+       "name": "",
+       "url": "https://example.invalid/portrait",
+       "path": "",
+       "size": 24117248,
+       "img_meta": {
+        "thumbhash": "6%fXoBL7P(`cp*l1#)iQt/q;6h",
+        "width": 700,
+        "height": 1000
+       },
+       "downloading": false,
+       "downloaded": false
+      }
+     ],
+     "reactions": [],
+     "at": 1794359880000,
+     "pending": false,
+     "failed": false,
+     "mine": true,
+     "npub": "npub1yazve5gvw5em6um2mzg0nh2u4v4dkfas04gqh9yn72wdcssvktsqfmmmv4",
+     "edited": false
+    },
+    {
+     "id": "76228bc2fc2f34503ca5c91c453e655ea233a85680896aae056e74805681e137",
+     "content": "",
+     "replied_to": "",
+     "preview_metadata": null,
+     "attachments": [
+      {
+       "id": "3549e7ac429efad0ee75535ec93ea7ef1aa7f8b9b24d2de064a0a1d7e0017599",
+       "key": "",
+       "nonce": "",
+       "extension": "png",
+       "name": "SPOILER_sticker.png",
+       "url": "https://example.invalid/sticker",
+       "path": "media/sticker.png",
+       "size": 15319,
+       "img_meta": {
+        "thumbhash": "HUN*`C9p<)MJbF6vQY^LC_$qYVyrBA",
+        "width": 220,
+        "height": 220
+       },
+       "downloading": false,
+       "downloaded": true
+      }
+     ],
+     "reactions": [],
+     "at": 1794360480000,
+     "pending": false,
+     "failed": false,
+     "mine": false,
+     "npub": "npub17jjvuhaxxs9rt2jakz6td5c6d7a2vpfr2erqmwc9xajhmqplt03q63stmv",
+     "edited": false
+    },
+    {
+     "id": "90ea00dec631e38520b6d323b806ef549167f40d914d997c85c09663648d0f2b",
+     "content": "The spec, and the build",
+     "replied_to": "",
+     "preview_metadata": null,
+     "attachments": [
+      {
+       "id": "b336680d9d206af3b937b99b899fb1896886728823a9f96ca4b98f9227b64a92",
+       "key": "",
+       "nonce": "",
+       "extension": "pdf",
+       "name": "Vector Protocol Spec.pdf",
+       "url": "https://example.invalid/spec",
+       "path": "",
+       "size": 13002342,
+       "img_meta": null,
+       "downloading": false,
+       "downloaded": false
+      },
+      {
+       "id": "1ece496bf8a0b989f1630ba7425eb5daff5054bc8c27df76be4cb7b5977e7f97",
+       "key": "",
+       "nonce": "",
+       "extension": "zip",
+       "name": "vector-0.5.1-linux.zip",
+       "url": "https://example.invalid/build",
+       "path": "media/sticker.png",
+       "size": 48234496,
+       "img_meta": null,
+       "downloading": false,
+       "downloaded": true
+      }
+     ],
+     "reactions": [],
+     "at": 1794361080000,
+     "pending": false,
+     "failed": false,
+     "mine": false,
+     "npub": "npub17jjvuhaxxs9rt2jakz6td5c6d7a2vpfr2erqmwc9xajhmqplt03q63stmv",
+     "edited": false
+    },
+    {
+     "id": "fae91624685ae6d8b7c0df70b11eaae2ed785620a551bb4d56d006fb30b6840a",
+     "content": "Made a little fox",
+     "replied_to": "",
+     "preview_metadata": null,
+     "attachments": [
+      {
+       "id": "d97044e701822bac5a62696459b27d7b375aada5de8574ed4362edbba94771f7",
+       "key": "",
+       "nonce": "",
+       "extension": "glb",
+       "name": "Fox.glb",
+       "url": "https://example.invalid/fox",
+       "path": "media/fox.glb",
+       "size": 162852,
+       "img_meta": null,
+       "downloading": false,
+       "downloaded": true
+      }
+     ],
+     "reactions": [],
+     "at": 1794361140000,
+     "pending": false,
+     "failed": false,
+     "mine": false,
+     "npub": "npub17jjvuhaxxs9rt2jakz6td5c6d7a2vpfr2erqmwc9xajhmqplt03q63stmv",
+     "edited": false
+    },
+    {
+     "id": "2bdaad8f7f7f63f749a37d97e109d72300424e5ca39d1b623d8b717de7802d08",
+     "content": "Thanks!",
+     "replied_to": "",
+     "preview_metadata": null,
+     "attachments": [],
+     "reactions": [],
+     "at": 1794361980000,
+     "pending": false,
+     "failed": false,
+     "mine": true,
+     "npub": "npub1yazve5gvw5em6um2mzg0nh2u4v4dkfas04gqh9yn72wdcssvktsqfmmmv4",
+     "edited": false
+    }
+   ],
+   "last_read": "2bdaad8f7f7f63f749a37d97e109d72300424e5ca39d1b623d8b717de7802d08",
+   "unread_from": "",
+   "created_at": 1794275880,
+   "metadata": {
+    "custom_fields": {}
+   },
+   "muted": false,
+   "notify": 2,
+   "everyone_pings": true,
+   "community_muted": false
+  },
+  {
+   "id": "npub15387nevpzd0u700y2t24ym9l0zxe8fsxx2w7qn47ysn6mndn9gvqqmlahu",
+   "chat_type": "DirectMessage",
+   "participants": [
+    "npub15387nevpzd0u700y2t24ym9l0zxe8fsxx2w7qn47ysn6mndn9gvqqmlahu"
+   ],
+   "messages": [
+    {
+     "id": "46160c560d01fcd55bc718f8adef022d010f02cc27d8a1c9e066c8ae61f1f4b4",
+     "content": "Have you tried the **new** markdown? It handles *italics*, ~~strikes~~ and `inline code`.",
+     "replied_to": "",
+     "preview_metadata": null,
+     "attachments": [],
+     "reactions": [],
+     "at": 1794268740000,
+     "pending": false,
+     "failed": false,
+     "mine": false,
+     "npub": "npub15387nevpzd0u700y2t24ym9l0zxe8fsxx2w7qn47ysn6mndn9gvqqmlahu",
+     "edited": false
+    },
+    {
+     "id": "29e4fd18155e79dd760d101aca6abae460e8662b34ccf9bdaf9edd8e3b7a18b6",
+     "content": "Lists too:\n- one\n- two\n- three",
+     "replied_to": "",
+     "preview_metadata": null,
+     "attachments": [],
+     "reactions": [],
+     "at": 1794268800000,
+     "pending": false,
+     "failed": false,
+     "mine": false,
+     "npub": "npub15387nevpzd0u700y2t24ym9l0zxe8fsxx2w7qn47ysn6mndn9gvqqmlahu",
+     "edited": false
+    },
+    {
+     "id": "f5e8a64a4803fd9cf5c2f2cc23eb5a66b6126982b1394d53195b86220dda9ed3",
+     "content": "> quoting you here\nand replying below the quote",
+     "replied_to": "",
+     "preview_metadata": null,
+     "attachments": [],
+     "reactions": [
+      {
+       "id": "d989534175d49bdce27c894467617cf954aa81994482cb551c63b8fe08918b5a",
+       "reference_id": "f5e8a64a4803fd9cf5c2f2cc23eb5a66b6126982b1394d53195b86220dda9ed3",
+       "author_id": "npub15387nevpzd0u700y2t24ym9l0zxe8fsxx2w7qn47ysn6mndn9gvqqmlahu",
+       "emoji": "\u2764\ufe0f"
+      },
+      {
+       "id": "78e8fce8c1f9dce779d3287be6a7ec18f29ebbe3a0386710d569e62dbd2da183",
+       "reference_id": "f5e8a64a4803fd9cf5c2f2cc23eb5a66b6126982b1394d53195b86220dda9ed3",
+       "author_id": "npub1yazve5gvw5em6um2mzg0nh2u4v4dkfas04gqh9yn72wdcssvktsqfmmmv4",
+       "emoji": "\u2764\ufe0f"
+      },
+      {
+       "id": "06320cad2867c2713b524fa38138aa146bf402abd91c54d1f7eae469adc8187c",
+       "reference_id": "f5e8a64a4803fd9cf5c2f2cc23eb5a66b6126982b1394d53195b86220dda9ed3",
+       "author_id": "npub15387nevpzd0u700y2t24ym9l0zxe8fsxx2w7qn47ysn6mndn9gvqqmlahu",
+       "emoji": "\ud83d\ude02"
+      }
+     ],
+     "at": 1794268920000,
+     "pending": false,
+     "failed": false,
+     "mine": true,
+     "npub": "npub1yazve5gvw5em6um2mzg0nh2u4v4dkfas04gqh9yn72wdcssvktsqfmmmv4",
+     "edited": false
+    },
+    {
+     "id": "9224c65fb1c0fa757b5f2b9f069eb1ef3a888b071604a532eb0a22ddf4bbe1db",
+     "content": "```rust\nfn main() {\n    println!(\"hello\");\n}\n```",
+     "replied_to": "",
+     "preview_metadata": null,
+     "attachments": [],
+     "reactions": [],
+     "at": 1794268980000,
+     "pending": false,
+     "failed": false,
+     "mine": true,
+     "npub": "npub1yazve5gvw5em6um2mzg0nh2u4v4dkfas04gqh9yn72wdcssvktsqfmmmv4",
+     "edited": false
+    },
+    {
+     "id": "12a8715a08bb5cf5558c3e30e350beb05103f589af9ef0f894481c2c93cf58bf",
+     "content": "Nice! That one has a ||secret spoiler|| inside, and a [link](https://vectorapp.io).",
+     "replied_to": "",
+     "preview_metadata": null,
+     "attachments": [],
+     "reactions": [],
+     "at": 1794360540000,
+     "pending": false,
+     "failed": false,
+     "mine": false,
+     "npub": "npub15387nevpzd0u700y2t24ym9l0zxe8fsxx2w7qn47ysn6mndn9gvqqmlahu",
+     "edited": true,
+     "edit_history": [
+      {
+       "content": "Nice! That one has a secret inside",
+       "edited_at": 1794360540000
+      },
+      {
+       "content": "Nice! That one has a ||secret spoiler|| inside \ud83c\udf89",
+       "edited_at": 1794360660000
+      },
+      {
+       "content": "Nice! That one has a ||secret spoiler|| inside, and a [link](https://vectorapp.io).",
+       "edited_at": 1794360840000
+      }
+     ]
+    },
+    {
+     "id": "f20c550ac443c1caf754848c6e70ebf4c46375e864ed7b1595b10f86f3ece07a",
+     "content": "# A heading\n-# and some subtext",
+     "replied_to": "",
+     "preview_metadata": null,
+     "attachments": [],
+     "reactions": [],
+     "at": 1794360600000,
+     "pending": false,
+     "failed": false,
+     "mine": false,
+     "npub": "npub15387nevpzd0u700y2t24ym9l0zxe8fsxx2w7qn47ysn6mndn9gvqqmlahu",
+     "edited": false
+    },
+    {
+     "id": "45593079abe5d2bad5a8311b974a1ce700bd7933fa79e86f2ec32d0ec977b569",
+     "content": "Replying to that heading",
+     "replied_to": "f20c550ac443c1caf754848c6e70ebf4c46375e864ed7b1595b10f86f3ece07a",
+     "preview_metadata": null,
+     "attachments": [],
+     "reactions": [],
+     "at": 1794361740000,
+     "pending": false,
+     "failed": false,
+     "mine": true,
+     "npub": "npub1yazve5gvw5em6um2mzg0nh2u4v4dkfas04gqh9yn72wdcssvktsqfmmmv4",
+     "edited": false,
+     "replied_to_content": "# A heading\n-# and some subtext",
+     "replied_to_npub": "npub15387nevpzd0u700y2t24ym9l0zxe8fsxx2w7qn47ysn6mndn9gvqqmlahu"
+    },
+    {
+     "id": "0334355612cd1b65f5c35f87e405a17bb0d60854077fb7fde302fc92fcedd230",
+     "content": "This one is still sending",
+     "replied_to": "",
+     "preview_metadata": null,
+     "attachments": [],
+     "reactions": [],
+     "at": 1794362220000,
+     "pending": true,
+     "failed": false,
+     "mine": true,
+     "npub": "npub1yazve5gvw5em6um2mzg0nh2u4v4dkfas04gqh9yn72wdcssvktsqfmmmv4",
+     "edited": false
+    },
+    {
+     "id": "bb49ca62931ae9d7d12f0641cacd899649c3975713d350c513db4fc027d504eb",
+     "content": "And this one failed",
+     "replied_to": "",
+     "preview_metadata": null,
+     "attachments": [],
+     "reactions": [],
+     "at": 1794362280000,
+     "pending": false,
+     "failed": true,
+     "mine": true,
+     "npub": "npub1yazve5gvw5em6um2mzg0nh2u4v4dkfas04gqh9yn72wdcssvktsqfmmmv4",
+     "edited": false
+    },
+    {
+     "id": "c011111111111111111111111111111111111111111111111111111111111111",
+     "content": "Colours landed: rainbow text, a **bold gradient** run and a solid one.",
+     "replied_to": "",
+     "preview_metadata": null,
+     "attachments": [],
+     "reactions": [],
+     "at": 1794362310000,
+     "pending": false,
+     "failed": false,
+     "mine": false,
+     "npub": "npub15387nevpzd0u700y2t24ym9l0zxe8fsxx2w7qn47ysn6mndn9gvqqmlahu",
+     "edited": false,
+     "text_spans": [
+      {
+       "kind": "color",
+       "from": 16,
+       "to": 28,
+       "effect": "rainbow"
+      },
+      {
+       "kind": "color",
+       "from": 32,
+       "to": 53,
+       "effect": "gradient",
+       "colors": [
+        "#ff4f8b",
+        "#4fb3ff"
+       ]
+      },
+      {
+       "kind": "color",
+       "from": 60,
+       "to": 69,
+       "effect": "solid",
+       "colors": [
+        "#ffb020"
+       ]
+      }
+     ]
+    },
+    {
+     "id": "c022222222222222222222222222222222222222222222222222222222222222",
+     "content": "/roll 20",
+     "replied_to": "",
+     "preview_metadata": null,
+     "attachments": [],
+     "reactions": [],
+     "at": 1794362320000,
+     "pending": false,
+     "failed": false,
+     "mine": true,
+     "npub": "npub1yazve5gvw5em6um2mzg0nh2u4v4dkfas04gqh9yn72wdcssvktsqfmmmv4",
+     "edited": false
+    },
+    {
+     "id": "c033333333333333333333333333333333333333333333333333333333333333",
+     "content": "/say hello there",
+     "replied_to": "",
+     "preview_metadata": null,
+     "attachments": [],
+     "reactions": [],
+     "at": 1794362330000,
+     "pending": false,
+     "failed": false,
+     "mine": true,
+     "npub": "npub1yazve5gvw5em6um2mzg0nh2u4v4dkfas04gqh9yn72wdcssvktsqfmmmv4",
+     "edited": false,
+     "addressed_bots": [
+      "npub15387nevpzd0u700y2t24ym9l0zxe8fsxx2w7qn47ysn6mndn9gvqqmlahu"
+     ]
+    },
+    {
+     "id": "c045acf2d273a786b030c9bc52f82e5208621ae4f0f7400c6ed71f088498e0d3",
+     "content": "\ud83d\udc4d",
+     "replied_to": "",
+     "preview_metadata": null,
+     "attachments": [],
+     "reactions": [
+      {
+       "id": "c14e0ecfd58555fc3a9db5e78aa7c771b69b7ca246b1a388a2d342ee3ccb1cc9",
+       "reference_id": "c045acf2d273a786b030c9bc52f82e5208621ae4f0f7400c6ed71f088498e0d3",
+       "author_id": "npub1yazve5gvw5em6um2mzg0nh2u4v4dkfas04gqh9yn72wdcssvktsqfmmmv4",
+       "emoji": "\ud83d\udd25"
+      }
+     ],
+     "at": 1794362340000,
+     "pending": false,
+     "failed": false,
+     "mine": false,
+     "npub": "npub15387nevpzd0u700y2t24ym9l0zxe8fsxx2w7qn47ysn6mndn9gvqqmlahu",
+     "edited": false
+    },
+    {
+     "id": "c044400000000000000000000000000000000000000000000000000000000000",
+     "content": "",
+     "replied_to": "",
+     "preview_metadata": null,
+     "attachments": [
+      {
+       "id": "e2f2737c1e1529d75d7a55cae8489d272e3c41e5d2c278df0740aee61dd42498",
+       "key": "",
+       "nonce": "",
+       "extension": "mp4",
+       "name": "",
+       "url": "https://example.invalid/clip",
+       "path": "media/clip.mp4",
+       "size": 179263,
+       "img_meta": {
+        "thumbhash": "",
+        "width": 640,
+        "height": 360
+       },
+       "downloading": false,
+       "downloaded": true
+      }
+     ],
+     "reactions": [],
+     "at": 1794362400000,
+     "pending": false,
+     "failed": false,
+     "mine": false,
+     "npub": "npub15387nevpzd0u700y2t24ym9l0zxe8fsxx2w7qn47ysn6mndn9gvqqmlahu",
+     "edited": false
+    },
+    {
+     "id": "c055500000000000000000000000000000000000000000000000000000000000",
+     "content": "",
+     "replied_to": "",
+     "preview_metadata": null,
+     "attachments": [
+      {
+       "id": "84a0b1daf40586ed20ab02dddb247d335fa3308deb404f2189e06dcdb5532826",
+       "key": "",
+       "nonce": "",
+       "extension": "mov",
+       "name": "",
+       "url": "https://example.invalid/turned",
+       "path": "media/turned.mov",
+       "size": 179314,
+       "img_meta": {
+        "thumbhash": "",
+        "width": 360,
+        "height": 640
+       },
+       "downloading": false,
+       "downloaded": true
+      }
+     ],
+     "reactions": [],
+     "at": 1794362430000,
+     "pending": false,
+     "failed": false,
+     "mine": false,
+     "npub": "npub15387nevpzd0u700y2t24ym9l0zxe8fsxx2w7qn47ysn6mndn9gvqqmlahu",
+     "edited": false
+    }
+   ],
+   "last_read": "c045acf2d273a786b030c9bc52f82e5208621ae4f0f7400c6ed71f088498e0d3",
+   "unread_from": "",
+   "created_at": 1794189540,
+   "metadata": {
+    "custom_fields": {}
+   },
+   "muted": false,
+   "notify": 2,
+   "everyone_pings": true,
+   "community_muted": false
+  },
+  {
+   "id": "npub190vqdjtlpcq27xslcveglfmr4ynfwg7gmw86cnun4acakxrdd6gqnp929a",
+   "chat_type": "DirectMessage",
+   "participants": [
+    "npub190vqdjtlpcq27xslcveglfmr4ynfwg7gmw86cnun4acakxrdd6gqnp929a"
+   ],
+   "messages": [
+    {
+     "id": "8151ec931604feccea39c49138f698e832871901bfe95d7e8e1278836da509cd",
+     "content": "Hey! It's Alice",
+     "replied_to": "",
+     "preview_metadata": null,
+     "attachments": [],
+     "reactions": [],
+     "at": 1794359280000,
+     "pending": false,
+     "failed": false,
+     "mine": false,
+     "npub": "npub190vqdjtlpcq27xslcveglfmr4ynfwg7gmw86cnun4acakxrdd6gqnp929a",
+     "edited": false
+    },
+    {
+     "id": "a42ac5108869b599bcbac21069f63fb47f07452fcc4b87e89b3c06a945612d0b",
+     "content": "Hey, how are you doing?",
+     "replied_to": "",
+     "preview_metadata": null,
+     "attachments": [],
+     "reactions": [],
+     "at": 1794359400000,
+     "pending": false,
+     "failed": false,
+     "mine": true,
+     "npub": "npub1yazve5gvw5em6um2mzg0nh2u4v4dkfas04gqh9yn72wdcssvktsqfmmmv4",
+     "edited": false
+    },
+    {
+     "id": "e9969eb8667d15372c967cfe5402b12ecb4b64a8c563088ca80237ff5ecf83d5",
+     "content": "Pretty good, working on something fun.",
+     "replied_to": "",
+     "preview_metadata": null,
+     "attachments": [],
+     "reactions": [],
+     "at": 1794359580000,
+     "pending": false,
+     "failed": false,
+     "mine": false,
+     "npub": "npub190vqdjtlpcq27xslcveglfmr4ynfwg7gmw86cnun4acakxrdd6gqnp929a",
+     "edited": false
+    },
+    {
+     "id": "532819ebaebe89404671ee38eefd39495c7ec8342347bc31de2c67d55229ce4a",
+     "content": "Ooh, tell me more when you can \ud83d\udc40",
+     "replied_to": "",
+     "preview_metadata": null,
+     "attachments": [],
+     "reactions": [],
+     "at": 1794359640000,
+     "pending": false,
+     "failed": false,
+     "mine": true,
+     "npub": "npub1yazve5gvw5em6um2mzg0nh2u4v4dkfas04gqh9yn72wdcssvktsqfmmmv4",
+     "edited": false
+    },
+    {
+     "id": "d402d566b92e2040b3378d4cad8f136f2790f973143ef12b857148cab29dea11",
+     "content": "Running late, save me a seat!",
+     "replied_to": "",
+     "preview_metadata": null,
+     "attachments": [],
+     "reactions": [],
+     "at": 1794362280000,
+     "pending": false,
+     "failed": false,
+     "mine": false,
+     "npub": "npub190vqdjtlpcq27xslcveglfmr4ynfwg7gmw86cnun4acakxrdd6gqnp929a",
+     "edited": false
+    }
+   ],
+   "last_read": "a42ac5108869b599bcbac21069f63fb47f07452fcc4b87e89b3c06a945612d0b",
+   "unread_from": "",
+   "created_at": 1794358680,
+   "metadata": {
+    "custom_fields": {}
+   },
+   "muted": false,
+   "notify": 2,
+   "everyone_pings": true,
+   "community_muted": false
+  },
+  {
+   "id": "npub1sxmr0k8u6trd5c6eu6trzyapzux7090ykujmsng7pdx0m8k93n5sd02fwn",
+   "chat_type": "DirectMessage",
+   "participants": [
+    "npub1sxmr0k8u6trd5c6eu6trzyapzux7090ykujmsng7pdx0m8k93n5sd02fwn"
+   ],
+   "messages": [
+    {
+     "id": "0e7dcc98d6c20f8d5560821e454650cb0f8b7e07accecf1547bde134a467624d",
+     "content": "Hey! It's Bob",
+     "replied_to": "",
+     "preview_metadata": null,
+     "attachments": [],
+     "reactions": [],
+     "at": 1794357900000,
+     "pending": false,
+     "failed": false,
+     "mine": false,
+     "npub": "npub1sxmr0k8u6trd5c6eu6trzyapzux7090ykujmsng7pdx0m8k93n5sd02fwn",
+     "edited": false
+    },
+    {
+     "id": "a5fc3eac9107fe9b449965916d54b334233b8077a37f782d9b59e6e98e04def8",
+     "content": "Hey, how are you doing?",
+     "replied_to": "",
+     "preview_metadata": null,
+     "attachments": [],
+     "reactions": [],
+     "at": 1794358020000,
+     "pending": false,
+     "failed": false,
+     "mine": true,
+     "npub": "npub1yazve5gvw5em6um2mzg0nh2u4v4dkfas04gqh9yn72wdcssvktsqfmmmv4",
+     "edited": false
+    },
+    {
+     "id": "a9137698d8d3fdbf27efcdc8cd372084b52d484e8db866c5455bbb3f85299b54",
+     "content": "Pretty good, working on something fun.",
+     "replied_to": "",
+     "preview_metadata": null,
+     "attachments": [],
+     "reactions": [],
+     "at": 1794358200000,
+     "pending": false,
+     "failed": false,
+     "mine": false,
+     "npub": "npub1sxmr0k8u6trd5c6eu6trzyapzux7090ykujmsng7pdx0m8k93n5sd02fwn",
+     "edited": false
+    },
+    {
+     "id": "a6a17c7ac82f305add533b6fa9860dee624d3df3ac3745a5007ea24ca2047f6a",
+     "content": "Ooh, tell me more when you can \ud83d\udc40",
+     "replied_to": "",
+     "preview_metadata": null,
+     "attachments": [],
+     "reactions": [],
+     "at": 1794358260000,
+     "pending": false,
+     "failed": false,
+     "mine": true,
+     "npub": "npub1yazve5gvw5em6um2mzg0nh2u4v4dkfas04gqh9yn72wdcssvktsqfmmmv4",
+     "edited": false
+    },
+    {
+     "id": "598b288443e42c9a93f5562409ac78c385fe4d66c95174330c4805b79fa67f52",
+     "content": "The new build is so much faster \ud83d\ude80",
+     "replied_to": "",
+     "preview_metadata": null,
+     "attachments": [],
+     "reactions": [],
+     "at": 1794360900000,
+     "pending": false,
+     "failed": false,
+     "mine": false,
+     "npub": "npub1sxmr0k8u6trd5c6eu6trzyapzux7090ykujmsng7pdx0m8k93n5sd02fwn",
+     "edited": false
+    }
+   ],
+   "last_read": "598b288443e42c9a93f5562409ac78c385fe4d66c95174330c4805b79fa67f52",
+   "unread_from": "",
+   "created_at": 1794357300,
+   "metadata": {
+    "custom_fields": {}
+   },
+   "muted": false,
+   "notify": 2,
+   "everyone_pings": true,
+   "community_muted": false
+  },
+  {
+   "id": "npub1fsndjp6vylvfahjeyuxq4s2tw8s8rv2j89ge7a28fvhnhf35s86sg3uctf",
+   "chat_type": "DirectMessage",
+   "participants": [
+    "npub1fsndjp6vylvfahjeyuxq4s2tw8s8rv2j89ge7a28fvhnhf35s86sg3uctf"
+   ],
+   "messages": [
+    {
+     "id": "84d31f0608eb78e78d7f480dd0e99047ea64ab3546571b2cbe25aa40c5594d3e",
+     "content": "Hey! It's Carol",
+     "replied_to": "",
+     "preview_metadata": null,
+     "attachments": [],
+     "reactions": [],
+     "at": 1794348600000,
+     "pending": false,
+     "failed": false,
+     "mine": false,
+     "npub": "npub1fsndjp6vylvfahjeyuxq4s2tw8s8rv2j89ge7a28fvhnhf35s86sg3uctf",
+     "edited": false
+    },
+    {
+     "id": "b52a4abe79e15521cfb98270bbb4df9a2180df897028e9ef5b2078fe898e3b86",
+     "content": "Hey, how are you doing?",
+     "replied_to": "",
+     "preview_metadata": null,
+     "attachments": [],
+     "reactions": [],
+     "at": 1794348720000,
+     "pending": false,
+     "failed": false,
+     "mine": true,
+     "npub": "npub1yazve5gvw5em6um2mzg0nh2u4v4dkfas04gqh9yn72wdcssvktsqfmmmv4",
+     "edited": false
+    },
+    {
+     "id": "ccae70ef441818f6e600d906bb15f26822cd2c75f52236c669c78db9eef71d7b",
+     "content": "Pretty good, working on something fun.",
+     "replied_to": "",
+     "preview_metadata": null,
+     "attachments": [],
+     "reactions": [],
+     "at": 1794348900000,
+     "pending": false,
+     "failed": false,
+     "mine": false,
+     "npub": "npub1fsndjp6vylvfahjeyuxq4s2tw8s8rv2j89ge7a28fvhnhf35s86sg3uctf",
+     "edited": false
+    },
+    {
+     "id": "af6f12698ed64974e2947593be116ca71c0abfbc0bd4614f55e383e3359bc386",
+     "content": "Ooh, tell me more when you can \ud83d\udc40",
+     "replied_to": "",
+     "preview_metadata": null,
+     "attachments": [],
+     "reactions": [],
+     "at": 1794348960000,
+     "pending": false,
+     "failed": false,
+     "mine": true,
+     "npub": "npub1yazve5gvw5em6um2mzg0nh2u4v4dkfas04gqh9yn72wdcssvktsqfmmmv4",
+     "edited": false
+    },
+    {
+     "id": "f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0",
+     "content": "Grab this pack https://vectorapp.io/emojis/pack/naddr1qqzkymr0vfesygypkcma3lxjcmdxxk0xjcc38gghphnete9hykuy68stfn7ea3vvaypsgqqqw48qsh6h7r",
+     "replied_to": "",
+     "preview_metadata": null,
+     "attachments": [],
+     "reactions": [],
+     "at": 1794349020000,
+     "pending": false,
+     "failed": false,
+     "mine": true,
+     "npub": "npub1yazve5gvw5em6um2mzg0nh2u4v4dkfas04gqh9yn72wdcssvktsqfmmmv4",
+     "edited": false
+    },
+    {
+     "id": "fc9be69f77ac6387b476bf18eecac0d49e846462bf151d098b956d642c9257c4",
+     "content": "haha yes exactly",
+     "replied_to": "",
+     "preview_metadata": null,
+     "attachments": [],
+     "reactions": [],
+     "at": 1794351600000,
+     "pending": false,
+     "failed": false,
+     "mine": false,
+     "npub": "npub1fsndjp6vylvfahjeyuxq4s2tw8s8rv2j89ge7a28fvhnhf35s86sg3uctf",
+     "edited": false
+    }
+   ],
+   "last_read": "af6f12698ed64974e2947593be116ca71c0abfbc0bd4614f55e383e3359bc386",
+   "unread_from": "",
+   "created_at": 1794348000,
+   "metadata": {
+    "custom_fields": {}
+   },
+   "muted": false,
+   "notify": 2,
+   "everyone_pings": true,
+   "community_muted": false
+  },
+  {
+   "id": "npub1v84qsqlcs56j8dmh6s22eccnpn2d87fdutxhl7rftseh67wzamhqfv9ft6",
+   "chat_type": "DirectMessage",
+   "participants": [
+    "npub1v84qsqlcs56j8dmh6s22eccnpn2d87fdutxhl7rftseh67wzamhqfv9ft6"
+   ],
+   "messages": [
+    {
+     "id": "df3800172069679be70df9a4408362938ec13352f6965b4b6ae83e8b15ec4b7b",
+     "content": "Hey! It's Dave",
+     "replied_to": "",
+     "preview_metadata": null,
+     "attachments": [],
+     "reactions": [],
+     "at": 1794287400000,
+     "pending": false,
+     "failed": false,
+     "mine": false,
+     "npub": "npub1v84qsqlcs56j8dmh6s22eccnpn2d87fdutxhl7rftseh67wzamhqfv9ft6",
+     "edited": false
+    },
+    {
+     "id": "b1b6970a41ecda3f826c36d4704439a99271fc68fa320d6de8a6770236bafca7",
+     "content": "Hey, how are you doing?",
+     "replied_to": "",
+     "preview_metadata": null,
+     "attachments": [],
+     "reactions": [],
+     "at": 1794287520000,
+     "pending": false,
+     "failed": false,
+     "mine": true,
+     "npub": "npub1yazve5gvw5em6um2mzg0nh2u4v4dkfas04gqh9yn72wdcssvktsqfmmmv4",
+     "edited": false
+    },
+    {
+     "id": "256d5942571987a8f984f2a6de380b961f092da1367181c7f36815f322e092c8",
+     "content": "Pretty good, working on something fun.",
+     "replied_to": "",
+     "preview_metadata": null,
+     "attachments": [],
+     "reactions": [],
+     "at": 1794287700000,
+     "pending": false,
+     "failed": false,
+     "mine": false,
+     "npub": "npub1v84qsqlcs56j8dmh6s22eccnpn2d87fdutxhl7rftseh67wzamhqfv9ft6",
+     "edited": false
+    },
+    {
+     "id": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+     "content": "Ask @npub10j7vkrzv4t0elnd4rmj902pge3e2gkresvd4h9u2ut3valzyjuzsz7ad26 or nostr:npub1wajx7kj0x9nxxa38405e3eapgu87wtvtgv8svld04p3x8u0j872qnta00x, they set up https://vectorapp.io/profile/npub10j7vkrzv4t0elnd4rmj902pge3e2gkresvd4h9u2ut3valzyjuzsz7ad26 last week.",
+     "replied_to": "",
+     "preview_metadata": null,
+     "attachments": [],
+     "reactions": [],
+     "at": 1794287730000,
+     "pending": false,
+     "failed": false,
+     "mine": false,
+     "npub": "npub1v84qsqlcs56j8dmh6s22eccnpn2d87fdutxhl7rftseh67wzamhqfv9ft6",
+     "edited": false
+    },
+    {
+     "id": "738b726df924c6da31999c37456119362e7a3bde84378f4409be99747cafa1c8",
+     "content": "Pay me here: DLabsktzGMnsK5K9uRTMCF6NoYNY6ET4Bb",
+     "replied_to": "",
+     "preview_metadata": null,
+     "attachments": [],
+     "reactions": [],
+     "at": 1794287745000,
+     "pending": false,
+     "failed": false,
+     "mine": false,
+     "npub": "npub1v84qsqlcs56j8dmh6s22eccnpn2d87fdutxhl7rftseh67wzamhqfv9ft6",
+     "edited": false
+    },
+    {
+     "id": "0cd834c4a78e321bcf7377b9a94b89995fec1ec2c493563d6af759565ce3adb1",
+     "content": "Ooh, tell me more when you can \ud83d\udc40",
+     "replied_to": "",
+     "preview_metadata": null,
+     "attachments": [],
+     "reactions": [],
+     "at": 1794287760000,
+     "pending": false,
+     "failed": false,
+     "mine": true,
+     "npub": "npub1yazve5gvw5em6um2mzg0nh2u4v4dkfas04gqh9yn72wdcssvktsqfmmmv4",
+     "edited": false
+    },
+    {
+     "id": "31fe2982dff7210a144b3af820a570e62650b652ecc1ca8a7a1c46c4360a1fcf",
+     "content": "Sent you the invoice",
+     "replied_to": "",
+     "preview_metadata": null,
+     "attachments": [],
+     "reactions": [],
+     "at": 1794290400000,
+     "pending": false,
+     "failed": false,
+     "mine": false,
+     "npub": "npub1v84qsqlcs56j8dmh6s22eccnpn2d87fdutxhl7rftseh67wzamhqfv9ft6",
+     "edited": false
+    }
+   ],
+   "last_read": "31fe2982dff7210a144b3af820a570e62650b652ecc1ca8a7a1c46c4360a1fcf",
+   "unread_from": "",
+   "created_at": 1794286800,
+   "metadata": {
+    "custom_fields": {}
+   },
+   "muted": false,
+   "notify": 2,
+   "everyone_pings": true,
+   "community_muted": false
+  },
+  {
+   "id": "npub10j7vkrzv4t0elnd4rmj902pge3e2gkresvd4h9u2ut3valzyjuzsz7ad26",
+   "chat_type": "DirectMessage",
+   "participants": [
+    "npub10j7vkrzv4t0elnd4rmj902pge3e2gkresvd4h9u2ut3valzyjuzsz7ad26"
+   ],
+   "messages": [
+    {
+     "id": "2dfc7f1fec2378642603513880c3d185c1d946c80fe462ddd746d9a966fee6c6",
+     "content": "Hey! It's Erin",
+     "replied_to": "",
+     "preview_metadata": null,
+     "attachments": [],
+     "reactions": [],
+     "at": 1794265800000,
+     "pending": false,
+     "failed": false,
+     "mine": false,
+     "npub": "npub10j7vkrzv4t0elnd4rmj902pge3e2gkresvd4h9u2ut3valzyjuzsz7ad26",
+     "edited": false
+    },
+    {
+     "id": "fa66a85f397a2570a1bd24cc913ede2ae20e52760450debd2be0dc3e8264b6cf",
+     "content": "Hey, how are you doing?",
+     "replied_to": "",
+     "preview_metadata": null,
+     "attachments": [],
+     "reactions": [],
+     "at": 1794265920000,
+     "pending": false,
+     "failed": false,
+     "mine": true,
+     "npub": "npub1yazve5gvw5em6um2mzg0nh2u4v4dkfas04gqh9yn72wdcssvktsqfmmmv4",
+     "edited": false
+    },
+    {
+     "id": "4d01f2c559d2131367694374a6d4b7c8d25406b9d288e441a97fa246b58b916e",
+     "content": "Pretty good, working on something fun.",
+     "replied_to": "",
+     "preview_metadata": null,
+     "attachments": [],
+     "reactions": [],
+     "at": 1794266100000,
+     "pending": false,
+     "failed": false,
+     "mine": false,
+     "npub": "npub10j7vkrzv4t0elnd4rmj902pge3e2gkresvd4h9u2ut3valzyjuzsz7ad26",
+     "edited": false
+    },
+    {
+     "id": "6bb9076027cd5db478938eea32df3cd109814cd0842ee2130a86b2d30922fc5a",
+     "content": "Ooh, tell me more when you can \ud83d\udc40",
+     "replied_to": "",
+     "preview_metadata": null,
+     "attachments": [],
+     "reactions": [],
+     "at": 1794266160000,
+     "pending": false,
+     "failed": false,
+     "mine": true,
+     "npub": "npub1yazve5gvw5em6um2mzg0nh2u4v4dkfas04gqh9yn72wdcssvktsqfmmmv4",
+     "edited": false
+    },
+    {
+     "id": "77ba0426a3e472fdc0b2d2037f5c274825b8c5a4b90a7b7e77c4d1b8d84d8be2",
+     "content": "Can you check the relay list later?",
+     "replied_to": "",
+     "preview_metadata": null,
+     "attachments": [],
+     "reactions": [],
+     "at": 1794268800000,
+     "pending": false,
+     "failed": false,
+     "mine": false,
+     "npub": "npub10j7vkrzv4t0elnd4rmj902pge3e2gkresvd4h9u2ut3valzyjuzsz7ad26",
+     "edited": false
+    }
+   ],
+   "last_read": "77ba0426a3e472fdc0b2d2037f5c274825b8c5a4b90a7b7e77c4d1b8d84d8be2",
+   "unread_from": "",
+   "created_at": 1794265200,
+   "metadata": {
+    "custom_fields": {}
+   },
+   "muted": false,
+   "notify": 2,
+   "everyone_pings": true,
+   "community_muted": false
+  },
+  {
+   "id": "npub1wajx7kj0x9nxxa38405e3eapgu87wtvtgv8svld04p3x8u0j872qnta00x",
+   "chat_type": "DirectMessage",
+   "participants": [
+    "npub1wajx7kj0x9nxxa38405e3eapgu87wtvtgv8svld04p3x8u0j872qnta00x"
+   ],
+   "messages": [
+    {
+     "id": "916d83f3c60ae97786062fd90dd4fa836778f764fec4d72b69707a9ae0497b9d",
+     "content": "Hey! It's Frank",
+     "replied_to": "",
+     "preview_metadata": null,
+     "attachments": [],
+     "reactions": [],
+     "at": 1794100200000,
+     "pending": false,
+     "failed": false,
+     "mine": false,
+     "npub": "npub1wajx7kj0x9nxxa38405e3eapgu87wtvtgv8svld04p3x8u0j872qnta00x",
+     "edited": false
+    },
+    {
+     "id": "a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7",
+     "content": "made a little game, try it: https://apps.example.org/games/chess.xdc",
+     "replied_to": "",
+     "preview_metadata": null,
+     "attachments": [],
+     "reactions": [],
+     "at": 1794100260000,
+     "pending": false,
+     "failed": false,
+     "mine": false,
+     "npub": "npub1wajx7kj0x9nxxa38405e3eapgu87wtvtgv8svld04p3x8u0j872qnta00x",
+     "edited": false
+    },
+    {
+     "id": "9f5f848bfd4eaec7636efa22c4fafc7f5ef5a3b3abcf69eecc0ca906945c821e",
+     "content": "Hey, how are you doing?",
+     "replied_to": "",
+     "preview_metadata": null,
+     "attachments": [],
+     "reactions": [],
+     "at": 1794100320000,
+     "pending": false,
+     "failed": false,
+     "mine": true,
+     "npub": "npub1yazve5gvw5em6um2mzg0nh2u4v4dkfas04gqh9yn72wdcssvktsqfmmmv4",
+     "edited": false
+    },
+    {
+     "id": "0dd69c24d98198c02a74c49c23b00c3ebed2897d6b18bf3fa9e22377e0de17bd",
+     "content": "Pretty good, working on something fun.",
+     "replied_to": "",
+     "preview_metadata": null,
+     "attachments": [],
+     "reactions": [],
+     "at": 1794100500000,
+     "pending": false,
+     "failed": false,
+     "mine": false,
+     "npub": "npub1wajx7kj0x9nxxa38405e3eapgu87wtvtgv8svld04p3x8u0j872qnta00x",
+     "edited": false
+    },
+    {
+     "id": "e1ea99b2aa44648632472ac1ba8b433fb7792a754edbe16bb4104676c60aeb32",
+     "content": "Ooh, tell me more when you can \ud83d\udc40",
+     "replied_to": "",
+     "preview_metadata": null,
+     "attachments": [],
+     "reactions": [],
+     "at": 1794100560000,
+     "pending": false,
+     "failed": false,
+     "mine": true,
+     "npub": "npub1yazve5gvw5em6um2mzg0nh2u4v4dkfas04gqh9yn72wdcssvktsqfmmmv4",
+     "edited": false
+    },
+    {
+     "id": "701941eb2099073cce5789d43667b92d69aeed4c279da1bcc248cb18ea08a203",
+     "content": "gm",
+     "replied_to": "",
+     "preview_metadata": null,
+     "attachments": [],
+     "reactions": [],
+     "at": 1794103200000,
+     "pending": false,
+     "failed": false,
+     "mine": false,
+     "npub": "npub1wajx7kj0x9nxxa38405e3eapgu87wtvtgv8svld04p3x8u0j872qnta00x",
+     "edited": false
+    }
+   ],
+   "last_read": "701941eb2099073cce5789d43667b92d69aeed4c279da1bcc248cb18ea08a203",
+   "unread_from": "",
+   "created_at": 1794099600,
+   "metadata": {
+    "custom_fields": {}
+   },
+   "muted": false,
+   "notify": 2,
+   "everyone_pings": true,
+   "community_muted": false,
+   "wallpaper_path": "media/photo.png",
+   "wallpaper_ts": 1,
+   "wallpaper_blur": 5,
+   "wallpaper_dim": 50
+  },
+  {
+   "id": "npub1uqg0688p4nqh8ca5sddhvd0c63sq6a6gdygz4k6uk76a0z2kfxaqmmg7t4",
+   "chat_type": "DirectMessage",
+   "participants": [
+    "npub1uqg0688p4nqh8ca5sddhvd0c63sq6a6gdygz4k6uk76a0z2kfxaqmmg7t4"
+   ],
+   "messages": [
+    {
+     "id": "50b5f31dfb00f33f086e1ae2abc4438be0a843062a9ba57e320d341c5fbcd145",
+     "content": "Hey! It's Grace",
+     "replied_to": "",
+     "preview_metadata": null,
+     "attachments": [],
+     "reactions": [],
+     "at": 1793581800000,
+     "pending": false,
+     "failed": false,
+     "mine": false,
+     "npub": "npub1uqg0688p4nqh8ca5sddhvd0c63sq6a6gdygz4k6uk76a0z2kfxaqmmg7t4",
+     "edited": false
+    },
+    {
+     "id": "46fdae29620a12a9aacbbc73f5fc7aeb4eb997d686bfb289be1dae882cfb61e0",
+     "content": "Hey, how are you doing?",
+     "replied_to": "",
+     "preview_metadata": null,
+     "attachments": [],
+     "reactions": [],
+     "at": 1793581920000,
+     "pending": false,
+     "failed": false,
+     "mine": true,
+     "npub": "npub1yazve5gvw5em6um2mzg0nh2u4v4dkfas04gqh9yn72wdcssvktsqfmmmv4",
+     "edited": false
+    },
+    {
+     "id": "2ee330e99ab8daeca8dc2cc9743c0904a536ec62226660ae640c6abba3f8118a",
+     "content": "Pretty good, working on something fun.",
+     "replied_to": "",
+     "preview_metadata": null,
+     "attachments": [],
+     "reactions": [],
+     "at": 1793582100000,
+     "pending": false,
+     "failed": false,
+     "mine": false,
+     "npub": "npub1uqg0688p4nqh8ca5sddhvd0c63sq6a6gdygz4k6uk76a0z2kfxaqmmg7t4",
+     "edited": false
+    },
+    {
+     "id": "1c13bd769a5602ef0fa2e909d49fad4cc9955d09d41a2a0fd233f53dd7b5ab59",
+     "content": "Ooh, tell me more when you can \ud83d\udc40",
+     "replied_to": "",
+     "preview_metadata": null,
+     "attachments": [],
+     "reactions": [],
+     "at": 1793582160000,
+     "pending": false,
+     "failed": false,
+     "mine": true,
+     "npub": "npub1yazve5gvw5em6um2mzg0nh2u4v4dkfas04gqh9yn72wdcssvktsqfmmmv4",
+     "edited": false
+    },
+    {
+     "id": "a5bb91d4e778afed68b313afd3c981a59cf7f3a49fbf72efe8974ce87f526218",
+     "content": "It's easier to ask forgiveness than permission.",
+     "replied_to": "",
+     "preview_metadata": null,
+     "attachments": [],
+     "reactions": [],
+     "at": 1793584800000,
+     "pending": false,
+     "failed": false,
+     "mine": false,
+     "npub": "npub1uqg0688p4nqh8ca5sddhvd0c63sq6a6gdygz4k6uk76a0z2kfxaqmmg7t4",
+     "edited": false
+    }
+   ],
+   "last_read": "a5bb91d4e778afed68b313afd3c981a59cf7f3a49fbf72efe8974ce87f526218",
+   "unread_from": "",
+   "created_at": 1793581200,
+   "metadata": {
+    "custom_fields": {}
+   },
+   "muted": false,
+   "notify": 2,
+   "everyone_pings": true,
+   "community_muted": false
+  },
+  {
+   "id": "npub1qk3nrfl57xffl2k29zdxd7vdtgzm8p7ee045lrpdmqsy56cz8g2qqxdt9s",
+   "chat_type": "DirectMessage",
+   "participants": [
+    "npub1qk3nrfl57xffl2k29zdxd7vdtgzm8p7ee045lrpdmqsy56cz8g2qqxdt9s"
+   ],
+   "messages": [
+    {
+     "id": "4fb91cf06af8fc36e9a29cd59245441d204dc24b8c4a7f7ff5fb2d157c11c608",
+     "content": "Hey! It's Heidi",
+     "replied_to": "",
+     "preview_metadata": null,
+     "attachments": [],
+     "reactions": [],
+     "at": 1790903400000,
+     "pending": false,
+     "failed": false,
+     "mine": false,
+     "npub": "npub1qk3nrfl57xffl2k29zdxd7vdtgzm8p7ee045lrpdmqsy56cz8g2qqxdt9s",
+     "edited": false
+    },
+    {
+     "id": "d9ff57dd878fcd98c1110de3224817685f9a9a19d453112c2dfed9216645bdd8",
+     "content": "Hey, how are you doing?",
+     "replied_to": "",
+     "preview_metadata": null,
+     "attachments": [],
+     "reactions": [],
+     "at": 1790903520000,
+     "pending": false,
+     "failed": false,
+     "mine": true,
+     "npub": "npub1yazve5gvw5em6um2mzg0nh2u4v4dkfas04gqh9yn72wdcssvktsqfmmmv4",
+     "edited": false
+    },
+    {
+     "id": "f8c2dd42b5d4d876a4332c56e38594d68795b82589d0e981a6c30edc0f2cda00",
+     "content": "Pretty good, working on something fun.",
+     "replied_to": "",
+     "preview_metadata": null,
+     "attachments": [],
+     "reactions": [],
+     "at": 1790903700000,
+     "pending": false,
+     "failed": false,
+     "mine": false,
+     "npub": "npub1qk3nrfl57xffl2k29zdxd7vdtgzm8p7ee045lrpdmqsy56cz8g2qqxdt9s",
+     "edited": false
+    },
+    {
+     "id": "8f59f5a85a3503d368364ff444a7e1d38ca8a0be2d207b0c41683a21f96807f5",
+     "content": "Ooh, tell me more when you can \ud83d\udc40",
+     "replied_to": "",
+     "preview_metadata": null,
+     "attachments": [],
+     "reactions": [],
+     "at": 1790903760000,
+     "pending": false,
+     "failed": false,
+     "mine": true,
+     "npub": "npub1yazve5gvw5em6um2mzg0nh2u4v4dkfas04gqh9yn72wdcssvktsqfmmmv4",
+     "edited": false
+    },
+    {
+     "id": "e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0",
+     "content": "Have you seen this? :grin: nostr:note1wg33qsaurqr7da6qkg67kag3ajeny4dx5d65x433r9k732t4p49sk04fpd",
+     "replied_to": "",
+     "preview_metadata": null,
+     "attachments": [],
+     "reactions": [
+      {
+       "id": "r1",
+       "reference_id": "e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0",
+       "author_id": "npub1yazve5gvw5em6um2mzg0nh2u4v4dkfas04gqh9yn72wdcssvktsqfmmmv4",
+       "emoji": ":grin:",
+       "emoji_url": "https://ref.invalid/media/emoji-grin.png"
+      }
+     ],
+     "at": 1790903820000,
+     "pending": false,
+     "failed": false,
+     "mine": false,
+     "npub": "npub1qk3nrfl57xffl2k29zdxd7vdtgzm8p7ee045lrpdmqsy56cz8g2qqxdt9s",
+     "edited": false,
+     "emoji_tags": [
+      {
+       "shortcode": "grin",
+       "url": "https://ref.invalid/media/emoji-grin.png"
+      }
+     ]
+    },
+    {
+     "id": "e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1",
+     "content": "Great write-up https://njump.me/naddr1qqx8yetvv9uj6er9wd5kwmszyq4aspkf0u8qptc6rlpn9ra8vw5jd9ererdcltz0jwhhrkccd4hfqqcyqqq823cyhyg2k",
+     "replied_to": "",
+     "preview_metadata": null,
+     "attachments": [],
+     "reactions": [],
+     "at": 1790903880000,
+     "pending": false,
+     "failed": false,
+     "mine": true,
+     "npub": "npub1yazve5gvw5em6um2mzg0nh2u4v4dkfas04gqh9yn72wdcssvktsqfmmmv4",
+     "edited": false
+    },
+    {
+     "id": "e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2",
+     "content": "nostr:nevent1qqsqe2cujct5qna09vjwyg0p3899j3vp8c2d8amxx3dsnjsnh03gllqzyzqmvd7clnfvdknrt8nfvvgn5ytsmeu4ujmjtwzdrc95elv7ckxwjqcyqqqgtwc9z4mnx and this one nostr:nevent1qqs0lf34s006vurtslfgfwrtp45n59s7fpq245k9ea446f7rh93p7lgrqsqqqqqpguxfpx",
+     "replied_to": "",
+     "preview_metadata": null,
+     "attachments": [],
+     "reactions": [],
+     "at": 1790903940000,
+     "pending": false,
+     "failed": false,
+     "mine": false,
+     "npub": "npub1qk3nrfl57xffl2k29zdxd7vdtgzm8p7ee045lrpdmqsy56cz8g2qqxdt9s",
+     "edited": false
+    },
+    {
+     "id": "c33c8607c4f223f4233f68b92e7fef6b309201b87fb34d1bdfa18e4e13752e76",
+     "content": "See you on Saturday",
+     "replied_to": "",
+     "preview_metadata": null,
+     "attachments": [],
+     "reactions": [],
+     "at": 1790906400000,
+     "pending": false,
+     "failed": false,
+     "mine": false,
+     "npub": "npub1qk3nrfl57xffl2k29zdxd7vdtgzm8p7ee045lrpdmqsy56cz8g2qqxdt9s",
+     "edited": false
+    }
+   ],
+   "last_read": "c33c8607c4f223f4233f68b92e7fef6b309201b87fb34d1bdfa18e4e13752e76",
+   "unread_from": "",
+   "created_at": 1790902800,
+   "metadata": {
+    "custom_fields": {}
+   },
+   "muted": false,
+   "notify": 2,
+   "everyone_pings": true,
+   "community_muted": false
+  },
+  {
+   "id": "npub19ayt3q02wpelr3hsswefdgmqh4xfeag7m2kt58xecdxc4c7ejnkq92s7dr",
+   "chat_type": "DirectMessage",
+   "participants": [
+    "npub19ayt3q02wpelr3hsswefdgmqh4xfeag7m2kt58xecdxc4c7ejnkq92s7dr"
+   ],
+   "messages": [
+    {
+     "id": "53b8cc19da5f56354d0281c9daa68f89304c11dc11942342d0b4553b88aefa8c",
+     "content": "Have a read: https://example.invalid/posts/private-by-default",
+     "replied_to": "",
+     "preview_metadata": {
+      "domain": "https://example.invalid/",
+      "og_title": "Private by default",
+      "og_description": "Why every message you send should be sealed before it leaves your device.\nA look at gift wraps, relays and what they can never learn.<br>Part one of three.",
+      "og_image": "https://example.invalid/og.png",
+      "og_url": "https://example.invalid/posts/private-by-default",
+      "og_type": null,
+      "title": null,
+      "description": null,
+      "favicon": "https://example.invalid/favicon.ico"
+     },
+     "attachments": [],
+     "reactions": [],
+     "at": 1794101400000,
+     "pending": false,
+     "failed": false,
+     "mine": false,
+     "npub": "npub19ayt3q02wpelr3hsswefdgmqh4xfeag7m2kt58xecdxc4c7ejnkq92s7dr",
+     "edited": false
+    },
+    {
+     "id": "eecc0a5093579f0de707c656ea2289edffb6ea722dca762b7bcfe2414090846d",
+     "content": "https://example.invalid/docs",
+     "replied_to": "",
+     "preview_metadata": {
+      "domain": "https://example.invalid/",
+      "og_title": null,
+      "og_description": null,
+      "og_image": null,
+      "og_url": null,
+      "og_type": null,
+      "title": "Docs",
+      "description": "Short and to the point.",
+      "favicon": "https://example.invalid/favicon.ico"
+     },
+     "attachments": [],
+     "reactions": [],
+     "at": 1794102000000,
+     "pending": false,
+     "failed": false,
+     "mine": true,
+     "npub": "npub1yazve5gvw5em6um2mzg0nh2u4v4dkfas04gqh9yn72wdcssvktsqfmmmv4",
+     "edited": false
+    },
+    {
+     "id": "97a55d29a973a83f670c1f48c92336dd35248f3f744445bd1de09275ca189bdf",
+     "content": "Watch this https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+     "replied_to": "",
+     "preview_metadata": {
+      "domain": "https://www.youtube.com/",
+      "og_title": "A video worth watching",
+      "og_description": "Uploaded by somebody.",
+      "og_image": "https://i.ytimg.com/vi/dQw4w9WgXcQ/hqdefault.jpg",
+      "og_url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+      "og_type": null,
+      "title": null,
+      "description": null,
+      "favicon": "https://example.invalid/favicon.ico"
+     },
+     "attachments": [],
+     "reactions": [],
+     "at": 1794102600000,
+     "pending": false,
+     "failed": false,
+     "mine": false,
+     "npub": "npub19ayt3q02wpelr3hsswefdgmqh4xfeag7m2kt58xecdxc4c7ejnkq92s7dr",
+     "edited": false
+    }
+   ],
+   "last_read": "97a55d29a973a83f670c1f48c92336dd35248f3f744445bd1de09275ca189bdf",
+   "unread_from": "",
+   "created_at": 1794016800,
+   "metadata": {
+    "custom_fields": {}
+   },
+   "muted": false,
+   "notify": 2,
+   "everyone_pings": true,
+   "community_muted": false
+  },
+  {
+   "id": "a0f367a05f629b3bb09ee8f1561bf03267962217d9ff6fc7ce3b235235702bc1",
+   "chat_type": "Community",
+   "participants": [],
+   "messages": [
+    {
+     "id": "7a3c760d48ddcb81b5b84767bdb6888628fe32badc3075ee364324255c1f53a1",
+     "content": "Welcome to the new community!",
+     "replied_to": "",
+     "preview_metadata": null,
+     "attachments": [],
+     "reactions": [],
+     "at": 1794360000000,
+     "pending": false,
+     "failed": false,
+     "mine": false,
+     "npub": "npub190vqdjtlpcq27xslcveglfmr4ynfwg7gmw86cnun4acakxrdd6gqnp929a",
+     "edited": false
+    },
+    {
+     "id": "e55c72814cdc85d3ec5df9cf7d0f7856eae78a3f8e67281a81f2ef2adb3660e6",
+     "content": "Glad to be here \ud83d\udc4b",
+     "replied_to": "",
+     "preview_metadata": null,
+     "attachments": [],
+     "reactions": [],
+     "at": 1794360600000,
+     "pending": false,
+     "failed": false,
+     "mine": false,
+     "npub": "npub1sxmr0k8u6trd5c6eu6trzyapzux7090ykujmsng7pdx0m8k93n5sd02fwn",
+     "edited": false
+    },
+    {
+     "id": "3b5ddcbb97a2556731cd4376b27b365b56eb569277b419bc8afe248833527732",
+     "content": "The GPUI port is coming along nicely.",
+     "replied_to": "",
+     "preview_metadata": null,
+     "attachments": [],
+     "reactions": [],
+     "at": 1794361200000,
+     "pending": false,
+     "failed": false,
+     "mine": true,
+     "npub": "npub1yazve5gvw5em6um2mzg0nh2u4v4dkfas04gqh9yn72wdcssvktsqfmmmv4",
+     "edited": false
+    },
+    {
+     "id": "1196b072a6d5283c763dea302077985c28cbe827c0b18e82d9533abd63e51100",
+     "content": "Can't wait to try it.",
+     "replied_to": "",
+     "preview_metadata": null,
+     "attachments": [],
+     "reactions": [],
+     "at": 1794361800000,
+     "pending": false,
+     "failed": false,
+     "mine": false,
+     "npub": "npub1fsndjp6vylvfahjeyuxq4s2tw8s8rv2j89ge7a28fvhnhf35s86sg3uctf",
+     "edited": false
+    }
+   ],
+   "last_read": "1196b072a6d5283c763dea302077985c28cbe827c0b18e82d9533abd63e51100",
+   "unread_from": "",
+   "created_at": 1794362400,
+   "metadata": {
+    "custom_fields": {
+     "community_id": "ca848c275e2117470342c641ada0ae4639dd0472ab4a5ec654a189bf1f689087",
+     "name": "Vector Devs",
+     "description": "Where Vector gets built, in the open.",
+     "primary_channel": "a0f367a05f629b3bb09ee8f1561bf03267962217d9ff6fc7ce3b235235702bc1",
+     "owner_npub": "npub1yazve5gvw5em6um2mzg0nh2u4v4dkfas04gqh9yn72wdcssvktsqfmmmv4",
+     "is_owner": "true",
+     "channel_name": "general"
+    }
+   },
+   "muted": false,
+   "notify": 2,
+   "everyone_pings": true,
+   "community_muted": false
+  },
+  {
+   "id": "d961d1281aed7b3ad2f6964aa7e59d427d8b921a8f7dd8c4c0f0a0e1422a17d1",
+   "chat_type": "Community",
+   "participants": [],
+   "messages": [
+    {
+     "id": "c42822194abfc07af77d310d9fd4d35d0fba4fa68d45d753e5a99181c926caea",
+     "content": "CI is green again, @everyone go pull.",
+     "replied_to": "",
+     "preview_metadata": null,
+     "attachments": [],
+     "reactions": [],
+     "at": 1794361200000,
+     "pending": false,
+     "failed": false,
+     "mine": false,
+     "npub": "npub1sxmr0k8u6trd5c6eu6trzyapzux7090ykujmsng7pdx0m8k93n5sd02fwn",
+     "edited": false
+    },
+    {
+     "id": "47c3066a117648de8e251a190b356d8be10c166b1ef1c10d074239a848a8a441",
+     "content": "Nice, merging the calls branch next.",
+     "replied_to": "",
+     "preview_metadata": null,
+     "attachments": [],
+     "reactions": [],
+     "at": 1794361800000,
+     "pending": false,
+     "failed": false,
+     "mine": true,
+     "npub": "npub1yazve5gvw5em6um2mzg0nh2u4v4dkfas04gqh9yn72wdcssvktsqfmmmv4",
+     "edited": false
+    }
+   ],
+   "last_read": "47c3066a117648de8e251a190b356d8be10c166b1ef1c10d074239a848a8a441",
+   "unread_from": "",
+   "created_at": 1794362400,
+   "metadata": {
+    "custom_fields": {
+     "community_id": "ca848c275e2117470342c641ada0ae4639dd0472ab4a5ec654a189bf1f689087",
+     "name": "Vector Devs",
+     "description": "Where Vector gets built, in the open.",
+     "primary_channel": "a0f367a05f629b3bb09ee8f1561bf03267962217d9ff6fc7ce3b235235702bc1",
+     "owner_npub": "npub1yazve5gvw5em6um2mzg0nh2u4v4dkfas04gqh9yn72wdcssvktsqfmmmv4",
+     "is_owner": "true",
+     "channel_name": "dev"
+    }
+   },
+   "muted": false,
+   "notify": 2,
+   "everyone_pings": true,
+   "community_muted": false
+  },
+  {
+   "id": "451269113943deb53e912b83f5e397cd38bdc2460928a14dbc4f766181425977",
+   "chat_type": "Community",
+   "participants": [],
+   "messages": [
+    {
+     "id": "ae19a8aaa77fb5559a042d5498489758ca94951173813ea34c57d1f605f579c0",
+     "content": "New icons are in Figma.",
+     "replied_to": "",
+     "preview_metadata": null,
+     "attachments": [],
+     "reactions": [],
+     "at": 1794361800000,
+     "pending": false,
+     "failed": false,
+     "mine": false,
+     "npub": "npub1fsndjp6vylvfahjeyuxq4s2tw8s8rv2j89ge7a28fvhnhf35s86sg3uctf",
+     "edited": false
+    }
+   ],
+   "last_read": "ae19a8aaa77fb5559a042d5498489758ca94951173813ea34c57d1f605f579c0",
+   "unread_from": "",
+   "created_at": 1794362400,
+   "metadata": {
+    "custom_fields": {
+     "community_id": "ca848c275e2117470342c641ada0ae4639dd0472ab4a5ec654a189bf1f689087",
+     "name": "Vector Devs",
+     "description": "Where Vector gets built, in the open.",
+     "primary_channel": "a0f367a05f629b3bb09ee8f1561bf03267962217d9ff6fc7ce3b235235702bc1",
+     "owner_npub": "npub1yazve5gvw5em6um2mzg0nh2u4v4dkfas04gqh9yn72wdcssvktsqfmmmv4",
+     "is_owner": "true",
+     "channel_name": "design"
+    }
+   },
+   "muted": false,
+   "notify": 2,
+   "everyone_pings": true,
+   "community_muted": false
+  },
+  {
+   "id": "58e6267876fd6c4acb7fbc37091bb920e4f325e24df4887b8048d0ccf7137f2f",
+   "chat_type": "Community",
+   "participants": [],
+   "messages": [],
+   "last_read": "",
+   "unread_from": "",
+   "created_at": 1794362400,
+   "metadata": {
+    "custom_fields": {
+     "community_id": "ca848c275e2117470342c641ada0ae4639dd0472ab4a5ec654a189bf1f689087",
+     "name": "Vector Devs",
+     "description": "Where Vector gets built, in the open.",
+     "primary_channel": "a0f367a05f629b3bb09ee8f1561bf03267962217d9ff6fc7ce3b235235702bc1",
+     "owner_npub": "npub1yazve5gvw5em6um2mzg0nh2u4v4dkfas04gqh9yn72wdcssvktsqfmmmv4",
+     "is_owner": "true",
+     "channel_name": "Lounge"
+    }
+   },
+   "muted": false,
+   "notify": 2,
+   "everyone_pings": true,
+   "community_muted": false
+  },
+  {
+   "id": "npub1yn2tjm6cmfk54pgjxyam6q4z36lse22aa3hyeph00r887q083zkq7g4t6h",
+   "chat_type": "DirectMessage",
+   "participants": [
+    "npub1yn2tjm6cmfk54pgjxyam6q4z36lse22aa3hyeph00r887q083zkq7g4t6h"
+   ],
+   "messages": [
+    {
+     "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "content": "send me the loop?",
+     "replied_to": "",
+     "preview_metadata": null,
+     "attachments": [],
+     "reactions": [],
+     "at": 1787880000000,
+     "pending": false,
+     "failed": false,
+     "mine": true,
+     "npub": "npub1yazve5gvw5em6um2mzg0nh2u4v4dkfas04gqh9yn72wdcssvktsqfmmmv4",
+     "edited": false,
+     "expiration": 1893456000
+    },
+    {
+     "id": "b02add15a54a6a91cf66fe50248abdec79f84ed022c788d67a3984fb4fcadc50",
+     "content": "",
+     "replied_to": "",
+     "preview_metadata": null,
+     "attachments": [
+      {
+       "id": "dbf76ea440dfc079815f321b2a42d64d59bf424324f88dd32b9c2eb09093c013",
+       "key": "",
+       "nonce": "",
+       "extension": "wav",
+       "name": "",
+       "url": "https://example.invalid/voice",
+       "path": "media/voice.wav",
+       "size": 118444,
+       "img_meta": null,
+       "downloading": false,
+       "downloaded": true
+      }
+     ],
+     "reactions": [],
+     "at": 1787880600000,
+     "pending": false,
+     "failed": false,
+     "mine": false,
+     "npub": "npub1yn2tjm6cmfk54pgjxyam6q4z36lse22aa3hyeph00r887q083zkq7g4t6h",
+     "edited": false
+    },
+    {
+     "id": "29f486453349e2b4b77608d08f98d9adb8df9e0c1e4b5c3e62fd8e3d34d0b4cd",
+     "content": "and the loop",
+     "replied_to": "",
+     "preview_metadata": null,
+     "attachments": [
+      {
+       "id": "cc3fe8261c75abf5327a1702b25bae4f31c36a248c8bbca54be9506eaff0725d",
+       "key": "",
+       "nonce": "",
+       "extension": "wav",
+       "name": "night-loop.wav",
+       "url": "https://example.invalid/loop",
+       "path": "media/loop.wav",
+       "size": 192044,
+       "img_meta": null,
+       "downloading": false,
+       "downloaded": true
+      }
+     ],
+     "reactions": [],
+     "at": 1787881200000,
+     "pending": false,
+     "failed": false,
+     "mine": false,
+     "npub": "npub1yn2tjm6cmfk54pgjxyam6q4z36lse22aa3hyeph00r887q083zkq7g4t6h",
+     "edited": false,
+     "expiration": 1893456000
+    },
+    {
+     "id": "5b1e0c3a9d7f4e2b8a6c1d0e9f8a7b6c5d4e3f2a1b0c9d8e7f6a5b4c3d2e1f00",
+     "content": "this one is on repeat",
+     "replied_to": "",
+     "preview_metadata": null,
+     "attachments": [
+      {
+       "id": "a7d2c9e14b3f58e06c1a2b3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f6a7b",
+       "key": "",
+       "nonce": "",
+       "extension": "mp3",
+       "name": "golden-hour.mp3",
+       "url": "https://example.invalid/golden",
+       "path": "media/golden-hour.mp3",
+       "size": 42473,
+       "img_meta": null,
+       "downloading": false,
+       "downloaded": true
+      }
+     ],
+     "reactions": [],
+     "at": 1787881500000,
+     "pending": false,
+     "failed": false,
+     "mine": false,
+     "npub": "npub1yn2tjm6cmfk54pgjxyam6q4z36lse22aa3hyeph00r887q083zkq7g4t6h",
+     "edited": false
+    },
+    {
+     "id": "6c2f1d4b0e8a5f3c9b7d2e1a0f9e8d7c6b5a4f3e2d1c0b9a8f7e6d5c4b3a2f10",
+     "content": "whole album in one file",
+     "replied_to": "",
+     "preview_metadata": null,
+     "attachments": [
+      {
+       "id": "b8e3d0f25c4a69f17d2b3c4e5f6a708192a3b4c5d6e7f8091a2b3c4d5e6f7a8c",
+       "key": "",
+       "nonce": "",
+       "extension": "mp3",
+       "name": "northern-lines.mp3",
+       "url": "https://example.invalid/northern",
+       "path": "media/northern-lines.mp3",
+       "size": 132767,
+       "img_meta": null,
+       "downloading": false,
+       "downloaded": true
+      }
+     ],
+     "reactions": [],
+     "at": 1787881800000,
+     "pending": false,
+     "failed": false,
+     "mine": false,
+     "npub": "npub1yn2tjm6cmfk54pgjxyam6q4z36lse22aa3hyeph00r887q083zkq7g4t6h",
+     "edited": false
+    }
+   ],
+   "last_read": "6c2f1d4b0e8a5f3c9b7d2e1a0f9e8d7c6b5a4f3e2d1c0b9a8f7e6d5c4b3a2f10",
+   "unread_from": "",
+   "created_at": 1787796000,
+   "metadata": {
+    "custom_fields": {}
+   },
+   "muted": false,
+   "notify": 2,
+   "everyone_pings": true,
+   "community_muted": false
+  }
+ ],
+ "thumbs": {
+  "U(^ /twg4<&F@NQS~xhD@CSA": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAASCAYAAAA6yNxSAAAE+ElEQVR4Ae3AA6AkWZbG8f937o3IzKdyS2Oubdu2bdu2bdu2bWmMnpZKr54yMyLu+Xa3anqmhztr1a8+8jFf6FIKtVZq7ShRkES2ZJompnEkpwmRdDXYWHRsb804fmzBsZ05x3Z6tjeDzQ1YzJPFbGIxb2zMGxuLxmKRLObJrG90ZSJiBAbsCZzU+SwpIWpNak0ihICMpNAIT6QmIOlr0FXR10pXJ/ra6OtE3xX6Cn1N+i7pa6Orja4mfU260uhKo9ZGaAIa9gRO6vHtRgTUAqVARIKhtcY0jozDSJtGIOlqsDFPNuZicx5szgubc9icJxtz2Jgn83ljMZtYzBsb82QxS+azRt9P1DIRGrAH8Iid1GtOTESYUkyECTVsM42NYRgYh4FpmsBJV8Ri0djZhJ1NsbMpdjbN9mZhc0MsZsli3pjPJhbzxmKeLOaNWd/ou4kSI9KAvcY5Yif1+jONkIliQkaI1pJxnBjWa4b1wDiO4KQWsVg0drbMsS1xfFsc2zbbm5WNDbGYJ/NZYz5rLGaN+byxmDVmfaPWkRIDeMBekznibNSbrjFSEgHC2DBNyTCMrFcD69WacRiwk1KCxdxsb4lj24Xj24VjW2JrK9lciPnczPvGfDYxmzXms8Z81qjdBGUEDeAV5BraCG7UG86AAAnAZMI4NtbridVyYtWPDMNEZqNGMJ+L7a3KztbE8c2Jnc3C1obYWIj5LJnNGrO+MesnZrOG+gZ1gjICA+QAbQAGcKNec6ICQhI2tGbGQayWcFTMssCwNtmgBMznsLWA7QVsLWBzDptzs5jBrIe+g1ln+goqhmIoCUogQQk0oIEn6vGtnitEJrQpWReoNMKVyImOSmuNEoVZX5n3lXlXmdVKXytdVGpAkSkYuSAbXKAZFKAAAlrAFNAEGdRZnXOFyISJxG2kBXRhuoCMQDZFQVVPYUF4gTyHnJGt0CZoJCMFPEEGfTboAqYACWxoCVPiZrI1qtsCECCcJqckp45shZwK2So59WRLiEKbZrRpwThuMKwX1NIjCtnMWJNaJmqd6Gqj6ya62ihlIlSxC60VpqnQpkpmoy6PNgBhi0yYpmS9nlguO5bLjtWyZ72eaM2ECtlmwAJpAzEns2cYgq6aUhqlTJQyUctE1zW62ii1ERqwZ2Trmaae1gYyG/XixQUgQGSKaTLD0FiuBpZHM5bLgWFotAYRla6bMU4LprZgHOcs1x19J0oxEROhiVImam3U2ui6pJaJiAk80HJNm9a0NpA5Uc+eWwAChFNMDcahsVr3LJcjq9XEMCSZQlHpuxmr9YLVsGC5mtP3lVpFiUSaUIxETNTS6Lqk65JakxITMJK5prWB1gYyG/Xe+2YIgQJbtAbjaNbrxmo1sVo3xjHJDCI6+n7GbLXBYj1nNp/Rd5VSQEqkCRiJmKi10VXT9UlXTSkNaSRzINtAy5HMRj13rgMJCCDIFOMIw9BYrRvDOhknk1mI0tF3c2bzBathwWzV03WVCJAaMAIjoYlSk64zfW+6ztSSSBP2SMuBbCPpRt29VEBCKkCQGUwTDENhPSTDkEwTpAsleoZ+ztgWTG3BMPV0taAAaOACFBQTtSRdZ/oe+t6UkkQ07JHMjswRZ1KXKyEFUmACZzA1GEexXothCKYJTCGiYipSh6JiKq0VIgCEbcBIUGvS0qQhDbUmEYEtMiFT2Mk/Ah7D65d0eLWCAAAAAElFTkSuQmCC",
+  "6%fXoBL7P(`cp*l1#)iQt/q;6h": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABcAAAAgCAYAAAD5VeO1AAAGzUlEQVR4Ae3AA6AkWZbG8f937o3IzKdyS2Oubdu2bdu2bdu2bWmMnpZKr54yMyLu+Xa3anqmhztr1a8+7I3eyDs7O1x3w/XcePPNXHfj9Rw7fgx1laP1kouXdrmwe5GDo0MSs7m5wanTp7n22ms5dfIk89mM9WrFfffcy9Of/jSe8uSncNutz+DixQvU1WpFP5uxWq1YrVasliv6+YxoldV6xWq1YrVes16vMaZ2lWEYGIeBcRwoEYzjyDiNTOPENE5M08Q4TdS9/X2QWGxusr23x2JrE4qIrnK0XrG/v8/+/j6HyyMQEOLo6Iij5RGL5QKnGVZrVqsVq/WK9XrFer1mvV5T93cv0TKZLeZsbm/SL+Y0kugqy2HF7t4lLu1d4mi1hBCJmc/nHBxsMZ/PyZaM6zXL5ZLlcslytWK1WjGtVlT29jgCdjc22Ni5RL+xoMlEV1kOKy7t77G7v8dytSRKgGBjY4PDo0M2jhaQZhgGlssVq9Wa9XrNeljDeqCyWkHXcbhccnh4xMHBIaqFqIXlsGb/4ICDgwNW6xVRC6VWlsslq9WK1WpNKJiGgWEcGMeRaRqZpgnaRCUTMplaY5gm1uNItx5QC5brFcvVitVqzWpYU1phGAeGcWQYR8ZpZGodLRuZiW1sAECi0vXQdUQpSIGBtHFLptaYpsbYJqbWIERrSWaSaWyDAYQkIoJSCrVWWq0Emxuw2GA2X9D1PaVWFAESCaSNbdKQNsaY+wmFiAhqKXRdpe97ZrMZzGdUtrYpm5vMNzbo5wtq1xO1YicgDCRgjAHzTBIKERGoQO06+r5nPp+xWMwZhgW1bm2z2FgwX2zQz2fUriei0NIYSEOmSRvb2GCuEEIKooquq8xmM+bzOYvFgnEcqYuNDeaLBbP5nNr1RClYIg0tkykbrTVaSyKSlklmYhuACBEKuq5jNpuxsViwublJtkbt53O6fkbpOqIULJGGqTXGqTFNE+PUaNOEQmRrZCa2QRARdFGY9T2L+ZzNzQ22t7aQTe36GbXvKKWiKBiRaaaWTK0xTo2pNWhJZpI2AJKICGqp9F0H2djc3GR7e5thvaaWQu36nq7rKbVDUUDCGNtkGtvYBkASEUGJQi2FvuuYzXoWsxl9KeQ0MQ1ryGQxm1NnswVd39H1M2rXUUoFJ4pCRBBRKLXSMF3X0Xc9/axnNpuxmM/Z3Nhgc7HAU6NKyKaLwnLziLrY2KDrOmaLObPZjNIVWjbGnOj6nr6fMZsGshbm8zmLxZyNxYLNjQ02NzbY2txke3MT2cy6So1g3nWslkvqxuYWXVeZzWf08xlRgpaNRjKMC9bDmnQjs7FYzNjc2GRzY4PNjQ02NzbY2txke2uLAsxrpZOY1cJqtaJubG7S1Uo/6+lnPVGDKSeSZBgHNsYBk2ROLOYzFos589mc2WzGrJ8x63vmfU+VKACtoTR9rdRZP6N2lb7v6fqOKIEy6KaJvu/pu56p62kZdF1HLZUSQQDYOBNnYgnZyCYERUEFAQIABADmMiHEM9m4JW2aGNcDq+WS5eEhh/tzSiY1gmm9Znl0xPLwkGEYqOv1mqlNZCYtk6hBaxPr9Zr1as16vWa9WjNNA20a6WtwaT5ja2POoutQm1hubFCBaRhYHh6yPDpiHAbq7u4lai30s56u74gSNE+sVkv2D/bY39/n8HCfYVxTi2jDGmVSnHgYWO7vsTmfEzbTes3y6Ijl0RHjMFDPnj1LrYV+1tP3PaUGzY31esX+4R77+5c4PNyH9RIER4sZ4/KIcXXEan+fS9vbLPoeORlXK5ZHRyyPjhiHgXrvPfdSa2U27+lnPbUrpJP1uOLw8IDh4BIc7MF6CU7GWce9R4esjw5Z7u2xu7nJrBbIZFwuWR4dsTw6YhwG6njffYxdZTmbEfMZXV9BZpgGfHQAh3twsA/rJeQEXYX1it31inF5xOF8Tl8KbhPDcsny8JDV8ohxGKlcvAhdB/MZuZiznnVQBG2E1RKWK1ivYbWCnGAqQILgMJNcr6khPE4MqyXD4SEcHcE4UDk8gr4DJwjAUAPcIJNnkUACAAOZ0BptmpDA08Q0jjCOME0wQqU1mAJaQiYAhIACXQethzYHATlBFcx6mM2os55Z31MFKcE0sep73BpooIJAgggoBWqFroMAaoCAEPQF3KAEzHrqxpyt+ZxF31EFOU6MpdBFsCqFaRyplAKlQClQO+g6at8TRWQWpiKogrGCG9Sgznq2FnO2FnMWfUcVeJwYaqGLoK+VcRyplIBSoBQoBUql1kqpQVogM5EQgJOowXzWM5/PmM9mzPuOKnApBEaZCFNK8I958c/ms+Jt8gAAAABJRU5ErkJggg==",
+  "HUN*`C9p<)MJbF6vQY^LC_$qYVyrBA": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAHJUlEQVR4Ae3AA6AkWZbG8f937o3IzKdyS2Oubdu2bdu2bdu2bWmMnpZKr54yMyLu+Xa3anqmhztr1a8e/ejP2YAFCChCpRB9pfSVOuvRrIfZDGY9zHroZ9DPoOuhdKACDVhPcLCCSwdwcZ/lxX2OLh0xHq3xaDpV5t2MRb+gzGZQOioIAWCMwOIyAwjMsxkwYIMNNtiAwYANBgwYsBAAQjyTucICoApxmQEJELKQgQQMJJCGNDRDM7SESMAgQwOaIQ0JGDBgwIC5woABGxIqybPZ2ICMG7iZbKZMCZGgBmqgBjRwgzKBDCmYEqaEltCMm3EDpyGNActkM6UZSGobEzAGLCAECelGQRhhi2IhAwkk0IAJqAZVSGBIWI8wNHJotKnRpkaOiUcjNRpJi0aloSLquBwwYMACAqiBpkJMSWlJNFOmpIxJ6ZIYEroGXYMyQVTIgDFhOcByYFiNjKuRcT0xricYjTFRg8iCmuhKUo8OVoAxYAEhqIFqIbpK9JXSTURXiW6kdJVSO2rX0dUR1Q6iAwtGw2pkOFyxOlqxOhpYHw2MywFGUwgohhHcmak26sHuIQiMsQRFqATqCtFVoqtEX4muErUQtVJqpXYdtfZ0taNEJVxgMtN6Yn24Yrm/YnmwYnW4YloOeDTFQStJdqZ1SS2Vur97AIAFhCCEaqCuUrpK9JXoKtEVVCtRC1ErpVRq7ehqT41KUKDBtJ4Yjtas9pcsD5asD1aMywGPpjiYSqPVZOwatRTqwaUjACwghEqgGkRXib5S+o7oKuoKUQsqhSiFqJVaOmodqVEJCmrQhsZwNLA+XLE8WLE+WDEtRzyZ4mCKRqtmqo1SCvVof8VlIQihGkStRG/KBGWC6I3GRDVRNFQKURqlNEpp1KgUCiTkkIzLgfXhwOpoYH00Mq1GPCbFQYskK7SalCjUYdlAQAhFoCpKnwQGGQQGZCANYYiGAkpACZgiCQpKkUNjXI0My5H1amJYT0yrhqekpHEI1wkXUYqpOQkkCKESRATOirJCVnAFV8gABbZwCgQp0yIpEgHQRI7JtE6GIRkHMw6mjcaTyTSEURpVk81UqQeBFEhBUaWoUqKnlI4SHVEqisASKbDBBiOcwoAAmsnRTKOZRpgmaE1MTdCEU4TFhJCEDbWUOZJQCNVCqYVSO2rtqbWj1A7VCiWwABuTpI0NJKQFBprJ0UwTjBNMk5iaaCloAQQtg6IgMxBBrXUBEgoRtVBqpdSO2nXU2lO6ikrBJWgYOXFr2I2WxmmcQBqaydFMo5kmGBtMTWQLsMGBImguhANcqFHmIFAEUQKVSpSOKB0qPYoKUUAAJt1ohrGZ1hqtgTNxA5rJMZmGZBqTaTTTBNlATSSBCKYIlIEJqum4IkgCUUkqzR1yBVdwkIbJydCSYYJhNOOUtCnJlrgZN5OjacNEWzemIWlj4gkioQIgSKEI0kEdM0AghFrQQpQmSoM2QYQB0wRTJuupsR4b63FiHEemsdFa4mY8GU+mDY0cGm2YyDFhMpGiCgwgsKAAdTUaBAhUGjIUi0IQFpHGNUiZMRvraWQ1DKyHgWEcmcaJ1hJPxs14MjkmOSYeGh4TJigUOhkDDnCKgqiH64nLAohAUxJTEi2JKYmu4CpSZszGehpZDQPrYWA9DExTo02J09CMJ/BkPCYeEyYTKSqihbGMAzKgAnV/OYKMJQhQCdQVYmzE2FBXoIomM2VjPU2sxoH1MDCMI9M00aaEBBJowGQ8GSajBpGiKmgYEkhwwgTU/dUAgGUsQRGqQfQVjYXoC5SgBUxuDNPEehxYjyPDODJNjcyEBFIogQaagGbURLGoGAtIIMEJRVAP1iPGGLCMQ6gGmiaiq2gqUIMMaE6GnBimkWGcGKfG1BpuBoNSyIIGSiAh0oRNJ3ACCdhkmoKph8OEbYxJGQuogaaCWiNaga7gIhrJlI2hNcapMbYkm3EaLGRQggwYlCBDJKTAMmTiZpqSiqjLsWFM2iRJCmiCTMJJ2MiJS5AyE8nUzJgwGdLCgBBCCAEgAxgSIk1T0khSSVOjJygJdd2StEknDZMyTiGbwEgQFLDJEImZDBPQECkwQgghJAHGGCeQRmmKYZJoKaYUQ5oShTqkSZu0mZwkxgFgIiBCRAgCjEhBMzREI7CMASFACDBgm8zEzdBMZDLKjM0MzdSpUSKoY0LaNJuWSZOxAYGaKC2JTJQCiQQS0RApSMSzmMts09JkJtkaHo0aBI2qRlcaNSoRQW02aZjSNJvmJAUkKEWmiTSRhjCWSKBJpME8J2PSpmUytaRNjRwbNBMWhUKNRo2JUFCbIW3S0AzNkGGwURqcOI0NGDCkwAgLjDGAwYBtMs2UydSSqTVaazAmSigkUyQlCiFRDRhITNokJg3YyEYGYdJGXGGEMQaMMAbAgA0JpE1z0jJpreE0SjDgNA4TCv4RtiqpFjEcUFEAAAAASUVORK5CYII="
+ },
+ "communities": [
+  {
+   "community_id": "ca848c275e2117470342c641ada0ae4639dd0472ab4a5ec654a189bf1f689087",
+   "name": "Vector Devs",
+   "description": "Where Vector gets built, in the open.",
+   "is_owner": true,
+   "has_icon": true,
+   "channels": [
+    {
+     "channel_id": "a0f367a05f629b3bb09ee8f1561bf03267962217d9ff6fc7ce3b235235702bc1",
+     "name": "general",
+     "private": false,
+     "readable": true,
+     "category_id": null,
+     "topic": "Say hi!",
+     "view": "chat",
+     "my_permissions": null,
+     "restricted": false,
+     "can_post": true,
+     "public_until": null
+    },
+    {
+     "channel_id": "d961d1281aed7b3ad2f6964aa7e59d427d8b921a8f7dd8c4c0f0a0e1422a17d1",
+     "name": "dev",
+     "private": false,
+     "readable": true,
+     "category_id": "e70d362ac4e73ce2887e5395680c76b7b3c93e43b69587845448f3b9d03ff48c",
+     "topic": "Builds, branches and bugs",
+     "view": "chat",
+     "my_permissions": null,
+     "restricted": false,
+     "can_post": true,
+     "public_until": null
+    },
+    {
+     "channel_id": "451269113943deb53e912b83f5e397cd38bdc2460928a14dbc4f766181425977",
+     "name": "design",
+     "private": false,
+     "readable": true,
+     "category_id": "e70d362ac4e73ce2887e5395680c76b7b3c93e43b69587845448f3b9d03ff48c",
+     "topic": null,
+     "view": "chat",
+     "my_permissions": null,
+     "restricted": false,
+     "can_post": true,
+     "public_until": null
+    },
+    {
+     "channel_id": "58e6267876fd6c4acb7fbc37091bb920e4f325e24df4887b8048d0ccf7137f2f",
+     "name": "Lounge",
+     "private": false,
+     "readable": true,
+     "category_id": null,
+     "topic": null,
+     "view": "voice",
+     "my_permissions": null,
+     "restricted": false,
+     "can_post": true,
+     "public_until": null
+    }
+   ],
+   "categories": [
+    {
+     "category_id": "e70d362ac4e73ce2887e5395680c76b7b3c93e43b69587845448f3b9d03ff48c",
+     "name": "Build"
+    }
+   ],
+   "primary_channel": "a0f367a05f629b3bb09ee8f1561bf03267962217d9ff6fc7ce3b235235702bc1",
+   "owner_npub": "npub1yazve5gvw5em6um2mzg0nh2u4v4dkfas04gqh9yn72wdcssvktsqfmmmv4",
+   "dissolved": false,
+   "voice_relays": [],
+   "relays": [
+    "wss://jskitty.com/nostr",
+    "wss://asia.vectorapp.io/nostr"
+   ],
+   "members": [
+    "npub1yazve5gvw5em6um2mzg0nh2u4v4dkfas04gqh9yn72wdcssvktsqfmmmv4",
+    "npub190vqdjtlpcq27xslcveglfmr4ynfwg7gmw86cnun4acakxrdd6gqnp929a",
+    "npub1sxmr0k8u6trd5c6eu6trzyapzux7090ykujmsng7pdx0m8k93n5sd02fwn",
+    "npub1fsndjp6vylvfahjeyuxq4s2tw8s8rv2j89ge7a28fvhnhf35s86sg3uctf"
+   ],
+   "icon": "media/devs-icon.png",
+   "banner": "media/devs-banner.png"
+  }
+ ],
+ "invites": [
+  {
+   "community_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+   "inviter_npub": "npub1v84qsqlcs56j8dmh6s22eccnpn2d87fdutxhl7rftseh67wzamhqfv9ft6",
+   "bundle_json": "{\"name\": \"Night Owls\", \"channels\": [{\"id\": \"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\", \"name\": \"general\"}], \"relays\": [\"wss://jskitty.com/nostr\"]}",
+   "received_at": 1794358800,
+   "sent_at": 1794358700,
+   "ends_at": 1794880800
+  }
+ ],
+ "audit": {
+  "entries": [
+   {
+    "id": "a1",
+    "at": 1794362280000,
+    "actor": "npub1yazve5gvw5em6um2mzg0nh2u4v4dkfas04gqh9yn72wdcssvktsqfmmmv4",
+    "action": "member_ban",
+    "target": {
+     "kind": "member",
+     "npub": "npub1wajx7kj0x9nxxa38405e3eapgu87wtvtgv8svld04p3x8u0j872qnta00x"
+    }
+   },
+   {
+    "id": "a2",
+    "at": 1794351600000,
+    "actor": "npub190vqdjtlpcq27xslcveglfmr4ynfwg7gmw86cnun4acakxrdd6gqnp929a",
+    "action": "channel_create",
+    "target": {
+     "kind": "channel",
+     "name": "design",
+     "view": "chat"
+    },
+    "changes": [
+     {
+      "field": "view",
+      "new": "chat"
+     },
+     {
+      "field": "private",
+      "new": true
+     }
+    ]
+   },
+   {
+    "id": "a3",
+    "at": 1794268800000,
+    "actor": "npub1yazve5gvw5em6um2mzg0nh2u4v4dkfas04gqh9yn72wdcssvktsqfmmmv4",
+    "action": "community_update",
+    "changes": [
+     {
+      "field": "description",
+      "old": "",
+      "new": "Where Vector gets built, in the open."
+     },
+     {
+      "field": "relays",
+      "added": [
+       "wss://asia.vectorapp.io/nostr"
+      ],
+      "removed": []
+     }
+    ]
+   },
+   {
+    "id": "a4",
+    "at": 1794016800000,
+    "actor": "npub1yazve5gvw5em6um2mzg0nh2u4v4dkfas04gqh9yn72wdcssvktsqfmmmv4",
+    "action": "role_create",
+    "target": {
+     "kind": "role",
+     "name": "Mods"
+    },
+    "changes": [
+     {
+      "field": "name",
+      "new": "Mods"
+     },
+     {
+      "field": "permissions",
+      "added": [
+       3,
+       4,
+       5
+      ],
+      "removed": []
+     }
+    ]
+   },
+   {
+    "id": "a5",
+    "at": 1793844000000,
+    "actor": "npub190vqdjtlpcq27xslcveglfmr4ynfwg7gmw86cnun4acakxrdd6gqnp929a",
+    "action": "invite_create",
+    "changes": [
+     {
+      "field": "count",
+      "new": 2
+     }
+    ]
+   },
+   {
+    "id": "a6",
+    "at": 1793584800000,
+    "actor": "npub1yazve5gvw5em6um2mzg0nh2u4v4dkfas04gqh9yn72wdcssvktsqfmmmv4",
+    "action": "member_roles_update",
+    "target": {
+     "kind": "member",
+     "npub": "npub190vqdjtlpcq27xslcveglfmr4ynfwg7gmw86cnun4acakxrdd6gqnp929a"
+    },
+    "changes": [
+     {
+      "field": "roles",
+      "added": [
+       {
+        "kind": "role",
+        "name": "Mods"
+       }
+      ],
+      "removed": []
+     }
+    ]
+   },
+   {
+    "id": "a7",
+    "at": 1793325600000,
+    "actor": "npub1yazve5gvw5em6um2mzg0nh2u4v4dkfas04gqh9yn72wdcssvktsqfmmmv4",
+    "action": "community_create",
+    "changes": [
+     {
+      "field": "name",
+      "new": "Vector Devs"
+     }
+    ]
+   }
+  ],
+  "compacted": false
+ },
+ "roles_view": {
+  "is_owner": true,
+  "can_manage": true,
+  "rank": 0,
+  "grantable": "939518847",
+  "activated": true,
+  "everyone": "541057024",
+  "everyone_editable": true,
+  "everyone_default": "541057024",
+  "roles": [
+   {
+    "role_id": "1111111111111111111111111111111111111111111111111111111111111111",
+    "name": "Mods",
+    "position": 1,
+    "color": 5897395,
+    "permissions": "67111224",
+    "channel_id": null,
+    "holders": [
+     "npub190vqdjtlpcq27xslcveglfmr4ynfwg7gmw86cnun4acakxrdd6gqnp929a"
+    ],
+    "display": true,
+    "mentionable": true,
+    "manageable": true
+   },
+   {
+    "role_id": "2222222222222222222222222222222222222222222222222222222222222222",
+    "name": "Helpers",
+    "position": 2,
+    "color": 3718648,
+    "permissions": "2112",
+    "channel_id": null,
+    "holders": [
+     "npub1sxmr0k8u6trd5c6eu6trzyapzux7090ykujmsng7pdx0m8k93n5sd02fwn",
+     "npub1fsndjp6vylvfahjeyuxq4s2tw8s8rv2j89ge7a28fvhnhf35s86sg3uctf"
+    ],
+    "display": false,
+    "mentionable": false,
+    "manageable": true
+   },
+   {
+    "role_id": "3333333333333333333333333333333333333333333333333333333333333333",
+    "name": "Designers",
+    "position": 3,
+    "color": 0,
+    "permissions": "65536",
+    "channel_id": null,
+    "holders": [],
+    "display": false,
+    "mentionable": false,
+    "manageable": true
+   }
+  ],
+  "channels": [
+   {
+    "channel_id": "a0f367a05f629b3bb09ee8f1561bf03267962217d9ff6fc7ce3b235235702bc1",
+    "name": "general",
+    "private": false
+   },
+   {
+    "channel_id": "d961d1281aed7b3ad2f6964aa7e59d427d8b921a8f7dd8c4c0f0a0e1422a17d1",
+    "name": "dev",
+    "private": false
+   },
+   {
+    "channel_id": "451269113943deb53e912b83f5e397cd38bdc2460928a14dbc4f766181425977",
+    "name": "design",
+    "private": false
+   },
+   {
+    "channel_id": "58e6267876fd6c4acb7fbc37091bb920e4f325e24df4887b8048d0ccf7137f2f",
+    "name": "Lounge",
+    "private": false
+   }
+  ],
+  "max_roles": 100,
+  "max_per_member": 64
+ },
+ "moderation": {
+  "community_id": "ca848c275e2117470342c641ada0ae4639dd0472ab4a5ec654a189bf1f689087",
+  "name": "Vector Devs",
+  "owner_npub": "npub1yazve5gvw5em6um2mzg0nh2u4v4dkfas04gqh9yn72wdcssvktsqfmmmv4",
+  "epoch": 3,
+  "report": {
+   "members": [
+    {
+     "npub": "npub1yazve5gvw5em6um2mzg0nh2u4v4dkfas04gqh9yn72wdcssvktsqfmmmv4",
+     "verdict": "protected",
+     "score": 0,
+     "reasons": [
+      "Community owner"
+     ],
+     "joined_at_ms": 1783994400000,
+     "invite_label": null,
+     "messages": 412,
+     "distinct": 380,
+     "cohort": 0,
+     "tenure_secs": 10368000,
+     "last_secs": 60,
+     "is_owner": true,
+     "is_admin": false,
+     "is_me": true
+    },
+    {
+     "npub": "npub190vqdjtlpcq27xslcveglfmr4ynfwg7gmw86cnun4acakxrdd6gqnp929a",
+     "verdict": "protected",
+     "score": 0,
+     "reasons": [
+      "Holds a role"
+     ],
+     "joined_at_ms": 1786586400000,
+     "invite_label": null,
+     "messages": 233,
+     "distinct": 220,
+     "cohort": 0,
+     "tenure_secs": 7776000,
+     "last_secs": 60,
+     "is_owner": false,
+     "is_admin": true,
+     "is_me": false
+    },
+    {
+     "npub": "npub1sxmr0k8u6trd5c6eu6trzyapzux7090ykujmsng7pdx0m8k93n5sd02fwn",
+     "verdict": "trusted",
+     "score": 0,
+     "reasons": [
+      "Long-standing member"
+     ],
+     "joined_at_ms": 1789178400000,
+     "invite_label": null,
+     "messages": 88,
+     "distinct": 80,
+     "cohort": 0,
+     "tenure_secs": 5184000,
+     "last_secs": 60,
+     "is_owner": false,
+     "is_admin": false,
+     "is_me": false
+    },
+    {
+     "npub": "npub1fsndjp6vylvfahjeyuxq4s2tw8s8rv2j89ge7a28fvhnhf35s86sg3uctf",
+     "verdict": "neutral",
+     "score": 0,
+     "reasons": [
+      "Joined through a link posted in a raid"
+     ],
+     "joined_at_ms": 1794189600000,
+     "invite_label": "Reddit",
+     "messages": 4,
+     "distinct": 4,
+     "cohort": 0,
+     "tenure_secs": 172800,
+     "last_secs": 60,
+     "is_owner": false,
+     "is_admin": false,
+     "is_me": false
+    },
+    {
+     "npub": "npub1v84qsqlcs56j8dmh6s22eccnpn2d87fdutxhl7rftseh67wzamhqfv9ft6",
+     "verdict": "neutral",
+     "score": 0,
+     "reasons": [],
+     "joined_at_ms": 1793152800000,
+     "invite_label": null,
+     "messages": 12,
+     "distinct": 11,
+     "cohort": 0,
+     "tenure_secs": 1209600,
+     "last_secs": 60,
+     "is_owner": false,
+     "is_admin": false,
+     "is_me": false
+    },
+    {
+     "npub": "npub1wajx7kj0x9nxxa38405e3eapgu87wtvtgv8svld04p3x8u0j872qnta00x",
+     "verdict": "suspect",
+     "score": 9,
+     "reasons": [
+      "Posted the same text as 3 others",
+      "Joined minutes ago"
+     ],
+     "joined_at_ms": 1794362160000,
+     "invite_label": "Reddit",
+     "messages": 6,
+     "distinct": 1,
+     "cohort": 0,
+     "tenure_secs": 240,
+     "last_secs": 60,
+     "is_owner": false,
+     "is_admin": false,
+     "is_me": false
+    },
+    {
+     "npub": "npub1qk3nrfl57xffl2k29zdxd7vdtgzm8p7ee045lrpdmqsy56cz8g2qqxdt9s",
+     "verdict": "suspect",
+     "score": 9,
+     "reasons": [
+      "Posted the same text as 3 others",
+      "Joined minutes ago"
+     ],
+     "joined_at_ms": 1794362170000,
+     "invite_label": "Reddit",
+     "messages": 5,
+     "distinct": 1,
+     "cohort": 0,
+     "tenure_secs": 230,
+     "last_secs": 60,
+     "is_owner": false,
+     "is_admin": false,
+     "is_me": false
+    },
+    {
+     "npub": "npub1uqg0688p4nqh8ca5sddhvd0c63sq6a6gdygz4k6uk76a0z2kfxaqmmg7t4",
+     "verdict": "suspect",
+     "score": 8,
+     "reasons": [
+      "Posted the same text as 3 others"
+     ],
+     "joined_at_ms": 1794362190000,
+     "invite_label": null,
+     "messages": 7,
+     "distinct": 1,
+     "cohort": 0,
+     "tenure_secs": 210,
+     "last_secs": 60,
+     "is_owner": false,
+     "is_admin": false,
+     "is_me": false
+    },
+    {
+     "npub": "npub10j7vkrzv4t0elnd4rmj902pge3e2gkresvd4h9u2ut3valzyjuzsz7ad26",
+     "verdict": "suspect",
+     "score": 8,
+     "reasons": [
+      "Posted the same text as 3 others"
+     ],
+     "joined_at_ms": 1794362200000,
+     "invite_label": null,
+     "messages": 4,
+     "distinct": 1,
+     "cohort": 0,
+     "tenure_secs": 200,
+     "last_secs": 60,
+     "is_owner": false,
+     "is_admin": false,
+     "is_me": false
+    }
+   ],
+   "suspects": 4,
+   "trusted": 1,
+   "protected": 2,
+   "cohorts": [
+    {
+     "sample": "FREE NOSTR AIRDROP claim now at the link in my profile",
+     "size": 4,
+     "members": [
+      "npub1wajx7kj0x9nxxa38405e3eapgu87wtvtgv8svld04p3x8u0j872qnta00x",
+      "npub1qk3nrfl57xffl2k29zdxd7vdtgzm8p7ee045lrpdmqsy56cz8g2qqxdt9s",
+      "npub1uqg0688p4nqh8ca5sddhvd0c63sq6a6gdygz4k6uk76a0z2kfxaqmmg7t4",
+      "npub10j7vkrzv4t0elnd4rmj902pge3e2gkresvd4h9u2ut3valzyjuzsz7ad26"
+     ]
+    }
+   ],
+   "burst_size": 4,
+   "burst_from_ms": 1794362160000,
+   "burst_to_ms": 1794362200000,
+   "raid_detected": true
+  },
+  "unlisted": [],
+  "invites": [
+   {
+    "token": "tok1",
+    "label": "Reddit",
+    "created_at": 0,
+    "expires_at": null,
+    "join_count": 3
+   },
+   {
+    "token": "tok2",
+    "label": null,
+    "created_at": 0,
+    "expires_at": null,
+    "join_count": 0
+   }
+  ],
+  "banlist_count": 2,
+  "banlist_max": 500,
+  "capabilities": {
+   "ban": true
+  },
+  "channels": [
+   {
+    "id": "a0f367a05f629b3bb09ee8f1561bf03267962217d9ff6fc7ce3b235235702bc1",
+    "name": "general"
+   },
+   {
+    "id": "d961d1281aed7b3ad2f6964aa7e59d427d8b921a8f7dd8c4c0f0a0e1422a17d1",
+    "name": "dev"
+   },
+   {
+    "id": "451269113943deb53e912b83f5e397cd38bdc2460928a14dbc4f766181425977",
+    "name": "design"
+   },
+   {
+    "id": "58e6267876fd6c4acb7fbc37091bb920e4f325e24df4887b8048d0ccf7137f2f",
+    "name": "Lounge"
+   }
+  ]
+ },
+ "policy_presets": {
+  "presets": [
+   {
+    "id": "vector_defaults",
+    "name": "Vector's Defaults",
+    "description": "Raid detection, running here already. Open it to read every rule, or save your own version.",
+    "example": "a swarm of fresh accounts posting one line",
+    "caveat": "A Built-In Anti-Raid Policy: detects raids proactively and alerts you with a list of suspects for quick handling.",
+    "dials": [
+     {
+      "key": "summary",
+      "label": "What these rules do",
+      "kind": "summary",
+      "hint": "Every rule that runs here, in order."
+     },
+     {
+      "key": "strictness",
+      "label": "Sensitivity",
+      "kind": "strictness",
+      "hint": "How much it takes to trip a rule, and how confident the result is."
+     }
+    ],
+    "rules": [
+     {
+      "label": "Many accounts, one line",
+      "detail": "3 or more separate accounts posting the same line at the same time. The shape of a raid.",
+      "armed": false
+     },
+     {
+      "label": "Join flood",
+      "detail": "12 or more joins within 5 minutes.",
+      "armed": false
+     },
+     {
+      "label": "New account",
+      "detail": "Joined less than 24 hours ago.",
+      "armed": true
+     },
+     {
+      "label": "Barely posted",
+      "detail": "Has posted at most 2 messages.",
+      "armed": true
+     }
+    ],
+    "bytes": "{\"format\":1,\"requires\":[\"armed_by_any\"],\"name\":\"raid-detection\",\"shields\":{\"trusted\":{\"tenure_secs\":604800,\"messages\":5,\"distinct\":3,\"veteran_secs\":2592000,\"roles_trust\":true}},\"window\":{\"hours\":168,\"max_messages\":4000},\"exempt\":{\"patterns\":[],\"roles\":[],\"channels\":[]},\"rules\":[{\"id\":\"cohort\",\"match\":{\"type\":\"cohort\",\"min\":3,\"quiet_max\":2,\"short_factor\":3,\"thin_ratio\":null},\"severity\":\"severe\",\"weight\":85,\"pierces_trusted\":false,\"exempt\":{\"patterns\":[],\"roles\":[],\"channels\":[]},\"enforcement\":\"advisory\"},{\"id\":\"burst\",\"match\":{\"type\":\"join_burst\",\"gap_secs\":300,\"min\":12},\"severity\":\"major\",\"weight\":40,\"pierces_trusted\":false,\"exempt\":{\"patterns\":[],\"roles\":[],\"channels\":[]},\"enforcement\":\"advisory\"},{\"id\":\"fresh\",\"match\":{\"type\":\"tenure_lt\",\"secs\":86400},\"severity\":\"notice\",\"weight\":12,\"pierces_trusted\":false,\"armed_by\":{\"rule\":\"cohort\",\"scope\":\"subject\",\"also\":[\"burst\"]},\"exempt\":{\"patterns\":[],\"roles\":[],\"channels\":[]},\"enforcement\":\"advisory\"},{\"id\":\"quiet\",\"match\":{\"type\":\"messages_lte\",\"n\":2},\"severity\":\"notice\",\"weight\":10,\"pierces_trusted\":false,\"armed_by\":{\"rule\":\"cohort\",\"scope\":\"subject\",\"also\":[\"burst\"]},\"exempt\":{\"patterns\":[],\"roles\":[],\"channels\":[]},\"enforcement\":\"advisory\"}]}"
+   },
+   {
+    "id": "scam_links",
+    "name": "Scam Links",
+    "description": "Blocks link shorteners and redirectors that scams hide behind.",
+    "example": "claim your airdrop at bit.ly/\u2026",
+    "caveat": "Only catches the shorteners on the bundled list, plus any domain you add.",
+    "dials": [
+     {
+      "key": "domains",
+      "label": "Also block these domains",
+      "kind": "domainlist",
+      "hint": "One per line. The bundled shortener list is always included."
+     },
+     {
+      "key": "allow",
+      "label": "Never flag these domains",
+      "kind": "domainlist",
+      "hint": "Your own links, docs, anything you trust."
+     }
+    ],
+    "rules": [
+     {
+      "label": "Link domains",
+      "detail": "28 domains blocked, subdomains included. Trips at 1 hit in one message, then 3 hits in the window.",
+      "armed": false
+     }
+    ],
+    "bytes": "{\"format\":1,\"name\":\"Scam Links\",\"shields\":{\"trusted\":{\"tenure_secs\":604800,\"messages\":5,\"distinct\":3,\"veteran_secs\":2592000,\"roles_trust\":true}},\"window\":{\"hours\":168,\"max_messages\":4000},\"exempt\":{\"patterns\":[],\"roles\":[],\"channels\":[]},\"rules\":[{\"id\":\"shorteners\",\"match\":{\"type\":\"link\",\"patterns\":[\"bit.ly\",\"tinyurl.com\",\"t.co\",\"goo.gl\",\"ow.ly\",\"is.gd\",\"buff.ly\",\"adf.ly\",\"bit.do\",\"cutt.ly\",\"rebrand.ly\",\"shorturl.at\",\"rb.gy\",\"tiny.cc\",\"shorte.st\",\"bc.vc\",\"clck.ru\",\"soo.gd\",\"s2r.co\",\"tr.ee\",\"dub.sh\",\"e.vg\",\"paw.wf\",\"shm.to\",\"snl.ink\",\"surl.li\",\"url9.de\",\"waffl.link\"]},\"tiers\":{\"per_message\":[{\"hits\":1,\"severity\":\"severe\",\"weight\":70,\"pierces_trusted\":false}],\"per_window\":[{\"hits\":3,\"severity\":\"severe\",\"weight\":90,\"pierces_trusted\":false}]},\"pierces_trusted\":false,\"exempt\":{\"patterns\":[],\"roles\":[],\"channels\":[]},\"enforcement\":\"advisory\"}]}"
+   },
+   {
+    "id": "no_spam",
+    "name": "No Spam",
+    "description": "The same message over and over, from one account or many.",
+    "example": "the same pitch, twelve times",
+    "caveat": "Counts shapes, not words: changing case, punctuation or digits does not help a spammer.",
+    "dials": [
+     {
+      "key": "strictness",
+      "label": "Sensitivity",
+      "kind": "strictness",
+      "hint": "How much it takes to trip a rule, and how confident the result is."
+     }
+    ],
+    "rules": [
+     {
+      "label": "Same message repeated",
+      "detail": "One account posting the same thing over and over inside 30 minutes. Case, punctuation and digits are ignored, so changing them does not help. Trips at 4 hits, then 8 hits.",
+      "armed": false
+     },
+     {
+      "label": "Many accounts, one line",
+      "detail": "3 or more separate accounts posting the same line at the same time. The shape of a raid.",
+      "armed": false
+     }
+    ],
+    "bytes": "{\"format\":1,\"name\":\"No Spam\",\"shields\":{\"trusted\":{\"tenure_secs\":604800,\"messages\":5,\"distinct\":3,\"veteran_secs\":2592000,\"roles_trust\":true}},\"window\":{\"hours\":168,\"max_messages\":4000},\"exempt\":{\"patterns\":[],\"roles\":[],\"channels\":[]},\"rules\":[{\"id\":\"repeat\",\"match\":{\"type\":\"repeat\",\"normalize\":\"skeleton\",\"within_secs\":1800},\"tiers\":{\"per_window\":[{\"hits\":4,\"severity\":\"major\",\"weight\":50,\"pierces_trusted\":false},{\"hits\":8,\"severity\":\"severe\",\"weight\":85,\"pierces_trusted\":false}]},\"pierces_trusted\":false,\"exempt\":{\"patterns\":[],\"roles\":[],\"channels\":[]},\"enforcement\":\"advisory\"},{\"id\":\"cohort\",\"match\":{\"type\":\"cohort\",\"min\":3,\"quiet_max\":2,\"short_factor\":3,\"thin_ratio\":null},\"severity\":\"severe\",\"weight\":85,\"pierces_trusted\":false,\"exempt\":{\"patterns\":[],\"roles\":[],\"channels\":[]},\"enforcement\":\"advisory\"}]}"
+   },
+   {
+    "id": "word_filter",
+    "name": "Word Filter",
+    "description": "Any list of words you choose, with per-channel exceptions.",
+    "example": "spoilers, slurs, or a scam phrase",
+    "caveat": "Whole words by default, so filtering \"art\" leaves \"start\" alone.",
+    "dials": [
+     {
+      "key": "words",
+      "label": "Words to catch",
+      "kind": "wordlist",
+      "hint": "One per line. Use *word* to match inside longer words."
+     },
+     {
+      "key": "exempt_channels",
+      "label": "Allowed in these channels",
+      "kind": "channels",
+      "hint": "The filter ignores these channels entirely."
+     }
+    ],
+    "rules": [
+     {
+      "label": "Words",
+      "detail": "0 words on the list, matched as whole words unless you wrap them in *. Trips at 1 hit in one message, then 10 hits in the window.",
+      "armed": false
+     }
+    ],
+    "bytes": "{\"format\":1,\"name\":\"Word Filter\",\"shields\":{\"trusted\":{\"tenure_secs\":604800,\"messages\":5,\"distinct\":3,\"veteran_secs\":2592000,\"roles_trust\":true}},\"window\":{\"hours\":168,\"max_messages\":4000},\"exempt\":{\"patterns\":[],\"roles\":[],\"channels\":[]},\"rules\":[{\"id\":\"words\",\"match\":{\"type\":\"keyword\",\"patterns\":[],\"normalize\":\"fold\"},\"tiers\":{\"per_message\":[{\"hits\":1,\"severity\":\"minor\",\"weight\":10,\"pierces_trusted\":false}],\"per_window\":[{\"hits\":10,\"severity\":\"major\",\"weight\":45,\"pierces_trusted\":false}]},\"pierces_trusted\":false,\"exempt\":{\"patterns\":[],\"roles\":[],\"channels\":[]},\"enforcement\":\"advisory\"}]}"
+   },
+   {
+    "id": "mass_tagging",
+    "name": "Mass Tagging",
+    "description": "One message that names a crowd, rather than a person.",
+    "example": "a post tagging twelve people at once",
+    "caveat": "Counts distinct people per message: pinging one person twenty times reads as one, because it is.",
+    "dials": [
+     {
+      "key": "strictness",
+      "label": "Sensitivity",
+      "kind": "strictness",
+      "hint": "How much it takes to trip a rule, and how confident the result is."
+     },
+     {
+      "key": "exempt_channels",
+      "label": "Allowed in these channels",
+      "kind": "channels",
+      "hint": "Announcement channels where tagging everyone is the point."
+     }
+    ],
+    "rules": [
+     {
+      "label": "Mass tagging",
+      "detail": "How many DISTINCT people one message names. Tagging the same person repeatedly counts once. Trips at 6 hits in one message, then 12 hits in one message.",
+      "armed": false
+     }
+    ],
+    "bytes": "{\"format\":1,\"name\":\"Mass Tagging\",\"shields\":{\"trusted\":{\"tenure_secs\":604800,\"messages\":5,\"distinct\":3,\"veteran_secs\":2592000,\"roles_trust\":true}},\"window\":{\"hours\":168,\"max_messages\":4000},\"exempt\":{\"patterns\":[],\"roles\":[],\"channels\":[]},\"rules\":[{\"id\":\"mentions\",\"match\":{\"type\":\"mentions\"},\"tiers\":{\"per_message\":[{\"hits\":6,\"severity\":\"major\",\"weight\":50,\"pierces_trusted\":false},{\"hits\":12,\"severity\":\"severe\",\"weight\":85,\"pierces_trusted\":false}]},\"pierces_trusted\":false,\"exempt\":{\"patterns\":[],\"roles\":[],\"channels\":[]},\"enforcement\":\"advisory\"}]}"
+   },
+   {
+    "id": "rate_limit",
+    "name": "Rate Limit",
+    "description": "Too many messages too quickly from one account, whatever they say.",
+    "example": "twelve messages in ten seconds",
+    "caveat": "Counts messages, not content: a fast typer in a lively channel can trip it, so preview before enabling.",
+    "dials": [
+     {
+      "key": "per_secs",
+      "label": "Over how many seconds",
+      "kind": "seconds",
+      "hint": "The span it counts within. 10 catches a burst; 60 catches a sustained flood."
+     },
+     {
+      "key": "strictness",
+      "label": "Sensitivity",
+      "kind": "strictness",
+      "hint": "How much it takes to trip a rule, and how confident the result is."
+     }
+    ],
+    "rules": [
+     {
+      "label": "Posting too fast",
+      "detail": "One account's messages counted over any 10 seconds, whatever they say. Trips at 6 hits in the window, then 12 hits in the window.",
+      "armed": false
+     }
+    ],
+    "bytes": "{\"format\":1,\"name\":\"Rate Limit\",\"shields\":{\"trusted\":{\"tenure_secs\":604800,\"messages\":5,\"distinct\":3,\"veteran_secs\":2592000,\"roles_trust\":true}},\"window\":{\"hours\":168,\"max_messages\":4000},\"exempt\":{\"patterns\":[],\"roles\":[],\"channels\":[]},\"rules\":[{\"id\":\"rate\",\"match\":{\"type\":\"rate\",\"per_secs\":10},\"tiers\":{\"per_window\":[{\"hits\":6,\"severity\":\"major\",\"weight\":50,\"pierces_trusted\":false},{\"hits\":12,\"severity\":\"severe\",\"weight\":85,\"pierces_trusted\":false}]},\"pierces_trusted\":false,\"exempt\":{\"patterns\":[],\"roles\":[],\"channels\":[]},\"enforcement\":\"advisory\"}]}"
+   },
+   {
+    "id": "blank",
+    "name": "Start from scratch",
+    "description": "An empty policy. Name it, add the rules you want, preview before anything runs.",
+    "example": "whatever this community actually needs",
+    "caveat": "A policy with no rules catches nothing, and the preview will tell you so.",
+    "dials": [
+     {
+      "key": "name",
+      "label": "Policy name",
+      "kind": "text",
+      "hint": "What you will see in the list."
+     },
+     {
+      "key": "rules",
+      "label": "Rules",
+      "kind": "rules",
+      "hint": "Add as many as you like. Any one of them can convict on its own."
+     },
+     {
+      "key": "exempt_channels",
+      "label": "Allowed in these channels",
+      "kind": "channels",
+      "hint": "These channels are ignored entirely."
+     }
+    ],
+    "rules": [],
+    "bytes": "{\"format\":1,\"name\":\"New policy\",\"shields\":{\"trusted\":{\"tenure_secs\":604800,\"messages\":5,\"distinct\":3,\"veteran_secs\":2592000,\"roles_trust\":true}},\"window\":{\"hours\":168,\"max_messages\":4000},\"exempt\":{\"patterns\":[],\"roles\":[],\"channels\":[]},\"rules\":[]}"
+   }
+  ],
+  "rule_kinds": [
+   {
+    "id": "keyword",
+    "label": "Words",
+    "description": "Someone posts a word from your list.",
+    "input": "wordlist",
+    "input_label": "Words to catch",
+    "input_hint": "One per line. Use *word* to match inside longer words.",
+    "rule": {
+     "id": "words",
+     "match": {
+      "type": "keyword",
+      "patterns": [],
+      "normalize": "fold"
+     },
+     "tiers": {
+      "per_message": [
+       {
+        "hits": 1,
+        "severity": "minor",
+        "weight": 10,
+        "pierces_trusted": false
+       }
+      ],
+      "per_window": [
+       {
+        "hits": 10,
+        "severity": "major",
+        "weight": 45,
+        "pierces_trusted": false
+       }
+      ]
+     },
+     "pierces_trusted": false,
+     "exempt": {
+      "patterns": [],
+      "roles": [],
+      "channels": []
+     },
+     "enforcement": "advisory"
+    }
+   },
+   {
+    "id": "link",
+    "label": "Link domains",
+    "description": "Someone posts a link to a domain on your list.",
+    "input": "domainlist",
+    "input_label": "Domains to block",
+    "input_hint": "One per line. Matches the domain and its subdomains.",
+    "rule": {
+     "id": "links",
+     "match": {
+      "type": "link"
+     },
+     "tiers": {
+      "per_message": [
+       {
+        "hits": 1,
+        "severity": "severe",
+        "weight": 70,
+        "pierces_trusted": false
+       }
+      ],
+      "per_window": [
+       {
+        "hits": 3,
+        "severity": "severe",
+        "weight": 90,
+        "pierces_trusted": false
+       }
+      ]
+     },
+     "pierces_trusted": false,
+     "exempt": {
+      "patterns": [],
+      "roles": [],
+      "channels": []
+     },
+     "enforcement": "advisory"
+    }
+   },
+   {
+    "id": "repeat",
+    "label": "Same message repeated",
+    "description": "One account posting the same thing over and over inside half an hour. Case, punctuation and digits are ignored, so changing them does not help.",
+    "input": "none",
+    "input_label": "",
+    "input_hint": "",
+    "rule": {
+     "id": "repeat",
+     "match": {
+      "type": "repeat",
+      "normalize": "skeleton",
+      "within_secs": 1800
+     },
+     "tiers": {
+      "per_window": [
+       {
+        "hits": 4,
+        "severity": "major",
+        "weight": 50,
+        "pierces_trusted": false
+       },
+       {
+        "hits": 8,
+        "severity": "severe",
+        "weight": 85,
+        "pierces_trusted": false
+       }
+      ]
+     },
+     "pierces_trusted": false,
+     "exempt": {
+      "patterns": [],
+      "roles": [],
+      "channels": []
+     },
+     "enforcement": "advisory"
+    }
+   },
+   {
+    "id": "mentions",
+    "label": "Mass tagging",
+    "description": "One message naming a crowd. Counts distinct people, so twenty pings at one person is one person \u2014 annoying, but not a raid.",
+    "input": "none",
+    "input_label": "",
+    "input_hint": "",
+    "rule": {
+     "id": "mentions",
+     "match": {
+      "type": "mentions"
+     },
+     "tiers": {
+      "per_message": [
+       {
+        "hits": 6,
+        "severity": "major",
+        "weight": 50,
+        "pierces_trusted": false
+       },
+       {
+        "hits": 12,
+        "severity": "severe",
+        "weight": 85,
+        "pierces_trusted": false
+       }
+      ]
+     },
+     "pierces_trusted": false,
+     "exempt": {
+      "patterns": [],
+      "roles": [],
+      "channels": []
+     },
+     "enforcement": "advisory"
+    }
+   },
+   {
+    "id": "rate",
+    "label": "Posting too fast",
+    "description": "One account posting faster than a person reasonably types, whatever they are saying. Catches a spammer who varies their text just enough to look different every time.",
+    "input": "seconds",
+    "input_label": "Over how many seconds",
+    "input_hint": "The span it counts within. 10 catches a burst; 60 catches a sustained flood.",
+    "rule": {
+     "id": "rate",
+     "match": {
+      "type": "rate",
+      "per_secs": 10
+     },
+     "tiers": {
+      "per_window": [
+       {
+        "hits": 6,
+        "severity": "major",
+        "weight": 50,
+        "pierces_trusted": false
+       },
+       {
+        "hits": 12,
+        "severity": "severe",
+        "weight": 85,
+        "pierces_trusted": false
+       }
+      ]
+     },
+     "pierces_trusted": false,
+     "exempt": {
+      "patterns": [],
+      "roles": [],
+      "channels": []
+     },
+     "enforcement": "advisory"
+    }
+   },
+   {
+    "id": "cohort",
+    "label": "Many accounts, one line",
+    "description": "Separate accounts posting the same line at the same time. The shape of a raid.",
+    "input": "none",
+    "input_label": "",
+    "input_hint": "",
+    "rule": {
+     "id": "cohort",
+     "match": {
+      "type": "cohort",
+      "min": 3,
+      "quiet_max": 2,
+      "short_factor": 3,
+      "thin_ratio": null
+     },
+     "severity": "severe",
+     "weight": 85,
+     "pierces_trusted": false,
+     "exempt": {
+      "patterns": [],
+      "roles": [],
+      "channels": []
+     },
+     "enforcement": "advisory"
+    }
+   }
+  ]
+ },
+ "embeds": {
+  "note1wg33qsaurqr7da6qkg67kag3ajeny4dx5d65x433r9k732t4p49sk04fpd": {
+   "published_at": null,
+   "title": null,
+   "summary": null,
+   "image": null,
+   "media": [
+    {
+     "url": "media/photo.png",
+     "is_video": false,
+     "mime": "image/png",
+     "width": 640,
+     "height": 480,
+     "size": null,
+     "duration": null,
+     "poster": null,
+     "sha256": null,
+     "fallbacks": []
+    },
+    {
+     "url": "media/portrait.png",
+     "is_video": false,
+     "mime": "image/png",
+     "width": 480,
+     "height": 640,
+     "size": null,
+     "duration": null,
+     "poster": null,
+     "sha256": null,
+     "fallbacks": []
+    }
+   ],
+   "video": null,
+   "link": null,
+   "content_warning": null,
+   "emoji": [],
+   "reposted_by": null,
+   "reply_to": null,
+   "class": "post",
+   "kind": 1,
+   "id": "7272727272727272727272727272727272727272727272727272727272727272",
+   "author": "npub190vqdjtlpcq27xslcveglfmr4ynfwg7gmw86cnun4acakxrdd6gqnp929a",
+   "created_at": 1794355200,
+   "text": "Shipped the new relay picker today. **Tor routing** is on by default for every new account, and it is *so* much faster than I expected \ud83d\ude80",
+   "bech32": "note1wg33qsaurqr7da6qkg67kag3ajeny4dx5d65x433r9k732t4p49sk04fpd"
+  },
+  "naddr1qqx8yetvv9uj6er9wd5kwmszyq4aspkf0u8qptc6rlpn9ra8vw5jd9ererdcltz0jwhhrkccd4hfqqcyqqq823cyhyg2k": {
+   "published_at": 1794190000,
+   "title": "Designing relays for privacy first",
+   "summary": "Why every connection in Vector goes through one transport layer, and what failing closed buys you when a network is hostile.",
+   "image": "media/devs-banner.png",
+   "media": [],
+   "video": null,
+   "link": null,
+   "content_warning": null,
+   "emoji": [],
+   "reposted_by": null,
+   "reply_to": null,
+   "class": "article",
+   "kind": 30023,
+   "id": "abababababababababababababababababababababababababababababababab",
+   "author": "npub190vqdjtlpcq27xslcveglfmr4ynfwg7gmw86cnun4acakxrdd6gqnp929a",
+   "created_at": 1794200000,
+   "text": "Every connection Vector makes goes through **one transport layer**. It decides each egress: direct, a bridge into Tor, or a refusal with no socket and no DNS.\n\nNothing falls back to direct. A preference not loaded yet refuses, and a kind that is still starting refuses too.\n\nnostr:note1wg33qsaurqr7da6qkg67kag3ajeny4dx5d65x433r9k732t4p49sk04fpd",
+   "bech32": "naddr1qqx8yetvv9uj6er9wd5kwmszyq4aspkf0u8qptc6rlpn9ra8vw5jd9ererdcltz0jwhhrkccd4hfqqcyqqq823cyhyg2k"
+  },
+  "nevent1qqsqe2cujct5qna09vjwyg0p3899j3vp8c2d8amxx3dsnjsnh03gllqzyzqmvd7clnfvdknrt8nfvvgn5ytsmeu4ujmjtwzdrc95elv7ckxwjqcyqqqgtwc9z4mnx": {
+   "published_at": null,
+   "title": "Vector in five minutes",
+   "summary": null,
+   "image": "media/photo.png",
+   "media": [],
+   "video": null,
+   "link": "https://www.youtube.com/watch?v=aqz-KE-bpKQ",
+   "content_warning": null,
+   "emoji": [],
+   "reposted_by": null,
+   "reply_to": null,
+   "class": "video",
+   "kind": 34235,
+   "id": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+   "author": "npub1sxmr0k8u6trd5c6eu6trzyapzux7090ykujmsng7pdx0m8k93n5sd02fwn",
+   "created_at": 1794300000,
+   "text": "A quick tour of private messaging on Nostr: accounts, Communities and calls.",
+   "bech32": "nevent1qqsqe2cujct5qna09vjwyg0p3899j3vp8c2d8amxx3dsnjsnh03gllqzyzqmvd7clnfvdknrt8nfvvgn5ytsmeu4ujmjtwzdrc95elv7ckxwjqcyqqqgtwc9z4mnx"
+  }
+ },
+ "packs": {
+  "naddr1qqzkymr0vfesygypkcma3lxjcmdxxk0xjcc38gghphnete9hykuy68stfn7ea3vvaypsgqqqw48qsh6h7r": {
+   "id": "naddr1qqzkymr0vfesygypkcma3lxjcmdxxk0xjcc38gghphnete9hykuy68stfn7ea3vvaypsgqqqw48qsh6h7r",
+   "pubkey": "0000000000000000000000000000000000000000000000000000000000000000",
+   "identifier": "blobs",
+   "title": "Blob Friends",
+   "image_url": "https://ref.invalid/media/pack/icon.png",
+   "description": "Sixteen round friends for every mood.",
+   "emojis": [
+    {
+     "shortcode": "blob0",
+     "url": "https://ref.invalid/media/pack/e0.png",
+     "sha256": null
+    },
+    {
+     "shortcode": "blob1",
+     "url": "https://ref.invalid/media/pack/e1.png",
+     "sha256": null
+    },
+    {
+     "shortcode": "blob2",
+     "url": "https://ref.invalid/media/pack/e2.png",
+     "sha256": null
+    },
+    {
+     "shortcode": "blob3",
+     "url": "https://ref.invalid/media/pack/e3.png",
+     "sha256": null
+    },
+    {
+     "shortcode": "blob4",
+     "url": "https://ref.invalid/media/pack/e4.png",
+     "sha256": null
+    },
+    {
+     "shortcode": "blob5",
+     "url": "https://ref.invalid/media/pack/e5.png",
+     "sha256": null
+    },
+    {
+     "shortcode": "blob6",
+     "url": "https://ref.invalid/media/pack/e6.png",
+     "sha256": null
+    },
+    {
+     "shortcode": "blob7",
+     "url": "https://ref.invalid/media/pack/e7.png",
+     "sha256": null
+    },
+    {
+     "shortcode": "blob8",
+     "url": "https://ref.invalid/media/pack/e8.png",
+     "sha256": null
+    },
+    {
+     "shortcode": "blob9",
+     "url": "https://ref.invalid/media/pack/e9.png",
+     "sha256": null
+    },
+    {
+     "shortcode": "blob10",
+     "url": "https://ref.invalid/media/pack/e10.png",
+     "sha256": null
+    },
+    {
+     "shortcode": "blob11",
+     "url": "https://ref.invalid/media/pack/e11.png",
+     "sha256": null
+    },
+    {
+     "shortcode": "blob12",
+     "url": "https://ref.invalid/media/pack/e12.png",
+     "sha256": null
+    },
+    {
+     "shortcode": "blob13",
+     "url": "https://ref.invalid/media/pack/e13.png",
+     "sha256": null
+    },
+    {
+     "shortcode": "blob14",
+     "url": "https://ref.invalid/media/pack/e14.png",
+     "sha256": null
+    },
+    {
+     "shortcode": "blob15",
+     "url": "https://ref.invalid/media/pack/e15.png",
+     "sha256": null
+    }
+   ],
+   "is_own": false,
+   "updated_at": 1794300000,
+   "status": 0
+  },
+  "naddr1doodles": {
+   "id": "naddr1doodles",
+   "pubkey": "",
+   "identifier": "doodles",
+   "title": "My Doodles",
+   "image_url": "",
+   "description": "",
+   "emojis": [
+    {
+     "shortcode": "doodle0",
+     "url": "https://ref.invalid/media/pack/e15.png",
+     "sha256": null
+    },
+    {
+     "shortcode": "doodle1",
+     "url": "https://ref.invalid/media/pack/e14.png",
+     "sha256": null
+    },
+    {
+     "shortcode": "doodle2",
+     "url": "https://ref.invalid/media/pack/e13.png",
+     "sha256": null
+    },
+    {
+     "shortcode": "doodle3",
+     "url": "https://ref.invalid/media/pack/e12.png",
+     "sha256": null
+    },
+    {
+     "shortcode": "doodle4",
+     "url": "https://ref.invalid/media/pack/e11.png",
+     "sha256": null
+    },
+    {
+     "shortcode": "doodle5",
+     "url": "https://ref.invalid/media/pack/e10.png",
+     "sha256": null
+    },
+    {
+     "shortcode": "doodle6",
+     "url": "https://ref.invalid/media/pack/e9.png",
+     "sha256": null
+    },
+    {
+     "shortcode": "doodle7",
+     "url": "https://ref.invalid/media/pack/e8.png",
+     "sha256": null
+    }
+   ],
+   "is_own": true,
+   "updated_at": 1794300000,
+   "status": 0
+  }
+ },
+ "channel_perms": {
+  "activated": true,
+  "category": "e70d362ac4e73ce2887e5395680c76b7b3c93e43b69587845448f3b9d03ff48c",
+  "synced": null,
+  "can_manage": true,
+  "grantable": "18446744073709551615",
+  "roles": [
+   {
+    "role_id": "1111111111111111111111111111111111111111111111111111111111111111",
+    "name": "Mods",
+    "color": 5897395,
+    "position": 1
+   },
+   {
+    "role_id": "2222222222222222222222222222222222222222222222222222222222222222",
+    "name": "Helpers",
+    "color": 3718648,
+    "position": 2
+   },
+   {
+    "role_id": "3333333333333333333333333333333333333333333333333333333333333333",
+    "name": "Designers",
+    "color": 0,
+    "position": 3
+   }
+  ],
+  "overwrites": [
+   {
+    "kind": "everyone",
+    "id": null,
+    "npub": null,
+    "allow": "0",
+    "deny": "16384"
+   },
+   {
+    "kind": "role",
+    "id": "1111111111111111111111111111111111111111111111111111111111111111",
+    "npub": null,
+    "allow": "16416",
+    "deny": "0"
+   },
+   {
+    "kind": "member",
+    "id": "2bd806c97f0e00af1a1fc3328fa763a9269723c8db8fac4f93af71db186d6e90",
+    "npub": "npub190vqdjtlpcq27xslcveglfmr4ynfwg7gmw86cnun4acakxrdd6gqnp929a",
+    "allow": "65536",
+    "deny": "131072"
+   }
+  ],
+  "members": [
+   {
+    "id": "2bd806c97f0e00af1a1fc3328fa763a9269723c8db8fac4f93af71db186d6e90",
+    "npub": "npub190vqdjtlpcq27xslcveglfmr4ynfwg7gmw86cnun4acakxrdd6gqnp929a"
+   },
+   {
+    "id": "81b637d8fcd2c6da6359e6963113a1170de795e4b725b84d1e0b4cfd9ec58ce9",
+    "npub": "npub1sxmr0k8u6trd5c6eu6trzyapzux7090ykujmsng7pdx0m8k93n5sd02fwn"
+   },
+   {
+    "id": "4c26d9074c27d89ede59270c0ac14b71e071b15239519f75474b2f3ba63481f5",
+    "npub": "npub1fsndjp6vylvfahjeyuxq4s2tw8s8rv2j89ge7a28fvhnhf35s86sg3uctf"
+   }
+  ]
+ },
+ "bot_commands": {
+  "npub15387nevpzd0u700y2t24ym9l0zxe8fsxx2w7qn47ysn6mndn9gvqqmlahu": [
+   {
+    "bot": "npub15387nevpzd0u700y2t24ym9l0zxe8fsxx2w7qn47ysn6mndn9gvqqmlahu",
+    "commands": [
+     {
+      "name": "roll",
+      "description": "Roll a die",
+      "args": [
+       {
+        "name": "sides",
+        "type": "int",
+        "description": "How many sides",
+        "required": false
+       }
+      ]
+     },
+     {
+      "name": "say",
+      "description": "Make the bot say something",
+      "args": [
+       {
+        "name": "text",
+        "type": "string",
+        "description": "What to say",
+        "required": true
+       }
+      ]
+     },
+     {
+      "name": "mode",
+      "description": "Pick a play mode",
+      "args": [
+       {
+        "name": "mode",
+        "type": "choice",
+        "description": "The mode",
+        "required": true,
+        "choices": [
+         "easy",
+         "hard",
+         "chaos"
+        ]
+       }
+      ]
+     }
+    ]
+   }
+  ]
+ },
+ "marketplace": [
+  {
+   "id": "chess",
+   "name": "Chess Club",
+   "description": "Classic chess against a friend, with move history and clocks.",
+   "version": "1.0.0",
+   "blossom_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+   "download_url": "https://ref.invalid/chess.xdc",
+   "size": 180000,
+   "icon_url": "https://ref.invalid/chess.png",
+   "icon_mime": "image/png",
+   "icon_cached": "media/apps/chess.png",
+   "categories": [
+    "game",
+    "multiplayer",
+    "board",
+    "strategy",
+    "keyboard"
+   ],
+   "changelog": "Smoother animations and a new colour theme.",
+   "developer": "Mira Vale",
+   "source_url": "https://github.com/example/chess",
+   "publisher": "npub1yazve5gvw5em6um2mzg0nh2u4v4dkfas04gqh9yn72wdcssvktsqfmmmv4",
+   "published_at": 1794276000,
+   "signed_at": 1794276000,
+   "installed": true,
+   "local_path": "/tmp/chess.xdc",
+   "installed_version": "1.0.0",
+   "update_available": false,
+   "requested_permissions": "microphone,fullscreen,clipboard-write"
+  },
+  {
+   "id": "tetra",
+   "name": "Tetra Drop",
+   "description": "Stack falling blocks and clear lines. How long can you last?",
+   "version": "1.1.0",
+   "blossom_hash": "0000000000000000000000000000000000000000000000000000000000000001",
+   "download_url": "https://ref.invalid/tetra.xdc",
+   "size": 271000,
+   "icon_url": "https://ref.invalid/tetra.png",
+   "icon_mime": "image/png",
+   "icon_cached": "media/apps/tetra.png",
+   "categories": [
+    "game",
+    "puzzle",
+    "arcade",
+    "keyboard",
+    "controller"
+   ],
+   "changelog": null,
+   "developer": "Pixel Cat",
+   "source_url": null,
+   "publisher": "npub1jskittyvector000000000000000000000000000000000000000000",
+   "published_at": 1793844000,
+   "signed_at": 1793844000,
+   "installed": false,
+   "local_path": null,
+   "installed_version": null,
+   "update_available": false,
+   "requested_permissions": ""
+  },
+  {
+   "id": "snek",
+   "name": "Snek",
+   "description": "Eat, grow, don't bite yourself. A tiny classic, rebuilt for Vector.",
+   "version": "1.2.0",
+   "blossom_hash": "0000000000000000000000000000000000000000000000000000000000000002",
+   "download_url": "https://ref.invalid/snek.xdc",
+   "size": 362000,
+   "icon_url": "https://ref.invalid/snek.png",
+   "icon_mime": "image/png",
+   "icon_cached": "media/apps/snek.png",
+   "categories": [
+    "game",
+    "arcade",
+    "retro",
+    "keyboard",
+    "mobile"
+   ],
+   "changelog": null,
+   "developer": null,
+   "source_url": "https://github.com/example/snek",
+   "publisher": "npub1jskittyvector000000000000000000000000000000000000000000",
+   "published_at": 1793412000,
+   "signed_at": 1793412000,
+   "installed": false,
+   "local_path": null,
+   "installed_version": null,
+   "update_available": false,
+   "requested_permissions": ""
+  },
+  {
+   "id": "draw",
+   "name": "Sketch Party",
+   "description": "Take turns drawing and guessing with everyone in the chat.",
+   "version": "1.3.0",
+   "blossom_hash": "0000000000000000000000000000000000000000000000000000000000000003",
+   "download_url": "https://ref.invalid/draw.xdc",
+   "size": 453000,
+   "icon_url": "https://ref.invalid/draw.png",
+   "icon_mime": "image/png",
+   "icon_cached": "media/apps/draw.png",
+   "categories": [
+    "game",
+    "multiplayer",
+    "party",
+    "drawing",
+    "mobile",
+    "keyboard"
+   ],
+   "changelog": "Smoother animations and a new colour theme.",
+   "developer": "Mira Vale",
+   "source_url": null,
+   "publisher": "npub1jskittyvector000000000000000000000000000000000000000000",
+   "published_at": 1792980000,
+   "signed_at": 1792980000,
+   "installed": false,
+   "local_path": null,
+   "installed_version": null,
+   "update_available": false,
+   "requested_permissions": "microphone"
+  },
+  {
+   "id": "poll",
+   "name": "Quick Poll",
+   "description": "Ask the chat a question and watch the votes come in live.",
+   "version": "1.4.0",
+   "blossom_hash": "0000000000000000000000000000000000000000000000000000000000000004",
+   "download_url": "https://ref.invalid/poll.xdc",
+   "size": 544000,
+   "icon_url": "https://ref.invalid/poll.png",
+   "icon_mime": "image/png",
+   "icon_cached": "media/apps/poll.png",
+   "categories": [
+    "app",
+    "productivity",
+    "social"
+   ],
+   "changelog": null,
+   "developer": "Pixel Cat",
+   "source_url": "https://github.com/example/poll",
+   "publisher": "npub1jskittyvector000000000000000000000000000000000000000000",
+   "published_at": 1792548000,
+   "signed_at": 1792548000,
+   "installed": true,
+   "local_path": "/tmp/poll.xdc",
+   "installed_version": "1.0.0",
+   "update_available": true,
+   "requested_permissions": ""
+  },
+  {
+   "id": "notes",
+   "name": "Shared Notes",
+   "description": "A notepad everyone in the chat can edit together.",
+   "version": "1.5.0",
+   "blossom_hash": "0000000000000000000000000000000000000000000000000000000000000005",
+   "download_url": "https://ref.invalid/notes.xdc",
+   "size": 635000,
+   "icon_url": "https://ref.invalid/notes.png",
+   "icon_mime": "image/png",
+   "icon_cached": "media/apps/notes.png",
+   "categories": [
+    "app",
+    "productivity",
+    "multiplayer"
+   ],
+   "changelog": null,
+   "developer": null,
+   "source_url": null,
+   "publisher": "npub1jskittyvector000000000000000000000000000000000000000000",
+   "published_at": 1792116000,
+   "signed_at": 1792116000,
+   "installed": false,
+   "local_path": null,
+   "installed_version": null,
+   "update_available": false,
+   "requested_permissions": ""
+  },
+  {
+   "id": "mines",
+   "name": "Minefield",
+   "description": "Clear the board without setting off a mine.",
+   "version": "1.6.0",
+   "blossom_hash": "0000000000000000000000000000000000000000000000000000000000000006",
+   "download_url": "https://ref.invalid/mines.xdc",
+   "size": 726000,
+   "icon_url": "https://ref.invalid/mines.png",
+   "icon_mime": "image/png",
+   "icon_cached": "media/apps/mines.png",
+   "categories": [
+    "game",
+    "puzzle",
+    "retro",
+    "keyboard"
+   ],
+   "changelog": "Smoother animations and a new colour theme.",
+   "developer": "Mira Vale",
+   "source_url": "https://github.com/example/mines",
+   "publisher": "npub1jskittyvector000000000000000000000000000000000000000000",
+   "published_at": 1791684000,
+   "signed_at": 1791684000,
+   "installed": false,
+   "local_path": null,
+   "installed_version": null,
+   "update_available": false,
+   "requested_permissions": ""
+  },
+  {
+   "id": "cards",
+   "name": "Crazy Cards",
+   "description": "Match colours and numbers, then play your last card first.",
+   "version": "1.7.0",
+   "blossom_hash": "0000000000000000000000000000000000000000000000000000000000000007",
+   "download_url": "https://ref.invalid/cards.xdc",
+   "size": 817000,
+   "icon_url": "https://ref.invalid/cards.png",
+   "icon_mime": "image/png",
+   "icon_cached": "media/apps/cards.png",
+   "categories": [
+    "game",
+    "multiplayer",
+    "cards",
+    "party",
+    "keyboard",
+    "mobile"
+   ],
+   "changelog": null,
+   "developer": "Pixel Cat",
+   "source_url": null,
+   "publisher": "npub1jskittyvector000000000000000000000000000000000000000000",
+   "published_at": 1791252000,
+   "signed_at": 1791252000,
+   "installed": false,
+   "local_path": null,
+   "installed_version": null,
+   "update_available": false,
+   "requested_permissions": ""
+  },
+  {
+   "id": "racer",
+   "name": "Pixel Racer",
+   "description": "Retro top-down racing with a controller or the arrow keys.",
+   "version": "1.8.0",
+   "blossom_hash": "0000000000000000000000000000000000000000000000000000000000000008",
+   "download_url": "https://ref.invalid/racer.xdc",
+   "size": 908000,
+   "icon_url": "https://ref.invalid/racer.png",
+   "icon_mime": "image/png",
+   "icon_cached": "media/apps/racer.png",
+   "categories": [
+    "game",
+    "racing",
+    "retro",
+    "controller",
+    "keyboard"
+   ],
+   "changelog": null,
+   "developer": null,
+   "source_url": "https://github.com/example/racer",
+   "publisher": "npub1jskittyvector000000000000000000000000000000000000000000",
+   "published_at": 1790820000,
+   "signed_at": 1790820000,
+   "installed": false,
+   "local_path": null,
+   "installed_version": null,
+   "update_available": false,
+   "requested_permissions": ""
+  }
+ ],
+ "pivx": {
+  "balance": 42.5,
+  "price": {
+   "currency": "usd",
+   "value": 0.21
+  },
+  "deposit_address": "DLabsktzGMnsK5K9uRTMCF6NoYNY6ET4Bb",
+  "promos": [
+   {
+    "gift_code": "PIVX-7QK2M",
+    "address": "DA1",
+    "balance_piv": 25.0,
+    "status": "confirmed",
+    "created_at": 0
+   },
+   {
+    "gift_code": "PIVX-3XN8B",
+    "address": "DA2",
+    "balance_piv": 12.5,
+    "status": "confirmed",
+    "created_at": 0
+   },
+   {
+    "gift_code": "PIVX-9TR4C",
+    "address": "DA3",
+    "balance_piv": 5.0,
+    "status": "confirmed",
+    "created_at": 0
+   }
+  ],
+  "currencies": [
+   "AUD",
+   "CAD",
+   "EUR",
+   "GBP",
+   "JPY",
+   "USD"
+  ],
+  "payments": [
+   {
+    "conversation_id": "npub17jjvuhaxxs9rt2jakz6td5c6d7a2vpfr2erqmwc9xajhmqplt03q63stmv",
+    "message_id": "b100000000000000000000000000000000000000000000000000000000000000",
+    "gift_code": "PIVX-AB12C",
+    "amount_piv": 10.0,
+    "sender": "npub17jjvuhaxxs9rt2jakz6td5c6d7a2vpfr2erqmwc9xajhmqplt03q63stmv",
+    "is_mine": false,
+    "at": 1794362040000
+   },
+   {
+    "conversation_id": "npub17jjvuhaxxs9rt2jakz6td5c6d7a2vpfr2erqmwc9xajhmqplt03q63stmv",
+    "message_id": "b200000000000000000000000000000000000000000000000000000000000000",
+    "gift_code": "PIVX-DE34F",
+    "amount_piv": 2.5,
+    "sender": "npub1yazve5gvw5em6um2mzg0nh2u4v4dkfas04gqh9yn72wdcssvktsqfmmmv4",
+    "is_mine": true,
+    "at": 1794362100000
+   }
+  ]
+ },
+ "chatlist_demo": {
+  "pinned": [
+   "npub1fsndjp6vylvfahjeyuxq4s2tw8s8rv2j89ge7a28fvhnhf35s86sg3uctf",
+   "npub1wajx7kj0x9nxxa38405e3eapgu87wtvtgv8svld04p3x8u0j872qnta00x"
+  ],
+  "archived": {
+   "npub1v84qsqlcs56j8dmh6s22eccnpn2d87fdutxhl7rftseh67wzamhqfv9ft6": 1794290400000,
+   "npub10j7vkrzv4t0elnd4rmj902pge3e2gkresvd4h9u2ut3valzyjuzsz7ad26": 1794268800000
+  }
+ },
+ "rail_demo": [
+  {
+   "community_id": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+   "name": "Rust Club"
+  },
+  {
+   "community_id": "a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2",
+   "name": "Nostr Devs"
+  },
+  {
+   "community_id": "a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3",
+   "name": "Pixel Art"
+  },
+  {
+   "community_id": "a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4",
+   "name": "Bookworms"
+  }
+ ],
+ "voice_demo": {
+  "present": {
+   "58e6267876fd6c4acb7fbc37091bb920e4f325e24df4887b8048d0ccf7137f2f": [
+    {
+     "npub": "npub190vqdjtlpcq27xslcveglfmr4ynfwg7gmw86cnun4acakxrdd6gqnp929a",
+     "muted": false,
+     "deafened": false,
+     "server_muted": false,
+     "server_deafened": false,
+     "screen": false,
+     "camera": false,
+     "elsewhere": false
+    },
+    {
+     "npub": "npub1sxmr0k8u6trd5c6eu6trzyapzux7090ykujmsng7pdx0m8k93n5sd02fwn",
+     "muted": true,
+     "deafened": false,
+     "server_muted": false,
+     "server_deafened": false,
+     "screen": false,
+     "camera": false,
+     "elsewhere": false
+    },
+    {
+     "npub": "npub1fsndjp6vylvfahjeyuxq4s2tw8s8rv2j89ge7a28fvhnhf35s86sg3uctf",
+     "muted": true,
+     "deafened": true,
+     "server_muted": false,
+     "server_deafened": true,
+     "screen": false,
+     "camera": false,
+     "elsewhere": false
+    }
+   ]
+  },
+  "joined": {
+   "58e6267876fd6c4acb7fbc37091bb920e4f325e24df4887b8048d0ccf7137f2f": [
+    {
+     "npub": "npub1yazve5gvw5em6um2mzg0nh2u4v4dkfas04gqh9yn72wdcssvktsqfmmmv4",
+     "muted": false,
+     "deafened": false,
+     "server_muted": false,
+     "server_deafened": false,
+     "screen": false,
+     "camera": false,
+     "elsewhere": false
+    },
+    {
+     "npub": "npub190vqdjtlpcq27xslcveglfmr4ynfwg7gmw86cnun4acakxrdd6gqnp929a",
+     "muted": false,
+     "deafened": false,
+     "server_muted": false,
+     "server_deafened": false,
+     "screen": false,
+     "camera": false,
+     "elsewhere": false
+    },
+    {
+     "npub": "npub1sxmr0k8u6trd5c6eu6trzyapzux7090ykujmsng7pdx0m8k93n5sd02fwn",
+     "muted": true,
+     "deafened": false,
+     "server_muted": false,
+     "server_deafened": false,
+     "screen": false,
+     "camera": false,
+     "elsewhere": false
+    },
+    {
+     "npub": "npub1fsndjp6vylvfahjeyuxq4s2tw8s8rv2j89ge7a28fvhnhf35s86sg3uctf",
+     "muted": true,
+     "deafened": true,
+     "server_muted": false,
+     "server_deafened": true,
+     "screen": false,
+     "camera": false,
+     "elsewhere": false
+    }
+   ]
+  },
+  "session": {
+   "community_id": "ca848c275e2117470342c641ada0ae4639dd0472ab4a5ec654a189bf1f689087",
+   "channel_id": "58e6267876fd6c4acb7fbc37091bb920e4f325e24df4887b8048d0ccf7137f2f",
+   "peers": [
+    {
+     "npub": "npub190vqdjtlpcq27xslcveglfmr4ynfwg7gmw86cnun4acakxrdd6gqnp929a",
+     "pubkey": "1111111111111111111111111111111111111111111111111111111111111111",
+     "volume": 1.0,
+     "connected": true,
+     "direct": true,
+     "rtt_ms": 38,
+     "level": 0.6,
+     "muted": false,
+     "deafened": false,
+     "server_muted": false,
+     "server_deafened": false,
+     "screen": false,
+     "camera": false
+    },
+    {
+     "npub": "npub1sxmr0k8u6trd5c6eu6trzyapzux7090ykujmsng7pdx0m8k93n5sd02fwn",
+     "pubkey": "2222222222222222222222222222222222222222222222222222222222222222",
+     "volume": 1.0,
+     "connected": true,
+     "direct": true,
+     "rtt_ms": 64,
+     "level": 0.0,
+     "muted": true,
+     "deafened": false,
+     "server_muted": false,
+     "server_deafened": false,
+     "screen": false,
+     "camera": false
+    },
+    {
+     "npub": "npub1fsndjp6vylvfahjeyuxq4s2tw8s8rv2j89ge7a28fvhnhf35s86sg3uctf",
+     "pubkey": "3333333333333333333333333333333333333333333333333333333333333333",
+     "volume": 1.0,
+     "connected": true,
+     "direct": false,
+     "rtt_ms": 120,
+     "level": 0.0,
+     "muted": true,
+     "deafened": true,
+     "server_muted": false,
+     "server_deafened": true,
+     "screen": false,
+     "camera": false
+    }
+   ],
+   "muted": false,
+   "deafened": false,
+   "audio": true,
+   "mic_level": 0.0,
+   "mic": true,
+   "server_muted": false,
+   "server_deafened": false,
+   "sharing": false,
+   "viewers": 0,
+   "camera": false,
+   "can_video": false
+  },
+  "video": {
+   "58e6267876fd6c4acb7fbc37091bb920e4f325e24df4887b8048d0ccf7137f2f": [
+    {
+     "npub": "npub1yazve5gvw5em6um2mzg0nh2u4v4dkfas04gqh9yn72wdcssvktsqfmmmv4",
+     "muted": false,
+     "deafened": false,
+     "server_muted": false,
+     "server_deafened": false,
+     "screen": false,
+     "camera": true,
+     "elsewhere": false
+    },
+    {
+     "npub": "npub190vqdjtlpcq27xslcveglfmr4ynfwg7gmw86cnun4acakxrdd6gqnp929a",
+     "muted": false,
+     "deafened": false,
+     "server_muted": false,
+     "server_deafened": false,
+     "screen": true,
+     "camera": true,
+     "elsewhere": false
+    },
+    {
+     "npub": "npub1sxmr0k8u6trd5c6eu6trzyapzux7090ykujmsng7pdx0m8k93n5sd02fwn",
+     "muted": true,
+     "deafened": false,
+     "server_muted": false,
+     "server_deafened": false,
+     "screen": false,
+     "camera": false,
+     "elsewhere": false
+    },
+    {
+     "npub": "npub1fsndjp6vylvfahjeyuxq4s2tw8s8rv2j89ge7a28fvhnhf35s86sg3uctf",
+     "muted": true,
+     "deafened": true,
+     "server_muted": false,
+     "server_deafened": true,
+     "screen": false,
+     "camera": false,
+     "elsewhere": false
+    }
+   ]
+  },
+  "session_video": {
+   "community_id": "ca848c275e2117470342c641ada0ae4639dd0472ab4a5ec654a189bf1f689087",
+   "channel_id": "58e6267876fd6c4acb7fbc37091bb920e4f325e24df4887b8048d0ccf7137f2f",
+   "peers": [
+    {
+     "npub": "npub190vqdjtlpcq27xslcveglfmr4ynfwg7gmw86cnun4acakxrdd6gqnp929a",
+     "pubkey": "1111111111111111111111111111111111111111111111111111111111111111",
+     "volume": 1.0,
+     "connected": true,
+     "direct": true,
+     "rtt_ms": 38,
+     "level": 0.6,
+     "muted": false,
+     "deafened": false,
+     "server_muted": false,
+     "server_deafened": false,
+     "screen": false,
+     "camera": false
+    },
+    {
+     "npub": "npub1sxmr0k8u6trd5c6eu6trzyapzux7090ykujmsng7pdx0m8k93n5sd02fwn",
+     "pubkey": "2222222222222222222222222222222222222222222222222222222222222222",
+     "volume": 1.0,
+     "connected": true,
+     "direct": true,
+     "rtt_ms": 64,
+     "level": 0.0,
+     "muted": true,
+     "deafened": false,
+     "server_muted": false,
+     "server_deafened": false,
+     "screen": false,
+     "camera": false
+    },
+    {
+     "npub": "npub1fsndjp6vylvfahjeyuxq4s2tw8s8rv2j89ge7a28fvhnhf35s86sg3uctf",
+     "pubkey": "3333333333333333333333333333333333333333333333333333333333333333",
+     "volume": 1.0,
+     "connected": true,
+     "direct": false,
+     "rtt_ms": 120,
+     "level": 0.0,
+     "muted": true,
+     "deafened": true,
+     "server_muted": false,
+     "server_deafened": true,
+     "screen": false,
+     "camera": false
+    }
+   ],
+   "muted": false,
+   "deafened": false,
+   "audio": true,
+   "mic_level": 0.0,
+   "mic": true,
+   "server_muted": false,
+   "server_deafened": false,
+   "sharing": false,
+   "viewers": 0,
+   "camera": true,
+   "can_video": true
+  }
+ },
+ "pins_demo": {
+  "a0f367a05f629b3bb09ee8f1561bf03267962217d9ff6fc7ce3b235235702bc1": [
+   {
+    "rumor_id": "7a3c760d48ddcb81b5b84767bdb6888628fe32badc3075ee364324255c1f53a1",
+    "author": "2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b",
+    "kind": 9,
+    "content": "Welcome to the new community!",
+    "tags": [],
+    "epoch": null,
+    "ms": 1794360000000,
+    "created_at": 1794360000,
+    "wrap_hint": null,
+    "edited": null
+   },
+   {
+    "rumor_id": "c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+    "author": "2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b",
+    "kind": 9,
+    "content": "**Community rules**\n1. Be kind to each other\n2. No spam or self-promotion\n3. Keep it on topic",
+    "tags": [],
+    "epoch": null,
+    "ms": 1793000000000,
+    "created_at": 1793000000,
+    "wrap_hint": null,
+    "edited": null
+   },
+   {
+    "rumor_id": "d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1",
+    "author": "2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b",
+    "kind": 9,
+    "content": "Relay list for the meetup: wss://relay.damus.io, wss://nos.lol, wss://relay.primal.net, wss://relay.snort.social and wss://nostr.wine for anyone who wants paid",
+    "tags": [],
+    "epoch": null,
+    "ms": 1792000000000,
+    "created_at": 1792000000,
+    "wrap_hint": null,
+    "edited": null
+   },
+   {
+    "rumor_id": "e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2",
+    "author": "2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b",
+    "kind": 9,
+    "content": "",
+    "tags": [
+     [
+      "imeta",
+      "url https://blossom.example/abc",
+      "m application/pdf",
+      "name roadmap.pdf"
+     ]
+    ],
+    "epoch": null,
+    "ms": 1791000000000,
+    "created_at": 1791000000,
+    "wrap_hint": null,
+    "edited": null
+   }
+  ]
+ },
+ "server_demo": {
+  "https://magnitude.vectorapp.io": {
+   "status": {
+    "state": "online",
+    "label": "Online",
+    "tone": "connected",
+    "latency_ms": 84
+   },
+   "stats": {
+    "latency_ms": 84.3,
+    "mbps": 23.4,
+    "best_mbps": 41.2,
+    "uploads": 37,
+    "bytes_total": 851443712,
+    "last_ok_at": null,
+    "last_fail_at": null,
+    "last_fail_kind": null,
+    "recent": [
+     [
+      12.1,
+      3145728
+     ],
+     [
+      18.4,
+      9437184
+     ],
+     [
+      9.7,
+      1048576
+     ],
+     [
+      26.0,
+      23068672
+     ],
+     [
+      41.2,
+      50331648
+     ],
+     [
+      22.5,
+      12582912
+     ],
+     [
+      30.8,
+      32505856
+     ],
+     [
+      23.4,
+      8388608
+     ]
+    ]
+   },
+   "info": {
+    "name": "Magnitude",
+    "software": null,
+    "version": null,
+    "description": null,
+    "buds": [
+     1,
+     2
+    ],
+    "extensions": [],
+    "max_blob": null,
+    "mime": [],
+    "capacity_used": null,
+    "capacity_limit": null,
+    "fetched_at": 0,
+    "caller": {
+     "tier": "badged",
+     "max_blob": 536870912,
+     "storage_used": 1300234240,
+     "storage_limit": 10737418240,
+     "blobs": 214,
+     "daily_used": 1981808640,
+     "daily_limit": 2147483648,
+     "allowed": true,
+     "reasons": [],
+     "plan_title": "Premium",
+     "plan_description": "Thanks for backing Vector."
+    }
+   },
+   "caps": []
+  },
+  "https://blossom.ditto.pub": {
+   "status": {
+    "state": "untested",
+    "label": "Untested",
+    "tone": "disabled",
+    "latency_ms": null
+   },
+   "stats": null,
+   "info": null,
+   "caps": [
+    {
+     "mime_type": "image/png",
+     "is_encrypted": true,
+     "outcome": 1,
+     "max_accepted_size": 12582912,
+     "min_rejected_size": null,
+     "updated_at": 0
+    },
+    {
+     "mime_type": "image/jpeg",
+     "is_encrypted": false,
+     "outcome": 1,
+     "max_accepted_size": 5242880,
+     "min_rejected_size": null,
+     "updated_at": 0
+    },
+    {
+     "mime_type": "video/mp4",
+     "is_encrypted": true,
+     "outcome": 3,
+     "max_accepted_size": 0,
+     "min_rejected_size": 104857600,
+     "updated_at": 0
+    },
+    {
+     "mime_type": "application/x-msdownload",
+     "is_encrypted": true,
+     "outcome": 2,
+     "max_accepted_size": 0,
+     "min_rejected_size": null,
+     "updated_at": 0
+    }
+   ]
+  }
+ },
+ "net_demo": {
+  "i2p_config": {
+   "sam_port": 7656,
+   "sam_user": null,
+   "sam_auth": false,
+   "exit": "allow",
+   "outproxies": [
+    {
+     "id": "stormycloud",
+     "name": "StormyCloud",
+     "address": "5d4s7pcvfdpftfk7npc7hllyujhufsdprtrf4o53i44rgsa2xbwa.b32.i2p",
+     "port": 80,
+     "enabled": true,
+     "builtin": true
+    },
+    {
+     "id": "acetone",
+     "name": "Acetone",
+     "address": "proxy4uwdijqxac2bvdx4fuhem6njmiwukuk2gelejv2nzxka2xq.b32.i2p",
+     "port": 3128,
+     "enabled": true,
+     "builtin": true
+    }
+   ],
+   "defaults": [
+    {
+     "id": "stormycloud",
+     "name": "StormyCloud",
+     "address": "5d4s7pcvfdpftfk7npc7hllyujhufsdprtrf4o53i44rgsa2xbwa.b32.i2p",
+     "port": 80,
+     "enabled": true,
+     "builtin": true
+    },
+    {
+     "id": "acetone",
+     "name": "Acetone",
+     "address": "proxy4uwdijqxac2bvdx4fuhem6njmiwukuk2gelejv2nzxka2xq.b32.i2p",
+     "port": 3128,
+     "enabled": true,
+     "builtin": true
+    }
+   ],
+   "customized": false
+  },
+  "clearnet": {
+   "view": {
+    "label": null,
+    "supported": [
+     "clearnet",
+     "tor",
+     "i2p"
+    ],
+    "blocked": false,
+    "progress": null,
+    "reason": null,
+    "retry_in": null,
+    "since": 0,
+    "prelogin": "clearnet",
+    "prelogin_armed": false,
+    "realtime_allowed": false,
+    "realtime_active": false,
+    "call_active": false,
+    "config_seq": 1,
+    "steps": [],
+    "detail": null,
+    "kind": "clearnet",
+    "phase": "direct",
+    "ready": true
+   }
+  },
+  "tor": {
+   "view": {
+    "label": "Tor",
+    "supported": [
+     "clearnet",
+     "tor",
+     "i2p"
+    ],
+    "blocked": false,
+    "progress": null,
+    "reason": null,
+    "retry_in": null,
+    "since": 0,
+    "prelogin": "clearnet",
+    "prelogin_armed": false,
+    "realtime_allowed": false,
+    "realtime_active": false,
+    "call_active": false,
+    "config_seq": 1,
+    "steps": [],
+    "detail": {
+     "status": "connected",
+     "bootstrap_progress": 100,
+     "multi_circuit": true
+    },
+    "kind": "tor",
+    "phase": "ready",
+    "ready": true
+   },
+   "tor": {
+    "enabled": true,
+    "running": true,
+    "supported": true,
+    "status": "connected",
+    "bootstrap_progress": 100,
+    "prelogin": false,
+    "multi_circuit": true,
+    "socks_proxy": null
+   },
+   "circuits": {
+    "host": null,
+    "hops": [],
+    "circuits": 4,
+    "hosts": 6
+   }
+  },
+  "tor_single": {
+   "view": {
+    "label": "Tor",
+    "supported": [
+     "clearnet",
+     "tor",
+     "i2p"
+    ],
+    "blocked": false,
+    "progress": null,
+    "reason": null,
+    "retry_in": null,
+    "since": 0,
+    "prelogin": "clearnet",
+    "prelogin_armed": false,
+    "realtime_allowed": false,
+    "realtime_active": false,
+    "call_active": false,
+    "config_seq": 1,
+    "steps": [],
+    "detail": {
+     "status": "connected",
+     "bootstrap_progress": 100,
+     "multi_circuit": false
+    },
+    "kind": "tor",
+    "phase": "ready",
+    "ready": true
+   },
+   "tor": {
+    "enabled": true,
+    "running": true,
+    "supported": true,
+    "status": "connected",
+    "bootstrap_progress": 100,
+    "prelogin": false,
+    "multi_circuit": false,
+    "socks_proxy": null
+   },
+   "circuits": {
+    "host": "jskitty.com",
+    "hops": [
+     {
+      "position": "Guard",
+      "address": "185.220.101.4:443",
+      "fingerprint": "A1B2C3D4E5F60718293A4B5C6D7E8F9012345678",
+      "is_bridge": false
+     },
+     {
+      "position": "Middle",
+      "address": "94.23.172.32:9001",
+      "fingerprint": "1122334455667788990011223344556677889900",
+      "is_bridge": false
+     },
+     {
+      "position": "Exit",
+      "address": "199.249.230.87:443",
+      "fingerprint": "FFEEDDCCBBAA99887766554433221100FFEEDDCC",
+      "is_bridge": false
+     }
+    ],
+    "circuits": 1,
+    "hosts": 3
+   }
+  },
+  "tor_boot": {
+   "view": {
+    "label": "Tor",
+    "supported": [
+     "clearnet",
+     "tor",
+     "i2p"
+    ],
+    "blocked": true,
+    "progress": 45,
+    "reason": null,
+    "retry_in": null,
+    "since": 0,
+    "prelogin": "clearnet",
+    "prelogin_armed": false,
+    "realtime_allowed": false,
+    "realtime_active": false,
+    "call_active": false,
+    "config_seq": 1,
+    "steps": [],
+    "detail": {
+     "status": "bootstrapping",
+     "bootstrap_progress": 45,
+     "multi_circuit": true
+    },
+    "kind": "tor",
+    "phase": "starting",
+    "ready": false
+   },
+   "tor": {
+    "enabled": true,
+    "running": false,
+    "supported": true,
+    "status": "bootstrapping 45%",
+    "bootstrap_progress": 45,
+    "prelogin": false,
+    "multi_circuit": true,
+    "socks_proxy": null
+   }
+  },
+  "i2p": {
+   "view": {
+    "label": "I2P",
+    "supported": [
+     "clearnet",
+     "tor",
+     "i2p"
+    ],
+    "blocked": false,
+    "progress": null,
+    "reason": null,
+    "retry_in": null,
+    "since": 0,
+    "prelogin": "clearnet",
+    "prelogin_armed": false,
+    "realtime_allowed": false,
+    "realtime_active": false,
+    "call_active": false,
+    "config_seq": 1,
+    "steps": [
+     {
+      "id": "router",
+      "label": "Router",
+      "state": "ok",
+      "text": "SAM 3.3 on port 7656"
+     },
+     {
+      "id": "tunnels",
+      "label": "Tunnels",
+      "state": "ok",
+      "text": "Ready"
+     },
+     {
+      "id": "exit",
+      "label": "Clearnet",
+      "state": "ok",
+      "text": "Via StormyCloud"
+     }
+    ],
+    "detail": {
+     "b32": null
+    },
+    "kind": "i2p",
+    "phase": "ready",
+    "ready": true
+   },
+   "routes": [
+    {
+     "url": "wss://jskitty.com/nostr",
+     "host": "jskitty.com",
+     "kind": "i2p",
+     "class": "twin",
+     "via": "nostrakjf3mw7a2xqzlh4vpcdg6ytb5neiu4rs7k2o3pqfvxhcj5kn5a.b32.i2p",
+     "text": "Through its I2P address",
+     "last_error": null
+    },
+    {
+     "url": "wss://asia.vectorapp.io/nostr",
+     "host": "asia.vectorapp.io",
+     "kind": "i2p",
+     "class": "exit",
+     "via": "StormyCloud",
+     "text": "Through the StormyCloud outproxy",
+     "last_error": null
+    },
+    {
+     "url": "wss://nostr.computingcache.com",
+     "host": "nostr.computingcache.com",
+     "kind": "i2p",
+     "class": "exit",
+     "via": "StormyCloud",
+     "text": "Through the StormyCloud outproxy",
+     "last_error": null
+    },
+    {
+     "url": "wss://relay.example.org",
+     "host": "relay.example.org",
+     "kind": "i2p",
+     "class": "refused",
+     "via": null,
+     "text": "I2P-Only is on, so this server is off.",
+     "last_error": null
+    },
+    {
+     "url": "https://magnitude.vectorapp.io",
+     "host": "magnitude.vectorapp.io",
+     "kind": "i2p",
+     "class": "twin",
+     "via": "nostrakjf3mw7a2xqzlh4vpcdg6ytb5neiu4rs7k2o3pqfvxhcj5kn5a.b32.i2p",
+     "text": "Through its I2P address",
+     "last_error": null
+    },
+    {
+     "url": "https://blossom.ditto.pub",
+     "host": "blossom.ditto.pub",
+     "kind": "i2p",
+     "class": "blocked",
+     "via": null,
+     "text": "Blocked: The outproxy didn\u2019t answer.",
+     "last_error": "The outproxy didn\u2019t answer."
+    }
+   ],
+   "aliases": [
+    {
+     "host": "jskitty.com",
+     "twins": {
+      "i2p": "nostrakjf3mw7a2xqzlh4vpcdg6ytb5neiu4rs7k2o3pqfvxhcj5kn5a.b32.i2p"
+     },
+     "source": "builtin",
+     "check": {
+      "state": "ok",
+      "at": null,
+      "text": null
+     }
+    },
+    {
+     "host": "magnitude.vectorapp.io",
+     "twins": {
+      "i2p": "nostrakjf3mw7a2xqzlh4vpcdg6ytb5neiu4rs7k2o3pqfvxhcj5kn5a.b32.i2p"
+     },
+     "source": "user",
+     "check": {
+      "state": "ok",
+      "at": null,
+      "text": null
+     }
+    },
+    {
+     "host": "nostr.computingcache.com",
+     "twins": {
+      "i2p": "nostrakjf3mw7a2xqzlh4vpcdg6ytb5neiu4rs7k2o3pqfvxhcj5kn5a.b32.i2p"
+     },
+     "source": "user",
+     "check": {
+      "state": "failed",
+      "at": null,
+      "text": "This address doesn\u2019t serve nostr.computingcache.com. Vector won\u2019t use it."
+     }
+    }
+   ]
+  },
+  "i2p_start": {
+   "view": {
+    "label": "I2P",
+    "supported": [
+     "clearnet",
+     "tor",
+     "i2p"
+    ],
+    "blocked": true,
+    "progress": null,
+    "reason": null,
+    "retry_in": null,
+    "since": 0,
+    "prelogin": "clearnet",
+    "prelogin_armed": false,
+    "realtime_allowed": false,
+    "realtime_active": false,
+    "call_active": false,
+    "config_seq": 1,
+    "steps": [
+     {
+      "id": "router",
+      "label": "Router",
+      "state": "ok",
+      "text": "SAM 3.3 on port 7656"
+     },
+     {
+      "id": "tunnels",
+      "label": "Tunnels",
+      "state": "pending",
+      "text": "Building\u2026 12s"
+     },
+     {
+      "id": "exit",
+      "label": "Clearnet",
+      "state": "pending",
+      "text": "Waiting\u2026"
+     }
+    ],
+    "detail": null,
+    "kind": "i2p",
+    "phase": "starting",
+    "ready": false
+   }
+  },
+  "i2p_down": {
+   "view": {
+    "label": "I2P",
+    "supported": [
+     "clearnet",
+     "tor",
+     "i2p"
+    ],
+    "blocked": true,
+    "progress": null,
+    "reason": {
+     "code": "router_unreachable",
+     "text": "Your I2P router isn\u2019t answering on port 7656."
+    },
+    "retry_in": 8,
+    "since": 0,
+    "prelogin": "clearnet",
+    "prelogin_armed": false,
+    "realtime_allowed": false,
+    "realtime_active": false,
+    "call_active": false,
+    "config_seq": 1,
+    "steps": [
+     {
+      "id": "router",
+      "label": "Router",
+      "state": "fail",
+      "text": "Not answering"
+     },
+     {
+      "id": "tunnels",
+      "label": "Tunnels",
+      "state": "pending",
+      "text": "Waiting\u2026"
+     },
+     {
+      "id": "exit",
+      "label": "Clearnet",
+      "state": "pending",
+      "text": "Waiting\u2026"
+     }
+    ],
+    "detail": null,
+    "kind": "i2p",
+    "phase": "waiting",
+    "ready": false
+   }
+  },
+  "login_tor": {
+   "view": {
+    "label": "Tor",
+    "supported": [
+     "clearnet",
+     "tor",
+     "i2p"
+    ],
+    "blocked": true,
+    "progress": 45,
+    "reason": null,
+    "retry_in": null,
+    "since": 0,
+    "prelogin": "tor",
+    "prelogin_armed": false,
+    "realtime_allowed": false,
+    "realtime_active": false,
+    "call_active": false,
+    "config_seq": 1,
+    "steps": [],
+    "detail": {
+     "status": "bootstrapping",
+     "bootstrap_progress": 45,
+     "multi_circuit": true
+    },
+    "kind": "tor",
+    "phase": "starting",
+    "ready": false
+   },
+   "tor": {
+    "enabled": true,
+    "running": false,
+    "supported": true,
+    "status": "bootstrapping 45%",
+    "bootstrap_progress": 45,
+    "prelogin": false,
+    "multi_circuit": true,
+    "socks_proxy": null
+   }
+  },
+  "login_i2p_down": {
+   "view": {
+    "label": "I2P",
+    "supported": [
+     "clearnet",
+     "tor",
+     "i2p"
+    ],
+    "blocked": true,
+    "progress": null,
+    "reason": {
+     "code": "router_unreachable",
+     "text": "Your I2P router isn\u2019t answering on port 7656."
+    },
+    "retry_in": 8,
+    "since": 0,
+    "prelogin": "i2p",
+    "prelogin_armed": false,
+    "realtime_allowed": false,
+    "realtime_active": false,
+    "call_active": false,
+    "config_seq": 1,
+    "steps": [
+     {
+      "id": "router",
+      "label": "Router",
+      "state": "fail",
+      "text": "Not answering"
+     },
+     {
+      "id": "tunnels",
+      "label": "Tunnels",
+      "state": "pending",
+      "text": "Waiting\u2026"
+     },
+     {
+      "id": "exit",
+      "label": "Clearnet",
+      "state": "pending",
+      "text": "Waiting\u2026"
+     }
+    ],
+    "detail": null,
+    "kind": "i2p",
+    "phase": "waiting",
+    "ready": false
+   }
+  },
+  "login_clearnet": {
+   "view": {
+    "label": null,
+    "supported": [
+     "clearnet",
+     "tor",
+     "i2p"
+    ],
+    "blocked": false,
+    "progress": null,
+    "reason": null,
+    "retry_in": null,
+    "since": 0,
+    "prelogin": "clearnet",
+    "prelogin_armed": false,
+    "realtime_allowed": false,
+    "realtime_active": false,
+    "call_active": false,
+    "config_seq": 1,
+    "steps": [],
+    "detail": null,
+    "kind": "clearnet",
+    "phase": "direct",
+    "ready": true
+   }
+  }
+ },
+ "sync_report": {
+  "control": {
+   "root_epoch": 3,
+   "converged": true,
+   "complete": true,
+   "activated": true,
+   "authority_gapped": false,
+   "fold_gapped": false,
+   "truncated": false,
+   "pages_read": 4,
+   "editions": 27,
+   "would_update": true,
+   "healed": [],
+   "entities": [
+    {
+     "entity": "9f2c41d07ab3",
+     "kind": 2,
+     "mine": false,
+     "served": 3,
+     "newest": {
+      "version": 5,
+      "age_days": 1,
+      "author": "owner",
+      "admitted": true,
+      "is_floor": false,
+      "extends_floor": true
+     },
+     "floor": {
+      "version": 4,
+      "served": true
+     },
+     "folds_to": null,
+     "refused": null,
+     "carried": false,
+     "kept": false
+    },
+    {
+     "entity": "1be07c9a44d2",
+     "kind": 1,
+     "mine": false,
+     "served": 2,
+     "newest": {
+      "version": 2,
+      "age_days": 6,
+      "author": "3e1a90bb27c4",
+      "admitted": false,
+      "is_floor": false,
+      "extends_floor": false
+     },
+     "floor": {
+      "version": 1,
+      "served": true
+     },
+     "folds_to": null,
+     "refused": "unauthorized",
+     "carried": false,
+     "kept": false
+    },
+    {
+     "entity": "a03d55e18f60",
+     "kind": 0,
+     "mine": false,
+     "served": 1,
+     "newest": {
+      "version": 9,
+      "age_days": 0,
+      "author": "owner",
+      "admitted": true,
+      "is_floor": true,
+      "extends_floor": null
+     },
+     "floor": {
+      "version": 9,
+      "served": true
+     },
+     "folds_to": null,
+     "refused": null,
+     "carried": false,
+     "kept": false
+    }
+   ]
+  },
+  "epoch": {
+   "root_epoch": 3,
+   "verdict": "current",
+   "held": {
+    "epoch": 3,
+    "base_plane": "5c0e2a91d7f3"
+   }
+  }
+ },
+ "relay_info": {
+  "wss://jskitty.com/nostr": {
+   "name": "JSKitty's Relay",
+   "icon": "avatars/grace.png",
+   "auth": true
+  },
+  "wss://asia.vectorapp.io/nostr": {
+   "name": "Vector Asia",
+   "icon": null,
+   "auth": false
+  }
+ }
+}

@@ -1,0 +1,14 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><script src="webxdc.js"></script>
+<style>body{margin:0;font:16px sans-serif;background:#101418;color:#e8f0f2;display:flex;flex-direction:column;align-items:center;justify-content:center;height:100vh}
+button{font-size:22px;padding:12px 28px;border-radius:12px;border:0;background:#59fcb3;color:#000}</style></head>
+<body><h2 id="who"></h2><button id="b">Tap</button><p id="n">0</p><p id="net"></p>
+<script>
+document.getElementById('who').textContent = 'Hi ' + window.webxdc.selfName;
+let n = 0; document.getElementById('b').onclick = () => { n++; document.getElementById('n').textContent = n; };
+fetch('https://example.com').then(() => document.getElementById('net').textContent = 'network: OPEN')
+  .catch(() => document.getElementById('net').textContent = 'network: blocked');
+window.__TAURI__.core.invoke('miniapp_call', { call: { op: 'granted_permissions' } })
+  .then(p => document.getElementById('n').textContent = 'perms: [' + p + ']')
+  .catch(e => document.getElementById('n').textContent = 'ipc error: ' + e);
+</script></body></html>

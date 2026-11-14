@@ -5413,8 +5413,7 @@ mod tests {
             before.4,
             (vec![(Epoch(0), v2.community_root)], vec![(Epoch(0), [0x62; 32])], vec![("e1".to_string(), 5, r#"{"action":"message_delete"}"#.to_string())])
         );
-        // File captions are stored but not shown again yet; the view still carries the rest.
-        assert_eq!(before.5, vec![(String::new(), dm.preview_metadata.clone(), dm.attachments.clone())]);
+        assert_eq!(before.5, vec![(dm.content.clone(), dm.preview_metadata.clone(), dm.attachments.clone())]);
         assert_eq!(before.6.as_deref(), Some("still sending"));
         assert_eq!(before.7, (vec![banned.to_hex()], vec!["d8".repeat(32)], 1, Some(1)), "the banned author stays hidden");
         let sealed: (String, String, String) = crate::db::get_db_connection_guard_static().unwrap().query_row(

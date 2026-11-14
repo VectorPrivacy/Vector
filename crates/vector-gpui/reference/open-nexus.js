@@ -1,0 +1,1 @@
+(() => { setTimeout(() => showMiniApps(), 400); })();

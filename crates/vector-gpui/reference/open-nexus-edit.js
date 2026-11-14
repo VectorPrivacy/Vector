@@ -1,0 +1,1 @@
+(() => { setTimeout(async () => { await showMarketplacePanel('discover'); setTimeout(() => { VectorSvelte.mktShowDetails ? VectorSvelte.mktShowDetails('chess') : document.querySelector('.nx-row')?.click(); setTimeout(() => document.querySelector('.nx-edit')?.click(), 400); }, 400); }, 400); })();

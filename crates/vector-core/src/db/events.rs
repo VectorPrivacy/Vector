@@ -20,6 +20,17 @@ fn seal_event_fields(event: &StoredEvent, sealer: &mut crate::crypto::AtRestSeal
     Ok((content, preview))
 }
 
+/// A file message's caption: its stored content less the file's own URL, which NIP-17 puts there.
+fn file_caption(content: &str, attachments: &[crate::types::Attachment]) -> String {
+    let rest = crate::community::attachments::strip_attachment_urls(content, attachments);
+    let bare_link = !rest.contains(char::is_whitespace) && (rest.starts_with("https://") || rest.starts_with("http://"));
+    let names_a_file = bare_link
+        && attachments.iter().any(|a| {
+            rest.contains(a.id.as_str()) || a.original_hash.as_deref().is_some_and(|h| !h.is_empty() && rest.contains(h))
+        });
+    if names_a_file { String::new() } else { rest }
+}
+
 // A stored message's text and tags are its original, written once: edits are their own rows, so a
 // re-save from memory (which holds the latest edit, or whatever a failed open left) never replaces them.
 const _: () = assert!(
@@ -1258,6 +1269,8 @@ pub async fn get_events(
         if event.kind == event_kind::CHAT_MESSAGE || event.kind == event_kind::PRIVATE_DIRECT_MESSAGE {
             event.content = at_rest.open(event.content)
                 .unwrap_or_else(|_| "[Decryption failed]".to_string());
+        } else if event.kind == event_kind::FILE_ATTACHMENT {
+            event.content = at_rest.open_or_keep(event.content);
         }
         event
     }).collect());
@@ -1654,7 +1667,7 @@ async fn compose_message_views(message_events: Vec<StoredEvent>) -> Result<Vec<M
         let attachments = attachments_by_msg.remove(&event.id).unwrap_or_default();
 
         let original_content = if event.kind == event_kind::FILE_ATTACHMENT {
-            String::new()
+            file_caption(&event.content, &attachments)
         } else {
             event.content.clone()
         };
@@ -1763,7 +1776,8 @@ pub async fn get_message_by_id(message_id: &str) -> Result<Option<(String, Messa
     let Some((mut event, chat_identifier)) = found else { return Ok(None) };
     if event.kind == event_kind::CHAT_MESSAGE || event.kind == event_kind::PRIVATE_DIRECT_MESSAGE {
         event.content = crate::crypto::open_batch(|at_rest| at_rest.open(event.content))
-            .unwrap_or_else(|_| "[Decryption failed]".to_string());
+            .unwrap_or_else(|_| "[Decryption failed]".to_string());    } else if event.kind == event_kind::FILE_ATTACHMENT {
+        event.content = crate::crypto::open_batch(|at_rest| at_rest.open_or_keep(event.content));
     }
     Ok(compose_message_views(vec![event]).await?.pop().map(|m| (chat_identifier, m)))
 }
@@ -1883,6 +1897,8 @@ pub async fn get_messages_around(
         if event.kind == event_kind::CHAT_MESSAGE || event.kind == event_kind::PRIVATE_DIRECT_MESSAGE {
             event.content = at_rest.open(event.content)
                 .unwrap_or_else(|_| "[Decryption failed]".to_string());
+        } else if event.kind == event_kind::FILE_ATTACHMENT {
+            event.content = at_rest.open_or_keep(event.content);
         }
         event
     }).collect());
@@ -2086,6 +2102,8 @@ pub async fn get_all_chats_last_messages() -> Result<std::collections::HashMap<S
             {
                 at_rest.open(event.content.clone())
                     .unwrap_or_else(|_| "[Decryption failed]".to_string())
+            } else if event.kind == event_kind::FILE_ATTACHMENT {
+                file_caption(&at_rest.open_or_keep(event.content.clone()), &attachments)
             } else {
                 String::new()
             };
