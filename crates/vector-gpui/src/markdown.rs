@@ -226,6 +226,11 @@ fn swap_inline(line: &str, swaps: &mut Vec<Swap>) -> String {
             i += len;
             continue;
         }
+        if let Some(len) = tilde_shortcode(rest) {
+            out.extend(rest[..len].chars().map(|c| if c == '~' { TILDE } else { c }));
+            i += len;
+            continue;
+        }
         for shrug in ["¯\\\\_(ツ)_/¯", "¯\\_(ツ)_/¯"] {
             if rest.starts_with(shrug) {
                 out.push(marker(swaps.len()));
@@ -241,6 +246,37 @@ fn swap_inline(line: &str, swaps: &mut Vec<Swap>) -> String {
         }
     }
     out
+}
+
+/// A pack emoji's disambiguating `~` (`:love~2:`) rides through markdown as this, not strikethrough.
+const TILDE: char = '\u{F0220}';
+
+/// The length of a `:name~n:` shortcode opening `s`.
+fn tilde_shortcode(s: &str) -> Option<usize> {
+    let b = s.as_bytes();
+    if b.first() != Some(&b':') {
+        return None;
+    }
+    let word = |c: &u8| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'-');
+    let mut i = 1;
+    let mut parts = 0;
+    loop {
+        let n = b[i..].iter().take_while(|c| word(c)).count();
+        if n == 0 {
+            return None;
+        }
+        i += n;
+        parts += 1;
+        match b.get(i) {
+            Some(b'~') => i += 1,
+            Some(b':') if parts > 1 => return Some(i + 1),
+            _ => return None,
+        }
+    }
+}
+
+fn untilde(t: &str) -> std::borrow::Cow<'_, str> {
+    if t.contains(TILDE) { t.replace(TILDE, "~").into() } else { t.into() }
 }
 
 /// Where a backtick run exactly `ticks` long next starts.
@@ -772,6 +808,7 @@ impl Builder<'_> {
             Event::Start(tag) => self.start(tag),
             Event::End(tag) => self.end(tag),
             Event::Text(t) => {
+                let t = untilde(&t);
                 if let Some((_, code)) = &mut self.code {
                     code.push_str(&t);
                 } else {
@@ -1434,6 +1471,31 @@ mod custom_tests {
             }
         )));
         assert_eq!(shortcodes("21:20:30"), vec![]);
+    }
+
+    #[test]
+    fn tilde_pack_emoji_are_not_strikethrough() {
+        let revealed = HashSet::new();
+        let pic = std::sync::Arc::new(gpui::RenderImage::new(Vec::new()));
+        let f = |c: &str| c.starts_with("love~").then(|| crate::media::Custom::Ready(pic.clone()));
+        let ctx = Ctx {
+            base: Look::new("Rubik", 15., 21., gpui::white()),
+            revealed: &revealed,
+            custom: Some(&f),
+            now: 0.,
+            mention: None,
+            tags: &[],
+            mask: None,
+            colors: &[],
+            go: None,
+        };
+        let blocks = parse(":love~2: and :love~3: but ~gone~", &ctx);
+        let Block::Para(p) = &blocks[0] else { panic!() };
+        let images = p.atoms.iter().filter(|a| matches!(a, Atom::Image { .. })).count();
+        assert_eq!(images, 2);
+        assert_eq!(tilde_shortcode(":a~b:"), Some(5));
+        assert_eq!(tilde_shortcode(":ab:"), None);
+        assert_eq!(tilde_shortcode(":a~:"), None);
     }
 
     #[test]
