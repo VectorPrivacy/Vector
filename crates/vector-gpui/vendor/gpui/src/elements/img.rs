@@ -382,7 +382,11 @@ impl Element for Img {
 
                             let image_size = data.render_size(frame_index);
 
-                            if style.aspect_ratio.is_none() {
+                            // With both sides given, a ratio would let a min-size of auto outgrow them.
+                            if style.aspect_ratio.is_none()
+                                && (matches!(style.size.width, Length::Auto)
+                                    || matches!(style.size.height, Length::Auto))
+                            {
                                 style.aspect_ratio = Some(image_size.width / image_size.height);
                             }
 
