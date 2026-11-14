@@ -770,7 +770,7 @@ fn content(ctx: &Ctx, m: &Message) -> AnyElement {
             })),
         }
     }
-    let pieces = linked_pictures(ctx, blocks);
+    let pieces = linked_pictures(ctx, &m.id, blocks);
     let mut col = div().flex().flex_col();
     let mut prev_bottom: Option<f32> = None;
     let mut prev_para = false;
@@ -858,7 +858,7 @@ pub fn is_image_url(url: &str) -> bool {
 
 /// Links to pictures, as `processInlineImages` swaps them: a ring beside the link while it
 /// fetches, then the picture in its place, splitting the paragraph around it.
-fn linked_pictures(ctx: &Ctx, blocks: Vec<Block>) -> Vec<Piece> {
+fn linked_pictures(ctx: &Ctx, msg: &str, blocks: Vec<Block>) -> Vec<Piece> {
     let mut out = Vec::with_capacity(blocks.len());
     for b in blocks {
         let Block::Para(p) = b else {
@@ -904,7 +904,7 @@ fn linked_pictures(ctx: &Ctx, blocks: Vec<Block>) -> Vec<Piece> {
             {
                 end += 1;
             }
-            match ctx.media.borrow_mut().linked(&url) {
+            match ctx.media.borrow_mut().linked_in(&url, msg) {
                 Linked::Ready { image, w, h } => {
                     if !run.is_empty() {
                         out.push(Piece::Block(para(std::mem::take(&mut run)), cont));

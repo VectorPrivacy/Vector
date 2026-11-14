@@ -369,7 +369,7 @@ pub fn card(ctx: &Ctx, m: &Message) -> Option<AnyElement> {
             })
             .collect()
     };
-    let picture = image.as_deref().map(|u| ctx.media.borrow_mut().linked(u));
+    let picture = image.as_deref().map(|u| ctx.media.borrow_mut().linked_in(u, &m.id));
 
     let mut card = div()
         .id(gpui::SharedString::from(format!("card-{}", m.id)))

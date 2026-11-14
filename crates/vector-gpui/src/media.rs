@@ -119,6 +119,10 @@ pub struct Media {
     pub auto_queue: Vec<(String, String)>,
     linked: HashMap<String, Linked>,
     linked_wants: Vec<String>,
+    /// The messages each linked picture shows in, and the pictures done loading (or failed)
+    /// since the app last looked: their rows change height, so the timeline measures them again.
+    linked_by: HashMap<String, HashSet<String>>,
+    pub linked_settled: Vec<String>,
     /// Messages whose link card was asked for, and those asks waiting to go: (chat, message).
     pub meta_asked: HashSet<String>,
     pub meta_queue: Vec<(String, String)>,
@@ -232,6 +236,24 @@ impl Media {
 }
 
 impl Media {
+    /// A linked picture shown in message `msg`; its row is measured again once it loads.
+    pub fn linked_in(&mut self, url: &str, msg: &str) -> Linked {
+        let l = self.linked(url);
+        if matches!(l, Linked::Loading(_)) {
+            self.linked_by.entry(url.to_string()).or_default().insert(msg.to_string());
+        }
+        l
+    }
+
+    /// The messages waiting on pictures that have settled since the last ask.
+    pub fn take_settled_rows(&mut self) -> Vec<String> {
+        let mut out = Vec::new();
+        for url in std::mem::take(&mut self.linked_settled) {
+            out.extend(self.linked_by.remove(&url).into_iter().flatten());
+        }
+        out
+    }
+
     /// A linked picture; the first ask fetches it.
     pub fn linked(&mut self, url: &str) -> Linked {
         self.used.insert((2, url.to_string()), std::time::Instant::now());
@@ -438,7 +460,11 @@ pub fn pump<V: 'static>(
                 },
                 None => Linked::Failed,
             };
-            media.borrow_mut().linked.insert(url, slot);
+            {
+                let mut m = media.borrow_mut();
+                m.linked.insert(url.clone(), slot);
+                m.linked_settled.push(url);
+            }
             app.update(cx, |_, cx| cx.notify()).ok();
         })
         .detach();

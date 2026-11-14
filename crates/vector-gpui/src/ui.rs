@@ -6046,6 +6046,17 @@ impl Render for VectorApp {
         {
             let mut media = self.media.borrow_mut();
             media.videos.scale = window.scale_factor();
+            // Rows whose linked picture just loaded are taller now: only those are measured again.
+            let grown = media.take_settled_rows();
+            if !grown.is_empty() {
+                let rows: Vec<usize> = grown.iter().filter_map(|id| self.row_of(id)).collect();
+                for ix in &rows {
+                    self.timeline.remeasure_items(*ix..*ix + 1);
+                }
+                if !rows.is_empty() {
+                    crate::pane::notify(&self.panes.timeline, cx);
+                }
+            }
             if media.videos.tick() {
                 window.request_animation_frame();
             }
