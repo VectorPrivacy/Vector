@@ -139,6 +139,28 @@ pub async fn sync_channel(channel_id: String, before_ms: Option<u64>) -> Result<
     })
 }
 
+/// One relay page of a channel's history older than `before_ms`, for a walk back to a point:
+/// whether it reached the start, how many messages were new here, and the oldest it reached (ms).
+pub async fn walk_channel(channel_id: String, before_ms: u64) -> Result<(bool, usize, Option<u64>), String> {
+    use vector_core::community::cache;
+    let Some(_claim) = cache::claim_page_fetch(&channel_id, true) else {
+        return Ok((false, 0, None));
+    };
+    let community_id =
+        db::community::community_id_for_channel(&channel_id)?.ok_or("Unknown Community channel")?;
+    if !is_held(&community_id) {
+        return Ok((true, 0, None));
+    }
+    const LIMIT: usize = 50;
+    let before = Some(before_ms / 1000);
+    let count = db::scoped(VectorCore.sync_community_channel_page(&channel_id, LIMIT, before, None))
+        .await
+        .map(|(c, _)| c)
+        .unwrap_or_default();
+    let start = vector_core::community::reached_history_start(&channel_id, before, &count);
+    Ok((start, count.new_messages, count.next_before.map(|s| s * 1000)))
+}
+
 /// The optimistic bubble carries the real id: the rumor is built before it shows.
 pub async fn send(channel_id: String, content: String, replied_to: String, bot: Option<String>) -> Result<(), String> {
     db::scoped(async move {

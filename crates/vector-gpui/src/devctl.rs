@@ -9,6 +9,7 @@
 //! - `dev:bottom`: jump the open timeline to its newest message
 //! - `dev:pin:<digits>`: type a PIN into the lock screen
 //! - `dev:raise`: bring the window to the front
+//! - `dev:unread:<chat>:<message>`: Mark as Unread from that message, loaded or not
 //! - `dev:idle:<secs>`: how long without input before animations hold their frame (default 300)
 //! - `dev:dump:<message id>`: that message as the timeline holds it, keys and nonces left out
 //! - `dev:net:<json>`: stand in for the network status the routing views read
@@ -101,6 +102,11 @@ pub fn run(app: &mut VectorApp, cmd: &str, window: &mut Window, cx: &mut Context
         }
         "pin" => app.dev_pin(rest, window, cx),
         "raise" => window.activate_window(),
+        "unread" => {
+            if let Some((chat, msg)) = rest.split_once(':') {
+                app.dev_mark_unread(chat.to_string(), msg.to_string(), cx);
+            }
+        }
         "idle" => gpui::set_animation_idle(std::time::Duration::from_secs(rest.parse().unwrap_or(300))),
         "dump" => answer(app.dev_dump(rest)),
         "net" => app.dev_net(serde_json::from_str(rest).ok(), cx),

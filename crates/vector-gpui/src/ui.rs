@@ -56,7 +56,20 @@ enum Screen {
     Main,
 }
 
+/// `.unread-jump-pill`: the first unread sits above the opened page; a tap pages back to it.
+struct UnreadJump {
+    chat: SharedString,
+    /// The message the unread run starts after (`last_read`), or at (`unread_from`).
+    anchor: String,
+    count: usize,
+    /// While paging back: what it's doing. Then a tap does nothing.
+    status: Option<String>,
+    /// The walk stopped at its budget; a tap carries on from where it left off.
+    paused: bool,
+}
+
 pub struct VectorApp {
+    unread_jump: Option<UnreadJump>,
     screen: Screen,
     panes: crate::pane::Panes,
     /// This build is older than the account's database: (this build, the one it needs).
@@ -898,6 +911,7 @@ impl VectorApp {
             row_keys: Vec::new(),
             msg_index: Rc::default(),
             read_anchor: None,
+            unread_jump: None,
             input,
             syncing: false,
             revealed: Rc::default(),
@@ -3897,6 +3911,7 @@ impl VectorApp {
         self.bar.reset();
         self.unread_below = 0;
         self.return_shown = false;
+        self.unread_jump = None;
         self.read_anchor = self.store.borrow().chat(&id).map(|c| {
             if c.unread_from.is_empty() { data::Unread::After(c.last_read.clone()) } else { data::Unread::At(c.unread_from.clone()) }
         });
@@ -3968,12 +3983,108 @@ impl VectorApp {
                 let count = this.rebuild_rows();
                 this.timeline = timeline_state(count, cx.entity().downgrade());
                 this.timeline.scroll_to_end();
+                this.offer_unread_jump(&id);
                 if let Some(Some(jump)) = this.opening.take() {
                     this.jump_to_message(jump, cx);
                 }
                 if this.history_done.contains(id.as_ref()) && this.timeline.logical_scroll_top().item_ix < 4 {
                     this.load_older(cx);
                 }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// After an open: the pill, when the unread run begins above what the page loaded.
+    fn offer_unread_jump(&mut self, id: &SharedString) {
+        let anchor = match &self.read_anchor {
+            Some(data::Unread::After(a)) | Some(data::Unread::At(a)) if !a.is_empty() => a.clone(),
+            _ => return,
+        };
+        let store = self.store.borrow();
+        let Some(chat) = store.chat(id) else { return };
+        let count = store.unread.as_ref().and_then(|u| u.get(id.as_ref()).copied()).map_or_else(|| data::unread_count(chat), |n| n as usize);
+        let loaded = chat.messages.iter().any(|m| m.id == anchor);
+        if count == 0 || loaded || self.history_done.contains(id.as_ref()) {
+            return;
+        }
+        drop(store);
+        self.unread_jump = Some(UnreadJump { chat: id.clone(), anchor, count, status: None, paused: false });
+    }
+
+    /// `jumpToUnread`: page back to where the unread run begins (the relays too, for a Community
+    /// channel), then centre it under its NEW divider. An old, long gap stops every
+    /// `BUDGET` messages and waits for another tap.
+    fn jump_to_unread(&mut self, cx: &mut Context<Self>) {
+        const BUDGET: usize = 500;
+        const STALE_MS: u64 = 7 * 24 * 60 * 60 * 1000;
+        let Some(jump) = self.unread_jump.as_mut().filter(|j| j.status.is_none()) else { return };
+        jump.status = Some("Syncing…".into());
+        jump.paused = false;
+        let (chat, anchor) = (jump.chat.clone(), jump.anchor.clone());
+        let community = self.store.borrow().community_of(&chat).is_some();
+        let now = self.store.borrow().now_ms();
+        let oldest = self.store.borrow().chat(&chat).and_then(|c| c.messages.first()).map(|m| m.at);
+        let (c, a) = (chat.to_string(), anchor.clone());
+        let boundary = backend::run(messaging::messages_around(c, a, 1, 0));
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let at = boundary.await.ok().and_then(Result::ok).and_then(|v| v.into_iter().find(|m| m.id == anchor).map(|m| m.at));
+            let Some(at) = at else {
+                this.update(cx, |this, cx| {
+                    this.unread_jump = None;
+                    cx.notify();
+                })
+                .ok();
+                return;
+            };
+            if community && let Some(start) = oldest.filter(|o| *o > at) {
+                let stale = at + STALE_MS < now;
+                let (mut cursor, mut synced) = (start, 0usize);
+                for _ in 0..400 {
+                    if cursor <= at {
+                        break;
+                    }
+                    if stale && synced >= BUDGET {
+                        this.update(cx, |this, cx| {
+                            if let Some(j) = this.unread_jump.as_mut() {
+                                j.status = None;
+                                j.paused = true;
+                            }
+                            cx.notify();
+                        })
+                        .ok();
+                        return;
+                    }
+                    let page = backend::run(backend::community::walk_channel(chat.to_string(), cursor)).await;
+                    let Ok(Ok((reached_start, new, next))) = page else { break };
+                    synced += new;
+                    let Some(next) = next.filter(|n| *n < cursor) else { break };
+                    cursor = next;
+                    let pct = ((start - cursor.max(at)) * 100 / (start - at).max(1)).min(100);
+                    let open = this
+                        .update(cx, |this, cx| {
+                            if let Some(j) = this.unread_jump.as_mut() {
+                                j.status = Some(format!("Syncing… {pct}%"));
+                            }
+                            cx.notify();
+                            this.open.as_ref() == Some(&chat)
+                        })
+                        .unwrap_or(false);
+                    if !open || reached_start {
+                        break;
+                    }
+                }
+            }
+            this.update(cx, |this, cx| {
+                if this.open.as_ref() != Some(&chat) {
+                    return;
+                }
+                this.unread_jump = None;
+                this.history_done.remove(chat.as_ref());
+                this.jump_or_say(anchor, "Couldn't reach the first unread message.", cx);
                 cx.notify();
             })
             .ok();
@@ -8845,6 +8956,11 @@ impl VectorApp {
                 }),
             )
         });
+        let pill = self
+            .unread_jump
+            .as_ref()
+            .filter(|j| j.chat == id && alone.is_none() && self.row_of(&j.anchor).is_none())
+            .map(|j| unread_jump_pill(j, cx));
         let request = store
             .chat(&id)
             .is_some_and(|chat| store.is_request(chat))
@@ -8883,6 +8999,7 @@ impl VectorApp {
                     // After the list: painted over its media and toolbars, and hit first.
                     .children(bar)
                     .children(back)
+                    .children(pill)
                     .children(request)
                     .children(drawer)
                     .children(typing_strip(store, &id, self.typing_fade, window))
@@ -9142,6 +9259,53 @@ fn history_edge(store: &Store, chat: &SerializableChat, on: &timeline::OnAct, ed
                 .into_any_element()
         }
     }
+}
+
+/// `.unread-jump-pill`: the accent pill at the top of the chat, "N+ new messages", a spinner line
+/// while it pages back.
+fn unread_jump_pill(j: &UnreadJump, cx: &mut Context<VectorApp>) -> AnyElement {
+    let label = match (&j.status, j.paused) {
+        (Some(s), _) => s.clone(),
+        (None, true) => "Lots of unread history: keep loading?".to_string(),
+        (None, false) if j.count > 99 => "99+ new messages".to_string(),
+        (None, false) => format!("{}+ new messages", j.count),
+    };
+    let busy = j.status.is_some();
+    let app = cx.entity().downgrade();
+    div()
+        .absolute()
+        .top(px(12.))
+        .left_0()
+        .right_0()
+        .flex()
+        .justify_center()
+        .child(
+            div()
+                .id("unread-jump-pill")
+                .occlude()
+                .px(px(15.))
+                .py(px(7.))
+                .rounded_full()
+                .bg(c(PRIMARY))
+                .text_color(c(0x0c0c0c))
+                .text_size(px(13.))
+                .font_weight(FontWeight::SEMIBOLD)
+                .shadow(vec![gpui::BoxShadow {
+                    color: ca(0, 0, 0, 0.5),
+                    offset: gpui::point(px(0.), px(6.)),
+                    blur_radius: px(18.),
+                    spread_radius: px(0.),
+                    inset: false,
+                }])
+                .when(!busy, |d| d.cursor_pointer())
+                .on_click(move |_, _, cx| {
+                    if !busy {
+                        app.update(cx, |app, cx| app.jump_to_unread(cx)).ok();
+                    }
+                })
+                .child(label),
+        )
+        .into_any_element()
 }
 
 /// A short chat sits at the top, as the Tauri list does; a long one opens at its end and
@@ -18909,6 +19073,11 @@ impl VectorApp {
                 "id": v.id, "members": v.members.len(), "panel": v.panel,
             })),
             "timeline_items": self.timeline.item_count(),
+            "read_anchor": format!("{:?}", self.read_anchor),
+            "unread_jump": self.unread_jump.as_ref().map(|j| serde_json::json!({ "anchor": j.anchor, "count": j.count, "status": j.status, "paused": j.paused })),
+            "history_done": self.open.as_ref().is_some_and(|o| self.history_done.contains(o.as_ref())),
+            "loaded": self.open.as_ref().and_then(|o| store.chat(o)).map(|c| c.messages.len()),
+            "unread_from": self.open.as_ref().and_then(|o| store.chat(o)).map(|c| c.unread_from.clone()),
             "communities": communities,
         })
     }
@@ -18923,6 +19092,19 @@ impl VectorApp {
 
     pub(crate) fn dev_open_chat(&mut self, id: SharedString, window: &mut Window, cx: &mut Context<Self>) {
         self.open_chat(id, window, cx);
+    }
+
+    /// Mark as Unread from a message that needn't be loaded: the chat reopens with its unread run.
+    pub(crate) fn dev_mark_unread(&mut self, chat: String, id: String, cx: &mut Context<Self>) {
+        if let Some(c) = self.store.borrow_mut().chat_mut(&chat) {
+            c.unread_from = id.clone();
+        }
+        let rx = backend::run(backend::chatlist::mark_unread_from(chat, id));
+        cx.spawn(async move |this, cx| {
+            let _ = rx.await;
+            this.update(cx, |this, cx| this.refresh_unread(cx)).ok();
+        })
+        .detach();
     }
 
     pub(crate) fn dev_timeline(&self) -> &ListState {
