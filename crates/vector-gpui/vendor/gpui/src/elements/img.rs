@@ -1083,14 +1083,14 @@ pub(crate) fn wake_animations_in(window: &mut Window, cx: &mut App, due: Duratio
 }
 
 fn wake(window: &mut Window, cx: &mut App, due: Duration, redraw: bool) {
-    // Wakes land on one shared 30 fps grid, so many animations out of phase cost one
-    // wake per tick rather than one each.
-    const TICK: Duration = Duration::from_millis(33);
+    // Wakes land on one shared grid, so many animations out of phase cost one wake per
+    // tick rather than one each; animation-only steps share a coarser 20 fps grid.
+    let tick = Duration::from_millis(if redraw { 33 } else { 50 });
     thread_local!(static EPOCH: Instant = Instant::now());
     let epoch = EPOCH.with(|e| *e);
     let want = Instant::now() + due;
-    let ticks = (want.saturating_duration_since(epoch).as_nanos() / TICK.as_nanos() + 1) as u32;
-    let at = epoch + TICK * ticks;
+    let ticks = (want.saturating_duration_since(epoch).as_nanos() / tick.as_nanos() + 1) as u32;
+    let at = epoch + tick * ticks;
     let id = window.window_handle().window_id();
     let sooner = WAKES.with(|w| {
         let mut w = w.borrow_mut();
