@@ -1048,8 +1048,6 @@ pub(crate) struct AnimatedSprite {
     pub(crate) at: Bounds<ScaledPixels>,
     pub(crate) visible: Bounds<Pixels>,
     pub(crate) image: Bounds<Pixels>,
-    /// When this picture last stepped on screen.
-    pub(crate) shown: Option<Instant>,
 }
 
 pub(crate) struct Frame {
@@ -5362,7 +5360,6 @@ impl Window {
                 at,
                 visible: bounds.intersect(&image_bounds),
                 image: image_bounds,
-                shown: None,
             });
         }
         Ok(())
@@ -5374,7 +5371,6 @@ impl Window {
         const FULL_DRAW_EVERY: Duration = Duration::from_secs(30);
         const SMALL: Pixels = px(32.);
         const SMALL_STEP: Duration = Duration::from_millis(100);
-        const SLACK: Duration = Duration::from_millis(5);
         if self.invalidator.is_dirty()
             || !self.is_window_active()
             || cx.reduce_motion()
@@ -5384,6 +5380,7 @@ impl Window {
             return;
         }
         let now = Instant::now();
+        let since = now.saturating_duration_since(crate::elements::anim_epoch());
         let mut next: Option<Duration> = None;
         let mut changed = false;
         let mut records = std::mem::take(&mut self.rendered_frame.animated);
@@ -5392,27 +5389,25 @@ impl Window {
             if count < 2 {
                 continue;
             }
-            let (mut ix, last) = r.clock.get();
-            ix = ix.min(count - 1);
-            let mut last = last.unwrap_or(now);
-            let delay = crate::elements::frame_delay(&r.data, ix);
-            let elapsed = now.saturating_duration_since(last);
-            // Emoji-sized pictures step at most every SMALL_STEP, skipping frames to keep their
-            // speed: each step costs a present, and at that size the difference doesn't show.
-            let gap = if r.image.size.height <= SMALL { SMALL_STEP } else { Duration::ZERO };
-            let rested = r.shown.is_none_or(|s| now.saturating_duration_since(s) + SLACK >= gap);
-            if elapsed >= delay && rested {
-                let mut left = elapsed;
-                for _ in 0..count {
-                    let d = crate::elements::frame_delay(&r.data, ix);
-                    if left < d {
-                        break;
-                    }
-                    left -= d;
-                    ix = (ix + 1) % count;
-                }
-                last = now - left.min(crate::elements::frame_delay(&r.data, ix));
-                r.shown = Some(now);
+            let shown = r.clock.get().0.min(count - 1);
+            // Every copy of a picture reads one shared clock, so all show the same frame. Emoji-sized
+            // ones read it on a SMALL_STEP grid, skipping frames to keep their speed: each step
+            // costs a present, and at that size the difference doesn't show.
+            let small = r.image.size.height <= SMALL;
+            let at = if small {
+                since - Duration::from_nanos((since.as_nanos() % SMALL_STEP.as_nanos()) as u64)
+            } else {
+                since
+            };
+            let (ix, left) = crate::elements::shared_frame(&r.data, at);
+            let due = if small {
+                let change = (at + left).as_nanos();
+                let tick = change.div_ceil(SMALL_STEP.as_nanos()) * SMALL_STEP.as_nanos();
+                Duration::from_nanos(tick as u64).saturating_sub(since)
+            } else {
+                left
+            };
+            if ix != shown {
                 let params = RenderImageParams {
                     image_id: r.data.id,
                     frame_index: ix,
@@ -5433,11 +5428,7 @@ impl Window {
                     changed = true;
                 }
             }
-            r.clock.set((ix, Some(last)));
-            let frame_due = crate::elements::frame_delay(&r.data, ix)
-                .saturating_sub(now.saturating_duration_since(last));
-            let gap_due = r.shown.map_or(Duration::ZERO, |s| gap.saturating_sub(now.saturating_duration_since(s)));
-            let due = frame_due.max(gap_due);
+            r.clock.set((ix, Some(now)));
             next = Some(next.map_or(due, |n| n.min(due)));
         }
         self.rendered_frame.animated = records;

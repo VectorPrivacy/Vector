@@ -369,25 +369,12 @@ impl Element for Img {
                                 }
                                 if frame_count > 1 && !cx.reduce_motion() && !still {
                                     if window.is_window_active() {
+                                        // Every copy of a picture reads one clock, so all show the same frame.
                                         let current_time = Instant::now();
-                                        if let Some(last_frame_time) = state.last_frame_time {
-                                            let elapsed = current_time - last_frame_time;
-                                            let frame_duration = frame_delay(&data, state.frame_index);
-
-                                            if elapsed >= frame_duration {
-                                                state.frame_index =
-                                                    (state.frame_index + 1) % frame_count;
-                                                // A late frame resyncs rather than racing to catch up.
-                                                let over = (elapsed - frame_duration).min(frame_duration);
-                                                state.last_frame_time = Some(current_time - over);
-                                            }
-                                        } else {
-                                            state.last_frame_time = Some(current_time);
-                                        }
-                                        let since = current_time - state.last_frame_time.unwrap_or(current_time);
-                                        next_frame_in = Some(
-                                            frame_delay(&data, state.frame_index).saturating_sub(since),
-                                        );
+                                        let (ix, left) = shared_frame(&data, current_time.saturating_duration_since(anim_epoch()));
+                                        state.frame_index = ix;
+                                        state.last_frame_time = Some(current_time);
+                                        next_frame_in = Some(left);
                                     } else {
                                         state.last_frame_time = None;
                                     }
@@ -1146,6 +1133,30 @@ pub fn wake_window_in(window: &mut Window, cx: &mut App, due: Duration) {
     wake(window, cx, due, true);
 }
 
+/// The instant every animation's clock and wake grid count from.
+pub(crate) fn anim_epoch() -> Instant {
+    thread_local!(static EPOCH: Instant = Instant::now());
+    EPOCH.with(|e| *e)
+}
+
+/// The frame a picture shows `at` into the shared clock, and how long until the next one.
+pub(crate) fn shared_frame(data: &RenderImage, at: Duration) -> (usize, Duration) {
+    let count = data.frame_count();
+    let total: u128 = (0..count).map(|i| frame_delay(data, i).as_nanos()).sum();
+    if count < 2 || total == 0 {
+        return (0, Duration::ZERO);
+    }
+    let mut t = at.as_nanos() % total;
+    for i in 0..count {
+        let d = frame_delay(data, i).as_nanos();
+        if t < d {
+            return (i, Duration::from_nanos((d - t) as u64));
+        }
+        t -= d;
+    }
+    (count - 1, Duration::ZERO)
+}
+
 /// Step the window's animated pictures once `due` has passed, redrawing nothing else.
 pub(crate) fn wake_animations_in(window: &mut Window, cx: &mut App, due: Duration) {
     wake(window, cx, due, false);
@@ -1155,8 +1166,7 @@ fn wake(window: &mut Window, cx: &mut App, due: Duration, redraw: bool) {
     // Wakes land on one shared grid, so many animations out of phase cost one wake per
     // tick rather than one each; animation-only steps share a coarser 20 fps grid.
     let tick = Duration::from_millis(if redraw { 33 } else { 50 });
-    thread_local!(static EPOCH: Instant = Instant::now());
-    let epoch = EPOCH.with(|e| *e);
+    let epoch = anim_epoch();
     let want = Instant::now() + due;
     let ticks = (want.saturating_duration_since(epoch).as_nanos() / tick.as_nanos() + 1) as u32;
     let at = epoch + tick * ticks;
