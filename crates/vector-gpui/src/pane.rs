@@ -32,13 +32,14 @@ pub struct Panes {
     pub side: Entity<Pane>,
     pub chat: Entity<Pane>,
     pub members: Entity<Pane>,
+    pub timeline: Entity<Pane>,
 }
 
 impl Panes {
     pub fn new(cx: &mut Context<VectorApp>) -> Self {
         let app = cx.entity().downgrade();
         let mut pane = || cx.new(|_| Pane { app: app.clone(), build: None });
-        Self { side: pane(), chat: pane(), members: pane() }
+        Self { side: pane(), chat: pane(), members: pane(), timeline: pane() }
     }
 }
 

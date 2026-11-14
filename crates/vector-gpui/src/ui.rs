@@ -8271,59 +8271,16 @@ impl VectorApp {
         })
     }
 
-    fn chat_pane(
+    /// The open chat's message list, drawn as a pane of its own so typing in the composer
+    /// leaves it as it was.
+    fn timeline_list(
         &self,
         store: &Store,
         id: SharedString,
-        on_community: &crate::community::OnAct,
+        staged_voice: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let channel = store.community_of(&id).and_then(|com| com.channel(&id));
-        let lock = store.send_lock(&id);
-        let staged_voice = channel.is_some_and(|ch| ch.is_voice());
-        let stage = channel.filter(|ch| ch.is_voice()).and_then(|ch| {
-            let com = store.community_of(&id)?;
-            Some(crate::voice::stage(
-                &self.voice,
-                store,
-                &self.voice_seen,
-                f32::from(window.viewport_size().height),
-                &com.community_id,
-                &ch.channel_id,
-                &store.my_npub,
-                self.is_slim,
-                &self.on_voice_handler(cx),
-            ))
-        });
-        let panel = self.community.as_ref().is_some_and(|v| v.panel);
-        let paper = self.wallpaper.image(self.wallpaper_key().as_ref());
-        let slim_com = channel.and_then(|_| store.community_of(&id)).filter(|_| self.is_slim);
-        let header = if let (Some(ch), Some(com)) = (channel, slim_com) {
-            crate::community::slim_header(store, com, ch, self.chat_menu_btn.clone(), on_community).into_any_element()
-        } else if let Some(ch) = channel {
-            let pins = self.pins.button(&id).map(|_| self.pins_on(cx));
-            crate::community::header(ch, panel, self.chat_menu_btn.clone(), pins, on_community).into_any_element()
-        } else {
-            self.dm_header(store, &id, paper.is_some(), cx).into_any_element()
-        };
-        let on_wp: crate::wallpaper::OnAct = {
-            let app = cx.entity().downgrade();
-            Rc::new(move |act, _, cx| {
-                app.update(cx, |app, cx| match act {
-                    crate::wallpaper::Act::Cancel => app.cancel_wallpaper(cx),
-                    crate::wallpaper::Act::Save => app.save_wallpaper(cx),
-                    crate::wallpaper::Act::Slide(blur, v) => app.wallpaper_slider(blur, v, cx),
-                })
-                .ok();
-            })
-        };
-        let staged = self.wallpaper.preview.as_ref().filter(|p| p.chat == id.as_ref());
-        let edit_bar = self.wallpaper.edit_alpha().filter(|_| staged.is_some() || self.wallpaper.preview.is_none()).map(|a| {
-            crate::wallpaper::edit_bar(&self.wallpaper.label, self.wallpaper.busy, a, &on_wp)
-        });
-        let preview_bar = staged.map(|p| crate::wallpaper::preview_bar(p.blur, p.dim, self.wallpaper.dragging.clone(), &on_wp));
-        let chat_box = self.chat_box.clone();
+    ) -> AnyElement {
         let rows_store = self.store.clone();
         let rows_id = id.clone();
         let rows = self.rows.clone();
@@ -8360,10 +8317,6 @@ impl VectorApp {
             .filter(|(_, t)| t.elapsed().as_secs_f32() < 1.5);
         let cmd_names = self.command_names();
         // `.history-edge.alone`: a chat with nothing yet has its beginning mid-view.
-        let alone = match self.rows.as_slice() {
-            [Row::Edge(edge)] => store.chat(&id).map(|chat| history_edge(store, chat, &on_act, *edge)),
-            _ => None,
-        };
         let anchors = self.anchors.clone();
         // 3px border, 12px padding and the 56px gutter on the left; 12px and the body's 12px on the right.
         let content_w = (f32::from(self.timeline.viewport_bounds().size.width) - 95.).max(0.);
@@ -8373,7 +8326,7 @@ impl VectorApp {
             let top = if self.is_slim && !staged_voice { 15. } else { 12. };
             if store.chat(&id).is_some_and(|chat| store.is_request(chat)) { top + 56. } else { top }
         };
-        let messages = list(self.timeline.clone(), move |i, window, cx| {
+        list(self.timeline.clone(), move |i, window, cx| {
             let rows_store = rows_store.borrow();
             let (Some(chat), Some(row)) = (rows_store.chat(&rows_id), rows.get(i)) else {
                 return div().into_any_element();
@@ -8512,7 +8465,95 @@ impl VectorApp {
             }
             el
         })
-        .size_full();
+        .size_full()
+        .into_any_element()
+    }
+
+    fn timeline_cached(&self, id: SharedString, staged_voice: bool, cx: &mut Context<Self>) -> AnyElement {
+        crate::pane::cached(
+            &self.panes.timeline,
+            gpui::StyleRefinement::default().size_full(),
+            move |app, window, cx| {
+                let store = app.store.clone();
+                let store = store.borrow();
+                app.timeline_list(&store, id.clone(), staged_voice, window, cx)
+            },
+            cx,
+        )
+    }
+
+    fn chat_pane(
+        &self,
+        store: &Store,
+        id: SharedString,
+        on_community: &crate::community::OnAct,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let channel = store.community_of(&id).and_then(|com| com.channel(&id));
+        let lock = store.send_lock(&id);
+        let staged_voice = channel.is_some_and(|ch| ch.is_voice());
+        let stage = channel.filter(|ch| ch.is_voice()).and_then(|ch| {
+            let com = store.community_of(&id)?;
+            Some(crate::voice::stage(
+                &self.voice,
+                store,
+                &self.voice_seen,
+                f32::from(window.viewport_size().height),
+                &com.community_id,
+                &ch.channel_id,
+                &store.my_npub,
+                self.is_slim,
+                &self.on_voice_handler(cx),
+            ))
+        });
+        let panel = self.community.as_ref().is_some_and(|v| v.panel);
+        let paper = self.wallpaper.image(self.wallpaper_key().as_ref());
+        let slim_com = channel.and_then(|_| store.community_of(&id)).filter(|_| self.is_slim);
+        let header = if let (Some(ch), Some(com)) = (channel, slim_com) {
+            crate::community::slim_header(store, com, ch, self.chat_menu_btn.clone(), on_community).into_any_element()
+        } else if let Some(ch) = channel {
+            let pins = self.pins.button(&id).map(|_| self.pins_on(cx));
+            crate::community::header(ch, panel, self.chat_menu_btn.clone(), pins, on_community).into_any_element()
+        } else {
+            self.dm_header(store, &id, paper.is_some(), cx).into_any_element()
+        };
+        let on_wp: crate::wallpaper::OnAct = {
+            let app = cx.entity().downgrade();
+            Rc::new(move |act, _, cx| {
+                app.update(cx, |app, cx| match act {
+                    crate::wallpaper::Act::Cancel => app.cancel_wallpaper(cx),
+                    crate::wallpaper::Act::Save => app.save_wallpaper(cx),
+                    crate::wallpaper::Act::Slide(blur, v) => app.wallpaper_slider(blur, v, cx),
+                })
+                .ok();
+            })
+        };
+        let staged = self.wallpaper.preview.as_ref().filter(|p| p.chat == id.as_ref());
+        let edit_bar = self.wallpaper.edit_alpha().filter(|_| staged.is_some() || self.wallpaper.preview.is_none()).map(|a| {
+            crate::wallpaper::edit_bar(&self.wallpaper.label, self.wallpaper.busy, a, &on_wp)
+        });
+        let preview_bar = staged.map(|p| crate::wallpaper::preview_bar(p.blur, p.dim, self.wallpaper.dragging.clone(), &on_wp));
+        let chat_box = self.chat_box.clone();
+        let clock = self.started.elapsed().as_secs_f32();
+        let app = cx.entity().downgrade();
+        let on_act: timeline::OnAct = Rc::new(move |msg_id, act, window, cx| {
+            let msg_id = msg_id.to_string();
+            app.update(cx, |app, cx| app.on_act(msg_id, act, window, cx))
+                .ok();
+        });
+        // `.history-edge.alone`: a chat with nothing yet has its beginning mid-view.
+        let alone = match self.rows.as_slice() {
+            [Row::Edge(edge)] => store.chat(&id).map(|chat| history_edge(store, chat, &on_act, *edge)),
+            _ => None,
+        };
+        // 3px border, 12px padding and the 56px gutter on the left; 12px and the body's 12px on the right.
+        // Slim's header floats 60px over a list padded 75px; a voice stage takes that place in flow.
+        let top_pad = {
+            let top = if self.is_slim && !staged_voice { 15. } else { 12. };
+            if store.chat(&id).is_some_and(|chat| store.is_request(chat)) { top + 56. } else { top }
+        };
+        let messages = self.timeline_cached(id.clone(), staged_voice, cx);
 
         let drawer_open = self.pins.open && self.pins.button(&id).is_some();
         let drawer = (self.pins.open && self.pins.button(&id).is_some()).then(|| {
