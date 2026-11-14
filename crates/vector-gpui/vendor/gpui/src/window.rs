@@ -1048,6 +1048,8 @@ pub(crate) struct AnimatedSprite {
     pub(crate) at: Bounds<ScaledPixels>,
     pub(crate) visible: Bounds<Pixels>,
     pub(crate) image: Bounds<Pixels>,
+    /// When this picture last stepped on screen.
+    pub(crate) shown: Option<Instant>,
 }
 
 pub(crate) struct Frame {
@@ -5360,6 +5362,7 @@ impl Window {
                 at,
                 visible: bounds.intersect(&image_bounds),
                 image: image_bounds,
+                shown: None,
             });
         }
         Ok(())
@@ -5369,6 +5372,9 @@ impl Window {
     /// presented scene: no render, layout or paint unless something else asked for one.
     pub(crate) fn step_animations(&mut self, cx: &mut App) {
         const FULL_DRAW_EVERY: Duration = Duration::from_secs(30);
+        const SMALL: Pixels = px(32.);
+        const SMALL_STEP: Duration = Duration::from_millis(100);
+        const SLACK: Duration = Duration::from_millis(5);
         if self.invalidator.is_dirty()
             || !self.is_window_active()
             || cx.reduce_motion()
@@ -5391,9 +5397,22 @@ impl Window {
             let mut last = last.unwrap_or(now);
             let delay = crate::elements::frame_delay(&r.data, ix);
             let elapsed = now.saturating_duration_since(last);
-            if elapsed >= delay {
-                ix = (ix + 1) % count;
-                last = now - (elapsed - delay).min(delay);
+            // Emoji-sized pictures step at most every SMALL_STEP, skipping frames to keep their
+            // speed: each step costs a present, and at that size the difference doesn't show.
+            let gap = if r.image.size.height <= SMALL { SMALL_STEP } else { Duration::ZERO };
+            let rested = r.shown.is_none_or(|s| now.saturating_duration_since(s) + SLACK >= gap);
+            if elapsed >= delay && rested {
+                let mut left = elapsed;
+                for _ in 0..count {
+                    let d = crate::elements::frame_delay(&r.data, ix);
+                    if left < d {
+                        break;
+                    }
+                    left -= d;
+                    ix = (ix + 1) % count;
+                }
+                last = now - left.min(crate::elements::frame_delay(&r.data, ix));
+                r.shown = Some(now);
                 let params = RenderImageParams {
                     image_id: r.data.id,
                     frame_index: ix,
@@ -5415,8 +5434,10 @@ impl Window {
                 }
             }
             r.clock.set((ix, Some(last)));
-            let due = crate::elements::frame_delay(&r.data, ix)
+            let frame_due = crate::elements::frame_delay(&r.data, ix)
                 .saturating_sub(now.saturating_duration_since(last));
+            let gap_due = r.shown.map_or(Duration::ZERO, |s| gap.saturating_sub(now.saturating_duration_since(s)));
+            let due = frame_due.max(gap_due);
             next = Some(next.map_or(due, |n| n.min(due)));
         }
         self.rendered_frame.animated = records;
