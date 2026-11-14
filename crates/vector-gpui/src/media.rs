@@ -483,6 +483,10 @@ fn gif_frames(bytes: &[u8], to: impl Fn(u32, u32) -> (u32, u32)) -> Option<(Vec<
     None
 }
 
+/// Decoded bytes one animation may hold. Every frame is kept whole in memory and again on
+/// the GPU, so a long animation keeps every other frame (twice as long each) until it fits.
+const ANIMATION_BUDGET: usize = 24 << 20;
+
 fn frames_of(
     frames: image::Frames<'_>,
     w: u32,
@@ -491,21 +495,52 @@ fn frames_of(
 ) -> Option<(Vec<Frame>, u32, u32)> {
     let (tw, th) = to(w, h);
     let scale = tw < w || th < h;
-    let frames = frames
-        .map(|f| {
-            f.map(|f| {
-                let delay = f.delay();
-                let buf = f.into_buffer();
-                let buf = if scale {
-                    image::imageops::resize(&buf, tw.max(1), th.max(1), FilterType::Triangle)
-                } else {
-                    buf
-                };
-                Frame::from_parts(to_bgra(buf), 0, 0, delay)
-            })
-        })
-        .collect::<Result<Vec<_>, _>>()
-        .ok()?;
+    let ms = |d: image::Delay| {
+        let (n, d) = d.numer_denom_ms();
+        // Browsers play 10ms or less as 100ms.
+        match n / d.max(1) {
+            0..=10 => 100,
+            v => v,
+        }
+    };
+    let mut kept: Vec<(image::RgbaImage, u32)> = Vec::new();
+    let mut bytes = 0usize;
+    let mut stride = 1usize;
+    for (i, f) in frames.enumerate() {
+        let f = f.ok()?;
+        let delay = ms(f.delay());
+        if i % stride != 0 {
+            if let Some(last) = kept.last_mut() {
+                last.1 += delay;
+            }
+            continue;
+        }
+        let buf = f.into_buffer();
+        let buf = if scale {
+            image::imageops::resize(&buf, tw.max(1), th.max(1), FilterType::Triangle)
+        } else {
+            buf
+        };
+        bytes += buf.len();
+        kept.push((buf, delay));
+        if bytes > ANIMATION_BUDGET && kept.len() > 1 {
+            let mut halved = Vec::with_capacity(kept.len() / 2 + 1);
+            let mut it = kept.into_iter();
+            while let Some((buf, mut delay)) = it.next() {
+                if let Some((_, d)) = it.next() {
+                    delay += d;
+                }
+                halved.push((buf, delay));
+            }
+            kept = halved;
+            bytes = kept.iter().map(|(b, _)| b.len()).sum();
+            stride *= 2;
+        }
+    }
+    let frames = kept
+        .into_iter()
+        .map(|(buf, delay)| Frame::from_parts(to_bgra(buf), 0, 0, image::Delay::from_numer_denom_ms(delay, 1)))
+        .collect();
     Some((frames, w, h))
 }
 

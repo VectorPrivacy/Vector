@@ -932,7 +932,14 @@ thread_local! {
 
 /// Redraw `window` once `due` has passed, instead of on every vsync until then.
 pub fn wake_window_in(window: &mut Window, cx: &mut App, due: Duration) {
-    let at = Instant::now() + due.max(Duration::from_millis(8));
+    // Wakes land on one shared 30 fps grid, so many animations out of phase cost one
+    // redraw per tick rather than one each.
+    const TICK: Duration = Duration::from_millis(33);
+    thread_local!(static EPOCH: Instant = Instant::now());
+    let epoch = EPOCH.with(|e| *e);
+    let want = Instant::now() + due;
+    let ticks = (want.saturating_duration_since(epoch).as_nanos() / TICK.as_nanos() + 1) as u32;
+    let at = epoch + TICK * ticks;
     let id = window.window_handle().window_id();
     let sooner = WAKES.with(|w| {
         let mut w = w.borrow_mut();
