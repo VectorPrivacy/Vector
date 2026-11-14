@@ -282,6 +282,7 @@ pub fn members(voice: &Voice, store: &Store, community: &str, channel: &str, on:
         list = list.child(
             div()
                 .id(key.clone())
+                .motion_host()
                 .relative()
                 .h(px(28.))
                 .pl(px(34.))
@@ -757,6 +758,7 @@ pub fn stage(
                 } else {
                     d.child(
                         div()
+                            .motion_live()
                             .relative()
                             .rounded_full()
                             .shadow(vec![

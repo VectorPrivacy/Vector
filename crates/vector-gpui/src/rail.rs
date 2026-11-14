@@ -305,7 +305,7 @@ pub fn render(
 
 /// The open bar, or the grey unread one, at the rail's edge.
 fn bars(d: gpui::Stateful<gpui::Div>, left: f32, inset: f32, open: bool, unread: bool) -> gpui::Stateful<gpui::Div> {
-    d.when(open, |d| {
+    d.motion_host().when(open, |d| {
         d.child(
             div()
                 .absolute()

@@ -799,6 +799,18 @@ pub trait InteractiveElement: Sized {
         self
     }
 
+    /// Faces ([`Img::face`]) inside this element animate only while it is hovered.
+    fn motion_host(mut self) -> Self {
+        self.interactivity().motion = Some(Motion::Host);
+        self
+    }
+
+    /// Faces inside this element animate freely, whatever host surrounds it.
+    fn motion_live(mut self) -> Self {
+        self.interactivity().motion = Some(Motion::Live);
+        self
+    }
+
     /// Assign this element an ID, so that it can be used with interactivity
     fn id(mut self, id: impl Into<ElementId>) -> Stateful<Self> {
         self.interactivity().element_id = Some(id.into());
@@ -2242,6 +2254,7 @@ pub struct Interactivity {
     pub(crate) scroll_offset: Option<Rc<RefCell<Point<Pixels>>>>,
     pub(crate) ongoing_scroll: Option<Rc<RefCell<OngoingScroll>>>,
     pub(crate) group: Option<SharedString>,
+    pub(crate) motion: Option<Motion>,
     /// The base style of the element, before any modifications are applied
     /// by focus, active, etc.
     pub base_style: Box<StyleRefinement>,
@@ -2506,6 +2519,7 @@ impl Interactivity {
             || self.window_control.is_some()
             || style.mouse_cursor.is_some()
             || self.group.is_some()
+            || self.motion == Some(Motion::Host)
             || self.scroll_offset.is_some()
             || self.tracked_focus_handle.is_some()
             || self.hover_style.is_some()
@@ -2710,7 +2724,18 @@ impl Interactivity {
                                             }
                                         }
 
+                                        let scope = match self.motion {
+                                            Some(Motion::Live) => Some(None),
+                                            Some(Motion::Host) => hitbox.map(|h| Some(h.id)),
+                                            None => None,
+                                        };
+                                        if let Some(scope) = scope {
+                                            cx.default_global::<MotionScopes>().0.push(scope);
+                                        }
                                         f(&style, window, cx);
+                                        if scope.is_some() {
+                                            cx.default_global::<MotionScopes>().0.pop();
+                                        }
 
                                         if let Some(_hitbox) = hitbox {
                                             #[cfg(any(feature = "inspector", debug_assertions))]
@@ -4139,6 +4164,24 @@ fn handle_tooltip_check_visible_and_update(
     }
 
     active_tooltip.borrow().is_some()
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Motion {
+    Host,
+    Live,
+}
+
+/// The motion scopes being painted, innermost last: a host's hitbox, or `None` for a live one.
+#[derive(Default)]
+pub(crate) struct MotionScopes(pub(crate) Vec<Option<HitboxId>>);
+
+impl Global for MotionScopes {}
+
+impl MotionScopes {
+    pub fn current(cx: &mut App) -> Option<Option<HitboxId>> {
+        cx.default_global::<Self>().0.last().copied()
+    }
 }
 
 #[derive(Default)]

@@ -6559,6 +6559,7 @@ fn chrome(window: &Window, login: bool, mark_only: bool) -> gpui::Div {
 pub(crate) fn avatar(store: &Store, npub: &str, size: f32) -> AnyElement {
     match store.avatar_path(npub) {
         Some(path) => img(path).object_fit(gpui::ObjectFit::Cover)
+            .face()
             .size(px(size))
             .rounded_full()
             .flex_shrink_0()
@@ -6801,6 +6802,7 @@ fn rail(
             let on = on_c.clone();
             div()
                 .id(SharedString::from(format!("rail-{}", chat.id)))
+                .motion_host()
                 .relative()
                 .size(px(45.))
                 .mx_auto()
@@ -6819,6 +6821,7 @@ fn rail(
                 let (id, on) = (chat.id.clone(), on_c.clone());
                 div()
                     .id(SharedString::from(format!("rail-{}", chat.id)))
+                    .motion_host()
                     .cursor_pointer()
                     .hover(|d| d.bg(white_a(0.045)))
                     .on_click(move |_, w, cx| on(crate::community::Act::Dm(id.clone()), w, cx))
@@ -7017,6 +7020,7 @@ fn rail(
                 div().pt(px(8.)).pb(px(8.)).child(
                     div()
                         .id("ws-rail-account")
+                        .motion_host()
                         .cursor_pointer()
                         .on_click(move |e, w, cx| on_me1(e, w, cx))
                         .w(px(40.))
@@ -7034,6 +7038,7 @@ fn rail(
             div().p(px(8.)).pt(px(8.)).child(
                 div()
                     .id("ws-rail-account")
+                    .motion_host()
                     .cursor_pointer()
                     .on_click(move |e, w, cx| on_me2(e, w, cx))
                     .h(px(54.))
@@ -7606,6 +7611,7 @@ fn chat_row(store: &Store, chat: &SerializableChat, active: bool, pinned: bool) 
     let last = chat.messages.last().map(|m| m.at).unwrap_or(0);
     div()
         .id(SharedString::from(format!("row-{}", chat.id)))
+        .motion_host()
         .h(px(ROW_PITCH))
         .w(px(list_w() - 9.))
         .pb(px(4.))
@@ -7795,6 +7801,7 @@ impl VectorApp {
         };
         let name_row = div()
             .id("chat-header-info")
+            .motion_live()
             .when(!notes, |d| {
                 let id = id.to_string();
                 d.cursor_pointer().on_click(cx.listener(move |app, _, _, cx| app.open_profile(id.clone(), cx)))
@@ -8745,7 +8752,7 @@ fn history_edge(store: &Store, chat: &SerializableChat, on: &timeline::OnAct, ed
                 .pb(px(20.))
                 .gap(px(6.))
                 .text_color(white_a(0.6))
-                .child(div().mb(px(8.)).child(art))
+                .child(div().motion_live().mb(px(8.)).child(art))
                 .child(
                     div()
                         .text_size(px(16.))

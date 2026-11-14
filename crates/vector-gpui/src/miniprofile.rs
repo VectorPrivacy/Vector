@@ -204,6 +204,7 @@ pub fn render(m: &Mini, store: &Store, window: Size<Pixels>, anchors: &crate::ki
         }));
     let avatar = div()
         .id("mini-profile-avatar")
+        .motion_live()
         .absolute()
         .top(px(28.))
         .left(px(12.))

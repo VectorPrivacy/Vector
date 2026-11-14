@@ -1,5 +1,6 @@
 use crate::{
-    AnyElement, AnyImageCache, App, Asset, AssetLogger, Bounds, DefiniteLength, Element, ElementId,
+    AnyElement, AnyImageCache, App, Asset, AssetLogger, Bounds, DefiniteLength, DispatchPhase,
+    Element, ElementId, MotionScopes, MouseMoveEvent,
     Entity, GlobalElementId, Hitbox, Image, ImageCache, InspectorElementId, InteractiveElement,
     Interactivity, LayoutId, Length, ObjectFit, Pixels, RenderImage, Resource, SharedString,
     SharedUri, StyleRefinement, Styled, Task, Window, decode_gif_image, decode_static_image,
@@ -12,7 +13,9 @@ use gpui_util::ResultExt;
 use image::{ImageError, ImageFormat};
 use scheduler::Instant;
 use std::{
+    cell::Cell,
     fs,
+    rc::Rc,
     io::{self},
     ops::{Deref, DerefMut},
     path::{Path, PathBuf},
@@ -178,6 +181,14 @@ impl StyledImage for Img {
     }
 }
 
+impl Stateful<Img> {
+    /// See [`Img::face`].
+    pub fn face(mut self) -> Self {
+        self.element.face = true;
+        self
+    }
+}
+
 impl StyledImage for Stateful<Img> {
     fn image_style(&mut self) -> &mut ImageStyle {
         &mut self.element.style
@@ -190,6 +201,7 @@ pub struct Img {
     source: ImageSource,
     style: ImageStyle,
     image_cache: Option<AnyImageCache>,
+    face: bool,
 }
 
 /// Create a new image element.
@@ -200,10 +212,18 @@ pub fn img(source: impl Into<ImageSource>) -> Img {
         source: source.into(),
         style: ImageStyle::default(),
         image_cache: None,
+        face: false,
     }
 }
 
 impl Img {
+    /// Hold an animation on its first frame unless the nearest motion scope lets it move: a
+    /// live one always, a host while hovered. See [`InteractiveElement::motion_host`].
+    pub fn face(mut self) -> Self {
+        self.face = true;
+        self
+    }
+
     /// A list of all format extensions currently supported by this img element
     pub fn extensions() -> &'static [&'static str] {
         // This is the list in [image::ImageFormat::from_extension] + `svg`
@@ -250,12 +270,14 @@ struct ImgState {
     frame_index: usize,
     last_frame_time: Option<Instant>,
     started_loading: Option<(Instant, Task<()>)>,
+    hovered: Rc<Cell<bool>>,
 }
 
 /// The image layout state between frames
 pub struct ImgLayoutState {
     frame_index: usize,
     replacement: Option<AnyElement>,
+    hover_gate: Option<Rc<Cell<bool>>>,
 }
 
 impl Element for Img {
@@ -280,6 +302,7 @@ impl Element for Img {
         let mut layout_state = ImgLayoutState {
             frame_index: 0,
             replacement: None,
+            hover_gate: None,
         };
 
         window.with_optional_element_state(global_id, |state, window| {
@@ -288,6 +311,7 @@ impl Element for Img {
                     frame_index: 0,
                     last_frame_time: None,
                     started_loading: None,
+                    hovered: Rc::default(),
                 })
             });
 
@@ -315,7 +339,16 @@ impl Element for Img {
 
                             if let Some(state) = &mut state {
                                 state.frame_index = state.frame_index.min(max_frame_index);
-                                if frame_count > 1 && !cx.reduce_motion() {
+                                let still = frame_count > 1
+                                    && self.face
+                                    && {
+                                        layout_state.hover_gate = Some(state.hovered.clone());
+                                        !state.hovered.get()
+                                    };
+                                if still {
+                                    state.frame_index = 0;
+                                }
+                                if frame_count > 1 && !cx.reduce_motion() && !still {
                                     if window.is_window_active() {
                                         let current_time = Instant::now();
                                         if let Some(last_frame_time) = state.last_frame_time {
@@ -468,6 +501,27 @@ impl Element for Img {
         cx: &mut App,
     ) {
         let source = self.source.clone();
+        if let Some(hovered) = layout_state.hover_gate.take() {
+            let host = MotionScopes::current(cx);
+            let moving = match host {
+                Some(Some(hitbox)) => hitbox.is_hovered(window),
+                Some(None) => true,
+                None => false,
+            };
+            if moving != hovered.get() {
+                hovered.set(moving);
+                window.refresh();
+            }
+            if let Some(Some(hitbox)) = host {
+                window.on_mouse_event(move |_: &MouseMoveEvent, phase, window, _| {
+                    if phase == DispatchPhase::Capture && hitbox.is_hovered(window) != hovered.get()
+                    {
+                        hovered.set(!hovered.get());
+                        window.refresh();
+                    }
+                });
+            }
+        }
         self.interactivity.paint(
             global_id,
             inspector_id,

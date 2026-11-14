@@ -165,7 +165,7 @@ const LABEL: u32 = 0x8a8a8a;
 /// The community's logo, or the group placeholder until it has one.
 pub fn logo(store: &Store, id: &str, size: f32, radius: f32) -> gpui::Stateful<gpui::Img> {
     match store.icon(id) {
-        Some(path) => img(path).object_fit(gpui::ObjectFit::Cover),
+        Some(path) => img(path).object_fit(gpui::ObjectFit::Cover).face(),
         None => img("icons/group-placeholder.svg"),
     }
     .size(px(size))
@@ -358,6 +358,7 @@ pub fn sidebar(
     };
     let head = div()
         .id("chatlist-community-head")
+        .motion_live()
         .h(px(61.))
         .flex_shrink_0()
         .flex()
@@ -775,6 +776,7 @@ fn member_row(store: &Store, cid: &str, npub: &str, owner: bool, colour: Option<
     let slim = crate::theme::is_slim();
     div()
         .id(SharedString::from(format!("member-{npub}")))
+        .motion_host()
         .h(px(if slim { 46. } else { 40. }))
         .rounded(px(6.))
         .flex()

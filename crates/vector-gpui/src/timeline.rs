@@ -214,6 +214,7 @@ pub fn base_look() -> Look {
 fn avatar(store: &Store, npub: &str, size: f32) -> AnyElement {
     match store.avatar_path(npub) {
         Some(path) => img(path).object_fit(gpui::ObjectFit::Cover)
+            .face()
             .size(px(size))
             .rounded_full()
             .flex_shrink_0()
@@ -463,6 +464,7 @@ fn row_shell(
             div()
                 .id(SharedString::from(m.id.clone()))
                 .group(group)
+                .motion_host()
                 .relative()
                 .on_hover({
                     let (act, id) = (ctx.on_act.clone(), m.id.clone());
