@@ -4297,6 +4297,22 @@ impl VectorApp {
         }
     }
 
+    #[cfg(feature = "devctl")]
+    pub(crate) fn dev_dump(&self, id: &str) -> serde_json::Value {
+        let Some(mut m) = self.message(id) else { return serde_json::json!({ "error": "not loaded" }) };
+        for a in &mut m.attachments {
+            a.key = format!("<{}>", a.key.len());
+            a.nonce = format!("<{}>", a.nonce.len());
+        }
+        let media = self.media.borrow();
+        let state: Vec<_> = m
+            .attachments
+            .iter()
+            .map(|a| serde_json::json!({ "id": a.id, "started": media.started.contains(&a.id), "auto_fired": media.auto_fired.contains(&a.id), "transfer": media.transfers.contains_key(&a.id), "failed": media.failed.get(&a.id) }))
+            .collect();
+        serde_json::json!({ "message": m, "ui": state })
+    }
+
     fn message(&self, id: &str) -> Option<Message> {
         let store = self.store.borrow();
         let find = |chat: &str| store.chat(chat)?.messages.iter().find(|m| m.id == id).cloned();
@@ -6592,10 +6608,13 @@ fn chrome(window: &Window, login: bool, mark_only: bool) -> gpui::Div {
             .window_control_area(area)
             // macOS has no hit-test for control areas: the click acts here.
             .when(cfg!(target_os = "macos"), |d| {
-                d.on_click(move |_, window, _| match area {
+                d.on_click(move |_, window, cx| match area {
                     WindowControlArea::Min => window.minimize_window(),
                     WindowControlArea::Max => window.zoom_window(),
-                    WindowControlArea::Close => window.remove_window(),
+                    WindowControlArea::Close => {
+                        crate::winstate::save(window, cx);
+                        window.remove_window();
+                    }
                     WindowControlArea::Drag => {}
                 })
             })

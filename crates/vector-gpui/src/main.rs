@@ -105,6 +105,7 @@ mod theme;
 mod timeline;
 mod transcript;
 mod wallpaper;
+mod winstate;
 mod transfer;
 mod ui;
 mod uploaderr;
@@ -132,6 +133,7 @@ struct Args {
     data_dir: Option<PathBuf>,
     open: Option<String>,
     size: (f32, f32),
+    sized: bool,
 }
 
 const FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/reference/fixtures.json");
@@ -142,6 +144,7 @@ fn args() -> Args {
         data_dir: None,
         open: None,
         size: (1200., 760.),
+        sized: false,
     };
     let mut it = std::env::args().skip(1).peekable();
     while let Some(flag) = it.next() {
@@ -153,6 +156,7 @@ fn args() -> Args {
             "--data-dir" => a.data_dir = it.next().map(PathBuf::from),
             "--open" => a.open = it.next(),
             "--size" => {
+                a.sized = true;
                 if let Some((w, h)) = it
                     .next()
                     .and_then(|s| s.split_once('x').map(|(w, h)| (w.parse(), h.parse())))
@@ -212,14 +216,21 @@ fn main() {
             .expect("bundled fonts");
         composer::bind_keys(cx);
         miniapp::attach(cx);
-        let bounds = Bounds::centered(None, size(px(args.size.0), px(args.size.1)), cx);
+        let min = size(px(385.), px(575.));
+        let remember = fixtures.is_none() && !args.sized;
+        let (window_bounds, display_id) = if remember {
+            winstate::restore(size(px(args.size.0), px(args.size.1)), min, cx)
+        } else {
+            (WindowBounds::Windowed(Bounds::centered(None, size(px(args.size.0), px(args.size.1)), cx)), None)
+        };
         let window = cx
             .open_window(
                 WindowOptions {
-                    window_bounds: Some(WindowBounds::Windowed(bounds)),
+                    window_bounds: Some(window_bounds),
+                    display_id,
                     titlebar: chrome::titlebar(),
                     window_decorations: Some(WindowDecorations::Client),
-                    window_min_size: Some(size(px(385.), px(575.))),
+                    window_min_size: Some(min),
                     app_id: Some("io.vectorapp.gpui".into()),
                     ..Default::default()
                 },
@@ -236,6 +247,35 @@ fn main() {
             )
             .expect("main window");
         cx.activate(true);
+        // Closing the main window ends the app: nothing else can bring it back.
+        let main = window.window_id();
+        cx.on_window_closed(move |cx, id| {
+            if id == main {
+                cx.quit();
+            }
+        })
+        .detach();
+        if remember {
+            winstate::enable();
+            window
+                .update(cx, |_, window, cx| {
+                    let generation = std::rc::Rc::new(std::cell::Cell::new(0u64));
+                    cx.observe_window_bounds(window, move |_, window, cx| {
+                        let now = generation.get() + 1;
+                        generation.set(now);
+                        let generation = generation.clone();
+                        cx.spawn_in(window, async move |_, cx| {
+                            cx.background_executor().timer(std::time::Duration::from_millis(400)).await;
+                            if generation.get() == now {
+                                cx.update(|window, cx| winstate::save(window, cx)).ok();
+                            }
+                        })
+                        .detach();
+                    })
+                    .detach();
+                })
+                .ok();
+        }
         let _keep = links_tx;
         cx.spawn(async move |cx| {
             use futures::StreamExt;

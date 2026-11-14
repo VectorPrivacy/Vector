@@ -76,6 +76,7 @@ fn emit(event: &str, payload: serde_json::Value) {
 }
 
 fn fail(chat: &str, msg_id: &str, attachment_id: &str, reason: &str) -> bool {
+    vector_core::log_warn!("attachment {attachment_id} of {msg_id}: {reason}");
     emit(
         "attachment_download_result",
         json!({ "profile_id": chat, "msg_id": msg_id, "id": attachment_id, "success": false, "result": reason }),
@@ -102,6 +103,17 @@ pub async fn download(chat: String, msg_id: String, attachment_id: String, auto:
             "attachment_download_result",
             json!({ "profile_id": chat, "msg_id": msg_id, "id": attachment_id, "success": true, "resident": true, "result": vector_core::media::MediaRef::held(&held) }),
         );
+        // Held already (fetched on receipt, or by another message): the row may not know yet.
+        if !attachment.resident {
+            let att = &mut message.attachments[idx];
+            att.resident = true;
+            att.verified = true;
+            att.downloading = false;
+            emit(
+                "message_update",
+                json!({ "old_id": message.id, "message": message, "chat_id": chat_id }),
+            );
+        }
         return true;
     }
     let author = if message.mine {
