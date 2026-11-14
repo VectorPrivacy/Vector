@@ -10457,6 +10457,8 @@ impl VectorApp {
                     self.category_menu(id, category, at, cx);
                 }
             }
+            Act::DropChannel(moved, at) => self.drop_channel(moved, at, cx),
+            Act::DropCategory(moved, target, before) => self.drop_category(moved, target, before, cx),
             Act::ChatMenu => {
                 if let Some(chat) = self.open.clone() {
                     self.open_chat_menu(chat.to_string(), cx);
@@ -14528,6 +14530,90 @@ impl VectorApp {
                 messaging::set_active_chat(None);
             }
         }
+    }
+
+    /// A dragged channel landed: shown in its new place at once, then published; the list
+    /// re-reads what the Community kept once the move lands.
+    fn drop_channel(&mut self, moved: String, at: crate::community::DropAt, cx: &mut Context<Self>) {
+        use crate::community::DropAt;
+        let Some(cid) = self.community.as_ref().map(|v| v.id.clone()) else { return };
+        let (category, index) = {
+            let mut store = self.store.borrow_mut();
+            let Some(com) = store.communities.iter_mut().find(|c| c.community_id == cid) else { return };
+            let Some(from) = com.channels.iter().position(|c| c.channel_id == moved) else { return };
+            let (category, index) = match &at {
+                DropAt::Into(cat) => (Some(cat.clone()), 0),
+                DropAt::Before(t) | DropAt::After(t) => {
+                    let Some(cat) = com.channel(t).map(|c| c.category_id.clone()) else { return };
+                    let group: Vec<&str> = com.channels.iter().filter(|c| c.channel_id != moved && c.category_id == cat).map(|c| c.channel_id.as_str()).collect();
+                    let Some(i) = group.iter().position(|c| c == t) else { return };
+                    (cat, i + usize::from(matches!(at, DropAt::After(_))))
+                }
+            };
+            let was = com.channels.iter().filter(|c| c.category_id == category).position(|c| c.channel_id == moved);
+            if com.channels[from].category_id == category && was == Some(index) {
+                return;
+            }
+            let mut ch = com.channels.remove(from);
+            ch.category_id = category.clone();
+            let group: Vec<usize> = com.channels.iter().enumerate().filter(|(_, c)| c.category_id == category).map(|(i, _)| i).collect();
+            let to = group.get(index).copied().or_else(|| group.last().map(|i| i + 1)).unwrap_or(com.channels.len());
+            com.channels.insert(to, ch);
+            (category, index)
+        };
+        crate::pane::notify(&self.panes.side, cx);
+        cx.notify();
+        if !self.live {
+            return;
+        }
+        let rx = backend::run(backend::community::move_channel(cid, moved, category, index));
+        self.after_move(rx, cx);
+    }
+
+    /// A dragged Category landed before or after another: shown at once, then published.
+    fn drop_category(&mut self, moved: String, target: String, before: bool, cx: &mut Context<Self>) {
+        if moved == target {
+            return;
+        }
+        let Some(cid) = self.community.as_ref().map(|v| v.id.clone()) else { return };
+        let index = {
+            let mut store = self.store.borrow_mut();
+            let Some(com) = store.communities.iter_mut().find(|c| c.community_id == cid) else { return };
+            let Some(from) = com.categories.iter().position(|k| k.category_id == moved) else { return };
+            let k = com.categories.remove(from);
+            let Some(t) = com.categories.iter().position(|k| k.category_id == target) else {
+                com.categories.insert(from, k);
+                return;
+            };
+            let index = t + usize::from(!before);
+            com.categories.insert(index, k);
+            if index == from {
+                return;
+            }
+            index
+        };
+        crate::pane::notify(&self.panes.side, cx);
+        cx.notify();
+        if !self.live {
+            return;
+        }
+        let rx = backend::run(backend::community::move_category(cid, moved, index));
+        self.after_move(rx, cx);
+    }
+
+    /// A move published: the Community's own order read back, or why it didn't land.
+    fn after_move(&mut self, rx: futures::channel::oneshot::Receiver<Result<(), String>>, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            let res = rx.await;
+            this.update(cx, |this, cx| {
+                if let Ok(Err(e)) = res {
+                    this.notice("Couldn't move it", e, cx);
+                }
+                this.reload_communities(cx);
+            })
+            .ok();
+        })
+        .detach();
     }
 
     fn reload_communities(&mut self, cx: &mut Context<Self>) {
@@ -19061,8 +19147,10 @@ impl VectorApp {
                     "id": c.community_id,
                     "name": c.name,
                     "channels": c.channels.iter().map(|ch| serde_json::json!({
-                        "id": ch.channel_id, "name": ch.name, "voice": ch.is_voice(),
+                        "id": ch.channel_id, "name": ch.name, "voice": ch.is_voice(), "category": ch.category_id,
                     })).collect::<Vec<_>>(),
+                    "categories": c.categories.iter().map(|k| serde_json::json!({ "id": k.category_id, "name": k.name })).collect::<Vec<_>>(),
+                    "owner": c.is_owner,
                 })
             })
             .collect();
@@ -19105,6 +19193,20 @@ impl VectorApp {
             this.update(cx, |this, cx| this.refresh_unread(cx)).ok();
         })
         .detach();
+    }
+
+    /// The sidebar's drops, as a drag would land them: `before`, `after` or `into` a target.
+    pub(crate) fn dev_drop(&mut self, what: &str, moved: &str, how: &str, target: &str, cx: &mut Context<Self>) {
+        use crate::community::DropAt;
+        let (moved, target) = (moved.to_string(), target.to_string());
+        match (what, how) {
+            ("channel", "before") => self.drop_channel(moved, DropAt::Before(target), cx),
+            ("channel", "after") => self.drop_channel(moved, DropAt::After(target), cx),
+            ("channel", "into") => self.drop_channel(moved, DropAt::Into(target), cx),
+            ("category", "before") => self.drop_category(moved, target, true, cx),
+            ("category", "after") => self.drop_category(moved, target, false, cx),
+            _ => {}
+        }
     }
 
     pub(crate) fn dev_timeline(&self) -> &ListState {

@@ -15,6 +15,8 @@
 //! - `dev:net:<json>`: stand in for the network status the routing views read
 //! - `dev:typing:<chat>:<npub>`: show that npub typing in that chat, as if a notice arrived
 //! - `dev:move:<x>,<y>` / `dev:click:<x>,<y>` / `dev:rclick:<x>,<y>`: the mouse, in window points
+//! - `dev:drag:<x1>,<y1>,<x2>,<y2>`: press at the first point, move with the button held, release at the second
+//! - `dev:drop:<channel|category>:<id>:<before|after|into>:<target id>`: a sidebar drop, as a drag lands it
 //! - `dev:leave`: the pointer leaves the window, as the platform reports it
 //! - `dev:wheel:<x>,<y>,<dy>`: scroll what is under the point (positive is down)
 //! - `dev:type:<text>`: type into whatever has focus
@@ -145,6 +147,34 @@ pub fn run(app: &mut VectorApp, cmd: &str, window: &mut Window, cx: &mut Context
                     window.dispatch_event(e, cx);
                 }
             });
+        }
+        "drag" => {
+            let n: Vec<f32> = rest.split(',').filter_map(|v| v.trim().parse().ok()).collect();
+            let [x1, y1, x2, y2] = n[..] else {
+                return answer(json!({ "error": "expected x1,y1,x2,y2" }));
+            };
+            let left = MouseButton::Left;
+            let mut events = vec![
+                PlatformInput::MouseMove(MouseMoveEvent { position: point(px(x1), px(y1)), pressed_button: None, modifiers: Modifiers::default() }),
+                PlatformInput::MouseDown(MouseDownEvent { button: left, position: point(px(x1), px(y1)), click_count: 1, ..Default::default() }),
+            ];
+            for i in 1..=8 {
+                let t = i as f32 / 8.;
+                let at = point(px(x1 + (x2 - x1) * t), px(y1 + (y2 - y1) * t));
+                events.push(PlatformInput::MouseMove(MouseMoveEvent { position: at, pressed_button: Some(left), modifiers: Modifiers::default() }));
+            }
+            events.push(PlatformInput::MouseUp(MouseUpEvent { button: left, position: point(px(x2), px(y2)), click_count: 1, ..Default::default() }));
+            later(window, cx, move |window, cx| {
+                for e in events {
+                    window.dispatch_event(e, cx);
+                }
+            });
+        }
+        "drop" => {
+            let p: Vec<&str> = rest.split(':').collect();
+            if let [what, moved, how, target] = p[..] {
+                app.dev_drop(what, moved, how, target, cx);
+            }
         }
         "leave" => later(window, cx, |window, cx| {
             // Just past the right edge, where macOS reports a pointer that has left.

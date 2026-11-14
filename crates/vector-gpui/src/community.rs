@@ -55,6 +55,64 @@ pub enum Act {
     MemberMenu(String, gpui::Point<gpui::Pixels>),
     /// A roster section head's menu: a role's carries its id.
     SectionMenu(String, gpui::Point<gpui::Pixels>),
+    /// A manager dropped a dragged channel: before or after another, or into a Category's top.
+    DropChannel(String, DropAt),
+    /// A manager dropped a dragged Category before (`true`) or after another.
+    DropCategory(String, String, bool),
+}
+
+/// Where a dragged channel lands.
+#[derive(Clone, Debug)]
+pub enum DropAt {
+    Before(String),
+    After(String),
+    /// The top of this Category.
+    Into(String),
+}
+
+/// A channel row being moved by a manager.
+#[derive(Clone)]
+pub struct ChannelDrag {
+    id: String,
+    name: SharedString,
+}
+
+/// A Category heading being moved by a manager.
+#[derive(Clone)]
+pub struct CategoryDrag {
+    id: String,
+    name: SharedString,
+}
+
+/// What follows the pointer while a channel or Category moves.
+struct DragGhost(SharedString);
+
+impl gpui::Render for DragGhost {
+    fn render(&mut self, _: &mut Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
+        div()
+            .w(px(200.))
+            .h(px(32.))
+            .px(px(10.))
+            .flex()
+            .items_center()
+            .rounded(px(6.))
+            .bg(c(0x161616))
+            .opacity(0.92)
+            .shadow_lg()
+            .text_size(px(15.))
+            .text_color(c(0xffffff))
+            .child(div().truncate().child(self.0.clone()))
+    }
+}
+
+/// A drop half over a row or heading: its top or bottom, lit with the accent edge while
+/// something of type `D` hovers it.
+fn drop_half<D: 'static>(top: bool, on: &OnAct, act: impl Fn(&D) -> Act + 'static) -> gpui::Div {
+    let zone = div().absolute().left_0().right_0().h(gpui::relative(0.5));
+    let zone = if top { zone.top_0() } else { zone.bottom_0() };
+    let on = on.clone();
+    zone.drag_over::<D>(move |d, _, _, _| if top { d.border_t_2() } else { d.border_b_2() }.border_color(c(PRIMARY)))
+        .on_drop(move |d: &D, w, cx| on(act(d), w, cx))
 }
 
 pub type OnAct = Rc<dyn Fn(Act, &mut Window, &mut App)>;
@@ -286,6 +344,16 @@ fn channel_row(
             let (on, id) = (on.clone(), ch.channel_id.clone());
             move |e, w, cx| on(Act::ChannelMenu(id.clone(), e.position), w, cx)
         })
+        // A manager moves channels: dragged onto another's top or bottom half.
+        .when(owner, |d| {
+            let (above, below) = (ch.channel_id.clone(), ch.channel_id.clone());
+            d.relative()
+                .on_drag(ChannelDrag { id: ch.channel_id.clone(), name: ch.name.clone().into() }, |d: &ChannelDrag, _, _, cx| {
+                    cx.new(|_| DragGhost(d.name.clone()))
+                })
+                .child(drop_half(true, on, move |d: &ChannelDrag| Act::DropChannel(d.id.clone(), DropAt::Before(above.clone()))))
+                .child(drop_half(false, on, move |d: &ChannelDrag| Act::DropChannel(d.id.clone(), DropAt::After(below.clone()))))
+        })
         .child(icon(channel_glyph(ch), 18., ink))
         .child(
             div()
@@ -486,6 +554,19 @@ pub fn sidebar(
                     .on_mouse_down(gpui::MouseButton::Right, {
                         let (on, id) = (on.clone(), cat.category_id.clone());
                         move |e, w, cx| on(Act::CategoryMenu(id.clone(), e.position), w, cx)
+                    })
+                    // A manager's heading is the Category's handle, and the top of it for a channel.
+                    .when(owner, |d| {
+                        let (above, below, into) = (cat.category_id.clone(), cat.category_id.clone(), cat.category_id.clone());
+                        let on_into = on.clone();
+                        d.relative()
+                            .on_drag(CategoryDrag { id: cat.category_id.clone(), name: cat.name.clone().into() }, |d: &CategoryDrag, _, _, cx| {
+                                cx.new(|_| DragGhost(d.name.clone()))
+                            })
+                            .drag_over::<ChannelDrag>(|d, _, _, _| d.bg(white_a(0.09)))
+                            .on_drop(move |d: &ChannelDrag, w, cx| on_into(Act::DropChannel(d.id.clone(), DropAt::Into(into.clone())), w, cx))
+                            .child(drop_half(true, on, move |d: &CategoryDrag| Act::DropCategory(d.id.clone(), above.clone(), true)))
+                            .child(drop_half(false, on, move |d: &CategoryDrag| Act::DropCategory(d.id.clone(), below.clone(), false)))
                     })
                     .child(
                         crate::kit::spaced(cat.name.to_uppercase(), 0.99)

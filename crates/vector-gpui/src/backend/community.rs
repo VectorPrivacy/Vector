@@ -1497,6 +1497,32 @@ pub async fn delete_channel(community_id: String, channel_id: String) -> Result<
     .await
 }
 
+/// Move a channel into a Category (`None`: uncategorized) at `index` among its channels.
+pub async fn move_channel(community_id: String, channel_id: String, category_id: Option<String>, index: usize) -> Result<(), String> {
+    db::scoped(async move {
+        VectorCore
+            .move_channel(&community_id, &channel_id, category_id.as_deref(), index)
+            .await
+            .map_err(|e| e.to_string())?;
+        reregister(&community_id).await;
+        Ok(())
+    })
+    .await
+}
+
+/// Move a Category to `index` among the Categories (0 is the top).
+pub async fn move_category(community_id: String, category_id: String, index: usize) -> Result<(), String> {
+    db::scoped(async move {
+        VectorCore
+            .move_category(&community_id, &category_id, index)
+            .await
+            .map_err(|e| e.to_string())?;
+        reregister(&community_id).await;
+        Ok(())
+    })
+    .await
+}
+
 pub async fn delete_category(community_id: String, category_id: String) -> Result<(), String> {
     db::scoped(async move {
         VectorCore
