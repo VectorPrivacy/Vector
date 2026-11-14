@@ -447,6 +447,18 @@ impl Element for Img {
                             }
                         }
                         Some(_err) => {
+                            if self.image_cache.is_none()
+                                && window.image_cache_stack.is_empty()
+                                && let ImageSource::Resource(resource) = &shown
+                            {
+                                match ask_again(resource) {
+                                    Some(Duration::ZERO) => {
+                                        cx.remove_asset::<ImgResourceLoader>(resource);
+                                    }
+                                    Some(wait) => wake_window_in(window, cx, wait),
+                                    None => {}
+                                }
+                            }
                             if let Some(fallback) = self.style.fallback.as_ref() {
                                 let mut element = fallback();
                                 replacement_id = Some(element.request_layout(window, cx));
@@ -800,6 +812,31 @@ pub const FIT: &str = "#fit=";
 
 /// Like [`FIT`], but first cut to the centred square: for a picture always drawn square or round.
 pub const SQUARE: &str = "#square=";
+
+/// How long a picture that failed to load waits before asking for its file again.
+const RETRY_AFTER: Duration = Duration::from_secs(1);
+
+/// A file that failed to load is asked for again twice a session, a while after each failure,
+/// then left as it is: one written a moment late or let go of recovers, one truly gone doesn't
+/// loop. `Some(ZERO)` means ask now, `Some(wait)` to look again after it.
+fn ask_again(resource: &Resource) -> Option<Duration> {
+    thread_local!(static ASKED: std::cell::RefCell<collections::FxHashMap<u64, (u8, Instant)>> = Default::default());
+    let key = crate::hash(resource);
+    ASKED.with(|a| {
+        let mut a = a.borrow_mut();
+        let (tries, since) = a.entry(key).or_insert((0, Instant::now()));
+        if *tries >= 2 {
+            return None;
+        }
+        let waited = since.elapsed();
+        if waited < RETRY_AFTER {
+            return Some(RETRY_AFTER - waited);
+        }
+        *tries += 1;
+        *since = Instant::now();
+        Some(Duration::ZERO)
+    })
+}
 
 /// Suffix on an embedded asset's name, after any fit: decode the first frame alone, noting
 /// whether the source has more ([`RenderImage`]'s `partial`).
