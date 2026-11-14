@@ -371,7 +371,9 @@ impl Element for Img {
                                     if window.is_window_active() && !animations_asleep() {
                                         // Every copy of a picture reads one clock, so all show the same frame.
                                         let current_time = Instant::now();
-                                        let (ix, left) = shared_frame(&data, current_time.saturating_duration_since(anim_epoch()));
+                                        let tick = anim_tick().min(fastest_frame(&data));
+                                        set_anim_tick(tick);
+                                        let (ix, left) = ticked_frame(&data, current_time.saturating_duration_since(anim_epoch()), tick);
                                         state.frame_index = ix;
                                         state.last_frame_time = Some(current_time);
                                         next_frame_in = Some(left);
@@ -839,6 +841,32 @@ fn still_of(source: &ImageSource) -> Option<ImageSource> {
     }
 }
 
+/// Scaled with premultiplied alpha, so the colour hidden under transparent pixels never
+/// bleeds into the edges it borders. Channel order doesn't matter.
+pub fn resize_premultiplied(buf: &image::RgbaImage, w: u32, h: u32) -> image::RgbaImage {
+    let mut pre = buf.clone();
+    for px in pre.chunks_exact_mut(4) {
+        let a = px[3] as u32;
+        if a < 255 {
+            for c in &mut px[..3] {
+                *c = ((*c as u32 * a + 127) / 255) as u8;
+            }
+        }
+    }
+    let mut out = image::imageops::resize(&pre, w, h, image::imageops::FilterType::Triangle);
+    for px in out.chunks_exact_mut(4) {
+        let a = px[3] as u32;
+        if a == 0 {
+            px[..3].fill(0);
+        } else if a < 255 {
+            for c in &mut px[..3] {
+                *c = ((*c as u32 * 255 + a / 2) / a).min(255) as u8;
+            }
+        }
+    }
+    out
+}
+
 /// Shrinks a frame whose longer side passes `max`; a picture shown small never holds its full size.
 fn fit_frame(frame: image::Frame, max: u32, square: bool) -> image::Frame {
     let (w, h) = frame.buffer().dimensions();
@@ -858,7 +886,7 @@ fn fit_frame(frame: image::Frame, max: u32, square: bool) -> image::Frame {
     let buffer = if (nw, nh) == (cw, ch) {
         cut
     } else {
-        image::imageops::resize(&cut, nw, nh, image::imageops::FilterType::Triangle)
+        resize_premultiplied(&cut, nw, nh)
     };
     image::Frame::from_parts(
         buffer,
@@ -1183,6 +1211,56 @@ pub(crate) fn shared_frame(data: &RenderImage, at: Duration) -> (usize, Duration
     (count - 1, Duration::ZERO)
 }
 
+/// The fastest any animation steps: source frames quicker than this are sampled at it.
+const MAX_RATE: Duration = if cfg!(any(target_os = "android", target_os = "ios")) {
+    Duration::from_nanos(33_333_334)
+} else {
+    Duration::from_nanos(16_666_667)
+};
+
+thread_local! {
+    /// The tick every animation steps on: the fastest frame on screen, never above MAX_RATE.
+    static ANIM_TICK: std::cell::Cell<Duration> = const { std::cell::Cell::new(MAX_RATE) };
+    static FASTEST: std::cell::RefCell<collections::FxHashMap<crate::ImageId, Duration>> = Default::default();
+}
+
+/// A picture's shortest frame, clamped to MAX_RATE.
+pub(crate) fn fastest_frame(data: &RenderImage) -> Duration {
+    FASTEST.with(|f| {
+        let mut f = f.borrow_mut();
+        if let Some(d) = f.get(&data.id) {
+            return *d;
+        }
+        if f.len() > 4096 {
+            f.clear();
+        }
+        let d = (0..data.frame_count()).map(|i| frame_delay(data, i)).min().unwrap_or(MAX_RATE).max(MAX_RATE);
+        f.insert(data.id, d);
+        d
+    })
+}
+
+pub(crate) fn anim_tick() -> Duration {
+    ANIM_TICK.with(|t| t.get())
+}
+
+pub(crate) fn set_anim_tick(tick: Duration) {
+    ANIM_TICK.with(|t| t.set(tick.max(MAX_RATE)));
+}
+
+/// The frame shown `since` the epoch when every animation steps on one `tick`, and how long
+/// until it changes, landing on a tick.
+pub(crate) fn ticked_frame(data: &RenderImage, since: Duration, tick: Duration) -> (usize, Duration) {
+    let t = tick.as_nanos().max(1);
+    let at = Duration::from_nanos((since.as_nanos() - since.as_nanos() % t) as u64);
+    let (ix, left) = shared_frame(data, at);
+    if left.is_zero() {
+        return (ix, Duration::ZERO);
+    }
+    let next = (at + left).as_nanos().div_ceil(t) * t;
+    (ix, Duration::from_nanos(next as u64).saturating_sub(since))
+}
+
 /// Step the window's animated pictures once `due` has passed, redrawing nothing else.
 pub(crate) fn wake_animations_in(window: &mut Window, cx: &mut App, due: Duration) {
     wake(window, cx, due, false);
@@ -1190,8 +1268,8 @@ pub(crate) fn wake_animations_in(window: &mut Window, cx: &mut App, due: Duratio
 
 fn wake(window: &mut Window, cx: &mut App, due: Duration, redraw: bool) {
     // Wakes land on one shared grid, so many animations out of phase cost one wake per
-    // tick rather than one each; animation-only steps share a coarser 20 fps grid.
-    let tick = Duration::from_millis(if redraw { 33 } else { 50 });
+    // tick rather than one each; animation-only steps share the animation tick.
+    let tick = if redraw { Duration::from_millis(33) } else { anim_tick() };
     let epoch = anim_epoch();
     let want = Instant::now() + due;
     let ticks = (want.saturating_duration_since(epoch).as_nanos() / tick.as_nanos() + 1) as u32;

@@ -5372,8 +5372,6 @@ impl Window {
     /// presented scene: no render, layout or paint unless something else asked for one.
     pub(crate) fn step_animations(&mut self, cx: &mut App) {
         const FULL_DRAW_EVERY: Duration = Duration::from_secs(30);
-        const SMALL: Pixels = px(32.);
-        const SMALL_STEP: Duration = Duration::from_millis(100);
         if self.invalidator.is_dirty()
             || !self.is_window_active()
             || cx.reduce_motion()
@@ -5388,29 +5386,24 @@ impl Window {
         let mut next: Option<Duration> = None;
         let mut changed = false;
         let mut records = std::mem::take(&mut self.rendered_frame.animated);
+        // One tick for all, at the fastest frame on screen: every animation steps together,
+        // none sampled coarser than its own rate.
+        let tick = records
+            .iter()
+            .filter(|r| r.data.frame_count() > 1)
+            .map(|r| crate::elements::fastest_frame(&r.data))
+            .min();
+        if let Some(tick) = tick {
+            crate::elements::set_anim_tick(tick);
+        }
+        let tick = crate::elements::anim_tick();
         for r in &mut records {
             let count = r.data.frame_count();
             if count < 2 {
                 continue;
             }
             let shown = r.clock.get().0.min(count - 1);
-            // Every copy of a picture reads one shared clock, so all show the same frame. Emoji-sized
-            // ones read it on a SMALL_STEP grid, skipping frames to keep their speed: each step
-            // costs a present, and at that size the difference doesn't show.
-            let small = r.image.size.height <= SMALL;
-            let at = if small {
-                since - Duration::from_nanos((since.as_nanos() % SMALL_STEP.as_nanos()) as u64)
-            } else {
-                since
-            };
-            let (ix, left) = crate::elements::shared_frame(&r.data, at);
-            let due = if small {
-                let change = (at + left).as_nanos();
-                let tick = change.div_ceil(SMALL_STEP.as_nanos()) * SMALL_STEP.as_nanos();
-                Duration::from_nanos(tick as u64).saturating_sub(since)
-            } else {
-                left
-            };
+            let (ix, due) = crate::elements::ticked_frame(&r.data, since, tick);
             if ix != shown {
                 let params = RenderImageParams {
                     image_id: r.data.id,

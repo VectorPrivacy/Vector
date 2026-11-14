@@ -529,7 +529,7 @@ fn frames_of(
         }
         let buf = f.into_buffer();
         let buf = if scale {
-            image::imageops::resize(&buf, tw.max(1), th.max(1), FilterType::Triangle)
+            gpui::resize_premultiplied(&buf, tw.max(1), th.max(1))
         } else {
             buf
         };
