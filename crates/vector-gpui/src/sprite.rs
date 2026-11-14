@@ -67,6 +67,35 @@ pub fn disc(buf: &mut image::RgbaImage, cx: f32, cy: f32, r: f32, rgb: u32, alph
     }
 }
 
+/// A disc of radius `r` blurred by a Gaussian of `sigma`, as a box-shadow paints one.
+pub fn glow(buf: &mut image::RgbaImage, cx: f32, cy: f32, r: f32, sigma: f32, rgb: u32, alpha: f32) {
+    let [_, red, green, blue] = rgb.to_be_bytes();
+    for y in 0..buf.height() {
+        for x in 0..buf.width() {
+            let d = ((x as f32 + 0.5 - cx).powi(2) + (y as f32 + 0.5 - cy).powi(2)).sqrt();
+            let a = alpha * 0.5 * erfc((d - r) / (sigma * std::f32::consts::SQRT_2));
+            if a > 0.002 {
+                buf.put_pixel(x, y, image::Rgba([red, green, blue, (a * 255.).round() as u8]));
+            }
+        }
+    }
+}
+
+/// Scales every pixel's alpha, as `opacity` does to a whole element.
+pub fn fade(buf: &mut image::RgbaImage, opacity: f32) {
+    for px in buf.pixels_mut() {
+        px.0[3] = (px.0[3] as f32 * opacity).round() as u8;
+    }
+}
+
+fn erfc(x: f32) -> f32 {
+    // Abramowitz and Stegun 7.1.26: within 1.5e-7, far below one alpha step.
+    let t = 1. / (1. + 0.327_591_1 * x.abs());
+    let poly = t * (0.254_829_6 + t * (-0.284_496_7 + t * (1.421_413_7 + t * (-1.453_152 + t * 1.061_405_4))));
+    let e = poly * (-x * x).exp();
+    if x >= 0. { e } else { 2. - e }
+}
+
 fn to_bgra(mut buf: image::RgbaImage) -> image::RgbaImage {
     for px in buf.chunks_exact_mut(4) {
         px.swap(0, 2);

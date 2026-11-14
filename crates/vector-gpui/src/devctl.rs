@@ -8,6 +8,7 @@
 //! - `dev:scroll:<px>`: scroll the open timeline by that much (positive is down)
 //! - `dev:bottom`: jump the open timeline to its newest message
 //! - `dev:pin:<digits>`: type a PIN into the lock screen
+//! - `dev:net:<json>`: stand in for the network status the routing views read
 //! - `dev:typing:<chat>:<npub>`: show that npub typing in that chat, as if a notice arrived
 //! - `dev:move:<x>,<y>` / `dev:click:<x>,<y>` / `dev:rclick:<x>,<y>`: the mouse, in window points
 //! - `dev:wheel:<x>,<y>,<dy>`: scroll what is under the point (positive is down)
@@ -89,6 +90,7 @@ pub fn run(app: &mut VectorApp, cmd: &str, window: &mut Window, cx: &mut Context
             cx.notify();
         }
         "pin" => app.dev_pin(rest, window, cx),
+        "net" => app.dev_net(serde_json::from_str(rest).ok(), cx),
         "typing" => {
             if let Some((chat, who)) = rest.rsplit_once(':') {
                 app.dev_typing(chat, who, cx);

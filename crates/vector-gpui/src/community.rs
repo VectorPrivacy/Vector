@@ -4,7 +4,6 @@
 use std::collections::HashSet;
 use std::rc::Rc;
 
-use gpui::AnimationExt;
 use gpui::prelude::*;
 use gpui::{AnyElement, App, Entity, FontWeight, SharedString, Window, div, px, svg};
 use crate::pic::img;

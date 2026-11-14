@@ -18561,6 +18561,11 @@ impl VectorApp {
         &self.timeline
     }
 
+    pub(crate) fn dev_net(&mut self, v: Option<serde_json::Value>, cx: &mut Context<Self>) {
+        self.net_view = v;
+        cx.notify();
+    }
+
     pub(crate) fn dev_typing(&mut self, chat: &str, who: &str, cx: &mut Context<Self>) {
         let mut store = self.store.borrow_mut();
         let now = store.now_ms();

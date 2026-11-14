@@ -1603,6 +1603,23 @@ pub fn notice(v: &Value, stranded: bool) -> Option<Notice> {
     }
 }
 
+/// The notice's breathing dot as a sprite strip: a lasting notice then re-renders nothing.
+fn notice_dot(warn: bool, dot: u32) -> impl IntoElement {
+    const SPAN: f32 = 1.6;
+    let name = if warn { "net-notice-warn" } else { "net-notice-fail" };
+    // Two device pixels a point: this row has no window to ask, and a 7pt dot shows no loss.
+    let strip = crate::sprite::strip(name, 2., 25, &crate::sprite::times(SPAN, 20.), SPAN, |t, buf, k| {
+        let p = t / SPAN;
+        let w = if p < 0.5 { p * 2. } else { (1. - p) * 2. };
+        crate::sprite::glow(buf, 12.5 * k, 12.5 * k, 3.5 * k, 3. * k, dot, if warn { 0.5 } else { 0.6 });
+        crate::sprite::disc(buf, 12.5 * k, 12.5 * k, 3.5 * k, dot, 1.);
+        crate::sprite::fade(buf, 1. - 0.7 * w * w * (3. - 2. * w));
+    });
+    div().relative().flex_shrink_0().size(px(7.)).child(
+        gpui::img(gpui::ImageSource::Render(strip)).id(name).absolute().left(px(-9.)).top(px(-9.)).size(px(25.)),
+    )
+}
+
 pub fn notice_line(n: Notice, open: impl Fn(&gpui::ClickEvent, &mut gpui::Window, &mut gpui::App) + 'static) -> AnyElement {
     let (rgb, text, dot): ((u8, u8, u8), u32, u32) = if n.warn { ((255, 193, 7), 0xffd98a, 0xffc107) } else { ((255, 120, 96), 0xffb3a3, 0xff7860) };
     let (bg, hover) = if n.warn { (0.06, 0.1) } else { (0.07, 0.12) };
@@ -1629,18 +1646,7 @@ pub fn notice_line(n: Notice, open: impl Fn(&gpui::ClickEvent, &mut gpui::Window
         .cursor_pointer()
         .tooltip(crate::kit::tooltip(tip))
         .on_click(open)
-        .child(
-            div()
-                .flex_shrink_0()
-                .size(px(7.))
-                .rounded_full()
-                .bg(c(dot))
-                .shadow(vec![gpui::BoxShadow { color: ca(rgb.0, rgb.1, rgb.2, if n.warn { 0.5 } else { 0.6 }), offset: point(px(0.), px(0.)), blur_radius: px(6.), spread_radius: px(0.), inset: false }])
-                .with_animation("net-notice-dot", gpui::Animation::new(std::time::Duration::from_millis(1600)).repeat(), |d, t| {
-                    let k = if t < 0.5 { t * 2. } else { (1. - t) * 2. };
-                    d.opacity(1. - 0.7 * k * k * (3. - 2. * k))
-                }),
-        )
+        .child(notice_dot(n.warn, dot))
         .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(n.text))
         .child(svg().path("ui/notice-go.svg").flex_shrink_0().w(px(6.)).h(px(10.)).text_color(c(text)).opacity(0.7))
         .into_any_element()
