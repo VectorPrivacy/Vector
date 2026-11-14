@@ -3066,6 +3066,19 @@ impl VectorApp {
         self.scoped = true;
     }
 
+    /// Someone else's profile changed: every pane that can show them, and the timeline only
+    /// when they wrote or are named in what it holds.
+    fn notify_profile(&mut self, in_timeline: bool, cx: &mut Context<Self>) {
+        crate::pane::notify(&self.panes.chrome, cx);
+        crate::pane::notify(&self.panes.chat, cx);
+        crate::pane::notify(&self.panes.members, cx);
+        if in_timeline {
+            crate::pane::notify(&self.panes.timeline, cx);
+        }
+        self.notify_side(cx);
+        self.scoped = true;
+    }
+
     fn on_core_event(
         &mut self,
         name: &str,
@@ -3494,8 +3507,19 @@ impl VectorApp {
             "profile_update" => {
                 if let Ok(p) = serde_json::from_value::<SlimProfile>(payload) {
                     let mut store = self.store.borrow_mut();
-                    self.scoped = store.profiles.get(&p.id) == Some(&p);
-                    store.profiles.insert(p.id.clone(), p);
+                    let same = store.profiles.get(&p.id) == Some(&p);
+                    let npub = p.id.clone();
+                    store.profiles.insert(npub.clone(), p);
+                    if same {
+                        self.scoped = true;
+                    } else if npub != store.my_npub {
+                        let in_timeline = self.open.as_deref().and_then(|o| store.chat(o)).is_some_and(|c| {
+                            c.id == npub
+                                || c.messages.iter().any(|m| m.npub.as_deref() == Some(npub.as_str()) || m.content.contains(npub.as_str()))
+                        });
+                        drop(store);
+                        self.notify_profile(in_timeline, cx);
+                    }
                 }
             }
             "chat_mark_read" => {

@@ -8,6 +8,7 @@
 //! - `dev:scroll:<px>`: scroll the open timeline by that much (positive is down)
 //! - `dev:bottom`: jump the open timeline to its newest message
 //! - `dev:pin:<digits>`: type a PIN into the lock screen
+//! - `dev:raise`: bring the window to the front
 //! - `dev:net:<json>`: stand in for the network status the routing views read
 //! - `dev:typing:<chat>:<npub>`: show that npub typing in that chat, as if a notice arrived
 //! - `dev:move:<x>,<y>` / `dev:click:<x>,<y>` / `dev:rclick:<x>,<y>`: the mouse, in window points
@@ -60,12 +61,15 @@ pub fn run(app: &mut VectorApp, cmd: &str, window: &mut Window, cx: &mut Context
     match verb {
         "state" => {
             let (draws, draw_ns, presents) = gpui::draw_stats::take();
+            let (draw_spread, present_spread) = gpui::draw_stats::spread_take();
             let renders = RENDERS.swap(0, Ordering::Relaxed);
             let render_ns = RENDER_NANOS.swap(0, Ordering::Relaxed);
             let mut v = app.dev_state();
             v["frames"] = json!({
                 "draws": draws,
                 "presents": presents,
+                "draw_ms_p50_p95_max": draw_spread,
+                "present_ms_p50_p95_max": present_spread,
                 "draw_ms": draw_ns as f64 / 1e6,
                 "renders": renders,
                 "render_ms": render_ns as f64 / 1e6,
@@ -93,6 +97,7 @@ pub fn run(app: &mut VectorApp, cmd: &str, window: &mut Window, cx: &mut Context
             cx.notify();
         }
         "pin" => app.dev_pin(rest, window, cx),
+        "raise" => window.activate_window(),
         "net" => app.dev_net(serde_json::from_str(rest).ok(), cx),
         "emit" => {
             if let Some((name, payload)) = rest.split_once(':') {

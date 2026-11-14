@@ -3870,8 +3870,9 @@ impl Window {
         let _foreground_turn = profiler::journal::foreground_turn();
         #[cfg(feature = "profiler")]
         let present_start = Instant::now();
+        let presenting = Instant::now();
         self.platform_window.draw(&self.rendered_frame.scene);
-        draw_stats::presented();
+        draw_stats::presented(presenting.elapsed());
         #[cfg(feature = "profiler")]
         self.window_profiler.record_present(
             present_start,
@@ -10814,6 +10815,7 @@ fn sub_tile(tile: AtlasTile, visible_bounds: Bounds<Pixels>, image_bounds: Bound
 /// Whole-window draws, the time they took, and presents (a draw's or a re-shown scene's), for a
 /// dev build's own measurements.
 pub mod draw_stats {
+    use std::sync::Mutex;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::Instant;
 
@@ -10833,8 +10835,35 @@ pub mod draw_stats {
         (ROOT.swap(0, Ordering::Relaxed), MODEL.swap(0, Ordering::Relaxed))
     }
 
-    pub(crate) fn presented() {
+    pub(crate) fn presented(took: std::time::Duration) {
         PRESENTS.fetch_add(1, Ordering::Relaxed);
+        keep(&PRESENT_MICROS, took);
+    }
+
+    const KEPT: usize = 4096;
+    static DRAW_MICROS: Mutex<Vec<u32>> = Mutex::new(Vec::new());
+    static PRESENT_MICROS: Mutex<Vec<u32>> = Mutex::new(Vec::new());
+
+    fn keep(into: &Mutex<Vec<u32>>, took: std::time::Duration) {
+        let mut v = into.lock().unwrap_or_else(|e| e.into_inner());
+        if v.len() < KEPT {
+            v.push(took.as_micros().min(u32::MAX as u128) as u32);
+        }
+    }
+
+    fn spread(from: &Mutex<Vec<u32>>) -> [f64; 3] {
+        let mut v = std::mem::take(&mut *from.lock().unwrap_or_else(|e| e.into_inner()));
+        if v.is_empty() {
+            return [0.; 3];
+        }
+        v.sort_unstable();
+        let at = |q: f64| v[((v.len() - 1) as f64 * q).round() as usize] as f64 / 1000.;
+        [at(0.5), at(0.95), at(1.)]
+    }
+
+    /// `[p50, p95, max]` milliseconds of draws and of presents since the last call.
+    pub fn spread_take() -> ([f64; 3], [f64; 3]) {
+        (spread(&DRAW_MICROS), spread(&PRESENT_MICROS))
     }
 
     pub(crate) struct Timed(Instant);
@@ -10849,6 +10878,7 @@ pub mod draw_stats {
         fn drop(&mut self) {
             DRAWS.fetch_add(1, Ordering::Relaxed);
             NANOS.fetch_add(self.0.elapsed().as_nanos() as u64, Ordering::Relaxed);
+            keep(&DRAW_MICROS, self.0.elapsed());
         }
     }
 
