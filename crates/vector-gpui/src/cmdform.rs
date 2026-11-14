@@ -443,7 +443,7 @@ impl Render for CommandForm {
                             }),
                         )
                         .children(face.as_ref().map(|a| match a {
-                            Some(p) => img(p.clone()).object_fit(gpui::ObjectFit::Cover).size(px(18.)).rounded_full().flex_shrink_0().into_any_element(),
+                            Some(p) => crate::pic::img_face(p.clone(), 18.).object_fit(gpui::ObjectFit::Cover).size(px(18.)).rounded_full().flex_shrink_0().into_any_element(),
                             None => img("icons/user-placeholder.svg").size(px(18.)).rounded_full().flex_shrink_0().into_any_element(),
                         }))
                         .child(div().truncate().max_w(px(40. * 7.)).child(label.clone()))
@@ -526,7 +526,7 @@ pub fn strip(form: &CommandForm, bot: (SharedString, Option<std::path::PathBuf>)
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(c(PRIMARY))
                 .child(match bot.1 {
-                    Some(p) => img(p).object_fit(gpui::ObjectFit::Cover).size(px(16.)).rounded_full().flex_shrink_0().into_any_element(),
+                    Some(p) => crate::pic::img_face(p, 16.).object_fit(gpui::ObjectFit::Cover).size(px(16.)).rounded_full().flex_shrink_0().into_any_element(),
                     None => img("icons/user-placeholder.svg").size(px(16.)).rounded_full().flex_shrink_0().into_any_element(),
                 })
                 .child(div().min_w_0().truncate().child(bot.0)),

@@ -705,10 +705,16 @@ impl Asset for ImageAssetLoader {
                 Resource::Embedded(path) => {
                     let path = match path.rsplit_once(FIT) {
                         Some((name, n)) if n.parse::<u32>().is_ok() => {
-                            fit = n.parse().ok();
+                            fit = n.parse().ok().map(|n| (n, false));
                             SharedString::from(name.to_string())
                         }
-                        _ => path,
+                        _ => match path.rsplit_once(SQUARE) {
+                            Some((name, n)) if n.parse::<u32>().is_ok() => {
+                                fit = n.parse().ok().map(|n| (n, true));
+                                SharedString::from(name.to_string())
+                            }
+                            _ => path,
+                        },
                     };
                     let data = asset_source.load(&path).ok().flatten();
                     if let Some(data) = data {
@@ -728,7 +734,7 @@ impl Asset for ImageAssetLoader {
                     _ => decode_static_image(&bytes, format)?,
                 };
                 let data = match fit {
-                    Some(max) => fit_frames(data, max),
+                    Some((max, square)) => fit_frames(data, max, square),
                     None => data,
                 };
 
@@ -745,35 +751,44 @@ impl Asset for ImageAssetLoader {
 /// Suffix on an embedded asset's name, `#fit=N`: decoded pictures are shrunk to fit N pixels.
 pub const FIT: &str = "#fit=";
 
+/// Like [`FIT`], but first cut to the centred square: for a picture always drawn square or round.
+pub const SQUARE: &str = "#square=";
+
 /// Shrinks frames whose longer side passes `max`; a picture shown small never holds its full size.
-fn fit_frames(frames: SmallVec<[image::Frame; 1]>, max: u32) -> SmallVec<[image::Frame; 1]> {
+fn fit_frames(
+    frames: SmallVec<[image::Frame; 1]>,
+    max: u32,
+    square: bool,
+) -> SmallVec<[image::Frame; 1]> {
     let Some(first) = frames.first() else {
         return frames;
     };
     let (w, h) = first.buffer().dimensions();
-    if w.max(h) <= max || max == 0 {
+    let (cw, ch) = if square { (w.min(h), w.min(h)) } else { (w, h) };
+    if (cw == w && ch == h && w.max(h) <= max) || max == 0 || cw == 0 {
         return frames;
     }
-    let scale = max as f64 / w.max(h) as f64;
+    let scale = (max as f64 / cw.max(ch) as f64).min(1.);
     let (nw, nh) = (
-        ((w as f64 * scale).round() as u32).max(1),
-        ((h as f64 * scale).round() as u32).max(1),
+        ((cw as f64 * scale).round() as u32).max(1),
+        ((ch as f64 * scale).round() as u32).max(1),
     );
+    let (cx, cy) = ((w - cw) / 2, (h - ch) / 2);
     frames
         .into_iter()
         .map(|frame| {
             let delay = frame.delay();
             let (left, top) = (frame.left(), frame.top());
-            let buffer = image::imageops::resize(
-                frame.buffer(),
-                nw,
-                nh,
-                image::imageops::FilterType::Triangle,
-            );
+            let cut = image::imageops::crop_imm(frame.buffer(), cx, cy, cw, ch).to_image();
+            let buffer = if (nw, nh) == (cw, ch) {
+                cut
+            } else {
+                image::imageops::resize(&cut, nw, nh, image::imageops::FilterType::Triangle)
+            };
             image::Frame::from_parts(
                 buffer,
-                (left as f64 * scale) as u32,
-                (top as f64 * scale) as u32,
+                (left.saturating_sub(cx) as f64 * scale) as u32,
+                (top.saturating_sub(cy) as f64 * scale) as u32,
                 delay,
             )
         })

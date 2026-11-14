@@ -614,7 +614,7 @@ fn avatar(face: &Face) -> AnyElement {
     let base = |i: gpui::Stateful<gpui::Img>| i.size(px(16.)).flex_shrink_0();
     match face {
         Face::Mark => base(img("icons/vector-mark.svg")).object_fit(gpui::ObjectFit::Contain).into_any_element(),
-        Face::Path(p) => base(img(p.clone()).object_fit(gpui::ObjectFit::Cover)).rounded_full().into_any_element(),
+        Face::Path(p) => base(crate::pic::img_face(p.clone(), 40.).object_fit(gpui::ObjectFit::Cover)).rounded_full().into_any_element(),
         Face::Placeholder => base(img("icons/user-placeholder.svg")).rounded_full().into_any_element(),
     }
 }

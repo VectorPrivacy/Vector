@@ -166,7 +166,7 @@ const LABEL: u32 = 0x8a8a8a;
 /// The community's logo, or the group placeholder until it has one.
 pub fn logo(store: &Store, id: &str, size: f32, radius: f32) -> gpui::Stateful<gpui::Img> {
     match store.icon(id) {
-        Some(path) => crate::pic::img_fit(path, size).object_fit(gpui::ObjectFit::Cover).face(),
+        Some(path) => crate::pic::img_face(path, size).object_fit(gpui::ObjectFit::Cover).face(),
         None => img("icons/group-placeholder.svg"),
     }
     .size(px(size))
@@ -673,7 +673,7 @@ pub fn slim_header(
     on: &OnAct,
 ) -> impl IntoElement {
     let face = match store.icon(&com.community_id) {
-        Some(path) => img(path).object_fit(gpui::ObjectFit::Cover).size(px(22.)).rounded_full().flex_shrink_0().into_any_element(),
+        Some(path) => crate::pic::img_face(path, 22.).object_fit(gpui::ObjectFit::Cover).size(px(22.)).rounded_full().flex_shrink_0().into_any_element(),
         None => img("icons/group-placeholder.svg").size(px(22.)).rounded_full().flex_shrink_0().into_any_element(),
     };
     let topic = ch.topic.clone().filter(|t| !t.is_empty());
