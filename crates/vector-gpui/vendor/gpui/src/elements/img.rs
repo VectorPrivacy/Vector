@@ -1272,7 +1272,10 @@ fn wake(window: &mut Window, cx: &mut App, due: Duration, redraw: bool) {
     let tick = if redraw { Duration::from_millis(33) } else { anim_tick() };
     let epoch = anim_epoch();
     let want = Instant::now() + due;
-    let ticks = (want.saturating_duration_since(epoch).as_nanos() / tick.as_nanos() + 1) as u32;
+    // The first tick at or after `want`. A due that lands on a tick keeps it: the moments since
+    // it was measured would otherwise push it a whole tick on, skipping every other frame.
+    let slack = (tick / 4).min(Duration::from_millis(2));
+    let ticks = want.checked_sub(slack).unwrap_or(want).saturating_duration_since(epoch).as_nanos().div_ceil(tick.as_nanos()).max(1) as u32;
     let at = epoch + tick * ticks;
     let key = (window.window_handle().window_id(), redraw);
     if redraw {
