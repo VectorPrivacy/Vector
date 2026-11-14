@@ -78,6 +78,8 @@ pub struct TextInput {
     /// The caret moved: scroll it into view on the next paint.
     reveal: bool,
     is_selecting: bool,
+    /// The right-click edit menu, open at this window point.
+    menu: Option<Point<Pixels>>,
     look: Look,
     /// Enter keeps the text (a login field's caller reads and clears it).
     clear_on_submit: bool,
@@ -378,13 +380,92 @@ impl TextInput {
         cx: &mut Context<Self>,
     ) {
         self.is_selecting = true;
+        self.menu = None;
         window.request_virtual_keyboard();
-
+        let at = self.index_for_mouse_position(event.position);
         if event.modifiers.shift {
-            self.select_to(self.index_for_mouse_position(event.position), window, cx);
-        } else {
-            self.move_to(self.index_for_mouse_position(event.position), window, cx)
+            self.select_to(at, window, cx);
+            return;
         }
+        let span = match event.click_count {
+            0 | 1 => return self.move_to(at, window, cx),
+            2 if !self.look.masked => self.word_around(at),
+            2 => 0..self.content.len(),
+            _ => self.line_around(at),
+        };
+        // A word or line stays picked: a drag after the press doesn't fold it back to a caret.
+        self.is_selecting = false;
+        self.selected_range = span;
+        self.selection_reversed = false;
+        window.notify_text_selection_changed(&self.focus_handle);
+        cx.notify();
+    }
+
+    /// The run under `offset`: word characters, punctuation or spaces, as a double-click picks.
+    fn word_around(&self, offset: usize) -> Range<usize> {
+        let class = |c: char| if c.is_alphanumeric() || c == '_' { 0 } else if c.is_whitespace() { 1 } else { 2 };
+        let here = self.content[offset..]
+            .chars()
+            .next()
+            .filter(|&c| c != '\n')
+            .or_else(|| self.content[..offset].chars().next_back())
+            .map(class);
+        let Some(want) = here else { return offset..offset };
+        let start = self.content[..offset]
+            .char_indices()
+            .rev()
+            .take_while(|&(_, c)| c != '\n' && class(c) == want)
+            .last()
+            .map_or(offset, |(i, _)| i);
+        let end = self.content[offset..]
+            .char_indices()
+            .find(|&(_, c)| c == '\n' || class(c) != want)
+            .map_or(self.content.len(), |(i, _)| offset + i);
+        self.out_of_label(start, false)..self.out_of_label(end, true)
+    }
+
+    /// The line holding `offset`, without its break.
+    fn line_around(&self, offset: usize) -> Range<usize> {
+        let start = self.content[..offset].rfind('\n').map_or(0, |i| i + 1);
+        let end = self.content[offset..].find('\n').map_or(self.content.len(), |i| offset + i);
+        start..end
+    }
+
+    /// Right-click: the edit menu at the press, with the caret moved there unless it lands in
+    /// the selection.
+    fn on_right_down(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        window.focus(&self.focus_handle, cx);
+        let at = self.index_for_mouse_position(event.position);
+        if !(self.selected_range.start <= at && at <= self.selected_range.end) {
+            self.move_to(at, window, cx);
+        }
+        self.menu = Some(event.position);
+        cx.stop_propagation();
+        cx.notify();
+    }
+
+    fn edit_menu(&self) -> Vec<crate::kit::MenuItem> {
+        use crate::kit::MenuItem;
+        let picked = !self.selected_range.is_empty() && !self.look.masked;
+        vec![
+            MenuItem::new("Cut", "").disabled(!picked),
+            MenuItem::new("Copy", "").disabled(!picked),
+            MenuItem::new("Paste", ""),
+            MenuItem::divider(),
+            MenuItem::new("Select All", "").disabled(self.content.is_empty()),
+        ]
+    }
+
+    fn on_edit_menu(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        self.menu = None;
+        match ix {
+            0 => self.cut(&Cut, window, cx),
+            1 => self.copy(&Copy, window, cx),
+            2 => self.paste(&Paste, window, cx),
+            4 => self.select_all(&SelectAll, window, cx),
+            _ => {}
+        }
+        cx.notify();
     }
 
     fn on_mouse_up(&mut self, _: &MouseUpEvent, _window: &mut Window, _: &mut Context<Self>) {
@@ -1354,7 +1435,30 @@ impl Element for TextElement {
 }
 
 impl Render for TextInput {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let menu = self.menu.map(|at| {
+            let (pick, close) = (cx.entity().downgrade(), cx.entity().downgrade());
+            // Laid over the whole window, so a press anywhere outside the rows closes it.
+            gpui::anchored().position(point(px(0.), px(0.))).child(
+                div().relative().w(window.viewport_size().width).h(window.viewport_size().height).child(crate::kit::context_menu(
+                    at,
+                    &self.edit_menu(),
+                    move |ix, window, cx| {
+                        pick.update(cx, |this, cx| this.on_edit_menu(ix, window, cx)).ok();
+                    },
+                    |_, _, _, _| {},
+                    Default::default(),
+                    move |_, cx| {
+                        close
+                            .update(cx, |this, cx| {
+                                this.menu = None;
+                                cx.notify();
+                            })
+                            .ok();
+                    },
+                )),
+            )
+        });
         div()
             .id("text-input")
             .flex()
@@ -1412,6 +1516,7 @@ impl Render for TextInput {
             .on_action(cx.listener(|this, _: &SelectUp, w, cx| this.vertical(-1., true, w, cx)))
             .on_action(cx.listener(|this, _: &SelectDown, w, cx| this.vertical(1., true, w, cx)))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
+            .on_mouse_down(MouseButton::Right, cx.listener(Self::on_right_down))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
@@ -1427,6 +1532,7 @@ impl Render for TextInput {
             .text_size(self.look.size)
             .text_color(self.look.color)
             .child(TextElement { input: cx.entity() })
+            .children(menu)
     }
 }
 
@@ -1482,6 +1588,7 @@ impl TextInput {
             scroll: ScrollHandle::new(),
             reveal: false,
             is_selecting: false,
+            menu: None,
             look: Look::default(),
             clear_on_submit: true,
             submit_empty: false,

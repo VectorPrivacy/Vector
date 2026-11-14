@@ -14,7 +14,8 @@
 //! - `dev:dump:<message id>`: that message as the timeline holds it, keys and nonces left out
 //! - `dev:net:<json>`: stand in for the network status the routing views read
 //! - `dev:typing:<chat>:<npub>`: show that npub typing in that chat, as if a notice arrived
-//! - `dev:move:<x>,<y>` / `dev:click:<x>,<y>` / `dev:rclick:<x>,<y>`: the mouse, in window points
+//! - `dev:move:<x>,<y>` / `dev:click:<x>,<y>` / `dev:rclick:<x>,<y>`: the mouse, in window points;
+//!   `dev:click:<x>,<y>,<n>` presses as the nth click of a run (2 = double-click)
 //! - `dev:drag:<x1>,<y1>,<x2>,<y2>`: press at the first point, move with the button held, release at the second
 //! - `dev:drop:<channel|category>:<id>:<before|after|into>:<target id>`: a sidebar drop, as a drag lands it
 //! - `dev:leave`: the pointer leaves the window, as the platform reports it
@@ -132,8 +133,10 @@ pub fn run(app: &mut VectorApp, cmd: &str, window: &mut Window, cx: &mut Context
             let button = if verb == "rclick" { MouseButton::Right } else { MouseButton::Left };
             match verb {
                 "click" | "rclick" => {
-                    events.push(PlatformInput::MouseDown(MouseDownEvent { button, position: at, click_count: 1, ..Default::default() }));
-                    events.push(PlatformInput::MouseUp(MouseUpEvent { button, position: at, click_count: 1, ..Default::default() }));
+                    // An optional third number is the press's click count: 2 a double-click.
+                    let click_count = n.get(2).map_or(1, |&c| c.max(1.) as usize);
+                    events.push(PlatformInput::MouseDown(MouseDownEvent { button, position: at, click_count, ..Default::default() }));
+                    events.push(PlatformInput::MouseUp(MouseUpEvent { button, position: at, click_count, ..Default::default() }));
                 }
                 "wheel" => events.push(PlatformInput::Scroll(ScrollEvent {
                     position: at,
