@@ -8404,8 +8404,8 @@ impl VectorApp {
     /// The chat list, or the open Community's channels.
     fn side_pane(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let el = self.side_pane_inner(cx);
-        // Previews ask for custom emoji too; start what they asked for.
-        crate::media::pump(&crate::media::shared(), cx.entity().downgrade(), self.live, cx);
+        // Custom emoji in the list's previews load here, and repaint this pane as they land.
+        crate::media::pump(&self.media, self.panes.side.downgrade(), self.live, cx);
         el
     }
 

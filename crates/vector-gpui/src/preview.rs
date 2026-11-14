@@ -339,7 +339,6 @@ pub fn with_customs(atoms: Vec<Atom>, custom: &dyn Fn(&str) -> Option<crate::med
         for (a, b) in spans {
             let image = match custom(&text[a + 1..b - 1]) {
                 Some(crate::media::Custom::Ready(image)) => Atom::Image { src: image.into(), size, drop: look.size * 0.2, tip: None },
-                Some(crate::media::Custom::Pending) => Atom::Gap(size),
                 _ => continue,
             };
             if a > last {
