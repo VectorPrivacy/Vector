@@ -368,7 +368,7 @@ impl Element for Img {
                                     state.frame_index = 0;
                                 }
                                 if frame_count > 1 && !cx.reduce_motion() && !still {
-                                    if window.is_window_active() {
+                                    if window.is_window_active() && !animations_asleep() {
                                         // Every copy of a picture reads one clock, so all show the same frame.
                                         let current_time = Instant::now();
                                         let (ix, left) = shared_frame(&data, current_time.saturating_duration_since(anim_epoch()));
@@ -1131,6 +1131,32 @@ thread_local! {
 /// Redraw `window` once `due` has passed, instead of on every vsync until then.
 pub fn wake_window_in(window: &mut Window, cx: &mut App, due: Duration) {
     wake(window, cx, due, true);
+}
+
+thread_local! {
+    static LAST_INPUT: std::cell::Cell<Option<Instant>> = const { std::cell::Cell::new(None) };
+    static IDLE_AFTER: std::cell::Cell<Duration> = const { std::cell::Cell::new(Duration::from_secs(300)) };
+}
+
+/// Someone is at the window (a mouse move, key, scroll or focus): animations run.
+pub fn note_input() {
+    LAST_INPUT.with(|t| t.set(Some(Instant::now())));
+}
+
+/// How long without input before animated pictures hold their frame.
+pub fn set_animation_idle(after: Duration) {
+    IDLE_AFTER.with(|i| i.set(after));
+}
+
+/// Nobody has touched the window for a while: animated pictures hold the frame they're on, and
+/// nothing is presented for them, which lets the GPU driver release its working memory.
+pub(crate) fn animations_asleep() -> bool {
+    let last = LAST_INPUT.with(|t| t.get()).unwrap_or_else(|| {
+        let now = Instant::now();
+        LAST_INPUT.with(|t| t.set(Some(now)));
+        now
+    });
+    last.elapsed() >= IDLE_AFTER.with(|i| i.get())
 }
 
 /// The instant every animation's clock and wake grid count from.

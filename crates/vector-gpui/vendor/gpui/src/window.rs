@@ -2201,6 +2201,9 @@ impl Window {
                 handle
                     .update(&mut cx, |_, window, cx| {
                         window.active.set(active);
+                        if active {
+                            crate::elements::note_input();
+                        }
                         window.modifiers = window.platform_window.modifiers();
                         window.capslock = window.platform_window.capslock();
                         window
@@ -5374,6 +5377,7 @@ impl Window {
         if self.invalidator.is_dirty()
             || !self.is_window_active()
             || cx.reduce_motion()
+            || crate::elements::animations_asleep()
             || self.last_full_draw.elapsed() > FULL_DRAW_EVERY
         {
             self.refresh();
@@ -5966,6 +5970,11 @@ impl Window {
     /// Dispatch a mouse, keyboard, or touch event on the window.
     #[profiling::function]
     pub fn dispatch_event(&mut self, event: PlatformInput, cx: &mut App) -> DispatchEventResult {
+        // Input wakes held animations onto the shared clock.
+        if crate::elements::animations_asleep() {
+            self.refresh();
+        }
+        crate::elements::note_input();
         // A pointer that has left the window is nowhere over it: follow the exit with a move off
         // the window, so hover styles clear (and return) through the same path as any move. A
         // drag keeps tracking it, and macOS's edge resize zones report exits from inside.
