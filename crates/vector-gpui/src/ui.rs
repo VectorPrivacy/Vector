@@ -3885,14 +3885,18 @@ impl VectorApp {
             self.store.borrow_mut().unveiled.clear();
             crate::select::reset();
         }
-        let elsewhere = self.community.as_ref().is_some_and(|v| {
-            self.store
-                .borrow()
-                .community_of(&id)
-                .is_none_or(|c| c.community_id != v.id)
-        });
-        if elsewhere {
-            self.community = None;
+        // A channel of another Community (or one opened from DMs) brings its whole view; a DM
+        // opened from a Community leaves it, so the side list always matches what is open.
+        let home = self.store.borrow().community_of(&id).map(|c| c.community_id.clone());
+        match home {
+            Some(com) if self.community.as_ref().is_none_or(|v| v.id != com) => {
+                return self.open_community_to(com, Some(id.to_string()), window, cx);
+            }
+            None if self.community.is_some() => {
+                self.leave_community();
+                self.notify_side(cx);
+            }
+            _ => {}
         }
         {
             let store = self.store.borrow();
@@ -10341,6 +10345,11 @@ impl VectorApp {
 impl VectorApp {
     /// A Community opens on the channel it was last left on, else its landing channel.
     fn open_community(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_community_to(id, None, window, cx);
+    }
+
+    /// The Community's whole view (channel list, members), landing on `to` when given.
+    fn open_community_to(&mut self, id: String, to: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
         let (landing, members) = {
             let store = self.store.borrow();
             let Some(com) = store.community(&id) else {
@@ -10348,7 +10357,7 @@ impl VectorApp {
             };
             let last = last_channels(&store.my_npub).remove(&id).filter(|ch| com.channel(ch).is_some_and(|c| !c.is_voice() && c.visible()));
             (
-                last.or_else(|| com.landing().map(|c| c.channel_id.clone())),
+                to.or(last).or_else(|| com.landing().map(|c| c.channel_id.clone())),
                 com.members.clone(),
             )
         };
@@ -13827,7 +13836,9 @@ impl VectorApp {
             if self.store.borrow().chat(&channel).is_none() {
                 return self.refuse_go("That channel isn't available to you");
             }
-            if self.open.as_deref() != Some(channel.as_str()) {
+            if self.community.as_ref().is_none_or(|v| v.id != community) {
+                self.open_community_to(community, Some(channel.clone()), window, cx);
+            } else if self.open.as_deref() != Some(channel.as_str()) {
                 self.open_channel(channel.clone(), window, cx);
             }
             let Some(message) = message else { return };
