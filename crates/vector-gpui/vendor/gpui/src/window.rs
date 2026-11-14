@@ -3675,6 +3675,7 @@ impl Window {
     #[profiling::function]
     pub fn draw(&mut self, cx: &mut App) -> ArenaClearNeeded {
         self.last_full_draw = Instant::now();
+        let _timed = draw_stats::Timed::start();
         // Drain every draw in profiler builds so a previous frame's
         // first-invalidation timestamp can't be attributed to this one.
         #[cfg(feature = "profiler")]
@@ -3859,6 +3860,7 @@ impl Window {
         #[cfg(feature = "profiler")]
         let present_start = Instant::now();
         self.platform_window.draw(&self.rendered_frame.scene);
+        draw_stats::presented();
         #[cfg(feature = "profiler")]
         self.window_profiler.record_present(
             present_start,
@@ -10789,5 +10791,44 @@ fn sub_tile(tile: AtlasTile, visible_bounds: Bounds<Pixels>, image_bounds: Bound
             },
             ..tile
         }
+    }
+}
+
+/// Whole-window draws, the time they took, and presents (a draw's or a re-shown scene's), for a
+/// dev build's own measurements.
+pub mod draw_stats {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::Instant;
+
+    static DRAWS: AtomicU64 = AtomicU64::new(0);
+    static NANOS: AtomicU64 = AtomicU64::new(0);
+    static PRESENTS: AtomicU64 = AtomicU64::new(0);
+
+    pub(crate) fn presented() {
+        PRESENTS.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) struct Timed(Instant);
+
+    impl Timed {
+        pub(crate) fn start() -> Self {
+            Self(Instant::now())
+        }
+    }
+
+    impl Drop for Timed {
+        fn drop(&mut self) {
+            DRAWS.fetch_add(1, Ordering::Relaxed);
+            NANOS.fetch_add(self.0.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        }
+    }
+
+    /// `(draws, nanoseconds drawing, presents)` since the last take.
+    pub fn take() -> (u64, u64, u64) {
+        (
+            DRAWS.swap(0, Ordering::Relaxed),
+            NANOS.swap(0, Ordering::Relaxed),
+            PRESENTS.swap(0, Ordering::Relaxed),
+        )
     }
 }

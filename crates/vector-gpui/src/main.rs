@@ -112,6 +112,8 @@ mod uploaderr;
 mod util;
 mod viewer;
 mod viktor;
+#[cfg(feature = "devctl")]
+mod devctl;
 mod video;
 #[cfg(feature = "video")]
 mod yuv;

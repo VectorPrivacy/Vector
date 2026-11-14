@@ -20,6 +20,8 @@ i2p = ["vector-core/i2p"]
 video = ["dep:ffmpeg-next"]
 # The static build's Opus decoder resamples through swresample, so it links too.
 video-static = ["video", "ffmpeg-next/static", "ffmpeg-next/software-resampling"]
+# Dev builds: `dev:` commands from a second launch drive and measure the window (src/devctl.rs).
+devctl = []
 
 [dependencies]
 gpui = { git = "https://github.com/zed-industries/zed", rev = "f8cfc7ed9e57503def9479138894f3139f5400cc" }

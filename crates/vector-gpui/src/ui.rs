@@ -5622,6 +5622,8 @@ impl VectorApp {
 
 impl Render for VectorApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        #[cfg(feature = "devctl")]
+        let _timed = crate::devctl::Timed::start();
         let me = cx.entity().downgrade();
         cx.defer(move |cx| crate::relayinfo::pump(me, cx));
         let customs = self.emoji_picker.read(cx).custom_map(&self.store.borrow());
@@ -12918,6 +12920,10 @@ impl VectorApp {
 
     /// A link from the OS: held until an account is open.
     pub fn deep_link(&mut self, url: &str, window: &mut Window, cx: &mut Context<Self>) {
+        #[cfg(feature = "devctl")]
+        if crate::devctl::is_command(url) {
+            return crate::devctl::run(self, url, window, cx);
+        }
         let Some(a) = vector_core::deep_link::parse_deep_link(url) else {
             return;
         };
@@ -18487,4 +18493,61 @@ fn remember_fold(community: &str, key: &str, closing: bool) {
     let mut list: Vec<_> = set.into_iter().collect();
     list.sort();
     backend::device::set(store, &serde_json::to_string(&list).unwrap_or_default());
+}
+
+#[cfg(feature = "devctl")]
+impl VectorApp {
+    pub(crate) fn dev_state(&self) -> serde_json::Value {
+        let store = self.store.borrow();
+        let screen = match &self.screen {
+            Screen::Booting => "booting",
+            Screen::Login(_) => "login",
+            Screen::Main => "main",
+        };
+        let communities: Vec<_> = store
+            .communities
+            .iter()
+            .map(|c| {
+                serde_json::json!({
+                    "id": c.community_id,
+                    "name": c.name,
+                    "channels": c.channels.iter().map(|ch| serde_json::json!({
+                        "id": ch.channel_id, "name": ch.name, "voice": ch.is_voice(),
+                    })).collect::<Vec<_>>(),
+                })
+            })
+            .collect();
+        serde_json::json!({
+            "screen": screen,
+            "open": self.open.as_ref().map(|s| s.to_string()),
+            "community": self.community.as_ref().map(|v| serde_json::json!({
+                "id": v.id, "members": v.members.len(), "panel": v.panel,
+            })),
+            "timeline_items": self.timeline.item_count(),
+            "communities": communities,
+        })
+    }
+
+    pub(crate) fn dev_open_community(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_community(id, window, cx);
+    }
+
+    pub(crate) fn dev_open_channel(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_channel(id, window, cx);
+    }
+
+    pub(crate) fn dev_open_chat(&mut self, id: SharedString, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_chat(id, window, cx);
+    }
+
+    pub(crate) fn dev_timeline(&self) -> &ListState {
+        &self.timeline
+    }
+
+    pub(crate) fn dev_pin(&mut self, digits: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if let Screen::Login(view) = &self.screen {
+            let digits = digits.to_string();
+            view.update(cx, |v, cx| v.dev_pin(&digits, window, cx));
+        }
+    }
 }

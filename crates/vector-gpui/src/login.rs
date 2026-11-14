@@ -673,6 +673,20 @@ impl LoginView {
         cx.notify();
     }
 
+    #[cfg(feature = "devctl")]
+    pub(crate) fn dev_pin(&mut self, digits: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if self.busy || self.cred != Cred::Pin {
+            return;
+        }
+        self.pin.clear();
+        self.pin.extend(digits.chars().filter(|c| c.is_ascii_digit()).take(6));
+        if self.pin.len() == 6 {
+            let pin = Zeroizing::new(std::mem::take(&mut self.pin));
+            self.credential_entered(pin, window, cx);
+        }
+        cx.notify();
+    }
+
     fn revert_error_title(&mut self, cx: &mut Context<Self>) {
         if self.error && self.cred == Cred::Pin {
             let title = if self.unlock {

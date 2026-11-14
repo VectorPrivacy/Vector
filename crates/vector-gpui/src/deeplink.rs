@@ -124,7 +124,7 @@ fn deliver(argv: impl IntoIterator<Item = String>, tx: &UnboundedSender<String>)
     let links: Vec<String> = argv
         .into_iter()
         .skip(1)
-        .filter(|a| vector_core::deep_link::parse_deep_link(a).is_some())
+        .filter(|a| vector_core::deep_link::parse_deep_link(a).is_some() || dev_command(a))
         .collect();
     if links.is_empty() {
         let _ = tx.unbounded_send(String::new());
@@ -132,6 +132,16 @@ fn deliver(argv: impl IntoIterator<Item = String>, tx: &UnboundedSender<String>)
     for l in links {
         let _ = tx.unbounded_send(l);
     }
+}
+
+#[cfg(feature = "devctl")]
+fn dev_command(a: &str) -> bool {
+    crate::devctl::is_command(a)
+}
+
+#[cfg(not(feature = "devctl"))]
+fn dev_command(_: &str) -> bool {
+    false
 }
 
 fn cwd() -> String {
