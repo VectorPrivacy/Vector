@@ -58,7 +58,7 @@ impl VectorApp {
                     self.voice.set_session(Some(s));
                 }
                 // Rings show in the channel list, the stage and the root's bar.
-                crate::pane::notify(&self.panes.side, cx);
+                self.notify_side(cx);
                 crate::pane::notify(&self.panes.chat, cx);
                 self.scoped = true;
                 return;

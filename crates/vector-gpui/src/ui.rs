@@ -3003,7 +3003,7 @@ impl VectorApp {
         if self.open.as_deref() == Some(chat) {
             crate::pane::notify(&self.panes.chat, cx);
         }
-        crate::pane::notify(&self.panes.side, cx);
+        self.notify_side(cx);
     }
 
     fn on_event(&mut self, ev: UiEvent, window: &mut Window, cx: &mut Context<Self>) {
@@ -3039,6 +3039,15 @@ impl VectorApp {
         }
     }
 
+    /// The chat list or Community sidebar; on a phone-width window the root draws it.
+    pub(super) fn notify_side(&mut self, cx: &mut Context<Self>) {
+        if self.is_slim {
+            cx.notify();
+        } else {
+            crate::pane::notify(&self.panes.side, cx);
+        }
+    }
+
     /// Transfers show only in message rows (and what draws over them).
     fn notify_timeline(&mut self, cx: &mut Context<Self>) {
         crate::pane::notify(&self.panes.timeline, cx);
@@ -3051,7 +3060,7 @@ impl VectorApp {
             crate::pane::notify(&self.panes.chat, cx);
             crate::pane::notify(&self.panes.timeline, cx);
         }
-        crate::pane::notify(&self.panes.side, cx);
+        self.notify_side(cx);
         self.scoped = true;
     }
 
@@ -5823,7 +5832,7 @@ impl Render for VectorApp {
                 gpui::wake_window_in(window, cx, due);
             }
             // Wide rows ask for this themselves, only while one is on screen.
-            if self.is_slim && store.anyone_typing() {
+            if self.is_slim && (self.open.is_none() || self.slim.drawer) && store.anyone_typing() {
                 gpui::wake_window_in(window, cx, BREATH);
             }
         }
@@ -8368,7 +8377,7 @@ impl VectorApp {
         }
     }
 
-    fn chat_cached(&mut self, id: SharedString, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn chat_cached(&mut self, id: SharedString, cx: &mut Context<Self>) -> AnyElement {
         crate::pane::cached(
             &self.panes.chat,
             gpui::StyleRefinement::default().flex_1().min_w_0().h_full(),

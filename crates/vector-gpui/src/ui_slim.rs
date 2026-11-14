@@ -262,7 +262,7 @@ impl VectorApp {
                 .w_full()
                 .relative()
                 .flex()
-                .child(self.chat_pane(store, id, on_community, window, cx))
+                .child(self.chat_cached(id, cx))
                 .child(
                     // .nav-back-btn
                     div()
@@ -350,7 +350,7 @@ impl VectorApp {
                 .w_full()
                 .relative()
                 .flex()
-                .child(self.chat_pane(store, id, on_community, window, cx))
+                .child(self.chat_cached(id, cx))
                 .child(shade)
                 .child(drawer_el)
                 .into_any_element();
