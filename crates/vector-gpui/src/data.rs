@@ -569,7 +569,11 @@ impl Store {
         }
     }
 
+    /// `computeRowUnreadCount`: a muted chat or channel never counts as unread.
     pub fn unread_count(&self, chat: &SerializableChat) -> usize {
+        if chat.muted {
+            return 0;
+        }
         match &self.unread {
             Some(counts) => counts.get(&chat.id).copied().unwrap_or(0) as usize,
             None => unread_count(chat),

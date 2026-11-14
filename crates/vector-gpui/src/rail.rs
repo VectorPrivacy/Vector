@@ -407,6 +407,7 @@ fn row_shell(id: SharedString, inset: f32) -> gpui::Stateful<gpui::Div> {
 
 #[allow(clippy::too_many_arguments)]
 fn item(store: &Store, com: &Community, open: bool, unread: bool, inset: f32, voice: Option<bool>, zones: Zones, on: &OnAct) -> AnyElement {
+    let unread = unread && !community_muted(store, com);
     let id = com.community_id.clone();
     let source = RailDrag::Item { key: id.clone() };
     let group = SharedString::from(format!("rail-c-{id}"));
@@ -704,6 +705,7 @@ fn ring(id: SharedString) -> gpui::Stateful<gpui::Div> {
 
 #[allow(clippy::too_many_arguments)]
 fn tile(store: &Store, com: &Community, open: bool, unread: bool, edge: f32, voice: Option<bool>, zones: Zones, on: &OnAct) -> AnyElement {
+    let unread = unread && !community_muted(store, com);
     let id = com.community_id.clone();
     let el = bars(ring(SharedString::from(format!("rail-c-{id}"))), -edge - 3., 6., open, unread)
         .on_click({
