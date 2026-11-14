@@ -2980,6 +2980,18 @@ impl VectorApp {
         .detach();
     }
 
+    fn set_typing(&mut self, chat: &str, typers: Vec<String>, cx: &mut Context<Self>) {
+        let mut store = self.store.borrow_mut();
+        let now = store.now_ms();
+        store.typing.insert(chat.to_string(), (typers, now));
+        drop(store);
+        // Shown only by the open chat's strip and the chat list's previews.
+        if self.open.as_deref() == Some(chat) {
+            crate::pane::notify(&self.panes.chat, cx);
+        }
+        crate::pane::notify(&self.panes.side, cx);
+    }
+
     fn on_event(&mut self, ev: UiEvent, window: &mut Window, cx: &mut Context<Self>) {
         match ev {
             UiEvent::Booted(boot) => {
@@ -3093,11 +3105,7 @@ impl VectorApp {
             "typing-update" => {
                 let Some(chat) = payload.get("conversation_id").and_then(Value::as_str) else { return };
                 let typers: Vec<String> = payload.get("typers").and_then(Value::as_array).map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect()).unwrap_or_default();
-                let mut store = self.store.borrow_mut();
-                let now = store.now_ms();
-                store.typing.insert(chat.to_string(), (typers, now));
-                drop(store);
-                cx.notify();
+                self.set_typing(chat, typers, cx);
             }
             "embed_video_progress" => {
                 let (Some(url), Some(pct)) = (payload.get("url").and_then(Value::as_str), payload.get("progress").and_then(Value::as_i64)) else { return };
@@ -18659,11 +18667,7 @@ impl VectorApp {
     }
 
     pub(crate) fn dev_typing(&mut self, chat: &str, who: &str, cx: &mut Context<Self>) {
-        let mut store = self.store.borrow_mut();
-        let now = store.now_ms();
-        store.typing.insert(chat.to_string(), (vec![who.to_string()], now));
-        drop(store);
-        cx.notify();
+        self.set_typing(chat, vec![who.to_string()], cx);
     }
 
     pub(crate) fn dev_pin(&mut self, digits: &str, window: &mut Window, cx: &mut Context<Self>) {
