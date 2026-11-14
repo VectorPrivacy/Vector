@@ -85,6 +85,17 @@ pub struct PlayerSpec {
     pub size: (f32, f32),
 }
 
+/// The provider frames a player page embeds: besides the page's own origin, the only
+/// navigation its webview allows.
+pub const PLAYER_FRAMES: [&str; 2] = ["www.youtube-nocookie.com", "w.soundcloud.com"];
+
+/// Whether a player webview may load `url`, its page being at `page`: the page's own origin,
+/// or a provider's embed over https.
+pub fn player_may_load(url: &str, page: &str) -> bool {
+    let (Ok(u), Ok(p)) = (url::Url::parse(url), url::Url::parse(page)) else { return false };
+    u.origin() == p.origin() || (u.scheme() == "https" && u.host_str().is_some_and(|h| PLAYER_FRAMES.contains(&h)))
+}
+
 /// The window the link cards play in.
 pub const PLAYER: &str = "player";
 
@@ -707,5 +718,22 @@ async fn package_path(path_or_ref: &str) -> Result<String, String> {
     match vector_core::media::MediaRef::parse(path_or_ref).ok_or("Unknown file")? {
         vector_core::media::MediaRef::File(p) => Ok(p),
         vector_core::media::MediaRef::Held(h) => held_package(h).await,
+    }
+}
+
+#[cfg(test)]
+mod player_tests {
+    use super::player_may_load;
+
+    #[test]
+    fn a_player_page_loads_itself_and_its_provider_frame_only() {
+        let page = "http://localhost:4000/youtube/abc";
+        assert!(player_may_load("http://localhost:4000/other", page));
+        assert!(player_may_load("https://www.youtube-nocookie.com/embed/abc?autoplay=1", page));
+        assert!(player_may_load("https://w.soundcloud.com/player/?url=x", page));
+        assert!(!player_may_load("http://www.youtube-nocookie.com/embed/abc", page));
+        assert!(!player_may_load("https://evil.example/embed", page));
+        assert!(!player_may_load("http://localhost:4001/", page));
+        assert!(!player_may_load("about:blank", page));
     }
 }

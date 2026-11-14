@@ -317,7 +317,8 @@ mod host {
             .with_incognito(true)
             .with_initialization_script_for_main_only(init, true)
             .with_ipc_handler(|request| send(&FromHost::Player { body: request.into_body() }, &[]))
-            .with_navigation_handler(move |url| origin(&url) == own)
+            // The page, and the provider frame it embeds: nothing else loads.
+            .with_navigation_handler(move |url| origin(&url) == own || provider_frame(&url))
             .with_new_window_req_handler(|url, _| {
                 send(&FromHost::Browse { url }, &[]);
                 wry::NewWindowResponse::Deny
@@ -333,6 +334,11 @@ mod host {
         window.present();
         OPEN.with(|o| o.borrow_mut().insert(PLAYER.into(), Window { window, view, _context: None }));
         Ok(())
+    }
+
+    /// A YouTube or SoundCloud embed over https: the frame a player page holds.
+    fn provider_frame(url: &str) -> bool {
+        url::Url::parse(url).is_ok_and(|u| u.scheme() == "https" && matches!(u.host_str(), Some("www.youtube-nocookie.com" | "w.soundcloud.com")))
     }
 
     fn origin(url: &str) -> (String, String) {

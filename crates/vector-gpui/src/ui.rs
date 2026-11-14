@@ -2886,9 +2886,20 @@ impl VectorApp {
     fn play_link(&mut self, msg: String, p: crate::linkcard::Play, cx: &mut Context<Self>) {
         let audio = p.provider == "soundcloud";
         let title = p.title.clone();
-        let rx = backend::run(async move {
+        let fetch = async move {
             vector_media::players::player_url(p.provider.to_string(), p.id, (p.start > 0).then_some(p.start)).await
-        });
+        };
+        let rx = if self.live {
+            backend::run(fetch)
+        } else {
+            // Fixtures have no backend: the loopback page is served from the shell's runtime.
+            let (tx, rx) = futures::channel::oneshot::channel();
+            // spawn-detached: serves a public player page; owns no account state.
+            tauri::async_runtime::spawn(async move {
+                let _ = tx.send(fetch.await);
+            });
+            rx
+        };
         cx.spawn(async move |this, cx| {
             let Ok(got) = rx.await else { return };
             this.update(cx, |this, cx| match got.and_then(|url| crate::miniapp::play(msg, title, url, audio)) {

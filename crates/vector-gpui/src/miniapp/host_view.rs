@@ -279,12 +279,12 @@ fn build_player(spec: PlayerSpec, cx: &mut App) -> Result<(), String> {
     let mut failed = None;
     let handle = cx
         .open_window(opts, |window, cx| {
-            let own = origin(&spec.url);
+            let page = spec.url.clone();
             let made = WebViewBuilder::new()
                 .with_incognito(true)
                 .with_initialization_script_for_main_only(super::PLAYER_SHIM.to_string(), true)
                 .with_ipc_handler(|request| emit(Event::Player(request.into_body())))
-                .with_navigation_handler(move |url| origin(&url) == own)
+                .with_navigation_handler(move |url| super::player_may_load(&url, &page))
                 .with_new_window_req_handler(|url, _| {
                     emit(Event::Browse(url));
                     wry::NewWindowResponse::Deny

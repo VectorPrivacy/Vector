@@ -19,7 +19,8 @@
 //! - `dev:drag:<x1>,<y1>,<x2>,<y2>`: press at the first point, move with the button held, release at the second
 //! - `dev:drop:<channel|category>:<id>:<before|after|into>:<target id>`: a sidebar drop, as a drag lands it
 //! - `dev:leave`: the pointer leaves the window, as the platform reports it
-//! - `dev:wheel:<x>,<y>,<dy>`: scroll what is under the point (positive is down)
+//! - `dev:wheel:<x>,<y>,<dy>[,<n>]`: scroll what is under the point (positive is down), `n` times in one gesture, a final `1` landing a finger first
+//! - `dev:chatlist`: the chat list's scroll position and the archive row's state
 //! - `dev:type:<text>`: type into whatever has focus
 //! - `dev:key:<keystroke>`: press one, as GPUI spells them (`enter`, `escape`, `cmd-k`)
 //! - `dev:sel`: the message paragraphs on screen and what is selected
@@ -139,11 +140,19 @@ pub fn run(app: &mut VectorApp, cmd: &str, window: &mut Window, cx: &mut Context
                     events.push(PlatformInput::MouseDown(MouseDownEvent { button, position: at, click_count, ..Default::default() }));
                     events.push(PlatformInput::MouseUp(MouseUpEvent { button, position: at, click_count, ..Default::default() }));
                 }
-                "wheel" => events.push(PlatformInput::Scroll(ScrollEvent {
-                    position: at,
-                    delta: ScrollDelta::Pixels(point(px(0.), px(-n.get(2).copied().unwrap_or(0.)))),
-                    ..Default::default()
-                })),
+                // An optional fourth number repeats it, as one unbroken gesture; a fifth of 1 marks
+                // its first event as a finger landing on the trackpad.
+                "wheel" => {
+                    for k in 0..n.get(3).map_or(1, |&k| k.max(1.) as usize) {
+                        let landed = k == 0 && n.get(4).is_some_and(|&f| f == 1.);
+                        events.push(PlatformInput::Scroll(ScrollEvent {
+                            position: at,
+                            delta: ScrollDelta::Pixels(point(px(0.), px(-n.get(2).copied().unwrap_or(0.)))),
+                            touch_phase: if landed { gpui::TouchPhase::Started } else { gpui::TouchPhase::Moved },
+                            ..Default::default()
+                        }));
+                    }
+                }
                 _ => {}
             }
             later(window, cx, move |window, cx| {
@@ -206,6 +215,7 @@ pub fn run(app: &mut VectorApp, cmd: &str, window: &mut Window, cx: &mut Context
         },
         "shot" => answer(shot()),
         "sel" => answer(crate::select::debug()),
+        "chatlist" => answer(app.dev_chatlist()),
         _ => answer(json!({ "error": format!("unknown command {verb}") })),
     }
 }

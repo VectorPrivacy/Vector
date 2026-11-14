@@ -96,6 +96,23 @@ impl VectorApp {
         if self.archive.slim { self.slim.list.clone() } else { self.chatlist.clone() }
     }
 
+    /// For devctl: where the chat list sits and what the archive row is doing.
+    #[cfg(feature = "devctl")]
+    pub(crate) fn dev_chatlist(&self) -> serde_json::Value {
+        let top = self.fold_list().logical_scroll_top();
+        let f = &self.archive;
+        serde_json::json!({
+            "item_ix": top.item_ix,
+            "offset": f32::from(top.offset_in_item),
+            "scrolled_px": -f32::from(self.fold_list().scroll_px_offset_for_scrollbar().y),
+            "at_top": self.at_top(),
+            "revealed": f.revealed,
+            "pull": f.pull,
+            "from_top": f.from_top,
+            "travel": f.travel,
+        })
+    }
+
     fn at_top(&self) -> bool {
         let top = self.fold_list().logical_scroll_top();
         top.item_ix == 0 && top.offset_in_item <= px(0.5)
@@ -110,7 +127,9 @@ impl VectorApp {
         let now = Instant::now();
         let list = self.fold_list();
         let f = &mut self.archive;
-        if f.wheel_at.is_none_or(|t| now - t > GESTURE_GAP) {
+        // A finger landing starts a gesture even mid-momentum: the last swipe's glide keeps
+        // the gap from ever opening.
+        if e.touch_phase == gpui::TouchPhase::Started || f.wheel_at.is_none_or(|t| now - t > GESTURE_GAP) {
             let top = list.logical_scroll_top();
             f.from_top = top.item_ix == 0 && top.offset_in_item <= px(0.5);
             f.travel = 0.;
