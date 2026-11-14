@@ -33,13 +33,15 @@ pub struct Panes {
     pub chat: Entity<Pane>,
     pub members: Entity<Pane>,
     pub timeline: Entity<Pane>,
+    /// Empty: notifying it redraws only what the root draws itself (the call panel, the rail).
+    pub chrome: Entity<Pane>,
 }
 
 impl Panes {
     pub fn new(cx: &mut Context<VectorApp>) -> Self {
         let app = cx.entity().downgrade();
         let mut pane = || cx.new(|_| Pane { app: app.clone(), build: None });
-        Self { side: pane(), chat: pane(), members: pane(), timeline: pane() }
+        Self { side: pane(), chat: pane(), members: pane(), timeline: pane(), chrome: pane() }
     }
 }
 

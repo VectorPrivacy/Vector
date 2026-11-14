@@ -142,8 +142,10 @@ impl VectorApp {
             self.load_older(cx);
         }
         if fresh {
-            // Bounds lag the layout by a frame: measure again once it settles.
-            window.request_animation_frame();
+            // Bounds lag the layout by a frame: measure again once it settles. The bar is the
+            // chat pane's, so only it redraws.
+            let pane = self.panes.chat.clone();
+            window.on_next_frame(move |_, cx| crate::pane::notify(&pane, cx));
         }
         self.bar.sig = Some(sig.clone());
         let Some((newer_j, total)) = rank else { return };
@@ -184,7 +186,7 @@ impl VectorApp {
                     }
                     this.bar.sig = None;
                     if this.open.as_deref() == Some(chat.as_str()) {
-                        cx.notify();
+                        crate::pane::notify(&this.panes.chat, cx);
                     }
                 })
                 .ok();

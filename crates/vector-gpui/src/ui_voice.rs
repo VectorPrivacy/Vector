@@ -57,6 +57,11 @@ impl VectorApp {
                 if let Ok(s) = serde_json::from_value::<Session>(payload.clone()) {
                     self.voice.set_session(Some(s));
                 }
+                // Rings show in the channel list, the stage and the root's bar.
+                crate::pane::notify(&self.panes.side, cx);
+                crate::pane::notify(&self.panes.chat, cx);
+                self.scoped = true;
+                return;
             }
             "voice_presence" => {
                 if let Some(ch) = payload.get("channel_id").and_then(Value::as_str) {
@@ -82,7 +87,7 @@ impl VectorApp {
                         if this.voice.session.is_none() {
                             this.voice_ticking = false;
                         } else {
-                            cx.notify();
+                            crate::pane::notify(&this.panes.chrome, cx);
                         }
                         this.voice_ticking
                     })

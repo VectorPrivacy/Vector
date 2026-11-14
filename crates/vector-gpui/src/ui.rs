@@ -82,6 +82,8 @@ pub struct VectorApp {
     timeline: ListState,
     /// The open chat's rows, rebuilt when it changes rather than per frame.
     rows: Rc<Vec<Row>>,
+    /// Per row: what it shows, by message id rather than index.
+    row_keys: Vec<u64>,
     /// The open chat's message positions by id, built with `rows`.
     msg_index: Rc<HashMap<String, usize>>,
     read_anchor: Option<data::Unread>,
@@ -93,6 +95,8 @@ pub struct VectorApp {
     timeout_expiry: Option<gpui::Task<()>>,
     /// A pending read of who can't react in the open channel.
     react_recheck: Option<gpui::Task<()>>,
+    /// Set by an event handler that notified just the panes its change shows in.
+    scoped: bool,
     /// Fetches the open profile again every 30 s while the window has focus.
     profile_poll: Option<gpui::Task<()>>,
     started: std::time::Instant,
@@ -891,6 +895,7 @@ impl VectorApp {
             open: None,
             timeline: ListState::new(0, ListAlignment::Top, px(600.)),
             rows: Rc::default(),
+            row_keys: Vec::new(),
             msg_index: Rc::default(),
             read_anchor: None,
             input,
@@ -898,6 +903,7 @@ impl VectorApp {
             revealed: Rc::default(),
             timeout_expiry: None,
             react_recheck: None,
+            scoped: false,
             profile_poll: None,
             started: std::time::Instant::now(),
             mode: Mode::Normal,
@@ -2986,8 +2992,13 @@ impl VectorApp {
     fn set_typing(&mut self, chat: &str, typers: Vec<String>, cx: &mut Context<Self>) {
         let mut store = self.store.borrow_mut();
         let now = store.now_ms();
+        let showing = store.typing.get(chat).is_some_and(|(who, at)| *who == typers && now.saturating_sub(*at) <= data::TYPING_TTL_MS);
         store.typing.insert(chat.to_string(), (typers, now));
         drop(store);
+        // A renewal changes nothing on screen; the strip's own wake finds it renewed.
+        if showing {
+            return;
+        }
         // Shown only by the open chat's strip and the chat list's previews.
         if self.open.as_deref() == Some(chat) {
             crate::pane::notify(&self.panes.chat, cx);
@@ -3023,7 +3034,19 @@ impl VectorApp {
             UiEvent::Core(name, payload) => self.on_core_event(&name, payload, window, cx),
         }
         self.sync_request_mutuals(cx);
-        cx.notify();
+        if !std::mem::take(&mut self.scoped) {
+            cx.notify();
+        }
+    }
+
+    /// Redraw the side pane, plus the open chat's when `chat` is it.
+    fn notify_chat(&mut self, chat: &str, cx: &mut Context<Self>) {
+        if self.open.as_deref() == Some(chat) {
+            crate::pane::notify(&self.panes.chat, cx);
+            crate::pane::notify(&self.panes.timeline, cx);
+        }
+        crate::pane::notify(&self.panes.side, cx);
+        self.scoped = true;
     }
 
     fn on_core_event(
@@ -3109,6 +3132,7 @@ impl VectorApp {
                 let Some(chat) = payload.get("conversation_id").and_then(Value::as_str) else { return };
                 let typers: Vec<String> = payload.get("typers").and_then(Value::as_array).map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect()).unwrap_or_default();
                 self.set_typing(chat, typers, cx);
+                self.scoped = true;
             }
             "embed_video_progress" => {
                 let (Some(url), Some(pct)) = (payload.get("url").and_then(Value::as_str), payload.get("progress").and_then(Value::as_i64)) else { return };
@@ -3223,7 +3247,9 @@ impl VectorApp {
                     .filter(|a| a.testing)
                 {
                     a.level = payload.get("mic").and_then(Value::as_f64).unwrap_or(0.) as f32;
+                    crate::pane::notify(&self.panes.chrome, cx);
                 }
+                self.scoped = true;
             }
             "call_state" => {
                 self.call.apply_state(&payload);
@@ -3239,11 +3265,16 @@ impl VectorApp {
                     self.show_toast("You're muted: Vector doesn't have access to your microphone.", cx);
                 }
             }
-            "call_level" => {
-                self.call.apply_level(&payload);
-                self.sync_call_meter();
+            "call_level" | "call_stats" => {
+                if name == "call_level" {
+                    self.call.apply_level(&payload);
+                    self.sync_call_meter();
+                } else {
+                    self.call.apply_stats(&payload);
+                }
+                crate::pane::notify(&self.panes.chrome, cx);
+                self.scoped = true;
             }
-            "call_stats" => self.call.apply_stats(&payload),
             "community_relay_move" => {
                 if let Some(r) = self.rekey.as_mut() {
                     let pct = payload.get("pct").and_then(Value::as_f64).unwrap_or(0.) as f32;
@@ -3359,6 +3390,7 @@ impl VectorApp {
                         who.retain(|n| *n != sender);
                     }
                 }
+                let changed = msg.id.clone();
                 let known = if name == "message_new" {
                     self.store.borrow_mut().insert_message(&chat_id, msg)
                 } else {
@@ -3388,8 +3420,11 @@ impl VectorApp {
                     .detach();
                 }
                 if self.open.as_deref() == Some(chat_id.as_str()) {
-                    self.refresh_rows(true);
+                    self.refresh_rows_at(&changed, true);
                     self.check_reactors(cx);
+                }
+                if known {
+                    self.notify_chat(&chat_id, cx);
                 }
             }
             "marketplace_install_progress" | "marketplace_apps_updated" => self.nexus_event(name, &payload, cx),
@@ -3401,6 +3436,7 @@ impl VectorApp {
                     self.badge = total;
                     crate::badge::set(_window, total);
                 }
+                self.scoped = true;
             }
             "deep_link_action" => {
                 let field = |k: &str| payload.get(k).and_then(Value::as_str).map(str::to_string);
@@ -3440,7 +3476,9 @@ impl VectorApp {
             }
             "profile_update" => {
                 if let Ok(p) = serde_json::from_value::<SlimProfile>(payload) {
-                    self.store.borrow_mut().profiles.insert(p.id.clone(), p);
+                    let mut store = self.store.borrow_mut();
+                    self.scoped = store.profiles.get(&p.id) == Some(&p);
+                    store.profiles.insert(p.id.clone(), p);
                 }
             }
             "chat_mark_read" => {
@@ -3452,6 +3490,7 @@ impl VectorApp {
                 if let Some(chat) = self.store.borrow_mut().chat_mut(&chat_id) {
                     chat.last_read = last;
                 }
+                self.notify_chat(&chat_id, cx);
             }
             "attachment_download_progress" => {
                 let Some(id) = payload.get("id").and_then(Value::as_str) else {
@@ -3601,8 +3640,65 @@ impl VectorApp {
         if let Some(edge) = self.edge() {
             rows.insert(0, Row::Edge(edge));
         }
+        self.row_keys = self.keys_of(&rows);
         self.rows = Rc::new(rows);
         self.rows.len()
+    }
+
+    fn keys_of(&self, rows: &[Row]) -> Vec<u64> {
+        use std::hash::{Hash, Hasher};
+        let store = self.store.borrow();
+        let chat = self.open.as_ref().and_then(|id| store.chat(id));
+        let system = chat.and_then(|c| store.system.get(&c.id));
+        rows.iter()
+            .map(|r| {
+                let mut h = std::collections::hash_map::DefaultHasher::new();
+                std::mem::discriminant(r).hash(&mut h);
+                match r {
+                    Row::Edge(e) => std::mem::discriminant(e).hash(&mut h),
+                    Row::Date { label, time } => (label, time).hash(&mut h),
+                    Row::Unread => {}
+                    Row::Notice(n) => n.hash(&mut h),
+                    Row::Message { index, first, run } => {
+                        chat.and_then(|c| c.messages.get(*index)).map(|m| &m.id).hash(&mut h);
+                        (first, run).hash(&mut h);
+                    }
+                    Row::System { index, count } => {
+                        system.and_then(|s| s.get(*index)).map(|l| &l.id).hash(&mut h);
+                        count.hash(&mut h);
+                    }
+                }
+                h.finish()
+            })
+            .collect()
+    }
+
+    /// `refresh_rows` for one message's arrival or change: rows above it keep their measured
+    /// heights, so a busy channel lays out only its tail.
+    fn refresh_rows_at(&mut self, changed: &str, follow: bool) {
+        let at_end = self.timeline.logical_scroll_top().item_ix + 12 >= self.timeline.item_count();
+        let old = self.timeline.item_count();
+        let old_keys = std::mem::take(&mut self.row_keys);
+        if old_keys.len() != old {
+            self.row_keys = old_keys;
+            return self.refresh_rows(follow);
+        }
+        self.rebuild_rows();
+        let hit = {
+            let store = self.store.borrow();
+            let chat = self.open.as_ref().and_then(|id| store.chat(id));
+            self.rows.iter().position(|r| {
+                matches!(r, Row::Message { index, .. } if chat.and_then(|c| c.messages.get(*index)).is_some_and(|m| m.id == changed))
+            })
+        };
+        let same = old_keys.iter().zip(&self.row_keys).take_while(|(a, b)| a == b).count();
+        // The row above may change with it: a streak's tail, a date's last message.
+        let from = same.min(hit.unwrap_or(usize::MAX)).saturating_sub(1);
+        let new = self.rows.len();
+        self.timeline.splice(from..old, new - from);
+        if follow && at_end {
+            self.timeline.scroll_to_end();
+        }
     }
 
     /// `updateHistoryEdge`: what sits above the oldest message, once the database has no older.
@@ -6183,6 +6279,12 @@ impl Render for VectorApp {
             .children(self.comm_crop.as_ref().map(|(v, _, _)| {
                 gpui::deferred(div().absolute().inset_0().child(v.clone())).with_priority(14)
             }))
+            .child({
+                let chrome = self.panes.chrome.clone();
+                let mut style = gpui::StyleRefinement::default();
+                style.position = Some(gpui::Position::Absolute);
+                crate::pane::cached(&chrome, style, |_, _, _| div().into_any_element(), cx)
+            })
             .children({
                 let app = cx.entity().downgrade();
                 let on: crate::call::OnAct = Rc::new(move |act, window, cx| {
@@ -12624,6 +12726,8 @@ impl VectorApp {
     fn update_shortcode(&mut self, cx: &mut Context<Self>) {
         let input = self.input.read(cx);
         let (text, caret) = (input.text().to_string(), input.caret());
+        let shown = |app: &Self| (app.shortcode.is_some(), app.mention.is_some(), app.time_pick.is_some(), app.time_chip.as_ref().map(|c| c.key()));
+        let (before, send_before) = (shown(self), self.send_shown);
         let send = !text.trim().is_empty();
         if send != self.send_shown {
             self.send_shown = send;
@@ -12664,9 +12768,17 @@ impl VectorApp {
         let popup =
             crate::shortcodes::suggest(&text, caret, self.emoji_picker.read(cx), self.emoticons);
         let none = popup.is_none();
-        self.set_shortcode(popup, cx);
+        self.shortcode = popup;
+        self.input.update(cx, |i, _| i.set_nav(!none));
         if none {
             self.suggest_time(&text, caret, now, cx);
+        }
+        // Most keystrokes change only the composer, which redraws itself.
+        let after = shown(self);
+        if before.0 || after != before {
+            cx.notify();
+        } else if send_before != self.send_shown {
+            crate::pane::notify(&self.panes.chat, cx);
         }
     }
 
@@ -12702,7 +12814,6 @@ impl VectorApp {
         let on = chip.is_some();
         self.time_chip = chip;
         self.input.update(cx, |i, _| i.set_chip(on));
-        cx.notify();
     }
 
     fn time_popup(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -18671,6 +18782,11 @@ impl VectorApp {
     pub(crate) fn dev_net(&mut self, v: Option<serde_json::Value>, cx: &mut Context<Self>) {
         self.net_view = v;
         cx.notify();
+    }
+
+    /// A backend event, as if the core had sent it.
+    pub(crate) fn dev_emit(&mut self, name: &str, payload: Value, window: &mut Window, cx: &mut Context<Self>) {
+        self.on_event(UiEvent::Core(name.to_string(), payload), window, cx);
     }
 
     pub(crate) fn dev_typing(&mut self, chat: &str, who: &str, cx: &mut Context<Self>) {

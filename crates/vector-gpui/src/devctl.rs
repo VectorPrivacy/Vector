@@ -94,6 +94,11 @@ pub fn run(app: &mut VectorApp, cmd: &str, window: &mut Window, cx: &mut Context
         }
         "pin" => app.dev_pin(rest, window, cx),
         "net" => app.dev_net(serde_json::from_str(rest).ok(), cx),
+        "emit" => {
+            if let Some((name, payload)) = rest.split_once(':') {
+                app.dev_emit(name, serde_json::from_str(payload).unwrap_or_default(), window, cx);
+            }
+        }
         "typing" => {
             if let Some((chat, who)) = rest.rsplit_once(':') {
                 app.dev_typing(chat, who, cx);
