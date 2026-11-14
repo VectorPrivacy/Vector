@@ -13,6 +13,7 @@
 //! - `dev:net:<json>`: stand in for the network status the routing views read
 //! - `dev:typing:<chat>:<npub>`: show that npub typing in that chat, as if a notice arrived
 //! - `dev:move:<x>,<y>` / `dev:click:<x>,<y>` / `dev:rclick:<x>,<y>`: the mouse, in window points
+//! - `dev:leave`: the pointer leaves the window, as the platform reports it
 //! - `dev:wheel:<x>,<y>,<dy>`: scroll what is under the point (positive is down)
 //! - `dev:type:<text>`: type into whatever has focus
 //! - `dev:key:<keystroke>`: press one, as GPUI spells them (`enter`, `escape`, `cmd-k`)
@@ -21,7 +22,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use gpui::{
-    Context, Keystroke, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+    Context, Keystroke, Modifiers, MouseButton, MouseDownEvent, MouseExitEvent, MouseMoveEvent, MouseUpEvent,
     PlatformInput, ScrollDelta, ScrollEvent, Window, point, px,
 };
 use serde_json::json;
@@ -137,6 +138,11 @@ pub fn run(app: &mut VectorApp, cmd: &str, window: &mut Window, cx: &mut Context
                 }
             });
         }
+        "leave" => later(window, cx, |window, cx| {
+            // Just past the right edge, where macOS reports a pointer that has left.
+            let position = point(window.viewport_size().width + px(1.), window.mouse_position().y);
+            window.dispatch_event(PlatformInput::MouseExited(MouseExitEvent { position, pressed_button: None, modifiers: Modifiers::default() }), cx);
+        }),
         "type" => {
             let text = rest.to_string();
             later(window, cx, move |window, cx| {

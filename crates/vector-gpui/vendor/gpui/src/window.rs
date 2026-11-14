@@ -5975,6 +5975,23 @@ impl Window {
     /// Dispatch a mouse, keyboard, or touch event on the window.
     #[profiling::function]
     pub fn dispatch_event(&mut self, event: PlatformInput, cx: &mut App) -> DispatchEventResult {
+        // A pointer that has left the window is nowhere over it: follow the exit with a move off
+        // the window, so hover styles clear (and return) through the same path as any move. A
+        // drag keeps tracking it, and macOS's edge resize zones report exits from inside.
+        if let PlatformInput::MouseExited(exit) = &event {
+            let (p, size) = (exit.position, self.viewport_size);
+            let left = p.x <= px(0.) || p.y <= px(0.) || p.x >= size.width || p.y >= size.height;
+            if left && exit.pressed_button.is_none() {
+                let away = MouseMoveEvent { position: point(px(-1.), px(-1.)), pressed_button: None, modifiers: exit.modifiers };
+                let result = self.dispatch_input(event, cx);
+                self.dispatch_input(PlatformInput::MouseMove(away), cx);
+                return result;
+            }
+        }
+        self.dispatch_input(event, cx)
+    }
+
+    fn dispatch_input(&mut self, event: PlatformInput, cx: &mut App) -> DispatchEventResult {
         #[cfg(feature = "profiler")]
         self.window_profiler.begin_input(event.kind_name());
         let update_count_before = self.invalidator.update_count();
