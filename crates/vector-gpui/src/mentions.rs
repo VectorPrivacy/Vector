@@ -78,7 +78,8 @@ pub fn trigger(text: &str, caret: usize, sigil: char) -> Option<(usize, &str)> {
     None
 }
 
-/// `getMentionCandidates`: who in this chat can be tagged, most recently active first, then
+/// `getMentionCandidates`: who in this chat can be tagged, most recently active (spoken or
+/// joined) first, then
 /// the Roles and @everyone a Community lets me use.
 pub fn candidates(
     store: &Store,
@@ -96,6 +97,13 @@ pub fn candidates(
             _ => chat.id.as_str(),
         };
         last.entry(sender).or_insert(m.at);
+    }
+    // A joiner is taggable, and recent, from their join line, before they've said anything.
+    for l in store.system.get(&chat.id).into_iter().flatten() {
+        if l.kind == 1 && l.npub.starts_with("npub1") {
+            let at = last.entry(l.npub.as_str()).or_insert(l.at);
+            *at = (*at).max(l.at);
+        }
     }
     let mut npubs: Vec<&str> = chat.participants.iter().map(String::as_str).collect();
     if community.is_some() {
