@@ -612,6 +612,7 @@ impl Builder<'_> {
                         src: image.into(),
                         size: size * 1.15,
                         drop: size * 0.2, tip: None,
+                        alt: t[start..end].to_string().into(),
                     });
                 }
                 crate::media::Custom::Pending => {
@@ -647,6 +648,7 @@ impl Builder<'_> {
                     src: src.into(),
                     size: size * 1.15,
                     drop: size * 0.2, tip: None,
+                    alt: g.to_string().into(),
                 });
                 run_start = i + g.len();
             }

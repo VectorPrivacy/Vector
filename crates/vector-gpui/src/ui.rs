@@ -3869,6 +3869,7 @@ impl VectorApp {
     fn open_chat(&mut self, id: SharedString, window: &mut Window, cx: &mut Context<Self>) {
         if self.open.as_ref() != Some(&id) {
             self.store.borrow_mut().unveiled.clear();
+            crate::select::reset();
         }
         let elsewhere = self.community.as_ref().is_some_and(|v| {
             self.store
@@ -6065,6 +6066,11 @@ impl Render for VectorApp {
         }
         let root = div()
             .track_focus(&self.root_focus)
+            .on_action(cx.listener(|_, _: &crate::composer::Copy, _, cx| {
+                if let Some(text) = crate::select::text() {
+                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+                }
+            }))
             .capture_key_down(cx.listener(|app, e: &gpui::KeyDownEvent, window, cx| {
                 if e.keystroke.key == "escape"
                     && app.menu.is_none()
@@ -8667,6 +8673,7 @@ impl VectorApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        crate::select::next_pass();
         let rows_store = self.store.clone();
         let rows_id = id.clone();
         let rows = self.rows.clone();
@@ -8712,7 +8719,9 @@ impl VectorApp {
             let top = if self.is_slim && !staged_voice { 15. } else { 12. };
             if store.chat(&id).is_some_and(|chat| store.is_request(chat)) { top + 56. } else { top }
         };
-        list(self.timeline.clone(), move |i, window, cx| {
+        let app = cx.entity().downgrade();
+        let scroller = self.timeline.clone();
+        let list = list(self.timeline.clone(), move |i, window, cx| {
             let rows_store = rows_store.borrow();
             let (Some(chat), Some(row)) = (rows_store.chat(&rows_id), rows.get(i)) else {
                 return div().into_any_element();
@@ -8851,8 +8860,55 @@ impl VectorApp {
             }
             el
         })
-        .size_full()
-        .into_any_element()
+        .size_full();
+        div()
+            .size_full()
+            .relative()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, e: &gpui::MouseDownEvent, window, cx| {
+                    if crate::select::press(e.position, e.click_count, window) == Some(true) {
+                        crate::pane::notify(&this.panes.timeline, cx);
+                    }
+                }),
+            )
+            .child(list)
+            .child(
+                gpui::canvas(
+                    |_, _, _| {},
+                    move |bounds, _, window, _| {
+                        let (app, scroller) = (app.clone(), scroller.clone());
+                        // While a selection is dragged the pointer may leave the list: it still
+                        // follows, and scrolls the list when held past an edge.
+                        window.on_mouse_event(move |e: &gpui::MouseMoveEvent, phase, window, cx| {
+                            if !phase.bubble() || !crate::select::dragging() {
+                                return;
+                            }
+                            if e.pressed_button != Some(MouseButton::Left) {
+                                crate::select::release();
+                                return;
+                            }
+                            let edge = px(24.);
+                            if e.position.y < bounds.top() + edge {
+                                scroller.scroll_by(e.position.y - bounds.top() - edge);
+                            } else if e.position.y > bounds.bottom() - edge {
+                                scroller.scroll_by(e.position.y - bounds.bottom() + edge);
+                            }
+                            if crate::select::drag(e.position, window) {
+                                app.update(cx, |this, cx| crate::pane::notify(&this.panes.timeline, cx)).ok();
+                            }
+                        });
+                        window.on_mouse_event(|e: &gpui::MouseUpEvent, phase, _, _| {
+                            if phase.bubble() && e.button == MouseButton::Left {
+                                crate::select::release();
+                            }
+                        });
+                    },
+                )
+                .absolute()
+                .size_full(),
+            )
+            .into_any_element()
     }
 
     fn timeline_cached(&self, id: SharedString, staged_voice: bool, cx: &mut Context<Self>) -> AnyElement {

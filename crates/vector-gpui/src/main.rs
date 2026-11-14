@@ -116,6 +116,7 @@ mod viktor;
 #[cfg(feature = "devctl")]
 mod devctl;
 mod pane;
+mod select;
 mod sprite;
 mod video;
 #[cfg(feature = "video")]

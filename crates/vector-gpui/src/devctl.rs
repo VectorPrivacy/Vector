@@ -22,6 +22,7 @@
 //! - `dev:wheel:<x>,<y>,<dy>`: scroll what is under the point (positive is down)
 //! - `dev:type:<text>`: type into whatever has focus
 //! - `dev:key:<keystroke>`: press one, as GPUI spells them (`enter`, `escape`, `cmd-k`)
+//! - `dev:sel`: the message paragraphs on screen and what is selected
 //! - `dev:shot`: the window as `$TMPDIR/vector-devctl.png` (macOS and Windows)
 
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -204,6 +205,7 @@ pub fn run(app: &mut VectorApp, cmd: &str, window: &mut Window, cx: &mut Context
             Err(e) => answer(json!({ "error": e })),
         },
         "shot" => answer(shot()),
+        "sel" => answer(crate::select::debug()),
         _ => answer(json!({ "error": format!("unknown command {verb}") })),
     }
 }

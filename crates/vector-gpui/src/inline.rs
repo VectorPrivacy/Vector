@@ -176,6 +176,8 @@ pub enum Atom {
         drop: f32,
         /// Shown at 40%, whole on hover, with this hint.
         tip: Option<Tip>,
+        /// What a copy of the selection writes in its place: the emoji or its `:shortcode:`.
+        alt: SharedString,
     },
     /// Fixed space that never breaks from what follows (an inline box's margin).
     Gap(f32),
@@ -284,6 +286,8 @@ pub struct Inline {
     ellipsis: bool,
     /// Told whether the one line was cut, as laid out.
     clipped: Option<Rc<std::cell::Cell<bool>>>,
+    /// A message's paragraph, which a drag can select.
+    select: Option<crate::select::Key>,
 }
 
 pub fn inline(atoms: impl Into<Rc<[Atom]>>, base: Look) -> Inline {
@@ -295,6 +299,7 @@ pub fn inline(atoms: impl Into<Rc<[Atom]>>, base: Look) -> Inline {
         clock: 0.,
         ellipsis: false,
         clipped: None,
+        select: None,
     }
 }
 
@@ -317,6 +322,12 @@ impl Inline {
     /// A one-line cut repaints the next frame when it changes.
     pub fn report_clip(mut self, cell: Rc<std::cell::Cell<bool>>) -> Self {
         self.clipped = Some(cell);
+        self
+    }
+
+    /// Selectable, as this paragraph of a message.
+    pub fn selectable(mut self, key: crate::select::Key) -> Self {
+        self.select = Some(key);
         self
     }
 
@@ -885,6 +896,9 @@ impl Element for Inline {
                 };
             }
         }
+        if let Some(key) = &self.select {
+            crate::select::place(key, &self.atoms, laid, bounds);
+        }
         let s = laid.borrow();
         if let Some(cell) = &self.clipped
             && cell.replace(s.ellipsis.is_some()) != s.ellipsis.is_some()
@@ -967,6 +981,7 @@ impl Element for Inline {
                         size: sz,
                         drop,
                         tip,
+                        ..
                     } => {
                         let pic = gpui::StyledImage::object_fit(
                             img(src.clone()).size(px(*sz)).aspect_ratio(1.),
@@ -1053,6 +1068,13 @@ impl Element for Inline {
             el.paint(window, cx);
         }
         let action_hot = pre.hits.iter().any(|(h, t)| matches!(t, Target::Action(_)) && h.is_hovered(window));
+        if let Some(key) = &self.select
+            && let Some(picked) = crate::select::range_in(key, || plain_len(&self.atoms))
+        {
+            for r in rects(&self.atoms, &s, picked, window) {
+                window.paint_quad(fill(Bounds::new(bounds.origin + r.origin, r.size), ca(89, 252, 179, 0.28)));
+            }
+        }
         for line in &s.lines {
             // Boxes first, so text paints over them.
             let mut k = 0;
@@ -1264,6 +1286,7 @@ pub fn emoji_line(text: &str, look: Look, emoji: f32, drop: f32) -> Inline {
                     size: emoji,
                     drop,
                     tip: None,
+                    alt: g.to_string().into(),
                 });
             }
             None => run.push_str(g),
@@ -1277,4 +1300,117 @@ pub fn emoji_line(text: &str, look: Look, emoji: f32, drop: f32) -> Inline {
         });
     }
     inline(atoms, look).single_line()
+}
+
+/// How much of the paragraph's plain text an atom stands for.
+fn atom_len(a: &Atom) -> usize {
+    match a {
+        Atom::Text { text, .. } => text.len(),
+        Atom::Image { alt, .. } => alt.len(),
+        Atom::Pill(p) => p.parts.iter().map(|p| if let Part::Text { text, .. } = p { text.len() } else { 0 }).sum(),
+        Atom::Break => 1,
+        Atom::Gap(_) | Atom::Ring(_) => 0,
+    }
+}
+
+fn plain_len(atoms: &[Atom]) -> usize {
+    atoms.iter().map(atom_len).sum()
+}
+
+fn starts(atoms: &[Atom]) -> Vec<usize> {
+    let mut at = 0;
+    atoms
+        .iter()
+        .map(|a| {
+            let s = at;
+            at += atom_len(a);
+            s
+        })
+        .collect()
+}
+
+/// A paragraph as plain text: an emoji as itself, a pill as its words, a break as a newline.
+pub(crate) fn plain(atoms: &[Atom]) -> String {
+    let mut out = String::with_capacity(plain_len(atoms));
+    for a in atoms {
+        match a {
+            Atom::Text { text, .. } => out.push_str(text),
+            Atom::Image { alt, .. } => out.push_str(alt),
+            Atom::Pill(p) => {
+                for part in &p.parts {
+                    if let Part::Text { text, .. } = part {
+                        out.push_str(text);
+                    }
+                }
+            }
+            Atom::Break => out.push('\n'),
+            Atom::Gap(_) | Atom::Ring(_) => {}
+        }
+    }
+    out
+}
+
+/// The plain-text offset nearest `local`, a point in the paragraph's own space.
+pub(crate) fn hit(atoms: &[Atom], laid: &Laid, local: gpui::Point<Pixels>, window: &Window) -> usize {
+    let (Some(first), Some(last)) = (laid.lines.first(), laid.lines.last()) else { return 0 };
+    let (x, y) = (f32::from(local.x), f32::from(local.y));
+    if y < first.top {
+        return 0;
+    }
+    if y >= last.top + last.height {
+        return plain_len(atoms);
+    }
+    let starts = starts(atoms);
+    let line = laid.lines.iter().find(|l| y < l.top + l.height).unwrap_or(last);
+    for (n, p) in line.items.iter().enumerate() {
+        let right = p.x + p.lead + p.width + p.tail;
+        if x >= right && n + 1 < line.items.len() {
+            continue;
+        }
+        return match &atoms[p.atom] {
+            Atom::Text { text, look, .. } => {
+                let shaped = shape(&text[p.range.clone()], look, look.color, window);
+                starts[p.atom] + p.range.start + shaped.closest_index_for_x(px(x - p.x - p.lead))
+            }
+            a => starts[p.atom] + if x < (p.x + right) / 2. { 0 } else { atom_len(a) },
+        };
+    }
+    // An empty line (a break alone): where the next one starts.
+    let next = laid.lines.iter().skip_while(|l| !std::ptr::eq(*l, line)).skip(1).find_map(|l| l.items.first());
+    next.map_or(plain_len(atoms), |p| starts[p.atom] + p.range.start)
+}
+
+/// Where the plain-text span `picked` is drawn, in the paragraph's own space: one box per line,
+/// so neighbouring pieces' translucent fills don't overlap into seams.
+fn rects(atoms: &[Atom], laid: &Laid, picked: Range<usize>, window: &Window) -> Vec<Bounds<Pixels>> {
+    let starts = starts(atoms);
+    let mut out = Vec::new();
+    for line in &laid.lines {
+        let mut span: Option<(f32, f32)> = None;
+        for p in &line.items {
+            let (a0, a1) = match &atoms[p.atom] {
+                Atom::Text { .. } => (starts[p.atom] + p.range.start, starts[p.atom] + p.range.end),
+                a => (starts[p.atom], starts[p.atom] + atom_len(a)),
+            };
+            let (lo, hi) = (picked.start.max(a0), picked.end.min(a1));
+            if lo >= hi {
+                continue;
+            }
+            let (x0, x1) = match &atoms[p.atom] {
+                Atom::Text { text, look, .. } => {
+                    let shaped = shape(&text[p.range.clone()], look, look.color, window);
+                    let base = p.x + p.lead;
+                    (base + f32::from(shaped.x_for_index(lo - a0)), base + f32::from(shaped.x_for_index(hi - a0)))
+                }
+                _ => (p.x, p.x + p.lead + p.width + p.tail),
+            };
+            if x1 > x0 {
+                span = Some(span.map_or((x0, x1), |(a, b)| (a.min(x0), b.max(x1))));
+            }
+        }
+        if let Some((x0, x1)) = span {
+            out.push(Bounds::new(point(px(x0), px(line.top)), size(px(x1 - x0), px(line.height))));
+        }
+    }
+    out
 }

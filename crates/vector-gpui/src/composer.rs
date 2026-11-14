@@ -535,11 +535,13 @@ impl TextInput {
     }
 
     fn copy(&mut self, _: &Copy, _: &mut Window, cx: &mut Context<Self>) {
-        if !self.selected_range.is_empty() {
-            cx.write_to_clipboard(ClipboardItem::new_string(
-                self.content[self.selected_range.clone()].to_string(),
-            ));
+        if self.selected_range.is_empty() {
+            // Nothing picked here: a selection in the messages may want it.
+            return cx.propagate();
         }
+        cx.write_to_clipboard(ClipboardItem::new_string(
+            self.content[self.selected_range.clone()].to_string(),
+        ));
     }
     fn cut(&mut self, _: &Cut, window: &mut Window, cx: &mut Context<Self>) {
         if !self.selected_range.is_empty() {
@@ -1515,7 +1517,7 @@ impl Render for TextInput {
                     cx.propagate();
                 }
             }))
-            .on_action(cx.listener(|this, _: &TabBack, w, cx| {
+            .on_action(cx.listener(|_, _: &TabBack, w, cx| {
                 if !tab_order::step(cx.entity_id(), true, w, cx) {
                     cx.propagate();
                 }

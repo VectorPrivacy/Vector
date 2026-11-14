@@ -654,6 +654,7 @@ fn content(ctx: &Ctx, m: &Message) -> AnyElement {
     let id = m.id.clone();
     let act = ctx.on_act.clone();
     let click: OnClick = Rc::new(move |t, w, cx| act(&id, Act::Text(t), w, cx));
+    let _selectable = crate::select::Scope::enter(m.at, &m.id);
     use vector_core::text_spans::TextSpan;
     let colors: Vec<vector_core::text_color::ColorSpan> = m
         .text_spans
@@ -965,11 +966,16 @@ pub(crate) fn margins(b: &Block, first: bool, last: bool) -> (f32, f32) {
 
 pub(crate) fn block(b: &Block, key: &str, click: &OnClick, clock: f32) -> AnyElement {
     match b {
-        Block::Para(p) => inline(p.atoms.clone(), p.base.clone())
-            .id(SharedString::from(key.to_string()))
-            .on_click(click.clone())
-            .clock(clock)
-            .into_any_element(),
+        Block::Para(p) => {
+            let el = inline(p.atoms.clone(), p.base.clone())
+                .id(SharedString::from(key.to_string()))
+                .on_click(click.clone())
+                .clock(clock);
+            match crate::select::key_for(key) {
+                Some(k) => el.selectable(k).into_any_element(),
+                None => el.into_any_element(),
+            }
+        }
         Block::Rule => div()
             .min_w(px(192.))
             .w_full()
@@ -1146,12 +1152,12 @@ fn table(
             Some(Alignment::Center) => d.flex().justify_center(),
             _ => d,
         };
-        d.child(
-            inline(p.atoms.clone(), base)
-                .id(SharedString::from(k))
-                .on_click(click.clone())
-                .clock(clock),
-        )
+        let el = inline(p.atoms.clone(), base).on_click(click.clone()).clock(clock);
+        let el = match crate::select::key_for(&k) {
+            Some(sel) => el.selectable(sel),
+            None => el,
+        };
+        d.child(el.id(SharedString::from(k)))
     };
     let mut t = div()
         .flex()
@@ -1237,6 +1243,7 @@ fn trailing_atoms(m: &Message) -> Vec<Atom> {
             size: 12.,
             drop: -2.,
             tip: m.expiration.map(|at| crate::inline::Tip::Dissolve(at as i64)),
+            alt: SharedString::default(),
         });
     }
     out
