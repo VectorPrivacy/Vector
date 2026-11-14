@@ -49,6 +49,12 @@ pub enum Act {
     /// A scrub to this fraction; `done` on release.
     Seek(f32, bool),
     Mute,
+    /// The volume slider to this level; `done` on release.
+    Volume(f32, bool),
+    /// Fill the window, or leave it.
+    Fullscreen,
+    /// The next playback speed.
+    Speed,
     Hover(bool),
     Moved,
 }
@@ -75,13 +81,26 @@ enum Out {
 struct Clock {
     anchor: u64,
     at: Option<Instant>,
+    /// Clip time per real time: the playback speed.
+    rate: f32,
 }
 
 impl Clock {
     fn now(&self) -> u64 {
-        self.anchor + self.at.map_or(0, |t| t.elapsed().as_millis() as u64)
+        self.anchor + self.at.map_or(0, |t| (t.elapsed().as_millis() as f32 * self.rate) as u64)
     }
 }
+
+/// The speeds a clip plays at, in the order the button steps through them.
+const SPEEDS: [f32; 6] = [1., 1.25, 1.5, 2., 0.5, 0.75];
+
+/// A clip time in the stretched track the engine plays.
+fn on_track(ms: u64, speed: f32) -> u64 {
+    (ms as f32 / speed) as u64
+}
+
+/// The decoded track, mono, and its rate: kept once read so another speed needs no decode.
+type Track = Arc<Mutex<Option<Arc<(Vec<f32>, u32)>>>>;
 
 /// A clip being played: its decoder and its sound.
 struct Play {
@@ -95,6 +114,9 @@ struct Play {
     started: bool,
     audio: Arc<Mutex<Option<Result<u32, String>>>>,
     source: Option<u32>,
+    /// The speed the engine's track was stretched for.
+    speed: f32,
+    track: Track,
     /// The track would not load: the picture goes on alone.
     silent: bool,
     heard: Option<u64>,
@@ -110,7 +132,6 @@ impl Drop for Play {
     }
 }
 
-#[derive(Default)]
 pub struct Clip {
     pub info: Option<Info>,
     play: Option<Play>,
@@ -119,9 +140,38 @@ pub struct Clip {
     position: u64,
     frame: Option<Arc<RenderImage>>,
     pub muted: bool,
+    /// The level it sounds at when not muted.
+    pub volume: f32,
+    /// How fast it plays, the pitch kept.
+    pub speed: f32,
+    /// The volume slider is held.
+    leveling: bool,
+    /// Decoded for the whole window rather than its row.
+    big: bool,
     hovered: bool,
     moved: Option<Instant>,
     scrub: Option<f32>,
+}
+
+impl Default for Clip {
+    fn default() -> Self {
+        Self {
+            info: None,
+            play: None,
+            playing: false,
+            loading: false,
+            position: 0,
+            frame: None,
+            muted: false,
+            volume: 1.,
+            speed: 1.,
+            leveling: false,
+            big: false,
+            hovered: false,
+            moved: None,
+            scrub: None,
+        }
+    }
 }
 
 impl Clip {
@@ -150,8 +200,13 @@ impl Clip {
         self.info.as_ref().map_or(0, |i| i.duration)
     }
 
+    /// What the engine is told to sound at.
+    fn gain(&self) -> f32 {
+        if self.muted { 0. } else { self.volume }
+    }
+
     fn controls(&self) -> bool {
-        !self.playing || self.scrub.is_some() || (self.hovered && self.moved.is_some_and(|t| t.elapsed() < IDLE))
+        !self.playing || self.scrub.is_some() || self.leveling || (self.hovered && self.moved.is_some_and(|t| t.elapsed() < IDLE))
     }
 }
 
@@ -165,6 +220,8 @@ pub struct Videos {
     /// Frames off screen, for the app to take out of the atlas.
     pub retired: Vec<Arc<RenderImage>>,
     pub scale: f32,
+    /// The clip filling the window, and where it reads from.
+    pub full: Option<(String, Option<AudioInputSpec>)>,
 }
 
 impl Videos {
@@ -225,10 +282,46 @@ impl Videos {
             Act::Mute => {
                 if let Some(c) = self.clips.get_mut(att) {
                     c.muted = !c.muted;
+                    if !c.muted && c.volume <= 0.01 {
+                        c.volume = 1.;
+                    }
                     if let (Some(id), Ok(e)) = (c.play.as_ref().and_then(|p| p.source), crate::audio::engine()) {
-                        let _ = e.set_volume(id, if c.muted { 0. } else { 1. });
+                        let _ = e.set_volume(id, c.gain());
                     }
                 }
+                false
+            }
+            Act::Volume(v, done) => {
+                if let Some(c) = self.clips.get_mut(att) {
+                    c.volume = v.clamp(0., 1.);
+                    c.muted = c.volume <= 0.01;
+                    c.leveling = !done;
+                    if let (Some(id), Ok(e)) = (c.play.as_ref().and_then(|p| p.source), crate::audio::engine()) {
+                        let _ = e.set_volume(id, c.gain());
+                    }
+                }
+                false
+            }
+            Act::Speed => {
+                if let Some(c) = self.clips.get_mut(att) {
+                    let at = SPEEDS.iter().position(|s| (s - c.speed).abs() < 1e-3).unwrap_or(0);
+                    c.speed = SPEEDS[(at + 1) % SPEEDS.len()];
+                    respeed(c, input);
+                }
+                false
+            }
+            Act::Fullscreen => {
+                let leaving = self.full.as_ref().is_some_and(|(a, _)| a == att);
+                let input = input.or_else(|| self.full.as_ref().filter(|(a, _)| a == att).and_then(|(_, i)| i.clone()));
+                if let Some((prev, prev_input)) = self.full.take()
+                    && prev != att
+                {
+                    self.redecode(&prev, prev_input, false);
+                }
+                if !leaving {
+                    self.full = Some((att.to_string(), input.clone()));
+                }
+                self.redecode(att, input, !leaving);
                 false
             }
             Act::Hover(on) => {
@@ -244,6 +337,31 @@ impl Videos {
                     c.moved = Some(Instant::now());
                 }
                 false
+            }
+        }
+    }
+
+    /// Decoded again for the window (`big`) or its row, carrying on from where it is.
+    fn redecode(&mut self, att: &str, input: Option<AudioInputSpec>, big: bool) {
+        let scale = self.scale.max(1.);
+        let Some(c) = self.clips.get_mut(att) else { return };
+        if c.big == big {
+            return;
+        }
+        c.big = big;
+        if c.play.is_none() {
+            return;
+        }
+        let (at, playing) = (c.position(), c.playing || c.loading);
+        c.play = None;
+        c.position = at;
+        c.playing = false;
+        c.loading = false;
+        if let Some(input) = input {
+            if playing {
+                self.play(att, input, scale);
+            } else if let Some(c) = self.clips.get_mut(att) {
+                seek(c, at, Some(input), scale);
             }
         }
     }
@@ -266,15 +384,15 @@ impl Videos {
         c.playing = true;
         match &mut c.play {
             Some(p) => {
-                p.clock = Clock { anchor: c.position, at: Some(Instant::now()) };
+                p.clock = Clock { anchor: c.position, at: Some(Instant::now()), rate: p.speed };
                 if let (Some(id), Ok(e)) = (p.source, crate::audio::engine()) {
-                    let _ = e.seek(id, c.position);
+                    let _ = e.seek(id, on_track(c.position, p.speed));
                     let _ = e.play(id);
                 }
             }
             None => {
                 c.loading = true;
-                c.play = start(input, &info, c.position, scale);
+                c.play = start(input, &info, c.position, scale, c.big, c.speed);
             }
         }
     }
@@ -288,7 +406,7 @@ impl Videos {
         c.playing = false;
         c.loading = false;
         if let Some(p) = &mut c.play {
-            p.clock = Clock { anchor: c.position, at: None };
+            p.clock = Clock { anchor: c.position, at: None, rate: p.speed };
             if let (Some(id), Ok(e)) = (p.source, crate::audio::engine()) {
                 let _ = e.pause(id);
             }
@@ -337,6 +455,7 @@ impl Videos {
             if c.hovered && c.playing && c.moved.is_some_and(|t| t.elapsed() < IDLE + Duration::from_millis(200)) {
                 moving = true;
             }
+            let gain = c.gain();
             let Some(p) = &mut c.play else { continue };
             let duration = c.info.as_ref().map_or(0, |i| i.duration);
             if p.source.is_none()
@@ -345,10 +464,8 @@ impl Videos {
                 p.source = res.ok();
                 p.silent = p.source.is_none();
                 if let (Some(id), Ok(e)) = (p.source, crate::audio::engine()) {
-                    if c.muted {
-                        let _ = e.set_volume(id, 0.);
-                    }
-                    let _ = e.seek(id, c.position);
+                    let _ = e.set_volume(id, gain);
+                    let _ = e.seek(id, on_track(c.position, p.speed));
                 }
             }
             let audio_ready = c.info.as_ref().is_none_or(|i| !i.audio) || p.source.is_some() || p.silent;
@@ -356,19 +473,20 @@ impl Videos {
             if c.playing && !p.started && !p.fresh && audio_ready {
                 p.started = true;
                 c.loading = false;
-                p.clock = Clock { anchor: c.position, at: Some(Instant::now()) };
+                p.clock = Clock { anchor: c.position, at: Some(Instant::now()), rate: p.speed };
                 if let (Some(id), Ok(e)) = (p.source, crate::audio::engine()) {
                     let _ = e.play(id);
                 }
             }
             if c.playing && p.started && let (Some(id), Ok(e)) = (p.source, crate::audio::engine()) {
                 // Only a moving engine clock leads: a device that is not sounding holds still.
-                if let Ok(a) = e.get_position(id)
-                    && p.heard.replace(a).is_some_and(|prev| prev != a)
+                if let Ok(heard) = e.get_position(id)
+                    && p.heard.replace(heard).is_some_and(|prev| prev != heard)
                 {
+                    let a = (heard as f32 * p.speed) as u64;
                     let v = p.clock.now();
                     if a + 100 < duration && (a as i64 - v as i64).abs() > DRIFT_MS {
-                        p.clock = Clock { anchor: a, at: Some(Instant::now()) };
+                        p.clock = Clock { anchor: a, at: Some(Instant::now()), rate: p.speed };
                     }
                 }
             }
@@ -406,7 +524,7 @@ impl Videos {
             if c.playing && p.started && over {
                 c.playing = false;
                 c.position = duration;
-                p.clock = Clock { anchor: duration, at: None };
+                p.clock = Clock { anchor: duration, at: None, rate: p.speed };
                 p.ended = true;
                 if let (Some(id), Ok(e)) = (p.source, crate::audio::engine()) {
                     let _ = e.pause(id);
@@ -436,27 +554,92 @@ fn seek(c: &mut Clip, ms: u64, input: Option<AudioInputSpec>, scale: f32) {
     if let Some(p) = &mut c.play {
         p.ended = false;
         restart(p, ms);
-        p.clock = Clock { anchor: ms, at: c.playing.then(Instant::now) };
+        p.clock = Clock { anchor: ms, at: c.playing.then(Instant::now), rate: p.speed };
         if let (Some(id), Ok(e)) = (p.source, crate::audio::engine()) {
-            let _ = e.seek(id, ms);
+            let _ = e.seek(id, on_track(ms, p.speed));
         }
     } else if let (Some(info), Some(input)) = (&c.info, input) {
         // Never played: a decoder for the frame there, kept for the play that follows.
-        c.play = start(input, info, ms, scale);
+        c.play = start(input, info, ms, scale, c.big, c.speed);
     }
 }
 
-fn start(input: AudioInputSpec, info: &Info, from: u64, scale: f32) -> Option<Play> {
+/// The box a window-filling clip decodes for: a large display's, never past the source.
+const BIG: (f32, f32) = (2560., 1440.);
+
+/// Another speed while playing: the clock carries on from the same moment, and the sound waits
+/// for its track stretched to match, the picture holding with it.
+fn respeed(c: &mut Clip, input: Option<AudioInputSpec>) {
+    let at = c.position();
+    let (speed, playing, audio) = (c.speed, c.playing, c.info.as_ref().is_some_and(|i| i.audio));
+    let Some(p) = &mut c.play else { return };
+    if (p.speed - speed).abs() < 1e-3 {
+        return;
+    }
+    p.speed = speed;
+    c.position = at;
+    p.clock = Clock { anchor: at, at: (playing && !audio).then(Instant::now), rate: speed };
+    if !audio {
+        return;
+    }
+    if let (Some(id), Ok(e)) = (p.source.take(), crate::audio::engine()) {
+        let _ = e.stop(id);
+    }
+    p.silent = false;
+    p.heard = None;
+    p.started = false;
+    c.loading = playing;
+    p.audio = Arc::new(Mutex::new(None));
+    let (slot, track) = (p.audio.clone(), p.track.clone());
+    // spawn-detached: stretches samples in hand for the engine; owns no account state.
+    std::thread::spawn(move || {
+        let res = stretched(&track, input.as_ref(), speed);
+        if let Ok(mut s) = slot.lock() {
+            *s = Some(res);
+        }
+    });
+}
+
+/// The track at `speed` in the engine: read once (then kept), stretched, loaded.
+fn stretched(track: &Track, input: Option<&AudioInputSpec>, speed: f32) -> Result<u32, String> {
+    let kept = track.lock().ok().and_then(|t| t.clone());
+    let pcm = match kept {
+        Some(t) => t,
+        None => {
+            let i = input.ok_or("no source")?.open()?;
+            let t = Arc::new(decode_audio(&i)?);
+            if let Ok(mut slot) = track.lock() {
+                *slot = Some(t.clone());
+            }
+            t
+        }
+    };
+    let e = crate::audio::engine()?;
+    e.load_from_samples(crate::stretch::stretch(&pcm.0, pcm.1, speed), pcm.1).map(|r| r.id)
+}
+
+fn start(input: AudioInputSpec, info: &Info, from: u64, scale: f32, big: bool, speed: f32) -> Option<Play> {
     let (cmd_tx, cmd_rx) = std::sync::mpsc::channel();
     let (tx, rx) = std::sync::mpsc::sync_channel(QUEUE);
-    let (w, h) = fit(info.w, info.h);
+    let (w, h) = if big {
+        let s = (BIG.0 / info.w.max(1) as f32).min(BIG.1 / info.h.max(1) as f32).min(1.);
+        // Already the source's pixels: the scale below must not shrink them again.
+        ((info.w as f32 * s) / scale, (info.h as f32 * s) / scale)
+    } else {
+        fit(info.w, info.h)
+    };
     let target = (((w * scale) as u32).min(info.w).max(1), ((h * scale) as u32).min(info.h).max(1));
     let slot = Arc::new(Mutex::new(None));
+    let track: Track = Arc::default();
     if info.audio {
-        let (slot, input) = (slot.clone(), input.clone());
+        let (slot, input, track) = (slot.clone(), input.clone(), track.clone());
         // spawn-detached: decodes bytes in hand into the engine; owns no account state.
         std::thread::spawn(move || {
-            let res = input.open().and_then(|i| load_audio(&i));
+            let res = if (speed - 1.).abs() < 1e-3 {
+                input.open().and_then(|i| load_audio(&i))
+            } else {
+                stretched(&track, Some(&input), speed)
+            };
             if let Ok(mut s) = slot.lock() {
                 *s = Some(res);
             }
@@ -477,10 +660,12 @@ fn start(input: AudioInputSpec, info: &Info, from: u64, scale: f32) -> Option<Pl
         next: None,
         epoch: 0,
         fresh: true,
-        clock: Clock { anchor: from, at: None },
+        clock: Clock { anchor: from, at: None, rate: speed },
         started: false,
         audio: slot,
         source: None,
+        speed,
+        track,
         silent: false,
         heard: None,
         ended: false,
@@ -546,6 +731,14 @@ pub fn view(id: &str, clip: &Clip, dim: bool, size: Option<(f32, f32)>, radius: 
     let frac = if duration > 0 { pos as f32 / duration as f32 } else { 0. };
     let playing = clip.playing || clip.loading;
     let (o1, o2, o3, o4, o5) = (on.clone(), on.clone(), on.clone(), on.clone(), on.clone());
+    let (o6, o7, o8) = (on.clone(), on.clone(), on.clone());
+    let speed_label = if (clip.speed - clip.speed.round()).abs() < 1e-3 {
+        format!("{}×", clip.speed as u32)
+    } else {
+        format!("{}×", clip.speed)
+    };
+    let level = if clip.muted { 0. } else { clip.volume };
+    let full = clip.big;
     let time = format!("{} / {}", crate::audio::format_time(pos), crate::audio::format_time(duration));
     let button = |icon: &'static str, key: &'static str, act: Act, on: OnAct| {
         div()
@@ -591,19 +784,61 @@ pub fn view(id: &str, clip: &Clip, dim: bool, size: Option<(f32, f32)>, radius: 
                     Act::Toggle,
                     o2,
                 ))
-                .child(
-                    div()
-                        .text_size(px(12.))
-                        .text_color(gpui::white())
-                        .flex_none()
-                        .child(time),
-                )
+                // A narrow clip gives its time's room to the buttons.
+                .when(w >= 240., |d| {
+                    d.child(
+                        div()
+                            .text_size(px(12.))
+                            .text_color(gpui::white())
+                            .flex_none()
+                            .child(time),
+                    )
+                })
                 .child(scrubber(id, frac, duration > 0, clip.scrub.is_some(), o3))
+                .when(w >= 220., |d| {
+                    d.child(
+                        div()
+                            .id(SharedString::from(format!("vspeed-{id}")))
+                            .h(px(22.))
+                            .min_w(px(34.))
+                            .px(px(5.))
+                            .flex_none()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded(px(11.))
+                            .cursor_pointer()
+                            .text_size(px(12.))
+                            .text_color(gpui::white())
+                            .hover(|s| s.bg(white_a(0.12)))
+                            .on_click(move |_, w, cx| {
+                                cx.stop_propagation();
+                                o8(Act::Speed, w, cx)
+                            })
+                            .child(speed_label),
+                    )
+                })
                 .child(button(
                     if clip.muted { "icons/volume-mute.svg" } else { "icons/volume-max.svg" },
                     "vmute",
                     Act::Mute,
                     o4,
+                ))
+                .when(w >= 260. && info.is_some_and(|i| i.audio), |d| {
+                    d.child(div().w(px(56.)).flex_none().h(px(20.)).child(slider(
+                        &format!("vvol-{id}"),
+                        level,
+                        true,
+                        clip.leveling,
+                        o6,
+                        Act::Volume,
+                    )))
+                })
+                .child(button(
+                    if full { "ui/video-exit-full.svg" } else { "ui/video-full.svg" },
+                    "vfull",
+                    Act::Fullscreen,
+                    o7,
                 )),
         );
     let veil = (!playing && pos == 0 && !dim).then(|| {
@@ -657,11 +892,15 @@ pub fn view(id: &str, clip: &Clip, dim: bool, size: Option<(f32, f32)>, radius: 
 }
 
 fn scrubber(id: &str, frac: f32, seekable: bool, dragging: bool, on: OnAct) -> impl IntoElement {
+    div().flex_1().h(px(20.)).mx(px(6.)).child(slider(&format!("vseek-{id}"), frac, seekable, dragging, on, Act::Seek))
+}
+
+/// A track with a knob: `act(fraction, done)` as it is pressed, dragged and let go.
+fn slider(key: &str, frac: f32, live: bool, dragging: bool, on: OnAct, act: fn(f32, bool) -> Act) -> impl IntoElement {
+    let seekable = live;
     div()
-        .id(SharedString::from(format!("vseek-{id}")))
-        .flex_1()
-        .h(px(20.))
-        .mx(px(6.))
+        .id(SharedString::from(key.to_string()))
+        .size_full()
         .on_click(|_, _, cx| cx.stop_propagation())
         .child(
             canvas(
@@ -686,7 +925,7 @@ fn scrubber(id: &str, frac: f32, seekable: bool, dragging: bool, on: OnAct) -> i
                         window.on_mouse_event(move |e: &MouseDownEvent, phase, window, cx| {
                             if phase.bubble() && e.button == MouseButton::Left && hitbox.is_hovered(window) {
                                 cx.stop_propagation();
-                                on(Act::Seek(at(e.position.x), false), window, cx);
+                                on(act(at(e.position.x).clamp(0., 1.), false), window, cx);
                             }
                         });
                     }
@@ -697,13 +936,13 @@ fn scrubber(id: &str, frac: f32, seekable: bool, dragging: bool, on: OnAct) -> i
                         let on = on.clone();
                         window.on_mouse_event(move |e: &MouseMoveEvent, phase, window, cx| {
                             if phase.bubble() && e.dragging() {
-                                on(Act::Seek(at(e.position.x), false), window, cx);
+                                on(act(at(e.position.x).clamp(0., 1.), false), window, cx);
                             }
                         });
                     }
                     window.on_mouse_event(move |e: &MouseUpEvent, phase, window, cx| {
                         if phase.bubble() {
-                            on(Act::Seek(at(e.position.x), true), window, cx);
+                            on(act(at(e.position.x).clamp(0., 1.), true), window, cx);
                         }
                     });
                 },

@@ -1052,30 +1052,29 @@ pub fn stack(blocks: &[Block], key: &str, click: &OnClick, clock: f32, lh: f32) 
 /// `.code-block-wrapper` + `pre code.hljs` (GitHub Dark).
 fn code_block(lang: &str, text: &SharedString, key: &str, click: &OnClick) -> AnyElement {
     let mut lines = div().flex().flex_col();
-    for (line, runs) in text
+    let plain = c(crate::highlight::PLAIN);
+    for (n, (line, runs)) in text
         .split('\n')
         .zip(crate::highlight::highlight(text, lang))
+        .enumerate()
     {
-        let font = gpui::font(MONO);
-        let runs: Vec<gpui::TextRun> = runs
+        // Each line its own paragraph, coloured run by run, so a drag selects code like prose.
+        let mut at = 0;
+        let atoms: Vec<Atom> = runs
             .into_iter()
-            .map(|(len, color)| gpui::TextRun {
-                len,
-                font: font.clone(),
-                color,
-                background_color: None,
-                underline: None,
-                strikethrough: None,
+            .filter_map(|(len, color)| {
+                let piece = line.get(at..at + len)?;
+                at += len;
+                Some(Atom::Text { text: piece.to_string().into(), look: Look::new(MONO, 13., 19.5, color), kind: Kind::Plain })
             })
             .collect();
-        let el: AnyElement = if line.is_empty() {
-            div().child(" ").into_any_element()
-        } else {
-            gpui::StyledText::new(line.to_string())
-                .with_runs(runs)
-                .into_any_element()
+        let line_key = format!("{key}-{n}");
+        let el = inline(atoms, Look::new(MONO, 13., 19.5, plain)).nowrap();
+        let el = match crate::select::key_for(&line_key) {
+            Some(k) => el.selectable(k),
+            None => el,
         };
-        lines = lines.child(div().h(px(19.5)).whitespace_nowrap().child(el));
+        lines = lines.child(div().h(px(19.5)).flex().child(div().flex_none().child(el.id(SharedString::from(line_key)))));
     }
     let copy = click.clone();
     let code: SharedString = text.clone();

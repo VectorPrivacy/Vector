@@ -272,7 +272,9 @@ pub fn text() -> Option<String> {
             let (Some(start), Some(end)) = (floor_char(&text, start), floor_char(&text, end)) else { continue };
             // The layout's break hints in long URLs are invisible and don't belong in a copy.
             let piece: String = text[start..end.max(start)].chars().filter(|c| !matches!(c, '\u{2060}' | '\u{200B}' | '\u{00AD}')).collect();
-            if piece.is_empty() {
+            // An empty end contributes nothing; an empty line inside (a blank code line) keeps
+            // its place.
+            if piece.is_empty() && (*key == lo.0 || *key == hi.0) {
                 continue;
             }
             if let Some(prev) = last {

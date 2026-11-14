@@ -288,6 +288,8 @@ pub struct Inline {
     clipped: Option<Rc<std::cell::Cell<bool>>>,
     /// A message's paragraph, which a drag can select.
     select: Option<crate::select::Key>,
+    /// Never wraps, however narrow its box (`white-space: pre`).
+    nowrap: bool,
 }
 
 pub fn inline(atoms: impl Into<Rc<[Atom]>>, base: Look) -> Inline {
@@ -300,6 +302,7 @@ pub fn inline(atoms: impl Into<Rc<[Atom]>>, base: Look) -> Inline {
         ellipsis: false,
         clipped: None,
         select: None,
+        nowrap: false,
     }
 }
 
@@ -322,6 +325,12 @@ impl Inline {
     /// A one-line cut repaints the next frame when it changes.
     pub fn report_clip(mut self, cell: Rc<std::cell::Cell<bool>>) -> Self {
         self.clipped = Some(cell);
+        self
+    }
+
+    /// One line however wide: a code line, clipped by its box rather than wrapped.
+    pub fn nowrap(mut self) -> Self {
+        self.nowrap = true;
         self
     }
 
@@ -848,19 +857,24 @@ impl Element for Inline {
         _: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
         let laid: Rc<RefCell<Laid>> = Rc::default();
-        let (atoms, base, state, cut) = (
+        let (atoms, base, state, cut, nowrap) = (
             self.atoms.clone(),
             self.base.clone(),
             laid.clone(),
             self.ellipsis,
+            self.nowrap,
         );
         let id =
             window.request_measured_layout(Style::default(), move |known, available, window, _| {
-                let width = known.width.map(f32::from).unwrap_or(match available.width {
-                    gpui::AvailableSpace::Definite(w) => w.into(),
-                    gpui::AvailableSpace::MinContent => 0.,
-                    gpui::AvailableSpace::MaxContent => f32::INFINITY,
-                });
+                let width = if nowrap {
+                    f32::INFINITY
+                } else {
+                    known.width.map(f32::from).unwrap_or(match available.width {
+                        gpui::AvailableSpace::Definite(w) => w.into(),
+                        gpui::AvailableSpace::MinContent => 0.,
+                        gpui::AvailableSpace::MaxContent => f32::INFINITY,
+                    })
+                };
                 let mut s = state.borrow_mut();
                 if s.width != Some(width) {
                     *s = if cut {
@@ -886,7 +900,7 @@ impl Element for Inline {
         {
             let w = f32::from(bounds.size.width);
             let mut s = laid.borrow_mut();
-            if s.width.is_none_or(|lw| {
+            if !self.nowrap && s.width.is_none_or(|lw| {
                 (lw - w).abs() > 0.5 && (self.ellipsis || f32::from(s.size.width) > w)
             }) {
                 *s = if self.ellipsis {

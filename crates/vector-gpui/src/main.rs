@@ -118,6 +118,7 @@ mod devctl;
 mod pane;
 mod select;
 mod sprite;
+mod stretch;
 mod video;
 #[cfg(feature = "video")]
 mod yuv;

@@ -135,6 +135,8 @@ pub struct VectorApp {
     hover_in: u8,
     viewer: Option<Entity<crate::viewer::Viewer>>,
     model_viewer: Option<(Entity<crate::model3d::viewer::ModelViewer>, String, String)>,
+    /// A clip fills the window: whether this app put the window into fullscreen for it.
+    video_window_full: Option<bool>,
     /// The attachment panel is open, and since when (its items fade in from then).
     attach: Option<std::time::Instant>,
     attach_dismissed: Option<std::time::Instant>,
@@ -984,6 +986,7 @@ impl VectorApp {
             hover_in: 0,
             viewer: None,
             model_viewer: None,
+            video_window_full: None,
             cropper: None,
             attach: None,
             attach_dismissed: None,
@@ -5106,6 +5109,41 @@ impl VectorApp {
         cx.notify();
     }
 
+    /// The clip filling the window, fitted to it on black, its controls as in the row.
+    fn video_full_overlay(&self, window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let media = self.media.borrow();
+        let (att, input) = media.videos.full.clone()?;
+        let clip = media.videos.clip(&att)?;
+        let view = window.viewport_size();
+        let (vw, vh) = (f32::from(view.width), f32::from(view.height));
+        let aspect = clip.aspect();
+        let w = vw.min(vh * aspect);
+        let me = cx.entity().downgrade();
+        let key = att.clone();
+        let on: crate::video::OnAct = Rc::new(move |a, _, cx| {
+            me.update(cx, |app, cx| {
+                app.media.borrow_mut().videos.act(&key, input.clone(), a);
+                cx.notify();
+            })
+            .ok();
+        });
+        Some(
+            gpui::deferred(
+                div()
+                    .absolute()
+                    .inset_0()
+                    .bg(gpui::black())
+                    .occlude()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(crate::video::view(&format!("full-{att}"), clip, false, Some((w, w / aspect)), 0., on)),
+            )
+            .with_priority(30)
+            .into_any_element(),
+        )
+    }
+
     fn video_act(&mut self, msg: String, att: String, act: crate::video::Act, cx: &mut Context<Self>) {
         let input = self.audio_input(&msg, &att);
         self.media.borrow_mut().videos.act(&att, input, act);
@@ -5999,6 +6037,23 @@ impl Render for VectorApp {
             for old in media.videos.retired.drain(..) {
                 let _ = window.drop_image(old);
             }
+            // A clip filling the window takes the screen too, and gives it back as it found it.
+            match (media.videos.full.is_some(), self.video_window_full) {
+                (true, None) => {
+                    let was = window.is_fullscreen();
+                    if !was {
+                        window.toggle_fullscreen();
+                    }
+                    self.video_window_full = Some(!was);
+                }
+                (false, Some(ours)) => {
+                    if ours && window.is_fullscreen() {
+                        window.toggle_fullscreen();
+                    }
+                    self.video_window_full = None;
+                }
+                _ => {}
+            }
             media.models.scale = window.scale_factor();
             media.models.active = window.is_window_active();
             media.models.front = self.model_viewer.is_some();
@@ -6072,6 +6127,15 @@ impl Render for VectorApp {
                 }
             }))
             .capture_key_down(cx.listener(|app, e: &gpui::KeyDownEvent, window, cx| {
+                if e.keystroke.key == "escape" {
+                    let full = app.media.borrow().videos.full.clone();
+                    if let Some((att, input)) = full {
+                        app.media.borrow_mut().videos.act(&att, input, crate::video::Act::Fullscreen);
+                        cx.stop_propagation();
+                        cx.notify();
+                        return;
+                    }
+                }
                 if e.keystroke.key == "escape"
                     && app.menu.is_none()
                     && app.popup.is_none()
@@ -6637,6 +6701,7 @@ impl Render for VectorApp {
                 )))
                 .with_priority(8)
             }))
+            .children(self.video_full_overlay(window, cx))
             .children(self.menu.as_ref().map(|(at, items, _)| {
                 let pick = cx.entity().downgrade();
                 let close = pick.clone();
