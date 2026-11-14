@@ -3039,9 +3039,10 @@ impl VectorApp {
         }
     }
 
-    /// The chat list or Community sidebar; on a phone-width window the root draws it.
+    /// The chat list or Community sidebar. Where its pane isn't drawn (phone width, Settings,
+    /// the app hub) the root draws what the change shows in.
     pub(super) fn notify_side(&mut self, cx: &mut Context<Self>) {
-        if self.is_slim {
+        if self.is_slim || self.settings.is_some() || self.nexus.is_some() {
             cx.notify();
         } else {
             crate::pane::notify(&self.panes.side, cx);
