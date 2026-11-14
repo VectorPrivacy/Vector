@@ -7768,11 +7768,16 @@ fn preview_line_at(store: &Store, chat: &SerializableChat, color: gpui::Hsla, si
             chrono::Local::now().timestamp() as f64,
         );
         let content = store.resolve_mentions(&content, store.community_of(&chat.id).map(|c| c.community_id.as_str()));
-        v.extend(crate::preview::atoms(
-            &crate::embeds::for_preview(&content),
-            usize::MAX,
-            &look,
-        ));
+        let mut atoms = crate::preview::atoms(&crate::embeds::for_preview(&content), usize::MAX, &look);
+        if !m.emoji_tags.is_empty() {
+            let media = crate::media::shared();
+            let custom = |code: &str| {
+                let tag = m.emoji_tags.iter().find(|t| t.shortcode == code)?;
+                Some(media.borrow_mut().custom(&timeline::emoji_source(store, &tag.url), false))
+            };
+            atoms = crate::preview::with_customs(atoms, &custom);
+        }
+        v.extend(atoms);
         v
     };
     crate::inline::inline(atoms, look)
