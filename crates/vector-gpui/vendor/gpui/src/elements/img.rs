@@ -272,6 +272,7 @@ struct ImgState {
     last_frame_time: Option<Instant>,
     started_loading: Option<(Instant, Task<()>)>,
     hovered: Rc<Cell<bool>>,
+    clock: Rc<Cell<(usize, Option<Instant>)>>,
 }
 
 /// The image layout state between frames
@@ -279,6 +280,7 @@ pub struct ImgLayoutState {
     frame_index: usize,
     replacement: Option<AnyElement>,
     hover_gate: Option<Rc<Cell<bool>>>,
+    clock: Option<Rc<Cell<(usize, Option<Instant>)>>>,
 }
 
 impl Element for Img {
@@ -304,6 +306,7 @@ impl Element for Img {
             frame_index: 0,
             replacement: None,
             hover_gate: None,
+            clock: None,
         };
 
         window.with_optional_element_state(global_id, |state, window| {
@@ -313,6 +316,7 @@ impl Element for Img {
                     last_frame_time: None,
                     started_loading: None,
                     hovered: Rc::default(),
+                    clock: Rc::default(),
                 })
             });
 
@@ -339,6 +343,7 @@ impl Element for Img {
                             let max_frame_index = frame_count.saturating_sub(1);
 
                             if let Some(state) = &mut state {
+                                (state.frame_index, state.last_frame_time) = state.clock.get();
                                 state.frame_index = state.frame_index.min(max_frame_index);
                                 let still = frame_count > 1
                                     && self.face
@@ -378,6 +383,10 @@ impl Element for Img {
                                 }
                                 state.started_loading = None;
                                 frame_index = state.frame_index;
+                                state.clock.set((state.frame_index, state.last_frame_time));
+                                if next_frame_in.is_some() {
+                                    layout_state.clock = Some(state.clock.clone());
+                                }
                             }
 
                             let image_size = data.render_size(frame_index);
@@ -421,7 +430,7 @@ impl Element for Img {
                             if global_id.is_some()
                                 && let Some(due) = next_frame_in
                             {
-                                wake_window_in(window, cx, due);
+                                wake_animations_in(window, cx, due);
                             }
                         }
                         Some(_err) => {
@@ -550,16 +559,25 @@ impl Element for Img {
                         .object_fit
                         .get_bounds(bounds, data.size(layout_state.frame_index));
                     let corner_radii = style.corner_radii.to_pixels(window.rem_size());
-                    window
-                        .paint_image(
+                    match layout_state.clock.take() {
+                        Some(clock) => window.paint_animated_image(
+                            bounds,
+                            new_bounds,
+                            corner_radii,
+                            data,
+                            clock,
+                            self.style.grayscale,
+                        ),
+                        None => window.paint_image(
                             bounds,
                             new_bounds,
                             corner_radii,
                             data,
                             layout_state.frame_index,
                             self.style.grayscale,
-                        )
-                        .log_err();
+                        ),
+                    }
+                    .log_err();
                 } else if let Some(replacement) = &mut layout_state.replacement {
                     replacement.paint(window, cx);
                 }
@@ -1039,7 +1057,7 @@ mod tests {
 
 /// A frame's delay as browsers play it: 10ms or less means 100ms, so a GIF saved with no
 /// delay doesn't spin at the display's refresh rate.
-fn frame_delay(data: &RenderImage, index: usize) -> Duration {
+pub(crate) fn frame_delay(data: &RenderImage, index: usize) -> Duration {
     let delay = Duration::from(data.delay(index));
     if delay <= Duration::from_millis(10) {
         Duration::from_millis(100)
@@ -1049,15 +1067,24 @@ fn frame_delay(data: &RenderImage, index: usize) -> Duration {
 }
 
 thread_local! {
-    /// Each window's earliest pending animation wake, so every image on screen shares one timer.
-    static WAKES: std::cell::RefCell<collections::FxHashMap<crate::WindowId, Instant>> =
+    /// Each window's earliest pending wake, and whether it must redraw or only step animations.
+    static WAKES: std::cell::RefCell<collections::FxHashMap<crate::WindowId, (Instant, bool)>> =
         Default::default();
 }
 
 /// Redraw `window` once `due` has passed, instead of on every vsync until then.
 pub fn wake_window_in(window: &mut Window, cx: &mut App, due: Duration) {
+    wake(window, cx, due, true);
+}
+
+/// Step the window's animated pictures once `due` has passed, redrawing nothing else.
+pub(crate) fn wake_animations_in(window: &mut Window, cx: &mut App, due: Duration) {
+    wake(window, cx, due, false);
+}
+
+fn wake(window: &mut Window, cx: &mut App, due: Duration, redraw: bool) {
     // Wakes land on one shared 30 fps grid, so many animations out of phase cost one
-    // redraw per tick rather than one each.
+    // wake per tick rather than one each.
     const TICK: Duration = Duration::from_millis(33);
     thread_local!(static EPOCH: Instant = Instant::now());
     let epoch = EPOCH.with(|e| *e);
@@ -1068,10 +1095,18 @@ pub fn wake_window_in(window: &mut Window, cx: &mut App, due: Duration) {
     let sooner = WAKES.with(|w| {
         let mut w = w.borrow_mut();
         let now = Instant::now();
-        match w.get(&id) {
-            Some(pending) if *pending > now && *pending <= at => false,
+        match w.get_mut(&id) {
+            Some((pending, r)) if *pending > now && *pending <= at => {
+                *r |= redraw;
+                false
+            }
+            Some((pending, r)) if *pending > now => {
+                let redraw = redraw || *r;
+                w.insert(id, (at, redraw));
+                true
+            }
             _ => {
-                w.insert(id, at);
+                w.insert(id, (at, redraw));
                 true
             }
         }
@@ -1083,9 +1118,18 @@ pub fn wake_window_in(window: &mut Window, cx: &mut App, due: Duration) {
         .spawn(cx, async move |cx| {
             cx.background_executor().timer(at - Instant::now()).await;
             let current = WAKES.with(|w| w.borrow().get(&id).copied());
-            if current == Some(at) {
+            if let Some((when, redraw)) = current
+                && when == at
+            {
                 WAKES.with(|w| w.borrow_mut().remove(&id));
-                cx.update(|window, _| window.refresh()).ok();
+                cx.update(|window, cx| {
+                    if redraw {
+                        window.refresh()
+                    } else {
+                        window.step_animations(cx)
+                    }
+                })
+                .ok();
             }
         })
         .detach();

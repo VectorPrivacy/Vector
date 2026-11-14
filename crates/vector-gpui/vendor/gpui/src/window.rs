@@ -1038,6 +1038,17 @@ pub(crate) struct DeferredDraw {
     accessed_entities: FxHashSet<EntityId>,
 }
 
+/// An animated picture as last painted: enough to swap its frame in the scene without a redraw.
+pub(crate) struct AnimatedSprite {
+    pub(crate) data: Arc<RenderImage>,
+    /// The frame shown and when it began, shared with the element's own state.
+    pub(crate) clock: Rc<Cell<(usize, Option<Instant>)>>,
+    pub(crate) tile: AtlasTile,
+    pub(crate) at: Bounds<ScaledPixels>,
+    pub(crate) visible: Bounds<Pixels>,
+    pub(crate) image: Bounds<Pixels>,
+}
+
 pub(crate) struct Frame {
     pub(crate) focus: Option<FocusId>,
     pub(crate) window_active: bool,
@@ -1052,6 +1063,7 @@ pub(crate) struct Frame {
     pub(crate) input_handlers: Vec<Option<PlatformInputHandler>>,
     pub(crate) tooltip_requests: Vec<Option<TooltipRequest>>,
     pub(crate) cursor_styles: Vec<CursorStyleRequest>,
+    pub(crate) animated: Vec<AnimatedSprite>,
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) debug_bounds: FxHashMap<String, Bounds<Pixels>>,
     #[cfg(any(test, feature = "test-support"))]
@@ -1108,6 +1120,7 @@ impl Frame {
             input_handlers: Vec::new(),
             tooltip_requests: Vec::new(),
             cursor_styles: Vec::new(),
+            animated: Vec::new(),
 
             #[cfg(any(test, feature = "test-support"))]
             debug_bounds: FxHashMap::default(),
@@ -1132,6 +1145,7 @@ impl Frame {
         self.input_handlers.clear();
         self.tooltip_requests.clear();
         self.cursor_styles.clear();
+        self.animated.clear();
         self.hitboxes.clear();
         self.window_control_hitboxes.clear();
         self.deferred_draws.clear();
@@ -1277,6 +1291,7 @@ pub struct Window {
         SingleSubscriberSet<Box<dyn FnMut(WindowVisibility, &mut Window, &mut App) -> bool>>,
     hovered: Rc<Cell<bool>>,
     pub(crate) needs_present: Rc<Cell<bool>>,
+    last_full_draw: Instant,
     /// Tracks recent input event timestamps to determine if input is arriving at a high rate.
     /// Used to selectively enable VRR optimization only when input rate exceeds 60fps.
     pub(crate) input_rate_tracker: Rc<RefCell<InputRateTracker>>,
@@ -2399,6 +2414,7 @@ impl Window {
             visibility_observers: SingleSubscriberSet::new(),
             hovered,
             needs_present,
+            last_full_draw: Instant::now(),
             input_rate_tracker,
             #[cfg(feature = "profiler")]
             window_profiler: profiler::WindowProfiler::new(handle.window_id())?,
@@ -3658,6 +3674,7 @@ impl Window {
     /// the contents of the new [`Scene`], use [`Self::present`].
     #[profiling::function]
     pub fn draw(&mut self, cx: &mut App) -> ArenaClearNeeded {
+        self.last_full_draw = Instant::now();
         // Drain every draw in profiler builds so a previous frame's
         // first-invalidation timestamp can't be attributed to this one.
         #[cfg(feature = "profiler")]
@@ -5302,6 +5319,96 @@ impl Window {
     ///
     /// The visible region rendered is `bounds.intersect(&image_bounds)`, with `corner_radii`
     /// applied to `bounds`.
+    pub(crate) fn paint_animated_image(
+        &mut self,
+        bounds: Bounds<Pixels>,
+        image_bounds: Bounds<Pixels>,
+        corner_radii: Corners<Pixels>,
+        data: Arc<RenderImage>,
+        clock: Rc<Cell<(usize, Option<Instant>)>>,
+        grayscale: bool,
+    ) -> Result<()> {
+        let frame_index = clock.get().0;
+        let before = self.next_frame.scene.polychrome_sprites.len();
+        self.paint_image(bounds, image_bounds, corner_radii, data.clone(), frame_index, grayscale)?;
+        if let Some(sprite) = self.next_frame.scene.polychrome_sprites.get(before) {
+            let (tile, at) = (sprite.tile, sprite.bounds);
+            self.next_frame.animated.push(AnimatedSprite {
+                data,
+                clock,
+                tile,
+                at,
+                visible: bounds.intersect(&image_bounds),
+                image: image_bounds,
+            });
+        }
+        Ok(())
+    }
+
+    /// Moves every animated picture on screen to its due frame by swapping tiles in the
+    /// presented scene: no render, layout or paint unless something else asked for one.
+    pub(crate) fn step_animations(&mut self, cx: &mut App) {
+        const FULL_DRAW_EVERY: Duration = Duration::from_secs(30);
+        if self.invalidator.is_dirty()
+            || !self.is_window_active()
+            || cx.reduce_motion()
+            || self.last_full_draw.elapsed() > FULL_DRAW_EVERY
+        {
+            self.refresh();
+            return;
+        }
+        let now = Instant::now();
+        let mut next: Option<Duration> = None;
+        let mut changed = false;
+        let mut records = std::mem::take(&mut self.rendered_frame.animated);
+        for r in &mut records {
+            let count = r.data.frame_count();
+            if count < 2 {
+                continue;
+            }
+            let (mut ix, last) = r.clock.get();
+            ix = ix.min(count - 1);
+            let mut last = last.unwrap_or(now);
+            let delay = crate::elements::frame_delay(&r.data, ix);
+            let elapsed = now.saturating_duration_since(last);
+            if elapsed >= delay {
+                ix = (ix + 1) % count;
+                last = now - (elapsed - delay).min(delay);
+                let params = RenderImageParams {
+                    image_id: r.data.id,
+                    frame_index: ix,
+                };
+                let data = r.data.clone();
+                if let Ok(Some(tile)) = self.sprite_atlas.get_or_insert_with(params.into(), &mut || {
+                    Ok(data
+                        .as_bytes(ix)
+                        .map(|bytes| (data.size(ix), Cow::Borrowed(bytes))))
+                }) {
+                    let sub = sub_tile(tile, r.visible, r.image);
+                    for sprite in self.rendered_frame.scene.polychrome_sprites.iter_mut() {
+                        if sprite.tile == r.tile && sprite.bounds == r.at {
+                            sprite.tile = sub;
+                        }
+                    }
+                    r.tile = sub;
+                    changed = true;
+                }
+            }
+            r.clock.set((ix, Some(last)));
+            let due = crate::elements::frame_delay(&r.data, ix)
+                .saturating_sub(now.saturating_duration_since(last));
+            next = Some(next.map_or(due, |n| n.min(due)));
+        }
+        self.rendered_frame.animated = records;
+        if changed {
+            self.needs_present.set(true);
+            self.invalidator.wake_platform();
+        }
+        if let Some(due) = next {
+            crate::elements::wake_animations_in(self, cx, due);
+        }
+    }
+
     pub fn paint_image(
         &mut self,
         bounds: Bounds<Pixels>,
@@ -5340,46 +5447,7 @@ impl Window {
             .expect("Callback above only returns Some");
 
         let visible_bounds_snapped = self.snap_bounds(visible_bounds);
-
-        let sub_tile = if visible_bounds == image_bounds {
-            tile
-        } else {
-            let x_offset_ratio =
-                (visible_bounds.origin.x - image_bounds.origin.x) / image_bounds.size.width;
-            let y_offset_ratio =
-                (visible_bounds.origin.y - image_bounds.origin.y) / image_bounds.size.height;
-            let width_ratio = visible_bounds.size.width / image_bounds.size.width;
-            let height_ratio = visible_bounds.size.height / image_bounds.size.height;
-
-            let tile_origin_x = tile.bounds.origin.x.0;
-            let tile_origin_y = tile.bounds.origin.y.0;
-            let tile_width = tile.bounds.size.width.0;
-            let tile_height = tile.bounds.size.height.0;
-
-            let sub_origin_x = tile_origin_x + (x_offset_ratio * tile_width as f32).round() as i32;
-            let sub_origin_y = tile_origin_y + (y_offset_ratio * tile_height as f32).round() as i32;
-            let sub_width = (width_ratio * tile_width as f32).round() as i32;
-            let sub_height = (height_ratio * tile_height as f32).round() as i32;
-
-            let max_x = tile_origin_x + tile_width;
-            let max_y = tile_origin_y + tile_height;
-
-            let clamped_origin_x = sub_origin_x.clamp(tile_origin_x, max_x);
-            let clamped_origin_y = sub_origin_y.clamp(tile_origin_y, max_y);
-            let clamped_width = sub_width.min(max_x - clamped_origin_x).max(0);
-            let clamped_height = sub_height.min(max_y - clamped_origin_y).max(0);
-
-            AtlasTile {
-                bounds: Bounds {
-                    origin: point(
-                        DevicePixels(clamped_origin_x),
-                        DevicePixels(clamped_origin_y),
-                    ),
-                    size: size(DevicePixels(clamped_width), DevicePixels(clamped_height)),
-                },
-                ..tile
-            }
-        };
+        let sub_tile = sub_tile(tile, visible_bounds, image_bounds);
 
         let content_mask = self.snapped_content_mask();
         let corner_radii = corner_radii
@@ -10678,5 +10746,48 @@ mod inspector_tests {
             }
         })
         .expect("closed inspector has no bookkeeping and no style overrides");
+    }
+}
+
+/// The part of `tile` that shows when an image laid out at `image_bounds` is cut to `visible_bounds`.
+fn sub_tile(tile: AtlasTile, visible_bounds: Bounds<Pixels>, image_bounds: Bounds<Pixels>) -> AtlasTile {
+    if visible_bounds == image_bounds {
+        tile
+    } else {
+        let x_offset_ratio =
+            (visible_bounds.origin.x - image_bounds.origin.x) / image_bounds.size.width;
+        let y_offset_ratio =
+            (visible_bounds.origin.y - image_bounds.origin.y) / image_bounds.size.height;
+        let width_ratio = visible_bounds.size.width / image_bounds.size.width;
+        let height_ratio = visible_bounds.size.height / image_bounds.size.height;
+
+        let tile_origin_x = tile.bounds.origin.x.0;
+        let tile_origin_y = tile.bounds.origin.y.0;
+        let tile_width = tile.bounds.size.width.0;
+        let tile_height = tile.bounds.size.height.0;
+
+        let sub_origin_x = tile_origin_x + (x_offset_ratio * tile_width as f32).round() as i32;
+        let sub_origin_y = tile_origin_y + (y_offset_ratio * tile_height as f32).round() as i32;
+        let sub_width = (width_ratio * tile_width as f32).round() as i32;
+        let sub_height = (height_ratio * tile_height as f32).round() as i32;
+
+        let max_x = tile_origin_x + tile_width;
+        let max_y = tile_origin_y + tile_height;
+
+        let clamped_origin_x = sub_origin_x.clamp(tile_origin_x, max_x);
+        let clamped_origin_y = sub_origin_y.clamp(tile_origin_y, max_y);
+        let clamped_width = sub_width.min(max_x - clamped_origin_x).max(0);
+        let clamped_height = sub_height.min(max_y - clamped_origin_y).max(0);
+
+        AtlasTile {
+            bounds: Bounds {
+                origin: point(
+                    DevicePixels(clamped_origin_x),
+                    DevicePixels(clamped_origin_y),
+                ),
+                size: size(DevicePixels(clamped_width), DevicePixels(clamped_height)),
+            },
+            ..tile
+        }
     }
 }
