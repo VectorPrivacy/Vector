@@ -3699,10 +3699,11 @@ impl VectorApp {
             .collect()
     }
 
-    /// `refresh_rows` for one message's arrival or change: rows above it keep their measured
-    /// heights, so a busy channel lays out only its tail.
+    /// `refresh_rows` for one message's arrival or change: the rows around it keep their
+    /// measured heights, so a busy channel lays out only what changed.
     fn refresh_rows_at(&mut self, changed: &str, follow: bool) {
-        let at_end = self.timeline.logical_scroll_top().item_ix + 12 >= self.timeline.item_count();
+        let top = self.timeline.logical_scroll_top();
+        let at_end = top.item_ix + 12 >= self.timeline.item_count();
         let old = self.timeline.item_count();
         let old_keys = std::mem::take(&mut self.row_keys);
         if old_keys.len() != old {
@@ -3721,9 +3722,22 @@ impl VectorApp {
         // The row above may change with it: a streak's tail, a date's last message.
         let from = same.min(hit.unwrap_or(usize::MAX)).saturating_sub(1);
         let new = self.rows.len();
-        self.timeline.splice(from..old, new - from);
+        let below = hit.map_or(new, |h| new - h - 1);
+        let tail = old_keys[from..]
+            .iter()
+            .rev()
+            .zip(self.row_keys[from..].iter().rev())
+            .take_while(|(a, b)| a == b)
+            .count()
+            .min(below);
+        self.timeline.splice(from..old - tail, new - tail - from);
         if follow && at_end {
             self.timeline.scroll_to_end();
+        } else if from <= top.item_ix
+            && let Some(ix) = old_keys.get(top.item_ix).and_then(|k| self.row_keys.iter().position(|x| x == k))
+        {
+            // A splice over the reading position would drop it to the splice's start.
+            self.timeline.scroll_to(gpui::ListOffset { item_ix: ix, offset_in_item: top.offset_in_item });
         }
     }
 
