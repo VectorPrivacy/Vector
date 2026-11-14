@@ -3046,6 +3046,7 @@ impl VectorApp {
             cx.notify();
         } else {
             crate::pane::notify(&self.panes.side, cx);
+            crate::pane::notify(&self.panes.rail, cx);
         }
     }
 
@@ -6061,54 +6062,11 @@ impl Render for VectorApp {
                     .min_h_0()
                     .relative()
                     .child(gpui::deferred(self.list_resizer(rail_mode.width(), list_full, cx)).with_priority(1))
-                    .child(rail(
-                        &store,
-                        &self.rail_open,
-                        self.open.as_ref(),
-                        self.community.as_ref().map(|v| v.id.as_str()),
-                        &store.communities.iter().filter_map(|c| Some((c.community_id.clone(), self.voice.badge(&store, &c.community_id)?))).collect(),
-                        rail_mode,
-                        &on_community,
-                        {
-                            let app = cx.entity().downgrade();
-                            move |_: &gpui::ClickEvent, window: &mut Window, cx: &mut gpui::App| {
-                                app.update(cx, |app, cx| {
-                                    app.toggle_start(window, cx);
-                                })
-                                .ok();
-                            }
-                        },
-                        cx.listener(|app, _: &gpui::ClickEvent, _, cx| {
-                            app.rail_pref = !app.rail_pref;
-                            backend::device::set("ws_rail_collapsed", app.rail_pref.to_string());
-                            cx.notify();
-                        }),
-                        (!self.start_menu_on()).then(|| {
-                            let app = cx.entity().downgrade();
-                            let me = store.my_npub.clone();
-                            Navbar {
-                                active: if self.settings.is_some() {
-                                    "settings"
-                                } else if self.nexus.is_some() {
-                                    "miniapps"
-                                } else if self.profile.as_ref().is_some_and(|p| p.npub == me) {
-                                    "profile"
-                                } else if self.open.as_deref() == Some(me.as_str()) {
-                                    "bookmarks"
-                                } else {
-                                    "chat"
-                                },
-                                chat_badge: store
-                                    .chats
-                                    .iter()
-                                    .filter(|c| store.listed(c) && !store.is_request(c) && store.community_of(&c.id).is_none() && store.unread_count(c) > 0)
-                                    .count(),
-                                update_dot: false,
-                                on: Rc::new(move |id, window, cx| {
-                                    app.update(cx, |app, cx| app.nav_to(id, window, cx)).ok();
-                                }),
-                            }
-                        }),
+                    .child(crate::pane::cached(
+                        &self.panes.rail,
+                        gpui::StyleRefinement::default().w(px(rail_mode.width())).flex_shrink_0().h_full(),
+                        |app, window, cx| app.rail_pane(window, cx),
+                        cx,
                     ))
                     .when_some(self.settings.as_ref(), |row, settings| {
                         let app = cx.entity().downgrade();
@@ -8452,6 +8410,63 @@ impl VectorApp {
             }
             None => div().into_any_element(),
         }
+    }
+
+    /// The rail, as its own pane: a hover there redraws only the rail.
+    fn rail_pane(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let store = self.store.clone();
+        let store = store.borrow();
+        let rail_mode = self.rail_mode(window);
+        let on_community = self.on_community_act(cx);
+        rail(
+            &store,
+            &self.rail_open,
+            self.open.as_ref(),
+            self.community.as_ref().map(|v| v.id.as_str()),
+            &store.communities.iter().filter_map(|c| Some((c.community_id.clone(), self.voice.badge(&store, &c.community_id)?))).collect(),
+            rail_mode,
+            &on_community,
+            {
+                let app = cx.entity().downgrade();
+                move |_: &gpui::ClickEvent, window: &mut Window, cx: &mut gpui::App| {
+                    app.update(cx, |app, cx| {
+                        app.toggle_start(window, cx);
+                    })
+                    .ok();
+                }
+            },
+            cx.listener(|app, _: &gpui::ClickEvent, _, cx| {
+                app.rail_pref = !app.rail_pref;
+                backend::device::set("ws_rail_collapsed", app.rail_pref.to_string());
+                cx.notify();
+            }),
+            (!self.start_menu_on()).then(|| {
+                let app = cx.entity().downgrade();
+                let me = store.my_npub.clone();
+                Navbar {
+                    active: if self.settings.is_some() {
+                        "settings"
+                    } else if self.nexus.is_some() {
+                        "miniapps"
+                    } else if self.profile.as_ref().is_some_and(|p| p.npub == me) {
+                        "profile"
+                    } else if self.open.as_deref() == Some(me.as_str()) {
+                        "bookmarks"
+                    } else {
+                        "chat"
+                    },
+                    chat_badge: store
+                        .chats
+                        .iter()
+                        .filter(|c| store.listed(c) && !store.is_request(c) && store.community_of(&c.id).is_none() && store.unread_count(c) > 0)
+                        .count(),
+                    update_dot: false,
+                    on: Rc::new(move |id, window, cx| {
+                        app.update(cx, |app, cx| app.nav_to(id, window, cx)).ok();
+                    }),
+                }
+            }),
+        ).into_any_element()
     }
 
     fn on_community_act(&self, cx: &mut Context<Self>) -> crate::community::OnAct {
