@@ -773,7 +773,7 @@ impl VectorApp {
                 match filter {
                     Filter::Requests => note("New people who message you show up here.".into()),
                     Filter::Communities => note("Communities you join live here.".into()),
-                    Filter::All | Filter::Messages => super::get_started(cx).into_any_element(),
+                    Filter::All | Filter::Messages => super::get_started(f32::from(window.viewport_size().width) - 14., cx).into_any_element(),
                 }
             }
         });

@@ -7391,7 +7391,7 @@ fn chat_list(
                 .into_any_element(),
         )
     } else {
-        no_messages.then(|| get_started(cx).into_any_element())
+        no_messages.then(|| get_started(list_w() - 14., cx).into_any_element())
     };
     let pin_keys: Rc<Vec<String>> = Rc::new(
         rows.iter()
@@ -7552,7 +7552,8 @@ fn chat_list(
 }
 
 /// `.chatlist-get-started`: the empty list's first step, which rides the New Chat button.
-fn get_started(cx: &mut Context<VectorApp>) -> impl IntoElement {
+/// `width` is the card's own: its second line shows from 290px, as the container query does.
+fn get_started(width: f32, cx: &mut Context<VectorApp>) -> impl IntoElement {
     div().pt(px(6.)).px(px(7.)).child(
         div()
             .id("chatlist-get-started")
@@ -7605,12 +7606,28 @@ fn get_started(cx: &mut Context<VectorApp>) -> impl IntoElement {
                     .flex_1()
                     .min_w_0()
                     .pr(px(12.))
-                    .truncate()
-                    .text_size(px(15.))
-                    .line_height(px(18.))
-                    .font_weight(FontWeight::BOLD)
-                    .text_color(c(0xf7f4f4))
-                    .child("Get Started"),
+                    .flex()
+                    .flex_col()
+                    .child(
+                        div()
+                            .truncate()
+                            .text_size(px(15.))
+                            .line_height(px(18.))
+                            .font_weight(FontWeight::BOLD)
+                            .text_color(c(0xf7f4f4))
+                            .child("Get Started"),
+                    )
+                    .when(width >= 290., |d| {
+                        d.child(
+                            div()
+                                .mt(px(1.))
+                                .truncate()
+                                .text_size(px(12.))
+                                .line_height(px(14.))
+                                .text_color(white_a(0.7))
+                                .child("Create your first private chat."),
+                        )
+                    }),
             ),
     )
 }
