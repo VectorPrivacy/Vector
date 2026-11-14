@@ -41,6 +41,7 @@ actions!(
         SelectUp,
         SelectDown,
         Tab,
+        TabBack,
         Undo,
         Redo,
         WordLeft,
@@ -1237,6 +1238,7 @@ impl Element for TextElement {
         window: &mut Window,
         cx: &mut App,
     ) -> Self::PrepaintState {
+        tab_order::place(&self.input, bounds, window);
         let input = self.input.read(cx);
         let (text, runs, font_size) = input.display(window);
         let line_height = window.line_height();
@@ -1506,10 +1508,15 @@ impl Render for TextInput {
                 }
                 this.vertical(1., false, w, cx)
             }))
-            .on_action(cx.listener(|this, _: &Tab, _, cx| {
+            .on_action(cx.listener(|this, _: &Tab, w, cx| {
                 if this.nav || this.chip {
                     cx.emit(Nav::Pick);
-                } else {
+                } else if !tab_order::step(cx.entity_id(), false, w, cx) {
+                    cx.propagate();
+                }
+            }))
+            .on_action(cx.listener(|this, _: &TabBack, w, cx| {
+                if !tab_order::step(cx.entity_id(), true, w, cx) {
                     cx.propagate();
                 }
             }))
@@ -2053,6 +2060,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("shift-down", SelectDown, Some("TextInput")),
         KeyBinding::new("escape", Cancel, Some("TextInput")),
         KeyBinding::new("tab", Tab, Some("TextInput")),
+        KeyBinding::new("shift-tab", TabBack, Some("TextInput")),
         KeyBinding::new("shift-home", SelectHome, None),
         KeyBinding::new("shift-end", SelectEnd, None),
     ]);
@@ -2100,5 +2108,78 @@ mod npub_tests {
         let found = npub_mentions(&text);
         assert_eq!(found.len(), 1);
         assert_eq!(&text[found[0].clone()], format!("@{n}"));
+    }
+}
+
+/// Tab and Shift-Tab between the text fields on screen, in reading order. A field counts only
+/// where a press would reach it, so a dialog's fields cycle among themselves, not out to the
+/// composer it covers.
+mod tab_order {
+    use std::cell::RefCell;
+
+    use gpui::{App, Bounds, Entity, EntityId, Hitbox, HitboxBehavior, Pixels, Point, WeakEntity, Window};
+
+    use super::TextInput;
+
+    struct Placed {
+        input: WeakEntity<TextInput>,
+        hitbox: Hitbox,
+        probe: Point<Pixels>,
+    }
+
+    thread_local! {
+        static PLACED: RefCell<Vec<(EntityId, Placed)>> = const { RefCell::new(Vec::new()) };
+    }
+
+    /// Where a field was laid out this frame, and the point a press would take to reach it.
+    pub fn place(input: &Entity<TextInput>, bounds: Bounds<Pixels>, window: &mut Window) {
+        let seen = bounds.intersect(&window.content_mask().bounds);
+        if seen.size.width <= Pixels::ZERO || seen.size.height <= Pixels::ZERO {
+            return;
+        }
+        let hitbox = window.insert_hitbox(bounds, HitboxBehavior::Normal);
+        let id = input.entity_id();
+        let placed = Placed { input: input.downgrade(), hitbox, probe: seen.center() };
+        PLACED.with(|p| {
+            let mut p = p.borrow_mut();
+            p.retain(|(_, e)| e.input.upgrade().is_some());
+            match p.iter_mut().find(|(at, _)| *at == id) {
+                Some(slot) => slot.1 = placed,
+                None => p.push((id, placed)),
+            }
+        });
+    }
+
+    /// Focus the next field (or the previous one) from `from`, with its text selected. False
+    /// when there is no other. `from` is mid-update, so it is only compared, never read.
+    pub fn step(from: EntityId, back: bool, window: &mut Window, cx: &mut App) -> bool {
+        let mut open: Vec<(Bounds<Pixels>, Entity<TextInput>)> = PLACED.with(|p| {
+            p.borrow()
+                .iter()
+                .filter(|(_, e)| e.hitbox.is_hovered_at(e.probe, window))
+                .filter_map(|(_, e)| Some((e.hitbox.bounds, e.input.upgrade()?)))
+                .collect()
+        });
+        // Rows a few points apart still read as one line.
+        open.sort_by(|(a, _), (b, _)| {
+            let (ay, by) = ((f32::from(a.top()) / 8.).round(), (f32::from(b.top()) / 8.).round());
+            ay.total_cmp(&by).then(f32::from(a.left()).total_cmp(&f32::from(b.left())))
+        });
+        let Some(here) = open.iter().position(|(_, e)| e.entity_id() == from) else {
+            return false;
+        };
+        if open.len() < 2 {
+            return false;
+        }
+        let next = if back { (here + open.len() - 1) % open.len() } else { (here + 1) % open.len() };
+        let target = open[next].1.clone();
+        let handle = target.read(cx).focus_handle.clone();
+        target.update(cx, |t, cx| {
+            t.selected_range = 0..t.content.len();
+            t.selection_reversed = false;
+            cx.notify();
+        });
+        window.focus(&handle, cx);
+        true
     }
 }
