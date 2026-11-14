@@ -3039,6 +3039,12 @@ impl VectorApp {
         }
     }
 
+    /// Transfers show only in message rows (and what draws over them).
+    fn notify_timeline(&mut self, cx: &mut Context<Self>) {
+        crate::pane::notify(&self.panes.timeline, cx);
+        self.scoped = true;
+    }
+
     /// Redraw the side pane, plus the open chat's when `chat` is it.
     fn notify_chat(&mut self, chat: &str, cx: &mut Context<Self>) {
         if self.open.as_deref() == Some(chat) {
@@ -3507,6 +3513,8 @@ impl VectorApp {
                     t.stage = None;
                 }
                 t.bps = payload.get("bytesPerSec").and_then(Value::as_f64);
+                drop(media);
+                self.notify_timeline(cx);
             }
             "inline_image_progress" => {
                 let (Some(url), Some(p)) = (
@@ -3518,6 +3526,7 @@ impl VectorApp {
                 if p >= 0. {
                     self.media.borrow_mut().linked_progress(url, p as f32);
                 }
+                self.notify_timeline(cx);
             }
             "attachment_upload_progress" => {
                 let Some(id) = payload.get("id").and_then(Value::as_str) else {
@@ -3531,6 +3540,8 @@ impl VectorApp {
                 let t = media.transfers.entry(id.to_string()).or_default();
                 t.pct = Some(p as f32);
                 t.stage = None;
+                drop(media);
+                self.notify_timeline(cx);
             }
             "attachment_upload_stage" => {
                 let Some(id) = payload.get("id").and_then(Value::as_str) else {
@@ -3546,6 +3557,7 @@ impl VectorApp {
                     .entry(id.to_string())
                     .or_default()
                     .stage = stage;
+                self.notify_timeline(cx);
             }
             "attachment_download_stage" => {
                 let Some(id) = payload.get("id").and_then(Value::as_str) else {
@@ -3561,6 +3573,7 @@ impl VectorApp {
                     .entry(id.to_string())
                     .or_default()
                     .stage = stage;
+                self.notify_timeline(cx);
             }
             "attachment_download_result" => {
                 let id = payload
@@ -3599,7 +3612,10 @@ impl VectorApp {
             }
             "unread_counts_stale" => self.refresh_unread(cx),
             "chat_commands_updated" => self.on_commands_updated(&payload, cx),
-            "sync_progress" => self.syncing = true,
+            "sync_progress" => {
+                self.scoped = self.syncing;
+                self.syncing = true;
+            }
             "transport_state" => self.on_transport_view(payload, cx),
             "sync_finished" => {
                 self.syncing = false;
