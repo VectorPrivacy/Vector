@@ -449,6 +449,10 @@ impl<E: IntoElement + 'static> Element for AnimationElement<E> {
                                 .detach();
                         }
                     }
+                    // An endless loop shares the coalesced wake grid: a pulse needs no vsync rate.
+                    _ if !self.animations[animation_ix].oneshot => {
+                        crate::wake_window_in(window, cx, Duration::ZERO)
+                    }
                     _ => window.request_animation_frame(),
                 }
             }

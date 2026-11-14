@@ -12,7 +12,7 @@ use futures::channel::mpsc::UnboundedSender;
 pub fn from_args() -> Vec<String> {
     std::env::args()
         .skip(1)
-        .filter(|a| vector_core::deep_link::parse_deep_link(a).is_some())
+        .filter(|a| vector_core::deep_link::parse_deep_link(a).is_some() || dev_command(a))
         .collect()
 }
 

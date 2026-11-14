@@ -187,7 +187,9 @@ fn main() {
         .data_dir
         .clone()
         .unwrap_or_else(backend::default_data_dir);
-    if fixtures.is_none() && !deeplink::claim(&data_dir, &deeplink::from_args(), links_tx.clone()) {
+    // A devctl build listens in fixture mode too, so its window can be driven.
+    let listens = fixtures.is_none() || cfg!(feature = "devctl");
+    if listens && !deeplink::claim(&data_dir, &deeplink::from_args(), links_tx.clone()) {
         return;
     }
     if fixtures.is_none() {

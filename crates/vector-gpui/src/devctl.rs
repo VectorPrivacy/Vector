@@ -8,10 +8,18 @@
 //! - `dev:scroll:<px>`: scroll the open timeline by that much (positive is down)
 //! - `dev:bottom`: jump the open timeline to its newest message
 //! - `dev:pin:<digits>`: type a PIN into the lock screen
+//! - `dev:move:<x>,<y>` / `dev:click:<x>,<y>` / `dev:rclick:<x>,<y>`: the mouse, in window points
+//! - `dev:wheel:<x>,<y>,<dy>`: scroll what is under the point (positive is down)
+//! - `dev:type:<text>`: type into whatever has focus
+//! - `dev:key:<keystroke>`: press one, as GPUI spells them (`enter`, `escape`, `cmd-k`)
+//! - `dev:shot`: the window as `$TMPDIR/vector-devctl.png` (macOS and Windows)
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use gpui::{Context, Window, px};
+use gpui::{
+    Context, Keystroke, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+    PlatformInput, ScrollDelta, ScrollEvent, Window, point, px,
+};
 use serde_json::json;
 
 use crate::ui::VectorApp;
@@ -79,6 +87,85 @@ pub fn run(app: &mut VectorApp, cmd: &str, window: &mut Window, cx: &mut Context
             cx.notify();
         }
         "pin" => app.dev_pin(rest, window, cx),
+        "move" | "click" | "rclick" | "wheel" => {
+            let n: Vec<f32> = rest.split(',').filter_map(|v| v.trim().parse().ok()).collect();
+            let Some((&x, &y)) = n.first().zip(n.get(1)) else {
+                return answer(json!({ "error": "expected x,y" }));
+            };
+            let at = point(px(x), px(y));
+            let mut events = vec![PlatformInput::MouseMove(MouseMoveEvent { position: at, pressed_button: None, modifiers: Modifiers::default() })];
+            let button = if verb == "rclick" { MouseButton::Right } else { MouseButton::Left };
+            match verb {
+                "click" | "rclick" => {
+                    events.push(PlatformInput::MouseDown(MouseDownEvent { button, position: at, click_count: 1, ..Default::default() }));
+                    events.push(PlatformInput::MouseUp(MouseUpEvent { button, position: at, click_count: 1, ..Default::default() }));
+                }
+                "wheel" => events.push(PlatformInput::Scroll(ScrollEvent {
+                    position: at,
+                    delta: ScrollDelta::Pixels(point(px(0.), px(-n.get(2).copied().unwrap_or(0.)))),
+                    ..Default::default()
+                })),
+                _ => {}
+            }
+            later(window, cx, move |window, cx| {
+                for e in events {
+                    window.dispatch_event(e, cx);
+                }
+            });
+        }
+        "type" => {
+            let text = rest.to_string();
+            later(window, cx, move |window, cx| {
+                for ch in text.chars() {
+                    let key = if ch == ' ' { "space".to_string() } else { ch.to_string() };
+                    window.dispatch_keystroke(
+                        Keystroke { key, key_char: Some(ch.to_string()), modifiers: Modifiers::default(), ..Default::default() },
+                        cx,
+                    );
+                }
+            });
+        }
+        // parse wants a static source: a dev command is small and rare, so leak it.
+        "key" => match Keystroke::parse(Box::leak(rest.to_string().into_boxed_str())).map_err(|e| e.to_string()) {
+            Ok(k) => later(window, cx, move |window, cx| {
+                window.dispatch_keystroke(k, cx);
+            }),
+            Err(e) => answer(json!({ "error": e })),
+        },
+        "shot" => answer(shot()),
         _ => answer(json!({ "error": format!("unknown command {verb}") })),
     }
+}
+
+/// Input dispatched once the app's own update has ended, as the platform's would be.
+fn later(window: &mut Window, cx: &mut Context<VectorApp>, f: impl FnOnce(&mut Window, &mut gpui::App) + 'static) {
+    cx.spawn_in(window, async move |_, cx| {
+        cx.update(|window, cx| f(window, cx)).ok();
+    })
+    .detach();
+}
+
+#[cfg(not(target_os = "linux"))]
+fn shot() -> serde_json::Value {
+    let me = std::process::id();
+    let path = std::env::temp_dir().join("vector-devctl.png");
+    let found = xcap::Window::all()
+        .map_err(|e| e.to_string())
+        .and_then(|ws| {
+            ws.into_iter()
+                .filter(|w| w.pid().ok() == Some(me) && !w.is_minimized().unwrap_or(false))
+                .max_by_key(|w| w.width().unwrap_or(0) * w.height().unwrap_or(0))
+                .ok_or_else(|| "no window of this process".to_string())
+        })
+        .and_then(|w| w.capture_image().map_err(|e| e.to_string()))
+        .and_then(|img| img.save(&path).map(|_| (img.width(), img.height())).map_err(|e| e.to_string()));
+    match found {
+        Ok((w, h)) => json!({ "shot": path, "width": w, "height": h }),
+        Err(e) => json!({ "error": e }),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn shot() -> serde_json::Value {
+    json!({ "error": "on Linux, capture with the X server (import -window)" })
 }
