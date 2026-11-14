@@ -5687,8 +5687,15 @@ impl Render for VectorApp {
         for old in self.retired_frames.drain(..) {
             let _ = window.drop_image(old);
         }
-        if self.store.borrow().anyone_typing() {
-            gpui::wake_window_in(window, cx, std::time::Duration::from_millis(33));
+        {
+            let store = self.store.borrow();
+            if let Some(due) = store.typing_due() {
+                gpui::wake_window_in(window, cx, due);
+            }
+            // Wide rows ask for this themselves, only while one is on screen.
+            if self.is_slim && store.anyone_typing() {
+                gpui::wake_window_in(window, cx, BREATH);
+            }
         }
         self.revoke_outlived_archives();
         if self.mini_animating() || self.pivx_animating() || self.archive.animating() || self.nexus.as_ref().is_some_and(|n| n.animating()) {
@@ -7345,7 +7352,7 @@ fn chat_list(
                     app.archive_scrolled(forced);
                 }))
                 .child(
-                    list(state, move |i, _, _| {
+                    list(state, move |i, window, cx| {
                         let Some(row) = rows.get(i).copied() else {
                             return div().into_any_element();
                         };
@@ -7356,6 +7363,9 @@ fn chat_list(
                         let Some(chat) = store.chats.get(idx) else {
                             return div().into_any_element();
                         };
+                        if !store.typers(&chat.id).is_empty() {
+                            gpui::wake_window_in(window, cx, BREATH);
+                        }
                         let active = open.as_ref().is_some_and(|o| *o == chat.id);
                         let id: SharedString = chat.id.clone().into();
                         let (open_view, menu_view, menu_id) = (view.clone(), view.clone(), chat.id.clone());
@@ -7460,20 +7470,12 @@ fn get_started(cx: &mut Context<VectorApp>) -> impl IntoElement {
 /// The chat list's last-message line (`chatPreviewText`).
 /// `.typing-strip`: who is typing in the open chat, in the room the last row keeps clear
 /// above the composer.
-fn typing_strip(store: &Store, chat: &str, fade: f32) -> Option<AnyElement> {
+fn typing_strip(store: &Store, chat: &str, fade: f32, window: &Window) -> Option<AnyElement> {
     const FACES: usize = 3;
     let typers = store.typers(chat);
     if typers.is_empty() {
         return None;
     }
-    let t = crate::attachments::EPOCH.elapsed().as_secs_f32();
-    let dots = (0..3).map(|i| {
-        // `typing-wave`: up 1.5px and fully lit at 30% of each 1.2s beat.
-        let p = ((t - i as f32 * 0.15) / 1.2).rem_euclid(1.);
-        let k = if p < 0.3 { p / 0.3 } else if p < 0.6 { 1. - (p - 0.3) / 0.3 } else { 0. };
-        let k = k * k * (3. - 2. * k);
-        div().size(px(4.)).rounded_full().bg(white_a(0.7)).opacity(0.45 + 0.55 * k).mt(px(-1.5 * k))
-    });
     let names: Vec<String> = if typers.len() > 3 { Vec::new() } else { typers.iter().map(|n| store.name(n)).collect() };
     let mut text = div().min_w_0().flex().overflow_hidden().whitespace_nowrap();
     if names.is_empty() {
@@ -7519,11 +7521,26 @@ fn typing_strip(store: &Store, chat: &str, fade: f32) -> Option<AnyElement> {
                     .when(i > 0, |d| d.ml(px(-6.)))
                     .child(avatar(store, n, 18.))
             })))
-            .child(div().h(px(18.)).flex().items_center().gap(px(3.)).flex_shrink_0().children(dots))
+            .child(gpui::img(gpui::ImageSource::Render(typing_dots(window.scale_factor()))).id("typing-dots").size(px(18.)).flex_shrink_0())
             .child(text)
             .into_any_element(),
     )
 }
+
+/// `typing-wave`: three dots, each up 1.5px and fully lit at 30% of a 1.2s beat.
+fn typing_dots(scale: f32) -> Arc<gpui::RenderImage> {
+    crate::sprite::strip("typing-wave", scale, 18, &crate::sprite::times(1.2, 20.), 1.2, |t, buf, k| {
+        for i in 0..3 {
+            let p = ((t - i as f32 * 0.15) / 1.2).rem_euclid(1.);
+            let w = if p < 0.3 { p / 0.3 } else if p < 0.6 { 1. - (p - 0.3) / 0.3 } else { 0. };
+            let w = w * w * (3. - 2. * w);
+            crate::sprite::disc(buf, (2. + 7. * i as f32) * k, (9. - 1.5 * w) * k, 2. * k, 0xffffff, 0.7 * (0.45 + 0.55 * w));
+        }
+    })
+}
+
+/// The typing preview's 6s breath steps at 10 fps: smooth at that pace, a third the redraws.
+const BREATH: std::time::Duration = std::time::Duration::from_millis(100);
 
 fn preview_line(store: &Store, chat: &SerializableChat, color: gpui::Hsla) -> AnyElement {
     preview_line_at(store, chat, color, 13., 18.)
@@ -8509,7 +8526,7 @@ impl VectorApp {
                     .children(back)
                     .children(request)
                     .children(drawer)
-                    .children(typing_strip(store, &id, self.typing_fade).inspect(|_| gpui::wake_window_in(window, cx, std::time::Duration::from_millis(33))))
+                    .children(typing_strip(store, &id, self.typing_fade, window))
                     // `.fadeout-bottom-msgs`: rows dim into the composer.
                     .child(
                         div()
@@ -18542,6 +18559,14 @@ impl VectorApp {
 
     pub(crate) fn dev_timeline(&self) -> &ListState {
         &self.timeline
+    }
+
+    pub(crate) fn dev_typing(&mut self, chat: &str, who: &str, cx: &mut Context<Self>) {
+        let mut store = self.store.borrow_mut();
+        let now = store.now_ms();
+        store.typing.insert(chat.to_string(), (vec![who.to_string()], now));
+        drop(store);
+        cx.notify();
     }
 
     pub(crate) fn dev_pin(&mut self, digits: &str, window: &mut Window, cx: &mut Context<Self>) {

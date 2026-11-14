@@ -8,6 +8,7 @@
 //! - `dev:scroll:<px>`: scroll the open timeline by that much (positive is down)
 //! - `dev:bottom`: jump the open timeline to its newest message
 //! - `dev:pin:<digits>`: type a PIN into the lock screen
+//! - `dev:typing:<chat>:<npub>`: show that npub typing in that chat, as if a notice arrived
 //! - `dev:move:<x>,<y>` / `dev:click:<x>,<y>` / `dev:rclick:<x>,<y>`: the mouse, in window points
 //! - `dev:wheel:<x>,<y>,<dy>`: scroll what is under the point (positive is down)
 //! - `dev:type:<text>`: type into whatever has focus
@@ -68,6 +69,7 @@ pub fn run(app: &mut VectorApp, cmd: &str, window: &mut Window, cx: &mut Context
                 "renders": renders,
                 "render_ms": render_ns as f64 / 1e6,
             });
+            v["active"] = json!(window.is_window_active());
             answer(v);
         }
         "community" => app.dev_open_community(rest.to_string(), window, cx),
@@ -87,6 +89,11 @@ pub fn run(app: &mut VectorApp, cmd: &str, window: &mut Window, cx: &mut Context
             cx.notify();
         }
         "pin" => app.dev_pin(rest, window, cx),
+        "typing" => {
+            if let Some((chat, who)) = rest.rsplit_once(':') {
+                app.dev_typing(chat, who, cx);
+            }
+        }
         "move" | "click" | "rclick" | "wheel" => {
             let n: Vec<f32> = rest.split(',').filter_map(|v| v.trim().parse().ok()).collect();
             let Some((&x, &y)) = n.first().zip(n.get(1)) else {

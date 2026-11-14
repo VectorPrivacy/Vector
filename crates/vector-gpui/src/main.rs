@@ -114,6 +114,7 @@ mod viewer;
 mod viktor;
 #[cfg(feature = "devctl")]
 mod devctl;
+mod sprite;
 mod video;
 #[cfg(feature = "video")]
 mod yuv;

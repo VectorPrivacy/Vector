@@ -1067,8 +1067,9 @@ pub(crate) fn frame_delay(data: &RenderImage, index: usize) -> Duration {
 }
 
 thread_local! {
-    /// Each window's earliest pending wake, and whether it must redraw or only step animations.
-    static WAKES: std::cell::RefCell<collections::FxHashMap<crate::WindowId, (Instant, bool)>> =
+    /// Each window's earliest pending wake of each sort, keyed by whether it redraws.
+    /// Kept apart so a slow redraw never promotes the frequent animation steps into redraws.
+    static WAKES: std::cell::RefCell<collections::FxHashMap<(crate::WindowId, bool), Instant>> =
         Default::default();
 }
 
@@ -1091,22 +1092,13 @@ fn wake(window: &mut Window, cx: &mut App, due: Duration, redraw: bool) {
     let want = Instant::now() + due;
     let ticks = (want.saturating_duration_since(epoch).as_nanos() / tick.as_nanos() + 1) as u32;
     let at = epoch + tick * ticks;
-    let id = window.window_handle().window_id();
+    let key = (window.window_handle().window_id(), redraw);
     let sooner = WAKES.with(|w| {
         let mut w = w.borrow_mut();
-        let now = Instant::now();
-        match w.get_mut(&id) {
-            Some((pending, r)) if *pending > now && *pending <= at => {
-                *r |= redraw;
-                false
-            }
-            Some((pending, r)) if *pending > now => {
-                let redraw = redraw || *r;
-                w.insert(id, (at, redraw));
-                true
-            }
+        match w.get(&key) {
+            Some(pending) if *pending > Instant::now() && *pending <= at => false,
             _ => {
-                w.insert(id, (at, redraw));
+                w.insert(key, at);
                 true
             }
         }
@@ -1117,11 +1109,9 @@ fn wake(window: &mut Window, cx: &mut App, due: Duration, redraw: bool) {
     window
         .spawn(cx, async move |cx| {
             cx.background_executor().timer(at - Instant::now()).await;
-            let current = WAKES.with(|w| w.borrow().get(&id).copied());
-            if let Some((when, redraw)) = current
-                && when == at
-            {
-                WAKES.with(|w| w.borrow_mut().remove(&id));
+            let current = WAKES.with(|w| w.borrow().get(&key).copied());
+            if current == Some(at) {
+                WAKES.with(|w| w.borrow_mut().remove(&key));
                 cx.update(|window, cx| {
                     if redraw {
                         window.refresh()

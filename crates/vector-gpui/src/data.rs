@@ -646,6 +646,16 @@ impl Store {
         self.typing.keys().any(|c| !self.typers(c).is_empty())
     }
 
+    /// How long until the soonest typing notice lapses, so its strip can go on time.
+    pub fn typing_due(&self) -> Option<std::time::Duration> {
+        let now = self.now_ms();
+        self.typing
+            .values()
+            .filter_map(|(who, at)| (!who.is_empty()).then(|| (at + TYPING_TTL_MS).checked_sub(now)).flatten())
+            .min()
+            .map(|ms| std::time::Duration::from_millis(ms + 1))
+    }
+
     /// Who is typing in `chat` now, minus anyone blocked.
     pub fn typers(&self, chat: &str) -> Vec<String> {
         match self.typing.get(chat) {

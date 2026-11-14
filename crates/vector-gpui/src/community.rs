@@ -313,27 +313,23 @@ fn channel_row(
 
 /// `.chatlist-community-head-alert`: pulses, since noticing a raid late costs the community.
 fn raid_pip() -> impl IntoElement {
-    let danger = c(crate::timeline::DANGER);
+    const SPAN: f32 = 1.9;
+    // Its ring is gone for the last 30% of the beat, so that stretch is one still frame.
+    let mut times = crate::sprite::times(SPAN * 0.7, 20.);
+    times.push(SPAN * 0.7);
     // A ring, not a box-shadow spread: GPUI keeps a shadow's corner radius as the spread grows.
-    let ring = div().absolute().rounded_full().with_animation(
-        "raid-pulse",
-        gpui::Animation::new(std::time::Duration::from_millis(1900)).repeat(),
-        move |d, t| {
-            let (spread, alpha) = if t < 0.7 {
-                let k = gpui::ease_out_quint()(t / 0.7);
-                (7. * k, 0.7 * (1. - k))
-            } else {
-                (7. * (1. - (t - 0.7) / 0.3), 0.)
-            };
-            d.left(px(-spread)).top(px(-spread)).size(px(8. + 2. * spread)).bg(danger.opacity(alpha))
-        },
-    );
-    div()
-        .relative()
-        .size(px(8.))
-        .flex_shrink_0()
-        .child(ring)
-        .child(div().absolute().inset_0().rounded_full().bg(danger))
+    // Two device pixels a point: the sidebar has no window to ask, and a 22pt pip shows no loss.
+    let strip = crate::sprite::strip("raid-pulse", 2., 22, &times, SPAN, |t, buf, k| {
+        let p = t / SPAN;
+        if p < 0.7 {
+            let e = gpui::ease_out_quint()(p / 0.7);
+            crate::sprite::disc(buf, 11. * k, 11. * k, (4. + 7. * e) * k, crate::timeline::DANGER, 0.7 * (1. - e));
+        }
+        crate::sprite::disc(buf, 11. * k, 11. * k, 4. * k, crate::timeline::DANGER, 1.);
+    });
+    div().relative().size(px(8.)).flex_shrink_0().child(
+        gpui::img(gpui::ImageSource::Render(strip)).id("raid-pulse").absolute().left(px(-7.)).top(px(-7.)).size(px(22.)),
+    )
 }
 
 /// `#chats` over a Community: its head, then its channels by Category.
