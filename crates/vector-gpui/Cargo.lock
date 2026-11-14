@@ -13149,6 +13149,7 @@ dependencies = [
  "objc2-app-kit 0.3.2",
  "objc2-foundation 0.3.2",
  "openh264",
+ "png 0.18.1",
  "pollster 0.4.0",
  "pulldown-cmark",
  "qrcodegen",

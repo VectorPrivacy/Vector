@@ -488,11 +488,101 @@ fn gif_frames(bytes: &[u8], to: impl Fn(u32, u32) -> (u32, u32)) -> Option<(Vec<
         if !head[..idat].windows(4).any(|w| w == b"acTL") {
             return None;
         }
-        let dec = image::codecs::png::PngDecoder::new(Cursor::new(bytes)).ok()?;
-        let (w, h) = dec.dimensions();
-        return frames_of(dec.apng().ok()?.into_frames(), w, h, &to);
+        let (frames, w, h) = apng_frames(bytes)?;
+        return frames_of(image::Frames::new(Box::new(frames.into_iter().map(Ok))), w, h, &to);
     }
     None
+}
+
+/// An APNG's frames composited on its canvas by the spec: each region blended (source or over)
+/// at its offset, then disposed (kept, cleared, or put back as it was). The image crate's own
+/// compositing gets "dispose to previous" wrong, leaving earlier frames behind.
+fn apng_frames(bytes: &[u8]) -> Option<(Vec<Frame>, u32, u32)> {
+    use png::{BlendOp, DisposeOp};
+    let mut dec = png::Decoder::new(Cursor::new(bytes));
+    dec.set_transformations(png::Transformations::normalize_to_color8());
+    let mut reader = dec.read_info().ok()?;
+    let (w, h) = (reader.info().width, reader.info().height);
+    let count = reader.info().animation_control?.num_frames as usize;
+    // The default image is a frame only when its own fcTL comes before it.
+    let default_shown = reader.info().frame_control.is_some();
+    let mut canvas = image::RgbaImage::new(w, h);
+    let mut buf = vec![0u8; reader.output_buffer_size()?];
+    let mut frames = Vec::with_capacity(count);
+    let mut first = true;
+    loop {
+        let Ok(out) = reader.next_frame(&mut buf) else { break };
+        if first && !default_shown {
+            first = false;
+            continue;
+        }
+        let Some(fc) = reader.info().frame_control else { break };
+        let (color, _) = reader.output_color_type();
+        let rgba = to_rgba(&buf[..out.buffer_size()], color, out.width, out.height)?;
+        let (fx, fy) = (fc.x_offset, fc.y_offset);
+        if fx + out.width > w || fy + out.height > h {
+            return None;
+        }
+        let dispose = if first && fc.dispose_op == DisposeOp::Previous { DisposeOp::Background } else { fc.dispose_op };
+        first = false;
+        let saved = (dispose == DisposeOp::Previous).then(|| image::imageops::crop_imm(&canvas, fx, fy, out.width, out.height).to_image());
+        for (x, y, src) in rgba.enumerate_pixels() {
+            let dst = canvas.get_pixel_mut(fx + x, fy + y);
+            *dst = match fc.blend_op {
+                BlendOp::Source => *src,
+                BlendOp::Over => over(*src, *dst),
+            };
+        }
+        let den = if fc.delay_den == 0 { 100 } else { fc.delay_den as u32 };
+        let delay = image::Delay::from_numer_denom_ms(fc.delay_num as u32 * 1000, den);
+        frames.push(Frame::from_parts(canvas.clone(), 0, 0, delay));
+        match dispose {
+            DisposeOp::None => {}
+            DisposeOp::Background => {
+                for y in fy..fy + out.height {
+                    for x in fx..fx + out.width {
+                        canvas.put_pixel(x, y, image::Rgba([0, 0, 0, 0]));
+                    }
+                }
+            }
+            DisposeOp::Previous => {
+                if let Some(saved) = saved {
+                    image::imageops::replace(&mut canvas, &saved, fx as i64, fy as i64);
+                }
+            }
+        }
+        if frames.len() >= count {
+            break;
+        }
+    }
+    (!frames.is_empty()).then_some((frames, w, h))
+}
+
+/// A decoded PNG frame (8 bits a channel, palettes expanded) as RGBA.
+fn to_rgba(data: &[u8], color: png::ColorType, w: u32, h: u32) -> Option<image::RgbaImage> {
+    let px: Vec<u8> = match color {
+        png::ColorType::Rgba => data.to_vec(),
+        png::ColorType::Rgb => data.chunks_exact(3).flat_map(|p| [p[0], p[1], p[2], 255]).collect(),
+        png::ColorType::GrayscaleAlpha => data.chunks_exact(2).flat_map(|p| [p[0], p[0], p[0], p[1]]).collect(),
+        png::ColorType::Grayscale => data.iter().flat_map(|&g| [g, g, g, 255]).collect(),
+        png::ColorType::Indexed => return None,
+    };
+    image::RgbaImage::from_raw(w, h, px)
+}
+
+/// `src` over `dst`, straight alpha.
+fn over(src: image::Rgba<u8>, dst: image::Rgba<u8>) -> image::Rgba<u8> {
+    let sa = src[3] as u32;
+    if sa == 255 {
+        return src;
+    }
+    if sa == 0 {
+        return dst;
+    }
+    let da = dst[3] as u32 * (255 - sa) / 255;
+    let a = sa + da;
+    let mix = |s: u8, d: u8| ((s as u32 * sa + d as u32 * da) / a.max(1)) as u8;
+    image::Rgba([mix(src[0], dst[0]), mix(src[1], dst[1]), mix(src[2], dst[2]), a as u8])
 }
 
 /// Decoded bytes one animation may hold. Every frame is kept whole in memory and again on
@@ -519,7 +609,8 @@ fn frames_of(
     let mut bytes = 0usize;
     let mut stride = 1usize;
     for (i, f) in frames.enumerate() {
-        let f = f.ok()?;
+        // A damaged frame ends the animation there, as browsers play what decodes.
+        let Ok(f) = f else { break };
         let delay = ms(f.delay());
         if i % stride != 0 {
             if let Some(last) = kept.last_mut() {
@@ -667,5 +758,54 @@ mod tests {
         let mut png = Vec::new();
         RgbaImage::new(4, 4).write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
         assert_eq!(super::decode(&png, "png", (64, 64)).unwrap().0.frame_count(), 1);
+    }
+}
+
+#[cfg(test)]
+mod apng_tests {
+    use super::*;
+
+    /// A 4×1 APNG: red everywhere, then green over the left half disposed back to what was
+    /// there, then blue over the right half.
+    fn sample() -> Vec<u8> {
+        let mut out = Vec::new();
+        {
+            let mut enc = png::Encoder::new(&mut out, 4, 1);
+            enc.set_color(png::ColorType::Rgba);
+            enc.set_depth(png::BitDepth::Eight);
+            enc.set_animated(3, 0).unwrap();
+            let mut w = enc.write_header().unwrap();
+            w.write_image_data(&[255, 0, 0, 255].repeat(4)).unwrap();
+            w.set_frame_dimension(2, 1).unwrap();
+            w.set_frame_position(0, 0).unwrap();
+            w.set_dispose_op(png::DisposeOp::Previous).unwrap();
+            w.write_image_data(&[0, 255, 0, 255].repeat(2)).unwrap();
+            w.set_frame_position(2, 0).unwrap();
+            w.set_dispose_op(png::DisposeOp::None).unwrap();
+            w.write_image_data(&[0, 0, 255, 255].repeat(2)).unwrap();
+            w.finish().unwrap();
+        }
+        out
+    }
+
+    fn row(f: &Frame) -> Vec<char> {
+        f.buffer()
+            .pixels()
+            .map(|p| match (p[0], p[1], p[2]) {
+                (255, 0, 0) => 'R',
+                (0, 255, 0) => 'G',
+                (0, 0, 255) => 'B',
+                _ => '?',
+            })
+            .collect()
+    }
+
+    #[test]
+    fn dispose_to_previous_puts_the_region_back() {
+        let (frames, w, h) = apng_frames(&sample()).unwrap();
+        assert_eq!((w, h, frames.len()), (4, 1, 3));
+        assert_eq!(row(&frames[0]), "RRRR".chars().collect::<Vec<_>>());
+        assert_eq!(row(&frames[1]), "GGRR".chars().collect::<Vec<_>>());
+        assert_eq!(row(&frames[2]), "RRBB".chars().collect::<Vec<_>>());
     }
 }
