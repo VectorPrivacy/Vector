@@ -4168,7 +4168,8 @@ impl VectorApp {
                 if self.hovered.as_deref() != Some(id.as_str()) {
                     self.hovered = Some(id);
                     self.hover_in = 1;
-                    cx.notify();
+                    // Only the message list shows it.
+                    crate::pane::notify(&self.panes.timeline, cx);
                 } else {
                     self.hover_in = self.hover_in.saturating_add(1);
                 }
@@ -4195,7 +4196,7 @@ impl VectorApp {
                                 && this.hover_in == 0
                             {
                                 this.hovered = None;
-                                cx.notify();
+                                crate::pane::notify(&this.panes.timeline, cx);
                             }
                         })
                         .ok();

@@ -53,3 +53,8 @@ pub fn cached(
     pane.update(cx, |p, _| p.build = Some(Rc::new(build)));
     AnyView::from(pane.clone()).cached(style).into_any_element()
 }
+
+/// Redraw `pane` alone; off screen, GPUI falls back to redrawing the window.
+pub fn notify(pane: &Entity<Pane>, cx: &mut gpui::App) {
+    pane.update(cx, |_, cx| cx.notify());
+}
