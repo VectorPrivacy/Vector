@@ -8561,6 +8561,7 @@ impl VectorApp {
             &self.panes.chat,
             gpui::StyleRefinement::default().flex_1().min_w_0().h_full(),
             move |app, window, cx| {
+                app.locate_go_pills(cx);
                 let store = app.store.clone();
                 let store = store.borrow();
                 let on_community = app.on_community_act(cx);
@@ -13702,6 +13703,39 @@ impl VectorApp {
         self.toast = Some((text.to_string().into(), std::time::Instant::now()));
     }
 
+    /// Message-link pills drawn since the last frame ask where their message is; the chat pane
+    /// repaints once the database has said, deleted and missing ones dimmed with why.
+    fn locate_go_pills(&mut self, cx: &mut Context<Self>) {
+        if !self.live {
+            return;
+        }
+        let wanted = crate::golinks::take_wanted();
+        if wanted.is_empty() {
+            return;
+        }
+        let rx = backend::run(async move {
+            let mut out = Vec::new();
+            for m in wanted {
+                let q = m.clone();
+                let at = vector_core::db::scoped(async move { vector_core::db::events::locate_message(&q) }).await.unwrap_or_default();
+                out.push((m, at.chat, at.deleted));
+            }
+            out
+        });
+        cx.spawn(async move |this, cx| {
+            let Ok(found) = rx.await else { return };
+            for (m, chat, deleted) in found {
+                crate::golinks::settle(m, crate::golinks::Located { chat, deleted });
+            }
+            this.update(cx, |this, cx| {
+                this.refresh_rows(false);
+                crate::pane::notify(&this.panes.chat, cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     /// Where a linked message is on this device; a link naming a room counts only there.
     fn locate_go_message(
         &mut self,
@@ -17383,8 +17417,32 @@ impl VectorApp {
                 }
                 m.busy = true;
                 m.error = None;
-                m.progress = Some(("Creating your community".into(), 0.1));
+                m.progress = Some(("Creating your community".into(), 0.));
                 let rx = backend::run(backend::community::create_community(name));
+                // `ccStaged`: the stages walk on an easing toward 90% while the publish runs.
+                cx.spawn(async move |this, cx| {
+                    const STAGES: [&str; 4] = ["Creating your community", "Putting it online", "Making you the owner", "Almost done"];
+                    let t0 = std::time::Instant::now();
+                    loop {
+                        cx.background_executor().timer(std::time::Duration::from_millis(120)).await;
+                        let p = 0.9 * (1. - (-2.3 * t0.elapsed().as_secs_f32() / 3.5).exp());
+                        let stage = STAGES[((p / 0.9 * STAGES.len() as f32) as usize).min(STAGES.len() - 1)];
+                        let busy = this
+                            .update(cx, |this, cx| {
+                                let Some(m) = this.create_community.as_mut().filter(|m| m.busy && m.created.is_none()) else {
+                                    return false;
+                                };
+                                m.progress = Some((stage.into(), p));
+                                cx.notify();
+                                true
+                            })
+                            .unwrap_or(false);
+                        if !busy {
+                            break;
+                        }
+                    }
+                })
+                .detach();
                 cx.spawn_in(window, async move |this, cx| {
                     let Ok(res) = rx.await else { return };
                     this.update_in(cx, |this, window, cx| {

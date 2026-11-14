@@ -1,6 +1,8 @@
 //! Vector links in messages as pills naming the place (`golinks.js`): a community, a channel,
 //! a message, or a place in the app. What a pill says comes from this device, never the link.
 
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::rc::Rc;
 
 use gpui::SharedString;
@@ -45,6 +47,56 @@ pub fn pill(store: &Store, url: &str, here: Option<&str>, look: &Look) -> Option
         tip: tip.filter(|t| !t.is_empty()).map(SharedString::from),
         target: Target::Link(url.to_string().into()),
     }))
+}
+
+/// Where a linked message is on this device, once the database has said.
+#[derive(Clone)]
+pub struct Located {
+    pub chat: Option<String>,
+    pub deleted: bool,
+}
+
+#[derive(Clone)]
+enum Asked {
+    Wanted,
+    Asking,
+    Known(Located),
+}
+
+thread_local! {
+    static LOCATED: RefCell<HashMap<String, Asked>> = RefCell::new(HashMap::new());
+}
+
+/// What the database said of `message`; asked for on first sight.
+fn located(message: &str) -> Option<Located> {
+    LOCATED.with(|l| {
+        let mut l = l.borrow_mut();
+        match l.get(message) {
+            Some(Asked::Known(at)) => Some(at.clone()),
+            Some(_) => None,
+            None => {
+                l.insert(message.to_string(), Asked::Wanted);
+                None
+            }
+        }
+    })
+}
+
+/// The linked messages a pill has asked about, now being asked of the database.
+pub fn take_wanted() -> Vec<String> {
+    LOCATED.with(|l| {
+        let mut l = l.borrow_mut();
+        let wanted: Vec<String> = l.iter().filter(|(_, a)| matches!(a, Asked::Wanted)).map(|(m, _)| m.clone()).collect();
+        for m in &wanted {
+            l.insert(m.clone(), Asked::Asking);
+        }
+        wanted
+    })
+}
+
+/// The database's answer for a linked message.
+pub fn settle(message: String, at: Located) {
+    LOCATED.with(|l| l.borrow_mut().insert(message, Asked::Known(at)));
 }
 
 fn text(t: String) -> Part {
@@ -105,15 +157,31 @@ fn go(store: &Store, link: &GoLink, here: Option<&str>) -> (Vec<Part>, Option<St
     }
     parts.push(Part::Icon(room_icon));
     parts.push(text(room));
-    if message.is_some() {
+    if let Some(message) = message {
         parts.push(sep());
         parts.push(Part::Icon("icons/chat-bubble.svg"));
-        return (parts, Some(format!("Message in {room_ref}, {name}")), false);
+        return match located(message) {
+            Some(at) if at.chat.as_deref() != Some(chid.as_str()) && at.deleted => {
+                parts.push(text("deleted".into()));
+                (parts, Some("Deleted message".into()), true)
+            }
+            Some(at) if at.chat.as_deref() != Some(chid.as_str()) => (parts, Some("Not on this device yet".into()), true),
+            _ => (parts, Some(format!("Message in {room_ref}, {name}")), false),
+        };
     }
     (parts, Some(format!("{room_ref} in {name}")), false)
 }
 
 fn dm_message(store: &Store, message: &str) -> (Vec<Part>, Option<String>, bool) {
+    match located(message) {
+        Some(Located { chat: None, deleted: true }) => {
+            return (vec![Part::Icon("icons/chat-bubble.svg"), text("Deleted message".into())], Some("Deleted message".into()), true);
+        }
+        Some(Located { chat: None, deleted: false }) => {
+            return (vec![Part::Icon("icons/chat-bubble.svg"), text("Message".into())], Some("Not on this device yet".into()), true);
+        }
+        _ => {}
+    }
     let chat = store
         .chats
         .iter()
