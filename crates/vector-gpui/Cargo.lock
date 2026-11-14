@@ -13169,6 +13169,7 @@ dependencies = [
  "tempfile",
  "tobj",
  "tokio",
+ "unicode-bidi",
  "unicode-linebreak",
  "unicode-segmentation",
  "url",

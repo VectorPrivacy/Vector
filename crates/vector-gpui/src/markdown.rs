@@ -303,6 +303,10 @@ struct Flags {
     bold: u32,
     italic: u32,
     strike: u32,
+    underline: u32,
+    small: u32,
+    sub: u32,
+    sup: u32,
     link: Vec<Option<SharedString>>,
     image: Option<(String, String)>,
 }
@@ -344,7 +348,14 @@ struct Builder<'a> {
     quote_depth: u32,
     spoilers: u32,
     tc: Option<Tc>,
+    /// Inside a `<details>`: the spoiler its body shows as, once its summary closed.
+    details: Option<Option<u32>>,
 }
+
+/// The block tags the desktop lets through (`safeHtmlTags`): their text shows, the tags don't.
+const BLOCK_TAGS: &[&str] = &[
+    "details", "summary", "div", "p", "blockquote", "pre", "h1", "h2", "h3", "h4", "h5", "h6", "hr", "ol", "ul", "li", "table", "tbody", "thead", "tr", "td", "th",
+];
 
 impl Builder<'_> {
     /// The block's own look, before inline styling.
@@ -382,6 +393,18 @@ impl Builder<'_> {
         }
         if self.flags.strike > 0 {
             l.strike = true;
+        }
+        if self.flags.underline > 0 {
+            l.underline = true;
+        }
+        if self.flags.small > 0 {
+            l.size *= 0.85;
+        }
+        // `<sub>` and `<sup>` as a browser draws them: smaller, off the baseline.
+        if self.flags.sub + self.flags.sup > 0 {
+            let full = l.size;
+            l.size *= 0.75;
+            l.rise = if self.flags.sup > 0 { full * 0.35 } else { -full * 0.2 };
         }
         l
     }
@@ -800,8 +823,78 @@ impl Builder<'_> {
                 self.ensure_para();
                 self.atoms.push(Atom::Break);
             }
-            "u" | "span" | "sub" | "sup" | "abbr" | "small" | "code" => {}
+            "u" => delta(&mut self.flags.underline),
+            "sub" => delta(&mut self.flags.sub),
+            "sup" => delta(&mut self.flags.sup),
+            "small" => delta(&mut self.flags.small),
+            "span" | "abbr" | "code" => {}
+            _ if BLOCK_TAGS.contains(&name.as_str()) => self.html_block(html),
             _ => self.text(html),
+        }
+    }
+
+    /// Raw HTML, a chunk at a time: the safe tags the desktop passes through shape the text
+    /// (a `<details>` body hidden behind a tap, as the closed element is), anything else stays
+    /// literal, as the desktop escapes it.
+    fn html_block(&mut self, html: &str) {
+        let mut rest = html;
+        while !rest.is_empty() {
+            let Some(open) = rest.find('<') else {
+                self.html_text(rest);
+                break;
+            };
+            self.html_text(&rest[..open]);
+            let Some(close) = rest[open..].find('>') else {
+                self.html_text(&rest[open..]);
+                break;
+            };
+            let tag = &rest[open..open + close + 1];
+            rest = &rest[open + close + 1..];
+            let closing = tag.starts_with("</");
+            let name = tag.trim_start_matches('<').trim_start_matches('/');
+            let name: String = name.chars().take_while(|c| c.is_ascii_alphanumeric()).collect::<String>().to_ascii_lowercase();
+            match name.as_str() {
+                "details" if !closing => self.details = Some(None),
+                "details" => self.details = None,
+                "summary" if !closing => self.flags.bold += 1,
+                "summary" => {
+                    self.flags.bold = self.flags.bold.saturating_sub(1);
+                    // The body after it is one spoiler: a tap shows it all.
+                    if let Some(slot) = self.details.as_mut() {
+                        let id = self.spoilers;
+                        self.spoilers += 1;
+                        *slot = Some(id);
+                    }
+                    self.html_break();
+                }
+                "br" => self.html_break(),
+                "p" | "div" | "li" | "tr" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6" | "blockquote" | "pre" if closing => self.html_break(),
+                "b" | "strong" | "i" | "em" | "s" | "del" | "u" | "sub" | "sup" | "small" | "span" | "abbr" | "code" => self.inline_html(tag),
+                n if BLOCK_TAGS.contains(&n) => {}
+                _ => self.html_text(tag),
+            }
+        }
+    }
+
+    fn html_break(&mut self) {
+        if self.para.is_some() && !matches!(self.atoms.last(), None | Some(Atom::Break)) {
+            self.atoms.push(Atom::Break);
+        }
+    }
+
+    /// Text inside raw HTML: its line breaks are the source's, not the reader's.
+    fn html_text(&mut self, t: &str) {
+        let t = t.trim_matches(|c: char| c == '\n' || c == '\r');
+        if t.trim().is_empty() {
+            return;
+        }
+        self.ensure_para();
+        match self.details {
+            Some(Some(id)) => {
+                let kind = Kind::Spoiler { id, revealed: self.ctx.revealed.contains(&id) };
+                self.emoji_text(t, kind);
+            }
+            _ => self.text(t),
         }
     }
 
@@ -819,10 +912,7 @@ impl Builder<'_> {
             }
             Event::Code(t) => self.code_span(&t),
             Event::InlineHtml(h) => self.inline_html(&h),
-            Event::Html(h) => {
-                self.ensure_para();
-                self.text(h.trim_end_matches('\n'));
-            }
+            Event::Html(h) => self.html_block(&h),
             Event::SoftBreak | Event::HardBreak => {
                 self.ensure_para();
                 self.atoms.push(Atom::Break);
@@ -1254,6 +1344,7 @@ pub fn plain(src: &str, ctx: &Ctx) -> Vec<Atom> {
         code: None,
         quote_depth: 0,
         spoilers: 0,
+        details: None,
         tc: None,
     };
     for (i, line) in src.split('\n').enumerate() {
@@ -1298,6 +1389,7 @@ pub fn parse(src: &str, ctx: &Ctx) -> Vec<Block> {
         code: None,
         quote_depth: 0,
         spoilers: 0,
+        details: None,
         tc,
     };
     let colored = !ctx.colors.is_empty() && src.chars().any(crate::textcolor::is_sentinel);
@@ -1531,5 +1623,66 @@ mod custom_tests {
             Kind::LinkTip(url, tip) if url.as_ref() == "https://evil.io/npub1x" && tip.as_ref() == "https://evil.io/•••x"
         )));
         assert!(kinds("[https://a.io/](https://a.io)").iter().all(|k| !matches!(k, Kind::LinkTip(..))));
+    }
+}
+
+#[cfg(test)]
+mod html_tests {
+    use super::*;
+
+    fn atoms(src: &str) -> Vec<Atom> {
+        let revealed = HashSet::new();
+        let ctx = Ctx {
+            base: Look::new("Rubik", 15., 21., gpui::white()),
+            revealed: &revealed,
+            custom: None,
+            now: 0.,
+            mention: None,
+            tags: &[],
+            mask: None,
+            colors: &[],
+            go: None,
+        };
+        parse(src, &ctx)
+            .into_iter()
+            .flat_map(|b| match b {
+                Block::Para(p) => p.atoms.to_vec(),
+                _ => Vec::new(),
+            })
+            .collect()
+    }
+
+    fn look_of<'a>(atoms: &'a [Atom], text: &str) -> &'a Look {
+        atoms
+            .iter()
+            .find_map(|a| match a {
+                Atom::Text { text: t, look, .. } if t.as_ref() == text => Some(look),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("no run {text:?}"))
+    }
+
+    #[test]
+    fn inline_tags_style_the_text() {
+        let a = atoms("a <u>line</u> H<sub>2</sub>O x<sup>2</sup> <small>fine</small>");
+        assert!(look_of(&a, "line").underline);
+        assert!(look_of(&a, "2").rise != 0.);
+        assert!(look_of(&a, "fine").size < 15.);
+        assert!(!look_of(&a, "a ").underline);
+    }
+
+    #[test]
+    fn details_hide_their_body_behind_a_tap() {
+        let a = atoms("<details>\n<summary>Plot</summary>\nThe butler did it.\n</details>");
+        assert_eq!(look_of(&a, "Plot").weight, FontWeight::BOLD);
+        let body = a.iter().any(|x| matches!(x, Atom::Text { text, kind: Kind::Spoiler { revealed: false, .. }, .. } if text.contains("butler")));
+        assert!(body, "the body is a closed spoiler");
+        assert!(!a.iter().any(|x| matches!(x, Atom::Text { text, .. } if text.contains('<'))), "no tags show");
+    }
+
+    #[test]
+    fn unknown_tags_stay_as_written() {
+        let a = atoms("Fill in <insert name here> please");
+        assert!(a.iter().any(|x| matches!(x, Atom::Text { text, .. } if text.contains("<insert name here>"))));
     }
 }

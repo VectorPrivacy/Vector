@@ -29,6 +29,8 @@ pub struct Look {
     pub underline: bool,
     /// A highlight behind the glyphs.
     pub bg: Option<Hsla>,
+    /// Raised off the line's baseline (`<sup>`), or lowered when negative (`<sub>`).
+    pub rise: f32,
 }
 
 impl Look {
@@ -43,6 +45,7 @@ impl Look {
             strike: false,
             underline: false,
             bg: None,
+            rise: 0.,
         }
     }
 
@@ -357,6 +360,8 @@ struct Placed {
     /// Box padding before and after the glyphs (a chip's first and last piece).
     lead: f32,
     tail: f32,
+    /// Width of the trailing spaces within `width`.
+    hang: f32,
 }
 
 struct Line {
@@ -679,6 +684,9 @@ fn layout(atoms: &[Atom], base: &Look, width: f32, window: &Window) -> Laid {
     {
         lines.pop();
     }
+    for line in &mut lines {
+        reorder_rtl(line, atoms);
+    }
 
     // Vertical: every line holds the block's strut, then each box by its own line-height.
     let strut = metrics(base, window);
@@ -793,6 +801,7 @@ fn layout_cut(atoms: &[Atom], base: &Look, width: f32, window: &Window) -> Laid 
                     width: w,
                     lead,
                     tail: 0.,
+                    hang: 0.,
                 });
                 cut_at = Some((x + lead + w, p.atom));
                 break;
@@ -826,6 +835,7 @@ fn place(lines: &mut [Vec<Placed>], x: &mut f32, s: &Seg, atoms: &[Atom]) {
         width: s.width,
         lead: s.lead,
         tail: s.tail,
+        hang: s.hang,
     });
     *x += s.lead + s.width + s.tail;
 }
@@ -1162,7 +1172,7 @@ impl Element for Inline {
                 };
                 let m = metrics(look, window);
                 let lh = look.line_height;
-                let top = line.baseline - m.ascent - (lh - (m.ascent + m.descent)) / 2.;
+                let top = line.baseline - m.ascent - (lh - (m.ascent + m.descent)) / 2. - look.rise;
                 let origin = bounds.origin + point(px(p.x + p.lead), px(top));
                 let piece = &text[p.range.clone()];
                 match kind {
@@ -1316,6 +1326,63 @@ pub fn emoji_line(text: &str, look: Look, emoji: f32, drop: f32) -> Inline {
     inline(atoms, look).single_line()
 }
 
+/// Right-to-left words in a left-to-right line, as a page shows them (UAX #9 at paragraph
+/// level 0): each run of them reads right to left, its spaces before its words. A line with
+/// none is left as it is.
+fn reorder_rtl(items: &mut [Placed], atoms: &[Atom]) {
+    use unicode_bidi::{BidiClass, bidi_class};
+    let strong = |p: &Placed| match &atoms[p.atom] {
+        Atom::Text { text, .. } => text.get(p.range.clone()).and_then(|t| {
+            t.chars().find_map(|c| match bidi_class(c) {
+                BidiClass::R | BidiClass::AL => Some(true),
+                BidiClass::L => Some(false),
+                _ => None,
+            })
+        }),
+        _ => None,
+    };
+    let dirs: Vec<Option<bool>> = items.iter().map(strong).collect();
+    if !dirs.contains(&Some(true)) {
+        return;
+    }
+    // Neutrals (spaces, digits, punctuation) between two right-to-left words join their run.
+    let n = items.len();
+    let rtl: Vec<bool> = (0..n)
+        .map(|i| {
+            dirs[i].unwrap_or_else(|| {
+                dirs[..i].iter().rev().find_map(|d| *d) == Some(true) && dirs[i + 1..].iter().find_map(|d| *d) == Some(true)
+            })
+        })
+        .collect();
+    let start = items.first().map_or(0., |p| p.x);
+    let mut i = 0;
+    while i < n {
+        if !rtl[i] {
+            i += 1;
+            continue;
+        }
+        let mut j = i;
+        while j + 1 < n && rtl[j + 1] {
+            j += 1;
+        }
+        // A word's trailing space goes to its left once the run reads right to left.
+        for p in &mut items[i..=j] {
+            if p.hang > 0. && p.hang < p.width {
+                p.lead += p.hang;
+                p.width -= p.hang;
+                p.hang = 0.;
+            }
+        }
+        items[i..=j].reverse();
+        i = j + 1;
+    }
+    let mut x = start;
+    for p in items.iter_mut() {
+        p.x = x;
+        x += p.lead + p.width + p.tail;
+    }
+}
+
 /// How much of the paragraph's plain text an atom stands for.
 fn atom_len(a: &Atom) -> usize {
     match a {
@@ -1427,4 +1494,57 @@ fn rects(atoms: &[Atom], laid: &Laid, picked: Range<usize>, window: &Window) -> 
         }
     }
     out
+}
+
+#[cfg(test)]
+mod rtl_tests {
+    use super::*;
+
+    fn word(atom: usize, range: Range<usize>, x: f32, width: f32) -> Placed {
+        Placed { atom, range, x, width, lead: 0., tail: 0., hang: 0. }
+    }
+
+    fn order(text: &str, cuts: &[usize]) -> Vec<String> {
+        let atoms = vec![Atom::Text { text: text.to_string().into(), look: Look::new("Rubik", 15., 21., gpui::white()), kind: Kind::Plain }];
+        let mut x = 0.;
+        let mut items: Vec<Placed> = cuts
+            .windows(2)
+            .map(|w| {
+                let p = word(0, w[0]..w[1], x, 10.);
+                x += 10.;
+                p
+            })
+            .collect();
+        reorder_rtl(&mut items, &atoms);
+        items.sort_by(|a, b| a.x.total_cmp(&b.x));
+        items.iter().map(|p| text[p.range.clone()].trim().to_string()).collect()
+    }
+
+    fn cuts(text: &str) -> Vec<usize> {
+        let mut c = vec![0];
+        c.extend(text.match_indices(' ').map(|(i, _)| i + 1));
+        c.push(text.len());
+        c.dedup();
+        c
+    }
+
+    #[test]
+    fn a_right_to_left_line_reads_right_to_left() {
+        let t = "שלום עולם יפה";
+        assert_eq!(order(t, &cuts(t)), vec!["יפה", "עולם", "שלום"]);
+    }
+
+    #[test]
+    fn mixed_lines_reverse_only_the_right_to_left_run() {
+        let t = "hi שלום עולם there";
+        assert_eq!(order(t, &cuts(t)), vec!["hi", "עולם", "שלום", "there"]);
+        let plain = "just english words";
+        assert_eq!(order(plain, &cuts(plain)), vec!["just", "english", "words"]);
+    }
+
+    #[test]
+    fn numbers_between_right_to_left_words_stay_in_the_run() {
+        let t = "שלום 42 עולם";
+        assert_eq!(order(t, &cuts(t)), vec!["עולם", "42", "שלום"]);
+    }
 }
