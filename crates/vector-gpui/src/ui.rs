@@ -3733,11 +3733,8 @@ impl VectorApp {
         self.timeline.splice(from..old - tail, new - tail - from);
         if follow && at_end {
             self.timeline.scroll_to_end();
-        } else if from <= top.item_ix
-            && let Some(ix) = old_keys.get(top.item_ix).and_then(|k| self.row_keys.iter().position(|x| x == k))
-        {
-            // A splice over the reading position would drop it to the splice's start.
-            self.timeline.scroll_to(gpui::ListOffset { item_ix: ix, offset_in_item: top.offset_in_item });
+        } else if from <= top.item_ix {
+            self.hold_top(top, &old_keys);
         }
     }
 
@@ -3798,12 +3795,30 @@ impl VectorApp {
 
     /// The open chat's rows changed: re-laid, following the end when `follow`.
     fn refresh_rows(&mut self, follow: bool) {
-        let at_end = self.timeline.logical_scroll_top().item_ix + 12 >= self.timeline.item_count();
+        let top = self.timeline.logical_scroll_top();
+        let at_end = top.item_ix + 12 >= self.timeline.item_count();
         let old = self.timeline.item_count();
+        let old_keys = std::mem::take(&mut self.row_keys);
         let new = self.rebuild_rows();
-        self.timeline.splice(0..old, new);
+        if old_keys.len() == old && old_keys == self.row_keys {
+            // The same rows: remeasuring keeps the reading place, a splice would drop it.
+            self.timeline.remeasure_items(0..new);
+        } else {
+            self.timeline.splice(0..old, new);
+            self.hold_top(top, &old_keys);
+        }
         if follow && at_end {
             self.timeline.scroll_to_end();
+        }
+    }
+
+    /// Back to the row that was at the top before a splice over it, unless following the tail.
+    fn hold_top(&self, top: gpui::ListOffset, old_keys: &[u64]) {
+        if self.timeline.is_following_tail() {
+            return;
+        }
+        if let Some(ix) = old_keys.get(top.item_ix).and_then(|k| self.row_keys.iter().position(|x| x == k)) {
+            self.timeline.scroll_to(gpui::ListOffset { item_ix: ix, offset_in_item: top.offset_in_item });
         }
     }
 
