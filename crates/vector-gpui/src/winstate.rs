@@ -99,13 +99,17 @@ pub fn save(window: &Window, cx: &App) -> bool {
     if !ENABLED.load(std::sync::atomic::Ordering::Relaxed) {
         return false;
     }
+    let Some(path) = ours() else { return false };
+    let before: Option<Saved> = std::fs::read(&path).ok().and_then(|b| serde_json::from_slice(&b).ok());
     let (mode, b) = match window.window_bounds() {
+        // macOS reports a zoomed window as windowed at the zoomed size.
+        WindowBounds::Windowed(b) if window.is_maximized() => (Mode::Maximized, b),
         WindowBounds::Windowed(b) => (Mode::Windowed, b),
         WindowBounds::Maximized(b) => (Mode::Maximized, b),
         WindowBounds::Fullscreen(b) => (Mode::Fullscreen, b),
     };
     let display = window.display(cx);
-    let s = Saved {
+    let mut s = Saved {
         display: display.as_ref().and_then(|d| d.uuid().ok()).map(|u| u.to_string()),
         mode,
         x: f32::from(b.origin.x),
@@ -113,7 +117,12 @@ pub fn save(window: &Window, cx: &App) -> bool {
         w: f32::from(b.size.width),
         h: f32::from(b.size.height),
     };
-    let Some(path) = ours() else { return false };
+    // A zoom keeps the frame it was zoomed from, so the window can return to it after a relaunch.
+    if mode == Mode::Maximized && window.window_bounds() == WindowBounds::Windowed(b) {
+        if let Some(p) = before.filter(|p| p.mode != Mode::Fullscreen) {
+            (s.x, s.y, s.w, s.h) = (p.x, p.y, p.w, p.h);
+        }
+    }
     let Ok(bytes) = serde_json::to_vec(&s) else { return false };
     if std::fs::read(&path).ok().as_deref() == Some(bytes.as_slice()) {
         return false;
