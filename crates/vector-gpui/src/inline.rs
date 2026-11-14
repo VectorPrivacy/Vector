@@ -968,6 +968,15 @@ impl Element for Inline {
                         if let Some(target) = kind.target(&text[..]) {
                             hits.push((window.insert_hitbox(rect, HitboxBehavior::Normal), target));
                         }
+                        if matches!(kind, Kind::Spoiler { revealed: false, .. }) {
+                            let mut el = gpui::StyledImage::object_fit(img(gpui::ImageSource::Render(sheen())), gpui::ObjectFit::Fill)
+                                .size_full()
+                                .rounded(px(3.))
+                                .id(ElementId::Name(format!("inline-{salt}-sheen-{}", images.len()).into()))
+                                .into_any_element();
+                            el.prepaint_as_root(rect.origin, rect.size.map(Into::into), window, cx);
+                            images.push(el);
+                        }
                         let (lift, hint) = match kind {
                             Kind::Mention(_) => (true, None),
                             Kind::Time(hint) if !hint.is_empty() => (false, Some(hint.clone())),
@@ -1087,7 +1096,6 @@ impl Element for Inline {
         cx: &mut App,
     ) {
         let s = laid.borrow();
-        let mut shimmering = false;
         for el in &mut pre.under {
             el.paint(window, cx);
         }
@@ -1141,7 +1149,6 @@ impl Element for Inline {
                                 fill(boxed(2.), ca(0, 0, 0, 0.35))
                                     .corner_radii(Corners::all(px(3.))),
                             );
-                            shimmering = true;
                         }
                         Kind::Mention(_) | Kind::Tag(None) => {
                             window.paint_quad(
@@ -1179,12 +1186,9 @@ impl Element for Inline {
                     Kind::Spoiler {
                         revealed: false, ..
                     } => {
-                        // No blur in GPUI: offset copies at low alpha read as one, in the
-                        // shimmering accent the CSS gradient sweeps across.
-                        let phase = (self.clock / 4.).fract();
-                        let mid = (p.x + p.width / 2.) / s.size.width.max(px(1.)).to_f64() as f32;
-                        let t = ((mid - phase * 2.).rem_euclid(1.) * 2. - 1.).abs();
-                        let color = mix(c(ACCENT), c(0x04110d), 1. - t);
+                        // No blur in GPUI: offset copies at low alpha read as one. The light the
+                        // CSS gradient sweeps across them is the sheen drawn over the box.
+                        let color = mix(c(ACCENT), c(0x04110d), 0.55);
                         for (dx, dy) in [
                             (-1.5f32, -1.),
                             (1.5, -1.),
@@ -1236,9 +1240,6 @@ impl Element for Inline {
         }
         for el in &mut pre.images {
             el.paint(window, cx);
-        }
-        if shimmering {
-            gpui::wake_window_in(window, cx, std::time::Duration::from_millis(33));
         }
 
         if pre.hits.is_empty() {
@@ -1324,6 +1325,33 @@ pub fn emoji_line(text: &str, look: Look, emoji: f32, drop: f32) -> Inline {
         });
     }
     inline(atoms, look).single_line()
+}
+
+/// The light that sweeps across a hidden spoiler every four seconds, as frames: drawn
+/// stretched over each box and stepped like any animated picture, so the shimmer swaps a tile
+/// rather than redrawing the chat.
+fn sheen() -> std::sync::Arc<gpui::RenderImage> {
+    thread_local! {
+        static SHEEN: std::sync::Arc<gpui::RenderImage> = {
+            const W: u32 = 64;
+            const FRAMES: u32 = 40;
+            let frames: Vec<image::Frame> = (0..FRAMES)
+                .map(|f| {
+                    let centre = -0.4 + 1.8 * f as f32 / FRAMES as f32;
+                    let mut buf = image::RgbaImage::new(W, 2);
+                    for (x, _, px) in buf.enumerate_pixels_mut() {
+                        let d = (x as f32 / (W - 1) as f32 - centre) / 0.2;
+                        let a = (0.5 * (-d * d).exp() * 255.) as u8;
+                        // BGRA, as the atlas takes it: the accent, 0x59fcb3.
+                        *px = image::Rgba([0xb3, 0xfc, 0x59, a]);
+                    }
+                    image::Frame::from_parts(buf, 0, 0, image::Delay::from_numer_denom_ms(4000 / FRAMES, 1))
+                })
+                .collect();
+            std::sync::Arc::new(gpui::RenderImage::new(frames))
+        };
+    }
+    SHEEN.with(|s| s.clone())
 }
 
 /// Right-to-left words in a left-to-right line, as a page shows them (UAX #9 at paragraph
