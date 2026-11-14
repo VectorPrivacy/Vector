@@ -3419,16 +3419,32 @@ fn decode_animated_frames<'a>(
     decoder: impl image::AnimationDecoder<'a>,
     format_name: &str,
 ) -> Result<SmallVec<[Frame; 1]>> {
+    decode_animated_frames_with(decoder, format_name, |f| f, None).map(|(frames, _)| frames)
+}
+
+/// Shapes each frame as it is decoded, so an animation never holds all its full-size frames at
+/// once; with a `limit`, says whether the source has frames past it.
+fn decode_animated_frames_with<'a>(
+    decoder: impl image::AnimationDecoder<'a>,
+    format_name: &str,
+    mut each: impl FnMut(Frame) -> Frame,
+    limit: Option<usize>,
+) -> Result<(SmallVec<[Frame; 1]>, bool)> {
     let mut frames = SmallVec::new();
+    let mut more = false;
 
     for frame in decoder.into_frames() {
+        if limit.is_some_and(|n| frames.len() >= n) {
+            more = true;
+            break;
+        }
         match frame {
             Ok(mut frame) => {
                 // Convert from RGBA to BGRA.
                 for pixel in frame.buffer_mut().chunks_exact_mut(4) {
                     pixel.swap(0, 2);
                 }
-                frames.push(frame);
+                frames.push(each(frame));
             }
             Err(err) => {
                 log::debug!("Skipping {format_name} frame due to decode error: {err}");
@@ -3440,7 +3456,7 @@ fn decode_animated_frames<'a>(
         anyhow::bail!("{format_name} could not be decoded: all frames failed");
     }
 
-    Ok(frames)
+    Ok((frames, more))
 }
 
 pub(crate) fn decode_gif_image(bytes: &[u8]) -> Result<SmallVec<[Frame; 1]>> {
@@ -3448,14 +3464,32 @@ pub(crate) fn decode_gif_image(bytes: &[u8]) -> Result<SmallVec<[Frame; 1]>> {
     decode_animated_frames(decoder, "GIF")
 }
 
+pub(crate) fn decode_gif_image_with(
+    bytes: &[u8],
+    each: impl FnMut(Frame) -> Frame,
+    limit: Option<usize>,
+) -> Result<(SmallVec<[Frame; 1]>, bool)> {
+    let decoder = GifDecoder::new(Cursor::new(bytes))?;
+    decode_animated_frames_with(decoder, "GIF", each, limit)
+}
+
 pub(crate) fn decode_webp_image(bytes: &[u8]) -> Result<SmallVec<[Frame; 1]>> {
+    decode_webp_image_with(bytes, |f| f, None).map(|(frames, _)| frames)
+}
+
+pub(crate) fn decode_webp_image_with(
+    bytes: &[u8],
+    mut each: impl FnMut(Frame) -> Frame,
+    limit: Option<usize>,
+) -> Result<(SmallVec<[Frame; 1]>, bool)> {
     let mut decoder = WebPDecoder::new(Cursor::new(bytes))?;
 
     if decoder.has_animation() {
         let _ = decoder.set_background_color(Rgba([0, 0, 0, 0]));
-        decode_animated_frames(decoder, "WebP")
+        decode_animated_frames_with(decoder, "WebP", each, limit)
     } else {
-        decode_static_image_from_decoder(decoder)
+        let frames = decode_static_image_from_decoder(decoder)?;
+        Ok((frames.into_iter().map(&mut each).collect(), false))
     }
 }
 

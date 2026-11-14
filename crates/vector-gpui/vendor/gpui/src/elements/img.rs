@@ -3,11 +3,10 @@ use crate::{
     Element, ElementId, MotionScopes, MouseMoveEvent,
     Entity, GlobalElementId, Hitbox, Image, ImageCache, InspectorElementId, InteractiveElement,
     Interactivity, LayoutId, Length, ObjectFit, Pixels, RenderImage, Resource, SharedString,
-    SharedUri, StyleRefinement, Styled, Task, Window, decode_gif_image, decode_static_image,
-    decode_webp_image, px,
+    SharedUri, StyleRefinement, Styled, Task, Window, decode_gif_image_with, decode_static_image,
+    decode_webp_image_with, px,
 };
 use anyhow::Result;
-use smallvec::SmallVec;
 
 use futures::Future;
 use gpui_util::ResultExt;
@@ -203,6 +202,8 @@ pub struct Img {
     style: ImageStyle,
     image_cache: Option<AnyImageCache>,
     face: bool,
+    /// The source this frame draws: a face's first frame alone until it may move.
+    shown: Option<ImageSource>,
 }
 
 /// Create a new image element.
@@ -214,6 +215,7 @@ pub fn img(source: impl Into<ImageSource>) -> Img {
         style: ImageStyle::default(),
         image_cache: None,
         face: false,
+        shown: None,
     }
 }
 
@@ -330,14 +332,25 @@ impl Element for Img {
                 |mut style, window, cx| {
                     let mut replacement_id = None;
                     let mut next_frame_in = None;
+                    let cache = self
+                        .image_cache
+                        .clone()
+                        .or_else(|| window.image_cache_stack.last().cloned());
+                    // A held face decodes its first frame alone; once it may move, the whole
+                    // strip loads behind that frame.
+                    let shown = match self.face.then(|| still_of(&self.source)).flatten() {
+                        Some(still) if state.as_ref().is_some_and(|s| s.hovered.get()) => {
+                            match self.source.use_data(cache.clone(), window, cx) {
+                                Some(Ok(_)) => self.source.clone(),
+                                _ => still,
+                            }
+                        }
+                        Some(still) => still,
+                        None => self.source.clone(),
+                    };
+                    self.shown = Some(shown.clone());
 
-                    match self.source.use_data(
-                        self.image_cache
-                            .clone()
-                            .or_else(|| window.image_cache_stack.last().cloned()),
-                        window,
-                        cx,
-                    ) {
+                    match shown.use_data(cache, window, cx) {
                         Some(Ok(data)) => {
                             let frame_count = data.frame_count();
                             let max_frame_index = frame_count.saturating_sub(1);
@@ -345,7 +358,7 @@ impl Element for Img {
                             if let Some(state) = &mut state {
                                 (state.frame_index, state.last_frame_time) = state.clock.get();
                                 state.frame_index = state.frame_index.min(max_frame_index);
-                                let still = frame_count > 1
+                                let still = (frame_count > 1 || data.partial)
                                     && self.face
                                     && {
                                         layout_state.hover_gate = Some(state.hovered.clone());
@@ -514,8 +527,10 @@ impl Element for Img {
         window: &mut Window,
         cx: &mut App,
     ) {
-        let source = self.source.clone();
+        let source = self.shown.clone().unwrap_or_else(|| self.source.clone());
         if let Some(hovered) = layout_state.hover_gate.take() {
+            // Only this picture's view redraws: cached views elsewhere keep their frame.
+            let view = window.current_view();
             let host = MotionScopes::current(cx);
             let moving = match host {
                 Some(Some(hitbox)) => hitbox.is_hovered(window),
@@ -524,14 +539,14 @@ impl Element for Img {
             };
             if moving != hovered.get() {
                 hovered.set(moving);
-                window.refresh();
+                cx.notify(view);
             }
             if let Some(Some(hitbox)) = host {
-                window.on_mouse_event(move |_: &MouseMoveEvent, phase, window, _| {
+                window.on_mouse_event(move |_: &MouseMoveEvent, phase, window, cx| {
                     if phase == DispatchPhase::Capture && hitbox.is_hovered(window) != hovered.get()
                     {
                         hovered.set(!hovered.get());
-                        window.refresh();
+                        cx.notify(view);
                     }
                 });
             }
@@ -700,6 +715,7 @@ impl Asset for ImageAssetLoader {
         let asset_source = cx.asset_source().clone();
         async move {
             let mut fit = None;
+            let mut still = false;
             let bytes = match source.clone() {
                 Resource::Path(uri) => fs::read(uri.as_ref())?,
                 Resource::Uri(uri) => {
@@ -725,6 +741,13 @@ impl Asset for ImageAssetLoader {
                     body
                 }
                 Resource::Embedded(path) => {
+                    let path = match path.strip_suffix(STILL) {
+                        Some(name) => {
+                            still = true;
+                            SharedString::from(name.to_string())
+                        }
+                        None => path,
+                    };
                     let path = match path.rsplit_once(FIT) {
                         Some((name, n)) if n.parse::<u32>().is_ok() => {
                             fit = n.parse().ok().map(|n| (n, false));
@@ -750,17 +773,19 @@ impl Asset for ImageAssetLoader {
             };
 
             if let Ok(format) = image::guess_format(&bytes) {
-                let data = match format {
-                    ImageFormat::Gif => decode_gif_image(&bytes)?,
-                    ImageFormat::WebP => decode_webp_image(&bytes)?,
-                    _ => decode_static_image(&bytes, format)?,
+                let each = |frame: image::Frame| match fit {
+                    Some((max, square)) => fit_frame(frame, max, square),
+                    None => frame,
                 };
-                let data = match fit {
-                    Some((max, square)) => fit_frames(data, max, square),
-                    None => data,
+                let limit = still.then_some(1);
+                let (data, partial) = match format {
+                    ImageFormat::Gif => decode_gif_image_with(&bytes, each, limit)?,
+                    ImageFormat::WebP => decode_webp_image_with(&bytes, each, limit)?,
+                    _ => (decode_static_image(&bytes, format)?.into_iter().map(each).collect(), false),
                 };
-
-                Ok(Arc::new(RenderImage::new(data)))
+                let mut image = RenderImage::new(data);
+                image.partial = partial;
+                Ok(Arc::new(image))
             } else {
                 svg_renderer
                     .render_single_frame(&bytes, 1.0)
@@ -776,19 +801,26 @@ pub const FIT: &str = "#fit=";
 /// Like [`FIT`], but first cut to the centred square: for a picture always drawn square or round.
 pub const SQUARE: &str = "#square=";
 
-/// Shrinks frames whose longer side passes `max`; a picture shown small never holds its full size.
-fn fit_frames(
-    frames: SmallVec<[image::Frame; 1]>,
-    max: u32,
-    square: bool,
-) -> SmallVec<[image::Frame; 1]> {
-    let Some(first) = frames.first() else {
-        return frames;
-    };
-    let (w, h) = first.buffer().dimensions();
+/// Suffix on an embedded asset's name, after any fit: decode the first frame alone, noting
+/// whether the source has more ([`RenderImage`]'s `partial`).
+pub const STILL: &str = "#still";
+
+/// The first-frame form of `source`, where its name can carry the hint.
+fn still_of(source: &ImageSource) -> Option<ImageSource> {
+    match source {
+        ImageSource::Resource(Resource::Embedded(name)) => {
+            Some(ImageSource::Resource(Resource::Embedded(format!("{name}{STILL}").into())))
+        }
+        _ => None,
+    }
+}
+
+/// Shrinks a frame whose longer side passes `max`; a picture shown small never holds its full size.
+fn fit_frame(frame: image::Frame, max: u32, square: bool) -> image::Frame {
+    let (w, h) = frame.buffer().dimensions();
     let (cw, ch) = if square { (w.min(h), w.min(h)) } else { (w, h) };
     if (cw == w && ch == h && w.max(h) <= max) || max == 0 || cw == 0 {
-        return frames;
+        return frame;
     }
     let scale = (max as f64 / cw.max(ch) as f64).min(1.);
     let (nw, nh) = (
@@ -796,25 +828,20 @@ fn fit_frames(
         ((ch as f64 * scale).round() as u32).max(1),
     );
     let (cx, cy) = ((w - cw) / 2, (h - ch) / 2);
-    frames
-        .into_iter()
-        .map(|frame| {
-            let delay = frame.delay();
-            let (left, top) = (frame.left(), frame.top());
-            let cut = image::imageops::crop_imm(frame.buffer(), cx, cy, cw, ch).to_image();
-            let buffer = if (nw, nh) == (cw, ch) {
-                cut
-            } else {
-                image::imageops::resize(&cut, nw, nh, image::imageops::FilterType::Triangle)
-            };
-            image::Frame::from_parts(
-                buffer,
-                (left.saturating_sub(cx) as f64 * scale) as u32,
-                (top.saturating_sub(cy) as f64 * scale) as u32,
-                delay,
-            )
-        })
-        .collect()
+    let delay = frame.delay();
+    let (left, top) = (frame.left(), frame.top());
+    let cut = image::imageops::crop_imm(frame.buffer(), cx, cy, cw, ch).to_image();
+    let buffer = if (nw, nh) == (cw, ch) {
+        cut
+    } else {
+        image::imageops::resize(&cut, nw, nh, image::imageops::FilterType::Triangle)
+    };
+    image::Frame::from_parts(
+        buffer,
+        (left.saturating_sub(cx) as f64 * scale) as u32,
+        (top.saturating_sub(cy) as f64 * scale) as u32,
+        delay,
+    )
 }
 
 /// An error that can occur when interacting with the image cache.

@@ -46,6 +46,8 @@ pub struct RenderImage {
     /// The scale factor of this image on render.
     pub(crate) scale_factor: f32,
     data: SmallVec<[Frame; 1]>,
+    /// Only the first frame of an animation was decoded; the source holds more.
+    pub(crate) partial: bool,
 }
 
 impl PartialEq for RenderImage {
@@ -65,6 +67,7 @@ impl RenderImage {
             id: ImageId(NEXT_ID.fetch_add(1, SeqCst)),
             scale_factor: 1.0,
             data: data.into(),
+            partial: false,
         }
     }
 
