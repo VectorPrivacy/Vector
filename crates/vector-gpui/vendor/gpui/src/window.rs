@@ -1243,6 +1243,8 @@ pub struct Window {
     is_resizable: bool,
     is_minimizable: bool,
     sprite_atlas: Arc<dyn PlatformAtlas>,
+    /// Images asked to leave the atlas while still on screen: they go once they aren't.
+    deferred_drops: Vec<Arc<RenderImage>>,
     text_system: Rc<WindowTextSystem>,
     text_rendering_mode: Rc<Cell<TextRenderingMode>>,
     rem_size: Pixels,
@@ -2378,6 +2380,7 @@ impl Window {
             is_resizable,
             is_minimizable,
             sprite_atlas,
+            deferred_drops: Vec::new(),
             text_system,
             text_rendering_mode: cx.text_rendering_mode.clone(),
             rem_size: px(16.),
@@ -5499,6 +5502,36 @@ impl Window {
 
     /// Removes an image from the sprite atlas.
     pub fn drop_image(&mut self, data: Arc<RenderImage>) -> Result<()> {
+        // One still drawn keeps its tiles: freed, their space would take another image's
+        // pixels while the presented frame (and its animation's tile swaps) still sample it.
+        let waiting = std::mem::take(&mut self.deferred_drops);
+        for image in waiting.into_iter().chain(std::iter::once(data)) {
+            if self.image_on_screen(&image) {
+                if !self.deferred_drops.iter().any(|d| d.id == image.id) {
+                    self.deferred_drops.push(image);
+                }
+            } else {
+                self.release_image(&image);
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether any frame of `data` is in the scene on screen.
+    fn image_on_screen(&self, data: &RenderImage) -> bool {
+        let tiles: Vec<AtlasTile> = (0..data.frame_count())
+            .filter_map(|frame_index| {
+                let key = RenderImageParams { image_id: data.id, frame_index }.into();
+                self.sprite_atlas.get_or_insert_with(key, &mut || Ok(None)).ok().flatten()
+            })
+            .collect();
+        !tiles.is_empty()
+            && self.rendered_frame.scene.polychrome_sprites.iter().any(|s| {
+                tiles.iter().any(|t| t.texture_id == s.tile.texture_id && t.tile_id == s.tile.tile_id)
+            })
+    }
+
+    fn release_image(&mut self, data: &RenderImage) {
         for frame_index in 0..data.frame_count() {
             let params = RenderImageParams {
                 image_id: data.id,
@@ -5507,8 +5540,6 @@ impl Window {
 
             self.sprite_atlas.remove(&params.clone().into());
         }
-
-        Ok(())
     }
 
     /// Returns whether every frame of an image is present in the sprite atlas.

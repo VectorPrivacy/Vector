@@ -471,7 +471,9 @@ fn gif_frames(bytes: &[u8], to: impl Fn(u32, u32) -> (u32, u32)) -> Option<(Vec<
     if bytes.starts_with(b"GIF8") {
         let dec = image::codecs::gif::GifDecoder::new(Cursor::new(bytes)).ok()?;
         let (w, h) = dec.dimensions();
-        return frames_of(dec.into_frames(), w, h, &to);
+        // Each frame's Graphic Control Extension: a count close enough to size the budget by.
+        let count = bytes.windows(3).filter(|w| *w == [0x21, 0xF9, 0x04]).count();
+        return frames_of(dec.into_frames(), w, h, count, &to);
     }
     if bytes.len() > 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
         let dec = image::codecs::webp::WebPDecoder::new(Cursor::new(bytes)).ok()?;
@@ -479,7 +481,8 @@ fn gif_frames(bytes: &[u8], to: impl Fn(u32, u32) -> (u32, u32)) -> Option<(Vec<
             return None;
         }
         let (w, h) = dec.dimensions();
-        return frames_of(dec.into_frames(), w, h, &to);
+        let count = bytes.windows(4).filter(|w| *w == b"ANMF").count();
+        return frames_of(dec.into_frames(), w, h, count, &to);
     }
     // An APNG declares itself with `acTL` before its first `IDAT`.
     if bytes.starts_with(b"\x89PNG") {
@@ -489,7 +492,8 @@ fn gif_frames(bytes: &[u8], to: impl Fn(u32, u32) -> (u32, u32)) -> Option<(Vec<
             return None;
         }
         let (frames, w, h) = apng_frames(bytes)?;
-        return frames_of(image::Frames::new(Box::new(frames.into_iter().map(Ok))), w, h, &to);
+        let count = frames.len();
+        return frames_of(image::Frames::new(Box::new(frames.into_iter().map(Ok))), w, h, count, &to);
     }
     None
 }
@@ -585,6 +589,23 @@ fn over(src: image::Rgba<u8>, dst: image::Rgba<u8>) -> image::Rgba<u8> {
     image::Rgba([mix(src[0], dst[0]), mix(src[1], dst[1]), mix(src[2], dst[2]), a as u8])
 }
 
+/// The size an animation of `count` frames decodes at to fit [`ANIMATION_BUDGET`] with every
+/// frame kept: shrunk as far as needed, but never below [`MIN_SHRINK`] of `size`. Past that,
+/// frames are dropped instead.
+fn fit_budget(size: (u32, u32), count: usize) -> (u32, u32) {
+    let full = size.0 as f64 * size.1 as f64 * 4. * count.max(1) as f64;
+    if full <= ANIMATION_BUDGET as f64 {
+        return size;
+    }
+    // A little under the budget, so rounding never tips it over and halves the frames.
+    let s = (ANIMATION_BUDGET as f64 * 0.98 / full).sqrt().max(MIN_SHRINK);
+    (((size.0 as f64 * s) as u32).max(1), ((size.1 as f64 * s) as u32).max(1))
+}
+
+/// The smallest an animation is shrunk to keep all its frames: smaller still would soften it
+/// more than dropping every other frame costs.
+const MIN_SHRINK: f64 = 0.75;
+
 /// Decoded bytes one animation may hold. Every frame is kept whole in memory and again on
 /// the GPU, so a long animation keeps every other frame (twice as long each) until it fits.
 const ANIMATION_BUDGET: usize = 24 << 20;
@@ -593,9 +614,10 @@ fn frames_of(
     frames: image::Frames<'_>,
     w: u32,
     h: u32,
+    count: usize,
     to: &impl Fn(u32, u32) -> (u32, u32),
 ) -> Option<(Vec<Frame>, u32, u32)> {
-    let (tw, th) = to(w, h);
+    let (tw, th) = fit_budget(to(w, h), count);
     let scale = tw < w || th < h;
     let ms = |d: image::Delay| {
         let (n, d) = d.numer_denom_ms();
@@ -807,5 +829,22 @@ mod apng_tests {
         assert_eq!(row(&frames[0]), "RRRR".chars().collect::<Vec<_>>());
         assert_eq!(row(&frames[1]), "GGRR".chars().collect::<Vec<_>>());
         assert_eq!(row(&frames[2]), "RRBB".chars().collect::<Vec<_>>());
+    }
+}
+
+#[cfg(test)]
+mod budget_tests {
+    use super::*;
+
+    #[test]
+    fn an_over_budget_animation_shrinks_before_it_drops_frames() {
+        // 137 frames at 360×213 come to 42 MB: shrunk to fit, every frame kept.
+        let (w, h) = fit_budget((360, 213), 137);
+        assert!(w as usize * h as usize * 4 * 137 <= ANIMATION_BUDGET);
+        assert!(w as f64 >= 360. * MIN_SHRINK && h as f64 >= 213. * MIN_SHRINK);
+        // One that fits is left alone.
+        assert_eq!(fit_budget((128, 128), 30), (128, 128));
+        // One far over shrinks no further than the floor; dropping frames does the rest.
+        assert_eq!(fit_budget((1000, 1000), 500), (750, 750));
     }
 }
