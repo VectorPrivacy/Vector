@@ -8971,7 +8971,7 @@ impl VectorApp {
                     },
                 )
                 .absolute()
-                .size_full(),
+                .inset_0(),
             )
             .into_any_element()
     }
