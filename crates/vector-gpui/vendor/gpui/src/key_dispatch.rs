@@ -585,6 +585,10 @@ impl DispatchTree {
         focus_path
     }
 
+    pub fn has_view(&self, view_id: EntityId) -> bool {
+        self.view_node_ids.contains_key(&view_id)
+    }
+
     pub fn view_path_reversed(&self, view_id: EntityId) -> impl Iterator<Item = EntityId> {
         let current_node_id = self.view_node_ids.get(&view_id).copied();
 

@@ -1071,6 +1071,10 @@ thread_local! {
     /// Kept apart so a slow redraw never promotes the frequent animation steps into redraws.
     static WAKES: std::cell::RefCell<collections::FxHashMap<(crate::WindowId, bool), Instant>> =
         Default::default();
+    /// The views each window's pending redraw serves: only they re-render, so cached views
+    /// elsewhere keep their frame.
+    static WAKE_VIEWS: std::cell::RefCell<collections::FxHashMap<crate::WindowId, collections::FxHashMap<crate::EntityId, Instant>>> =
+        Default::default();
 }
 
 /// Redraw `window` once `due` has passed, instead of on every vsync until then.
@@ -1093,6 +1097,18 @@ fn wake(window: &mut Window, cx: &mut App, due: Duration, redraw: bool) {
     let ticks = (want.saturating_duration_since(epoch).as_nanos() / tick.as_nanos() + 1) as u32;
     let at = epoch + tick * ticks;
     let key = (window.window_handle().window_id(), redraw);
+    if redraw {
+        let view = window.current_view();
+        WAKE_VIEWS.with(|v| {
+            let mut v = v.borrow_mut();
+            let due = v.entry(key.0).or_default().entry(view).or_insert(at);
+            *due = (*due).min(at);
+        });
+    }
+    arm(window, cx, key, at);
+}
+
+fn arm(window: &mut Window, cx: &mut App, key: (crate::WindowId, bool), at: Instant) {
     let sooner = WAKES.with(|w| {
         let mut w = w.borrow_mut();
         match w.get(&key) {
@@ -1113,10 +1129,26 @@ fn wake(window: &mut Window, cx: &mut App, due: Duration, redraw: bool) {
             if current == Some(at) {
                 WAKES.with(|w| w.borrow_mut().remove(&key));
                 cx.update(|window, cx| {
-                    if redraw {
-                        window.refresh()
-                    } else {
-                        window.step_animations(cx)
+                    if !key.1 {
+                        return window.step_animations(cx);
+                    }
+                    // Only the views due now: one asking for a later tick keeps its frame.
+                    let (due, next) = WAKE_VIEWS.with(|v| {
+                        let mut v = v.borrow_mut();
+                        let Some(views) = v.get_mut(&key.0) else {
+                            return (Vec::new(), None);
+                        };
+                        let due: Vec<_> = views.iter().filter(|(_, t)| **t <= at).map(|(id, _)| *id).collect();
+                        for id in &due {
+                            views.remove(id);
+                        }
+                        (due, views.values().min().copied())
+                    });
+                    for view in due {
+                        cx.notify(view);
+                    }
+                    if let Some(next) = next {
+                        arm(window, cx, key, next);
                     }
                 })
                 .ok();

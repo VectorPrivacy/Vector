@@ -58,6 +58,7 @@ enum Screen {
 
 pub struct VectorApp {
     screen: Screen,
+    panes: crate::pane::Panes,
     /// This build is older than the account's database: (this build, the one it needs).
     downgrade: Option<(String, String)>,
     /// Re-pairing the remote signer from Settings: the signer form over everything.
@@ -873,6 +874,7 @@ impl VectorApp {
         }
         Self {
             screen: Screen::Main,
+            panes: crate::pane::Panes::new(cx),
             downgrade: None,
             reauth: None,
             net_view: None,
@@ -5961,33 +5963,12 @@ impl Render for VectorApp {
                         row.child(div().flex_1().min_w_0().h_full().children(self.nexus_view(width, cx)))
                     })
                     .when(self.settings.is_none() && self.nexus.is_none(), |row| {
-                        match self
-                            .community
-                            .as_ref()
-                            .and_then(|v| Some((v, store.community(&v.id)?)))
-                        {
-                            Some((view, com)) => row.child(crate::community::sidebar(
-                                &store,
-                                view,
-                                com,
-                                self.open.as_deref(),
-                                self.raid
-                                    .get(&com.community_id)
-                                    .is_some_and(|r| r.0 || r.1 > 0),
-                                &on_community,
-                                (&self.voice, &self.on_voice_handler(cx), &self.anchors),
-                                list_w(),
-                                false,
-                            )),
-                            None => row.child(chat_list(
-                                self,
-                                &self.store,
-                                &store,
-                                self.open.clone().or_else(|| self.profile.as_ref().and_then(|p| p.back.clone())),
-                                (self.requests_tab, self.tab_slid, no_messages),
-                                cx,
-                            )),
-                        }
+                        row.child(crate::pane::cached(
+                            &self.panes.side,
+                            gpui::StyleRefinement::default().w(px(list_w())).flex_shrink_0().h_full(),
+                            |app, _, cx| app.side_pane(cx),
+                            cx,
+                        ))
                     })
                     .when(self.settings.is_none() && self.nexus.is_none(), |row| {
                         row.child(match (&self.profile, self.open.clone()) {
@@ -6063,25 +6044,20 @@ impl Render for VectorApp {
                                 .filter(|v| v.panel)
                                 .and_then(|v| Some((v, store.community(&v.id)?)))
                             {
-                                Some((view, com)) => div()
+                                Some(_) => div()
                                     .flex_1()
                                     .min_w_0()
                                     .h_full()
                                     .flex()
-                                    .child(self.chat_pane(&store, id.clone(), &on_community, window, cx))
-                                    .child(crate::community::members_panel(
-                                        &store,
-                                        &id,
-                                        view,
-                                        com,
-                                        &on_community,
-                                        &self.anchors,
+                                    .child(self.chat_cached(id.clone(), cx))
+                                    .child(crate::pane::cached(
+                                        &self.panes.members,
+                                        gpui::StyleRefinement::default().w(px(240.)).flex_shrink_0().h_full(),
+                                        move |app, _, cx| app.members_pane(&id, cx),
                                         cx,
                                     ))
                                     .into_any_element(),
-                                None => self
-                                    .chat_pane(&store, id, &on_community, window, cx)
-                                    .into_any_element(),
+                                None => self.chat_cached(id, cx),
                             },
                             (None, None) => empty_pane(self.viktor.clone()).into_any_element(),
                         })
@@ -8219,6 +8195,80 @@ impl VectorApp {
                 store.timeouts.entry(id).or_default().insert(me.clone(), data::Timeout { from: now - 600, until: now + 3 * 3600 });
             }
         }
+    }
+
+    /// The chat list, or the open Community's channels.
+    fn side_pane(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let store = self.store.clone();
+        let store = store.borrow();
+        let on_community = self.on_community_act(cx);
+        let no_messages = self.viktor.is_some();
+        match self
+            .community
+            .as_ref()
+            .and_then(|v| Some((v, store.community(&v.id)?)))
+        {
+            Some((view, com)) => crate::community::sidebar(
+                &store,
+                view,
+                com,
+                self.open.as_deref(),
+                self.raid
+                    .get(&com.community_id)
+                    .is_some_and(|r| r.0 || r.1 > 0),
+                &on_community,
+                (&self.voice, &self.on_voice_handler(cx), &self.anchors),
+                list_w(),
+                false,
+            )
+            .into_any_element(),
+            None => chat_list(
+                self,
+                &self.store,
+                &store,
+                self.open.clone().or_else(|| self.profile.as_ref().and_then(|p| p.back.clone())),
+                (self.requests_tab, self.tab_slid, no_messages),
+                cx,
+            )
+            .into_any_element(),
+        }
+    }
+
+    fn chat_cached(&mut self, id: SharedString, cx: &mut Context<Self>) -> AnyElement {
+        crate::pane::cached(
+            &self.panes.chat,
+            gpui::StyleRefinement::default().flex_1().min_w_0().h_full(),
+            move |app, window, cx| {
+                let store = app.store.clone();
+                let store = store.borrow();
+                let on_community = app.on_community_act(cx);
+                div()
+                    .size_full()
+                    .flex()
+                    .child(app.chat_pane(&store, id.clone(), &on_community, window, cx))
+                    .into_any_element()
+            },
+            cx,
+        )
+    }
+
+    fn members_pane(&mut self, id: &str, cx: &mut Context<Self>) -> AnyElement {
+        let store = self.store.clone();
+        let store = store.borrow();
+        let on_community = self.on_community_act(cx);
+        match self.community.as_ref().and_then(|v| Some((v, store.community(&v.id)?))) {
+            Some((view, com)) => {
+                crate::community::members_panel(&store, id, view, com, &on_community, &self.anchors, cx).into_any_element()
+            }
+            None => div().into_any_element(),
+        }
+    }
+
+    fn on_community_act(&self, cx: &mut Context<Self>) -> crate::community::OnAct {
+        let app = cx.entity().downgrade();
+        Rc::new(move |act, window, cx| {
+            app.update(cx, |app, cx| app.on_community(act, window, cx)).ok();
+        })
     }
 
     fn chat_pane(

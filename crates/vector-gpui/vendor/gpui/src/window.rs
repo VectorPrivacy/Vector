@@ -1039,6 +1039,7 @@ pub(crate) struct DeferredDraw {
 }
 
 /// An animated picture as last painted: enough to swap its frame in the scene without a redraw.
+#[derive(Clone)]
 pub(crate) struct AnimatedSprite {
     pub(crate) data: Arc<RenderImage>,
     /// The frame shown and when it began, shared with the element's own state.
@@ -1096,6 +1097,7 @@ pub(crate) struct PaintIndex {
     accessed_element_states_index: usize,
     tab_handle_index: usize,
     line_layout_index: LineLayoutIndex,
+    animated_index: usize,
 }
 
 impl Frame {
@@ -3847,7 +3849,16 @@ impl Window {
 
     fn invalidate_entities(&mut self) {
         let mut views = self.invalidator.take_views();
+        let root = self.root.as_ref().map(|r| r.entity_id());
         for entity in views.drain() {
+            // Cached views learn of change only through their own notify, so a change to the
+            // root or to a model they may read redraws them all, as an uncached tree would.
+            if Some(entity) == root || !self.rendered_frame.dispatch_tree.has_view(entity) {
+                if !self.refreshing {
+                    draw_stats::whole(Some(entity) == root);
+                }
+                self.refreshing = true;
+            }
             self.mark_view_dirty(entity);
         }
         self.invalidator.replace_views(views);
@@ -4323,6 +4334,7 @@ impl Window {
             accessed_element_states_index: self.next_frame.accessed_element_states.len(),
             tab_handle_index: self.next_frame.tab_stops.paint_index(),
             line_layout_index: self.text_system.layout_index(),
+            animated_index: self.next_frame.animated.len(),
         }
     }
 
@@ -4369,6 +4381,11 @@ impl Window {
         self.next_frame.scene.replay(
             range.start.scene_index..range.end.scene_index,
             &self.rendered_frame.scene,
+        );
+        self.next_frame.animated.extend(
+            self.rendered_frame.animated[range.start.animated_index..range.end.animated_index]
+                .iter()
+                .cloned(),
         );
     }
 
@@ -10803,6 +10820,18 @@ pub mod draw_stats {
     static DRAWS: AtomicU64 = AtomicU64::new(0);
     static NANOS: AtomicU64 = AtomicU64::new(0);
     static PRESENTS: AtomicU64 = AtomicU64::new(0);
+    static ROOT: AtomicU64 = AtomicU64::new(0);
+    static MODEL: AtomicU64 = AtomicU64::new(0);
+
+    /// A draw that redrew every view because the root, or a model, changed.
+    pub(crate) fn whole(root: bool) {
+        if root { &ROOT } else { &MODEL }.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// `(root, model)` whole-window draws since the last call.
+    pub fn whole_take() -> (u64, u64) {
+        (ROOT.swap(0, Ordering::Relaxed), MODEL.swap(0, Ordering::Relaxed))
+    }
 
     pub(crate) fn presented() {
         PRESENTS.fetch_add(1, Ordering::Relaxed);
