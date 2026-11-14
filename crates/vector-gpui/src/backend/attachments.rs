@@ -79,9 +79,20 @@ fn fail(chat: &str, msg_id: &str, attachment_id: &str, reason: &str) -> bool {
     vector_core::log_warn!("attachment {attachment_id} of {msg_id}: {reason}");
     emit(
         "attachment_download_result",
-        json!({ "profile_id": chat, "msg_id": msg_id, "id": attachment_id, "success": false, "result": reason }),
+        json!({ "profile_id": chat, "msg_id": msg_id, "id": attachment_id, "success": false, "result": reason, "partial": partial(attachment_id) }),
     );
     false
+}
+
+/// The bytes a stopped download left to resume from: (bytes, total).
+fn partial(attachment_id: &str) -> Option<(u64, Option<u64>)> {
+    let part = vector_core::resume::part_for(attachment_id).ok()?;
+    vector_core::resume::read_checkpoint(&part).map(|c| (c.offset, c.total))
+}
+
+/// Every download of this account stopped part-way, by attachment id.
+pub fn paused() -> HashMap<String, (u64, Option<u64>)> {
+    vector_core::resume::paused().into_iter().map(|(id, c)| (id, (c.offset, c.total))).collect()
 }
 
 pub async fn download(chat: String, msg_id: String, attachment_id: String, auto: bool) -> bool {
@@ -195,15 +206,21 @@ pub async fn download(chat: String, msg_id: String, attachment_id: String, auto:
         }
         !active.cancelled()
     };
-    let bytes = match VectorCore
-        .download_attachment_reporting(&attachment, author.as_deref(), 1024 * 1024 * 1024, report)
-        .await
-    {
+    // Files that go to disk anyway fetch through a checkpointed partial, so a stop resumes.
+    let resumable = !vector_core::media::ram::cache().admits(attachment.size) || vector_core::media::keep_media();
+    let got = if resumable {
+        VectorCore.download_attachment_resumable(&attachment, author.as_deref(), report).await
+    } else {
+        VectorCore
+            .download_attachment_reporting(&attachment, author.as_deref(), 1024 * 1024 * 1024, report)
+            .await
+    };
+    let bytes = match got {
         Ok(b) => b,
         Err(DownloadError::Cancelled) => {
             emit(
                 "attachment_download_result",
-                json!({ "profile_id": chat, "msg_id": msg_id, "id": attachment_id, "success": false, "cancelled": true, "result": DownloadError::Cancelled.to_string() }),
+                json!({ "profile_id": chat, "msg_id": msg_id, "id": attachment_id, "success": false, "cancelled": true, "result": DownloadError::Cancelled.to_string(), "partial": partial(&attachment_id) }),
             );
             return false;
         }

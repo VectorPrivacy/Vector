@@ -112,6 +112,8 @@ pub struct Media {
     pub failed: HashMap<String, String>,
     /// Attachments whose auto-download already fired.
     pub auto_fired: HashSet<String>,
+    /// Downloads stopped part-way with their bytes kept on disk, by attachment id: (bytes, total).
+    pub paused: HashMap<String, (u64, Option<u64>)>,
     wants: Vec<Want>,
     /// Downloads the renderer asks the app to start: (msg id, attachment id).
     pub auto_queue: Vec<(String, String)>,
@@ -184,6 +186,16 @@ impl Default for AutoDownload {
 }
 
 impl Media {
+    /// "Resume download · N%" for a download stopped part-way.
+    pub fn resume_note(&self, id: &str, size: u64) -> Option<String> {
+        let &(done, total) = self.paused.get(id)?;
+        let total = total.or((size > 0).then_some(size)).filter(|&t| t > 0);
+        Some(match total {
+            Some(t) => format!("Resume download · {}%", (done.saturating_mul(100) / t).min(99)),
+            None => format!("Resume download · {}", format_bytes(done)),
+        })
+    }
+
     /// A thumbhash's blur, stretched bilinearly to `px` device pixels on the CPU: the GPU's
     /// sampler would bleed the atlas around a ~32px tile into its edges.
     pub fn thumb(&mut self, hash: &str, px: (u32, u32)) -> Option<Arc<RenderImage>> {

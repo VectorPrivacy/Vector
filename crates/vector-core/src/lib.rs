@@ -114,6 +114,8 @@ pub mod deep_link;
 pub mod golink;
 pub mod badges;
 pub mod history_gaps;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod resume;
 pub mod bot_interface;
 pub mod webxdc;
 pub mod webxdc_permissions;

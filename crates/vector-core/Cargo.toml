@@ -141,7 +141,7 @@ tor-guardmgr = { version = "0.45", default-features = false, features = ["bridge
 tokio-util = { version = "0.7", features = ["compat"], optional = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-tokio = { version = "1.49.0", features = ["net", "rt-multi-thread"] }
+tokio = { version = "1.49.0", features = ["net", "rt-multi-thread", "fs"] }
 # The transport's relay socket (`transport::ws`): the same SOCKS client, TCP connect and
 # WebSocket upgrade nostr-sdk's default transport uses (all already in the tree through it),
 # so the Direct path stays byte-identical. TLS features unify with async-wsocket's ring roots.

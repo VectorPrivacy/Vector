@@ -94,6 +94,11 @@ pub fn take_wanted() -> Vec<String> {
     })
 }
 
+/// Forget every answer: whether a message is on this device is the account's to say.
+pub fn forget_all() {
+    LOCATED.with(|l| l.borrow_mut().clear());
+}
+
 /// The database's answer for a linked message.
 pub fn settle(message: String, at: Located) {
     LOCATED.with(|l| l.borrow_mut().insert(message, Asked::Known(at)));

@@ -2752,6 +2752,7 @@ impl VectorApp {
 
     /// Start over on whichever account boot now finds, as a fresh launch would.
     fn reboot(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        crate::golinks::forget_all();
         let mut fresh = Self::base(Store::live(), true, window, cx);
         fresh.screen = Screen::Booting;
         *self = fresh;
@@ -3647,6 +3648,10 @@ impl VectorApp {
                 for k in [&id, &matched] {
                     media.transfers.remove(k);
                     media.started.remove(k);
+                    media.paused.remove(k);
+                }
+                if let Some(at) = payload.get("partial").and_then(|p| serde_json::from_value::<(u64, Option<u64>)>(p.clone()).ok()) {
+                    media.paused.insert(matched.clone(), at);
                 }
                 if !success && !cancelled {
                     let reason = payload
@@ -3882,6 +3887,7 @@ impl VectorApp {
                 self.last_dm = Some(id.to_string());
             }
         }
+        self.load_paused(cx);
         self.self_destruct = if self.live {
             vector_core::self_destruct::chat_duration_secs(&id)
         } else {
@@ -13701,6 +13707,27 @@ impl VectorApp {
 
     fn refuse_go(&mut self, text: &str) {
         self.toast = Some((text.to_string().into(), std::time::Instant::now()));
+    }
+
+    /// Downloads stopped part-way on this device, so their boxes offer to resume.
+    fn load_paused(&mut self, cx: &mut Context<Self>) {
+        if !self.live {
+            return;
+        }
+        let rx = backend::run(vector_core::db::scoped(async { backend::attachments::paused() }));
+        cx.spawn(async move |this, cx| {
+            let Ok(paused) = rx.await else { return };
+            this.update(cx, |this, cx| {
+                let mut media = this.media.borrow_mut();
+                if media.paused != paused {
+                    media.paused = paused;
+                    drop(media);
+                    this.notify_timeline(cx);
+                }
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// Message-link pills drawn since the last frame ask where their message is; the chat pane

@@ -452,7 +452,7 @@ fn blur(
     } else if ctx.held {
         held_box(w, h)
     } else {
-        download_box(ctx, m, att, w, h, failed)
+        download_box(ctx, m, att, w, h, failed, media.resume_note(&att.id, att.size))
     };
     Some(
         div()
@@ -505,6 +505,7 @@ fn download_box(
     w: f32,
     h: f32,
     failed: Option<&str>,
+    paused: Option<String>,
 ) -> AnyElement {
     let compact = w < 205. || h < 76.;
     let color = if failed.is_some() {
@@ -539,6 +540,7 @@ fn download_box(
         );
     let title = match failed {
         Some(_) => "Download Failed".to_string(),
+        None if paused.is_some() => "Resume Download".to_string(),
         None => format!("Download {}", att.extension.to_uppercase())
             .trim()
             .to_string(),
@@ -546,6 +548,7 @@ fn download_box(
     let sub = match failed {
         Some(e) if !e.is_empty() => e.chars().take(64).collect(),
         Some(_) => "Tap to Retry".to_string(),
+        None if paused.is_some() => paused.unwrap_or_default().trim_start_matches("Resume download · ").to_string() + " done",
         None if att.size > 0 => media::format_bytes(att.size),
         None => "Unknown Size".to_string(),
     };
@@ -850,9 +853,10 @@ fn file_box_on(
                     format!("Failed: {reason} · Tap to Retry")
                 }
             }
-            _ => match &size {
-                Some(s) => format!("{kind} — {s}"),
-                None => kind,
+            _ => match (media.resume_note(&att.id, att.size), &size) {
+                (Some(r), _) => r,
+                (None, Some(s)) => format!("{kind} — {s}"),
+                (None, None) => kind,
             },
         };
         let text = text.child(
