@@ -205,8 +205,8 @@ pub fn lossless(pixels: &[u8], width: u32, height: u32, alpha: bool) -> Option<V
         if JxlEncoderSetColorEncoding(e.enc, &color) != SUCCESS {
             return None;
         }
-        // Effort 4: a 2560px screenshot in well under a second, still far below PNG.
-        let settings = e.settings(4)?;
+        // Effort 5: a 2560px screenshot in about 0.2 s; 7 costs half as much again for 3-4% more.
+        let settings = e.settings(5)?;
         if JxlEncoderSetFrameLossless(settings, 1) != SUCCESS {
             return None;
         }
