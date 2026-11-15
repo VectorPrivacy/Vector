@@ -123,7 +123,12 @@ struct Spelling {
     waiting: bool,
     /// The word being typed at this caret was left unmarked, until the caret leaves it.
     held: Option<usize>,
+    /// The misspelled word the edit menu opened on, and its guesses.
+    menu: Option<(Range<usize>, Vec<String>)>,
 }
+
+/// The best guesses only, so the menu stays short.
+const SPELL_GUESSES: usize = 6;
 
 /// How long typing pauses before the text is checked.
 const SPELL_WAIT: std::time::Duration = std::time::Duration::from_millis(300);
@@ -495,8 +500,27 @@ impl TextInput {
     fn on_right_down(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         window.focus(&self.focus_handle, cx);
         let at = self.index_for_mouse_position(event.position);
-        if !(self.selected_range.start <= at && at <= self.selected_range.end) {
-            self.move_to(at, window, cx);
+        let word = self
+            .spell
+            .as_ref()
+            .filter(|s| s.text == self.content)
+            .and_then(|s| s.words.iter().find(|r| r.start <= at && at <= r.end).cloned());
+        if let Some(word) = word {
+            // A misspelled word is picked whole, as WebKit does, so a guess replaces it.
+            let guesses = crate::spell::backend().guesses(&self.content, word.clone()).into_iter().take(SPELL_GUESSES).collect();
+            self.selected_range = word.clone();
+            self.selection_reversed = false;
+            window.notify_text_selection_changed(&self.focus_handle);
+            if let Some(sp) = self.spell.as_mut() {
+                sp.menu = Some((word, guesses));
+            }
+        } else {
+            if let Some(sp) = self.spell.as_mut() {
+                sp.menu = None;
+            }
+            if !(self.selected_range.start <= at && at <= self.selected_range.end) {
+                self.move_to(at, window, cx);
+            }
         }
         self.menu = Some(event.position);
         cx.stop_propagation();
@@ -506,17 +530,61 @@ impl TextInput {
     fn edit_menu(&self) -> Vec<crate::kit::MenuItem> {
         use crate::kit::MenuItem;
         let picked = !self.selected_range.is_empty() && !self.look.masked;
-        vec![
+        let mut items = Vec::new();
+        if let Some((_, guesses)) = self.spell.as_ref().and_then(|s| s.menu.as_ref()) {
+            if guesses.is_empty() {
+                items.push(MenuItem::new("No Guesses Found", "").disabled(true));
+            }
+            items.extend(guesses.iter().map(|g| MenuItem::new(g.clone(), "")));
+            items.push(MenuItem::divider());
+            items.push(MenuItem::new("Ignore Spelling", ""));
+            items.push(MenuItem::new("Learn Spelling", ""));
+            items.push(MenuItem::divider());
+        }
+        items.extend([
             MenuItem::new("Cut", "").disabled(!picked),
             MenuItem::new("Copy", "").disabled(!picked),
             MenuItem::new("Paste", ""),
             MenuItem::divider(),
             MenuItem::new("Select All", "").disabled(self.content.is_empty()),
-        ]
+        ]);
+        items
     }
 
     fn on_edit_menu(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
         self.menu = None;
+        let spell = self.spell.as_mut().and_then(|s| s.menu.take());
+        let ix = match spell {
+            Some((word, guesses)) => {
+                // Guesses (or the one "No Guesses Found"), a divider, Ignore, Learn, a divider.
+                let shown = guesses.len().max(1);
+                let still = self.content.get(word.clone()).is_some();
+                match ix.checked_sub(shown) {
+                    None if still && ix < guesses.len() => {
+                        self.marked_range = None;
+                        self.selected_range = word;
+                        self.replace_text_in_range(None, &guesses[ix], window, cx);
+                        return;
+                    }
+                    Some(1) | Some(2) if still => {
+                        let w = self.content[word].to_string();
+                        if ix - shown == 1 {
+                            crate::spell::backend().ignore(&w);
+                        } else {
+                            crate::spell::backend().learn(&w);
+                        }
+                        let caret = self.selected_range.end;
+                        self.selected_range = caret..caret;
+                        self.spell_check();
+                        cx.notify();
+                        return;
+                    }
+                    Some(n) if n >= 4 => n - 4,
+                    _ => return cx.notify(),
+                }
+            }
+            None => ix,
+        };
         match ix {
             0 => self.cut(&Cut, window, cx),
             1 => self.copy(&Copy, window, cx),
@@ -1543,6 +1611,9 @@ impl Render for TextInput {
                         close
                             .update(cx, |this, cx| {
                                 this.menu = None;
+                                if let Some(s) = this.spell.as_mut() {
+                                    s.menu = None;
+                                }
                                 cx.notify();
                             })
                             .ok();

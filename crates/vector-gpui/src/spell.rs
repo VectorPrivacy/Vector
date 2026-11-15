@@ -14,6 +14,8 @@ pub trait Backend {
     fn correction(&self, text: &str, range: Range<usize>) -> Option<String>;
     /// Never flag this word again (Learn Spelling).
     fn learn(&self, word: &str);
+    /// Stop flagging this word until the app quits (Ignore Spelling).
+    fn ignore(&self, word: &str);
 }
 
 /// This platform's checker. Asked on the main thread only.
@@ -44,6 +46,7 @@ impl Backend for NoSpelling {
         None
     }
     fn learn(&self, _: &str) {}
+    fn ignore(&self, _: &str) {}
 }
 
 /// Byte offset → UTF-16 offset, as `NSString` counts.
@@ -134,6 +137,10 @@ mod mac {
 
         fn learn(&self, word: &str) {
             self.checker.learnWord(&NSString::from_str(word));
+        }
+
+        fn ignore(&self, word: &str) {
+            self.checker.ignoreWord_inSpellDocumentWithTag(&NSString::from_str(word), self.tag);
         }
     }
 }
