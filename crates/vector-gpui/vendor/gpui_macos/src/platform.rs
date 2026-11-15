@@ -40,6 +40,7 @@ use objc2_foundation::{
     NSActivityOptions, NSArray, NSBundle, NSError, NSInteger, NSProcessInfo, NSString, NSURL,
     NSUTF8StringEncoding,
 };
+use objc2_uniform_type_identifiers::UTType;
 use parking_lot::Mutex;
 use semver::Version;
 use std::{
@@ -910,6 +911,18 @@ impl Platform for MacPlatform {
 
                 if let Some(prompt) = options.prompt {
                     panel.setPrompt(Some(&NSString::from_str(prompt.as_str())));
+                }
+
+                // An extension macOS has no type for is left out; if none resolve, any file goes.
+                let types: Vec<Retained<UTType>> = options
+                    .filters
+                    .iter()
+                    .flatten()
+                    .flat_map(|(_, extensions)| extensions)
+                    .filter_map(|ext| UTType::typeWithFilenameExtension(&NSString::from_str(ext)))
+                    .collect();
+                if !types.is_empty() {
+                    panel.setAllowedContentTypes(&NSArray::from_retained_slice(&types));
                 }
 
                 panel.beginWithCompletionHandler(&handler);

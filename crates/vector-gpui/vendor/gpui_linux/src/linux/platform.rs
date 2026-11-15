@@ -837,6 +837,12 @@ impl Platform for LinuxPlatform {
                     "Open File"
                 };
 
+                // Portal globs can match case-sensitively, so each extension goes in both cases.
+                let filters = options.filters.iter().flatten().map(|(name, extensions)| {
+                    extensions.iter().fold(ashpd::desktop::file_chooser::FileFilter::new(name), |f, ext| {
+                        f.glob(&format!("*.{}", ext.to_lowercase())).glob(&format!("*.{}", ext.to_uppercase()))
+                    })
+                });
                 let request = match ashpd::desktop::file_chooser::OpenFileRequest::default()
                     .identifier(identifier.await)
                     .modal(true)
@@ -844,6 +850,7 @@ impl Platform for LinuxPlatform {
                     .accept_label(options.prompt.as_ref().map(gpui::SharedString::as_str))
                     .multiple(options.multiple)
                     .directory(options.directories)
+                    .filters(filters)
                     .send()
                     .await
                 {

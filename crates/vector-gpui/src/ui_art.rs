@@ -110,6 +110,7 @@ impl VectorApp {
             files: true,
             directories: false,
             multiple: false,
+            filters: crate::pickers::picture(),
             prompt: Some(if matches!(art, Art::NewIcon | Art::OverviewIcon) { "Choose Community Icon" } else { "Choose Image" }.into()),
         });
         let window = window.window_handle();

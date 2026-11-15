@@ -23,6 +23,7 @@ mod rail;
 mod voice;
 mod miniprofile;
 mod pins;
+mod pickers;
 mod edithistory;
 mod textdiff;
 mod payaddr;

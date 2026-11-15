@@ -490,6 +490,7 @@ impl EmojiPicker {
             files: true,
             directories: false,
             multiple: true,
+            filters: crate::pickers::pack_image(),
             prompt: None,
         });
         let window = window.window_handle();
@@ -663,6 +664,7 @@ impl EmojiPicker {
             files: true,
             directories: false,
             multiple: false,
+            filters: crate::pickers::pack_image(),
             prompt: None,
         });
         cx.spawn(async move |this, cx| {

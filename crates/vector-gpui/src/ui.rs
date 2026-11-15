@@ -8481,6 +8481,7 @@ impl VectorApp {
             files: true,
             directories: false,
             multiple: false,
+            filters: crate::pickers::wallpaper(),
             prompt: None,
         });
         let live = self.live;
@@ -10299,6 +10300,7 @@ impl VectorApp {
             files: true,
             directories: false,
             multiple: false,
+            filters: None,
             prompt: None,
         });
         let window = window.window_handle();
@@ -10352,6 +10354,7 @@ impl VectorApp {
             files: false,
             directories: true,
             multiple: false,
+            filters: None,
             prompt: None,
         });
         let window = window.window_handle();
@@ -16889,6 +16892,7 @@ impl VectorApp {
             files: true,
             directories: false,
             multiple: false,
+            filters: crate::pickers::sound(),
             prompt: None,
         });
         let dir = backend::default_data_dir().join("cache").join("sounds");
@@ -18275,6 +18279,7 @@ impl VectorApp {
             files: true,
             directories: false,
             multiple: false,
+            filters: crate::pickers::picture(),
             prompt: Some(
                 if banner {
                     "Choose Banner Image"

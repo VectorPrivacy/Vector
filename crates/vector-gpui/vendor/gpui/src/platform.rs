@@ -2974,6 +2974,9 @@ pub struct PathPromptOptions {
     pub multiple: bool,
     /// The prompt to show to a user when selecting a path
     pub prompt: Option<SharedString>,
+    /// The file types offered, each a name and its extensions without the dot; `None` allows any
+    /// file. The platform dialog greys out or hides the rest.
+    pub filters: Option<Vec<(SharedString, Vec<SharedString>)>>,
 }
 
 /// What kind of prompt styling to show

@@ -194,6 +194,8 @@ regex = "1"
 # gpui at the same rev: animated images redraw when their next frame is due, not every vsync.
 gpui = { path = "vendor/gpui" }
 gpui_linux = { path = "vendor/gpui_linux" }
+# gpui_macos at the same rev: the open panel takes file-type filters.
+gpui_macos = { path = "vendor/gpui_macos" }
 # gpui_wgpu at the same rev, bringing up one GPU API (Vulkan, else GL) instead of both.
 gpui_wgpu = { path = "vendor/gpui_wgpu" }
 
