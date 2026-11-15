@@ -869,17 +869,71 @@ fn art_accent(px: &image::RgbaImage) -> Option<gpui::Hsla> {
 
 /// `splitTitle`: an edition note ("Remastered 2011", "Live") set apart from the title.
 pub fn split_title(t: &str) -> (String, String) {
-    static RE: OnceLock<regex::Regex> = OnceLock::new();
-    let re = RE.get_or_init(|| {
-        regex::Regex::new(r"(?i)\s*(?:\(([^()]*\b(?:remaster(?:ed)?|remix|live|mono|stereo|edit|version|demo|acoustic|deluxe|bonus)\b[^()]*)\)|-\s*((?:\d{4}\s*)?remaster(?:ed)?(?:\s*\d{4})?|live|radio edit))\s*$").unwrap()
-    });
-    match re.captures(t) {
-        Some(c) => {
-            let at = c.get(0).unwrap().start();
-            let note = c.get(1).or(c.get(2)).map_or("", |m| m.as_str()).trim();
-            (t[..at].trim().to_string(), note.to_string())
-        }
+    match edition(t) {
+        Some((at, note)) => (t[..at].trim().to_string(), note.trim().to_string()),
         None => (t.to_string(), String::new()),
+    }
+}
+
+/// `(?i)\s*(?:\(([^()]*\b(?:remaster(?:ed)?|…|bonus)\b[^()]*)\)|-\s*(…|live|radio edit))\s*$`: where
+/// the note starts, whitespace before it included, and the note.
+fn edition(t: &str) -> Option<(usize, &str)> {
+    use crate::scan::{boundary, digit, lit_i};
+    const WORDS: &[&str] = &["remastered", "remaster", "remix", "live", "mono", "stereo", "edit", "version", "demo", "acoustic", "deluxe", "bonus"];
+    let body = t.trim_end();
+    let ws_from = |i: usize| t[..i].trim_end().len();
+    let paren = body.strip_suffix(')').and_then(|inner| {
+        let open = inner.rfind(['(', ')']).filter(|&o| inner.as_bytes()[o] == b'(')?;
+        let x = (open + 1, inner.len());
+        let named = t[x.0..x.1].char_indices().map(|(i, _)| x.0 + i).any(|q| {
+            boundary(t, q) && WORDS.iter().any(|w| lit_i(t, q, w).is_some_and(|e| boundary(t, e)))
+        });
+        named.then(|| (ws_from(open), &t[x.0..x.1]))
+    });
+    // `(?:\d{4}\s*)?remaster(?:ed)?(?:\s*\d{4})?`, whole.
+    let remaster = |s: &str| {
+        let year = |s: &str| {
+            let mut cs = s.char_indices();
+            (0..4).all(|_| cs.next().is_some_and(|(_, c)| digit(c))).then(|| cs.next().map_or(s.len(), |(i, _)| i))
+        };
+        let s = year(s).map_or(s, |n| s[n..].trim_start());
+        let Some(e) = lit_i(s, 0, "remaster") else { return false };
+        let rest = lit_i(s, e, "ed").map_or(&s[e..], |e| &s[e..]);
+        let rest = rest.trim_start();
+        rest.is_empty() || year(rest) == Some(rest.len())
+    };
+    let dash = t.match_indices('-').find_map(|(d, _)| {
+        let note = t[d + 1..].trim();
+        (lit_i(note, 0, "live") == Some(note.len()) || lit_i(note, 0, "radio edit") == Some(note.len()) || remaster(note))
+            .then(|| (ws_from(d), note))
+    });
+    match (paren, dash) {
+        (Some(p), Some(d)) => Some(if d.0 < p.0 { d } else { p }),
+        (p, d) => p.or(d),
+    }
+}
+
+#[cfg(test)]
+mod edition_tests {
+    #[test]
+    fn edition_matches_the_pattern_it_replaces() {
+        let re = regex::Regex::new(r"(?i)\s*(?:\(([^()]*\b(?:remaster(?:ed)?|remix|live|mono|stereo|edit|version|demo|acoustic|deluxe|bonus)\b[^()]*)\)|-\s*((?:\d{4}\s*)?remaster(?:ed)?(?:\s*\d{4})?|live|radio edit))\s*$").unwrap();
+        const PARTS: &[&str] = &[
+            "Song", " ", "  ", "(", ")", "-", " - ", "Remastered", "remaster", "REMASTER", "ed", "2011", "201", "Live",
+            "live", "Radio Edit", "radio  edit", "mono", "x", "liver", "\u{3000}", "ſtereo", "deluxe", "é", "edition",
+        ];
+        let mut seed = 0x7777_1234u64;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        for _ in 0..40_000 {
+            let s: String = (0..1 + next() % 10).map(|_| PARTS[(next() % PARTS.len() as u64) as usize]).collect();
+            let want = re.captures(&s).map(|c| (c.get(0).unwrap().start(), c.get(1).or(c.get(2)).unwrap().as_str().trim()));
+            assert_eq!(super::edition(&s).map(|(a, n)| (a, n.trim())), want, "{s:?}");
+        }
     }
 }
 

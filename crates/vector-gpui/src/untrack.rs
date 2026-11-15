@@ -2,10 +2,9 @@
 //! sent and in what is shown, while "Prevent URL Tracking" is on. Referral credit stays: a
 //! stable ID saying who gets credit is a choice the sharer made, a per-click ID is not.
 
-use std::sync::LazyLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use regex::Regex;
+use crate::scan::{digit, fold_letter, lit_i};
 
 static ENABLED: AtomicBool = AtomicBool::new(true);
 
@@ -24,24 +23,121 @@ pub fn shown(url: &str) -> String {
 
 /// Every http(s) URL in `text` cleaned, when the setting is on (`sendComposed`).
 pub fn text(text: &str) -> String {
-    static URL: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"(?i)https?://[^\s<>"{}|\\^`\[\]]+"#).unwrap());
     if !enabled() {
         return text.to_string();
     }
-    URL.replace_all(text, |c: &regex::Captures| clean(&c[0])).into_owned()
+    let mut out = String::with_capacity(text.len());
+    let mut last = 0;
+    let mut at = 0;
+    while let Some(i) = memchr::memchr2(b'h', b'H', &text.as_bytes()[at..]).map(|i| at + i) {
+        match url_at(text, i) {
+            Some(end) => {
+                out += &text[last..i];
+                out += &clean(&text[i..end]);
+                (last, at) = (end, end);
+            }
+            None => at = i + 1,
+        }
+    }
+    out += &text[last..];
+    out
 }
 
-static REFERRAL: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)^(?:tag|partner|wmlspartner|campid|a(?:f|ff)id|affname|aff|aff_[a-z_]+|affiliate(?:_id)?|ref|refcode|ref_code|referral(?:_?code)?|invite(?:_?code)?|invited_by|via|promo(?:_?code)?|coupon|discount(?:_?code)?|sponsor|supporter|creator|epic_(?:affiliate|creator_id))$").unwrap()
-});
+/// `(?i)https?://[^\s<>"{}|\\^`\[\]]+` at `i`.
+fn url_at(text: &str, i: usize) -> Option<usize> {
+    let from = lit_i(text, i, "https://").or_else(|| lit_i(text, i, "http://"))?;
+    let len = text[from..].find(|c: char| c.is_whitespace() || "<>\"{}|\\^`[]".contains(c)).unwrap_or(text.len() - from);
+    (len > 0).then_some(from + len)
+}
 
-static UTM_CLONE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)^(?:utm_.|[a-z][a-z0-9]{0,3}_(?:source|medium|campaign|term|content|source_platform|creative_format|marketing_tactic)$)").unwrap()
-});
+/// `name` is `w`, as `(?i)` compares.
+fn is_i(name: &str, w: &str) -> bool {
+    lit_i(name, 0, w) == Some(name.len())
+}
 
-static NAMESPACE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)^(?:mtm_|pk_|hsa_|af_|adj_|adjust_|_branch_|bsft_|_sgm_|oly_|vero_|_x_(?:ads|ns|bg|sessn)_|cm_mmc|at_(?:campaign|channel|creation|custom|detail_placement|emailtype|format|general_placement|identifier|link|medium|network|platform|ptr_|recipient|send_|type$|variant)|mt_(?:click_id|network|adset|creative|sub\d|link_id)$|ebis(?:AdID|Other\d)$|nb_(?:adid|aname|asize|atype|cid|mtype|partner_name|partner_shared_id|pid|platform|product_sku|placement|expid_meta)$)").unwrap()
-});
+/// `(?i)^(?:tag|partner|…|epic_(?:affiliate|creator_id))$`: a stable ID saying who gets credit.
+fn referral(name: &str) -> bool {
+    const NAMES: &[&str] = &[
+        "tag", "partner", "wmlspartner", "campid", "afid", "affid", "affname", "aff", "affiliate", "affiliate_id",
+        "ref", "refcode", "ref_code", "referral", "referralcode", "referral_code", "invite", "invitecode",
+        "invite_code", "invited_by", "via", "promo", "promocode", "promo_code", "coupon", "discount",
+        "discountcode", "discount_code", "sponsor", "supporter", "creator", "epic_affiliate", "epic_creator_id",
+    ];
+    NAMES.iter().any(|w| is_i(name, w))
+        || lit_i(name, 0, "aff_").is_some_and(|e| e < name.len() && name[e..].chars().all(|c| c == '_' || fold_letter(c)))
+}
+
+/// `(?i)^(?:utm_.|[a-z][a-z0-9]{0,3}_(?:source|medium|…|marketing_tactic)$)`
+fn utm_clone(name: &str) -> bool {
+    const TAILS: &[&str] = &["source", "medium", "campaign", "term", "content", "source_platform", "creative_format", "marketing_tactic"];
+    if lit_i(name, 0, "utm_").is_some_and(|e| name[e..].chars().next().is_some_and(|c| c != '\n')) {
+        return true;
+    }
+    let mut cs = name.char_indices();
+    if !cs.next().is_some_and(|(_, c)| fold_letter(c)) {
+        return false;
+    }
+    let mut rest = cs.as_str();
+    for k in 0..4 {
+        let Some(c) = rest.chars().next() else { return false };
+        if c == '_' {
+            return TAILS.iter().any(|w| is_i(&rest[1..], w));
+        }
+        if k == 3 || !(fold_letter(c) || c.is_ascii_digit()) {
+            return false;
+        }
+        rest = &rest[c.len_utf8()..];
+    }
+    false
+}
+
+/// `(?i)^(?:mtm_|pk_|…|nb_(?:adid|…|expid_meta)$)`: a vendor's own parameter family.
+fn namespace(name: &str) -> bool {
+    const PREFIXES: &[&str] = &[
+        "mtm_", "pk_", "hsa_", "af_", "adj_", "adjust_", "_branch_", "bsft_", "_sgm_", "oly_", "vero_", "_x_ads_",
+        "_x_ns_", "_x_bg_", "_x_sessn_", "cm_mmc", "at_campaign", "at_channel", "at_creation", "at_custom",
+        "at_detail_placement", "at_emailtype", "at_format", "at_general_placement", "at_identifier", "at_link",
+        "at_medium", "at_network", "at_platform", "at_ptr_", "at_recipient", "at_send_", "at_variant",
+    ];
+    const WHOLE: &[&str] = &[
+        "at_type", "mt_click_id", "mt_network", "mt_adset", "mt_creative", "mt_link_id", "ebisadid", "nb_adid",
+        "nb_aname", "nb_asize", "nb_atype", "nb_cid", "nb_mtype", "nb_partner_name", "nb_partner_shared_id",
+        "nb_pid", "nb_platform", "nb_product_sku", "nb_placement", "nb_expid_meta",
+    ];
+    let one_digit = |w: &str| lit_i(name, 0, w).is_some_and(|e| {
+        let mut cs = name[e..].chars();
+        cs.next().is_some_and(digit) && cs.next().is_none()
+    });
+    PREFIXES.iter().any(|w| lit_i(name, 0, w).is_some())
+        || WHOLE.iter().any(|w| is_i(name, w))
+        || one_digit("mt_sub")
+        || one_digit("ebisother")
+}
+
+/// `(?i)/dp/[A-Z0-9]+`
+fn dp_product(path: &str) -> bool {
+    (0..path.len().saturating_sub(4)).any(|i| {
+        path.as_bytes()[i..i + 4].eq_ignore_ascii_case(b"/dp/") && path[i + 4..].chars().next().is_some_and(|c| fold_letter(c) || c.is_ascii_digit())
+    })
+}
+
+fn starts_any(name: &str, prefixes: &[&str]) -> bool {
+    prefixes.iter().any(|p| name.starts_with(p))
+}
+
+/// `/itm/(?:.+/)?(\d{6,})`: the item number.
+fn ebay_item(path: &str) -> Option<&str> {
+    let digits_at = |i: usize| {
+        let n: usize = path[i..].chars().take_while(|&c| digit(c)).map(char::len_utf8).sum();
+        (path[i..].chars().take_while(|&c| digit(c)).count() >= 6).then(|| &path[i..i + n])
+    };
+    (0..path.len()).filter(|&i| path.as_bytes()[i..].starts_with(b"/itm/")).find_map(|i| {
+        let q = i + 5;
+        let line = path[q..].find('\n').map_or(path.len(), |n| q + n);
+        let first = path[q..line].chars().next().map_or(line, |c| q + c.len_utf8());
+        path[first..line].rmatch_indices('/').map(|(j, _)| first + j).find_map(|j| digits_at(j + 1)).or_else(|| digits_at(q))
+    })
+}
 
 const GLOBAL: &[&str] = &[
     // Facebook/Meta
@@ -176,14 +272,13 @@ pub fn clean(url: &str) -> String {
             }
         }
     };
-    let drop_matching = |pairs: &mut Vec<Pair>, re: &Regex, shield: Option<&Regex>| {
+    let drop_matching = |pairs: &mut Vec<Pair>, matches: &dyn Fn(&str) -> bool, shield: Option<fn(&str) -> bool>| {
         for p in pairs.iter_mut() {
-            if re.is_match(&p.name) && !shield.is_some_and(|s| s.is_match(&p.name)) {
+            if matches(&p.name) && !shield.is_some_and(|s| s(&p.name)) {
                 p.keep = false;
             }
         }
     };
-    let re = |s: &str| Regex::new(s).unwrap();
 
     if host_is(&["youtube.com", "youtu.be", "youtube-nocookie.com"]) {
         drop(&mut pairs, &[
@@ -197,7 +292,7 @@ pub fn clean(url: &str) -> String {
             "cad", "atyp", "vet", "je", "dcr", "dpr", "iflsig", "fbs", "ictx", "cshid", "sclient", "_u",
             "site", "ie", "pcampaignid", "icid", "original_referer", "sstk", "spell",
         ]);
-        drop_matching(&mut pairs, &re(r"^(?:gs_|gws_|gfe_|bi[hw]$|btn|sca_(?:esv|upv)$)"), None);
+        drop_matching(&mut pairs, &|n| starts_any(n, &["gs_", "gws_", "gfe_", "btn"]) || ["bih", "biw", "sca_esv", "sca_upv"].contains(&n), None);
     } else if host_is(&["bing.com"]) {
         drop(&mut pairs, &[
             "cvid", "CVID", "qs", "sk", "sc", "sp", "pq", "form", "FORM", "PC", "ghsh", "ghacc", "ghpl",
@@ -214,10 +309,10 @@ pub fn clean(url: &str) -> String {
     } else if label_is("yandex") {
         drop(&mut pairs, &["lr", "redircnt", "clid", "banerid", "suggest_reqid", "did", "msid", "persistent_id", "from"]);
     } else if label_is("amazon") {
-        if re(r"(?i)/dp/[A-Z0-9]+").is_match(&path) {
+        if dp_product(&path) {
             // Only the product survives, and any referral credit (`tag`).
             for p in pairs.iter_mut() {
-                p.keep = REFERRAL.is_match(&p.name);
+                p.keep = referral(&p.name);
             }
             if let Some(i) = path.find("/dp/") {
                 path.truncate((i + 14).min(path.len()));
@@ -230,12 +325,12 @@ pub fn clean(url: &str) -> String {
             "qualifier", "_encoding", "dchild", "starsLeft", "skipTwisterOG", "aaxitk", "ms3_c", "colid",
             "coliid", "twchReferral", "ingress", "yTwchPos", "linkId", "geniuslink", "ufe",
         ]);
-        drop_matching(&mut pairs, &re(r"^(?:p[fd]_rd_|__mk_|cv_ct_|sb-ci-|field-lbr_)"), None);
+        drop_matching(&mut pairs, &|n| starts_any(n, &["pf_rd_", "pd_rd_", "__mk_", "cv_ct_", "sb-ci-", "field-lbr_"]), None);
     } else if label_is("ebay") {
-        if let Some(id) = re(r"/itm/(?:.+/)?(\d{6,})").captures(&path).map(|c| c[1].to_string()) {
+        if let Some(id) = ebay_item(&path).map(str::to_string) {
             // `var` picks a variation and campaign credit is a referral; the rest goes.
             for p in pairs.iter_mut() {
-                p.keep = p.name == "var" || REFERRAL.is_match(&p.name);
+                p.keep = p.name == "var" || referral(&p.name);
             }
             path = format!("/itm/{id}");
             frag_out = None;
@@ -248,7 +343,7 @@ pub fn clean(url: &str) -> String {
         }
     } else if host_is(&["etsy.com"]) {
         drop(&mut pairs, &["click_key", "click_sum", "organic_search_click", "ref", "frs", "sts"]);
-        drop_matching(&mut pairs, &re("^ga_"), None);
+        drop_matching(&mut pairs, &|n| n.starts_with("ga_"), None);
     } else if label_is("aliexpress") || label_is("lazada") || host_is(&["taobao.com", "tmall.com"]) {
         drop(&mut pairs, &[
             "algo_pvid", "algo_expid", "algo_exp_id", "curPageLogUid", "pdp_npi", "ws_ab_test", "btsid",
@@ -258,7 +353,7 @@ pub fn clean(url: &str) -> String {
         ]);
     } else if host_is(&["walmart.com"]) {
         drop(&mut pairs, &["u1", "from", "sourceid", "veh"]);
-        drop_matching(&mut pairs, &re("^ath"), None);
+        drop_matching(&mut pairs, &|n| n.starts_with("ath"), None);
     } else if host_is(&["target.com"]) {
         drop(&mut pairs, &["CPNG", "LID", "LNM", "DFA", "fndsrc", "adgroup", "network", "device", "location", "targetid", "ds_rl"]);
     } else if host_is(&["bestbuy.com"]) {
@@ -267,7 +362,7 @@ pub fn clean(url: &str) -> String {
         drop(&mut pairs, &["ACRID", "ASUBID", "ASID", "nm_mc", "cm_mmc"]);
     } else if host_is(&["temu.com"]) {
         drop(&mut pairs, &["top_gallery_url", "adg_ctx", "mrk_rec", "freesia_scene", "share_img", "from_share", "spec_gallery_id"]);
-        drop_matching(&mut pairs, &re(r"^(?:_x_|_oak_|_p_|_bg_|refer_)"), None);
+        drop_matching(&mut pairs, &|n| starts_any(n, &["_x_", "_oak_", "_p_", "_bg_", "refer_"]), None);
     } else if host_is(&["twitter.com", "x.com", "t.co"]) {
         drop(&mut pairs, &["a", "s", "t", "cn", "cxt", "ref_src", "refsrc", "ref_url", "src"]);
     } else if host_is(&["facebook.com", "fb.com", "fb.me", "m.me", "messenger.com"]) {
@@ -277,7 +372,7 @@ pub fn clean(url: &str) -> String {
             "video_source", "ftentidentifier", "pageid", "eid", "acontext", "external_ref",
             "gd_impression_id", "sale_post_id", "store_visit_source", "with_pv",
         ]);
-        drop_matching(&mut pairs, &re(r"^(?:hc_|__cft__|__xts__)"), None);
+        drop_matching(&mut pairs, &|n| starts_any(n, &["hc_", "__cft__", "__xts__"]), None);
     } else if host_is(&["instagram.com"]) {
         drop(&mut pairs, &["igshid", "igsh", "ig_rid", "stkn", "click_source"]);
     } else if host_is(&["threads.net", "threads.com"]) {
@@ -302,7 +397,7 @@ pub fn clean(url: &str) -> String {
             "original_referer", "originalReferer", "midToken", "midSig", "eid", "courseClaim",
             "alternateChannel", "eBP", "mcid", "rcm", "isSS", "src",
         ]);
-        drop_matching(&mut pairs, &re("^li[a-z]{2}$"), None);
+        drop_matching(&mut pairs, &|n| n.len() == 4 && n.starts_with("li") && n[2..].bytes().all(|b| b.is_ascii_lowercase()), None);
     } else if host_is(&["pinterest.com", "pin.it"]) {
         drop(&mut pairs, &["nic", "nic_v1", "nic_v2", "amp_client_id", "mweb_unauth_id", "sender"]);
     } else if host_is(&["snapchat.com"]) {
@@ -311,7 +406,7 @@ pub fn clean(url: &str) -> String {
         drop(&mut pairs, &["si", "nd", "nid", "sp_cid", "dlsi", "pi", "referral"]);
     } else if host_is(&["apple.com"]) {
         drop(&mut pairs, &["itsct", "itscg", "cid", "ct", "pt", "app"]);
-        drop_matching(&mut pairs, &re("^ign-itsc"), None);
+        drop_matching(&mut pairs, &|n| n.starts_with("ign-itsc"), None);
     } else if host_is(&["twitch.tv"]) {
         drop(&mut pairs, &["tt_email_id"]);
     } else if host_is(&["steampowered.com", "steamcommunity.com"]) {
@@ -326,7 +421,7 @@ pub fn clean(url: &str) -> String {
         drop(&mut pairs, &["trackId", "tctx"]);
     } else if host_is(&["imdb.com"]) {
         drop(&mut pairs, &["ref_"]);
-        drop_matching(&mut pairs, &re("^pf_rd_"), None);
+        drop_matching(&mut pairs, &|n| n.starts_with("pf_rd_"), None);
     } else if host_is(&["github.com"]) {
         drop(&mut pairs, &["email_token", "email_source", "notification_referrer_id", "reference_location"]);
     } else if host_is(&["vimeo.com"]) {
@@ -343,8 +438,8 @@ pub fn clean(url: &str) -> String {
 
     // Every host: the exact names, then the pattern families, which spare referrals.
     drop(&mut pairs, GLOBAL);
-    drop_matching(&mut pairs, &UTM_CLONE, Some(&REFERRAL));
-    drop_matching(&mut pairs, &NAMESPACE, Some(&REFERRAL));
+    drop_matching(&mut pairs, &utm_clone, Some(referral));
+    drop_matching(&mut pairs, &namespace, Some(referral));
 
     let kept: Vec<&str> = pairs.iter().filter(|p| p.keep).map(|p| p.raw).collect();
     if kept.len() == pairs.len() && path == raw_path && frag_out.as_deref() == frag {
@@ -364,6 +459,51 @@ pub fn clean(url: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::clean;
+
+    #[test]
+    fn matchers_agree_with_the_patterns_they_replace() {
+        let re = |p: &str| regex::Regex::new(p).unwrap();
+        let referral = re(r"(?i)^(?:tag|partner|wmlspartner|campid|a(?:f|ff)id|affname|aff|aff_[a-z_]+|affiliate(?:_id)?|ref|refcode|ref_code|referral(?:_?code)?|invite(?:_?code)?|invited_by|via|promo(?:_?code)?|coupon|discount(?:_?code)?|sponsor|supporter|creator|epic_(?:affiliate|creator_id))$");
+        let utm = re(r"(?i)^(?:utm_.|[a-z][a-z0-9]{0,3}_(?:source|medium|campaign|term|content|source_platform|creative_format|marketing_tactic)$)");
+        let ns = re(r"(?i)^(?:mtm_|pk_|hsa_|af_|adj_|adjust_|_branch_|bsft_|_sgm_|oly_|vero_|_x_(?:ads|ns|bg|sessn)_|cm_mmc|at_(?:campaign|channel|creation|custom|detail_placement|emailtype|format|general_placement|identifier|link|medium|network|platform|ptr_|recipient|send_|type$|variant)|mt_(?:click_id|network|adset|creative|sub\d|link_id)$|ebis(?:AdID|Other\d)$|nb_(?:adid|aname|asize|atype|cid|mtype|partner_name|partner_shared_id|pid|platform|product_sku|placement|expid_meta)$)");
+        let dp = re(r"(?i)/dp/[A-Z0-9]+");
+        let itm = re(r"/itm/(?:.+/)?(\d{6,})");
+        let url = re(r#"(?i)https?://[^\s<>"{}|\\^`\[\]]+"#);
+        const PARTS: &[&str] = &[
+            "utm_", "utm", "_", "x", "ab", "abcd", "source", "SOURCE", "medium", "aff", "aff_", "affid", "afid", "ref",
+            "_code", "code", "referral", "invite", "epic_", "creator_id", "mt_", "sub", "1", "٣", "ebis", "AdID",
+            "Other", "nb_", "cid", "at_", "type", "ptr_", "_x_", "ns", "sessn", "cm_mmc", "\u{212A}", "\u{17F}", "é",
+            "\n", "/dp/", "/DP/", "B0", "/itm/", "1234567", "12345", "/", "a/b", "http://", "HTTPS://", "httpſ://",
+            "h", " ", "<", "[", "`", "|", "mtm_", "vero_", "hsa_", "sku", "nb_product_sku",
+        ];
+        let mut seed = 0x51f1_5eedu64;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        for _ in 0..50_000 {
+            let s: String = (0..1 + next() % 6).map(|_| PARTS[(next() % PARTS.len() as u64) as usize]).collect();
+            assert_eq!(super::referral(&s), referral.is_match(&s), "referral {s:?}");
+            assert_eq!(super::utm_clone(&s), utm.is_match(&s), "utm {s:?}");
+            assert_eq!(super::namespace(&s), ns.is_match(&s), "namespace {s:?}");
+            assert_eq!(super::dp_product(&s), dp.is_match(&s), "dp {s:?}");
+            assert_eq!(super::ebay_item(&s), itm.captures(&s).map(|c| c.get(1).unwrap().as_str()), "itm {s:?}");
+            let mut found = Vec::new();
+            let mut at = 0;
+            while let Some(i) = memchr::memchr2(b'h', b'H', &s.as_bytes()[at..]).map(|i| at + i) {
+                match super::url_at(&s, i) {
+                    Some(e) => {
+                        found.push((i, e));
+                        at = e;
+                    }
+                    None => at = i + 1,
+                }
+            }
+            assert_eq!(found, url.find_iter(&s).map(|m| (m.start(), m.end())).collect::<Vec<_>>(), "url {s:?}");
+        }
+    }
 
     #[test]
     fn strips_trackers_and_keeps_the_rest() {

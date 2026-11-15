@@ -45,7 +45,6 @@ tokio = { version = "1.49.0", features = ["rt-multi-thread", "sync", "time", "ma
 futures = "0.3"
 sysinfo = { version = "0.31", default-features = false, features = ["system"] }
 rand = "0.8"
-regex = "1"
 base64 = "0.22"
 nostr-sdk = "=0.45.6"
 bip39 = "2.2.2"
@@ -187,6 +186,8 @@ khronos-egl = { git = "https://github.com/zed-industries/khronos-egl", rev = "42
 color_quant = "1.1"
 # The desktop's video encoder tests, built in with it.
 tempfile = "3"
+# The scanners that replaced regexes are tested against the patterns they replace.
+regex = "1"
 
 # gpui_linux at the same rev, plus file references on the clipboard (text/uri-list) for X11 and Wayland.
 [patch."https://github.com/zed-industries/zed"]

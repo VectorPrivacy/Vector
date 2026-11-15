@@ -2,7 +2,7 @@
 //! reader's zone, a typed phrase read as a time, and a draft's trailing phrase offered as one.
 
 use chrono::{DateTime, Datelike, Duration, Local, NaiveDate, TimeZone};
-use crate::scan::{boundary, digit, fold_letter, lit, lit_i, next, prev, run, word, At};
+use crate::scan::{boundary, digit, fold_letter, lit, lit_i, matches, next, prev, run, word, At};
 use std::rc::Rc;
 
 use gpui::{StatefulInteractiveElement, 
@@ -141,22 +141,6 @@ fn squeeze(t: &str) -> String {
         out.push(' ');
     }
     out
-}
-
-/// Non-overlapping matches, leftmost first, as a regex's `find_iter` takes them.
-fn matches<'a, C: 'a>(t: &'a str, at: impl Fn(&str, usize) -> Option<(usize, C)> + 'a) -> impl Iterator<Item = (usize, usize, C)> + 'a {
-    let mut p = 0;
-    std::iter::from_fn(move || {
-        while p <= t.len() {
-            if let Some((end, caps)) = at(t, p) {
-                let start = p;
-                p = if end > p { end } else { p + next(t, p).map_or(1, char::len_utf8) };
-                return Some((start, end, caps));
-            }
-            p += next(t, p).map_or(1, char::len_utf8);
-        }
-        None
-    })
 }
 
 /// Whether everything outside the matches is whitespace: `replace_all(..., "").trim().is_empty()`.

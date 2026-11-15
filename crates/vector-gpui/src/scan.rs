@@ -106,6 +106,35 @@ pub fn run(t: &str, at: usize, max: usize, f: impl Fn(char) -> bool) -> (usize, 
     (n, end)
 }
 
+/// Non-overlapping matches, leftmost first, as a regex's `find_iter` takes them.
+pub fn matches<'a, C: 'a>(t: &'a str, at: impl Fn(&str, usize) -> Option<(usize, C)> + 'a) -> impl Iterator<Item = (usize, usize, C)> + 'a {
+    let mut p = 0;
+    std::iter::from_fn(move || {
+        while p <= t.len() {
+            if let Some((end, caps)) = at(t, p) {
+                let start = p;
+                p = if end > p { end } else { p + next(t, p).map_or(1, char::len_utf8) };
+                return Some((start, end, caps));
+            }
+            p += next(t, p).map_or(1, char::len_utf8);
+        }
+        None
+    })
+}
+
+/// `t` with each match replaced by what `put` writes for it.
+pub fn replace_all<C>(t: &str, at: impl Fn(&str, usize) -> Option<(usize, C)>, put: impl Fn(&mut String, &str, C)) -> String {
+    let mut out = String::with_capacity(t.len());
+    let mut last = 0;
+    for (s, e, caps) in matches(t, at) {
+        out += &t[last..s];
+        put(&mut out, t, caps);
+        last = e;
+    }
+    out += &t[last..];
+    out
+}
+
 /// A set of byte positions below 384: every place a pattern so far can have reached.
 #[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
 pub struct At([u64; 6]);

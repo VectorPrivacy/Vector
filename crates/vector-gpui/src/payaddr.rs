@@ -1,12 +1,9 @@
 //! `CryptoAddress.svelte` over `payments.js`: the first coin address a message holds, as a
 //! card in the coin's colours with a Pay button opening its payment URI.
 
-use std::sync::LazyLock;
-
 use gpui::prelude::*;
 use gpui::{AnyElement, FontWeight, SharedString, div, px};
 use crate::pic::img;
-use regex::Regex;
 
 use crate::theme::*;
 
@@ -22,20 +19,54 @@ struct Kind {
     color: u32,
     uri: &'static str,
     transparent: bool,
-    re: Regex,
+    find: fn(&str) -> Option<(usize, usize)>,
 }
 
-/// Highest priority first; `\b` is ASCII, as in JS.
-static KINDS: LazyLock<Vec<Kind>> = LazyLock::new(|| {
-    let pivx = |pat: &str, transparent| Kind {
+fn ascii_word(c: Option<char>) -> bool {
+    c.is_some_and(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// `\b` as JS reads it: only ASCII letters, digits and `_` are word chars.
+fn ascii_boundary(t: &str, at: usize) -> bool {
+    ascii_word(crate::scan::prev(t, at)) != ascii_word(crate::scan::next(t, at))
+}
+
+/// `\b{head}[class]{min,max}\b`, leftmost, longest first.
+fn first_run(t: &str, head: impl Fn(&str, usize) -> Option<usize>, min: usize, max: usize, class: impl Fn(char) -> bool) -> Option<(usize, usize)> {
+    t.char_indices().filter(|&(i, _)| ascii_boundary(t, i)).find_map(|(i, _)| {
+        let from = head(t, i)?;
+        let mut ends = Vec::with_capacity(max);
+        let mut e = from;
+        for c in t[from..].chars().take(max) {
+            if !class(c) {
+                break;
+            }
+            e += c.len_utf8();
+            ends.push(e);
+        }
+        ends.iter().skip(min.saturating_sub(1)).rev().find(|&&e| ascii_boundary(t, e)).map(|&e| (i, e))
+    })
+}
+
+/// Highest priority first.
+const KINDS: [Kind; 2] = [
+    Kind {
         coin: "PIVX",
         color: 0x9530f4,
         uri: "https://app.mypivxwallet.org/?pay=",
-        transparent,
-        re: Regex::new(&format!(r"(?-u:\b){pat}(?-u:\b)")).unwrap(),
-    };
-    vec![pivx("(?i:ps1[a-z0-9]{50,120})", false), pivx("D[a-zA-Z0-9]{33,35}", true)]
-});
+        transparent: false,
+        // `(?i:ps1[a-z0-9]{50,120})`
+        find: |t| first_run(t, |t, i| crate::scan::lit_i(t, i, "ps1"), 50, 120, |c| crate::scan::fold_letter(c) || c.is_ascii_digit()),
+    },
+    Kind {
+        coin: "PIVX",
+        color: 0x9530f4,
+        uri: "https://app.mypivxwallet.org/?pay=",
+        transparent: true,
+        // `D[a-zA-Z0-9]{33,35}`
+        find: |t| first_run(t, |t, i| crate::scan::lit(t, i, "D"), 33, 35, |c| c.is_ascii_alphanumeric()),
+    },
+];
 
 const BASE58: &str = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
 
@@ -50,18 +81,19 @@ pub fn detect(text: &str) -> Option<Coin> {
         return None;
     }
     for k in KINDS.iter() {
-        let Some(m) = k.re.find(text) else { continue };
-        let before = text[..m.start()].chars().next_back();
+        let Some((start, end)) = (k.find)(text) else { continue };
+        let found = &text[start..end];
+        let before = text[..start].chars().next_back();
         if matches!(before, Some('/' | '.' | ':' | '=' | '?')) {
             continue;
         }
-        if matches!(text[m.end()..].chars().next(), Some('/' | '.')) {
+        if matches!(text[end..].chars().next(), Some('/' | '.')) {
             continue;
         }
-        if k.transparent && !base58(m.as_str()) {
+        if k.transparent && !base58(found) {
             continue;
         }
-        return Some(Coin { coin: k.coin, color: k.color, uri: k.uri, address: m.as_str().to_string() });
+        return Some(Coin { coin: k.coin, color: k.color, uri: k.uri, address: found.to_string() });
     }
     None
 }
@@ -111,6 +143,26 @@ pub fn card(id: &str, coin: &Coin, on_pay: impl Fn(String, &mut gpui::Window, &m
 #[cfg(test)]
 mod tests {
     use super::detect;
+
+    #[test]
+    fn finders_agree_with_the_patterns_they_replace() {
+        let shielded = regex::Regex::new(r"(?-u:\b)(?i:ps1[a-z0-9]{50,120})(?-u:\b)").unwrap();
+        let transparent = regex::Regex::new(r"(?-u:\b)D[a-zA-Z0-9]{33,35}(?-u:\b)").unwrap();
+        const PARTS: &[&str] = &["ps1", "PS1", "pſ1", "D", "abc123", "qwertyuiop", "Z", "\u{212A}", "ſ", "é", " ", "/", "_", "x9"];
+        let mut seed = 0xbadc_0ffeu64;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        for _ in 0..30_000 {
+            let s: String = (0..1 + next() % 30).map(|_| PARTS[(next() % PARTS.len() as u64) as usize]).collect();
+            let m = |r: &regex::Regex| r.find(&s).map(|m| (m.start(), m.end()));
+            assert_eq!((super::KINDS[0].find)(&s), m(&shielded), "{s:?}");
+            assert_eq!((super::KINDS[1].find)(&s), m(&transparent), "{s:?}");
+        }
+    }
 
     #[test]
     fn finds_addresses_outside_urls() {
