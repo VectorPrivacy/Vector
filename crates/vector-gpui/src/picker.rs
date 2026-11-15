@@ -383,6 +383,8 @@ pub struct EmojiPicker {
     /// The section the rail last saw, and whether it's still easing its tab into view.
     rail_seen: Option<Section>,
     rail_chase: bool,
+    /// The rail's marker: the tab it left, the tab it shows, and when it moved.
+    marker: (Option<Section>, Option<Section>, Option<std::time::Instant>),
     rail_drag: RailDrag,
 }
 
@@ -466,6 +468,7 @@ impl EmojiPicker {
             rail: ScrollHandle::new(),
             rail_seen: None,
             rail_chase: false,
+            marker: (None, None, None),
             rail_drag: RailDrag::default(),
         };
         this.rebuild();
@@ -1605,7 +1608,13 @@ impl EmojiPicker {
         let off = f32::from(self.rail.offset().y);
         // A child's bounds are where it lays out unscrolled: on screen it sits `off` from there.
         let (top, bottom) = (f32::from(item.top()) + off, f32::from(item.bottom()) + off);
-        let want = if top < f32::from(view.top()) + PAD {
+        let max = f32::from(self.rail.max_offset().y);
+        // The first tab and the last pack take the rail to its ends, with nothing cut above or below.
+        let want = if ix == 0 && off < 0. {
+            0.
+        } else if ix == 1 + self.packs.len() && off > -max {
+            -max
+        } else if top < f32::from(view.top()) + PAD {
             off + f32::from(view.top()) + PAD - top
         } else if bottom > f32::from(view.bottom()) - PAD {
             off - (bottom - f32::from(view.bottom()) + PAD)
@@ -1896,6 +1905,20 @@ fn thumb_of(state: Option<crate::media::Custom>, size: f32) -> AnyElement {
     }
 }
 
+/// The active tab's marker at `level` of its pop: 35% to full height about its middle, faded in.
+fn rail_marker(level: f32) -> impl IntoElement {
+    let h = 28. * (0.35 + 0.65 * level);
+    div()
+        .absolute()
+        .left(px(-12.))
+        .top(px(1. + (28. - h) / 2.))
+        .w(px(6.))
+        .h(px(h))
+        .rounded(px(2.))
+        .bg(c(PRIMARY))
+        .opacity(level)
+}
+
 impl Render for EmojiPicker {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.rail_tick(window, cx);
@@ -1973,8 +1996,31 @@ impl Render for EmojiPicker {
         } else {
             None
         };
+        // `.emoji-category-btn::before`: the marker pops out of the tab left as it pops into
+        // the next, 130ms ease-out; the first one shown is simply there.
+        let (_, cur, _) = self.marker;
+        if active != cur {
+            self.marker = (cur, active, cur.map(|_| std::time::Instant::now()));
+        }
+        let (left, shown, at) = self.marker;
+        let t = at.map_or(1., |a| (a.elapsed().as_secs_f32() / 0.13).min(1.));
+        if t < 1. {
+            cx.on_next_frame(window, |_, _, cx| cx.notify());
+        }
+        let eased = 1. - (1. - t) * (1. - t);
+        let level = move |s: Option<Section>| {
+            if s.is_none() {
+                0.
+            } else if s == shown {
+                eased
+            } else if s == left {
+                1. - eased
+            } else {
+                0.
+            }
+        };
         let rail_btn = |icon: &'static str, s: Option<Section>, cx: &mut Context<Self>| {
-            let on = s.is_some() && active == s;
+            let on = level(s);
             div()
                 .id(icon)
                 .when(s.is_none(), |d| d.tooltip(crate::kit::tooltip("Create new pack")))
@@ -1990,18 +2036,7 @@ impl Render for EmojiPicker {
                 .when(s.is_none(), |d| {
                     d.border_1().border_dashed().border_color(white_a(0.18))
                 })
-                .when(on, |d| {
-                    d.child(
-                        div()
-                            .absolute()
-                            .left(px(-12.))
-                            .top(px(1.))
-                            .w(px(6.))
-                            .h(px(28.))
-                            .rounded(px(2.))
-                            .bg(c(PRIMARY)),
-                    )
-                })
+                .when(on > 0., |d| d.child(rail_marker(on)))
                 .on_click(cx.listener(move |this, _, window, cx| match s {
                     Some(s) => this.go(s, cx),
                     None if this.creator.is_none() => this.open_creator(None, window, cx),
@@ -2099,18 +2134,7 @@ impl Render for EmojiPicker {
                     .cursor_pointer()
                     .hover(|d| d.opacity(0.7))
                     .when(p.dead(), |d| d.opacity(0.5))
-                    .when(active == Some(s), |d| {
-                        d.child(
-                            div()
-                                .absolute()
-                                .left(px(-12.))
-                                .top(px(1.))
-                                .w(px(6.))
-                                .h(px(28.))
-                                .rounded(px(2.))
-                                .bg(c(PRIMARY)),
-                        )
-                    })
+                    .when(level(Some(s)) > 0., |d| d.child(rail_marker(level(Some(s)))))
                     .when(self.rail_drag.from == Some(i), |d| d.opacity(0.3))
                     .on_click(cx.listener(move |this, _, _, cx| this.go(s, cx)))
                     .on_mouse_down(
