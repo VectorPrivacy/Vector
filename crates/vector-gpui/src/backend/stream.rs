@@ -20,6 +20,8 @@ const KEEP_BEHIND: u64 = 2 * 1024 * 1024;
 const HEAD_LIFE: Duration = Duration::from_secs(3);
 /// One request at most this many chunks: big enough to amortise a slow link's round trip.
 const MAX_BURST: u64 = 8;
+/// While the picture waits: a megabyte, enough for a second of most clips in one round trip.
+const WAITING_BURST: u64 = 4;
 const READ_TIMEOUT: Duration = Duration::from_secs(45);
 const ATTEMPTS: u32 = 4;
 
@@ -302,7 +304,7 @@ impl<R: Ranges> Stream<R> {
             heads.sort_unstable();
             heads.into_iter().find_map(|h| gap(h, st))
         })?;
-        let burst = if Self::playhead_waits(st) { 2 } else { MAX_BURST };
+        let burst = if Self::playhead_waits(st) { WAITING_BURST } else { MAX_BURST };
         let mut n = 1;
         while n < burst && start + n < end && !st.chunks.contains_key(&(start + n)) && !st.inflight.contains(&(start + n)) {
             n += 1;

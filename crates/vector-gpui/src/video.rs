@@ -125,6 +125,8 @@ struct Play {
     net: Option<Arc<crate::backend::stream::Stream<crate::backend::stream::Web>>>,
     /// Paused on an empty buffer, to go on once a little is back.
     rebuffering: bool,
+    /// Restarting after a seek, which wants less in hand than a first play.
+    resumed: bool,
 }
 
 impl Drop for Play {
@@ -505,8 +507,9 @@ impl Videos {
                 }
             }
             // Wait for a picture and the sound before the clock starts.
-            if c.playing && !p.started && !p.fresh && audio_ready && buffered(2.5) {
+            if c.playing && !p.started && !p.fresh && audio_ready && buffered(if p.resumed { 1. } else { 2.5 }) {
                 p.started = true;
+                p.resumed = false;
                 c.loading = false;
                 p.clock = Clock { anchor: c.position, at: Some(Instant::now()), rate: p.speed };
                 if let (Some(id), Ok(e)) = (p.source, crate::audio::engine()) {
@@ -594,6 +597,7 @@ fn seek(c: &mut Clip, ms: u64, input: Option<AudioInputSpec>, scale: f32) {
         if wait {
             p.started = false;
             p.rebuffering = false;
+            p.resumed = true;
             c.loading = true;
         }
         p.clock = Clock { anchor: ms, at: (c.playing && !wait).then(Instant::now), rate: p.speed };
@@ -720,6 +724,7 @@ fn start(input: AudioInputSpec, info: &Info, from: u64, scale: f32, big: bool, s
         ended: false,
         net,
         rebuffering: false,
+        resumed: false,
     })
 }
 
