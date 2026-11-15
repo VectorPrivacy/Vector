@@ -207,10 +207,14 @@ pub async fn mark_as_read(chat_id: String, message_id: Option<String>) -> bool {
             return false;
         }
         state.unread_clear(&chat_id);
-        db::chats::SlimChatDB::from_chat(&state.chats[idx], &state.interner)
+        let last_read = vector_core::compact::decode_message_id(&state.chats[idx].last_read);
+        (db::chats::SlimChatDB::from_chat(&state.chats[idx], &state.interner), last_read)
     };
+    let (slim, last_read) = slim;
     let _ = db::chats::save_slim_chat(&slim);
     super::notify::read(&chat_id);
+    // The UI's copy of the marker follows, so a reopened chat draws no stale NEW line.
+    vector_core::emit_event("chat_mark_read", &json!({ "chat_id": chat_id, "last_read": last_read }));
     vector_core::emit_event("unread_counts_stale", &json!({ "chats": [chat_id] }));
     true
 }

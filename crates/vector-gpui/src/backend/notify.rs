@@ -91,18 +91,7 @@ fn ready() {
 }
 
 async fn mark_read(chat_id: String) -> bool {
-    if !super::messaging::mark_as_read(chat_id.clone(), None).await {
-        return false;
-    }
-    let last_read = STATE
-        .lock()
-        .await
-        .get_chat(&chat_id)
-        .map(|c| vector_core::compact::decode_message_id(&c.last_read));
-    if let Some(last_read) = last_read {
-        vector_core::emit_event("chat_mark_read", &json!({ "chat_id": chat_id, "last_read": last_read }));
-    }
-    true
+    super::messaging::mark_as_read(chat_id, None).await
 }
 
 async fn reply(chat_id: String, text: String) -> Result<String, String> {

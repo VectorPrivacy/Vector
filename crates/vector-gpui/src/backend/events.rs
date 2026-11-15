@@ -62,19 +62,7 @@ impl InboundEventHandler for Handler {
         db::spawn_bound(async move {
             if msg.mine {
                 // Answered from another device: read here too.
-                if super::messaging::mark_as_read(chat_id.clone(), None).await {
-                    let last_read = STATE
-                        .lock()
-                        .await
-                        .get_chat(&chat_id)
-                        .map(|c| vector_core::compact::decode_message_id(&c.last_read));
-                    if let Some(last_read) = last_read {
-                        vector_core::emit_event(
-                            "chat_mark_read",
-                            &json!({ "chat_id": chat_id, "last_read": last_read }),
-                        );
-                    }
-                }
+                super::messaging::mark_as_read(chat_id.clone(), None).await;
                 return;
             }
             let marked = auto_mark_if_active(&chat_id, &msg.id).await;

@@ -3590,6 +3590,8 @@ impl VectorApp {
                     .to_string();
                 if let Some(chat) = self.store.borrow_mut().chat_mut(&chat_id) {
                     chat.last_read = last;
+                    // Reading ends a Mark as Unread, as the backend's marker does.
+                    chat.unread_from.clear();
                 }
                 self.notify_chat(&chat_id, cx);
             }
