@@ -235,6 +235,7 @@ pub fn run(app: &mut VectorApp, cmd: &str, window: &mut Window, cx: &mut Context
                 }
             });
         }
+        "file" => app.dev_open_file(rest.into(), window, cx),
         "drop" => {
             let p: Vec<&str> = rest.split(':').collect();
             if let [what, moved, how, target] = p[..] {

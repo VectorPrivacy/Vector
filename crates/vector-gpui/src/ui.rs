@@ -10259,6 +10259,46 @@ impl VectorApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.live {
+            // `checkUploadBlocked`: a file no enabled media server would take is refused before
+            // its preview, with each server's reason. Asking also warms the upload connection.
+            let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("bin").to_ascii_lowercase();
+            let rx = backend::run(async move {
+                let mime = vector_core::crypto::mime_from_extension(&ext);
+                let servers = vector_core::state::get_blossom_servers();
+                let warm = servers.clone();
+                vector_core::db::spawn_bound(async move {
+                    vector_core::blossom::warm_upload_connection(warm, mime, true, size).await;
+                });
+                vector_core::blossom_capabilities::upload_verdict(&servers, mime, true, size)
+            });
+            cx.spawn_in(window, async move |this, cx| {
+                // Fall open: the real upload's failover reports any real failure.
+                let verdict = rx.await.ok();
+                this.update_in(cx, |this, window, cx| match verdict {
+                    Some(v) if !v.likely => {
+                        let reasons: String = v.reasons.iter().map(|r| format!("<br>• {}", kit::escape(r))).collect();
+                        this.notice(
+                            "No media server will take this file",
+                            format!(
+                                "This file is <b>{}</b>.{reasons}<br><br>Shrink the file, or add a server in Settings → Network.",
+                                crate::media::format_bytes_with(size as f64, 1, false)
+                            ),
+                            cx,
+                        );
+                    }
+                    _ => this.preview_file(path, window, cx),
+                })
+                .ok();
+            })
+            .detach();
+            return;
+        }
+        self.preview_file(path, window, cx);
+    }
+
+    fn preview_file(&mut self, path: std::path::PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         let media = self.media.clone();
         self.open_preview(window, cx, move |chat, reply, window, cx| {
             crate::filepreview::FilePreview::new(path, chat, reply, window, cx).with_media(media)
@@ -19436,6 +19476,10 @@ impl VectorApp {
 
     pub(crate) fn dev_open_channel(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
         self.open_channel(id, window, cx);
+    }
+
+    pub(crate) fn dev_open_file(&mut self, path: std::path::PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_file_preview(path, window, cx);
     }
 
     pub(crate) fn dev_open_chat(&mut self, id: SharedString, window: &mut Window, cx: &mut Context<Self>) {
