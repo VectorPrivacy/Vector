@@ -1539,7 +1539,7 @@ impl VectorApp {
                 store.typing.insert(id, (who, now));
             }
         }
-        // Fixtures: VECTOR_EMBED_VIDEO=idle|loading|failed|ready|preview|grid gives the video embed a file of its
+        // Fixtures: VECTOR_EMBED_VIDEO=idle|loading|failed|ready|preview|grid|stream gives the video embed a file of its
         // own, in that state.
         if let Ok(state) = std::env::var("VECTOR_EMBED_VIDEO") {
             let url = "https://cdn.example.org/vector-tour.mp4".to_string();
@@ -1560,6 +1560,17 @@ impl VectorApp {
                 "failed" => drop(media.embed_videos.insert(url, VideoState::Failed("Media server returned an error status".into()))),
                 "ready" => drop(media.embed_videos.insert(url, VideoState::Ready(crate::audio::AudioInputSpec::File(clip)))),
                 "preview" => drop(media.embed_previews.insert(url, Some(crate::audio::AudioInputSpec::File(clip)))),
+                // With VECTOR_EMBED_STREAM=<https url>: that video, played while it downloads.
+                "stream" => {
+                    static RT: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
+                    let rt = RT.get_or_init(|| tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().expect("runtime"));
+                    let web = std::env::var("VECTOR_EMBED_STREAM").map_err(|e| e.to_string()).and_then(|u| crate::backend::stream::Web::new(&u));
+                    let state = match web.map(|w| rt.block_on(crate::backend::stream::open(w, None))) {
+                        Ok(Ok(s)) => VideoState::Ready(crate::audio::AudioInputSpec::Stream(s)),
+                        _ => VideoState::Failed("Couldn't stream it".into()),
+                    };
+                    media.embed_videos.insert(url, state);
+                }
                 _ => {}
             }
         }
@@ -14611,18 +14622,22 @@ impl VectorApp {
 
     fn fetch_embed_video(&mut self, v: crate::embeds::Media, cx: &mut Context<Self>) {
         let url = v.url.clone();
-        let rx = backend::run(backend::embedvideo::fetch(v.url, v.size, v.sha256, v.fallbacks));
+        let rx = backend::run(backend::embedvideo::play(v.url, v.size, v.sha256, v.fallbacks));
         cx.spawn(async move |this, cx| {
             let result = rx.await.unwrap_or_else(|_| Err("Backend stopped".into()));
             this.update(cx, |this, cx| {
                 use crate::embeds::VideoState;
+                use backend::embedvideo::{Fetched, Playable};
                 let mut media = this.media.borrow_mut();
                 match result {
-                    Ok(backend::embedvideo::Fetched::Held(h)) => {
+                    Ok(Playable::Fetched(Fetched::Held(h))) => {
                         media.embed_videos.insert(url, VideoState::Ready(crate::audio::AudioInputSpec::Held(h)));
                     }
-                    Ok(backend::embedvideo::Fetched::Sealed(p, mime)) => {
+                    Ok(Playable::Fetched(Fetched::Sealed(p, mime))) => {
                         media.embed_videos.insert(url, VideoState::Ready(crate::audio::AudioInputSpec::Sealed(p, mime)));
+                    }
+                    Ok(Playable::Stream(s)) => {
+                        media.embed_videos.insert(url, VideoState::Ready(crate::audio::AudioInputSpec::Stream(s)));
                     }
                     Err(e) if backend::embedvideo::is_cancel(&e) => {
                         media.embed_videos.remove(&url);

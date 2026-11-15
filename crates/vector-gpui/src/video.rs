@@ -121,6 +121,10 @@ struct Play {
     silent: bool,
     heard: Option<u64>,
     ended: bool,
+    /// A web video still downloading: playback waits on it.
+    net: Option<Arc<crate::backend::stream::Stream<crate::backend::stream::Web>>>,
+    /// Paused on an empty buffer, to go on once a little is back.
+    rebuffering: bool,
 }
 
 impl Drop for Play {
@@ -471,8 +475,30 @@ impl Videos {
                 }
             }
             let audio_ready = c.info.as_ref().is_none_or(|i| !i.audio) || p.source.is_some() || p.silent;
+            // A stream starts with a few seconds in hand, and holds (spinner up) when they run out.
+            let buffered = |secs: f64| p.net.as_ref().is_none_or(|s| s.error().is_some() || s.complete_ahead() || s.ahead_secs().is_some_and(|a| a >= secs));
+            if let Some(e) = p.net.as_ref().and_then(|s| s.error()) {
+                log::warn!("[video] stream: {e}");
+                c.playing = false;
+                c.loading = false;
+            }
+            if c.playing && p.started && !p.rebuffering && p.net.as_ref().is_some_and(|s| s.starving()) {
+                p.rebuffering = true;
+                c.loading = true;
+                p.clock = Clock { anchor: p.clock.now(), at: None, rate: p.speed };
+                if let (Some(id), Ok(e)) = (p.source, crate::audio::engine()) {
+                    let _ = e.pause(id);
+                }
+            } else if p.rebuffering && buffered(1.) {
+                p.rebuffering = false;
+                c.loading = false;
+                p.clock = Clock { anchor: p.clock.now(), at: Some(Instant::now()), rate: p.speed };
+                if let (Some(id), Ok(e)) = (p.source, crate::audio::engine()) {
+                    let _ = e.play(id);
+                }
+            }
             // Wait for a picture and the sound before the clock starts.
-            if c.playing && !p.started && !p.fresh && audio_ready {
+            if c.playing && !p.started && !p.fresh && audio_ready && buffered(2.5) {
                 p.started = true;
                 c.loading = false;
                 p.clock = Clock { anchor: c.position, at: Some(Instant::now()), rate: p.speed };
@@ -633,6 +659,10 @@ fn start(input: AudioInputSpec, info: &Info, from: u64, scale: f32, big: bool, s
     let target = (((w * scale) as u32).min(info.w).max(1), ((h * scale) as u32).min(info.h).max(1));
     let slot = Arc::new(Mutex::new(None));
     let track: Track = Arc::default();
+    let net = match &input {
+        AudioInputSpec::Stream(s) => Some(s.clone()),
+        _ => None,
+    };
     if info.audio {
         let (slot, input, track) = (slot.clone(), input.clone(), track.clone());
         // spawn-detached: decodes bytes in hand into the engine; owns no account state.
@@ -671,6 +701,8 @@ fn start(input: AudioInputSpec, info: &Info, from: u64, scale: f32, big: bool, s
         silent: false,
         heard: None,
         ended: false,
+        net,
+        rebuffering: false,
     })
 }
 
@@ -678,7 +710,8 @@ fn start(input: AudioInputSpec, info: &Info, from: u64, scale: f32, big: bool, s
 fn load_audio(input: &AudioInput) -> Result<u32, String> {
     let e = crate::audio::engine()?;
     let mp4 = input.extension().is_some_and(|x| matches!(x.as_str(), "mp4" | "mov" | "m4v"));
-    if mp4 && let Ok(r) = e.load_from_file(input) {
+    // A stream decodes as it plays: reading all of it first would download the whole video.
+    if (mp4 || input.is_remote()) && let Ok(r) = e.load_from_file(input) {
         return Ok(r.id);
     }
     let (samples, rate) = decode_audio(input)?;
@@ -690,7 +723,13 @@ pub fn run(work: Work) -> futures::channel::oneshot::Receiver<WorkDone> {
     // spawn-detached: reads the file's header and first frame; owns no account state.
     std::thread::spawn(move || {
         let done = match work {
-            Work::Probe(att, input, scale) => WorkDone::Probed(att, input.open().ok().and_then(|i| probe(i, scale))),
+            Work::Probe(att, input, scale) => {
+                let info = input.open().ok().and_then(|i| probe(i, scale));
+                if let (AudioInputSpec::Stream(s), Some(i)) = (&input, &info) {
+                    s.set_duration(i.duration);
+                }
+                WorkDone::Probed(att, info)
+            }
         };
         let _ = tx.send(done);
     });

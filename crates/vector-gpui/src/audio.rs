@@ -84,6 +84,8 @@ pub enum AudioInputSpec {
     Held([u8; 32]),
     /// A sealed cache file, and the type of its bytes.
     Sealed(std::path::PathBuf, &'static str),
+    /// A web video read while it downloads.
+    Stream(std::sync::Arc<crate::backend::stream::Stream<crate::backend::stream::Web>>),
 }
 
 impl AudioInputSpec {
@@ -102,6 +104,7 @@ impl AudioInputSpec {
             AudioInputSpec::Held(h) => vector_core::media::open(h)
                 .map(AudioInput::Held)
                 .ok_or_else(|| "Audio file not found".into()),
+            AudioInputSpec::Stream(s) => Ok(AudioInput::Held(s.clone())),
         }
     }
 }

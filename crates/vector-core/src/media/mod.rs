@@ -20,6 +20,10 @@ pub trait MediaSource: Send + Sync {
     fn mime(&self) -> &str;
     /// Fill `buf` from `offset`. Fewer bytes only at the end, none past it.
     fn read_at(&self, offset: u64, buf: &mut [u8]) -> std::io::Result<usize>;
+    /// Bytes still on the network: a reader that wants all of them downloads the file.
+    fn remote(&self) -> bool {
+        false
+    }
 }
 
 /// "Keep Files on This Device": every file received is kept in the store too, not only held.

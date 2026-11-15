@@ -117,6 +117,34 @@ pub async fn preview(url: String, sha256: Option<String>) -> Result<Fetched, Str
     Ok(Fetched::Sealed(path, mime(poster.ext)))
 }
 
+pub enum Playable {
+    Fetched(Fetched),
+    Stream(std::sync::Arc<super::stream::Stream<super::stream::Web>>),
+}
+
+/// Played while it downloads where the host serves byte ranges; a video already here, or a
+/// host that serves only whole files, goes the whole-file way.
+pub async fn play(url: String, size: Option<u64>, sha256: Option<String>, fallbacks: Vec<String>) -> Result<Playable, String> {
+    if !url.starts_with("https://") {
+        return Err("Not a web video".into());
+    }
+    let dir = dir()?;
+    let stem = stem(&url, sha256.as_deref());
+    let held = vector_core::media::url_key("embed-video", &stem);
+    if vector_core::media::resident(&held) {
+        return Ok(Playable::Fetched(Fetched::Held(held)));
+    }
+    if let Some(done) = cached(&dir, &stem) {
+        return Ok(Playable::Fetched(done));
+    }
+    match super::stream::open(super::stream::Web::new(&url)?, sha256.clone()).await {
+        Ok(s) => return Ok(Playable::Stream(s)),
+        Err(super::stream::Open::NoRanges) => {}
+        Err(super::stream::Open::Failed(e)) => log::warn!("[video] streaming {url}: {e}"),
+    }
+    fetch(url, size, sha256, fallbacks).await.map(Playable::Fetched)
+}
+
 pub async fn fetch(url: String, size: Option<u64>, sha256: Option<String>, fallbacks: Vec<String>) -> Result<Fetched, String> {
     if !url.starts_with("https://") {
         return Err("Not a web video".into());
