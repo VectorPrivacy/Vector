@@ -232,6 +232,7 @@ impl Call {
         self.id = Some(id);
         self.peer = str_of("peer");
         self.outgoing = bool_of("outgoing");
+        let was = self.phase;
         self.phase = s.get("phase").and_then(Value::as_str).and_then(phase_of);
         self.reason = s.get("reason").and_then(Value::as_str).map(str::to_string);
         self.muted = bool_of("muted");
@@ -259,7 +260,8 @@ impl Call {
             self.maximized = None;
         }
         self.ended_at = (self.phase == Some(Phase::Ended)).then(Instant::now);
-        if self.phase != Some(Phase::Active) && self.phase != Some(Phase::Ended) {
+        // On a phase change only: a mute or volume update mid-ring keeps the details open.
+        if self.phase != was && self.phase != Some(Phase::Active) && self.phase != Some(Phase::Ended) {
             self.expanded = false;
         }
     }
