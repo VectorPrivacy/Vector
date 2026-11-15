@@ -1,8 +1,9 @@
-//! An unencrypted web video played while it downloads: byte ranges fetched around where the
-//! decoder reads, about ten seconds ahead, more on a slow or uneven link. The decoder's reads
-//! wait for the bytes they need; a seek moves where fetching continues.
+//! An unencrypted web video played while it downloads, as a browser does: one connection reads
+//! on from where the decoder needs bytes, about ten seconds ahead (more on a slow or uneven
+//! link), and pauses when that is in hand. The decoder's reads wait for the bytes they need; a
+//! read elsewhere (a seek, the sound's own position) moves the connection there.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::future::Future;
 use std::sync::{Arc, Condvar, Mutex, Weak};
 use std::time::{Duration, Instant};
@@ -20,18 +21,10 @@ const KEEP_BEHIND: u64 = 2 * 1024 * 1024;
 const HEAD_SPAN: Duration = Duration::from_secs(2);
 /// A head nobody has read from for this long is gone.
 const HEAD_LIFE: Duration = Duration::from_secs(3);
-/// One request at most this many chunks: big enough to amortise a slow link's round trip.
-const MAX_BURST: u64 = 8;
-/// While the picture waits: a megabyte, enough for a second of most clips in one round trip.
-const WAITING_BURST: u64 = 4;
 const READ_TIMEOUT: Duration = Duration::from_secs(45);
 const ATTEMPTS: u32 = 4;
-/// Requests in flight at once when a host is slow to answer each; a quick one gets one at a time,
-/// as hosts that cap a client's bandwidth slow every request it opens alongside.
-const PARALLEL: usize = 3;
-const SLOW_ANSWER: f64 = 0.4;
-/// A request still unanswered after this is dropped and asked again.
-const STALL: Duration = Duration::from_secs(8);
+/// A connection that brings nothing for this long is dropped and opened again where it was.
+const NO_PROGRESS: Duration = Duration::from_secs(6);
 
 /// One answer to a range request.
 pub struct Got {
@@ -42,9 +35,17 @@ pub struct Got {
     pub ranged: bool,
 }
 
+/// The bytes of an open connection, as they come; `None` at the file's end.
+pub trait Body: Send + 'static {
+    fn next(&mut self) -> impl Future<Output = Result<Option<Vec<u8>>, String>> + Send;
+}
+
 /// Where byte ranges come from: the web, or memory in a test.
 pub trait Ranges: Send + Sync + 'static {
+    type Body: Body;
     fn get(&self, start: u64, end: u64) -> impl Future<Output = Result<Got, String>> + Send;
+    /// The file from `start` on.
+    fn from(&self, start: u64) -> impl Future<Output = Result<Self::Body, String>> + Send;
 }
 
 pub enum Open {
@@ -69,7 +70,6 @@ struct Head {
 
 struct State {
     chunks: BTreeMap<u64, Vec<u8>>,
-    inflight: BTreeSet<u64>,
     heads: Vec<Head>,
     /// The offset a read is blocked on.
     wanted: Option<u64>,
@@ -119,7 +119,6 @@ pub async fn open<R: Ranges>(ranges: R, expected: Option<String>) -> Result<Arc<
         ranges: Arc::new(ranges),
         state: Mutex::new(State {
             chunks: BTreeMap::new(),
-            inflight: BTreeSet::new(),
             heads: vec![Head { reader: None, at: 0, last: 0, span: Instant::now(), seen: Instant::now(), waiting: false }],
             wanted: None,
             error: None,
@@ -252,7 +251,6 @@ impl<R: Ranges> Stream<R> {
     fn store(&self, st: &mut State, first: u64, bytes: Vec<u8>) {
         for (k, part) in bytes.chunks(CHUNK as usize).enumerate() {
             let i = first + k as u64;
-            st.inflight.remove(&i);
             st.chunks.entry(i).or_insert_with(|| part.to_vec());
         }
         self.hash_along(st);
@@ -302,55 +300,30 @@ impl<R: Ranges> Stream<R> {
         }
     }
 
-    /// The next run of chunks to fetch.
-    fn next(&self, st: &mut State) -> Option<(u64, u64)> {
+    /// The chunk to fetch next: the playhead's window first, then a read waiting elsewhere (the
+    /// sound at the edge, a header at the file's end), then the other readers front to back.
+    fn next_gap(&self, st: &State) -> Option<u64> {
         let window = self.window(st);
-        let gap = |from: u64, st: &State| {
+        let gap = |from: u64| {
             let end = ((from + window).div_ceil(CHUNK)).min(self.chunks());
-            (from / CHUNK..end).find(|i| !st.chunks.contains_key(i) && !st.inflight.contains(i)).map(|i| (i, end))
+            (from / CHUNK..end).find(|i| !st.chunks.contains_key(i))
         };
-        // The playhead's window first, then a read waiting elsewhere (the sound at the edge),
-        // then the other readers front to back.
-        let urgent = Self::earliest(st).and_then(|h| gap(h, st));
-        let blocked = st.wanted.and_then(|w| gap(w, st));
-        let (start, end) = urgent.or(blocked).or_else(|| {
+        let urgent = Self::earliest(st).and_then(gap);
+        urgent.or_else(|| st.wanted.and_then(gap)).or_else(|| {
             let mut heads: Vec<u64> = st.heads.iter().map(|h| h.at).collect();
             heads.sort_unstable();
-            heads.into_iter().find_map(|h| gap(h, st))
-        })?;
-        let burst = if Self::playhead_waits(st) { WAITING_BURST } else { MAX_BURST };
-        let mut n = 1;
-        while n < burst && start + n < end && !st.chunks.contains_key(&(start + n)) && !st.inflight.contains(&(start + n)) {
-            n += 1;
-        }
-        for i in start..start + n {
-            st.inflight.insert(i);
-        }
-        Some((start, n))
+            heads.into_iter().find_map(gap)
+        })
     }
 
-    fn landed(&self, first: u64, n: u64, got: Result<Got, String>, took: Duration, ttfb: Duration) -> bool {
+    /// A smoothed throughput (bytes/s) or time to first byte (s) sample.
+    fn measured(&self, rate: Option<f64>, latency: Option<f64>) {
         let mut st = self.state.lock().unwrap();
-        match got {
-            Ok(g) if g.ranged => {
-                let secs = took.as_secs_f64().max(1e-3);
-                let rate = g.bytes.len() as f64 / secs;
-                st.rate = Some(st.rate.map_or(rate, |r| r * 0.7 + rate * 0.3));
-                let lat = ttfb.as_secs_f64();
-                st.latency = Some(st.latency.map_or(lat, |l| l * 0.7 + lat * 0.3));
-                self.store(&mut st, first, g.bytes);
-                true
-            }
-            other => {
-                for i in first..first + n {
-                    st.inflight.remove(&i);
-                }
-                if other.is_ok() {
-                    st.error = Some("The video host stopped answering ranges".into());
-                    self.arrived.notify_all();
-                }
-                false
-            }
+        if let Some(r) = rate {
+            st.rate = Some(st.rate.map_or(r, |old| old * 0.7 + r * 0.3));
+        }
+        if let Some(l) = latency {
+            st.latency = Some(st.latency.map_or(l, |old| old * 0.7 + l * 0.3));
         }
     }
 
@@ -360,63 +333,110 @@ impl<R: Ranges> Stream<R> {
     }
 }
 
+/// One open connection: the chunk it is filling and the bytes of it in hand.
+struct Conn<B> {
+    body: B,
+    chunk: u64,
+    buf: Vec<u8>,
+    opened: Instant,
+    answered: bool,
+    /// Bytes and time spent waiting on the body since the last rate sample.
+    tally: (usize, Duration),
+}
+
 async fn fetch_loop<R: Ranges>(weak: Weak<Stream<R>>) {
-    use futures::stream::{FuturesUnordered, StreamExt};
+    let mut conn: Option<Conn<R::Body>> = None;
     let mut failures = 0u32;
-    let mut flying = FuturesUnordered::new();
     loop {
         let Some(s) = weak.upgrade() else { return };
         if s.state.lock().unwrap().error.is_some() {
             return;
         }
-        let lanes = {
-            let st = s.state.lock().unwrap();
-            // A waiting picture gets a lane of its own, whatever slow request holds the others.
-            let base = if st.latency.is_some_and(|l| l >= SLOW_ANSWER) { PARALLEL } else { 1 };
-            base + usize::from(Stream::<R>::playhead_waits(&st))
+        let target = s.next_gap(&s.state.lock().unwrap());
+        let Some(target) = target else {
+            // The window is in hand: the connection waits unread, the host held back by TCP.
+            let moved = s.moved.clone();
+            drop(s);
+            let _ = tokio::time::timeout(Duration::from_millis(500), moved.notified()).await;
+            continue;
         };
-        while flying.len() < lanes {
-            let next = {
-                let mut st = s.state.lock().unwrap();
-                s.next(&mut st)
-            };
-            let Some((first, n)) = next else { break };
-            let (start, end) = (first * CHUNK, ((first + n) * CHUNK).min(s.len));
-            // The requests hold the host, never the stream: letting go of the player ends them.
+        if conn.as_ref().is_none_or(|c| c.chunk != target) {
+            conn = None;
             let ranges = s.ranges.clone();
-            flying.push(async move {
-                let t0 = Instant::now();
-                let got = match tokio::time::timeout(STALL, ranges.get(start, end)).await {
-                    Ok(got) => got,
-                    Err(_) => Err("The video host stalled".into()),
-                };
-                (first, n, end - start, got, t0.elapsed())
-            });
-        }
-        let moved = s.moved.clone();
-        drop(s);
-        let landed = tokio::select! {
-            l = flying.next(), if !flying.is_empty() => l,
-            _ = tokio::time::timeout(Duration::from_millis(500), moved.notified()) => None,
-        };
-        let Some((first, n, bytes, got, took)) = landed else { continue };
-        let Some(s) = weak.upgrade() else { return };
-        // Round trip of a small request is mostly latency; of a big one mostly transfer.
-        let ttfb = if bytes <= CHUNK { took } else { took.mul_f64(CHUNK as f64 / bytes as f64) };
-        let err = got.as_ref().err().cloned();
-        if s.landed(first, n, got, took, ttfb) {
-            failures = 0;
+            drop(s);
+            let opened = Instant::now();
+            let e = match tokio::time::timeout(NO_PROGRESS, ranges.from(target * CHUNK)).await {
+                Ok(Ok(body)) => {
+                    conn = Some(Conn { body, chunk: target, buf: Vec::new(), opened, answered: false, tally: (0, Duration::ZERO) });
+                    continue;
+                }
+                Ok(Err(e)) => e,
+                Err(_) => "The video host stopped answering".into(),
+            };
+            if !retry(&weak, &mut failures, e).await {
+                return;
+            }
             continue;
         }
-        let Some(e) = err else { return };
-        failures += 1;
-        if failures >= ATTEMPTS {
-            s.fail(e);
+        drop(s);
+        let Some(c) = conn.as_mut() else { continue };
+        let t0 = Instant::now();
+        let piece = tokio::time::timeout(NO_PROGRESS, c.body.next()).await;
+        let waited = t0.elapsed();
+        let Some(s) = weak.upgrade() else { return };
+        let e = match piece {
+            Ok(Ok(Some(bytes))) => {
+                failures = 0;
+                if !c.answered {
+                    c.answered = true;
+                    s.measured(None, Some(c.opened.elapsed().as_secs_f64()));
+                } else {
+                    c.tally = (c.tally.0 + bytes.len(), c.tally.1 + waited);
+                }
+                if c.tally.0 as u64 >= CHUNK {
+                    s.measured(Some(c.tally.0 as f64 / c.tally.1.as_secs_f64().max(1e-3)), None);
+                    c.tally = (0, Duration::ZERO);
+                }
+                c.buf.extend_from_slice(&bytes);
+                loop {
+                    let need = (s.len - (c.chunk * CHUNK).min(s.len)).min(CHUNK) as usize;
+                    if need == 0 || c.buf.len() < need {
+                        break;
+                    }
+                    let rest = c.buf.split_off(need);
+                    let whole = std::mem::replace(&mut c.buf, rest);
+                    let mut st = s.state.lock().unwrap();
+                    s.store(&mut st, c.chunk, whole);
+                    c.chunk += 1;
+                }
+                continue;
+            }
+            Ok(Ok(None)) => {
+                conn = None;
+                continue;
+            }
+            Ok(Err(e)) => e,
+            Err(_) => "The video host stalled".into(),
+        };
+        conn = None;
+        drop(s);
+        if !retry(&weak, &mut failures, e).await {
             return;
         }
-        drop(s);
-        tokio::time::sleep(Duration::from_millis(500 * failures as u64)).await;
     }
+}
+
+/// A failed connection: back off and go on, or give up for good after a few in a row.
+async fn retry<R: Ranges>(weak: &Weak<Stream<R>>, failures: &mut u32, e: String) -> bool {
+    *failures += 1;
+    if *failures >= ATTEMPTS {
+        if let Some(s) = weak.upgrade() {
+            s.fail(e);
+        }
+        return false;
+    }
+    tokio::time::sleep(Duration::from_millis(500 * *failures as u64)).await;
+    true
 }
 
 impl<R: Ranges> vector_core::media::MediaSource for Stream<R> {
@@ -488,7 +508,31 @@ impl Web {
     }
 }
 
+pub struct WebBody(vector_core::net::Resp);
+
+impl Body for WebBody {
+    async fn next(&mut self) -> Result<Option<Vec<u8>>, String> {
+        self.0.chunk().await.map(|b| b.map(|b| b.to_vec())).map_err(|e| e.to_string())
+    }
+}
+
 impl Ranges for Web {
+    type Body = WebBody;
+
+    async fn from(&self, start: u64) -> Result<WebBody, String> {
+        let resp = vector_core::net::proxied_request(&self.client, reqwest::Method::GET, &self.url)
+            .await
+            .header(reqwest::header::RANGE, format!("bytes={start}-"))
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
+        match resp.status() {
+            reqwest::StatusCode::PARTIAL_CONTENT => Ok(WebBody(resp)),
+            s if s.is_success() => Err("The video host stopped answering ranges".into()),
+            s => Err(format!("The video host answered {s}")),
+        }
+    }
+
     async fn get(&self, start: u64, end: u64) -> Result<Got, String> {
         let resp = vector_core::net::proxied_request(&self.client, reqwest::Method::GET, &self.url)
             .await
@@ -527,14 +571,46 @@ mod tests {
 
     /// A file in memory, served as ranges at `bps` bytes a second after `latency`.
     struct Mem {
-        bytes: Vec<u8>,
+        bytes: Arc<Vec<u8>>,
         ranged: bool,
         bps: Option<f64>,
         latency: Duration,
-        served: std::sync::atomic::AtomicU64,
+        served: Arc<std::sync::atomic::AtomicU64>,
+        opened: std::sync::atomic::AtomicU32,
+    }
+
+    struct MemBody {
+        bytes: Arc<Vec<u8>>,
+        at: usize,
+        bps: Option<f64>,
+        served: Arc<std::sync::atomic::AtomicU64>,
+    }
+
+    impl Body for MemBody {
+        async fn next(&mut self) -> Result<Option<Vec<u8>>, String> {
+            let end = (self.at + 64 * 1024).min(self.bytes.len());
+            if self.at >= end {
+                return Ok(None);
+            }
+            let part = self.bytes[self.at..end].to_vec();
+            if let Some(bps) = self.bps {
+                tokio::time::sleep(Duration::from_secs_f64(part.len() as f64 / bps)).await;
+            }
+            self.at = end;
+            self.served.fetch_add(part.len() as u64, std::sync::atomic::Ordering::Relaxed);
+            Ok(Some(part))
+        }
     }
 
     impl Ranges for Mem {
+        type Body = MemBody;
+
+        async fn from(&self, start: u64) -> Result<MemBody, String> {
+            self.opened.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            tokio::time::sleep(self.latency).await;
+            Ok(MemBody { bytes: self.bytes.clone(), at: start as usize, bps: self.bps, served: self.served.clone() })
+        }
+
         async fn get(&self, start: u64, end: u64) -> Result<Got, String> {
             tokio::time::sleep(self.latency).await;
             if !self.ranged {
@@ -556,7 +632,7 @@ mod tests {
     }
 
     fn mem(bytes: Vec<u8>) -> Mem {
-        Mem { bytes, ranged: true, bps: None, latency: Duration::ZERO, served: Default::default() }
+        Mem { bytes: Arc::new(bytes), ranged: true, bps: None, latency: Duration::ZERO, served: Default::default(), opened: Default::default() }
     }
 
     fn sha(b: &[u8]) -> String {
@@ -651,16 +727,17 @@ mod tests {
     }
 
     #[test]
-    fn a_host_slow_to_answer_is_asked_several_ranges_at_once() {
+    fn a_host_slow_to_answer_pays_its_delay_once() {
         let rt = rt();
         let mut m = mem(video(40 * 1024 * 1024));
         m.latency = Duration::from_secs(1);
         let s = rt.block_on(open(m, None)).ok().unwrap();
         s.set_duration(80_000);
         std::thread::sleep(Duration::from_millis(2500));
-        // One at a time, two 2 MB answers fit in this; three lanes fill the window.
-        let served = s.ranges().served.load(std::sync::atomic::Ordering::Relaxed);
-        assert!(served >= 11 * 512 * 1024, "served {served}");
+        // One connection reads on: the window is in hand after a single round trip.
+        let held: u64 = s.state.lock().unwrap().chunks.values().map(|c| c.len() as u64).sum();
+        assert!(held >= 5 * 1024 * 1024, "held {held}");
+        assert_eq!(s.ranges().opened.load(std::sync::atomic::Ordering::Relaxed), 1);
     }
 
     #[test]
