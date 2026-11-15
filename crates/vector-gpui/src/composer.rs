@@ -243,6 +243,40 @@ fn npub_mentions(text: &str) -> Vec<Range<usize>> {
 /// What an emoji's art occupies in the drawn text: 1.25em (`.cmp-twemoji`), an em space and a quarter-em.
 const EMOJI_SLOT: &str = "\u{2003}\u{2005}";
 
+/// Rubik has no em or quarter-em space, so a fallback font would pick the slot's width and lift the
+/// line; `assets/fonts/VectorSlot.ttf` has only those two, at exactly 1em and 0.25em, on Rubik's metrics.
+const SLOT_FAMILY: &str = "Vector Slot";
+
+/// Shapes each emoji slot in [`SLOT_FAMILY`].
+fn slot_runs(runs: Vec<TextRun>, slots: &[Range<usize>]) -> Vec<TextRun> {
+    if slots.is_empty() {
+        return runs;
+    }
+    let mut out = Vec::with_capacity(runs.len() + slots.len() * 2);
+    let mut at = 0;
+    for run in runs {
+        let end = at + run.len;
+        let mut from = at;
+        for s in slots.iter().filter(|s| s.start < end && s.end > at) {
+            let (a, b) = (s.start.max(at), s.end.min(end));
+            if a > from {
+                out.push(TextRun { len: a - from, ..run.clone() });
+            }
+            let mut slot = TextRun { len: b - a, ..run.clone() };
+            slot.font.family = SLOT_FAMILY.into();
+            slot.font.weight = gpui::FontWeight::NORMAL;
+            slot.font.style = gpui::FontStyle::Normal;
+            out.push(slot);
+            from = b;
+        }
+        if end > from {
+            out.push(TextRun { len: end - from, ..run });
+        }
+        at = end;
+    }
+    out
+}
+
 /// How a field draws: the composer's, or a login field's.
 #[derive(Clone)]
 pub struct Look {
@@ -1242,6 +1276,8 @@ impl TextInput {
             Some(names) => self.decorate(runs, names),
             None => runs,
         };
+        let slots: Vec<Range<usize>> = self.subs().iter().filter(|s| s.label.is_none()).map(|s| s.display.clone()).collect();
+        let runs = slot_runs(runs, &slots);
         (text, runs, style.font_size.to_pixels(window.rem_size()))
     }
 
@@ -1618,7 +1654,7 @@ impl Element for TextElement {
             }
             (layout, caret)
         });
-        self.input.update(cx, |input, cx| {
+        let scrolled = self.input.update(cx, |input, _| {
             input.last_layout = Some(layout);
             input.last_bounds = Some(bounds);
             // Keep the caret in view of a scrolled field.
@@ -1633,13 +1669,18 @@ impl Element for TextElement {
                     } else if bottom > view.bottom() {
                         offset.y -= bottom - view.bottom();
                     } else {
-                        return;
+                        return false;
                     }
                     input.scroll.set_offset(offset);
-                    cx.notify();
+                    return true;
                 }
             }
+            false
         });
+        // A notify mid-draw is dropped, so the new offset would wait for an unrelated repaint.
+        if scrolled {
+            window.request_animation_frame();
+        }
     }
 }
 
@@ -2272,7 +2313,10 @@ impl TextInput {
                     break;
                 }
                 if offset < sub.display.end {
-                    return if offset - sub.display.start > sub.display.len() / 2 {
+                    // A slot's one inner boundary sits at 1em of its 1.25em, past the art's middle.
+                    let past = offset - sub.display.start;
+                    let after = if sub.label.is_none() { past * 2 >= sub.display.len() } else { past > sub.display.len() / 2 };
+                    return if after {
                         sub.content.end
                     } else {
                         sub.content.start
