@@ -2954,13 +2954,13 @@ pub fn load_community_v2(id: &CommunityId) -> Result<Option<crate::community::v2
 
     // One vault read for the whole row set.
     let dk = |o: &mut crate::crypto::AtRestOpener, b: &[u8]| to_32(&o.open_blob_or_keep(b));
-    let dt = |o: &mut crate::crypto::AtRestOpener, s: &str| o.open_or_keep(s.to_string());
+    let dt = |o: &mut crate::crypto::AtRestOpener, s: String| o.open_or_keep(s);
     crate::crypto::open_batch(|o| {
         let community_root = dk(o, &root_blob)?;
-        let owner_xonly = parse_hex32(&dt(o, &owner_pk_e))?;
-        let owner_salt = parse_hex32(&dt(o, &owner_salt_e))?;
+        let owner_xonly = parse_hex32(&dt(o, owner_pk_e))?;
+        let owner_salt = parse_hex32(&dt(o, owner_salt_e))?;
         let identity = CommunityIdentity { community_id: *id, owner_xonly, owner_salt };
-        let relays: Vec<String> = serde_json::from_str(&dt(o, &relays_e)).unwrap_or_default();
+        let relays: Vec<String> = serde_json::from_str(&dt(o, relays_e)).unwrap_or_default();
 
         let mut channels = Vec::new();
         {
@@ -2989,12 +2989,12 @@ pub fn load_community_v2(id: &CommunityId) -> Result<Option<crate::community::v2
                 // Unparseable stash degrades to empty — the fold re-persists the
                 // authoritative value on its next pass.
                 let ch_stash: ChannelMetaStash = ch_stash_e
-                    .map(|s| dt(o, &s))
+                    .map(|s| dt(o, s))
                     .and_then(|j| serde_json::from_str(&j).ok())
                     .unwrap_or_default();
                 channels.push(ChannelV2 {
                     id: ChannelId(hex_id_to_32(&ch_hex)?),
-                    name: dt(o, &name_e),
+                    name: dt(o, name_e),
                     private,
                     // A public channel derives from the root — drop the placeholder. A
                     // PRIVATE channel stored with the root value is the KEYLESS placeholder
@@ -3022,7 +3022,7 @@ pub fn load_community_v2(id: &CommunityId) -> Result<Option<crate::community::v2
             for row in rows {
                 let (ch_hex, content) = row.map_err(|e| e.to_string())?;
                 let Some(ch) = channels.iter_mut().find(|c| crate::simd::hex::bytes_to_hex_32(&c.id.0) == ch_hex) else { continue };
-                ch.writers = crate::community::v2::writers::Ledger::parse(&dt(o, &content)).filter(|l| l.channel == ch.id.0);
+                ch.writers = crate::community::v2::writers::Ledger::parse(&dt(o, content)).filter(|l| l.channel == ch.id.0);
             }
         }
         // The held set keeps these resident; push-growth leaves up to half unused.
@@ -3031,13 +3031,13 @@ pub fn load_community_v2(id: &CommunityId) -> Result<Option<crate::community::v2
         // Unparseable image JSON degrades to no-image rather than failing the load —
         // the fold re-persists the authoritative value on its next pass.
         let icon = icon_e
-            .map(|s| dt(o, &s))
+            .map(|s| dt(o, s))
             .and_then(|j| serde_json::from_str::<crate::community::v2::control::ImageRef>(&j).ok());
         let banner = banner_e
-            .map(|s| dt(o, &s))
+            .map(|s| dt(o, s))
             .and_then(|j| serde_json::from_str::<crate::community::v2::control::ImageRef>(&j).ok());
         let stash: CommunityMetaStash = stash_e
-            .map(|s| dt(o, &s))
+            .map(|s| dt(o, s))
             .and_then(|j| serde_json::from_str(&j).ok())
             .unwrap_or_default();
 
@@ -3045,9 +3045,7 @@ pub fn load_community_v2(id: &CommunityId) -> Result<Option<crate::community::v2
         // address degrades to the legacy view, and a secret that no longer derives
         // to the held address is dropped to read-only rather than signing at an
         // address nobody reads.
-        let control_pk = control_pk_e
-            .as_deref()
-            .and_then(|e| nostr_sdk::prelude::PublicKey::from_hex(&dt(o, e)).ok());
+        let control_pk = control_pk_e.and_then(|e| nostr_sdk::prelude::PublicKey::from_hex(&dt(o, e)).ok());
         let control_root = match (control_pk, control_root_b) {
             (Some(pk), Some(blob)) => dk(o, &blob).ok().filter(|cr| {
                 crate::community::v2::derive::control_signer_group_key(cr, id, Epoch(root_epoch as u64)).pk() == pk
@@ -3061,8 +3059,8 @@ pub fn load_community_v2(id: &CommunityId) -> Result<Option<crate::community::v2
             root_epoch: Epoch(root_epoch as u64),
             control_pk,
             control_root,
-            name: dt(o, &name_e),
-            description: desc_e.map(|d| dt(o, &d)),
+            name: dt(o, name_e),
+            description: desc_e.map(|d| dt(o, d)),
             icon,
             banner,
             meta_custom: stash.custom,
@@ -3246,7 +3244,7 @@ fn read_guestbook(community_id: &str) -> Result<(Vec<crate::community::v2::guest
         rows.filter_map(|r| r.ok()).filter_map(|(id, body)| Some((id.try_into().ok()?, body))).collect()
     };
     let events = crate::crypto::open_batch(|o| {
-        rows.into_iter().filter_map(|(id, body)| crate::community::v2::guestbook::event_from_body(id, &o.open_blob_or_keep(&body))).collect()
+        rows.into_iter().filter_map(|(id, body)| crate::community::v2::guestbook::event_from_body(id, &o.open_blob_owned(body))).collect()
     });
     Ok((events, cursor.max(0) as u64))
 }
@@ -5695,7 +5693,7 @@ fn held_author_retractions(conn: &rusqlite::Connection, community_id: &str, chan
     Ok(crate::crypto::open_batch(|o| {
         rows.into_iter()
             .filter_map(|(seq, channel, body)| {
-                let (author, since, generation, until) = author_owed_from_body(&o.open_blob_or_keep(&body))?;
+                let (author, since, generation, until) = author_owed_from_body(&o.open_blob_owned(body))?;
                 Some(AuthorOwed { seq, channel, author, since, generation, until })
             })
             .collect()
@@ -5870,7 +5868,7 @@ fn read_departures(conn: &rusqlite::Connection, community_id: &str) -> Result<De
         rows.filter_map(|r| r.ok()).collect()
     };
     let held: std::collections::BTreeMap<PublicKey, (i64, Vec<crate::community::v2::guestbook::Span>)> = crate::crypto::open_batch(|o| {
-        rows.into_iter().filter_map(|(seq, body)| departure_from_body(&o.open_blob_or_keep(&body)).map(|(member, owed)| (member, (seq, owed)))).collect()
+        rows.into_iter().filter_map(|(seq, body)| departure_from_body(&o.open_blob_owned(body)).map(|(member, owed)| (member, (seq, owed)))).collect()
     });
     let rows = held.values().map(|(seq, _)| *seq).collect();
     Ok(DeparturesSeen { spans: std::sync::Arc::new(held.into_iter().map(|(member, (_, owed))| (member, owed.into())).collect()), rows })
@@ -6122,12 +6120,18 @@ pub fn control_wrap_ids(community_id: &str, view: &[u8; 32]) -> Result<Vec<([u8;
         .prepare_cached("SELECT wrap_id, created_at FROM community_control_wraps WHERE community_id = ?1 AND view = ?2")
         .map_err(|e| format!("control wrap ids: {e}"))?;
     let rows = stmt
-        .query_map(params![community_id, &view[..]], |r| Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, i64>(1)?)))
+        .query_map(params![community_id, &view[..]], |r| {
+            let id = match r.get_ref(0)?.as_blob() {
+                Ok(b) => <[u8; 32]>::try_from(b).ok(),
+                Err(_) => <[u8; 32]>::try_from(r.get::<_, Vec<u8>>(0)?).ok(),
+            };
+            Ok((id, r.get::<_, i64>(1)?))
+        })
         .map_err(|e| format!("control wrap ids: {e}"))?;
     let mut out = Vec::new();
     for row in rows {
         let (id, at) = row.map_err(|e| format!("control wrap ids: {e}"))?;
-        out.push((id.try_into().map_err(|_| "control wrap ids: a wrap id is not 32 bytes".to_string())?, at.max(0) as u64));
+        out.push((id.ok_or_else(|| "control wrap ids: a wrap id is not 32 bytes".to_string())?, at.max(0) as u64));
     }
     Ok(out)
 }
@@ -6183,7 +6187,7 @@ pub fn control_wrap_page(community_id: &str, view: &[u8; 32], below: Option<(u64
     };
     crate::crypto::open_batch(|o| {
         rows.into_iter()
-            .map(|(id, at, body)| Ok((id.try_into().map_err(|_| "control wrap page: a wrap id is not 32 bytes".to_string())?, at.max(0) as u64, o.open_blob_or_keep(&body))))
+            .map(|(id, at, body)| Ok((id.try_into().map_err(|_| "control wrap page: a wrap id is not 32 bytes".to_string())?, at.max(0) as u64, o.open_blob_owned(body))))
             .collect()
     })
 }
@@ -6202,7 +6206,7 @@ pub fn control_wrap_bodies(community_id: &str, view: &[u8; 32], ids: &[[u8; 32]]
             }
         }
     }
-    crate::crypto::open_batch(|o| Ok(sealed.iter().map(|body| o.open_blob_or_keep(body)).collect()))
+    crate::crypto::open_batch(|o| Ok(sealed.into_iter().map(|body| o.open_blob_owned(body)).collect()))
 }
 
 /// What `view` holds: bodies, refusals, and the bodies' bytes as stored.

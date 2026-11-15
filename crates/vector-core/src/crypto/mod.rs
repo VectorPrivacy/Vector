@@ -916,6 +916,24 @@ impl AtRestOpener {
         maybe_decrypt_blob(stored)
     }
 
+    /// [`Self::open_blob_or_keep`] that opens a blob it owns in place: a failed open checks the
+    /// tag before touching the buffer, so the fallbacks still see the stored bytes.
+    pub fn open_blob_owned(&mut self, mut stored: Vec<u8>) -> Vec<u8> {
+        if stored.len() == 32 {
+            return stored;
+        }
+        if stored.len() >= NONCE_LEN + TAG_LEN {
+            if let Some(c) = self.cipher() {
+                if let Ok(len) = c.open_framed_in_place(&mut stored).map(|p| p.len()) {
+                    stored.copy_within(NONCE_LEN..NONCE_LEN + len, 0);
+                    stored.truncate(len);
+                    return stored;
+                }
+            }
+        }
+        maybe_decrypt_blob(&stored)
+    }
+
     /// `maybe_decrypt` for one string, sharing the batch's cipher.
     #[allow(clippy::result_unit_err)] // maybe_decrypt's own contract, which every caller already handles
     pub fn open(&mut self, input: String) -> Result<String, ()> {
