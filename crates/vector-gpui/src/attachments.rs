@@ -137,17 +137,22 @@ pub fn attachments(ctx: &Ctx, m: &Message) -> Option<AnyElement> {
                 match media.videos.clip(&att.id) {
                     Some(clip) => {
                         let (on_act, msg, aid) = (ctx.on_act.clone(), m.id.clone(), att.id.clone());
-                        (
-                            crate::video::view(
-                                &att.id,
-                                clip,
-                                m.pending,
-                                clip.info.as_ref().map(|i| within(ctx, crate::video::fit(i.w, i.h))),
-                                8.,
-                                std::rc::Rc::new(move |a, w, cx| on_act(&msg, Act::Video(aid.clone(), a), w, cx)),
-                            ),
-                            6.,
-                        )
+                        let size = clip.info.as_ref().map(|i| within(ctx, crate::video::fit(i.w, i.h)));
+                        let view = crate::video::view(
+                            &att.id,
+                            clip,
+                            m.pending,
+                            size,
+                            8.,
+                            std::rc::Rc::new(move |a, w, cx| on_act(&msg, Act::Video(aid.clone(), a), w, cx)),
+                        );
+                        let view = if m.mine && m.pending {
+                            let (w, h) = size.unwrap_or((crate::video::MAX_W, crate::video::MAX_H * 0.6));
+                            div().relative().child(view).child(upload_overlay(ctx, m, media.transfers.get(&m.id), w, h)).into_any_element()
+                        } else {
+                            view
+                        };
+                        (view, 6.)
                     }
                     None => (video_placeholder(ctx, att), 6.),
                 }
@@ -346,7 +351,6 @@ fn picture(ctx: &Ctx, media: &mut Media, m: &Message, att: &Attachment) -> Optio
         None => max(media::MAX_W, media::MAX_H),
     };
     let pending = m.mine && m.pending;
-    let upload = media.transfers.get(&m.id).and_then(|t| t.pct);
     match media.image(&att.id, source(ctx, att), &ext(att), want) {
         Slot::Ready { image, w, h } => {
             let (fw, fh) = within(ctx, media::fit(w, h));
@@ -378,17 +382,7 @@ fn picture(ctx: &Ctx, media: &mut Media, m: &Message, att: &Attachment) -> Optio
                             .rounded(px(8.))
                             .when(pending, |i| i.opacity(0.25)),
                     )
-                    .when(pending, |d| {
-                        d.child(
-                            div()
-                                .absolute()
-                                .inset_0()
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .child(ring(48., upload)),
-                        )
-                    })
+                    .when(pending, |d| d.child(upload_overlay(ctx, m, media.transfers.get(&m.id), fw, fh)))
                     .when(!pending && media.image_types, |d| d.children(ext_badge(&ext(att), fw, fh)))
                     .into_any_element(),
             )
@@ -625,6 +619,69 @@ fn download_box(
                         .child(sub),
                 ),
         )
+        .into_any_element()
+}
+
+/// `UploadOverlay`: over a picture or video still uploading, the ring, a line under it whenever
+/// the ring can't speak for itself (on media with room for one), and the cancel, shown on hover
+/// until the last byte has left.
+fn upload_overlay(ctx: &Ctx, m: &Message, t: Option<&Transfer>, w: f32, h: f32) -> AnyElement {
+    const RING: f32 = 48.;
+    let note = t.map(Transfer::upload_note).filter(|n| !n.is_empty() && w >= 120. && h >= 118.);
+    let group = SharedString::from(format!("upload-{}", m.id));
+    div()
+        .absolute()
+        .top_0()
+        .left_0()
+        .w(px(w))
+        .h(px(h))
+        .group(group.clone())
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(
+            div()
+                .relative()
+                .size(px(RING))
+                .child(ring(RING, t.and_then(|t| t.pct)))
+                // `.media-progress-note`: hung under the ring, so the ring never moves for it.
+                .children(note.map(|n| {
+                    div()
+                        .absolute()
+                        .top(px(RING + 7.))
+                        .left(px(RING / 2. - 120.))
+                        .w(px(240.))
+                        .flex()
+                        .justify_center()
+                        .whitespace_nowrap()
+                        .text_size(px(11.))
+                        .line_height(px(13.))
+                        .text_color(white_a(0.82))
+                        .child(n)
+                })),
+        )
+        .when(!t.is_some_and(Transfer::publishing), |d| {
+            // `.upload-cancel-btn`: fills the ring's hole.
+            d.child(
+                div().absolute().inset_0().flex().items_center().justify_center().child(
+                    div()
+                        .id(SharedString::from(format!("upload-cancel-{}", m.id)))
+                        .size(px(40.))
+                        .rounded_full()
+                        .bg(gpui::black().opacity(0.6))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_size(px(16.))
+                        .text_color(c(0xffffff))
+                        .cursor_pointer()
+                        .opacity(0.)
+                        .group_hover(group, |s| s.opacity(1.))
+                        .on_click(act(ctx, m, Act::CancelUpload(m.id.clone())))
+                        .child("\u{2715}"),
+                ),
+            )
+        })
         .into_any_element()
 }
 

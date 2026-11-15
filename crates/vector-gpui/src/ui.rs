@@ -3633,10 +3633,19 @@ impl VectorApp {
                     .get("progress")
                     .and_then(Value::as_f64)
                     .unwrap_or(0.);
+                let sent = payload.get("bytesSent").and_then(Value::as_u64).unwrap_or(0);
                 let mut media = self.media.borrow_mut();
                 let t = media.transfers.entry(id.to_string()).or_default();
                 t.pct = Some(p as f32);
-                t.stage = None;
+                // The first byte out ends what the upload was doing before; the last starts the publish.
+                if sent > 0 || p >= 100. {
+                    t.stage = None;
+                }
+                if p < 100. {
+                    t.sent_at = None;
+                } else if t.sent_at.is_none() {
+                    t.sent_at = Some(std::time::Instant::now());
+                }
                 drop(media);
                 self.notify_timeline(cx);
             }
@@ -3648,12 +3657,14 @@ impl VectorApp {
                     .get("stage")
                     .and_then(Value::as_str)
                     .map(str::to_string);
-                self.media
-                    .borrow_mut()
-                    .transfers
-                    .entry(id.to_string())
-                    .or_default()
-                    .stage = stage;
+                let mut media = self.media.borrow_mut();
+                let t = media.transfers.entry(id.to_string()).or_default();
+                if t.stage != stage || t.stage_at.is_none() {
+                    t.stage_at = Some(std::time::Instant::now());
+                }
+                t.stage = stage;
+                t.stage_pct = payload.get("progress").and_then(Value::as_f64).map(|p| p as f32);
+                drop(media);
                 self.notify_timeline(cx);
             }
             "attachment_download_stage" => {

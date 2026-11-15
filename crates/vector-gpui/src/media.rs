@@ -41,18 +41,55 @@ pub struct Transfer {
     pub bps: Option<f64>,
     /// What it is doing while no bytes move ("decrypting", "saving").
     pub stage: Option<String>,
+    /// When the stage began, and the stage's own progress, when it reports one.
+    pub stage_at: Option<std::time::Instant>,
+    pub stage_pct: Option<f32>,
+    /// When an upload's last byte left: the publish that follows has a full ring and no rate.
+    pub sent_at: Option<std::time::Instant>,
+}
+
+/// How long a stage or a publish holds the screen before it earns words: the common, quick
+/// transfer goes by without a flash of text.
+const GLANCE: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// `STAGE_WORDS`.
+fn stage_word(stage: &str) -> &str {
+    match stage {
+        "encrypting" => "Encrypting",
+        "starting" => "Starting upload",
+        "decrypting" => "Decrypting",
+        "verifying" => "Verifying",
+        "saving" => "Saving",
+        other => other,
+    }
 }
 
 impl Transfer {
+    /// The last byte has left: nothing is left to cancel.
+    pub fn publishing(&self) -> bool {
+        self.pct.is_some_and(|p| p >= 100.)
+    }
+
+    /// `UploadOverlay`'s line: "Sending" for a publish that drags on, else the stage once it
+    /// has held a moment (`transferStageText`), else nothing while the ring speaks for itself.
+    pub fn upload_note(&self) -> String {
+        if self.sent_at.is_some_and(|t| t.elapsed() >= GLANCE) {
+            return "Sending".into();
+        }
+        let Some(stage) = self.stage.as_deref().filter(|_| self.stage_at.is_some_and(|t| t.elapsed() >= GLANCE)) else {
+            return String::new();
+        };
+        let word = stage_word(stage);
+        match self.stage_pct.filter(|&p| p < 100.) {
+            Some(p) => format!("{word} {}%", p as u32),
+            None => word.to_string(),
+        }
+    }
+
     /// `transferStageText`, else the rate.
     pub fn note(&self) -> String {
         if let Some(s) = &self.stage {
-            return match s.as_str() {
-                "verifying" => "Verifying".into(),
-                "decrypting" => "Decrypting".into(),
-                "saving" => "Saving".into(),
-                other => other.to_string(),
-            };
+            return stage_word(s).to_string();
         }
         match self.bps.filter(|&b| b > 0.) {
             Some(b) => format!("{}/s", format_bytes_rate(b)),
