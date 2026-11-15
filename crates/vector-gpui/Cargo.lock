@@ -13425,6 +13425,7 @@ dependencies = [
  "tokio",
  "unicode-bidi",
  "unicode-linebreak",
+ "unicode-properties",
  "unicode-segmentation",
  "url",
  "vector-core",
