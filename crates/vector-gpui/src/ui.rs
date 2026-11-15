@@ -140,6 +140,9 @@ pub struct VectorApp {
     /// The attachment panel is open, and since when (its items fade in from then).
     attach: Option<std::time::Instant>,
     attach_dismissed: Option<std::time::Instant>,
+    /// Whether the panel was open when last drawn, and when the plus last turned. The turn runs
+    /// from this clock, not element state, so a layout switch doesn't replay it.
+    attach_turn: std::cell::Cell<(bool, Option<std::time::Instant>)>,
     /// The attachment panel's Mini Apps view, while it shows.
     mini: Option<miniapps_ops::MiniPanel>,
     nexus: Option<crate::nexus::Nexus>,
@@ -220,8 +223,8 @@ pub struct VectorApp {
     mention_rules: HashMap<String, crate::mentions::Rules>,
     /// The draft has text: Send stands where the mic does.
     send_shown: bool,
-    /// Typed flips between the two, each animated once.
-    send_flips: usize,
+    /// When typing last flipped the two: the swap runs from this clock, not element state.
+    send_flipped: Option<std::time::Instant>,
     /// The message a jump landed on, flashing.
     jumped: Option<(String, std::time::Instant)>,
     /// Older history is on its way.
@@ -975,7 +978,7 @@ impl VectorApp {
             drafts: HashMap::new(),
             mention_rules: HashMap::new(),
             send_shown: false,
-            send_flips: 0,
+            send_flipped: None,
             jumped: None,
             paging: false,
             opening: None,
@@ -997,6 +1000,7 @@ impl VectorApp {
             cropper: None,
             attach: None,
             attach_dismissed: None,
+            attach_turn: Default::default(),
             mini: None,
             nexus: None,
             launch: None,
@@ -9293,6 +9297,12 @@ impl VectorApp {
                 (self.picker_open && !self.picker_status)
                     .then(|| (self.emoji_picker.clone(), self.picker.is_none(), f32::from(window.viewport_size().width) < 700.)),
                 self.attach.map(|o| (o, self.pivx_wallet_view(cx).or_else(|| self.miniapps_view(cx)))),
+                {
+                    let (was, at) = self.attach_turn.get();
+                    let at = if was != self.attach.is_some() { Some(std::time::Instant::now()) } else { at };
+                    self.attach_turn.set((self.attach.is_some(), at));
+                    at
+                },
                 self.command_popup(cx).or_else(|| self.time_popup(cx)).or_else(|| self.mention
                     .as_ref()
                     .map(|p| {
@@ -9319,7 +9329,7 @@ impl VectorApp {
                 self.composer_box.clone(),
                 (
                     self.send_shown || matches!(self.mode, Mode::Edit { .. }) || self.cmd_form.is_some(),
-                    self.send_flips,
+                    self.send_flipped,
                 ),
                 (self.self_destruct, self.send_btn.clone()),
                 &self.rec,
@@ -9680,9 +9690,10 @@ fn composer(
     mode: &Mode,
     picker: Option<(Entity<crate::picker::EmojiPicker>, bool, bool)>,
     attach: Option<(std::time::Instant, Option<AnyElement>)>,
+    attach_turned: Option<std::time::Instant>,
     popup: Option<AnyElement>,
     measure: Rc<std::cell::Cell<Option<gpui::Bounds<gpui::Pixels>>>>,
-    send: (bool, usize),
+    send: (bool, Option<std::time::Instant>),
     (timer, send_probe): (Option<u64>, Rc<std::cell::Cell<Option<gpui::Bounds<gpui::Pixels>>>>),
     rec: &crate::recorder::Recorder,
     on_rec: crate::recorder::On,
@@ -9867,7 +9878,7 @@ fn composer(
                         .h(px(45.))
                         .into_any_element()
                 } else {
-                    attach_button(attach.is_some(), cx).into_any_element()
+                    attach_button(attach.is_some(), attach_turned, cx).into_any_element()
                 }))
                 .when_some(form, |d, form| d.child(div().flex_1().min_w_0().child(form)))
                 .when_some(lock, |d, lock| d.child(
@@ -9954,9 +9965,9 @@ fn composer(
 }
 
 /// `#chat-input-voice` / `#chat-input-send`: Send for a draft, the mic otherwise, swapped with a
-/// spin (`swapOut` 0.15s, then `swapIn` 0.2s) when typing flips it; `flips` names each swap.
+/// spin (`swapOut` 0.15s, then `swapIn` 0.2s) from when typing last flipped it.
 fn send_or_mic(
-    (send, flips): (bool, usize),
+    (send, flipped): (bool, Option<std::time::Instant>),
     pending: bool,
     voice_send: bool,
     dictating: bool,
@@ -9964,7 +9975,6 @@ fn send_or_mic(
     on_rec: crate::recorder::On,
     cx: &mut Context<VectorApp>,
 ) -> impl IntoElement {
-    use gpui::AnimationExt as _;
     let face = |send: bool| {
         if send {
             svg()
@@ -9979,34 +9989,27 @@ fn send_or_mic(
                 .group_hover("chat-input-send", |s| s.text_color(c(0xffffff)))
         }
     };
-    let icon: AnyElement = if flips == 0 {
+    let at = flipped.map_or(1., |t| t.elapsed().as_secs_f32());
+    let icon: AnyElement = if at >= 0.35 {
         face(send).into_any_element()
     } else {
-        face(send)
-            .with_animation(
-                gpui::ElementId::NamedInteger("send-swap".into(), flips as u64),
-                gpui::Animation::new(std::time::Duration::from_millis(350)),
-                move |s, t| {
-                    let at = t * 0.35;
-                    let ease = |p: f32| 1. - (1. - p).powi(2);
-                    let (p, out) = if at < 0.15 {
-                        (ease(at / 0.15), true)
-                    } else {
-                        (ease((at - 0.15) / 0.2), false)
-                    };
-                    let (scale, turn, alpha) = if out {
-                        (1. - 0.5 * p, -p, 1. - p)
-                    } else {
-                        (0.5 + 0.5 * p, 1. - p, p)
-                    };
-                    let s = if out { face(!send) } else { s };
-                    s.opacity(alpha).with_transformation(
-                        gpui::Transformation::rotate(gpui::radians(
-                            turn * std::f32::consts::FRAC_PI_2,
-                        ))
-                        .with_scaling(gpui::size(scale, scale)),
-                    )
-                },
+        keep_turning(cx);
+        let ease = |p: f32| 1. - (1. - p).powi(2);
+        let (p, out) = if at < 0.15 {
+            (ease(at / 0.15), true)
+        } else {
+            (ease((at - 0.15) / 0.2), false)
+        };
+        let (scale, turn, alpha) = if out {
+            (1. - 0.5 * p, -p, 1. - p)
+        } else {
+            (0.5 + 0.5 * p, 1. - p, p)
+        };
+        face(if out { !send } else { send })
+            .opacity(alpha)
+            .with_transformation(
+                gpui::Transformation::rotate(gpui::radians(turn * std::f32::consts::FRAC_PI_2))
+                    .with_scaling(gpui::size(scale, scale)),
             )
             .into_any_element()
     };
@@ -10063,14 +10066,23 @@ fn send_or_mic(
         .child(div().when(pending, |d| d.opacity(0.)).child(icon))
 }
 
+/// Another frame of the chat pane while a composer button turns.
+fn keep_turning(cx: &mut Context<VectorApp>) {
+    let me = cx.entity().downgrade();
+    cx.defer(move |cx| {
+        me.update(cx, |app, cx| crate::pane::notify(&app.panes.chat, cx)).ok();
+    });
+}
+
 /// `#chat-input-file`: the plus, turned to a cross while the panel is open.
-fn attach_button(open: bool, cx: &mut Context<VectorApp>) -> impl IntoElement {
-    use gpui::AnimationExt as _;
-    let turn = move |t: f32| {
-        // cubic-bezier(0.34, 1.56, 0.64, 1): an overshoot, eased back.
-        let k = 1. - (1. - t).powi(3) + 0.35 * (std::f32::consts::PI * t).sin() * (1. - t);
-        if open { k } else { 1. - k }
-    };
+fn attach_button(open: bool, turned: Option<std::time::Instant>, cx: &mut Context<VectorApp>) -> impl IntoElement {
+    let t = turned.map_or(1., |at| (at.elapsed().as_secs_f32() / 0.4).min(1.));
+    if t < 1. {
+        keep_turning(cx);
+    }
+    // cubic-bezier(0.34, 1.56, 0.64, 1): an overshoot, eased back.
+    let k = 1. - (1. - t).powi(3) + 0.35 * (std::f32::consts::PI * t).sin() * (1. - t);
+    let turn = if open { k } else { 1. - k };
     div()
         .id("chat-input-file")
         .w(px(38.))
@@ -10086,15 +10098,7 @@ fn attach_button(open: bool, cx: &mut Context<VectorApp>) -> impl IntoElement {
                 .path("icons/plus.svg")
                 .size(px(23.))
                 .text_color(c(ICON_MUTED))
-                .with_animation(
-                    if open { "attach-open" } else { "attach-close" },
-                    gpui::Animation::new(std::time::Duration::from_millis(400)),
-                    move |s, t| {
-                        s.with_transformation(gpui::Transformation::rotate(gpui::radians(
-                            turn(t) * std::f32::consts::FRAC_PI_4,
-                        )))
-                    },
-                ),
+                .with_transformation(gpui::Transformation::rotate(gpui::radians(turn * std::f32::consts::FRAC_PI_4))),
         )
 }
 
@@ -13348,7 +13352,7 @@ impl VectorApp {
         let send = !text.trim().is_empty();
         if send != self.send_shown {
             self.send_shown = send;
-            self.send_flips += 1;
+            self.send_flipped = Some(std::time::Instant::now());
         }
         if self.update_commands(&text, cx) {
             return;

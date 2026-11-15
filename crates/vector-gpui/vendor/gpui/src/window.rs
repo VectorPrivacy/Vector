@@ -5402,6 +5402,8 @@ impl Window {
             crate::elements::set_anim_tick(tick);
         }
         let tick = crate::elements::anim_tick();
+        // (tile shown, where, tile due): applied in one pass over the scene below.
+        let mut swaps: Vec<(AtlasTile, Bounds<ScaledPixels>, AtlasTile)> = Vec::new();
         for r in &mut records {
             let count = r.data.frame_count();
             if count < 2 {
@@ -5413,17 +5415,32 @@ impl Window {
                 let data = r.data.clone();
                 if let Ok(Some(tile)) = image_tile(&*self.sprite_atlas, &data, ix) {
                     let sub = sub_tile(tile, r.visible, r.image);
-                    for sprite in self.rendered_frame.scene.polychrome_sprites.iter_mut() {
-                        if sprite.tile == r.tile && sprite.bounds == r.at {
-                            sprite.tile = sub;
-                        }
-                    }
+                    swaps.push((r.tile, r.at, sub));
                     r.tile = sub;
                     changed = true;
                 }
             }
             r.clock.set((ix, Some(now)));
             next = Some(next.map_or(due, |n| n.min(due)));
+        }
+        if !swaps.is_empty() {
+            let due = |tile: &AtlasTile, at: &Bounds<ScaledPixels>| {
+                swaps.iter().find(|(shown, where_, _)| shown == tile && where_ == at).map(|s| s.2)
+            };
+            let scene = &mut self.rendered_frame.scene;
+            for sprite in scene.polychrome_sprites.iter_mut() {
+                if let Some(tile) = due(&sprite.tile, &sprite.bounds) {
+                    sprite.tile = tile;
+                }
+            }
+            // A cached view's next frame replays these recorded copies, not the sprites above.
+            for op in scene.paint_operations.iter_mut() {
+                if let crate::scene::PaintOperation::Primitive(crate::Primitive::PolychromeSprite(sprite)) = op
+                    && let Some(tile) = due(&sprite.tile, &sprite.bounds)
+                {
+                    sprite.tile = tile;
+                }
+            }
         }
         self.rendered_frame.animated = records;
         // A pending redraw replays the tiles just stepped; a refresh would re-render every cached pane.
