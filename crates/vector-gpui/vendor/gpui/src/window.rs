@@ -5375,8 +5375,10 @@ impl Window {
     /// presented scene: no render, layout or paint unless something else asked for one.
     pub(crate) fn step_animations(&mut self, cx: &mut App) {
         const FULL_DRAW_EVERY: Duration = Duration::from_secs(30);
-        if self.invalidator.is_dirty()
-            || !self.is_window_active()
+        // A pending redraw still steps first: cached panes replay these tiles, so a hover
+        // elsewhere that redraws the window must not hold them on their old frame.
+        let dirty = self.invalidator.is_dirty();
+        if !self.is_window_active()
             || cx.reduce_motion()
             || crate::elements::animations_asleep()
             || self.last_full_draw.elapsed() > FULL_DRAW_EVERY
@@ -5424,7 +5426,9 @@ impl Window {
             next = Some(next.map_or(due, |n| n.min(due)));
         }
         self.rendered_frame.animated = records;
-        if changed {
+        if dirty {
+            self.refresh();
+        } else if changed {
             self.needs_present.set(true);
             self.invalidator.wake_platform();
         }
