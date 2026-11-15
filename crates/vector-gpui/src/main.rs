@@ -10,6 +10,7 @@ use vector_media::{audio_devices, calls, mic_access};
 mod attachments;
 mod audio;
 mod audit;
+mod jxl;
 mod backend;
 mod badge;
 mod badgecard;

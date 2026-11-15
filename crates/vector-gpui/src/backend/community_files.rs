@@ -136,7 +136,7 @@ async fn prepare_bytes(
     let is_image = IMAGE_EXTS.contains(&extension.as_str());
     let (bytes, img_meta, extension, hash) = tokio::task::spawn_blocking(move || {
         let (bytes, img_meta) = if is_image {
-            let processed = crate::message::compression::process_image_for_send(
+            let processed = crate::message::process_image_for_send(
                 Arc::new(bytes),
                 &extension,
                 compress,

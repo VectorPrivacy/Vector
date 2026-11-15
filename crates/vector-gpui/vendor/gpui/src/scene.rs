@@ -50,6 +50,36 @@ pub struct Scene {
     pub subpixel_sprites: Vec<SubpixelSprite>,
     pub polychrome_sprites: Vec<PolychromeSprite>,
     pub surfaces: Vec<PaintSurface>,
+    /// Sort keys with each primitive's index, kept between frames so sorting allocates nothing.
+    sort_keys: Vec<(u64, u32)>,
+}
+
+/// Sorts `items` by `key`, keeping insertion order among equal keys (a layer's primitives share
+/// one order and must draw as painted), through `keys` rather than a fresh merge buffer.
+fn sort_stable<T>(items: &mut [T], keys: &mut Vec<(u64, u32)>, key: impl Fn(&T) -> u64) {
+    keys.clear();
+    keys.extend(items.iter().enumerate().map(|(i, item)| (key(item), i as u32)));
+    if keys.is_sorted() {
+        return;
+    }
+    keys.sort_unstable();
+    // Position `j` takes the item from `keys[j].1`: follow each cycle once, marking it done.
+    const DONE: u32 = u32::MAX;
+    for start in 0..items.len() {
+        let mut at = start;
+        loop {
+            let from = keys[at].1;
+            if from == DONE {
+                break;
+            }
+            keys[at].1 = DONE;
+            if from as usize == start {
+                break;
+            }
+            items.swap(at, from as usize);
+            at = from as usize;
+        }
+    }
 }
 
 #[expect(missing_docs)]
@@ -149,17 +179,22 @@ impl Scene {
     }
 
     pub fn finish(&mut self) {
-        self.shadows.sort_by_key(|shadow| shadow.order);
-        self.quads.sort_by_key(|quad| quad.order);
-        self.paths.sort_by_key(|path| path.order);
-        self.underlines.sort_by_key(|underline| underline.order);
-        self.monochrome_sprites
-            .sort_by_key(|sprite| (sprite.order, sprite.tile.texture_id.index));
-        self.subpixel_sprites
-            .sort_by_key(|sprite| (sprite.order, sprite.tile.texture_id.index));
-        self.polychrome_sprites
-            .sort_by_key(|sprite| (sprite.order, sprite.tile.texture_id.index));
-        self.surfaces.sort_by_key(|surface| surface.order);
+        let keys = &mut self.sort_keys;
+        let order = |order: DrawOrder| (order as u64) << 32;
+        sort_stable(&mut self.shadows, keys, |shadow| order(shadow.order));
+        sort_stable(&mut self.quads, keys, |quad| order(quad.order));
+        sort_stable(&mut self.paths, keys, |path| order(path.order));
+        sort_stable(&mut self.underlines, keys, |underline| order(underline.order));
+        sort_stable(&mut self.monochrome_sprites, keys, |sprite| {
+            order(sprite.order) | sprite.tile.texture_id.index as u64
+        });
+        sort_stable(&mut self.subpixel_sprites, keys, |sprite| {
+            order(sprite.order) | sprite.tile.texture_id.index as u64
+        });
+        sort_stable(&mut self.polychrome_sprites, keys, |sprite| {
+            order(sprite.order) | sprite.tile.texture_id.index as u64
+        });
+        sort_stable(&mut self.surfaces, keys, |surface| order(surface.order));
     }
 
     #[cfg_attr(

@@ -194,3 +194,6 @@ gpui = { path = "vendor/gpui" }
 gpui_linux = { path = "vendor/gpui_linux" }
 # gpui_wgpu at the same rev, bringing up one GPU API (Vulkan, else GL) instead of both.
 gpui_wgpu = { path = "vendor/gpui_wgpu" }
+
+[build-dependencies]
+jpegxl-src = "0.12"

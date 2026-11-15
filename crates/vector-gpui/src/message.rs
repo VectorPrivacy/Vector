@@ -66,5 +66,16 @@ pub fn savings_percent(c: &types::CachedCompressedImage) -> u32 {
 
 /// A picked image compressed as a default send would: resized, stripped and re-encoded.
 pub fn precompress(path: &std::path::Path) -> Result<types::CachedCompressedImage, String> {
-    compression::compress_image_internal(&path.to_string_lossy())
+    compression::compress_image_internal(&path.to_string_lossy()).map(crate::jxl::outbound)
+}
+
+/// The desktop client's send processing, then this client's JPEG XL.
+pub fn process_image_for_send(
+    bytes: std::sync::Arc<Vec<u8>>,
+    extension: &str,
+    compress: bool,
+    keep_metadata: bool,
+    precompressed: Option<types::CachedCompressedImage>,
+) -> Result<types::CachedCompressedImage, String> {
+    compression::process_image_for_send(bytes, extension, compress, keep_metadata, precompressed).map(crate::jxl::outbound)
 }

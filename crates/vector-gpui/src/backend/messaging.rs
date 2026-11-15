@@ -332,7 +332,7 @@ pub async fn send_file(
     let processed = tokio::task::spawn_blocking(move || {
         let bytes =
             Arc::new(std::fs::read(&file).map_err(|e| format!("Couldn't read the file: {e}"))?);
-        let out = crate::message::compression::process_image_for_send(
+        let out = crate::message::process_image_for_send(
             bytes,
             &ext,
             compress,

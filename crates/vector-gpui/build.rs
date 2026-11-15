@@ -10,6 +10,10 @@ fn field<'a>(line: &'a str, key: &str) -> Option<&'a str> {
 }
 
 fn main() {
+    // libjxl, statically linked, for sending JPEG XL. A docs-only check links nothing.
+    if std::env::var_os("DOCS_RS").is_none() {
+        jpegxl_src::build();
+    }
     let src = concat!(env!("CARGO_MANIFEST_DIR"), "/../../src/js/emoji.js");
     println!("cargo:rerun-if-changed={src}");
     let js = std::fs::read_to_string(src).expect("emoji dataset");

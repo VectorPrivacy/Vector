@@ -5892,6 +5892,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "00810f1d8b74be64b13dbf3db89ac67740615d6c891f0e7b6179326533011a07"
 
 [[package]]
+name = "jpegxl-src"
+version = "0.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "06f56a51e36f688517deebb0b7c10a11c598476936838938495c93764696180a"
+dependencies = [
+ "cmake",
+]
+
+[[package]]
 name = "js-sys"
 version = "0.3.107"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -13380,6 +13389,7 @@ dependencies = [
  "gtk",
  "http",
  "image",
+ "jpegxl-src",
  "jxl-oxide",
  "libc",
  "libwebp-sys",
