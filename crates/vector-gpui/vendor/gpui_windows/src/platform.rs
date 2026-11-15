@@ -1604,6 +1604,28 @@ fn file_open_dialog(
             folder_dialog.SetOkButtonLabel(&HSTRING::from(prompt))?;
         }
 
+        // The strings back the specs until the dialog closes.
+        let filters: Vec<(HSTRING, HSTRING)> = options
+            .filters
+            .iter()
+            .flatten()
+            .filter(|(_, extensions)| !extensions.is_empty())
+            .map(|(name, extensions)| {
+                let spec = extensions.iter().map(|e| format!("*.{e}")).collect::<Vec<_>>().join(";");
+                (HSTRING::from(name.as_ref()), HSTRING::from(spec))
+            })
+            .collect();
+        if !filters.is_empty() {
+            let specs: Vec<windows::Win32::UI::Shell::Common::COMDLG_FILTERSPEC> = filters
+                .iter()
+                .map(|(name, spec)| windows::Win32::UI::Shell::Common::COMDLG_FILTERSPEC {
+                    pszName: PCWSTR(name.as_ptr()),
+                    pszSpec: PCWSTR(spec.as_ptr()),
+                })
+                .collect();
+            folder_dialog.SetFileTypes(&specs)?;
+        }
+
         if let Err(error) = folder_dialog.Show(window) {
             if error.code() == HRESULT::from_win32(ERROR_CANCELLED.0) {
                 return Ok(None);
