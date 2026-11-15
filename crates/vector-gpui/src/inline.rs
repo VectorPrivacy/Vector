@@ -293,6 +293,8 @@ pub struct Inline {
     select: Option<crate::select::Key>,
     /// Never wraps, however narrow its box (`white-space: pre`).
     nowrap: bool,
+    /// Its pictures hold their first frame until their row is hovered (`data-motion="hover"`).
+    held: bool,
 }
 
 pub fn inline(atoms: impl Into<Rc<[Atom]>>, base: Look) -> Inline {
@@ -306,6 +308,7 @@ pub fn inline(atoms: impl Into<Rc<[Atom]>>, base: Look) -> Inline {
         clipped: None,
         select: None,
         nowrap: false,
+        held: false,
     }
 }
 
@@ -334,6 +337,13 @@ impl Inline {
     /// One line however wide: a code line, clipped by its box rather than wrapped.
     pub fn nowrap(mut self) -> Self {
         self.nowrap = true;
+        self
+    }
+
+    /// Animated pictures in it move only while the nearest motion host is hovered: names,
+    /// statuses and previews in a list row, as `motion.js` holds them.
+    pub fn held(mut self) -> Self {
+        self.held = true;
         self
     }
 
@@ -1048,10 +1058,9 @@ impl Element for Inline {
                         tip,
                         ..
                     } => {
-                        let pic = gpui::StyledImage::object_fit(
-                            img(src.clone()).size(px(*sz)).aspect_ratio(1.),
-                            gpui::ObjectFit::Contain,
-                        );
+                        let pic = img(src.clone());
+                        let pic = if self.held { pic.face() } else { pic };
+                        let pic = gpui::StyledImage::object_fit(pic.size(px(*sz)).aspect_ratio(1.), gpui::ObjectFit::Contain);
                         let mut el = match tip.clone() {
                             Some(tip) => div()
                                 .id(ElementId::Name(format!("inline-{salt}-tip-{}", images.len()).into()))

@@ -8068,6 +8068,7 @@ fn preview_line_at(store: &Store, chat: &SerializableChat, color: gpui::Hsla, si
     };
     crate::inline::inline(atoms, look)
         .single_line()
+        .held()
         .into_any_element()
 }
 

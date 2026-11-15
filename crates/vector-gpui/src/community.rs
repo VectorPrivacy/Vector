@@ -837,6 +837,7 @@ fn status_line(text: &str) -> AnyElement {
     };
     crate::inline::inline(crate::preview::atoms(text, usize::MAX, &look), look)
         .single_line()
+        .held()
         .into_any_element()
 }
 
@@ -942,7 +943,7 @@ fn member_row(store: &Store, cid: &str, npub: &str, owner: bool, colour: Option<
                             } else {
                                 crate::inline::Look::new(INTER, 11.5, 15.5, white_a(0.38))
                             };
-                            crate::profile::status(store, npub, look).into_any_element()
+                            crate::profile::status(store, npub, look).held().into_any_element()
                         } else {
                             status_line(&s)
                         })
