@@ -293,7 +293,7 @@ fn channel_row(
     } else {
         white_a(0.55)
     };
-    let action = |path: &'static str, shown: bool, act: Option<Rc<dyn Fn() -> Act>>| {
+    let action = |path: &'static str, act: Option<Rc<dyn Fn() -> Act>>| {
         let tip = match path {
             "icons/add-user.svg" => Some("Invite People"),
             "icons/settings.svg" => Some("Edit Channel"),
@@ -316,10 +316,26 @@ fn channel_row(
             .justify_center()
             .flex_shrink_0()
             .opacity(0.6)
-            // Out of the layout until hovered, so the name runs full width meanwhile.
-            .when(!shown, |d| d.hidden().group_hover(group.clone(), |d| d.flex()))
             .child(icon(path, 14., c(0xffffff)))
     };
+    // Zero width until hovered, so the name runs full width meanwhile. Width, not display: a
+    // hover flip between prepaint and paint would paint children that were never prepainted.
+    let actions = div()
+        .flex()
+        .items_center()
+        .gap(px(8.))
+        .flex_shrink_0()
+        .overflow_hidden()
+        .when(!open, |d| d.max_w(px(0.)).ml(px(-8.)).group_hover(group.clone(), |d| d.max_w(px(80.)).ml(px(0.))))
+        .when(owner && !ch.private, |d| d.child(action("icons/add-user.svg", Some(Rc::new(|| Act::Invite)))))
+        .when(owner, |d| {
+            let gear = ch.channel_id.clone();
+            d.child(action("icons/settings.svg", Some(Rc::new(move || Act::EditChannel(gear.clone())))))
+        })
+        .when(ch.is_voice(), |d| {
+            let chat = ch.channel_id.clone();
+            d.child(action("icons/chat-bubble.svg", Some(Rc::new(move || Act::ChannelChat(chat.clone())))))
+        });
     div()
         .id(SharedString::from(format!(
             "chatlist-channel-{}",
@@ -366,17 +382,7 @@ fn channel_row(
                 .when(unread, |d| d.font_weight(FontWeight::MEDIUM))
                 .child(ch.name.clone()),
         )
-        .when(owner && !ch.private, |d| {
-            d.child(action("icons/add-user.svg", open, Some(Rc::new(|| Act::Invite))))
-        })
-        .when(owner, |d| {
-            let gear = ch.channel_id.clone();
-            d.child(action("icons/settings.svg", open, Some(Rc::new(move || Act::EditChannel(gear.clone())))))
-        })
-        .when(ch.is_voice(), |d| {
-            let chat = ch.channel_id.clone();
-            d.child(action("icons/chat-bubble.svg", open, Some(Rc::new(move || Act::ChannelChat(chat.clone())))))
-        })
+        .when(owner || ch.is_voice(), |d| d.child(actions))
 }
 
 /// `.chatlist-community-head-alert`: pulses, since noticing a raid late costs the community.
