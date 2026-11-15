@@ -533,7 +533,9 @@ pub struct Web {
 impl Web {
     pub fn new(url: &str) -> Result<Self, String> {
         vector_core::net::validate_url_not_private(url).map_err(str::to_string)?;
-        let client = vector_core::net::build_http_client_with_options(None, Some(vector_core::net::transfer_stall()), true)?;
+        // Ranges left unread hold the host back by TCP; on a shared HTTP/2 connection they would
+        // fill the window the range being read needs.
+        let client = vector_core::net::build_http_client_with_options(None, Some(vector_core::net::transfer_stall()), true)?.http1_only();
         Ok(Self { url: url.to_string(), client })
     }
 }
