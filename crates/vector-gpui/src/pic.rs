@@ -60,6 +60,6 @@ fn sealed(source: ImageSource, n: u32, fit: &str) -> ImageSource {
 /// A file's plaintext: a sealed cache file opened, anything else as it is.
 pub fn read(path: impl AsRef<Path>) -> std::io::Result<Vec<u8>> {
     vector_core::vcache::read(path.as_ref())
-        .map(|b| b.to_vec())
+        .map(|mut b| std::mem::take(&mut *b))
         .map_err(std::io::Error::other)
 }
