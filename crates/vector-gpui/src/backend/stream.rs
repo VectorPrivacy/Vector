@@ -25,6 +25,14 @@ const READ_TIMEOUT: Duration = Duration::from_secs(45);
 const ATTEMPTS: u32 = 4;
 /// A connection that brings nothing for this long is dropped and opened again where it was.
 const NO_PROGRESS: Duration = Duration::from_secs(6);
+/// Connections kept open at once, each reading its own region.
+const CONNS: usize = 3;
+/// How far short of a gap a connection may be and still read on to it, in chunks.
+const READ_THROUGH: u64 = 4;
+/// Unread this long, a connection may have been closed by the host.
+const PARKED: Duration = Duration::from_secs(5);
+/// A read at least this far from a reader's heads starts a new one, however small the window.
+const REGION: u64 = 8 * 1024 * 1024;
 
 /// One answer to a range request.
 pub struct Got {
@@ -54,8 +62,9 @@ pub enum Open {
     Failed(String),
 }
 
-/// Where one reader is reading. Each decoder reads on a thread of its own (the picture and the
-/// sound decode apart), so its thread names it and a seek moves its head rather than leaving one.
+/// Where one reader is reading in one region of the file. Each decoder reads on a thread of its
+/// own, and one reader can need two distant regions at once: a file that stores its sound far
+/// from its picture.
 struct Head {
     reader: Option<std::thread::ThreadId>,
     /// The lowest offset it read this span: a demuxer hops between its tracks' samples, and
@@ -71,8 +80,6 @@ struct Head {
 struct State {
     chunks: BTreeMap<u64, Vec<u8>>,
     heads: Vec<Head>,
-    /// The offset a read is blocked on.
-    wanted: Option<u64>,
     error: Option<String>,
     duration_ms: Option<u64>,
     /// Smoothed throughput (bytes/s) and time to first byte (s).
@@ -120,7 +127,6 @@ pub async fn open<R: Ranges>(ranges: R, expected: Option<String>) -> Result<Arc<
         state: Mutex::new(State {
             chunks: BTreeMap::new(),
             heads: vec![Head { reader: None, at: 0, last: 0, span: Instant::now(), seen: Instant::now(), waiting: false }],
-            wanted: None,
             error: None,
             duration_ms: None,
             rate: Some(first.bytes.len() as f64 / took),
@@ -180,21 +186,26 @@ impl<R: Ranges> Stream<R> {
 
     /// The reader furthest back: the picture at the playhead. The sound's decoder reads as far
     /// ahead as its window allows, so it waits at the download's edge even with plenty in hand.
-    fn earliest(st: &State) -> Option<u64> {
-        st.heads.iter().map(|h| h.at).min()
+    fn playhead(st: &State) -> Option<Option<std::thread::ThreadId>> {
+        st.heads.iter().min_by_key(|h| h.at).map(|h| h.reader)
     }
 
     /// Only the playhead's reader waiting holds playback.
     fn playhead_waits(st: &State) -> bool {
-        st.heads.iter().min_by_key(|h| h.at).is_some_and(|h| h.waiting)
+        let p = Self::playhead(st);
+        st.heads.iter().any(|h| Some(h.reader) == p && h.waiting)
     }
 
-    /// Seconds of the clip already here past the playhead's reader.
+    /// Seconds of the clip already here past the playhead's reader, in its region nearest a gap.
     pub fn ahead_secs(&self) -> Option<f64> {
         let st = self.state.lock().unwrap();
         let d = st.duration_ms.filter(|d| *d > 0)?;
-        let h = st.heads.iter().min_by_key(|h| h.at)?;
-        let held = self.held_past(&st, h.at).min(self.held_past(&st, h.last));
+        let p = Self::playhead(&st)?;
+        let mine: Vec<&Head> = st.heads.iter().filter(|h| h.reader == p).collect();
+        let held = |h: &&Head| self.held_past(&st, h.at).min(self.held_past(&st, h.last));
+        // A region in hand to the file's end (the index a demuxer reads there) can't run dry.
+        let open = |h: &&&Head| h.at + self.held_past(&st, h.at) < self.len;
+        let held = mine.iter().filter(open).map(held).min().or_else(|| mine.iter().map(held).max())?;
         Some(held as f64 * d as f64 / 1000. / self.len as f64)
     }
 
@@ -214,11 +225,20 @@ impl<R: Ranges> Stream<R> {
     fn touch(&self, st: &mut State, offset: u64, waiting: bool) {
         let now = Instant::now();
         let me = std::thread::current().id();
+        let near = self.window(st).max(REGION);
         let before = st.heads.len();
-        // The opening's stand-in head goes once a real reader shows up.
-        st.heads.retain(|h| h.reader.is_some() && (h.reader == Some(me) || h.waiting || now.duration_since(h.seen) < HEAD_LIFE));
+        // The opening's stand-in head goes once a real reader shows up. A reader blocked in one
+        // region still needs the others it was reading.
+        let blocked: Vec<_> = st.heads.iter().filter(|h| h.waiting).map(|h| h.reader).collect();
+        st.heads.retain(|h| h.reader.is_some() && (blocked.contains(&h.reader) || now.duration_since(h.seen) < HEAD_LIFE));
         let pruned = st.heads.len() < before;
-        match st.heads.iter_mut().find(|h| h.reader == Some(me)) {
+        let dist = |h: &Head| offset.abs_diff(h.at).min(offset.abs_diff(h.last));
+        let mine = st.heads.iter().enumerate().filter(|(_, h)| h.reader == Some(me) && dist(h) <= near).min_by_key(|(_, h)| dist(h)).map(|(i, _)| i);
+        // A thread blocks on one read at a time: its other regions aren't waiting.
+        for h in st.heads.iter_mut().filter(|h| h.reader == Some(me)) {
+            h.waiting = false;
+        }
+        match mine.map(|i| &mut st.heads[i]) {
             Some(h) => {
                 if now.duration_since(h.span) > HEAD_SPAN {
                     (h.at, h.span) = (offset, now);
@@ -300,20 +320,18 @@ impl<R: Ranges> Stream<R> {
         }
     }
 
-    /// The chunk to fetch next: the playhead's window first, then a read waiting elsewhere (the
-    /// sound at the edge, a header at the file's end), then the other readers front to back.
+    /// The chunk to fetch next: a waiting read (the playhead's first), then the playhead's
+    /// regions, least in hand first, then the other readers' the same way.
     fn next_gap(&self, st: &State) -> Option<u64> {
         let window = self.window(st);
         let gap = |from: u64| {
             let end = ((from + window).div_ceil(CHUNK)).min(self.chunks());
             (from / CHUNK..end).find(|i| !st.chunks.contains_key(i))
         };
-        let urgent = Self::earliest(st).and_then(gap);
-        urgent.or_else(|| st.wanted.and_then(gap)).or_else(|| {
-            let mut heads: Vec<u64> = st.heads.iter().map(|h| h.at).collect();
-            heads.sort_unstable();
-            heads.into_iter().find_map(gap)
-        })
+        let p = Self::playhead(st);
+        let mut heads: Vec<&Head> = st.heads.iter().collect();
+        heads.sort_by_key(|h| (!h.waiting, Some(h.reader) != p, self.held_past(st, h.at)));
+        heads.into_iter().find_map(|h| if h.waiting { gap(h.last).or_else(|| gap(h.at)) } else { gap(h.at) })
     }
 
     /// A smoothed throughput (bytes/s) or time to first byte (s) sample.
@@ -339,13 +357,17 @@ struct Conn<B> {
     chunk: u64,
     buf: Vec<u8>,
     opened: Instant,
+    /// Last read from: the least recently used goes when another is needed.
+    used: Instant,
     answered: bool,
     /// Bytes and time spent waiting on the body since the last rate sample.
     tally: (usize, Duration),
 }
 
 async fn fetch_loop<R: Ranges>(weak: Weak<Stream<R>>) {
-    let mut conn: Option<Conn<R::Body>> = None;
+    // A demuxer can read two regions in turn (a poorly interleaved file, a track's index):
+    // each keeps its own connection rather than reopening one at every switch.
+    let mut conns: Vec<Conn<R::Body>> = Vec::new();
     let mut failures = 0u32;
     loop {
         let Some(s) = weak.upgrade() else { return };
@@ -354,20 +376,25 @@ async fn fetch_loop<R: Ranges>(weak: Weak<Stream<R>>) {
         }
         let target = s.next_gap(&s.state.lock().unwrap());
         let Some(target) = target else {
-            // The window is in hand: the connection waits unread, the host held back by TCP.
+            // The window is in hand: the connections wait unread, the host held back by TCP.
             let moved = s.moved.clone();
             drop(s);
             let _ = tokio::time::timeout(Duration::from_millis(500), moved.notified()).await;
             continue;
         };
-        if conn.as_ref().is_none_or(|c| c.chunk != target) {
-            conn = None;
+        // A connection a little short of the gap reads on through it rather than reopening.
+        let found = conns.iter().position(|c| c.chunk <= target && target - c.chunk <= READ_THROUGH);
+        let Some(i) = found else {
+            if conns.len() >= CONNS {
+                let oldest = (0..conns.len()).min_by_key(|&i| conns[i].used).unwrap_or(0);
+                conns.swap_remove(oldest);
+            }
             let ranges = s.ranges.clone();
             drop(s);
             let opened = Instant::now();
             let e = match tokio::time::timeout(NO_PROGRESS, ranges.from(target * CHUNK)).await {
                 Ok(Ok(body)) => {
-                    conn = Some(Conn { body, chunk: target, buf: Vec::new(), opened, answered: false, tally: (0, Duration::ZERO) });
+                    conns.push(Conn { body, chunk: target, buf: Vec::new(), opened, used: opened, answered: false, tally: (0, Duration::ZERO) });
                     continue;
                 }
                 Ok(Err(e)) => e,
@@ -377,12 +404,15 @@ async fn fetch_loop<R: Ranges>(weak: Weak<Stream<R>>) {
                 return;
             }
             continue;
-        }
+        };
         drop(s);
-        let Some(c) = conn.as_mut() else { continue };
+        let c = &mut conns[i];
+        // One left unread a while may have been closed by the host: that is no failure.
+        let parked = c.used.elapsed() > PARKED;
         let t0 = Instant::now();
         let piece = tokio::time::timeout(NO_PROGRESS, c.body.next()).await;
         let waited = t0.elapsed();
+        c.used = Instant::now();
         let Some(s) = weak.upgrade() else { return };
         let e = match piece {
             Ok(Ok(Some(bytes))) => {
@@ -390,7 +420,7 @@ async fn fetch_loop<R: Ranges>(weak: Weak<Stream<R>>) {
                 if !c.answered {
                     c.answered = true;
                     s.measured(None, Some(c.opened.elapsed().as_secs_f64()));
-                } else {
+                } else if !parked {
                     c.tally = (c.tally.0 + bytes.len(), c.tally.1 + waited);
                 }
                 if c.tally.0 as u64 >= CHUNK {
@@ -412,13 +442,17 @@ async fn fetch_loop<R: Ranges>(weak: Weak<Stream<R>>) {
                 continue;
             }
             Ok(Ok(None)) => {
-                conn = None;
+                conns.swap_remove(i);
+                continue;
+            }
+            Ok(Err(_)) | Err(_) if parked => {
+                conns.swap_remove(i);
                 continue;
             }
             Ok(Err(e)) => e,
             Err(_) => "The video host stalled".into(),
         };
-        conn = None;
+        conns.swap_remove(i);
         drop(s);
         if !retry(&weak, &mut failures, e).await {
             return;
@@ -477,15 +511,11 @@ impl<R: Ranges> vector_core::media::MediaSource for Stream<R> {
             if waited >= READ_TIMEOUT {
                 return Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "The video stopped loading"));
             }
-            st.wanted = Some(at);
             self.touch(&mut st, at, true);
             self.moved.notify_one();
             let step = Duration::from_millis(250);
             st = self.arrived.wait_timeout(st, step).unwrap().0;
             waited += step;
-        }
-        if st.wanted.is_some_and(|w| w >= offset && w < offset + want as u64) {
-            st.wanted = None;
         }
         if waited > Duration::ZERO {
             self.touch(&mut st, offset + done as u64, false);
@@ -577,6 +607,8 @@ mod tests {
         latency: Duration,
         served: Arc<std::sync::atomic::AtomicU64>,
         opened: std::sync::atomic::AtomicU32,
+        /// The offset of every piece served, to find a byte fetched twice.
+        pieces: Arc<Mutex<Vec<u64>>>,
     }
 
     struct MemBody {
@@ -584,6 +616,7 @@ mod tests {
         at: usize,
         bps: Option<f64>,
         served: Arc<std::sync::atomic::AtomicU64>,
+        pieces: Arc<Mutex<Vec<u64>>>,
     }
 
     impl Body for MemBody {
@@ -596,6 +629,7 @@ mod tests {
             if let Some(bps) = self.bps {
                 tokio::time::sleep(Duration::from_secs_f64(part.len() as f64 / bps)).await;
             }
+            self.pieces.lock().unwrap().push(self.at as u64);
             self.at = end;
             self.served.fetch_add(part.len() as u64, std::sync::atomic::Ordering::Relaxed);
             Ok(Some(part))
@@ -608,7 +642,7 @@ mod tests {
         async fn from(&self, start: u64) -> Result<MemBody, String> {
             self.opened.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             tokio::time::sleep(self.latency).await;
-            Ok(MemBody { bytes: self.bytes.clone(), at: start as usize, bps: self.bps, served: self.served.clone() })
+            Ok(MemBody { bytes: self.bytes.clone(), at: start as usize, bps: self.bps, served: self.served.clone(), pieces: self.pieces.clone() })
         }
 
         async fn get(&self, start: u64, end: u64) -> Result<Got, String> {
@@ -632,7 +666,7 @@ mod tests {
     }
 
     fn mem(bytes: Vec<u8>) -> Mem {
-        Mem { bytes: Arc::new(bytes), ranged: true, bps: None, latency: Duration::ZERO, served: Default::default(), opened: Default::default() }
+        Mem { bytes: Arc::new(bytes), ranged: true, bps: None, latency: Duration::ZERO, served: Default::default(), opened: Default::default(), pieces: Default::default() }
     }
 
     fn sha(b: &[u8]) -> String {
@@ -718,7 +752,7 @@ mod tests {
             std::thread::sleep(Duration::from_millis(5));
         }
         assert!(s.starving(), "a read blocked at the new spot holds playback");
-        assert_eq!(s.state.lock().unwrap().heads.len(), 1, "the seek moved the head, leaving none behind");
+        assert_eq!(s.state.lock().unwrap().heads.iter().filter(|h| h.waiting).count(), 1, "only the read at the new spot waits");
         assert_eq!(&reader.join().unwrap()[..], &v[far..far + 4096]);
         assert!(!s.starving());
         s.sought();
@@ -738,6 +772,63 @@ mod tests {
         let held: u64 = s.state.lock().unwrap().chunks.values().map(|c| c.len() as u64).sum();
         assert!(held >= 5 * 1024 * 1024, "held {held}");
         assert_eq!(s.ranges().opened.load(std::sync::atomic::Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn a_reader_in_two_distant_regions_fetches_each_byte_once() {
+        let rt = rt();
+        let gap = 90 * 1024 * 1024u64;
+        let v = video(120 * 1024 * 1024);
+        let mut m = mem(v.clone());
+        m.bps = Some(4. * 1024. * 1024.);
+        m.latency = Duration::from_millis(200);
+        let pieces = m.pieces.clone();
+        let s = rt.block_on(open(m, None)).ok().unwrap();
+        s.set_duration(120_000);
+        let src: Arc<dyn MediaSource> = s.clone();
+        // The sound for each moment sits 90 MB before its picture; the demuxer reads them in turn.
+        let read = |a: u64, len: u64| {
+            let mut r = vector_core::media::reader(src.clone());
+            let mut b = vec![0u8; 256 * 1024];
+            let mut off = 0;
+            while off < len {
+                for at in [a + off, a + gap + off] {
+                    r.seek(SeekFrom::Start(at)).unwrap();
+                    r.read_exact(&mut b).unwrap();
+                    assert_eq!(&b[..], &v[at as usize..at as usize + b.len()]);
+                }
+                off += b.len() as u64;
+            }
+        };
+        let t0 = Instant::now();
+        read(1024 * 1024, 6 * 1024 * 1024);
+        s.sought();
+        read(20 * 1024 * 1024, 6 * 1024 * 1024);
+        assert!(t0.elapsed() < Duration::from_secs(20), "took {:?}", t0.elapsed());
+        let mut seen = pieces.lock().unwrap().clone();
+        let all = seen.len();
+        seen.sort_unstable();
+        seen.dedup();
+        assert_eq!(seen.len(), all, "a piece was fetched twice");
+        assert!(s.ranges().opened.load(std::sync::atomic::Ordering::Relaxed) <= 6);
+    }
+
+    #[test]
+    fn an_index_at_the_files_end_doesnt_hold_back_playback() {
+        let rt = rt();
+        let v = video(40 * 1024 * 1024);
+        let s = rt.block_on(open(mem(v.clone()), None)).ok().unwrap();
+        s.set_duration(80_000);
+        let src: Arc<dyn MediaSource> = s.clone();
+        let mut r = vector_core::media::reader(src);
+        r.read_exact(&mut [0u8; 1024]).unwrap();
+        r.seek(SeekFrom::Start(v.len() as u64 - 4096)).unwrap();
+        r.read_exact(&mut [0u8; 4096]).unwrap();
+        r.seek(SeekFrom::Start(2048)).unwrap();
+        r.read_exact(&mut [0u8; 1024]).unwrap();
+        std::thread::sleep(Duration::from_millis(500));
+        let ahead = s.ahead_secs().unwrap();
+        assert!(ahead > 5., "ahead {ahead:.2}s");
     }
 
     #[test]
