@@ -323,6 +323,8 @@ pub struct Store {
     pub streamer: Streamer,
     /// The synced setting that switches the link cards' players off.
     pub players_off: bool,
+    /// Channels whose start was reached but whose oldest epochs this account never held.
+    pub history_limited: std::collections::HashSet<String>,
     /// Why YouTube refused to play a card's video here, by message: it then opens on YouTube.
     pub player_refused: HashMap<String, String>,
     /// Pinned chat-list rows in pin order: a DM's npub or a community's id.
@@ -501,6 +503,7 @@ impl Store {
             archived: demo.archived,
             rail: Default::default(),
             players_off: std::env::var_os("VECTOR_PLAYERS").is_none(),
+            history_limited: Default::default(),
             player_refused: HashMap::new(),
             // Fixtures: VECTOR_STREAMER=1 goes live under the mock's seed.
             streamer: {
@@ -562,6 +565,7 @@ impl Store {
             hidden_banners: Vec::new(),
             streamer: Default::default(),
             players_off: false,
+            history_limited: Default::default(),
             player_refused: HashMap::new(),
             pinned: Vec::new(),
             archived: HashMap::new(),

@@ -3825,16 +3825,27 @@ impl VectorApp {
             return;
         }
         let before = self.store.borrow().chat(&id).and_then(|c| c.messages.first()).map(|m| m.at);
-        let rx = backend::run(backend::community::sync_channel(id.to_string(), before));
+        let channel = id.to_string();
+        let rx = backend::run(async move {
+            let start = backend::community::sync_channel(channel.clone(), before).await;
+            // `history_limited`: the start reached going back is only this account's start.
+            let limited = before.is_some()
+                && matches!(start, Ok(true))
+                && !vector_core::community::holds_history_from_start(&channel);
+            start.map(|s| (s, limited))
+        });
         cx.spawn(async move |this, cx| {
             let res = rx.await;
             this.update(cx, |this, cx| {
                 this.history_net_busy.remove(id.as_ref());
                 match res {
-                    Ok(Ok(true)) => {
+                    Ok(Ok((true, limited))) => {
                         this.history_net.insert(id.to_string(), true);
+                        if limited {
+                            this.store.borrow_mut().history_limited.insert(id.to_string());
+                        }
                     }
-                    Ok(Ok(false)) => {
+                    Ok(Ok((false, _))) => {
                         this.history_done.remove(id.as_ref());
                         if this.open.as_ref() == Some(&id) {
                             this.load_older(cx);
@@ -9376,7 +9387,9 @@ fn history_edge(store: &Store, chat: &SerializableChat, on: &timeline::OnAct, ed
                     (
                         crate::community::logo(store, &com.community_id, 64., 32.).into_any_element(),
                         format!("Welcome to #{name}"),
-                        if alone {
+                        if store.history_limited.contains(&chat.id) {
+                            "This is the beginning of your history."
+                        } else if alone {
                             "This is the very beginning of the channel, say hello! 👋"
                         } else {
                             "This is the beginning of the channel."
