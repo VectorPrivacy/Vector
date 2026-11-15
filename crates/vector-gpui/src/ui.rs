@@ -4367,25 +4367,33 @@ impl VectorApp {
     }
 
     fn land_on(&mut self, ix: usize, id: String, cx: &mut Context<Self>) {
-        self.timeline.pause_following_tail();
-        self.timeline.scroll_to(gpui::ListOffset {
-            item_ix: ix,
-            offset_in_item: px(0.),
-        });
-        // Centred once a layout has measured the rows above it.
-        let list = self.timeline.clone();
-        cx.spawn(async move |this, cx| {
-            cx.background_executor()
-                .timer(std::time::Duration::from_millis(32))
-                .await;
-            let h = list.viewport_bounds().size.height;
-            let row = list.bounds_for_item(ix).map_or(px(0.), |b| b.size.height);
-            if list.logical_scroll_top().item_ix == ix {
-                list.scroll_by(-((h - row) / 2.).max(px(0.)));
+        let view = self.timeline.viewport_bounds();
+        match self.timeline.bounds_for_item(ix) {
+            // Already in full view: only the highlight.
+            Some(b) if b.top() >= view.top() && b.bottom() <= view.bottom() => {}
+            // Drawn, so its height is known: centred in one step.
+            Some(b) => {
+                self.timeline.pause_following_tail();
+                self.timeline.scroll_to(gpui::ListOffset { item_ix: ix, offset_in_item: px(0.) });
+                self.timeline.scroll_by(-((view.size.height - b.size.height) / 2.).max(px(0.)));
             }
-            this.update(cx, |_, cx| cx.notify()).ok();
-        })
-        .detach();
+            None => {
+                self.timeline.pause_following_tail();
+                self.timeline.scroll_to(gpui::ListOffset { item_ix: ix, offset_in_item: px(0.) });
+                // Centred once a layout has measured the rows above it.
+                let list = self.timeline.clone();
+                cx.spawn(async move |this, cx| {
+                    cx.background_executor().timer(std::time::Duration::from_millis(32)).await;
+                    let h = list.viewport_bounds().size.height;
+                    let row = list.bounds_for_item(ix).map_or(px(0.), |b| b.size.height);
+                    if list.logical_scroll_top().item_ix == ix {
+                        list.scroll_by(-((h - row) / 2.).max(px(0.)));
+                    }
+                    this.update(cx, |_, cx| cx.notify()).ok();
+                })
+                .detach();
+            }
+        }
         if self
             .jumped
             .as_ref()
