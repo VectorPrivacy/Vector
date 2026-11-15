@@ -235,6 +235,8 @@ pub struct VectorApp {
     history_net_busy: HashSet<String>,
     /// A batch of on-screen people is on its way to the profile queue.
     profile_flush: bool,
+    /// The newest message a catch-up read was last sent for, so it is sent once.
+    read_sent: Option<String>,
     pack_crop: Option<(
         Entity<crate::cropper::Cropper>,
         futures::channel::oneshot::Sender<Option<vector_core::image_crop::CropRect>>,
@@ -980,6 +982,7 @@ impl VectorApp {
             history_net: HashMap::new(),
             history_net_busy: HashSet::new(),
             profile_flush: false,
+            read_sent: None,
             pack_crop: None,
             emoji_picker,
             picker_open: false,
@@ -6094,6 +6097,7 @@ impl Render for VectorApp {
         if self.media.borrow_mut().audio.tick() || self.rec.animating() {
             window.request_animation_frame();
         }
+        self.catch_up_read(window, cx);
         {
             let mut media = self.media.borrow_mut();
             media.videos.scale = window.scale_factor();
@@ -9067,11 +9071,38 @@ impl VectorApp {
             .into_any_element()
     }
 
+    /// `onWindowResumed` and the scroll's own catch-up: the open chat, in front and at its newest,
+    /// reads what arrived while the user was away or scrolled up.
+    fn catch_up_read(&mut self, window: &Window, cx: &mut Context<Self>) {
+        let pinned = self.gap.is_none() && self.timeline.is_following_tail();
+        backend::notify::set_pinned(pinned);
+        if !(self.live && pinned && window.is_window_active()) {
+            return;
+        }
+        let Some(id) = self.open.clone() else { return };
+        let store = self.store.borrow();
+        let unread = store.chat(&id).filter(|c| c.unread_from.is_empty()).map_or(0, crate::data::unread_count);
+        let newest = store.chat(&id).and_then(|c| c.messages.last()).map(|m| m.id.clone());
+        drop(store);
+        if unread == 0 || newest.is_none() || self.read_sent == newest {
+            return;
+        }
+        self.read_sent = newest;
+        let rx = backend::run(messaging::mark_as_read(id.to_string(), None));
+        cx.spawn(async move |this, cx| {
+            let _ = rx.await;
+            this.update(cx, |this, cx| this.refresh_unread(cx)).ok();
+        })
+        .detach();
+    }
+
     fn timeline_cached(&self, id: SharedString, staged_voice: bool, cx: &mut Context<Self>) -> AnyElement {
         crate::pane::cached(
             &self.panes.timeline,
             gpui::StyleRefinement::default().size_full(),
             move |app, window, cx| {
+                // A scroll back to the newest redraws this pane alone.
+                app.catch_up_read(window, cx);
                 let store = app.store.clone();
                 let store = store.borrow();
                 app.timeline_list(&store, id.clone(), staged_voice, window, cx)

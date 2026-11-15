@@ -12,6 +12,17 @@ use vector_media::services::{NotificationData, show_notification_generic, strip_
 
 static FOCUSED: AtomicBool = AtomicBool::new(true);
 
+static PINNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+/// The open chat shows its newest message: only then has an arrival been seen.
+pub fn set_pinned(pinned: bool) {
+    PINNED.store(pinned, Ordering::Relaxed);
+}
+
+pub fn pinned() -> bool {
+    PINNED.load(Ordering::Relaxed)
+}
+
 pub fn set_focused(focused: bool) {
     FOCUSED.store(focused, Ordering::Relaxed);
 }

@@ -10,6 +10,11 @@ async fn auto_mark_if_active(chat_id: &str, msg_id: &str) -> bool {
     if vector_core::state::get_active_chat().as_deref() != Some(chat_id) {
         return false;
     }
+    // Seen only when the window is in front and the chat at its newest: an arrival while away
+    // or scrolled up stays unread until the user is back (`onWindowResumed`).
+    if !(super::notify::focused() && super::notify::pinned()) {
+        return false;
+    }
     let slim = {
         let mut state = STATE.lock().await;
         let Some(chat) = state.chats.iter_mut().find(|c| c.id == chat_id) else {
