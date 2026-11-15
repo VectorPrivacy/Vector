@@ -139,6 +139,15 @@ pub async fn sync_channel(channel_id: String, before_ms: Option<u64>) -> Result<
     })
 }
 
+/// `fill_community_gap`: the hole a scroll up from `before_ms` is about to cross, filled from the
+/// relays first, or the database read below it would step straight across. 0 when there is none.
+pub async fn fill_gap(channel_id: String, before_ms: u64) -> usize {
+    let Some(_claim) = vector_core::community::cache::claim_page_fetch(&channel_id, true) else {
+        return 0;
+    };
+    db::scoped(async move { VectorCore.fill_community_gap(&channel_id, before_ms).await.unwrap_or(0) }).await
+}
+
 /// One relay page of a channel's history older than `before_ms`, for a walk back to a point:
 /// whether it reached the start, how many messages were new here, and the oldest it reached (ms).
 pub async fn walk_channel(channel_id: String, before_ms: u64) -> Result<(bool, usize, Option<u64>), String> {

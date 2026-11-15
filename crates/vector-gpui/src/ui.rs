@@ -4199,12 +4199,12 @@ impl VectorApp {
             }
             return;
         }
-        let Some(anchor) = self
+        let Some((anchor, top_at)) = self
             .store
             .borrow()
             .chat(&id)
             .and_then(|c| c.messages.first())
-            .map(|m| m.id.clone())
+            .map(|m| (m.id.clone(), m.at))
         else {
             self.history_done.insert(id.to_string());
             self.relayout_keeping_top();
@@ -4212,7 +4212,13 @@ impl VectorApp {
         };
         self.paging = true;
         let chat_id = id.to_string();
-        let rx = backend::run(messaging::messages_around(chat_id, anchor, 101, 0));
+        let community = self.store.borrow().community_of(&id).is_some();
+        let rx = backend::run(async move {
+            if community {
+                backend::community::fill_gap(chat_id.clone(), top_at).await;
+            }
+            messaging::messages_around(chat_id, anchor, 101, 0).await
+        });
         cx.spawn(async move |this, cx| {
             let res = rx.await;
             this.update(cx, |this, cx| {
