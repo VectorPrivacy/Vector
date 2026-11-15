@@ -18,6 +18,11 @@ pub const GIANT: u64 = 50 * 1024 * 1024;
 const SIDE: f32 = 320.;
 /// A view off screen this long gives its GPU memory back.
 const IDLE: Duration = Duration::from_secs(30);
+/// On screen this long before a view starts: a GPU device costs hundreds of MB, too much for a
+/// row a jump or a fling only passes over.
+const DWELL: Duration = Duration::from_millis(150);
+/// A sighting this far apart from the last starts the dwell again.
+const GAP: Duration = Duration::from_millis(100);
 
 #[derive(Clone, Debug)]
 pub enum Act {
@@ -39,6 +44,8 @@ pub type OnAct = Rc<dyn Fn(Act, &mut Window, &mut App)>;
 pub struct Models {
     views: HashMap<String, View>,
     armed: HashSet<String>,
+    /// Models on screen with no view yet: (first seen in this run of frames, last seen).
+    sighted: HashMap<String, (Instant, Instant)>,
     wake: Option<futures::channel::mpsc::UnboundedSender<()>>,
     wake_rx: Option<futures::channel::mpsc::UnboundedReceiver<()>>,
     /// A full-screen view stands in front: the chat's hold still.
@@ -68,6 +75,24 @@ impl Models {
 
     pub fn armed(&self, att: &str, size: u64) -> bool {
         size <= GIANT || self.armed.contains(att)
+    }
+
+    /// Whether `att` has a view, or has stayed on screen long enough to start one.
+    pub fn settled(&mut self, att: &str) -> bool {
+        if self.views.contains_key(att) {
+            return true;
+        }
+        let now = Instant::now();
+        let (first, last) = self.sighted.entry(att.to_string()).or_insert((now, now));
+        if now - *last > GAP {
+            *first = now;
+        }
+        *last = now;
+        if now - *first < DWELL {
+            return false;
+        }
+        self.sighted.remove(att);
+        true
     }
 
     pub fn view(&mut self, att: &str, ext: &str, src: impl FnOnce() -> Option<Src>) -> Option<&mut View> {
@@ -125,7 +150,9 @@ impl Models {
             }
             keep
         });
-        let mut moving = false;
+        self.sighted.retain(|_, (_, last)| now - *last < Duration::from_secs(1));
+        // Drawn again until a model that stays in view is through its dwell.
+        let mut moving = self.sighted.values().any(|(_, last)| now - *last < GAP);
         for v in self.views.values_mut() {
             let on_screen = v.seen.is_some_and(|t| now - t < Duration::from_millis(250));
             moving |= v.tick(on_screen && self.active && !self.front) && on_screen;
@@ -305,6 +332,10 @@ pub fn stage(models: &mut Models, f: &Facts, src: impl FnOnce() -> Option<Src>, 
             .into_any_element(),
         );
     }
+    let note = |text: String, color| div().absolute().inset_0().flex().items_center().justify_center().p(px(16.)).text_center().text_size(px(13.)).text_color(color).child(text);
+    if !models.settled(f.att) {
+        return Some(el.child(note("Loading model…".into(), ca(255, 255, 255, 0.5))).into_any_element());
+    }
     let v = models.view(f.att, f.ext, src)?;
     v.seen = Some(Instant::now());
     let size = v.css_size();
@@ -314,7 +345,6 @@ pub fn stage(models: &mut Models, f: &Facts, src: impl FnOnce() -> Option<Src>, 
     if let Some(frame) = v.frame.clone() {
         el = el.child(img(frame).absolute().inset_0().size_full().opacity(v.opacity()));
     }
-    let note = |text: String, color| div().absolute().inset_0().flex().items_center().justify_center().p(px(16.)).text_center().text_size(px(13.)).text_color(color).child(text);
     match &v.phase {
         Phase::Loading => el = el.child(note("Loading model…".into(), ca(255, 255, 255, 0.5))),
         Phase::Failed(t) => el = el.child(note(t.clone(), ca(255, 140, 117, 0.9))),
