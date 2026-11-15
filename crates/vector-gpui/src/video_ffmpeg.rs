@@ -175,7 +175,12 @@ impl Video {
         let audio = src.input.streams().best(ffmpeg::media::Type::Audio).map(|s| s.index());
         let tb = f64::from(stream.time_base());
         let rot = rotation(&stream);
-        let mut ctx = ffmpeg::codec::context::Context::from_parameters(stream.parameters()).ok()?;
+        let params = stream.parameters();
+        // SAFETY: the stream's codec parameters, read while `src` owns them.
+        let pixels = unsafe { (*params.as_ptr()).width.max(0) as u64 * (*params.as_ptr()).height.max(0) as u64 };
+        let fps = f64::from(stream.avg_frame_rate());
+        let threads = if threads > 0 { threads } else { playback_threads(pixels, fps) };
+        let mut ctx = ffmpeg::codec::context::Context::from_parameters(params).ok()?;
         ctx.set_threading(ffmpeg::threading::Config { kind: ffmpeg::threading::Type::Frame, count: threads });
         let decoder = ctx.decoder().video().ok()?;
         Some((Video { src, index, decoder, tb, rot }, audio))
@@ -222,6 +227,12 @@ impl Video {
         let _ = self.src.input.seek(ts, ..ts + 1);
         self.decoder.flush();
     }
+}
+
+/// Each frame thread holds frames of its own: FFmpeg's default of one per core costs ~80 MB a
+/// 1080p clip, and two keep up with 1080p30.
+fn playback_threads(pixels: u64, fps: f64) -> usize {
+    if pixels > 1920 * 1088 || fps > 31. { 4 } else { 2 }
 }
 
 fn convert(f: &ffmpeg::frame::Video, target: (u32, u32), rot: u16) -> Option<image::RgbaImage> {
