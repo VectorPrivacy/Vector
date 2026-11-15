@@ -1071,20 +1071,11 @@ pub fn stack(blocks: &[Block], key: &str, click: &OnClick, clock: f32, lh: f32) 
 fn code_block(lang: &str, text: &SharedString, key: &str, click: &OnClick) -> AnyElement {
     let mut lines = div().flex().flex_col();
     let plain = c(crate::highlight::PLAIN);
-    for (n, (line, runs)) in text
-        .split('\n')
-        .zip(crate::highlight::highlight(text, lang))
-        .enumerate()
-    {
+    for (n, pieces) in crate::highlight::colored(text, lang).into_iter().enumerate() {
         // Each line its own paragraph, coloured run by run, so a drag selects code like prose.
-        let mut at = 0;
-        let atoms: Vec<Atom> = runs
+        let atoms: Vec<Atom> = pieces
             .into_iter()
-            .filter_map(|(len, color)| {
-                let piece = line.get(at..at + len)?;
-                at += len;
-                Some(Atom::Text { text: piece.to_string().into(), look: Look::new(MONO, 13., 19.5, color), kind: Kind::Plain })
-            })
+            .map(|(piece, color)| Atom::Text { text: piece.into(), look: Look::new(MONO, 13., 19.5, color), kind: Kind::Plain })
             .collect();
         let line_key = format!("{key}-{n}");
         let el = inline(atoms, Look::new(MONO, 13., 19.5, plain)).nowrap();
@@ -1095,7 +1086,7 @@ fn code_block(lang: &str, text: &SharedString, key: &str, click: &OnClick) -> An
         lines = lines.child(div().h(px(19.5)).flex().child(div().flex_none().child(el.id(SharedString::from(line_key)))));
     }
     let copy = click.clone();
-    let code: SharedString = text.clone();
+    let code: SharedString = crate::highlight::shown(text, lang).into();
     div()
         .relative()
         .max_w(px(470.))
