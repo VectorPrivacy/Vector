@@ -280,7 +280,9 @@ impl Videos {
                     c.scrub = Some(f);
                     return false;
                 }
-                c.scrub = None;
+                if c.scrub.take().is_none() {
+                    return false;
+                }
                 let ms = (f * c.info.as_ref().map_or(0, |i| i.duration) as f32) as u64;
                 seek(c, ms, input, scale);
                 false
@@ -298,7 +300,9 @@ impl Videos {
                 false
             }
             Act::Volume(v, done) => {
-                if let Some(c) = self.clips.get_mut(att) {
+                if let Some(c) = self.clips.get_mut(att)
+                    && (!done || c.leveling)
+                {
                     c.volume = v.clamp(0., 1.);
                     c.muted = c.volume <= 0.01;
                     c.leveling = !done;
@@ -986,11 +990,27 @@ fn scrubber(id: &str, frac: f32, seekable: bool, dragging: bool, on: OnAct) -> i
     div().flex_1().h(px(20.)).mx(px(6.)).child(slider(&format!("vseek-{id}"), frac, seekable, dragging, on, Act::Seek))
 }
 
+thread_local! {
+    static PRESSED: std::cell::RefCell<Option<SharedString>> = const { std::cell::RefCell::new(None) };
+}
+
+/// A track's press, held apart from the frame that paints it: its release can arrive first.
+pub(crate) fn press(key: &SharedString) {
+    PRESSED.with_borrow_mut(|p| *p = Some(key.clone()));
+}
+
+/// Whether this release ends a press on `key`.
+pub(crate) fn release(key: &SharedString) -> bool {
+    PRESSED.with_borrow_mut(|p| p.take_if(|k| *k == *key).is_some())
+}
+
 /// A track with a knob: `act(fraction, done)` as it is pressed, dragged and let go.
 fn slider(key: &str, frac: f32, live: bool, dragging: bool, on: OnAct, act: fn(f32, bool) -> Act) -> impl IntoElement {
     let seekable = live;
+    let key = SharedString::from(key.to_string());
+    let name = key.clone();
     div()
-        .id(SharedString::from(key.to_string()))
+        .id(key)
         .size_full()
         .on_click(|_, _, cx| cx.stop_propagation())
         .child(
@@ -1012,18 +1032,16 @@ fn slider(key: &str, frac: f32, live: bool, dragging: bool, on: OnAct, act: fn(f
                     window.set_cursor_style(CursorStyle::PointingHand, &hitbox);
                     let at = move |x: Pixels| f32::from(x - bounds.origin.x) / f32::from(bounds.size.width).max(1.);
                     {
-                        let (on, hitbox) = (on.clone(), hitbox.clone());
+                        let (on, hitbox, name) = (on.clone(), hitbox.clone(), name.clone());
                         window.on_mouse_event(move |e: &MouseDownEvent, phase, window, cx| {
                             if phase.bubble() && e.button == MouseButton::Left && hitbox.is_hovered(window) {
                                 cx.stop_propagation();
+                                press(&name);
                                 on(act(at(e.position.x).clamp(0., 1.), false), window, cx);
                             }
                         });
                     }
-                    if !dragging {
-                        return;
-                    }
-                    {
+                    if dragging {
                         let on = on.clone();
                         window.on_mouse_event(move |e: &MouseMoveEvent, phase, window, cx| {
                             if phase.bubble() && e.dragging() {
@@ -1032,7 +1050,7 @@ fn slider(key: &str, frac: f32, live: bool, dragging: bool, on: OnAct, act: fn(f
                         });
                     }
                     window.on_mouse_event(move |e: &MouseUpEvent, phase, window, cx| {
-                        if phase.bubble() {
+                        if phase.bubble() && release(&name) {
                             on(act(at(e.position.x).clamp(0., 1.), true), window, cx);
                         }
                     });

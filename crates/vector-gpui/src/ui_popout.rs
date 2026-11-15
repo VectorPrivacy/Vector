@@ -792,6 +792,8 @@ fn seek_line(frac: f32, accent: gpui::Hsla, scrubbing: bool, on: On) -> impl Int
     )
 }
 
+const SCRUB: SharedString = SharedString::new_static("popout-scrub");
+
 fn scrub_events(bounds: Bounds<Pixels>, hitbox: &gpui::Hitbox, scrubbing: bool, on: On, window: &mut Window) {
     window.set_cursor_style(CursorStyle::PointingHand, hitbox);
     let at = move |x: Pixels| (f32::from(x - bounds.origin.x) / f32::from(bounds.size.width).max(1.)).clamp(0., 1.);
@@ -800,14 +802,12 @@ fn scrub_events(bounds: Bounds<Pixels>, hitbox: &gpui::Hitbox, scrubbing: bool, 
         window.on_mouse_event(move |e: &MouseDownEvent, phase, window, cx| {
             if phase.bubble() && e.button == MouseButton::Left && hitbox.is_hovered(window) {
                 cx.stop_propagation();
+                crate::video::press(&SCRUB);
                 on(Act::Seek(at(e.position.x), false), window, cx);
             }
         });
     }
-    if !scrubbing {
-        return;
-    }
-    {
+    if scrubbing {
         let on = on.clone();
         window.on_mouse_event(move |e: &MouseMoveEvent, phase, window, cx| {
             if phase.bubble() && e.dragging() {
@@ -816,7 +816,7 @@ fn scrub_events(bounds: Bounds<Pixels>, hitbox: &gpui::Hitbox, scrubbing: bool, 
         });
     }
     window.on_mouse_event(move |e: &MouseUpEvent, phase, window, cx| {
-        if phase.bubble() {
+        if phase.bubble() && crate::video::release(&SCRUB) {
             on(Act::Seek(at(e.position.x), true), window, cx);
         }
     });
