@@ -1563,7 +1563,7 @@ fn toolbar(ctx: &Ctx, m: &Message, first: bool) -> Option<AnyElement> {
             spread_radius: px(0.),
             inset: false,
         }])
-        .occlude()
+        .block_mouse_except_scroll()
         .on_hover({
             let (act, id) = (ctx.on_act.clone(), m.id.clone());
             move |h, w, cx| act(&id, Act::Hover(*h), w, cx)
