@@ -135,14 +135,19 @@ pub struct Cache {
 impl Cache {
     pub fn get(&mut self, entity: &str) -> State {
         let key = entity.to_ascii_lowercase();
-        match self.states.get(&key) {
-            Some(State::Failed(_, at)) if at.elapsed() >= ERR_TTL => {}
-            Some(s) => return s.clone(),
-            None => {}
+        match self.states.get_mut(&key) {
+            // Asked again behind the card it shows: flipping to a skeleton would jump the row.
+            Some(State::Failed(_, at)) if at.elapsed() >= ERR_TTL => {
+                *at = Instant::now();
+                self.queue.push(entity.to_string());
+            }
+            Some(_) => {}
+            None => {
+                self.states.insert(key.clone(), State::Loading);
+                self.queue.push(entity.to_string());
+            }
         }
-        self.states.insert(key, State::Loading);
-        self.queue.push(entity.to_string());
-        State::Loading
+        self.states[&key].clone()
     }
 
     pub fn settle(&mut self, entity: &str, res: Result<Embed, String>) {

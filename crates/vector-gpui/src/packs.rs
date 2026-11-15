@@ -44,14 +44,19 @@ pub struct Cache {
 impl Cache {
     pub fn get(&mut self, naddr: &str) -> State {
         let key = naddr.to_ascii_lowercase();
-        match self.states.get(&key) {
-            Some(State::Failed(_, at)) if at.elapsed() >= ERR_TTL => {}
-            Some(s) => return s.clone(),
-            None => {}
+        match self.states.get_mut(&key) {
+            // Asked again behind the card it shows: flipping to a skeleton would jump the row.
+            Some(State::Failed(_, at)) if at.elapsed() >= ERR_TTL => {
+                *at = Instant::now();
+                self.queue.push(key.clone());
+            }
+            Some(_) => {}
+            None => {
+                self.states.insert(key.clone(), State::Loading);
+                self.queue.push(key.clone());
+            }
         }
-        self.states.insert(key.clone(), State::Loading);
-        self.queue.push(key);
-        State::Loading
+        self.states[&key].clone()
     }
 
     pub fn settle(&mut self, naddr: &str, res: Result<EmojiPack, String>) {
