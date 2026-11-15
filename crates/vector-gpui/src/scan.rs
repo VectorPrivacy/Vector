@@ -214,6 +214,11 @@ impl At {
         self
     }
 
+    /// The highest position held; 0 when empty.
+    fn last(&self) -> usize {
+        (0..6).rev().find(|&w| self.0[w] != 0).map_or(0, |w| w * 64 + 63 - self.0[w].leading_zeros() as usize)
+    }
+
     pub fn iter(self) -> impl Iterator<Item = usize> {
         let mut w = 0;
         let mut bits = self.0[0];
@@ -248,7 +253,12 @@ impl At {
 
     /// A literal, case-insensitive.
     pub fn li(self, t: &str, w: &str) -> Self {
+        let (b, f) = (t.as_bytes(), w.as_bytes()[0]);
         self.step(|p, o| {
+            // An ASCII byte that differs from the first, folded, can't open it.
+            if b.get(p).is_some_and(|&x| x.is_ascii() && x != f && !(f.is_ascii_alphabetic() && x | 0x20 == f | 0x20)) {
+                return;
+            }
             if let Some(e) = lit_i(t, p, w) {
                 o.add(e)
             }
@@ -295,10 +305,14 @@ impl At {
     fn class_run(self, t: &str, min: usize, f: impl Fn(char) -> bool) -> Self {
         let mut out = if min == 0 { self } else { Self::default() };
         let Some(first) = self.iter().next() else { return out };
+        let last = self.last();
         let mut live = false;
         for (i, c) in t[first..].char_indices() {
             let i = first + i;
             live |= self.has(i);
+            if !live && i > last {
+                break;
+            }
             if f(c) {
                 if live {
                     out.add(i + c.len_utf8());

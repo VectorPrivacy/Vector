@@ -181,9 +181,13 @@ fn dur_at(t: &str, p: usize) -> Option<(usize, [Span; 2])> {
 
 /// "2h 30m", "an hour", "3 days and 4 hours": seconds, or None when any word isn't one.
 pub fn duration(text: &str) -> Option<f64> {
+    // Every reading opens with an amount: a digit, "a", "an", "and", "half" or "one".
+    if !text.trim_start().starts_with(|c: char| digit(c) || matches!(c, 'a' | 'h' | 'o')) {
+        return None;
+    }
     let mut clean = String::with_capacity(text.len() + 8);
     let mut last = 0;
-    for (s, e, ()) in matches(text, |t, p| (boundary(t, p) && lit(t, p, "and").is_some_and(|e| boundary(t, e))).then_some((p + 3, ()))) {
+    for (s, e, ()) in crate::scan::matches_from(text, crate::scan::lead(b"a"), |t, p| (boundary(t, p) && lit(t, p, "and").is_some_and(|e| boundary(t, e))).then_some((p + 3, ()))) {
         clean += &text[last..s];
         clean.push(' ');
         last = e;
@@ -211,7 +215,12 @@ pub fn duration(text: &str) -> Option<f64> {
     let clean = squeeze(&both);
     let clean = clean.trim();
     let mut total = 0.;
-    for (_, _, [a, u]) in matches(clean, dur_at) {
+    let mut last = 0;
+    for (s, e, [a, u]) in matches(clean, dur_at) {
+        if !clean[last..s].trim().is_empty() {
+            return None;
+        }
+        last = e;
         let (a, u) = (span(clean, a), span(clean, u));
         let amount = if a.starts_with(|c: char| c.is_ascii_digit()) {
             a.parse::<f64>().ok()?
@@ -223,7 +232,7 @@ pub fn duration(text: &str) -> Option<f64> {
         let unit = UNITS.iter().find(|(words, _)| words.contains(&u))?;
         total += amount * unit.1;
     }
-    (total != 0. && only_matches(clean, matches(clean, dur_at))).then_some(total)
+    (total != 0. && clean[last..].trim().is_empty()).then_some(total)
 }
 
 fn span(t: &str, s: Span) -> &str {
@@ -789,6 +798,15 @@ struct Form {
     last: fn(char) -> bool,
     relative: bool,
     alone: bool,
+    /// What the lead or phrase can open with.
+    first: fn(char) -> bool,
+    /// The most chars the lead, phrase and closing mark can span, when bounded.
+    span: Option<usize>,
+}
+
+/// `c` lowercased is in `set`, LONG S reading as `s`.
+fn opens(c: char, set: &str) -> bool {
+    set.contains(if c == '\u{17F}' { 's' } else { c.to_ascii_lowercase() })
 }
 
 const FORMS: [Form; 7] = [
@@ -801,10 +819,10 @@ const FORMS: [Form; 7] = [
             if has_from { ahead.or(g_span(t, s).li(t, " from now")) } else { ahead }
         },
         last: fold_letter, relative: true,
-        alone: false,
+        alone: false, first: |c| digit(c) || opens(c, "ahi"), span: None,
     },
-    Form { lead: "", phrase: |t, s| g_clock(t, g_year(t, g_day(t, g_month(t, s).opt(|m| m.li(t, ".")).li(t, " ")))), last: |c| digit(c) || matches!(c.to_ascii_lowercase(), 't' | 'd' | 'h' | 'm'), relative: false, alone: false },
-    Form { lead: "the ", phrase: |t, s| g_clock(t, g_year(t, g_month(t, g_day(t, s).li(t, " ").opt(|x| x.li(t, "of "))))), last: |c| digit(c) || matches!(c.to_ascii_lowercase(), 'n' | 'y' | 'b' | 'r' | 'h' | 'l' | 'e' | 'g' | 't' | 'p' | 'v' | 'c' | 'm'), relative: false, alone: false },
+    Form { lead: "", phrase: |t, s| g_clock(t, g_year(t, g_day(t, g_month(t, s).opt(|m| m.li(t, ".")).li(t, " ")))), last: |c| digit(c) || matches!(c.to_ascii_lowercase(), 't' | 'd' | 'h' | 'm'), relative: false, alone: false, first: |c| opens(c, "jfmasond"), span: Some(40) },
+    Form { lead: "the ", phrase: |t, s| g_clock(t, g_year(t, g_month(t, g_day(t, s).li(t, " ").opt(|x| x.li(t, "of "))))), last: |c| digit(c) || matches!(c.to_ascii_lowercase(), 'n' | 'y' | 'b' | 'r' | 'h' | 'l' | 'e' | 'g' | 't' | 'p' | 'v' | 'c' | 'm'), relative: false, alone: false, first: |c| digit(c) || opens(c, "t"), span: Some(48) },
     Form {
         lead: "",
         phrase: |t, s| {
@@ -812,7 +830,7 @@ const FORMS: [Form; 7] = [
             d.opt(|x| x.class(t, 1, 1, |c| c == ' ' || c == 'T').digits(t, 1, 2).lit(t, ":").digits(t, 2, 2))
         },
         last: digit, relative: false,
-        alone: false,
+        alone: false, first: digit, span: Some(24),
     },
     Form {
         lead: "on ",
@@ -821,19 +839,19 @@ const FORMS: [Form; 7] = [
             g_time(t, d.opt(|x| x.li(t, ",")).li(t, " ").opt(|x| x.li(t, "at "))).or(d.li(t, " at ").digits(t, 1, 2))
         },
         last: |c| digit(c) || matches!(c, 'm' | 'M' | '.'), relative: false,
-        alone: false,
+        alone: false, first: |c| opens(c, "otncsmwf"), span: Some(48),
     },
     Form {
         lead: "",
         phrase: |t, s| g_dayword(t, g_time(t, s.opt(|x| x.li(t, "at "))).opt(|x| x.li(t, ",")).li(t, " ").opt(|x| x.li(t, "on "))),
         last: |c| matches!(c.to_ascii_lowercase(), 'y' | 't' | 'w' | 'r'), relative: false,
-        alone: false,
+        alone: false, first: |c| digit(c) || opens(c, "a"), span: Some(48),
     },
     Form {
         lead: "",
         phrase: |t, s| g_hour(t, s.opt(|x| x.li(t, "at "))).any_li(t, &["am", "pm", "a.m.", "p.m."]).or(g_clock24(t, s.li(t, "at "))),
         last: |c| digit(c) || matches!(c, 'm' | 'M' | '.'), relative: false,
-        alone: true,
+        alone: true, first: |c| digit(c) || opens(c, "a"), span: Some(24),
     },
 ];
 
@@ -853,15 +871,25 @@ fn form_at(form: &Form, t: &str) -> Option<(usize, usize)> {
         return None;
     }
     let leads = |s: At| if form.lead.is_empty() { s } else { s.or(s.li(t, form.lead)) };
+    // Too far from the end for a bounded form to reach it.
+    let near = form.span.map_or(0, |n| t.char_indices().rev().nth(n).map_or(0, |(i, _)| i));
+    let can = |p: usize| p >= near && next(t, p).is_some_and(form.first);
     let mut starts = [0usize; 81];
-    let mut count = 1;
+    let mut count = 0;
+    if can(0) {
+        starts[0] = 0;
+        count = 1;
+    }
     for (i, c) in t.char_indices().filter(|&(_, c)| c.is_whitespace() || c == '(') {
-        if count < starts.len() {
+        if count < starts.len() && can(i + c.len_utf8()) {
             starts[count] = i + c.len_utf8();
             count += 1;
         }
     }
     let starts = &starts[..count];
+    if starts.is_empty() {
+        return None;
+    }
     let reaches = |n: usize| {
         let mut s = At::default();
         starts[..n].iter().for_each(|&p| s.add(p));
@@ -943,7 +971,7 @@ fn amount_at(t: &str, p: usize) -> Option<(usize, [Span; 3])> {
 /// A time phrase the draft ends with, worth offering as a time everyone reads in their own
 /// zone (`ttSuggest`): "in 6 hours" a countdown, a date a date, a date with a time both.
 pub fn suggest(before: &str, now: DateTime<Local>) -> Option<Suggestion> {
-    if before.chars().count() < 6 {
+    if before.len() < 24 && before.chars().count() < 6 {
         return None;
     }
     let skip = before.char_indices().rev().nth(79).map_or(0, |(i, _)| i);
@@ -1021,7 +1049,8 @@ fn token_at(t: &str, p: usize) -> Option<(usize, (Span, Option<char>))> {
 
 /// `<t:UNIX>` and `<t:UNIX:STYLE>` outside code: (byte start, byte end, unix, style).
 pub fn codes(src: &str) -> Vec<(usize, usize, i64, char)> {
-    let Some(first) = memchr::memmem::find(src.as_bytes(), b"<t:") else { return Vec::new() };
+    static OPEN: std::sync::LazyLock<memchr::memmem::Finder<'static>> = std::sync::LazyLock::new(|| memchr::memmem::Finder::new("<t:"));
+    let Some(first) = OPEN.find(src.as_bytes()) else { return Vec::new() };
     let code = vector_core::text_color::code_ranges(src);
     let tokens = crate::scan::matches_from(&src[first..], crate::scan::lead(b"<"), token_at);
     tokens
