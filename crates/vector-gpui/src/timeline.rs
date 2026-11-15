@@ -1694,7 +1694,8 @@ fn toolbar(ctx: &Ctx, m: &Message, first: bool) -> Option<AnyElement> {
         .id(SharedString::from(format!("{}-toolbar", m.id)))
         .absolute()
         .top(px(-lift))
-        .right(px(8.))
+        // Clear of the 22px scrollbar strip, which would otherwise take the last button's edge.
+        .right(px(26.))
         .flex()
         .gap(px(2.))
         .p(px(4.))
