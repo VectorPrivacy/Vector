@@ -1866,6 +1866,7 @@ pub fn div() -> Div {
         prepaint_listener: None,
         image_cache: None,
         prepaint_order_fn: None,
+        children_prepainted: false,
     }
 }
 
@@ -1922,6 +1923,9 @@ pub struct Div {
     prepaint_listener: Option<Box<dyn Fn(Vec<Bounds<Pixels>>, &mut Window, &mut App) + 'static>>,
     image_cache: Option<Box<dyn ImageCacheProvider>>,
     prepaint_order_fn: Option<Box<dyn Fn(&mut Window, &mut App) -> SmallVec<[usize; 8]>>>,
+    /// Paint follows prepaint's verdict on the children: a hover that flips `display` in
+    /// between would otherwise paint children that were never prepainted.
+    children_prepainted: bool,
 }
 
 impl Div {
@@ -2139,7 +2143,8 @@ impl Element for Div {
             cx,
             |style, scroll_offset, hitbox, window, cx| {
                 // skip children
-                if style.display == Display::None {
+                self.children_prepainted = style.display != Display::None;
+                if !self.children_prepainted {
                     return hitbox;
                 }
 
@@ -2195,7 +2200,7 @@ impl Element for Div {
                 cx,
                 |style, window, cx| {
                     // skip children
-                    if style.display == Display::None {
+                    if style.display == Display::None || !self.children_prepainted {
                         return;
                     }
 
