@@ -4,7 +4,6 @@
 //! Tauri client places them, so both clients colour the same glyphs.
 
 use gpui::Hsla;
-use unicode_properties::GeneralCategory;
 use vector_core::text_color::{ColorSpan, Effect};
 
 const OPEN: u32 = 0xF0000;
@@ -220,10 +219,7 @@ fn link_at(b: &[u8], open: usize) -> Option<usize> {
     (b[end] == b')' && chars_within(&b[paren..end], 2048)).then_some(end + 1)
 }
 
-/// `\d` as regex reads it: any decimal digit, not only ASCII.
-fn digit(c: char) -> bool {
-    c.is_ascii_digit() || (!c.is_ascii() && unicode_properties::UnicodeGeneralCategory::general_category(c) == GeneralCategory::DecimalNumber)
-}
+use crate::scan::digit;
 
 /// How many chars from `at` satisfy `f`, counting no further than `limit`.
 fn count_while(t: &[char], at: usize, limit: usize, f: impl Fn(char) -> bool) -> usize {
@@ -253,27 +249,8 @@ fn prefix_len(t: &[char]) -> usize {
     }
 }
 
-/// `\p{P}` or `\p{S}`.
 fn punct(c: Option<char>) -> bool {
-    use GeneralCategory as G;
-    c.is_some_and(|c| {
-        c.is_ascii_punctuation()
-            || (!c.is_ascii()
-                && matches!(
-                    unicode_properties::UnicodeGeneralCategory::general_category(c),
-                    G::ConnectorPunctuation
-                        | G::DashPunctuation
-                        | G::OpenPunctuation
-                        | G::ClosePunctuation
-                        | G::InitialPunctuation
-                        | G::FinalPunctuation
-                        | G::OtherPunctuation
-                        | G::MathSymbol
-                        | G::CurrencySymbol
-                        | G::ModifierSymbol
-                        | G::OtherSymbol
-                ))
-    })
+    c.is_some_and(crate::scan::punct)
 }
 
 /// `<[A-Za-z/!?][^<>]*$`: only the last `<` can open it.

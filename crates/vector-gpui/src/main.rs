@@ -98,6 +98,7 @@ mod security;
 mod settings;
 #[allow(dead_code, unused_imports, unsafe_op_in_unsafe_fn, clippy::all)]
 mod shared;
+mod scan;
 mod shortcodes;
 #[allow(dead_code, unused_imports, unsafe_op_in_unsafe_fn, clippy::all)]
 mod simd;
