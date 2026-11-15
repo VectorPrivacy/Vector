@@ -1732,8 +1732,24 @@ impl VectorApp {
         app.listen_video(cx);
         crate::callvideo::announce_caps();
         backend::notify::set_focused(window.is_window_active());
-        cx.observe_window_activation(window, |_, window, _| {
-            backend::notify::set_focused(window.is_window_active())
+        let away_since = std::cell::Cell::new(None::<std::time::Instant>);
+        cx.observe_window_activation(window, move |_, window, _| {
+            let active = window.is_window_active();
+            backend::notify::set_focused(active);
+            // `resume_after_away`: back after a minute or more, the relays are proven, the live
+            // subscriptions re-armed and the gap caught up.
+            if !active {
+                away_since.set(Some(std::time::Instant::now()));
+            } else if let Some(at) = away_since.take()
+                && at.elapsed() >= std::time::Duration::from_secs(60)
+            {
+                let away = at.elapsed().as_millis() as u64;
+                let _ = backend::run(async move {
+                    if let Some(client) = vector_core::state::nostr_client() {
+                        vector_core::live_subs::revive(&client, away, false).await;
+                    }
+                });
+            }
         })
         .detach();
         app.screen = Screen::Booting;
@@ -3966,6 +3982,13 @@ impl VectorApp {
         if self.live && switching {
             // `queue_chat_profiles_sync`: the chat's people, refreshed as it opens.
             let _ = backend::run(vector_core::profile::sync::queue_chat_profiles(id.to_string(), true));
+            // `warm_inbox_relays`: a DM's inbox relays, looked up ahead of the first send (the
+            // backend holds it to hourly per person).
+            if id.starts_with("npub1")
+                && let Ok(pk) = nostr_sdk::prelude::PublicKey::parse(id.as_ref())
+            {
+                let _ = backend::run(async move { vector_core::inbox_relays::refresh_in_background(pk) });
+            }
         }
         self.commands.close();
         self.load_commands(false, cx);
