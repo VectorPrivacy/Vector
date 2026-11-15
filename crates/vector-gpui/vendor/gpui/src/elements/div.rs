@@ -2191,6 +2191,8 @@ impl Element for Div {
             .map(|provider| provider.provide(window, cx));
 
         let source_location = self.interactivity.source_location();
+        // Release builds carry no source location; the id path still names the element.
+        let id_path = global_id.cloned();
         window.with_image_cache(image_cache, |window| {
             self.interactivity.paint(
                 global_id,
@@ -2208,8 +2210,9 @@ impl Element for Div {
                         // Display flipped between prepaint and paint (a hover styling `display`):
                         // skipped rather than aborting, and reported so the cause gets fixed.
                         log::error!(
-                            "div painted without prepainted children (display changed mid-frame){}",
-                            source_location.map(|l| format!(" at {l}")).unwrap_or_default()
+                            "div painted without prepainted children (display changed mid-frame){}{}",
+                            source_location.map(|l| format!(" at {l}")).unwrap_or_default(),
+                            id_path.as_ref().map(|p| format!(", id path {p:?}")).unwrap_or_default()
                         );
                         debug_assert!(false, "div display changed between prepaint and paint");
                         return;
