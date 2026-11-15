@@ -28,6 +28,8 @@ pub struct Pin {
     /// `image` or `video`, when the first attachment can preview inline.
     pub media: Option<&'static str>,
     pub jumpable: bool,
+    /// NIP-30 custom emoji the message carries.
+    pub emoji: Vec<vector_core::types::EmojiTag>,
 }
 
 impl Pin {
@@ -64,7 +66,21 @@ impl Pin {
                 None
             }
         });
-        Some(Self { id, content, ms: v["ms"].as_u64().unwrap_or(0), files, media, jumpable: false })
+        let mut seen = HashSet::new();
+        let emoji = v["tags"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_array)
+            .filter_map(|t| match t.as_slice() {
+                [k, code, url, ..] if k.as_str() == Some("emoji") => Some((code.as_str()?, url.as_str()?)),
+                _ => None,
+            })
+            .filter(|(code, _)| !code.is_empty() && code.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '~')))
+            .filter(|(code, _)| seen.insert(*code))
+            .map(|(code, url)| vector_core::types::EmojiTag { shortcode: code.to_string(), url: url.to_string() })
+            .collect();
+        Some(Self { id, content, ms: v["ms"].as_u64().unwrap_or(0), files, media, jumpable: false, emoji })
     }
 
     fn lines(&self) -> usize {
@@ -241,6 +257,9 @@ fn row(pins: &Pins, pin: &Pin, store: &Store, revealed: &HashMap<String, HashSet
         ));
     }
 
+    let media = crate::media::shared();
+    let custom = crate::timeline::custom_emoji(store, &media, &pin.emoji);
+    let custom = custom.as_ref().map(|f| f as &dyn Fn(&str) -> Option<crate::media::Custom>);
     let body: AnyElement = if expanded {
         let mut col = div().flex().flex_col();
         let source = demote(&pin.content);
@@ -249,7 +268,7 @@ fn row(pins: &Pins, pin: &Pin, store: &Store, revealed: &HashMap<String, HashSet
             &markdown::Ctx {
                 base: look(),
                 revealed,
-                custom: None,
+                custom,
                 now: store.now_ms() as f64 / 1000.,
                 mention: Some(&|npub: &str| store.name_in(npub, Some(&pins.community))),
                 tags: &[],
@@ -282,6 +301,9 @@ fn row(pins: &Pins, pin: &Pin, store: &Store, revealed: &HashMap<String, HashSet
     } else {
         let source = store.resolve_mentions(first_line(&pin.content), Some(&pins.community));
         let mut atoms = crate::preview::atoms(&source, usize::MAX, &look());
+        if let Some(custom) = custom {
+            atoms = crate::preview::with_customs(atoms, custom);
+        }
         atoms.extend(kinds(pin));
         inline(atoms, look()).single_line().report_clip(clipped).into_any_element()
     };
