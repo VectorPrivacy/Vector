@@ -159,12 +159,23 @@ impl<R: Ranges> Stream<R> {
         (i * CHUNK).min(self.len).saturating_sub(head)
     }
 
-    /// Seconds of the clip already here past the reader with the least.
+    /// The reader furthest back: the picture at the playhead. The sound's decoder reads as far
+    /// ahead as its window allows, so it waits at the download's edge even with plenty in hand.
+    fn earliest(st: &State) -> Option<u64> {
+        st.heads.iter().map(|&(h, _)| h).min()
+    }
+
+    /// Only the playhead's reader waiting holds playback.
+    fn playhead_waits(st: &State) -> bool {
+        st.wanted.zip(Self::earliest(st)).is_some_and(|(w, h)| w.abs_diff(h) <= SAME_HEAD)
+    }
+
+    /// Seconds of the clip already here past the playhead's reader.
     pub fn ahead_secs(&self) -> Option<f64> {
         let st = self.state.lock().unwrap();
         let d = st.duration_ms.filter(|d| *d > 0)?;
-        let least = st.heads.iter().map(|&(h, _)| self.held_past(&st, h)).min()?;
-        Some(least as f64 * d as f64 / 1000. / self.len as f64)
+        let held = self.held_past(&st, Self::earliest(&st)?);
+        Some(held as f64 * d as f64 / 1000. / self.len as f64)
     }
 
     /// Everything past every reader to the end is here.
@@ -194,7 +205,7 @@ impl<R: Ranges> Stream<R> {
 
     /// A read is waiting on the network.
     pub fn starving(&self) -> bool {
-        self.state.lock().unwrap().wanted.is_some()
+        Self::playhead_waits(&self.state.lock().unwrap())
     }
 
     pub fn error(&self) -> Option<String> {
@@ -254,21 +265,23 @@ impl<R: Ranges> Stream<R> {
         }
     }
 
-    /// The next run of chunks to fetch: what a blocked read waits on first, else the first gap
-    /// in the window ahead of the reader with the least.
+    /// The next run of chunks to fetch.
     fn next(&self, st: &mut State) -> Option<(u64, u64)> {
         let window = self.window(st);
         let gap = |from: u64, st: &State| {
             let end = ((from + window).div_ceil(CHUNK)).min(self.chunks());
             (from / CHUNK..end).find(|i| !st.chunks.contains_key(i) && !st.inflight.contains(i)).map(|i| (i, end))
         };
+        // The playhead's window first, then a read waiting elsewhere (the sound at the edge),
+        // then the other readers front to back.
+        let urgent = Self::earliest(st).and_then(|h| gap(h, st));
         let blocked = st.wanted.and_then(|w| gap(w, st));
-        let (start, end) = blocked.or_else(|| {
+        let (start, end) = urgent.or(blocked).or_else(|| {
             let mut heads: Vec<u64> = st.heads.iter().map(|&(h, _)| h).collect();
-            heads.sort_by_key(|&h| self.held_past(st, h));
+            heads.sort_unstable();
             heads.into_iter().find_map(|h| gap(h, st))
         })?;
-        let burst = if blocked.is_some() { 2 } else { MAX_BURST };
+        let burst = if Self::playhead_waits(st) { 2 } else { MAX_BURST };
         let mut n = 1;
         while n < burst && start + n < end && !st.chunks.contains_key(&(start + n)) && !st.inflight.contains(&(start + n)) {
             n += 1;
