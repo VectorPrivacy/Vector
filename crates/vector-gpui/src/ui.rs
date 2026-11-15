@@ -8870,6 +8870,15 @@ impl VectorApp {
                 .ok();
         });
         let hovered = self.hovered.clone();
+        // The head of the hovered message's streak: its avatar moves for any row of the streak.
+        let hover_head = hovered.as_ref().and_then(|h| {
+            let at = *self.msg_index.get(h)?;
+            let r = self.rows.iter().position(|r| matches!(r, Row::Message { index, .. } if *index == at))?;
+            self.rows[..=r].iter().rev().find_map(|r| match r {
+                Row::Message { index, first: true, .. } => Some(*index),
+                _ => None,
+            })
+        });
         let picker = self.picker.clone();
         let replying = match &self.mode {
             Mode::Reply { id, .. } => Some(id.clone()),
@@ -8920,6 +8929,7 @@ impl VectorApp {
                 clock,
                 on_act: on_act.clone(),
                 hovered: hovered.as_deref(),
+                hover_head,
                 replying: replying.as_deref(),
                 picker: picker.as_deref(),
                 fail_reasons: &fail_reasons,

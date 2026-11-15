@@ -100,6 +100,8 @@ pub struct Ctx<'a> {
     pub on_act: OnAct,
     /// The row under the pointer, which carries the toolbar.
     pub hovered: Option<&'a str>,
+    /// The message heading the hovered row's streak.
+    pub hover_head: Option<usize>,
     /// The message the composer is replying to.
     pub replying: Option<&'a str>,
     /// The message whose reaction menu is open.
@@ -267,6 +269,7 @@ pub fn message_row(ctx: &Ctx, index: usize, first: bool, run: u32, gap: f32) -> 
                     .cursor_pointer()
                     .on_click(move |_, w, cx| act(&id, Act::Mini(who.clone(), k.clone()), w, cx))
                     .on_mouse_down(gpui::MouseButton::Right, author_menu(ctx, m, &author, &key))
+                    .when(ctx.hover_head == Some(index), |d| d.motion_live())
                     .child(avatar(ctx.store, &author, 40.))
                     .child(crate::kit::anchor(ctx.anchors, key)),
             )
