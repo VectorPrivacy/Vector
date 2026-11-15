@@ -64,6 +64,9 @@ pub enum Act {
     RevealMedia(String),
     /// A file on this device: show it, or save a held one.
     OpenFile(String),
+    /// A downloaded attachment's toolbar buttons: reveal it (or save a held one), or copy it.
+    RevealFile(String),
+    CopyFile(String),
     /// A Mini App link: fetch it (or retry), or open what it fetched.
     XdcUrl(String),
     OpenXdcUrl(String),
@@ -1672,6 +1675,14 @@ fn toolbar(ctx: &Ctx, m: &Message, first: bool) -> Option<AnyElement> {
         acts.push(("icons/reply.svg", "Reply", Act::Reply, false));
         if m.mine && !m.content.is_empty() && m.attachments.is_empty() && crate::data::command(m, ctx.commands).is_none() {
             acts.push(("icons/edit.svg", "Edit", Act::Edit, false));
+        }
+        if let Some(a) = m.attachments.iter().find(|a| a.downloaded && (a.resident || !a.path.is_empty())) {
+            acts.push(("icons/copy.svg", "Copy", Act::CopyFile(a.id.clone()), false));
+            acts.push(if a.resident {
+                ("icons/download.svg", "Save", Act::RevealFile(a.id.clone()), false)
+            } else {
+                ("icons/file-search.svg", "Reveal in folder", Act::RevealFile(a.id.clone()), false)
+            });
         }
         if ctx.chat.id.starts_with("npub1") || m.mine {
             acts.push(("icons/trash.svg", "Delete message", Act::Delete, true));

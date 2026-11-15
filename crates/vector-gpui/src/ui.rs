@@ -4635,6 +4635,8 @@ impl VectorApp {
                 cx.notify();
             }
             Act::OpenFile(att) => self.open_file(id, att, cx),
+            Act::RevealFile(att) => self.reveal_attachment(id, att, cx),
+            Act::CopyFile(att) => self.copy_attachment(id, att, cx),
             Act::XdcUrl(url) => self.fetch_xdc_url(id, url, cx),
             Act::OpenXdcUrl(url) => self.open_xdc_url(id, url, cx),
             Act::Audio(att, crate::audio::Act::Art | crate::audio::Act::Album(crate::audio::AlbumAct::Art)) => {

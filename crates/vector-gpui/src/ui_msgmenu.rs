@@ -66,22 +66,28 @@ impl VectorApp {
                 rows.push((kit::MenuItem::new("Edit", "edit"), act(MsgAct::Act(timeline::Act::Edit))));
             }
         }
-        if let Some(a) = m.attachments.iter().find(|a| a.downloaded && (a.resident || !a.path.is_empty())) {
+        let file = m.attachments.iter().find(|a| a.downloaded && (a.resident || !a.path.is_empty()));
+        // Beside a file, a bare "Copy" would not say which of the two it takes.
+        let (copy_file, copy_text) = match (file.is_some(), m.content.is_empty()) {
+            (true, false) => ("Copy File", "Copy Text"),
+            _ => ("Copy", "Copy"),
+        };
+        if let Some(a) = file {
             rows.push(if a.resident {
                 (kit::MenuItem::new("Save", "download"), act(MsgAct::File(a.id.clone())))
             } else {
                 (kit::MenuItem::new("Reveal in folder", "file-search"), act(MsgAct::File(a.id.clone())))
             });
-            rows.push((kit::MenuItem::new("Copy", "copy"), act(MsgAct::CopyFile(a.id.clone()))));
+            rows.push((kit::MenuItem::new(copy_file, "copy"), act(MsgAct::CopyFile(a.id.clone()))));
         }
         if !m.content.is_empty() {
             let plain = strip_markdown(&m.content);
             if plain == m.content.trim() {
-                rows.push((kit::MenuItem::new("Copy", "copy"), act(MsgAct::Copy(m.content.clone()))));
+                rows.push((kit::MenuItem::new(copy_text, "copy"), act(MsgAct::Copy(m.content.clone()))));
             } else {
-                rows.push((kit::MenuItem::new("Copy", "copy"), act(MsgAct::Copy(plain))));
+                rows.push((kit::MenuItem::new(copy_text, "copy"), act(MsgAct::Copy(plain))));
                 rows.push((
-                    kit::MenuItem::new("Copy", "file-code").hint(Some("(markdown)".into())),
+                    kit::MenuItem::new(copy_text, "file-code").hint(Some("(markdown)".into())),
                     act(MsgAct::Copy(m.content.clone())),
                 ));
             }
@@ -232,7 +238,7 @@ impl VectorApp {
     }
 
     /// A downloaded file's place on disk, or a stored one saved where the user picks.
-    fn copy_attachment(&mut self, msg: String, att: String, cx: &mut Context<Self>) {
+    pub(super) fn copy_attachment(&mut self, msg: String, att: String, cx: &mut Context<Self>) {
         let Some(a) = self.message(&msg).and_then(|m| m.attachments.into_iter().find(|a| a.id == att)) else { return };
         let path = if a.path.is_empty() {
             String::new()
