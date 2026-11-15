@@ -1284,6 +1284,15 @@ fn flagged_sql(placeholders: &str, strict: bool) -> String {
 pub(crate) const HELD_POST: &str = "instr(tags, '[\"unauthorized\"]') > 0";
 pub(crate) const WRITER_POST: &str = "instr(tags, '[\"writer\"]') > 0";
 
+/// A presence event's `["event-type", n]`: Some(true) for a join, Some(false) for a leave.
+fn presence_kind(tags_json: &str) -> Option<bool> {
+    match crate::event_json::first_tag_value(tags_json, "event-type")?.as_deref() {
+        Some("1") => Some(true),
+        Some("0") => Some(false),
+        _ => None,
+    }
+}
+
 /// `strict`: Grants stamped 0 rather than now, and a post at a writer address no sign of
 /// presence, since a writer who left still holds a key to post there.
 fn member_activity(community_id: &str, capped: bool, strict: bool) -> Result<Vec<(String, u64)>, String> {
@@ -1359,33 +1368,29 @@ fn member_activity(community_id: &str, capped: bool, strict: bool) -> Result<Vec
         let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
         let rows = stmt
             .query_map(rusqlite::params_from_iter(chat_ints.iter()), |r| {
-                Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?.max(0) as u64, r.get::<_, String>(2)?))
+                // SystemEventType: 1 = MemberJoined, 0 = MemberLeft (carried in an ["event-type", n] tag).
+                let etype = match r.get_ref(2)? {
+                    rusqlite::types::ValueRef::Text(b) if let Ok(tags) = std::str::from_utf8(b) => presence_kind(tags),
+                    _ => presence_kind(&r.get::<_, String>(2)?),
+                };
+                Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?.max(0) as u64, etype))
             })
             .map_err(|e| e.to_string())?
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| e.to_string())?;
-        // The reader goes back before every presence event's tags are parsed.
         drop(stmt);
         drop(conn);
-        for (npub, at, tags_json) in rows {
-            // SystemEventType: 1 = MemberJoined, 0 = MemberLeft (carried in an ["event-type", n] tag).
-            let etype = serde_json::from_str::<Vec<Vec<String>>>(&tags_json)
-                .ok()
-                .and_then(|tags| {
-                    tags.into_iter()
-                        .find(|t| t.first().map(|s| s == "event-type").unwrap_or(false))
-                        .and_then(|t| t.into_iter().nth(1))
-                });
-            match etype.as_deref() {
-                Some("1") => {
+        for (npub, at, etype) in rows {
+            match etype {
+                Some(true) => {
                     let e = active.entry(npub).or_insert(0);
                     if at > *e { *e = at; }
                 }
-                Some("0") => {
+                Some(false) => {
                     let e = left.entry(npub).or_insert(0);
                     if at > *e { *e = at; }
                 }
-                _ => {}
+                None => {}
             }
         }
     }
