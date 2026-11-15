@@ -1070,6 +1070,18 @@ pub fn stack(blocks: &[Block], key: &str, click: &OnClick, clock: f32, lh: f32) 
     col.into_any_element()
 }
 
+/// A code block's sideways scroll, by its key, so the offset outlasts the renders between.
+fn code_scroll(key: &str) -> gpui::ScrollHandle {
+    thread_local!(static SCROLLS: std::cell::RefCell<HashMap<String, gpui::ScrollHandle>> = Default::default());
+    SCROLLS.with(|s| {
+        let mut s = s.borrow_mut();
+        if s.len() > 512 && !s.contains_key(key) {
+            s.clear();
+        }
+        s.entry(key.to_string()).or_default().clone()
+    })
+}
+
 /// `.code-block-wrapper` + `pre code.hljs` (GitHub Dark).
 fn code_block(lang: &str, text: &SharedString, key: &str, click: &OnClick) -> AnyElement {
     let mut lines = div().flex().flex_col();
@@ -1090,6 +1102,23 @@ fn code_block(lang: &str, text: &SharedString, key: &str, click: &OnClick) -> An
     }
     let copy = click.clone();
     let code: SharedString = crate::highlight::shown(text, lang).into();
+    let scroll = code_scroll(key);
+    // `pre { overflow-x: auto }`'s thumb, laid in the bottom padding so the block keeps its height.
+    let view = scroll.bounds().size.width;
+    let max = scroll.max_offset().x;
+    let thumb = (max > px(0.5) && view > px(0.)).then(|| {
+        let track = view - px(4.);
+        let w = (track * (view / (view + max))).max(px(24.));
+        let at = (track - w) * (-scroll.offset().x / max).clamp(0., 1.);
+        div()
+            .absolute()
+            .bottom(px(2.))
+            .left(at + px(2.))
+            .w(w)
+            .h(px(6.))
+            .rounded(px(4.))
+            .bg(ca(71, 71, 71, 0.6))
+    });
     div()
         .relative()
         .max_w(px(470.))
@@ -1100,14 +1129,22 @@ fn code_block(lang: &str, text: &SharedString, key: &str, click: &OnClick) -> An
         .bg(c(0x0d1117))
         .overflow_hidden()
         .child(
+            // Sideways only: a vertical wheel goes on to the timeline.
             div()
+                .id(SharedString::from(format!("{key}-code")))
+                .overflow_x_scroll()
+                .restrict_scroll_to_axis()
+                .track_scroll(&scroll)
+                // A row, so the lines keep their own width and the overflow is there to scroll.
+                .flex()
                 .p(px(13.))
                 .font_family(MONO)
                 .text_size(px(13.))
                 .line_height(px(19.5))
                 .text_color(c(crate::highlight::PLAIN))
-                .child(lines),
+                .child(lines.flex_none()),
         )
+        .children(thumb)
         .child(
             div()
                 .id(SharedString::from(format!("{key}-copy")))
