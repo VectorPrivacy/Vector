@@ -26,6 +26,8 @@ const QUEUE: usize = 4;
 const IDLE: Duration = Duration::from_millis(2200);
 /// The picture follows the sound; drift past this snaps it back.
 const DRIFT_MS: i64 = 60;
+/// A wait on the network this short passes unseen: the spinner would only flicker.
+const STARVE_GRACE: Duration = Duration::from_millis(150);
 
 pub fn fit(w: u32, h: u32) -> (f32, f32) {
     let (w, h) = (w.max(1) as f32, h.max(1) as f32);
@@ -127,6 +129,8 @@ struct Play {
     rebuffering: bool,
     /// Restarting after a seek, which wants less in hand than a first play.
     resumed: bool,
+    /// Since when the picture's reader has been waiting, before the clock holds for it.
+    starved: Option<Instant>,
 }
 
 impl Drop for Play {
@@ -491,14 +495,19 @@ impl Videos {
                 c.playing = false;
                 c.loading = false;
             }
-            if c.playing && p.started && !p.rebuffering && p.net.as_ref().is_some_and(|s| s.starving()) {
+            let starving = p.net.as_ref().is_some_and(|s| s.starving());
+            let since = *p.starved.get_or_insert_with(Instant::now);
+            if !starving {
+                p.starved = None;
+            }
+            if c.playing && p.started && !p.rebuffering && starving && since.elapsed() >= STARVE_GRACE {
                 p.rebuffering = true;
                 c.loading = true;
                 p.clock = Clock { anchor: p.clock.now(), at: None, rate: p.speed };
                 if let (Some(id), Ok(e)) = (p.source, crate::audio::engine()) {
                     let _ = e.pause(id);
                 }
-            } else if p.rebuffering && buffered(1.) {
+            } else if p.rebuffering && !starving && buffered(1.) {
                 p.rebuffering = false;
                 c.loading = false;
                 p.clock = Clock { anchor: p.clock.now(), at: Some(Instant::now()), rate: p.speed };
@@ -725,6 +734,7 @@ fn start(input: AudioInputSpec, info: &Info, from: u64, scale: f32, big: bool, s
         net,
         rebuffering: false,
         resumed: false,
+        starved: None,
     })
 }
 

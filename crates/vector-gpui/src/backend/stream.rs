@@ -26,8 +26,10 @@ const MAX_BURST: u64 = 8;
 const WAITING_BURST: u64 = 4;
 const READ_TIMEOUT: Duration = Duration::from_secs(45);
 const ATTEMPTS: u32 = 4;
-/// Requests in flight at once: a host slow to answer each still fills the window.
+/// Requests in flight at once when a host is slow to answer each; a quick one gets one at a time,
+/// as hosts that cap a client's bandwidth slow every request it opens alongside.
 const PARALLEL: usize = 3;
+const SLOW_ANSWER: f64 = 0.4;
 
 /// One answer to a range request.
 pub struct Got {
@@ -56,6 +58,8 @@ struct Head {
     /// The lowest offset it read this span: a demuxer hops between its tracks' samples, and
     /// the bytes at the low end are still wanted while it reads the high.
     at: u64,
+    /// Where it read last: a seek forward lands here before the span's low end moves.
+    last: u64,
     span: Instant,
     seen: Instant,
     waiting: bool,
@@ -114,7 +118,7 @@ pub async fn open<R: Ranges>(ranges: R, expected: Option<String>) -> Result<Arc<
         state: Mutex::new(State {
             chunks: BTreeMap::new(),
             inflight: BTreeSet::new(),
-            heads: vec![Head { reader: None, at: 0, span: Instant::now(), seen: Instant::now(), waiting: false }],
+            heads: vec![Head { reader: None, at: 0, last: 0, span: Instant::now(), seen: Instant::now(), waiting: false }],
             wanted: None,
             error: None,
             duration_ms: None,
@@ -188,7 +192,8 @@ impl<R: Ranges> Stream<R> {
     pub fn ahead_secs(&self) -> Option<f64> {
         let st = self.state.lock().unwrap();
         let d = st.duration_ms.filter(|d| *d > 0)?;
-        let held = self.held_past(&st, Self::earliest(&st)?);
+        let h = st.heads.iter().min_by_key(|h| h.at)?;
+        let held = self.held_past(&st, h.at).min(self.held_past(&st, h.last));
         Some(held as f64 * d as f64 / 1000. / self.len as f64)
     }
 
@@ -219,9 +224,9 @@ impl<R: Ranges> Stream<R> {
                 } else {
                     h.at = h.at.min(offset);
                 }
-                (h.seen, h.waiting) = (now, waiting);
+                (h.last, h.seen, h.waiting) = (offset, now, waiting);
             }
-            None => st.heads.push(Head { reader: Some(me), at: offset, span: now, seen: now, waiting }),
+            None => st.heads.push(Head { reader: Some(me), at: offset, last: offset, span: now, seen: now, waiting }),
         }
         if pruned {
             self.evict(st);
@@ -283,7 +288,7 @@ impl<R: Ranges> Stream<R> {
         let behind = KEEP_BEHIND / CHUNK;
         let ahead = self.window(st).div_ceil(CHUNK) * 2 + 1;
         let unhashed = st.hasher.is_some().then(|| st.hashed / CHUNK);
-        let heads: Vec<u64> = st.heads.iter().map(|h| h.at / CHUNK).collect();
+        let heads: Vec<u64> = st.heads.iter().flat_map(|h| [h.at / CHUNK, h.last / CHUNK]).collect();
         let needed = |i: u64| i < HEAD / CHUNK || heads.iter().any(|&h| i + behind >= h && i <= h + ahead);
         let drop: Vec<u64> = st.chunks.keys().copied().filter(|&i| !needed(i)).collect();
         for i in drop {
@@ -362,7 +367,8 @@ async fn fetch_loop<R: Ranges>(weak: Weak<Stream<R>>) {
         if s.state.lock().unwrap().error.is_some() {
             return;
         }
-        while flying.len() < PARALLEL {
+        let lanes = if s.state.lock().unwrap().latency.is_some_and(|l| l >= SLOW_ANSWER) { PARALLEL } else { 1 };
+        while flying.len() < lanes {
             let next = {
                 let mut st = s.state.lock().unwrap();
                 s.next(&mut st)
