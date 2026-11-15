@@ -59,6 +59,11 @@ impl ModelViewer {
         Self { focus, view: View::new(src, ext, true, wake), name, file, scrub: None, scrubbing: false, picking: false }
     }
 
+    /// Every picture it holds, for the atlas to let go of as it closes.
+    pub fn images(&mut self) -> Vec<std::sync::Arc<gpui::RenderImage>> {
+        self.view.retired.drain(..).chain(self.view.frame.take()).collect()
+    }
+
     fn close(&mut self, cx: &mut Context<Self>) {
         cx.emit(Event::Closed);
     }

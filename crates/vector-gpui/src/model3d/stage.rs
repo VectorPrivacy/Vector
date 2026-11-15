@@ -115,7 +115,16 @@ impl Models {
     /// One frame: true while any view on screen moves on its own.
     pub fn tick(&mut self) -> bool {
         let now = Instant::now();
-        self.views.retain(|_, v| v.seen.is_none_or(|t| now - t < IDLE));
+        let retired = &mut self.retired;
+        // An evicted view's last frame leaves the atlas with it, not just the cache.
+        self.views.retain(|_, v| {
+            let keep = v.seen.is_none_or(|t| now - t < IDLE);
+            if !keep {
+                retired.append(&mut v.retired);
+                retired.extend(v.frame.take());
+            }
+            keep
+        });
         let mut moving = false;
         for v in self.views.values_mut() {
             let on_screen = v.seen.is_some_and(|t| now - t < Duration::from_millis(250));

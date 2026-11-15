@@ -5183,7 +5183,13 @@ impl VectorApp {
         let viewer = cx.new(|cx| crate::model3d::viewer::ModelViewer::new(src, &ext, att.name.clone(), file, window, cx));
         cx.subscribe_in(&viewer, window, |app, _, e: &crate::model3d::viewer::Event, window, cx| match e {
             crate::model3d::viewer::Event::Closed => {
-                app.model_viewer = None;
+                if let Some((viewer, ..)) = app.model_viewer.take() {
+                    // Its frames leave the atlas with it.
+                    let gone: Vec<_> = viewer.update(cx, |v, _| v.images());
+                    for image in gone {
+                        let _ = window.drop_image(image);
+                    }
+                }
                 window.focus(&app.input.focus_handle(cx), cx);
                 cx.notify();
             }
