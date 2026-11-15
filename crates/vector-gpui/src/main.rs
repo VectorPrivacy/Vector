@@ -58,6 +58,7 @@ mod marks;
 mod langnames;
 mod lyrics;
 mod media;
+mod spell;
 mod profilewatch;
 mod untrack;
 mod model3d;

@@ -109,6 +109,64 @@ pub struct TextInput {
     redo: Vec<(SharedString, Range<usize>)>,
     /// The last edit was typing, and when: a run of it undoes as one step.
     typed: Option<std::time::Instant>,
+    /// Checked for spelling, as the webview's `spellcheck` does.
+    spell: Option<Spelling>,
+}
+
+/// The misspelled words, for the content they were found in.
+#[derive(Default)]
+struct Spelling {
+    text: SharedString,
+    words: Vec<Range<usize>>,
+    /// When the text next gets checked, and whether a wait for it is running.
+    due: Option<std::time::Instant>,
+    waiting: bool,
+    /// The word being typed at this caret was left unmarked, until the caret leaves it.
+    held: Option<usize>,
+}
+
+/// How long typing pauses before the text is checked.
+const SPELL_WAIT: std::time::Duration = std::time::Duration::from_millis(300);
+
+/// The words still standing after `old` became `new`: those clear of the edit, shifted past it.
+/// A word the edit touches goes, and comes back when the text is checked.
+fn carry_words(old: &str, new: &str, words: &[Range<usize>]) -> Vec<Range<usize>> {
+    let mut pre = old.bytes().zip(new.bytes()).take_while(|(a, b)| a == b).count();
+    while !old.is_char_boundary(pre) || !new.is_char_boundary(pre) {
+        pre -= 1;
+    }
+    let room = old.len().min(new.len()) - pre;
+    let mut suf = old.bytes().rev().zip(new.bytes().rev()).take(room).take_while(|(a, b)| a == b).count();
+    while !old.is_char_boundary(old.len() - suf) || !new.is_char_boundary(new.len() - suf) {
+        suf -= 1;
+    }
+    let (old_end, new_end) = (old.len() - suf, new.len() - suf);
+    let wordy = |c: Option<char>| c.is_some_and(|c| c.is_alphanumeric() || c == '\'');
+    let joins_before = wordy(new[pre..].chars().next());
+    let joins_after = wordy(new[..new_end].chars().next_back());
+    words
+        .iter()
+        .filter_map(|r| {
+            if r.end < pre || (r.end == pre && !joins_before) {
+                Some(r.clone())
+            } else if r.start > old_end || (r.start == old_end && !joins_after) {
+                Some(r.start - old_end + new_end..r.end - old_end + new_end)
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+/// Dots along `x0..x1`, as WebKit draws a misspelling: whole dots only, centred, the gap at
+/// its 9.457/13.247 of a dot.
+fn spell_dots(x0: Pixels, x1: Pixels) -> impl Iterator<Item = Pixels> {
+    const DOT: f32 = 3.;
+    let gap = DOT * 9.457 / 13.247;
+    let w = f32::from(x1 - x0);
+    let n = ((w + gap) / (DOT + gap)).floor().max(0.) as usize;
+    let lead = (w - (n as f32 * DOT + n.saturating_sub(1) as f32 * gap)) / 2.;
+    (0..n).map(move |i| x0 + px(lead + i as f32 * (DOT + gap)))
 }
 
 /// A key an open autocomplete takes from the field.
@@ -997,6 +1055,8 @@ struct PrepaintState {
     emoji: Vec<gpui::AnyElement>,
     cursor: Option<PaintQuad>,
     selections: Vec<PaintQuad>,
+    /// Each misspelled word's run on a row: its left and right, and the row's top.
+    spelling: Vec<(Pixels, Pixels, Pixels)>,
 }
 
 impl TextInput {
@@ -1315,6 +1375,21 @@ impl Element for TextElement {
             }
             (None, rects.into_iter().map(|r| fill(r, tint)).collect())
         };
+        let spelling = match input.spell.as_ref().filter(|s| s.text == input.content && !input.look.masked) {
+            Some(sp) => sp
+                .words
+                .iter()
+                .flat_map(|r| {
+                    let (a, b) = (layout.position(input.to_display(r.start)), layout.position(input.to_display(r.end)));
+                    if a.y == b.y {
+                        vec![(o.x + a.x, o.x + b.x, o.y + a.y)]
+                    } else {
+                        vec![(o.x + a.x, o.x + bounds.size.width, o.y + a.y), (o.x, o.x + b.x, o.y + b.y)]
+                    }
+                })
+                .collect(),
+            None => Vec::new(),
+        };
         let side = font_size * 1.25;
         let emoji = input
             .subs()
@@ -1339,6 +1414,7 @@ impl Element for TextElement {
             emoji,
             cursor,
             selections,
+            spelling,
         }
     }
 
@@ -1406,6 +1482,16 @@ impl Element for TextElement {
             for art in &mut prepaint.emoji {
                 art.paint(window, cx);
             }
+            let dot = px(3.);
+            for (x0, x1, y) in prepaint.spelling.drain(..) {
+                let top = y + layout.line_height - px(4.5);
+                for x in spell_dots(x0, x1) {
+                    window.paint_quad(
+                        gpui::fill(Bounds::new(point(x, top), size(dot, dot)), ca(255, 69, 58, 1.))
+                            .corner_radii(gpui::Corners::all(dot / 2.)),
+                    );
+                }
+            }
             let caret = prepaint.cursor.take();
             let focused = focus_handle.is_focused(window);
             if focused && let Some(cursor) = caret.clone() {
@@ -1440,6 +1526,7 @@ impl Element for TextElement {
 
 impl Render for TextInput {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.spell_follow(cx);
         let menu = self.menu.map(|at| {
             let (pick, close) = (cx.entity().downgrade(), cx.entity().downgrade());
             // Laid over the whole window, so a press anywhere outside the rows closes it.
@@ -1615,7 +1702,72 @@ impl TextInput {
             undo: Vec::new(),
             redo: Vec::new(),
             typed: None,
+            spell: None,
         }
+    }
+
+    /// Marks misspelled words, as the chat box does.
+    pub fn spellchecked(mut self) -> Self {
+        self.spell = Some(Spelling::default());
+        self
+    }
+
+    /// Follows the text with the words already found, and checks it again once typing pauses.
+    fn spell_follow(&mut self, cx: &mut Context<Self>) {
+        let caret = self.cursor_offset();
+        let Some(sp) = self.spell.as_mut() else { return };
+        let changed = sp.text != self.content;
+        if changed {
+            sp.words = carry_words(&sp.text, &self.content, &sp.words);
+            sp.text = self.content.clone();
+        }
+        if !changed && !sp.held.is_some_and(|at| at != caret) {
+            return;
+        }
+        sp.held = None;
+        sp.due = Some(std::time::Instant::now() + SPELL_WAIT);
+        if std::mem::replace(&mut sp.waiting, true) {
+            return;
+        }
+        cx.spawn(async move |this, cx| {
+            loop {
+                let Ok(Some(due)) = this.update(cx, |t, _| t.spell.as_ref().and_then(|s| s.due)) else { return };
+                let now = std::time::Instant::now();
+                if due <= now {
+                    break;
+                }
+                cx.background_executor().timer(due - now).await;
+            }
+            this.update(cx, |t, cx| {
+                t.spell_check();
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn spell_check(&mut self) {
+        let caret = self.cursor_offset();
+        let typing = self.typed.is_some() && self.selected_range.is_empty();
+        let subs = self.subs();
+        let masked = self.look.masked;
+        let Some(sp) = self.spell.as_mut() else { return };
+        sp.due = None;
+        sp.waiting = false;
+        sp.held = None;
+        sp.text = self.content.clone();
+        if masked {
+            sp.words.clear();
+            return;
+        }
+        let mut words = crate::spell::backend().misspelled(&self.content);
+        words.retain(|r| !subs.iter().any(|s| s.content.start < r.end && r.start < s.content.end));
+        if typing && let Some(i) = words.iter().position(|r| r.end == caret) {
+            words.remove(i);
+            sp.held = Some(caret);
+        }
+        sp.words = words;
     }
 
     /// Styles markdown, headers and tags in place, as the rich composer does.
@@ -2183,5 +2335,33 @@ mod tab_order {
         });
         window.focus(&handle, cx);
         true
+    }
+}
+
+#[cfg(test)]
+mod spell_tests {
+    use super::{carry_words, px, spell_dots};
+
+    #[test]
+    fn words_clear_of_an_edit_follow_it() {
+        let old = "teh cat hsa ran";
+        let words = [0..3, 8..11];
+        // Typing in the middle shifts the word after it.
+        assert_eq!(carry_words(old, "teh big cat hsa ran", &words), [0..3, 12..15]);
+        // A letter joined onto a word drops it until the next check.
+        assert_eq!(carry_words(old, "tehx cat hsa ran", &words), [9..12]);
+        // A space after it keeps it.
+        assert_eq!(carry_words("teh", "teh ", &[0..3]), [0..3]);
+        // Wide characters before don't split a boundary.
+        assert_eq!(carry_words("👋 teh", "👋👋 teh", &[5..8]), [9..12]);
+    }
+
+    #[test]
+    fn dots_fit_whole_and_centred() {
+        let xs: Vec<f32> = spell_dots(px(0.), px(20.)).map(f32::from).collect();
+        assert_eq!(xs.len(), 4);
+        let last = xs[3] + 3.;
+        assert!((xs[0] - (20. - last)).abs() < 0.01);
+        assert_eq!(spell_dots(px(0.), px(2.)).count(), 0);
     }
 }

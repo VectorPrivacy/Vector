@@ -652,7 +652,8 @@ impl VectorApp {
             let mut t = TextInput::new("Enter message...", cx)
                 .multiline(px(126.))
                 .twemoji()
-                .decorated();
+                .decorated()
+                .spellchecked();
             let names = Rc::downgrade(&store);
             t.set_npub_labels(Rc::new(move |npub: &str| {
                 names
