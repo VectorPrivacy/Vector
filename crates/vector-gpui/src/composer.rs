@@ -125,6 +125,30 @@ struct Spelling {
     held: Option<usize>,
     /// The misspelled word the edit menu opened on, and its guesses.
     menu: Option<(Range<usize>, Vec<String>)>,
+    /// Corrects a misspelled word as a space or punctuation ends it (the Autocorrect setting).
+    autocorrect: bool,
+    /// The text a correction left, and the word it replaced: undoing it keeps that word.
+    corrected: Option<(SharedString, String)>,
+    /// Words whose correction was undone, left alone from then on, as macOS does.
+    kept: std::collections::HashSet<String>,
+}
+
+/// Whether `c` belongs to a word autocorrect looks at.
+fn wordy(c: char) -> bool {
+    c.is_alphanumeric() || c == '\'' || c == '\u{2019}'
+}
+
+/// The word `ended` closes in `text`, when a correction may touch it: plain prose, not a link,
+/// tag, mention, shortcode or number.
+fn word_before(text: &str, ended: usize) -> Option<Range<usize>> {
+    let head = &text[..ended];
+    let start = head.char_indices().rev().take_while(|&(_, c)| wordy(c)).last().map(|(i, _)| i)?;
+    let word = &text[start..ended];
+    let token_start = head.rfind(char::is_whitespace).map_or(0, |i| i + 1);
+    let lead = &text[token_start..start];
+    let plain = word.chars().any(char::is_alphabetic) && !word.chars().any(|c| c.is_ascii_digit());
+    let opener = lead.chars().all(|c| matches!(c, '(' | '[' | '"' | '\'' | '\u{201C}' | '\u{2018}' | '*' | '_' | '~'));
+    (plain && opener).then_some(start..ended)
 }
 
 /// The best guesses only, so the menu stays short.
@@ -817,6 +841,12 @@ impl TextInput {
     }
 
     fn undo(&mut self, _: &Undo, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(sp) = self.spell.as_mut()
+            && let Some((after, word)) = sp.corrected.take()
+            && after == self.content
+        {
+            sp.kept.insert(word);
+        }
         if let Some(prev) = self.undo.pop() {
             self.redo.push((self.content.clone(), self.selected_range.clone()));
             self.restore(prev, window, cx);
@@ -1020,8 +1050,11 @@ impl EntityInputHandler for TextInput {
                 .into();
         self.selected_range = range.start + new_text.len()..range.start + new_text.len();
         self.selection_reversed = false;
-        self.marked_range.take();
+        let composing = self.marked_range.take().is_some();
         self.reveal = true;
+        if range.is_empty() && !composing {
+            self.autocorrect(range.start, new_text);
+        }
         window.notify_text_input_changed(&self.focus_handle);
         cx.emit(InputChanged);
         cx.notify();
@@ -1779,7 +1812,7 @@ impl TextInput {
 
     /// Marks misspelled words, as the chat box does.
     pub fn spellchecked(mut self) -> Self {
-        self.spell = Some(Spelling::default());
+        self.spell = Some(Spelling { autocorrect: true, ..Default::default() });
         self
     }
 
@@ -1816,6 +1849,49 @@ impl TextInput {
             .ok();
         })
         .detach();
+    }
+
+    /// Turns autocorrect on or off, from the setting.
+    pub fn set_autocorrect(&mut self, on: bool) {
+        if let Some(sp) = self.spell.as_mut() {
+            sp.autocorrect = on;
+        }
+    }
+
+    /// `typed` went in at `at`: when it is a space or punctuation that ends a misspelled word,
+    /// the word becomes the system's correction, in its own undo step.
+    fn autocorrect(&mut self, at: usize, typed: &str) {
+        let mut chars = typed.chars();
+        let (Some(c), None) = (chars.next(), chars.next()) else { return };
+        if !(c.is_whitespace() || c.is_ascii_punctuation()) || matches!(c, '\'' | '_' | '@' | '#' | '/' | ':' | '-' | '`' | '*' | '~') {
+            return;
+        }
+        let Some(sp) = self.spell.as_ref().filter(|s| s.autocorrect) else { return };
+        if self.look.masked {
+            return;
+        }
+        let Some(word) = word_before(&self.content, at) else { return };
+        let original = self.content[word.clone()].to_string();
+        if sp.kept.contains(&original) {
+            return;
+        }
+        // Never inside code, a mention or an emoji.
+        let code = crate::decorate::tokenize(&self.content, &[])
+            .into_iter()
+            .any(|(r, d)| matches!(d, crate::decorate::Deco::Code | crate::decorate::Deco::CodeMark) && r.start < word.end && word.start < r.end);
+        if code || self.subs().iter().any(|s| s.content.start < word.end && word.start < s.content.end) {
+            return;
+        }
+        let Some(fix) = crate::spell::backend().correction(&self.content, word.clone()).filter(|f| *f != original) else { return };
+        self.undo.push((self.content.clone(), self.selected_range.clone()));
+        self.redo.clear();
+        self.typed = None;
+        let caret = self.selected_range.end + fix.len() - original.len();
+        self.content = format!("{}{}{}", &self.content[..word.start], fix, &self.content[word.end..]).into();
+        self.selected_range = caret..caret;
+        if let Some(sp) = self.spell.as_mut() {
+            sp.corrected = Some((self.content.clone(), original));
+        }
     }
 
     fn spell_check(&mut self) {
@@ -2411,7 +2487,21 @@ mod tab_order {
 
 #[cfg(test)]
 mod spell_tests {
-    use super::{carry_words, px, spell_dots};
+    use super::{carry_words, px, spell_dots, word_before};
+
+    #[test]
+    fn autocorrect_touches_prose_only() {
+        let at = |t: &str| word_before(t, t.len()).map(|r| t[r].to_string());
+        assert_eq!(at("I said teh").as_deref(), Some("teh"));
+        assert_eq!(at("(teh").as_deref(), Some("teh"));
+        assert_eq!(at("don't").as_deref(), Some("don't"));
+        assert_eq!(at("see example.cmo"), None);
+        assert_eq!(at("@jskity"), None);
+        assert_eq!(at("#tagg"), None);
+        assert_eq!(at(":smiel"), None);
+        assert_eq!(at("abc123"), None);
+        assert_eq!(at("hi "), None);
+    }
 
     #[test]
     fn words_clear_of_an_edit_follow_it() {

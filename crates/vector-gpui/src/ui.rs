@@ -2990,7 +2990,7 @@ impl VectorApp {
             backend::selfsync::start();
         });
         let rx = backend::run(async {
-            let early = backend::prefs::sql_bools(&[("strip_tracking", true), ("display_image_types", false)]);
+            let early = backend::prefs::sql_bools(&[("strip_tracking", true), ("display_image_types", false), ("autocorrect", true)]);
             crate::untrack::set_enabled(early[0]);
             let b = backend::prefs::sql_bools(&[
                 ("web_previews", true),
@@ -3000,14 +3000,14 @@ impl VectorApp {
                 ("floating_player", true),
             ]);
             (
-                (backend::storage::auto_download(), early[1]),
+                (backend::storage::auto_download(), early[1], early[2]),
                 b[0],
                 (b[1], b[2], b[3], b[4]),
                 (backend::actions::emoji_usage(), backend::prefs::synced_settings()),
             )
         });
         cx.spawn(async move |this, cx| {
-            let Ok((((on, limit), image_types), previews, (emoticons, times, chat_bg, floating), (used, synced))) = rx.await else {
+            let Ok((((on, limit), image_types, autocorrect), previews, (emoticons, times, chat_bg, floating), (used, synced))) = rx.await else {
                 return;
             };
             this.update(cx, |this, cx| {
@@ -3016,6 +3016,7 @@ impl VectorApp {
                 media.web_previews_off = !previews;
                 media.image_types = image_types;
                 drop(media);
+                this.input.update(cx, |t, _| t.set_autocorrect(autocorrect));
                 this.emoticons = emoticons;
                 this.time_suggestions = times;
                 this.chat_bg = chat_bg;
@@ -17078,6 +17079,9 @@ impl VectorApp {
                 }
                 if key == "display_image_types" {
                     self.media.borrow_mut().image_types = value;
+                }
+                if key == "autocorrect" {
+                    self.input.update(cx, |t, _| t.set_autocorrect(value));
                 }
                 if key == "emoticon_suggestions" {
                     self.emoticons = value;
