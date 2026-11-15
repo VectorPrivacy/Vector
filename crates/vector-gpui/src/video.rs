@@ -393,6 +393,8 @@ impl Videos {
         }
         c.playing = true;
         match &mut c.play {
+            // Not yet under way: the start gate runs the clock and the sound together.
+            Some(p) if !p.started => c.loading = true,
             Some(p) => {
                 p.clock = Clock { anchor: c.position, at: Some(Instant::now()), rate: p.speed };
                 if let (Some(id), Ok(e)) = (p.source, crate::audio::engine()) {
@@ -416,6 +418,7 @@ impl Videos {
         c.playing = false;
         c.loading = false;
         if let Some(p) = &mut c.play {
+            p.rebuffering = false;
             p.clock = Clock { anchor: c.position, at: None, rate: p.speed };
             if let (Some(id), Ok(e)) = (p.source, crate::audio::engine()) {
                 let _ = e.pause(id);
@@ -586,9 +589,19 @@ fn seek(c: &mut Clip, ms: u64, input: Option<AudioInputSpec>, scale: f32) {
     if let Some(p) = &mut c.play {
         p.ended = false;
         restart(p, ms);
-        p.clock = Clock { anchor: ms, at: c.playing.then(Instant::now), rate: p.speed };
+        // A stream starts over from the new spot: the clock waits for its bytes like a first play.
+        let wait = p.net.as_ref().inspect(|s| s.sought()).is_some() && c.playing;
+        if wait {
+            p.started = false;
+            p.rebuffering = false;
+            c.loading = true;
+        }
+        p.clock = Clock { anchor: ms, at: (c.playing && !wait).then(Instant::now), rate: p.speed };
         if let (Some(id), Ok(e)) = (p.source, crate::audio::engine()) {
             let _ = e.seek(id, on_track(ms, p.speed));
+            if wait {
+                let _ = e.pause(id);
+            }
         }
     } else if let (Some(info), Some(input)) = (&c.info, input) {
         // Never played: a decoder for the frame there, kept for the play that follows.
@@ -979,7 +992,7 @@ pub fn view(id: &str, clip: &Clip, dim: bool, size: Option<(f32, f32)>, radius: 
             cx.stop_propagation();
             on(Act::Toggle, w, cx)
         })
-        .children(picture.map(|p| img(p).size_full().object_fit(ObjectFit::Fill)))
+        .children(picture.map(|p| img(p).size_full().object_fit(ObjectFit::Contain)))
         .children(veil)
         .children(spin)
         .when(shown, |d| d.child(bar))

@@ -16,9 +16,6 @@ const BASE_SECS: f64 = 10.;
 const MAX_SECS: f64 = 30.;
 /// Kept behind a read head for the decoder's short backward reads.
 const KEEP_BEHIND: u64 = 2 * 1024 * 1024;
-/// A read this close to a head moves it; further off, it is another reader (the picture and
-/// the sound decode apart) or a seek.
-const SAME_HEAD: u64 = 1024 * 1024;
 /// A head nobody has read from for this long is gone.
 const HEAD_LIFE: Duration = Duration::from_secs(3);
 /// One request at most this many chunks: big enough to amortise a slow link's round trip.
@@ -46,11 +43,19 @@ pub enum Open {
     Failed(String),
 }
 
+/// Where one reader last read. Each decoder reads on a thread of its own (the picture and the
+/// sound decode apart), so its thread names it and a seek moves its head rather than leaving one.
+struct Head {
+    reader: Option<std::thread::ThreadId>,
+    at: u64,
+    seen: Instant,
+    waiting: bool,
+}
+
 struct State {
     chunks: BTreeMap<u64, Vec<u8>>,
     inflight: BTreeSet<u64>,
-    /// Where each reader last read, and when.
-    heads: Vec<(u64, Instant)>,
+    heads: Vec<Head>,
     /// The offset a read is blocked on.
     wanted: Option<u64>,
     error: Option<String>,
@@ -100,7 +105,7 @@ pub async fn open<R: Ranges>(ranges: R, expected: Option<String>) -> Result<Arc<
         state: Mutex::new(State {
             chunks: BTreeMap::new(),
             inflight: BTreeSet::new(),
-            heads: vec![(0, Instant::now())],
+            heads: vec![Head { reader: None, at: 0, seen: Instant::now(), waiting: false }],
             wanted: None,
             error: None,
             duration_ms: None,
@@ -162,12 +167,12 @@ impl<R: Ranges> Stream<R> {
     /// The reader furthest back: the picture at the playhead. The sound's decoder reads as far
     /// ahead as its window allows, so it waits at the download's edge even with plenty in hand.
     fn earliest(st: &State) -> Option<u64> {
-        st.heads.iter().map(|&(h, _)| h).min()
+        st.heads.iter().map(|h| h.at).min()
     }
 
     /// Only the playhead's reader waiting holds playback.
     fn playhead_waits(st: &State) -> bool {
-        st.wanted.zip(Self::earliest(st)).is_some_and(|(w, h)| w.abs_diff(h) <= SAME_HEAD)
+        st.heads.iter().min_by_key(|h| h.at).is_some_and(|h| h.waiting)
     }
 
     /// Seconds of the clip already here past the playhead's reader.
@@ -181,19 +186,35 @@ impl<R: Ranges> Stream<R> {
     /// Everything past every reader to the end is here.
     pub fn complete_ahead(&self) -> bool {
         let st = self.state.lock().unwrap();
-        st.heads.iter().all(|&(h, _)| (h / CHUNK..self.chunks()).all(|i| st.chunks.contains_key(&i)))
+        !st.heads.is_empty() && st.heads.iter().all(|h| (h.at / CHUNK..self.chunks()).all(|i| st.chunks.contains_key(&i)))
     }
 
-    fn touch(&self, st: &mut State, offset: u64) {
+    /// The player moved: until the readers read again, nothing counts as buffered.
+    pub fn sought(&self) {
+        let mut st = self.state.lock().unwrap();
+        st.heads.retain(|h| h.waiting);
+        self.moved.notify_one();
+    }
+
+    fn touch(&self, st: &mut State, offset: u64, waiting: bool) {
         let now = Instant::now();
+        let me = std::thread::current().id();
         let before = st.heads.len();
-        st.heads.retain(|&(_, at)| now.duration_since(at) < HEAD_LIFE);
+        // The opening's stand-in head goes once a real reader shows up.
+        st.heads.retain(|h| h.reader.is_some() && (h.reader == Some(me) || h.waiting || now.duration_since(h.seen) < HEAD_LIFE));
         let pruned = st.heads.len() < before;
-        match st.heads.iter_mut().find(|(h, _)| h.abs_diff(offset) <= SAME_HEAD) {
-            Some(head) => *head = (offset, now),
-            None => st.heads.push((offset, now)),
-        }
-        if pruned {
+        let moved = match st.heads.iter_mut().find(|h| h.reader == Some(me)) {
+            Some(h) => {
+                let moved = h.at.abs_diff(offset) > KEEP_BEHIND;
+                *h = Head { reader: Some(me), at: offset, seen: now, waiting };
+                moved
+            }
+            None => {
+                st.heads.push(Head { reader: Some(me), at: offset, seen: now, waiting });
+                false
+            }
+        };
+        if pruned || moved {
             self.evict(st);
         }
     }
@@ -253,7 +274,7 @@ impl<R: Ranges> Stream<R> {
         let behind = KEEP_BEHIND / CHUNK;
         let ahead = self.window(st).div_ceil(CHUNK) * 2 + 1;
         let unhashed = st.hasher.is_some().then(|| st.hashed / CHUNK);
-        let heads: Vec<u64> = st.heads.iter().map(|&(h, _)| h / CHUNK).collect();
+        let heads: Vec<u64> = st.heads.iter().map(|h| h.at / CHUNK).collect();
         let needed = |i: u64| i < HEAD / CHUNK || heads.iter().any(|&h| i + behind >= h && i <= h + ahead);
         let drop: Vec<u64> = st.chunks.keys().copied().filter(|&i| !needed(i)).collect();
         for i in drop {
@@ -277,7 +298,7 @@ impl<R: Ranges> Stream<R> {
         let urgent = Self::earliest(st).and_then(|h| gap(h, st));
         let blocked = st.wanted.and_then(|w| gap(w, st));
         let (start, end) = urgent.or(blocked).or_else(|| {
-            let mut heads: Vec<u64> = st.heads.iter().map(|&(h, _)| h).collect();
+            let mut heads: Vec<u64> = st.heads.iter().map(|h| h.at).collect();
             heads.sort_unstable();
             heads.into_iter().find_map(|h| gap(h, st))
         })?;
@@ -382,7 +403,7 @@ impl<R: Ranges> vector_core::media::MediaSource for Stream<R> {
         }
         let want = buf.len().min((self.len - offset) as usize);
         let mut st = self.state.lock().unwrap();
-        self.touch(&mut st, offset);
+        self.touch(&mut st, offset, false);
         self.moved.notify_one();
         let mut done = 0usize;
         let mut waited = Duration::ZERO;
@@ -402,6 +423,7 @@ impl<R: Ranges> vector_core::media::MediaSource for Stream<R> {
                 return Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "The video stopped loading"));
             }
             st.wanted = Some(at);
+            self.touch(&mut st, at, true);
             self.moved.notify_one();
             let step = Duration::from_millis(250);
             st = self.arrived.wait_timeout(st, step).unwrap().0;
@@ -409,6 +431,9 @@ impl<R: Ranges> vector_core::media::MediaSource for Stream<R> {
         }
         if st.wanted.is_some_and(|w| w >= offset && w < offset + want as u64) {
             st.wanted = None;
+        }
+        if waited > Duration::ZERO {
+            self.touch(&mut st, offset + done as u64, false);
         }
         Ok(done)
     }
@@ -554,6 +579,40 @@ mod tests {
         let held: u64 = s.state.lock().unwrap().chunks.values().map(|c| c.len() as u64).sum();
         // Window (10 s of a 4 Mbit/s clip ≈ 5 MB) twice, plus what sits behind and the opening.
         assert!(held < 16 * 1024 * 1024, "held {held}");
+    }
+
+    #[test]
+    fn a_seek_moves_its_readers_head_and_waiting_there_starves() {
+        let rt = rt();
+        let v = video(40 * 1024 * 1024);
+        let mut m = mem(v.clone());
+        m.bps = Some(1024. * 1024.);
+        let s = rt.block_on(open(m, None)).ok().unwrap();
+        s.set_duration(80_000);
+        let src: Arc<dyn MediaSource> = s.clone();
+        let far = 30 * 1024 * 1024usize;
+        let (went, gone) = std::sync::mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            let mut r = vector_core::media::reader(src);
+            r.read_exact(&mut [0u8; 1024]).unwrap();
+            went.send(()).unwrap();
+            r.seek(SeekFrom::Start(far as u64)).unwrap();
+            let mut b = vec![0u8; 4096];
+            r.read_exact(&mut b).unwrap();
+            b
+        });
+        gone.recv().unwrap();
+        let t0 = Instant::now();
+        while !s.starving() && t0.elapsed() < Duration::from_secs(5) {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(s.starving(), "a read blocked at the new spot holds playback");
+        assert_eq!(s.state.lock().unwrap().heads.len(), 1, "the seek moved the head, leaving none behind");
+        assert_eq!(&reader.join().unwrap()[..], &v[far..far + 4096]);
+        assert!(!s.starving());
+        s.sought();
+        assert_eq!(s.ahead_secs(), None);
+        assert!(!s.complete_ahead());
     }
 
     #[test]

@@ -1140,19 +1140,33 @@ fn poster_in(env: &Env, short: bool, image: Option<&str>, video: Option<Media>, 
         let ratio = video.as_ref().and_then(|v| Some(v.width? as f32 / v.height.filter(|h| *h > 0)? as f32)).unwrap_or(16. / 9.);
         (CARD_W, (CARD_W / ratio).min(CARD_W * 1.25))
     };
+    let mut loading = loading;
     if let (Some(v), Some(spec)) = (video.as_ref(), ready) {
         let id = clip_id(&v.url);
         let mut media = env.media.borrow_mut();
         media.videos.want_probe(&id, &spec);
         if let Some(clip) = media.videos.clip(&id) {
+            // The box takes the clip's own shape: a post's stated size can be wrong or missing.
+            let size = if tile.is_some() {
+                (w, h)
+            } else {
+                let a = clip.aspect().max(0.1);
+                let (mw, mh) = if short { (202.5, 360.) } else { (CARD_W, CARD_W * 1.25) };
+                let fw = mw.min(mh * a);
+                (fw, fw / a)
+            };
             let s = send.clone();
             let cid = id.clone();
             return div()
                 .w_full()
                 .flex()
                 .justify_center()
-                .child(crate::video::view(&id, clip, false, Some((w, h)), 8., Rc::new(move |a, win, cx| s(Act::Clip(cid.clone(), a), win, cx))))
+                .child(crate::video::view(&id, clip, false, Some(size), 8., Rc::new(move |a, win, cx| s(Act::Clip(cid.clone(), a), win, cx))))
                 .into_any_element();
+        }
+        // Fetched, still being read: the spinner stays until it plays.
+        if media.embed_autoplay.contains(&v.url) {
+            loading = Some(-1);
         }
     }
     let first = video.as_ref().filter(|_| image.is_none()).and_then(|v| preview_frame(env, v));
