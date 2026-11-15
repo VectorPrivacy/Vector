@@ -13732,6 +13732,11 @@ impl VectorApp {
         popup.text = Some(format!("It loads outside {}.<br><br>{}", esc(&label), esc(&shown)).into());
         popup.confirm = "Open".into();
         popup.cancel = Some("Cancel".into());
+        let full = url.to_string();
+        popup.link = Some((
+            "Copy Link".into(),
+            std::rc::Rc::new(move |_, cx| cx.write_to_clipboard(gpui::ClipboardItem::new_string(full.clone()))),
+        ));
         self.popup = Some((popup, PopupAct::OpenWeb(url.to_string())));
         cx.notify();
     }
