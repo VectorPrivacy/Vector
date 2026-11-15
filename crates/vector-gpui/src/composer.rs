@@ -352,6 +352,14 @@ impl Layout {
             .find(|(start, _, _)| *start <= index)
     }
 
+    /// The char boundary after `index`.
+    fn after(&self, index: usize) -> usize {
+        self.line_at(index).map_or(index, |(start, _, line)| {
+            let local = index - start;
+            index + line.text.get(local..).and_then(|t| t.chars().next()).map_or(0, char::len_utf8)
+        })
+    }
+
     /// Where `index` sits, from the text's top left.
     fn position(&self, index: usize) -> Point<Pixels> {
         let Some((start, y, line)) = self.line_at(index) else {
@@ -1548,13 +1556,21 @@ impl Element for TextElement {
             // A chip spans the text's 18px content box, not the 21px line.
             let inset = ((layout.line_height - px(18.)) / 2.).max(px(0.));
             for (range, fill, radius, pad) in self.input.read(cx).chips.borrow().iter() {
-                let (a, b) = (layout.position(range.start), layout.position(range.end));
+                let (mut a, b) = (layout.position(range.start), layout.position(range.end));
+                // A chip opening right at a soft wrap reads as the end of the row above.
+                let second = layout.after(range.start);
+                if second <= range.end {
+                    let p = layout.position(second);
+                    if p.y > a.y {
+                        a = point(px(0.), p.y);
+                    }
+                }
                 let rows = if a.y == b.y {
                     vec![(a.x, b.x, a.y)]
                 } else {
                     vec![(a.x, bounds.size.width, a.y), (px(0.), b.x, b.y)]
                 };
-                for (x0, x1, y) in rows {
+                for (x0, x1, y) in rows.into_iter().filter(|(x0, x1, _)| x1 > x0) {
                     let quad = Bounds::new(
                         bounds.origin + point(x0 - px(*pad), y + inset),
                         gpui::size(x1 - x0 + px(2. * pad), layout.line_height - inset * 2.),
