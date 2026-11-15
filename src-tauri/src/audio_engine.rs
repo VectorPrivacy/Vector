@@ -852,7 +852,8 @@ impl AudioEngine {
 
         self.evict_if_needed();
 
-        if est_frames >= STREAM_MIN_SECS * sample_rate as u64 {
+        // A remote file decoded whole would be downloaded whole, by every segment worker at once.
+        if input.is_remote() || est_frames >= STREAM_MIN_SECS * sample_rate as u64 {
             return self.load_windowed(id, input, sample_rate, channels, src_channels, duration_ms);
         }
 

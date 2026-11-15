@@ -16,6 +16,8 @@ const BASE_SECS: f64 = 10.;
 const MAX_SECS: f64 = 30.;
 /// Kept behind a read head for the decoder's short backward reads.
 const KEEP_BEHIND: u64 = 2 * 1024 * 1024;
+/// How long a head keeps the lowest offset its reader touched.
+const HEAD_SPAN: Duration = Duration::from_secs(2);
 /// A head nobody has read from for this long is gone.
 const HEAD_LIFE: Duration = Duration::from_secs(3);
 /// One request at most this many chunks: big enough to amortise a slow link's round trip.
@@ -47,11 +49,14 @@ pub enum Open {
     Failed(String),
 }
 
-/// Where one reader last read. Each decoder reads on a thread of its own (the picture and the
+/// Where one reader is reading. Each decoder reads on a thread of its own (the picture and the
 /// sound decode apart), so its thread names it and a seek moves its head rather than leaving one.
 struct Head {
     reader: Option<std::thread::ThreadId>,
+    /// The lowest offset it read this span: a demuxer hops between its tracks' samples, and
+    /// the bytes at the low end are still wanted while it reads the high.
     at: u64,
+    span: Instant,
     seen: Instant,
     waiting: bool,
 }
@@ -109,7 +114,7 @@ pub async fn open<R: Ranges>(ranges: R, expected: Option<String>) -> Result<Arc<
         state: Mutex::new(State {
             chunks: BTreeMap::new(),
             inflight: BTreeSet::new(),
-            heads: vec![Head { reader: None, at: 0, seen: Instant::now(), waiting: false }],
+            heads: vec![Head { reader: None, at: 0, span: Instant::now(), seen: Instant::now(), waiting: false }],
             wanted: None,
             error: None,
             duration_ms: None,
@@ -207,18 +212,18 @@ impl<R: Ranges> Stream<R> {
         // The opening's stand-in head goes once a real reader shows up.
         st.heads.retain(|h| h.reader.is_some() && (h.reader == Some(me) || h.waiting || now.duration_since(h.seen) < HEAD_LIFE));
         let pruned = st.heads.len() < before;
-        let moved = match st.heads.iter_mut().find(|h| h.reader == Some(me)) {
+        match st.heads.iter_mut().find(|h| h.reader == Some(me)) {
             Some(h) => {
-                let moved = h.at.abs_diff(offset) > KEEP_BEHIND;
-                *h = Head { reader: Some(me), at: offset, seen: now, waiting };
-                moved
+                if now.duration_since(h.span) > HEAD_SPAN {
+                    (h.at, h.span) = (offset, now);
+                } else {
+                    h.at = h.at.min(offset);
+                }
+                (h.seen, h.waiting) = (now, waiting);
             }
-            None => {
-                st.heads.push(Head { reader: Some(me), at: offset, seen: now, waiting });
-                false
-            }
-        };
-        if pruned || moved {
+            None => st.heads.push(Head { reader: Some(me), at: offset, span: now, seen: now, waiting }),
+        }
+        if pruned {
             self.evict(st);
         }
     }
