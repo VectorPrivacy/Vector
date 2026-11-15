@@ -48,6 +48,10 @@ pub struct Transfer {
     pub sent_at: Option<std::time::Instant>,
 }
 
+/// Decoded pictures held past which the longest undrawn are let go before their idle time.
+const DECODED_BUDGET: usize = 256 << 20;
+/// Drawn this recently: kept whatever the budget says.
+const RECENT: std::time::Duration = std::time::Duration::from_secs(5);
 /// How long a stage or a publish holds the screen before it earns words: the common, quick
 /// transfer goes by without a flash of text.
 const GLANCE: std::time::Duration = std::time::Duration::from_secs(1);
@@ -328,50 +332,81 @@ impl Media {
     }
 
     /// Decoded pictures not drawn for `idle`, taken out of the caches for their atlas
-    /// textures to be dropped; one drawn again later is decoded again.
+    /// textures to be dropped; one drawn again later is decoded again. Past
+    /// [`DECODED_BUDGET`], the longest undrawn go too, sparing what was just on screen.
     pub fn sweep(&mut self, idle: std::time::Duration) -> Vec<Arc<RenderImage>> {
         let now = std::time::Instant::now();
-        let stale: Vec<(u8, String)> = self
+        let mut stale: Vec<((u8, String), std::time::Instant)> = self
             .used
             .iter()
-            .filter(|(_, at)| now.duration_since(**at) > idle)
-            .map(|(k, _)| k.clone())
+            .filter(|(_, at)| now.duration_since(**at) > RECENT)
+            .map(|(k, at)| (k.clone(), *at))
             .collect();
+        stale.sort_unstable_by_key(|(_, at)| *at);
+        let mut held = self.decoded_bytes();
         let mut out = Vec::new();
-        for key in stale {
-            let image = match key.0 {
-                0 => {
-                    let mut parts = key.1.split('\u{0}');
-                    let (Some(h), Some(w), Some(t)) = (parts.next(), parts.next(), parts.next()) else { continue };
-                    let (Ok(w), Ok(t)) = (w.parse(), t.parse()) else { continue };
-                    self.thumbs.remove(&(h.to_string(), w, t)).flatten()
-                }
-                1 => match self.images.get(&key.1) {
-                    Some(Slot::Ready { .. }) => match self.images.remove(&key.1) {
-                        Some(Slot::Ready { image, .. }) => Some(image),
-                        _ => None,
-                    },
-                    _ => continue,
-                },
-                2 => match self.linked.get(&key.1) {
-                    Some(Linked::Ready { .. }) => match self.linked.remove(&key.1) {
-                        Some(Linked::Ready { image, .. }) => Some(image),
-                        _ => None,
-                    },
-                    _ => continue,
-                },
-                _ => match self.custom.get(&key.1) {
-                    Some(Custom::Ready(_)) => match self.custom.remove(&key.1) {
-                        Some(Custom::Ready(image)) => Some(image),
-                        _ => None,
-                    },
-                    _ => continue,
-                },
-            };
+        for (key, at) in stale {
+            if now.duration_since(at) <= idle && held <= DECODED_BUDGET {
+                break;
+            }
+            let Some(image) = self.take(&key) else { continue };
             self.used.remove(&key);
-            out.extend(image);
+            if let Some(image) = image {
+                held = held.saturating_sub(image_bytes(&image));
+                out.push(image);
+            }
         }
         out
+    }
+
+    fn decoded_bytes(&self) -> usize {
+        let thumbs = self.thumbs.values().flatten();
+        let images = self.images.values().filter_map(|s| match s {
+            Slot::Ready { image, .. } => Some(image),
+            _ => None,
+        });
+        let linked = self.linked.values().filter_map(|l| match l {
+            Linked::Ready { image, .. } => Some(image),
+            _ => None,
+        });
+        let custom = self.custom.values().filter_map(|c| match c {
+            Custom::Ready(image) => Some(image),
+            _ => None,
+        });
+        thumbs.chain(images).chain(linked).chain(custom).map(|i| image_bytes(i)).sum()
+    }
+
+    /// The cached picture under a `used` key, removed; `None` while it is still loading.
+    fn take(&mut self, key: &(u8, String)) -> Option<Option<Arc<RenderImage>>> {
+        Some(match key.0 {
+            0 => {
+                let mut parts = key.1.split('\u{0}');
+                let (Some(h), Some(w), Some(t)) = (parts.next(), parts.next(), parts.next()) else { return Some(None) };
+                let (Ok(w), Ok(t)) = (w.parse(), t.parse()) else { return Some(None) };
+                self.thumbs.remove(&(h.to_string(), w, t)).flatten()
+            }
+            1 => match self.images.get(&key.1)? {
+                Slot::Ready { .. } => match self.images.remove(&key.1) {
+                    Some(Slot::Ready { image, .. }) => Some(image),
+                    _ => None,
+                },
+                _ => return None,
+            },
+            2 => match self.linked.get(&key.1)? {
+                Linked::Ready { .. } => match self.linked.remove(&key.1) {
+                    Some(Linked::Ready { image, .. }) => Some(image),
+                    _ => None,
+                },
+                _ => return None,
+            },
+            _ => match self.custom.get(&key.1)? {
+                Custom::Ready(_) => match self.custom.remove(&key.1) {
+                    Some(Custom::Ready(image)) => Some(image),
+                    _ => None,
+                },
+                _ => return None,
+            },
+        })
     }
 
     /// A custom emoji (`icon`: a pack's logo); the first ask fetches it.
@@ -876,6 +911,37 @@ mod tests {
     use image::{Delay, Frame, RgbaImage};
 
     #[test]
+    fn past_the_budget_the_longest_undrawn_go_and_the_recent_stay() {
+        use std::time::{Duration, Instant};
+        let mut media = super::Media::default();
+        // 64 MB apiece: eight is twice the budget.
+        let picture = || std::sync::Arc::new(gpui::RenderImage::new(vec![Frame::new(RgbaImage::new(4096, 4096))]));
+        let now = Instant::now();
+        for i in 0..8u64 {
+            let url = format!("e{i}");
+            media.custom.insert(url.clone(), super::Custom::Ready(picture()));
+            media.used.insert((3, url), now - Duration::from_secs(60 - i * 7));
+        }
+        media.custom.insert("loading".into(), super::Custom::Pending);
+        media.used.insert((3, "loading".into()), now - Duration::from_secs(600));
+        let gone = media.sweep(Duration::from_secs(90));
+        assert_eq!(gone.len(), 4);
+        let kept: Vec<_> = (0..8).filter(|i| media.custom.contains_key(&format!("e{i}"))).collect();
+        assert_eq!(kept, [4, 5, 6, 7]);
+        assert!(media.decoded_bytes() <= super::DECODED_BUDGET);
+        assert!(matches!(media.custom.get("loading"), Some(super::Custom::Pending)));
+
+        // Drawn moments ago: kept over the budget.
+        for i in 8..16u64 {
+            let url = format!("e{i}");
+            media.custom.insert(url.clone(), super::Custom::Ready(picture()));
+            media.used.insert((3, url), Instant::now());
+        }
+        assert!(media.sweep(Duration::from_secs(90)).len() == 4);
+        assert!((8..16).all(|i| media.custom.contains_key(&format!("e{i}"))));
+    }
+
+    #[test]
     fn an_animation_is_sniffed_whatever_its_name() {
         let mut gif = Vec::new();
         {
@@ -1032,7 +1098,6 @@ mod jpeg_tests {
 }
 
 /// Decoded size of every frame of `image`.
-#[cfg(feature = "devctl")]
 fn image_bytes(image: &RenderImage) -> usize {
     (0..image.frame_count())
         .map(|i| {
