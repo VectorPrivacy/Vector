@@ -108,9 +108,20 @@ pub fn run(t: &str, at: usize, max: usize, f: impl Fn(char) -> bool) -> (usize, 
 
 /// Non-overlapping matches, leftmost first, as a regex's `find_iter` takes them.
 pub fn matches<'a, C: 'a>(t: &'a str, at: impl Fn(&str, usize) -> Option<(usize, C)> + 'a) -> impl Iterator<Item = (usize, usize, C)> + 'a {
+    matches_from(t, |_, p| Some(p), at)
+}
+
+/// [`matches`] trying only where `from` says one can start: the first such position at or after
+/// its argument, or none left.
+pub fn matches_from<'a, C: 'a>(
+    t: &'a str,
+    from: impl Fn(&str, usize) -> Option<usize> + 'a,
+    at: impl Fn(&str, usize) -> Option<(usize, C)> + 'a,
+) -> impl Iterator<Item = (usize, usize, C)> + 'a {
     let mut p = 0;
     std::iter::from_fn(move || {
         while p <= t.len() {
+            p = from(t, p)?;
             if let Some((end, caps)) = at(t, p) {
                 let start = p;
                 p = if end > p { end } else { p + next(t, p).map_or(1, char::len_utf8) };
@@ -122,11 +133,35 @@ pub fn matches<'a, C: 'a>(t: &'a str, at: impl Fn(&str, usize) -> Option<(usize,
     })
 }
 
+/// The next of `bytes` at or after `p`: where a pattern opening with one of them can start.
+pub fn lead(bytes: &'static [u8]) -> impl Fn(&str, usize) -> Option<usize> {
+    move |t, p| {
+        let h = t.as_bytes().get(p..)?;
+        let i = match *bytes {
+            [a] => memchr::memchr(a, h),
+            [a, b] => memchr::memchr2(a, b, h),
+            [a, b, c] => memchr::memchr3(a, b, c, h),
+            _ => h.iter().position(|x| bytes.contains(x)),
+        }?;
+        Some(p + i)
+    }
+}
+
 /// `t` with each match replaced by what `put` writes for it.
 pub fn replace_all<C>(t: &str, at: impl Fn(&str, usize) -> Option<(usize, C)>, put: impl Fn(&mut String, &str, C)) -> String {
+    replace_from(t, |_, p| Some(p), at, put)
+}
+
+/// [`replace_all`] trying only where `from` allows, as [`matches_from`].
+pub fn replace_from<C>(
+    t: &str,
+    from: impl Fn(&str, usize) -> Option<usize>,
+    at: impl Fn(&str, usize) -> Option<(usize, C)>,
+    put: impl Fn(&mut String, &str, C),
+) -> String {
     let mut out = String::with_capacity(t.len());
     let mut last = 0;
-    for (s, e, caps) in matches(t, at) {
+    for (s, e, caps) in matches_from(t, from, at) {
         out += &t[last..s];
         put(&mut out, t, caps);
         last = e;

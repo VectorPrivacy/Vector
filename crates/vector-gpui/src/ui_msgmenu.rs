@@ -3,7 +3,7 @@
 
 
 use gpui::{Context, Pixels, Point, Window};
-use crate::scan::{lit, matches, next, replace_all};
+use crate::scan::{lead, lit, matches_from, next, replace_from};
 
 use super::{MenuAct, PopupAct, VectorApp};
 use crate::{backend, kit, timeline};
@@ -368,20 +368,37 @@ fn rule_at(t: &str, p: usize) -> Option<(usize, ())> {
     ok.then_some((end, ()))
 }
 
+/// Where `under_at` can next start: a char just before an underscore, or the very start.
+fn under_from(t: &str, p: usize) -> Option<usize> {
+    if p == 0 && t.starts_with('_') {
+        return Some(0);
+    }
+    let q = p + 1 + memchr::memchr(b'_', t.as_bytes().get(p + 1..)?)?;
+    Some(q - crate::scan::prev(t, q).map_or(0, char::len_utf8))
+}
+
+/// The next line start at or after `p`.
+fn line_from(t: &str, p: usize) -> Option<usize> {
+    if p == 0 {
+        return Some(0);
+    }
+    Some(p + memchr::memchr(b'\n', t.as_bytes().get(p - 1..)?)?)
+}
+
 /// `stripMarkdownToPlain`: what the message reads as, its markdown dropped.
 pub(super) fn strip_markdown(content: &str) -> String {
     let keep = |out: &mut String, t: &str, (a, b): Spot| *out += &t[a..b];
-    let mut t = replace_all(content, fence_at, keep);
-    t = replace_all(&t, code_at, keep);
-    t = replace_all(&t, |t, p| lit(t, p, "!").and_then(|q| link_at(t, q, 0)), keep);
-    t = replace_all(&t, |t, p| link_at(t, p, 1), keep);
-    t = replace_all(&t, |t, p| wrapped_at(t, p, "**"), keep);
-    t = replace_all(&t, |t, p| wrapped_at(t, p, "*"), keep);
+    let mut t = replace_from(content, lead(b"`"), fence_at, keep);
+    t = replace_from(&t, lead(b"`"), code_at, keep);
+    t = replace_from(&t, lead(b"!"), |t, p| lit(t, p, "!").and_then(|q| link_at(t, q, 0)), keep);
+    t = replace_from(&t, lead(b"["), |t, p| link_at(t, p, 1), keep);
+    t = replace_from(&t, lead(b"*"), |t, p| wrapped_at(t, p, "**"), keep);
+    t = replace_from(&t, lead(b"*"), |t, p| wrapped_at(t, p, "*"), keep);
     // Underscore emphasis is never intraword, so snake_case survives.
     for mark in ["__", "_"] {
         let mut out = String::with_capacity(t.len());
         let mut last = 0;
-        for (s, e, (lead, inner)) in matches(&t, |t, p| under_at(t, p, mark)) {
+        for (s, e, (lead, inner)) in matches_from(&t, under_from, |t, p| under_at(t, p, mark)) {
             if next(&t, e).is_some_and(|ch| ch.is_ascii_alphanumeric() || ch == '_') {
                 continue;
             }
@@ -393,10 +410,10 @@ pub(super) fn strip_markdown(content: &str) -> String {
         out += &t[last..];
         t = out;
     }
-    t = replace_all(&t, |t, p| wrapped_at(t, p, "~~"), keep);
-    t = replace_all(&t, |t, p| wrapped_at(t, p, "||"), keep);
+    t = replace_from(&t, lead(b"~"), |t, p| wrapped_at(t, p, "~~"), keep);
+    t = replace_from(&t, lead(b"|"), |t, p| wrapped_at(t, p, "||"), keep);
     for at in [heading_at, quote_at, rule_at] {
-        t = replace_all(&t, at, |_, _, ()| {});
+        t = replace_from(&t, line_from, at, |_, _, ()| {});
     }
     vector_core::notify::strip_ansi(&t).trim().to_string()
 }

@@ -948,9 +948,13 @@ pub fn suggest(before: &str, now: DateTime<Local>) -> Option<Suggestion> {
     }
     let skip = before.char_indices().rev().nth(79).map_or(0, |(i, _)| i);
     let tail = &before[skip..];
-    // Every form but the countdown has a digit in it somewhere.
-    let has_digit = tail.chars().any(digit);
-    for form in FORMS.iter().filter(|f| f.relative || has_digit) {
+    // Every form but the countdown has a digit at most 28 chars from its end ("5 p.m., on
+    // coming wednesday" and its closing mark).
+    let dated = tail.chars().rev().take(32).any(digit);
+    // The countdown needs its "in " or "from now"; neither folds past ASCII.
+    let counts = tail.as_bytes().windows(3).any(|w| w.eq_ignore_ascii_case(b"in "))
+        || tail.as_bytes().windows(8).any(|w| w.eq_ignore_ascii_case(b"from now"));
+    for form in FORMS.iter().filter(|f| if f.relative { counts } else { dated }) {
         let Some((ps, pe)) = form_at(form, tail) else { continue };
         let phrase = &tail[ps..pe];
         if !form.relative && opens_with_may(phrase) && !has_ordinal(phrase) && !ends_dated(phrase) {
@@ -1019,7 +1023,7 @@ fn token_at(t: &str, p: usize) -> Option<(usize, (Span, Option<char>))> {
 pub fn codes(src: &str) -> Vec<(usize, usize, i64, char)> {
     let Some(first) = memchr::memmem::find(src.as_bytes(), b"<t:") else { return Vec::new() };
     let code = vector_core::text_color::code_ranges(src);
-    let tokens = matches(&src[first..], token_at);
+    let tokens = crate::scan::matches_from(&src[first..], crate::scan::lead(b"<"), token_at);
     tokens
         .filter_map(|(s, e, (num, style))| {
             let (s, e) = (first + s, first + e);

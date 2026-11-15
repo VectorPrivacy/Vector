@@ -31,20 +31,23 @@ fn ascii_boundary(t: &str, at: usize) -> bool {
     ascii_word(crate::scan::prev(t, at)) != ascii_word(crate::scan::next(t, at))
 }
 
-/// `\b{head}[class]{min,max}\b`, leftmost, longest first.
-fn first_run(t: &str, head: impl Fn(&str, usize) -> Option<usize>, min: usize, max: usize, class: impl Fn(char) -> bool) -> Option<(usize, usize)> {
-    t.char_indices().filter(|&(i, _)| ascii_boundary(t, i)).find_map(|(i, _)| {
+/// `\b{head}[class]{min,max}\b`, leftmost, longest first. `lead` holds every byte `head` can
+/// start with, so only those positions are tried.
+fn first_run(t: &str, lead: &[u8], head: impl Fn(&str, usize) -> Option<usize>, min: usize, max: usize, class: impl Fn(char) -> bool) -> Option<(usize, usize)> {
+    memchr::memchr2_iter(lead[0], lead[lead.len() - 1], t.as_bytes()).filter(|&i| ascii_boundary(t, i)).find_map(|i| {
         let from = head(t, i)?;
-        let mut ends = Vec::with_capacity(max);
         let mut e = from;
-        for c in t[from..].chars().take(max) {
+        let mut best = None;
+        for (n, c) in t[from..].chars().take(max).enumerate() {
             if !class(c) {
                 break;
             }
             e += c.len_utf8();
-            ends.push(e);
+            if n + 1 >= min && ascii_boundary(t, e) {
+                best = Some(e);
+            }
         }
-        ends.iter().skip(min.saturating_sub(1)).rev().find(|&&e| ascii_boundary(t, e)).map(|&e| (i, e))
+        best.map(|e| (i, e))
     })
 }
 
@@ -56,7 +59,7 @@ const KINDS: [Kind; 2] = [
         uri: "https://app.mypivxwallet.org/?pay=",
         transparent: false,
         // `(?i:ps1[a-z0-9]{50,120})`
-        find: |t| first_run(t, |t, i| crate::scan::lit_i(t, i, "ps1"), 50, 120, |c| crate::scan::fold_letter(c) || c.is_ascii_digit()),
+        find: |t| first_run(t, b"pP", |t, i| crate::scan::lit_i(t, i, "ps1"), 50, 120, |c| crate::scan::fold_letter(c) || c.is_ascii_digit()),
     },
     Kind {
         coin: "PIVX",
@@ -64,7 +67,7 @@ const KINDS: [Kind; 2] = [
         uri: "https://app.mypivxwallet.org/?pay=",
         transparent: true,
         // `D[a-zA-Z0-9]{33,35}`
-        find: |t| first_run(t, |t, i| crate::scan::lit(t, i, "D"), 33, 35, |c| c.is_ascii_alphanumeric()),
+        find: |t| first_run(t, b"D", |t, i| crate::scan::lit(t, i, "D"), 33, 35, |c| c.is_ascii_alphanumeric()),
     },
 ];
 
@@ -77,7 +80,8 @@ fn base58(s: &str) -> bool {
 
 /// `detectCryptoAddress`: each kind's first match only, skipped when it sits inside a URL.
 pub fn detect(text: &str) -> Option<Coin> {
-    if text.encode_utf16().count() < 25 {
+    // A UTF-16 unit takes at most three UTF-8 bytes.
+    if text.len() < 25 || (text.len() < 75 && text.encode_utf16().count() < 25) {
         return None;
     }
     for k in KINDS.iter() {
