@@ -6155,8 +6155,9 @@ impl Render for VectorApp {
             if media.videos.tick() {
                 window.request_animation_frame();
             }
-            for old in media.videos.retired.drain(..) {
-                let _ = window.drop_image(old);
+            for old in std::mem::take(&mut media.videos.retired) {
+                let _ = window.drop_image(old.clone());
+                media.videos.recycle(old);
             }
             // A clip filling the window takes the screen too, and gives it back as it found it.
             match (media.videos.full.is_some(), self.video_window_full) {

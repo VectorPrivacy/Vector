@@ -107,6 +107,11 @@ impl RenderImage {
     pub fn frame_count(&self) -> usize {
         self.data.len()
     }
+
+    /// The frames' pixel buffers, for a producer to fill again.
+    pub fn into_buffers(self) -> Vec<Vec<u8>> {
+        self.data.into_iter().map(|f| f.into_buffer().into_raw()).collect()
+    }
 }
 
 impl fmt::Debug for RenderImage {

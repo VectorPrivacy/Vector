@@ -219,6 +219,8 @@ pub struct Videos {
     active: Option<String>,
     /// Frames off screen, for the app to take out of the atlas.
     pub retired: Vec<Arc<RenderImage>>,
+    /// Retired frames out of the atlas, their buffers going back to the decoders once ours alone.
+    spent: Vec<Arc<RenderImage>>,
     pub scale: f32,
     /// The clip filling the window, and where it reads from.
     pub full: Option<(String, Option<AudioInputSpec>)>,
@@ -693,6 +695,45 @@ pub fn run(work: Work) -> futures::channel::oneshot::Receiver<WorkDone> {
         let _ = tx.send(done);
     });
     rx
+}
+
+/// Decoded frames' buffers for the next ones: playback fills the same few instead of
+/// allocating (and the allocator keeping) a fresh one per frame.
+static BUFFERS: Mutex<Vec<Vec<u8>>> = Mutex::new(Vec::new());
+const BUFFERS_KEPT: usize = 8;
+
+#[cfg_attr(not(feature = "video"), allow(dead_code))]
+fn frame_buffer(len: usize) -> Vec<u8> {
+    let mut pool = BUFFERS.lock().unwrap_or_else(|e| e.into_inner());
+    match pool.iter().rposition(|b| b.len() == len) {
+        Some(i) => pool.swap_remove(i),
+        None => vec![0; len],
+    }
+}
+
+impl Videos {
+    /// A retired frame, after the app has handed it to `drop_image`.
+    pub fn recycle(&mut self, frame: Arc<RenderImage>) {
+        self.spent.push(frame);
+        let mut pool = BUFFERS.lock().unwrap_or_else(|e| e.into_inner());
+        let mut held = Vec::new();
+        for frame in self.spent.drain(..) {
+            match Arc::try_unwrap(frame) {
+                Ok(image) => {
+                    for buffer in image.into_buffers() {
+                        if pool.len() >= BUFFERS_KEPT {
+                            pool.remove(0);
+                        }
+                        pool.push(buffer);
+                    }
+                }
+                Err(frame) => held.push(frame),
+            }
+        }
+        // Still drawn: kept a few frames for its buffer, then left to whoever holds it.
+        let over = held.len().saturating_sub(BUFFERS_KEPT);
+        self.spent = held.split_off(over);
+    }
 }
 
 #[cfg(feature = "video")]

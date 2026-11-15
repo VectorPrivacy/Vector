@@ -260,7 +260,7 @@ fn convert(f: &ffmpeg::frame::Video, target: (u32, u32), rot: u16) -> Option<ima
         bt709,
     };
     let (ow, oh) = (target.0 as usize, target.1 as usize);
-    let mut out = vec![0u8; ow * oh * 4];
+    let mut out = super::frame_buffer(ow * oh * 4);
     yuv::convert(&y, ow, oh, rot, &mut out);
     image::RgbaImage::from_raw(target.0, target.1, out)
 }
