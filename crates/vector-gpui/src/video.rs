@@ -907,7 +907,7 @@ pub fn view(id: &str, clip: &Clip, dim: bool, size: Option<(f32, f32)>, radius: 
                     o2,
                 ))
                 // A narrow clip gives its time's room to the buttons.
-                .when(w >= 240., |d| {
+                .when(w >= 260., |d| {
                     d.child(
                         div()
                             .text_size(px(12.))
@@ -917,7 +917,7 @@ pub fn view(id: &str, clip: &Clip, dim: bool, size: Option<(f32, f32)>, radius: 
                     )
                 })
                 .child(scrubber(id, frac, duration > 0, clip.scrub.is_some(), o3))
-                .when(w >= 220., |d| {
+                .when(w >= 300., |d| {
                     d.child(
                         div()
                             .id(SharedString::from(format!("vspeed-{id}")))
@@ -946,7 +946,8 @@ pub fn view(id: &str, clip: &Clip, dim: bool, size: Option<(f32, f32)>, radius: 
                     Act::Mute,
                     o4,
                 ))
-                .when(w >= 260. && info.is_some_and(|i| i.audio), |d| {
+                // The seek bar keeps its room: the level, then the speed, then the time give way.
+                .when(w >= 380. && info.is_some_and(|i| i.audio), |d| {
                     // Room for the knob, which overhangs the track's ends.
                     d.child(div().w(px(56.)).flex_none().h(px(20.)).mx(px(6.)).child(slider(
                         &format!("vvol-{id}"),

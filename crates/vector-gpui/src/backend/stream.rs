@@ -30,6 +30,8 @@ const ATTEMPTS: u32 = 4;
 /// as hosts that cap a client's bandwidth slow every request it opens alongside.
 const PARALLEL: usize = 3;
 const SLOW_ANSWER: f64 = 0.4;
+/// A request still unanswered after this is dropped and asked again.
+const STALL: Duration = Duration::from_secs(8);
 
 /// One answer to a range request.
 pub struct Got {
@@ -367,7 +369,12 @@ async fn fetch_loop<R: Ranges>(weak: Weak<Stream<R>>) {
         if s.state.lock().unwrap().error.is_some() {
             return;
         }
-        let lanes = if s.state.lock().unwrap().latency.is_some_and(|l| l >= SLOW_ANSWER) { PARALLEL } else { 1 };
+        let lanes = {
+            let st = s.state.lock().unwrap();
+            // A waiting picture gets a lane of its own, whatever slow request holds the others.
+            let base = if st.latency.is_some_and(|l| l >= SLOW_ANSWER) { PARALLEL } else { 1 };
+            base + usize::from(Stream::<R>::playhead_waits(&st))
+        };
         while flying.len() < lanes {
             let next = {
                 let mut st = s.state.lock().unwrap();
@@ -379,7 +386,10 @@ async fn fetch_loop<R: Ranges>(weak: Weak<Stream<R>>) {
             let ranges = s.ranges.clone();
             flying.push(async move {
                 let t0 = Instant::now();
-                let got = ranges.get(start, end).await;
+                let got = match tokio::time::timeout(STALL, ranges.get(start, end)).await {
+                    Ok(got) => got,
+                    Err(_) => Err("The video host stalled".into()),
+                };
                 (first, n, end - start, got, t0.elapsed())
             });
         }
