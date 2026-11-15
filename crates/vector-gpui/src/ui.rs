@@ -10553,6 +10553,7 @@ impl VectorApp {
                 com.members.clone(),
             )
         };
+        let cached = self.store.borrow().rosters.get(&id).cloned();
         if self.community.as_ref().is_none_or(|v| v.id != id) {
             let search = cx.new(|cx| {
                 TextInput::new("Search Members...", cx).with_look(crate::community::member_search_look(self.is_slim))
@@ -10561,12 +10562,16 @@ impl VectorApp {
                 cx.notify()
             })
             .detach();
+            let (members, admins, unlisted) = match cached {
+                Some(r) => r,
+                None => (members, Vec::new(), self.store.borrow().fixture_unlisted.get(&id).cloned().unwrap_or_default()),
+            };
             self.community = Some(crate::community::View {
                 id: id.clone(),
-                unlisted: self.store.borrow().fixture_unlisted.get(&id).cloned().unwrap_or_default(),
+                unlisted,
                 loading: self.live && members.is_empty(),
                 members,
-                admins: Vec::new(),
+                admins,
                 panel: !self.live || backend::prefs::sql("ws_members_open").as_deref() != Some("false"),
                 search,
                 folded: folded_sections(&id),
@@ -10600,6 +10605,10 @@ impl VectorApp {
             this.update(cx, |this, cx| {
                 if let Some(v) = this.community.as_mut().filter(|v| v.id == id) {
                     if let Ok((members, admins, unlisted, graph)) = read {
+                        this.store
+                            .borrow_mut()
+                            .rosters
+                            .insert(id.clone(), (members.clone(), admins.clone(), unlisted.clone()));
                         v.members = members;
                         v.admins = admins;
                         v.unlisted = unlisted;

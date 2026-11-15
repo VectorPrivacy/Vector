@@ -467,6 +467,7 @@ pub fn sidebar(
                         .text_color(white_a(0.42))
                         .child(icon("icons/users-multi.svg", 13., white_a(0.42)))
                         .child(match view.members.len() {
+                            _ if view.loading => String::new(),
                             1 => "1 Member".to_string(),
                             n => format!("{n} Members"),
                         }),

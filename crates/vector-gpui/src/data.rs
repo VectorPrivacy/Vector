@@ -249,6 +249,8 @@ impl Community {
     }
 }
 
+pub type Roster = (Vec<String>, Vec<String>, HashMap<String, String>);
+
 pub struct Store {
     pub my_npub: String,
     pub profiles: HashMap<String, SlimProfile>,
@@ -303,6 +305,8 @@ pub struct Store {
     pub pivx_price: Option<(f64, String)>,
     /// Each community's nicknames, npub → name.
     pub nicknames: HashMap<String, HashMap<String, String>>,
+    /// Each community's last roster read: members, admins, unlisted.
+    pub rosters: HashMap<String, Roster>,
     /// Each community's running Timeouts, npub → its span.
     pub timeouts: HashMap<String, HashMap<String, Timeout>>,
     /// Per channel, the authors seen there who can't send in it.
@@ -490,6 +494,7 @@ impl Store {
             pivx_bubbles: HashMap::new(),
             pivx_price: None,
             nicknames: f.nicknames,
+            rosters: HashMap::new(),
             timeouts: f.timeouts,
             send_denied: f.send_denied,
             react_denied: f.react_denied,
@@ -554,6 +559,7 @@ impl Store {
             pivx_bubbles: HashMap::new(),
             pivx_price: None,
             nicknames: HashMap::new(),
+            rosters: HashMap::new(),
             timeouts: HashMap::new(),
             send_denied: HashMap::new(),
             react_denied: HashMap::new(),
