@@ -302,7 +302,7 @@ fn channel_row(
         };
         div()
             .id(path)
-            .when_some(tip.filter(|_| shown), |d, t| d.tooltip(crate::kit::tooltip(t)))
+            .when_some(tip, |d, t| d.tooltip(crate::kit::tooltip(t)))
             .when_some(act, |d, act| {
                 let on = on.clone();
                 d.on_click(move |_, w, cx| {
@@ -315,8 +315,9 @@ fn channel_row(
             .items_center()
             .justify_center()
             .flex_shrink_0()
-            .opacity(if shown { 0.6 } else { 0. })
-            .group_hover(group.clone(), |d| d.opacity(0.6))
+            .opacity(0.6)
+            // Out of the layout until hovered, so the name runs full width meanwhile.
+            .when(!shown, |d| d.hidden().group_hover(group.clone(), |d| d.flex()))
             .child(icon(path, 14., c(0xffffff)))
     };
     div()
