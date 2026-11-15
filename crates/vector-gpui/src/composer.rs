@@ -1388,6 +1388,8 @@ impl Element for TextElement {
             style.size.height = line_height.into();
             return (window.request_layout(style, [], cx), ());
         }
+        // Unstretched: a stretched child is clamped to the field's max height and never overflows it to scroll.
+        style.align_self = Some(gpui::AlignSelf::FlexStart);
         let (text, runs, font_size) = input.display(window);
         let id = window.request_measured_layout(style, move |known, available, window, _| {
             let width = known.width.or(match available.width {
