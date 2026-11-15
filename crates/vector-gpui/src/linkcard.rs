@@ -515,13 +515,15 @@ pub fn card(ctx: &Ctx, m: &Message) -> Option<AnyElement> {
         );
         card = card.child(frame);
     } else if let Some(Linked::Ready { image, w, h }) = picture {
-        let (w, h) = (w as f32, h.max(1) as f32);
+        // A height in pixels: left to the ratio, a picture smaller than the card is measured
+        // at its own height and painted taller, over the rows below.
+        let inner = if ctx.content_w > 0. { (MAX_W + 22.).min(ctx.content_w) - 22. } else { MAX_W };
+        let h = (inner * h.max(1) as f32 / w.max(1) as f32).min(350.);
         card = card.child(
             img(image)
                 .mt(px(6.))
                 .w_full()
-                .aspect_ratio(w / h)
-                .max_h(px(350.))
+                .h(px(h))
                 .object_fit(gpui::ObjectFit::Cover)
                 .rounded(px(4.)),
         );
