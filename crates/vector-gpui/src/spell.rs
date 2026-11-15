@@ -25,7 +25,15 @@ pub fn backend() -> &'static dyn Backend {
         thread_local!(static MAC: &'static mac::Mac = Box::leak(Box::new(mac::Mac::new())));
         MAC.with(|m| *m as &'static dyn Backend)
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(windows)]
+    {
+        thread_local!(static WIN: &'static dyn Backend = match win::Win::new() {
+            Some(w) => Box::leak(Box::new(w)),
+            None => &NoSpelling,
+        });
+        WIN.with(|w| *w)
+    }
+    #[cfg(not(any(target_os = "macos", windows)))]
     {
         &NoSpelling
     }
@@ -56,7 +64,7 @@ fn utf16_at(text: &str, byte: usize) -> usize {
 }
 
 /// UTF-16 offset → byte offset, at a char boundary.
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[cfg_attr(not(any(target_os = "macos", windows)), allow(dead_code))]
 fn byte_at(text: &str, unit: usize) -> usize {
     let mut n = 0;
     for (i, c) in text.char_indices() {
@@ -141,6 +149,119 @@ mod mac {
 
         fn ignore(&self, word: &str) {
             self.checker.ignoreWord_inSpellDocumentWithTag(&NSString::from_str(word), self.tag);
+        }
+    }
+}
+
+#[cfg(windows)]
+mod win {
+    use super::{Backend, Range, byte_at};
+    use windows::Win32::Globalization::{
+        CORRECTIVE_ACTION_REPLACE, GetUserDefaultLocaleName, ISpellChecker, ISpellCheckerFactory, ISpellingError,
+        SpellCheckerFactory,
+    };
+    use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, CoCreateInstance, CoTaskMemFree};
+    use windows::core::{HSTRING, PCWSTR, PWSTR};
+
+    /// The Windows 8+ spell checker, in the user's language (English where it has none).
+    pub struct Win {
+        checker: ISpellChecker,
+    }
+
+    /// A string the checker allocated, read and freed.
+    fn take(p: PWSTR) -> Option<String> {
+        if p.is_null() {
+            return None;
+        }
+        // SAFETY: the checker hands back a NUL-terminated string from CoTaskMemAlloc.
+        let s = unsafe { p.to_string().ok() };
+        unsafe { CoTaskMemFree(Some(p.0 as *const _)) };
+        s
+    }
+
+    impl Win {
+        pub fn new() -> Option<Self> {
+            // SAFETY: COM is initialised on the main thread by the platform before any window.
+            unsafe {
+                let factory: ISpellCheckerFactory = CoCreateInstance(&SpellCheckerFactory, None, CLSCTX_INPROC_SERVER).ok()?;
+                let mut buf = [0u16; 85];
+                let n = GetUserDefaultLocaleName(&mut buf);
+                let mine = (n > 1).then(|| String::from_utf16_lossy(&buf[..n as usize - 1]));
+                for lang in mine.iter().map(String::as_str).chain(["en-US"]) {
+                    let tag = HSTRING::from(lang);
+                    if factory.IsSupported(PCWSTR(tag.as_ptr())).is_ok_and(|b| b.as_bool()) {
+                        return factory.CreateSpellChecker(PCWSTR(tag.as_ptr())).ok().map(|checker| Self { checker });
+                    }
+                }
+                None
+            }
+        }
+
+        fn errors(&self, text: &str) -> Vec<(Range<usize>, Option<String>)> {
+            let wide = HSTRING::from(text);
+            let mut out = Vec::new();
+            // SAFETY: plain COM calls on a live checker with a NUL-terminated string.
+            unsafe {
+                let Ok(list) = self.checker.Check(PCWSTR(wide.as_ptr())) else { return out };
+                loop {
+                    let mut e: Option<ISpellingError> = None;
+                    if list.Next(&mut e).is_err() {
+                        break;
+                    }
+                    let Some(e) = e else { break };
+                    let (Ok(at), Ok(len)) = (e.StartIndex(), e.Length()) else { continue };
+                    let fix = (e.CorrectiveAction().ok() == Some(CORRECTIVE_ACTION_REPLACE))
+                        .then(|| e.Replacement().ok().and_then(take))
+                        .flatten();
+                    let (at, len) = (at as usize, len as usize);
+                    out.push((byte_at(text, at)..byte_at(text, at + len), fix));
+                }
+            }
+            out
+        }
+    }
+
+    impl Backend for Win {
+        fn misspelled(&self, text: &str) -> Vec<Range<usize>> {
+            self.errors(text).into_iter().map(|(r, _)| r).collect()
+        }
+
+        fn guesses(&self, text: &str, range: Range<usize>) -> Vec<String> {
+            let Some(word) = text.get(range) else { return Vec::new() };
+            let wide = HSTRING::from(word);
+            let mut out = Vec::new();
+            // SAFETY: plain COM calls; each string handed back is freed by `take`.
+            unsafe {
+                let Ok(list) = self.checker.Suggest(PCWSTR(wide.as_ptr())) else { return out };
+                loop {
+                    let mut one = [PWSTR::null()];
+                    let mut got = 0u32;
+                    if list.Next(&mut one, Some(&mut got)).is_err() || got == 0 {
+                        break;
+                    }
+                    if let Some(s) = take(one[0]) {
+                        out.push(s);
+                    }
+                }
+            }
+            out
+        }
+
+        fn correction(&self, text: &str, range: Range<usize>) -> Option<String> {
+            let word = text.get(range)?;
+            self.errors(word).into_iter().find_map(|(r, fix)| (r == (0..word.len())).then_some(fix).flatten())
+        }
+
+        fn learn(&self, word: &str) {
+            let wide = HSTRING::from(word);
+            // SAFETY: a plain COM call with a NUL-terminated string.
+            let _ = unsafe { self.checker.Add(PCWSTR(wide.as_ptr())) };
+        }
+
+        fn ignore(&self, word: &str) {
+            let wide = HSTRING::from(word);
+            // SAFETY: a plain COM call with a NUL-terminated string.
+            let _ = unsafe { self.checker.Ignore(PCWSTR(wide.as_ptr())) };
         }
     }
 }
