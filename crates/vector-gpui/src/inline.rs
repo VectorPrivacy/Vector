@@ -508,6 +508,9 @@ fn segments(atoms: &[Atom], window: &Window) -> Vec<Seg> {
                     continue;
                 }
                 let line = shape(text, look, look.color, window);
+                // The shaper lays right-to-left runs out visually, so offsets into the whole
+                // line don't measure a piece of one: such text is measured piece by piece.
+                let rtl = has_rtl(text);
                 let pad = kind.pad();
                 let mut start = 0;
                 let first = segs.len();
@@ -519,10 +522,16 @@ fn segments(atoms: &[Atom], window: &Window) -> Vec<Seg> {
                 for end in ends {
                     let piece = &text[start..end];
                     let trimmed = piece.trim_end();
-                    let full = f32::from(line.x_for_index(end) - line.x_for_index(start));
-                    let body = f32::from(
-                        line.x_for_index(start + trimmed.len()) - line.x_for_index(start),
-                    );
+                    let (full, body) = if rtl {
+                        let full = f32::from(shape(piece, look, look.color, window).width);
+                        let body = if trimmed.len() == piece.len() { full } else { f32::from(shape(trimmed, look, look.color, window).width) };
+                        (full, body)
+                    } else {
+                        (
+                            f32::from(line.x_for_index(end) - line.x_for_index(start)),
+                            f32::from(line.x_for_index(start + trimmed.len()) - line.x_for_index(start)),
+                        )
+                    };
                     let at_end = end == text.len();
                     segs.push(Seg {
                         atom: i,
@@ -588,8 +597,16 @@ fn piece_width(atoms: &[Atom], atom: usize, range: Range<usize>, window: &Window
     let Atom::Text { text, look, .. } = &atoms[atom] else {
         return 0.;
     };
+    if has_rtl(text) {
+        return text.get(range).map_or(0., |t| f32::from(shape(t, look, look.color, window).width));
+    }
     let line = shape(text, look, look.color, window);
     f32::from(line.x_for_index(range.end) - line.x_for_index(range.start))
+}
+
+fn has_rtl(text: &str) -> bool {
+    use unicode_bidi::{BidiClass, bidi_class};
+    text.chars().any(|c| matches!(bidi_class(c), BidiClass::R | BidiClass::AL))
 }
 
 fn layout(atoms: &[Atom], base: &Look, width: f32, window: &Window) -> Laid {
