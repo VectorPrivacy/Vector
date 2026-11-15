@@ -551,7 +551,7 @@ impl TextInput {
             .char_indices()
             .find(|&(_, c)| c == '\n' || class(c) != want)
             .map_or(self.content.len(), |(i, _)| offset + i);
-        self.out_of_label(start, false)..self.out_of_label(end, true)
+        self.out_of_sub(start, false)..self.out_of_sub(end, true)
     }
 
     /// The line holding `offset`, without its break.
@@ -838,7 +838,7 @@ impl TextInput {
             .rev()
             .find_map(|(idx, _)| (idx < offset).then_some(idx))
             .unwrap_or(0);
-        self.out_of_label(at, false)
+        self.out_of_sub(at, false)
     }
 
     fn next_boundary(&self, offset: usize) -> usize {
@@ -847,7 +847,7 @@ impl TextInput {
             .grapheme_indices(true)
             .find_map(|(idx, _)| (idx > offset).then_some(idx))
             .unwrap_or(self.content.len());
-        self.out_of_label(at, true)
+        self.out_of_sub(at, true)
     }
 
     /// Keep the state before an edit for Undo; a run of typing keeps only its first.
@@ -915,7 +915,7 @@ impl TextInput {
             }
             at = i;
         }
-        self.out_of_label(at, false)
+        self.out_of_sub(at, false)
     }
 
     fn word_end(&self, offset: usize) -> usize {
@@ -930,7 +930,7 @@ impl TextInput {
                 break;
             }
         }
-        self.out_of_label(end, true)
+        self.out_of_sub(end, true)
     }
 
     fn word_left(&mut self, _: &WordLeft, window: &mut Window, cx: &mut Context<Self>) {
@@ -2073,11 +2073,12 @@ impl TextInput {
         self.subs.borrow_mut().0 = SharedString::default();
     }
 
-    /// `offset` moved out of any name drawn over an npub, toward `forward`'s side.
-    fn out_of_label(&self, offset: usize, forward: bool) -> usize {
+    /// `offset` moved out of anything drawn in place of its text (a name over an npub, a custom
+    /// emoji over its shortcode), toward `forward`'s side: the caret steps over it whole.
+    fn out_of_sub(&self, offset: usize, forward: bool) -> usize {
         self.subs()
             .iter()
-            .find(|s| s.label.is_some() && s.content.start < offset && offset < s.content.end)
+            .find(|s| s.content.start < offset && offset < s.content.end)
             .map_or(offset, |s| if forward { s.content.end } else { s.content.start })
     }
 
