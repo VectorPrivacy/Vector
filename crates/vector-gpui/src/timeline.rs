@@ -787,7 +787,13 @@ fn content(ctx: &Ctx, m: &Message) -> AnyElement {
                     full: None,
                 };
                 let s = (400. / *h as f32).min(1.);
-                let (w, h) = (*w as f32 * s, *h as f32 * s);
+                let (mut w, mut h) = (*w as f32 * s, *h as f32 * s);
+                // Sized in pixels: left to its ratio, the picture is measured at its decoded
+                // height, which a big animation shrinks, and painted taller over the next row.
+                if ctx.content_w > 0. && w > ctx.content_w {
+                    h *= ctx.content_w / w;
+                    w = ctx.content_w;
+                }
                 let (on_act, mid) = (ctx.on_act.clone(), m.id.clone());
                 col = col.child(
                     div()
@@ -802,7 +808,7 @@ fn content(ctx: &Ctx, m: &Message) -> AnyElement {
                         .child(
                             img(image.clone()).object_fit(gpui::ObjectFit::Cover)
                                 .w_full()
-                                .aspect_ratio(w / h.max(1.))
+                                .h(px(h))
                                 .rounded(px(8.))
                                 .hover(|s| s.opacity(0.9)),
                         ),
@@ -904,7 +910,7 @@ fn linked_pictures(ctx: &Ctx, msg: &str, blocks: Vec<Block>) -> Vec<Piece> {
             {
                 end += 1;
             }
-            match ctx.media.borrow_mut().linked_in(&url, msg) {
+            match ctx.media.borrow_mut().linked_in(&emoji_source(ctx.store, &url), msg) {
                 Linked::Ready { image, w, h } => {
                     if !run.is_empty() {
                         out.push(Piece::Block(para(std::mem::take(&mut run)), cont));
