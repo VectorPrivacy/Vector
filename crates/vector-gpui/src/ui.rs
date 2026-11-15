@@ -19582,6 +19582,10 @@ fn remember_fold(community: &str, key: &str, closing: bool) {
 
 #[cfg(feature = "devctl")]
 impl VectorApp {
+    pub(crate) fn dev_caches(&self) -> serde_json::Value {
+        self.media.borrow().dev_caches()
+    }
+
     pub(crate) fn dev_state(&self) -> serde_json::Value {
         let store = self.store.borrow();
         let screen = match &self.screen {

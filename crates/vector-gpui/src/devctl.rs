@@ -24,6 +24,7 @@
 //! - `dev:type:<text>`: type into whatever has focus
 //! - `dev:key:<keystroke>`: press one, as GPUI spells them (`enter`, `escape`, `cmd-k`)
 //! - `dev:sel`: the message paragraphs on screen and what is selected
+//! - `dev:caches`: each decoded picture cache's entries, MB and frames, and the video clips held
 //! - `dev:shot`: the window as `$TMPDIR/vector-devctl.png` (macOS and Windows)
 
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -166,6 +167,7 @@ pub fn run(app: &mut VectorApp, cmd: &str, window: &mut Window, cx: &mut Context
         }
         "idle" => gpui::set_animation_idle(std::time::Duration::from_secs(rest.parse().unwrap_or(300))),
         "dump" => answer(app.dev_dump(rest)),
+        "caches" => answer(app.dev_caches()),
         "net" => app.dev_net(serde_json::from_str(rest).ok(), cx),
         "emit" => {
             if let Some((name, payload)) = rest.split_once(':') {

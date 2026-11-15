@@ -712,6 +712,16 @@ fn frame_buffer(len: usize) -> Vec<u8> {
 }
 
 impl Videos {
+    #[cfg(feature = "devctl")]
+    pub fn dev_clips(&self) -> serde_json::Value {
+        serde_json::json!({
+            "clips": self.clips.len(),
+            "playing": self.clips.values().filter(|c| c.play.is_some()).count(),
+            "spent": self.spent.len(),
+            "pooled_buffers": BUFFERS.lock().map_or(0, |p| p.len()),
+        })
+    }
+
     /// A retired frame, after the app has handed it to `drop_image`.
     pub fn recycle(&mut self, frame: Arc<RenderImage>) {
         self.spent.push(frame);

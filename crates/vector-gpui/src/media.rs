@@ -304,6 +304,29 @@ impl Media {
         Linked::Loading(None)
     }
 
+    /// Each decoded cache: entries, decoded bytes, frames, and the largest entry's bytes.
+    #[cfg(feature = "devctl")]
+    pub fn dev_caches(&self) -> serde_json::Value {
+        fn tally<'a>(images: impl Iterator<Item = &'a Arc<RenderImage>>) -> serde_json::Value {
+            let (mut n, mut bytes, mut frames, mut largest) = (0usize, 0usize, 0usize, 0usize);
+            for image in images {
+                let b = image_bytes(image);
+                n += 1;
+                bytes += b;
+                frames += image.frame_count();
+                largest = largest.max(b);
+            }
+            serde_json::json!({ "entries": n, "mb": bytes as f64 / 1048576., "frames": frames, "largest_mb": largest as f64 / 1048576. })
+        }
+        serde_json::json!({
+            "thumbs": tally(self.thumbs.values().flatten()),
+            "images": tally(self.images.values().filter_map(|s| match s { Slot::Ready { image, .. } => Some(image), _ => None })),
+            "linked": tally(self.linked.values().filter_map(|l| match l { Linked::Ready { image, .. } => Some(image), _ => None })),
+            "custom": tally(self.custom.values().filter_map(|c| match c { Custom::Ready(image) => Some(image), _ => None })),
+            "video_clips": self.videos.dev_clips(),
+        })
+    }
+
     /// Decoded pictures not drawn for `idle`, taken out of the caches for their atlas
     /// textures to be dropped; one drawn again later is decoded again.
     pub fn sweep(&mut self, idle: std::time::Duration) -> Vec<Arc<RenderImage>> {
@@ -1006,4 +1029,15 @@ mod jpeg_tests {
         // Small enough already: the plain decode stands.
         assert!(gpui::jpeg_fitted(&jpeg(80, 60, None), 100, false).is_none());
     }
+}
+
+/// Decoded size of every frame of `image`.
+#[cfg(feature = "devctl")]
+fn image_bytes(image: &RenderImage) -> usize {
+    (0..image.frame_count())
+        .map(|i| {
+            let s = image.size(i);
+            s.width.0.max(0) as usize * s.height.0.max(0) as usize * 4
+        })
+        .sum()
 }
