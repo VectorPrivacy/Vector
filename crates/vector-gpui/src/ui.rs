@@ -4462,10 +4462,9 @@ impl VectorApp {
     fn show_edit_history(&mut self, id: String, window: &Window, cx: &mut Context<Self>) {
         let Some(m) = self.message(&id) else { return };
         let Some(entries) = m.edit_history.clone().filter(|e| !e.is_empty()) else { return };
-        let anchor = self
-            .row_of(&id)
-            .and_then(|ix| self.timeline.bounds_for_item(ix))
-            .unwrap_or_else(|| gpui::Bounds::new(window.mouse_position(), gpui::size(px(0.), px(0.))));
+        // Against the "(edited)" just pressed, not its row: a long message would leave it far off.
+        let at = window.mouse_position();
+        let anchor = gpui::Bounds::new(at - gpui::point(px(12.), px(12.)), gpui::size(px(24.), px(24.)));
         let mut tags: Vec<(String, String)> = m.emoji_tags.iter().map(|t| (t.shortcode.clone(), t.url.clone())).collect();
         let picker = self.emoji_picker.read(cx);
         for e in &entries {
