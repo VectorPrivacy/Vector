@@ -5426,9 +5426,8 @@ impl Window {
             next = Some(next.map_or(due, |n| n.min(due)));
         }
         self.rendered_frame.animated = records;
-        if dirty {
-            self.refresh();
-        } else if changed {
+        // A pending redraw replays the tiles just stepped; a refresh would re-render every cached pane.
+        if changed && !dirty {
             self.needs_present.set(true);
             self.invalidator.wake_platform();
         }
