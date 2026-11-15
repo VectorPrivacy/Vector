@@ -526,8 +526,9 @@ impl Gpu {
         Target {
             w,
             h,
-            msaa: tex(COLOR, SAMPLES, wgpu::TextureUsages::RENDER_ATTACHMENT).create_view(&wgpu::TextureViewDescriptor::default()),
-            depth: tex(DEPTH, SAMPLES, wgpu::TextureUsages::RENDER_ATTACHMENT).create_view(&wgpu::TextureViewDescriptor::default()),
+            // Cleared and discarded every pass: tile memory only (Metal memoryless) where the GPU has it.
+            msaa: tex(COLOR, SAMPLES, wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TRANSIENT_ATTACHMENT).create_view(&wgpu::TextureViewDescriptor::default()),
+            depth: tex(DEPTH, SAMPLES, wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TRANSIENT_ATTACHMENT).create_view(&wgpu::TextureViewDescriptor::default()),
             resolve: tex(COLOR, 1, wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC),
             readback: self.device.create_buffer(&wgpu::BufferDescriptor { label: Some("model3d readback"), size: (stride * h) as u64, usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false }),
             stride,
