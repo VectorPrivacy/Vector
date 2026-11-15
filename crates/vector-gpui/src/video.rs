@@ -825,7 +825,8 @@ pub fn view(id: &str, clip: &Clip, dim: bool, size: Option<(f32, f32)>, radius: 
                     o4,
                 ))
                 .when(w >= 260. && info.is_some_and(|i| i.audio), |d| {
-                    d.child(div().w(px(56.)).flex_none().h(px(20.)).child(slider(
+                    // Room for the knob, which overhangs the track's ends.
+                    d.child(div().w(px(56.)).flex_none().h(px(20.)).mx(px(6.)).child(slider(
                         &format!("vvol-{id}"),
                         level,
                         true,
