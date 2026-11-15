@@ -9751,7 +9751,10 @@ fn composer(
             .flex()
             .items_center()
             .justify_center()
-            .on_click(cx.listener(|app, _, _, cx| app.cancel_mode(cx)))
+            .on_click(cx.listener(|app, _, _, cx| {
+                cx.stop_propagation();
+                app.cancel_mode(cx)
+            }))
             .child(
                 svg()
                     .path("icons/cancel.svg")
@@ -9779,7 +9782,7 @@ fn composer(
             linear_color_stop(c(ACCENT), 0.),
             linear_color_stop(c(ACCENT_DEEP), 1.),
         ));
-    if let Mode::Reply { name, snippet, tags, .. } = mode {
+    if let Mode::Reply { id, name, snippet, tags } = mode {
         let look = crate::inline::Look::new(INTER, 13., 18., white_a(0.45));
         let mut atoms = crate::preview::reply_atoms(snippet, &look);
         if !tags.is_empty() {
@@ -9805,6 +9808,12 @@ fn composer(
                 .flex()
                 .items_center()
                 .gap(px(8.))
+                .id("reply-bar")
+                .cursor_pointer()
+                .on_click({
+                    let id = id.clone();
+                    cx.listener(move |app, _, _, cx| app.jump_to_message(id.clone(), cx))
+                })
                 .child(
                     div()
                         .w(px(3.))
