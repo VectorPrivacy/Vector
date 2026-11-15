@@ -7,7 +7,7 @@ use crate::profiler;
 use crate::subscription::SingleSubscriberSet;
 use crate::taffy::TaffyLayoutEngine;
 use crate::{
-    Action, AnyDrag, AnyElement, AnyImageCache, AnyTooltip, AnyView, App, AppContext, Arena, Asset,
+    Action, AtlasKey, AtlasTextureId, ImageId, AnyDrag, AnyElement, AnyImageCache, AnyTooltip, AnyView, App, AppContext, Arena, Asset,
     AsyncWindowContext, AtlasTile, AvailableSpace, Background, BorderStyle, Bounds, BoxShadow,
     Capslock, Context, Corners, CursorHideMode, CursorStyle, Decorations, DevicePixels,
     DispatchActionListener, DispatchNodeId, DispatchTree, DisplayId, Edges, Effect, Entity,
@@ -1245,6 +1245,9 @@ pub struct Window {
     sprite_atlas: Arc<dyn PlatformAtlas>,
     /// Images asked to leave the atlas while still on screen: they go once they aren't.
     deferred_drops: Vec<Arc<RenderImage>>,
+    /// Animated images by when a frame of theirs was last painted, and their frame count.
+    anim_painted: FxHashMap<ImageId, (Instant, usize)>,
+    anim_swept: Instant,
     text_system: Rc<WindowTextSystem>,
     text_rendering_mode: Rc<Cell<TextRenderingMode>>,
     rem_size: Pixels,
@@ -2381,6 +2384,8 @@ impl Window {
             is_minimizable,
             sprite_atlas,
             deferred_drops: Vec::new(),
+            anim_painted: FxHashMap::default(),
+            anim_swept: Instant::now(),
             text_system,
             text_rendering_mode: cx.text_rendering_mode.clone(),
             rem_size: px(16.),
@@ -3683,6 +3688,7 @@ impl Window {
     #[profiling::function]
     pub fn draw(&mut self, cx: &mut App) -> ArenaClearNeeded {
         self.last_full_draw = Instant::now();
+        self.sweep_animation_tiles();
         let _timed = draw_stats::Timed::start();
         // Drain every draw in profiler builds so a previous frame's
         // first-invalidation timestamp can't be attributed to this one.
@@ -5474,6 +5480,9 @@ impl Window {
 
         let tile = image_tile(&*self.sprite_atlas, &data, frame_index)?
             .expect("It's the caller's job to pass a valid frame index");
+        if data.frame_count() > 1 {
+            self.anim_painted.insert(data.id, (self.last_full_draw, data.frame_count()));
+        }
 
         let visible_bounds_snapped = self.snap_bounds(visible_bounds);
         let sub_tile = sub_tile(tile, visible_bounds, image_bounds);
@@ -5537,6 +5546,52 @@ impl Window {
         Ok(())
     }
 
+    /// Every frame of an animation is its own tile, kept while the image lives (a cache's idle
+    /// sweep, often minutes). One unpainted for a couple of seconds and absent from the frame on
+    /// screen gives its tiles back now; drawn again, its frames upload again.
+    fn sweep_animation_tiles(&mut self) {
+        const IDLE: Duration = Duration::from_secs(2);
+        let now = self.last_full_draw;
+        if self.anim_painted.is_empty() || now.duration_since(self.anim_swept) < Duration::from_secs(1) {
+            return;
+        }
+        self.anim_swept = now;
+        let stale: Vec<(ImageId, usize)> = self
+            .anim_painted
+            .iter()
+            .filter(|(_, (at, _))| now.duration_since(*at) > IDLE)
+            .map(|(id, (_, frames))| (*id, *frames))
+            .collect();
+        if stale.is_empty() {
+            return;
+        }
+        // A cached view reuses its last primitives without painting again: on screen, it stays.
+        let shown: FxHashSet<(AtlasTextureId, u32)> = self
+            .rendered_frame
+            .scene
+            .polychrome_sprites
+            .iter()
+            .map(|s| (s.tile.texture_id, s.tile.tile_id.0))
+            .collect();
+        for (id, frames) in stale {
+            let keys: Vec<AtlasKey> = (0..frames)
+                .map(|frame_index| RenderImageParams { image_id: id, frame_index }.into())
+                .collect();
+            let on_screen = keys.iter().any(|k| {
+                matches!(self.sprite_atlas.get_or_insert_with(k.clone(), &mut || Ok(None)),
+                    Ok(Some(t)) if shown.contains(&(t.texture_id, t.tile_id.0)))
+            });
+            if on_screen {
+                self.anim_painted.insert(id, (now, frames));
+                continue;
+            }
+            for k in &keys {
+                self.sprite_atlas.remove(k);
+            }
+            self.anim_painted.remove(&id);
+        }
+    }
+
     /// Whether any frame of `data` is in the scene on screen.
     fn image_on_screen(&self, data: &RenderImage) -> bool {
         let tiles: Vec<AtlasTile> = (0..data.frame_count())
@@ -5552,6 +5607,7 @@ impl Window {
     }
 
     fn release_image(&mut self, data: &RenderImage) {
+        self.anim_painted.remove(&data.id);
         for frame_index in 0..data.frame_count() {
             let params = RenderImageParams {
                 image_id: data.id,
