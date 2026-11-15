@@ -35,16 +35,34 @@ pub fn is_sentinel(c: char) -> bool {
     edge(c).is_some()
 }
 
-/// Runs a span edge must never split: links, nostr references, shortcodes, entities,
-/// inline code and escape codes.
-static ATOMIC: LazyLock<Regex> = LazyLock::new(|| {
-    regex::RegexBuilder::new(
-        r"!?\[[^\[\]\n]{0,512}\]\([^()\n]{0,2048}\)|<[^<>\s]{1,2048}>|(?:https?://|www\.)[^\s<]+|(?:nostr:|@)?(?:npub1|nprofile1|naddr1|nevent1|note1)[02-9ac-hj-np-z]+|:[a-zA-Z0-9_~-]+:|&#?[a-zA-Z0-9]+;|`+[^`\n]*`+|\x1b\[[\x20-\x3f]*[\x40-\x7e]?",
-    )
-    .size_limit(64 << 20)
-    .build()
-    .expect("atomic runs")
-});
+/// The rest of `text-color.js`'s atomic runs, after the two whose lengths it caps: bare links,
+/// nostr references, shortcodes, entities, inline code and escape codes.
+const ATOMIC_REST: &str = r"(?:https?://|www\.)[^\s<]+|(?:nostr:|@)?(?:npub1|nprofile1|naddr1|nevent1|note1)[02-9ac-hj-np-z]+|:[a-zA-Z0-9_~-]+:|&#?[a-zA-Z0-9]+;|`+[^`\n]*`+|\x1b\[[\x20-\x3f]*[\x40-\x7e]?";
+
+/// Runs a span edge must never split, as `!?\[[^\[\]\n]{0,512}\]\([^()\n]{0,2048}\)|<[^<>\s]{1,2048}>|…`
+/// finds them. The caps are checked by count rather than compiled in: counted repetition of a
+/// Unicode class builds an automaton of megabytes.
+fn atomic_runs(text: &str) -> Vec<(usize, usize)> {
+    static ALL: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(&format!(r"(?P<link>!?\[(?P<label>[^\[\]\n]*)\]\((?P<url>[^()\n]*)\))|(?P<auto><(?P<inner>[^<>\s]+)>)|{ATOMIC_REST}"))
+            .expect("atomic runs")
+    });
+    let fits = |m: Option<regex::Match>, max: usize| m.is_none_or(|m| m.as_str().chars().count() <= max);
+    let mut out = Vec::new();
+    let mut at = 0;
+    while let Some(c) = ALL.captures_at(text, at) {
+        let whole = c.get(0).expect("whole match");
+        let capped = fits(c.name("label"), 512) && fits(c.name("url"), 2048) && fits(c.name("inner"), 2048);
+        if capped {
+            out.push((whole.start(), whole.end()));
+            at = whole.end();
+        } else {
+            // Past its cap the pattern fails here, and nothing else starts with `[`, `!` or `<`.
+            at = whole.start() + text[whole.start()..].chars().next().map_or(1, char::len_utf8);
+        }
+    }
+    out
+}
 static PREFIX: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"^[ \t]{0,3}(?:(?:#{1,6}|-#|>|[-*]|\d{1,9}\.)[ \t]+|>[ \t]?)*").expect("block prefix")
 });
@@ -145,9 +163,9 @@ pub fn mark(text: &str, spans: &[ColorSpan], times: &[(usize, usize)]) -> Option
         .map(|(s, e)| (byte_to_char[s], byte_to_char[e]))
         .chain(indented_code(&t))
         .collect();
-    let atomic: Vec<(usize, usize)> = ATOMIC
-        .find_iter(text)
-        .map(|m| (byte_to_char[m.start()], byte_to_char[m.end()]))
+    let atomic: Vec<(usize, usize)> = atomic_runs(text)
+        .into_iter()
+        .map(|(s, e)| (byte_to_char[s], byte_to_char[e]))
         .chain(times.iter().copied().filter(|&(_, e)| e <= n))
         .collect();
     let last_nl = |from: isize| -> isize {
@@ -611,6 +629,29 @@ mod tests {
                     .collect()
             })
             .unwrap_or_default()
+    }
+
+    #[test]
+    fn atomic_runs_match_the_capped_pattern() {
+        let capped = regex::RegexBuilder::new(&format!(r"!?\[[^\[\]\n]{{0,512}}\]\([^()\n]{{0,2048}}\)|<[^<>\s]{{1,2048}}>|{}", super::ATOMIC_REST))
+            .size_limit(64 << 20)
+            .build()
+            .unwrap();
+        let long = |n: usize, c: char| std::iter::repeat_n(c, n).collect::<String>();
+        let cases = [
+            "see [docs](https://x.y/z) and <https://a.b> :wave: &amp; `code` npub1abc".to_string(),
+            format!("[{}](u) then :ok:", long(513, 'é')),
+            format!("[{}](u)", long(512, 'é')),
+            format!("[a]({}) https://tail.example", long(2049, 'x')),
+            format!("[a](<{}>) x", long(2049, 'y')),
+            format!("<{}> and <ok>", long(2049, 'z')),
+            format!("![{}](<www.x.y>)", long(600, 'q')),
+            "[a](b)[c](d) <e><f> www.g.h".to_string(),
+        ];
+        for text in &cases {
+            let want: Vec<(usize, usize)> = capped.find_iter(text).map(|m| (m.start(), m.end())).collect();
+            assert_eq!(super::atomic_runs(text), want, "{}", &text[..text.len().min(80)]);
+        }
     }
 
     #[test]
