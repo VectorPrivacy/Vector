@@ -196,6 +196,8 @@ gpui = { path = "vendor/gpui" }
 gpui_linux = { path = "vendor/gpui_linux" }
 # gpui_macos at the same rev: the open panel takes file-type filters.
 gpui_macos = { path = "vendor/gpui_macos" }
+# gpui_windows at the same rev: the open dialog takes file-type filters.
+gpui_windows = { path = "vendor/gpui_windows" }
 # gpui_wgpu at the same rev, bringing up one GPU API (Vulkan, else GL) instead of both.
 gpui_wgpu = { path = "vendor/gpui_wgpu" }
 
