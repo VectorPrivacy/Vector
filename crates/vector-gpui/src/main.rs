@@ -58,6 +58,7 @@ mod marks;
 mod langnames;
 mod lyrics;
 mod media;
+mod untrack;
 mod model3d;
 mod trim;
 #[cfg(target_os = "linux")]
