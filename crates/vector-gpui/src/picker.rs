@@ -1561,7 +1561,7 @@ impl EmojiPicker {
                 d.drop = None;
             }
             d.edge = 0.;
-            self.rail_follow(window);
+            self.rail_follow(window, cx);
             return;
         }
         if d.edge == 0. {
@@ -1585,7 +1585,7 @@ impl EmojiPicker {
 
     /// The rail eases after the section scrolled to once its tab leaves view; a rail scrolled
     /// by hand stays put until the section changes again.
-    fn rail_follow(&mut self, window: &mut Window) {
+    fn rail_follow(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let active = if self.query.is_empty() { self.active() } else { None };
         if active != self.rail_seen {
             self.rail_seen = active;
@@ -1603,7 +1603,8 @@ impl EmojiPicker {
         let (Some(item), view) = (self.rail.bounds_for_item(ix), self.rail.bounds()) else { return };
         const PAD: f32 = 6.;
         let off = f32::from(self.rail.offset().y);
-        let (top, bottom) = (f32::from(item.top()), f32::from(item.bottom()));
+        // A child's bounds are where it lays out unscrolled: on screen it sits `off` from there.
+        let (top, bottom) = (f32::from(item.top()) + off, f32::from(item.bottom()) + off);
         let want = if top < f32::from(view.top()) + PAD {
             off + f32::from(view.top()) + PAD - top
         } else if bottom > f32::from(view.bottom()) - PAD {
@@ -1622,7 +1623,8 @@ impl EmojiPicker {
         let step = gap * 0.22;
         let step = if step.abs() < 0.5 { 0.5f32.copysign(gap) } else { step };
         self.rail.set_offset(gpui::point(self.rail.offset().x, px(off + step)));
-        window.request_animation_frame();
+        // The next step is taken in render: a frame alone replays the picker as it was drawn.
+        cx.on_next_frame(window, |_, _, cx| cx.notify());
     }
 
     /// `_applyPackTabReorder`: the lifted tab lands at the marker, and the order persists.
