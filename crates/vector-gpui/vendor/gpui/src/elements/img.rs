@@ -764,7 +764,7 @@ impl Asset for ImageAssetLoader {
                     };
                     let data = asset_source.load(&path).ok().flatten();
                     if let Some(data) = data {
-                        data.to_vec()
+                        data.into_owned()
                     } else {
                         return Err(ImageCacheError::Asset(
                             format!("Embedded resource not found: {}", path).into(),
@@ -883,7 +883,11 @@ fn fit_frame(frame: image::Frame, max: u32, square: bool) -> image::Frame {
     let (cx, cy) = ((w - cw) / 2, (h - ch) / 2);
     let delay = frame.delay();
     let (left, top) = (frame.left(), frame.top());
-    let cut = image::imageops::crop_imm(frame.buffer(), cx, cy, cw, ch).to_image();
+    let cut = if (cw, ch) == (w, h) {
+        frame.into_buffer()
+    } else {
+        image::imageops::crop_imm(frame.buffer(), cx, cy, cw, ch).to_image()
+    };
     let buffer = if (nw, nh) == (cw, ch) {
         cut
     } else {

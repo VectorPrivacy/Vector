@@ -3417,7 +3417,9 @@ pub(crate) fn decode_static_image_from_decoder(
         pixel.swap(0, 2);
     }
 
-    Ok(SmallVec::from_elem(Frame::new(data), 1))
+    let mut frames = SmallVec::new();
+    frames.push(Frame::new(data));
+    Ok(frames)
 }
 
 fn decode_animated_frames<'a>(
