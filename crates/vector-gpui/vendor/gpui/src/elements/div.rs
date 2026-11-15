@@ -2190,6 +2190,7 @@ impl Element for Div {
             .as_mut()
             .map(|provider| provider.provide(window, cx));
 
+        let source_location = self.interactivity.source_location();
         window.with_image_cache(image_cache, |window| {
             self.interactivity.paint(
                 global_id,
@@ -2200,7 +2201,17 @@ impl Element for Div {
                 cx,
                 |style, window, cx| {
                     // skip children
-                    if style.display == Display::None || !self.children_prepainted {
+                    if style.display == Display::None {
+                        return;
+                    }
+                    if !self.children_prepainted {
+                        // Display flipped between prepaint and paint (a hover styling `display`):
+                        // skipped rather than aborting, and reported so the cause gets fixed.
+                        log::error!(
+                            "div painted without prepainted children (display changed mid-frame){}",
+                            source_location.map(|l| format!(" at {l}")).unwrap_or_default()
+                        );
+                        debug_assert!(false, "div display changed between prepaint and paint");
                         return;
                     }
 

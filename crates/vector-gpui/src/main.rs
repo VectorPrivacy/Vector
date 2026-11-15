@@ -5,6 +5,7 @@
 extern crate vector_core;
 
 mod album;
+mod applog;
 mod assets;
 use vector_media::{audio_devices, calls, mic_access};
 mod attachments;
@@ -192,9 +193,10 @@ fn main() {
     }
     #[cfg(target_os = "linux")]
     vkselect::narrow();
-    env_logger::init();
-    jxl_oxide::integration::register_image_decoding_hook();
     let args = args();
+    // A fixture run without its own data dir keeps out of the real account's log.
+    applog::init(args.data_dir.clone().or_else(|| args.fixtures.is_none().then(backend::default_data_dir)));
+    jxl_oxide::integration::register_image_decoding_hook();
     let fixtures = args.fixtures.as_ref().map(|f| {
         let store = data::Store::from_fixtures(f).expect("fixtures");
         let open = args.open.clone().or_else(|| {
