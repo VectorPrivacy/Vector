@@ -95,7 +95,12 @@ async fn fetch(url: &str, max: usize) -> Result<Vec<u8>, String> {
     if !resp.status().is_success() {
         return Err(format!("HTTP {}", resp.status()));
     }
-    let mut out = Vec::new();
+    // Sized once from the header: grown by doubling, a big picture churns twice its size.
+    let declared = resp.content_length().map_or(0, |n| n as usize);
+    if declared > max {
+        return Err("Image too large".into());
+    }
+    let mut out = Vec::with_capacity(declared);
     while let Some(chunk) = resp.chunk().await.map_err(|e| e.to_string())? {
         if out.len() + chunk.len() > max {
             return Err("Image too large".into());
@@ -105,14 +110,56 @@ async fn fetch(url: &str, max: usize) -> Result<Vec<u8>, String> {
     Ok(out)
 }
 
+/// How long a failure is believed (`unavailable_for`): a day for a file that is gone, too large
+/// or not a picture; an hour for a server error; not at all for a fetch that got no answer.
+/// Without it every launch downloads every broken avatar and banner again.
+fn unavailable_for(reason: &str) -> Option<u64> {
+    if reason.contains("too large") || reason.contains("HTTP 404") || reason.contains("HTTP 410") || reason.starts_with("Invalid") {
+        Some(24 * 3600)
+    } else if reason.starts_with("HTTP ") {
+        Some(3600)
+    } else {
+        None
+    }
+}
+
+/// The desktop client's marker: a folder beside the pictures, never among them.
+fn unavailable_marker(url: &str, kind: Kind) -> Option<PathBuf> {
+    let dir = cache_dir(kind)?.join("unavailable");
+    std::fs::create_dir_all(&dir).ok()?;
+    Some(dir.join(cache_key(url)))
+}
+
+fn unavailable(url: &str, kind: Kind) -> Option<String> {
+    let path = unavailable_marker(url, kind)?;
+    let v: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).ok()?).ok()?;
+    let (at, for_secs) = (v.get("at")?.as_u64()?, v.get("for")?.as_u64()?);
+    if vector_core::clock::now_secs().saturating_sub(at) >= for_secs {
+        let _ = std::fs::remove_file(&path);
+        return None;
+    }
+    Some(v.get("reason")?.as_str()?.to_string())
+}
+
+fn remember_unavailable(url: &str, kind: Kind, reason: &str) {
+    let (Some(for_secs), Some(path)) = (unavailable_for(reason), unavailable_marker(url, kind)) else { return };
+    let marker = serde_json::json!({ "reason": reason, "at": vector_core::clock::now_secs(), "for": for_secs });
+    let _ = std::fs::write(path, marker.to_string());
+}
+
 async fn cache(url: &str, kind: Kind) -> Result<String, String> {
     if let Some(path) = cached(url, kind) {
         return Ok(path);
     }
     let _permit = DOWNLOADS.acquire().await.map_err(|e| e.to_string())?;
     vector_core::net::validate_url_not_private(url)?;
-    let bytes = fetch(url, kind.max_bytes()).await?;
-    let mut ext = sniff(&bytes).ok_or("Invalid image")?;
+    if let Some(reason) = unavailable(url, kind) {
+        return Err(reason);
+    }
+    let fetched = fetch(url, kind.max_bytes())
+        .await
+        .and_then(|b| sniff(&b).map(|ext| (b, ext)).ok_or_else(|| "Invalid image".to_string()));
+    let (bytes, mut ext) = fetched.inspect_err(|reason| remember_unavailable(url, kind, reason))?;
     // An SVG is kept as the pixels it draws.
     let bytes = if ext == "svg" {
         ext = "png";

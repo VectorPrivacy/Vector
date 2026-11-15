@@ -175,7 +175,18 @@ fn args() -> Args {
     a
 }
 
+#[cfg(feature = "dhat-heap")]
+#[global_allocator]
+static ALLOC: dhat::Alloc = dhat::Alloc;
+
+#[cfg(feature = "dhat-heap")]
+pub static DHAT: std::sync::Mutex<Option<dhat::Profiler>> = std::sync::Mutex::new(None);
+
 fn main() {
+    #[cfg(feature = "dhat-heap")]
+    {
+        *DHAT.lock().unwrap() = Some(dhat::Profiler::builder().trim_backtraces(Some(12)).build());
+    }
     #[cfg(target_os = "linux")]
     vkselect::narrow();
     env_logger::init();

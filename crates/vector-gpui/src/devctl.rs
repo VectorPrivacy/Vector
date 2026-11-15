@@ -267,6 +267,9 @@ pub fn run(app: &mut VectorApp, cmd: &str, window: &mut Window, cx: &mut Context
             Err(e) => answer(json!({ "error": e })),
         },
         "shot" => answer(shot()),
+        // Stops the heap profiler: its report lands in dhat-heap.json in the working directory.
+        #[cfg(feature = "dhat-heap")]
+        "dhat" => drop(crate::DHAT.lock().unwrap().take()),
         "emodump" => emodump(rest.parse().unwrap_or(6), cx),
         "sel" => answer(crate::select::debug()),
         "chatlist" => answer(app.dev_chatlist()),
