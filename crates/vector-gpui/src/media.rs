@@ -676,7 +676,7 @@ fn frames_of(
         }
         let buf = f.into_buffer();
         let buf = if scale {
-            gpui::resize_premultiplied(&buf, tw.max(1), th.max(1))
+            gpui::resize_premultiplied(buf, tw.max(1), th.max(1))
         } else {
             buf
         };

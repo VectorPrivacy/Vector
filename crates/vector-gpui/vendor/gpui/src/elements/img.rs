@@ -843,8 +843,9 @@ fn still_of(source: &ImageSource) -> Option<ImageSource> {
 
 /// Scaled with premultiplied alpha, so the colour hidden under transparent pixels never
 /// bleeds into the edges it borders. Channel order doesn't matter.
-pub fn resize_premultiplied(buf: &image::RgbaImage, w: u32, h: u32) -> image::RgbaImage {
-    let mut pre = buf.clone();
+pub fn resize_premultiplied(buf: image::RgbaImage, w: u32, h: u32) -> image::RgbaImage {
+    // Premultiplied in place: the caller's buffer is consumed, never copied first.
+    let mut pre = buf;
     for px in pre.chunks_exact_mut(4) {
         let a = px[3] as u32;
         if a < 255 {
@@ -886,7 +887,7 @@ fn fit_frame(frame: image::Frame, max: u32, square: bool) -> image::Frame {
     let buffer = if (nw, nh) == (cw, ch) {
         cut
     } else {
-        resize_premultiplied(&cut, nw, nh)
+        resize_premultiplied(cut, nw, nh)
     };
     image::Frame::from_parts(
         buffer,
