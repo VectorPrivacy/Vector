@@ -12,6 +12,14 @@ fn field<'a>(line: &'a str, key: &str) -> Option<&'a str> {
 fn main() {
     // libjxl, statically linked, for sending JPEG XL. A docs-only check links nothing.
     if std::env::var_os("DOCS_RS").is_none() {
+        // jpegxl-src asks MSVC for the static CRT; everything else here links the DLL one. A
+        // toolchain file's plain variable shadows its cache entry.
+        if std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") {
+            let file = std::path::Path::new(&std::env::var("OUT_DIR").unwrap()).join("jxl-crt.cmake");
+            std::fs::write(&file, "set(CMAKE_MSVC_RUNTIME_LIBRARY \"MultiThreadedDLL\")\n").unwrap();
+            // SAFETY: the build script is single-threaded here.
+            unsafe { std::env::set_var("CMAKE_TOOLCHAIN_FILE", file.to_string_lossy().replace('\\', "/")) };
+        }
         jpegxl_src::build();
     }
     let src = concat!(env!("CARGO_MANIFEST_DIR"), "/../../src/js/emoji.js");
