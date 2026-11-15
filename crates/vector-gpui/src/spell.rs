@@ -283,8 +283,8 @@ mod tests {
         let s = backend();
         let t = "Thiss line 👋 has erorrs";
         let words: Vec<&str> = s.misspelled(t).into_iter().map(|r| &t[r]).collect();
-        // A headless runner may have no dictionary loaded.
-        if words.is_empty() && s.guesses(t, 0..5).is_empty() {
+        // A headless runner may have no dictionary loaded, or guesses without a checking language.
+        if words.is_empty() {
             eprintln!("no system dictionary; skipped");
             return;
         }
