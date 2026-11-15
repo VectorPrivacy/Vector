@@ -708,7 +708,7 @@ fn start(input: AudioInputSpec, info: &Info, from: u64, scale: f32, big: bool, s
         });
     }
     // spawn-detached: the decoder reads one file and answers only its channel.
-    std::thread::Builder::new()
+    let decoder = std::thread::Builder::new()
         .name("video-decode".into())
         .spawn(move || {
             if let Ok(i) = input.open() {
@@ -716,6 +716,10 @@ fn start(input: AudioInputSpec, info: &Info, from: u64, scale: f32, big: bool, s
             }
         })
         .ok()?;
+    // The picture's reader leads the stream: the sound's can sit lower in the file yet ahead.
+    if let Some(n) = &net {
+        n.lead(decoder.thread().id());
+    }
     Some(Play {
         cmd: cmd_tx,
         frames: rx,

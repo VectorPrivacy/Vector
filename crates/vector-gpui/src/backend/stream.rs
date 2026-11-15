@@ -1,7 +1,7 @@
-//! An unencrypted web video played while it downloads, as a browser does: one connection reads
-//! on from where the decoder needs bytes, about ten seconds ahead (more on a slow or uneven
-//! link), and pauses when that is in hand. The decoder's reads wait for the bytes they need; a
-//! read elsewhere (a seek, the sound's own position) moves the connection there.
+//! An unencrypted web video played while it downloads, as a browser does: a connection per
+//! region a decoder reads reads on from where it needs bytes, about ten seconds ahead (more on a
+//! slow or uneven link), and pauses when that is in hand. The decoder's reads wait for the bytes
+//! they need; a read elsewhere (a seek, the sound's own position) opens a connection there.
 
 use std::collections::BTreeMap;
 use std::future::Future;
@@ -19,8 +19,10 @@ const MAX_SECS: f64 = 30.;
 const KEEP_BEHIND: u64 = 2 * 1024 * 1024;
 /// How long a head keeps the lowest offset its reader touched.
 const HEAD_SPAN: Duration = Duration::from_secs(2);
-/// A head nobody has read from for this long is gone.
+/// A head its reader has read elsewhere for this long is gone.
 const HEAD_LIFE: Duration = Duration::from_secs(3);
+/// A reader that has read nothing at all for this long is gone, its heads with it.
+const READER_LIFE: Duration = Duration::from_secs(30);
 const READ_TIMEOUT: Duration = Duration::from_secs(45);
 const ATTEMPTS: u32 = 4;
 /// A connection that brings nothing for this long is dropped and opened again where it was.
@@ -88,6 +90,29 @@ struct State {
     /// In-order hash of what arrived, while nothing was skipped.
     hashed: u64,
     hasher: Option<vector_core::crypto::sha256::Sha256>,
+    /// The picture's decoder, when the player names it: the playhead whatever the others read.
+    lead: Option<std::thread::ThreadId>,
+    /// The connections open or opening: a task each, which ends once its slot is gone.
+    conns: Vec<Slot>,
+    next_conn: u64,
+    /// Failed connections in a row, and when the next may open.
+    failures: u32,
+    retry_at: Option<Instant>,
+}
+
+/// One connection's place: the chunk it fills next, and when it last read.
+struct Slot {
+    id: u64,
+    chunk: u64,
+    used: Instant,
+}
+
+/// What a connection does next.
+enum Want {
+    Read,
+    /// Past every window but still in a reader's way: unread, the host held back by TCP.
+    Park,
+    Close,
 }
 
 pub struct Stream<R: Ranges> {
@@ -133,6 +158,11 @@ pub async fn open<R: Ranges>(ranges: R, expected: Option<String>) -> Result<Arc<
             latency: Some(took * CHUNK as f64 / HEAD as f64),
             hashed: 0,
             hasher: None,
+            lead: None,
+            conns: Vec::new(),
+            next_conn: 0,
+            failures: 0,
+            retry_at: None,
         }),
         arrived: Condvar::new(),
         moved: Arc::new(tokio::sync::Notify::new()),
@@ -187,7 +217,19 @@ impl<R: Ranges> Stream<R> {
     /// The reader furthest back: the picture at the playhead. The sound's decoder reads as far
     /// ahead as its window allows, so it waits at the download's edge even with plenty in hand.
     fn playhead(st: &State) -> Option<Option<std::thread::ThreadId>> {
-        st.heads.iter().min_by_key(|h| h.at).map(|h| h.reader)
+        if let Some(lead) = st.lead
+            && st.heads.iter().any(|h| h.reader == Some(lead))
+        {
+            return Some(Some(lead));
+        }
+        // Two readers can share a span's low end; the one whose last read is further back leads.
+        st.heads.iter().min_by_key(|h| (h.at, h.last)).map(|h| h.reader)
+    }
+
+    /// The thread decoding the picture: in a file that keeps its sound apart, the sound's
+    /// decoder can sit lower in one region while far ahead in time.
+    pub fn lead(&self, reader: std::thread::ThreadId) {
+        self.state.lock().unwrap().lead = Some(reader);
     }
 
     /// Only the playhead's reader waiting holds playback.
@@ -227,10 +269,24 @@ impl<R: Ranges> Stream<R> {
         let me = std::thread::current().id();
         let near = self.window(st).max(REGION);
         let before = st.heads.len();
-        // The opening's stand-in head goes once a real reader shows up. A reader blocked in one
-        // region still needs the others it was reading.
+        // The opening's stand-in head goes once a real reader shows up. A head lapses once its
+        // reader reads on elsewhere: one blocked, or holding still (a full frame queue, playback
+        // not started), still needs every region it was reading.
         let blocked: Vec<_> = st.heads.iter().filter(|h| h.waiting).map(|h| h.reader).collect();
-        st.heads.retain(|h| h.reader.is_some() && (blocked.contains(&h.reader) || now.duration_since(h.seen) < HEAD_LIFE));
+        let latest = |r: Option<std::thread::ThreadId>| {
+            if r == Some(me) { now } else { st.heads.iter().filter(|h| h.reader == r).map(|h| h.seen).max().unwrap_or(now) }
+        };
+        let keep: Vec<bool> = st
+            .heads
+            .iter()
+            .map(|h| {
+                let last = latest(h.reader);
+                h.reader.is_some()
+                    && (blocked.contains(&h.reader) || now.duration_since(h.seen) < HEAD_LIFE || (last.duration_since(h.seen) < HEAD_LIFE && now.duration_since(last) < READER_LIFE))
+            })
+            .collect();
+        let mut keep = keep.into_iter();
+        st.heads.retain(|_| keep.next().unwrap_or(false));
         let pruned = st.heads.len() < before;
         let dist = |h: &Head| offset.abs_diff(h.at).min(offset.abs_diff(h.last));
         let mine = st.heads.iter().enumerate().filter(|(_, h)| h.reader == Some(me) && dist(h) <= near).min_by_key(|(_, h)| dist(h)).map(|(i, _)| i);
@@ -257,6 +313,15 @@ impl<R: Ranges> Stream<R> {
     #[cfg(test)]
     pub fn ranges(&self) -> &R {
         &self.ranges
+    }
+
+    /// What a stuck read was waiting on: the heads, the connections and the gaps they chase.
+    #[cfg(test)]
+    fn dump(&self) -> String {
+        let st = self.state.lock().unwrap();
+        let heads: Vec<String> = st.heads.iter().map(|h| format!("{:?}@{}..{}{}", h.reader, h.at / CHUNK, h.last / CHUNK, if h.waiting { " waiting" } else { "" })).collect();
+        let conns: Vec<String> = st.conns.iter().map(|c| format!("#{}@{} read {:?} ago", c.id, c.chunk, c.used.elapsed())).collect();
+        format!("heads {heads:?}, conns {conns:?}, gaps {:?}, failures {}, window {} chunks", self.gaps(&st), st.failures, self.window(&st) / CHUNK)
     }
 
     /// A read is waiting on the network.
@@ -320,9 +385,9 @@ impl<R: Ranges> Stream<R> {
         }
     }
 
-    /// The chunk to fetch next: a waiting read (the playhead's first), then the playhead's
-    /// regions, least in hand first, then the other readers' the same way.
-    fn next_gap(&self, st: &State) -> Option<u64> {
+    /// The chunks to fetch next, a reader's first gap each: a waiting read (the playhead's
+    /// first), then the playhead's regions, least in hand first, then the other readers'.
+    fn gaps(&self, st: &State) -> Vec<u64> {
         let window = self.window(st);
         let gap = |from: u64| {
             let end = ((from + window).div_ceil(CHUNK)).min(self.chunks());
@@ -331,7 +396,41 @@ impl<R: Ranges> Stream<R> {
         let p = Self::playhead(st);
         let mut heads: Vec<&Head> = st.heads.iter().collect();
         heads.sort_by_key(|h| (!h.waiting, Some(h.reader) != p, self.held_past(st, h.at)));
-        heads.into_iter().find_map(|h| if h.waiting { gap(h.last).or_else(|| gap(h.at)) } else { gap(h.at) })
+        let mut out: Vec<u64> = Vec::new();
+        for g in heads.into_iter().filter_map(|h| if h.waiting { gap(h.last).or_else(|| gap(h.at)) } else { gap(h.at) }) {
+            if !out.contains(&g) {
+                out.push(g);
+            }
+        }
+        out
+    }
+
+    /// Whether connection `id`, about to fill `chunk`, reads on, waits, or goes.
+    fn want(&self, st: &State, id: u64, chunk: u64) -> Want {
+        if chunk >= self.chunks() || !st.conns.iter().any(|c| c.id == id) {
+            return Want::Close;
+        }
+        let have = |k: u64| st.chunks.contains_key(&k);
+        // Another connection just ahead has everything between: from here it would read the same.
+        if have(chunk) && st.conns.iter().any(|o| o.id != id && o.chunk > chunk && o.chunk <= chunk + READ_THROUGH + 1 && (chunk..o.chunk).all(have)) {
+            return Want::Close;
+        }
+        let window = self.window(st).div_ceil(CHUNK);
+        let (mut inside, mut beyond) = (false, false);
+        for h in &st.heads {
+            let lo = (h.at / CHUNK).saturating_sub(1);
+            let hi = h.at.max(h.last) / CHUNK + window;
+            inside |= chunk >= lo && chunk < hi;
+            beyond |= chunk >= hi && chunk < hi + window;
+        }
+        let end = (chunk + READ_THROUGH + 1).min(self.chunks());
+        if inside && (chunk..end).any(|k| !have(k)) {
+            Want::Read
+        } else if beyond && !have(chunk) {
+            Want::Park
+        } else {
+            Want::Close
+        }
     }
 
     /// A smoothed throughput (bytes/s) or time to first byte (s) sample.
@@ -351,126 +450,123 @@ impl<R: Ranges> Stream<R> {
     }
 }
 
-/// One open connection: the chunk it is filling and the bytes of it in hand.
-struct Conn<B> {
-    body: B,
-    chunk: u64,
-    buf: Vec<u8>,
-    opened: Instant,
-    /// Last read from: the least recently used goes when another is needed.
-    used: Instant,
-    answered: bool,
-    /// Bytes and time spent waiting on the body since the last rate sample.
-    tally: (usize, Duration),
-}
-
+/// Opens a connection at each reader's gap no open one covers, without waiting on any: a slow
+/// host answering one range must not hold up another the playhead needs.
 async fn fetch_loop<R: Ranges>(weak: Weak<Stream<R>>) {
-    // A demuxer can read two regions in turn (a poorly interleaved file, a track's index):
-    // each keeps its own connection rather than reopening one at every switch.
-    let mut conns: Vec<Conn<R::Body>> = Vec::new();
-    let mut failures = 0u32;
     loop {
         let Some(s) = weak.upgrade() else { return };
-        if s.state.lock().unwrap().error.is_some() {
-            return;
-        }
-        let target = s.next_gap(&s.state.lock().unwrap());
-        let Some(target) = target else {
-            // The window is in hand: the connections wait unread, the host held back by TCP.
-            let moved = s.moved.clone();
-            drop(s);
-            let _ = tokio::time::timeout(Duration::from_millis(500), moved.notified()).await;
-            continue;
-        };
-        // A connection a little short of the gap reads on through it rather than reopening.
-        let found = conns.iter().position(|c| c.chunk <= target && target - c.chunk <= READ_THROUGH);
-        let Some(i) = found else {
-            if conns.len() >= CONNS {
-                let oldest = (0..conns.len()).min_by_key(|&i| conns[i].used).unwrap_or(0);
-                conns.swap_remove(oldest);
-            }
-            let ranges = s.ranges.clone();
-            drop(s);
-            let opened = Instant::now();
-            let e = match tokio::time::timeout(NO_PROGRESS, ranges.from(target * CHUNK)).await {
-                Ok(Ok(body)) => {
-                    conns.push(Conn { body, chunk: target, buf: Vec::new(), opened, used: opened, answered: false, tally: (0, Duration::ZERO) });
-                    continue;
-                }
-                Ok(Err(e)) => e,
-                Err(_) => "The video host stopped answering".into(),
-            };
-            if !retry(&weak, &mut failures, e).await {
+        {
+            let mut st = s.state.lock().unwrap();
+            if st.error.is_some() {
                 return;
             }
-            continue;
-        };
-        drop(s);
-        let c = &mut conns[i];
-        // One left unread a while may have been closed by the host: that is no failure.
-        let parked = c.used.elapsed() > PARKED;
-        let t0 = Instant::now();
-        let piece = tokio::time::timeout(NO_PROGRESS, c.body.next()).await;
-        let waited = t0.elapsed();
-        c.used = Instant::now();
-        let Some(s) = weak.upgrade() else { return };
-        let e = match piece {
-            Ok(Ok(Some(bytes))) => {
-                failures = 0;
-                if !c.answered {
-                    c.answered = true;
-                    s.measured(None, Some(c.opened.elapsed().as_secs_f64()));
-                } else if !parked {
-                    c.tally = (c.tally.0 + bytes.len(), c.tally.1 + waited);
-                }
-                if c.tally.0 as u64 >= CHUNK {
-                    s.measured(Some(c.tally.0 as f64 / c.tally.1.as_secs_f64().max(1e-3)), None);
-                    c.tally = (0, Duration::ZERO);
-                }
-                c.buf.extend_from_slice(&bytes);
-                loop {
-                    let need = (s.len - (c.chunk * CHUNK).min(s.len)).min(CHUNK) as usize;
-                    if need == 0 || c.buf.len() < need {
-                        break;
+            if st.retry_at.is_none_or(|t| Instant::now() >= t) {
+                let top: Vec<u64> = s.gaps(&st).into_iter().take(CONNS).collect();
+                let covers = |c: &Slot, g: u64| c.chunk <= g && g - c.chunk <= READ_THROUGH;
+                for &g in &top {
+                    if st.conns.iter().any(|c| covers(c, g)) {
+                        continue;
                     }
-                    let rest = c.buf.split_off(need);
-                    let whole = std::mem::replace(&mut c.buf, rest);
-                    let mut st = s.state.lock().unwrap();
-                    s.store(&mut st, c.chunk, whole);
-                    c.chunk += 1;
+                    if st.conns.len() >= CONNS {
+                        let spare = st.conns.iter().enumerate().filter(|(_, c)| !top.iter().any(|&t| covers(c, t))).min_by_key(|(_, c)| c.used).map(|(i, _)| i);
+                        let Some(i) = spare else { break };
+                        st.conns.swap_remove(i);
+                    }
+                    let id = st.next_conn;
+                    st.next_conn += 1;
+                    st.conns.push(Slot { id, chunk: g, used: Instant::now() });
+                    // spawn-detached: one connection of a web video; it holds the stream only weakly and ends when the stream or its slot goes.
+                    tokio::spawn(connection(weak.clone(), s.ranges.clone(), id, g));
                 }
-                continue;
             }
-            Ok(Ok(None)) => {
-                conns.swap_remove(i);
-                continue;
-            }
-            Ok(Err(_)) | Err(_) if parked => {
-                conns.swap_remove(i);
-                continue;
-            }
-            Ok(Err(e)) => e,
-            Err(_) => "The video host stalled".into(),
-        };
-        conns.swap_remove(i);
+        }
+        let moved = s.moved.clone();
         drop(s);
-        if !retry(&weak, &mut failures, e).await {
-            return;
+        let _ = tokio::time::timeout(Duration::from_millis(100), moved.notified()).await;
+    }
+}
+
+/// One range read on while a reader needs it, storing each chunk as it fills.
+async fn connection<R: Ranges>(weak: Weak<Stream<R>>, ranges: Arc<R>, id: u64, start: u64) {
+    let opened = Instant::now();
+    let opening = tokio::time::timeout(NO_PROGRESS, ranges.from(start * CHUNK)).await;
+    drop(ranges);
+    let mut body = match opening {
+        Ok(Ok(body)) => body,
+        Ok(Err(e)) => return failed(&weak, id, e),
+        Err(_) => return failed(&weak, id, "The video host stopped answering".into()),
+    };
+    let (mut chunk, mut buf, mut used, mut answered) = (start, Vec::new(), opened, false);
+    // Bytes and time spent waiting on the body since the last rate sample.
+    let mut tally = (0usize, Duration::ZERO);
+    loop {
+        let Some(s) = weak.upgrade() else { return };
+        let want = s.want(&s.state.lock().unwrap(), id, chunk);
+        match want {
+            Want::Read => {}
+            Want::Park => {
+                drop(s);
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                continue;
+            }
+            Want::Close => return s.state.lock().unwrap().conns.retain(|c| c.id != id),
+        }
+        drop(s);
+        // One left unread a while may have been closed by the host: that is no failure.
+        let parked = used.elapsed() > PARKED;
+        let t0 = Instant::now();
+        let piece = tokio::time::timeout(NO_PROGRESS, body.next()).await;
+        let waited = t0.elapsed();
+        used = Instant::now();
+        let Some(s) = weak.upgrade() else { return };
+        let bytes = match piece {
+            Ok(Ok(Some(bytes))) => bytes,
+            Ok(Ok(None)) => return s.state.lock().unwrap().conns.retain(|c| c.id != id),
+            Ok(Err(_)) | Err(_) if parked => return s.state.lock().unwrap().conns.retain(|c| c.id != id),
+            Ok(Err(e)) => return failed(&weak, id, e),
+            Err(_) => return failed(&weak, id, "The video host stalled".into()),
+        };
+        if !answered {
+            answered = true;
+            s.measured(None, Some(opened.elapsed().as_secs_f64()));
+        } else if !parked {
+            tally = (tally.0 + bytes.len(), tally.1 + waited);
+        }
+        if tally.0 as u64 >= CHUNK {
+            s.measured(Some(tally.0 as f64 / tally.1.as_secs_f64().max(1e-3)), None);
+            tally = (0, Duration::ZERO);
+        }
+        buf.extend_from_slice(&bytes);
+        let mut st = s.state.lock().unwrap();
+        st.failures = 0;
+        loop {
+            let need = (s.len - (chunk * CHUNK).min(s.len)).min(CHUNK) as usize;
+            if need == 0 || buf.len() < need {
+                break;
+            }
+            let rest = buf.split_off(need);
+            let whole = std::mem::replace(&mut buf, rest);
+            s.store(&mut st, chunk, whole);
+            chunk += 1;
+        }
+        if let Some(c) = st.conns.iter_mut().find(|c| c.id == id) {
+            (c.chunk, c.used) = (chunk, used);
         }
     }
 }
 
-/// A failed connection: back off and go on, or give up for good after a few in a row.
-async fn retry<R: Ranges>(weak: &Weak<Stream<R>>, failures: &mut u32, e: String) -> bool {
-    *failures += 1;
-    if *failures >= ATTEMPTS {
-        if let Some(s) = weak.upgrade() {
-            s.fail(e);
-        }
-        return false;
+/// A failed connection: the next waits a little, and a few in a row stop the clip.
+fn failed<R: Ranges>(weak: &Weak<Stream<R>>, id: u64, e: String) {
+    let Some(s) = weak.upgrade() else { return };
+    let mut st = s.state.lock().unwrap();
+    st.conns.retain(|c| c.id != id);
+    st.failures += 1;
+    if st.failures >= ATTEMPTS {
+        drop(st);
+        s.fail(e);
+        return;
     }
-    tokio::time::sleep(Duration::from_millis(500 * *failures as u64)).await;
-    true
+    st.retry_at = Some(Instant::now() + Duration::from_millis(500 * st.failures as u64));
 }
 
 impl<R: Ranges> vector_core::media::MediaSource for Stream<R> {
@@ -611,6 +707,8 @@ mod tests {
         opened: std::sync::atomic::AtomicU32,
         /// The offset of every piece served, to find a byte fetched twice.
         pieces: Arc<Mutex<Vec<u64>>>,
+        /// A range from this offset on takes this much longer to answer.
+        slow_from: Option<(u64, Duration)>,
     }
 
     struct MemBody {
@@ -644,6 +742,11 @@ mod tests {
         async fn from(&self, start: u64) -> Result<MemBody, String> {
             self.opened.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             tokio::time::sleep(self.latency).await;
+            if let Some((at, extra)) = self.slow_from
+                && start >= at
+            {
+                tokio::time::sleep(extra).await;
+            }
             Ok(MemBody { bytes: self.bytes.clone(), at: start as usize, bps: self.bps, served: self.served.clone(), pieces: self.pieces.clone() })
         }
 
@@ -668,7 +771,7 @@ mod tests {
     }
 
     fn mem(bytes: Vec<u8>) -> Mem {
-        Mem { bytes: Arc::new(bytes), ranged: true, bps: None, latency: Duration::ZERO, served: Default::default(), opened: Default::default(), pieces: Default::default() }
+        Mem { bytes: Arc::new(bytes), ranged: true, bps: None, latency: Duration::ZERO, served: Default::default(), opened: Default::default(), pieces: Default::default(), slow_from: None }
     }
 
     fn sha(b: &[u8]) -> String {
@@ -796,7 +899,7 @@ mod tests {
             while off < len {
                 for at in [a + off, a + gap + off] {
                     r.seek(SeekFrom::Start(at)).unwrap();
-                    r.read_exact(&mut b).unwrap();
+                    r.read_exact(&mut b).unwrap_or_else(|e| panic!("{e} at {at}: {}", s.dump()));
                     assert_eq!(&b[..], &v[at as usize..at as usize + b.len()]);
                 }
                 off += b.len() as u64;
@@ -813,6 +916,120 @@ mod tests {
         seen.dedup();
         assert_eq!(seen.len(), all, "a piece was fetched twice");
         assert!(s.ranges().opened.load(std::sync::atomic::Ordering::Relaxed) <= 6);
+    }
+
+    #[test]
+    fn the_playheads_range_never_waits_behind_a_slow_answer_elsewhere() {
+        let rt = rt();
+        let v = video(60 * 1024 * 1024);
+        let mut m = mem(v.clone());
+        m.slow_from = Some((40 * 1024 * 1024, Duration::from_secs(3)));
+        let s = rt.block_on(open(m, None)).ok().unwrap();
+        s.set_duration(120_000);
+        let src: Arc<dyn MediaSource> = s.clone();
+        // Another reader asks far ahead, where the host takes seconds to answer.
+        let far = src.clone();
+        let other = std::thread::spawn(move || {
+            let mut r = vector_core::media::reader(far);
+            r.seek(SeekFrom::Start(50 * 1024 * 1024)).unwrap();
+            r.read_exact(&mut [0u8; 4096]).unwrap();
+        });
+        std::thread::sleep(Duration::from_millis(200));
+        let t0 = Instant::now();
+        let at = 10 * 1024 * 1024usize;
+        let mut r = vector_core::media::reader(src);
+        r.seek(SeekFrom::Start(at as u64)).unwrap();
+        let mut b = vec![0u8; 4096];
+        r.read_exact(&mut b).unwrap();
+        assert_eq!(&b[..], &v[at..at + 4096]);
+        assert!(t0.elapsed() < Duration::from_secs(1), "waited {:?}", t0.elapsed());
+        other.join().unwrap();
+    }
+
+    #[test]
+    fn a_reader_ahead_of_the_playhead_waiting_doesnt_hold_playback() {
+        let rt = rt();
+        let mut m = mem(video(60 * 1024 * 1024));
+        m.bps = Some(1024. * 1024.);
+        let s = rt.block_on(open(m, None)).ok().unwrap();
+        s.set_duration(120_000);
+        let src: Arc<dyn MediaSource> = s.clone();
+        let (went, gone) = std::sync::mpsc::channel();
+        // The sound's decoder: it starts where the picture does, then reads to the download's edge.
+        let ahead = src.clone();
+        let sound = std::thread::spawn(move || {
+            let mut r = vector_core::media::reader(ahead);
+            r.read_exact(&mut [0u8; 1024]).unwrap();
+            went.send(()).unwrap();
+            r.seek(SeekFrom::Start(6 * 1024 * 1024)).unwrap();
+            r.read_exact(&mut [0u8; 1024]).unwrap();
+        });
+        gone.recv().unwrap();
+        let mut r = vector_core::media::reader(src);
+        r.read_exact(&mut [0u8; 1024]).unwrap();
+        let t0 = Instant::now();
+        while !s.state.lock().unwrap().heads.iter().any(|h| h.waiting) && t0.elapsed() < Duration::from_secs(5) {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(s.state.lock().unwrap().heads.iter().any(|h| h.waiting), "the sound waits at the edge");
+        assert!(!s.starving(), "the picture has its bytes: playback goes on");
+        sound.join().unwrap();
+    }
+
+    #[test]
+    fn a_reader_holding_still_keeps_its_bytes() {
+        let rt = rt();
+        let v = video(40 * 1024 * 1024);
+        let s = rt.block_on(open(mem(v), None)).ok().unwrap();
+        s.set_duration(80_000);
+        let src: Arc<dyn MediaSource> = s.clone();
+        // The picture's decoder reads, then holds still while its frame queue is full.
+        let at = 1024 * 1024u64;
+        let mut r = vector_core::media::reader(src.clone());
+        r.seek(SeekFrom::Start(at)).unwrap();
+        r.read_exact(&mut [0u8; 1024]).unwrap();
+        // The sound's decoder reads on far away meanwhile.
+        let sound = std::thread::spawn(move || {
+            let mut r = vector_core::media::reader(src);
+            let t0 = Instant::now();
+            let mut off = 20 * 1024 * 1024u64;
+            while t0.elapsed() < HEAD_LIFE + Duration::from_secs(1) {
+                r.seek(SeekFrom::Start(off)).unwrap();
+                r.read_exact(&mut [0u8; 1024]).unwrap();
+                off += 16 * 1024;
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        });
+        sound.join().unwrap();
+        assert!(s.state.lock().unwrap().chunks.contains_key(&(at / CHUNK)), "the bytes it reads next were dropped");
+    }
+
+    #[test]
+    fn the_named_picture_reader_is_the_playhead() {
+        let rt = rt();
+        let mut m = mem(video(60 * 1024 * 1024));
+        m.bps = Some(1024. * 1024.);
+        let s = rt.block_on(open(m, None)).ok().unwrap();
+        s.set_duration(120_000);
+        let src: Arc<dyn MediaSource> = s.clone();
+        s.lead(std::thread::current().id());
+        let mut r = vector_core::media::reader(src.clone());
+        r.seek(SeekFrom::Start(2 * 1024 * 1024)).unwrap();
+        r.read_exact(&mut [0u8; 1024]).unwrap();
+        // The sound's decoder reads lower in the file, then waits at the download's edge.
+        let sound = std::thread::spawn(move || {
+            let mut r = vector_core::media::reader(src);
+            r.read_exact(&mut [0u8; 1024]).unwrap();
+            r.seek(SeekFrom::Start(7 * 1024 * 1024)).unwrap();
+            r.read_exact(&mut [0u8; 1024]).unwrap();
+        });
+        let t0 = Instant::now();
+        while !s.state.lock().unwrap().heads.iter().any(|h| h.waiting) && t0.elapsed() < Duration::from_secs(5) {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(s.state.lock().unwrap().heads.iter().any(|h| h.waiting), "the sound waits at the edge");
+        assert!(!s.starving(), "the picture has its bytes: playback goes on");
+        sound.join().unwrap();
     }
 
     #[test]
