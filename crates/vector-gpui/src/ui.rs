@@ -7303,8 +7303,10 @@ fn rail(
     // #ws-rail-spaces
     let spaces = if slim {
         let on = on_c.clone();
+        // Padding, not margin: a scroll never reaches its child's margin.
         div()
-            .mt(px(6.))
+            .pt(px(6.))
+            .pb(px(6.))
             .when(dms_slim.is_some(), |d| {
                 d.child(div().pt(px(6.)).child(div().mx(px(16.)).h(px(1.)).bg(c(DIVIDER))))
             })
@@ -7314,6 +7316,7 @@ fn rail(
                     .id("rail-create-community")
                     .size(px(45.))
                     .mx_auto()
+                    .mt(px(2.))
                     .rounded(px(8.5))
                     .border_1()
                     .border_dashed()
@@ -7327,8 +7330,8 @@ fn rail(
                     .child(svg().path("ui/plus-thin.svg").size(px(20.)).text_color(c(PRIMARY))),
             )
     } else { div()
-        .mt(px(10.))
-        .pt(px(6.))
+        .pt(px(16.))
+        .pb(px(6.))
         .child(div().mx(px(16.)).h(px(1.)).bg(c(DIVIDER)))
         .child(div().pt(px(16.)).child(rail_label("Communities")))
         .child(crate::rail::render(store, &store.rail, folders, active, voice, on_c))
