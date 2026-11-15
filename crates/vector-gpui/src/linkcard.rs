@@ -370,12 +370,14 @@ pub fn card(ctx: &Ctx, m: &Message) -> Option<AnyElement> {
             .collect()
     };
     let picture = image.as_deref().map(|u| ctx.media.borrow_mut().linked_in(u, &m.id));
+    let outer = if ctx.content_w > 0. { (MAX_W + 22.).min(ctx.content_w) } else { MAX_W + 22. };
+    let inner = outer - 22.;
 
     let mut card = div()
         .id(gpui::SharedString::from(format!("card-{}", m.id)))
         .relative()
         .mt(px(8.))
-        .max_w(px(MAX_W + 22.))
+        .max_w(px(outer))
         .px(px(10.))
         .pt(px(8.))
         .pb(px(
@@ -432,15 +434,12 @@ pub fn card(ctx: &Ctx, m: &Message) -> Option<AnyElement> {
         let mut frame = div()
             .relative()
             .mt(px(6.))
-            .w_full()
+            .w(px(inner))
             .rounded(px(4.))
             .overflow_hidden()
             .bg(c(0x000000));
-        frame = if audio {
-            frame.h(px(166.))
-        } else {
-            frame.aspect_ratio(16. / 9.).min_h(px(200.))
-        };
+        // Sized in pixels: a ratio left to layout grows past a card narrower than the picture.
+        frame = frame.h(px(if audio { 166. } else { (inner * 9. / 16.).max(200.) }));
         if let Some(Linked::Ready { image, .. }) = &picture {
             frame = frame.child(
                 img(image.clone())
@@ -517,7 +516,6 @@ pub fn card(ctx: &Ctx, m: &Message) -> Option<AnyElement> {
     } else if let Some(Linked::Ready { image, w, h }) = picture {
         // A height in pixels: left to the ratio, a picture smaller than the card is measured
         // at its own height and painted taller, over the rows below.
-        let inner = if ctx.content_w > 0. { (MAX_W + 22.).min(ctx.content_w) - 22. } else { MAX_W };
         let h = (inner * h.max(1) as f32 / w.max(1) as f32).min(350.);
         card = card.child(
             img(image)
