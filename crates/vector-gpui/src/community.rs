@@ -321,6 +321,7 @@ fn channel_row(
     // Zero width until hovered, so the name runs full width meanwhile. Width, not display: a
     // hover flip between prepaint and paint would paint children that were never prepainted.
     let actions = div()
+        .id("channel-actions")
         .flex()
         .items_center()
         .gap(px(8.))
