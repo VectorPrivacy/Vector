@@ -69,7 +69,8 @@ pub fn precompress(path: &std::path::Path) -> Result<types::CachedCompressedImag
     compression::compress_image_internal(&path.to_string_lossy()).map(crate::jxl::outbound)
 }
 
-/// The desktop client's send processing, then this client's JPEG XL.
+/// The desktop client's send processing, then this client's JPEG XL. Uncompressed, the picture
+/// leaves in its own format: only compressing may change it.
 pub fn process_image_for_send(
     bytes: std::sync::Arc<Vec<u8>>,
     extension: &str,
@@ -77,5 +78,29 @@ pub fn process_image_for_send(
     keep_metadata: bool,
     precompressed: Option<types::CachedCompressedImage>,
 ) -> Result<types::CachedCompressedImage, String> {
-    compression::process_image_for_send(bytes, extension, compress, keep_metadata, precompressed).map(crate::jxl::outbound)
+    let out = compression::process_image_for_send(bytes, extension, compress, keep_metadata, precompressed)?;
+    Ok(if compress { crate::jxl::outbound(out) } else { out })
+}
+
+#[cfg(test)]
+mod send_format_tests {
+    fn png() -> Vec<u8> {
+        let img = image::RgbImage::from_fn(64, 48, |x, y| image::Rgb([(x * 4) as u8, (y * 5) as u8, 90]));
+        let mut out = std::io::Cursor::new(Vec::new());
+        img.write_to(&mut out, image::ImageFormat::Png).unwrap();
+        out.into_inner()
+    }
+
+    #[test]
+    fn an_uncompressed_picture_keeps_its_format() {
+        let sent = super::process_image_for_send(std::sync::Arc::new(png()), "png", false, false, None).unwrap();
+        assert_eq!(sent.extension, "png");
+        assert_eq!(image::guess_format(&sent.bytes).unwrap(), image::ImageFormat::Png);
+    }
+
+    #[test]
+    fn a_compressed_picture_leaves_as_jpeg_xl() {
+        let sent = super::process_image_for_send(std::sync::Arc::new(png()), "png", true, false, None).unwrap();
+        assert_eq!(sent.extension, "jxl");
+    }
 }
