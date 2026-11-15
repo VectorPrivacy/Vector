@@ -14,8 +14,13 @@ const HEAD: u64 = 2 * CHUNK;
 const DEFAULT_WINDOW: u64 = 8 * 1024 * 1024;
 const BASE_SECS: f64 = 10.;
 const MAX_SECS: f64 = 30.;
-/// Kept behind the read head for the decoder's short backward reads.
+/// Kept behind a read head for the decoder's short backward reads.
 const KEEP_BEHIND: u64 = 2 * 1024 * 1024;
+/// A read this close to a head moves it; further off, it is another reader (the picture and
+/// the sound decode apart) or a seek.
+const SAME_HEAD: u64 = 1024 * 1024;
+/// A head nobody has read from for this long is gone.
+const HEAD_LIFE: Duration = Duration::from_secs(3);
 /// One request at most this many chunks: big enough to amortise a slow link's round trip.
 const MAX_BURST: u64 = 8;
 const READ_TIMEOUT: Duration = Duration::from_secs(45);
@@ -44,10 +49,10 @@ pub enum Open {
 struct State {
     chunks: BTreeMap<u64, Vec<u8>>,
     inflight: BTreeSet<u64>,
-    /// Where the decoder last read.
-    head: u64,
-    /// A read is waiting on bytes not here yet.
-    starving: bool,
+    /// Where each reader last read, and when.
+    heads: Vec<(u64, Instant)>,
+    /// The offset a read is blocked on.
+    wanted: Option<u64>,
     error: Option<String>,
     duration_ms: Option<u64>,
     /// Smoothed throughput (bytes/s) and time to first byte (s).
@@ -95,8 +100,8 @@ pub async fn open<R: Ranges>(ranges: R, expected: Option<String>) -> Result<Arc<
         state: Mutex::new(State {
             chunks: BTreeMap::new(),
             inflight: BTreeSet::new(),
-            head: 0,
-            starving: false,
+            heads: vec![(0, Instant::now())],
+            wanted: None,
             error: None,
             duration_ms: None,
             rate: Some(first.bytes.len() as f64 / took),
@@ -145,22 +150,41 @@ impl<R: Ranges> Stream<R> {
         self.moved.notify_one();
     }
 
-    /// Seconds of the clip already here, from where the decoder reads.
-    pub fn ahead_secs(&self) -> Option<f64> {
-        let st = self.state.lock().unwrap();
-        let d = st.duration_ms.filter(|d| *d > 0)?;
-        let mut i = st.head / CHUNK;
+    /// Bytes already here past `head`, up to the first gap.
+    fn held_past(&self, st: &State, head: u64) -> u64 {
+        let mut i = head / CHUNK;
         while st.chunks.contains_key(&i) {
             i += 1;
         }
-        let bytes = (i * CHUNK).min(self.len).saturating_sub(st.head);
-        Some(bytes as f64 * d as f64 / 1000. / self.len as f64)
+        (i * CHUNK).min(self.len).saturating_sub(head)
     }
 
-    /// Everything from the read head to the end is here.
+    /// Seconds of the clip already here past the reader with the least.
+    pub fn ahead_secs(&self) -> Option<f64> {
+        let st = self.state.lock().unwrap();
+        let d = st.duration_ms.filter(|d| *d > 0)?;
+        let least = st.heads.iter().map(|&(h, _)| self.held_past(&st, h)).min()?;
+        Some(least as f64 * d as f64 / 1000. / self.len as f64)
+    }
+
+    /// Everything past every reader to the end is here.
     pub fn complete_ahead(&self) -> bool {
         let st = self.state.lock().unwrap();
-        (st.head / CHUNK..self.chunks()).all(|i| st.chunks.contains_key(&i))
+        st.heads.iter().all(|&(h, _)| (h / CHUNK..self.chunks()).all(|i| st.chunks.contains_key(&i)))
+    }
+
+    fn touch(&self, st: &mut State, offset: u64) {
+        let now = Instant::now();
+        let before = st.heads.len();
+        st.heads.retain(|&(_, at)| now.duration_since(at) < HEAD_LIFE);
+        let pruned = st.heads.len() < before;
+        match st.heads.iter_mut().find(|(h, _)| h.abs_diff(offset) <= SAME_HEAD) {
+            Some(head) => *head = (offset, now),
+            None => st.heads.push((offset, now)),
+        }
+        if pruned {
+            self.evict(st);
+        }
     }
 
     #[cfg(test)]
@@ -170,7 +194,7 @@ impl<R: Ranges> Stream<R> {
 
     /// A read is waiting on the network.
     pub fn starving(&self) -> bool {
-        self.state.lock().unwrap().starving
+        self.state.lock().unwrap().wanted.is_some()
     }
 
     pub fn error(&self) -> Option<String> {
@@ -212,19 +236,15 @@ impl<R: Ranges> Stream<R> {
         }
     }
 
-    /// Far behind the read head goes, and so does anything past twice the window ahead; the
-    /// opening stays, as players re-read the header on a seek.
+    /// What no reader needs goes: far behind each, or past twice the window ahead. The opening
+    /// stays, as players re-read the header on a seek.
     fn evict(&self, st: &mut State) {
-        let head = st.head / CHUNK;
         let behind = KEEP_BEHIND / CHUNK;
         let ahead = self.window(st).div_ceil(CHUNK) * 2 + 1;
         let unhashed = st.hasher.is_some().then(|| st.hashed / CHUNK);
-        let drop: Vec<u64> = st
-            .chunks
-            .keys()
-            .copied()
-            .filter(|&i| i >= HEAD / CHUNK && (i + behind < head || i > head + ahead))
-            .collect();
+        let heads: Vec<u64> = st.heads.iter().map(|&(h, _)| h / CHUNK).collect();
+        let needed = |i: u64| i < HEAD / CHUNK || heads.iter().any(|&h| i + behind >= h && i <= h + ahead);
+        let drop: Vec<u64> = st.chunks.keys().copied().filter(|&i| !needed(i)).collect();
         for i in drop {
             st.chunks.remove(&i);
             // A hole now precedes chunks not yet hashed: the in-order hash can't finish.
@@ -234,13 +254,21 @@ impl<R: Ranges> Stream<R> {
         }
     }
 
-    /// The next run of chunks to fetch: the one the decoder waits on first, else the first gap
-    /// in the window ahead of it.
+    /// The next run of chunks to fetch: what a blocked read waits on first, else the first gap
+    /// in the window ahead of the reader with the least.
     fn next(&self, st: &mut State) -> Option<(u64, u64)> {
-        let head = st.head / CHUNK;
-        let end = ((st.head + self.window(st)).div_ceil(CHUNK)).min(self.chunks());
-        let start = (head..end).find(|i| !st.chunks.contains_key(i) && !st.inflight.contains(i))?;
-        let burst = if st.starving { 2 } else { MAX_BURST };
+        let window = self.window(st);
+        let gap = |from: u64, st: &State| {
+            let end = ((from + window).div_ceil(CHUNK)).min(self.chunks());
+            (from / CHUNK..end).find(|i| !st.chunks.contains_key(i) && !st.inflight.contains(i)).map(|i| (i, end))
+        };
+        let blocked = st.wanted.and_then(|w| gap(w, st));
+        let (start, end) = blocked.or_else(|| {
+            let mut heads: Vec<u64> = st.heads.iter().map(|&(h, _)| h).collect();
+            heads.sort_by_key(|&h| self.held_past(st, h));
+            heads.into_iter().find_map(|h| gap(h, st))
+        })?;
+        let burst = if blocked.is_some() { 2 } else { MAX_BURST };
         let mut n = 1;
         while n < burst && start + n < end && !st.chunks.contains_key(&(start + n)) && !st.inflight.contains(&(start + n)) {
             n += 1;
@@ -341,10 +369,8 @@ impl<R: Ranges> vector_core::media::MediaSource for Stream<R> {
         }
         let want = buf.len().min((self.len - offset) as usize);
         let mut st = self.state.lock().unwrap();
-        if st.head != offset {
-            st.head = offset;
-            self.moved.notify_one();
-        }
+        self.touch(&mut st, offset);
+        self.moved.notify_one();
         let mut done = 0usize;
         let mut waited = Duration::ZERO;
         while done < want {
@@ -362,13 +388,15 @@ impl<R: Ranges> vector_core::media::MediaSource for Stream<R> {
             if waited >= READ_TIMEOUT {
                 return Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "The video stopped loading"));
             }
-            st.starving = true;
+            st.wanted = Some(at);
             self.moved.notify_one();
             let step = Duration::from_millis(250);
             st = self.arrived.wait_timeout(st, step).unwrap().0;
             waited += step;
         }
-        st.starving = false;
+        if st.wanted.is_some_and(|w| w >= offset && w < offset + want as u64) {
+            st.wanted = None;
+        }
         Ok(done)
     }
 }
@@ -505,6 +533,10 @@ mod tests {
             r.read_exact(&mut b).unwrap();
             assert_eq!(&b[..], &v[at as usize..at as usize + 300_000]);
         }
+        // Past a head's life, a read leaves only its own window held.
+        std::thread::sleep(HEAD_LIFE + Duration::from_millis(200));
+        r.seek(SeekFrom::Start(5_000_000)).unwrap();
+        r.read_exact(&mut [0u8; 1024]).unwrap();
         std::thread::sleep(Duration::from_millis(300));
         let held: u64 = s.state.lock().unwrap().chunks.values().map(|c| c.len() as u64).sum();
         // Window (10 s of a 4 Mbit/s clip ≈ 5 MB) twice, plus what sits behind and the opening.
