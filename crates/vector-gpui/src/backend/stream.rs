@@ -24,6 +24,8 @@ const MAX_BURST: u64 = 8;
 const WAITING_BURST: u64 = 4;
 const READ_TIMEOUT: Duration = Duration::from_secs(45);
 const ATTEMPTS: u32 = 4;
+/// Requests in flight at once: a host slow to answer each still fills the window.
+const PARALLEL: usize = 3;
 
 /// One answer to a range request.
 pub struct Got {
@@ -74,7 +76,7 @@ pub struct Stream<R: Ranges> {
     len: u64,
     mime: &'static str,
     expected: Option<String>,
-    ranges: R,
+    ranges: Arc<R>,
     state: Mutex<State>,
     arrived: Condvar,
     moved: Arc<tokio::sync::Notify>,
@@ -103,7 +105,7 @@ pub async fn open<R: Ranges>(ranges: R, expected: Option<String>) -> Result<Arc<
         len: total,
         mime,
         expected: expected.map(|e| e.to_ascii_lowercase()),
-        ranges,
+        ranges: Arc::new(ranges),
         state: Mutex::new(State {
             chunks: BTreeMap::new(),
             inflight: BTreeSet::new(),
@@ -347,29 +349,39 @@ impl<R: Ranges> Stream<R> {
 }
 
 async fn fetch_loop<R: Ranges>(weak: Weak<Stream<R>>) {
+    use futures::stream::{FuturesUnordered, StreamExt};
     let mut failures = 0u32;
+    let mut flying = FuturesUnordered::new();
     loop {
         let Some(s) = weak.upgrade() else { return };
         if s.state.lock().unwrap().error.is_some() {
             return;
         }
-        let next = {
-            let mut st = s.state.lock().unwrap();
-            s.next(&mut st)
+        while flying.len() < PARALLEL {
+            let next = {
+                let mut st = s.state.lock().unwrap();
+                s.next(&mut st)
+            };
+            let Some((first, n)) = next else { break };
+            let (start, end) = (first * CHUNK, ((first + n) * CHUNK).min(s.len));
+            // The requests hold the host, never the stream: letting go of the player ends them.
+            let ranges = s.ranges.clone();
+            flying.push(async move {
+                let t0 = Instant::now();
+                let got = ranges.get(start, end).await;
+                (first, n, end - start, got, t0.elapsed())
+            });
+        }
+        let moved = s.moved.clone();
+        drop(s);
+        let landed = tokio::select! {
+            l = flying.next(), if !flying.is_empty() => l,
+            _ = tokio::time::timeout(Duration::from_millis(500), moved.notified()) => None,
         };
-        let Some((first, n)) = next else {
-            let moved = s.moved.clone();
-            drop(s);
-            let _ = tokio::time::timeout(Duration::from_millis(500), moved.notified()).await;
-            continue;
-        };
-        let start = first * CHUNK;
-        let end = ((first + n) * CHUNK).min(s.len);
-        let t0 = Instant::now();
-        let got = s.ranges.get(start, end).await;
-        let took = t0.elapsed();
+        let Some((first, n, bytes, got, took)) = landed else { continue };
+        let Some(s) = weak.upgrade() else { return };
         // Round trip of a small request is mostly latency; of a big one mostly transfer.
-        let ttfb = if end - start <= CHUNK { took } else { took.mul_f64(CHUNK as f64 / (end - start) as f64) };
+        let ttfb = if bytes <= CHUNK { took } else { took.mul_f64(CHUNK as f64 / bytes as f64) };
         let err = got.as_ref().err().cloned();
         if s.landed(first, n, got, took, ttfb) {
             failures = 0;
@@ -615,6 +627,19 @@ mod tests {
         s.sought();
         assert_eq!(s.ahead_secs(), None);
         assert!(!s.complete_ahead());
+    }
+
+    #[test]
+    fn a_host_slow_to_answer_is_asked_several_ranges_at_once() {
+        let rt = rt();
+        let mut m = mem(video(40 * 1024 * 1024));
+        m.latency = Duration::from_secs(1);
+        let s = rt.block_on(open(m, None)).ok().unwrap();
+        s.set_duration(80_000);
+        std::thread::sleep(Duration::from_millis(2500));
+        // One at a time, two 2 MB answers fit in this; three lanes fill the window.
+        let served = s.ranges().served.load(std::sync::atomic::Ordering::Relaxed);
+        assert!(served >= 11 * 512 * 1024, "served {served}");
     }
 
     #[test]
