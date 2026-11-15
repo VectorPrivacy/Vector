@@ -782,11 +782,26 @@ impl Asset for ImageAssetLoader {
                 let (data, partial) = match format {
                     ImageFormat::Gif => decode_gif_image_with(&bytes, each, limit)?,
                     ImageFormat::WebP => decode_webp_image_with(&bytes, each, limit)?,
+                    ImageFormat::Jpeg if let Some(frame) = fit.and_then(|(max, square)| jpeg_fitted(&bytes, max, square)) => {
+                        (std::iter::once(frame).collect(), false)
+                    }
                     _ => (decode_static_image(&bytes, format)?.into_iter().map(each).collect(), false),
                 };
                 let mut image = RenderImage::new(data);
                 image.partial = partial;
                 Ok(Arc::new(image))
+            } else if let Some(decoder) = image::ImageReader::new(std::io::Cursor::new(&bytes))
+                .with_guessed_format()
+                .ok()
+                .filter(|r| r.format().is_none())
+                .and_then(|r| r.into_decoder().ok())
+            {
+                // A format the app registered with `image::hooks` (JPEG XL).
+                let data = crate::decode_static_image_from_decoder(decoder)?.into_iter().map(|f| match fit {
+                    Some((max, square)) => fit_frame(f, max, square),
+                    None => f,
+                });
+                Ok(Arc::new(RenderImage::new(data.collect::<smallvec::SmallVec<[_; 1]>>())))
             } else {
                 svg_renderer
                     .render_single_frame(&bytes, 1.0)
@@ -866,6 +881,94 @@ pub fn resize_premultiplied(buf: image::RgbaImage, w: u32, h: u32) -> image::Rgb
         }
     }
     out
+}
+
+/// A JPEG decoded at the smallest DCT scale (1/8, 1/4 or 1/2) that still covers what `need`
+/// asks of its upright size, with its orientation applied: a picture shown small never builds
+/// its full-size buffer. Comes back with the picture's full upright size. None where only a
+/// full decode would do, or for a JPEG that isn't 8-bit RGB or grey.
+pub fn decode_jpeg_scaled(
+    bytes: &[u8],
+    need: impl FnOnce(u32, u32) -> (u32, u32),
+) -> Option<(image::RgbaImage, u32, u32)> {
+    use image::metadata::Orientation;
+    let mut dec = jpeg_decoder::Decoder::new(bytes);
+    dec.read_info().ok()?;
+    let info = dec.info()?;
+    let (w, h) = (info.width as u32, info.height as u32);
+    let orientation = dec
+        .exif_data()
+        .and_then(Orientation::from_exif_chunk)
+        .unwrap_or(Orientation::NoTransforms);
+    let turned = matches!(
+        orientation,
+        Orientation::Rotate90 | Orientation::Rotate270 | Orientation::Rotate90FlipH | Orientation::Rotate270FlipH
+    );
+    let (uw, uh) = if turned { (h, w) } else { (w, h) };
+    let (nw, nh) = need(uw, uh);
+    let (rw, rh) = if turned { (nh, nw) } else { (nw, nh) };
+    let scaled = |len: u32, s: u32| (len * s - 1) / 8 + 1;
+    let s = [1u32, 2, 4].into_iter().find(|&s| scaled(w, s) >= rw && scaled(h, s) >= rh)?;
+    let (sw, sh) = dec.scale(scaled(w, s) as u16, scaled(h, s) as u16).ok()?;
+    let (sw, sh) = (sw as u32, sh as u32);
+    if sw < rw || sh < rh {
+        return None;
+    }
+    let px = dec.decode().ok()?;
+    let mut rgba = Vec::with_capacity(sw as usize * sh as usize * 4);
+    match info.pixel_format {
+        jpeg_decoder::PixelFormat::RGB24 => {
+            for p in px.chunks_exact(3) {
+                rgba.extend_from_slice(&[p[0], p[1], p[2], 255]);
+            }
+        }
+        jpeg_decoder::PixelFormat::L8 => {
+            for &l in &px {
+                rgba.extend_from_slice(&[l, l, l, 255]);
+            }
+        }
+        _ => return None,
+    }
+    drop(px);
+    let mut img = image::DynamicImage::ImageRgba8(image::RgbaImage::from_raw(sw, sh, rgba)?);
+    img.apply_orientation(orientation);
+    Some((img.into_rgba8(), uw, uh))
+}
+
+/// [`fit_frame`] for a JPEG, decoded no larger than the fit needs: the same size comes out.
+pub fn jpeg_fitted(bytes: &[u8], max: u32, square: bool) -> Option<image::Frame> {
+    let mut target = None;
+    let (img, w, h) = decode_jpeg_scaled(bytes, |w, h| {
+        let (cw, ch) = if square { (w.min(h), w.min(h)) } else { (w, h) };
+        if (cw == w && ch == h && w.max(h) <= max) || max == 0 || cw == 0 {
+            return (w, h);
+        }
+        let scale = (max as f64 / cw.max(ch) as f64).min(1.);
+        let (nw, nh) = (
+            ((cw as f64 * scale).round() as u32).max(1),
+            ((ch as f64 * scale).round() as u32).max(1),
+        );
+        target = Some((nw, nh));
+        (
+            (w as f64 * nw as f64 / cw as f64).ceil() as u32,
+            (h as f64 * nh as f64 / ch as f64).ceil() as u32,
+        )
+    })?;
+    let (nw, nh) = target?;
+    let (sw, sh) = img.dimensions();
+    let k = sw as f64 / w as f64;
+    let (cw, ch) = if square { (w.min(h), w.min(h)) } else { (w, h) };
+    let (cw, ch) = (((cw as f64 * k).round() as u32).clamp(1, sw), ((ch as f64 * k).round() as u32).clamp(1, sh));
+    let cut = if (cw, ch) == (sw, sh) {
+        img
+    } else {
+        image::imageops::crop_imm(&img, (sw - cw) / 2, (sh - ch) / 2, cw, ch).to_image()
+    };
+    let mut buffer = if (cw, ch) == (nw, nh) { cut } else { resize_premultiplied(cut, nw, nh) };
+    for p in buffer.chunks_exact_mut(4) {
+        p.swap(0, 2);
+    }
+    Some(image::Frame::new(buffer))
 }
 
 /// Shrinks a frame whose longer side passes `max`; a picture shown small never holds its full size.

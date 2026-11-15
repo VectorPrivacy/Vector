@@ -66,6 +66,7 @@ rqrr = { version = "0.11", default-features = false }
 gif = "0.14"
 libwebp-sys = "0.9"
 rayon = "1.11.0"
+jxl-oxide = { version = "0.12", default-features = false, features = ["image", "rayon"] }
 fast_image_resize = "5.5"
 crc32fast = "1.5"
 simd-adler32 = "0.3"

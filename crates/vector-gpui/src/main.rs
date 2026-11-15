@@ -191,6 +191,7 @@ fn main() {
     #[cfg(target_os = "linux")]
     vkselect::narrow();
     env_logger::init();
+    jxl_oxide::integration::register_image_decoding_hook();
     let args = args();
     let fixtures = args.fixtures.as_ref().map(|f| {
         let store = data::Store::from_fixtures(f).expect("fixtures");

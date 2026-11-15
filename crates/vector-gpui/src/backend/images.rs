@@ -58,6 +58,8 @@ fn sniff(bytes: &[u8]) -> Option<&'static str> {
         (&[0x89, b'P', b'N', b'G'], "png"),
         (&[0xFF, 0xD8, 0xFF], "jpg"),
         (b"GIF8", "gif"),
+        (&[0xFF, 0x0A], "jxl"),
+        (&[0x00, 0x00, 0x00, 0x0C, b'J', b'X', b'L', b' '], "jxl"),
     ];
     if let Some((_, ext)) = SIGS.iter().find(|(sig, _)| bytes.starts_with(sig)) {
         return Some(ext);
@@ -78,7 +80,7 @@ fn cached(url: &str, kind: Kind) -> Option<String> {
     let dir = cache_dir(kind)?;
     let key = cache_key(url);
     // Every extension the desktop client writes a cache file with.
-    ["jpg", "png", "webp", "gif", "ico", "svg", "bmp"]
+    ["jpg", "png", "webp", "gif", "ico", "svg", "bmp", "jxl"]
         .iter()
         .map(|ext| dir.join(format!("{key}.{ext}")))
         .find(|p| vector_core::vcache::readable(p))

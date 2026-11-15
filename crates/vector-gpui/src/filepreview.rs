@@ -17,7 +17,7 @@ use crate::composer::{CancelInput, InputChanged, SendText, TextInput};
 use crate::message::types::CachedCompressedImage;
 use crate::theme::{INTER, PRIMARY, c, white_a};
 
-pub const IMAGE_EXTS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp", "tiff", "tif", "ico"];
+pub const IMAGE_EXTS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp", "jxl", "tiff", "tif", "ico"];
 const MIN_COMPRESS_SIZE: u64 = 25 * 1024;
 
 pub type Compressed = Shared<Task<Option<CachedCompressedImage>>>;

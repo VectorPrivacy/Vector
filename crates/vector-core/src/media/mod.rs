@@ -43,7 +43,7 @@ pub fn url_key(kind: &str, url: &str) -> [u8; 32] {
 
 /// Kinds a chat bubble draws itself: these load for viewing without being kept.
 pub fn previewable(extension: &str) -> bool {
-    const IMAGES: [&str; 10] = ["png", "jpeg", "jpg", "gif", "webp", "svg", "bmp", "tiff", "tif", "ico"];
+    const IMAGES: [&str; 11] = ["png", "jpeg", "jpg", "gif", "webp", "jxl", "svg", "bmp", "tiff", "tif", "ico"];
     const AUDIO: [&str; 6] = ["wav", "mp3", "flac", "aac", "m4a", "ogg"];
     const VIDEO: [&str; 3] = ["mp4", "webm", "mov"];
     const MODELS: [&str; 5] = ["glb", "gltf", "stl", "obj", "fbx"];

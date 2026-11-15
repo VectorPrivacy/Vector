@@ -13,6 +13,8 @@ static DOWNLOADS: LazyLock<tokio::sync::Semaphore> =
 const SIGNATURES: &[(&[u8], &str)] = &[
     (&[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A], "png"),
     (&[0xFF, 0xD8, 0xFF], "jpg"),
+    (&[0xFF, 0x0A], "jxl"),
+    (&[0x00, 0x00, 0x00, 0x0C, b'J', b'X', b'L', b' '], "jxl"),
     (b"GIF8", "gif"),
     (b"RIFF", "webp"),
     (b"BM", "bmp"),
@@ -52,7 +54,7 @@ fn cache_stem(url: &str) -> String {
 
 fn kept(url: &str) -> Option<PathBuf> {
     let (dir, stem) = (cache_dir()?, cache_stem(url));
-    ["png", "jpg", "gif", "webp", "bmp", "ico"]
+    ["png", "jpg", "gif", "webp", "jxl", "bmp", "ico"]
         .iter()
         .map(|e| dir.join(format!("{stem}.{e}")))
         .find(|p| vector_core::vcache::readable(p))
@@ -150,5 +152,23 @@ pub async fn image(url: String) -> Option<Vec<u8>> {
         let mime = vector_core::crypto::mime_from_extension(ext);
         vector_core::media::ram::insert(held, bytes.clone(), mime).ok()?;
         Some(bytes)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn jpeg_xl_is_recognised_and_decoded() {
+        let bytes = include_bytes!("../testdata/stripe.jxl");
+        assert_eq!(super::sniff(bytes), Some("jxl"));
+        assert_eq!(vector_core::crypto::mime_from_magic_bytes(bytes), "image/jxl");
+        jxl_oxide::integration::register_image_decoding_hook();
+        let (img, w, h) = crate::media::decode(bytes, "jxl", (1000, 1000)).expect("decodes");
+        assert_eq!((w, h), (64, 48));
+        let frame = img.as_bytes(0).expect("one frame");
+        // BGRA: the stripe on row 10 is green, the rest red-pink.
+        let px = |x: usize, y: usize| &frame[(y * 64 + x) * 4..][..4];
+        assert_eq!(px(5, 10), [0, 255, 0, 255]);
+        assert_eq!(px(5, 20), [90, 30, 200, 255]);
     }
 }

@@ -323,7 +323,7 @@ pub fn seal_in_place(path: &Path) -> Result<bool, String> {
 /// Seal every legacy picture and video under `dir`, recursively; sidecars and markers stay as
 /// they are. Returns how many were sealed.
 pub fn seal_dir(dir: &Path) -> usize {
-    const MEDIA: [&str; 13] = ["png", "jpg", "jpeg", "gif", "webp", "bmp", "ico", "svg", "tif", "tiff", "mp4", "webm", "mov"];
+    const MEDIA: [&str; 14] = ["png", "jpg", "jpeg", "gif", "webp", "jxl", "bmp", "ico", "svg", "tif", "tiff", "mp4", "webm", "mov"];
     let Ok(entries) = std::fs::read_dir(dir) else { return 0 };
     let mut sealed = 0;
     for entry in entries.flatten() {

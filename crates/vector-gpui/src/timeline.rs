@@ -867,7 +867,7 @@ fn url_ext(url: &str) -> String {
 
 /// `isImageUrl`: the path ends in a picture's extension, or the text names one anywhere.
 pub fn is_image_url(url: &str) -> bool {
-    const EXTS: [&str; 8] = ["png", "jpg", "jpeg", "gif", "webp", "bmp", "ico", "svg"];
+    const EXTS: [&str; 9] = ["png", "jpg", "jpeg", "gif", "webp", "jxl", "bmp", "ico", "svg"];
     let lower = url.to_ascii_lowercase();
     let path = lower.split(['?', '#']).next().unwrap_or("");
     EXTS.iter()

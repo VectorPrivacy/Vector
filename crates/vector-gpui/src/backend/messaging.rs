@@ -246,7 +246,7 @@ fn file_send_config(receiver: &str) -> SendConfig {
     }
 }
 
-const IMAGE_EXTS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp", "tiff", "tif", "ico"];
+const IMAGE_EXTS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp", "jxl", "tiff", "tif", "ico"];
 
 /// Send a picked file to a DM. An image is compressed (reusing `precompressed`, the preview's
 /// own run, when it fits the choice) or stripped of metadata; anything else streams from disk.

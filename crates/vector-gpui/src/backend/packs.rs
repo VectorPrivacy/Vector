@@ -10,7 +10,7 @@ pub const MAX_EMOJI_BYTES: usize = 256 * 1024;
 
 /// What the picker accepts: web formats as they are, and what the image crate reads, as PNG.
 pub const IMPORT_EXTS: &[&str] = &[
-    "png", "jpg", "jpeg", "gif", "webp", "tiff", "tif", "bmp", "ico",
+    "png", "jpg", "jpeg", "gif", "webp", "tiff", "tif", "bmp", "ico", "jxl",
 ];
 
 /// A picked file as the creator will hold it: web-safe bytes, never an SVG.

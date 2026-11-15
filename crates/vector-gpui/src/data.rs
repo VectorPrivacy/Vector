@@ -1237,6 +1237,7 @@ pub fn file_type(extension: &str) -> (&'static str, &'static str) {
         "jpeg" => ("image", "Picture"),
         "gif" => ("film", "GIF Animation"),
         "webp" => ("image", "Picture"),
+        "jxl" => ("image", "Picture"),
         "svg" => ("image", "Vector Image"),
         "bmp" => ("image", "Bitmap Image"),
         "ico" => ("image", "Icon"),

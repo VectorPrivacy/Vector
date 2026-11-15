@@ -1866,7 +1866,7 @@ pub const STORE_CATS: [StoreCat; 7] = [
     StoreCat {
         name: "Images",
         exts: &[
-            "jpg", "jpeg", "png", "gif", "bmp", "webp", "svg", "avif", "heic", "heif", "tif",
+            "jpg", "jpeg", "png", "gif", "bmp", "webp", "jxl", "svg", "avif", "heic", "heif", "tif",
             "tiff", "ico",
         ],
         key: None,

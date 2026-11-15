@@ -726,6 +726,23 @@ pub fn decode(bytes: &[u8], ext: &str, max: (u32, u32)) -> Option<(RenderImage, 
     {
         return Some((RenderImage::new(frames), w, h));
     }
+    if ext != "svg" && image::guess_format(bytes).ok() == Some(image::ImageFormat::Jpeg) {
+        let mut target = None;
+        let scaled = gpui::decode_jpeg_scaled(bytes, |w, h| {
+            if w <= max.0 && h <= max.1 {
+                return (w, h);
+            }
+            // As `DynamicImage::resize` sizes it, so the result matches the full decode's.
+            let r = (max.0.max(1) as f64 / w as f64).min(max.1.max(1) as f64 / h as f64);
+            let t = (((w as f64 * r).round() as u32).max(1), ((h as f64 * r).round() as u32).max(1));
+            target = Some(t);
+            t
+        });
+        if let (Some((img, w, h)), Some((tw, th))) = (scaled, target) {
+            let img = DynamicImage::ImageRgba8(img).resize_exact(tw, th, FilterType::CatmullRom);
+            return Some((RenderImage::new(vec![Frame::new(to_bgra(img.into_rgba8()))]), w, h));
+        }
+    }
     let img = if ext == "svg" {
         let png = vector_core::svg::rasterize_png(bytes, 1024).ok()?;
         image::load_from_memory(&png).ok()?
@@ -880,5 +897,76 @@ mod budget_tests {
         assert_eq!(fit_budget((128, 128), 30), (128, 128));
         // One far over shrinks no further than the floor; dropping frames does the rest.
         assert_eq!(fit_budget((1000, 1000), 500), (750, 750));
+    }
+}
+
+#[cfg(test)]
+mod jpeg_tests {
+    use super::*;
+    use image::codecs::jpeg::JpegEncoder;
+    use image::{ImageEncoder, RgbImage, RgbaImage};
+
+    /// A smooth photo-like JPEG, with an EXIF orientation when given.
+    fn jpeg(w: u32, h: u32, orientation: Option<u8>) -> Vec<u8> {
+        let img = RgbImage::from_fn(w, h, |x, y| {
+            image::Rgb([(x * 255 / w) as u8, (y * 255 / h) as u8, ((x + y) * 127 / (w + h)) as u8])
+        });
+        let mut out = Vec::new();
+        let mut enc = JpegEncoder::new_with_quality(&mut out, 90);
+        if let Some(o) = orientation {
+            let exif = [
+                b'M', b'M', 0, 42, 0, 0, 0, 8, 0, 1, 0x01, 0x12, 0, 3, 0, 0, 0, 1, 0, o, 0, 0, 0, 0, 0, 0,
+            ];
+            enc.set_exif_metadata(exif.to_vec()).unwrap();
+        }
+        enc.write_image(img.as_raw(), w, h, image::ExtendedColorType::Rgb8).unwrap();
+        out
+    }
+
+    /// What `decode` gave before it decoded JPEGs scaled: the full picture, then resized.
+    fn full(bytes: &[u8], max: (u32, u32)) -> (RgbaImage, u32, u32) {
+        let mut dec = ImageReader::new(Cursor::new(bytes)).with_guessed_format().unwrap().into_decoder().unwrap();
+        let o = dec.orientation().unwrap();
+        let mut img = DynamicImage::from_decoder(dec).unwrap();
+        img.apply_orientation(o);
+        let (w, h) = (img.width(), img.height());
+        (img.resize(max.0, max.1, FilterType::CatmullRom).into_rgba8(), w, h)
+    }
+
+    fn mean_diff(a: &[u8], b: &[u8]) -> f64 {
+        a.iter().zip(b).map(|(x, y)| (*x as i32 - *y as i32).unsigned_abs() as f64).sum::<f64>() / a.len() as f64
+    }
+
+    #[test]
+    fn a_jpeg_decodes_scaled_to_the_same_size_and_look() {
+        for (w, h, o, max) in [(1600, 1200, None, (400, 400)), (1600, 1200, Some(6), (300, 500)), (999, 333, Some(3), (120, 90))] {
+            let bytes = jpeg(w, h, o);
+            let (want, fw, fh) = full(&bytes, max);
+            let (got, gw, gh) = decode(&bytes, "jpg", max).unwrap();
+            assert_eq!((gw, gh), (fw, fh), "natural size");
+            let size = got.size(0);
+            assert_eq!((size.width.0 as u32, size.height.0 as u32), want.dimensions(), "{w}x{h} {o:?}");
+            let mut want = want.into_raw();
+            for p in want.chunks_exact_mut(4) {
+                p.swap(0, 2);
+            }
+            let d = mean_diff(got.as_bytes(0).unwrap(), &want);
+            assert!(d < 3., "{w}x{h} {o:?}: mean difference {d}");
+        }
+    }
+
+    #[test]
+    fn a_fitted_jpeg_comes_out_at_the_fitted_size() {
+        let bytes = jpeg(1600, 1200, Some(6));
+        // Decoded at a quarter, never the full 1600 by 1200, and turned upright.
+        let (img, w, h) = gpui::decode_jpeg_scaled(&bytes, |_, _| (300, 400)).unwrap();
+        assert_eq!((img.dimensions(), w, h), ((300, 400), 1200, 1600));
+        // Upright it's 1200 by 1600.
+        let f = gpui::jpeg_fitted(&bytes, 100, false).unwrap();
+        assert_eq!(f.buffer().dimensions(), (75, 100));
+        let f = gpui::jpeg_fitted(&bytes, 64, true).unwrap();
+        assert_eq!(f.buffer().dimensions(), (64, 64));
+        // Small enough already: the plain decode stands.
+        assert!(gpui::jpeg_fitted(&jpeg(80, 60, None), 100, false).is_none());
     }
 }

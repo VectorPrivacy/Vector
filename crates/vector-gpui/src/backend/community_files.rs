@@ -14,7 +14,7 @@ use vector_core::Message;
 use super::messaging::Callback;
 use crate::message::types::CachedCompressedImage;
 
-const IMAGE_EXTS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp", "tiff", "tif", "ico"];
+const IMAGE_EXTS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp", "jxl", "tiff", "tif", "ico"];
 
 struct Prepared {
     attachment: vector_core::types::Attachment,
