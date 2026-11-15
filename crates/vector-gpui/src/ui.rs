@@ -233,6 +233,8 @@ pub struct VectorApp {
     /// A Community channel's history past the database: all fetched, or the last ask failed.
     history_net: HashMap<String, bool>,
     history_net_busy: HashSet<String>,
+    /// A batch of on-screen people is on its way to the profile queue.
+    profile_flush: bool,
     pack_crop: Option<(
         Entity<crate::cropper::Cropper>,
         futures::channel::oneshot::Sender<Option<vector_core::image_crop::CropRect>>,
@@ -977,6 +979,7 @@ impl VectorApp {
             history_done: HashSet::new(),
             history_net: HashMap::new(),
             history_net_busy: HashSet::new(),
+            profile_flush: false,
             pack_crop: None,
             emoji_picker,
             picker_open: false,
@@ -3960,6 +3963,10 @@ impl VectorApp {
             self.stash_draft(cx);
         }
         self.open = Some(id.clone());
+        if self.live && switching {
+            // `queue_chat_profiles_sync`: the chat's people, refreshed as it opens.
+            let _ = backend::run(vector_core::profile::sync::queue_chat_profiles(id.to_string(), true));
+        }
         self.commands.close();
         self.load_commands(false, cx);
         self.pivx_merge(id.to_string(), cx);
@@ -6061,6 +6068,19 @@ impl Render for VectorApp {
         {
             let mut media = self.media.borrow_mut();
             media.videos.scale = window.scale_factor();
+            // `profilewatch.js`: who was drawn goes to the profile queue every 1.5 s.
+            if self.live && !self.profile_flush && crate::profilewatch::has_pending() {
+                self.profile_flush = true;
+                cx.spawn(async move |this, cx| {
+                    cx.background_executor().timer(std::time::Duration::from_millis(1500)).await;
+                    let npubs = crate::profilewatch::take();
+                    if !npubs.is_empty() {
+                        let _ = backend::run(vector_core::profile::sync::queue_visible_profiles(npubs));
+                    }
+                    this.update(cx, |this, _| this.profile_flush = false).ok();
+                })
+                .detach();
+            }
             // Rows whose linked picture just loaded are taller now: only those are measured again.
             let grown = media.take_settled_rows();
             if !grown.is_empty() {
@@ -10324,9 +10344,11 @@ impl VectorApp {
             _ => String::new(),
         };
         let publish = self.can_publish();
+        let live = self.live;
         let preview = cx.new(|cx| {
             let mut p = make(chat.to_string(), reply, window, cx);
             p.publish = publish;
+            p.check_servers = live;
             p
         });
         cx.subscribe_in(
@@ -19479,7 +19501,7 @@ impl VectorApp {
     }
 
     pub(crate) fn dev_open_file(&mut self, path: std::path::PathBuf, window: &mut Window, cx: &mut Context<Self>) {
-        self.open_file_preview(path, window, cx);
+        self.open_paths_preview(vec![path], window, cx);
     }
 
     pub(crate) fn dev_open_chat(&mut self, id: SharedString, window: &mut Window, cx: &mut Context<Self>) {

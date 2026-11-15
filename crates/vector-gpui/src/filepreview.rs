@@ -75,6 +75,10 @@ pub struct FilePreview {
     zip: Option<Zip>,
     /// Offers Publish: a Mini App in the trusted publisher's hands.
     pub publish: bool,
+    /// Ask the media servers whether they'd take a finished zip (a live session only).
+    pub check_servers: bool,
+    /// No enabled server would take the zip: it can't be sent.
+    too_large: bool,
 }
 
 /// A folder or a selection being zipped, then what the archive holds.
@@ -386,6 +390,8 @@ impl FilePreview {
             rename: None,
             zip: None,
             publish: false,
+            check_servers: false,
+            too_large: false,
         }
     }
 
@@ -449,6 +455,8 @@ impl FilePreview {
             rename: None,
             zip: Some(Zip::Running(percent)),
             publish: false,
+            check_servers: false,
+            too_large: false,
         }
     }
 
@@ -474,6 +482,27 @@ impl FilePreview {
                 let open = tree.dirs.iter().map(|d| d.path.clone()).collect();
                 self.path = z.path;
                 self.size = z.size;
+                if self.check_servers {
+                    // `checkUploadBlocked`, scoped to the .zip: falls open if the ask fails.
+                    let size = z.size;
+                    let rx = crate::backend::run(async move {
+                        let servers = vector_core::state::get_blossom_servers();
+                        vector_core::blossom_capabilities::upload_verdict(&servers, "application/zip", true, size).likely
+                    });
+                    cx.spawn(async move |this, cx| {
+                        if let Ok(false) = rx.await {
+                            this.update(cx, |p, cx| {
+                                p.too_large = true;
+                                if let Some(Zip::Done { label, .. }) = p.zip.as_mut() {
+                                    *label = format!("{} — Too Large", crate::media::format_bytes(size));
+                                }
+                                cx.notify();
+                            })
+                            .ok();
+                        }
+                    })
+                    .detach();
+                }
                 self.zip = Some(Zip::Done {
                     tree,
                     total: z.file_count + z.dir_count,
@@ -594,7 +623,7 @@ impl FilePreview {
     }
 
     fn send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if matches!(self.zip, Some(Zip::Running(_))) {
+        if matches!(self.zip, Some(Zip::Running(_))) || self.too_large {
             return;
         }
         if self.rename.is_some() {
@@ -1063,8 +1092,8 @@ impl Render for FilePreview {
                     .on_click(cx.listener(|p, _, _, cx| p.close(cx))),
             )
             .child(
-                button("fp-send", if zipping { "Compressing..." } else if self.held.is_some() { "Sending when ready" } else { "Send" })
-                    .when(zipping || self.held.is_some(), |d| d.opacity(0.5).cursor_default())
+                button("fp-send", if zipping { "Compressing..." } else if self.too_large { "Too Large" } else if self.held.is_some() { "Sending when ready" } else { "Send" })
+                    .when(zipping || self.too_large || self.held.is_some(), |d| d.opacity(0.5).cursor_default())
                     .bg(linear_gradient(
                         90.,
                         linear_color_stop(c(0x33db98), 0.),

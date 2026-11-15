@@ -947,6 +947,7 @@ impl Store {
     }
 
     pub fn avatar_path(&self, npub: &str) -> Option<PathBuf> {
+        crate::profilewatch::seen(npub);
         if self.stream_hidden(npub) {
             return Some(self.streamer.tint(npub));
         }
