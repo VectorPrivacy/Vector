@@ -2153,6 +2153,13 @@ impl TextInput {
         cx.notify();
     }
 
+    /// Everything selected, as a field opened to edit what it holds starts.
+    pub fn select_everything(&mut self, cx: &mut Context<Self>) {
+        self.selected_range = 0..self.content.len();
+        self.selection_reversed = false;
+        cx.notify();
+    }
+
     pub fn set_text(&mut self, text: &str, cx: &mut Context<Self>) {
         self.forget();
         self.content = text.to_string().into();

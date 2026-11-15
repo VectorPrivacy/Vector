@@ -566,6 +566,7 @@ impl FilePreview {
                 .centered()
                 .keep_on_submit();
             i.set_text(&stem, cx);
+            i.select_everything(cx);
             i
         });
         cx.subscribe(&input, |p, input, _: &InputChanged, cx| {
@@ -942,9 +943,11 @@ impl Render for FilePreview {
         };
 
         let name = match &self.rename {
+            // `.file-preview-name-input`: 100% of the row, at most 350px.
             Some(input) => div()
-                .w_full()
-                .max_w(px(350.))
+                .w(px(350.))
+                .min_w_0()
+                .flex_shrink(1.)
                 .px(px(8.))
                 .py(px(4.))
                 .rounded(px(6.))
@@ -953,8 +956,12 @@ impl Render for FilePreview {
                 .border_color(c(PRIMARY))
                 .child(input.clone())
                 .into_any_element(),
+            // `word-break: break-word`: a long name wraps rather than overflowing.
             None => div()
                 .id("file-preview-name")
+                .min_w_0()
+                .flex_shrink(1.)
+                .text_center()
                 .text_size(px(18.))
                 .line_height(px(24.))
                 .font_weight(FontWeight::MEDIUM)
