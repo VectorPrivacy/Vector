@@ -2967,6 +2967,8 @@ impl VectorApp {
             backend::selfsync::start();
         });
         let rx = backend::run(async {
+            let early = backend::prefs::sql_bools(&[("strip_tracking", true), ("display_image_types", false)]);
+            crate::untrack::set_enabled(early[0]);
             let b = backend::prefs::sql_bools(&[
                 ("web_previews", true),
                 ("emoticon_suggestions", true),
@@ -2975,20 +2977,21 @@ impl VectorApp {
                 ("floating_player", true),
             ]);
             (
-                backend::storage::auto_download(),
+                (backend::storage::auto_download(), early[1]),
                 b[0],
                 (b[1], b[2], b[3], b[4]),
                 (backend::actions::emoji_usage(), backend::prefs::synced_settings()),
             )
         });
         cx.spawn(async move |this, cx| {
-            let Ok(((on, limit), previews, (emoticons, times, chat_bg, floating), (used, synced))) = rx.await else {
+            let Ok((((on, limit), image_types), previews, (emoticons, times, chat_bg, floating), (used, synced))) = rx.await else {
                 return;
             };
             this.update(cx, |this, cx| {
                 let mut media = this.media.borrow_mut();
                 media.auto_download = crate::media::AutoDownload { on, limit };
                 media.web_previews_off = !previews;
+                media.image_types = image_types;
                 drop(media);
                 this.emoticons = emoticons;
                 this.time_suggestions = times;
@@ -5908,6 +5911,7 @@ impl VectorApp {
             self.input.update(cx, |i, cx| i.set_text(&text, cx));
             return;
         };
+        let text = crate::untrack::text(&text);
         let text = crate::mentions::resolve(&text, &std::mem::take(&mut self.tracked));
         self.sync_mentions(cx);
         let mode = std::mem::replace(&mut self.mode, Mode::Normal);
@@ -16926,6 +16930,12 @@ impl VectorApp {
                 }
                 if key == "web_previews" {
                     self.media.borrow_mut().web_previews_off = !value;
+                }
+                if key == "strip_tracking" {
+                    crate::untrack::set_enabled(value);
+                }
+                if key == "display_image_types" {
+                    self.media.borrow_mut().image_types = value;
                 }
                 if key == "emoticon_suggestions" {
                     self.emoticons = value;

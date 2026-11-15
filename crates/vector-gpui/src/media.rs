@@ -134,6 +134,8 @@ pub struct Media {
     pub packs: crate::packs::Cache,
     /// "Display Web Previews" turned off: no link or Nostr cards.
     pub web_previews_off: bool,
+    /// "Display Image Types": a picture's file type in its corner.
+    pub image_types: bool,
     /// Custom emoji and pack icons on disk, by URL, and those asked for since the last pump.
     pub custom: HashMap<String, Custom>,
     custom_wants: Vec<(String, bool)>,

@@ -778,7 +778,7 @@ fn content(ctx: &Ctx, m: &Message) -> AnyElement {
     for (i, piece) in pieces.iter().enumerate() {
         let b = match piece {
             Piece::Block(b, _) => b,
-            Piece::Picture { image, w, h } => {
+            Piece::Picture { image, w, h, ext } => {
                 // `.inline-image`: its own size, no taller than 400px nor wider than the bubble.
                 let open = crate::viewer::Open {
                     image: image.clone(),
@@ -811,7 +811,8 @@ fn content(ctx: &Ctx, m: &Message) -> AnyElement {
                                 .h(px(h))
                                 .rounded(px(8.))
                                 .hover(|s| s.opacity(0.9)),
-                        ),
+                        )
+                        .when(ctx.media.borrow().image_types, |d| d.children(crate::attachments::ext_badge(ext, w, h))),
                 );
                 prev_bottom = Some(0.);
                 prev_para = false;
@@ -850,7 +851,18 @@ enum Piece {
         image: Arc<gpui::RenderImage>,
         w: u32,
         h: u32,
+        /// The type its link names (`getExtensionFromUrl`), for the badge.
+        ext: String,
     },
+}
+
+/// `getExtensionFromUrl`: what follows the last dot of the link's path.
+fn url_ext(url: &str) -> String {
+    let path = url::Url::parse(url).map(|u| u.path().to_string()).unwrap_or_else(|_| url.split(['?', '#']).next().unwrap_or("").to_string());
+    match path.rfind('.') {
+        Some(i) if i + 1 < path.len() && !path[i + 1..].contains('/') => path[i + 1..].to_lowercase(),
+        _ => String::new(),
+    }
 }
 
 /// `isImageUrl`: the path ends in a picture's extension, or the text names one anywhere.
@@ -915,7 +927,7 @@ fn linked_pictures(ctx: &Ctx, msg: &str, blocks: Vec<Block>) -> Vec<Piece> {
                     if !run.is_empty() {
                         out.push(Piece::Block(para(std::mem::take(&mut run)), cont));
                     }
-                    out.push(Piece::Picture { image, w, h });
+                    out.push(Piece::Picture { image, w, h, ext: url_ext(&url) });
                     cont = true;
                     // A space the link was set off by goes with it.
                     if let Some(Atom::Text { text, look, kind }) = atoms.get(end)

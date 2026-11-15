@@ -232,6 +232,27 @@ fn model(ctx: &Ctx, media: &mut Media, m: &Message, att: &Attachment) -> AnyElem
         .into_any_element()
 }
 
+/// `.file-ext-badge` (`attachFileExtBadge`): the file type in a picture's corner, left off
+/// one too small to carry it without covering more than a quarter of it.
+pub fn ext_badge(ext: &str, w: f32, h: f32) -> Option<AnyElement> {
+    let ext = ext.trim().to_uppercase();
+    let (bw, bh) = (12. + 6.5 * ext.chars().count() as f32, 14.);
+    (!ext.is_empty() && bw <= w * 0.25 && bh <= h * 0.25).then(|| {
+        div()
+            .absolute()
+            .bottom(px(8.))
+            .right(px(1.))
+            .px(px(6.))
+            .rounded(px(14.))
+            .bg(ca(0, 0, 0, 0.25))
+            .text_color(c(0xffffff))
+            .text_size(px(10.))
+            .line_height(px(14.))
+            .child(ext)
+            .into_any_element()
+    })
+}
+
 /// A fitted size scaled down, aspect kept, to the row it sits in.
 fn within(ctx: &Ctx, (w, h): (f32, f32)) -> (f32, f32) {
     if ctx.content_w > 0. && w > ctx.content_w {
@@ -368,6 +389,7 @@ fn picture(ctx: &Ctx, media: &mut Media, m: &Message, att: &Attachment) -> Optio
                                 .child(ring(48., upload)),
                         )
                     })
+                    .when(!pending && media.image_types, |d| d.children(ext_badge(&ext(att), fw, fh)))
                     .into_any_element(),
             )
         }

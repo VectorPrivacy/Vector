@@ -550,8 +550,8 @@ impl Builder<'_> {
             match profile_link(&t[start..end]).filter(|_| self.ctx.mention.is_some()) {
                 Some(npub) => self.pill(npub),
                 None => {
-                    let url: SharedString = t[start..end].to_string().into();
-                    self.styled(&glued(&t[start..end]), Kind::Link(url));
+                    let clean = crate::untrack::shown(&t[start..end]);
+                    self.styled(&glued(&clean), Kind::Link(clean.into()));
                 }
             }
             last = end;
