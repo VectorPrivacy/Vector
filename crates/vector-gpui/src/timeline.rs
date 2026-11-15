@@ -1070,9 +1070,19 @@ pub fn stack(blocks: &[Block], key: &str, click: &OnClick, clock: f32, lh: f32) 
     col.into_any_element()
 }
 
-/// A code block's sideways scroll, by its key, so the offset outlasts the renders between.
-fn code_scroll(key: &str) -> gpui::ScrollHandle {
-    thread_local!(static SCROLLS: std::cell::RefCell<HashMap<String, gpui::ScrollHandle>> = Default::default());
+/// A code block's sideways scroll: the offset, the gesture it has latched and a thumb drag,
+/// kept by its key so they outlast the renders between.
+#[derive(Clone, Default)]
+struct CodeScroll {
+    handle: gpui::ScrollHandle,
+    /// The gesture in hand, while it is the block's: when its last event came.
+    latched: Rc<std::cell::Cell<Option<std::time::Instant>>>,
+    /// The thumb held: where the press began and the offset then.
+    drag: Rc<std::cell::Cell<Option<(gpui::Pixels, gpui::Pixels)>>>,
+}
+
+fn code_scroll(key: &str) -> CodeScroll {
+    thread_local!(static SCROLLS: std::cell::RefCell<HashMap<String, CodeScroll>> = Default::default());
     SCROLLS.with(|s| {
         let mut s = s.borrow_mut();
         if s.len() > 512 && !s.contains_key(key) {
@@ -1080,6 +1090,103 @@ fn code_scroll(key: &str) -> gpui::ScrollHandle {
         }
         s.entry(key.to_string()).or_default().clone()
     })
+}
+
+/// How long a pause ends a gesture, for wheels that report no phases.
+const GESTURE_GAP: std::time::Duration = std::time::Duration::from_millis(150);
+
+impl CodeScroll {
+    /// A browser's scroll latching: a gesture that opens sideways over a block that can scroll
+    /// belongs to the block until it ends, its up-and-down drift with it, so the chat holds still.
+    /// One that opens upright goes on to the chat untouched.
+    fn latch(&self, e: &gpui::ScrollWheelEvent, cx: &mut App) {
+        let now = std::time::Instant::now();
+        let d = e.delta.pixel_delta(px(19.5));
+        let ended = matches!(e.touch_phase, gpui::TouchPhase::Ended | gpui::TouchPhase::Cancelled);
+        let fresh = e.touch_phase == gpui::TouchPhase::Started || self.latched.get().is_none_or(|t| now - t >= GESTURE_GAP);
+        if fresh {
+            let sideways = d.x.abs() > d.y.abs() && self.handle.max_offset().x > px(0.5);
+            self.latched.set(sideways.then_some(now));
+        } else if self.latched.get().is_some() {
+            self.latched.set(Some(now));
+        }
+        if self.latched.get().is_some() {
+            cx.stop_propagation();
+        }
+        if ended {
+            self.latched.set(None);
+        }
+    }
+}
+
+/// `pre::-webkit-scrollbar`: the thumb, in the block's bottom padding, lit while hovered or
+/// held; dragged, it scrolls in proportion, and a press on the track pages.
+fn code_scrollbar(scroll: CodeScroll) -> AnyElement {
+    use gpui::{Bounds, DispatchPhase, HitboxBehavior, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent};
+    gpui::canvas(
+        |bounds, window, _| window.insert_hitbox(bounds, HitboxBehavior::BlockMouse),
+        move |bounds: Bounds<gpui::Pixels>, hitbox, window, _| {
+            let h = &scroll.handle;
+            let (view, max) = (h.bounds().size.width, h.max_offset().x);
+            if max <= px(0.5) || view <= px(0.) {
+                return;
+            }
+            let track = bounds.size.width - px(4.);
+            let w = (track * (view / (view + max))).max(px(24.));
+            let room = (track - w).max(px(1.));
+            let at = room * (-h.offset().x / max).clamp(0., 1.);
+            let thumb = Bounds::new(gpui::point(bounds.origin.x + px(2.) + at, bounds.origin.y + px(2.)), gpui::size(w, px(6.)));
+            let lit = scroll.drag.get().is_some() || (hitbox.is_hovered(window) && thumb.contains(&window.mouse_position()));
+            let color = if lit { ca(180, 180, 180, 0.8) } else { ca(71, 71, 71, 0.6) };
+            window.paint_quad(gpui::fill(thumb, color).corner_radii(px(4.)));
+            let view_id = window.current_view();
+            let set = {
+                let h = h.clone();
+                move |x: gpui::Pixels, cx: &mut App| {
+                    let y = h.offset().y;
+                    h.set_offset(gpui::point(x.clamp(-max, px(0.)), y));
+                    cx.notify(view_id);
+                }
+            };
+            {
+                let (scroll, set, hitbox) = (scroll.clone(), set.clone(), hitbox.clone());
+                window.on_mouse_event(move |e: &MouseDownEvent, phase, window, cx| {
+                    if phase != DispatchPhase::Bubble || e.button != MouseButton::Left || !hitbox.is_hovered(window) {
+                        return;
+                    }
+                    cx.stop_propagation();
+                    let off = scroll.handle.offset().x;
+                    if thumb.contains(&e.position) {
+                        scroll.drag.set(Some((e.position.x, off)));
+                        cx.notify(view_id);
+                    } else {
+                        // Page toward the press, a view at a time.
+                        let toward = if e.position.x < thumb.origin.x { 1. } else { -1. };
+                        set(off + view * toward, cx);
+                    }
+                });
+            }
+            {
+                let scroll = scroll.clone();
+                window.on_mouse_event(move |e: &MouseMoveEvent, _, _, cx| {
+                    if let Some((x0, off0)) = scroll.drag.get() {
+                        set(off0 - (e.position.x - x0) * (max / room), cx);
+                    }
+                });
+            }
+            window.on_mouse_event(move |_: &MouseUpEvent, _, _, cx| {
+                if scroll.drag.take().is_some() {
+                    cx.notify(view_id);
+                }
+            });
+        },
+    )
+    .absolute()
+    .left_0()
+    .right_0()
+    .bottom_0()
+    .h(px(10.))
+    .into_any_element()
 }
 
 /// `.code-block-wrapper` + `pre code.hljs` (GitHub Dark).
@@ -1103,22 +1210,6 @@ fn code_block(lang: &str, text: &SharedString, key: &str, click: &OnClick) -> An
     let copy = click.clone();
     let code: SharedString = crate::highlight::shown(text, lang).into();
     let scroll = code_scroll(key);
-    // `pre { overflow-x: auto }`'s thumb, laid in the bottom padding so the block keeps its height.
-    let view = scroll.bounds().size.width;
-    let max = scroll.max_offset().x;
-    let thumb = (max > px(0.5) && view > px(0.)).then(|| {
-        let track = view - px(4.);
-        let w = (track * (view / (view + max))).max(px(24.));
-        let at = (track - w) * (-scroll.offset().x / max).clamp(0., 1.);
-        div()
-            .absolute()
-            .bottom(px(2.))
-            .left(at + px(2.))
-            .w(w)
-            .h(px(6.))
-            .rounded(px(4.))
-            .bg(ca(71, 71, 71, 0.6))
-    });
     div()
         .relative()
         .max_w(px(470.))
@@ -1134,7 +1225,11 @@ fn code_block(lang: &str, text: &SharedString, key: &str, click: &OnClick) -> An
                 .id(SharedString::from(format!("{key}-code")))
                 .overflow_x_scroll()
                 .restrict_scroll_to_axis()
-                .track_scroll(&scroll)
+                .track_scroll(&scroll.handle)
+                .on_scroll_wheel({
+                    let scroll = scroll.clone();
+                    move |e, _, cx| scroll.latch(e, cx)
+                })
                 // A row, so the lines keep their own width and the overflow is there to scroll.
                 .flex()
                 .p(px(13.))
@@ -1144,7 +1239,8 @@ fn code_block(lang: &str, text: &SharedString, key: &str, click: &OnClick) -> An
                 .text_color(c(crate::highlight::PLAIN))
                 .child(lines.flex_none()),
         )
-        .children(thumb)
+        // `pre { overflow-x: auto }`'s thumb, laid in the bottom padding so the block keeps its height.
+        .child(code_scrollbar(scroll))
         .child(
             div()
                 .id(SharedString::from(format!("{key}-copy")))
@@ -1154,14 +1250,12 @@ fn code_block(lang: &str, text: &SharedString, key: &str, click: &OnClick) -> An
                 .size(px(32.))
                 .rounded(px(6.))
                 .border_1()
-                .border_color(ca(89, 252, 179, 0.3))
-                .bg(ca(0, 0, 0, 0.6))
-                .opacity(0.7)
-                .hover(|s| {
-                    s.opacity(1.)
-                        .bg(ca(0, 0, 0, 0.8))
-                        .border_color(ca(89, 252, 179, 0.5))
-                })
+                // Opaque, so code scrolled under it doesn't show through: `.code-copy-btn`'s
+                // black at 60%, at 70% opacity, as it falls on the block.
+                .border_color(ca(89, 252, 179, 0.21))
+                .bg(c(0x050709))
+                .hover(|s| s.bg(c(0x030405)).border_color(ca(89, 252, 179, 0.5)))
+                .group(SharedString::from(format!("{key}-copy")))
                 .cursor_pointer()
                 .flex()
                 .items_center()
@@ -1171,7 +1265,8 @@ fn code_block(lang: &str, text: &SharedString, key: &str, click: &OnClick) -> An
                     svg()
                         .path("icons/copy.svg")
                         .size(px(16.))
-                        .text_color(c(ACCENT)),
+                        .text_color(c(ACCENT).opacity(0.7))
+                        .group_hover(SharedString::from(format!("{key}-copy")), |s| s.text_color(c(ACCENT))),
                 ),
         )
         .into_any_element()
