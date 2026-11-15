@@ -55,6 +55,58 @@ impl Drop for Timed {
     }
 }
 
+/// The most-used custom emoji written out at each decode stage: the cached file, then every
+/// frame `media::decode` hands the atlas, as PNGs, with their sizes and offsets.
+fn emodump(n: usize, cx: &mut Context<VectorApp>) {
+    let rx = crate::backend::run(async move {
+        let mut out = Vec::new();
+        for e in vector_core::emoji_usage::ranked(Some(256)).into_iter().filter(|e| e.kind == "custom").take(n) {
+            let Some(url) = e.url else { continue };
+            let path = crate::backend::images::emoji(url.clone(), false).await;
+            out.push((e.id, url, path));
+        }
+        out
+    });
+    cx.background_executor()
+        .spawn(async move {
+            let Ok(list) = rx.await else { return };
+            let dir = std::env::temp_dir().join("emodump");
+            let _ = std::fs::remove_dir_all(&dir);
+            let _ = std::fs::create_dir_all(&dir);
+            let mut report = Vec::new();
+            for (i, (code, url, path)) in list.into_iter().enumerate() {
+                let Ok(path) = path else {
+                    report.push(json!({ "code": code, "url": url, "error": "no path" }));
+                    continue;
+                };
+                let Ok(bytes) = crate::pic::read(&path) else { continue };
+                let ext = std::path::Path::new(&path).extension().and_then(|e| e.to_str()).unwrap_or("png").to_ascii_lowercase();
+                let _ = std::fs::write(dir.join(format!("{i}-raw.{ext}")), &bytes);
+                let mut frames = Vec::new();
+                if let Some((img, w, h)) = crate::media::decode(&bytes, &ext, (160, 160)) {
+                    for ix in 0..img.frame_count() {
+                        let sz = img.size(ix);
+                        let (fw, fh) = (sz.width.0 as u32, sz.height.0 as u32);
+                        let mut raw = img.as_bytes(ix).unwrap_or_default().to_vec();
+                        let len = raw.len();
+                        for px in raw.chunks_exact_mut(4) {
+                            px.swap(0, 2);
+                        }
+                        if let Some(buf) = image::RgbaImage::from_raw(fw, fh, raw) {
+                            let _ = buf.save(dir.join(format!("{i}-f{ix:03}.png")));
+                        }
+                        frames.push(json!([fw, fh, len, img.delay(ix).numer_denom_ms().0]));
+                    }
+                    report.push(json!({ "i": i, "code": code, "url": url, "ext": ext, "natural": [w, h], "frames": frames }));
+                } else {
+                    report.push(json!({ "i": i, "code": code, "url": url, "ext": ext, "error": "decode" }));
+                }
+            }
+            let _ = std::fs::write(dir.join("report.json"), serde_json::to_vec_pretty(&report).unwrap_or_default());
+        })
+        .detach();
+}
+
 fn answer(v: serde_json::Value) {
     let path = std::env::temp_dir().join("vector-devctl.json");
     let _ = std::fs::write(path, serde_json::to_vec_pretty(&v).unwrap_or_default());
@@ -214,6 +266,7 @@ pub fn run(app: &mut VectorApp, cmd: &str, window: &mut Window, cx: &mut Context
             Err(e) => answer(json!({ "error": e })),
         },
         "shot" => answer(shot()),
+        "emodump" => emodump(rest.parse().unwrap_or(6), cx),
         "sel" => answer(crate::select::debug()),
         "chatlist" => answer(app.dev_chatlist()),
         _ => answer(json!({ "error": format!("unknown command {verb}") })),

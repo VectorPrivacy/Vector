@@ -127,6 +127,7 @@ async-channel = { version = "2.5", default-features = false, features = ["std"] 
 
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
 pollster = { version = "0.4.0" }
+libwebp-sys = "0.9"
 
 [target.'cfg(any(target_os = "macos", target_os = "linux", target_os = "windows", target_os = "ios"))'.dependencies]
 async-tungstenite = { version = "0.33", optional = true }

@@ -54,6 +54,11 @@ use futures::channel::oneshot;
 #[cfg(any(test, feature = "test-support", feature = "bench-support"))]
 use image::RgbaImage;
 use image::codecs::{gif::GifDecoder, webp::WebPDecoder};
+
+#[cfg(not(target_family = "wasm"))]
+#[allow(dead_code)]
+#[path = "../../../../../src-tauri/src/shared/animated_webp.rs"]
+mod animated_webp;
 use image::{DynamicImage, Frame, Rgba};
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use scheduler::Instant;
@@ -3427,13 +3432,22 @@ fn decode_animated_frames<'a>(
 fn decode_animated_frames_with<'a>(
     decoder: impl image::AnimationDecoder<'a>,
     format_name: &str,
+    each: impl FnMut(Frame) -> Frame,
+    limit: Option<usize>,
+) -> Result<(SmallVec<[Frame; 1]>, bool)> {
+    frames_with(decoder.into_frames(), format_name, each, limit)
+}
+
+fn frames_with(
+    source: image::Frames<'_>,
+    format_name: &str,
     mut each: impl FnMut(Frame) -> Frame,
     limit: Option<usize>,
 ) -> Result<(SmallVec<[Frame; 1]>, bool)> {
     let mut frames = SmallVec::new();
     let mut more = false;
 
-    for frame in decoder.into_frames() {
+    for frame in source {
         if limit.is_some_and(|n| frames.len() >= n) {
             more = true;
             break;
@@ -3482,6 +3496,19 @@ pub(crate) fn decode_webp_image_with(
     mut each: impl FnMut(Frame) -> Frame,
     limit: Option<usize>,
 ) -> Result<(SmallVec<[Frame; 1]>, bool)> {
+    #[cfg(not(target_family = "wasm"))]
+    if let Ok(anim) = animated_webp::Decoder::new(bytes)
+        && anim.frame_count() > 1
+    {
+        // libwebp composites the frames: the image crate's compositor keeps parts of earlier
+        // frames a later one should have cleared, which show as trails.
+        let frames = anim.map(|f| {
+            f.map(|(rgba, ms)| Frame::from_parts(rgba, 0, 0, image::Delay::from_numer_denom_ms(ms, 1)))
+                .map_err(|e| image::ImageError::IoError(std::io::Error::other(e)))
+        });
+        return frames_with(image::Frames::new(Box::new(frames)), "WebP", each, limit);
+    }
+
     let mut decoder = WebPDecoder::new(Cursor::new(bytes))?;
 
     if decoder.has_animation() {

@@ -571,13 +571,19 @@ fn split_word(atoms: &[Atom], seg: &Seg, room: f32, window: &Window) -> Option<u
     };
     let line = shape(text, look, look.color, window);
     let base = f32::from(line.x_for_index(seg.range.start));
+    let rtl = has_rtl(text);
     let mut cut = None;
     for (off, g) in text[seg.range.clone()].grapheme_indices(true) {
         let end = seg.range.start + off + g.len();
         if end == seg.range.end {
             break;
         }
-        if f32::from(line.x_for_index(end)) - base + seg.lead <= room {
+        let w = if rtl {
+            f32::from(shape(&text[seg.range.start..end], look, look.color, window).width)
+        } else {
+            f32::from(line.x_for_index(end)) - base
+        };
+        if w + seg.lead <= room {
             cut = Some(end);
         } else {
             break;
@@ -798,17 +804,26 @@ fn layout_cut(atoms: &[Atom], base: &Look, width: f32, window: &Window) -> Laid 
         if let Atom::Text { text, .. } = &atoms[p.atom] {
             let line = shape(text, &look, look.color, window);
             let base_x = f32::from(line.x_for_index(p.range.start));
+            // Right-to-left text is laid out visually on the whole line: measure each cut alone.
+            let rtl = has_rtl(text);
+            let upto = |e: usize| {
+                if rtl {
+                    f32::from(shape(&text[p.range.start..e], &look, look.color, window).width)
+                } else {
+                    f32::from(line.x_for_index(e)) - base_x
+                }
+            };
             let mut end = p.range.start;
             for (off, g) in text[p.range.clone()].grapheme_indices(true) {
                 let e = p.range.start + off + g.len();
-                if p.x + p.lead + f32::from(line.x_for_index(e)) - base_x > room {
+                if p.x + p.lead + upto(e) > room {
                     break;
                 }
                 end = e;
             }
             let trimmed = text[p.range.start..end].trim_end().len() + p.range.start;
             if trimmed > p.range.start {
-                let w = f32::from(line.x_for_index(trimmed)) - base_x;
+                let w = upto(trimmed);
                 let x = p.x;
                 let lead = p.lead;
                 keep.push(Placed {
@@ -1410,15 +1425,17 @@ fn reorder_rtl(items: &mut [Placed], atoms: &[Atom]) {
         while j + 1 < n && rtl[j + 1] {
             j += 1;
         }
-        // A word's trailing space goes to its left once the run reads right to left.
-        for p in &mut items[i..=j] {
-            if p.hang > 0. && p.hang < p.width {
-                p.lead += p.hang;
-                p.width -= p.hang;
-                p.hang = 0.;
-            }
-        }
+        // Reversed, each space still sits between the same two words, and the run's last space
+        // stays after it: it parts the run from what follows (UAX #9 N1/N2 at level 0).
+        let hangs: Vec<f32> = items[i..=j].iter().map(|p| if p.hang < p.width { p.hang } else { 0. }).collect();
         items[i..=j].reverse();
+        let len = hangs.len();
+        for (t, p) in items[i..=j].iter_mut().enumerate() {
+            let own = hangs[len - 1 - t];
+            let after = if t + 1 < len { hangs[len - 2 - t] } else { hangs[len - 1] };
+            p.width += after - own;
+            p.hang = after;
+        }
         i = j + 1;
     }
     let mut x = start;

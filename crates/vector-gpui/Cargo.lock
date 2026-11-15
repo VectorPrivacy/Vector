@@ -4251,6 +4251,7 @@ dependencies = [
  "inventory",
  "itertools 0.14.0",
  "libc",
+ "libwebp-sys",
  "log",
  "lyon",
  "num_cpus",

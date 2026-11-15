@@ -502,13 +502,19 @@ fn gif_frames(bytes: &[u8], to: impl Fn(u32, u32) -> (u32, u32)) -> Option<(Vec<
         return frames_of(dec.into_frames(), w, h, count, &to);
     }
     if bytes.len() > 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
-        let dec = image::codecs::webp::WebPDecoder::new(Cursor::new(bytes)).ok()?;
-        if !dec.has_animation() {
+        // libwebp composites the frames: the image crate's compositor keeps parts of earlier
+        // frames a later one should have cleared, which show as trails.
+        let dec = crate::shared::animated_webp::Decoder::new(bytes).ok()?;
+        if dec.frame_count() <= 1 {
             return None;
         }
         let (w, h) = dec.dimensions();
-        let count = bytes.windows(4).filter(|w| *w == b"ANMF").count();
-        return frames_of(dec.into_frames(), w, h, count, &to);
+        let count = dec.frame_count() as usize;
+        let frames = dec.map(|f| {
+            f.map(|(rgba, ms)| Frame::from_parts(rgba, 0, 0, image::Delay::from_numer_denom_ms(ms, 1)))
+                .map_err(|e| image::ImageError::IoError(std::io::Error::other(e)))
+        });
+        return frames_of(image::Frames::new(Box::new(frames)), w, h, count, &to);
     }
     // An APNG declares itself with `acTL` before its first `IDAT`.
     if bytes.starts_with(b"\x89PNG") {
