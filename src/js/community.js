@@ -1237,6 +1237,10 @@ async function openCommunityInvitePanel(chat) {
         communityIsPublic = !!summary.is_public;
         VectorSvelte.ilSet(links, summary);
     };
+    // Links minted or retired on this account's other devices, read after the local list shows.
+    const syncLinks = () => invoke('sync_public_invites', { communityId })
+        .then((changed) => { if (changed && !busy) renderLinks(); })
+        .catch(() => {});
 
     const revokeLink = async (link) => {
         // Revoking the last GLOBAL link (across every creator) flips the community back to Private —
@@ -1305,6 +1309,7 @@ async function openCommunityInvitePanel(chat) {
 
     VectorSvelte.ilReset();
     await renderLinks();
+    syncLinks();
     // Live-refresh when a control change folds in (a remote create/revoke by another admin, or our own
     // privatize re-founding), so the mode pill + per-creator counts update without a manual close/reopen.
     // Skipped while a local critical op is in flight (its own handler re-renders on completion).

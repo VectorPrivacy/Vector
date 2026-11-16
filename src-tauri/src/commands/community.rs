@@ -2919,6 +2919,13 @@ pub async fn list_public_invites(
     vector_core::db::community::list_public_invites(&community_id)
 }
 
+/// Bring the user's public-invite links up to date with those minted or retired on their other
+/// devices. Whether the list changed.
+#[tauri::command]
+pub async fn sync_public_invites(community_id: String) -> Result<bool, String> {
+    vector_core::db::scoped(async move { vector_core::VectorCore.sync_public_invites(&community_id).await.map_err(|e| e.to_string()) }).await
+}
+
 /// Revoke a public-invite link: delete the bundle on the Community relays and forget the
 /// token locally. `token` is the 64-char hex token (from `list_public_invites`).
 #[tauri::command]

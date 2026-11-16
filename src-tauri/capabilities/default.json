@@ -112,6 +112,7 @@
     "allow-preview-public-invite",
     "allow-accept-public-invite",
     "allow-list-public-invites",
+    "allow-sync-public-invites",
     "allow-revoke-public-invite",
     "allow-update-community-metadata",
     "allow-rename-community-channel",

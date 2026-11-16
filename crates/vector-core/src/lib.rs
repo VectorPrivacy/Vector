@@ -2510,6 +2510,14 @@ impl VectorCore {
         crate::db::community::list_public_invites(community_id).map_err(VectorError::Other)
     }
 
+    /// Bring [`list_public_invites`](Self::list_public_invites) up to date with the links this
+    /// account minted or retired on its other devices. Returns whether it changed.
+    pub async fn sync_public_invites(&self, community_id: &str) -> Result<bool> {
+        let held = Self::held_v2(community_id)?;
+        let transport = crate::community::transport::LiveTransport::with_timeout(std::time::Duration::from_secs(12));
+        crate::community::v2::service::adopt_invite_list(&transport, &held).await.map_err(VectorError::Other)
+    }
+
     /// Revoke a public invite link by its hex token. Retiring the LAST active link flips the Community to
     /// Private, which re-founds (rotates the base key + every channel key) to cut link-joined lurkers.
     /// Idempotent: a token this account doesn't hold is a no-op. Needs a local key when the revoke triggers

@@ -1058,6 +1058,21 @@ pub fn save_public_invite(
     Ok(())
 }
 
+/// Keep a public-invite link minted on another of this account's devices, dated as it was there.
+pub fn adopt_public_invite(token: &str, community_id: &str, url: &str, expires_at: Option<i64>, label: Option<&str>, created_at: i64) -> Result<(), String> {
+    let _seal = crate::crypto::gate::sealing();
+    let conn = super::get_write_connection_guard_static()?;
+    let enc_label = label.map(enc_txt).transpose()?;
+    conn.execute(
+        "INSERT INTO community_public_invites
+            (token, community_id, url, expires_at, created_at, label)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![enc_txt(token)?, community_id, enc_txt(url)?, expires_at, created_at, enc_label],
+    )
+    .map_err(|e| format!("adopt public invite: {e}"))?;
+    Ok(())
+}
+
 /// All minted public-invite links for a Community, newest first.
 pub fn list_public_invites(community_id: &str) -> Result<Vec<PublicInviteRecord>, String> {
     let conn = super::get_db_connection_guard_static()?;

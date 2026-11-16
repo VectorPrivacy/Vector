@@ -1668,6 +1668,31 @@ fn link_entry(community: &CommunityV2, minted: &MintedLink) -> invite::InviteEnt
     }
 }
 
+/// Bring this device's list of my public links in line with the Invite List every device writes
+/// (CORD-05 §4): a link minted on another joins it, one retired on another leaves it. Returns
+/// whether anything changed.
+pub async fn adopt_invite_list<T: Transport + ?Sized>(transport: &T, community: &CommunityV2) -> Result<bool, String> {
+    crate::db::scoped(async move {
+        let Some(mut list) = fetch_invite_list(transport, &invite_list_relays(community).await).await? else { return Ok(false) };
+        list.prune_expired(now_ms());
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        let held: std::collections::HashSet<String> = crate::db::community::list_public_invites(&cid_hex)?.into_iter().map(|r| r.token).collect();
+        let retired: std::collections::HashSet<&str> = list.tombstones.iter().filter(|t| t.community_id == cid_hex).map(|t| t.token.as_str()).collect();
+        let mut changed = false;
+        for token in held.iter().filter(|t| retired.contains(t.as_str())) {
+            crate::db::community::delete_public_invite(token)?;
+            changed = true;
+        }
+        for e in list.entries.iter().filter(|e| e.community_id == cid_hex && !held.contains(&e.token) && !retired.contains(e.token.as_str())) {
+            let expires = e.expires_at_ms().map(|ms| ms as i64);
+            crate::db::community::adopt_public_invite(&e.token, &cid_hex, &e.url, expires, e.label.as_deref(), e.created_at as i64)?;
+            changed = true;
+        }
+        Ok(changed)
+    })
+    .await
+}
+
 struct InviteListWrite;
 
 /// Held across each Invite List read-modify-publish: the 13303 is replaceable, so two at once
@@ -16977,6 +17002,35 @@ mod tests {
         bed.swap_to(&member);
         let joined = accept_direct_invite(&bed.relay, &invite_wrap).await.unwrap();
         assert_eq!(joined.id().0, community.id().0, "unban restores joinability");
+    }
+
+    #[tokio::test]
+    async fn every_device_lists_the_links_another_minted_and_drops_those_it_revoked() {
+        let (bed, owner, _member) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Linked", bed.relays.clone(), None).await.unwrap();
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        let held = || crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        let a = mint_public_link(&bed.relay, &community, "https://vectorapp.io", None, Some("Twitter".into())).await.unwrap();
+        let b = mint_public_link(&bed.relay, &community, "https://vectorapp.io", None, None).await.unwrap();
+        let (ta, tb) = (crate::simd::hex::bytes_to_hex_16(&a.token), crate::simd::hex::bytes_to_hex_16(&b.token));
+        let listed = || {
+            let mut out: Vec<(String, String, Option<String>)> = crate::db::community::list_public_invites(&cid_hex).unwrap().into_iter().map(|r| (r.token, r.url, r.label)).collect();
+            out.sort();
+            out
+        };
+        let minted = listed();
+        // Another device of the same account: it minted neither.
+        crate::db::community::delete_public_invite(&ta).unwrap();
+        crate::db::community::delete_public_invite(&tb).unwrap();
+        assert!(adopt_invite_list(&bed.relay, &held()).await.unwrap());
+        assert_eq!(listed(), minted, "both links, as minted");
+        assert!(!adopt_invite_list(&bed.relay, &held()).await.unwrap(), "nothing more to take");
+        // Revoked on the first device while this one still lists it.
+        revoke_public_link(&bed.relay, &held(), &ta).await.unwrap();
+        crate::db::community::adopt_public_invite(&ta, &cid_hex, &a.url, None, Some("Twitter"), 0).unwrap();
+        assert!(adopt_invite_list(&bed.relay, &held()).await.unwrap());
+        assert_eq!(listed().into_iter().map(|(t, ..)| t).collect::<Vec<_>>(), vec![tb]);
     }
 
     #[tokio::test]
