@@ -4446,7 +4446,7 @@ impl VectorApp {
         let pane = self.chat_box.get().unwrap_or_else(|| gpui::Bounds::new(gpui::Point::default(), window.viewport_size()));
         let custom = |pop: &crate::reactpop::Pop| {
             let url = self.message(&pop.msg)?.reactions.iter().find(|r| r.emoji == pop.emoji)?.emoji_url.clone()?;
-            match self.media.borrow_mut().custom(&timeline::emoji_source(store, &url), false) {
+            match self.media.borrow_mut().custom_small(&timeline::emoji_source(store, &url)) {
                 crate::media::Custom::Ready(i) => Some(gpui::ImageSource::from(i)),
                 _ => None,
             }
@@ -9838,7 +9838,7 @@ fn composer(
             let media = crate::media::shared();
             let custom = |code: &str| {
                 let (_, url) = tags.iter().find(|(c, _)| c == code)?;
-                Some(media.borrow_mut().custom(url, false))
+                Some(media.borrow_mut().custom_small(url))
             };
             atoms = crate::preview::with_customs(atoms, &custom);
         }

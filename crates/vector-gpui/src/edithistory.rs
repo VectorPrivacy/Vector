@@ -197,7 +197,7 @@ fn rendered(source: &str, tags: &[(String, String)], store: &Store, media: &std:
     let revealed = std::collections::HashSet::new();
     let custom = |code: &str| {
         let (_, url) = tags.iter().find(|(c, _)| c == code)?;
-        Some(media.borrow_mut().custom(&crate::timeline::emoji_source(store, url), false))
+        Some(media.borrow_mut().custom_small(&crate::timeline::emoji_source(store, url)))
     };
     let mut blocks = crate::markdown::parse(
         source.trim(),

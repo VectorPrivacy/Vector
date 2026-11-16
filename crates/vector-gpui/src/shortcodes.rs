@@ -141,7 +141,7 @@ pub fn view(
                     format!(":{}:", e.shortcode),
                 ),
                 Cell::Custom(e) => (
-                    match media.custom(&e.src, false) {
+                    match media.custom_small(&e.src) {
                         Custom::Ready(i) => img(gpui::ImageSource::Render(i))
                             .size(px(28.))
                             .flex_shrink_0()

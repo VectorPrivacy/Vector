@@ -130,6 +130,10 @@ pub enum Linked {
 
 /// A custom emoji's longest side, in device pixels: its largest display at 3x.
 const EMOJI_MAX: u32 = 160;
+/// The longest side of one drawn at text size: 40 points at 2x.
+const EMOJI_SMALL: u32 = 80;
+/// What marks a text-size emoji's cache key.
+const SMALL: &str = "\u{0}small";
 
 /// The box a linked picture is decoded to fit, in device pixels: its row draws it no larger than
 /// a wide bubble by 400 points at 2x. The viewer reads its own full-size copy.
@@ -508,6 +512,22 @@ impl Media {
         Custom::Pending
     }
 
+    /// A custom emoji drawn at text size (a line, a reaction, a picker cell): decoded to
+    /// [`EMOJI_SMALL`], a sixteenth of the pixels, unless the full size is already held.
+    pub fn custom_small(&mut self, url: &str) -> Custom {
+        if let Some(c @ Custom::Ready(_)) = self.custom.get(url) {
+            let c = c.clone();
+            self.used.insert((3, url.to_string()), std::time::Instant::now());
+            return c;
+        }
+        self.custom(&format!("{url}{SMALL}"), false)
+    }
+
+    /// Whether a custom emoji failed to load, at either size.
+    pub fn custom_missing(&self, url: &str) -> bool {
+        [url.to_string(), format!("{url}{SMALL}")].iter().any(|k| matches!(self.custom.get(k), Some(Custom::Missing(_))))
+    }
+
     pub fn linked_progress(&mut self, url: &str, pct: f32) {
         if let Some(Linked::Loading(p)) = self.linked.get_mut(url) {
             *p = Some(pct);
@@ -579,12 +599,16 @@ pub fn pump<V: 'static>(
     for (url, icon) in custom {
         let media = media.clone();
         let app = app.clone();
+        let (src, max) = match url.strip_suffix(SMALL) {
+            Some(src) => (src.to_string(), EMOJI_SMALL),
+            None => (url.clone(), EMOJI_MAX),
+        };
         let rx =
-            live.then(|| crate::backend::run(crate::backend::images::emoji(url.clone(), icon)));
+            live.then(|| crate::backend::run(crate::backend::images::emoji(src.clone(), icon)));
         cx.spawn(async move |cx| {
             let res = match rx {
                 Some(rx) => rx.await.unwrap_or_else(|_| Err("Cancelled".into())),
-                None if std::path::Path::new(&url).is_file() => Ok(url.clone()),
+                None if std::path::Path::new(&src).is_file() => Ok(src.clone()),
                 None => Err("Not found".into()),
             };
             let decoded = match res {
@@ -601,7 +625,7 @@ pub fn pump<V: 'static>(
                                 .unwrap_or("png")
                                 .to_ascii_lowercase();
                             cx.background_executor()
-                                .spawn(async move { decode(&b, &ext, (EMOJI_MAX, EMOJI_MAX)) })
+                                .spawn(async move { decode(&b, &ext, (max, max)) })
                                 .await
                                 .ok_or_else(|| "Invalid image".to_string())
                         }
@@ -1080,6 +1104,18 @@ mod tests {
         assert_eq!(gone.len(), 1);
         assert_eq!(kept(&media, &["shown", "asked", "gone"]), ["shown", "asked"]);
         assert!(!media.pressed(), "a sweep settles the pressure it was called for");
+    }
+
+    #[test]
+    fn a_text_size_emoji_reuses_a_full_one_held_and_else_asks_for_its_own() {
+        let mut media = super::Media::default();
+        let full = held(&mut media, "https://e/a.png", 1, Duration::ZERO);
+        assert!(matches!(media.custom_small("https://e/a.png"), super::Custom::Ready(i) if i.id == full.id));
+        assert!(matches!(media.custom_small("https://e/b.png"), super::Custom::Pending));
+        assert_eq!(media.custom_wants, [(format!("https://e/b.png{}", super::SMALL), false)]);
+        media.custom.insert(format!("https://e/b.png{}", super::SMALL), super::Custom::Missing("gone".into()));
+        assert!(media.custom_missing("https://e/b.png"));
+        assert!(!media.custom_missing("https://e/a.png"));
     }
 
     #[test]

@@ -2027,7 +2027,7 @@ impl TextInput {
                     let media = crate::media::shared();
                     for (a, b) in crate::markdown::shortcodes(&self.content) {
                         let Some(url) = self.customs.get(&self.content[a + 1..b - 1]) else { continue };
-                        match media.borrow_mut().custom(url, false) {
+                        match media.borrow_mut().custom_small(url) {
                             crate::media::Custom::Ready(image) => found.push((a..b, Some(gpui::ImageSource::Render(image)), None)),
                             // Held as a blank slot until it lands, then drawn.
                             crate::media::Custom::Pending => {

@@ -522,7 +522,7 @@ enum Jumbo {
 
 /// `.dmsg-emoji-only`: one to six emoji, stock or the message's own `:shortcode:`s, and nothing else.
 fn jumbo(ctx: &Ctx, m: &Message, text: &str) -> Option<Vec<Jumbo>> {
-    let custom = custom_emoji(ctx.store, ctx.media, &m.emoji_tags);
+    let custom = custom_emoji_at(ctx.store, ctx.media, &m.emoji_tags, true);
     let mut out = Vec::new();
     let mut rest = text;
     while !rest.is_empty() {
@@ -571,14 +571,22 @@ pub fn custom_emoji<'a>(
     media: &'a std::cell::RefCell<crate::media::Media>,
     tags: &'a [vector_core::types::EmojiTag],
 ) -> Option<impl Fn(&str) -> Option<crate::media::Custom> + 'a> {
+    custom_emoji_at(store, media, tags, false)
+}
+
+/// [`custom_emoji`], `big` for a jumbo row's close-up rather than text size.
+fn custom_emoji_at<'a>(
+    store: &'a Store,
+    media: &'a std::cell::RefCell<crate::media::Media>,
+    tags: &'a [vector_core::types::EmojiTag],
+    big: bool,
+) -> Option<impl Fn(&str) -> Option<crate::media::Custom> + 'a> {
     (!tags.is_empty()).then(move || {
         move |code: &str| {
             let tag = tags.iter().find(|t| t.shortcode == code)?;
-            Some(
-                media
-                    .borrow_mut()
-                    .custom(&emoji_source(store, &tag.url), false),
-            )
+            let src = emoji_source(store, &tag.url);
+            let mut media = media.borrow_mut();
+            Some(if big { media.custom(&src, false) } else { media.custom_small(&src) })
         }
     })
 }
@@ -1439,7 +1447,7 @@ fn reactions(ctx: &Ctx, m: &Message) -> Option<AnyElement> {
         let custom = url.map(|u| {
             ctx.media
                 .borrow_mut()
-                .custom(&emoji_source(ctx.store, u), false)
+                .custom_small(&emoji_source(ctx.store, u))
         });
         let glyph: AnyElement = match (custom, emoji::twemoji(emoji_str)) {
             (Some(crate::media::Custom::Ready(image)), _) => img(image)

@@ -1286,10 +1286,7 @@ impl EmojiPicker {
 
     fn failed(&self, e: &PackEmoji) -> bool {
         self.media.as_ref().is_some_and(|(m, _)| {
-            matches!(
-                m.borrow().custom.get(&e.src),
-                Some(crate::media::Custom::Missing(_))
-            )
+            m.borrow().custom_missing(&e.src)
         })
     }
 
@@ -1750,7 +1747,7 @@ impl EmojiPicker {
             let group: SharedString = format!("pick-c-{}", e.code).into();
             let state = media
                 .as_ref()
-                .map(|(m, _)| m.borrow_mut().custom(&e.src, false));
+                .map(|(m, _)| m.borrow_mut().custom_small(&e.src));
             let picker = picker.clone();
             let e = e.clone();
             row = row.child(
@@ -1814,7 +1811,7 @@ impl EmojiPicker {
                     let group: SharedString = format!("pick-c-{}", e.code).into();
                     let state = media
                         .as_ref()
-                        .map(|(m, _)| m.borrow_mut().custom(&e.src, false));
+                        .map(|(m, _)| m.borrow_mut().custom_small(&e.src));
                     let picker = picker.clone();
                     let e = e.clone();
                     row = row.child(
