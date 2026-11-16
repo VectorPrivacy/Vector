@@ -234,10 +234,29 @@ pub struct Videos {
     pub scale: f32,
     /// The clip filling the window, and where it reads from.
     pub full: Option<(String, Option<AudioInputSpec>)>,
+    /// When each clip was last drawn.
+    seen: HashMap<String, Instant>,
+    /// Where a clip let go for memory stood, restored when it is probed again.
+    resume: HashMap<String, Resume>,
+    /// A poster landed since the media cache last looked.
+    landed: bool,
+}
+
+struct Resume {
+    position: u64,
+    muted: bool,
+    volume: f32,
+    speed: f32,
 }
 
 impl Videos {
     pub fn want_probe(&mut self, att: &str, input: &AudioInputSpec) {
+        match self.seen.get_mut(att) {
+            Some(at) => *at = Instant::now(),
+            None => {
+                self.seen.insert(att.to_string(), Instant::now());
+            }
+        }
         if self.clips.contains_key(att) || self.failed.contains(att) || !self.probing.insert(att.to_string()) {
             return;
         }
@@ -247,7 +266,15 @@ impl Videos {
     pub fn probed(&mut self, att: String, info: Option<Info>) {
         self.probing.remove(&att);
         match info {
-            Some(i) => self.clips.entry(att).or_default().info = Some(i),
+            Some(i) => {
+                self.landed = true;
+                let back = self.resume.remove(&att);
+                let c = self.clips.entry(att).or_default();
+                c.info = Some(i);
+                if let Some(r) = back {
+                    (c.position, c.muted, c.volume, c.speed) = (r.position, r.muted, r.volume, r.speed);
+                }
+            }
             None => {
                 self.failed.insert(att);
             }
@@ -458,10 +485,52 @@ impl Videos {
     pub fn forget(&mut self, att: &str) {
         self.stop(att);
         self.failed.remove(att);
+        self.seen.remove(att);
+        self.resume.remove(att);
         if let Some(c) = self.clips.remove(att) {
             self.retired.extend(c.frame);
             self.retired.extend(c.info.and_then(|i| i.poster));
         }
+    }
+
+    /// Clips at rest (stopped, not filling the window), when each was last drawn, and the bytes
+    /// their pictures hold.
+    pub fn at_rest(&self) -> Vec<(String, Instant, usize)> {
+        let full = self.full.as_ref().map(|(a, _)| a.as_str());
+        self.clips
+            .iter()
+            .filter(|(a, c)| {
+                c.play.is_none() && !c.playing && !c.loading && c.scrub.is_none() && Some(a.as_str()) != full && self.active.as_deref() != Some(a.as_str())
+            })
+            .filter_map(|(a, c)| {
+                let bytes = c.frame.iter().chain(c.info.as_ref().and_then(|i| i.poster.as_ref())).map(|i| crate::media::image_bytes(i)).sum();
+                Some((a.clone(), *self.seen.get(a)?, bytes))
+            })
+            .collect()
+    }
+
+    pub fn take_landed(&mut self) -> bool {
+        std::mem::take(&mut self.landed)
+    }
+
+    /// The bytes every clip's pictures hold.
+    pub fn held(&self) -> usize {
+        self.clips
+            .values()
+            .flat_map(|c| c.frame.iter().chain(c.info.as_ref().and_then(|i| i.poster.as_ref())))
+            .map(|i| crate::media::image_bytes(i))
+            .sum()
+    }
+
+    /// A clip at rest let go with its pictures, keeping where it stood for its next sight.
+    pub fn shed(&mut self, att: &str) {
+        self.seen.remove(att);
+        let Some(c) = self.clips.remove(att) else { return };
+        if c.position > 0 || c.muted || c.volume != 1. || c.speed != 1. {
+            self.resume.insert(att.to_string(), Resume { position: c.position, muted: c.muted, volume: c.volume, speed: c.speed });
+        }
+        self.retired.extend(c.frame);
+        self.retired.extend(c.info.and_then(|i| i.poster));
     }
 
     /// One frame: true while anything moves.
@@ -1144,4 +1213,29 @@ pub fn available() -> bool {
 #[cfg(not(feature = "video"))]
 pub fn available() -> bool {
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_clip_let_go_comes_back_where_it_stood() {
+        let mut v = Videos::default();
+        let poster = Arc::new(RenderImage::new(vec![image::Frame::new(image::RgbaImage::new(512, 512))]));
+        let info = |poster| Info { w: 16, h: 9, duration: 10_000, audio: false, poster };
+        let spec = AudioInputSpec::File(std::path::PathBuf::from("/nonexistent.mp4"));
+        v.want_probe("a", &spec);
+        v.probed("a".into(), Some(info(Some(poster))));
+        let c = v.clips.get_mut("a").unwrap();
+        (c.muted, c.position) = (true, 4_000);
+        let rest = v.at_rest();
+        assert_eq!(rest.len(), 1);
+        assert_eq!(rest[0].2, 512 * 512 * 4);
+        v.shed("a");
+        assert!(v.clip("a").is_none());
+        assert_eq!(v.retired.len(), 1);
+        v.probed("a".into(), Some(info(None)));
+        assert!(v.clip("a").is_some_and(|c| c.muted && c.position == 4_000));
+    }
 }

@@ -29,6 +29,14 @@ pub struct Full {
     pub hash: Option<[u8; 32]>,
     pub path: Option<PathBuf>,
     pub ext: String,
+    /// A linked picture, fetched again from what the link cache keeps.
+    pub url: Option<String>,
+}
+
+impl Full {
+    pub fn linked(url: &str) -> Self {
+        Self { hash: None, path: None, ext: String::new(), url: Some(url.to_string()) }
+    }
 }
 
 pub struct Closed;
@@ -69,7 +77,13 @@ impl Viewer {
         window.focus(&focus, cx);
         if let Some(full) = open.full.clone() {
             cx.spawn(async move |this, cx| {
-                let bytes = if live {
+                let bytes = if let Some(url) = full.url.clone() {
+                    if url.starts_with("https://") {
+                        crate::backend::run(crate::backend::inline::image(url)).await.ok().flatten()
+                    } else {
+                        cx.background_executor().spawn(async move { crate::pic::read(url).ok() }).await
+                    }
+                } else if live {
                     let path = full
                         .path
                         .as_ref()
@@ -86,7 +100,10 @@ impl Viewer {
                         .await
                 };
                 let Some(bytes) = bytes else { return };
-                let ext = full.ext.clone();
+                let ext = match &full.url {
+                    Some(_) => crate::backend::inline::sniff(&bytes).unwrap_or("png").to_string(),
+                    None => full.ext.clone(),
+                };
                 let Some((image, w, h)) = cx
                     .background_executor()
                     .spawn(async move { crate::media::decode(&bytes, &ext, FULL_MAX) })

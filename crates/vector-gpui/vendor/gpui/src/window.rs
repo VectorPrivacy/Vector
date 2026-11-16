@@ -5593,7 +5593,7 @@ impl Window {
     }
 
     /// Whether any frame of `data` is in the scene on screen.
-    fn image_on_screen(&self, data: &RenderImage) -> bool {
+    pub fn image_on_screen(&self, data: &RenderImage) -> bool {
         let tiles: Vec<AtlasTile> = (0..data.frame_count())
             .filter_map(|frame_index| {
                 let key = RenderImageParams { image_id: data.id, frame_index }.into();

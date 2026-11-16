@@ -48,10 +48,17 @@ pub struct Transfer {
     pub sent_at: Option<std::time::Instant>,
 }
 
-/// Decoded pictures held past which the longest undrawn are let go before their idle time.
-const DECODED_BUDGET: usize = 256 << 20;
-/// Drawn this recently: kept whatever the budget says.
-const RECENT: std::time::Duration = std::time::Duration::from_secs(5);
+/// Decoded pictures and resting clips' frames held past which the costliest off screen go at
+/// once, before their idle time.
+const DECODED_BUDGET: usize = 128 << 20;
+/// Asked for this recently: spared, it may be on its way to the screen.
+const GRACE: std::time::Duration = std::time::Duration::from_millis(1500);
+/// Each half-life off screen doubles what an entry's bytes weigh against the budget.
+const HALF_LIFE: f64 = 10.;
+/// The size kept for the sweep's whole idle time; four times larger keeps half as long.
+const IDLE_AT: usize = 1 << 20;
+/// A decode whose row went this long undrawn while other rows drew (scrolled past) is skipped.
+const STALE: std::time::Duration = std::time::Duration::from_secs(1);
 /// How long a stage or a publish holds the screen before it earns words: the common, quick
 /// transfer goes by without a flash of text.
 const GLANCE: std::time::Duration = std::time::Duration::from_secs(1);
@@ -124,8 +131,9 @@ pub enum Linked {
 /// A custom emoji's longest side, in device pixels: its largest display at 3x.
 const EMOJI_MAX: u32 = 160;
 
-/// The longest side a linked picture is decoded to, in device pixels.
-const LINKED_MAX: (u32, u32) = (2048, 2048);
+/// The box a linked picture is decoded to fit, in device pixels: its row draws it no larger than
+/// a wide bubble by 400 points at 2x. The viewer reads its own full-size copy.
+const LINKED_MAX: (u32, u32) = (1600, 800);
 
 struct Want {
     key: String,
@@ -201,6 +209,10 @@ pub struct Media {
     pub xdc_live: HashMap<String, XdcLive>,
     /// When each decoded picture was last drawn, so one off screen for long is let go.
     used: HashMap<(u8, String), std::time::Instant>,
+    /// A decode landed since the last sweep.
+    pressed: bool,
+    /// When a row last drew an attachment's or a link's picture.
+    asked: Option<std::time::Instant>,
 }
 
 /// A Mini App session as its card reports it.
@@ -254,13 +266,18 @@ impl Media {
         self.used.insert((0, format!("{hash}\u{0}{}\u{0}{}", px.0, px.1)), std::time::Instant::now());
         self.thumbs
             .entry((hash.to_string(), px.0, px.1))
-            .or_insert_with(|| decode_thumbhash(hash, px).map(Arc::new))
+            .or_insert_with(|| {
+                self.pressed = true;
+                decode_thumbhash(hash, px).map(Arc::new)
+            })
             .clone()
     }
 
     /// An attachment's picture; the first ask queues its decode at `max` device pixels.
     pub fn image(&mut self, key: &str, source: Source, ext: &str, max: (u32, u32)) -> Slot {
-        self.used.insert((1, key.to_string()), std::time::Instant::now());
+        let now = std::time::Instant::now();
+        self.asked = Some(now);
+        self.used.insert((1, key.to_string()), now);
         if let Some(s) = self.images.get(key) {
             return s.clone();
         }
@@ -301,7 +318,9 @@ impl Media {
 
     /// A linked picture; the first ask fetches it.
     pub fn linked(&mut self, url: &str) -> Linked {
-        self.used.insert((2, url.to_string()), std::time::Instant::now());
+        let now = std::time::Instant::now();
+        self.asked = Some(now);
+        self.used.insert((2, url.to_string()), now);
         if let Some(l) = self.linked.get(url) {
             return l.clone();
         }
@@ -333,32 +352,99 @@ impl Media {
         })
     }
 
-    /// Decoded pictures not drawn for `idle`, taken out of the caches for their atlas
-    /// textures to be dropped; one drawn again later is decoded again. Past
-    /// [`DECODED_BUDGET`], the longest undrawn go too, sparing what was just on screen.
-    pub fn sweep(&mut self, idle: std::time::Duration) -> Vec<Arc<RenderImage>> {
+    /// Decoded pictures and resting clips off screen past their idle time, taken out of the
+    /// caches for their atlas textures to be dropped; one drawn again later is decoded again.
+    /// The larger an entry, the shorter its idle time. Past [`DECODED_BUDGET`] the costliest go
+    /// too, cost being bytes doubled every [`HALF_LIFE`] off screen: a big picture scrolled past
+    /// goes before a small one, and a recent one before an old one only when far larger.
+    /// Nothing `shown` (in the frame on screen) or asked for within [`GRACE`] goes.
+    pub fn sweep(&mut self, idle: std::time::Duration, shown: impl Fn(&RenderImage) -> bool) -> Vec<Arc<RenderImage>> {
+        enum Held {
+            Pic((u8, String)),
+            Clip(String),
+        }
+        self.pressed = false;
         let now = std::time::Instant::now();
-        let mut stale: Vec<((u8, String), std::time::Instant)> = self
-            .used
-            .iter()
-            .filter(|(_, at)| now.duration_since(**at) > RECENT)
-            .map(|(k, at)| (k.clone(), *at))
-            .collect();
-        stale.sort_unstable_by_key(|(_, at)| *at);
-        let mut held = self.decoded_bytes();
-        let mut out = Vec::new();
-        for (key, at) in stale {
-            if now.duration_since(at) <= idle && held <= DECODED_BUDGET {
-                break;
+        let mut held = self.decoded_bytes() + self.videos.held();
+        let mut stale: Vec<(Held, f64, usize)> = Vec::new();
+        for (key, at) in &self.used {
+            let age = now.saturating_duration_since(*at);
+            if age > GRACE {
+                let bytes = self.peek(key).map_or(0, |i| image_bytes(i));
+                stale.push((Held::Pic(key.clone()), age.as_secs_f64(), bytes));
             }
-            let Some(image) = self.take(&key) else { continue };
-            self.used.remove(&key);
-            if let Some(image) = image {
-                held = held.saturating_sub(image_bytes(&image));
-                out.push(image);
+        }
+        for (att, at, bytes) in self.videos.at_rest() {
+            let age = now.saturating_duration_since(at);
+            if age > GRACE {
+                stale.push((Held::Clip(att), age.as_secs_f64(), bytes));
+            }
+        }
+        let cost = |(_, age, bytes): &(Held, f64, usize)| *bytes as f64 * (age / HALF_LIFE).exp2();
+        stale.sort_unstable_by(|a, b| cost(b).total_cmp(&cost(a)));
+        let mut out = Vec::new();
+        for (held_by, age, bytes) in stale {
+            if age <= idle_for(bytes, idle).as_secs_f64() && held <= DECODED_BUDGET {
+                continue;
+            }
+            match held_by {
+                Held::Pic(key) => {
+                    if self.peek(&key).is_some_and(|i| shown(i)) {
+                        continue;
+                    }
+                    let Some(image) = self.take(&key) else { continue };
+                    self.used.remove(&key);
+                    if let Some(image) = image {
+                        held = held.saturating_sub(bytes);
+                        out.push(image);
+                    }
+                }
+                Held::Clip(att) => {
+                    if self.videos.clip(&att).and_then(|c| c.picture()).is_some_and(|i| shown(&i)) {
+                        continue;
+                    }
+                    self.videos.shed(&att);
+                    held = held.saturating_sub(bytes);
+                }
             }
         }
         out
+    }
+
+    /// A decode landed and the held bytes may be past the budget: the next frame sweeps.
+    pub fn pressed(&mut self) -> bool {
+        let landed = std::mem::take(&mut self.pressed) | self.videos.take_landed();
+        landed && self.decoded_bytes() + self.videos.held() > DECODED_BUDGET
+    }
+
+    /// Whether rows have drawn since without `key`: scrolled past, its decode waits for the next
+    /// sight. Time alone can't tell, a pane at rest drawing nothing.
+    fn stale(&self, key: &(u8, String)) -> bool {
+        self.used.get(key).is_none_or(|at| self.asked.is_some_and(|last| last.saturating_duration_since(*at) > STALE))
+    }
+
+    /// The cached picture under a `used` key, left in place.
+    fn peek(&self, key: &(u8, String)) -> Option<&Arc<RenderImage>> {
+        match key.0 {
+            0 => {
+                let mut parts = key.1.split('\u{0}');
+                let (Some(h), Some(w), Some(t)) = (parts.next(), parts.next(), parts.next()) else { return None };
+                let (Ok(w), Ok(t)) = (w.parse(), t.parse()) else { return None };
+                self.thumbs.get(&(h.to_string(), w, t))?.as_ref()
+            }
+            1 => match self.images.get(&key.1)? {
+                Slot::Ready { image, .. } => Some(image),
+                _ => None,
+            },
+            2 => match self.linked.get(&key.1)? {
+                Linked::Ready { image, .. } => Some(image),
+                _ => None,
+            },
+            _ => match self.custom.get(&key.1)? {
+                Custom::Ready(image) => Some(image),
+                _ => None,
+            },
+        }
     }
 
     fn decoded_bytes(&self) -> usize {
@@ -457,6 +543,12 @@ pub fn pump<V: 'static>(
                     .spawn(async move { path.and_then(|p| crate::pic::read(p).ok()) })
                     .await
             };
+            // Scrolled past while its bytes were read: the next sight asks again.
+            if media.borrow().stale(&(1, w.key.clone())) {
+                media.borrow_mut().images.remove(&w.key);
+                app.update(cx, |_, cx| cx.notify()).ok();
+                return;
+            }
             let (ext, max) = (w.ext.clone(), w.max);
             let decoded = match bytes {
                 Some(b) => {
@@ -474,7 +566,11 @@ pub fn pump<V: 'static>(
                 },
                 None => Slot::Failed,
             };
-            media.borrow_mut().images.insert(w.key, slot);
+            {
+                let mut m = media.borrow_mut();
+                m.images.insert(w.key, slot);
+                m.pressed = true;
+            }
             app.update(cx, |_, cx| cx.notify()).ok();
         })
         .detach();
@@ -518,7 +614,11 @@ pub fn pump<V: 'static>(
                 Ok((image, ..)) => Custom::Ready(Arc::new(image)),
                 Err(e) => Custom::Missing(e),
             };
-            media.borrow_mut().custom.insert(url, state);
+            {
+                let mut m = media.borrow_mut();
+                m.custom.insert(url, state);
+                m.pressed = true;
+            }
             app.update(cx, |_, cx| cx.notify()).ok();
         })
         .detach();
@@ -542,6 +642,11 @@ pub fn pump<V: 'static>(
                 }
                 _ => None,
             };
+            if bytes.is_some() && media.borrow().stale(&(2, url.clone())) {
+                media.borrow_mut().linked.remove(&url);
+                app.update(cx, |_, cx| cx.notify()).ok();
+                return;
+            }
             let decoded = match bytes {
                 Some(b) => {
                     let ext = crate::backend::inline::sniff(&b).unwrap_or("png");
@@ -563,6 +668,7 @@ pub fn pump<V: 'static>(
                 let mut m = media.borrow_mut();
                 m.linked.insert(url.clone(), slot);
                 m.linked_settled.push(url);
+                m.pressed = true;
             }
             app.update(cx, |_, cx| cx.notify()).ok();
         })
@@ -912,35 +1018,80 @@ mod tests {
     use image::codecs::gif::GifEncoder;
     use image::{Delay, Frame, RgbaImage};
 
+    use std::time::{Duration, Instant};
+
+    const IDLE: Duration = Duration::from_secs(90);
+
+    /// A picture of `mb` megabytes, held as a custom emoji drawn `ago`.
+    fn held(media: &mut super::Media, name: &str, mb: u32, ago: Duration) -> std::sync::Arc<gpui::RenderImage> {
+        let side = (mb as f64 * 262144.).sqrt() as u32;
+        let image = std::sync::Arc::new(gpui::RenderImage::new(vec![Frame::new(RgbaImage::new(side, side))]));
+        media.custom.insert(name.into(), super::Custom::Ready(image.clone()));
+        media.used.insert((3, name.into()), Instant::now() - ago);
+        image
+    }
+
+    fn kept(media: &super::Media, names: &[&str]) -> Vec<String> {
+        names.iter().filter(|n| media.custom.contains_key(**n)).map(|n| n.to_string()).collect()
+    }
+
     #[test]
-    fn past_the_budget_the_longest_undrawn_go_and_the_recent_stay() {
-        use std::time::{Duration, Instant};
+    fn a_big_picture_off_screen_goes_sooner_than_a_small_one() {
         let mut media = super::Media::default();
-        // 64 MB apiece: eight is twice the budget.
-        let picture = || std::sync::Arc::new(gpui::RenderImage::new(vec![Frame::new(RgbaImage::new(4096, 4096))]));
-        let now = Instant::now();
-        for i in 0..8u64 {
-            let url = format!("e{i}");
-            media.custom.insert(url.clone(), super::Custom::Ready(picture()));
-            media.used.insert((3, url), now - Duration::from_secs(60 - i * 7));
+        held(&mut media, "small", 1, Duration::from_secs(80));
+        held(&mut media, "mid", 4, Duration::from_secs(40));
+        held(&mut media, "big", 16, Duration::from_secs(30));
+        assert_eq!(media.sweep(IDLE, |_| false).len(), 1);
+        assert_eq!(kept(&media, &["small", "mid", "big"]), ["small", "mid"]);
+        assert_eq!(super::idle_for(1 << 20, IDLE), IDLE);
+        assert_eq!(super::idle_for(4 << 20, IDLE), IDLE / 2);
+        assert_eq!(super::idle_for(1 << 30, IDLE), IDLE / 6);
+    }
+
+    #[test]
+    fn past_the_budget_the_costliest_go_first_and_no_more_than_needed() {
+        let mut media = super::Media::default();
+        let big: Vec<_> = (2..6).map(|s| format!("big{s}")).collect();
+        for (i, name) in big.iter().enumerate() {
+            held(&mut media, name, 32, Duration::from_secs(2 + i as u64));
         }
+        let small: Vec<_> = (0..20).map(|i| format!("small{i}")).collect();
+        for (i, name) in small.iter().enumerate() {
+            held(&mut media, name, 1, Duration::from_secs(20 + i as u64));
+        }
+        assert!(media.decoded_bytes() > super::DECODED_BUDGET);
         media.custom.insert("loading".into(), super::Custom::Pending);
-        media.used.insert((3, "loading".into()), now - Duration::from_secs(600));
-        let gone = media.sweep(Duration::from_secs(90));
-        assert_eq!(gone.len(), 4);
-        let kept: Vec<_> = (0..8).filter(|i| media.custom.contains_key(&format!("e{i}"))).collect();
-        assert_eq!(kept, [4, 5, 6, 7]);
+        media.used.insert((3, "loading".into()), Instant::now() - Duration::from_secs(600));
+        assert_eq!(media.sweep(IDLE, |_| false).len(), 1);
+        // The 32 MB picture off screen 5 s outweighs a 1 MB one off screen 39 s.
+        assert!(!media.custom.contains_key("big5"));
+        assert_eq!(kept(&media, &["big2", "big3", "big4"]).len(), 3);
+        assert!(small.iter().all(|n| media.custom.contains_key(n)));
         assert!(media.decoded_bytes() <= super::DECODED_BUDGET);
         assert!(matches!(media.custom.get("loading"), Some(super::Custom::Pending)));
+    }
 
-        // Drawn moments ago: kept over the budget.
-        for i in 8..16u64 {
-            let url = format!("e{i}");
-            media.custom.insert(url.clone(), super::Custom::Ready(picture()));
-            media.used.insert((3, url), Instant::now());
-        }
-        assert!(media.sweep(Duration::from_secs(90)).len() == 4);
-        assert!((8..16).all(|i| media.custom.contains_key(&format!("e{i}"))));
+    #[test]
+    fn what_is_on_screen_or_just_asked_for_stays_over_the_budget() {
+        let mut media = super::Media::default();
+        let shown = held(&mut media, "shown", 64, Duration::from_secs(300));
+        held(&mut media, "asked", 64, Duration::from_millis(200));
+        held(&mut media, "gone", 64, Duration::from_secs(4));
+        let gone = media.sweep(IDLE, |i| i.id == shown.id);
+        assert_eq!(gone.len(), 1);
+        assert_eq!(kept(&media, &["shown", "asked", "gone"]), ["shown", "asked"]);
+        assert!(!media.pressed(), "a sweep settles the pressure it was called for");
+    }
+
+    #[test]
+    fn a_decode_scrolled_past_is_stale_but_one_on_a_resting_pane_is_not() {
+        let mut media = super::Media::default();
+        let key = (1u8, "a".to_string());
+        media.used.insert(key.clone(), Instant::now() - Duration::from_secs(30));
+        media.asked = Some(Instant::now() - Duration::from_secs(30));
+        assert!(!media.stale(&key));
+        media.asked = Some(Instant::now());
+        assert!(media.stale(&key));
     }
 
     #[test]
@@ -1100,7 +1251,14 @@ mod jpeg_tests {
 }
 
 /// Decoded size of every frame of `image`.
-fn image_bytes(image: &RenderImage) -> usize {
+/// How long an entry of `bytes` is kept off screen: `idle` at [`IDLE_AT`] or less, shrinking
+/// with the square root of its size, to a sixth of it.
+fn idle_for(bytes: usize, idle: std::time::Duration) -> std::time::Duration {
+    let s = (IDLE_AT as f64 / bytes.max(1) as f64).sqrt().clamp(1. / 6., 1.);
+    idle.mul_f64(s)
+}
+
+pub fn image_bytes(image: &RenderImage) -> usize {
     (0..image.frame_count())
         .map(|i| {
             let s = image.size(i);

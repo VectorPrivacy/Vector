@@ -513,18 +513,18 @@ enum Pic {
     Gone,
 }
 
-/// A picture the card shows: a web one through the linked cache, a fixture one from disk.
-fn pic(env: &Env, url: &str) -> Pic {
-    let key = if url.starts_with("https://") {
+/// Where a card's picture is read from: the web, or beside a fixture.
+fn pic_key(env: &Env, url: &str) -> String {
+    if url.starts_with("https://") {
         url.to_string()
     } else {
-        env.store
-            .media_root
-            .join(url)
-            .to_string_lossy()
-            .into_owned()
-    };
-    match env.media.borrow_mut().linked(&key) {
+        env.store.media_root.join(url).to_string_lossy().into_owned()
+    }
+}
+
+/// A picture the card shows: a web one through the linked cache, a fixture one from disk.
+fn pic(env: &Env, url: &str) -> Pic {
+    match env.media.borrow_mut().linked(&pic_key(env, url)) {
         Linked::Ready { image, w, h } => Pic::Ready(image, w, h),
         Linked::Loading(_) => Pic::Loading,
         Linked::Failed => Pic::Gone,
@@ -1305,7 +1305,7 @@ fn media(env: &Env, all: &[Media], key: &str) -> AnyElement {
                     image: image.clone(),
                     w,
                     h,
-                    full: None,
+                    full: url.map(|u| crate::viewer::Full::linked(&pic_key(env, u))),
                 };
                 let send = env.send.clone();
                 let natural = Some(w as f32 / h.max(1) as f32);

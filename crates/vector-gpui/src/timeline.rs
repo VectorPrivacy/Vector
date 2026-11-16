@@ -784,13 +784,13 @@ fn content(ctx: &Ctx, m: &Message) -> AnyElement {
     for (i, piece) in pieces.iter().enumerate() {
         let b = match piece {
             Piece::Block(b, _) => b,
-            Piece::Picture { image, w, h, ext } => {
+            Piece::Picture { image, w, h, ext, src } => {
                 // `.inline-image`: its own size, no taller than 400px nor wider than the bubble.
                 let open = crate::viewer::Open {
                     image: image.clone(),
                     w: *w,
                     h: *h,
-                    full: None,
+                    full: Some(crate::viewer::Full::linked(src)),
                 };
                 let s = (400. / *h as f32).min(1.);
                 let (mut w, mut h) = (*w as f32 * s, *h as f32 * s);
@@ -859,6 +859,8 @@ enum Piece {
         h: u32,
         /// The type its link names (`getExtensionFromUrl`), for the badge.
         ext: String,
+        /// What the linked cache reads it from, for the viewer's full-size copy.
+        src: String,
     },
 }
 
@@ -928,12 +930,13 @@ fn linked_pictures(ctx: &Ctx, msg: &str, blocks: Vec<Block>) -> Vec<Piece> {
             {
                 end += 1;
             }
-            match ctx.media.borrow_mut().linked_in(&emoji_source(ctx.store, &url), msg) {
+            let src = emoji_source(ctx.store, &url);
+            match ctx.media.borrow_mut().linked_in(&src, msg) {
                 Linked::Ready { image, w, h } => {
                     if !run.is_empty() {
                         out.push(Piece::Block(para(std::mem::take(&mut run)), cont));
                     }
-                    out.push(Piece::Picture { image, w, h, ext: url_ext(&url) });
+                    out.push(Piece::Picture { image, w, h, ext: url_ext(&url), src });
                     cont = true;
                     // A space the link was set off by goes with it.
                     if let Some(Atom::Text { text, look, kind }) = atoms.get(end)

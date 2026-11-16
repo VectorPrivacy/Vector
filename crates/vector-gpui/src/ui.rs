@@ -1779,7 +1779,7 @@ impl VectorApp {
         cx.spawn_in(window, async move |this, cx| {
             loop {
                 cx.background_executor().timer(std::time::Duration::from_secs(15)).await;
-                if this.update_in(cx, |this, window, cx| this.sweep_pictures(window, cx)).is_err() {
+                if this.update_in(cx, |this, window, cx| this.sweep_pictures(true, window, cx)).is_err() {
                     break;
                 }
             }
@@ -6169,6 +6169,9 @@ impl Render for VectorApp {
             window.request_animation_frame();
         }
         self.catch_up_read(window, cx);
+        if self.media.borrow_mut().pressed() {
+            self.sweep_pictures(false, window, cx);
+        }
         {
             let mut media = self.media.borrow_mut();
             media.videos.scale = window.scale_factor();
@@ -14977,15 +14980,26 @@ impl VectorApp {
         }
     }
 
-    /// Decoded pictures off screen for a while, out of memory and off the GPU.
-    fn sweep_pictures(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// Decoded pictures off screen for a while, out of memory and off the GPU; `timed`, GPUI's
+    /// own image cache too.
+    fn sweep_pictures(&mut self, timed: bool, window: &mut Window, cx: &mut Context<Self>) {
         const IDLE: std::time::Duration = std::time::Duration::from_secs(90);
-        let gone = self.media.borrow_mut().sweep(IDLE);
-        let any = !gone.is_empty();
+        let (gone, frames) = {
+            let mut media = self.media.borrow_mut();
+            let gone = media.sweep(IDLE, |image| window.image_on_screen(image));
+            (gone, std::mem::take(&mut media.videos.retired))
+        };
+        let any = !gone.is_empty() || !frames.is_empty();
         for image in gone {
             let _ = window.drop_image(image);
         }
-        cx.evict_idle_images(IDLE, Some(window));
+        for old in frames {
+            let _ = window.drop_image(old.clone());
+            self.media.borrow_mut().videos.recycle(old);
+        }
+        if timed {
+            cx.evict_idle_images(IDLE, Some(window));
+        }
         if any {
             crate::trim::soon();
         }

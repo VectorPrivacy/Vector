@@ -366,6 +366,7 @@ fn picture(ctx: &Ctx, media: &mut Media, m: &Message, att: &Attachment) -> Optio
                     hash,
                     path,
                     ext: ext(att),
+                    url: None,
                 }),
             };
             Some(
