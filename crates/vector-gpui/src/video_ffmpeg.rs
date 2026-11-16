@@ -382,7 +382,6 @@ pub fn decode(input: AudioInput, size: (u32, u32), from: u64, cmds: Receiver<Cmd
 
 /// A track FFmpeg reads that the engine's own decoders do not (Opus in WebM): whole, mono.
 pub fn decode_audio(input: &AudioInput) -> Result<(Vec<f32>, u32), String> {
-    use ffmpeg::format::Sample;
     let reader: Box<dyn ReadSeek> = Box::new(Reader(input.open()?));
     let mut src = Source::open(reader).ok_or("unreadable")?;
     let stream = src.input.streams().best(ffmpeg::media::Type::Audio).ok_or("no audio")?;
@@ -395,30 +394,7 @@ pub fn decode_audio(input: &AudioInput) -> Result<(Vec<f32>, u32), String> {
     let mut drain = |dec: &mut ffmpeg::decoder::Audio, samples: &mut Vec<f32>, rate: &mut u32| {
         while dec.receive_frame(&mut frame).is_ok() {
             *rate = frame.rate();
-            let n = frame.samples();
-            let ch = (frame.channels() as usize).max(1);
-            let planar = frame.is_planar();
-            let get = |c: usize, i: usize| -> f32 {
-                let (plane, at) = if planar { (c, i) } else { (0, i * ch + c) };
-                let d = frame.data(plane);
-                match frame.format() {
-                    Sample::F32(_) => f32::from_le_bytes(d[at * 4..at * 4 + 4].try_into().unwrap_or([0; 4])),
-                    Sample::I16(_) => i16::from_le_bytes([d[at * 2], d[at * 2 + 1]]) as f32 / 32768.,
-                    Sample::I32(_) => {
-                        i32::from_le_bytes(d[at * 4..at * 4 + 4].try_into().unwrap_or([0; 4])) as f32 / 2147483648.
-                    }
-                    Sample::F64(_) => f64::from_le_bytes(d[at * 8..at * 8 + 8].try_into().unwrap_or([0; 8])) as f32,
-                    _ => 0.,
-                }
-            };
-            samples.reserve(n);
-            for i in 0..n {
-                let mut s = 0.;
-                for c in 0..ch {
-                    s += get(c, i);
-                }
-                samples.push(s / ch as f32);
-            }
+            mono(&frame, samples);
         }
     };
     let mut packet = ffmpeg::Packet::empty();
@@ -438,6 +414,105 @@ pub fn decode_audio(input: &AudioInput) -> Result<(Vec<f32>, u32), String> {
         return Err("no audio".into());
     }
     Ok((samples, rate))
+}
+
+/// A decoded frame's channels averaged, onto `out`.
+fn mono(frame: &ffmpeg::frame::Audio, out: &mut Vec<f32>) {
+    use ffmpeg::format::Sample;
+    let n = frame.samples();
+    let ch = (frame.channels() as usize).max(1);
+    let planar = frame.is_planar();
+    let get = |c: usize, i: usize| -> f32 {
+        let (plane, at) = if planar { (c, i) } else { (0, i * ch + c) };
+        let d = frame.data(plane);
+        match frame.format() {
+            Sample::F32(_) => f32::from_le_bytes(d[at * 4..at * 4 + 4].try_into().unwrap_or([0; 4])),
+            Sample::I16(_) => i16::from_le_bytes([d[at * 2], d[at * 2 + 1]]) as f32 / 32768.,
+            Sample::I32(_) => i32::from_le_bytes(d[at * 4..at * 4 + 4].try_into().unwrap_or([0; 4])) as f32 / 2147483648.,
+            Sample::F64(_) => f64::from_le_bytes(d[at * 8..at * 8 + 8].try_into().unwrap_or([0; 8])) as f32,
+            _ => 0.,
+        }
+    };
+    out.reserve(n);
+    for i in 0..n {
+        let mut s = 0.;
+        for c in 0..ch {
+            s += get(c, i);
+        }
+        out.push(s / ch as f32);
+    }
+}
+
+/// A clip's sound from any moment on, mono at its own rate, its other tracks never read.
+pub struct AudioReader {
+    src: Source,
+    index: usize,
+    dec: ffmpeg::decoder::Audio,
+    frame: ffmpeg::frame::Audio,
+    tb: f64,
+    rate: u32,
+    eof: bool,
+}
+
+impl AudioReader {
+    pub fn open(input: &AudioInput) -> Result<Self, String> {
+        let reader: Box<dyn ReadSeek> = Box::new(Reader(input.open()?));
+        let mut src = Source::open(reader).ok_or("unreadable")?;
+        let stream = src.input.streams().best(ffmpeg::media::Type::Audio).ok_or("no audio")?;
+        let (index, tb) = (stream.index(), f64::from(stream.time_base()));
+        let ctx = ffmpeg::codec::context::Context::from_parameters(stream.parameters()).map_err(|e| e.to_string())?;
+        let dec = ctx.decoder().audio().map_err(|e| e.to_string())?;
+        // A web video's picture would be downloaded only to be dropped.
+        // SAFETY: the format context `src` owns, its streams only flagged.
+        unsafe {
+            let ctx = src.input.as_mut_ptr();
+            for i in 0..(*ctx).nb_streams as usize {
+                if i != index {
+                    (**(*ctx).streams.add(i)).discard = ffmpeg::ffi::AVDiscard::AVDISCARD_ALL;
+                }
+            }
+        }
+        let mut r = AudioReader { src, index, dec, frame: ffmpeg::frame::Audio::empty(), tb, rate: 0, eof: false };
+        // The decoder's own rate can be the core's (HE-AAC doubles it): the first frame's is the one heard.
+        let mut first = Vec::new();
+        r.rate = r.next(&mut first).and(Some(r.frame.rate())).filter(|&x| x > 0).ok_or("no audio")?;
+        Ok(r)
+    }
+
+    pub fn rate(&self) -> u32 {
+        self.rate
+    }
+
+    pub fn seek(&mut self, ms: u64) {
+        let ts = (ms as i64) * 1000;
+        let _ = self.src.input.seek(ts, ..ts + 1);
+        self.dec.flush();
+        self.eof = false;
+    }
+
+    /// The next frame's samples onto `out`, with its time in seconds where it has one; None at the end.
+    pub fn next(&mut self, out: &mut Vec<f32>) -> Option<Option<f64>> {
+        loop {
+            if self.dec.receive_frame(&mut self.frame).is_ok() {
+                mono(&self.frame, out);
+                return Some(self.frame.timestamp().map(|t| t as f64 * self.tb));
+            }
+            if self.eof {
+                return None;
+            }
+            let mut packet = ffmpeg::Packet::empty();
+            match packet.read(&mut self.src.input) {
+                Ok(()) if packet.stream() == self.index => {
+                    let _ = self.dec.send_packet(&packet);
+                }
+                Ok(()) => {}
+                Err(_) => {
+                    self.eof = true;
+                    let _ = self.dec.send_eof();
+                }
+            }
+        }
+    }
 }
 
 struct Reader(Box<dyn symphonia::core::io::MediaSource>);

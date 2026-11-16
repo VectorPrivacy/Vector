@@ -630,6 +630,7 @@ const BIG: (f32, f32) = (2560., 1440.);
 fn respeed(c: &mut Clip, input: Option<AudioInputSpec>) {
     let at = c.position();
     let (speed, playing, audio) = (c.speed, c.playing, c.info.as_ref().is_some_and(|i| i.audio));
+    let duration = c.info.as_ref().map_or(0, |i| i.duration);
     let Some(p) = &mut c.play else { return };
     if (p.speed - speed).abs() < 1e-3 {
         return;
@@ -651,15 +652,25 @@ fn respeed(c: &mut Clip, input: Option<AudioInputSpec>) {
     let (slot, track) = (p.audio.clone(), p.track.clone());
     // spawn-detached: stretches samples in hand for the engine; owns no account state.
     std::thread::spawn(move || {
-        let res = stretched(&track, input.as_ref(), speed);
+        let res = stretched(&track, input.as_ref(), speed, duration);
         if let Ok(mut s) = slot.lock() {
             *s = Some(res);
         }
     });
 }
 
-/// The track at `speed` in the engine: read once (then kept), stretched, loaded.
-fn stretched(track: &Track, input: Option<&AudioInputSpec>, speed: f32) -> Result<u32, String> {
+/// The track at `speed` in the engine. A web video's is made as the engine reads it; another's
+/// is read once (then kept), stretched and loaded.
+fn stretched(track: &Track, input: Option<&AudioInputSpec>, speed: f32, duration: u64) -> Result<u32, String> {
+    if let Some(net @ AudioInputSpec::Stream(_)) = input
+        && duration > 0
+    {
+        if (speed - 1.).abs() < 1e-3 {
+            return net.open().and_then(|i| load_audio(&i));
+        }
+        let wav = stretched::open(net.open()?, speed, duration)?;
+        return crate::audio::engine()?.load_from_file(&AudioInput::Held(wav)).map(|r| r.id);
+    }
     let kept = track.lock().ok().and_then(|t| t.clone());
     let pcm = match kept {
         Some(t) => t,
@@ -694,13 +705,13 @@ fn start(input: AudioInputSpec, info: &Info, from: u64, scale: f32, big: bool, s
         _ => None,
     };
     if info.audio {
-        let (slot, input, track) = (slot.clone(), input.clone(), track.clone());
+        let (slot, input, track, duration) = (slot.clone(), input.clone(), track.clone(), info.duration);
         // spawn-detached: decodes bytes in hand into the engine; owns no account state.
         std::thread::spawn(move || {
             let res = if (speed - 1.).abs() < 1e-3 {
                 input.open().and_then(|i| load_audio(&i))
             } else {
-                stretched(&track, Some(&input), speed)
+                stretched(&track, Some(&input), speed, duration)
             };
             if let Ok(mut s) = slot.lock() {
                 *s = Some(res);
@@ -838,9 +849,25 @@ mod ff {
     pub fn decode_audio(_: &AudioInput) -> Result<(Vec<f32>, u32), String> {
         Err("no decoder".into())
     }
+    pub struct AudioReader;
+    impl AudioReader {
+        pub fn open(_: &AudioInput) -> Result<Self, String> {
+            Err("no decoder".into())
+        }
+        pub fn rate(&self) -> u32 {
+            0
+        }
+        pub fn seek(&mut self, _: u64) {}
+        pub fn next(&mut self, _: &mut Vec<f32>) -> Option<Option<f64>> {
+            None
+        }
+    }
 }
 
 use ff::{decode, decode_audio, probe};
+
+#[path = "video_stretched.rs"]
+mod stretched;
 
 // ── The player ──────────────────────────────────────────────────────────────────────────
 
