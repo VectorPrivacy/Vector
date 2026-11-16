@@ -50,7 +50,7 @@ pub struct Transfer {
 
 /// Decoded pictures and resting clips' frames held past which the costliest off screen go at
 /// once, before their idle time.
-const DECODED_BUDGET: usize = 96 << 20;
+const DECODED_BUDGET: usize = 64 << 20;
 /// Asked for this recently: spared, it may be on its way to the screen.
 const GRACE: std::time::Duration = std::time::Duration::from_millis(1500);
 /// Each half-life off screen doubles what an entry's bytes weigh against the budget.
@@ -1062,9 +1062,9 @@ mod tests {
         assert!(media.decoded_bytes() > super::DECODED_BUDGET);
         media.custom.insert("loading".into(), super::Custom::Pending);
         media.used.insert((3, "loading".into()), Instant::now() - Duration::from_secs(600));
-        assert_eq!(media.sweep(IDLE, |_| false).len(), 2);
-        // A 32 MB picture off screen 4 s outweighs a 1 MB one off screen 39 s.
-        assert_eq!(kept(&media, &["big2", "big3", "big4", "big5"]), ["big2", "big3"]);
+        assert_eq!(media.sweep(IDLE, |_| false).len(), 3);
+        // A 32 MB picture off screen 3 s outweighs a 1 MB one off screen 39 s.
+        assert_eq!(kept(&media, &["big2", "big3", "big4", "big5"]), ["big2"]);
         assert!(small.iter().all(|n| media.custom.contains_key(n)));
         assert!(media.decoded_bytes() <= super::DECODED_BUDGET);
         assert!(matches!(media.custom.get("loading"), Some(super::Custom::Pending)));
