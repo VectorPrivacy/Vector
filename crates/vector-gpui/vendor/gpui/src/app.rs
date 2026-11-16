@@ -3215,7 +3215,8 @@ impl App {
     }
 
     /// Drops decoded images no element has asked for in `idle`, from the cache and from every
-    /// window's atlas; one drawn again later is decoded again.
+    /// window's atlas; one drawn again later is decoded again. Past 1 MB the wait shrinks with
+    /// the square root of the size, to a sixth of `idle`: big pictures cost the most to keep.
     pub fn evict_idle_images(&mut self, idle: Duration, mut current_window: Option<&mut Window>) {
         type Loaded = Result<Arc<RenderImage>, crate::ImageCacheError>;
         let kinds = [
@@ -3223,14 +3224,15 @@ impl App {
             TypeId::of::<crate::AssetLogger<crate::ImageDecoder>>(),
         ];
         let now = std::time::Instant::now();
+        let floor = idle / 6;
         let stale: Vec<_> = self
             .asset_used
             .iter()
-            .filter(|(k, at)| kinds.contains(&k.0) && now.duration_since(**at) > idle)
-            .map(|(k, _)| *k)
+            .filter(|(k, at)| kinds.contains(&k.0) && now.duration_since(**at) > floor)
+            .map(|(k, at)| (*k, now.duration_since(*at)))
             .collect();
         let mut images = Vec::new();
-        for key in stale {
+        for (key, age) in stale {
             let loaded = self
                 .loading_assets
                 .get(&key)
@@ -3239,7 +3241,20 @@ impl App {
             match loaded {
                 // Still loading: its waiters need it.
                 Some(None) => continue,
-                Some(Some(Ok(image))) => images.push(image),
+                Some(Some(Ok(image))) => {
+                    let bytes: usize = (0..image.frame_count())
+                        .map(|i| {
+                            let s = image.size(i);
+                            s.width.0.max(0) as usize * s.height.0.max(0) as usize * 4
+                        })
+                        .sum();
+                    let keep = idle.mul_f64(((1usize << 20) as f64 / bytes.max(1) as f64).sqrt().clamp(1. / 6., 1.));
+                    if age <= keep {
+                        continue;
+                    }
+                    images.push(image)
+                }
+                _ if age <= idle => continue,
                 _ => {}
             }
             self.loading_assets.remove(&key);
