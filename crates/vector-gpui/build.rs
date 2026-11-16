@@ -11,6 +11,7 @@ fn field<'a>(line: &'a str, key: &str) -> Option<&'a str> {
 
 fn main() {
     // libjxl, statically linked, for sending JPEG XL. A docs-only check links nothing.
+    println!("cargo:rerun-if-env-changed=DOCS_RS");
     if std::env::var_os("DOCS_RS").is_none() {
         // jpegxl-src asks MSVC for the static CRT; everything else here links the DLL one. A
         // toolchain file's plain variable shadows its cache entry.
