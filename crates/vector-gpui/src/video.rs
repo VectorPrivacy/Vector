@@ -240,6 +240,8 @@ pub struct Videos {
     resume: HashMap<String, Resume>,
     /// A poster landed since the media cache last looked.
     landed: bool,
+    /// Clips whose probe failed, by how often they were probed again.
+    retried: HashMap<String, u8>,
 }
 
 struct Resume {
@@ -275,8 +277,14 @@ impl Videos {
                     (c.position, c.muted, c.volume, c.speed) = (r.position, r.muted, r.volume, r.speed);
                 }
             }
+            // Bytes let go meanwhile: the next sight probes again, a couple of times.
             None => {
-                self.failed.insert(att);
+                let tries = self.retried.entry(att.clone()).or_default();
+                if *tries < 2 {
+                    *tries += 1;
+                } else {
+                    self.failed.insert(att);
+                }
             }
         }
     }

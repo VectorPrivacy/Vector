@@ -215,6 +215,8 @@ pub struct Media {
     used: HashMap<(u8, String), std::time::Instant>,
     /// A decode landed since the last sweep.
     pressed: bool,
+    /// Attachments whose bytes couldn't be read or decoded, by how often they were asked again.
+    retried: HashMap<String, u8>,
     /// When a row last drew an attachment's or a link's picture.
     asked: Option<std::time::Instant>,
 }
@@ -535,6 +537,9 @@ impl Media {
     }
 }
 
+/// How often a picture that failed to load is asked for again in a session.
+const RETRIES: u8 = 2;
+
 /// Pictures read and decoded at once: a fast scroll queues the rest, and those it has passed
 /// by the time their turn comes are dropped unread.
 const DECODE_SLOTS: usize = 4;
@@ -594,18 +599,22 @@ pub fn pump<V: 'static>(
                 }
                 None => None,
             };
-            let slot = match decoded {
-                Some((image, w, h)) => Slot::Ready {
-                    image: Arc::new(image),
-                    w,
-                    h,
-                },
-                None => Slot::Failed,
-            };
             {
                 let mut m = media.borrow_mut();
-                m.images.insert(w.key, slot);
-                m.pressed = true;
+                match decoded {
+                    Some((image, iw, ih)) => {
+                        m.images.insert(w.key, Slot::Ready { image: Arc::new(image), w: iw, h: ih });
+                        m.pressed = true;
+                    }
+                    // A held copy let go meanwhile: the next sight asks again, a couple of times.
+                    None if m.retried.get(&w.key).copied().unwrap_or(0) < RETRIES => {
+                        *m.retried.entry(w.key.clone()).or_default() += 1;
+                        m.images.remove(&w.key);
+                    }
+                    None => {
+                        m.images.insert(w.key, Slot::Failed);
+                    }
+                }
             }
             app.update(cx, |_, cx| cx.notify()).ok();
         })
