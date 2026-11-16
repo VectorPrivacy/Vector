@@ -213,7 +213,8 @@ function standingRoleMentions(msg, chat) {
     const m = ids?.length && communityMentionsCache.get(communityIdOfChat(chat));
     if (!m) return [];
     const byAnyone = mayMentionEveryone(chat, msg.npub || (msg.mine ? strPubkey : ''));
-    return m.roles.filter(r => ids.includes(r.id) && (msg.content || '').includes('@' + r.name) && (r.mentionable || byAnyone));
+    const text = outsideCode(msg.content);
+    return m.roles.filter(r => ids.includes(r.id) && text.includes('@' + r.name) && (r.mentionable || byAnyone));
 }
 
 /** Whether `msg` pings me through a Role I hold. */

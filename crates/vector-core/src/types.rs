@@ -202,26 +202,28 @@ impl Message {
 
     /// Check if this message mentions a specific npub (e.g. `@npub1abc...`).
     pub fn mentions(&self, npub: &str) -> bool {
-        self.content.contains(&format!("@{}", npub))
+        outside_code(&self.content).contains(&format!("@{}", npub))
     }
 
     /// Check if this message mentions the current user.
     pub fn mentions_me(&self) -> bool {
         crate::state::my_public_key()
             .and_then(|pk| nostr_sdk::prelude::ToBech32::to_bech32(&pk).ok())
-            .is_some_and(|my_npub| self.content.contains(&format!("@{}", my_npub)))
+            .is_some_and(|my_npub| self.mentions(&my_npub))
     }
 
     /// Check if this message contains an `@everyone` ping.
     pub fn mentions_everyone(&self) -> bool {
-        self.content.contains("@everyone")
+        outside_code(&self.content).contains("@everyone")
     }
 
     /// Extract all mentioned npubs from the message content.
     ///
     /// Returns a list of npub strings (without the `@` prefix) found in the message.
     pub fn mentioned_npubs(&self) -> Vec<&str> {
-        extract_mentions(&self.content)
+        let code = code_spans(&self.content);
+        let base = self.content.as_ptr() as usize;
+        extract_mentions(&self.content).into_iter().filter(|m| !code.iter().any(|r| r.contains(&(m.as_ptr() as usize - base)))).collect()
     }
 }
 
@@ -230,6 +232,62 @@ impl Message {
 // ============================================================================
 
 const BECH32_CHARS: &[u8] = b"qpzry9x8gf2tvdw0s3jn54khce6mua7l";
+
+/// The byte ranges of `text`'s code, fenced blocks and inline spans alike: a run of backticks up
+/// to the next run as long. A run nothing closes is just backticks.
+pub fn code_spans(text: &str) -> Vec<std::ops::Range<usize>> {
+    let b = text.as_bytes();
+    let run_at = |i: usize| b[i..].iter().take_while(|c| **c == b'`').count();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] != b'`' {
+            i += 1;
+            continue;
+        }
+        let run = run_at(i);
+        let mut j = i + run;
+        let mut close = None;
+        while j < b.len() {
+            if b[j] == b'`' {
+                let n = run_at(j);
+                if n == run {
+                    close = Some(j + n);
+                    break;
+                }
+                j += n;
+            } else {
+                j += 1;
+            }
+        }
+        match close {
+            Some(end) => {
+                out.push(i..end);
+                i = end;
+            }
+            None => i += run,
+        }
+    }
+    out
+}
+
+/// `text` with its code blanked: a mention written as code is quoted, not made, so it pings
+/// nobody. A spoiler still pings, since it only hides the mention.
+pub fn outside_code(text: &str) -> std::borrow::Cow<'_, str> {
+    let spans = code_spans(text);
+    if spans.is_empty() {
+        return std::borrow::Cow::Borrowed(text);
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut at = 0;
+    for r in spans {
+        out.push_str(&text[at..r.start]);
+        out.push(' ');
+        at = r.end;
+    }
+    out.push_str(&text[at..]);
+    std::borrow::Cow::Owned(out)
+}
 
 /// Format an npub as a mention tag for embedding in message content.
 ///
@@ -917,6 +975,20 @@ mod tests {
         };
         assert!(msg.mentions(&npub));
         assert!(!msg.mentions("npub1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqdmf9lg"));
+    }
+
+    #[test]
+    fn a_mention_written_as_code_pings_nobody() {
+        let at = |content: &str| Message { content: content.to_string(), ..Default::default() }.mentions_everyone();
+        assert!(!at("quiet `@everyone` please"));
+        assert!(!at("```\n@everyone\n```"));
+        assert!(!at("``a ` @everyone``"), "closed only by a run as long");
+        assert!(at("||@everyone||"), "a spoiler still pings");
+        assert!(at("`code` then @everyone"));
+        assert!(at("an unclosed ` @everyone"), "a lone backtick is just a backtick");
+        let npub = "npub1".to_string() + &"q".repeat(58);
+        let msg = Message { content: format!("`@{npub}` and @{npub}"), ..Default::default() };
+        assert_eq!(msg.mentioned_npubs().len(), 1, "only the one outside code");
     }
 
     #[test]

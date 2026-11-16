@@ -112,6 +112,7 @@ pub fn pings(
     content: &str,
     role_ids: &[String],
 ) -> bool {
+    let content = crate::types::outside_code(content);
     role_ids.iter().any(|id| {
         roster.roles_of(reader_hex).any(|r| r.role_id == *id && content.contains(&format!("@{}", r.name)))
             && stands(roster, owner_hex, author_hex, id)

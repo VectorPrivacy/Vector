@@ -783,12 +783,13 @@ function countPingMessages(chat) {
             if (senderIsMuted(msg.npub)) continue;
         }
         if (!msg.content) continue;
-        const mentionedMe = strPubkey && msg.content.includes('@' + strPubkey);
+        const text = outsideCode(msg.content);
+        const mentionedMe = strPubkey && text.includes('@' + strPubkey);
         // An @everyone from someone who may mention everyone, where the community still lets one through.
         const everyoneAuthor = msg.npub || '';
         const mentionedEveryone = isGroup
             && chat.everyone_pings !== false
-            && /@everyone\b/.test(msg.content)
+            && /@everyone\b/.test(text)
             && mayMentionEveryone(chat, everyoneAuthor);
         if (mentionedMe || mentionedEveryone || (isGroup && rolePingsMe(msg, chat))) pings++;
     }
