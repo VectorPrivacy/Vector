@@ -783,12 +783,14 @@ async function openCommunityMenu(chat, ev, at, { inList = false } = {}) {
         items.push({ divider: true });
         items.push(...await notifyMenuItems(cf.community_id, cf.community_id));
         if (inList) items.push(chatPinMenuItem(chat));
+        // Here as well as on the banner itself: a touch screen may offer no menu on the image.
         const banners = VectorSvelte.bannerState();
-        if (banners.src[cf.community_id] && banners.hidden.includes(cf.community_id)) {
+        if (banners.src[cf.community_id]) {
+            const hidden = banners.hidden.includes(cf.community_id);
             items.push({
-                label: 'Show Banner',
-                icon: 'eye',
-                onClick: () => setCommunityBannerHidden(cf.community_id, false),
+                label: hidden ? 'Show Banner' : 'Hide Banner',
+                icon: hidden ? 'eye' : 'eye-off',
+                onClick: () => setCommunityBannerHidden(cf.community_id, !hidden),
             });
         }
     }
