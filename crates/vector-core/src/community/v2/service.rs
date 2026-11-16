@@ -30507,7 +30507,8 @@ mod tests {
         let held = || crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
         bed.swap_to(&owner);
         let role = create_role_v2(&bed.relay, &held(), "Writers", 0, 0).await.unwrap();
-        let writers: Vec<Keys> = (0..rekey::MAX_CERTIFIED_BLOBS_PER_EVENT + 2).map(|_| Keys::generate()).collect();
+        // Three parts, so the one dropped holds writers whatever order its recipients sort in.
+        let writers: Vec<Keys> = (0..2 * rekey::MAX_CERTIFIED_BLOBS_PER_EVENT + 2).map(|_| Keys::generate()).collect();
         for w in &writers {
             set_member_roles(&bed.relay, &held(), &w.public_key(), vec![role.clone()]).await.unwrap();
         }
