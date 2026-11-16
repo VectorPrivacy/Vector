@@ -277,8 +277,13 @@
         return new File([blob], name, { type });
     }
 
+    // Photos and videos go through the share sheet, for Save Image and Save Video; any other file
+    // downloads, which iOS asks about itself and needs nothing fetched ahead.
+    const PHOTOS = /\.(png|jpe?g|gif|webp|avif|heic|bmp|mp4|m4v|mov|webm)$/i;
+    const forPhotos = (args) => PHOTOS.test(typed(saveName(args), args.extension, savePath(args)));
+
     register('prepare_attachment', async (args) => {
-        if (!touchSave) return;
+        if (!touchSave || !forPhotos(args)) return;
         const key = saveKey(args);
         if (prepared?.key === key) return;
         const entry = { key, file: null, failed: false };
@@ -291,7 +296,7 @@
     });
 
     register('save_attachment', (args) => {
-        if (touchSave) {
+        if (touchSave && forPhotos(args)) {
             const entry = prepared?.key === saveKey(args) ? prepared : null;
             const file = entry?.file;
             if (!file && !entry?.failed) throw new Error('Still getting it ready, tap Save again');
