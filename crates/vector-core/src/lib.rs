@@ -5549,7 +5549,11 @@ impl VectorCore {
             .ok_or_else(|| VectorError::Other("v2 community not found".into()))?;
         crate::community::v2::service::dissolve_community(&transport, &community)
             .await
-            .map_err(VectorError::Other)
+            .map_err(VectorError::Other)?;
+        // Its icon and banner have nothing left to show on: off the media server too.
+        drop_community_image(community.icon.as_ref().map(|i| i.url.clone()), None);
+        drop_community_image(community.banner.as_ref().map(|i| i.url.clone()), community.icon.as_ref().map(|i| i.url.as_str()));
+        Ok(())
     }
 
     /// Edit community metadata (name / description) as an authorized member (MANAGE_METADATA). `None` leaves
