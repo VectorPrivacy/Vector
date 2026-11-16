@@ -1247,6 +1247,9 @@ pub struct Window {
     deferred_drops: Vec<Arc<RenderImage>>,
     /// Images by when a frame of theirs was last painted, and their frame count.
     anim_painted: FxHashMap<ImageId, (Instant, usize)>,
+    /// Frames a big animation stepped off, given back at the next step: by then no presented
+    /// frame samples them.
+    anim_left: Vec<(ImageId, usize)>,
     anim_swept: Instant,
     text_system: Rc<WindowTextSystem>,
     text_rendering_mode: Rc<Cell<TextRenderingMode>>,
@@ -2385,6 +2388,7 @@ impl Window {
             sprite_atlas,
             deferred_drops: Vec::new(),
             anim_painted: FxHashMap::default(),
+            anim_left: Vec::new(),
             anim_swept: Instant::now(),
             text_system,
             text_rendering_mode: cx.text_rendering_mode.clone(),
@@ -5408,6 +5412,7 @@ impl Window {
             crate::elements::set_anim_tick(tick);
         }
         let tick = crate::elements::anim_tick();
+        self.release_left_frames(&records);
         // (tile shown, where, tile due): applied in one pass over the scene below.
         let mut swaps: Vec<(AtlasTile, Bounds<ScaledPixels>, AtlasTile)> = Vec::new();
         for r in &mut records {
@@ -5424,6 +5429,9 @@ impl Window {
                     swaps.push((r.tile, r.at, sub));
                     r.tile = sub;
                     changed = true;
+                    if streams_frames(&data) && !self.anim_left.contains(&(data.id, shown)) {
+                        self.anim_left.push((data.id, shown));
+                    }
                 }
             }
             r.clock.set((ix, Some(now)));
@@ -5456,6 +5464,32 @@ impl Window {
         }
         if let Some(due) = next {
             crate::elements::wake_animations_in(self, cx, due);
+        }
+    }
+
+    /// The frames big animations stepped off last time, out of the atlas unless something on
+    /// screen still shows them: one such animation holds a tile or two, not one per frame.
+    fn release_left_frames(&mut self, records: &[AnimatedSprite]) {
+        if self.anim_left.is_empty() {
+            return;
+        }
+        let shown: FxHashSet<(AtlasTextureId, u32)> = self
+            .rendered_frame
+            .scene
+            .polychrome_sprites
+            .iter()
+            .map(|s| (s.tile.texture_id, s.tile.tile_id.0))
+            .collect();
+        for (id, frame_index) in std::mem::take(&mut self.anim_left) {
+            if records.iter().any(|r| r.data.id == id && r.clock.get().0 == frame_index) {
+                continue;
+            }
+            let key: AtlasKey = RenderImageParams { image_id: id, frame_index }.into();
+            let held = matches!(self.sprite_atlas.get_or_insert_with(key.clone(), &mut || Ok(None)),
+                Ok(Some(t)) if shown.contains(&(t.texture_id, t.tile_id.0)));
+            if !held {
+                self.sprite_atlas.remove(&key);
+            }
         }
     }
 
@@ -11045,4 +11079,13 @@ pub mod draw_stats {
             PRESENTS.swap(0, Ordering::Relaxed),
         )
     }
+}
+
+/// An animation whose frames together pass this many bytes uploads each frame as it is shown
+/// and gives the last one back, rather than keeping a tile per frame.
+const STREAM_FRAMES_FROM: usize = 2 << 20;
+
+fn streams_frames(data: &RenderImage) -> bool {
+    let s = data.size(0);
+    s.width.0.max(0) as usize * s.height.0.max(0) as usize * 4 * data.frame_count() > STREAM_FRAMES_FROM
 }
