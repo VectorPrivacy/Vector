@@ -535,6 +535,15 @@ impl Media {
     }
 }
 
+/// Pictures read and decoded at once: a fast scroll queues the rest, and those it has passed
+/// by the time their turn comes are dropped unread.
+const DECODE_SLOTS: usize = 4;
+
+fn decode_slots() -> Arc<tokio::sync::Semaphore> {
+    thread_local!(static SLOTS: Arc<tokio::sync::Semaphore> = Arc::new(tokio::sync::Semaphore::new(DECODE_SLOTS)));
+    SLOTS.with(|s| s.clone())
+}
+
 /// Start the decodes the last render asked for; the app repaints as each lands.
 pub fn pump<V: 'static>(
     media: &std::rc::Rc<std::cell::RefCell<Media>>,
@@ -547,6 +556,13 @@ pub fn pump<V: 'static>(
         let media = media.clone();
         let app = app.clone();
         cx.spawn(async move |cx| {
+            let _slot = decode_slots().acquire_owned().await;
+            // Scrolled past while it queued: nothing read, the next sight asks again.
+            if media.borrow().stale(&(1, w.key.clone())) {
+                media.borrow_mut().images.remove(&w.key);
+                app.update(cx, |_, cx| cx.notify()).ok();
+                return;
+            }
             let bytes = if live {
                 let path = w
                     .path
@@ -666,6 +682,7 @@ pub fn pump<V: 'static>(
                 }
                 _ => None,
             };
+            let _slot = decode_slots().acquire_owned().await;
             if bytes.is_some() && media.borrow().stale(&(2, url.clone())) {
                 media.borrow_mut().linked.remove(&url);
                 app.update(cx, |_, cx| cx.notify()).ok();
