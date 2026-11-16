@@ -14988,7 +14988,7 @@ impl VectorApp {
     /// Decoded pictures off screen for a while, out of memory and off the GPU; `timed`, GPUI's
     /// own image cache too.
     fn sweep_pictures(&mut self, timed: bool, window: &mut Window, cx: &mut Context<Self>) {
-        const IDLE: std::time::Duration = std::time::Duration::from_secs(90);
+        const IDLE: std::time::Duration = std::time::Duration::from_secs(60);
         let (gone, frames) = {
             let mut media = self.media.borrow_mut();
             let gone = media.sweep(IDLE, |image| window.image_on_screen(image));
