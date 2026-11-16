@@ -179,12 +179,13 @@ pub fn search_scored(query: &str, used: impl Fn(&str) -> f64) -> Vec<(&'static E
             });
         }
     }
+    // Scores a hundredth apart tie, as `searchEmojis` means them to; by bucket, since "within a
+    // hundredth" is no order (a ties b, b ties c, a beats c) and the sort refuses one.
+    let bucket = |s: f64| (s * 100.).round() as i64;
     hits.sort_by(|a, b| {
-        if (a.score - b.score).abs() > 0.01 {
-            return a.score.total_cmp(&b.score);
-        }
-        a.index
-            .cmp(&b.index)
+        bucket(a.score)
+            .cmp(&bucket(b.score))
+            .then(a.index.cmp(&b.index))
             .then(a.e.freq.cmp(&b.e.freq))
             .then(a.word.len().cmp(&b.word.len()))
             .then(a.e.name.len().cmp(&b.e.name.len()))
@@ -270,4 +271,20 @@ pub fn search_kaomoji(query: &str) -> Vec<&'static Kaomoji> {
         .collect();
     hits.sort_by_key(|(r, _)| *r);
     hits.into_iter().map(|(_, k)| k).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scores_a_hair_apart_sort_without_a_panic() {
+        // Usage a few thousandths apart chains near-ties across every hit.
+        let used = |e: &str| e.bytes().fold(7u32, |h, b| h.wrapping_mul(31).wrapping_add(b as u32)) as f64 % 40. * 0.0025;
+        for q in ["face", "cat", "heart", "smile", "hand"] {
+            let hits = search_scored(q, used);
+            assert!(hits.len() > 20, "{q}: {}", hits.len());
+            assert!(hits.windows(2).all(|w| (w[0].1 * 100.).round() <= (w[1].1 * 100.).round()), "{q}");
+        }
+    }
 }
