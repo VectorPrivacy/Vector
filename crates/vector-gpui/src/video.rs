@@ -948,7 +948,7 @@ pub fn view(id: &str, clip: &Clip, dim: bool, size: Option<(f32, f32)>, radius: 
                     )
                 })
                 .child(scrubber(id, frac, duration > 0, clip.scrub.is_some(), o3))
-                .when(w >= 300., |d| {
+                .when(w >= 290., |d| {
                     d.child(
                         div()
                             .id(SharedString::from(format!("vspeed-{id}")))
