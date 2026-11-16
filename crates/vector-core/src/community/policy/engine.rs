@@ -775,12 +775,15 @@ fn cohort_rule(
     for m in corpus {
         *volume.entry(m.author.0).or_insert(0) += 1;
     }
+    for authors in clusters.values_mut() {
+        keep_densest_burst(authors, caps::COHORT_SPAN_MS);
+    }
 
     // Each subject is convicted once (scope Whole) on the LARGEST cluster they
     // belong to; ties break by clustering key ascending.
     let mut best: BTreeMap<[u8; 32], (usize, String)> = BTreeMap::new();
     for (key, authors) in &clusters {
-        let need = if key.chars().count() < caps::MIN_SKELETON_LEN {
+        let need = if key.chars().count() < caps::COHORT_PAYLOAD_LEN {
             min.saturating_mul(short_factor)
         } else {
             min
@@ -792,7 +795,12 @@ fn cohort_rule(
         if (thin as u64) * (thin_ratio.denom as u64) < (authors.len() as u64) * (thin_ratio.num as u64) {
             continue;
         }
-        for author in authors.keys() {
+        for (author, said) in authors {
+            // A member who has been talking and also said this line is in the
+            // room, not in the wave: the line must be most of what they wrote.
+            if (said.len() as u64) * 2 < u64::from(volume.get(author).copied().unwrap_or(0)) {
+                continue;
+            }
             let slot = best.entry(*author).or_insert((0, String::new()));
             if authors.len() > slot.0 {
                 *slot = (authors.len(), key.clone());
@@ -865,6 +873,41 @@ fn cohort_rule(
         }
     }
     let _ = signals;
+}
+
+/// Narrow one cluster to its densest burst: the window of `span_ms` holding the
+/// most distinct authors (earliest such window on a tie), keeping only the
+/// messages inside it.
+fn keep_densest_burst(authors: &mut BTreeMap<[u8; 32], Vec<&MessageSignal>>, span_ms: u64) {
+    let mut said: Vec<(u64, [u8; 32])> =
+        authors.iter().flat_map(|(a, ms)| ms.iter().map(move |m| (m.at_ms, *a))).collect();
+    said.sort();
+    let mut inside: BTreeMap<[u8; 32], usize> = BTreeMap::new();
+    let (mut best, mut best_authors, mut start) = ((0usize, 0usize), 0usize, 0usize);
+    for end in 0..said.len() {
+        *inside.entry(said[end].1).or_insert(0) += 1;
+        while said[end].0.saturating_sub(said[start].0) > span_ms {
+            if let Some(n) = inside.get_mut(&said[start].1) {
+                *n -= 1;
+                if *n == 0 {
+                    inside.remove(&said[start].1);
+                }
+            }
+            start += 1;
+        }
+        if inside.len() > best_authors {
+            best_authors = inside.len();
+            best = (start, end + 1);
+        }
+    }
+    let (from, to) = match (said.get(best.0), best.1.checked_sub(1).and_then(|i| said.get(i))) {
+        (Some(a), Some(b)) => (a.0, b.0),
+        _ => return,
+    };
+    for ms in authors.values_mut() {
+        ms.retain(|m| m.at_ms >= from && m.at_ms <= to);
+    }
+    authors.retain(|_, ms| !ms.is_empty());
 }
 
 /// The densest run of joins inside one window. Deliberately weak alone: a
@@ -1473,9 +1516,66 @@ mod tests {
 
         let ev = &convicted[0].convictions[0].evidence;
         assert!(
-            matches!(ev.first(), Some(Evidence::Cohort { size: 101, .. })),
-            "the exhibit names the true cluster size: {ev:?}"
+            matches!(ev.first(), Some(Evidence::Cohort { size: 100, .. })),
+            "the exhibit names the burst, not the regular who said it an hour earlier: {ev:?}"
         );
+    }
+
+    fn convicted_by_cohort(s: Signals) -> Vec<SubjectId> {
+        let r = evaluate(&s, &[loaded(policy_with(vec![cohort_rule_doc()]))], &[], NOW);
+        only(&r).subjects.iter().filter(|x| x.convictions.iter().any(|c| !c.suppressed)).map(|x| x.subject).collect()
+    }
+
+    /// Four members thanking the room across twelve hours, one of them mid
+    /// conversation: a room being polite, never a raid.
+    #[test]
+    fn the_same_thank_you_hours_apart_convicts_nobody() {
+        let members: Vec<MemberSignal> = (0..4).map(|i| member(10 + i, Some(48))).collect();
+        let mut messages: Vec<MessageSignal> =
+            (0..3).map(|i| msg(0x10 + i, 10 + i, NOW - 12 * HOUR + u64::from(i) * 60_000, "thank you")).collect();
+        messages.push(msg(0x20, 13, NOW - HOUR, "Thank you"));
+        for i in 0..40u8 {
+            messages.push(msg(0x30 + i, 13, NOW - 2 * HOUR + u64::from(i) * 60_000, &format!("chatting about piano {i}")));
+        }
+        assert!(convicted_by_cohort(signals(members, messages)).is_empty());
+    }
+
+    /// A pleasantry from a handful of newcomers in the same minutes is a
+    /// welcome. It convicts only at `short_factor` times the cohort size.
+    #[test]
+    fn a_burst_of_thank_yous_is_a_welcome() {
+        let members: Vec<MemberSignal> = (0..5).map(|i| member(10 + i, Some(1))).collect();
+        let messages: Vec<MessageSignal> =
+            (0..5).map(|i| msg(0x10 + i, 10 + i, NOW - HOUR + u64::from(i) * 60_000, "thank you!")).collect();
+        assert!(convicted_by_cohort(signals(members, messages)).is_empty());
+    }
+
+    /// The same payload, but spread over hours, is not one wave.
+    #[test]
+    fn one_payload_spread_over_hours_is_not_a_wave() {
+        let members: Vec<MemberSignal> = (0..6).map(|i| member(10 + i, Some(30))).collect();
+        let messages: Vec<MessageSignal> = (0..6)
+            .map(|i| msg(0x10 + i, 10 + i, NOW - 20 * HOUR + u64::from(i) * 3 * HOUR, "free airdrop claim it right now"))
+            .collect();
+        assert!(convicted_by_cohort(signals(members, messages)).is_empty());
+    }
+
+    /// Inside a real burst, the accounts that posted only the line are the
+    /// wave; a member who has been talking all along and echoed it is not.
+    #[test]
+    fn a_talker_who_echoed_a_burst_is_not_in_it() {
+        let mut members: Vec<MemberSignal> = (0..6).map(|i| member(10 + i, Some(1))).collect();
+        members.push(member(40, Some(30)));
+        let mut messages: Vec<MessageSignal> = (0..6)
+            .map(|i| msg(0x10 + i, 10 + i, NOW - HOUR + u64::from(i) * 30_000, "free airdrop claim it right now"))
+            .collect();
+        messages.push(msg(0x40, 40, NOW - HOUR + 200_000, "free airdrop claim it right now"));
+        for i in 0..10u8 {
+            messages.push(msg(0x50 + i, 40, NOW - 3 * HOUR + u64::from(i) * 60_000, &format!("ordinary chat {i}")));
+        }
+        let got = convicted_by_cohort(signals(members, messages));
+        assert_eq!(got.len(), 6, "{got:?}");
+        assert!(!got.contains(&sid(40)));
     }
 
     /// The corpus outlives membership: a banned raider's messages sit in local

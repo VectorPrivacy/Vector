@@ -3376,9 +3376,11 @@ impl VectorCore {
         // Cohort evidence comes from the recent window only — a raid is by definition
         // recent, and the whole history would cost a vault decrypt per row.
         const TEXT_WINDOW: usize = 4_000;
-        let mut texts: HashMap<String, Vec<String>> = HashMap::new();
-        for (npub, _at, text) in crate::db::community::community_recent_texts(cid_hex, TEXT_WINDOW).unwrap_or_default() {
-            texts.entry(npub).or_default().push(text);
+        let mut texts: HashMap<String, (Vec<String>, Vec<u64>)> = HashMap::new();
+        for (npub, at, text) in crate::db::community::community_recent_texts(cid_hex, TEXT_WINDOW).unwrap_or_default() {
+            let slot = texts.entry(npub).or_default();
+            slot.0.push(text);
+            slot.1.push(at);
         }
 
         let signals: Vec<raid::MemberSignals> = members
@@ -3392,7 +3394,8 @@ impl VectorCore {
                     messages: f.map(|f| f.messages).unwrap_or(0),
                     first_secs: f.map(|f| f.first_secs).unwrap_or(0),
                     last_secs: f.map(|f| f.last_secs).unwrap_or(0),
-                    texts: texts.get(npub).cloned().unwrap_or_default(),
+                    texts: texts.get(npub).map(|t| t.0.clone()).unwrap_or_default(),
+                    text_secs: texts.get(npub).map(|t| t.1.clone()).unwrap_or_default(),
                     is_owner: *npub == owner_b32,
                     is_admin: staff.contains(npub),
                     is_me: *npub == me_b32,

@@ -17,6 +17,10 @@ use std::collections::{HashMap, HashSet};
 /// so a cohort of that shape needs [`RaidParams::short_text_factor`] times the members.
 const MIN_SKELETON_LEN: usize = 8;
 
+/// A shared line shorter than this is a pleasantry ("thank you", "good morning"), so its
+/// cohort must clear [`RaidParams::short_text_factor`] times the size.
+const COHORT_PAYLOAD_LEN: usize = 12;
+
 /// Collapse a message to the shape a raid script repeats. Case, punctuation, spacing and
 /// digit variation are all one line of attacker code to randomise, so none of them may
 /// carry weight.
@@ -91,6 +95,9 @@ pub struct RaidParams {
     pub short_text_factor: usize,
     /// How far apart two joins may be and still belong to the same burst.
     pub burst_gap_secs: u64,
+    /// A cohort is the senders inside its densest window of this span: a raid lands as
+    /// one burst, and the same words hours apart are a conversation.
+    pub cohort_span_secs: u64,
     /// Joins in one window before it reads as a burst rather than a busy afternoon.
     pub min_burst: usize,
     /// Shortcodes that render as images here; anything else in colons is read as text.
@@ -108,6 +115,7 @@ impl Default for RaidParams {
             min_cohort: 3,
             short_text_factor: 3,
             burst_gap_secs: 10 * 60,
+            cohort_span_secs: 15 * 60,
             min_burst: 5,
             known_shortcodes: HashSet::new(),
         }
@@ -128,6 +136,9 @@ pub struct MemberSignals {
     pub last_secs: u64,
     /// Their texts from the recent window only — the cohort evidence.
     pub texts: Vec<String>,
+    /// When each of `texts` was sent, seconds, index for index. Missing or `0` = unknown,
+    /// which never splits a cohort.
+    pub text_secs: Vec<u64>,
     pub is_owner: bool,
     pub is_admin: bool,
     pub is_me: bool,
@@ -203,22 +214,55 @@ pub struct RaidReport {
     pub raid_detected: bool,
 }
 
+/// The distinct senders inside the densest `span_secs` window of one shape (earliest such
+/// window on a tie). Unknown times (`0`) sit in every window, so they never split a cohort.
+fn densest_senders(mut at: Vec<(u64, &str)>, span_secs: u64) -> HashSet<String> {
+    let unknown: Vec<&str> = at.iter().filter(|(t, _)| *t == 0).map(|(_, n)| *n).collect();
+    at.retain(|(t, _)| *t != 0);
+    at.sort();
+    let mut inside: HashMap<&str, usize> = HashMap::new();
+    let (mut best, mut best_len, mut start) = ((0usize, 0usize), 0usize, 0usize);
+    for end in 0..at.len() {
+        *inside.entry(at[end].1).or_insert(0) += 1;
+        while at[end].0.saturating_sub(at[start].0) > span_secs {
+            if let Some(n) = inside.get_mut(at[start].1) {
+                *n -= 1;
+                if *n == 0 {
+                    inside.remove(at[start].1);
+                }
+            }
+            start += 1;
+        }
+        if inside.len() > best_len {
+            best_len = inside.len();
+            best = (start, end + 1);
+        }
+    }
+    at[best.0..best.1].iter().map(|(_, n)| *n).chain(unknown).map(str::to_string).collect()
+}
+
 /// Judge every member against the cohort evidence. `now_secs` is the clock the
 /// caller reads once, so a long assessment can't drift mid-pass.
 pub fn assess(signals: &[MemberSignals], now_secs: u64, p: &RaidParams) -> RaidReport {
     // ── Cohorts: skeleton → the distinct members who posted it ───────────────
-    let mut by_skeleton: HashMap<String, HashSet<String>> = HashMap::new();
+    let mut said: HashMap<String, Vec<(u64, &str)>> = HashMap::new();
     let mut sample_of: HashMap<String, String> = HashMap::new();
+    // How many times each member posted each shape: the line must be most of what a member
+    // wrote for the cohort to hold them.
+    let mut repeats: HashMap<(&str, String), u64> = HashMap::new();
     for s in signals {
-        for t in &s.texts {
+        for (i, t) in s.texts.iter().enumerate() {
             let sk = skeleton_with(t, &p.known_shortcodes);
             if sk.is_empty() {
                 continue;
             }
-            by_skeleton.entry(sk.clone()).or_default().insert(s.npub.clone());
+            said.entry(sk.clone()).or_default().push((s.text_secs.get(i).copied().unwrap_or(0), s.npub.as_str()));
+            *repeats.entry((s.npub.as_str(), sk.clone())).or_insert(0) += 1;
             sample_of.entry(sk).or_insert_with(|| t.clone());
         }
     }
+    let by_skeleton: HashMap<String, HashSet<String>> =
+        said.into_iter().map(|(sk, at)| (sk, densest_senders(at, p.cohort_span_secs))).collect();
     let volume: HashMap<&str, u64> = signals.iter().map(|s| (s.npub.as_str(), s.messages)).collect();
     // A cohort convicts on two counts, not one. Size alone would hang a community
     // catchphrase on whoever repeats it, so the cluster must ALSO be thin: a script
@@ -226,7 +270,7 @@ pub fn assess(signals: &[MemberSignals], now_secs: u64, p: &RaidParams) -> RaidR
     // hundreds of other messages between them. A short skeleton is cheap coincidence on
     // top of that, so it clears a higher size bar.
     let convicting = |sk: &str, members: &HashSet<String>| -> bool {
-        let need = if sk.chars().count() < MIN_SKELETON_LEN {
+        let need = if sk.chars().count() < COHORT_PAYLOAD_LEN {
             p.min_cohort.saturating_mul(p.short_text_factor)
         } else {
             p.min_cohort
@@ -250,6 +294,10 @@ pub fn assess(signals: &[MemberSignals], now_secs: u64, p: &RaidParams) -> RaidR
         }
         let peers = members.len().saturating_sub(1) as u64;
         for m in members {
+            let own = repeats.get(&(m.as_str(), sk.clone())).copied().unwrap_or(0);
+            if own.saturating_mul(2) < volume.get(m.as_str()).copied().unwrap_or(0) {
+                continue;
+            }
             let e = cohort_of.entry(m.clone()).or_insert(0);
             *e = (*e).max(peers);
         }
@@ -591,7 +639,7 @@ mod tests {
         let r = assess(&signals, NOW, &RaidParams::default());
         let vet = r.members.iter().find(|m| m.npub == "npub_veteran").unwrap();
         assert_eq!(vet.verdict, Verdict::Trusted, "cohort membership must not outrank real history");
-        assert!(vet.cohort > 0, "they are genuinely in the cohort — the panel just keeps them ticked");
+        assert_eq!(vet.cohort, 0, "one line in four hundred is a member echoing the room, not the wave");
         assert!(vet.reasons.iter().any(|s| s.contains("Long-standing")));
         assert_eq!(r.suspects, 20, "the raiders, and only the raiders");
     }
@@ -612,6 +660,49 @@ mod tests {
         assert_eq!(r.members.iter().find(|m| m.npub == "npub_admin").unwrap().verdict, Verdict::Protected);
         assert_eq!(r.members.iter().find(|m| m.npub == "npub_me").unwrap().verdict, Verdict::Protected);
         assert_eq!(r.suspects, 10, "protection wins over cohort evidence");
+    }
+
+    #[test]
+    fn the_same_thank_you_hours_apart_is_not_a_cohort() {
+        let mut signals: Vec<MemberSignals> = (0..3)
+            .map(|i| {
+                let mut r = raider(&format!("npub_new_{i}"), NOW - 12 * HOUR + i * 60, "thank you");
+                r.text_secs = vec![NOW - 12 * HOUR + i * 60];
+                r
+            })
+            .collect();
+        let mut chatty = regular("npub_chatty", 2, 60, &["Thank you", "piano", "violin", "python"]);
+        chatty.text_secs = vec![NOW - HOUR, NOW - 2 * HOUR, NOW - 2 * HOUR, NOW - 2 * HOUR];
+        signals.push(chatty);
+        let r = assess(&signals, NOW, &RaidParams::default());
+        assert_eq!(r.suspects, 0);
+        assert!(!r.raid_detected);
+    }
+
+    #[test]
+    fn one_payload_spread_over_hours_is_not_a_cohort() {
+        let signals: Vec<MemberSignals> = (0..6)
+            .map(|i| {
+                let at = NOW - 20 * HOUR + i * 3 * HOUR;
+                let mut r = raider(&format!("npub_r{i}"), at, "free airdrop claim it now");
+                r.text_secs = vec![at];
+                r
+            })
+            .collect();
+        assert_eq!(assess(&signals, NOW, &RaidParams::default()).suspects, 0);
+    }
+
+    #[test]
+    fn a_burst_of_one_payload_is_still_a_cohort() {
+        let signals: Vec<MemberSignals> = (0..6)
+            .map(|i| {
+                let at = NOW - HOUR + i * 30;
+                let mut r = raider(&format!("npub_r{i}"), at, "free airdrop claim it now");
+                r.text_secs = vec![at];
+                r
+            })
+            .collect();
+        assert_eq!(assess(&signals, NOW, &RaidParams::default()).suspects, 6);
     }
 
     #[test]
