@@ -637,6 +637,11 @@ async fn settle_writers_moved<T: Transport + ?Sized>(transport: &T, community: &
     if !held.channels.iter().any(|ch| restricts(after, ch) || restricts(before, ch) || ch.restricted()) {
         return Ok(());
     }
+    // Writers come from the memberlist: a member granted a Role moments after joining is in it
+    // only once their Join is read.
+    if let Err(e) = super::sync_guestbook(transport, &held).await {
+        crate::log_warn!("v2: the Guestbook couldn't be read before settling writers (a backstop serves whoever it missed): {e}");
+    }
     let banned: std::collections::BTreeSet<String> = crate::db::community::get_community_banlist(&hex(&held.id().0)).unwrap_or_default().into_iter().collect();
     let (was, now) = (Posters::of(&held, before, &banned)?, Posters::of(&held, after, &banned)?);
     let mut candidates = writer_candidates(&held, after)?;

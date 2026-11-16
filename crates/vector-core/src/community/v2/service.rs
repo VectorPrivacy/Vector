@@ -7930,9 +7930,10 @@ async fn settle_access<T: Transport + ?Sized>(
         }
     }
     let mut gained: std::collections::BTreeMap<PublicKey, ()> = Default::default();
+    let mut gained_in: Vec<(ChannelId, Epoch, Vec<PublicKey>)> = Vec::new();
     for ch in community.channels.iter().filter(|c| c.private && c.key.is_some()) {
         let chan = crate::simd::hex::bytes_to_hex_32(&ch.id.0);
-        let (mut lost, mut fresh) = (Vec::new(), 0usize);
+        let (mut lost, mut fresh, mut readers) = (Vec::new(), 0usize, Vec::new());
         for pk in &candidates {
             let hex = pk.to_hex();
             if *pk == me || hex == owner_hex {
@@ -7943,6 +7944,7 @@ async fn settle_access<T: Transport + ?Sized>(
                 // Without history they come in at a fresh epoch, which the rotation below mints.
                 if after.reads_history(Some(&owner_hex), &hex, &chan, &[], &[]) {
                     gained.insert(*pk, ());
+                    readers.push(*pk);
                 } else {
                     fresh += 1;
                 }
@@ -7959,17 +7961,48 @@ async fn settle_access<T: Transport + ?Sized>(
             let held = crate::db::community::load_community_v2(community.id())?.ok_or("v2 community not found")?;
             rekey_channel_excluding(transport, &held, &ch.id, after, &[], &lost).await?;
         }
+        // Readers adopt a delivery only from a deliverer their fold entitles.
+        if !readers.is_empty() && (me.to_hex() == owner_hex || after.is_entitled(Some(&owner_hex), &me.to_hex(), &chan, &[], &[])) {
+            gained_in.push((ch.id, ch.epoch, readers));
+        }
     }
     if !gained.is_empty() {
         let held = crate::db::community::load_community_v2(community.id())?.ok_or("v2 community not found")?;
+        // On each Channel's access plane, which a member's client sweeps as soon as its roster
+        // moves, rather than leaving them to another holder's duty.
+        let ledger = crate::db::current_session().scoped::<AccessLedger, std::sync::Mutex<std::collections::HashSet<([u8; 32], u64, [u8; 32])>>>();
+        for (channel, epoch, readers) in &gained_in {
+            let delivered = async {
+                deliver_access(transport, &held, channel, readers).await?;
+                deliver_history(transport, &held, channel, readers).await
+            };
+            // At the epoch it now holds: a rotation above may have moved it.
+            let epoch = held.channel(channel).map_or(*epoch, |c| c.epoch);
+            match delivered.await {
+                Ok(_) => ledger.lock().unwrap_or_else(|e| e.into_inner()).extend(readers.iter().map(|pk| (channel.0, epoch.0, pk.to_bytes()))),
+                Err(e) => crate::log_warn!("[v2:access] delivering a gained channel's key failed (a holder's duty retries): {e}"),
+            }
+        }
         let signer = crate::signer::active_signer()?;
         for pk in gained.keys() {
             let bundle = bundle_of_with_overlay(&held, BundleAudience::Member(*pk), Some(me), None, None, &[], &[]);
             let wrap = invite::build_direct_invite_signed(&signer, me, pk, &bundle).await.map_err(|e| e.to_string())?;
             transport.publish(&wrap, &held.relays).await?;
+            send_to_inbox(&wrap, pk).await;
         }
     }
     writing::settle_writers(transport, community, before, after).await
+}
+
+/// A gift wrap to `recipient`'s DM inbox as well: their client reads gift wraps there, and a
+/// Community's relays only for its planes.
+async fn send_to_inbox(wrap: &Event, recipient: &PublicKey) {
+    let Some(client) = crate::state::nostr_client() else { return };
+    let targets = crate::inbox_relays::resolve_gift_wrap_targets(&client, recipient).await;
+    if let Err(e) = crate::inbox_relays::publish_gift_wrap_to_targets(&client, &targets, wrap).await {
+        crate::log_warn!("[v2:access] a Direct Invite didn't reach the recipient's inbox (the community relays carry it): {e}");
+    }
+    crate::inbox_relays::teardown_gift_wrap_targets(&client, &targets).await;
 }
 
 /// A Channel's access plane at the community's root epoch (CORD-03 §5).
@@ -28688,7 +28721,7 @@ mod tests {
         let m = Keys::generate();
         set_overwrite(&bed.relay, &held(), ch.0, crate::community::roles::OverwriteTarget::Member(m.public_key().to_hex()), Permissions::VIEW_CHANNEL, 0).await.unwrap();
         follow_control(&bed.relay, &held()).await.unwrap();
-        assert_eq!(access_duty(&bed.relay, &held()).await.unwrap().delivered, 1, "the creator delivers");
+        assert_eq!(access_duty(&bed.relay, &held()).await.unwrap().delivered, 0, "the creator delivered with the change itself");
         // M's device: keyless, and its fold can't open the seal that names the creator.
         let mut c = held();
         let e = c.channels.iter_mut().find(|e| e.id.0 == ch.0).unwrap();
@@ -29624,6 +29657,54 @@ mod tests {
         let texts = channel_texts(&bed.relay, &held(), &general).await;
         assert!(!texts.contains(&"kicked in flight".to_string()), "a writer no longer a member vouches for nothing: {texts:?}");
         assert!(!texts.contains(&"banned in flight".to_string()), "nor one banned");
+    }
+
+    #[tokio::test]
+    async fn a_member_let_into_a_private_channel_finds_its_key_on_its_own_next_sweep() {
+        use crate::community::roles::OverwriteTarget;
+        let (bed, owner, member) = TestBed::new();
+        let held = |c: &CommunityV2| crate::db::community::load_community_v2(c.id()).unwrap().unwrap();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Prompt", bed.relays.clone(), None).await.unwrap();
+        activate_roles_v2(&bed.relay, &community, crate::community::v2::roles::EVERYONE_DEFAULT).await.unwrap();
+        follow_control(&bed.relay, &community).await.unwrap();
+        let m = member.keys.public_key();
+        let ch = create_private_channel(&bed.relay, &held(&community), "staff").await.unwrap();
+        send_direct_invite(&bed.relay, &held(&community), &m, None, None).await.unwrap();
+        bed.swap_to(&member);
+        accept_direct_invite(&bed.relay, &fetch_direct_invite(&bed.relay, &bed.relays, &m).await).await.unwrap();
+        follow_control(&bed.relay, &held(&community)).await.unwrap();
+        bed.swap_to(&owner);
+        set_overwrite(&bed.relay, &held(&community), ch.0, OverwriteTarget::Member(m.to_hex()), Permissions::VIEW_CHANNEL, 0).await.unwrap();
+        // No holder's duty runs: the change itself put the key where the member's client looks.
+        bed.swap_to(&member);
+        follow_control(&bed.relay, &held(&community)).await.unwrap();
+        assert_eq!(collect_access(&bed.relay, &held(&community)).await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_member_given_the_right_to_post_moments_after_joining_gets_the_key() {
+        use crate::community::roles::OverwriteTarget;
+        let (bed, owner, member) = TestBed::new();
+        let held = |c: &CommunityV2| crate::db::community::load_community_v2(c.id()).unwrap().unwrap();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Gate", bed.relays.clone(), None).await.unwrap();
+        activate_roles_v2(&bed.relay, &community, crate::community::v2::roles::EVERYONE_DEFAULT).await.unwrap();
+        follow_control(&bed.relay, &community).await.unwrap();
+        let general = community.channels[0].id;
+        set_overwrite(&bed.relay, &held(&community), general.0, OverwriteTarget::Everyone, 0, Permissions::SEND_MESSAGES).await.unwrap();
+        let m = member.keys.public_key();
+        send_direct_invite(&bed.relay, &held(&community), &m, None, None).await.unwrap();
+        bed.swap_to(&member);
+        accept_direct_invite(&bed.relay, &fetch_direct_invite(&bed.relay, &bed.relays, &m).await).await.unwrap();
+        follow_control(&bed.relay, &held(&community)).await.unwrap();
+        // The owner lets them post before its Guestbook has read their Join.
+        bed.swap_to(&owner);
+        set_overwrite(&bed.relay, &held(&community), general.0, OverwriteTarget::Member(m.to_hex()), Permissions::SEND_MESSAGES, 0).await.unwrap();
+        bed.swap_to(&member);
+        follow_control(&bed.relay, &held(&community)).await.unwrap();
+        assert_eq!(collect_writers(&bed.relay, &held(&community)).await.unwrap(), 1);
+        assert!(can_post(&held(&community), &general));
     }
 
     #[tokio::test]
@@ -33695,12 +33776,6 @@ mod tests {
         let readers = create_role_v2(&bed.relay, &held(), "Readers", 0, 0).await.unwrap();
         set_overwrite(&bed.relay, &held(), ch.0, crate::community::roles::OverwriteTarget::Role(readers.clone()), Permissions::VIEW_CHANNEL, 0).await.unwrap();
         let (m, d, f, stranger) = (Keys::generate(), Keys::generate(), Keys::generate(), Keys::generate());
-        set_member_roles(&bed.relay, &held(), &m.public_key(), vec![readers.clone()]).await.unwrap();
-        set_member_roles(&bed.relay, &held(), &d.public_key(), vec![readers.clone()]).await.unwrap();
-        set_member_roles(&bed.relay, &held(), &f.public_key(), vec![readers]).await.unwrap();
-        let others = create_role_v2(&bed.relay, &held(), "Others", 0, 0).await.unwrap();
-        set_member_roles(&bed.relay, &held(), &stranger.public_key(), vec![others]).await.unwrap();
-        follow_control(&bed.relay, &held()).await.unwrap();
         let key = held().channel(&ch).unwrap().key.unwrap();
         let epoch = held().channel(&ch).unwrap().epoch;
         let with_channel = |k: Option<[u8; 32]>, e: Epoch| {
@@ -33710,6 +33785,15 @@ mod tests {
             slot.epoch = e;
             crate::db::community::save_community_v2(&c).unwrap();
         };
+        // Granted from a device holding no key, so only a holder's duty serves them.
+        with_channel(None, epoch);
+        set_member_roles(&bed.relay, &held(), &m.public_key(), vec![readers.clone()]).await.unwrap();
+        set_member_roles(&bed.relay, &held(), &d.public_key(), vec![readers.clone()]).await.unwrap();
+        set_member_roles(&bed.relay, &held(), &f.public_key(), vec![readers]).await.unwrap();
+        let others = create_role_v2(&bed.relay, &held(), "Others", 0, 0).await.unwrap();
+        set_member_roles(&bed.relay, &held(), &stranger.public_key(), vec![others]).await.unwrap();
+        with_channel(Some(key), epoch);
+        follow_control(&bed.relay, &held()).await.unwrap();
         let trusted = |pk: &PublicKey| *pk == owner.keys.public_key();
         let served = |pk: PublicKey| {
             let relay = &bed.relay;
@@ -33768,7 +33852,7 @@ mod tests {
         rekey_channel_excluding(&bed.relay, &held(), &ch, &roster, &[], &[d.public_key()]).await.unwrap();
         set_member_roles(&bed.relay, &held(), &fresh_member.public_key(), vec![readers]).await.unwrap();
         follow_control(&bed.relay, &held()).await.unwrap();
-        assert_eq!(access_duty(&bed.relay, &held()).await.unwrap().delivered, 1, "only the member entitled since: the rotation carried m and the rider, and cut d");
+        assert_eq!(access_duty(&bed.relay, &held()).await.unwrap().delivered, 0, "the rotation carried m and the rider, cut d, and the grant itself served the member entitled since");
         assert!(served(fresh_member.public_key()).await && !served(d.public_key()).await && !served(rider.public_key()).await);
     }
 
@@ -33906,11 +33990,11 @@ mod tests {
         let readers = create_role_v2(&bed.relay, &held(), "Readers", 0, 0).await.unwrap();
         set_overwrite(&bed.relay, &held(), ch.0, crate::community::roles::OverwriteTarget::Role(readers.clone()), Permissions::VIEW_CHANNEL, 0).await.unwrap();
         let (m, n) = (Keys::generate(), Keys::generate());
+        set_overwrite(&bed.relay, &held(), ch.0, crate::community::roles::OverwriteTarget::Member(n.public_key().to_hex()), 0, Permissions::READ_MESSAGE_HISTORY).await.unwrap();
         set_member_roles(&bed.relay, &held(), &m.public_key(), vec![readers.clone()]).await.unwrap();
         set_member_roles(&bed.relay, &held(), &n.public_key(), vec![readers]).await.unwrap();
-        set_overwrite(&bed.relay, &held(), ch.0, crate::community::roles::OverwriteTarget::Member(n.public_key().to_hex()), 0, Permissions::READ_MESSAGE_HISTORY).await.unwrap();
         follow_control(&bed.relay, &held()).await.unwrap();
-        assert_eq!(access_duty(&bed.relay, &held()).await.unwrap().delivered, 2);
+        assert_eq!(access_duty(&bed.relay, &held()).await.unwrap().delivered, 0, "the grants themselves served them");
         let blob_for = |who: PublicKey| {
             let (relay, c) = (&bed.relay, held());
             let owner_pk = owner.keys.public_key();
@@ -33928,7 +34012,7 @@ mod tests {
         bed.relay.publish(&wrap, &held().relays).await.unwrap();
         // And a holder sends N history N may not read.
         deliver_history(&bed.relay, &held(), &ch, &[n.public_key()]).await.unwrap();
-        // A reader denied history is let in by a fresh epoch, which the duty mints.
+        // A reader denied history is let in by a fresh epoch, which their grant minted.
         let rotated = held().channel(&ch).unwrap().epoch;
         assert!(rotated > now);
         // Each reader's own device: keyless where its fold left it, and no secret of the past epoch.
