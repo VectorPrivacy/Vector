@@ -7794,7 +7794,7 @@ pub async fn set_overwrite<T: Transport + ?Sized>(
         // whether the rule is its own or its Category's.
         let scope_hex = crate::simd::hex::bytes_to_hex_32(&scope);
         if community.channels.iter().any(|c| c.private && c.key.is_none() && (c.id.0 == scope || view.roles.syncs.get(&crate::simd::hex::bytes_to_hex_32(&c.id.0)) == Some(&scope_hex))) {
-            return Err("you can only change who reads a private channel you can read".to_string());
+            return Err(NO_KEY_TO_SHARE.to_string());
         }
         // Who might gain or lose a key must be readable before anything is published.
         access_candidates(community, &view.roles)?;
@@ -7835,7 +7835,7 @@ pub async fn set_channel_sync<T: Transport + ?Sized>(transport: &T, community: &
         let author = role_author(community, &view)?;
         let channel = community.channel(channel_id).ok_or("no such channel")?;
         if channel.private && channel.key.is_none() {
-            return Err("you can only change who reads a private channel you can read".to_string());
+            return Err(NO_KEY_TO_SHARE.to_string());
         }
         if category.is_some_and(|k| !community.categories.iter().any(|c| c.id == k)) {
             return Err("no such category".to_string());
@@ -7863,6 +7863,9 @@ pub async fn set_channel_sync<T: Transport + ?Sized>(transport: &T, community: &
     })
     .await
 }
+
+/// Why a change that opens a private channel this device can't key is refused (CORD-03 §5).
+const NO_KEY_TO_SHARE: &str = "You can't change who can see this private channel: you don't have access to it yourself.";
 
 /// Move Private Channel keys from what `before` entitled to what `after` does (CORD-03 §5):
 /// the newly entitled get one Direct Invite carrying every key they gained, and a Channel
@@ -8797,6 +8800,26 @@ pub async fn change_member_roles<T: Transport + ?Sized, F: FnOnce(&[String]) -> 
         b.sort();
         if a == b {
             return Ok(());
+        }
+        // Keys follow the grant: one that opens a private channel this device can't key leaves
+        // the member at its door (CORD-03 §5).
+        if view.roles.everyone.is_some() {
+            let mut after = view.roles.clone();
+            after.grants.retain(|g| g.member != member_hex);
+            after.grants.push(crate::community::roles::MemberGrant { member: member_hex.clone(), role_ids: next.clone() });
+            let owner = Some(author.owner_hex.as_str());
+            let opened = community
+                .channels
+                .iter()
+                .filter(|c| c.private && c.key.is_none())
+                .map(|c| crate::simd::hex::bytes_to_hex_32(&c.id.0))
+                .filter(|chan| !view.roles.is_entitled(owner, &member_hex, chan, &[], &[]) && after.is_entitled(owner, &member_hex, chan, &[], &[]))
+                .count();
+            if opened > 0 {
+                let what = if next.iter().filter(|id| !current.contains(id)).count() > 1 { "these roles" } else { "this role" };
+                let channels = if opened == 1 { "a private channel".to_string() } else { format!("{opened} private channels") };
+                return Err(format!("You can't give {what}: it opens {channels} you don't have access to. Someone with access has to, or get access first."));
+            }
         }
         grant_roles_with_roster(transport, community, member, next.clone(), &view.roles).await?;
         let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
@@ -16554,6 +16577,31 @@ mod tests {
     }
 
     /// The relay stores the event but its OK never arrives.
+    /// Every publish but a Channel's access-plane deliveries, as a client that doesn't deliver keys
+    /// with a grant.
+    struct NoAccessDeliveries<'a>(&'a MemoryRelay, PublicKey);
+    #[async_trait::async_trait]
+    impl Transport for NoAccessDeliveries<'_> {
+        async fn publish(&self, e: &Event, r: &[String]) -> Result<(), String> {
+            if e.pubkey == self.1 {
+                return Ok(());
+            }
+            self.0.publish(e, r).await
+        }
+        async fn fetch(&self, query: &Query, relays: &[String]) -> Result<Vec<Event>, String> {
+            self.0.fetch(query, relays).await
+        }
+        async fn fetch_plane(&self, plane: &Keys, query: &Query, relays: &[String]) -> Result<crate::community::transport::PlaneFetch, String> {
+            self.0.fetch_plane(plane, query, relays).await
+        }
+        async fn publish_durable(&self, e: &Event, r: &[String]) -> Result<(), String> {
+            if e.pubkey == self.1 {
+                return Ok(());
+            }
+            self.0.publish_durable(e, r).await
+        }
+    }
+
     struct LostAck<'a>(&'a MemoryRelay);
     #[async_trait::async_trait]
     impl Transport for LostAck<'_> {
@@ -29032,9 +29080,9 @@ mod tests {
         keyless.channels.iter_mut().find(|c| c.id.0 == ch.0).unwrap().key = None;
         crate::db::community::save_community_v2(&keyless).unwrap();
         let err = set_overwrite(&bed.relay, &held(), cat, crate::community::roles::OverwriteTarget::Everyone, 0, Permissions::SEND_MESSAGES).await.unwrap_err();
-        assert!(err.contains("can read"), "through its Category: {err}");
+        assert!(err.contains("don't have access to it yourself"), "through its Category: {err}");
         let err = set_channel_sync(&bed.relay, &held(), &ch, None).await.unwrap_err();
-        assert!(err.contains("can read"), "or its sync: {err}");
+        assert!(err.contains("don't have access to it yourself"), "or its sync: {err}");
     }
 
     #[tokio::test]
@@ -33769,6 +33817,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_role_that_opens_a_private_channel_its_granter_cant_read_is_refused() {
+        let (bed, owner, x, community) = v2_bed_with_admin("Gatekeeper").await;
+        let held = || crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        let ch = create_private_channel(&bed.relay, &held(), "staff").await.unwrap();
+        let staff = create_role_v2(&bed.relay, &held(), "Staff", 0, 0).await.unwrap();
+        set_overwrite(&bed.relay, &held(), ch.0, crate::community::roles::OverwriteTarget::Role(staff.clone()), Permissions::VIEW_CHANNEL, 0).await.unwrap();
+        let key = held().channel(&ch).unwrap().key;
+        let with_key = |k: Option<[u8; 32]>| {
+            let mut c = held();
+            c.channels.iter_mut().find(|c| c.id.0 == ch.0).unwrap().key = k;
+            crate::db::community::save_community_v2(&c).unwrap();
+        };
+        let m = Keys::generate();
+        // A manager of roles who isn't in the channel: the member would wait at its door.
+        with_key(None);
+        act_as(&x);
+        let refused = set_member_roles(&bed.relay, &held(), &m.public_key(), vec![staff.clone()]).await.unwrap_err();
+        assert!(refused.contains("opens a private channel you don't have access to"), "{refused}");
+        let others = create_role_v2(&bed.relay, &held(), "Others", 0, 0).await.unwrap();
+        set_member_roles(&bed.relay, &held(), &m.public_key(), vec![others.clone()]).await.unwrap();
+        // A granter holding its key hands it over with the grant.
+        act_as(&owner.keys);
+        with_key(key);
+        set_member_roles(&bed.relay, &held(), &m.public_key(), vec![others, staff]).await.unwrap();
+    }
+
+    #[tokio::test]
     async fn a_holder_delivers_on_the_access_plane_and_the_member_adopts_it() {
         let (bed, owner, x, community) = v2_bed_with_admin("Access").await;
         let held = || crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
@@ -33785,14 +33860,14 @@ mod tests {
             slot.epoch = e;
             crate::db::community::save_community_v2(&c).unwrap();
         };
-        // Granted from a device holding no key, so only a holder's duty serves them.
-        with_channel(None, epoch);
-        set_member_roles(&bed.relay, &held(), &m.public_key(), vec![readers.clone()]).await.unwrap();
-        set_member_roles(&bed.relay, &held(), &d.public_key(), vec![readers.clone()]).await.unwrap();
-        set_member_roles(&bed.relay, &held(), &f.public_key(), vec![readers]).await.unwrap();
+        // Granted by a client that delivers nothing with the grant, so only a holder's duty serves them.
+        let quiet = NoAccessDeliveries(&bed.relay, access_group(&held(), &ch).pk());
+        set_member_roles(&quiet, &held(), &m.public_key(), vec![readers.clone()]).await.unwrap();
+        set_member_roles(&quiet, &held(), &d.public_key(), vec![readers.clone()]).await.unwrap();
+        set_member_roles(&quiet, &held(), &f.public_key(), vec![readers]).await.unwrap();
         let others = create_role_v2(&bed.relay, &held(), "Others", 0, 0).await.unwrap();
-        set_member_roles(&bed.relay, &held(), &stranger.public_key(), vec![others]).await.unwrap();
-        with_channel(Some(key), epoch);
+        set_member_roles(&quiet, &held(), &stranger.public_key(), vec![others]).await.unwrap();
+        crate::db::current_session().scoped::<AccessLedger, std::sync::Mutex<std::collections::HashSet<([u8; 32], u64, [u8; 32])>>>().lock().unwrap().clear();
         follow_control(&bed.relay, &held()).await.unwrap();
         let trusted = |pk: &PublicKey| *pk == owner.keys.public_key();
         let served = |pk: PublicKey| {
