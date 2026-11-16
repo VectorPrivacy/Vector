@@ -267,6 +267,13 @@ body.ws #invites {
   background-color: #030303;
 }
 
+/* Creating a Community has nothing to do with the list or conversation beside it:
+   it takes everything right of the rail, over the list's resizer too. */
+body.ws #create-group:has(> .create-group-content.is-community) {
+  grid-column: 2 / -1;
+  z-index: 46;
+}
+
 /* Community details becomes the member sidebar: same pane, same renderer, same
    moderation controls — docked beside the conversation instead of replacing it. */
 body.ws #group-overview {

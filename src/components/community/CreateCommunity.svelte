@@ -57,10 +57,13 @@
 </script>
 
 <div class="create-group-content" class:is-community={community}>
-    <center class="chat-new-content">
-        <h2 class="chat-new-title"><span class="icon {community ? 'icon-users-multi' : 'icon-chats'} chat-new-icon" style="width: 50px; height: 30px; opacity: 0.7; display: inline-block; vertical-align: bottom;"></span>{community ? 'Create Community' : 'New Message'}</h2>
-        <hr class="divider chat-new-divider">
-    </center>
+    <!-- Create Community's steps head their own page. -->
+    {#if !community}
+        <center class="chat-new-content">
+            <h2 class="chat-new-title"><span class="icon icon-chats chat-new-icon" style="width: 50px; height: 30px; opacity: 0.7; display: inline-block; vertical-align: bottom;"></span>New Message</h2>
+            <hr class="divider chat-new-divider">
+        </center>
+    {/if}
 
     {#if community}
         <CommunitySetup {h} />
