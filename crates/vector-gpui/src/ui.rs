@@ -92,6 +92,8 @@ pub struct VectorApp {
     live: bool,
     store: Shared,
     open: Option<SharedString>,
+    /// The chat whose media was last in view: leaving it, however, floats what plays.
+    media_chat: Option<SharedString>,
     timeline: ListState,
     /// The open chat's rows, rebuilt when it changes rather than per frame.
     rows: Rc<Vec<Row>>,
@@ -916,6 +918,7 @@ impl VectorApp {
             live,
             store,
             open: None,
+            media_chat: None,
             timeline: ListState::new(0, ListAlignment::Top, px(600.)),
             rows: Rc::default(),
             row_keys: Vec::new(),
@@ -4008,7 +4011,7 @@ impl VectorApp {
         });
         let switching = self.open.as_ref() != Some(&id);
         if switching {
-            self.leave_media(id.as_ref(), window);
+            self.follow_open(Some(&id), window);
             self.stash_draft(cx);
         }
         self.open = Some(id.clone());
@@ -4591,7 +4594,20 @@ impl VectorApp {
             Act::Jump(target) => self.jump_to_message(target, cx),
             Act::PivxClaim(code) => self.pivx_claim(code, cx),
             Act::Rerun(name) => self.rerun_command(name, window, cx),
-            Act::Embed(a) => self.on_embed(a, window, cx),
+            Act::Embed(a) => {
+                let clip = match &a {
+                    crate::embeds::Act::Clip(cid, v) => Some((cid.clone(), matches!(v, crate::video::Act::Toggle))),
+                    crate::embeds::Act::Video(v) => Some((crate::embeds::clip_id(&v.url), true)),
+                    _ => None,
+                };
+                if let Some((cid, toggle)) = clip {
+                    if toggle {
+                        self.yield_popout(crate::popout::Kind::Video, &cid);
+                    }
+                    self.media.borrow_mut().embed_clip_msgs.insert(cid, id.clone());
+                }
+                self.on_embed(a, window, cx)
+            }
             Act::Pack(a) => self.on_pack(a, cx),
             Act::Hover(true) => {
                 self.hover_gen += 1;
@@ -5258,7 +5274,11 @@ impl VectorApp {
     }
 
     fn video_act(&mut self, msg: String, att: String, act: crate::video::Act, cx: &mut Context<Self>) {
-        let input = self.audio_input(&msg, &att);
+        let embed = att.strip_prefix("embed:").map(|url| match self.media.borrow().embed_videos.get(url) {
+            Some(crate::embeds::VideoState::Ready(spec)) => Some(spec.clone()),
+            _ => None,
+        });
+        let input = embed.unwrap_or_else(|| self.audio_input(&msg, &att));
         self.media.borrow_mut().videos.act(&att, input, act);
         cx.notify();
     }
@@ -6106,6 +6126,8 @@ impl Render for VectorApp {
         let _timed = crate::devctl::Timed::start();
         let me = cx.entity().downgrade();
         cx.defer(move |cx| crate::relayinfo::pump(me, cx));
+        let open = self.open.clone();
+        self.follow_open(open.as_ref(), window);
         let customs = self.emoji_picker.read(cx).custom_map(&self.store.borrow());
         for input in std::iter::once(self.input.clone()).chain(self.status.clone()) {
             let customs = customs.clone();

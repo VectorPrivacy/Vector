@@ -191,6 +191,8 @@ pub struct Media {
     pub embed_videos: HashMap<String, crate::embeds::VideoState>,
     pub embed_video_queue: Vec<crate::embeds::Media>,
     pub embed_autoplay: HashSet<String>,
+    /// The message each embedded clip was last played from, which the floating player returns to.
+    pub embed_clip_msgs: HashMap<String, String>,
     /// First-frame openings for videos with no poster that won't download on their own: None
     /// while fetching or when there is none.
     pub embed_previews: HashMap<String, Option<crate::audio::AudioInputSpec>>,

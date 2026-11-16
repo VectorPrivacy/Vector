@@ -19,13 +19,22 @@ impl VectorApp {
         (f32::from(s.width), f32::from(s.height))
     }
 
-    /// Leaving the open chat for `next`: what plays floats (or stops, with the player off), and
-    /// coming back to where the floating media came from takes it back into its row.
-    pub(crate) fn leave_media(&mut self, next: &str, window: &Window) {
+    /// The open chat is now `open`: leaving the last one, for another or for none, floats its media.
+    pub(crate) fn follow_open(&mut self, open: Option<&SharedString>, window: &Window) {
+        if self.media_chat.as_ref() == open {
+            return;
+        }
+        let prev = std::mem::replace(&mut self.media_chat, open.cloned());
+        self.leave_media(prev.as_deref(), open.map_or("", |o| o.as_ref()), window);
+    }
+
+    /// Leaving `prev` for `next`: what plays floats (or stops, with the player off), and coming
+    /// back to where the floating media came from takes it back into its row.
+    fn leave_media(&mut self, prev: Option<&str>, next: &str, window: &Window) {
         if self.popout.item.as_ref().is_some_and(|i| i.chat == next) {
             self.popout.close();
         }
-        let Some(prev) = self.open.clone().map(String::from) else { return };
+        let Some(prev) = prev.map(String::from) else { return };
         let mut media = self.media.borrow_mut();
         let audio = media.audio.playing().map(String::from);
         let video = media.videos.playing().map(String::from);
@@ -33,12 +42,13 @@ impl VectorApp {
         if self.popout.enabled {
             let in_prev = |att: &str| -> Option<String> {
                 let store = self.store.borrow();
-                store
-                    .chat(&prev)?
-                    .messages
-                    .iter()
-                    .find(|m| m.attachments.iter().any(|a| a.id == att))
-                    .map(|m| m.id.clone())
+                let messages = &store.chat(&prev)?.messages;
+                // A link's video is no attachment: the message it was played from holds it.
+                if att.starts_with("embed:") {
+                    let msg = media.embed_clip_msgs.get(att)?;
+                    return messages.iter().any(|m| &m.id == msg).then(|| msg.clone());
+                }
+                messages.iter().find(|m| m.attachments.iter().any(|a| a.id == att)).map(|m| m.id.clone())
             };
             let music = audio.as_deref().filter(|a| held.as_deref() != Some(*a)).and_then(|a| {
                 in_prev(a).map(|msg| Item { kind: Kind::Audio, att: a.to_string(), msg, chat: prev.clone() })
