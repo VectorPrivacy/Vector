@@ -1248,6 +1248,7 @@ impl VectorApp {
         cx: &mut Context<Self>,
     ) -> Self {
         let mut app = Self::base(store, false, window, cx);
+        Self::start_sweeps(window, cx);
         app.listen_models(cx);
         app.listen_video(cx);
         app.reload_picker_packs(cx);
@@ -1775,16 +1776,7 @@ impl VectorApp {
         })
         .detach();
         app.screen = Screen::Booting;
-        // Its own timer: an idle window draws nothing, so a sweep tied to drawing never runs.
-        cx.spawn_in(window, async move |this, cx| {
-            loop {
-                cx.background_executor().timer(std::time::Duration::from_secs(15)).await;
-                if this.update_in(cx, |this, window, cx| this.sweep_pictures(true, window, cx)).is_err() {
-                    break;
-                }
-            }
-        })
-        .detach();
+        Self::start_sweeps(window, cx);
         cx.spawn_in(window, async move |this, cx| {
             while let Some(ev) = events.next().await {
                 if this
@@ -14978,6 +14970,19 @@ impl VectorApp {
                 cx.notify();
             }
         }
+    }
+
+    /// Its own timer: an idle window draws nothing, so a sweep tied to drawing never runs.
+    fn start_sweeps(window: &mut Window, cx: &mut Context<Self>) {
+        cx.spawn_in(window, async move |this, cx| {
+            loop {
+                cx.background_executor().timer(std::time::Duration::from_secs(15)).await;
+                if this.update_in(cx, |this, window, cx| this.sweep_pictures(true, window, cx)).is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
     }
 
     /// Decoded pictures off screen for a while, out of memory and off the GPU; `timed`, GPUI's

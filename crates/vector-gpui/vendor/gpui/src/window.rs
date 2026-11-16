@@ -1245,7 +1245,7 @@ pub struct Window {
     sprite_atlas: Arc<dyn PlatformAtlas>,
     /// Images asked to leave the atlas while still on screen: they go once they aren't.
     deferred_drops: Vec<Arc<RenderImage>>,
-    /// Animated images by when a frame of theirs was last painted, and their frame count.
+    /// Images by when a frame of theirs was last painted, and their frame count.
     anim_painted: FxHashMap<ImageId, (Instant, usize)>,
     anim_swept: Instant,
     text_system: Rc<WindowTextSystem>,
@@ -5480,9 +5480,7 @@ impl Window {
 
         let tile = image_tile(&*self.sprite_atlas, &data, frame_index)?
             .expect("It's the caller's job to pass a valid frame index");
-        if data.frame_count() > 1 {
-            self.anim_painted.insert(data.id, (self.last_full_draw, data.frame_count()));
-        }
+        self.anim_painted.insert(data.id, (self.last_full_draw, data.frame_count()));
 
         let visible_bounds_snapped = self.snap_bounds(visible_bounds);
         let sub_tile = sub_tile(tile, visible_bounds, image_bounds);
@@ -5546,11 +5544,13 @@ impl Window {
         Ok(())
     }
 
-    /// Every frame of an animation is its own tile, kept while the image lives (a cache's idle
-    /// sweep, often minutes). One unpainted for a couple of seconds and absent from the frame on
-    /// screen gives its tiles back now; drawn again, its frames upload again.
+    /// A painted image keeps its tiles while it lives (a cache's idle sweep, often a minute or
+    /// more), a copy of pixels the cache holds anyway. One unpainted for a few seconds (an
+    /// animation, each frame its own tile, sooner) and absent from the frame on screen gives its
+    /// tiles back now; drawn again, it uploads again.
     fn sweep_animation_tiles(&mut self) {
         const IDLE: Duration = Duration::from_secs(2);
+        const IDLE_STILL: Duration = Duration::from_secs(5);
         let now = self.last_full_draw;
         if self.anim_painted.is_empty() || now.duration_since(self.anim_swept) < Duration::from_secs(1) {
             return;
@@ -5559,7 +5559,7 @@ impl Window {
         let stale: Vec<(ImageId, usize)> = self
             .anim_painted
             .iter()
-            .filter(|(_, (at, _))| now.duration_since(*at) > IDLE)
+            .filter(|(_, (at, frames))| now.duration_since(*at) > if *frames > 1 { IDLE } else { IDLE_STILL })
             .map(|(id, (_, frames))| (*id, *frames))
             .collect();
         if stale.is_empty() {
