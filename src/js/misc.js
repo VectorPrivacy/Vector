@@ -184,23 +184,7 @@ function scrollToBottom(domElement, fSmooth = true) {
     // only matters for #chat-messages); harmless elsewhere.
     beginProgrammaticScroll();
     if (!fSmooth) { scrollToEnd(domElement); return; }
-    domElement.scrollTo({ top: scrollEnd(domElement), behavior: 'smooth' });
-}
-
-/** The chat list scrolls bottom-up: its scrollTop is 0 at the far end and runs negative into
- *  history. Its end is the newest row, above any room the window keeps under the rows. */
-function scrollEnd(el) {
-    return el === domChatMessages ? -chatTailRoom() : Math.max(0, el.scrollHeight - el.clientHeight);
-}
-
-/** How far a scroller sits from its end (px). */
-function scrollFromEnd(el) {
-    return el === domChatMessages ? -el.scrollTop - chatTailRoom() : el.scrollHeight - el.clientHeight - el.scrollTop;
-}
-
-/** How far a scroller sits from its start (px). */
-function scrollFromStart(el) {
-    return el === domChatMessages ? el.scrollHeight - el.clientHeight + el.scrollTop : el.scrollTop;
+    domElement.scrollTo({ top: Math.max(0, domElement.scrollHeight - domElement.clientHeight), behavior: 'smooth' });
 }
 
 /**
@@ -212,9 +196,9 @@ function scrollFromStart(el) {
  * even when this call would otherwise change nothing.
  */
 function scrollToEnd(el) {
-    const end = scrollEnd(el);
-    if (el.scrollHeight > el.clientHeight) el.scrollTop = end - 1;
-    el.scrollTop = end;
+    const max = Math.max(0, el.scrollHeight - el.clientHeight);
+    if (max > 0) el.scrollTop = max - 1;
+    el.scrollTop = max;
 }
 
 /**
@@ -297,7 +281,11 @@ function createScrollHandler(scrollableDiv, bottomButton, options = {}) {
             VectorSvelte.setScrollReturnVisible(false);
             return;
         }
-        if (scrollFromEnd(scrollableDiv) > SCROLL_THRESHOLD) {
+        const currentScrollTop = scrollableDiv.scrollTop;
+        const maxScroll = scrollableDiv.scrollHeight - scrollableDiv.clientHeight;
+        const distanceFromBottom = maxScroll - currentScrollTop;
+
+        if (distanceFromBottom > SCROLL_THRESHOLD) {
             VectorSvelte.setScrollReturnVisible(true);
         } else {
             VectorSvelte.setScrollReturnVisible(false);
@@ -342,7 +330,8 @@ function createScrollHandler(scrollableDiv, bottomButton, options = {}) {
  * @param {HTMLElement} targetMessage - The element to center in view
  */
 function centerInView(targetMessage) {
-    const container = targetMessage.closest('.chat-messages') || targetMessage.parentElement;
+    // Get the container and the target message
+    const container = targetMessage.parentElement;
 
     // Get the container's height
     const containerHeight = container.clientHeight;
@@ -355,7 +344,7 @@ function centerInView(targetMessage) {
     beginProgrammaticScroll();
     // Smooth scroll to the calculated position
     container.scrollTo({
-        top: container === domChatMessages ? Math.min(scrollPosition, scrollEnd(container)) : scrollPosition,
+        top: scrollPosition,
         behavior: 'smooth'
     });
 }

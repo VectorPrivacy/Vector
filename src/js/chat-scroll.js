@@ -44,10 +44,6 @@ let windowAtTail = true;
 // updateChat's auto-scroll-to-bottom tail doesn't yank the viewport — the slide
 // owns scrollTop itself. Read by updateChat in main.js.
 let _windowSuppressAutoScroll = false;
-// Set while a whole window renders: the caller places the view after, so no anchor holds through it.
-let _windowRendering = false;
-// Counts whole-window renders: a load that awaited across one belongs to a window that is gone.
-let _windowGen = 0;
 
 // True while jumpToUnread swaps the window to the unread boundary (local work only,
 // never the relay walk), so arrivals then are data-only. Cleared in jumpToUnread's
@@ -87,7 +83,7 @@ function _currentWindowRange() {
  *  is rendered. Walks children from the end, returning the first that resolves. */
 function _windowBottomRenderedIndex() {
     if (!domChatMessages) return -1;
-    const children = domChatRows.children;
+    const children = domChatMessages.children;
     for (let i = children.length - 1; i >= 0; i--) {
         const id = children[i].id;
         if (!id) continue;                       // overlays, date dividers, "New"
@@ -115,8 +111,6 @@ function isAtDataBottom() {
  * the slice (caller may also re-insert). Returns the rendered slice array.
  */
 async function renderWindow(startIdx, endIdx) {
-    _windowGen++;
-    _chatStartHeld = false;
     const chat = arrChats.find(c => c.id === strOpenChat);
     if (!chat) return [];
     const msgs = _windowMessages();
@@ -157,10 +151,10 @@ async function renderWindow(startIdx, endIdx) {
     // the old one are kept by the keyed each instead of being rebuilt.
     ensureMessageList();
     windowTopId = windowBottomId = null;
-    _windowSuppressAutoScroll = _windowRendering = true;
+    _windowSuppressAutoScroll = true;
     try {
         await updateChat(chat, slice, profile, false);
-    } finally { _windowSuppressAutoScroll = _windowRendering = false; _tailAnchor = null; }
+    } finally { _windowSuppressAutoScroll = false; }
 
     // Set anchors from the slice edges.
     windowTopId = slice[0]?.id || null;
@@ -180,8 +174,6 @@ async function renderWindow(startIdx, endIdx) {
     // Land a pending manual-scroll frontier divider if its row just entered the slice.
     tryPlacePendingDivider();
 
-    setTailRoom(0);
-
     // Keep procedural-scroll bookkeeping consistent with what's rendered.
     proceduralScrollState.renderedMessageCount = slice.length;
     proceduralScrollState.totalMessageCount = msgs.length;
@@ -189,15 +181,15 @@ async function renderWindow(startIdx, endIdx) {
     // The rendered range moved — the scroll-return button's data-bottom term
     // may have flipped. (No scroll event fires from a programmatic render.)
     refreshScrollReturnButton();
-    scheduleChatScrollbar();
 
     return slice;
 }
 
 /**
- * Drop `count` rows (by id) from the BOTTOM of the rendered window. They are below the
- * view, so the caller hands their height to the tail room (keepTailAnchor). Re-derives
- * the new bottom anchor and heals day-separators. Returns the number of rows removed.
+ * Drop `count` rows (by id) from the BOTTOM of the rendered window. The dropped
+ * rows are below the viewport (we just prepended above), so scrollTop is
+ * unaffected; only scrollHeight shrinks. Re-derives the new bottom anchor and
+ * heals day-separators. Returns the number of .dmsg rows removed.
  */
 function _windowDropBottom(count) {
     const range = _currentWindowRange();
@@ -217,8 +209,9 @@ function _windowDropBottom(count) {
 }
 
 /**
- * Drop `count` rows (by id) from the TOP of the rendered window. They are above the
- * view, which the bottom-up scroller keeps where it is. Returns the pixel height removed.
+ * Drop `count` rows (by id) from the TOP of the rendered window. The dropped
+ * rows are ABOVE the viewport, so the caller must apply scrollTop -= droppedHeight
+ * synchronously to keep the viewport fixed. Returns the total pixel height removed.
  */
 function _windowDropTop(count) {
     const range = _currentWindowRange();
@@ -263,8 +256,9 @@ function _windowRenderedRowCount() {
 
 /**
  * After a realtime append while pinned at the bottom, drop the oldest rows from
- * the top if the rendered window exceeds MAX. They are above the view, which the
- * bottom-up scroller keeps where it is.
+ * the top if the rendered window exceeds MAX. When pinned, the user is reading
+ * the bottom so dropped top rows are above the viewport; we adjust scrollTop by
+ * the removed height SYNCHRONOUSLY so the view doesn't jump, then keep the pin.
  */
 function windowTrimTopIfOver() {
     if (!domChatMessages) return;
@@ -273,7 +267,15 @@ function windowTrimTopIfOver() {
     // Anchors may be stale after updateChat's own append — re-seat them to the
     // current DOM edges before dropping.
     _windowReseatAnchorsFromDom();
-    _windowDropTop(overflow);
+    const droppedHeight = _windowDropTop(overflow);
+    if (chatPinnedToBottom) {
+        // Stay pinned: simplest correct behaviour is to re-snap to bottom.
+        scrollToBottom(domChatMessages, false);
+    } else if (droppedHeight > 0) {
+        // Drop-top moves scrollTop UP — guard so it isn't misread as a user scroll-up.
+        beginProgrammaticScroll();
+        domChatMessages.scrollTop -= droppedHeight;
+    }
     // Content shrank below the viewport: no scroll event fires to clear the
     // scroll-away latch, so the pin would stay false forever. At the trivial
     // bottom, release the latch and re-pin so new tail messages auto-scroll.
@@ -293,8 +295,13 @@ function windowTrimTopIfOver() {
  * window with it (drops the seeked slice).
  */
 async function windowJumpToBottom() {
-    // Explicit user action (↓ button / own-send / the scrollbar): it MUST reach the live tail. A load
-    // in flight is overtaken, not waited on: it belongs to the window this replaces (_windowGen).
+    // Explicit user action (↓ button / own-send): it MUST reach the live tail, never silently no-op.
+    // If a scroll-triggered load holds the gate, WAIT for it to finish (don't bail) then claim it — so
+    // the re-seed-to-tail still runs, and it stays race-free by serialising after the in-flight load.
+    let _waitGuard = 0;
+    while (proceduralScrollState.isLoading && _waitGuard++ < 160) {
+        await new Promise(r => setTimeout(r, 25));
+    }
     proceduralScrollState.isLoading = true;
     try {
     const chatId = strOpenChat;
@@ -352,7 +359,7 @@ async function windowJumpToBottom() {
     // uses), unless the user deliberately scrolled away during the wait.
     await waitForMediaToLoad();
     if (strOpenChat === chatId && !_userScrolledAway) scrollToBottom(domChatMessages, false);
-    } finally { proceduralScrollState.isLoading = false; rekickHistoryEdge(); }
+    } finally { proceduralScrollState.isLoading = false; }
 }
 
 /** A row is leaving: if it anchors the window, hand the anchor to its neighbour
@@ -375,8 +382,8 @@ function _windowReleaseAnchor(id) {
  *  (rows OR system events both carry an id that resolves into chat.messages).
  *  Used after updateChat mutates the DOM directly (append/prepend path). */
 function _windowReseatAnchorsFromDom() {
-    if (!domChatRows) return;
-    const children = domChatRows.children;
+    if (!domChatMessages) return;
+    const children = domChatMessages.children;
     let first = null, last = null;
     for (let i = 0; i < children.length; i++) {
         const id = children[i].id;
@@ -415,6 +422,9 @@ async function windowExtendOlder() {
     const isGroup = chatIsGroup(chat);
     const profile = !isGroup ? getProfile(chat.id) : null;
     const msgs0 = _windowMessages();
+
+    const scrollHeightBefore = domChatMessages.scrollHeight;
+    const scrollTopBefore = domChatMessages.scrollTop;
 
     // When the window TOP sits in the tail (a gap below it, in the seek region) an
     // in-memory step up must not cross the gap into the seek region. Floor the reach
@@ -458,35 +468,27 @@ async function windowExtendOlder() {
         const anchorId = windowTopId;
         if (!anchorId) return false;
         const chatId = strOpenChat;
-        const gen = _windowGen;
         // Pill active → user is paging toward a (possibly deep) unread boundary; pull a larger batch
         // so the cache reaches it in far fewer round-trips (rendered window still steps by WINDOW_STEP).
         const seekFetch = (_unreadJumpPill && _unreadJumpPill.classList.contains('visible'))
             ? UNREAD_SEEK_FETCH_STEP : WINDOW_STEP;
-        // A Community channel can hold a hole above its older rows (a catch-up that ran out of
-        // pages): the relays fill it first, or the read below would step straight across it.
-        if (chat.chat_type === 'Community') {
-            const topAt = msgs0[start]?.at;
-            if (topAt) await invoke('fill_community_gap', { channelId: chatId, beforeMs: topAt }).catch(() => 0);
-            if (strOpenChat !== chatId || gen !== _windowGen) return true;
-        }
         let older = [];
         try {
             older = await invoke('get_messages_around', { chatId, anchorId, before: seekFetch + 1, after: 0 }) || [];
         } catch (e) { console.warn('[unread-jump] extend-older anchored load failed:', e); }
-        if (strOpenChat !== chatId || gen !== _windowGen) return true;
+        if (strOpenChat !== chatId) return true;
 
         // ≤1 row back = only the anchor (the `<= anchor` include) → DB history start.
         // For a Community, try the network to grow the DB first, THEN re-read.
         if (older.length <= 1 && chat.chat_type === 'Community') {
             await maybeLoadCommunityOlderFromNetwork(chatId);
-            if (strOpenChat !== chatId || gen !== _windowGen) return true;
+            if (strOpenChat !== chatId) return true;
             try {
                 older = await invoke('get_messages_around', { chatId, anchorId, before: seekFetch + 1, after: 0 }) || [];
             } catch (e) { console.warn('[unread-jump] extend-older re-read failed:', e); }
-            if (strOpenChat !== chatId || gen !== _windowGen) return true;
+            if (strOpenChat !== chatId) return true;
         }
-        if (older.length <= 1) return true;   // history start
+        if (older.length <= 1) return true;   // history start reached; handled, don't loop
 
         // addEvents(prepend) dedups the anchor row, so only the genuinely-older rows
         // enter chat.messages. Re-derive the slice from the cache so indices stay valid.
@@ -505,25 +507,31 @@ async function windowExtendOlder() {
         if (!olderSlice.length) return true;
     }
 
-    // The rows go in above the view, which the bottom-up scroller keeps where it is.
     _windowSuppressAutoScroll = true;
     try {
         await updateChat(chat, olderSlice, profile, false);
     } finally { _windowSuppressAutoScroll = false; }
     windowTopId = olderSlice[0]?.id || windowTopId;
 
-    // Drop from the bottom, into the tail room. This moves the window off the live tail.
+    // Maintain visual position for the prepended rows. Programmatic: prepend grows
+    // scrollHeight, so we add back the delta to hold the viewport — must not read as user intent.
+    const scrollHeightAfter = domChatMessages.scrollHeight;
+    beginProgrammaticScroll();
+    domChatMessages.scrollTop = scrollTopBefore + (scrollHeightAfter - scrollHeightBefore);
+
+    // Drop from the bottom (below the viewport → scrollTop unaffected). This moves
+    // the window off the live tail.
     const overOld = _windowRenderedRowCount() - MAX_WINDOW_ROWS;
-    if (overOld > 0) { windowAtTail = false; _windowDropBottom(overOld); keepTailAnchor(); }
+    if (overOld > 0) { _windowDropBottom(overOld); windowAtTail = false; }
     refreshScrollReturnButton();
     tryPlacePendingDivider();
     return true;
 }
 
 /**
- * Scroll-down: append the next WINDOW_STEP newer rows below the rendered window (they
- * take their height from the tail room), then drop from the TOP. Returns true if it
- * handled the scroll.
+ * Scroll-down: append the next WINDOW_STEP newer rows below the rendered window,
+ * then drop from the TOP and apply scrollTop -= droppedHeight SYNCHRONOUSLY so the
+ * viewport stays fixed. Returns true if it handled the scroll.
  *
  * Gap-aware. Sources, in order:
  *  1. In-memory rows below the window AND the window bottom is NOT the gap edge:
@@ -578,12 +586,11 @@ async function windowExtendNewer() {
         const anchorId = windowBottomId;
         if (!anchorId) return false;
         const chatId = strOpenChat;
-        const gen = _windowGen;
         let newer = [];
         try {
             newer = await invoke('get_messages_around', { chatId, anchorId, before: 0, after: WINDOW_STEP }) || [];
         } catch (e) { console.warn('[unread-jump] extend-newer anchored load failed:', e); }
-        if (strOpenChat !== chatId || gen !== _windowGen) return true;
+        if (strOpenChat !== chatId) return true;
 
         // No genuinely-newer rows in the DB past the anchor.
         if (!newer.length) {
@@ -632,7 +639,6 @@ async function windowExtendNewer() {
         await updateChat(chat, newerSlice, profile, false);
     } finally { _windowSuppressAutoScroll = false; }
     windowBottomId = newerSlice[newerSlice.length - 1]?.id || windowBottomId;
-    keepTailAnchor();
 
     // Authoritative tail check: the window's bottom row is the last in the buffer and
     // there's no gap left to fill. A gap-fill that just closed (seek met tail) still
@@ -642,162 +648,18 @@ async function windowExtendNewer() {
         const atBufferEnd = msgsFinal.length > 0 && windowBottomId === msgsFinal[msgsFinal.length - 1].id;
         if (atBufferEnd && eventCache.getGapAfterId(strOpenChat) == null) windowAtTail = true;
     }
-    if (windowAtTail) settleTailRoom();
 
-    // Drop from the top: above the view, which stays where it is.
+    // Drop from the top (above the viewport → must compensate scrollTop). Apply
+    // synchronously in this frame (WKWebView flashes if deferred to rAF).
     const overNew = _windowRenderedRowCount() - MAX_WINDOW_ROWS;
-    if (overNew > 0) _windowDropTop(overNew);
+    if (overNew > 0) {
+        const droppedHeight = _windowDropTop(overNew);
+        // Drop-top moves scrollTop UP — guard so it isn't misread as a user scroll-up.
+        if (droppedHeight > 0) { beginProgrammaticScroll(); domChatMessages.scrollTop -= droppedHeight; }
+    }
     refreshScrollReturnButton();
     tryPlacePendingDivider();
     return true;
-}
-
-// The list scrolls bottom-up, so rows added, removed or resized ABOVE the view never move it: the
-// engine keeps its distance from the end. A change BELOW the view would, so unless the view belongs
-// at the bottom, the last row ending in view keeps its distance from the end. The difference comes
-// out of (or goes into) the room under the rows; only past the room does the scroll position move,
-// which a scroll in flight could overwrite.
-let _tailAnchor = null;   // { el, at }: a row, and its distance from the end of the content
-let _tailRoom = 0;
-// Room kept under a window seeked into history, for the newer rows a scroll down brings back.
-const TAIL_RESERVE = 24000;
-// A scroll is in flight until it has been quiet this long (momentum included).
-const SCROLL_IDLE_MS = 160;
-let _lastScrollAt = 0;
-let _tailTimer = 0;
-
-function chatTailRoom() { return _tailRoom; }
-
-function setTailRoom(px) {
-    _tailRoom = Math.max(0, Math.round(px));
-    if (domChatTailRoom) domChatTailRoom.style.height = _tailRoom + 'px';
-}
-
-function _fromEnd(row) {
-    return domChatMessages.getBoundingClientRect().bottom - row.getBoundingClientRect().bottom - domChatMessages.scrollTop;
-}
-
-/** Note the last row that ends inside the view, and its distance from the end. A row cut off at
- *  the bottom would be a poor anchor: its media growing pushes up all that shows. */
-function recordTailAnchor() {
-    _tailAnchor = null;
-    if (!domChatRows) return;
-    if (_jumpHeld?.isConnected) {
-        _tailAnchor = { el: _jumpHeld, at: _fromEnd(_jumpHeld) };
-        return;
-    }
-    _jumpHeld = null;
-    const view = domChatMessages.getBoundingClientRect();
-    const rows = domChatRows.children;
-    let cut = null;
-    for (let i = rows.length - 1; i >= 0; i--) {
-        const row = rows[i];
-        // A divider moves with the rows around it; the hover toolbar follows the pointer.
-        if (!row.id || row.id === 'dmsg-toolbar') continue;
-        const r = row.getBoundingClientRect();
-        if (r.bottom <= view.bottom) {
-            const el = r.bottom > view.top ? row : cut;
-            if (el) _tailAnchor = { el, at: _fromEnd(el) };
-            return;
-        }
-        if (r.top < view.bottom) cut = row;
-    }
-    // One row taller than the view: it is the only one there is.
-    if (cut) _tailAnchor = { el: cut, at: _fromEnd(cut) };
-}
-
-/** Put the noted row back at its distance from the end. */
-function restoreTailAnchor() {
-    const a = _tailAnchor;
-    if (!a || !a.el.isConnected) return;
-    const delta = _fromEnd(a.el) - a.at;   // what grew below it (shrank, when negative)
-    if (Math.abs(delta) < 1) return;
-    const take = Math.min(delta, _tailRoom);
-    if (take !== 0) setTailRoom(_tailRoom - take);
-    if (delta - take >= 1) {
-        beginProgrammaticScroll();
-        domChatMessages.scrollTop -= delta - take;
-    }
-}
-
-/** Hold the view through a change below it, unless it belongs at the bottom, and note it afresh. */
-function keepTailAnchor() {
-    if (_windowRendering || _unreadJumpResolving || !domChatRows) { _tailAnchor = null; return; }
-    if (_jumpHeld?.isConnected) centreHeld();
-    else if (!chatPinnedToBottom || !isAtDataBottom()) restoreTailAnchor();
-    recordTailAnchor();
-}
-
-// A row jumped to stays centred until the reader scrolls: older rows load in above it and media
-// grows around it, and a landing short of the centre (too little drawn above) is made good.
-let _jumpHeld = null;
-
-function centreHeld() {
-    const view = domChatMessages;
-    const el = _jumpHeld;
-    const start = -(view.scrollHeight - view.clientHeight);
-    const top = Math.max(start, Math.min(el.offsetTop - (view.clientHeight - el.offsetHeight) / 2, scrollEnd(view)));
-    if (Math.abs(view.scrollTop - top) < 1) return;
-    beginProgrammaticScroll();
-    view.scrollTop = top;
-}
-
-/** Centre `el` at once and hold it there. */
-function landOn(el) {
-    chatPinnedToBottom = false;
-    _userScrolledAway = true;
-    _jumpHeld = el;
-    centreHeld();
-    _tailAnchor = { el, at: _fromEnd(el) };
-}
-
-// Landed at the very start: like the pin at the end, the view stays there while rows in it grow
-// (the bottom-up scroller would otherwise keep the end still and push the start away), until the
-// reader scrolls.
-let _chatStartHeld = false;
-
-function holdChatStart() {
-    _chatStartHeld = true;
-    beginProgrammaticScroll();
-    domChatMessages.scrollTop = -domChatMessages.scrollHeight;
-}
-
-// A reader's scroll wakes the touch handle and the floating date; they rest once it has been
-// still this long.
-const BAR_REST_MS = 1500;
-let _barRestTimer = 0;
-
-/** Every scroll event: the reader's scroll is in flight until it has been quiet a while. */
-function noteScrollActivity() {
-    if (VectorSvelte.now() >= _programmaticScrollUntil) {
-        _chatStartHeld = false;
-        _jumpHeld = null;
-        VectorSvelte.setChatScrollbar({ active: true });
-        clearTimeout(_barRestTimer);
-        _barRestTimer = setTimeout(() => VectorSvelte.setChatScrollbar({ active: false }), BAR_REST_MS);
-    }
-    _lastScrollAt = VectorSvelte.now();
-    if (_tailRoom && windowAtTail) {
-        clearTimeout(_tailTimer);
-        _tailTimer = setTimeout(settleTailRoom, SCROLL_IDLE_MS);
-    }
-}
-
-/** Back at the live tail, the room has nothing left to stand in for: close it once the scroll
- *  rests. Everything in view moves with it, so the scroll position follows: only safe at rest. */
-function settleTailRoom() {
-    clearTimeout(_tailTimer);
-    if (!_tailRoom || !windowAtTail || !domChatMessages) return;
-    const quiet = VectorSvelte.now() - _lastScrollAt;
-    if (quiet < SCROLL_IDLE_MS || proceduralScrollState.isLoading) {
-        _tailTimer = setTimeout(settleTailRoom, Math.max(SCROLL_IDLE_MS - quiet, 50));
-        return;
-    }
-    const room = _tailRoom;
-    setTailRoom(0);
-    beginProgrammaticScroll();
-    domChatMessages.scrollTop += room;
-    recordTailAnchor();
 }
 
 // Procedural scroll state
@@ -806,7 +668,9 @@ const proceduralScrollState = {
     renderedMessageCount: 0,
     totalMessageCount: 0,
     messagesPerBatch: 20,
-    scrollThreshold: 600, // pixels from an edge to load more, at least (a screen and a half, where taller)
+    scrollThreshold: 300, // pixels from top to trigger load
+    lastScrollHeight: 0, // Track scroll height for media load correction
+    isLoadingOlderMessages: false, // Flag to indicate we're in procedural load mode
     chatId: null, // Current chat ID for cache lookups
     useCache: false // Whether to use the message cache
 };
@@ -815,8 +679,6 @@ const proceduralScrollState = {
 // at a time, and a set of channels whose network history-start has been reached (stop trying).
 const _communityOlderInFlight = new Set();
 const _communityOlderExhausted = new Set();
-// Channels whose start reached here is only this account's: older epochs are sealed to it.
-const _communityHistoryLimited = new Set();
 // Where each channel's relay walk last stopped with history unread below (ms): a scroll goes on
 // from the lower of that and the oldest row held.
 const _communityOlderCursor = new Map();
@@ -834,47 +696,59 @@ async function maybeLoadCommunityOlderFromNetwork(chatId) {
 
     // Cursor = the oldest message we hold. getEventsRef is read-only (no LRU side effect).
     const events = eventCache.getEventsRef(chatId) || chat.messages || [];
-    // Holding nothing, there is no oldest message to page back from: the newest page is the ask.
-    const oldestMs = events.length ? events.reduce((min, e) => (e.at < min ? e.at : min), events[0].at) : null;
+    if (!events.length) return;
+    const oldestMs = events.reduce((min, e) => (e.at < min ? e.at : min), events[0].at);
 
     _communityOlderInFlight.add(chatId);
-    _communityOlderFailed.delete(chatId);
-    let grew = false, busy = false;
     try {
         const prevTotal = (eventCache.getStats(chatId) || {}).totalInDb || 0;
-        let beforeMs = oldestMs == null ? (_communityOlderCursor.get(chatId) ?? null) : Math.min(oldestMs, _communityOlderCursor.get(chatId) ?? Infinity);
+        let beforeMs = Math.min(oldestMs, _communityOlderCursor.get(chatId) ?? Infinity);
         for (let hop = 0; hop < 8; hop++) {
             const res = await invoke('sync_community_channel', { channelId: chatId, beforeMs });
-            // Another fetch of this channel holds the relay walk: ask again once it lets go.
-            if (res?.busy) { busy = true; break; }
             // Refresh the cache count so hasMoreEvents reflects any newly-ingested older rows.
             // A window with rows re-reads anchored to its top once this returns; only an empty
             // one pages them in here, as the offset page has nothing to anchor on.
             const newTotal = await invoke('get_chat_message_count', { chatId });
             if (newTotal > prevTotal) {
-                grew = true;
                 eventCache.updateTotalCount(chatId, newTotal);
-                if (strOpenChat === chatId && !(_windowMessages() || []).some(_barCounted)) loadMoreMessages();
+                const empty = !(_windowMessages() || []).some((m) => !m.system_event && !m.pending && !m.failed);
+                if (strOpenChat === chatId && empty) loadMoreMessages();
             }
             // Terminate ONLY on the backend's authoritative "no more older" signal — a page that
             // returned just already-known events (no count growth) does NOT mean history's start.
             if (res && res.reached_start) _communityOlderExhausted.add(chatId);
-            if (res && res.history_limited) _communityHistoryLimited.add(chatId);
             if (res && res.oldest_ms != null) _communityOlderCursor.set(chatId, res.oldest_ms);
             else _communityOlderCursor.delete(chatId);
             if (newTotal > prevTotal || !res || res.reached_start || strOpenChat !== chatId) break;
             // A page that added nothing still moved the relay walk down: go on from there.
-            if (res.oldest_ms == null || beforeMs == null || res.oldest_ms >= beforeMs) break;
+            if (res.oldest_ms == null || res.oldest_ms >= beforeMs) break;
             beforeMs = res.oldest_ms;
         }
     } catch (e) {
         console.warn('Community older-page fetch failed:', e);
     } finally {
         _communityOlderInFlight.delete(chatId);
-        // Neither older rows nor the relays' word that there are none: say so, with a retry.
-        if (!grew && !busy && !_communityOlderExhausted.has(chatId)) _communityOlderFailed.add(chatId);
-        if (strOpenChat === chatId) refreshHistoryEdge();
-        if (busy) setTimeout(rekickHistoryEdge, 800);
+    }
+}
+
+/**
+ * Correct scroll position when media loads during procedural scroll
+ * This prevents "snap-back" when images/videos load after messages are rendered
+ */
+function correctScrollForMediaLoad() {
+    // Only correct if we're not at the bottom and we have a baseline
+    if (!proceduralScrollState.lastScrollHeight || !domChatMessages) return;
+    
+    const currentScrollHeight = domChatMessages.scrollHeight;
+    const scrollHeightDiff = currentScrollHeight - proceduralScrollState.lastScrollHeight;
+    
+    // Only correct if there's a meaningful difference (media loaded)
+    if (scrollHeightDiff > 5) {
+        const currentScrollTop = domChatMessages.scrollTop;
+        // Programmatic media-load correction — don't read as user intent.
+        beginProgrammaticScroll();
+        domChatMessages.scrollTop = currentScrollTop + scrollHeightDiff;
+        proceduralScrollState.lastScrollHeight = currentScrollHeight;
     }
 }
 
@@ -883,9 +757,10 @@ async function maybeLoadCommunityOlderFromNetwork(chatId) {
  * once its row is already laid out: media finishing load, an emoji-pack preview
  * resolving its canvas height, the "New" unread divider being inserted, etc.
  *
- * Every resizable element behaves identically:
+ * Same three branches the media-load path uses, so every resizable element
+ * behaves identically:
  *  - inside the open window  → snap to bottom (user just opened, expects bottom)
- *  - scrolled away from "now" → the view keeps its place (keepTailAnchor)
+ *  - back-paging older history → keep the visual anchor (don't snap away)
  *  - steady-state            → soft scroll only if the user is still pinned
  */
 function compensateChatScrollForResize() {
@@ -893,8 +768,8 @@ function compensateChatScrollForResize() {
     if (chatOpenTimestamp && VectorSvelte.now() - chatOpenTimestamp < 100) {
         scrollToBottom(domChatMessages, false);
         holdChatBottom();
-    } else if (!chatPinnedToBottom || !isAtDataBottom()) {
-        keepTailAnchor();
+    } else if (proceduralScrollState.isLoadingOlderMessages) {
+        correctScrollForMediaLoad();
     } else {
         softChatScroll();
     }
@@ -960,7 +835,7 @@ function holdChatBottom(ms = BOTTOM_HOLD_MS) {
             // the user left.
             if (lastSet !== null && el.scrollTop < lastSet - 4
                 && _lastScrollGesture > lastSetAt
-                && scrollFromEnd(el) > 8) {
+                && height - el.scrollTop - el.clientHeight > 8) {
                 _bottomHoldUntil = 0;
                 _userScrolledAway = true;
                 chatPinnedToBottom = false;
@@ -968,7 +843,7 @@ function holdChatBottom(ms = BOTTOM_HOLD_MS) {
             }
             if (firstTick || height !== lastHeight) {
                 lastHeight = height;
-                if (scrollFromEnd(el) > 1) {
+                if (height - el.scrollTop - el.clientHeight > 1) {
                     beginProgrammaticScroll();
                     scrollToEnd(el);
                     lastSet = el.scrollTop;
@@ -983,47 +858,44 @@ function holdChatBottom(ms = BOTTOM_HOLD_MS) {
 }
 
 /**
- * The content's standing guard: any change in its height holds the view. Pinned, the bottom-up
- * scroller already keeps the end; only a view that drifted off it is put back. Away from it,
- * the tail anchor holds. Event-driven, so an idle chat costs nothing.
+ * The pin's standing guard: while pinned, any change in the content's height restates the
+ * end. The hold covers the moments after a render; this covers everything else (a row that
+ * shrinks as it joins a streak, a divider that comes and goes, a reaction row). A SHRINK
+ * matters most: WebKit pulls scrollTop back into range itself, that clamp never reaches its
+ * scrolling layer, and the view paints at the old offset (blank below the last row, hover
+ * landing a row high) until the user scrolls. Event-driven, so an idle chat costs nothing:
+ * rows are watched for size, the list for rows coming and going.
  */
 let _pinGuardHeight = 0;
 function _pinGuardCheck() {
-    scheduleChatScrollbar();
     const el = domChatMessages;
     const height = el.scrollHeight;
     if (height === _pinGuardHeight) return;
     _pinGuardHeight = height;
-    if (!strOpenChat || _windowRendering || _unreadJumpResolving) return;
-    if (_chatStartHeld) return holdChatStart();
-    if (!chatPinnedToBottom || !isAtDataBottom()) return keepTailAnchor();
-    if (_windowSuppressAutoScroll || Math.abs(scrollFromEnd(el)) < 1) return;
+    if (!strOpenChat || !chatPinnedToBottom || _windowSuppressAutoScroll || _unreadJumpResolving || !isAtDataBottom()) return;
     beginProgrammaticScroll();
     scrollToEnd(el);
 }
 VectorSvelte.guardTiling(domChatMessages, _pinGuardCheck);
-// Rows coming and going are seen here before the frame paints (the guard above checks them a frame
-// later), so a row added or removed below the view never shows it out of place.
-new MutationObserver(() => {
-    if (strOpenChat) keepTailAnchor();
-}).observe(domChatRows, { childList: true });
 
 /**
  * Handle procedural scroll loading of older messages
  */
 function handleProceduralScroll() {
-    if (!strOpenChat || proceduralScrollState.isLoading || _barDragging) return;
+    if (!strOpenChat || proceduralScrollState.isLoading) return;
 
-    const reach = Math.max(proceduralScrollState.scrollThreshold, domChatMessages.clientHeight * 1.5);
-    const nearTop = scrollFromStart(domChatMessages) <= reach;
-    const nearBottom = scrollFromEnd(domChatMessages) <= reach;
+    const scrollTop = domChatMessages.scrollTop;
+    const maxScroll = domChatMessages.scrollHeight - domChatMessages.clientHeight;
+    const pxFromBottom = maxScroll - scrollTop;
+    const nearTop = scrollTop <= proceduralScrollState.scrollThreshold;
+    const nearBottom = pxFromBottom <= proceduralScrollState.scrollThreshold;
 
     // Scroll DOWN near the DOM bottom: if newer in-memory rows sit below the
     // rendered window (we dropped them on an earlier extend), slide the window
     // toward "now" from memory — no backend.
     if (nearBottom && !isAtDataBottom()) {
         proceduralScrollState.isLoading = true;
-        windowExtendNewer().finally(() => { proceduralScrollState.isLoading = false; rekickHistoryEdge(); });
+        windowExtendNewer().finally(() => { proceduralScrollState.isLoading = false; });
         return;
     }
 
@@ -1034,7 +906,7 @@ function handleProceduralScroll() {
     // window top reaches the slice start, anchored-loads older rows from the DB itself
     // (community network-fill included).
     proceduralScrollState.isLoading = true;
-    windowExtendOlder().finally(() => { proceduralScrollState.isLoading = false; rekickHistoryEdge(); });
+    windowExtendOlder().finally(() => { proceduralScrollState.isLoading = false; });
 }
 
 /**
@@ -1058,6 +930,11 @@ async function loadMoreMessages() {
         }
 
         proceduralScrollState.isLoading = true;
+        proceduralScrollState.isLoadingOlderMessages = true;
+
+        // Store scroll position BEFORE rendering
+        const scrollHeightBefore = domChatMessages.scrollHeight;
+        const scrollTopBefore = domChatMessages.scrollTop;
 
         // Load more events from cache (fetches from DB if needed)
         const olderMessages = await eventCache.loadMoreEvents(
@@ -1067,6 +944,7 @@ async function loadMoreMessages() {
 
         if (olderMessages.length === 0) {
             proceduralScrollState.isLoading = false;
+            proceduralScrollState.isLoadingOlderMessages = false;
             return;
         }
 
@@ -1081,7 +959,7 @@ async function loadMoreMessages() {
         const isGroup = chatIsGroup(chat);
         const profile = !isGroup ? getProfile(chat.id) : null;
 
-        // Render the older events + newly-revealed system events (prepend), above the view.
+        // Render the older events + newly-revealed system events (prepend)
         await updateChat(chat, [...olderMessages, ...revealedSys], profile, false);
 
         // Update rendered count
@@ -1091,16 +969,36 @@ async function loadMoreMessages() {
         const newStats = eventCache.getStats(strOpenChat);
         proceduralScrollState.totalMessageCount = newStats?.totalInDb || proceduralScrollState.totalMessageCount;
 
-        // DOM windowing: trim back down to MAX from the bottom, into the tail room.
+        // Correct scroll position to prevent "snapping"
+        const scrollHeightAfter = domChatMessages.scrollHeight;
+        const scrollHeightDiff = scrollHeightAfter - scrollHeightBefore;
+
+        // Adjust scroll position to maintain visual position (programmatic).
+        beginProgrammaticScroll();
+        domChatMessages.scrollTop = scrollTopBefore + scrollHeightDiff;
+
+        // DOM windowing: dropped rows are below the viewport (we just prepended
+        // above), so scrollTop is unaffected — only scrollHeight shrinks. Trim
+        // back down to MAX.
         {
             _windowReseatAnchorsFromDom();
             const over = _windowRenderedRowCount() - MAX_WINDOW_ROWS;
-            if (over > 0) { windowAtTail = false; _windowDropBottom(over); keepTailAnchor(); }
+            if (over > 0) _windowDropBottom(over);
             // Dropping the bottom can move the window off the live tail.
             refreshScrollReturnButton();
         }
 
+        // Store the current scroll height for media load correction
+        proceduralScrollState.lastScrollHeight = domChatMessages.scrollHeight;
+
         proceduralScrollState.isLoading = false;
+
+        // Keep the flag active for a bit longer to catch late-loading media
+        setTimeout(() => {
+            proceduralScrollState.isLoadingOlderMessages = false;
+            proceduralScrollState.lastScrollHeight = 0;
+        }, 2000);
+
         return;
     }
 
@@ -1113,6 +1011,7 @@ async function loadMoreMessages() {
     if (currentRendered >= totalMessages) return;
 
     proceduralScrollState.isLoading = true;
+    proceduralScrollState.isLoadingOlderMessages = true;
 
     // Calculate how many more messages to load
     const messagesToLoad = Math.min(
@@ -1127,20 +1026,42 @@ async function loadMoreMessages() {
 
     if (olderMessages.length === 0) {
         proceduralScrollState.isLoading = false;
+        proceduralScrollState.isLoadingOlderMessages = false;
         return;
     }
+
+    // Store scroll position BEFORE rendering
+    const scrollHeightBefore = domChatMessages.scrollHeight;
+    const scrollTopBefore = domChatMessages.scrollTop;
 
     // Get profile for rendering
     const isGroup = chatIsGroup(chat);
     const profile = !isGroup ? getProfile(chat.id) : null;
 
-    // Render the older messages, above the view.
+    // Render the older messages
     await updateChat(chat, olderMessages, profile, false);
 
     // Update rendered count
     proceduralScrollState.renderedMessageCount += messagesToLoad;
 
+    // Correct scroll position to prevent "snapping"
+    const scrollHeightAfter = domChatMessages.scrollHeight;
+    const scrollHeightDiff = scrollHeightAfter - scrollHeightBefore;
+
+    // Adjust scroll position to maintain visual position (programmatic).
+    beginProgrammaticScroll();
+    domChatMessages.scrollTop = scrollTopBefore + scrollHeightDiff;
+
+    // Store the current scroll height for media load correction
+    proceduralScrollState.lastScrollHeight = domChatMessages.scrollHeight;
+
     proceduralScrollState.isLoading = false;
+
+    // Keep the flag active for a bit longer to catch late-loading media
+    setTimeout(() => {
+        proceduralScrollState.isLoadingOlderMessages = false;
+        proceduralScrollState.lastScrollHeight = 0;
+    }, 2000);
 }
 
 /**
@@ -1177,6 +1098,8 @@ function initProceduralScrollWithCache(chatId, initialCount, totalCount) {
     proceduralScrollState.renderedMessageCount = initialCount;
     proceduralScrollState.totalMessageCount = totalCount;
     proceduralScrollState.isLoading = false;
+    proceduralScrollState.isLoadingOlderMessages = false;
+    proceduralScrollState.lastScrollHeight = 0;
     // Re-arm network back-paging each open: if history truly ended, the backend's
     // history-start short-circuit answers instantly (no network) and we re-latch; if it
     // grew reachable again (rejoin, epoch backfill), scroll-up probes instead of staying dead.
@@ -1190,6 +1113,8 @@ function resetProceduralScroll() {
     proceduralScrollState.isLoading = false;
     proceduralScrollState.renderedMessageCount = 0;
     proceduralScrollState.totalMessageCount = 0;
+    proceduralScrollState.lastScrollHeight = 0;
+    proceduralScrollState.isLoadingOlderMessages = false;
     proceduralScrollState.chatId = null;
     proceduralScrollState.useCache = false;
 }
@@ -1316,13 +1241,15 @@ async function loadAndScrollToMessage(targetMsgId) {
         // The window is centered on the target, mid-history — its bottom is not the
         // live tail. Scrolling down will extend and re-latch windowAtTail at the tail.
         windowAtTail = false;
-        setTailRoom(TAIL_RESERVE);
     }
 
-    // Land on the target and flash it to bring the user's eye to it.
+    // Wait for all media (images, videos) to load before scrolling
+    await waitForMediaToLoad();
+
+    // Now scroll to the target message and flash to bring the user's eye to it.
     const domMsg = document.getElementById(targetMsgId);
     if (domMsg) {
-        landOn(domMsg);
+        centerInView(domMsg);
         applyHighlight(domMsg, 'jumped');
     }
 }
@@ -1368,7 +1295,7 @@ async function ensureChatScrollable() {
         const chatId = strOpenChat;
         let guard = 0;
         while (guard++ < 15 && strOpenChat === chatId) {
-            if (domChatMessages.scrollHeight - _tailRoom - domChatMessages.clientHeight > 60) break;  // overflows → scrollable
+            if (domChatMessages.scrollHeight - domChatMessages.clientHeight > 60) break;  // overflows → scrollable
             const before = (_windowMessages() || []).length;
             await windowExtendOlder();
             if (strOpenChat !== chatId) return;
@@ -1528,7 +1455,6 @@ async function jumpToUnread(lastReadId) {
             let res = null;
             try { res = await invoke('sync_community_channel', { channelId: chatId, beforeMs: cursor }); } catch (e) { if (strOpenChat === chatId) console.warn('[unread-jump] sync threw', e); break; }
             if (res && res.reached_start) _communityOlderExhausted.add(chatId);
-            if (res && res.history_limited) _communityHistoryLimited.add(chatId);
             synced += (res && res.new_messages) || 0;
             const next = res && res.oldest_ms;
             if (next == null || next >= cursor) break;   // relay returned nothing older
@@ -1617,8 +1543,8 @@ async function jumpToUnread(lastReadId) {
         const start = center - Math.floor(MAX_WINDOW_ROWS / 2);
         const end = center + Math.ceil(MAX_WINDOW_ROWS / 2);
         await renderWindow(start, end);
-        setTailRoom(TAIL_RESERVE);
     }
+    await waitForMediaToLoad();
     chatPinnedToBottom = false;   // re-assert after updateChat's own auto-scroll
 
     // Inject exactly one divider above the first unread row and center it (the
@@ -1628,11 +1554,11 @@ async function jumpToUnread(lastReadId) {
     const node = dividerMsg && document.getElementById(dividerMsg.id);
     if (node) {
         insertUnreadDivider(node);
-        if (unreadDividerEl) landOn(unreadDividerEl);
+        if (unreadDividerEl) centerInView(unreadDividerEl);
     } else {
         // Row not in DOM (shouldn't happen — the whole slice is rendered) — center last_read if present.
         const lr = document.getElementById(lastReadId);
-        if (lr) landOn(lr);
+        if (lr) centerInView(lr);
     }
     // Jumping to unread IS catching up — mark the whole chat read so the badge + pill clear in one
     // shot even though the viewport rests at the divider. Without this last_read stays at the old
@@ -1641,383 +1567,3 @@ async function jumpToUnread(lastReadId) {
     hideUnreadJumpPill();
     } finally { _unreadJumpResolving = false; }
 }
-// ===========================================================================
-// The chat's scrollbar: where the view sits in the whole chat, not in the rendered window. A row's
-// place is its rank among the chat's messages (vector-core counts what sorts after it), and a drag
-// seeks: it loads the window at the pointer's place instead of scrolling the one it has.
-// ===========================================================================
-const _barRanks = new Map();   // message id → { newer, total, at }, or { none, at } when not held
-const BAR_RANK_TTL_MS = 2000;
-const _barDateFmt = new Intl.DateTimeFormat([], { dateStyle: 'medium' });
-let _barAsking = null;
-let _barRaf = 0;
-let _barInset = 0;             // the header lying over the top of the list, where it does
-let _barLast = { total: 0, visible: 0 };
-let _barDragging = false;
-let _barWant = null;           // the place a drag last asked for, while a seek runs
-let _barSeeking = false;
-
-function scheduleChatScrollbar() {
-    if (!_barRaf) _barRaf = requestAnimationFrame(updateChatScrollbar);
-}
-
-/** A held message's rank, asked of the backend at most once at a time; a stale answer serves until
- *  the fresh one lands. */
-function _barRank(chatId, id) {
-    const hit = _barRanks.get(id);
-    if (hit && VectorSvelte.now() - hit.at < BAR_RANK_TTL_MS) return hit.none ? null : hit;
-    if (_barAsking !== id) {
-        _barAsking = id;
-        if (_barRanks.size > 200) _barRanks.clear();
-        invoke('get_message_position', { chatId, messageId: id })
-            .then((pos) => _barRanks.set(id, pos ? { ...pos, at: VectorSvelte.now() } : { none: true, at: VectorSvelte.now() }))
-            .catch(() => _barRanks.set(id, { none: true, at: VectorSvelte.now() }))
-            .finally(() => {
-                if (_barAsking === id) _barAsking = null;
-                if (strOpenChat === chatId) scheduleChatScrollbar();
-            });
-    }
-    return hit && !hit.none ? hit : null;
-}
-
-const _barCounted = (m) => m && !m.system_event && !m.pending && !m.failed;
-
-function updateChatScrollbar() {
-    _barRaf = 0;
-    const el = domChatMessages;
-    const chatId = strOpenChat;
-    const msgs = chatId ? _windowMessages() : null;
-    if (!el || !chatId || _windowRendering) {
-        VectorSvelte.setChatScrollbar({ shown: false });
-        return;
-    }
-    if (!msgs?.some(_barCounted)) {
-        VectorSvelte.setChatScrollbar({ shown: false });
-        _setHistoryAtStart(true);
-        return;
-    }
-    // The row at the top of the view, how far the view has passed into it, and how many rows show.
-    const view = el.getBoundingClientRect();
-    const edge = view.top + _barInset;
-    let top = null, into = 0, visible = 0;
-    for (const row of domChatRows.children) {
-        if (!row.id || row.id === 'dmsg-toolbar') continue;
-        const r = row.getBoundingClientRect();
-        if (r.bottom <= edge) continue;
-        if (r.top >= view.bottom) break;
-        if (!r.height) continue;
-        if (!top) { top = row; into = Math.max(0, Math.min(1, (edge - r.top) / r.height)); }
-        visible += (Math.min(r.bottom, view.bottom) - Math.max(r.top, edge)) / r.height;
-    }
-    const i = top ? msgs.findIndex(m => m.id === top.id) : -1;
-    if (i === -1) return;
-    const edgeEl = domChatRows.querySelector(':scope > .history-edge');
-    const edgeShown = !!edgeEl && edgeEl.getBoundingClientRect().bottom > edge;
-    _edgeInView = edgeShown;
-    _unreadJumpPill?.classList.toggle('at-edge', edgeShown);
-    VectorSvelte.setChatScrollbar({ here: _barDateFmt.format(new Date(msgs[i].at)), edgeShown });
-    // Rank the newest held row of the run the view is in (a seek leaves the tail as a run of its own).
-    const gapId = eventCache.getGapAfterId(chatId);
-    const gi = gapId != null ? msgs.findIndex(m => m.id === gapId) : -1;
-    let j = gi !== -1 && i <= gi ? gi : msgs.length - 1;
-    while (j > i && !_barCounted(msgs[j])) j--;
-    const rank = _barRank(chatId, msgs[j].id);
-    if (!rank) return;
-    let newer = rank.newer;
-    for (let k = i + 1; k <= j; k++) if (_barCounted(msgs[k])) newer++;
-    // Nothing held above the window's first row: the window starts the history held here.
-    const wi = _windowIndexOfId(windowTopId);
-    if (wi !== -1 && wi <= j) {
-        let held = 0;
-        for (let k = wi; k <= j; k++) if (_barCounted(msgs[k])) held++;
-        _setHistoryAtStart(rank.newer + held >= rank.total);
-    }
-    const total = Math.max(1, rank.total);
-    const at = Math.max(0, total - 1 - newer) + into;
-    _barLast = { total, visible };
-    const overflows = el.scrollHeight > el.clientHeight + 1;
-    const patch = { shown: overflows && total > visible + 0.5, size: Math.min(1, visible / total) };
-    if (!_barDragging) patch.top = Math.max(0, Math.min(1, at / Math.max(1, total - visible)));
-    VectorSvelte.setChatScrollbar(patch);
-}
-
-// ===========================================================================
-// The top of the history. Above the oldest row held here, the list says what lies beyond: older
-// rows still coming (a channel's relays not yet walked to its start, DMs still syncing), the
-// chat's true beginning, or a fetch that failed. The rail marks its top while more may come.
-// ===========================================================================
-const _communityOlderFailed = new Set();
-let _edgeAtStart = false;
-let _edgeNudge = 0;
-
-/** A chat opening: nothing is known of its top until the first measure. */
-function resetHistoryEdge() {
-    clearTimeout(_edgeWatch);
-    _edgeWatch = 0;
-    _edgeWatchKicked = false;
-    _edgeAtStart = false;
-    VectorSvelte.setHistoryEdge({ state: '' });
-}
-
-function _setHistoryAtStart(atStart) {
-    if (atStart === _edgeAtStart) return;
-    _edgeAtStart = atStart;
-    refreshHistoryEdge();
-}
-
-function refreshHistoryEdge() {
-    const chatId = strOpenChat;
-    const chat = chatId ? arrChats.find(c => c.id === chatId) : null;
-    if (!chat) {
-        VectorSvelte.setHistoryEdge({ state: '' });
-        return;
-    }
-    const community = chat.chat_type === 'Community';
-    const more = community ? !_communityOlderExhausted.has(chatId) : fSyncing;
-    _setRailMore(more ? (community ? 'Older messages load from the relays' : 'Older messages are still syncing') : '');
-    if (!_edgeAtStart) {
-        VectorSvelte.setHistoryEdge({ state: '' });
-        return;
-    }
-    const alone = !(_windowMessages() || []).some(_barCounted);
-    if (more) {
-        const failed = community && _communityOlderFailed.has(chatId);
-        VectorSvelte.setHistoryEdge({ state: failed ? 'retry' : 'loading' });
-        if (community && !failed) {
-            // Sat at the top with nothing on its way: ask for it. An empty channel has no row
-            // to page back from, so it asks the relays itself.
-            if (alone) maybeLoadCommunityOlderFromNetwork(chatId);
-            else nudgeHistoryEdge();
-            watchHistoryEdge(chatId);
-        }
-        return;
-    }
-    const cf = chat.metadata?.custom_fields || {};
-    const base = { state: 'start', alone, chatId, communityId: cf.community_id || '' };
-    if (community) {
-        VectorSvelte.setHistoryEdge({
-            ...base,
-            title: `Welcome to #${cf.channel_name || 'general'}`,
-            note: _communityHistoryLimited.has(chatId)
-                ? 'This is the beginning of your history.'
-                : alone ? 'This is the very beginning of the channel, say hello! 👋'
-                : 'This is the beginning of the channel.',
-        });
-    } else if (chatIsGroup(chat)) {
-        VectorSvelte.setHistoryEdge({ ...base, title: cf.name || 'Group', note: 'This is the beginning of the group.' });
-    } else if (chatId === strPubkey) {
-        VectorSvelte.setHistoryEdge({ ...base, title: 'Notes', note: 'This is the beginning of your notes.' });
-    } else {
-        const name = getName(chat.id);
-        VectorSvelte.setHistoryEdge({ ...base, title: name, note: 'This is the beginning of your conversation.' });
-    }
-}
-
-// A loader with nothing behind it is a stall: after a while it asks again once, and if still
-// nothing is on its way, it offers a retry instead of spinning on.
-const EDGE_IDLE_MS = 8000;
-let _edgeWatch = 0;
-let _edgeInView = false;
-let _edgeWatchKicked = false;
-
-function watchHistoryEdge(chatId) {
-    clearTimeout(_edgeWatch);
-    _edgeWatch = setTimeout(() => {
-        _edgeWatch = 0;
-        if (strOpenChat !== chatId || !_edgeAtStart || _communityOlderExhausted.has(chatId) || _communityOlderFailed.has(chatId)) return;
-        // Only a loader the reader can see is judged: one scrolled away waits for them to come back.
-        if (_communityOlderInFlight.has(chatId) || proceduralScrollState.isLoading || (!_edgeInView && (_windowMessages() || []).some(_barCounted))) {
-            _edgeWatchKicked = false;
-            return watchHistoryEdge(chatId);
-        }
-        if (!_edgeWatchKicked) {
-            _edgeWatchKicked = true;
-            if (!(_windowMessages() || []).some(_barCounted)) maybeLoadCommunityOlderFromNetwork(chatId);
-            else handleProceduralScroll();
-            return watchHistoryEdge(chatId);
-        }
-        _edgeWatchKicked = false;
-        _communityOlderFailed.add(chatId);
-        refreshHistoryEdge();
-    }, EDGE_IDLE_MS);
-}
-
-/** Older rows may have reached the database while the reader sits at the top: load them. */
-function nudgeHistoryEdge() {
-    if (!_edgeAtStart || _edgeNudge) return;
-    _edgeNudge = setTimeout(() => { _edgeNudge = 0; handleProceduralScroll(); }, 300);
-}
-
-/** A load just let go of the gate: a channel whose relays may still hold older pages goes on
- *  fetching while the reader waits at its top. */
-function rekickHistoryEdge() {
-    const chatId = strOpenChat;
-    const chat = chatId ? arrChats.find(c => c.id === chatId) : null;
-    if (chat?.chat_type !== 'Community' || _communityOlderExhausted.has(chatId) || _communityOlderFailed.has(chatId)) return;
-    nudgeHistoryEdge();
-}
-
-function retryHistoryEdge() {
-    _communityOlderFailed.delete(strOpenChat);
-    refreshHistoryEdge();
-    handleProceduralScroll();
-}
-
-let _railMore = '';
-function _setRailMore(tip) {
-    if (tip === _railMore) return;
-    _railMore = tip;
-    VectorSvelte.setChatScrollbar({ more: tip });
-    layoutChatScrollbar();
-}
-
-/** The track runs beside the list, below a header that lies over it. */
-function layoutChatScrollbar() {
-    const pane = domChatMessages.parentElement;
-    const v = domChatMessages.getBoundingClientRect();
-    const head = pane.querySelector('.chat-header')?.getBoundingClientRect();
-    _barInset = head && head.bottom > v.top && head.bottom < v.bottom ? head.bottom - v.top : 0;
-    // While more may come, the rail's top carries a mark above the track.
-    const mark = _railMore ? 16 : 0;
-    VectorSvelte.setChatScrollbar({
-        trackTop: v.top - pane.getBoundingClientRect().top + _barInset + 4 + mark,
-        trackHeight: Math.max(0, v.height - _barInset - 8 - mark),
-    });
-    scheduleChatScrollbar();
-}
-new ResizeObserver(layoutChatScrollbar).observe(domChatMessages);
-
-/** The message a place on the track puts at the top of the view, counted from the newest. */
-function _barNewerAt(p) {
-    const { total, visible } = _barLast;
-    return Math.max(0, Math.round(total - 1 - p * Math.max(0, total - visible)));
-}
-
-/** A drag or click on the track: `p` is the view's place, 0 (the start) to 1 (the newest). */
-function seekChatScrollbar(p, done) {
-    if (!done && !_barDragging) navigator.vibrate?.(8);   // taken hold of
-    _barDragging = !done;
-    if (done) _barTickTip = '';
-    VectorSvelte.setChatScrollbar({ top: p, dragging: !done });
-    pointChatScrollbar(p);
-    _barWant = p;
-    if (!_barSeeking) _runChatScrollbarSeeks();
-}
-
-// The date at a place on the track, read straight from the database: one ask at a time, the latest
-// place wins, and each place is remembered.
-const _barTimes = new Map();   // `${chatId}:${newer}` → ms, or null past the oldest
-let _barTickTip = '';          // the day a drag last ticked on
-let _barPointWant = null;
-let _barPointing = false;
-
-function pointChatScrollbar(p) {
-    _barPointWant = p;
-    if (!_barPointing) _runChatScrollbarPoints();
-}
-
-async function _runChatScrollbarPoints() {
-    _barPointing = true;
-    try {
-        while (_barPointWant != null) {
-            const p = _barPointWant;
-            _barPointWant = null;
-            const chatId = strOpenChat;
-            if (!chatId || !_barLast.total) break;
-            const key = chatId + ':' + _barNewerAt(p);
-            let at = _barTimes.get(key);
-            if (at === undefined) {
-                at = await invoke('get_message_time_at', { chatId, newer: _barNewerAt(p) }).catch(() => null);
-                if (_barTimes.size > 500) _barTimes.clear();
-                _barTimes.set(key, at);
-            }
-            if (!at || strOpenChat !== chatId) continue;
-            const tip = _barDateFmt.format(new Date(at));
-            // A drag ticks under the thumb as it passes from one day to the next.
-            if (_barDragging && _barTickTip && tip !== _barTickTip) navigator.vibrate?.(6);
-            _barTickTip = _barDragging ? tip : '';
-            VectorSvelte.setChatScrollbar({ tip });
-        }
-    } finally {
-        _barPointing = false;
-    }
-}
-
-async function _runChatScrollbarSeeks() {
-    _barSeeking = true;
-    try {
-        while (_barWant != null) {
-            const p = _barWant;
-            _barWant = null;
-            await _seekChatTo(p);
-        }
-    } finally {
-        _barSeeking = false;
-        scheduleChatScrollbar();
-    }
-}
-
-async function _seekChatTo(p) {
-    const chatId = strOpenChat;
-    const el = domChatMessages;
-    const { total, visible } = _barLast;
-    if (!chatId || !el || !total) return;
-    const newer = _barNewerAt(p);
-    if (newer <= visible) {
-        if (!windowAtTail) await windowJumpToBottom();
-        else { beginProgrammaticScroll(); scrollToEnd(el); }
-        chatPinnedToBottom = true;
-        _userScrolledAway = false;
-        return;
-    }
-    // A load in flight is overtaken, not waited on: it belongs to the window this replaces.
-    proceduralScrollState.isLoading = true;
-    try {
-        // The target row with a screenful of newer rows under it, and room to scroll on above.
-        const offset = Math.max(0, newer - WINDOW_STEP * 2);
-        let page = [];
-        try { page = await invoke('get_message_views', { chatId, limit: MAX_WINDOW_ROWS, offset }) || []; } catch (_) { return; }
-        if (strOpenChat !== chatId || !page.length) return;
-        const target = page[Math.min(page.length - 1, newer - offset)];   // newest first
-        page.sort((a, b) => a.at - b.at);
-        eventCache.seedWindow(chatId, page);
-        const chat = arrChats.find(c => c.id === chatId);
-        if (chat) chat.messages = eventCache.getEventsRef(chatId) || chat.messages;
-        const msgs = _windowMessages() || [];
-        const ti = msgs.findIndex(m => m.id === target.id);
-        if (ti === -1) return;
-        const gapId = eventCache.getGapAfterId(chatId);
-        const gi = gapId != null ? msgs.findIndex(m => m.id === gapId) : -1;
-        const inSeek = gi !== -1 && ti <= gi;
-        const start = Math.max(inSeek ? 0 : gi + 1, ti - WINDOW_STEP);
-        const end = Math.min(inSeek ? gi + 1 : msgs.length, ti + MAX_WINDOW_ROWS - WINDOW_STEP);
-        chatPinnedToBottom = false;
-        _userScrolledAway = true;
-        windowAtTail = end >= msgs.length;
-        await renderWindow(start, end);
-        if (strOpenChat !== chatId) return;
-        setTailRoom(windowAtTail ? 0 : TAIL_RESERVE);
-        const row = document.getElementById(target.id);
-        if (row) {
-            // The day and unread dividers above the row belong to it: they show with it.
-            let lead = row;
-            for (let n = row.previousElementSibling; n && !n.id; n = n.previousElementSibling) {
-                if (n.classList.contains('msg-inline-timestamp')) lead = n;
-            }
-            const top = lead.offsetTop - parseFloat(getComputedStyle(lead).marginTop || 0) - _barInset;
-            beginProgrammaticScroll();
-            if (p <= 0) holdChatStart();
-            else el.scrollTop = Math.min(top, scrollEnd(el));
-        }
-        recordTailAnchor();
-    } finally {
-        proceduralScrollState.isLoading = false;
-        rekickHistoryEdge();
-    }
-}
-
-VectorSvelte.setChatScrollbarHandlers({
-    seek: seekChatScrollbar,
-    point: pointChatScrollbar,
-    wheel: (e) => { domChatMessages.scrollTop += e.deltaMode === 1 ? e.deltaY * 16 : e.deltaY; },
-});

@@ -10,7 +10,6 @@
     import VoiceStage from '../calls/VoiceStage.svelte';
     import WallpaperLayer from '../chat/WallpaperLayer.svelte';
     import WallpaperPreviewBar from '../chat/WallpaperPreviewBar.svelte';
-    import ChatScrollbar from '../chat/ChatScrollbar.svelte';
     import ComposerBox from '../composer/ComposerBox.svelte';
     import RequestBar from '../chat/RequestBar.svelte';
     import { requestState } from '../lib/request.svelte.js';
@@ -47,7 +46,7 @@
         const pane = node.parentElement;
         let fade = -1, bar = -1;
         const sync = () => {
-            const below = -node.scrollTop;
+            const below = node.scrollHeight - node.clientHeight - node.scrollTop;
             const f = Math.round(Math.max(0, Math.min(1, below / TYPING_FADE)) * 100) / 100;
             const b = node.offsetWidth - node.clientWidth;
             if (f !== fade) { fade = f; pane.style.setProperty('--typing-fade', String(f)); }
@@ -73,13 +72,7 @@
     <PinsDrawer />
     <VoiceStage />
     <div id="msg-top-fade" class="fadeout-top-msgs" style="top: 60px;"></div>
-    <!-- Scrolls bottom-up (column-reverse): rows arriving or growing above the view never move it.
-         The tail room under the rows stands in for newer rows the window let go. -->
-    <div id="chat-messages" class="chat-messages" use:typingFade>
-        <div class="tail-room" aria-hidden="true"></div>
-        <div class="chat-rows"></div>
-    </div>
-    <ChatScrollbar />
+    <div id="chat-messages" class="chat-messages" use:typingFade></div>
     <WallpaperPreviewBar />
     <ComposerBox />
 </div>

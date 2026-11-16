@@ -23,10 +23,10 @@ const MAX_DISPLAYED_REACTIONS = 12;
 /** The mounted list island, one per page life (re-mounted if its target was replaced). */
 let _dmsgListIsland = null;
 function ensureMessageList() {
-    if (!domChatRows) return false;
-    if (_dmsgListIsland && _dmsgListIsland._target === domChatRows) return true;
-    _dmsgListIsland = VectorSvelte.mountMessageList(domChatRows, { h: _dmsgListHelpers });
-    _dmsgListIsland._target = domChatRows;
+    if (!domChatMessages) return false;
+    if (_dmsgListIsland && _dmsgListIsland._target === domChatMessages) return true;
+    _dmsgListIsland = VectorSvelte.mountMessageList(domChatMessages, { h: _dmsgListHelpers });
+    _dmsgListIsland._target = domChatMessages;
     // The mount cleared the container; the toolbar is re-created on demand.
     initMessageToolbar();
     return true;
@@ -43,8 +43,6 @@ function ensureMessageList() {
  * @property {(msg: object) => object|null} senderFor
  * @property {(msg: object) => object} ctxFor
  * @property {RowHelpers} row
- * @property {() => void} retryHistory
- * @property {(chatId: string) => { src: string|null, group: boolean }} edgeArt
  */
 const _dmsgListHelpers = {
     // The chat's own array is the complete one: the cache entry can be a fresh
@@ -58,16 +56,6 @@ const _dmsgListHelpers = {
         blocked: (m) => _dmsgListHelpers.ctxFor(m).blocked,
     },
     dayLabel: (at) => dayDividerHtml(at),
-    retryHistory: () => retryHistoryEdge(),
-    edgeArt: (chatId) => {
-        const chat = arrChats.find(c => c.id === chatId);
-        if (chatIsGroup(chat)) {
-            const path = chat.metadata?.avatar_cached;
-            return { src: path ? convertFileSrc(path) : null, group: true };
-        }
-        const profile = getProfile(chatId);
-        return { src: (profile && getProfileAvatarSrc(profile, true)) || null, group: false };
-    },
     get maxRows() { return typeof MAX_WINDOW_ROWS === 'number' ? MAX_WINDOW_ROWS : 80; },
     senderFor: (msg) => {
         if (msg.mine) return getProfile(strPubkey) || null;
@@ -215,7 +203,7 @@ const _dmsgLookups = {
     openChat: () => strOpenChat,
     openUrl: (url) => _dmsgOpenPreviewUrl(url),
     backendCachedImg: (img, url, fit) => bindBackendCachedImg(img, url, fit),
-    onThumbLoad: () => compensateChatScrollForResize(),
+    onThumbLoad: () => { if (proceduralScrollState.isLoadingOlderMessages) correctScrollForMediaLoad(); else softChatScroll(); },
 };
 
 /**

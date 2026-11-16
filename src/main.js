@@ -384,9 +384,6 @@ function showBugHunterCard(tier) {
 
 
 const domChatMessages = document.getElementById('chat-messages');
-// The rows, inside the bottom-up scroller, and the room under them (chat-scroll.js).
-const domChatRows = domChatMessages.querySelector('.chat-rows');
-const domChatTailRoom = domChatMessages.querySelector('.tail-room');
 // Late-bound because the composer is constructed here, thousands of lines before
 // the mention selector that owns the tracked list. `var` so the binding exists no
 // matter which of the two runs first.
@@ -3003,7 +3000,7 @@ document.addEventListener('click', (e) => {
             const chatMessages = domChatMessages;
             if (chatMessages) {
                 // Check scroll position BEFORE toggle
-                const wasNearBottom = scrollFromEnd(chatMessages) < 150;
+                const wasNearBottom = chatMessages.scrollHeight - chatMessages.scrollTop - chatMessages.clientHeight < 150;
                 
                 // Wait for the DOM to update after toggle
                 requestAnimationFrame(() => {

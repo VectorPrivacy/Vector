@@ -131,10 +131,9 @@ export { openReactionTip, closeReactionTip, openReactionDetails, closeReactionDe
 // The chat window as a derivation (streaks, day breaks, merged system events).
 export { deriveWindow } from './lib/chatwindow.js';
 // The chat view's window state: the engine sets it, the list island derives from it.
-export { setWindow, clearWindow, touchWindow, touchMessage, setDivider, clearDivider, setNotice, setHistoryEdge, setArrival } from './lib/chatview.svelte.js';
+export { setWindow, clearWindow, touchWindow, touchMessage, setDivider, clearDivider, setNotice, setArrival } from './lib/chatview.svelte.js';
 export { setSelfDestructSecs } from './lib/composer.svelte.js';
 export { toolbarHost, toolbarEls, setToolbarHandlers, setToolbarHost, setToolbarSwipe } from './lib/toolbar.svelte.js';
-export { setChatScrollbar, setChatScrollbarHandlers } from './lib/scrollbar.svelte.js';
 export { showToast, hideToast } from './lib/toast.svelte.js';
 export { contextMenuEls, setContextMenuHandlers, setContextMenu } from './lib/contextmenu.svelte.js';
 export { setRekey } from './lib/rekey.svelte.js';
@@ -183,7 +182,7 @@ export {
     composerMode,
     setAttachmentOpen,
     setEmojiIcon,
-    setScrollBadge, setScrollReturnVisible, dropScrollReturn,
+    setScrollBadge, setScrollReturnVisible,
     setComposerHandlers,
     composerEls,
 } from './lib/composer.svelte.js';
@@ -198,7 +197,7 @@ export function unmountComponent(instance) {
 
 
 /**
- * Mount the message-list island into `target` (`.chat-rows` in #chat-messages). Rows, separators, the
+ * Mount the message-list island into `target` (#chat-messages). Rows, separators, the
  * unread divider and system events derive from the window state; the vanilla engine
  * sets that state and flushes synchronously before it measures.
  */
