@@ -1,5 +1,5 @@
 <script>
-    // The chat view's message list. Owns `.chat-rows`' children: one keyed
+    // The chat view's message list. Owns #chat-messages' children: one keyed
     // each over the rendered window, with day separators, the unread divider, system
     // events and rows all DERIVED from the slice (deriveWindow). The engine sets the
     // window and flushes; nothing inserts or removes rows by hand any more.
@@ -7,9 +7,7 @@
     // The DOM stays flat and identical to the vanilla list: rows and separators are
     // direct children (the engine still walks `children` by id), overlays the vanilla
     // side appends after the each (toolbar, empty state, notices) are untouched.
-    import { windowState, dividerState, noticeState, historyEdge } from '../lib/chatview.svelte.js';
-    import { chatVersion, profileVersion, communityVersion } from '../lib/signals.svelte.js';
-    import Avatar from '../ui/Avatar.svelte';
+    import { windowState, dividerState, noticeState } from '../lib/chatview.svelte.js';
     import { deriveWindow } from '../lib/chatwindow.js';
     import MessageRow from './MessageRow.svelte';
     import MessageToolbar from './MessageToolbar.svelte';
@@ -21,16 +19,6 @@
     const win = windowState();
     const divider = dividerState();
     const notices = noticeState();
-    const edge = historyEdge();
-    // The chat's own face over its beginning: the peer's avatar, the community's icon.
-    const edgeArt = $derived.by(() => {
-        const id = edge.chatId;
-        if (edge.state !== 'start' || !id) return null;
-        chatVersion(id);
-        if (edge.communityId) communityVersion(edge.communityId);
-        else profileVersion(id);
-        return h.edgeArt(id);
-    });
     const host = toolbarHost();
     const swipe = toolbarSwipe();
     const tbEls = toolbarEls();
@@ -76,20 +64,6 @@
     <span class="dmsg-swipe-reply__icon icon icon-reply"></span>
 </div>
 
-{#if edge.state === 'start'}
-    <div class="chat-empty-state history-edge" class:alone={edge.alone}>
-        {#if edgeArt}<Avatar src={edgeArt.src} size={64} group={edgeArt.group} class="history-edge-avatar" />{/if}
-        <h3>{edge.title}</h3>
-        <p>{edge.note}</p>
-    </div>
-{:else if edge.state === 'loading'}
-    <div class="history-edge history-edge-line"><span class="history-edge-spinner"></span>Loading older messages…</div>
-{:else if edge.state === 'retry'}
-    <div class="history-edge history-edge-line">
-        Couldn't load older messages
-        <button class="history-edge-retry" onclick={() => h.retryHistory()}>Retry</button>
-    </div>
-{/if}
 {#each items as it (rowKey(it.msg))}
     {#if it.dayBreak}
         <p class="msg-inline-timestamp date-divider">{@html h.dayLabel(it.msg.at)}</p>
@@ -107,6 +81,14 @@
     {/if}
 {/each}
 
+{#if notices.empty}
+    <div class="chat-empty-state">
+        <!-- .icon is position:absolute: it needs a relative, sized wrapper. -->
+        <div class="chat-empty-state-icon"><span class="icon icon-users-multi"></span></div>
+        <h3>Welcome to {notices.empty}</h3>
+        <p>This is the very beginning of the channel, say hello! 👋</p>
+    </div>
+{/if}
 {#if notices.blocked}
     <p class="msg-inline-timestamp" style="margin-bottom: 20px;">Blocked: you won't receive new messages from them</p>
 {/if}

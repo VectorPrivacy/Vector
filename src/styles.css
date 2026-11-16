@@ -3360,10 +3360,10 @@ body.mobile #create-group-filter { padding-right: 46px !important; }
   transition: box-shadow 0.16s ease, border-color 0.16s ease, background-color 0.16s ease;
 }
 /* Themed chats paint a bg image via `.chat-messages::before` and lift content
-   with `.chat-rows > * { position: relative; z-index: 1 }`. That ties our
+   with `.chat-messages > * { position: relative; z-index: 1 }`. That ties our
    base rule's specificity and would knock the chip out of absolute positioning
    (and behind messages). Re-assert with matching specificity + a higher layer. */
-.chat-rows > .dmsg-swipe-reply {
+.chat-messages > .dmsg-swipe-reply {
   position: absolute;
   z-index: 2;
 }
@@ -4965,9 +4965,8 @@ body:not(.ws) #group-overview > .chat-header > .profile-header-info {
 
 .chat-messages {
   display: flex;
-  /* Bottom-up: scrollTop is 0 at the newest row and runs negative into history, so rows
-     arriving or growing above the view never move it (WebKit has no scroll anchoring). */
-  flex-direction: column-reverse;
+  flex-direction: column;
+  align-items: flex-end;
   overflow-y: scroll;
   overflow-x: hidden;
   /* Use flex: 1 to fill remaining space between header and chat-box */
@@ -4984,280 +4983,15 @@ body:not(.ws) #group-overview > .chat-header > .profile-header-info {
 
   overscroll-behavior-y: contain;
 
-  /* The bottom-up layout keeps the view; Chromium's own anchoring would correct it twice. */
+  /* DOM windowing owns scroll-position math (manual scrollTop corrections on
+     window slide). Chromium auto-anchors scroll on DOM mutation, WebKit does
+     not — disabling it gives engine parity and avoids double-correction. */
   overflow-anchor: none;
 }
 
 #chat { --typing-strip: 28px; }
 
-/* Under the rows, standing in for newer rows the window let go (chat-scroll.js), so letting them
-   go moves nothing in view. */
-.tail-room {
-  flex: none;
-  pointer-events: none;
-}
-
-/* The chat's own scrollbar (chat-scroll.js): the page holds a window of the history, so the
-   native bar measures only that window. Pointer devices get ours; touch keeps its overlay. */
-@media (hover: hover) and (pointer: fine) {
-  .chat-messages { scrollbar-width: none; }
-  .chat-messages::-webkit-scrollbar { display: none; }
-  .chat-scrollbar.shown { display: block; }
-}
-
-/* The track takes the pointer a little wide of the thumb it draws, so a reach for the bar lands
-   on it rather than on the row beneath. */
-.chat-scrollbar {
-  display: none;
-  position: absolute;
-  right: 0;
-  width: 22px;
-  /* Its dates read over everything floating on the list, the scroll-return button included. */
-  z-index: 104;
-  touch-action: none;
-}
-
-#chat.pins-focus .chat-scrollbar {
-  display: none;
-}
-
-/* Touch: the native bar goes too, and the handle is a thumb-sized pill that shows while the list
-   scrolls and rests a moment after. Hidden, it lets every touch through to the list. */
-@media not ((hover: hover) and (pointer: fine)) {
-  .chat-messages { scrollbar-width: none; }
-  .chat-messages::-webkit-scrollbar { display: none; }
-  .chat-scrollbar.shown {
-    display: block;
-    width: 40px;
-    pointer-events: none;
-    opacity: 0;
-    transition: opacity 0.25s ease;
-  }
-  .chat-scrollbar.shown.active,
-  .chat-scrollbar.shown.dragging {
-    opacity: 1;
-  }
-  .chat-scrollbar.active .chat-scrollbar-thumb,
-  .chat-scrollbar.dragging .chat-scrollbar-thumb {
-    pointer-events: auto;
-  }
-  /* At rest, the standard thin bar; a finger's reach for it is wider than it looks. */
-  .chat-scrollbar .chat-scrollbar-thumb,
-  .chat-scrollbar:hover .chat-scrollbar-thumb {
-    right: 4px;
-    width: 4px;
-    border-radius: 2px;
-    background-color: rgba(255, 255, 255, 0.35);
-    transition: width 0.15s ease, right 0.15s ease, border-radius 0.15s ease, background-color 0.15s ease;
-  }
-  .chat-scrollbar-thumb::after {
-    content: '';
-    position: absolute;
-    inset: -14px -4px -14px -28px;
-  }
-  /* Held: a grip pill the finger can see around. */
-  .chat-scrollbar.dragging .chat-scrollbar-thumb {
-    right: 5px;
-    width: 16px;
-    border-radius: 8px;
-    border: 1px solid rgba(255, 255, 255, 0.12);
-    background-color: #333;
-    box-shadow: 0 2px 10px rgba(0, 0, 0, 0.5);
-  }
-  .chat-scrollbar.dragging .chat-scrollbar-thumb::before {
-    content: '';
-    position: absolute;
-    inset: 50% 5px auto;
-    height: 7px;
-    translate: 0 -50%;
-    background-image: repeating-linear-gradient(to bottom, rgba(255, 255, 255, 0.45) 0 1px, transparent 1px 4px);
-  }
-  /* Left of the handle and above the fingertip: the thumb holding it covers below and right. */
-  .chat-scrollbar-label {
-    right: 34px;
-    margin-top: -32px;
-    padding: 7px 13px;
-    font-size: 15px;
-  }
-  .chat-scrollbar-more {
-    right: 18px;
-  }
-}
-
-.chat-float-date {
-  position: absolute;
-  left: 50%;
-  z-index: 104;
-  padding: 6px 14px;
-  border-radius: 999px;
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  background-color: #141414;
-  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.5);
-  color: #fff;
-  font-size: 13px;
-  font-weight: 500;
-  white-space: nowrap;
-  pointer-events: none;
-  opacity: 0;
-  translate: -50% -6px;
-  transition: opacity 0.2s ease, translate 0.2s ease;
-}
-
-.chat-float-date.on {
-  opacity: 1;
-  translate: -50% 0;
-}
-
-#chat.pins-focus .chat-float-date {
-  display: none;
-}
-
-/* Under the jump-to-unread pill while it shows, not over it. */
-#chat:has(> .unread-jump-pill.visible:not(.at-edge)) .chat-float-date {
-  margin-top: 42px;
-}
-
-/* Above the track while older history may still come: the rail runs on past what is held. */
-.chat-scrollbar-more {
-  position: absolute;
-  top: -14px;
-  right: 7px;
-  width: 2px;
-  height: 10px;
-  background-image: repeating-linear-gradient(to bottom, rgba(255, 255, 255, 0.35) 0 2px, transparent 2px 4px);
-  opacity: 0;
-  transition: opacity 0.2s ease;
-}
-
-.chat-scrollbar-more.near {
-  opacity: 1;
-}
-
-.chat-scrollbar-more::before {
-  content: '';
-  position: absolute;
-  inset: -4px -5px;
-}
-
-.chat-scrollbar-thumb {
-  position: absolute;
-  top: 0;
-  right: 5px;
-  width: 6px;
-  border-radius: 3px;
-  background-color: rgba(255, 255, 255, 0.22);
-  transition: width 0.12s ease, right 0.12s ease, background-color 0.12s ease;
-}
-
-.chat-scrollbar:hover .chat-scrollbar-thumb,
-.chat-scrollbar.dragging .chat-scrollbar-thumb {
-  right: 4px;
-  width: 8px;
-  background-color: rgba(255, 255, 255, 0.4);
-}
-
-.chat-scrollbar-label {
-  position: absolute;
-  top: 0;
-  right: 24px;
-  translate: 0 -50%;
-  padding: 4px 10px;
-  border-radius: 6px;
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  background-color: #141414;
-  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.5);
-  color: #fff;
-  font-size: 12px;
-  font-weight: 500;
-  white-space: nowrap;
-  pointer-events: none;
-  opacity: 0;
-  transition: opacity 0.15s ease;
-}
-
-.chat-scrollbar-label.on {
-  opacity: 1;
-}
-
-/* Over the thumb: where the view is, not where a click would go. */
-.chat-scrollbar-label.here {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  border-color: color-mix(in srgb, var(--icon-color-primary, #59fcb3) 45%, transparent);
-  color: var(--icon-color-primary, #59fcb3);
-}
-
-.chat-scrollbar-label.here::before {
-  content: '';
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background-color: currentColor;
-}
-
-/* The rows, top to bottom, inside the bottom-up scroller. It fills a chat shorter than the
-   view, whose rows start at the top. */
-.chat-rows {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-end;
-  flex: 1 0 auto;
-}
-
-/* Above the oldest row held: older rows on their way, the chat's beginning, or a retry. */
-.history-edge {
-  align-self: stretch;
-}
-
-.chat-empty-state.history-edge {
-  margin: 0;
-  padding: 32px 24px 20px;
-}
-
-.history-edge-avatar {
-  margin-bottom: 8px;
-}
-
-/* A chat with no messages yet: its beginning sits in the middle of the view. */
-.chat-empty-state.history-edge.alone {
-  margin: auto 0;
-}
-
-.history-edge-line {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
-  padding: 18px 0 10px;
-  color: rgba(255, 255, 255, 0.5);
-  font-size: 13px;
-}
-
-.history-edge-spinner {
-  width: 14px;
-  height: 14px;
-  border-radius: 50%;
-  border: 2px solid rgba(255, 255, 255, 0.15);
-  border-top-color: var(--icon-color-primary, #59fcb3);
-  animation: spin 0.8s linear infinite;
-}
-
-.history-edge-retry {
-  padding: 4px 12px;
-  border-radius: 999px;
-  border: 1px solid rgba(255, 255, 255, 0.15);
-  background-color: transparent;
-  backdrop-filter: none;
-  color: #fff;
-  font-size: 12px;
-}
-
-.history-edge-retry:hover {
-  border-color: rgba(255, 255, 255, 0.3);
-}
-
-.chat-rows > *:last-child {
+.chat-messages > *:last-child {
   /* The last child should have extra margin from the bottom — covers
      both `.dmsg` divs and `.msg-inline-timestamp` paragraphs (system
      events, date dividers, unread marker). It clears the typing strip,
@@ -5266,17 +5000,17 @@ body:not(.ws) #group-overview > .chat-header > .profile-header-info {
   margin-bottom: calc(5px + var(--typing-strip));
 }
 
-/* CONTRACT for any OVERLAY added as a direct child of `.chat-rows`
+/* CONTRACT for any OVERLAY added as a direct child of `.chat-messages`
    (hover toolbar, swipe-reply chip, future jump-to-bottom, typing dot, …):
      1. Insert it FIRST (prepend / before the first row), never append — an
         out-of-flow overlay landing as `:last-child` steals the 20px above
         from the real last message.
-     2. Out-specify `.chat-rows > *` (the themed-bg layering rule sets
+     2. Out-specify `.chat-messages > *` (the themed-bg layering rule sets
         `position: relative; z-index: 1` on every child). Use an id
-        (`#dmsg-toolbar`) or `.chat-rows > .your-class`, and a z-index
+        (`#dmsg-toolbar`) or `.chat-messages > .your-class`, and a z-index
         above 1, or themes knock the overlay out of position and behind rows.
    In-flow CONTENT (rows, separators, system events) wants the default
-   `.chat-rows > *` treatment and is exempt. */
+   `.chat-messages > *` treatment and is exempt. */
 
 /* Chat background toggle */
 body.chat-bg-disabled .chat-messages::before {
@@ -5295,10 +5029,10 @@ body.chat-bg-disabled .chat-messages::before {
   justify-content: center;
 }
 /* A divider owns the gap on BOTH sides — kill the next row's streak/continuation top-margin so it
- * doesn't stack on the divider's bottom margin and re-introduce the lop-sidedness. The `.chat-rows >`
+ * doesn't stack on the divider's bottom margin and re-introduce the lop-sidedness. The `.chat-messages >`
  * prefix lifts specificity to (0,3,0) so it beats `.dmsg[data-streak="…"]` (0,2,0) regardless of order. */
-.chat-rows > .msg-inline-timestamp + .dmsg,
-.chat-rows > .msg-inline-timestamp + .msg-inline-timestamp { margin-top: 0; }
+.chat-messages > .msg-inline-timestamp + .dmsg,
+.chat-messages > .msg-inline-timestamp + .msg-inline-timestamp { margin-top: 0; }
 .msg-inline-timestamp::before,
 .msg-inline-timestamp::after {
   content: '';
@@ -10362,6 +10096,26 @@ audio {
 .typing-text b { color: #fff; font-weight: 600; }
 .typing-text .emoji { width: 14px; height: 14px; vertical-align: -2px; }
 
+.corner-float {
+  bottom: calc(100% + 16px);
+  right: 20px;
+  position: absolute;
+  padding: 2.5px 12.5px;
+  font-size: 30px;
+  transform: scale(0) translateY(50px);
+  transition-property: transform;
+  transition-duration: 0.4s;
+  transition-timing-function: cubic-bezier(0.95, 0.05, 0.795, 0.035);
+}
+/* The scroll-return button floats over the conversation, not the typing strip. */
+#chat-box > .corner-float {
+  bottom: calc(100% + 16px + var(--typing-strip));
+}
+
+.corner-float.visible {
+  transform: scale(1) translateY(0px);
+}
+
 .progress-bar {
   height: 10px;
   border-radius: 16px;
@@ -13866,62 +13620,36 @@ body.mobile:not(.ws) .navbar-btn::before {
   50% { opacity: 1; }
 }
 
-/* Back to the newest message: a bar centred over the foot of the conversation, clear of the
-   typing strip. */
-.scroll-return-bar {
-  position: absolute;
-  left: 50%;
-  bottom: calc(100% + 14px + var(--typing-strip));
+.scroll-return-btn {
+  border-radius: 100%;
+  height: 45px;
+  width: 45px;
+  /* Above #dmsg-toolbar (z-index 50) so a message hover-toolbar can't render over
+     the floating button and swallow the click. */
   z-index: 60;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 7px 16px 7px 12px;
-  border-radius: 999px;
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  background-color: #141414;
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
-  backdrop-filter: none;
-  color: #fff;
-  font-size: 13px;
-  font-weight: 500;
-  white-space: nowrap;
-  opacity: 0;
-  translate: -50% 8px;
-  pointer-events: none;
-  transition: opacity 0.18s ease, translate 0.18s ease, border-color 0.15s ease, background-color 0.15s ease;
 }
 
-.scroll-return-bar.visible {
-  opacity: 1;
-  translate: -50% 0;
-  pointer-events: auto;
+.scroll-return-badge {
+  position: absolute;
+  top: -4px;
+  right: -4px;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 9px;
+  background-color: #59fcb3;
+  color: #0a0a0a;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 18px;
+  text-align: center;
+  box-sizing: border-box;
+  display: none;
+  box-shadow: 0 0 0 2px #030303;
 }
 
-.scroll-return-bar.snap {
-  transition: none;
-}
-
-.scroll-return-bar:hover {
-  border-color: rgba(255, 255, 255, 0.2);
-  background-color: #1c1c1c;
-}
-
-.scroll-return-bar .icon {
-  position: relative;
-  width: 14px;
-  height: 14px;
-  margin: 0;
-}
-
-/* Newer messages wait below: the bar carries the count, in the accent. */
-.scroll-return-bar.unread {
-  border-color: color-mix(in srgb, var(--icon-color-primary, #59fcb3) 45%, transparent);
-  color: var(--icon-color-primary, #59fcb3);
-}
-
-.scroll-return-bar.unread .icon {
-  background-color: currentColor;
+.scroll-return-badge.visible {
+  display: inline-block;
 }
 
 .sync-line {
@@ -21264,7 +20992,7 @@ textarea.command-part-input {
 .dmsg[data-streak="continuation"] { margin-top: var(--dmsg-continuation-gap); }
 /* Folded into its blocked run's head. Zero height rather than display:none: the scroll engine
  * reads offsetTop off rows, and a last-child row still carries the list's bottom clearance. */
-.chat-rows > .dmsg.dmsg--merged {
+.chat-messages > .dmsg.dmsg--merged {
   height: 0;
   margin-top: 0;
   padding-top: 0;
@@ -21274,7 +21002,7 @@ textarea.command-part-input {
 }
 /* A revealed blocked message dims what it says; the author reads as it did collapsed. */
 .dmsg--revealed .dmsg-body > :not(.dmsg-header) { opacity: 0.4; }
-/* Last-child bottom clearance is unified on `.chat-rows > *:last-child`
+/* Last-child bottom clearance is unified on `.chat-messages > *:last-child`
  * (covers dmsg rows + system-event paragraphs alike) — see that rule. */
 /* Top clearance for the fixed chat-header is handled by `.chat-messages`'s
  * padding-top — see that rule. Putting it on the container instead of on
@@ -22162,12 +21890,6 @@ textarea.command-part-input {
   opacity: 1;
   transform: translateX(-50%) translateY(0);
   pointer-events: auto;
-}
-
-/* At the top of the history, the unread are all below: the pill gives way to what the top says. */
-.unread-jump-pill.visible.at-edge {
-  opacity: 0;
-  pointer-events: none;
 }
 .unread-jump-pill.loading { cursor: default; pointer-events: none; }
 .unread-jump-pill.loading::before {

@@ -207,7 +207,7 @@ class MainActivity : TauriActivity() {
         super.onCreate(savedInstanceState)
         warnIfWebViewTooOld()
 
-        // Hand Rust the activity for ndk_context (tao 0.35 stopped registering it).
+        // ndk_context for Rust, when tao's glue in super.onCreate didn't register one.
         try { nativeRegisterNdkContext(this) } catch (e: Throwable) {
             android.util.Log.e("MainActivity", "nativeRegisterNdkContext failed", e)
         }

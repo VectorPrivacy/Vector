@@ -275,7 +275,7 @@ async function updateChat(chat, arrMessages = [], profile = null, fClicked = fal
         // Gated on the intent-aware pin, NOT raw distance: a user resting just below the
         // pin threshold during a sync must not be yanked to the tail. Suppressed during a
         // window slide (extend-newer/drop), which owns scrollTop itself.
-        const pxFromBottom = scrollFromEnd(domChatMessages);
+        const pxFromBottom = domChatMessages.scrollHeight - domChatMessages.scrollTop - domChatMessages.clientHeight;
         if (!_windowSuppressAutoScroll && ((chatPinnedToBottom && pxFromBottom < 500) || fClicked)) {
             const cLastMsg = chat.messages[chat.messages.length - 1];
             if (strLastMsgID !== cLastMsg.id || fClicked) {
@@ -766,7 +766,7 @@ function jumpToMessage(targetMsgId) {
     VectorSvelte.setPlaceMessage(strOpenChat, targetMsgId);
     const domMsg = document.getElementById(targetMsgId);
     if (domMsg) {
-        landOn(domMsg);
+        centerInView(domMsg);
         applyHighlight(domMsg, 'jumped');
     } else {
         loadAndScrollToMessage(targetMsgId);
@@ -1122,8 +1122,9 @@ function revealSystemEventsInWindow(chatId) {
  * render/content change for the open chat.
  */
 function refreshChatEmptyState() {
-    scheduleChatScrollbar();
-    refreshHistoryEdge();
+    const chat = strOpenChat ? arrChats.find(c => c.id === strOpenChat) : null;
+    const isEmptyCommunity = !!chat && chat.chat_type === 'Community' && (!chat.messages || chat.messages.length === 0);
+    VectorSvelte.setNotice('empty', isEmptyCommunity ? (chat.metadata?.custom_fields?.name || 'this community') : '');
 }
 
 // Bumped by every open and close: an open that awaited past a newer one paints nothing.
@@ -1276,9 +1277,6 @@ async function openChat(contact, { reread = true, fade = true } = {}) {
     // prior chat — re-entering a chat counts as "I've read up to here".
     chatPinnedToBottom = true;
     _userScrolledAway = false;   // fresh open lands at the live tail; release any prior latch
-    windowAtTail = true;
-    VectorSvelte.dropScrollReturn();
-    resetHistoryEdge();
     clearUnreadBelow();
     clearUnreadDivider();
     syncBackendActiveChat();
@@ -1392,13 +1390,10 @@ async function openChat(contact, { reread = true, fade = true } = {}) {
         // Anchor the window to the freshly-rendered tail so isAtDataBottom() and
         // the scroll-extend paths have valid anchors.
         _windowReseatAnchorsFromDom();
-        setTailRoom(0);
-        scrollToBottom(domChatMessages, false);
     }
     // Initial open lands on the newest message — the window bottom IS the live tail.
     windowAtTail = true;
     VectorSvelte.markOpenChat();
-    refreshScrollReturnButton();
     // A chat open is where the most media resolves at once, and every one of
     // those loads grows the content below the fold — hold the bottom until the
     // layout settles instead of finishing short of the newest message.
@@ -1898,8 +1893,8 @@ let _userScrolledAway = false;
  *  the move as ours: a re-render is never the reader leaving the page. */
 let _programmaticScrollUntil = 0;
 /** Mark a short window during which scroll events are the app's own (not the
- *  user). Call immediately before any programmatic scrollTop change so it isn't
- *  misread as a user scroll-up. */
+ *  user). Call immediately before any programmatic scrollTop change so a drop-top
+ *  compensation (scrollTop -= droppedHeight) isn't misread as a user scroll-up. */
 function beginProgrammaticScroll() {
     _programmaticScrollUntil = VectorSvelte.now() + PROGRAMMATIC_SCROLL_MS;
     // Re-baseline so the very next scroll event's delta is measured from the
@@ -1929,7 +1924,7 @@ function insertUnreadDivider(anchorEl, anchorAfter = false) {
     // its anchor mode are kept for the callers that measure it.
     VectorSvelte.setDivider(anchorEl.id, anchorAfter);
     VectorSvelte.flushSync();
-    const p = domChatRows.querySelector(':scope > .unread-divider');
+    const p = domChatMessages.querySelector(':scope > .unread-divider');
     if (p) { p._targetId = anchorEl.id; p._anchorAfter = anchorAfter; unreadDividerEl = p; }
 }
 /**
@@ -1939,16 +1934,29 @@ function insertUnreadDivider(anchorEl, anchorAfter = false) {
  * unread below being deleted. Removing it shrinks the
  * list by its height, so a pinned view is re-pinned explicitly (WKWebView can
  * leave its scroll layer past the new bottom when the clamp lands during a focus
- * change, showing blank space until the next gesture), and any other view keeps its place.
+ * change, showing blank space until the next gesture), and a view scrolled past
+ * it is shifted up by the same amount.
  */
 function clearUnreadDivider() {
     const div = unreadDividerEl?.isConnected ? unreadDividerEl : null;
+    const el = domChatMessages;
+    // Measured, not summed from the divider's box: the row after it has its top
+    // margin zeroed while the divider stands, and gets it back when it goes.
+    const above = !!(div && el && !chatPinnedToBottom && div.offsetTop + div.offsetHeight <= el.scrollTop);
+    const heightBefore = el ? el.scrollHeight : 0;
     VectorSvelte.clearDivider();
     VectorSvelte.flushSync();
     unreadDividerEl = null;
-    if (!div || !domChatMessages) return;
-    if (chatPinnedToBottom) softChatScroll();
-    else keepTailAnchor();
+    if (!div || !el) return;
+    if (above) {
+        const removed = heightBefore - el.scrollHeight;
+        if (removed > 0) {
+            beginProgrammaticScroll();
+            el.scrollTop -= removed;
+        }
+    } else {
+        softChatScroll();
+    }
 }
 function setUnreadBelow(n) {
     unreadBelowCount = Math.max(0, n);
@@ -1967,7 +1975,7 @@ function handleChatScrollIntent() {
     if (!strOpenChat || !domChatMessages) return;
     const scrollTop = domChatMessages.scrollTop;
     const scrollHeight = domChatMessages.scrollHeight;
-    const pxFromBottom = scrollFromEnd(domChatMessages);
+    const pxFromBottom = scrollHeight - scrollTop - domChatMessages.clientHeight;
     const isProgrammatic = VectorSvelte.now() < _programmaticScrollUntil;
     // Content grew and the view did NOT move up: the world got taller beneath us,
     // which is never the user leaving the bottom.
@@ -1976,7 +1984,8 @@ function handleChatScrollIntent() {
     const grewUnderUs = scrollHeight > prevHeight && scrollTop >= lastScrollTop;
 
     // User scrolled UP (and it wasn't us) → release and latch until they're
-    // back at the true bottom. The app's own moves are wrapped in beginProgrammaticScroll.
+    // back at the true bottom. Drop-top compensations move scrollTop up too,
+    // but they're wrapped in beginProgrammaticScroll, so isProgrammatic gates them out.
     //
     // A shrink clamp (a shorter chat, hidden rows) moves scrollTop without the user and
     // lands at the bottom; a real scroll-up leaves distance below.
@@ -2034,15 +2043,15 @@ async function wireChatUi() {
     // Self-Destruct Timer: right-click / long-press the Send button, plus the
     // active-timer clock indicator injected next to the composer.
 
-    // Scroll: intent, the anchor a change above the view holds it on, and loading ahead of the
-    // reader (one load at a time), so older rows are in place before they reach the top.
+    // Add scroll event listener for procedural message loading + intent tracking
+    let scrollTimeout;
     domChatMessages.addEventListener('scroll', () => {
         handleChatScrollIntent();
-        noteScrollActivity();
-        recordTailAnchor();
-        scheduleChatScrollbar();
-        handleProceduralScroll();
-    }, { passive: true });
+        if (scrollTimeout) clearTimeout(scrollTimeout);
+        scrollTimeout = setTimeout(() => {
+            handleProceduralScroll();
+        }, 100);
+    });
     // Hook up a scroll handler in the chat to display UI elements at certain scroll depths
     createScrollHandler(domChatMessages, VectorSvelte.composerEls().scrollReturn, {
         threshold: 500,

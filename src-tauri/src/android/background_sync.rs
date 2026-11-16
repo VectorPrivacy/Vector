@@ -81,24 +81,21 @@ static BG_DATA_DIR: OnceLock<String> = OnceLock::new();
 /// on the orphaned standalone client: a community created mid-session never delivers live until restart.
 static PRESWAP_FOREGROUND_CLIENT: Mutex<Option<Client>> = Mutex::new(None);
 
-/// Called from MainActivity.onResume via JNI
-/// Restore the ndk context registration tao 0.34 used to perform: tao 0.35
-/// dropped it and NOTHING else in the tauri 2.11 stack registers one, so
-/// every `ndk_context::android_context()` consumer (iroh's hickory-resolver,
-/// cpal, netdev, our own JNI fallbacks) panicked unconditionally — and a
-/// panic escaping the app main is a process abort. Called from
-/// MainActivity.onCreate with the activity, once per process; the global ref
-/// is deliberately leaked because the registration is process-lifetime.
-/// The service-only process never runs this, matching tao 0.34: consumers
-/// there must keep failing soft through their guards.
+/// Register the ndk context when tao's activity glue hasn't. Every `ndk_context::android_context()`
+/// consumer (iroh's DNS, cpal, netdev, our JNI fallbacks) panics without one, and registering a
+/// second one panics too. Called from MainActivity.onCreate after the glue has run; it holds the
+/// application context, as tao does, for the process's life. The service-only process never runs
+/// this: its consumers keep failing soft through their guards.
 #[no_mangle]
 pub extern "C" fn Java_io_vectorapp_MainActivity_nativeRegisterNdkContext(
-    env: JNIEnv,
+    mut env: JNIEnv,
     _class: JClass,
     activity: JObject<'_>,
 ) {
     crate::android::utils::jni_fence("Java_io_vectorapp_MainActivity_nativeRegisterNdkContext", || (), move || {
-        static REGISTERED: std::sync::Once = std::sync::Once::new();
+        if crate::android::utils::context_registered() {
+            return;
+        }
         let vm = match env.get_java_vm() {
             Ok(vm) => vm,
             Err(e) => {
@@ -106,23 +103,29 @@ pub extern "C" fn Java_io_vectorapp_MainActivity_nativeRegisterNdkContext(
                 return;
             }
         };
-        let global = match env.new_global_ref(&activity) {
+        let app = match env.call_method(&activity, "getApplicationContext", "()Landroid/content/Context;", &[]).and_then(|v| v.l()) {
+            Ok(app) => app,
+            Err(e) => {
+                logcat(&format!("nativeRegisterNdkContext: no application context: {:?}", e));
+                return;
+            }
+        };
+        let global = match env.new_global_ref(&app) {
             Ok(g) => g,
             Err(e) => {
                 logcat(&format!("nativeRegisterNdkContext: no global ref: {:?}", e));
                 return;
             }
         };
-        REGISTERED.call_once(|| {
-            let vm_ptr = vm.get_java_vm_pointer().cast();
-            let ctx_ptr = global.as_obj().as_raw().cast();
-            std::mem::forget(global);
-            unsafe { ndk_context::initialize_android_context(vm_ptr, ctx_ptr) };
-            logcat("ndk context registered (tao 0.35 no longer does this)");
-        });
-})
+        let vm_ptr = vm.get_java_vm_pointer().cast();
+        let ctx_ptr = global.as_obj().as_raw().cast();
+        std::mem::forget(global);
+        unsafe { ndk_context::initialize_android_context(vm_ptr, ctx_ptr) };
+        logcat("ndk context registered");
+    })
 }
 
+/// Called from MainActivity.onResume via JNI
 #[no_mangle]
 pub extern "C" fn Java_io_vectorapp_MainActivity_nativeOnResume(
     _env: JNIEnv,

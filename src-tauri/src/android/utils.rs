@@ -12,7 +12,7 @@ fn try_android_context() -> Option<AndroidContext> {
     std::panic::catch_unwind(ndk_context::android_context).ok()
 }
 
-/// Whether tao has registered the ndk context yet. Gate for code whose
+/// Whether the ndk context has been registered yet. Gate for code whose
 /// DEPENDENCIES call `ndk_context::android_context()` unguarded (iroh's
 /// hickory-resolver reads system DNS with it and the panic aborts the
 /// process): they must not run before registration, and never in the

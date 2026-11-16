@@ -175,6 +175,11 @@ pub async fn file_message(receiver: String, replied_to: String, path: String, ke
     let bytes = Arc::new(read(&path).await?);
     clear_compression(&path);
     let name = sanitized_name(&name_override, name);
+    // Media Vector holds is named by its hash: the name it goes out under carries its extension.
+    let ext = match vector_core::media::MediaRef::parse(&path) {
+        Some(vector_core::media::MediaRef::Held(_)) => name_and_ext(&name).1,
+        _ => ext,
+    };
     if !is_image(&ext) {
         let sent = send(receiver, replied_to, bytes, name, ext, None).await?;
         forget_picked(&path).await;

@@ -30,6 +30,12 @@ pub mod caps {
     pub const MAX_RULE_ID_LEN: usize = 64;
     pub const MAX_POLICY_BYTES: usize = 64 * 1024;
     pub const MIN_SKELETON_LEN: usize = 8; // Unicode scalar values, never bytes
+    /// A cohort line shorter than this is a pleasantry ("thank you", "good
+    /// morning"), so its cluster must clear `short_factor` times the size.
+    pub const COHORT_PAYLOAD_LEN: usize = 12;
+    /// A cohort is the authors inside its densest window of this span: a raid
+    /// lands as one burst, and the same words hours apart are a conversation.
+    pub const COHORT_SPAN_MS: u64 = 15 * 60 * 1000;
     /// Peers named per cohort exhibit. A 500-strong cluster would otherwise put
     /// tens of KB of ids through the IPC boundary for nothing.
     pub const COHORT_SAMPLE_CAP: usize = 24;

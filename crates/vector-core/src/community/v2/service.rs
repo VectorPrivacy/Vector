@@ -3093,7 +3093,7 @@ async fn publish_ban_departures<T: Transport + ?Sized>(transport: &T, community:
     let Ok(citation) = required_authority_citation(community, &my_pk) else { return 0 };
     let owner_hex = owner.to_hex();
     let roles = crate::db::community::get_community_roles(&cid_hex).unwrap_or_default();
-    let coalesced = guestbook::coalesce(&events, now_ms(), snapshot_authority_for(&cid_hex, community, &owner).as_ref(), &kick_judge(&cid_hex, &owner_hex, &roles));
+    let coalesced = guestbook::coalesce(&events, now_ms(), snapshot_authority_for(&cid_hex, community, &owner, &events, &roles).as_ref(), &kick_judge(&cid_hex, &owner_hex, &roles));
     drop(events);
     let gb_group = super::derive::guestbook_group_key(&community.community_root, community.id(), community.root_epoch);
     let mut landed = 0;
@@ -3193,7 +3193,7 @@ pub async fn heal_my_join<T: Transport + ?Sized>(transport: &T, community: &Comm
     let at_ms = {
         let (events, _) = crate::db::community::get_guestbook_shared(&cid_hex)?;
         let roles = crate::db::community::get_community_roles(&cid_hex).unwrap_or_default();
-        let authority = snapshot_authority_for(&cid_hex, community, &owner);
+        let authority = snapshot_authority_for(&cid_hex, community, &owner, &events, &roles);
         let state = guestbook::coalesce(&events, now_ms(), authority.as_ref(), &kick_judge(&cid_hex, &owner.to_hex(), &roles)).remove(&my_pk);
         if state.is_some_and(|st| st.verdict != guestbook::Verdict::Refounded) {
             return Ok(false);
@@ -3620,6 +3620,62 @@ pub async fn fetch_authority<T: Transport + ?Sized>(transport: &T, community: &C
     }
 }
 
+/// When each member provably arrived, seconds: the earliest of their Joins across
+/// the live plane and every epoch this client holds, lowered by any snapshot an
+/// npub that may rotate the base already listed them in. A member re-joining
+/// through a new link has been here since their first trace.
+///
+/// A Join's time is written by its author. With `watched` (this client was
+/// following before the window opened), a member it saw arrive is dated by those
+/// arrivals alone, each no earlier than when it was seen: an unwatched Join can
+/// only be a backdate. Only members with a Join on the live plane appear; what this
+/// client holds can date them earlier, never make anyone read as new.
+fn earliest_arrivals(
+    fetched: &[guestbook::GuestbookEvent],
+    held: &[guestbook::GuestbookEvent],
+    watched: bool,
+    may_rotate: impl Fn(&PublicKey) -> bool,
+) -> std::collections::BTreeMap<PublicKey, u64> {
+    let seen_at: std::collections::HashMap<[u8; 32], u64> =
+        fetched.iter().chain(held).filter_map(|ev| ev.observed_at.map(|o| (ev.rumor_id, o))).collect();
+    let on_plane: std::collections::BTreeSet<PublicKey> = fetched
+        .iter()
+        .filter_map(|ev| match &ev.entry {
+            guestbook::GuestbookEntry::Join { member, .. } => Some(*member),
+            _ => None,
+        })
+        .collect();
+    let mut claimed: std::collections::BTreeMap<PublicKey, u64> = std::collections::BTreeMap::new();
+    let mut observed: std::collections::BTreeMap<PublicKey, u64> = std::collections::BTreeMap::new();
+    for ev in fetched.iter().chain(held) {
+        let guestbook::GuestbookEntry::Join { member, at_ms, .. } = &ev.entry else { continue };
+        if !on_plane.contains(member) {
+            continue;
+        }
+        let claim = at_ms / 1000;
+        claimed.entry(*member).and_modify(|e| *e = (*e).min(claim)).or_insert(claim);
+        if let Some(seen) = seen_at.get(&ev.rumor_id).filter(|_| watched) {
+            let at = claim.max(*seen);
+            observed.entry(*member).and_modify(|e| *e = (*e).min(at)).or_insert(at);
+        }
+    }
+    let mut first = claimed;
+    first.extend(observed);
+    for ev in fetched.iter().chain(held) {
+        if let guestbook::GuestbookEntry::Snapshot { refounder, members, at_ms, .. } = &ev.entry {
+            if !may_rotate(refounder) {
+                continue;
+            }
+            for m in members {
+                if let Some(e) = first.get_mut(m) {
+                    *e = (*e).min(at_ms / 1000);
+                }
+            }
+        }
+    }
+    first
+}
+
 /// Page the Guestbook plane newest-to-oldest, stopping once a page's oldest wrap
 /// falls below `since_secs` (everything older is already held) or the plane is
 /// exhausted. Returns the parsed events at/after the window plus the newest wrap
@@ -3739,24 +3795,42 @@ async fn fetch_guestbook_from<T: Transport + ?Sized>(
 /// "honored only from the npub whose Refounding minted that epoch". That is the
 /// owner only when the owner did the refounding.
 ///
-/// Vector read it as owner-always, so an admin's — or a moderation bot's —
-/// refounding rolled the epoch and vended the keys while its survivor list was
-/// discarded. Every client then folded its own accumulated Joins instead: members
-/// the containment had cut lingered on the roster, and no two clients agreed on it.
-///
 /// The minter comes from the rotation this device VERIFIED and adopted, never from
-/// the snapshot, so writing a snapshot grants nobody authority over it. An epoch
-/// adopted before minters were recorded has no entry and falls back to the owner —
-/// the previous behaviour, never a wider one. Genesis (epoch 0) has no refounder and
-/// therefore no snapshot power at all.
-fn snapshot_authority_for(cid_hex: &str, community: &CommunityV2, owner: &PublicKey) -> Option<PublicKey> {
-    if community.root_epoch.0 == 0 {
+/// the snapshot, so writing a snapshot grants nobody authority over it. Genesis
+/// (epoch 0) has no refounder and therefore no snapshot power at all.
+///
+/// A device that arrived after the rotation (a joiner, a re-joiner) holds only this
+/// epoch and never saw it. It takes the earliest of this epoch's snapshots written by
+/// someone the roster lets rotate the base (the owner or a BAN holder, CORD-06): the
+/// Refounder writes its snapshot as it mints the epoch, and a rival branch's snapshot
+/// lands under that branch's own root, never this one. Failing that, the owner.
+fn snapshot_authority_for(
+    cid_hex: &str,
+    community: &CommunityV2,
+    owner: &PublicKey,
+    events: &[guestbook::GuestbookEvent],
+    roles: &crate::community::roles::CommunityRoles,
+) -> Option<PublicKey> {
+    let epoch = community.root_epoch.0;
+    if epoch == 0 {
         return None;
     }
-    let minted_by = epoch_minters(cid_hex)
-        .get(&community.root_epoch.0)
-        .and_then(|h| PublicKey::from_hex(h).ok());
-    Some(minted_by.unwrap_or(*owner))
+    if let Some(minted_by) = epoch_minters(cid_hex).get(&epoch).and_then(|h| PublicKey::from_hex(h).ok()) {
+        return Some(minted_by);
+    }
+    let owner_hex = owner.to_hex();
+    let may_rotate = |pk: &PublicKey| {
+        pk == owner || roles.is_authorized(&pk.to_hex(), Some(&owner_hex), crate::community::roles::Permissions::BAN)
+    };
+    let earliest = events
+        .iter()
+        .filter(|ev| ev.epoch == Some(epoch))
+        .filter_map(|ev| match &ev.entry {
+            guestbook::GuestbookEntry::Snapshot { refounder, at_ms, .. } if may_rotate(refounder) => Some((*at_ms, *refounder)),
+            _ => None,
+        })
+        .min_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.to_bytes().cmp(&b.1.to_bytes())));
+    Some(earliest.map_or(*owner, |(_, pk)| pk))
 }
 
 fn fold_members(
@@ -3798,10 +3872,9 @@ fn fold_member_parts(
         }
     }
 
-    // Snapshot authority (CORD-02 §5): the npub whose verified Refounding minted the current
-    // epoch — an admin's or a bot's as much as the owner's — so its survivors stay members
-    // without re-posting. Genesis has no refounder, hence no snapshot power.
-    let snapshot_authority_pk = snapshot_authority_for(&cid_hex, community, &owner);
+    // Snapshot authority (CORD-02 §5): whoever's Refounding minted the current epoch, an
+    // admin's or a bot's as much as the owner's, so its survivors stay members without re-posting.
+    let snapshot_authority_pk = snapshot_authority_for(&cid_hex, community, &owner, events, roles);
     let snapshot_authority = snapshot_authority_pk.as_ref();
     let can_kick = kick_judge(&cid_hex, &owner_hex, roles);
     let now = now_ms();
@@ -4012,7 +4085,7 @@ pub async fn wire_guestbook_members<T: Transport + ?Sized>(
     let owner = community.owner()?;
     let owner_hex = owner.to_hex();
     let roles = crate::db::community::get_community_roles(&cid_hex).unwrap_or_default();
-    let snapshot_authority_pk = snapshot_authority_for(&cid_hex, community, &owner);
+    let snapshot_authority_pk = snapshot_authority_for(&cid_hex, community, &owner, &events, &roles);
     let snapshot_authority = snapshot_authority_pk.as_ref();
     let can_kick = kick_judge(&cid_hex, &owner_hex, &roles);
     let coalesced = guestbook::coalesce(&events, now_ms(), snapshot_authority, &can_kick);
@@ -4040,7 +4113,7 @@ pub(crate) fn stored_departure_times(community: &CommunityV2) -> std::collection
     let Ok(owner) = community.owner() else { return Default::default() };
     let owner_hex = owner.to_hex();
     let roles = crate::db::community::get_community_roles(&cid_hex).unwrap_or_default();
-    let snapshot_authority_pk = snapshot_authority_for(&cid_hex, community, &owner);
+    let snapshot_authority_pk = snapshot_authority_for(&cid_hex, community, &owner, &events, &roles);
     let can_kick = kick_judge(&cid_hex, &owner_hex, &roles);
     guestbook::coalesce(&events, now_ms(), snapshot_authority_pk.as_ref(), &can_kick).into_iter().filter(|(_, st)| st.verdict != guestbook::Verdict::Joined).map(|(pk, st)| (pk, st.at_ms)).collect()
 }
@@ -4190,7 +4263,7 @@ fn with_departure_fold<R>(
     let owner = community.owner().ok()?;
     let owner_hex = owner.to_hex();
     let roles = crate::db::community::get_community_roles(cid_hex).unwrap_or_default();
-    let snapshot_authority_pk = snapshot_authority_for(cid_hex, community, &owner);
+    let snapshot_authority_pk = snapshot_authority_for(cid_hex, community, &owner, &events, &roles);
     let can_kick = kick_judge(cid_hex, &owner_hex, &roles);
     Some(f(&events, now_ms(), snapshot_authority_pk.as_ref(), &can_kick))
 }
@@ -4282,7 +4355,7 @@ pub fn stored_kick_rumor(community: &CommunityV2, member: &PublicKey) -> Option<
     let owner = community.owner().ok()?;
     let owner_hex = owner.to_hex();
     let roles = crate::db::community::get_community_roles(&cid_hex).unwrap_or_default();
-    let snapshot_authority = snapshot_authority_for(&cid_hex, community, &owner);
+    let snapshot_authority = snapshot_authority_for(&cid_hex, community, &owner, &events, &roles);
     let can_kick = kick_judge(&cid_hex, &owner_hex, &roles);
     guestbook::coalesce(&events, now_ms(), snapshot_authority.as_ref(), &can_kick)
         .get(member)
@@ -4296,7 +4369,7 @@ pub fn stored_kick_at(community: &CommunityV2, member: &PublicKey) -> Option<u64
     let owner = community.owner().ok()?;
     let owner_hex = owner.to_hex();
     let roles = crate::db::community::get_community_roles(&cid_hex).unwrap_or_default();
-    let snapshot_authority_pk = snapshot_authority_for(&cid_hex, community, &owner);
+    let snapshot_authority_pk = snapshot_authority_for(&cid_hex, community, &owner, &events, &roles);
     let snapshot_authority = snapshot_authority_pk.as_ref();
     let can_kick = kick_judge(&cid_hex, &owner_hex, &roles);
     guestbook::coalesce(&events, now_ms(), snapshot_authority, &can_kick)
@@ -5092,31 +5165,22 @@ async fn refound_community_with<T: Transport + ?Sized>(transport: &T, community:
         if joined_after_cut > 0 {
             match fetch_guestbook_events(transport, community, 0).await {
                 Ok((events, _, _)) => {
-                    let mut first_seen: std::collections::BTreeMap<PublicKey, u64> = std::collections::BTreeMap::new();
-                    for ev in &events {
-                        if let guestbook::GuestbookEntry::Join { member, at_ms, .. } = &ev.entry {
-                            let secs = at_ms / 1000;
-                            first_seen.entry(*member).and_modify(|e| *e = (*e).min(secs)).or_insert(secs);
-                        }
-                    }
                     // A Join's `at_ms` is written by its author, so a raider can
                     // backdate under any window computed from it. What this client
                     // WATCHED arrive, they cannot forge — but only if we were already
                     // following before the window opened. A client that started
                     // watching later sees everyone as new, and trusting it would evict
                     // the whole community.
-                    if guestbook_observed_since(&cid_hex).is_some_and(|since| since < joined_after_cut) {
-                        if let Ok((local, _)) = crate::db::community::get_guestbook_shared(&cid_hex) {
-                            for ev in local.iter() {
-                                let (guestbook::GuestbookEntry::Join { member, .. }, Some(seen)) = (&ev.entry, ev.observed_at) else {
-                                    continue;
-                                };
-                                // Incriminating only: an observation can move a member
-                                // LATER (catching a backdated claim), never earlier.
-                                first_seen.entry(*member).and_modify(|e| *e = (*e).max(seen)).or_insert(seen);
-                            }
-                        }
-                    }
+                    let watched = guestbook_observed_since(&cid_hex).is_some_and(|since| since < joined_after_cut);
+                    let (held, _) = crate::db::community::get_guestbook(&cid_hex).unwrap_or_default();
+                    let first_seen = earliest_arrivals(&events, &held, watched, |pk| {
+                        Some(pk.to_hex()) == owner_hex_for_channels
+                            || roster_for_channels.is_authorized(
+                                &pk.to_hex(),
+                                owner_hex_for_channels.as_deref(),
+                                crate::community::roles::Permissions::BAN,
+                            )
+                    });
                     let before = recipients.len();
                     recipients.retain(|r| {
                         if *r == my_pk || Some(r.to_hex()) == owner_hex_for_channels {
@@ -9203,18 +9267,12 @@ pub async fn contain_raid<T: Transport + ?Sized>(
             let owner_hex = owner.to_hex();
             match fetch_guestbook_events(transport, &community, 0).await {
                 Ok((events, _, _)) => {
-                    // EARLIEST trace per member: a re-announced Join must never make
-                    // an established member read as a window joiner.
-                    let mut first_seen: std::collections::BTreeMap<PublicKey, u64> = std::collections::BTreeMap::new();
-                    for ev in &events {
-                        if let guestbook::GuestbookEntry::Join { member, at_ms, .. } = &ev.entry {
-                            let secs = at_ms / 1000;
-                            first_seen
-                                .entry(*member)
-                                .and_modify(|e| *e = (*e).min(secs))
-                                .or_insert(secs);
-                        }
-                    }
+                    let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+                    let (held, _) = crate::db::community::get_guestbook(&cid_hex).unwrap_or_default();
+                    let watched = guestbook_observed_since(&cid_hex).is_some_and(|since| since < window_start_secs);
+                    let first_seen = earliest_arrivals(&events, &held, watched, |pk| {
+                        *pk == owner || roster.is_authorized(&pk.to_hex(), Some(&owner_hex), crate::community::roles::Permissions::BAN)
+                    });
                     for (pk, joined) in first_seen {
                         if joined < window_start_secs || pk == owner || pk == my_pk || cut.contains(&pk) {
                             continue;
@@ -17944,6 +18002,63 @@ mod tests {
         assert!(members.contains(&owner), "a survivor the snapshot names stays");
     }
 
+    #[tokio::test]
+    async fn a_device_that_missed_the_rotation_takes_the_earliest_snapshot_from_someone_who_may_rotate() {
+        use crate::community::roles::{CommunityRoles, MemberGrant, Permissions, Role, RoleScope};
+        // A joiner holds only the epoch it was invited into, so it never saw who minted it.
+        let (_tmp, _guard, _owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "Joiner", vec!["wss://r".into()], None).await.unwrap();
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        let owner = community.owner().unwrap();
+        let mut at_epoch_1 = community.clone();
+        at_epoch_1.root_epoch = Epoch(1);
+
+        let bot = Keys::generate();
+        let late_mod = Keys::generate();
+        let stranger = Keys::generate();
+        let role = |id: &str, bits: u64| Role { role_id: id.into(), name: id.into(), position: 1, permissions: Permissions(bits), scope: RoleScope::Server, color: 0, rank: None, display: false, mentionable: false, extra: Default::default() };
+        let roster = |granted: Vec<String>| CommunityRoles {
+            roles: vec![role("guard", Permissions::BAN)],
+            grants: granted.into_iter().map(|member| MemberGrant { member, role_ids: vec!["guard".into()] }).collect(),
+            everyone: None,
+            overwrites: Vec::new(), syncs: Default::default(), legacy_channels: None, creators: Default::default(),
+        };
+
+        let survivor = Keys::generate().public_key();
+        let cut = Keys::generate().public_key();
+        let join = |member: PublicKey, id: u8| guestbook::GuestbookEvent {
+            epoch: None, observed_at: None, rumor_id: [id; 32],
+            entry: guestbook::GuestbookEntry::Join { member, invited_by: None, at_ms: 1_000 },
+        };
+        let snapshot = |by: &Keys, members: Vec<PublicKey>, at_ms: u64, id: u8| guestbook::GuestbookEvent {
+            epoch: Some(1), observed_at: None, rumor_id: [id; 32],
+            entry: guestbook::GuestbookEntry::Snapshot { refounder: by.public_key(), members, snapshot_id: [id; 32], chunk: (1, 1), at_ms },
+        };
+        let events = vec![
+            join(cut, 1),
+            snapshot(&stranger, vec![cut], 4_000, 0x61),
+            snapshot(&bot, vec![owner, survivor], 5_000, 0x62),
+            snapshot(&late_mod, vec![owner, cut], 9_000, 0x63),
+        ];
+        crate::db::community::set_guestbook(&cid_hex, &events, 10).unwrap();
+
+        // Nobody but the owner may rotate: no snapshot here is theirs, so none seeds anything.
+        crate::db::community::set_community_roles(&cid_hex, &roster(vec![]), 1).unwrap();
+        let members = stored_memberlist(&at_epoch_1).unwrap();
+        assert!(!members.contains(&survivor) && members.contains(&cut), "without the right to rotate, a snapshot is noise");
+
+        // The bot and a later moderator both hold BAN: the bot's came first, so it is the Refounding's.
+        crate::db::community::set_community_roles(&cid_hex, &roster(vec![bot.public_key().to_hex(), late_mod.public_key().to_hex()]), 2).unwrap();
+        let members = stored_memberlist(&at_epoch_1).unwrap();
+        assert!(members.contains(&survivor), "the refounder's survivors are members without re-posting");
+        assert!(!members.contains(&cut), "and whoever it cut is not, whatever a later snapshot says");
+
+        // A device that saw the rotation keeps the minter it verified.
+        record_epoch_minter(&cid_hex, 1, &late_mod.public_key().to_hex());
+        assert!(stored_memberlist(&at_epoch_1).unwrap().contains(&cut), "a verified minter outranks the inference");
+    }
+
     /// A moderation report quotes what was said, so it may only reach someone who
     /// could have read the room it was said in. Community power is NOT that
     /// question — BAN says what a moderator may do to people, never which rooms
@@ -22744,6 +22859,64 @@ mod tests {
             vended_to(&bed, &community, &quiet).await,
             "no Join on the reachable plane means OLD — absence of evidence must never evict",
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_member_who_rejoined_inside_the_window_is_not_cut() {
+        let (bed, owner, _other) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Rejoin", bed.relays.clone(), None).await.unwrap();
+        mint_public_link(&bed.relay, &community, "https://x", None, None).await.unwrap();
+        let veteran = Keys::generate();
+        let raider = Keys::generate();
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        // The veteran's first Join, from an earlier epoch: held locally, gone from the plane.
+        let old = guestbook::GuestbookEvent {
+            epoch: Some(0),
+            observed_at: None,
+            rumor_id: [7u8; 32],
+            entry: guestbook::GuestbookEntry::Join { member: veteran.public_key(), invited_by: None, at_ms: 1_000_000 },
+        };
+        crate::db::community::store_guestbook_events(&cid_hex, &[old], 0).unwrap();
+        let gb = super::super::derive::guestbook_group_key(&community.community_root, community.id(), community.root_epoch);
+        for (who, at_ms) in [(&veteran, 9_000_000u64), (&raider, 9_500_000)] {
+            let join = guestbook::build_join_rumor(who.public_key(), None, at_ms);
+            let (wrap, _) = guestbook::seal_guestbook_rumor(&join, &gb, who, Timestamp::from_secs(at_ms / 1000)).unwrap();
+            bed.relay.publish(&wrap, &bed.relays).await.unwrap();
+        }
+
+        let report = contain_raid(&bed.relay, community.id(), &[raider.public_key()], 5_000, &[]).await.unwrap();
+        assert_eq!(report.window_cut, 0, "the veteran's re-Join is not their arrival");
+        let updated = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        let members = memberlist(&bed.relay, &updated).await.unwrap();
+        assert!(members.contains(&veteran.public_key()), "the veteran rides into the new epoch");
+        assert!(!members.contains(&raider.public_key()));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_snapshot_a_raider_forged_does_not_date_their_arrival() {
+        let (bed, owner, _other) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Forged", bed.relays.clone(), None).await.unwrap();
+        mint_public_link(&bed.relay, &community, "https://x", None, None).await.unwrap();
+        let raider = Keys::generate();
+        let lurker = Keys::generate();
+        let gb = super::super::derive::guestbook_group_key(&community.community_root, community.id(), community.root_epoch);
+        for (who, at_ms) in [(&raider, 9_000_000u64), (&lurker, 9_500_000)] {
+            let join = guestbook::build_join_rumor(who.public_key(), None, at_ms);
+            let (wrap, _) = guestbook::seal_guestbook_rumor(&join, &gb, who, Timestamp::from_secs(at_ms / 1000)).unwrap();
+            bed.relay.publish(&wrap, &bed.relays).await.unwrap();
+        }
+        // The lurker claims an ancient snapshot that already listed them.
+        for rumor in guestbook::build_snapshot_rumors(lurker.public_key(), &[lurker.public_key()], [9u8; 32], 1_000_000) {
+            let (wrap, _) = guestbook::seal_guestbook_rumor(&rumor, &gb, &lurker, Timestamp::from_secs(1_000)).unwrap();
+            bed.relay.publish(&wrap, &bed.relays).await.unwrap();
+        }
+
+        let report = contain_raid(&bed.relay, community.id(), &[raider.public_key()], 5_000, &[]).await.unwrap();
+        assert_eq!(report.window_cut, 1, "only someone who may rotate the base can vouch for an arrival");
+        let updated = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        assert!(!memberlist(&bed.relay, &updated).await.unwrap().contains(&lurker.public_key()));
     }
 
     #[tokio::test(flavor = "multi_thread")]
