@@ -254,6 +254,8 @@ pub struct Picked(pub String, pub bool);
 pub struct PickedCustom(pub String, pub String, pub bool);
 /// A dead pack's Remove Pack.
 pub struct RemovePack(pub String);
+/// A GIF's context menu, at the pointer: the URL a pick would send.
+pub struct GifMenu(pub String, pub gpui::Point<gpui::Pixels>);
 /// A pack tab or header's context menu, at the pointer.
 pub struct PackMenu(pub String, pub bool, pub bool, pub gpui::Point<gpui::Pixels>);
 /// The rail's new order, as `reorder_emoji_packs` takes it.
@@ -402,6 +404,7 @@ impl EventEmitter<RemovePack> for EmojiPicker {}
 impl EventEmitter<PackMenu> for EmojiPicker {}
 impl EventEmitter<ReorderPacks> for EmojiPicker {}
 impl EventEmitter<PickedGif> for EmojiPicker {}
+impl EventEmitter<GifMenu> for EmojiPicker {}
 impl EventEmitter<PickedText> for EmojiPicker {}
 impl EventEmitter<Dismissed> for EmojiPicker {}
 
@@ -930,6 +933,16 @@ impl EmojiPicker {
                             .hover(|s| s.border_color(c(PRIMARY)))
                             .active(|s| s.border_color(c(PRIMARY)).opacity(0.8))
                             .cursor_pointer()
+                            .on_mouse_down(
+                                gpui::MouseButton::Right,
+                                cx.listener({
+                                    let id = id.clone();
+                                    move |_, ev: &gpui::MouseDownEvent, _, cx| {
+                                        cx.stop_propagation();
+                                        cx.emit(GifMenu(crate::backend::gifs::original_url(&id), ev.position))
+                                    }
+                                }),
+                            )
                             .on_click(cx.listener(move |_, _, _, cx| {
                                 cx.emit(PickedGif(crate::backend::gifs::original_url(&id)))
                             }))

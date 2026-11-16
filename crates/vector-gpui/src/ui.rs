@@ -428,6 +428,7 @@ enum MenuAct {
         owner: bool,
     },
     Copy(String),
+    CopyLink(String),
     NotifyLevel(String, Option<&'static str>),
     NotifyMute(String, i64),
     SuppressEveryone(String, bool),
@@ -802,6 +803,11 @@ impl VectorApp {
             &emoji_picker,
             |app, _, crate::picker::RemovePack(id), cx| app.remove_pack(id.clone(), cx),
         )
+        .detach();
+        cx.subscribe(&emoji_picker, |app, _, crate::picker::GifMenu(url, at), cx| {
+            let rows = vec![(kit::MenuItem::new("Copy Link", "share"), MenuAct::CopyLink(url.clone()))];
+            app.show_menu(*at, rows, cx);
+        })
         .detach();
         cx.subscribe(
             &emoji_picker,
@@ -2060,6 +2066,10 @@ impl VectorApp {
             MenuAct::Copy(text) => {
                 cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
                 self.toast = Some(("Copied".into(), std::time::Instant::now()));
+            }
+            MenuAct::CopyLink(url) => {
+                cx.write_to_clipboard(gpui::ClipboardItem::new_string(url));
+                self.toast = Some(("Copied Link".into(), std::time::Instant::now()));
             }
             MenuAct::NotifyLevel(scope, level) => {
                 let rx = backend::run(backend::prefs::set_notify_level(scope, level));
