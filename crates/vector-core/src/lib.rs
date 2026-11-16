@@ -744,6 +744,15 @@ pub enum CatchUp {
     External,
 }
 
+/// A community image no edition names any more, off its media server. Only its uploader's delete
+/// is honoured there, so another admin's upload stays, encrypted, under a key only members held.
+fn drop_community_image(url: Option<String>, kept: Option<&str>) {
+    let Some(url) = url.filter(|u| Some(u.as_str()) != kept) else { return };
+    if let Ok(signer) = crate::signer::active_signer() {
+        crate::blossom::delete_blobs_best_effort(signer, vec![url]);
+    }
+}
+
 /// How many times a count-only backfill pages on from where the relay walk stopped.
 const BACKFILL_CONTINUATIONS: usize = 3;
 
@@ -5580,11 +5589,8 @@ impl VectorCore {
             .map_err(VectorError::Other)?
             .ok_or_else(|| VectorError::Other("v2 community not found".into()))?;
         let mut meta = community.metadata();
-        if is_banner {
-            meta.banner = None;
-        } else {
-            meta.icon = None;
-        }
+        let gone = if is_banner { meta.banner.take() } else { meta.icon.take() };
+        let kept = if is_banner { meta.icon.as_ref() } else { meta.banner.as_ref() }.map(|i| i.url.clone());
         let transport = LiveTransport::with_timeout(std::time::Duration::from_secs(12));
         crate::community::v2::service::edit_community_metadata(&transport, &community, &meta)
             .await
@@ -5593,6 +5599,7 @@ impl VectorCore {
         if !session.is_live() {
             return Err(VectorError::Other("account changed while removing the image".into()));
         }
+        drop_community_image(gone.map(|i| i.url), kept.as_deref());
         if let Some(updated) = crate::community::v2::service::persist_community_image(&cid, None, is_banner).await {
             self.register_v2_chats(&updated, &session).await;
         }
@@ -5668,11 +5675,8 @@ impl VectorCore {
             .map_err(VectorError::Db)?
             .ok_or_else(|| VectorError::NotFound("community".into()))?;
         let mut meta = community.metadata();
-        if is_banner {
-            meta.banner = Some(image.clone());
-        } else {
-            meta.icon = Some(image.clone());
-        }
+        let replaced = if is_banner { meta.banner.replace(image.clone()) } else { meta.icon.replace(image.clone()) };
+        let kept = if is_banner { meta.icon.as_ref() } else { meta.banner.as_ref() }.map(|i| i.url.clone());
         let transport = LiveTransport::with_timeout(std::time::Duration::from_secs(12));
         crate::community::v2::service::edit_community_metadata(&transport, &community, &meta)
             .await
@@ -5680,6 +5684,7 @@ impl VectorCore {
         if !session.is_live() {
             return Err(VectorError::Other("account changed while setting the image".into()));
         }
+        drop_community_image(replaced.map(|i| i.url).filter(|u| *u != url), kept.as_deref());
         if let Some(updated) = crate::community::v2::service::persist_community_image(&cid, Some(image), is_banner).await {
             self.register_v2_chats(&updated, &session).await;
         }
