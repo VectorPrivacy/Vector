@@ -747,6 +747,9 @@ pub enum CatchUp {
 /// How many times a count-only backfill pages on from where the relay walk stopped.
 const BACKFILL_CONTINUATIONS: usize = 3;
 
+/// Epochs below the live one a catch-up with no proof reads.
+const UNPROVEN_EPOCHS: u64 = 2;
+
 /// What one catch-up page cost and what it yielded.
 ///
 /// `fetched` is the relay's answer — zero means there is genuinely nothing
@@ -2955,13 +2958,14 @@ impl VectorCore {
     }
 
     /// Fill the hole in a channel's held history that a scroll up from `before_ms` is about to
-    /// cross, with the relay pages just below it. The count of messages that arrived; 0 when
+    /// cross, with the relay pages from its top down. The count of messages that arrived; 0 when
     /// there is no hole there, or the relays can't be reached (it stays for the next scroll).
     pub async fn fill_community_gap(&self, channel_id: &str, before_ms: u64) -> Result<usize> {
-        let before = before_ms / 1000;
-        if history_gaps::gap_at(channel_id, before).is_none() {
+        let Some(gap) = history_gaps::gap_at(channel_id, before_ms / 1000) else {
             return Ok(0);
-        }
+        };
+        // From the hole's top: a reader can step into it lower down, past rows it held.
+        let before = gap.hi + 1;
         let id = self.v2_community_for_channel(channel_id)?.ok_or_else(|| VectorError::Other("unknown community channel".into()))?;
         let count = Self::v2_backfill_channel_counted(
             &id, channel_id, 50, 2, None, Some(before),
@@ -4134,7 +4138,14 @@ impl VectorCore {
         let began = crate::clock::now_secs();
         let floor = crate::history_gaps::floor(channel_id, until, began);
         let reach = crate::history_gaps::reach(since, floor);
-        let Ok((page, next_before, complete)) = crate::community::v2::service::fetch_channel_history_paged(
+        let live = community.channel(&ch).map_or(community.root_epoch, |c| community.channel_secret(c).1);
+        // Epochs adopted since the proof are read whole. Unproven, the last few from the floor:
+        // a week rarely holds more rotations.
+        let past = until.is_none().then(|| match crate::history_gaps::proven_epoch(channel_id) {
+            Some(e) => (crate::community::Epoch(e), since),
+            None => (crate::community::Epoch(live.0.saturating_sub(UNPROVEN_EPOCHS)), reach),
+        });
+        let Ok((page, next_before, complete)) = crate::community::v2::service::fetch_channel_history_since_epoch(
             &transport,
             &community,
             &ch,
@@ -4158,6 +4169,7 @@ impl VectorCore {
                 held.fetch_add(skip.len(), std::sync::atomic::Ordering::Relaxed);
                 skip
             },
+            past,
         )
         .await
         else {
@@ -4170,7 +4182,7 @@ impl VectorCore {
         // From the top, everything down to the floor is now read or in the ledger: proven once every
         // relay answered, so one that didn't is read from the old floor next time.
         if until.is_none() && since.is_none() && complete {
-            crate::history_gaps::prove(channel_id, began);
+            crate::history_gaps::prove(channel_id, began, live.0);
         }
         (BackfillCount { fetched, new_messages, next_before, unreachable: false }, waiting)
     }

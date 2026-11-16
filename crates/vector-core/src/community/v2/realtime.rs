@@ -333,6 +333,31 @@ pub(crate) async fn settle_owed_retractions<T: crate::community::transport::Tran
     }
 }
 
+/// Read again each Channel whose live epoch moved since `before`: the live subscription carries
+/// only what arrives next, and what the new epoch said before this device adopted it is history.
+fn reread_moved_channels(before: &CommunityV2) {
+    let Ok(Some(after)) = crate::db::community::load_community_v2(before.id()) else { return };
+    let moved: Vec<String> = after
+        .channels
+        .iter()
+        .filter(|ch| !(ch.private && ch.key.is_none()))
+        .filter(|ch| before.channel(&ch.id).is_none_or(|was| before.channel_secret(was).1 != after.channel_secret(ch).1))
+        .map(|ch| crate::simd::hex::bytes_to_hex_32(&ch.id.0))
+        .collect();
+    if moved.is_empty() {
+        return;
+    }
+    let id = *after.id();
+    crate::db::spawn_bound(async move {
+        for channel in moved {
+            if !crate::db::current_session().is_live() {
+                return;
+            }
+            crate::VectorCore::v2_backfill_channel(&id, &channel, 50, 8, None, None, crate::community::transport::Evidence::Fast, 12).await;
+        }
+    });
+}
+
 /// One community's plane addresses: the subscription's author set and the dispatch routes are
 /// both built from this, so what is subscribed and what is recognized can't drift.
 fn community_addresses(c: &CommunityV2) -> Vec<PublicKey> {
@@ -1420,6 +1445,7 @@ async fn follow_community(session: &std::sync::Arc<crate::db::Session>, id: &Com
             Ok(follow) if follow.updated.is_some() => {
                 refresh_subscription(&client).await;
                 refreshed(&*handler, &community_id);
+                reread_moved_channels(&current);
             }
             Ok(_) => {}
             Err(e) => {

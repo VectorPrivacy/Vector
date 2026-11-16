@@ -928,8 +928,28 @@ pub async fn fetch_channel_history_paged<T: Transport + ?Sized>(
     since: Option<u64>,
     start_until: Option<u64>,
     evidence: crate::community::transport::Evidence,
+    keep_paging: impl FnMut(&[FetchedEvent], usize, Option<u64>) -> bool,
+    settled: impl Fn(&[nostr_sdk::prelude::EventId]) -> std::collections::HashSet<nostr_sdk::prelude::EventId>,
+) -> Result<(Vec<FetchedEvent>, Option<u64>, bool), String> {
+    fetch_channel_history_since_epoch(transport, community, channel_id, page, max_pages, since, start_until, evidence, keep_paging, settled, None).await
+}
+
+/// [`fetch_channel_history_paged`], where a newest-first walk also reads the Channel's epochs from
+/// `past.0` up: the one a proof was read under from `since`, and each later one from `past.1`,
+/// since no walk read those.
+#[allow(clippy::too_many_arguments)]
+pub async fn fetch_channel_history_since_epoch<T: Transport + ?Sized>(
+    transport: &T,
+    community: &CommunityV2,
+    channel_id: &ChannelId,
+    page: usize,
+    max_pages: usize,
+    since: Option<u64>,
+    start_until: Option<u64>,
+    evidence: crate::community::transport::Evidence,
     mut keep_paging: impl FnMut(&[FetchedEvent], usize, Option<u64>) -> bool,
     settled: impl Fn(&[nostr_sdk::prelude::EventId]) -> std::collections::HashSet<nostr_sdk::prelude::EventId>,
+    past: Option<(Epoch, Option<u64>)>,
 ) -> Result<(Vec<FetchedEvent>, Option<u64>, bool), String> {
     crate::db::scoped(async move {
         // Guards the opportunistic scrub-key heals below — the fetch loop straddles
@@ -968,12 +988,17 @@ pub async fn fetch_channel_history_paged<T: Transport + ?Sized>(
             writer_planes.truncate(2);
         }
         let live_writer = writing::live_writer(community, ch);
+        let mut whole: std::collections::HashSet<PublicKey> = std::collections::HashSet::new();
         if start_until.is_none() {
             // Root epochs and the Channel's own count apart, so each keeps its newest.
             let (mut public, mut own): (Vec<_>, Vec<_>) = planes.into_iter().partition(|(p, _)| matches!(p, ReadPlane::Public(..)));
-            for set in [&mut public, &mut own] {
-                set.sort_by_key(|(_, e)| std::cmp::Reverse(e.0));
-                set.truncate(LIVE_COORD_EPOCHS);
+            public.sort_by_key(|(_, e)| std::cmp::Reverse(e.0));
+            public.truncate(LIVE_COORD_EPOCHS);
+            own.sort_by_key(|(_, e)| std::cmp::Reverse(e.0));
+            let unread = past.map_or(0, |(from, _)| own.iter().filter(|(_, e)| e.0 >= from.0).count());
+            own.truncate(unread.max(LIVE_COORD_EPOCHS));
+            if let Some((from, _)) = past {
+                whole = own.iter().filter(|(_, e)| e.0 > from.0).map(|(p, _)| p.address()).collect();
             }
             planes = own.into_iter().chain(public).collect();
         }
@@ -1027,11 +1052,14 @@ pub async fn fetch_channel_history_paged<T: Transport + ?Sized>(
                 None => (false, until),
             };
             let read_since = since.max(range.map(|(f, _)| f / 1000).filter(|f| *f > 0));
+            let whole_since = past.and_then(|(_, s)| s).max(range.map(|(f, _)| f / 1000).filter(|f| *f > 0));
             let below = range.and_then(|(f, _)| (f > 0).then(|| (f / 1000).checked_sub(1)).flatten()).filter(|b| since.is_none_or(|s| s <= *b));
             let mut read_full = false;
-            let read_planes_here: &[(ReadPlane, Epoch)] = if read_on && !read_since.zip(read_until).is_some_and(|(s, u)| s > u) { &planes } else { &[] };
+            let lowest_since = if whole.is_empty() { read_since } else { read_since.min(whole_since) };
+            let read_planes_here: &[(ReadPlane, Epoch)] = if read_on && !lowest_since.zip(read_until).is_some_and(|(s, u)| s > u) { &planes } else { &[] };
             for (plane, _) in read_planes_here {
-                let q = Query { since: read_since, evidence, ..plane_page(plane.address().to_hex(), page, read_until) };
+                let since = if whole.contains(&plane.address()) { whole_since } else { read_since };
+                let q = Query { since, evidence, ..plane_page(plane.address().to_hex(), page, read_until) };
                 // A read view holds no key to authenticate as the plane, so it asks plainly.
                 let fetched = match plane.group() {
                     Some(group) => transport.fetch_plane(group.keys(), &q, &community.relays).await.map(|f| {
@@ -32186,6 +32214,57 @@ mod tests {
         assert!(!walk(None).await.contains("m15"), "without a floor the first held page ends the walk");
         let got = walk(Some(at(5) / 1000)).await;
         assert!((10..20).all(|i| got.contains(&format!("m{i}"))), "the unread middle is read");
+    }
+
+    #[tokio::test]
+    async fn a_catch_up_after_a_rotation_reads_the_epochs_its_proof_never_read() {
+        let (_tmp, _guard, _owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "Moved", vec!["wss://r".into()], None).await.unwrap();
+        let general = community.channels[0].id;
+        let now = now_ms();
+        for i in 0..5u64 {
+            send_chat_message_at(&relay, &community, &general, &format!("old{i}"), None, &[], vec![], now - (60 - i) * 60_000).await.unwrap();
+        }
+        let between = refound_community(&relay, &community, &[]).await.unwrap();
+        for i in 0..5u64 {
+            send_chat_message_at(&relay, &between, &general, &format!("mid{i}"), None, &[], vec![], now - (20 - i) * 60_000).await.unwrap();
+        }
+        let rotated = refound_community(&relay, &between, &[]).await.unwrap();
+        for i in 0..5u64 {
+            send_chat_message_at(&relay, &rotated, &general, &format!("new{i}"), None, &[], vec![], now + (i + 1) * 60_000).await.unwrap();
+        }
+        crate::clock::shift_for_test(10 * 60_000);
+        let held = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        assert_eq!(held.root_epoch, rotated.root_epoch);
+        // Proven on the old epoch after all of it was said: a floor above every new message.
+        let floor = Some((now + 8 * 60_000) / 1000);
+        let walk = |past: Option<(Epoch, Option<u64>)>| {
+            let (relay, held) = (&relay, &held);
+            async move {
+                let (got, ..) = fetch_channel_history_since_epoch(relay, held, &general, 10, 8, floor, None, crate::community::transport::Evidence::Quorum, |p, s, n| catch_up_pages_on(p, s, n, floor, |_| false), |_| Default::default(), past).await.unwrap();
+                got.iter().map(|f| f.event.opened().rumor.content.clone()).collect::<std::collections::HashSet<_>>()
+            }
+        };
+        assert!(walk(None).await.is_empty(), "the live epoch from the floor holds nothing");
+        let got = walk(Some((community.root_epoch, None))).await;
+        crate::clock::shift_for_test(0);
+        assert!((0..5).all(|i| got.contains(&format!("new{i}")) && got.contains(&format!("mid{i}"))), "every epoch adopted since the proof is read whole");
+        assert!(!got.iter().any(|t| t.starts_with("old")), "the proof's own epoch is read from its floor");
+    }
+
+    #[tokio::test]
+    async fn a_proof_holds_only_for_the_epoch_it_was_read_under() {
+        let (_tmp, _guard, _owner) = init_test_db();
+        let chat = "ab".repeat(32);
+        let now = 40 * 24 * 3600;
+        crate::db::set_sql_setting(format!("history_proven:{chat}"), (now - 3600).to_string()).unwrap();
+        assert_eq!(crate::history_gaps::proven_epoch(&chat), None, "a proof that names no epoch vouches for nothing");
+        assert!(crate::history_gaps::floor(&chat, None, now).is_some_and(|f| f < now - 3600), "so the catch-up looks back as if unproven");
+        crate::history_gaps::prove(&chat, now, 3);
+        assert_eq!(crate::history_gaps::proven_epoch(&chat), Some(3));
+        assert!(crate::history_gaps::proven(&chat, 3).is_some_and(|p| p < now));
+        assert_eq!(crate::history_gaps::proven(&chat, 4), None, "a later epoch was read by nothing");
     }
 
     #[tokio::test]

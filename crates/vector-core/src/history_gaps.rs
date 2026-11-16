@@ -10,6 +10,9 @@
 //! land the newest rows while the stretch under them was never read. So a channel also keeps
 //! where its history was last proven whole, and a catch-up walks down to there, not to the
 //! first page it already holds.
+//!
+//! A proof covers only the planes its walk read, so it names their epoch: an epoch adopted since
+//! began somewhere inside the stretch it vouches for, and nothing has read it yet.
 
 use serde::{Deserialize, Serialize};
 
@@ -62,25 +65,38 @@ fn proof_key(chat_id: &str) -> String {
     format!("history_proven:{chat_id}")
 }
 
-/// Where `chat_id`'s held history was last proven whole (Unix seconds): below it, only the
-/// ledger's holes are missing.
-pub fn proven(chat_id: &str) -> Option<u64> {
-    crate::db::get_sql_setting(proof_key(chat_id)).ok().flatten().and_then(|v| v.parse().ok())
+/// Where `chat_id`'s held history was last proven whole (Unix seconds), and the epoch it was read
+/// under. One written before proofs named their epoch vouches for nothing.
+fn proof(chat_id: &str) -> Option<(u64, u64)> {
+    let value = crate::db::get_sql_setting(proof_key(chat_id)).ok().flatten()?;
+    let (at, epoch) = value.split_once('@')?;
+    Some((at.parse().ok()?, epoch.parse().ok()?))
 }
 
-/// A catch-up that began at `began` (Unix seconds) has walked to proven history or left a hole
-/// for the rest.
-pub fn prove(chat_id: &str, began: u64) {
+/// Where `chat_id`'s held history was proven whole under `epoch`: below it, only the ledger's
+/// holes are missing.
+pub fn proven(chat_id: &str, epoch: u64) -> Option<u64> {
+    proof(chat_id).filter(|(_, e)| *e == epoch).map(|(at, _)| at)
+}
+
+/// The epoch `chat_id`'s proof was read under.
+pub fn proven_epoch(chat_id: &str) -> Option<u64> {
+    proof(chat_id).map(|(_, e)| e)
+}
+
+/// A catch-up that began at `began` (Unix seconds), reading up to `epoch`, has walked to proven
+/// history or left a hole for the rest.
+pub fn prove(chat_id: &str, began: u64, epoch: u64) {
     let at = began.saturating_sub(PROOF_SLACK_SECS);
-    if proven(chat_id).is_none_or(|p| at > p) {
-        let _ = crate::db::set_sql_setting(proof_key(chat_id), at.to_string());
+    if proof(chat_id).is_none_or(|(p, _)| at > p) {
+        let _ = crate::db::set_sql_setting(proof_key(chat_id), format!("{at}@{epoch}"));
     }
 }
 
 /// How far down a walk from `from` (None: the newest) must go before a page it already holds
 /// ends it: a hole's floor inside one, the proof above it, nothing below.
 pub fn floor(chat_id: &str, from: Option<u64>, now: u64) -> Option<u64> {
-    floor_of(&gaps(chat_id), proven(chat_id), from, now)
+    floor_of(&gaps(chat_id), proof(chat_id).map(|(at, _)| at), from, now)
 }
 
 fn floor_of(gaps: &[Gap], proven: Option<u64>, from: Option<u64>, now: u64) -> Option<u64> {
@@ -114,15 +130,15 @@ pub fn note_walk(chat_id: &str, from: Option<u64>, stopped: Option<u64>, floor: 
 
 fn walked(gaps: &[Gap], from: Option<u64>, stopped: Option<u64>, floor: Option<u64>, held_below: impl Fn(u64) -> Option<u64>) -> Vec<Gap> {
     let top = from.unwrap_or(u64::MAX);
-    let mut out: Vec<Gap> = Vec::with_capacity(gaps.len() + 1);
-    match stopped {
+    // A walk begun inside a hole read nothing above where it began: that part stays a hole.
+    let above = from.and_then(|f| find(gaps, f).filter(|g| g.hi > f).map(|g| Gap { lo: f, hi: g.hi }));
+    let mut out: Vec<Gap> = Vec::with_capacity(gaps.len() + 2);
+    match stopped.map(|stop| (stop, held_below(stop))) {
+        // Nothing held below: an ordinary older page reaches it, there is no hole to cross.
+        Some((stop, None)) => out.extend(gaps.iter().copied().filter(|g| g.lo >= top || g.hi < stop)),
         // Stopped with history still unread: everything down to the newest held row is a hole,
         // whatever this walk covered above it no longer is.
-        Some(stop) => {
-            let Some(held) = held_below(stop) else {
-                // Nothing held below: an ordinary older page reaches it, there is no hole to cross.
-                return gaps.iter().copied().filter(|g| g.lo >= top || g.hi < stop).collect();
-            };
+        Some((stop, Some(held))) => {
             let lo = floor.filter(|f| *f < stop).map_or(held, |f| f.min(held));
             let mut hole = Gap { lo, hi: stop };
             for g in gaps {
@@ -138,6 +154,7 @@ fn walked(gaps: &[Gap], from: Option<u64>, stopped: Option<u64>, floor: Option<u
         // Reached held history: the hole it started in is closed.
         None => out.extend(gaps.iter().copied().filter(|g| from.is_none_or(|f| find(std::slice::from_ref(g), f).is_none()))),
     }
+    out.extend(above);
     out.sort_by(|a, b| b.hi.cmp(&a.hi));
     out.truncate(MAX_GAPS);
     out
@@ -226,6 +243,19 @@ mod tests {
         // Below the proof, the hole starts at the newest held row as before.
         let out = walked(&[], None, Some(800), Some(1000), |t| (t > 500).then_some(500));
         assert_eq!(out, vec![g(500, 800)]);
+    }
+
+    #[test]
+    fn a_walk_begun_inside_a_hole_keeps_the_part_above_it() {
+        let held = |t: u64| (t > 1000).then_some(1000);
+        // Stepped into a hole at 4000 rather than its top at 9000, and walked to 3000.
+        assert_eq!(walked(&[g(1000, 9000)], Some(4000), Some(3000), None, held), vec![g(4000, 9000), g(1000, 3000)]);
+        // Or through to held history.
+        assert_eq!(walked(&[g(1000, 9000)], Some(4000), None, None, held), vec![g(4000, 9000)]);
+        // Or to the start, with nothing held below.
+        assert_eq!(walked(&[g(1000, 9000)], Some(4000), Some(3000), None, |_| None), vec![g(4000, 9000)]);
+        // From its top, nothing above remains.
+        assert_eq!(walked(&[g(1000, 9000)], Some(9001), None, None, held), vec![]);
     }
 
     #[test]
