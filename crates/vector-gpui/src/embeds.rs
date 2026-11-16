@@ -219,12 +219,12 @@ fn entity_from_url(url: &str) -> Option<String> {
     let path = url.get(8..)?.split(['?', '#']).next()?;
     let (_, path) = path.split_once('/')?;
     let last = path.trim_end_matches('/').rsplit('/').next()?;
-    let last = if last.len() > 5 && last[last.len() - 5..].eq_ignore_ascii_case(".html") {
+    let last = if last.len() > 5 && last.get(last.len() - 5..).is_some_and(|t| t.eq_ignore_ascii_case(".html")) {
         &last[..last.len() - 5]
     } else {
         last
     };
-    let last = if last.len() > 6 && last[..6].eq_ignore_ascii_case("nostr:") {
+    let last = if last.len() > 6 && last.get(..6).is_some_and(|h| h.eq_ignore_ascii_case("nostr:")) {
         &last[6..]
     } else {
         last

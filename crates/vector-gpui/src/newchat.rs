@@ -207,7 +207,7 @@ pub fn extract_npub(input: &str) -> Option<String> {
     let t = input.trim();
     let valid = |s: &str| {
         s.len() == 63
-            && s[..5].eq_ignore_ascii_case("npub1")
+            && s.get(..5).is_some_and(|h| h.eq_ignore_ascii_case("npub1"))
             && s[5..].bytes().all(|b| b.is_ascii_alphanumeric())
     };
     if valid(t) {

@@ -1214,7 +1214,7 @@ fn profile_link(url: &str) -> Option<&str> {
         .strip_prefix("https://")
         .or_else(|| url.strip_prefix("http://"))?;
     let (host, path) = rest.split_at(rest.find('/')?);
-    if !host.eq_ignore_ascii_case("vectorapp.io") || path.len() < 9 || !path[..9].eq_ignore_ascii_case("/profile/") {
+    if !host.eq_ignore_ascii_case("vectorapp.io") || !path.get(..9).is_some_and(|p| p.eq_ignore_ascii_case("/profile/")) {
         return None;
     }
     let npub = path[9..].strip_suffix('/').unwrap_or(&path[9..]);
