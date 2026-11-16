@@ -168,7 +168,7 @@ pub fn bake(job: Job) -> (Key, Option<Arc<image::RgbaImage>>, Option<Arc<RenderI
     let (cw, ch) = ((w as f32 / scale).min(sw), (h as f32 / scale).min(sh));
     let (cx, cy) = (((sw - cw) / 2.) as u32, ((sh - ch) / 2.) as u32);
     let crop = image::imageops::crop_imm(&*src, cx, cy, cw.round() as u32, ch.round() as u32).to_image();
-    let mut out = image::imageops::resize(&crop, w, h, image::imageops::FilterType::Triangle);
+    let mut out = gpui::resample(&crop, w, h, image::imageops::FilterType::Triangle);
     if key.blur > 0 {
         out = image::imageops::fast_blur(&out, key.blur as f32);
     }
@@ -192,7 +192,7 @@ fn shrink(img: image::RgbaImage, w: u32, h: u32) -> image::RgbaImage {
         return img;
     }
     let (nw, nh) = ((sw * keep).round().max(1.) as u32, (sh * keep).round().max(1.) as u32);
-    image::imageops::resize(&img, nw, nh, image::imageops::FilterType::Triangle)
+    gpui::resample(&img, nw, nh, image::imageops::FilterType::Triangle)
 }
 
 pub type OnAct = Rc<dyn Fn(Act, &mut gpui::Window, &mut gpui::App)>;

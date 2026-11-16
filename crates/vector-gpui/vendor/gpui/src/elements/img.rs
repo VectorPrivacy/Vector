@@ -869,7 +869,7 @@ pub fn resize_premultiplied(buf: image::RgbaImage, w: u32, h: u32) -> image::Rgb
             }
         }
     }
-    let mut out = image::imageops::resize(&pre, w, h, image::imageops::FilterType::Triangle);
+    let mut out = super::resample(&pre, w, h, image::imageops::FilterType::Triangle);
     for px in out.chunks_exact_mut(4) {
         let a = px[3] as u32;
         if a == 0 {

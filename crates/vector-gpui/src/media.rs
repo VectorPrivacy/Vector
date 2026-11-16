@@ -737,7 +737,7 @@ pub fn decode_thumbhash(hash: &str, px: (u32, u32)) -> Option<RenderImage> {
     let bytes = fast_thumbhash::base91_decode(hash).ok()?;
     let (w, h, rgba) = fast_thumbhash::thumb_hash_to_rgba(&bytes).ok()?;
     let buf = image::RgbaImage::from_raw(w as u32, h as u32, rgba)?;
-    let buf = image::imageops::resize(
+    let buf = gpui::resample(
         &buf,
         px.0.clamp(1, 4096),
         px.1.clamp(1, 4096),
@@ -992,8 +992,8 @@ pub fn decode(bytes: &[u8], ext: &str, max: (u32, u32)) -> Option<(RenderImage, 
             t
         });
         if let (Some((img, w, h)), Some((tw, th))) = (scaled, target) {
-            let img = DynamicImage::ImageRgba8(img).resize_exact(tw, th, FilterType::CatmullRom);
-            return Some((RenderImage::new(vec![Frame::new(to_bgra(img.into_rgba8()))]), w, h));
+            let img = gpui::resample(&img, tw, th, FilterType::CatmullRom);
+            return Some((RenderImage::new(vec![Frame::new(to_bgra(img))]), w, h));
         }
     }
     let img = if ext == "svg" {
@@ -1014,7 +1014,7 @@ pub fn decode(bytes: &[u8], ext: &str, max: (u32, u32)) -> Option<(RenderImage, 
     };
     let (w, h) = (img.width(), img.height());
     let img = if w > max.0 || h > max.1 {
-        img.resize(max.0.max(1), max.1.max(1), FilterType::CatmullRom)
+        gpui::resample_within(&img, max.0.max(1), max.1.max(1), FilterType::CatmullRom)
     } else {
         img
     };
@@ -1326,4 +1326,54 @@ pub fn image_bytes(image: &RenderImage) -> usize {
             s.width.0.max(0) as usize * s.height.0.max(0) as usize * 4
         })
         .sum()
+}
+
+#[cfg(test)]
+mod resample_tests {
+    use image::imageops::{self, FilterType};
+    use image::{ImageBuffer, Luma, Pixel, Rgb, Rgba};
+
+    fn noise<P: Pixel<Subpixel = u8> + 'static>(w: u32, h: u32, seed: u64) -> ImageBuffer<P, Vec<u8>> {
+        let mut s = seed | 1;
+        let raw = (0..w as usize * h as usize * P::CHANNEL_COUNT as usize)
+            .map(|i| {
+                s ^= s << 13;
+                s ^= s >> 7;
+                s ^= s << 17;
+                // Half noise, half smooth ramps: rounding ties show up on flat areas.
+                if (i / 97) % 2 == 0 { s as u8 } else { (i % 256) as u8 }
+            })
+            .collect();
+        ImageBuffer::from_raw(w, h, raw).unwrap()
+    }
+
+    fn same<P: Pixel<Subpixel = u8> + 'static>(w: u32, h: u32, nw: u32, nh: u32, f: FilterType) {
+        let img = noise::<P>(w, h, (w * 31 + h * 7 + nw) as u64);
+        let ours = gpui::resample(&img, nw, nh, f);
+        let theirs = imageops::resize(&img, nw, nh, f);
+        assert_eq!(ours.dimensions(), theirs.dimensions());
+        assert!(ours.as_raw() == theirs.as_raw(), "{w}x{h} -> {nw}x{nh} {f:?} {}ch", P::CHANNEL_COUNT);
+    }
+
+    #[test]
+    fn the_streamed_resize_matches_the_image_crate_to_the_bit() {
+        let sizes = [
+            (640, 480, 160, 120),
+            (1008, 756, 600, 450),
+            (333, 777, 101, 37),
+            (64, 64, 63, 65),
+            (7, 5, 40, 29),
+            (1, 1, 9, 4),
+            (500, 1, 13, 1),
+            (1, 300, 1, 2),
+            (32, 32, 1, 1),
+        ];
+        for (w, h, nw, nh) in sizes {
+            for f in [FilterType::Triangle, FilterType::CatmullRom] {
+                same::<Rgba<u8>>(w, h, nw, nh, f);
+                same::<Rgb<u8>>(w, h, nw, nh, f);
+                same::<Luma<u8>>(w, h, nw, nh, f);
+            }
+        }
+    }
 }

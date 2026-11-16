@@ -377,7 +377,7 @@ impl Gpu {
             let k = max as f32 / w.max(h) as f32;
             let (nw, nh) = (((w as f32 * k) as u32).max(1), ((h as f32 * k) as u32).max(1));
             shrunk = image::RgbaImage::from_raw(w, h, rgba.to_vec())
-                .map(|i| image::imageops::resize(&i, nw, nh, image::imageops::FilterType::Triangle).into_raw())
+                .map(|i| gpui::resample(&i, nw, nh, image::imageops::FilterType::Triangle).into_raw())
                 .unwrap_or_else(|| vec![255; (nw * nh * 4) as usize]);
             (nw, nh, shrunk.as_slice())
         } else {
