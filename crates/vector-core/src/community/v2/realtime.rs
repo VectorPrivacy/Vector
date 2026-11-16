@@ -333,15 +333,20 @@ pub(crate) async fn settle_owed_retractions<T: crate::community::transport::Tran
     }
 }
 
-/// Read again each Channel whose live epoch moved since `before`: the live subscription carries
-/// only what arrives next, and what the new epoch said before this device adopted it is history.
+/// Read again each Channel whose live epoch moved, or whose published history grew, since `before`:
+/// the live subscription carries only what arrives next, and what those planes hold is history.
 fn reread_moved_channels(before: &CommunityV2) {
     let Ok(Some(after)) = crate::db::community::load_community_v2(before.id()) else { return };
     let moved: Vec<String> = after
         .channels
         .iter()
         .filter(|ch| !(ch.private && ch.key.is_none()))
-        .filter(|ch| before.channel(&ch.id).is_none_or(|was| before.channel_secret(was).1 != after.channel_secret(ch).1))
+        .filter(|ch| {
+            before.channel(&ch.id).is_none_or(|was| {
+                let held: HashSet<PublicKey> = was.published_history().into_iter().map(|(_, g)| g.pk()).collect();
+                before.channel_secret(was).1 != after.channel_secret(ch).1 || ch.published_history().iter().any(|(_, g)| !held.contains(&g.pk()))
+            })
+        })
         .map(|ch| crate::simd::hex::bytes_to_hex_32(&ch.id.0))
         .collect();
     if moved.is_empty() {
@@ -1594,6 +1599,7 @@ async fn follow_community(session: &std::sync::Arc<crate::db::Session>, id: &Com
         if control_changed {
             refresh_subscription(&client).await;
             refreshed(&*handler, &community_id);
+            reread_moved_channels(&current);
             // A control change can reveal rekey work that predates it — a just-announced
             // private channel's key crate is already sitting on its rekey plane (the key
             // ships BEFORE the vsk-2), and this pass's rekey walk ran before the channel

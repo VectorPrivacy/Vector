@@ -352,6 +352,12 @@ impl CommunityRoles {
         self.everyone_in(channel_hex).is_some_and(|p| p & (Permissions::SEND_MESSAGES | Permissions::ADD_REACTIONS | Permissions::CONNECT) == 0)
     }
 
+    /// Whether `@everyone`, resolved the same way, reads a Channel's history: its earlier planes are
+    /// then every member's (CORD-03 §2). A legacy Roster holds no such bit, and reads it.
+    pub fn everyone_reads_history(&self, channel_hex: &str) -> bool {
+        self.everyone_in(channel_hex).is_none_or(|p| p & Permissions::READ_MESSAGE_HISTORY != 0)
+    }
+
     /// `@everyone`'s bits in a Channel with only its own overwrite applied (its Category's when
     /// synced), `None` on a legacy Roster.
     fn everyone_in(&self, channel_hex: &str) -> Option<u64> {

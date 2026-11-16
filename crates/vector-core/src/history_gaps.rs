@@ -93,6 +93,26 @@ pub fn prove(chat_id: &str, began: u64, epoch: u64) {
     }
 }
 
+fn history_read_key(chat_id: &str) -> String {
+    format!("history_read:{chat_id}")
+}
+
+/// The planes `chat_id`'s metadata publishes (CORD-03 §2) that a catch-up here has read, by
+/// address: the rest predate everything this device read, so a catch-up reads them whole.
+pub fn history_read(chat_id: &str) -> std::collections::HashSet<String> {
+    crate::db::get_sql_setting(history_read_key(chat_id)).ok().flatten().and_then(|v| serde_json::from_str(&v).ok()).unwrap_or_default()
+}
+
+/// A catch-up of `chat_id` read the published planes at `addresses` whole.
+pub fn mark_history_read(chat_id: &str, addresses: impl IntoIterator<Item = String>) {
+    let mut read = history_read(chat_id);
+    let before = read.len();
+    read.extend(addresses);
+    if read.len() != before {
+        let _ = crate::db::set_sql_setting(history_read_key(chat_id), serde_json::to_string(&read).unwrap_or_default());
+    }
+}
+
 /// How far down a walk from `from` (None: the newest) must go before a page it already holds
 /// ends it: a hole's floor inside one, the proof above it, nothing below.
 pub fn floor(chat_id: &str, from: Option<u64>, now: u64) -> Option<u64> {

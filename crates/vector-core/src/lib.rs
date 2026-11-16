@@ -4145,6 +4145,14 @@ impl VectorCore {
             Some(e) => (crate::community::Epoch(e), since),
             None => (crate::community::Epoch(live.0.saturating_sub(UNPROVEN_EPOCHS)), reach),
         });
+        // Published planes nothing here read: what they hold predates everything this device has.
+        let unread: Vec<nostr_sdk::prelude::PublicKey> = match community.channel(&ch).filter(|_| until.is_none()) {
+            Some(c) => {
+                let read = crate::history_gaps::history_read(channel_id);
+                c.published_history().into_iter().map(|(_, g)| g.pk()).filter(|pk| !read.contains(&pk.to_hex())).collect()
+            }
+            None => Vec::new(),
+        };
         let Ok((page, next_before, complete)) = crate::community::v2::service::fetch_channel_history_since_epoch(
             &transport,
             &community,
@@ -4170,6 +4178,7 @@ impl VectorCore {
                 skip
             },
             past,
+            &unread,
         )
         .await
         else {
@@ -4183,6 +4192,10 @@ impl VectorCore {
         // relay answered, so one that didn't is read from the old floor next time.
         if until.is_none() && since.is_none() && complete {
             crate::history_gaps::prove(channel_id, began, live.0);
+        }
+        // Read to their end or to where an older page goes on from: either way, read.
+        if complete && !unread.is_empty() {
+            crate::history_gaps::mark_history_read(channel_id, unread.iter().map(|pk| pk.to_hex()));
         }
         (BackfillCount { fetched, new_messages, next_before, unreachable: false }, waiting)
     }
@@ -5140,15 +5153,7 @@ impl VectorCore {
         if private {
             return crate::community::v2::service::privatize_channel(&transport, &v2, &channel).await.map_err(VectorError::Other);
         }
-        let mut meta = v2.channel(&channel).ok_or_else(|| VectorError::Other("unknown channel".into()))?.metadata();
-        if !meta.private {
-            return Ok(());
-        }
-        // What only a Private Channel means goes with it.
-        meta.private = false;
-        meta.extra.remove("creator");
-        meta.extra.remove("public_until");
-        crate::community::v2::service::edit_channel_metadata(&transport, &v2, &channel, &meta).await.map_err(VectorError::Other)
+        crate::community::v2::service::publicize_channel(&transport, &v2, &channel).await.map_err(VectorError::Other)
     }
 
     /// Set exactly which Roles a member holds.

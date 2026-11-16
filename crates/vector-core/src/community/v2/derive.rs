@@ -191,6 +191,19 @@ impl GroupKey {
         out
     }
 
+    /// A plane's group key from its own secret, as a Channel's published history carries it
+    /// (CORD-03 §2). `None` for bytes that are no secret key.
+    pub(crate) fn from_secret(secret: &[u8; 32]) -> Option<Self> {
+        let keys = Keys::new(nostr_sdk::prelude::SecretKey::from_slice(secret).ok()?);
+        let conv_key = ConversationKey::derive(keys.secret_key(), &keys.public_key()).ok()?;
+        Some(GroupKey { keys, conv_key })
+    }
+
+    /// The plane's own secret, which opens and signs this plane and no other.
+    pub(crate) fn secret(&self) -> [u8; 32] {
+        self.keys.secret_key().to_secret_bytes()
+    }
+
     /// The Stream address (x-only pubkey) — what `authors` filters match.
     pub fn pk(&self) -> PublicKey {
         self.keys.public_key()

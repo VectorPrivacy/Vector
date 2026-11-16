@@ -67,7 +67,32 @@ impl ChannelV2 {
     pub fn locked(&self) -> bool {
         self.writers.as_ref().is_some_and(|l| l.locked())
     }
+
+    /// The earlier planes its metadata hands every member (CORD-03 §2), each by its own secret
+    /// at the epoch its messages commit. A malformed entry names nothing.
+    pub fn published_history(&self) -> Vec<(Epoch, super::derive::GroupKey)> {
+        let Some(entries) = self.meta_extra.get(HISTORY_FIELD).and_then(|v| v.as_array()) else { return Vec::new() };
+        entries
+            .iter()
+            .filter_map(|entry| match entry.as_array()?.as_slice() {
+                [epoch, secret] => {
+                    let epoch = epoch.as_u64().filter(|e| *e < 1 << 53)?;
+                    let secret = crate::simd::hex::hex_to_bytes_32_checked(secret.as_str()?)?;
+                    Some((Epoch(epoch), super::derive::GroupKey::from_secret(&secret)?))
+                }
+                _ => None,
+            })
+            .take(MAX_HISTORY)
+            .collect()
+    }
 }
+
+/// The ChannelMetadata field that publishes a Channel's earlier planes (CORD-03 §2).
+pub const HISTORY_FIELD: &str = "history";
+
+/// At most this many earlier planes in a Channel's published history, so its edition stays well
+/// under a relay's 64 KB.
+pub const MAX_HISTORY: usize = 128;
 
 /// A Category (CORD-03 §4): a sidebar group Channels file under by their `category`.
 #[derive(Debug, Clone, PartialEq)]

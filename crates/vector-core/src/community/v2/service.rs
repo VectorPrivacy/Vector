@@ -831,6 +831,13 @@ fn read_planes(community: &CommunityV2, ch: &ChannelV2) -> Vec<(ReadPlane, Epoch
             planes.extend(roots.into_iter().map(|(ep, root)| (ReadPlane::Public(channel_group_key(&root, &ch.id, ep), until), ep)));
         }
     }
+    // The earlier planes its metadata publishes, last, so a live plane of the same epoch number
+    // sorts ahead of them.
+    for (epoch, group) in ch.published_history() {
+        if !planes.iter().any(|(p, _)| p.address() == group.pk()) {
+            planes.push((ReadPlane::Keyed(group), epoch));
+        }
+    }
     planes
 }
 
@@ -931,12 +938,12 @@ pub async fn fetch_channel_history_paged<T: Transport + ?Sized>(
     keep_paging: impl FnMut(&[FetchedEvent], usize, Option<u64>) -> bool,
     settled: impl Fn(&[nostr_sdk::prelude::EventId]) -> std::collections::HashSet<nostr_sdk::prelude::EventId>,
 ) -> Result<(Vec<FetchedEvent>, Option<u64>, bool), String> {
-    fetch_channel_history_since_epoch(transport, community, channel_id, page, max_pages, since, start_until, evidence, keep_paging, settled, None).await
+    fetch_channel_history_since_epoch(transport, community, channel_id, page, max_pages, since, start_until, evidence, keep_paging, settled, None, &[]).await
 }
 
 /// [`fetch_channel_history_paged`], where a newest-first walk also reads the Channel's epochs from
 /// `past.0` up: the one a proof was read under from `since`, and each later one from `past.1`,
-/// since no walk read those.
+/// since no walk read those; and so too each published plane at an address in `unread`.
 #[allow(clippy::too_many_arguments)]
 pub async fn fetch_channel_history_since_epoch<T: Transport + ?Sized>(
     transport: &T,
@@ -950,6 +957,7 @@ pub async fn fetch_channel_history_since_epoch<T: Transport + ?Sized>(
     mut keep_paging: impl FnMut(&[FetchedEvent], usize, Option<u64>) -> bool,
     settled: impl Fn(&[nostr_sdk::prelude::EventId]) -> std::collections::HashSet<nostr_sdk::prelude::EventId>,
     past: Option<(Epoch, Option<u64>)>,
+    unread: &[PublicKey],
 ) -> Result<(Vec<FetchedEvent>, Option<u64>, bool), String> {
     crate::db::scoped(async move {
         // Guards the opportunistic scrub-key heals below — the fetch loop straddles
@@ -991,16 +999,18 @@ pub async fn fetch_channel_history_since_epoch<T: Transport + ?Sized>(
         let mut whole: std::collections::HashSet<PublicKey> = std::collections::HashSet::new();
         if start_until.is_none() {
             // Root epochs and the Channel's own count apart, so each keeps its newest.
-            let (mut public, mut own): (Vec<_>, Vec<_>) = planes.into_iter().partition(|(p, _)| matches!(p, ReadPlane::Public(..)));
+            let (mut public, rest): (Vec<_>, Vec<_>) = planes.into_iter().partition(|(p, _)| matches!(p, ReadPlane::Public(..)));
+            let (fresh, mut own): (Vec<_>, Vec<_>) = rest.into_iter().partition(|(p, _)| unread.contains(&p.address()));
             public.sort_by_key(|(_, e)| std::cmp::Reverse(e.0));
             public.truncate(LIVE_COORD_EPOCHS);
             own.sort_by_key(|(_, e)| std::cmp::Reverse(e.0));
-            let unread = past.map_or(0, |(from, _)| own.iter().filter(|(_, e)| e.0 >= from.0).count());
-            own.truncate(unread.max(LIVE_COORD_EPOCHS));
+            let kept = past.map_or(0, |(from, _)| own.iter().filter(|(_, e)| e.0 >= from.0).count());
+            own.truncate(kept.max(LIVE_COORD_EPOCHS));
             if let Some((from, _)) = past {
                 whole = own.iter().filter(|(_, e)| e.0 > from.0).map(|(p, _)| p.address()).collect();
             }
-            planes = own.into_iter().chain(public).collect();
+            whole.extend(fresh.iter().map(|(p, _)| p.address()));
+            planes = own.into_iter().chain(fresh).chain(public).collect();
         }
 
         // The writers' rules judge what arrives: what they don't stand behind reaches only managers.
@@ -8292,6 +8302,8 @@ pub struct AccessDuty {
     pub writers: WriterDuty,
     /// Private Channels whose metadata was sealed under their current key (CORD-03 §2).
     pub resealed: usize,
+    /// Public Channels whose earlier planes this device published for every member (CORD-03 §2).
+    pub history: usize,
 }
 
 /// The holder's duty (CORD-03 §5): for every private Channel this device holds and may read,
@@ -8395,6 +8407,7 @@ pub async fn access_duty<T: Transport + ?Sized>(transport: &T, community: &Commu
     let writers = writing::writer_duty(transport, community, &roster, &banned).await;
     if may_rotate {
         done.resealed = reseal_backstop(transport, community, &roster).await;
+        done.history = history_backstop(transport, community, &roster).await;
     }
     done.writers = writers?;
     keys.map(|_| done)
@@ -10433,6 +10446,182 @@ async fn reseal_backstop<T: Transport + ?Sized>(transport: &T, community: &Commu
         }
     }
     resealed
+}
+
+/// The earlier planes of a Channel's history `held` lists or `add` brings, each address once,
+/// oldest dropped past the cap; `None` when `add` brings nothing new.
+fn merged_history(held: Vec<(Epoch, GroupKey)>, add: Vec<(Epoch, GroupKey)>) -> Option<serde_json::Value> {
+    let mut all = held;
+    let before = all.len();
+    for (epoch, group) in add {
+        if !all.iter().any(|(_, g)| g.pk() == group.pk()) {
+            all.push((epoch, group));
+        }
+    }
+    if all.len() == before {
+        return None;
+    }
+    all.sort_by_key(|(e, _)| e.0);
+    let drop = all.len().saturating_sub(super::community::MAX_HISTORY);
+    Some(serde_json::Value::Array(
+        all.into_iter().skip(drop).map(|(e, g)| serde_json::json!([e.0, crate::simd::hex::bytes_to_hex_32(&g.secret())])).collect(),
+    ))
+}
+
+/// The planes of a Private Channel's own epochs this device holds.
+fn private_planes(community: &CommunityV2, ch: &ChannelV2) -> Vec<(Epoch, GroupKey)> {
+    let (cid_hex, ch_hex) = (crate::simd::hex::bytes_to_hex_32(&community.id().0), crate::simd::hex::bytes_to_hex_32(&ch.id.0));
+    let mut keys = crate::db::community::held_epoch_keys(&cid_hex, &ch_hex).unwrap_or_default();
+    if let Some(key) = ch.key.filter(|_| ch.private && !keys.iter().any(|(e, _)| *e == ch.epoch)) {
+        keys.push((ch.epoch, key));
+    }
+    keys.into_iter().filter(|(_, k)| *k != community.community_root).map(|(e, k)| (e, channel_group_key(&k, &ch.id, e))).collect()
+}
+
+fn history_scan_key(community: &CommunityV2, ch: &ChannelV2) -> String {
+    format!("history_scan:{}:{}", crate::simd::hex::bytes_to_hex_32(&community.id().0), crate::simd::hex::bytes_to_hex_32(&ch.id.0))
+}
+
+/// What of a public Channel's history this device can hand every member and its metadata doesn't
+/// yet (CORD-03 §2): the private epochs it kept, and each past root epoch the Channel wrote
+/// under, found from the oldest not yet looked at. With it, the root epoch looked at up to.
+async fn owed_history<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, ch: &ChannelV2) -> (Vec<(Epoch, GroupKey)>, Option<u64>) {
+    let listed: std::collections::HashSet<PublicKey> = ch.published_history().into_iter().map(|(_, g)| g.pk()).collect();
+    let mut owed: Vec<(Epoch, GroupKey)> = private_planes(community, ch).into_iter().filter(|(_, g)| !listed.contains(&g.pk())).collect();
+    let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+    let from = crate::db::get_sql_setting(history_scan_key(community, ch)).ok().flatten().and_then(|v| v.parse::<u64>().ok()).map_or(0, |s| s + 1);
+    let mut roots: Vec<(Epoch, [u8; 32])> = crate::db::community::held_epoch_keys(&cid_hex, crate::community::SERVER_ROOT_SCOPE_HEX)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|(e, _)| e.0 >= from && *e < community.root_epoch)
+        .collect();
+    roots.sort_by_key(|(e, _)| e.0);
+    let written: std::collections::HashSet<u64> = ch.writers.iter().flat_map(|l| l.roots()).map(|e| e.0).collect();
+    let mut scanned = None;
+    for (epoch, root) in roots {
+        let group = channel_group_key(&root, &ch.id, epoch);
+        if !listed.contains(&group.pk()) {
+            let carries = written.contains(&epoch.0) || {
+                let q = Query { kinds: vec![stream::KIND_WRAP], authors: vec![group.pk().to_hex()], limit: Some(1), ..Default::default() };
+                match transport.fetch_plane(group.keys(), &q, &community.relays).await {
+                    Ok(f) => !f.events.is_empty(),
+                    Err(_) => break,
+                }
+            };
+            if carries {
+                owed.push((epoch, group));
+            }
+        }
+        scanned = Some(epoch.0);
+    }
+    (owed, scanned)
+}
+
+/// Add `add` to a public Channel's published history (CORD-03 §2), read from the Channel as this
+/// device holds it now. Returns whether an edition went out.
+async fn publish_history<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, channel_id: &ChannelId, add: Vec<(Epoch, GroupKey)>) -> Result<bool, String> {
+    let fresh = crate::db::community::load_community_v2(community.id())?.unwrap_or_else(|| community.clone());
+    let Some(ch) = fresh.channel(channel_id).filter(|c| !c.private) else { return Ok(false) };
+    let Some(history) = merged_history(ch.published_history(), add) else { return Ok(false) };
+    let mut meta = ch.metadata();
+    meta.extra.insert(super::community::HISTORY_FIELD.to_string(), history);
+    edit_channel_metadata(transport, &fresh, channel_id, &meta).await?;
+    Ok(true)
+}
+
+/// Make a Private Channel public (CORD-03 §2). While `@everyone` there reads history, the edition
+/// publishes the private epochs this device holds, so a member who never held the key reads what
+/// was said while it was private.
+pub async fn publicize_channel<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, channel_id: &ChannelId) -> Result<(), String> {
+    let ch = community.channel(channel_id).ok_or("unknown channel")?;
+    if !ch.private {
+        return Ok(());
+    }
+    let mut meta = ch.metadata();
+    meta.private = false;
+    meta.extra.remove("creator");
+    meta.extra.remove("public_until");
+    let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+    let roster = crate::db::community::get_community_roles(&cid_hex).unwrap_or_default();
+    if roster.everyone_reads_history(&crate::simd::hex::bytes_to_hex_32(&channel_id.0)) {
+        if let Some(history) = merged_history(ch.published_history(), private_planes(community, ch)) {
+            meta.extra.insert(super::community::HISTORY_FIELD.to_string(), history);
+        }
+    }
+    edit_channel_metadata(transport, community, channel_id, &meta).await
+}
+
+type Planes = Vec<(Epoch, GroupKey)>;
+
+/// How often one Channel's history is looked at again by the backstop.
+const HISTORY_CHECK_PERIOD_MS: u64 = 60 * 60 * 1000;
+
+/// The history backstop (CORD-03 §2): what this device holds of a public Channel's earlier planes,
+/// where `@everyone` reads history and the Channel's metadata doesn't publish them yet, it
+/// publishes after a rank-staggered wait. One Channel's failure never stops the rest.
+async fn history_backstop<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, roster: &crate::community::roles::CommunityRoles) -> usize {
+    struct HistoryChecks;
+    type Checks = std::sync::Mutex<std::collections::HashMap<[u8; 32], (u64, Epoch)>>;
+    let Ok(Some(held)) = crate::db::community::load_community_v2(community.id()) else { return 0 };
+    let checks = crate::db::current_session().scoped::<HistoryChecks, Checks>();
+    let now = now_ms();
+    let due: Vec<ChannelV2> = {
+        let mut last = checks.lock().unwrap_or_else(|e| e.into_inner());
+        let due: Vec<ChannelV2> = held
+            .channels
+            .iter()
+            .filter(|ch| !ch.private && roster.everyone_reads_history(&crate::simd::hex::bytes_to_hex_32(&ch.id.0)))
+            // A rotation closes an epoch to publish: due at once.
+            .filter(|ch| last.get(&ch.id.0).is_none_or(|(t, e)| *e != held.root_epoch || now.saturating_sub(*t) > HISTORY_CHECK_PERIOD_MS))
+            .cloned()
+            .collect();
+        for ch in &due {
+            last.insert(ch.id.0, (now, held.root_epoch));
+        }
+        due
+    };
+    let mut owed: Vec<(ChannelV2, Planes, Option<u64>)> = Vec::new();
+    for ch in due {
+        let (add, scanned) = owed_history(transport, &held, &ch).await;
+        if add.is_empty() {
+            if let Some(s) = scanned {
+                let _ = crate::db::set_sql_setting(history_scan_key(&held, &ch), s.to_string());
+            }
+        } else {
+            owed.push((ch, add, scanned));
+        }
+    }
+    if owed.is_empty() {
+        return 0;
+    }
+    let (Ok(owner), Ok(me)) = (held.owner(), me_pk()) else { return 0 };
+    let steps = if me == owner { 0 } else { roster.highest_position(&me.to_hex()).map_or(10, |p| p.saturating_add(1).min(10)) as u64 };
+    crate::rt::time::sleep(std::time::Duration::from_millis(2_000 * steps + rand::random::<u64>() % 2_000)).await;
+    if !crate::db::current_session().is_live() {
+        return 0;
+    }
+    // Published against what the Control Plane says now: another manager may have done it. The
+    // edit takes the follow lock itself.
+    let fresh = match follow_fresh(transport, held.id()).await {
+        Ok((_guard, fresh)) => fresh,
+        Err(e) => {
+            crate::log_warn!("v2: the history backstop couldn't read the Control Plane: {e}");
+            return 0;
+        }
+    };
+    let mut published = 0;
+    for (ch, add, scanned) in owed {
+        match publish_history(transport, &fresh, &ch.id, add).await {
+            Ok(done) => {
+                published += done as usize;
+                if let Some(s) = scanned {
+                    let _ = crate::db::set_sql_setting(history_scan_key(&fresh, &ch), s.to_string());
+                }
+            }
+            Err(e) => crate::log_warn!("v2: publishing a channel's history failed: {e}"),
+        }
+    }
+    published
 }
 
 fn roles_v2_held(community: &CommunityV2) -> bool {
@@ -32217,6 +32406,127 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_member_who_never_held_a_past_root_reads_it_once_the_channel_publishes_it() {
+        let (_tmp, _guard, _owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "Kept", vec!["wss://r".into()], None).await.unwrap();
+        let general = community.channels[0].id;
+        let now = now_ms();
+        send_chat_message_at(&relay, &community, &general, "before", None, &[], vec![], now - 60_000).await.unwrap();
+        let rotated = refound_community(&relay, &community, &[]).await.unwrap();
+        send_chat_message_at(&relay, &rotated, &general, "after", None, &[], vec![], now + 1_000).await.unwrap();
+        let held = || crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        let (root, past) = (crate::community::SERVER_ROOT_SCOPE_HEX, community.root_epoch);
+        crate::db::community::delete_epoch_key(&cid_hex, root, past.0).unwrap();
+        assert_eq!(all_texts_in(&relay, &held(), &general).await, vec!["after"], "without the past root, only what came after");
+        // A device that held it publishes the Channel's plane there.
+        crate::db::community::store_epoch_key(&cid_hex, root, past.0, &community.community_root).unwrap();
+        let ch = held().channel(&general).unwrap().clone();
+        let (owed, scanned) = owed_history(&relay, &held(), &ch).await;
+        assert_eq!((owed.iter().map(|(e, _)| *e).collect::<Vec<_>>(), scanned), (vec![past], Some(past.0)));
+        assert!(publish_history(&relay, &held(), &general, owed).await.unwrap());
+        follow_control(&relay, &held()).await.unwrap();
+        let ch = held().channel(&general).unwrap().clone();
+        assert!(owed_history(&relay, &held(), &ch).await.0.is_empty(), "published once, nothing more is owed");
+        crate::db::community::delete_epoch_key(&cid_hex, root, past.0).unwrap();
+        assert_eq!(all_texts_in(&relay, &held(), &general).await, vec!["before", "after"], "the published plane reads for a member who never held its root");
+        // A catch-up reads it too, whole, while this device hasn't: a Channel whose every post
+        // predates the rotation isn't left empty until someone scrolls.
+        let unread: Vec<PublicKey> = held().channel(&general).unwrap().published_history().iter().map(|(_, g)| g.pk()).collect();
+        let live = Some((held().root_epoch, None));
+        let (got, ..) = fetch_channel_history_since_epoch(&relay, &held(), &general, 50, 8, None, None, crate::community::transport::Evidence::Quorum, |_, _, _| true, |_| Default::default(), live, &[]).await.unwrap();
+        assert!(!got.iter().any(|f| f.event.opened().rumor.content == "before"), "a catch-up reads the live epoch");
+        let (got, ..) = fetch_channel_history_since_epoch(&relay, &held(), &general, 50, 8, None, None, crate::community::transport::Evidence::Quorum, |_, _, _| true, |_| Default::default(), live, &unread).await.unwrap();
+        assert!(got.iter().any(|f| f.event.opened().rumor.content == "before"), "and a published plane it never read");
+    }
+
+    #[tokio::test]
+    async fn after_a_rotation_a_manager_publishes_the_closed_epoch_once() {
+        let (_tmp, _guard, _owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "Rotated", vec!["wss://r".into()], None).await.unwrap();
+        let held = || crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        activate_roles_v2(&relay, &held(), crate::community::v2::roles::EVERYONE_DEFAULT).await.unwrap();
+        follow_control(&relay, &held()).await.unwrap();
+        let general = community.channels[0].id;
+        send_chat_message_at(&relay, &held(), &general, "before", None, &[], vec![], now_ms() - 60_000).await.unwrap();
+        let past = held().root_epoch;
+        refound_community(&relay, &held(), &[]).await.unwrap();
+        follow_control(&relay, &held()).await.unwrap();
+        assert_eq!(access_duty(&relay, &held()).await.unwrap().history, 1);
+        follow_control(&relay, &held()).await.unwrap();
+        assert_eq!(held().channel(&general).unwrap().published_history().iter().map(|(e, _)| *e).collect::<Vec<_>>(), vec![past]);
+        assert_eq!(access_duty(&relay, &held()).await.unwrap().history, 0, "nothing more to publish");
+    }
+
+    #[tokio::test]
+    async fn a_past_root_the_channel_never_wrote_under_is_not_published() {
+        let (_tmp, _guard, _owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "Quiet", vec!["wss://r".into()], None).await.unwrap();
+        let general = community.channels[0].id;
+        refound_community(&relay, &community, &[]).await.unwrap();
+        let held = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        let (owed, scanned) = owed_history(&relay, &held, held.channel(&general).unwrap()).await;
+        assert!(owed.is_empty());
+        assert_eq!(scanned, Some(community.root_epoch.0), "looked at, so not again");
+    }
+
+    #[tokio::test]
+    async fn a_private_channel_made_public_hands_what_it_said_while_private_to_every_member() {
+        let (_tmp, _guard, _owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "Opened", vec!["wss://r".into()], None).await.unwrap();
+        let held = || crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        activate_roles_v2(&relay, &held(), crate::community::v2::roles::EVERYONE_DEFAULT).await.unwrap();
+        follow_control(&relay, &held()).await.unwrap();
+        let directory = create_private_channel(&relay, &held(), "directory").await.unwrap();
+        send_chat_message_at(&relay, &held(), &directory, "the list", None, &[], vec![], now_ms() - 60_000).await.unwrap();
+        let epoch = held().channel(&directory).unwrap().epoch;
+        publicize_channel(&relay, &held(), &directory).await.unwrap();
+        follow_control(&relay, &held()).await.unwrap();
+        assert!(!held().channel(&directory).unwrap().private);
+        let (cid_hex, ch_hex) = (crate::simd::hex::bytes_to_hex_32(&community.id().0), crate::simd::hex::bytes_to_hex_32(&directory.0));
+        crate::db::community::delete_epoch_key(&cid_hex, &ch_hex, epoch.0).unwrap();
+        assert_eq!(all_texts_in(&relay, &held(), &directory).await, vec!["the list"], "a member who never held its key reads it");
+    }
+
+    #[tokio::test]
+    async fn a_channel_whose_everyone_reads_no_history_publishes_none() {
+        let (_tmp, _guard, _owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "Closed", vec!["wss://r".into()], None).await.unwrap();
+        let held = || crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        activate_roles_v2(&relay, &held(), crate::community::v2::roles::EVERYONE_DEFAULT).await.unwrap();
+        follow_control(&relay, &held()).await.unwrap();
+        let directory = create_private_channel(&relay, &held(), "directory").await.unwrap();
+        send_chat_message_at(&relay, &held(), &directory, "the list", None, &[], vec![], now_ms() - 60_000).await.unwrap();
+        set_overwrite(&relay, &held(), directory.0, crate::community::roles::OverwriteTarget::Everyone, 0, crate::community::roles::Permissions::READ_MESSAGE_HISTORY).await.unwrap();
+        follow_control(&relay, &held()).await.unwrap();
+        publicize_channel(&relay, &held(), &directory).await.unwrap();
+        follow_control(&relay, &held()).await.unwrap();
+        assert!(held().channel(&directory).unwrap().published_history().is_empty());
+        let (cid_hex, ch_hex) = (crate::simd::hex::bytes_to_hex_32(&community.id().0), crate::simd::hex::bytes_to_hex_32(&directory.0));
+        let epoch = crate::db::community::held_epoch_keys(&cid_hex, &ch_hex).unwrap()[0].0;
+        crate::db::community::delete_epoch_key(&cid_hex, &ch_hex, epoch.0).unwrap();
+        assert!(all_texts_in(&relay, &held(), &directory).await.is_empty(), "history starts where reading did");
+    }
+
+    #[test]
+    fn a_malformed_history_entry_names_nothing() {
+        let good = channel_group_key(&[7u8; 32], &ChannelId([1u8; 32]), Epoch(2));
+        let mut ch = crate::community::v2::community::ChannelV2 { id: ChannelId([1u8; 32]), name: "c".into(), private: false, key: None, epoch: Epoch(0), voice: None, meta_custom: None, meta_extra: Default::default(), writers: None, sealed: None };
+        ch.meta_extra.insert(
+            "history".into(),
+            serde_json::json!([[2, crate::simd::hex::bytes_to_hex_32(&good.secret())], [3, "zz"], ["4", crate::simd::hex::bytes_to_hex_32(&good.secret())], [9007199254740992u64, crate::simd::hex::bytes_to_hex_32(&good.secret())], [5]]),
+        );
+        let got = ch.published_history();
+        assert_eq!(got.len(), 1);
+        assert_eq!((got[0].0, got[0].1.pk()), (Epoch(2), good.pk()));
+    }
+
+    #[tokio::test]
     async fn a_catch_up_after_a_rotation_reads_the_epochs_its_proof_never_read() {
         let (_tmp, _guard, _owner) = init_test_db();
         let relay = MemoryRelay::new();
@@ -32242,7 +32552,7 @@ mod tests {
         let walk = |past: Option<(Epoch, Option<u64>)>| {
             let (relay, held) = (&relay, &held);
             async move {
-                let (got, ..) = fetch_channel_history_since_epoch(relay, held, &general, 10, 8, floor, None, crate::community::transport::Evidence::Quorum, |p, s, n| catch_up_pages_on(p, s, n, floor, |_| false), |_| Default::default(), past).await.unwrap();
+                let (got, ..) = fetch_channel_history_since_epoch(relay, held, &general, 10, 8, floor, None, crate::community::transport::Evidence::Quorum, |p, s, n| catch_up_pages_on(p, s, n, floor, |_| false), |_| Default::default(), past, &[]).await.unwrap();
                 got.iter().map(|f| f.event.opened().rumor.content.clone()).collect::<std::collections::HashSet<_>>()
             }
         };
@@ -32265,6 +32575,9 @@ mod tests {
         assert_eq!(crate::history_gaps::proven_epoch(&chat), Some(3));
         assert!(crate::history_gaps::proven(&chat, 3).is_some_and(|p| p < now));
         assert_eq!(crate::history_gaps::proven(&chat, 4), None, "a later epoch was read by nothing");
+        assert!(crate::history_gaps::history_read(&chat).is_empty());
+        crate::history_gaps::mark_history_read(&chat, ["aa".repeat(32)]);
+        assert!(crate::history_gaps::history_read(&chat).contains(&"aa".repeat(32)));
     }
 
     #[tokio::test]
