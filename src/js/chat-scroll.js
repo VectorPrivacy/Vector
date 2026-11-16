@@ -472,6 +472,13 @@ async function windowExtendOlder() {
         // so the cache reaches it in far fewer round-trips (rendered window still steps by WINDOW_STEP).
         const seekFetch = (_unreadJumpPill && _unreadJumpPill.classList.contains('visible'))
             ? UNREAD_SEEK_FETCH_STEP : WINDOW_STEP;
+        // A Community channel can hold a hole above its older rows (a catch-up that ran out of
+        // pages): the relays fill it first, or the read below would step straight across it.
+        if (chat.chat_type === 'Community') {
+            const topAt = msgs0[start]?.at;
+            if (topAt) await invoke('fill_community_gap', { channelId: chatId, beforeMs: topAt }).catch(() => 0);
+            if (strOpenChat !== chatId) return true;
+        }
         let older = [];
         try {
             older = await invoke('get_messages_around', { chatId, anchorId, before: seekFetch + 1, after: 0 }) || [];
