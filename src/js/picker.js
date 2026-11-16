@@ -73,6 +73,7 @@ const _pickerPanelHelpers = {
     },
     mainScroll: () => _onMainScroll(),
     gifClick: (e) => _onGifGridClick(e),
+    gifMenu: (e) => _onGifGridContextMenu(e),
     gifScroll: () => _onGifGridScroll(),
     /**
      * PickerIslandHelpers: the rail (PackSidebar), the pack sections (PackSections) and the
