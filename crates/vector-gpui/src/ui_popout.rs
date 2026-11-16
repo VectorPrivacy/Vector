@@ -128,6 +128,12 @@ impl VectorApp {
                 }
             }
             Act::ShowInChat => {
+                // Whatever is drawn in the chat's place gives way to it.
+                self.settings = None;
+                self.profile = None;
+                self.nexus = None;
+                self.new_chat = None;
+                self.create_community = None;
                 self.open_chat(SharedString::from(item.chat.clone()), window, cx);
                 self.jump_to_message(item.msg, cx);
             }

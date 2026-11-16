@@ -6126,8 +6126,12 @@ impl Render for VectorApp {
         let _timed = crate::devctl::Timed::start();
         let me = cx.entity().downgrade();
         cx.defer(move |cx| crate::relayinfo::pump(me, cx));
-        let open = self.open.clone();
-        self.follow_open(open.as_ref(), window);
+        // The chat on screen: Settings, the app hub, a profile or a new chat or Community drawn in
+        // its place leave it as surely as opening another.
+        let shown = self.open.clone().filter(|_| {
+            self.settings.is_none() && self.nexus.is_none() && self.profile.is_none() && self.new_chat.is_none() && self.create_community.is_none()
+        });
+        self.follow_open(shown.as_ref(), window);
         let customs = self.emoji_picker.read(cx).custom_map(&self.store.borrow());
         for input in std::iter::once(self.input.clone()).chain(self.status.clone()) {
             let customs = customs.clone();
