@@ -355,6 +355,10 @@
   mask-image: url("./icons/clock.svg");
 }
 
+.icon-at {
+  mask-image: url("./icons/at.svg");
+}
+
 .icon-clock-snooze {
   mask-image: url("./icons/clock-snooze.svg");
 }
@@ -19896,16 +19900,17 @@ hr {
   background-color: #b2b2b2;
 }
 .mention-item-role {
+  position: relative;
   width: 28px;
   height: 28px;
   flex-shrink: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
   border-radius: 50%;
-  font-weight: 600;
-  color: var(--role-color, var(--icon-color-primary, #59fcb3));
   background: color-mix(in srgb, var(--role-color, var(--icon-color-primary, #59fcb3)) 16%, transparent);
+}
+.mention-item-role .icon {
+  width: 16px;
+  height: 16px;
+  background-color: var(--role-color, var(--icon-color-primary, #59fcb3));
 }
 
 /* `.icon` is absolutely placed, so the box it centres in must be positioned. */
