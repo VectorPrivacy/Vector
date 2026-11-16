@@ -26,6 +26,12 @@
     let wakeLock = null;
     let wakeWanted = false;
     let wakeAsking = false;
+    let closing = 0;
+    /** How long a released context waits for the ended chime to claim it. */
+    const CHIME_WAIT_MS = 1500;
+    let reviving = false;
+    /** Counts releases: a microphone that opens after one belongs to no call. */
+    let era = 0;
     // An iPhone or iPad pauses a web app's microphone whenever it leaves the screen. Only their
     // WebKit has touch callouts, whatever a Mac's screen can do.
     const pausesHidden = CSS.supports('-webkit-touch-callout', 'none');
@@ -52,6 +58,7 @@
 
     /** Synchronous up to the context's start, which must happen inside the tap. */
     function context() {
+        clearTimeout(closing);
         if (!ctx || ctx.state === 'closed') {
             ctx = new AudioContext({ sampleRate: 48000, latencyHint: 'interactive' });
             worklets = null;
@@ -79,15 +86,33 @@
         const c = context();
         output(c);
         worklets ??= c.audioWorklet.addModule('/web/calls-worklet.js');
+        const began = era;
         preparing ??= (async () => {
             const settings = await backend('call_audio_settings_get').catch(() => null);
-            mic ??= await navigator.mediaDevices.getUserMedia(constraints(settings));
+            if (!mic) {
+                const stream = await navigator.mediaDevices.getUserMedia(constraints(settings));
+                if (began !== era || mic) stream.getTracks().forEach((t) => t.stop());
+                else mic = stream;
+            }
+            if (began !== era) throw new Error('The call ended');
             await worklets;
         })().catch((e) => {
-            preparing = null;
+            if (began === era) preparing = null;
             throw e;
         });
         return preparing;
+    }
+
+    /** The context goes with the call, once the ended chime has played. One left open keeps
+     *  the phone's audio session, and other apps' music pauses whenever this page is in front. */
+    function closeSoon(ms) {
+        clearTimeout(closing);
+        closing = setTimeout(() => {
+            if (graph || test || preparing || !ctx) return;
+            ctx.close().catch(() => {});
+            ctx = null;
+            worklets = null;
+        }, ms);
     }
 
     function stopGraph() {
@@ -129,11 +154,13 @@
         if (!graph) return;
         ctx?.resume().catch(() => {});
         if (out && out.player.paused) out.player.play().catch(() => {});
-        if (!graph.src || mic?.getAudioTracks()[0]?.readyState !== 'ended') return;
+        if (reviving || !graph.src || mic?.getAudioTracks()[0]?.readyState !== 'ended') return;
+        reviving = true;
+        const began = era;
         try {
             const settings = await backend('call_audio_settings_get').catch(() => null);
             const fresh = await navigator.mediaDevices.getUserMedia(constraints(settings));
-            if (!graph?.src) {
+            if (began !== era || !graph?.src) {
                 fresh.getTracks().forEach((t) => t.stop());
                 return;
             }
@@ -141,7 +168,10 @@
             mic = fresh;
             graph.src = ctx.createMediaStreamSource(mic);
             graph.src.connect(graph.mic);
-        } catch (_) {}
+        } catch (_) {
+        } finally {
+            reviving = false;
+        }
     }
 
     /** Off screen in a call: the lock screen says why the other side can't hear you. */
@@ -174,16 +204,23 @@
 
     /** Everything off: the microphone light goes out with the call. */
     function release() {
+        era++;
         stopGraph();
         if (out) {
             out.player.pause();
             out.player.srcObject = null;
+            // WebKit keeps an element that has played in its audio session until it is
+            // collected. Only a load that fails takes it out.
+            out.player.src = 'data:audio/wav;base64,AAAA';
             out = null;
         }
         mic?.getTracks().forEach((t) => t.stop());
         mic = null;
         preparing = null;
-        if (!test) ctx?.suspend().catch(() => {});
+        if (!test) {
+            ctx?.suspend().catch(() => {});
+            closeSoon(CHIME_WAIT_MS);
+        }
         keepAwake();
         clearPaused();
     }
@@ -231,15 +268,20 @@
     async function chime() {
         const c = ctx;
         if (!c) return;
+        clearTimeout(closing);
         try {
             await c.resume();
             chimeBuf ??= await c.decodeAudioData(await (await fetch('/web/ended.wav')).arrayBuffer());
             const src = c.createBufferSource();
             src.buffer = chimeBuf;
             src.connect(c.destination);
-            src.onended = () => { if (!graph && !test) c.suspend().catch(() => {}); };
+            src.onended = () => closeSoon(0);
             src.start();
-        } catch (_) {}
+            // A page that leaves the screen mid-chime never hears it end.
+            closeSoon(chimeBuf.duration * 1000 + 1000);
+        } catch (_) {
+            closeSoon(0);
+        }
     }
 
     /** A voice call's cues, the same two notes as desktop's: up for arrivals and unmuting. */
@@ -328,10 +370,10 @@
     function stopTest() {
         if (!test) return;
         clearInterval(test.timer);
-        test.src.disconnect();
-        test.stream.getTracks().forEach((t) => t.stop());
+        test.src?.disconnect();
+        test.stream?.getTracks().forEach((t) => t.stop());
         test = null;
-        if (!graph) ctx?.suspend().catch(() => {});
+        if (!graph) closeSoon(0);
     }
 
     // The microphone test runs here: the browser's own processing is what a call sends.
@@ -340,12 +382,19 @@
         if (!supported()) throw "Calls aren't supported in this browser";
         stopTest();
         const c = context();
+        // Held from the start: a stop that lands before the microphone opens still closes it.
+        const mine = test = { stream: null, src: null, timer: 0 };
         const settings = await backend('call_audio_settings_get').catch(() => null);
         let stream;
         try {
             stream = await navigator.mediaDevices.getUserMedia(constraints(settings));
         } catch (e) {
+            if (test === mine) stopTest();
             throw micMessage(e);
+        }
+        if (test !== mine) {
+            stream.getTracks().forEach((t) => t.stop());
+            return;
         }
         const src = c.createMediaStreamSource(stream);
         const analyser = c.createAnalyser();
@@ -358,7 +407,7 @@
             if (gain !== 1) for (let i = 0; i < buf.length; i++) buf[i] *= gain;
             emit('mic_level', { id: '', mic: level(buf), peer: 0 });
         }, 100);
-        test = { stream, src, timer };
+        Object.assign(mine, { stream, src, timer });
     });
     register('call_mic_test_stop', () => stopTest());
 })();
