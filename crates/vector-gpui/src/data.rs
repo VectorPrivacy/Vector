@@ -446,6 +446,21 @@ impl Store {
                 chat.notify = level;
             }
         }
+        // VECTOR_MUTED=1: every other chat muted (rung down to Mentions, as core resolves it).
+        // VECTOR_COMMUNITY_MUTED=1: the Communities themselves.
+        if std::env::var_os("VECTOR_MUTED").is_some() {
+            for chat in chats.iter_mut().skip(1).step_by(2) {
+                chat.muted = true;
+                chat.notify = chat.notify.max(1);
+            }
+        }
+        if std::env::var_os("VECTOR_COMMUNITY_MUTED").is_some() {
+            for chat in chats.iter_mut().filter(|c| c.chat_type == vector_core::chat::ChatType::Community) {
+                chat.community_muted = true;
+                chat.muted = true;
+                chat.notify = chat.notify.max(1);
+            }
+        }
         if std::env::var_os("VECTOR_PINGS").is_some() {
             for chat in chats.iter_mut().filter(|c| c.chat_type == vector_core::chat::ChatType::Community) {
                 if let Some(m) = chat.messages.iter_mut().rev().find(|m| !m.mine) {
