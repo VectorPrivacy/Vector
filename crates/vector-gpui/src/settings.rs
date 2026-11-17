@@ -849,6 +849,8 @@ pub struct Donut {
     pub busy: bool,
     /// Where it last painted, for hit-testing by angle.
     pub bounds: Rc<std::cell::Cell<Option<gpui::Bounds<gpui::Pixels>>>>,
+    /// When the slices first drew, for `storage-slice-in`.
+    pub since: Rc<std::cell::Cell<Option<std::time::Instant>>>,
 }
 
 pub struct Blocked {
@@ -1996,6 +1998,7 @@ fn donut(s: &Settings, on: &OnAct) -> AnyElement {
         .collect();
     let loaded = s.storage.is_some();
     let cell = s.donut.bounds.clone();
+    let since = s.donut.since.clone();
     let chart = canvas(
         move |bounds, _, _| cell.set(Some(bounds)),
         move |bounds: gpui::Bounds<gpui::Pixels>, _, window, _| {
@@ -2038,8 +2041,20 @@ fn donut(s: &Settings, on: &OnAct) -> AnyElement {
                 return;
             }
             let lone = paint.len() == 1;
-            for (a0, a1, color, pop, dim) in &paint {
-                let pop_k = if *pop { 1.05 } else { 1. };
+            let at = since.get().unwrap_or_else(|| {
+                let now = std::time::Instant::now();
+                since.set(Some(now));
+                now
+            });
+            let gone = at.elapsed().as_secs_f32();
+            let ease = crate::kit::bezier(0.22, 1., 0.36, 1.);
+            for (i, (a0, a1, color, pop, dim)) in paint.iter().enumerate() {
+                let t = ((gone - i as f32 * 0.055) / 0.5).clamp(0., 1.);
+                if t < 1. {
+                    window.request_animation_frame();
+                }
+                let grow = ease(t);
+                let pop_k = if *pop { 1.05 } else { 1. } * (0.55 + 0.45 * grow);
                 let mut col = c(*color);
                 if *pop {
                     col.l = (col.l * 1.12).min(1.);
@@ -2047,6 +2062,7 @@ fn donut(s: &Settings, on: &OnAct) -> AnyElement {
                 if *dim {
                     col = col.opacity(0.35);
                 }
+                col = col.opacity(grow.min(1.));
                 if let Some(p) = ring(*a0, if lone { TAU } else { *a1 }, !lone, pop_k) {
                     window.paint_path(p, col);
                 }
