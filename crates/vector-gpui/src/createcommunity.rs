@@ -3,6 +3,7 @@
 //! Community exists from the end of step 2; step 3 only hands out access to it.
 
 use crate::kit::Tipped as _;
+use gpui::AnimationExt as _;
 use std::collections::HashSet;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -259,7 +260,7 @@ fn share(m: &CreateCommunity, narrow: bool, on: &OnAct) -> impl IntoElement {
                 .bg(c(0xffffff))
                 .p(px(9.))
                 .when(ready, |d| d.cursor_pointer().on_click(click(on, || Act::ShowQr)))
-                .children(m.link_qr.clone().map(|q| img(q).size(px(114.)))),
+                .children(m.link_qr.clone().map(|q| share_in("cg-share-qr-in", img(q).size(px(114.))))),
         )
         .child(
             div()
@@ -270,12 +271,12 @@ fn share(m: &CreateCommunity, narrow: bool, on: &OnAct) -> impl IntoElement {
                 .when(narrow, |d| d.w_full().items_center())
                 .child(crate::kit::spaced("INVITE LINK", 0.99).font_weight(FontWeight::BOLD).text_size(px(11.)).line_height(px(24.)).text_color(c(0x8a8a8a)))
                 .child(match (&m.link, &m.link_error) {
-                    (Some(link), _) => div().id("cg-share-url").tip(link.to_string()).mt(px(10.)).map(|d| if narrow { d.flex_none().whitespace_nowrap() } else { d.truncate() }).font_weight(FontWeight::MEDIUM).text_size(px(15.)).line_height(px(24.)).text_color(c(0xffffff)).child(pretty(link)),
-                    (None, Some(e)) => div().id("cg-share-status").mt(px(10.)).text_size(px(13.)).line_height(px(18.)).text_color(c(crate::timeline::DANGER)).child(format!("Couldn't create the link. {e}")),
+                    (Some(link), _) => share_in("cg-share-url-in", div().id("cg-share-url").tip(link.to_string()).mt(px(10.)).map(|d| if narrow { d.flex_none().whitespace_nowrap() } else { d.truncate() }).font_weight(FontWeight::MEDIUM).text_size(px(15.)).line_height(px(24.)).text_color(c(0xffffff)).child(pretty(link))),
+                    (None, Some(e)) => div().id("cg-share-status").mt(px(10.)).text_size(px(13.)).line_height(px(18.)).text_color(c(crate::timeline::DANGER)).child(format!("Couldn't create the link. {e}")).into_any_element(),
                     (None, None) => div().id("cg-share-status").mt(px(10.)).text_size(px(13.)).line_height(px(24.)).text_color(white_a(0.55)).child(match &m.progress {
                         Some((label, pct)) => crate::kit::stage_progress(label.clone(), *pct, 16.),
                         None => crate::kit::stage_progress("Getting ready", 0., 16.),
-                    }),
+                    }).into_any_element(),
                 })
                 .child(
                     div().mt(px(10.)).flex().gap(px(8.)).map(|d| {
@@ -816,4 +817,14 @@ pub fn view(m: &CreateCommunity, store: &Store, width: f32, on: &OnAct, cx: &App
                 ),
         )
         .into_any_element()
+}
+
+/// `cg-share-in`: the link and its QR rise 4px into place once minted.
+fn share_in<E: gpui::Styled + IntoElement + 'static>(id: &'static str, el: E) -> AnyElement {
+    el.with_animation(
+        id,
+        gpui::Animation::new(std::time::Duration::from_millis(350)).with_easing(crate::kit::bezier(0., 0., 0.58, 1.)),
+        |d, t| d.relative().top(px(4. * (1. - t))).opacity(t),
+    )
+    .into_any_element()
 }
