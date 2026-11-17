@@ -140,8 +140,8 @@ impl Models {
         false
     }
 
-    /// One frame: true while any view on screen moves on its own.
-    pub fn tick(&mut self) -> bool {
+    /// One frame: when the next is wanted, while any view on screen moves on its own.
+    pub fn tick(&mut self) -> Option<Duration> {
         let now = Instant::now();
         match (self.active, self.held) {
             (false, None) => self.held = Some(now),
@@ -166,13 +166,15 @@ impl Models {
         });
         self.sighted.retain(|_, (_, last)| now - *last < Duration::from_secs(1));
         // Drawn again until a model that stays in view is through its dwell.
-        let mut moving = self.sighted.values().any(|(_, last)| now - *last < GAP);
+        let mut next = self.sighted.values().any(|(_, last)| now - *last < GAP).then_some(Duration::ZERO);
         for v in self.views.values_mut() {
             let on_screen = v.seen.is_some_and(|t| now - t < Duration::from_millis(250));
-            moving |= v.tick(on_screen && self.active && !self.front) && on_screen;
+            if v.tick(on_screen && self.active && !self.front) && on_screen {
+                next = Some(next.map_or(v.due(), |n| n.min(v.due())));
+            }
             self.retired.append(&mut v.retired);
         }
-        moving
+        next
     }
 
     /// The stage's radial glow, drawn once per size.
@@ -250,7 +252,16 @@ pub fn wheel_y(e: &ScrollEvent) -> f32 {
 }
 
 /// The measuring layer: reports the stage's size, and follows a drag past its edges.
-pub fn measure(size: (f32, f32), dragging: bool, moving: bool, on: OnAct) -> AnyElement {
+/// The next frame, at once or once `due` has passed.
+pub fn ask(window: &mut Window, cx: &mut App, due: Duration) {
+    if due.is_zero() {
+        window.request_animation_frame();
+    } else {
+        gpui::wake_window_in(window, cx, due);
+    }
+}
+
+pub fn measure(size: (f32, f32), dragging: bool, moving: Option<Duration>, on: OnAct) -> AnyElement {
     let on2 = on.clone();
     canvas(
         move |b: Bounds<Pixels>, w, cx| {
@@ -259,9 +270,9 @@ pub fn measure(size: (f32, f32), dragging: bool, moving: bool, on: OnAct) -> Any
                 on(Act::Size(s.0, s.1), w, cx);
             }
         },
-        move |_, _, window, _| {
-            if moving {
-                window.request_animation_frame();
+        move |_, _, window, cx| {
+            if let Some(due) = moving {
+                ask(window, cx, due);
             }
             if dragging {
                 let on = on2.clone();
@@ -364,7 +375,7 @@ pub fn stage(models: &mut Models, f: &Facts, src: impl FnOnce() -> Option<Src>, 
     let size = v.css_size();
     let dragging = v.dragging();
     // A background window or the idle pause asks for no frames, or the driver keeps its pool.
-    let moving = v.moving_hint() && runs;
+    let moving = v.moving_hint().filter(|_| runs);
     el = el.child(measure(size, dragging, moving, on.clone()));
     if let Some(frame) = v.frame.clone() {
         el = el.child(img(frame).absolute().inset_0().size_full().opacity(v.opacity()));

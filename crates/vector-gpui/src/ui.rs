@@ -6405,8 +6405,8 @@ impl Render for VectorApp {
             media.models.scale = window.scale_factor();
             media.models.active = window.is_window_active() && !gpui::animations_asleep();
             media.models.front = self.model_viewer.is_some();
-            if media.models.tick() {
-                window.request_animation_frame();
+            if let Some(due) = media.models.tick() {
+                crate::model3d::stage::ask(window, cx, due);
             }
             for old in media.models.retired.drain(..) {
                 let _ = window.drop_image(old);

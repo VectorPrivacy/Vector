@@ -289,9 +289,8 @@ fn round_button(id: &'static str) -> gpui::Stateful<gpui::Div> {
 impl Render for ModelViewer {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.view.set_size(f32::from(window.viewport_size().width), f32::from(window.viewport_size().height), window.scale_factor());
-        let moving = self.view.tick(window.is_window_active());
-        if moving {
-            window.request_animation_frame();
+        if self.view.tick(window.is_window_active()) {
+            crate::model3d::stage::ask(window, cx, self.view.due());
         }
         for old in self.view.retired.drain(..) {
             let _ = window.drop_image(old);

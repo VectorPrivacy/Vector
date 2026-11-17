@@ -4,7 +4,7 @@
 
 use std::sync::Arc;
 use std::sync::mpsc::Receiver;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use glam::{Quat, Vec3};
 use gpui::RenderImage;
@@ -249,9 +249,23 @@ impl View {
         self.css
     }
 
-    /// Whether it will want the next frame: its paint asks for one, as ticks stop off screen.
-    pub fn moving_hint(&self) -> bool {
-        self.ready() && (self.playing || self.spinning || self.coast.is_some() || (self.ready_at.is_some() && self.opacity() < 1.))
+    /// When it next wants a frame, if it moves: its paint asks for one, as ticks stop off screen.
+    pub fn moving_hint(&self) -> Option<Duration> {
+        if !self.ready() {
+            return None;
+        }
+        if self.playing || self.coast.is_some() || (self.ready_at.is_some() && self.opacity() < 1.) {
+            return Some(Duration::ZERO);
+        }
+        self.spinning.then(|| self.due())
+    }
+
+    /// A pedestal turn steps at its own rate, not the display's.
+    pub fn due(&self) -> Duration {
+        if self.playing || self.coast.is_some() || self.press.is_some() || (self.ready_at.is_some() && self.opacity() < 1.) {
+            return Duration::ZERO;
+        }
+        Duration::from_secs_f32((PEDESTAL_FRAME - self.spun).max(0.))
     }
 
     pub fn dragging(&self) -> bool {
