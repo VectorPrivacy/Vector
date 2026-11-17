@@ -213,6 +213,8 @@ struct LayoutItemsResponse {
     max_item_width: Pixels,
     scroll_top: ListOffset,
     item_layouts: VecDeque<ItemLayout>,
+    /// The height of the hidden item laid out above the first visible one.
+    lead: Pixels,
 }
 
 struct ItemLayout {
@@ -1075,6 +1077,9 @@ impl StateInner {
         );
 
         let mut cursor = old_items.cursor::<Count>(());
+        // One hidden item past each edge is laid out and prepainted too, so the keyboard can Tab
+        // onto it and scroll it in.
+        let mut past_edge = false;
 
         // Render items after the scroll top, including those in the trailing overdraw
         cursor.seek(&Count(scroll_top.item_ix), Bias::Right);
@@ -1085,7 +1090,10 @@ impl StateInner {
             }
 
             let item_index = scroll_top.item_ix + ix;
+            let edge = visible_height >= available_height && !past_edge;
+            past_edge |= edge;
             let (size, ready) = if visible_height >= available_height
+                && !edge
                 && let Some(size) = item.size()
             {
                 (size, self.is_item_ready(item_index, cx))
@@ -1105,7 +1113,7 @@ impl StateInner {
                     anchor.position = scroll_top;
                 }
 
-                if visible_height < available_height {
+                if visible_height < available_height || edge {
                     item_layouts.push_back(ItemLayout {
                         index: item_index,
                         element,
@@ -1237,6 +1245,16 @@ impl StateInner {
             }
         }
 
+        let mut lead = px(0.);
+        let first_shown = item_layouts.front().map(|l| l.index);
+        if !provisional && first_shown == Some(scroll_top.item_ix) && scroll_top.item_ix > 0 {
+            let item_index = scroll_top.item_ix - 1;
+            let mut element = render_item(item_index, window, cx);
+            let size = element.layout_as_root(available_item_space, window, cx);
+            lead = size.height;
+            item_layouts.push_front(ItemLayout { index: item_index, element, size });
+        }
+
         // If none of the visible items are focused, check if an off-screen item is focused
         // and include it to be rendered after the visible items so keyboard interaction continues
         // to work for it.
@@ -1265,6 +1283,7 @@ impl StateInner {
             max_item_width,
             scroll_top,
             item_layouts,
+            lead,
         }
     }
 
@@ -1301,10 +1320,12 @@ impl StateInner {
             // Only paint the visible items, if there is actually any space for them (taking padding into account)
             if bounds.size.height > padding.top + padding.bottom {
                 let mut item_origin = bounds.origin + Point::new(padding.left, padding.top);
-                item_origin.y -= layout_response.scroll_top.offset_in_item;
+                item_origin.y -= layout_response.scroll_top.offset_in_item + layout_response.lead;
                 for item in &mut layout_response.item_layouts {
                     window.with_content_mask(Some(ContentMask { bounds }), |window| {
+                        window.scroll_parents.push(crate::window::ScrollParent::List);
                         item.element.prepaint_at(item_origin, window, cx);
+                        window.scroll_parents.pop();
                     });
 
                     if let Some(autoscroll_bounds) = window.take_autoscroll()

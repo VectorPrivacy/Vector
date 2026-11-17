@@ -2576,9 +2576,21 @@ impl Interactivity {
 
                             let scroll_offset =
                                 self.clamp_scroll_position(bounds, &style, window, cx);
+                            if let Some(id) = window.reveal_focus
+                                && self.tracked_focus_handle.as_ref().is_some_and(|h| h.id == id)
+                            {
+                                window.reveal_focus = None;
+                                window.reveal(bounds);
+                            }
+                            let parent = self.scroll_offset.clone().map(|o| {
+                                window.scroll_parents.push(crate::window::ScrollParent::Div(bounds, o));
+                            });
                             let result = window.with_element_opacity(style.opacity, |window| {
                                 f(&style, scroll_offset, hitbox, window, cx)
                             });
+                            if parent.is_some() {
+                                window.scroll_parents.pop();
+                            }
                             (result, element_state)
                         },
                     )

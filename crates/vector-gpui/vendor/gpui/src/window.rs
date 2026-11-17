@@ -1026,6 +1026,11 @@ impl std::ops::Deref for ElementIdStack {
     }
 }
 
+pub(crate) enum ScrollParent {
+    Div(Bounds<Pixels>, Rc<RefCell<Point<Pixels>>>),
+    List,
+}
+
 pub(crate) struct DeferredDraw {
     current_view: EntityId,
     priority: usize,
@@ -1279,6 +1284,10 @@ pub struct Window {
     pub(crate) element_zoom: Option<(Point<Pixels>, f32)>,
     pub(crate) content_mask_stack: Vec<ContentMask<Pixels>>,
     pub(crate) requested_autoscroll: Option<Bounds<Pixels>>,
+    /// A tab stop the keyboard just moved to, to be scrolled into view where it next prepaints.
+    pub(crate) reveal_focus: Option<FocusId>,
+    /// The scrolling boxes around what is prepainting now, innermost last.
+    pub(crate) scroll_parents: Vec<ScrollParent>,
     /// The [`TextInputConfiguration`] most recently forwarded to the platform
     /// window, so that only actual changes are forwarded (reconfiguring a live
     /// input session can restart the IME connection).
@@ -2419,6 +2428,8 @@ impl Window {
             element_opacity: 1.0,
             element_zoom: None,
             requested_autoscroll: None,
+            reveal_focus: None,
+            scroll_parents: Vec::new(),
             last_text_input_configuration: None,
             focused_text_input: None,
             rendered_frame: Frame::new(DispatchTree::new(cx.keymap.clone(), cx.actions.clone())),
@@ -2674,6 +2685,7 @@ impl Window {
         }
 
         self.focus = Some(handle.id);
+        self.reveal_focus = None;
         self.focus_generation = self.focus_generation.wrapping_add(1);
         self.clear_pending_keystrokes(cx);
 
@@ -2721,7 +2733,8 @@ impl Window {
         }
 
         if let Some(handle) = self.rendered_frame.tab_stops.next(self.focus.as_ref()) {
-            self.focus(&handle, cx)
+            self.focus(&handle, cx);
+            self.reveal_focus = Some(handle.id);
         }
     }
 
@@ -2732,7 +2745,8 @@ impl Window {
         }
 
         if let Some(handle) = self.rendered_frame.tab_stops.prev(self.focus.as_ref()) {
-            self.focus(&handle, cx)
+            self.focus(&handle, cx);
+            self.reveal_focus = Some(handle.id);
         }
     }
 
@@ -4630,6 +4644,34 @@ impl Window {
     /// [`Element::prepaint`] again with a new set of bounds. See [`crate::List`] for an example of an element
     /// that supports this method being called on the elements it contains. This method should only be
     /// called during the prepaint phase of element drawing.
+    /// Scroll `bounds`, a keyboard-focused box, into its nearest scrolling parent with a little room
+    /// (`scrollIntoView({ block: "nearest" })`).
+    pub(crate) fn reveal(&mut self, bounds: Bounds<Pixels>) {
+        let room = px(8.);
+        match self.scroll_parents.last() {
+            Some(ScrollParent::Div(area, offset)) => {
+                let mut o = offset.borrow_mut();
+                let before = *o;
+                if bounds.bottom() > area.bottom() && bounds.size.height <= area.size.height {
+                    o.y -= bounds.bottom() - area.bottom() + room;
+                } else if bounds.top() < area.top() {
+                    o.y += area.top() - bounds.top() + room;
+                }
+                if bounds.right() > area.right() && bounds.size.width <= area.size.width {
+                    o.x -= bounds.right() - area.right() + room;
+                } else if bounds.left() < area.left() {
+                    o.x += area.left() - bounds.left() + room;
+                }
+                if *o != before {
+                    drop(o);
+                    self.request_animation_frame();
+                }
+            }
+            Some(ScrollParent::List) => self.request_autoscroll(bounds),
+            None => {}
+        }
+    }
+
     pub fn request_autoscroll(&mut self, bounds: Bounds<Pixels>) {
         self.invalidator.debug_assert_prepaint();
         self.requested_autoscroll = Some(bounds);
