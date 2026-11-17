@@ -110,6 +110,99 @@ fn emodump(n: usize, cx: &mut Context<VectorApp>) {
         .detach();
 }
 
+/// The process's footprint split as the kernel ledgers it, in MB: the same buckets `footprint`
+/// prints, without its developer-tools prompt.
+#[cfg(target_os = "macos")]
+fn mem() -> serde_json::Value {
+    // osfmk/mach/task_info.h, task_vm_info rev 7.
+    #[repr(C)]
+    #[derive(Default)]
+    struct TaskVmInfo {
+        virtual_size: u64,
+        region_count: i32,
+        page_size: i32,
+        resident_size: u64,
+        resident_size_peak: u64,
+        device: u64,
+        device_peak: u64,
+        internal: u64,
+        internal_peak: u64,
+        external: u64,
+        external_peak: u64,
+        reusable: u64,
+        reusable_peak: u64,
+        purgeable_volatile_pmap: u64,
+        purgeable_volatile_resident: u64,
+        purgeable_volatile_virtual: u64,
+        compressed: u64,
+        compressed_peak: u64,
+        compressed_lifetime: u64,
+        phys_footprint: u64,
+        min_address: u64,
+        max_address: u64,
+        ledger_phys_footprint_peak: i64,
+        ledger_purgeable_nonvolatile: i64,
+        ledger_purgeable_novolatile_compressed: i64,
+        ledger_purgeable_volatile: i64,
+        ledger_purgeable_volatile_compressed: i64,
+        ledger_tag_network_nonvolatile: i64,
+        ledger_tag_network_nonvolatile_compressed: i64,
+        ledger_tag_network_volatile: i64,
+        ledger_tag_network_volatile_compressed: i64,
+        ledger_tag_media_footprint: i64,
+        ledger_tag_media_footprint_compressed: i64,
+        ledger_tag_media_nofootprint: i64,
+        ledger_tag_media_nofootprint_compressed: i64,
+        ledger_tag_graphics_footprint: i64,
+        ledger_tag_graphics_footprint_compressed: i64,
+        ledger_tag_graphics_nofootprint: i64,
+        ledger_tag_graphics_nofootprint_compressed: i64,
+        ledger_tag_neural_footprint: i64,
+        ledger_tag_neural_footprint_compressed: i64,
+        ledger_tag_neural_nofootprint: i64,
+        ledger_tag_neural_nofootprint_compressed: i64,
+        limit_bytes_remaining: u64,
+        decompressions: i32,
+        ledger_swapins: i64,
+        ledger_tag_neural_nofootprint_total: i64,
+        ledger_tag_neural_nofootprint_peak: i64,
+    }
+    const TASK_VM_INFO: u32 = 22;
+    let mut info = TaskVmInfo::default();
+    let mut count = (std::mem::size_of::<TaskVmInfo>() / std::mem::size_of::<libc::natural_t>()) as libc::mach_msg_type_number_t;
+    // SAFETY: `info` is task_vm_info's layout and `count` its size in natural_t.
+    let kr = unsafe { libc::task_info(libc::mach_task_self(), TASK_VM_INFO, &mut info as *mut _ as libc::task_info_t, &mut count) };
+    let mb = |b: i128| (b as f64 / 1048576. * 10.).round() / 10.;
+    let metal = {
+        use objc2_metal::MTLDevice as _;
+        objc2_metal::MTLCreateSystemDefaultDevice().map(|d| mb(d.currentAllocatedSize() as i128))
+    };
+    serde_json::json!({
+        "ok": kr == 0,
+        "footprint": mb(info.phys_footprint as i128),
+        "footprint_peak": mb(info.ledger_phys_footprint_peak as i128),
+        "internal": mb(info.internal as i128),
+        "compressed": mb(info.compressed as i128),
+        "graphics": mb(info.ledger_tag_graphics_footprint as i128),
+        "graphics_compressed": mb(info.ledger_tag_graphics_footprint_compressed as i128),
+        "graphics_nofootprint": mb(info.ledger_tag_graphics_nofootprint as i128),
+        "media": mb(info.ledger_tag_media_footprint as i128),
+        "neural": mb(info.ledger_tag_neural_footprint as i128),
+        "purgeable_nonvolatile": mb(info.ledger_purgeable_nonvolatile as i128),
+        "metal_allocated": metal,
+    })
+}
+
+#[cfg(not(target_os = "macos"))]
+fn mem() -> serde_json::Value {
+    let rollup = std::fs::read_to_string("/proc/self/smaps_rollup").unwrap_or_default();
+    let kb = |key: &str| rollup.lines().filter(|l| l.starts_with(key)).filter_map(|l| l.split_whitespace().nth(1)?.parse::<f64>().ok()).sum::<f64>();
+    serde_json::json!({
+        "private": ((kb("Private_Clean:") + kb("Private_Dirty:")) / 1024. * 10.).round() / 10.,
+        "rss": (kb("Rss:") / 1024. * 10.).round() / 10.,
+    })
+}
+
 fn answer(v: serde_json::Value) {
     let path = std::env::temp_dir().join("vector-devctl.json");
     let _ = std::fs::write(path, serde_json::to_vec_pretty(&v).unwrap_or_default());
@@ -176,6 +269,7 @@ pub fn run(app: &mut VectorApp, cmd: &str, window: &mut Window, cx: &mut Context
         "idle" => gpui::set_animation_idle(std::time::Duration::from_secs(rest.parse().unwrap_or(300))),
         "dump" => answer(app.dev_dump(rest)),
         "caches" => answer(app.dev_caches()),
+        "mem" => answer(mem()),
         "net" => app.dev_net(serde_json::from_str(rest).ok(), cx),
         "emit" => {
             if let Some((name, payload)) = rest.split_once(':') {
