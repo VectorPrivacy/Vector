@@ -630,16 +630,17 @@ pub fn note_press() {
 }
 
 thread_local! {
-    static PRESS_FOCUS: std::cell::RefCell<Option<gpui::FocusHandle>> = const { std::cell::RefCell::new(None) };
+    static PRESS_FOCUS: std::cell::RefCell<Option<(std::time::Instant, Option<gpui::FocusHandle>)>> = const { std::cell::RefCell::new(None) };
 }
 
 /// What held focus as the latest press began, before the press moved it.
 pub fn note_press_focus(focus: Option<gpui::FocusHandle>) {
-    PRESS_FOCUS.with(|f| *f.borrow_mut() = focus);
+    PRESS_FOCUS.with(|f| *f.borrow_mut() = Some((std::time::Instant::now(), focus)));
 }
 
-pub fn take_press_focus() -> Option<gpui::FocusHandle> {
-    PRESS_FOCUS.with(|f| f.borrow_mut().take())
+/// [`note_press_focus`]'s handle, if a press just landed; `None` when none did.
+pub fn take_press_focus() -> Option<Option<gpui::FocusHandle>> {
+    PRESS_FOCUS.with(|f| f.borrow_mut().take()).filter(|(at, _)| at.elapsed() < std::time::Duration::from_millis(500)).map(|(_, h)| h)
 }
 
 fn presses() -> u64 {

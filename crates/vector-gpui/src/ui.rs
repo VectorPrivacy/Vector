@@ -104,6 +104,10 @@ pub struct VectorApp {
     msg_index: Rc<HashMap<String, usize>>,
     read_anchor: Option<data::Unread>,
     input: Entity<TextInput>,
+    /// The message the keyboard is on in the timeline, once it has moved.
+    msg_cursor: Option<String>,
+    timeline_focus: gpui::FocusHandle,
+    timeline_focused: bool,
     syncing: bool,
     /// Spoilers revealed, by message.
     revealed: Rc<RefCell<HashMap<String, HashSet<u32>>>>,
@@ -941,6 +945,9 @@ impl VectorApp {
             read_anchor: None,
             unread_jump: None,
             input,
+            msg_cursor: None,
+            timeline_focus: cx.focus_handle().tab_stop(true),
+            timeline_focused: false,
             syncing: false,
             revealed: Rc::default(),
             timeout_expiry: None,
@@ -6166,6 +6173,83 @@ impl VectorApp {
     }
 }
 
+impl VectorApp {
+    /// The open chat's messages in row order: (row, message id).
+    fn message_rows(&self, store: &Store, chat: &str) -> Vec<(usize, String)> {
+        let Some(c) = store.chat(chat) else { return Vec::new() };
+        self.rows
+            .iter()
+            .enumerate()
+            .filter_map(|(r, row)| match row {
+                Row::Message { index, .. } => c.messages.get(*index).map(|m| (r, m.id.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The keyboard's message: the one it moved to, else the newest.
+    fn cursor_message(&self, store: &Store, chat: &str) -> Option<String> {
+        let c = store.chat(chat)?;
+        self.msg_cursor
+            .clone()
+            .filter(|id| self.msg_index.contains_key(id))
+            .or_else(|| c.messages.last().map(|m| m.id.clone()))
+    }
+
+    /// Up/Down walk the messages, Home/End and Page Up/Down jump; Enter, Shift+F10 or the
+    /// Menu key open the message's menu; Escape goes back to the composer.
+    fn timeline_key(&mut self, e: &gpui::KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(chat) = self.open.clone() else { return };
+        let (rows, at) = {
+            let store = self.store.borrow();
+            let rows = self.message_rows(&store, &chat);
+            let cur = self.cursor_message(&store, &chat);
+            let at = cur.and_then(|c| rows.iter().position(|(_, id)| *id == c));
+            (rows, at)
+        };
+        if rows.is_empty() {
+            return;
+        }
+        let last = rows.len() - 1;
+        let at = at.unwrap_or(last);
+        let k = &e.keystroke;
+        let m = &k.modifiers;
+        let to = match k.key.as_str() {
+            "up" if !m.modified() => Some(at.saturating_sub(1)),
+            "down" if !m.modified() => Some((at + 1).min(last)),
+            "pageup" => Some(at.saturating_sub(10)),
+            "pagedown" => Some((at + 10).min(last)),
+            "home" => Some(0),
+            "end" => Some(last),
+            _ => None,
+        };
+        if let Some(to) = to {
+            self.msg_cursor = Some(rows[to].1.clone());
+            self.timeline.scroll_to_reveal_item(rows[to].0);
+            crate::pane::notify(&self.panes.timeline, cx);
+            cx.stop_propagation();
+            return;
+        }
+        let menu = k.key == "enter" && !m.modified()
+            || k.key == "f10" && m.shift && !m.control && !m.alt && !m.platform
+            || matches!(k.key.as_str(), "menu" | "contextmenu" | "apps") && !m.modified();
+        if menu {
+            let (row, id) = rows[at].clone();
+            let at = self
+                .timeline
+                .bounds_for_item(row)
+                .map_or(window.mouse_position(), |b| b.origin + gpui::point(px(64.), b.size.height.min(px(44.)) / 2.));
+            self.message_menu(id, at, cx);
+            cx.stop_propagation();
+        } else if k.key == "escape" {
+            self.msg_cursor = None;
+            window.focus(&self.input.focus_handle(cx), cx);
+            crate::pane::notify(&self.panes.timeline, cx);
+            cx.stop_propagation();
+        }
+    }
+}
+
 /// See [`VectorApp::menu_keys`]. `key` tells one menu (or submenu) from the next.
 struct MenuKeys {
     key: u64,
@@ -6193,7 +6277,7 @@ impl VectorApp {
             }
             (Some(key), None) => {
                 let focus = cx.focus_handle();
-                let back_to = kit::take_press_focus().or_else(|| window.focused(cx));
+                let back_to = kit::take_press_focus().unwrap_or_else(|| window.focused(cx));
                 let take = focus.clone();
                 window.defer(cx, move |w, cx| w.focus(&take, cx));
                 self.menu_keys = Some(MenuKeys { key, focus, hi: Rc::new(std::cell::Cell::new(usize::MAX)), back_to });
@@ -6218,6 +6302,12 @@ impl Render for VectorApp {
         let me = cx.entity().downgrade();
         cx.defer(move |cx| crate::relayinfo::pump(me, cx));
         self.sync_menu_keys(window, cx);
+        // The timeline is a cached pane: its cursor ring comes and goes with focus.
+        let focused = self.timeline_focus.is_focused(window);
+        if focused != self.timeline_focused {
+            self.timeline_focused = focused;
+            crate::pane::notify(&self.panes.timeline, cx);
+        }
         // The chat on screen: Settings, the app hub, a profile or a new chat or Community drawn in
         // its place leave it as surely as opening another.
         let shown = self.open.clone().filter(|_| {
@@ -6391,7 +6481,7 @@ impl Render for VectorApp {
             }))
             .capture_key_down(cx.listener(|app, e: &gpui::KeyDownEvent, window, cx| {
                 // An open dropdown has focus and answers its own keys.
-                if window.context_stack().iter().any(|k| k.contains("Select") || k.contains("Menu")) {
+                if window.context_stack().iter().any(|k| k.contains("Select") || k.contains("Menu") || k.contains("Timeline")) {
                     return;
                 }
                 if e.keystroke.key == "escape" {
@@ -9169,6 +9259,7 @@ impl VectorApp {
         };
         let app = cx.entity().downgrade();
         let scroller = self.timeline.clone();
+        let cursor = self.timeline_focus.is_focused(window).then(|| self.cursor_message(store, &id)).flatten();
         let list = list(self.timeline.clone(), move |i, window, cx| {
             let rows_store = rows_store.borrow();
             let (Some(chat), Some(row)) = (rows_store.chat(&rows_id), rows.get(i)) else {
@@ -9202,6 +9293,7 @@ impl VectorApp {
                 commands: cmd_names.as_deref(),
                 content_w,
                 vw,
+                cursor: cursor.as_deref(),
             };
             if ctx.jumped.is_some_and(|(id, _)| {
                 chat.messages
@@ -9313,6 +9405,12 @@ impl VectorApp {
         })
         .size_full();
         div()
+            .id("timeline")
+            .role(gpui::Role::List)
+            .aria_label("Messages")
+            .track_focus(&self.timeline_focus)
+            .key_context("Timeline")
+            .on_key_down(cx.listener(|this, e: &gpui::KeyDownEvent, window, cx| this.timeline_key(e, window, cx)))
             .size_full()
             .relative()
             .on_mouse_down(

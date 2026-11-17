@@ -135,6 +135,8 @@ pub struct Ctx<'a> {
     pub by_id: &'a HashMap<String, usize>,
     /// The window's width: what `100vw` reads.
     pub vw: f32,
+    /// The message the keyboard is on, while the timeline has focus.
+    pub cursor: Option<&'a str>,
 }
 
 /// The open chat's message `id`.
@@ -473,6 +475,12 @@ fn row_shell(
         .child(
             div()
                 .id(SharedString::from(m.id.clone()))
+                .role(gpui::Role::ListItem)
+                .when(ctx.cursor == Some(m.id.as_str()), |d| {
+                    d.aria_active_descendant().child(
+                        div().absolute().inset_0().border_2().border_color(c(ACCENT)).rounded(px(6.)),
+                    )
+                })
                 .group(group)
                 .motion_host()
                 .relative()
