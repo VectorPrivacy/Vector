@@ -59,6 +59,7 @@ struct Fades {
     comm_settings: kit::Linger<crate::commsettings::CommSettings>,
     invite_details: kit::Linger<String>,
     popup: kit::Linger<()>,
+    pins: kit::Linger<SharedString>,
 }
 
 enum Screen {
@@ -9709,12 +9710,17 @@ impl VectorApp {
         let messages = self.timeline_cached(id.clone(), staged_voice, cx);
 
         let drawer_open = self.pins.open && self.pins.button(&id).is_some();
-        let drawer = (self.pins.open && self.pins.button(&id).is_some()).then(|| {
-            let pane_h = self.chat_box.get().map_or(800., |b| f32::from(b.size.height));
-            // `max(200px, 40vh)`, the window being the pane plus its chrome.
-            let max_h = ((pane_h + 32.) * 0.4).max(200.);
-            crate::pins::drawer(&self.pins, store, &self.revealed.borrow(), clock, max_h, &self.pins_on(cx))
-        });
+        let drawer = self
+            .fades
+            .pins
+            .track(drawer_open.then_some(&id), window)
+            .filter(|(chat, _)| *chat == id && self.pins.button(&id).is_some())
+            .map(|(_, shown)| {
+                let pane_h = self.chat_box.get().map_or(800., |b| f32::from(b.size.height));
+                // `max(200px, 40vh)`, the window being the pane plus its chrome.
+                let max_h = ((pane_h + 32.) * 0.4).max(200.);
+                crate::pins::drawer(&self.pins, store, &self.revealed.borrow(), clock, max_h, shown, &self.pins_on(cx))
+            });
         let bar = (alone.is_none() && drawer.is_none()).then(|| crate::scrollbar::render(&self.bar, window, self.bar_on(cx)));
         let back = (self.return_shown && alone.is_none() && drawer.is_none()).then(|| {
             let app = cx.entity().downgrade();

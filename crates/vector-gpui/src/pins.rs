@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 use gpui::prelude::*;
-use gpui::{AnyElement, App, FontWeight, SharedString, Window, div, px, svg};
+use gpui::{AnimationExt, AnyElement, App, FontWeight, SharedString, Window, div, px, svg};
 use crate::pic::img;
 use serde_json::Value;
 
@@ -357,7 +357,8 @@ fn demote(source: &str) -> String {
 }
 
 /// The drawer and the dimmed conversation behind it, laid over the message list.
-pub fn drawer(pins: &Pins, store: &Store, revealed: &HashMap<String, HashSet<u32>>, clock: f32, max_h: f32, on: &OnAct) -> AnyElement {
+/// `shown` falls from 1 as the drawer shuts (`pins-drawer-shut`).
+pub fn drawer(pins: &Pins, store: &Store, revealed: &HashMap<String, HashSet<u32>>, clock: f32, max_h: f32, shown: f32, on: &OnAct) -> AnyElement {
     let notice = |text: &'static str| {
         div().p(px(16.)).text_size(px(13.)).opacity(0.6).text_center().child(text).into_any_element()
     };
@@ -373,6 +374,7 @@ pub fn drawer(pins: &Pins, store: &Store, revealed: &HashMap<String, HashSet<u32
         .size_full()
         .top_0()
         .left_0()
+        .opacity(shown)
         .child(
             div()
                 .id("pins-scrim")
@@ -413,8 +415,15 @@ pub fn drawer(pins: &Pins, store: &Store, revealed: &HashMap<String, HashSet<u32
                         .on_click(click(on, Act::Close))
                         .child("Click to Close")
                         .child(svg().path("ui/pins-close.svg").size(px(20.)).text_color(c(ACCENT))),
+                )
+                // `pins-drawer-open`: down 10px and in over 0.18 s.
+                .with_animation(
+                    "pins-drawer-in",
+                    gpui::Animation::new(std::time::Duration::from_millis(180)).with_easing(crate::kit::bezier(0., 0., 0.58, 1.)),
+                    move |d, t| d.top(px(-1. - 10. * (1. - t * shown))).opacity(t),
                 ),
         )
+        .when(shown < 1., |d| d.child(crate::kit::inert()))
         .into_any_element()
 }
 
