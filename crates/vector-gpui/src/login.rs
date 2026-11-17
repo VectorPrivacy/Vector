@@ -24,6 +24,8 @@ pub struct LoggedIn {
     pub npub: String,
 }
 
+const BG_FADE: f32 = 0.3;
+
 impl EventEmitter<LoggedIn> for LoginView {}
 
 /// A re-pair started from Settings ended, either way.
@@ -108,6 +110,8 @@ pub struct LoginView {
     /// The first entry of a new credential, awaiting its confirmation.
     first: Option<Zeroizing<String>>,
     bg_hidden: bool,
+    /// When the background last flipped: `.lg-art` fades over 0.3 s.
+    bg_flip: Option<Instant>,
     popup: Option<Popup>,
     born: Instant,
     /// Adding a profile over a live account: whether that account was already torn down.
@@ -182,6 +186,7 @@ impl LoginView {
             wrong: None,
             first: None,
             bg_hidden: false,
+            bg_flip: None,
             popup: None,
             born: Instant::now(),
             adding: None,
@@ -1299,7 +1304,8 @@ impl LoginView {
                             .items_center()
                             .justify_center()
                             .text_size(px(20.))
-                            .when(filled, |d| d.child("\u{2022}")),
+                            .when(filled, |d| d.child("\u{2022}"))
+                            .when(active && !filled, |d| d.child(div().w(px(2.)).h(px(23.)).bg(c(PRIMARY)))),
                     );
                 }
                 block = block.child(row);
@@ -1350,12 +1356,18 @@ impl Render for LoginView {
             .bg(c(APP_BG));
 
         // .lg-art: the camera, faded out towards the centre.
-        if !self.bg_hidden {
+        let fade = self.bg_flip.map_or(1., |t| (t.elapsed().as_secs_f32() / BG_FADE).min(1.));
+        if fade < 1. {
+            window.request_animation_frame();
+        }
+        let shown = if self.bg_hidden { 1. - kit::bezier(0.25, 0.1, 0.25, 1.)(fade) } else { kit::bezier(0.25, 0.1, 0.25, 1.)(fade) };
+        if shown > 0. {
             root = root.child(
                 div()
                     .absolute()
                     .inset_0()
                     .overflow_hidden()
+                    .opacity(shown)
                     .child(
                         img("icons/login/cctv.png")
                             .absolute()
@@ -1457,6 +1469,9 @@ impl Render for LoginView {
                 .cursor_pointer()
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.bg_hidden = !this.bg_hidden;
+                    // A flip mid-fade turns back from where it stands.
+                    let left = this.bg_flip.map_or(0., |t| (1. - t.elapsed().as_secs_f32() / BG_FADE).max(0.));
+                    this.bg_flip = Some(Instant::now() - std::time::Duration::from_secs_f32(left * BG_FADE));
                     cx.notify();
                 }))
                 .child(
