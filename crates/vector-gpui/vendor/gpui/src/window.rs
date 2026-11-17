@@ -1316,6 +1316,10 @@ pub struct Window {
     pub(crate) activation_observers: SingleSubscriberSet<AnyObserver>,
     pub(crate) focus: Option<FocusId>,
     focus_enabled: bool,
+    /// Every clickable element with an id becomes a keyboard-only tab stop, as buttons are on the web.
+    pub(crate) auto_tab_stops: bool,
+    /// Drawn around an automatic tab stop while the keyboard holds focus there.
+    pub(crate) focus_ring: Option<Hsla>,
     /// Incremented every time focus moves. Used to invalidate a
     /// pending keyboard activation state when focus changes.
     pub(crate) focus_generation: u64,
@@ -2448,6 +2452,8 @@ impl Window {
             activation_observers: SingleSubscriberSet::new(),
             focus: None,
             focus_enabled: true,
+            auto_tab_stops: false,
+            focus_ring: None,
             focus_generation: 0,
             pending_input: None,
             pending_modifier: ModifierState::default(),
@@ -2676,6 +2682,19 @@ impl Window {
         }
         self.focus = None;
         self.refresh();
+    }
+
+    /// Turns every clickable element with an id into a tab stop that only the keyboard focuses,
+    /// ringed in `ring` while focused from the keyboard. Off until asked, so a mouse-only session
+    /// keeps no focus handles for its buttons.
+    pub fn set_auto_tab_stops(&mut self, ring: Option<Hsla>) {
+        self.auto_tab_stops = true;
+        self.focus_ring = ring;
+    }
+
+    /// Whether [`Self::set_auto_tab_stops`] is on.
+    pub fn auto_tab_stops(&self) -> bool {
+        self.auto_tab_stops
     }
 
     /// Blur the window and don't allow anything in it to be focused again.

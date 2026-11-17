@@ -1832,7 +1832,7 @@ impl EventEmitter<Pasted> for TextInput {}
 impl TextInput {
     pub fn new(placeholder: impl Into<SharedString>, cx: &mut Context<Self>) -> Self {
         Self {
-            focus_handle: cx.focus_handle(),
+            focus_handle: cx.focus_handle().tab_stop(true),
             content: "".into(),
             placeholder: placeholder.into(),
             selected_range: 0..0,
@@ -2432,6 +2432,8 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("escape", Cancel, Some("TextInput")),
         KeyBinding::new("tab", Tab, Some("TextInput")),
         KeyBinding::new("shift-tab", TabBack, Some("TextInput")),
+        KeyBinding::new("tab", Tab, None),
+        KeyBinding::new("shift-tab", TabBack, None),
         KeyBinding::new("shift-home", SelectHome, None),
         KeyBinding::new("shift-end", SelectEnd, None),
     ]);

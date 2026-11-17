@@ -2316,6 +2316,8 @@ pub struct Interactivity {
     pub(crate) tab_index: Option<isize>,
     pub(crate) tab_group: bool,
     pub(crate) tab_stop: bool,
+    /// A tab stop made by [`Window::set_auto_tab_stops`]: the mouse never focuses it.
+    pub(crate) auto_focus: bool,
 
     pub(crate) a11y_action_listeners:
         Vec<(accesskit::Action, crate::window::a11y::A11yActionListener)>,
@@ -2379,15 +2381,20 @@ impl Interactivity {
                 // If there's an explicit focus handle we're tracking, use that. Otherwise
                 // create a new handle and store it in the element state, which lives for as
                 // as frames contain an element with this id.
-                if self.focusable
+                let auto = !self.focusable
+                    && window.auto_tab_stops
+                    && self.window_control.is_none()
+                    && !self.click_listeners.is_empty();
+                if (self.focusable || auto)
                     && self.tracked_focus_handle.is_none()
                     && let Some(element_state) = element_state.as_mut()
                 {
+                    self.auto_focus = auto;
                     let mut handle = element_state
                         .focus_handle
                         .get_or_insert_with(|| cx.focus_handle())
                         .clone()
-                        .tab_stop(self.tab_stop);
+                        .tab_stop(self.tab_stop || auto);
 
                     if let Some(index) = self.tab_index {
                         handle = handle.tab_index(index);
@@ -2772,6 +2779,25 @@ impl Interactivity {
                                 },
                             );
                         });
+                        if self.auto_focus
+                            && let Some(ring) = window.focus_ring
+                            && let Some(handle) = self.tracked_focus_handle.as_ref()
+                            && handle.is_focused(window)
+                            && window.last_input_was_keyboard()
+                        {
+                            let radii = style
+                                .corner_radii
+                                .to_pixels(window.rem_size())
+                                .clamp_radii_for_quad_size(bounds.size);
+                            window.paint_quad(crate::PaintQuad {
+                                bounds,
+                                corner_radii: radii,
+                                background: crate::transparent_black().into(),
+                                border_widths: px(2.).into(),
+                                border_color: ring,
+                                border_style: crate::BorderStyle::default(),
+                            });
+                        }
                     });
                 });
 
@@ -2913,7 +2939,7 @@ impl Interactivity {
         // If this element can be focused, register a mouse down listener
         // that will automatically transfer focus when hitting the element.
         // This behavior can be suppressed by using `cx.prevent_default()`.
-        if let Some(focus_handle) = self.tracked_focus_handle.clone() {
+        if let Some(focus_handle) = self.tracked_focus_handle.clone().filter(|_| !self.auto_focus) {
             let hitbox = hitbox.clone();
             window.on_mouse_event(move |_: &MouseDownEvent, phase, window, cx| {
                 if phase == DispatchPhase::Bubble

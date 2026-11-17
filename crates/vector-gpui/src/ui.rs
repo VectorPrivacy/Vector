@@ -6305,6 +6305,8 @@ impl Render for VectorApp {
         }
         let root = div()
             .track_focus(&self.root_focus)
+            .on_action(cx.listener(|_, _: &crate::composer::Tab, window, cx| keyboard_step(false, window, cx)))
+            .on_action(cx.listener(|_, _: &crate::composer::TabBack, window, cx| keyboard_step(true, window, cx)))
             .on_action(cx.listener(|_, _: &crate::composer::Copy, _, cx| {
                 if let Some(text) = crate::select::text() {
                     cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
@@ -6965,6 +6967,21 @@ impl VectorApp {
                         )),
                 ),
         )
+    }
+}
+
+/// Tab and Shift+Tab walk every button, as a browser does. The first press turns the stops on,
+/// so they exist from the next frame.
+fn keyboard_step(back: bool, window: &mut Window, cx: &mut gpui::App) {
+    let step = move |window: &mut Window, cx: &mut gpui::App| {
+        if back { window.focus_prev(cx) } else { window.focus_next(cx) }
+    };
+    if window.auto_tab_stops() {
+        step(window, cx);
+    } else {
+        window.set_auto_tab_stops(Some(c(PRIMARY)));
+        window.refresh();
+        window.on_next_frame(step);
     }
 }
 
