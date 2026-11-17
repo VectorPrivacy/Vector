@@ -641,6 +641,28 @@ impl Settle {
         }
         matches!(seen, Settled::At(_))
     }
+
+    /// `key`, a part of `row`, is drawn: whether it arrived after the row first drew and is
+    /// still entering. One drawn with its row fills in place.
+    pub fn arrived(&mut self, row: &str, key: &str) -> bool {
+        let row_seen = self.0.contains_key(row);
+        if !row_seen {
+            self.0.insert(row.to_string(), Settled::Done);
+        }
+        if !self.0.contains_key(key) {
+            self.0.insert(key.to_string(), if row_seen { Settled::Loading } else { Settled::Done });
+        }
+        self.fresh(key, true)
+    }
+}
+
+/// `reaction-pop-in`: a chip that arrived on a drawn message grows in from 0.6.
+pub fn chip_pop(id: impl Into<ElementId>, el: impl IntoElement) -> gpui::AnimationElement<gpui::Zoom> {
+    gpui::zoom(el).with_animation(
+        id,
+        gpui::Animation::new(std::time::Duration::from_millis(180)).with_easing(bezier(0.22, 1., 0.36, 1.)),
+        |z, t| z.scale(0.6 + 0.4 * t).opacity(t),
+    )
 }
 
 /// `.closing`: a modal kept on screen from its last open state while it fades out over 0.15 s

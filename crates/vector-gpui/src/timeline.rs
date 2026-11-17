@@ -1448,6 +1448,7 @@ fn reactions(ctx: &Ctx, m: &Message) -> Option<AnyElement> {
         }
     }
     if groups.is_empty() {
+        ctx.media.borrow_mut().settle.arrived(&m.id, &m.id);
         return None;
     }
     let mut row = div()
@@ -1497,15 +1498,15 @@ fn reactions(ctx: &Ctx, m: &Message) -> Option<AnyElement> {
             move |_: &gpui::MouseUpEvent, w: &mut Window, cx: &mut App| act(&id, Act::ReactionPress(e.clone(), false), w, cx)
         };
         let key = crate::reactpop::chip_key(&m.id, emoji_str);
-        row = row.child(
-            div()
+        let entering = ctx.media.borrow_mut().settle.arrived(&m.id, &key);
+        let chip = div()
                 .id(SharedString::from(format!("{}-r-{emoji_str}", m.id)))
                 .relative()
                 .on_hover(hover)
                 .on_mouse_down(gpui::MouseButton::Right, details)
                 .on_mouse_down(gpui::MouseButton::Left, press)
                 .on_mouse_up(gpui::MouseButton::Left, release)
-                .child(crate::kit::anchor(&ctx.anchors, key))
+                .child(crate::kit::anchor(&ctx.anchors, key.clone()))
                 .cursor_pointer()
                 .when(!mine, |d| d.hover(|s| s.bg(white_a(0.1)).opacity(1.)))
                 .on_click(move |_, w, cx| {
@@ -1527,8 +1528,12 @@ fn reactions(ctx: &Ctx, m: &Message) -> Option<AnyElement> {
                 .line_height(px(12.))
                 .text_color(white_a(0.85))
                 .child(glyph)
-                .child(count.to_string()),
-        );
+                .child(count.to_string());
+        row = row.child(if entering {
+            crate::kit::chip_pop(SharedString::from(format!("{key}-in")), chip).into_any_element()
+        } else {
+            chip.into_any_element()
+        });
     }
     if !ctx.store.can_react(&ctx.chat.id) {
         return Some(row.into_any_element());
