@@ -8147,8 +8147,16 @@ fn typing_strip(store: &Store, chat: &str, fade: f32, window: &Window) -> Option
         }
         text = text.child(if names.len() == 1 { "\u{a0}is typing" } else { "\u{a0}are typing" });
     }
+    let said = match names.as_slice() {
+        [] => "Several people are typing".to_string(),
+        [one] => format!("{one} is typing"),
+        [rest @ .., last] => format!("{} and {last} are typing", rest.join(", ")),
+    };
+    let text = text.spoken(said);
     Some(
         div()
+            .id("typing-strip")
+            .status()
             .absolute()
             .bottom_0()
             .left_0()

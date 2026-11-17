@@ -129,7 +129,7 @@ pub fn stage_progress(label: impl Into<SharedString>, pct: f32, size: f32) -> gp
         .gap(px(9.))
         .min_w_0()
         .child(ring)
-        .child(div().min_w_0().truncate().child(label))
+        .child(div().id("stage-progress-label").status().min_w_0().truncate().child(label))
 }
 
 /// `.processing-overlay`: the window dimmed under a card with a spinner and a line of text.
@@ -639,6 +639,16 @@ pub trait Tipped: gpui::StatefulInteractiveElement + Sized {
     fn tip(self, text: impl Into<gpui::SharedString>) -> Self {
         let text = text.into();
         self.aria_description(text.clone()).tooltip(tooltip(text))
+    }
+
+    /// `role="status"`: read out when it changes, once the reader is idle.
+    fn status(self) -> Self {
+        self.role(gpui::Role::Status).aria_live(gpui::accesskit::Live::Polite)
+    }
+
+    /// `role="alert"`: read out at once.
+    fn alert(self) -> Self {
+        self.role(gpui::Role::Alert).aria_live(gpui::accesskit::Live::Assertive)
     }
 
     /// A screen reader's view of a track: its name, the value as shown, and where it sits (0 to 1).

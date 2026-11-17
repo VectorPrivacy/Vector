@@ -1467,6 +1467,12 @@ pub trait StatefulInteractiveElement: InteractiveElement {
         self
     }
 
+    /// Announce changes to this element's contents: `Polite` waits for a pause, `Assertive` interrupts.
+    fn aria_live(mut self, live: accesskit::Live) -> Self {
+        self.interactivity().aria.live = Some(live);
+        self
+    }
+
     /// Set the numeric value for this element.
     fn aria_numeric_value(mut self, value: f64) -> Self {
         self.interactivity().aria.numeric_value = Some(value);
@@ -2265,6 +2271,7 @@ pub(crate) struct AriaProperties {
     pub(crate) selected: Option<bool>,
     pub(crate) expanded: Option<bool>,
     pub(crate) toggled: Option<accesskit::Toggled>,
+    pub(crate) live: Option<accesskit::Live>,
     pub(crate) numeric_value: Option<f64>,
     pub(crate) min_numeric_value: Option<f64>,
     pub(crate) max_numeric_value: Option<f64>,
@@ -3760,6 +3767,9 @@ impl Interactivity {
         }
         if let Some(value) = self.aria.min_numeric_value {
             node.set_min_numeric_value(value);
+        }
+        if let Some(live) = self.aria.live {
+            node.set_live(live);
         }
         if let Some(value) = self.aria.max_numeric_value {
             node.set_max_numeric_value(value);

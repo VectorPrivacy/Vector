@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use futures::StreamExt;
 use futures::channel::oneshot;
+use crate::kit::Tipped as _;
 use gpui::prelude::*;
 use gpui::{
     AnyElement, AsyncApp, Context, Entity, EventEmitter, FocusHandle, Focusable, FontWeight,
@@ -1113,6 +1114,8 @@ impl SecurityFlow {
         if p.mode == Mode::Checking {
             card = card.child(
                 div()
+                    .id("cred-wait")
+                    .status()
                     .pt(px(28.))
                     .pb(px(22.))
                     .flex()

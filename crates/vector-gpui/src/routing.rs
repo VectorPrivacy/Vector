@@ -562,6 +562,22 @@ fn card(r: &Routing, viewed: &str, phone: bool, on: &OnAct) -> AnyElement {
                 .child(div().h(px(if viewed == "tor" { 28. } else { 24. })).pt(px(if viewed == "tor" { 4. } else { 0. })).flex().items_center().child(info("net-card-info", act(on, move || NetAct::Help(help))))),
         )
         .child(div().min_h(px(16.)).text_size(px(12.)).line_height(px(16.8)).text_color(status_color).text_center().child(status));
+    // Read out once per phase: the bootstrap's percentages would crowd out other speech.
+    let phase_word = if !using {
+        String::new()
+    } else if b(v, "ready") {
+        format!("{} connected.", label(viewed))
+    } else {
+        match s(v, "phase") {
+            "failed" => format!("{} failed to start.", label(viewed)),
+            "starting" => format!("{} connecting.", label(viewed)),
+            "waiting" => reason_text(v).to_string(),
+            _ => String::new(),
+        }
+    };
+    if !phase_word.is_empty() {
+        body = body.child(div().absolute().size_0().overflow_hidden().spoken(phase_word).id("net-card-phase").status());
+    }
     if let Some((text, action)) = sub {
         let locked = r.locked;
         body = body.child(
@@ -698,6 +714,8 @@ fn btn(id: &'static str, text: &'static str, enabled: bool, primary: bool, on: &
 
 fn note(text: &str, tone: Option<bool>) -> AnyElement {
     div()
+        .id(SharedString::from(format!("note-{text}")))
+        .map(|d| if tone == Some(false) { d.alert() } else { d.status() })
         .mt(px(-4.))
         .mb(px(10.))
         .text_size(px(12.5))
@@ -1166,7 +1184,7 @@ fn i2p_options(r: &Routing, on: &OnAct) -> AnyElement {
             .into_any_element()
     };
     col = col.child(div().mb(px(14.)).flex().flex_col().gap(px(4.)).child(auth).when(!r.auth_error.is_empty(), |d| {
-        d.child(div().text_size(px(12.5)).text_color(c(0xff8c75)).child(r.auth_error.clone()))
+        d.child(div().id("i2p-auth-error").alert().text_size(px(12.5)).text_color(c(0xff8c75)).child(r.auth_error.clone()))
     }));
     if in_use {
         let addresses: Vec<(String, &'static str)> = [("account", "your relays"), ("shared", "other servers")]

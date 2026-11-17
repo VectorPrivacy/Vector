@@ -4,6 +4,7 @@
 
 use std::time::Instant;
 
+use crate::kit::Tipped as _;
 use gpui::{AnimationExt, AnyElement, App, Context, Entity, EventEmitter, FocusHandle, Focusable, FontWeight, IntoElement, KeyDownEvent, ObjectFit, ParentElement, Render, SharedString, Styled, Window, div, linear_color_stop, linear_gradient, prelude::*, px, svg};
 use crate::pic::img;
 use zeroize::Zeroizing;
@@ -1206,6 +1207,8 @@ impl LoginView {
         if let Some(what) = self.wrong {
             block = block.child(
                 div()
+                    .id("lg-aggro")
+                    .alert()
                     .flex()
                     .flex_col()
                     .items_center()

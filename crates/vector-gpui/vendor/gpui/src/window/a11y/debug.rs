@@ -232,6 +232,9 @@ fn node_to_json(
         aria.insert("on_action".into(), json!(on_action));
     }
 
+    if let Some(live) = node.live() {
+        aria.insert("live".into(), json!(format!("{live:?}")));
+    }
     if !node.character_lengths().is_empty() {
         aria.insert("character_lengths".into(), json!(node.character_lengths()));
         aria.insert("word_starts".into(), json!(node.word_starts()));

@@ -553,6 +553,8 @@ impl LoginView {
         if n.busy {
             slot = slot.child(
                 div()
+                    .id("lg-net-status")
+                    .status()
                     .mt(px(9.))
                     .flex()
                     .items_center()
@@ -603,6 +605,8 @@ impl LoginView {
             }
             slot = slot.child(
                 div()
+                    .id("lg-net-failed")
+                    .alert()
                     .mt(px(9.))
                     .w(px(250.))
                     .flex()
@@ -702,7 +706,7 @@ impl LoginView {
                         ),
                 );
         }
-        col.when(!n.sam_error.is_empty(), |d| d.child(div().mt(px(8.)).text_size(px(12.5)).text_color(c(0xff8c75)).child(SharedString::from(n.sam_error.clone()))))
+        col.when(!n.sam_error.is_empty(), |d| d.child(div().id("lg-net-sam-error").alert().mt(px(8.)).text_size(px(12.5)).text_color(c(0xff8c75)).child(SharedString::from(n.sam_error.clone()))))
             .into_any_element()
     }
 

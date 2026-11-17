@@ -671,6 +671,8 @@ impl SecurityFlow {
         };
         let error = |text: &str| {
             div()
+                .id("xfer-error")
+                .alert()
                 .mt(px(-4.))
                 .text_size(px(12.5))
                 .line_height(px(17.5))
@@ -680,6 +682,8 @@ impl SecurityFlow {
         let spinner = |text: &'static str| {
             window.request_animation_frame();
             div()
+                .id("xfer-wait")
+                .status()
                 .pt(px(28.))
                 .pb(px(22.))
                 .flex()

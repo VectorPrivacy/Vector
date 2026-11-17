@@ -4,6 +4,7 @@
 use std::collections::HashSet;
 use std::rc::Rc;
 
+use crate::kit::Tipped as _;
 use gpui::prelude::*;
 use gpui::{AnyElement, App, Entity, FontWeight, SharedString, Window, div, px, svg};
 
@@ -665,7 +666,7 @@ fn link_card(p: &Preview, member: impl Fn(&str) -> bool) -> impl IntoElement {
             .child(div().mt(px(18.)).w(gpui::relative(0.58)).h(px(20.)).rounded(px(6.)).bg(white_a(0.06)))
             .child(div().mt(px(12.)).w(gpui::relative(0.82)).h(px(12.)).rounded(px(6.)).bg(white_a(0.06)))
             .child(div().mt(px(8.)).w(gpui::relative(0.5)).h(px(12.)).rounded(px(6.)).bg(white_a(0.06)))
-            .child(div().mt(px(18.)).text_size(px(13.)).text_color(white_a(0.55)).child("Loading invite...")),
+            .child(div().id("cg-link-wait").status().mt(px(18.)).text_size(px(13.)).text_color(white_a(0.55)).child("Loading invite...")),
         Preview::Go(_) => card
             .child(eyebrow("Vector Link"))
             .child(icon("icons/vector-mark.svg".into(), 18.))
