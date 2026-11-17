@@ -32,6 +32,7 @@
         ctx,               // { myNpub, isGroupChat, currentChat, pinged, replyingTo, revealedBlocked }
         lastMine = false,  // the newest own message: the one that shows its Sent status
         blockedRun = null, // a run head's blocked messages (itself first), shown as one row
+        revealedRun = null, // a run head's revealed messages (itself first), hidden again as one
         merged = false,    // folded into the blocked run above it
         h,                 // RowHelpers (js/render/chat/message-row.js): the row's chrome, carrying
                            //   `content` and `media` for the leaves and `pivx` for the bubble
@@ -174,6 +175,12 @@
     const arrival = arrivalState();
 </script>
 
+<!-- The line a collapsed row shows, and the one that collapses a shown run again. -->
+{#snippet hiddenToggle(icon, label, act)}
+    <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+    <span class="dmsg-hidden-toggle" onclick={(e) => { e.stopPropagation(); act(); }}><span class="icon icon-{icon}"></span>{label}</span>
+{/snippet}
+
 <div
     class="dmsg"
     data-motion-host
@@ -230,10 +237,9 @@
                 <time class="dmsg-time">{hourMinute}</time>
             </div>
             <div class="dmsg-content">
-                <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-                <span style="color: rgba(255,255,255,0.3); font-style: italic; cursor: pointer; display: flex; align-items: center; gap: 5px;"
-                      onclick={(e) => { e.stopPropagation(); h.revealBlocked(blockedRun || [msg]); }}>
-                    <span class="icon {isTimedOut && ctx.timedOut !== 'unauthorized' ? 'icon-clock' : 'icon-cancel'}" style="width: 14px; height: 14px; position: relative; margin: 0; flex-shrink: 0; background-color: rgba(255,255,255,0.3);"></span>{blockedRun ? `${blockedRun.length} blocked messages` : h.hiddenLabel(ctx)}</span>
+                {@render hiddenToggle(isTimedOut && ctx.timedOut !== 'unauthorized' ? 'clock' : 'cancel',
+                    blockedRun ? `${blockedRun.length} blocked messages` : h.hiddenLabel(ctx),
+                    () => h.revealBlocked(blockedRun || [msg]))}
             </div>
         </div>
     {:else}
@@ -264,6 +270,11 @@
             {/if}
             <time class="dmsg-time">{hourMinute}</time>
         </div>
+        {#if revealedRun}
+            {@render hiddenToggle(ctx.revealedIcon,
+                `${revealedRun.length > 1 && ctx.revealedAs === h.hiddenLabel({ blocked: true }) ? `${revealedRun.length} blocked messages` : ctx.revealedAs} · Hide`,
+                () => h.hideRevealed(revealedRun))}
+        {/if}
         <div class="dmsg-content"><MessageContent msg={current} {sender} {ctx} {lastMine} h={h.content} media={h.media} sig={contentSig} /></div>
         {#if current.mine && current.failed && current.fail_reason}
             <div class="dmsg-fail-reason">{current.fail_reason}</div>

@@ -21056,7 +21056,9 @@ textarea.command-part-input {
   visibility: hidden;
 }
 /* A revealed blocked message dims what it says; the author reads as it did collapsed. */
-.dmsg--revealed .dmsg-body > :not(.dmsg-header) { opacity: 0.4; }
+.dmsg--revealed .dmsg-body > :not(.dmsg-header):not(.dmsg-hidden-toggle) { opacity: 0.4; }
+.dmsg-hidden-toggle { display: flex; align-items: center; gap: 5px; width: fit-content; color: rgba(255, 255, 255, 0.3); font-style: italic; cursor: pointer; }
+.dmsg-hidden-toggle .icon { position: relative; flex-shrink: 0; width: 14px; height: 14px; margin: 0; background-color: rgba(255, 255, 255, 0.3); }
 /* Last-child bottom clearance is unified on `.chat-messages > *:last-child`
  * (covers dmsg rows + system-event paragraphs alike) — see that rule. */
 /* Top clearance for the fixed chat-header is handled by `.chat-messages`'s
