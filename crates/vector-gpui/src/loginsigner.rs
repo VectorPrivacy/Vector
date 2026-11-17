@@ -382,7 +382,7 @@ impl LoginView {
             .on_click(cx.listener(|this, _, w, cx| this.signer_open_qr(w, cx)))
             .child(img("icons/login/qr.svg").size(px(40.)));
         let row = self
-            .field(self.signer.url.clone(), false, |this, w, cx| this.signer_connect(w, cx), cx)
+            .field(self.signer.url.clone(), false, "Connect", |this, w, cx| this.signer_connect(w, cx), cx)
             .when(self.signer.busy, |d| d.opacity(0.5))
             .child(qr_btn);
         div()

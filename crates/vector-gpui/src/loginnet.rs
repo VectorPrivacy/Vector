@@ -531,6 +531,7 @@ impl LoginView {
                             d.child(
                                 div()
                                     .id("lg-net-info")
+                                    .aria_label("About these networks")
                                     .cursor_pointer()
                                     .on_click(move |_, w, cx| entity.update(cx, |this, cx| this.net_info(Some(first), w, cx)))
                                     .child(svg().path("icons/info.svg").size(px(18.)).text_color(c(0x333333)).hover(|d| d.text_color(c(ICON_MUTED)))),

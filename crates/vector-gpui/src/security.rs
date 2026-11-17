@@ -990,6 +990,7 @@ pub(crate) fn head_tinted(
         .children(close.map(|close| {
             div()
                 .id("vcard-x")
+                .aria_label("Close")
                 .group("vcard-x")
                 .self_start()
                 .w(px(23.7))

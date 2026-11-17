@@ -373,6 +373,7 @@ impl LoginView {
                 .child(
                     div()
                         .id("login-account-list-backdrop")
+                        .role(gpui::Role::GenericContainer)
                         .absolute()
                         .inset_0()
                         .bg(ca(3, 3, 3, 0.9))
@@ -939,6 +940,7 @@ impl LoginView {
         &self,
         input: Entity<TextInput>,
         eye: bool,
+        go: &'static str,
         on_go: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
         cx: &mut Context<Self>,
     ) -> gpui::Div {
@@ -970,6 +972,7 @@ impl LoginView {
                         d.child(
                             div()
                                 .id("lg-eye")
+                                .aria_label(if self.reveal { "Hide password" } else { "Show password" })
                                 .h_full()
                                 .px(px(6.))
                                 .flex()
@@ -999,6 +1002,7 @@ impl LoginView {
                     .child(
                         div()
                             .id("lg-go")
+                            .aria_label(go)
                             .h_full()
                             .pl(px(4.))
                             .pr(px(6.))
@@ -1057,6 +1061,7 @@ impl LoginView {
                     .child(
                         div()
                             .id("lg-method-info")
+                            .aria_label("About these ways to sign in")
                             .cursor_pointer()
                             .on_click(cx.listener(|_, _, _, cx| cx.emit(MethodInfo)))
                             .child(
@@ -1137,6 +1142,7 @@ impl LoginView {
                         .child(self.field(
                             self.key.clone(),
                             false,
+                            "Login",
                             |this, w, cx| this.import_key(w, cx),
                             cx,
                         ));
@@ -1299,6 +1305,7 @@ impl LoginView {
                 block = block.child(self.field(
                     self.password.clone(),
                     true,
+                    "Continue",
                     |this, w, cx| this.submit_password(w, cx),
                     cx,
                 ));
