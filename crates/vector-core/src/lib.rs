@@ -5005,6 +5005,13 @@ impl VectorCore {
         Ok(())
     }
 
+    /// The Category a channel takes its permissions from while synced to one, read locally.
+    /// Its own overwrites are kept, and apply only once the sync stops.
+    pub fn channel_synced_to(&self, community_id: &str, channel_id: &str) -> Result<Option<String>> {
+        let roster = crate::db::community::get_community_roles(community_id).map_err(VectorError::Other)?;
+        Ok(roster.syncs.get(&channel_id.to_ascii_lowercase()).cloned())
+    }
+
     /// Of `npubs`, those who can't send in a channel by the roster as it stands (CORD-04 §8):
     /// a reader collapses their posts there. Empty on the legacy roster.
     pub fn channel_send_denied(&self, community_id: &str, channel_id: &str, npubs: &[String]) -> Result<Vec<String>> {

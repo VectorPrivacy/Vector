@@ -29440,6 +29440,35 @@ mod tests {
         assert!(may_send(&fetch_control(&relay, &held()).await, &news), "the low manager's re-sync is refused");
     }
 
+    #[tokio::test]
+    async fn a_synced_channel_names_its_category_and_holds_its_own_rules_dormant() {
+        let (_tmp, _guard, owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "Dormant", vec!["wss://r".into()], None).await.unwrap();
+        activate_roles_v2(&relay, &community, crate::community::v2::roles::EVERYONE_DEFAULT).await.unwrap();
+        follow_control(&relay, &community).await.unwrap();
+        let held = || crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        let staff = create_category(&relay, &held(), "Staff").await.unwrap();
+        let news = create_channel_in(&relay, &held(), "news", false, Some(staff)).await.unwrap();
+        let vault = create_channel_in(&relay, &held(), "vault", true, Some(staff)).await.unwrap();
+        let synced_to = |ch: &ChannelId| crate::VectorCore.channel_synced_to(&cid_hex, &crate::simd::hex::bytes_to_hex_32(&ch.0).to_ascii_uppercase()).unwrap();
+        assert_eq!(synced_to(&news), Some(crate::simd::hex::bytes_to_hex_32(&staff)), "a public Channel made in a Category");
+        assert_eq!(synced_to(&vault), None, "a private one keeps its own rules");
+        assert_eq!(synced_to(&community.channels[0].id), None, "as does one outside any Category");
+
+        let m = Keys::generate().public_key().to_hex();
+        let may_send = |eds: &[ParsedEdition]| {
+            let r = fold_authority(&held(), eds, &Floors::default()).roles;
+            r.channel_permissions(Some(&owner.public_key().to_hex()), &m, &crate::simd::hex::bytes_to_hex_32(&news.0), false).contains(Permissions::SEND_MESSAGES)
+        };
+        set_overwrite(&relay, &held(), news.0, crate::community::roles::OverwriteTarget::Everyone, 0, Permissions::SEND_MESSAGES).await.unwrap();
+        assert!(may_send(&fetch_control(&relay, &held()).await), "synced, its own deny is stored and not applied");
+        set_channel_sync(&relay, &held(), &news, None).await.unwrap();
+        assert_eq!(synced_to(&news), None);
+        assert!(!may_send(&fetch_control(&relay, &held()).await), "unsynced, the same rule applies");
+    }
+
     /// A Roles v2 community with an admin `x` (Manage Roles, Manage Channels, the channel basics).
     async fn v2_bed_with_admin(name: &str) -> (TestBed, Actor, Keys, CommunityV2) {
         let (bed, owner, _m) = TestBed::new();

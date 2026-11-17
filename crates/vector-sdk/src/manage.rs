@@ -512,7 +512,8 @@ impl Category {
         VectorCore.delete_category(&self.community_id, &self.id).await
     }
 
-    /// Set one overwrite on the Category, which every Channel synced to it takes.
+    /// Set one overwrite on the Category, which every Channel synced to it takes: the place to
+    /// set a rule for a Channel [`Channel::synced_to`] names this Category for. No bits removes it.
     pub async fn set_overwrite(&self, overwrite: Overwrite) -> Result<()> {
         overwrite.apply(&self.community_id, &self.id).await
     }
@@ -573,6 +574,17 @@ impl Overwrite {
     }
 }
 
+/// Refuse a rule a synced Channel would store and never apply.
+fn own_rules(synced_to: Option<String>) -> Result<()> {
+    match synced_to {
+        None => Ok(()),
+        Some(category) => Err(VectorError::Other(format!(
+            "this channel follows the permissions of category {category}, so a rule of its own would not apply: \
+             set it on the category, or call sync_permissions(None) first"
+        ))),
+    }
+}
+
 impl Channel {
     fn community_id(&self) -> Result<String> {
         not_a_dm(self)?;
@@ -616,6 +628,9 @@ impl Channel {
     /// Make it read-only for everyone (an announcement channel), or open it again. Roles whose
     /// overwrite here allows Send Messages still post. Needs Manage Roles.
     ///
+    /// An error while the Channel is synced to a Category ([`synced_to`](Self::synced_to)), as a
+    /// public Channel made inside one is: see [`set_overwrite`](Self::set_overwrite).
+    ///
     /// ```no_run
     /// # async fn f(news: vector_sdk::Channel, mods: vector_sdk::Role) -> vector_sdk::Result<()> {
     /// use vector_sdk::{Overwrite, Permissions};
@@ -652,7 +667,8 @@ impl Channel {
         VectorCore.move_channel(&cid, &self.id, category.map(|k| k.id.as_str()), index).await
     }
 
-    /// Its own overwrites (a synced Channel resolves against its Category's instead).
+    /// Its own overwrites. A synced Channel keeps them but resolves against its Category's
+    /// instead: see [`synced_to`](Self::synced_to).
     pub fn overwrites(&self) -> Result<Vec<Overwrite>> {
         let cid = self.community_id()?;
         let chan = self.id.to_ascii_lowercase();
@@ -671,18 +687,51 @@ impl Channel {
             .collect())
     }
 
+    /// The Category whose overwrites it takes instead of its own, while synced to one. A public
+    /// Channel made inside a Category starts out synced to it; a private one keeps its own.
+    pub fn synced_to(&self) -> Result<Option<Category>> {
+        let cid = self.community_id()?;
+        Ok(VectorCore.channel_synced_to(&cid, &self.id)?.map(|id| Category { community_id: cid, id }))
+    }
+
+    /// Checked again after catching the Community up, since an unsync may not have folded here yet.
+    async fn require_own_rules(&self, community_id: &str) -> Result<()> {
+        if VectorCore.channel_synced_to(community_id, &self.id)?.is_none() {
+            return Ok(());
+        }
+        VectorCore::v2_inline_follow(&vector_core::community::CommunityId(hex32(community_id, "community_id")?)).await;
+        own_rules(VectorCore.channel_synced_to(community_id, &self.id)?)
+    }
+
     /// Set one overwrite. Needs Manage Roles.
+    ///
+    /// An error while the Channel is synced to a Category ([`synced_to`](Self::synced_to)): the
+    /// rule would be stored and never apply. Set it on the Category for every Channel synced
+    /// there, or give this one its own rules first:
+    ///
+    /// ```no_run
+    /// # async fn f(community: vector_sdk::Community) -> vector_sdk::Result<()> {
+    /// use vector_sdk::{NewChannel, Overwrite, Permissions};
+    /// let staff = community.create_category("Staff").await?;
+    /// let news = community.create_channel_with("news", NewChannel::default().in_category(staff.id())).await?;
+    /// news.sync_permissions(None).await?;
+    /// news.set_overwrite(Overwrite::everyone().deny(Permissions::SEND_MESSAGES)).await?;
+    /// # Ok(()) }
+    /// ```
     pub async fn set_overwrite(&self, overwrite: Overwrite) -> Result<()> {
         let cid = self.community_id()?;
+        self.require_own_rules(&cid).await?;
         overwrite.apply(&cid, &self.id).await
     }
 
-    /// Remove the overwrite for `target`.
+    /// Remove the overwrite for `target`. An error on a synced Channel, like
+    /// [`set_overwrite`](Self::set_overwrite).
     pub async fn clear_overwrite(&self, target: OverwriteTarget) -> Result<()> {
         self.set_overwrite(Overwrite { target, allow: Permissions(0), deny: Permissions(0) }).await
     }
 
-    /// Take `category`'s overwrites instead of its own, or (`None`) its own again.
+    /// Take `category`'s overwrites instead of its own, or (`None`) its own again: whatever it
+    /// held before the sync, which for a Channel made inside a Category is none.
     pub async fn sync_permissions(&self, category: Option<&Category>) -> Result<()> {
         let cid = self.community_id()?;
         require(&cid, Permissions::MANAGE_ROLES, "syncing a channel's permissions").await?;
@@ -1050,6 +1099,15 @@ mod tests {
         let o = Overwrite::everyone().deny(Permissions::SEND_MESSAGES).deny(Permissions::ADD_REACTIONS).allow(Permissions::VIEW_CHANNEL);
         assert_eq!(o.deny.0, Permissions::SEND_MESSAGES | Permissions::ADD_REACTIONS);
         assert_eq!(o.allow.0, Permissions::VIEW_CHANNEL);
+    }
+
+    #[test]
+    fn a_rule_on_a_synced_channel_is_refused_with_both_ways_out() {
+        assert!(own_rules(None).is_ok(), "a Channel with its own rules takes one");
+        let category = "ab".repeat(32);
+        let err = own_rules(Some(category.clone())).unwrap_err().to_string();
+        assert!(err.contains(&category), "{err}");
+        assert!(err.contains("set it on the category") && err.contains("sync_permissions(None)"), "{err}");
     }
 
     #[tokio::test]
