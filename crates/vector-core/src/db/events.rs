@@ -1074,6 +1074,13 @@ pub fn get_system_events_for_chat(conversation_id: &str) -> Result<Vec<StoredEve
             events.push(event);
         }
     }
+    drop(stmt);
+    drop(conn);
+    // Join/Leave lines are kept even where they don't show: the member list reads them.
+    let is_presence = |e: &StoredEvent| e.tags.iter().any(|t| t.len() >= 2 && t[0] == "event-type" && (t[1] == "0" || t[1] == "1"));
+    if events.iter().any(is_presence) && !super::community::presence_lines_shown_in(conversation_id)? {
+        events.retain(|e| !is_presence(e));
+    }
     Ok(events)
 }
 

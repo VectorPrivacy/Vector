@@ -397,6 +397,7 @@ const _dmsgMediaHelpers = {
  *   renderCustomEmojiShortcodes: (el: Element, tags: object[]|null) => void,
  *   showMiniProfile: (npub: string, el: Element) => void,
  *   systemEventName: (npub: string) => string, systemEventSuffix: (type: string) => string,
+ *   systemEventVia: (msg: object) => ({ text: string, title: string }|null),
  *   reactionGroups: (msg: object) => Array<{ emoji: string, count: number, mine: boolean, url?: string }>,
  *   canAddReactionGroup: (msg: object, n: number) => boolean,
  *   reactionClick: (msgId: string, emoji: string) => void,
@@ -433,6 +434,12 @@ const _dmsgRowHelpers = {
     showMiniProfile: (npub, el) => showMiniProfile(npub, el),
     systemEventName: (npub) => chatName(npub),
     systemEventSuffix: (type) => systemEventSuffix(type),
+    systemEventVia: (msg) => {
+        const se = msg.system_event;
+        if (se?.event_type !== SystemEventType.MemberJoined || !se.invited_label || !se.invited_by) return null;
+        if (!VectorSvelte.inviteSight(communityIdOfChat(arrChats.find(c => c.id === strOpenChat)))) return null;
+        return { text: ` via ${se.invited_label}`, title: `${chatName(se.invited_by)}'s invite link` };
+    },
     // Reactions
     reactionGroups: (msg) => Array.from(_dmsgAggregateReactions(msg), ([emoji, g]) => ({ emoji, ...g })),
     canAddReactionGroup: (msg, n) => _dmsgCanAddReactionGroup(msg, n),

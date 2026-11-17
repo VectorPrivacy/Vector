@@ -146,6 +146,14 @@ export function details(entry, ctx) {
                 for (const r of c.removed || []) out.push(`Removed the ${kind} ${r}`);
                 break;
             }
+            case 'landing':
+                out.push(c.new?.kind === 'channel' ? `New members start in ${targetName(c.new, ctx)}` : 'New members start in the default channel');
+                break;
+            case 'system_messages':
+                out.push(c.new === 'off' ? 'Turned off join and leave messages'
+                    : c.new?.kind === 'channel' ? `Join and leave messages go to ${targetName(c.new, ctx)}`
+                    : 'Join and leave messages go to the default channel');
+                break;
             case 'color': out.push(c.old != null ? `Colour: ${hexColor(c.old)} → ${hexColor(c.new)}` : `Colour: ${hexColor(c.new)}`); break;
             case 'permissions':
                 if (c.added?.length) out.push(`${creating ? 'Permissions' : 'Granted'}: ${perms(c.added)}`);

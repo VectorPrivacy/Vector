@@ -40,6 +40,10 @@ pub struct CommunitySummary {
     pub relays: Vec<String>,
     /// The iroh relays its voice channels use; empty is iroh's defaults.
     pub voice_relays: Vec<String>,
+    /// The chat channel Join/Leave lines go to; `None` while they're off.
+    pub system_channel: Option<String>,
+    /// The channel new members open first; `None` for the default.
+    pub landing_channel: Option<String>,
     /// The categories in sidebar order; `channels` is in sidebar order too.
     pub categories: serde_json::Value,
 }
@@ -108,6 +112,8 @@ fn summarize_v2(c: &vector_core::community::v2::community::CommunityV2) -> Commu
         dissolved: c.dissolved,
         relays: c.relays.clone(),
         voice_relays: c.voice_relays(),
+        system_channel: c.system_lines_target().map(|ch| vector_core::simd::hex::bytes_to_hex_32(&ch.id.0)),
+        landing_channel: c.landing_channel().map(|ch| vector_core::simd::hex::bytes_to_hex_32(&ch.id.0)),
     }
 }
 
@@ -2323,6 +2329,8 @@ pub async fn hide_community_message(channel_id: String, message_id: String) -> R
 /// Persist + surface a Community presence (join/leave) as a `MemberJoined`/`MemberLeft`
 /// system event. Dedups by inner event id (the save returns false on a known id), so relay
 /// replays and the sender's own echo are silent. Shared by the live subscription + sync paths.
+/// A line that isn't `shown` is still kept: the member list reads it.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn apply_community_presence(
     channel_id: &str,
     npub: &str,
@@ -2331,6 +2339,7 @@ pub(crate) async fn apply_community_presence(
     created_at: u64,
     invited_by: Option<&str>,
     invited_label: Option<&str>,
+    shown: bool,
 ) {
     vector_core::db::scoped(async move {
         let et = if joined {
@@ -2368,6 +2377,9 @@ pub(crate) async fn apply_community_presence(
                     false,
                 );
             }
+            if !shown {
+                return;
+            }
             vector_core::emit_event(
                 "system_event",
                 &serde_json::json!({
@@ -2376,7 +2388,7 @@ pub(crate) async fn apply_community_presence(
                     "event_type": et.as_u8(),
                     "member_pubkey": npub,
                     "member_name": serde_json::Value::Null,
-                    "invited_by": invited_by,
+                    "invited_by": invited_by.and_then(vector_core::community::inviter_npub),
                     "invited_label": invited_label,
                     // The event's REAL time (ms) so the UI sorts it chronologically. Without it the frontend
                     // stamps `now`, and a join replayed during history paging/rehydration sinks to the bottom.
@@ -2535,6 +2547,24 @@ pub async fn update_community_metadata(
 #[tauri::command]
 pub async fn set_community_voice_relays(community_id: String, relays: Vec<String>) -> Result<Vec<String>, String> {
     vector_core::db::scoped(async move { vector_core::VectorCore.set_voice_relays(&community_id, &relays).await.map_err(|e| e.to_string()) }).await
+}
+
+/// Send a community's Join/Leave lines to a chat channel, or `None` to turn them off.
+#[tauri::command]
+pub async fn set_community_system_channel(community_id: String, channel_id: Option<String>) -> Result<(), String> {
+    vector_core::db::scoped(async move {
+        vector_core::VectorCore.set_system_channel(&community_id, channel_id.as_deref()).await.map_err(|e| e.to_string())
+    })
+    .await
+}
+
+/// Choose the channel new members open first, or `None` for the default.
+#[tauri::command]
+pub async fn set_community_landing_channel(community_id: String, channel_id: Option<String>) -> Result<(), String> {
+    vector_core::db::scoped(async move {
+        vector_core::VectorCore.set_landing_channel(&community_id, channel_id.as_deref()).await.map_err(|e| e.to_string())
+    })
+    .await
 }
 
 /// Rename a channel (requires manage-channels authority) and republish its ChannelMetadata so members

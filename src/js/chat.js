@@ -1340,9 +1340,12 @@ async function openChat(contact, { reread = true, fade = true } = {}) {
                 system_event: {
                     event_type: event.event_type,
                     member_npub: event.member_npub,
+                    invited_by: event.invited_by || null,
+                    invited_label: event.invited_label || null,
                 },
             }))
             .sort((a, b) => a.at - b.at);
+        if (buffer.some(m => m.system_event.invited_label)) ensureInviteSight(communityIdOfChat(chat));
         _systemEventBuffer.set(contact, buffer);
         // revealSystemEventsInWindow adds into the cache array, which is
         // aliased to initialMessages — re-sort so the pre-paint renders them

@@ -222,6 +222,12 @@ mod start_tests {
     }
 }
 
+/// An invite's creator as an npub: Joins name it in hex, older ones in bech32.
+pub fn inviter_npub(creator: &str) -> Option<String> {
+    use nostr_sdk::prelude::{PublicKey, ToBech32};
+    PublicKey::parse(creator).ok().and_then(|pk| pk.to_bech32().ok())
+}
+
 pub fn cap_relays(relays: Vec<String>) -> Vec<String> {
     let mut seen = std::collections::HashSet::new();
     let mut out = Vec::with_capacity(relays.len().min(MAX_COMMUNITY_RELAYS));

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-set-community-landing-channel"
+description = "Enables the set_community_landing_channel command without any pre-configured scope."
+commands.allow = ["set_community_landing_channel"]
+
+[[permission]]
+identifier = "deny-set-community-landing-channel"
+description = "Denies the set_community_landing_channel command without any pre-configured scope."
+commands.deny = ["set_community_landing_channel"]

@@ -108,6 +108,8 @@ async function setupRustListeners() {
     _on('community_refreshed', async (evt) => {
         const communityId = evt.payload?.community_id || evt.payload;
         if (!communityId) return;
+        // Create Invites granted or revoked: the join lines show their links, or stop.
+        ensureInviteSight(communityId, true);
         // A control change (ban/role/mode/metadata) can move the roster — refresh the count immediately.
         refreshCommunityMemberCount(communityId, true);
         // Roster moves can flip moderation-hide authority, so the cached delete-meta
@@ -116,7 +118,7 @@ async function setupRustListeners() {
         try {
             const summary = await invoke('get_community', { communityId });
             // A folded control edition can add, rename or tombstone channels.
-            setCommunityChannels(communityId, summary.channels, summary.categories);
+            setCommunityChannels(communityId, summary.channels, summary.categories, summary.landing_channel || null);
             const channelNames = new Map((summary.channels || []).map(ch => [ch.channel_id, ch.name || '']));
             // A message can reach a new channel before its control edition does.
             for (const [id, name] of channelNames) {
@@ -214,6 +216,12 @@ async function setupRustListeners() {
         if (open) await openChat(open.id, { reread: false });
     }
 
+    // Its Join/Leave lines moved channel or turned on or off: every channel re-reads them.
+    _on('community_presence_lines', (evt) => {
+        const communityId = evt.payload?.community_id;
+        if (communityId) purgeCommunityMessageCache(communityId);
+    });
+
     // A community synced in from another device (cross-device Community List, §6.3) appeared seamlessly —
     // render its metadata via the same path as a manual join so name/crown/members show without a restart.
     _on('community_surfaced', async (evt) => {
@@ -226,7 +234,7 @@ async function setupRustListeners() {
     // Listen for system events (member joined/left, etc.)
     _on('system_event', async (evt) => {
         try {
-            const { conversation_id, event_id, event_type, member_pubkey, member_name } = evt.payload || {};
+            const { conversation_id, event_id, event_type, member_pubkey, member_name, invited_by, invited_label } = evt.payload || {};
 
             // Deduplication by event_id
             const chat = arrChats.find(c => c.id === conversation_id);
@@ -257,8 +265,11 @@ async function setupRustListeners() {
                 system_event: {
                     event_type: event_type,
                     member_npub: member_pubkey,
+                    invited_by: invited_by || null,
+                    invited_label: invited_label || null,
                 }
             };
+            if (invited_label) ensureInviteSight(communityIdOfChat(chat));
 
             // Add to chat messages via cache (handles deduplication)
             // Note: chat.messages and cache share the same array reference, so only use cache

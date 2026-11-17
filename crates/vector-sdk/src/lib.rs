@@ -2358,10 +2358,13 @@ pub enum BotEvent {
     /// `by` is `None` when the Community's own rules took back a post held for review, and
     /// `at` is then when the bot's device judged it.
     Delete { chat_id: String, message_id: String, by: Option<String>, moderated: bool, at: u64 },
-    /// A member joined a Community. `invited_by` and `invite_label` say which invite brought
-    /// them, when it said so.
+    /// A member joined a Community. `channel_id` is where its line goes: the Community's
+    /// System Messages channel, or its default one while those are off (see
+    /// [`Community::system_channel`]). `invited_by` and `invite_label` say which invite
+    /// brought them, when it said so.
     MemberJoin { community_id: String, channel_id: String, npub: String, invited_by: Option<String>, invite_label: Option<String> },
-    /// A member left a Community. A kick arrives as a [`ChangeKind::MemberKicked`] change.
+    /// A member left a Community, `channel_id` as for [`BotEvent::MemberJoin`]. A kick arrives
+    /// as a [`ChangeKind::MemberKicked`] change.
     MemberLeave { community_id: String, channel_id: String, npub: String },
     /// Someone is typing, in a DM or a Community channel; `until` is the unix-secs the indicator expires.
     Typing { chat_id: String, npub: String, until: u64 },
@@ -2538,32 +2541,22 @@ where
     fn on_voice_presence(&self, channel_id: &str) {
         self.emit(BotEvent::VoicePresence { channel_id: channel_id.to_string() });
     }
-    fn on_community_presence(
-        &self,
-        chat_id: &str,
-        npub: &str,
-        joined: bool,
-        _event_id: &str,
-        created_at: u64,
-        invited_by: Option<&str>,
-        invited_label: Option<&str>,
-    ) {
+    fn on_community_presence(&self, p: &vector_core::Presence<'_>) {
         // Presence flows from live arrivals AND from guestbook/history folds — a
         // sync or relay backfill replays joins that happened weeks ago. Member
         // state still updates (core owns that); only news becomes a BotEvent, or a
         // welcome bot greets everyone who ever joined.
-        if !vector_core::news::is_news(created_at.saturating_mul(1000)) {
+        if !vector_core::news::is_news(p.created_at.saturating_mul(1000)) {
             return;
         }
-        let community_id = vector_core::db::community::community_id_for_channel(chat_id).ok().flatten().unwrap_or_default();
-        let (channel_id, npub) = (chat_id.to_string(), npub.to_string());
-        self.emit(if joined {
+        let (community_id, channel_id, npub) = (p.community_id.to_string(), p.channel_id.to_string(), p.npub.to_string());
+        self.emit(if p.joined {
             BotEvent::MemberJoin {
                 community_id,
                 channel_id,
                 npub,
-                invited_by: invited_by.map(String::from),
-                invite_label: invited_label.map(String::from),
+                invited_by: p.invited_by.map(String::from),
+                invite_label: p.invited_label.map(String::from),
             }
         } else {
             BotEvent::MemberLeave { community_id, channel_id, npub }

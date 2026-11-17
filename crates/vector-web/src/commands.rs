@@ -501,6 +501,14 @@ pub async fn dispatch(cmd: &str, a: Args) -> Result<Value, String> {
             let clean = VectorCore.set_voice_relays(&a.str("communityId")?, &relays).await.map_err(|e| e.to_string())?;
             Ok(json!(clean))
         }
+        "set_community_landing_channel" => {
+            let channel = a.opt_str("channelId");
+            core(VectorCore.set_landing_channel(&a.str("communityId")?, channel.as_deref()).await)
+        }
+        "set_community_system_channel" => {
+            let channel = a.opt_str("channelId");
+            core(VectorCore.set_system_channel(&a.str("communityId")?, channel.as_deref()).await)
+        }
         "preview_public_invite" => cm::preview_public_invite(&a.str("url")?).await,
         "accept_public_invite" => cm::accept_public_invite(a.str("url")?).await,
         "accept_community_invite" => cm::accept_community_invite(&a.str("communityId")?).await,

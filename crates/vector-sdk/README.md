@@ -120,6 +120,8 @@ for entry in community.audit_log().await?.entries { println!("{:?} by {:?}", ent
 Also on `Community`: `roles()`, `role_named(..)`, `reorder_roles(..)`, `set_everyone_permissions(..)`,
 `categories()`, `channel_infos()`, `timeouts()`, `nicknames()`, `invite_links()` /
 `revoke_invite(..)`, `relays()` / `move_relays(..)`, `voice_relays()` / `set_voice_relays(..)`,
+`system_channel()` / `set_system_channel(..)` (where join and leave messages go, or off),
+`landing_channel()` / `set_landing_channel(..)` (the Channel new members open first),
 `icon()` / `set_icon(bytes)` / `banner()` / `set_banner(bytes)` (images are stripped of metadata
 first), and `refound(..)` / `repair_roster()` for recovery. On a Channel: `info()`, `rename`,
 `set_topic`, `set_view("forum")`, `set_read_only(true)` (an announcement channel), `move_to(..)`, `overwrites()`, `sync_permissions(..)`,

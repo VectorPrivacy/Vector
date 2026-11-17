@@ -59,6 +59,8 @@ pub(crate) fn summarize_v2(c: &CommunityV2) -> Value {
         "owner_npub": owner.and_then(|pk| pk.to_bech32().ok()),
         "dissolved": c.dissolved,
         "voice_relays": c.voice_relays(),
+        "system_channel": c.system_lines_target().map(|ch| bytes_to_hex_32(&ch.id.0)),
+        "landing_channel": c.landing_channel().map(|ch| bytes_to_hex_32(&ch.id.0)),
         "relays": c.relays,
     })
 }
@@ -379,7 +381,9 @@ pub async fn accept_community_invite(community_id: &str) -> Result<Value, String
     get_community(community_id)
 }
 
-/// Join/leave lines in a channel, saved once and painted live.
+/// Join/leave lines in a channel, saved once and painted live while `shown`. A hidden one
+/// is still kept: the member list reads it.
+#[allow(clippy::too_many_arguments)]
 pub async fn apply_presence(
     channel_id: &str,
     npub: &str,
@@ -388,6 +392,7 @@ pub async fn apply_presence(
     created_at: u64,
     invited_by: Option<&str>,
     invited_label: Option<&str>,
+    shown: bool,
 ) {
     use vector_core::stored_event::SystemEventType;
     let et = if joined { SystemEventType::MemberJoined } else { SystemEventType::MemberLeft };
@@ -409,12 +414,15 @@ pub async fn apply_presence(
     if nameless {
         vector_core::profile::sync::queue_profile_sync(npub.to_string(), vector_core::profile::sync::SyncPriority::High, false);
     }
+    if !shown {
+        return;
+    }
     vector_core::emit_event(
         "system_event",
         &json!({
             "conversation_id": channel_id, "event_id": event_id, "event_type": et.as_u8(),
             "member_pubkey": npub, "member_name": null,
-            "invited_by": invited_by, "invited_label": invited_label,
+            "invited_by": invited_by.and_then(vector_core::community::inviter_npub), "invited_label": invited_label,
             "created_at_ms": created_at.saturating_mul(1000),
         }),
     );

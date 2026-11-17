@@ -17828,6 +17828,72 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_system_channel_reaches_members_and_outlives_a_rename() {
+        use super::super::community::{set_system_channel_in, SystemChannel};
+        let (bed, owner, member) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Lines", bed.relays.clone(), None).await.unwrap();
+        let welcome = create_public_channel(&bed.relay, &community, "welcome").await.unwrap();
+        let held = || crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        let mut meta = held().metadata();
+        meta.custom = serde_json::json!({ "rules": "be kind" }).as_object().cloned();
+        set_system_channel_in(&mut meta, Some(&welcome));
+        edit_community_metadata(&bed.relay, &held(), &meta).await.unwrap();
+        let link = mint_public_link(&bed.relay, &held(), "https://vectorapp.io", None, None).await.unwrap();
+
+        bed.swap_to(&member);
+        let joined = accept_public_link(&bed.relay, &link.url).await.unwrap();
+        assert_eq!(joined.system_channel(), SystemChannel::Named(welcome));
+
+        bed.swap_to(&owner);
+        let mut meta = held().metadata();
+        meta.name = "Renamed".into();
+        edit_community_metadata(&bed.relay, &held(), &meta).await.unwrap();
+        bed.swap_to(&member);
+        follow_control(&bed.relay, &held()).await.unwrap();
+        assert_eq!(held().name, "Renamed");
+        assert_eq!(held().system_channel(), SystemChannel::Named(welcome), "a rename carries it");
+        assert_eq!(held().meta_custom.unwrap()["rules"], "be kind");
+
+        bed.swap_to(&owner);
+        let mut meta = held().metadata();
+        set_system_channel_in(&mut meta, None);
+        edit_community_metadata(&bed.relay, &held(), &meta).await.unwrap();
+        bed.swap_to(&member);
+        follow_control(&bed.relay, &held()).await.unwrap();
+        assert_eq!(held().system_channel(), SystemChannel::Off);
+    }
+
+    #[tokio::test]
+    async fn a_joiner_learns_where_to_land_before_opening_anything() {
+        use super::super::community::{set_landing_channel_in, set_system_channel_in, SystemChannel};
+        let (bed, owner, member) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Landing", bed.relays.clone(), None).await.unwrap();
+        let rules = create_public_channel(&bed.relay, &community, "rules").await.unwrap();
+        let held = || crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        let mut meta = held().metadata();
+        set_system_channel_in(&mut meta, None);
+        set_landing_channel_in(&mut meta, Some(&rules));
+        edit_community_metadata(&bed.relay, &held(), &meta).await.unwrap();
+        let link = mint_public_link(&bed.relay, &held(), "https://vectorapp.io", None, None).await.unwrap();
+
+        bed.swap_to(&member);
+        let joined = accept_public_link(&bed.relay, &link.url).await.unwrap();
+        assert_eq!(joined.landing_channel().map(|c| c.id), Some(rules), "the join's own fold carries it");
+        assert_eq!(joined.system_channel(), SystemChannel::Off, "beside the other setting, untouched");
+
+        bed.swap_to(&owner);
+        let mut meta = held().metadata();
+        set_landing_channel_in(&mut meta, None);
+        edit_community_metadata(&bed.relay, &held(), &meta).await.unwrap();
+        bed.swap_to(&member);
+        follow_control(&bed.relay, &held()).await.unwrap();
+        assert!(held().landing_channel().is_none());
+        assert_eq!(held().system_channel(), SystemChannel::Off);
+    }
+
+    #[tokio::test]
     async fn an_own_metadata_edit_reads_back_before_any_control_pass() {
         let (bed, owner, _member) = TestBed::new();
         bed.swap_to(&owner);

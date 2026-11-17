@@ -160,6 +160,41 @@ fn relay_list(m: &control::CommunityMetadata, voice: bool) -> Vec<String> {
     m.relays.clone()
 }
 
+/// Where a metadata edition sends Join/Leave lines: a Channel, `"off"`, or null for the default.
+fn system_lines_of(m: &control::CommunityMetadata, names: &Names) -> Value {
+    let named = m
+        .custom
+        .as_ref()
+        .and_then(|c| c.get(crate::community::v2::community::SYSTEM_MESSAGES))
+        .and_then(|s| s.get("channel"))
+        .and_then(|v| v.as_str());
+    match named {
+        None => Value::Null,
+        Some("") => json!("off"),
+        Some(id) => names.channel(&id.to_ascii_lowercase()),
+    }
+}
+
+fn system_lines_change(old: &control::CommunityMetadata, new: &control::CommunityMetadata, names: &Names) -> Option<Value> {
+    let (was, now) = (system_lines_of(old, names), system_lines_of(new, names));
+    (was != now).then(|| json!({ "field": "system_messages", "old": was, "new": now }))
+}
+
+/// The Channel a metadata edition has new members open first, or null for the default.
+fn landing_of(m: &control::CommunityMetadata, names: &Names) -> Value {
+    m.custom
+        .as_ref()
+        .and_then(|c| c.get(crate::community::v2::community::LANDING))
+        .and_then(|s| s.get("channel"))
+        .and_then(|v| v.as_str())
+        .map_or(Value::Null, |id| names.channel(&id.to_ascii_lowercase()))
+}
+
+fn landing_change(old: &control::CommunityMetadata, new: &control::CommunityMetadata, names: &Names) -> Option<Value> {
+    let (was, now) = (landing_of(old, names), landing_of(new, names));
+    (was != now).then(|| json!({ "field": "landing", "old": was, "new": now }))
+}
+
 fn list_change(field: &str, old: &[String], new: &[String]) -> Option<Value> {
     let added: Vec<&String> = new.iter().filter(|r| !old.contains(r)).collect();
     let removed: Vec<&String> = old.iter().filter(|r| !new.contains(r)).collect();
@@ -260,6 +295,8 @@ pub(crate) fn control_entries(
                             image_change("banner", old.banner.as_ref(), new.banner.as_ref()),
                             list_change("relays", &relay_list(old, false), &relay_list(&new, false)),
                             list_change("voice_relays", &relay_list(old, true), &relay_list(&new, true)),
+                            system_lines_change(old, &new, &names),
+                            landing_change(old, &new, &names),
                         ]
                         .into_iter()
                         .flatten()

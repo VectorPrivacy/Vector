@@ -498,6 +498,8 @@
     "allow-voice-moderate",
     "allow-voice-powers",
     "allow-set-community-voice-relays",
+    "allow-set-community-system-channel",
+    "allow-set-community-landing-channel",
     "allow-call-audio-settings-set",
     "allow-call-mic-test-start",
     "allow-call-mic-test-stop",

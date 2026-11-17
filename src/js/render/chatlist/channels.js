@@ -78,6 +78,8 @@ function leaveHiddenChannel(communityId) {
 
 /** communityId → [{ id, name, private, category, topic, view }] in sidebar order, as last read. */
 const communityChannelsCache = new Map();
+/** communityId → the channel its managers chose for new members to open first. */
+const communityLandingCache = new Map();
 /** communityId → [{ id, name }]: its Categories in sidebar order. */
 const communityCategoriesCache = new Map();
 /** Per community, the private channels it lists that we hold no key for: named, never opened. */
@@ -100,6 +102,7 @@ function loadCommunityChannels() {
                 communityChannelsCache.set(community.community_id, visibleChannels(community.channels));
                 communityLockedChannels.set(community.community_id, lockedChannels(community.channels));
                 communityCategoriesCache.set(community.community_id, categoriesOf(community.categories));
+                communityLandingCache.set(community.community_id, community.landing_channel || null);
                 // A message can reach a channel before its list does.
                 for (const ch of community.channels || []) {
                     const bare = arrChats.find((c) => c.id === ch.channel_id && !communityIdOfChat(c));
@@ -123,9 +126,10 @@ function categoriesOf(categories) {
 }
 
 /** Adopt a channel set straight off a `get_community` summary the caller already fetched. */
-function setCommunityChannels(communityId, channels, categories) {
+function setCommunityChannels(communityId, channels, categories, landing = null) {
     if (!communityId || !Array.isArray(channels) || communityMovesPending(communityId)) return;
     communityChannelsCache.set(communityId, visibleChannels(channels));
+    communityLandingCache.set(communityId, landing);
     communityLockedChannels.set(communityId, lockedChannels(channels));
     if (Array.isArray(categories)) communityCategoriesCache.set(communityId, categoriesOf(categories));
     communityChanged(communityId);

@@ -370,6 +370,34 @@ impl Community {
         VectorCore.set_voice_relays(&self.id, relays).await
     }
 
+    /// The chat Channel its Join/Leave lines go to, chosen or by default; `None` while its
+    /// managers have them off. A welcome bot that honours the setting greets here.
+    pub fn system_channel(&self) -> Result<Option<Channel>> {
+        let held = self.held()?;
+        Ok(held.system_lines_target().map(|ch| self.channel(vector_core::simd::hex::bytes_to_hex_32(&ch.id.0))))
+    }
+
+    /// Send its Join/Leave lines to a chat Channel, or turn them off with `None`. Needs
+    /// Manage Metadata.
+    pub async fn set_system_channel(&self, channel: Option<&Channel>) -> Result<()> {
+        require(&self.id, Permissions::MANAGE_METADATA, "choosing where join and leave messages go").await?;
+        VectorCore.set_system_channel(&self.id, channel.map(|c| c.id())).await
+    }
+
+    /// The Channel its managers chose for new members to open first; `None` is the default,
+    /// the first Channel a member can read.
+    pub fn landing_channel(&self) -> Result<Option<Channel>> {
+        let held = self.held()?;
+        Ok(held.landing_channel().map(|ch| self.channel(vector_core::simd::hex::bytes_to_hex_32(&ch.id.0))))
+    }
+
+    /// Choose the Channel new members open first (a rules or verification Channel, say), or
+    /// `None` for the default. Needs Manage Metadata.
+    pub async fn set_landing_channel(&self, channel: Option<&Channel>) -> Result<()> {
+        require(&self.id, Permissions::MANAGE_METADATA, "choosing where new members start").await?;
+        VectorCore.set_landing_channel(&self.id, channel.map(|c| c.id())).await
+    }
+
     /// The icon's image bytes, downloaded and checked; `None` when it has none.
     pub async fn icon(&self) -> Result<Option<Vec<u8>>> {
         VectorCore.community_image(&self.id, false).await

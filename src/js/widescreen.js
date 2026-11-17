@@ -115,12 +115,15 @@ function wsRememberOpenChat() {
 }
 
 /** The channel a community's rail shortcut and list row open: where you left it, else
- *  its primary — which is also the fallback when that channel has since gone. */
+ *  where its managers have new members start, else its primary. */
 function wsChannelForCommunity(communityId) {
-    const last = wsLastChannels().get(communityId);
     // Only a channel still visible: the one left in may since have been revoked.
     const visible = communityChannelsCache.get(communityId);
-    if (last && arrChats.some(c => c.id === last) && (!visible || visible.some(c => c.id === last))) return last;
+    const opens = (id) => id && arrChats.some(c => c.id === id) && (!visible || visible.some(c => c.id === id));
+    const last = wsLastChannels().get(communityId);
+    if (opens(last)) return last;
+    const landing = communityLandingCache.get(communityId);
+    if (opens(landing)) return landing;
     return arrChats.find(c => communityIdOfChat(c) === communityId && isPrimaryChannelChat(c))?.id || null;
 }
 

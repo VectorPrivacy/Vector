@@ -1321,6 +1321,8 @@ pub fn run() {
             commands::community::revoke_public_invite,
             commands::community::update_community_metadata,
             commands::community::set_community_voice_relays,
+            commands::community::set_community_system_channel,
+            commands::community::set_community_landing_channel,
             commands::community::rename_community_channel,
             commands::community::edit_community_channel,
             commands::community::set_community_channel_private,

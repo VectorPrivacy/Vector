@@ -90,6 +90,12 @@ async function openCommunitySettings(communityId) {
             iconSrc: cached ? convertFileSrc(cached) : null,
             relays: summary.relays || [],
             voiceRelays: summary.voice_relays || [],
+            systemChannel: summary.system_channel || null,
+            landingChannel: summary.landing_channel || null,
+            // A private channel this account can't read isn't offered, unless it's the one chosen.
+            pickChannels: (summary.channels || [])
+                .filter((c) => c.view !== 'voice' && (c.readable !== false || c.channel_id === summary.system_channel))
+                .map((c) => ({ channel_id: c.channel_id, name: c.name || 'private channel', private: !!c.private, view: c.view })),
             canEdit: !!caps.manage_metadata,
             canBan: !!caps.ban,
             canRoles: !!caps.manage_roles,
@@ -211,6 +217,16 @@ async function csSave() {
         if (VectorSvelte.csVoiceRelaysDirty() && st.canEdit) {
             const voiceRelays = await invoke('set_community_voice_relays', { communityId, relays: st.draft.voiceRelays });
             VectorSvelte.csCommitted({ voiceRelays });
+        }
+        if (VectorSvelte.csSystemChannelDirty() && st.canEdit) {
+            const systemChannel = st.draft.systemChannel;
+            await invoke('set_community_system_channel', { communityId, channelId: systemChannel });
+            VectorSvelte.csCommitted({ systemChannel });
+        }
+        if (VectorSvelte.csLandingChannelDirty() && st.canEdit) {
+            const landingChannel = st.draft.landingChannel;
+            await invoke('set_community_landing_channel', { communityId, channelId: landingChannel });
+            VectorSvelte.csCommitted({ landingChannel });
         }
         if (VectorSvelte.csRelaysDirty() && st.canEdit) {
             await csMoveRelays(communityId, st.draft.relays);

@@ -512,7 +512,7 @@ pub use deletion::{delete_own_dm, delete_received_dm, DeleteOutcome};
 pub use stored_event::{StoredEvent, StoredEventBuilder, SystemEventType};
 pub use rumor::{RumorEvent, RumorContext, ConversationType, RumorProcessingResult, process_rumor};
 pub use profile::{SyncPriority, ProfileSyncHandler, NoOpProfileSyncHandler};
-pub use event_handler::{InboundEventHandler, LiveOnly, NoOpEventHandler, PreparedEvent, process_event};
+pub use event_handler::{InboundEventHandler, LiveOnly, NoOpEventHandler, PreparedEvent, Presence, process_event};
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -1832,6 +1832,8 @@ impl VectorCore {
                 }))
                 .collect::<Vec<_>>(),
             "categories": Self::categories_json(community),
+            "system_channel": community.system_lines_target().map(|c| crate::simd::hex::bytes_to_hex_32(&c.id.0)),
+            "landing_channel": community.landing_channel().map(|c| crate::simd::hex::bytes_to_hex_32(&c.id.0)),
         })
     }
 
@@ -1879,6 +1881,13 @@ pub(crate) async fn register_v2_chats_inner(community: &crate::community::v2::co
     // first changes are news rather than the baseline itself.
     crate::community::v2::changes::prime(community);
     crate::db::scoped(async move {
+        // Boot registers every held community: one saved before its Join/Leave lines had a
+        // home settles here.
+        match crate::db::community::settle_presence_lines(community) {
+            Ok(true) => crate::emit_event("community_presence_lines", &serde_json::json!({ "community_id": crate::simd::hex::bytes_to_hex_32(&community.id().0) })),
+            Ok(false) => {}
+            Err(e) => crate::log_warn!("[presence] settling join lines on register: {e}"),
+        }
         let owner_npub = community.owner().ok().and_then(|p| ToBech32::to_bech32(&p).ok());
             let me = state::my_public_key();
             let is_owner = me.is_some_and(|m| community.owner().is_ok_and(|o| o == m));
@@ -5796,6 +5805,55 @@ impl VectorCore {
         let transport = LiveTransport::with_timeout(std::time::Duration::from_secs(12));
         crate::community::v2::service::edit_community_metadata(&transport, &community, &meta).await.map_err(VectorError::Other)?;
         Ok(clean)
+    }
+
+    /// Choose the chat channel a Community's Join/Leave lines go to, or `None` to turn them
+    /// off (MANAGE_METADATA). Other `system_messages` fields, a newer client's included, stay.
+    pub async fn set_system_channel(&self, community_id: &str, channel_id: Option<&str>) -> Result<()> {
+        use crate::community::{transport::LiveTransport, ChannelId, CommunityId};
+        let cid = CommunityId(Self::id32(community_id, "community_id")?);
+        let community = crate::db::community::load_community_v2(&cid)
+            .map_err(VectorError::Other)?
+            .ok_or_else(|| VectorError::Other("v2 community not found".into()))?;
+        let named = match channel_id {
+            Some(ch) => {
+                let id = ChannelId(Self::id32(ch, "channel_id")?);
+                let channel = community.channel(&id).ok_or_else(|| VectorError::Other("no such channel in this community".into()))?;
+                if !crate::community::v2::community::takes_system_lines(channel) {
+                    return Err(VectorError::Other("join and leave messages go to a chat channel".into()));
+                }
+                Some(id)
+            }
+            None => None,
+        };
+        let mut meta = community.metadata();
+        crate::community::v2::community::set_system_channel_in(&mut meta, named.as_ref());
+        let transport = LiveTransport::with_timeout(std::time::Duration::from_secs(12));
+        crate::community::v2::service::edit_community_metadata(&transport, &community, &meta).await.map_err(VectorError::Other)
+    }
+
+    /// Choose the channel new members open first, or `None` for the default (MANAGE_METADATA).
+    pub async fn set_landing_channel(&self, community_id: &str, channel_id: Option<&str>) -> Result<()> {
+        use crate::community::{transport::LiveTransport, ChannelId, CommunityId};
+        let cid = CommunityId(Self::id32(community_id, "community_id")?);
+        let community = crate::db::community::load_community_v2(&cid)
+            .map_err(VectorError::Other)?
+            .ok_or_else(|| VectorError::Other("v2 community not found".into()))?;
+        let named = match channel_id {
+            Some(ch) => {
+                let id = ChannelId(Self::id32(ch, "channel_id")?);
+                let channel = community.channel(&id).ok_or_else(|| VectorError::Other("no such channel in this community".into()))?;
+                if !crate::community::v2::community::can_land_in(channel) {
+                    return Err(VectorError::Other("new members start in a public text or forum channel".into()));
+                }
+                Some(id)
+            }
+            None => None,
+        };
+        let mut meta = community.metadata();
+        crate::community::v2::community::set_landing_channel_in(&mut meta, named.as_ref());
+        let transport = LiveTransport::with_timeout(std::time::Duration::from_secs(12));
+        crate::community::v2::service::edit_community_metadata(&transport, &community, &meta).await.map_err(VectorError::Other)
     }
 
     /// Leave a Community: announce a best-effort "left" presence (before dropping keys), then
