@@ -61,6 +61,17 @@ pub fn gradient_text_in(text: &str, spacing: f32, phase: f32, from: gpui::Hsla, 
     row
 }
 
+/// The open [`select`]'s keyboard state: its focus and the highlighted row.
+struct SelectKeys {
+    id: ElementId,
+    focus: Option<gpui::FocusHandle>,
+    hi: std::rc::Rc<std::cell::Cell<usize>>,
+}
+
+thread_local! {
+    static OPEN_SELECT: std::cell::RefCell<Option<SelectKeys>> = const { std::cell::RefCell::new(None) };
+}
+
 /// One choice in a [`select`].
 pub struct Choice {
     pub value: &'static str,
@@ -108,6 +119,33 @@ pub fn select_with(
         .find(|c| c.value == value)
         .map(|c| c.label)
         .unwrap_or("");
+    let id: ElementId = id.into();
+    let on_toggle = std::rc::Rc::new(on_toggle);
+    let live: std::rc::Rc<[(&'static str, bool)]> =
+        choices.iter().map(|c| (c.value, !disabled.contains(&c.value))).collect();
+    let keys = open.then(|| OPEN_SELECT.with(|o| {
+        let mut o = o.borrow_mut();
+        let at = live.iter().position(|(v, _)| *v == value).unwrap_or(0);
+        match o.as_ref() {
+            Some(k) if k.id == id => {
+                if k.hi.get() == usize::MAX {
+                    k.hi.set(at);
+                }
+            }
+            _ => {
+                *o = Some(SelectKeys { id: id.clone(), focus: None, hi: std::rc::Rc::new(std::cell::Cell::new(at)) });
+            }
+        }
+        o.as_ref().map(|k| (k.focus.clone(), k.hi.clone()))
+    })).flatten();
+    if !open {
+        OPEN_SELECT.with(|o| {
+            let mut o = o.borrow_mut();
+            if o.as_ref().is_some_and(|k| k.id == id) {
+                *o = None;
+            }
+        });
+    }
     let caret = div().w(px(10.)).h(px(6.)).flex_shrink_0().child(
         gpui::svg()
             .path("ui/caret-down.svg")
@@ -119,8 +157,11 @@ pub fn select_with(
                 )))
             }),
     );
+    let toggle = on_toggle.clone();
+    let opening = !open;
+    let key_id = id.clone();
     let button = div()
-        .id(id.into())
+        .id(id.clone())
         .role(gpui::Role::ComboBox)
         .aria_expanded(open)
         .aria_value(label)
@@ -139,7 +180,19 @@ pub fn select_with(
         .line_height(px(font * 1.2))
         .text_color(c(0xffffff))
         .cursor_pointer()
-        .on_click(move |_, w, cx| on_toggle(w, cx))
+        .on_click(move |_, w, cx| {
+            toggle(w, cx);
+            // The open list takes focus, so its keys reach it before anything behind.
+            if opening {
+                let focus = cx.focus_handle();
+                w.focus(&focus, cx);
+                OPEN_SELECT.with(|o| *o.borrow_mut() = Some(SelectKeys {
+                    id: key_id.clone(),
+                    focus: Some(focus),
+                    hi: std::rc::Rc::new(std::cell::Cell::new(usize::MAX)),
+                }));
+            }
+        })
         .child(
             div()
                 .flex_1()
@@ -174,7 +227,37 @@ pub fn select_with(
                 inset: false,
             }])
             .occlude();
-        for choice in choices {
+        let hi = keys.as_ref().map(|(_, hi)| hi.get()).unwrap_or(usize::MAX);
+        if let Some((Some(focus), hi)) = keys {
+            let (pick, toggle, live) = (on_pick.clone(), on_toggle.clone(), live.clone());
+            list = list.track_focus(&focus).key_context("Select").on_key_down(move |e, w, cx| {
+                let step = |dir: isize| {
+                    let n = live.len() as isize;
+                    let mut at = hi.get() as isize;
+                    for _ in 0..n {
+                        at = (at + dir).rem_euclid(n);
+                        if live[at as usize].1 {
+                            hi.set(at as usize);
+                            return;
+                        }
+                    }
+                };
+                match e.keystroke.key.as_str() {
+                    "escape" | "tab" => toggle(w, cx),
+                    "down" => step(1),
+                    "up" => step(-1),
+                    "enter" | "space" => {
+                        if let Some(&(v, true)) = live.get(hi.get()) {
+                            pick(v, w, cx);
+                        }
+                    }
+                    _ => return,
+                }
+                cx.stop_propagation();
+                w.refresh();
+            });
+        }
+        for (ix, choice) in choices.iter().enumerate() {
             let selected = choice.value == value;
             let off = disabled.contains(&choice.value);
             let pick = on_pick.clone();
@@ -193,7 +276,7 @@ pub fn select_with(
                     .rounded(px(6.))
                     .text_size(px(font))
                     .text_color(c(if selected { 0xffffff } else { 0xcfcfcf }))
-                    .when(selected, |s| s.bg(c(0x1f1f1f)))
+                    .when(selected || ix == hi, |s| s.bg(c(0x1f1f1f)))
                     .when(off, |s| s.opacity(0.4))
                     .when(!off, |s| {
                         s.hover(|s| s.bg(c(0x1f1f1f)).text_color(c(0xffffff)))

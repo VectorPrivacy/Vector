@@ -6314,6 +6314,10 @@ impl Render for VectorApp {
                 }
             }))
             .capture_key_down(cx.listener(|app, e: &gpui::KeyDownEvent, window, cx| {
+                // An open dropdown has focus and answers its own keys.
+                if window.context_stack().iter().any(|k| k.contains("Select")) {
+                    return;
+                }
                 if e.keystroke.key == "escape" {
                     let full = app.media.borrow().videos.full.clone();
                     if let Some((att, input)) = full {

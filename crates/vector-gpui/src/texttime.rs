@@ -6,7 +6,7 @@ use chrono::{DateTime, Datelike, Duration, Local, NaiveDate, TimeZone};
 use crate::scan::{boundary, digit, fold_letter, lit, lit_i, matches, next, prev, run, word, At};
 use std::rc::Rc;
 
-use gpui::{StatefulInteractiveElement, 
+use gpui::{
     AnyElement, App, InteractiveElement, IntoElement, ParentElement, Styled, Window, div,
     px, svg, AnimationExt,
 };
