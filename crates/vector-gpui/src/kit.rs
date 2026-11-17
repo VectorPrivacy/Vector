@@ -640,6 +640,16 @@ pub trait Tipped: gpui::StatefulInteractiveElement + Sized {
         let text = text.into();
         self.aria_description(text.clone()).tooltip(tooltip(text))
     }
+
+    /// A screen reader's view of a track: its name, the value as shown, and where it sits (0 to 1).
+    fn as_slider(self, label: impl Into<gpui::SharedString>, shown: impl Into<gpui::SharedString>, frac: f32) -> Self {
+        self.role(gpui::Role::Slider)
+            .aria_label(label)
+            .aria_value(shown)
+            .aria_numeric_value((frac.clamp(0., 1.) * 100.).round() as f64)
+            .aria_min_numeric_value(0.)
+            .aria_max_numeric_value(100.)
+    }
 }
 
 impl<T: gpui::StatefulInteractiveElement> Tipped for T {}
@@ -959,6 +969,7 @@ fn menu_slider(
     .absolute()
     .inset_0();
     let fill = crate::theme::c(crate::theme::PRIMARY);
+    let spoken = (label.clone(), shown.clone());
     div()
         .pt(px(9.))
         .pb(px(11.))
@@ -978,6 +989,7 @@ fn menu_slider(
         .child(
             div()
                 .id(("ctx-slider", ix))
+                .as_slider(spoken.0, spoken.1, value)
                 .relative()
                 .w_full()
                 .h(px(20.))

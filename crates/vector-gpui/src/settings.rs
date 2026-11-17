@@ -3621,8 +3621,10 @@ fn slider(key: &'static str, value: f32, s: &Settings, on: &OnAct) -> AnyElement
         .absolute()
         .inset_0()
     };
+    let name = if key == "mic" { "Microphone Volume" } else { "Speaker Volume" };
     div()
         .id(key)
+        .as_slider(name, format!("{}%", (value * 100.).round()), value)
         .relative()
         .w_full()
         .h(px(22.))

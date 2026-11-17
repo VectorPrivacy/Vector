@@ -853,6 +853,7 @@ fn volume_slider(call: &Call, on: &OnAct) -> impl IntoElement {
         .child(
             div()
                 .id("call-volume")
+                .as_slider("Their volume", format!("{}%", (call.volume * 100.).round()), pct)
                 .relative()
                 .flex_1()
                 .min_w_0()

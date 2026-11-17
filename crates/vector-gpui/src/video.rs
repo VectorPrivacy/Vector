@@ -9,6 +9,7 @@ use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use crate::kit::Tipped;
 use gpui::{AnyElement, App, Bounds, CursorStyle, HitboxBehavior, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ObjectFit, Pixels, RenderImage, SharedString, Window, canvas, div, prelude::*, px, svg};
 use crate::pic::img;
 use vector_media::audio_engine::AudioInput;
@@ -1007,10 +1008,11 @@ pub fn view(id: &str, clip: &Clip, dim: bool, size: Option<(f32, f32)>, radius: 
     };
     let level = if clip.muted { 0. } else { clip.volume };
     let full = clip.big;
-    let time = format!("{} / {}", crate::audio::format_time(pos), crate::audio::format_time(duration));
-    let button = |icon: &'static str, key: &'static str, act: Act, on: OnAct| {
+    let time: SharedString = format!("{} / {}", crate::audio::format_time(pos), crate::audio::format_time(duration)).into();
+    let button = |icon: &'static str, key: &'static str, label: &'static str, act: Act, on: OnAct| {
         div()
             .id(SharedString::from(format!("{key}-{id}")))
+            .aria_label(label)
             .size(px(28.))
             .flex()
             .items_center()
@@ -1049,12 +1051,14 @@ pub fn view(id: &str, clip: &Clip, dim: bool, size: Option<(f32, f32)>, radius: 
                 .child(button(
                     if playing { "icons/pause.svg" } else { "icons/play.svg" },
                     "vplay",
+                    if playing { "Pause" } else { "Play" },
                     Act::Toggle,
                     o2,
                 ))
                 // A narrow clip gives its time's room to the buttons.
-                .when(w >= 260., |d| {
-                    d.child(
+                .when(w >= 260., {
+                    let time = time.clone();
+                    move |d| d.child(
                         div()
                             .text_size(px(12.))
                             .text_color(gpui::white())
@@ -1062,11 +1066,13 @@ pub fn view(id: &str, clip: &Clip, dim: bool, size: Option<(f32, f32)>, radius: 
                             .child(time),
                     )
                 })
-                .child(scrubber(id, frac, duration > 0, clip.scrub.is_some(), o3))
+                .child(scrubber(id, frac, time.clone(), duration > 0, clip.scrub.is_some(), o3))
                 .when(w >= 290., |d| {
                     d.child(
                         div()
                             .id(SharedString::from(format!("vspeed-{id}")))
+                            .aria_label("Playback speed")
+                            .aria_value(speed_label.clone())
                             .h(px(22.))
                             .min_w(px(34.))
                             .px(px(5.))
@@ -1089,6 +1095,7 @@ pub fn view(id: &str, clip: &Clip, dim: bool, size: Option<(f32, f32)>, radius: 
                 .child(button(
                     if clip.muted { "icons/volume-mute.svg" } else { "icons/volume-max.svg" },
                     "vmute",
+                    if clip.muted { "Unmute" } else { "Mute" },
                     Act::Mute,
                     o4,
                 ))
@@ -1097,6 +1104,8 @@ pub fn view(id: &str, clip: &Clip, dim: bool, size: Option<(f32, f32)>, radius: 
                     // Room for the knob, which overhangs the track's ends.
                     d.child(div().w(px(56.)).flex_none().h(px(20.)).mx(px(6.)).child(slider(
                         &format!("vvol-{id}"),
+                        "Volume",
+                        format!("{}%", (level * 100.).round()).into(),
                         level,
                         true,
                         clip.leveling,
@@ -1107,6 +1116,7 @@ pub fn view(id: &str, clip: &Clip, dim: bool, size: Option<(f32, f32)>, radius: 
                 .child(button(
                     if full { "ui/video-exit-full.svg" } else { "ui/video-full.svg" },
                     "vfull",
+                    if full { "Exit full screen" } else { "Full screen" },
                     Act::Fullscreen,
                     o7,
                 )),
@@ -1161,8 +1171,8 @@ pub fn view(id: &str, clip: &Clip, dim: bool, size: Option<(f32, f32)>, radius: 
         .into_any_element()
 }
 
-fn scrubber(id: &str, frac: f32, seekable: bool, dragging: bool, on: OnAct) -> impl IntoElement {
-    div().flex_1().h(px(20.)).mx(px(6.)).child(slider(&format!("vseek-{id}"), frac, seekable, dragging, on, Act::Seek))
+fn scrubber(id: &str, frac: f32, time: SharedString, seekable: bool, dragging: bool, on: OnAct) -> impl IntoElement {
+    div().flex_1().h(px(20.)).mx(px(6.)).child(slider(&format!("vseek-{id}"), "Seek", time, frac, seekable, dragging, on, Act::Seek))
 }
 
 thread_local! {
@@ -1180,12 +1190,14 @@ pub(crate) fn release(key: &SharedString) -> bool {
 }
 
 /// A track with a knob: `act(fraction, done)` as it is pressed, dragged and let go.
-fn slider(key: &str, frac: f32, live: bool, dragging: bool, on: OnAct, act: fn(f32, bool) -> Act) -> impl IntoElement {
+#[allow(clippy::too_many_arguments)]
+fn slider(key: &str, label: &'static str, value: SharedString, frac: f32, live: bool, dragging: bool, on: OnAct, act: fn(f32, bool) -> Act) -> impl IntoElement {
     let seekable = live;
     let key = SharedString::from(key.to_string());
     let name = key.clone();
     div()
         .id(key)
+        .as_slider(label, value, frac)
         .size_full()
         .on_click(|_, _, cx| cx.stop_propagation())
         .child(

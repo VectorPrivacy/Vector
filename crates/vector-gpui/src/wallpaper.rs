@@ -260,6 +260,12 @@ pub fn preview_bar(blur: u8, dim: u8, dragging: Rc<Cell<Option<bool>>>, on: &OnA
         let (on, dragging) = (on.clone(), dragging.clone());
         let pct = ((value.saturating_sub(lo)) as f32 / (hi - lo) as f32).clamp(0., 1.);
         div()
+            .id(if is_blur { "wp-blur" } else { "wp-dim" })
+            .as_slider(
+                if is_blur { "Blur" } else { "Brightness" },
+                if is_blur { value.to_string() } else { format!("{value}%") },
+                pct,
+            )
             .flex()
             .items_center()
             .gap(px(12.))

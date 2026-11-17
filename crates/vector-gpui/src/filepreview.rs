@@ -713,12 +713,16 @@ pub fn neon_toggle(on: bool) -> gpui::Div {
 
 fn option(
     id: &'static str,
+    name: &'static str,
     label: gpui::AnyElement,
     sublabel: impl Into<SharedString>,
     on: bool,
 ) -> gpui::Stateful<gpui::Div> {
     div()
         .id(id)
+        .role(gpui::Role::Switch)
+        .aria_toggled(on.into())
+        .aria_label(name)
         .flex()
         .items_center()
         .justify_between()
@@ -1023,10 +1027,12 @@ impl Render for FilePreview {
             .flex_col()
             .gap(px(12.))
             .when(self.compress_offered, |d| {
+                let name = if IMAGE_EXTS.contains(&self.ext.as_str()) { "Compress Image" } else { "Compress Video" };
                 d.child(
                     option(
                         "fp-compress",
-                        if IMAGE_EXTS.contains(&self.ext.as_str()) { "Compress Image" } else { "Compress Video" }.into_any_element(),
+                        name,
+                        name.into_any_element(),
                         self.compress_info.clone(),
                         self.compress,
                     )
@@ -1048,6 +1054,7 @@ impl Render for FilePreview {
                 d.child(
                     option(
                         "fp-metadata",
+                        "Keep Metadata",
                         label,
                         "Includes location, camera & date",
                         self.keep_metadata,

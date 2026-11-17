@@ -1203,6 +1203,7 @@ fn album_view(
                     d.child(
                         div()
                             .id(SharedString::from(format!("album-art-{id}")))
+                            .aria_label("View cover art")
                             .size(px(art_px))
                             .flex_shrink_0()
                             .rounded(px(10.))
@@ -1281,8 +1282,11 @@ fn waveform(
     let display: Rc<[f32]> = p.map_or_else(|| Rc::from([]), |p| Rc::from(p.display.as_slice()));
     let has_wave = p.is_some_and(|p| p.wave.is_some());
     let seekable = duration > 0;
+    let (start, total) = if span.1 > span.0 { (span.0, span.1 - span.0) } else { (0, duration) };
+    let spoken = format!("{} / {}", format_time(p.map_or(0, |p| p.position().saturating_sub(start))), format_time(total));
     div()
         .id(id)
+        .as_slider("Seek", spoken, progress)
         .group("audio-waveform")
         .flex_1()
         .h(px(tall))
@@ -1489,6 +1493,7 @@ pub fn view(
     };
     let button = div()
         .id(SharedString::from(format!("audio-play-{id}")))
+        .aria_label(if playing { "Pause" } else { "Play" })
         .size(px(40.))
         .flex_shrink_0()
         .rounded_full()
@@ -1594,6 +1599,7 @@ pub fn view(
         let on = on_album.clone();
         div()
             .id(SharedString::from(format!("audio-{dir}-{}", att.id)))
+            .aria_label(if dir == "prev" { "Previous" } else { "Next" })
             .size(px(30.))
             .mx(px(2.))
             .flex_shrink_0()
@@ -1686,6 +1692,7 @@ pub fn view(
                         .child(
                     div()
                         .id(SharedString::from(format!("audio-art-{}", att.id)))
+                        .aria_label("View cover art")
                         .size(px(art_px))
                         .flex_shrink_0()
                         .rounded(px(10.))
