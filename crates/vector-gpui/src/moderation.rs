@@ -1016,7 +1016,8 @@ pub fn view(
             .when(!narrow, |d| d.p(px(26.)))
             .occlude()
             .on_click(move |_, w, cx| close(Act::Close, w, cx))
-            .child(
+            .child(crate::kit::pop(
+                "mod-pop",
                 div()
                     .id("mod-card")
                     .w_full()
@@ -1035,7 +1036,8 @@ pub fn view(
                     .children(alert(m))
                     .child(tabs(m, on))
                     .child(body),
-            ),
+                160,
+            )),
     )
     .with_priority(12)
 }

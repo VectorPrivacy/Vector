@@ -117,7 +117,7 @@ impl VectorApp {
         match act {
             Act::Close => {
                 if m.busy.is_none() {
-                    self.moderation = None;
+                    self.fades.moderation.close(self.moderation.take());
                 }
             }
             Act::Tab(tab) => {

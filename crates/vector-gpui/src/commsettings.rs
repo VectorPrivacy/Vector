@@ -1759,7 +1759,7 @@ pub fn view(m: &CommSettings, store: &Store, compact: bool, on: &OnAct, cx: &App
             .when(!compact, |d| d.p(px(25.)))
             .occlude()
             .on_click(move |_, w, cx| dismiss(Act::Close, w, cx))
-            .child(card)
+            .child(crate::kit::pop("cs-pop", card, 160))
             .children(report),
     )
     .with_priority(12)

@@ -1029,6 +1029,8 @@ pub(crate) struct DeferredDraw {
     text_style_stack: Vec<TextStyleRefinement>,
     content_mask: Option<ContentMask<Pixels>>,
     rem_size: Pixels,
+    /// The opacity around the deferral point, as CSS opacity reaches every descendant.
+    opacity: f32,
     element: Option<AnyElement>,
     absolute_offset: Point<Pixels>,
     prepaint_range: Range<PrepaintStateIndex>,
@@ -4196,7 +4198,7 @@ impl Window {
             traversal_order.sort_by_key(|ix| self.next_frame.deferred_draws[*ix].priority);
 
             for deferred_draw_ix in traversal_order {
-                let (element, parent_node, current_view, rem_size, absolute_offset, prepaint_range) = {
+                let (element, parent_node, current_view, rem_size, absolute_offset, prepaint_range, opacity) = {
                     let deferred_draw = &mut self.next_frame.deferred_draws[deferred_draw_ix];
                     self.element_id_stack
                         .clone_from(&deferred_draw.element_id_stack);
@@ -4209,6 +4211,7 @@ impl Window {
                         deferred_draw.rem_size,
                         deferred_draw.absolute_offset,
                         deferred_draw.prepaint_range.clone(),
+                        deferred_draw.opacity,
                     )
                 };
                 self.next_frame.dispatch_tree.set_active_node(parent_node);
@@ -4219,7 +4222,8 @@ impl Window {
                         self.with_rendered_view(current_view, |window| {
                             window.with_rem_size(Some(rem_size), |window| {
                                 window.with_absolute_element_offset(absolute_offset, |window| {
-                                    element.prepaint(window, cx);
+                                    let opacity = (opacity < 1.).then_some(opacity);
+                                    window.with_element_opacity(opacity, |window| element.prepaint(window, cx));
                                 });
                             });
                         });
@@ -4273,7 +4277,8 @@ impl Window {
                     self.with_rendered_view(deferred_draw.current_view, |window| {
                         window.with_content_mask(content_mask, |window| {
                             window.with_rem_size(Some(deferred_draw.rem_size), |window| {
-                                element.paint(window, cx);
+                                let opacity = (deferred_draw.opacity < 1.).then_some(deferred_draw.opacity);
+                                window.with_element_opacity(opacity, |window| element.paint(window, cx));
                             });
                         })
                     })
@@ -4349,6 +4354,7 @@ impl Window {
                     text_style_stack: deferred_draw.text_style_stack.clone(),
                     content_mask: deferred_draw.content_mask,
                     rem_size: deferred_draw.rem_size,
+                    opacity: deferred_draw.opacity,
                     priority: deferred_draw.priority,
                     element: None,
                     absolute_offset: deferred_draw.absolute_offset,
@@ -4838,6 +4844,7 @@ impl Window {
             text_style_stack: self.text_style_stack.clone(),
             content_mask,
             rem_size: self.rem_size(),
+            opacity: self.element_opacity,
             priority,
             element: Some(element),
             absolute_offset,

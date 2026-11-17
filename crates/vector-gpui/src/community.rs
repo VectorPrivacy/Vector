@@ -1534,7 +1534,7 @@ pub fn invite_details(
             .justify_center()
             .occlude()
             .on_click(close)
-            .child(card),
+            .child(crate::kit::pop("pop-dialog", card, 160)),
     )
     .with_priority(13)
 }

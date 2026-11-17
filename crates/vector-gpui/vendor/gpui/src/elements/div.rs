@@ -3722,7 +3722,7 @@ impl Interactivity {
                 group_on = is_group_hovered;
             }
 
-            if let Some(hover_style) = self.hover_style.as_ref() {
+            if self.hover_style.is_some() {
                 let is_hovered = if let Some(hitbox) = hitbox {
                     !window.last_input_was_touch() && hitbox.is_hovered(window)
                 } else if let Some(element_state) = element_state.as_ref() {

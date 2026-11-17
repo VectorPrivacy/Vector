@@ -167,7 +167,8 @@ fn card(id: &'static str, body: impl IntoElement, on: &OnAct) -> AnyElement {
             .bg(ca(0, 0, 0, 0.85))
             .occlude()
             .on_click(move |_, w, cx| close(Act::Close, w, cx))
-            .child(
+            .child(crate::kit::pop(
+                "pop-dialog",
                 div()
                     .id(id)
                     .w_full()
@@ -188,7 +189,8 @@ fn card(id: &'static str, body: impl IntoElement, on: &OnAct) -> AnyElement {
                     // A click on the card stays in it.
                     .on_click(|_, _, cx| cx.stop_propagation())
                     .child(body),
-            ),
+                160,
+            )),
     )
     .with_priority(9)
     .into_any_element()

@@ -1354,25 +1354,13 @@ impl Render for LoginView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let wide = window.viewport_size().width >= px(900.);
         let vw = f32::from(window.viewport_size().width);
-        // `.lg-lockup`: min(429.72px, 100vw - 48px), height following.
-        let lock_w = 429.72f32.min(vw - 48.);
-        let lock_h = 44. * lock_w / 429.72;
+        let (lock_w, lock_h) = lockup_size(vw);
         // Under 640 the background toggle joins the footer's column, a grid row of its own.
         let stacked = vw <= 640.;
         let toggle_row = if stacked { 34. } else { 0. };
         let aggro = self.wrong.is_some();
         let stage = self.stage(window, cx);
         let account_list = self.account_list(51. + lock_h + 23. + 52., cx);
-        let link = |id: &'static str, label: &'static str, url: &'static str| {
-            div()
-                .id(id)
-                .cursor_pointer()
-                .text_color(c(PRIMARY))
-                .hover(|s| s.text_color(c(ACCENT)))
-                .on_click(move |_, _, cx| cx.open_url(url))
-                .child(kit::spaced(label, 0.8))
-        };
-        let sep = || kit::spaced("|", 0.8);
         let mut root = div()
             .size_full()
             .relative()
@@ -1380,35 +1368,14 @@ impl Render for LoginView {
             .text_color(c(0xffffff))
             .bg(c(APP_BG));
 
-        // .lg-art: the camera, faded out towards the centre.
+        // .lg-art: fades with the Background toggle.
         let fade = self.bg_flip.map_or(1., |t| (t.elapsed().as_secs_f32() / BG_FADE).min(1.));
         if fade < 1. {
             window.request_animation_frame();
         }
         let shown = if self.bg_hidden { 1. - kit::bezier(0.25, 0.1, 0.25, 1.)(fade) } else { kit::bezier(0.25, 0.1, 0.25, 1.)(fade) };
         if shown > 0. {
-            root = root.child(
-                div()
-                    .absolute()
-                    .inset_0()
-                    .overflow_hidden()
-                    .opacity(shown)
-                    .child(
-                        img("icons/login/cctv.png")
-                            .absolute()
-                            .left(gpui::relative(-0.0935))
-                            .top(gpui::relative(-0.1508))
-                            .w(gpui::relative(1.1679))
-                            .h(gpui::relative(1.1679))
-                            .object_fit(ObjectFit::Cover)
-                            .opacity(0.2),
-                    )
-                    .child(div().absolute().inset_0().bg(linear_gradient(
-                        90.,
-                        linear_color_stop(c(APP_BG), 0.5719),
-                        linear_color_stop(ca(3, 3, 3, 0.), 0.9156),
-                    ))),
-            );
+            root = root.child(art(shown));
         }
         if aggro {
             let face = |src: &'static str, l: f32, t: f32, w: f32, h: f32| {
@@ -1433,83 +1400,19 @@ impl Render for LoginView {
             );
         }
 
-        root.child(
-            // .lg-head
-            div().absolute().top(px(51.)).left_0().right_0().flex().justify_center().child(img("icons/login/lockup.svg").w(px(lock_w)).h(px(lock_h))),
-        )
+        root.child(head(lock_w, lock_h))
         .child(
             // .lg-stage: centred in the window.
             div().absolute().top_0().left_0().right_0().bottom(px(toggle_row)).flex().flex_col().items_center().justify_center().px(px(16.)).py(px(24.)).child(stage),
         )
-        .child(
-            // .lg-foot
-            div()
-                .absolute()
-                .bottom(px(if stacked { toggle_row + 6. } else { 25. }))
-                .left_0()
-                .right_0()
-                .flex()
-                .flex_col()
-                .items_center()
-                .gap(px(17.))
-                .child(
-                    div()
-                        .relative()
-                        .w(px(173.78))
-                        .h(px(10.47))
-                        .child(img("icons/login/credit-text.svg").size_full())
-                        .child(img("icons/login/credit-mark.svg").absolute().left(px(77.7)).top(px(-5.6)).w(px(13.16)).h(px(20.))),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(6.))
-                        .text_size(px(if wide { 12. } else { 8. }))
-                        .line_height(px(24.))
-                        .text_color(c(ICON_MUTED))
-                        .child(link("lk-web", "Website", "https://vectorapp.io"))
-                        .child(sep())
-                        .child(link("lk-docs", "Documentation", "https://docs.vectorapp.io"))
-                        .child(sep())
-                        .child(link("lk-privacy", "Privacy Policy", "https://vectorapp.io/privacy-policy"))
-                        .child(sep())
-                        .child(link("lk-donate", "Donate", "https://vector-privacy.gitbook.io/vector-privacy/vector-messenger/more/donations")),
-                ),
-        )
-        .child(
-            // .lg-bg-toggle
-            div()
-                .id("lg-bg-toggle")
-                .absolute()
-                .map(|d| if stacked { d.left(px((vw - 114.) / 2.)).bottom(px(10.)) } else { d.right(px(12.)).bottom(px(14.)) })
-                .w(px(114.))
-                .h(px(24.))
-                .p(px(4.))
-                .flex()
-                .items_center()
-                .gap(px(4.))
-                .text_size(px(8.))
-                .line_height(px(8.))
-                .text_color(c(CHROME_HELP))
-                .hover(|s| s.text_color(c(0x5b6060)))
-                .cursor_pointer()
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.bg_hidden = !this.bg_hidden;
-                    // A flip mid-fade turns back from where it stands.
-                    let left = this.bg_flip.map_or(0., |t| (1. - t.elapsed().as_secs_f32() / BG_FADE).max(0.));
-                    this.bg_flip = Some(Instant::now() - std::time::Duration::from_secs_f32(left * BG_FADE));
-                    cx.notify();
-                }))
-                .child(
-                    div().w(px(17.)).h(px(16.)).flex().items_center().child(if self.bg_hidden {
-                        img("icons/login/eye.svg").w(px(17.)).h(px(12.))
-                    } else {
-                        img("icons/login/hide.svg").w(px(17.)).h(px(16.))
-                    }),
-                )
-                .child(kit::spaced(if self.bg_hidden { "Show Background" } else { "Hide Background" }, 0.8)),
-        )
+        .child(foot(wide, stacked, toggle_row))
+        .child(bg_toggle(self.bg_hidden, stacked, vw).on_click(cx.listener(|this, _, _, cx| {
+            this.bg_hidden = !this.bg_hidden;
+            // A flip mid-fade turns back from where it stands.
+            let left = this.bg_flip.map_or(0., |t| (1. - t.elapsed().as_secs_f32() / BG_FADE).max(0.));
+            this.bg_flip = Some(Instant::now() - std::time::Duration::from_secs_f32(left * BG_FADE));
+            cx.notify();
+        })))
         .children(account_list)
         .children(self.net_modal(vw <= 480., cx))
         .children(self.signer_qr(cx))
@@ -1527,6 +1430,153 @@ impl Render for LoginView {
             }))
         })
     }
+}
+
+/// `.lg-lockup`: min(429.72px, 100vw - 48px), height following.
+fn lockup_size(vw: f32) -> (f32, f32) {
+    let w = 429.72f32.min(vw - 48.);
+    (w, 44. * w / 429.72)
+}
+
+/// `.lg-art`: the camera, faded out towards the centre.
+fn art(shown: f32) -> gpui::Div {
+    div()
+        .absolute()
+        .inset_0()
+        .overflow_hidden()
+        .opacity(shown)
+        .child(
+            img("icons/login/cctv.png")
+                .absolute()
+                .left(gpui::relative(-0.0935))
+                .top(gpui::relative(-0.1508))
+                .w(gpui::relative(1.1679))
+                .h(gpui::relative(1.1679))
+                .object_fit(ObjectFit::Cover)
+                .opacity(0.2),
+        )
+        .child(div().absolute().inset_0().bg(linear_gradient(
+            90.,
+            linear_color_stop(c(APP_BG), 0.5719),
+            linear_color_stop(ca(3, 3, 3, 0.), 0.9156),
+        )))
+}
+
+/// `.lg-head`
+fn head(lock_w: f32, lock_h: f32) -> gpui::Div {
+    div().absolute().top(px(51.)).left_0().right_0().flex().justify_center().child(img("icons/login/lockup.svg").w(px(lock_w)).h(px(lock_h)))
+}
+
+/// `.lg-foot`: the credits and links.
+fn foot(wide: bool, stacked: bool, toggle_row: f32) -> gpui::Div {
+    let link = |id: &'static str, label: &'static str, url: &'static str| {
+        div()
+            .id(id)
+            .cursor_pointer()
+            .text_color(c(PRIMARY))
+            .hover(|s| s.text_color(c(ACCENT)))
+            .on_click(move |_, _, cx| cx.open_url(url))
+            .child(kit::spaced(label, 0.8))
+    };
+    let sep = || kit::spaced("|", 0.8);
+    div()
+        .absolute()
+        .bottom(px(if stacked { toggle_row + 6. } else { 25. }))
+        .left_0()
+        .right_0()
+        .flex()
+        .flex_col()
+        .items_center()
+        .gap(px(17.))
+        .child(
+            div()
+                .relative()
+                .w(px(173.78))
+                .h(px(10.47))
+                .child(img("icons/login/credit-text.svg").size_full())
+                .child(img("icons/login/credit-mark.svg").absolute().left(px(77.7)).top(px(-5.6)).w(px(13.16)).h(px(20.))),
+        )
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(6.))
+                .text_size(px(if wide { 12. } else { 8. }))
+                .line_height(px(24.))
+                .text_color(c(ICON_MUTED))
+                .child(link("lk-web", "Website", "https://vectorapp.io"))
+                .child(sep())
+                .child(link("lk-docs", "Documentation", "https://docs.vectorapp.io"))
+                .child(sep())
+                .child(link("lk-privacy", "Privacy Policy", "https://vectorapp.io/privacy-policy"))
+                .child(sep())
+                .child(link("lk-donate", "Donate", "https://vector-privacy.gitbook.io/vector-privacy/vector-messenger/more/donations")),
+        )
+}
+
+/// `.lg-bg-toggle`
+fn bg_toggle(hidden: bool, stacked: bool, vw: f32) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id("lg-bg-toggle")
+        .absolute()
+        .map(|d| if stacked { d.left(px((vw - 114.) / 2.)).bottom(px(10.)) } else { d.right(px(12.)).bottom(px(14.)) })
+        .w(px(114.))
+        .h(px(24.))
+        .p(px(4.))
+        .flex()
+        .items_center()
+        .gap(px(4.))
+        .text_size(px(8.))
+        .line_height(px(8.))
+        .text_color(c(CHROME_HELP))
+        .hover(|s| s.text_color(c(0x5b6060)))
+        .cursor_pointer()
+        .child(div().w(px(17.)).h(px(16.)).flex().items_center().child(if hidden {
+            img("icons/login/eye.svg").w(px(17.)).h(px(12.))
+        } else {
+            img("icons/login/hide.svg").w(px(17.)).h(px(16.))
+        }))
+        .child(kit::spaced(if hidden { "Show Background" } else { "Hide Background" }, 0.8))
+}
+
+/// The login frame while the account is found on disk (`.lg-booting`): three dots that fade in
+/// after 0.35 s and pulse in turn.
+pub fn booting(since: Instant, window: &mut Window) -> AnyElement {
+    let vw = f32::from(window.viewport_size().width);
+    let wide = window.viewport_size().width >= px(900.);
+    let stacked = vw <= 640.;
+    let toggle_row = if stacked { 34. } else { 0. };
+    let (lock_w, lock_h) = lockup_size(vw);
+    let t = since.elapsed().as_secs_f32();
+    let ease = kit::bezier(0.25, 0.1, 0.25, 1.);
+    let swing = kit::bezier(0.42, 0., 0.58, 1.);
+    let shown = ease(((t - 0.35) / 0.4).clamp(0., 1.));
+    let dots = (shown > 0.).then(|| {
+        window.request_animation_frame();
+        div().flex().gap(px(8.)).opacity(shown).children([0., 0.15, 0.3].map(|delay: f32| {
+            // `lg-booting-pulse`: 0.2 → 0.9 at 40 %, back by 80 %, then rest.
+            let p = ((t - delay).max(0.) % 1.2) / 1.2;
+            let k = if p < 0.4 { swing(p / 0.4) } else if p < 0.8 { 1. - swing((p - 0.4) / 0.4) } else { 0. };
+            let size = 7. * (0.8 + 0.2 * k);
+            div().size(px(7.)).flex().items_center().justify_center().child(
+                div().size(px(size)).rounded_full().bg(c(PRIMARY)).opacity(0.2 + 0.7 * k),
+            )
+        }))
+    });
+    div()
+        .size_full()
+        .relative()
+        .font_family(RUBIK)
+        .text_color(c(0xffffff))
+        .bg(c(APP_BG))
+        .child(art(1.))
+        .child(head(lock_w, lock_h))
+        .child(
+            div().absolute().top_0().left_0().right_0().bottom(px(toggle_row)).flex().items_center().justify_center().children(dots),
+        )
+        .child(foot(wide, stacked, toggle_row))
+        .child(bg_toggle(false, stacked, vw))
+        .into_any_element()
 }
 
 impl Focusable for LoginView {

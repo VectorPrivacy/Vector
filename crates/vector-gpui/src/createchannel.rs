@@ -392,7 +392,7 @@ pub fn view(m: &CreateChannel, on: &OnAct, window: &Window, cx: &App) -> impl In
             .p(px(16.))
             .occlude()
             .on_click(move |_, w, cx| close(Act::Close, w, cx))
-            .child(card),
+            .child(crate::kit::pop("ccm-pop", card, 160)),
     )
     .with_priority(13)
 }

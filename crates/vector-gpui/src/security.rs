@@ -888,7 +888,7 @@ pub(crate) fn overlay(
             .justify_center()
             .bg(ca(0, 0, 0, 0.88))
             .occlude()
-            .child(card),
+            .child(crate::kit::pop("vcard-pop", card, 160)),
     )
     .with_priority(priority)
     .into_any_element()
@@ -913,7 +913,7 @@ pub(crate) fn overlay_dismiss(
             .bg(ca(0, 0, 0, 0.88))
             .occlude()
             .on_click(dismiss)
-            .child(card.on_click(|_, _, cx| cx.stop_propagation())),
+            .child(crate::kit::pop("vcard-pop", card.on_click(|_, _, cx| cx.stop_propagation()), 160)),
     )
     .with_priority(priority)
     .into_any_element()

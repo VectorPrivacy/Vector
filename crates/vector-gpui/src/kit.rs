@@ -598,6 +598,107 @@ pub fn popup(
     .into_any_element()
 }
 
+/// `qr-overlay-pop`: a modal card comes in over `ms` with CSS `ease-out`, fading `out` of the way
+/// as it closes. Tauri also grows it from 0.92, which a div can't.
+pub fn pop<E: Styled + IntoElement + 'static>(id: impl Into<ElementId>, el: E, ms: u64) -> gpui::AnimationElement<E> {
+    el.with_animation(
+        id,
+        gpui::Animation::new(std::time::Duration::from_millis(ms)).with_easing(bezier(0., 0., 0.58, 1.)),
+        |d, t| d.opacity(t),
+    )
+}
+
+/// `.closing`: a modal kept on screen from its last open state while it fades out over 0.15 s
+/// (`modal-overlay-fade-out`). Closing is seen at render, so every way out gets it.
+pub struct Linger<T> {
+    last: std::cell::RefCell<Option<T>>,
+    gone: std::cell::Cell<Option<std::time::Instant>>,
+}
+
+impl<T> Default for Linger<T> {
+    fn default() -> Self {
+        Self { last: Default::default(), gone: Default::default() }
+    }
+}
+
+impl<T: Clone> Linger<T> {
+    /// What to draw, and its opacity: 1 while open, falling to 0 once closed.
+    pub fn track(&self, live: Option<&T>, window: &mut Window) -> Option<(T, f32)> {
+        if let Some(v) = live {
+            *self.last.borrow_mut() = Some(v.clone());
+            self.gone.set(None);
+            return Some((v.clone(), 1.));
+        }
+        let last = self.last.borrow().clone()?;
+        let at = self.gone.get().unwrap_or_else(std::time::Instant::now);
+        self.gone.set(Some(at));
+        let t = at.elapsed().as_secs_f32() / 0.15;
+        if t >= 1. {
+            *self.last.borrow_mut() = None;
+            self.gone.set(None);
+            return None;
+        }
+        window.request_animation_frame();
+        Some((last, 1. - bezier(0., 0., 0.58, 1.)(t)))
+    }
+
+    /// True while a closed modal is still fading.
+    pub fn leaving(&self) -> bool {
+        self.gone.get().is_some()
+    }
+}
+
+impl<T> Linger<T> {
+    /// Fade out what was just closed, for state too large to copy every frame.
+    pub fn close(&self, gone: Option<T>) {
+        if let Some(v) = gone {
+            *self.last.borrow_mut() = Some(v);
+            self.gone.set(Some(std::time::Instant::now()));
+        }
+    }
+
+    /// Draw the closed state while it fades, with its opacity.
+    pub fn fading<R>(&self, window: &mut Window, draw: impl FnOnce(&T, f32, &mut Window) -> R) -> Option<R> {
+        let at = self.gone.get()?;
+        let t = at.elapsed().as_secs_f32() / 0.15;
+        if t >= 1. {
+            *self.last.borrow_mut() = None;
+            self.gone.set(None);
+            return None;
+        }
+        window.request_animation_frame();
+        let last = self.last.borrow();
+        Some(draw(last.as_ref()?, 1. - bezier(0., 0., 0.58, 1.)(t), window))
+    }
+}
+
+/// A fading modal's view, dimmed and kept from clicks.
+pub fn faded(view: impl IntoElement, shown: f32, priority: usize) -> AnyElement {
+    div()
+        .absolute()
+        .inset_0()
+        .opacity(shown)
+        .child(view)
+        .child(gpui::deferred(inert()).with_priority(priority + 1))
+        .into_any_element()
+}
+
+/// Over a fading modal: takes the clicks its buttons would, as `pointer-events: none` keeps them
+/// from a closing modal.
+pub fn inert() -> gpui::Div {
+    div().absolute().inset_0().occlude()
+}
+
+/// `.popup-container` once its popup is answered: the card goes at once, the dimming fades.
+pub fn popup_gone(gone: &Linger<()>, open: bool, window: &mut Window) -> Option<AnyElement> {
+    let (_, shown) = gone.track(open.then_some(&()), window)?;
+    (shown < 1.).then(|| {
+        gpui::deferred(div().absolute().inset_0().bg(ca(0, 0, 0, 0.85 * shown)).child(inert()))
+            .with_priority(15)
+            .into_any_element()
+    })
+}
+
 /// A hover label, where the web client sets a `title`.
 pub struct Tip(gpui::SharedString);
 

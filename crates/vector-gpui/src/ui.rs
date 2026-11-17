@@ -50,9 +50,20 @@ const ROW_PITCH: f32 = 54.;
 
 type Shared = Rc<RefCell<Store>>;
 
+#[derive(Default)]
+struct Fades {
+    status: kit::Linger<Entity<TextInput>>,
+    qr: kit::Linger<(std::sync::Arc<gpui::RenderImage>, gpui::FocusHandle)>,
+    ccm: kit::Linger<crate::createchannel::CreateChannel>,
+    moderation: kit::Linger<crate::moderation::Moderation>,
+    comm_settings: kit::Linger<crate::commsettings::CommSettings>,
+    invite_details: kit::Linger<String>,
+    popup: kit::Linger<()>,
+}
+
 enum Screen {
-    /// Finding the account on disk.
-    Booting,
+    /// Finding the account on disk, since then.
+    Booting(std::time::Instant),
     Login(Entity<LoginView>),
     Main,
 }
@@ -260,6 +271,8 @@ pub struct VectorApp {
     status: Option<Entity<TextInput>>,
     /// The QR overlay's code, and what holds focus while it shows.
     qr: Option<(std::sync::Arc<gpui::RenderImage>, gpui::FocusHandle)>,
+    /// Closed modals still fading out.
+    fades: Fades,
     switcher: Option<crate::switcher::Switcher>,
     /// The switcher rises from the rail's account chip (Main Menu off).
     switcher_up: bool,
@@ -1037,6 +1050,7 @@ impl VectorApp {
             toast: None,
             status: None,
             qr: None,
+            fades: Fades::default(),
             switcher: None,
             switcher_up: false,
             badge_card: None,
@@ -1316,7 +1330,7 @@ impl VectorApp {
         }
         // Fixtures: VECTOR_DOWNGRADE=<version> shows the takeover for an account that version wrote.
         if let Ok(v) = std::env::var("VECTOR_DOWNGRADE") {
-            app.screen = Screen::Booting;
+            app.screen = Screen::Booting(std::time::Instant::now());
             app.downgrade = Some(crate::downgrade::versions(&vector_core::db::DowngradeBlock { db_schema: 90, supported_schema: 87, last_app_version: Some(v) }));
         }
         // Fixtures: VECTOR_SETTINGS=<category> opens Settings there.
@@ -1813,7 +1827,7 @@ impl VectorApp {
             }
         })
         .detach();
-        app.screen = Screen::Booting;
+        app.screen = Screen::Booting(std::time::Instant::now());
         Self::start_sweeps(window, cx);
         cx.spawn_in(window, async move |this, cx| {
             while let Some(ev) = events.next().await {
@@ -2838,7 +2852,7 @@ impl VectorApp {
     fn reboot(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         crate::golinks::forget_all();
         let mut fresh = Self::base(Store::live(), true, window, cx);
-        fresh.screen = Screen::Booting;
+        fresh.screen = Screen::Booting(std::time::Instant::now());
         *self = fresh;
         self.probe(window, cx);
         cx.notify();
@@ -2887,7 +2901,7 @@ impl VectorApp {
             // A profile added over another account starts on a clean slate.
             if this.adding.take().is_some() {
                 let mut fresh = Self::base(Store::live(), true, window, cx);
-                fresh.screen = Screen::Booting;
+                fresh.screen = Screen::Booting(std::time::Instant::now());
                 *this = fresh;
             }
             this.logged_in(e.npub.clone(), window, cx)
@@ -6536,8 +6550,10 @@ impl Render for VectorApp {
             .text_size(px(16.))
             .line_height(px(24.));
         match &self.screen {
-            Screen::Booting => {
+            Screen::Booting(since) => {
+                let since = *since;
                 return root
+                    .when(self.downgrade.is_none(), |d| d.child(div().absolute().inset_0().child(crate::login::booting(since, window))))
                     .child(div().absolute().inset_0().child(chrome(window, true, false)))
                     .children(self.downgrade.as_ref().map(|(now, needs)| crate::downgrade::render(now, needs)));
             }
@@ -6593,13 +6609,14 @@ impl Render for VectorApp {
                 });
                 crate::netdialog::view(d, book, &on, window, cx)
             });
+        let popup_gone = kit::popup_gone(&self.fades.popup, self.popup.is_some(), window);
         let popup = self.popup.as_ref().map(|(p, _)| {
             let app = cx.entity().downgrade();
             kit::popup(p, move |yes, window, cx| {
                 app.update(cx, |app, cx| app.answer_popup(yes, window, cx))
                     .ok();
             })
-        });
+        }).or(popup_gone);
         let on_community: crate::community::OnAct = {
             let app = cx.entity().downgrade();
             Rc::new(move |act, window, cx| {
@@ -6821,7 +6838,7 @@ impl Render for VectorApp {
                     }),
             )
             .children(self.status_view(&store, window, cx))
-            .children(self.qr_view(cx))
+            .children(self.qr_view(window, cx))
             .children(self.qr_scanner_view(window, cx))
             .children(self.badge_card.as_ref().map(|card| {
                 if card.opened.elapsed().as_secs_f32() < 0.45 {
@@ -6976,12 +6993,12 @@ impl Render for VectorApp {
                     .flatten()
             })
             .children(
-                self.invite_details
-                    .as_ref()
-                    .and_then(|id| store.invites.iter().find(|i| &i.community_id == id))
-                    .map(|inv| {
+                self.fades.invite_details
+                    .track(self.invite_details.as_ref(), window)
+                    .and_then(|(id, shown)| store.invites.iter().find(|i| i.community_id == id).map(|inv| (inv, shown)))
+                    .map(|(inv, shown)| {
                         let (a, b) = (inv.community_id.clone(), inv.community_id.clone());
-                        crate::community::invite_details(
+                        let el = crate::community::invite_details(
                             &store,
                             inv,
                             Box::new(cx.listener(|app, _, _, cx| {
@@ -6994,7 +7011,8 @@ impl Render for VectorApp {
                             Box::new(cx.listener(move |app, _, window, cx| {
                                 app.answer_invite(b.clone(), false, window, cx)
                             })),
-                        )
+                        );
+                        if shown < 1. { kit::faded(el, shown, 13) } else { el.into_any_element() }
                     }),
             )
             .children(self.embed_modal.as_ref().map(|m| {
@@ -7035,7 +7053,13 @@ impl Render for VectorApp {
                     app.update(cx, |app, cx| app.on_comm_settings(act, window, cx))
                         .ok();
                 });
-                crate::commsettings::view(m, &store, compact, &on, cx)
+                crate::commsettings::view(m, &store, compact, &on, cx).into_any_element()
+            }).or_else(|| {
+                self.fades.comm_settings.fading(window, |m, shown, window| {
+                    let compact = f32::from(window.viewport_size().width) <= 760.;
+                    let on: crate::commsettings::OnAct = Rc::new(|_, _, _| {});
+                    kit::faded(crate::commsettings::view(m, &store, compact, &on, cx), shown, 12)
+                })
             }))
             .children(self.channel_editor.as_ref().map(|m| {
                 let app = cx.entity().downgrade();
@@ -7051,7 +7075,12 @@ impl Render for VectorApp {
                     app.update(cx, |app, cx| app.on_moderation(act, window, cx))
                         .ok();
                 });
-                crate::moderation::view(m, &store, f32::from(window.viewport_size().width), &on, cx)
+                crate::moderation::view(m, &store, f32::from(window.viewport_size().width), &on, cx).into_any_element()
+            }).or_else(|| {
+                self.fades.moderation.fading(window, |m, shown, window| {
+                    let on: crate::moderation::OnAct = Rc::new(|_, _, _| {});
+                    kit::faded(crate::moderation::view(m, &store, f32::from(window.viewport_size().width), &on, cx), shown, 12)
+                })
             }))
             .children(self.create_channel.as_ref().map(|m| {
                 let app = cx.entity().downgrade();
@@ -7059,7 +7088,12 @@ impl Render for VectorApp {
                     app.update(cx, |app, cx| app.on_create_channel(act, window, cx))
                         .ok();
                 });
-                crate::createchannel::view(m, &on, window, cx)
+                crate::createchannel::view(m, &on, window, cx).into_any_element()
+            }).or_else(|| {
+                self.fades.ccm.fading(window, |m, shown, window| {
+                    let on: crate::createchannel::OnAct = Rc::new(|_, _, _| {});
+                    kit::faded(crate::createchannel::view(m, &on, window, cx), shown, 13)
+                })
             }))
             .children(self.start.as_ref().map(|sm| {
                 let app = cx.entity().downgrade();
@@ -11721,7 +11755,7 @@ impl VectorApp {
             return;
         };
         match act {
-            Act::Close => self.create_channel = None,
+            Act::Close => self.fades.ccm.close(self.create_channel.take()),
             Act::Private => m.private = !m.private,
             Act::Voice(voice) => {
                 m.voice = voice;
@@ -11735,7 +11769,7 @@ impl VectorApp {
                 }
                 let name = m.name.read(cx).text().trim().to_string();
                 if !self.live {
-                    self.create_channel = None;
+                    self.fades.ccm.close(self.create_channel.take());
                     cx.notify();
                     return;
                 }
@@ -11765,7 +11799,7 @@ impl VectorApp {
                     this.update_in(cx, |this, window, cx| {
                         match result {
                             Ok(channel) => {
-                                this.create_channel = None;
+                                this.fades.ccm.close(this.create_channel.take());
                                 this.reload_communities(cx);
                                 if let Some(ch) = channel.filter(|_| !voice) {
                                     this.open_channel(ch, window, cx);
@@ -12965,7 +12999,7 @@ impl VectorApp {
                     })
                     .detach();
                 } else {
-                    self.comm_settings = None;
+                    self.fades.comm_settings.close(self.comm_settings.take());
                 }
             }
             Act::Section(id) => {
@@ -14939,7 +14973,10 @@ impl VectorApp {
         {
             return true;
         }
-        self.create_channel.take().is_some() || self.invite.take().is_some()
+        let ccm = self.create_channel.take();
+        let had = ccm.is_some();
+        self.fades.ccm.close(ccm);
+        had || self.invite.take().is_some()
     }
 
     /// Show `entity` in the expanded view, over whatever it shows now, once it resolves.
@@ -19295,10 +19332,10 @@ impl VectorApp {
     fn status_view(
         &self,
         store: &Store,
-        window: &Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        let input = self.status.clone()?;
+        let (input, shown) = self.fades.status.track(self.status.as_ref(), window)?;
         let panel = self.picker_open && self.picker_status;
         let raw = input.read(cx).text().to_string();
         let text = raw.trim().to_string();
@@ -19538,7 +19575,9 @@ impl VectorApp {
                             cx.notify();
                         }),
                     )
-                    .child(card)
+                    .opacity(shown)
+                    .child(kit::pop("status-dialog-pop", card, 160))
+                    .when(shown < 1., |d| d.child(kit::inert()))
                     .when(panel, |d| {
                         d.child(
                             div()
@@ -19567,8 +19606,8 @@ impl VectorApp {
 // ── #qr-overlay ─────────────────────────────────────────────────────────────────────────
 
 impl VectorApp {
-    fn qr_view(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let (image, focus) = self.qr.clone()?;
+    fn qr_view(&self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let ((image, focus), shown) = self.fades.qr.track(self.qr.as_ref(), window)?;
         let tile = (self.vw * 0.72).min(320.);
         let close = |app: &mut Self, cx: &mut Context<Self>| {
             app.qr = None;
@@ -19630,7 +19669,9 @@ impl VectorApp {
                         gpui::MouseButton::Left,
                         cx.listener(move |app, _, _, cx| close(app, cx)),
                     )
-                    .child(card),
+                    .opacity(shown)
+                    .child(kit::pop("qr-overlay-pop", card, 160))
+                    .when(shown < 1., |d| d.child(kit::inert())),
             )
             .with_priority(10)
             .into_any_element(),
@@ -20080,7 +20121,7 @@ impl VectorApp {
     pub(crate) fn dev_state(&self) -> serde_json::Value {
         let store = self.store.borrow();
         let screen = match &self.screen {
-            Screen::Booting => "booting",
+            Screen::Booting(_) => "booting",
             Screen::Login(_) => "login",
             Screen::Main => "main",
         };
