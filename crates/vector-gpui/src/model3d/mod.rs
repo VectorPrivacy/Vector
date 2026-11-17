@@ -284,6 +284,18 @@ mod tests {
             g.render(&model, &target, &shot).unwrap();
         }
         mark("90 frames");
+        // Long enough for any pool the first frames held, and the frame loop doesn't use, to drain.
+        if let Some(secs) = std::env::var("MODEL3D_SPIN").ok().and_then(|v| v.parse::<u64>().ok()) {
+            let until = std::time::Instant::now() + std::time::Duration::from_secs(secs);
+            let mut i = 0;
+            while std::time::Instant::now() < until {
+                shot.pivot = glam::Quat::from_rotation_y(i as f32 * 0.05);
+                g.render(&model, &target, &shot).unwrap();
+                std::thread::sleep(std::time::Duration::from_millis(33));
+                i += 1;
+            }
+            mark("spun");
+        }
         drop((target, model));
         mark("model dropped");
         drop(g);
