@@ -1317,6 +1317,7 @@ pub fn run() {
             commands::community::preview_public_invite,
             commands::community::accept_public_invite,
             commands::community::list_public_invites,
+            commands::community::sync_public_invites,
             commands::community::revoke_public_invite,
             commands::community::update_community_metadata,
             commands::community::set_community_voice_relays,

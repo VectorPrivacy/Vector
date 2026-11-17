@@ -482,8 +482,9 @@ function getMentionCandidates(includeSelf = false) {
         // Not always a participant of the chat it is in, and never an observed
         // sender in one nobody has spoken in yet.
         if (includeSelf && strPubkey) npubs.add(strPubkey);
+        const spoke = new Set(Object.keys(lastActive));
         if (isCommunity) {
-            for (const np of Object.keys(lastActive)) npubs.add(np);
+            for (const np of spoke) npubs.add(np);
             const communityId = chat.metadata?.custom_fields?.community_id;
             for (const m of communityMembersCache.get(communityId) || []) {
                 npubs.add(m.npub);
@@ -492,7 +493,10 @@ function getMentionCandidates(includeSelf = false) {
                 if (!lastActive[m.npub]) lastActive[m.npub] = (m.last_active || 0) * 1000;
             }
         }
+        // A private channel's ping reaches only who reads it: its readers, and anyone seen posting there.
+        const readers = isCommunity ? privateChannelReaders(chat) : null;
         const candidates = [...npubs]
+            .filter(npub => !readers || readers.has(npub) || spoke.has(npub) || npub === strPubkey)
             .filter(npub => npub && (includeSelf || npub !== strPubkey) && npub.startsWith('npub1'))
             .map(npub => {
                 const p = getProfile(npub);
@@ -538,6 +542,23 @@ function getMentionCandidates(includeSelf = false) {
             }
         }
         return candidates;
+}
+
+/** Who may read `chat` when it is a private channel, as the member list scopes it; null for a public one. */
+function privateChannelReaders(chat) {
+    const communityId = chat.metadata?.custom_fields?.community_id;
+    if (!communityId || !rosterChannelFor(communityId, chat.id)) return null;
+    const owner = chat.metadata?.custom_fields?.owner_npub;
+    const out = new Set(owner ? [owner] : []);
+    const graph = communityRoleGraphCache.get(communityId);
+    if (!graph) return out;
+    if (graph.activated) {
+        for (const npub of graph.readers?.[chat.id] || []) out.add(npub);
+        return out;
+    }
+    const access = new Set((graph.roles || []).filter((r) => r.channel_id === chat.id).map((r) => r.role_id));
+    for (const g of graph.grants || []) if (g.role_ids?.some((id) => access.has(id))) out.add(g.npub);
+    return out;
 }
 
 let mentionCtrl = null;

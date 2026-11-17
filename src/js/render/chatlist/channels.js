@@ -213,7 +213,8 @@ function standingRoleMentions(msg, chat) {
     const m = ids?.length && communityMentionsCache.get(communityIdOfChat(chat));
     if (!m) return [];
     const byAnyone = mayMentionEveryone(chat, msg.npub || (msg.mine ? strPubkey : ''));
-    return m.roles.filter(r => ids.includes(r.id) && (msg.content || '').includes('@' + r.name) && (r.mentionable || byAnyone));
+    const text = outsideCode(msg.content);
+    return m.roles.filter(r => ids.includes(r.id) && text.includes('@' + r.name) && (r.mentionable || byAnyone));
 }
 
 /** Whether `msg` pings me through a Role I hold. */
@@ -782,12 +783,14 @@ async function openCommunityMenu(chat, ev, at, { inList = false } = {}) {
         items.push({ divider: true });
         items.push(...await notifyMenuItems(cf.community_id, cf.community_id));
         if (inList) items.push(chatPinMenuItem(chat));
+        // Here as well as on the banner itself: a touch screen may offer no menu on the image.
         const banners = VectorSvelte.bannerState();
-        if (banners.src[cf.community_id] && banners.hidden.includes(cf.community_id)) {
+        if (banners.src[cf.community_id]) {
+            const hidden = banners.hidden.includes(cf.community_id);
             items.push({
-                label: 'Show Banner',
-                icon: 'eye',
-                onClick: () => setCommunityBannerHidden(cf.community_id, false),
+                label: hidden ? 'Show Banner' : 'Hide Banner',
+                icon: hidden ? 'eye' : 'eye-off',
+                onClick: () => setCommunityBannerHidden(cf.community_id, !hidden),
             });
         }
     }

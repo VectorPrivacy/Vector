@@ -2070,7 +2070,8 @@ pub async fn sync_communities_boot() -> Result<(), String> {
                     let cid = vector_core::simd::hex::bytes_to_hex_32(&ch.id.0);
                     let at = activity(&cid);
                     // Never below where the channel was last proven whole: that much is held.
-                    let since = (at > 0).then(|| (at / 1000).saturating_sub(VOLLEY_SINCE_SLACK_SECS).max(vector_core::history_gaps::proven(&cid).unwrap_or(0)));
+                    let proven = vector_core::history_gaps::proven(&cid, c.channel_secret(ch).1 .0);
+                    let since = (at > 0).then(|| (at / 1000).saturating_sub(VOLLEY_SINCE_SLACK_SECS).max(proven.unwrap_or(0)));
                     with_activity.push((
                         vector_core::community::v2::volley::PaintTarget {
                             community_id: vector_core::community::CommunityId(id.0),
@@ -2916,6 +2917,13 @@ pub async fn list_public_invites(
     community_id: String,
 ) -> Result<Vec<vector_core::db::community::PublicInviteRecord>, String> {
     vector_core::db::community::list_public_invites(&community_id)
+}
+
+/// Bring the user's public-invite links up to date with those minted or retired on their other
+/// devices. Whether the list changed.
+#[tauri::command]
+pub async fn sync_public_invites(community_id: String) -> Result<bool, String> {
+    vector_core::db::scoped(async move { vector_core::VectorCore.sync_public_invites(&community_id).await.map_err(|e| e.to_string()) }).await
 }
 
 /// Revoke a public-invite link: delete the bundle on the Community relays and forget the

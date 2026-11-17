@@ -463,6 +463,7 @@ pub async fn dispatch(cmd: &str, a: Args) -> Result<Value, String> {
         "check_community_raid" => core(VectorCore.check_community_raid(&a.str("communityId")?)),
         "list_community_invites" => to_value(db::community::list_pending_invites()?),
         "list_public_invites" => to_value(db::community::list_public_invites(&a.str("communityId")?)?),
+        "sync_public_invites" => core(VectorCore.sync_public_invites(&a.str("communityId")?).await),
         "sync_community_channel" => {
             cm::sync_community_channel(&a.str("channelId")?, a.de("beforeMs")?).await
         }

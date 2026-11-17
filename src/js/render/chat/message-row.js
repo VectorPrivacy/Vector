@@ -452,10 +452,11 @@ function _dmsgIsPinged(msg, currentChat, isGroupChat) {
     if (msg.mine) return false;
     // msg.mentions_me() is a Rust method that does not survive IPC; mentions are
     // stamped as `@npub1...` in the content, so a substring match is reliable.
-    const mentionedMe = strPubkey && msg.content && msg.content.includes('@' + strPubkey);
+    const text = outsideCode(msg.content);
+    const mentionedMe = strPubkey && text.includes('@' + strPubkey);
     const senderNpub = msg.npub || '';
     const senderIsAdmin = isGroupChat && mayMentionEveryone(currentChat, senderNpub);
-    const mentionedEveryone = senderIsAdmin && msg.content && /@everyone\b/.test(msg.content);
+    const mentionedEveryone = senderIsAdmin && /@everyone\b/.test(text);
     // A reply to one of my own messages is an implicit ping. Prefer the in-memory
     // target's `mine` flag (DMs don't populate replied_to_npub); fall back to the
     // backend-resolved reply author for history not held in memory.

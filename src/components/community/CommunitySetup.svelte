@@ -1,10 +1,9 @@
 <script>
-    // Create Community in three short steps: what it's called (with a live preview), who can
+    // Create Community in three short steps: what it's called and its icon, who can
     // join, then the way in, a link to share (Public) or friends to invite (Private). The
     // community exists from the end of step 2; step 3 only hands out access to it.
     import { ccState, ccSetSelected } from '../lib/createcommunity.svelte.js';
     import ContactPicker from '../people/ContactPicker.svelte';
-    import Avatar from '../ui/Avatar.svelte';
     import StageProgress from '../ui/StageProgress.svelte';
     import { fade } from 'svelte/transition';
     let { h } = $props();   // h: CreateGroupHelpers (js/create-community.js)
@@ -77,47 +76,20 @@
 
     {#if st.step === 1}
         <div class="cg-identity">
-            <div class="cg-identity-form">
-                <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-                <div class="create-group-avatar-picker" class:has-image={!!st.avatarPreview} title="Choose community icon" onclick={h.pickAvatar}>
-                    {#if st.avatarPreview}
-                        <img class="create-group-avatar-preview" src={st.avatarPreview} alt="">
-                    {:else}
-                        <img class="create-group-avatar-placeholder" src="icons/group-placeholder.svg" alt="">
-                    {/if}
+            <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+            <div class="create-group-avatar-picker cg-icon" class:has-image={!!st.avatarPreview} title="Choose community icon" aria-label="Choose community icon" onclick={h.pickAvatar}>
+                {#if st.avatarPreview}
+                    <img class="create-group-avatar-preview" src={st.avatarPreview} alt="">
                     <div class="create-group-avatar-edit"><span class="icon icon-plus-circle"></span></div>
-                </div>
-                <div class="cg-name-field">
-                    <input id="create-group-name" placeholder="Community Name" maxlength="32" class="chat-input-container chat-new-input" bind:value={st.name} bind:this={nameInput}
-                           onkeydown={(e) => { if (e.key === 'Enter') { e.preventDefault(); next(); } }}>
-                    <span class="cg-name-count">{st.name.length}/32</span>
-                </div>
+                {:else}
+                    <span class="icon icon-image"></span>
+                {/if}
             </div>
-            <!-- The channel pane's own classes, so the preview is how it will look. -->
-            <aside class="cg-preview" aria-hidden="true">
-                <span class="crop-preview-label">Preview</span>
-                <div class="crop-pane cg-preview-pane">
-                    <div class="crop-pane-surface">
-                        <div class="chatlist-community-head">
-                            <Avatar src={st.avatarPreview || null} size={36} group={true} class="chatlist-community-head-avatar" />
-                            <div class="chatlist-community-head-meta">
-                                <span class="chatlist-community-head-name cutoff">{st.name.trim() || 'Your Community'}</span>
-                                <span class="chatlist-community-head-members">
-                                    <span class="icon icon-users-multi chatlist-community-head-members-icon"></span>
-                                    <span>1 Member</span>
-                                </span>
-                            </div>
-                            <div class="chatlist-community-head-caret"><span class="icon icon-chevron-down"></span></div>
-                        </div>
-                        <div class="chatlist-channels chatlist-channels-pane cg-preview-channels">
-                            <div class="chatlist-channel active">
-                                <span class="chatlist-channel-hash"><span class="icon icon-channel-hash"></span></span>
-                                <span class="chatlist-channel-name cutoff">general</span>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            </aside>
+            <div class="cg-name-field">
+                <input id="create-group-name" placeholder="Community Name" maxlength="32" class="chat-input-container chat-new-input" bind:value={st.name} bind:this={nameInput}
+                       onkeydown={(e) => { if (e.key === 'Enter') { e.preventDefault(); next(); } }}>
+                {#if st.name.length >= 24}<span class="cg-name-count">{st.name.length}/32</span>{/if}
+            </div>
         </div>
     {:else if st.step === 2}
         <div class="cg-choices" role="radiogroup" aria-label="Who can join">

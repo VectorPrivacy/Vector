@@ -746,8 +746,20 @@ pub enum CatchUp {
     External,
 }
 
+/// A community image no edition names any more, off its media server. Only its uploader's delete
+/// is honoured there, so another admin's upload stays, encrypted, under a key only members held.
+fn drop_community_image(url: Option<String>, kept: Option<&str>) {
+    let Some(url) = url.filter(|u| Some(u.as_str()) != kept) else { return };
+    if let Ok(signer) = crate::signer::active_signer() {
+        crate::blossom::delete_blobs_best_effort(signer, vec![url]);
+    }
+}
+
 /// How many times a count-only backfill pages on from where the relay walk stopped.
 const BACKFILL_CONTINUATIONS: usize = 3;
+
+/// Epochs below the live one a catch-up with no proof reads.
+const UNPROVEN_EPOCHS: u64 = 2;
 
 /// What one catch-up page cost and what it yielded.
 ///
@@ -2500,6 +2512,14 @@ impl VectorCore {
         crate::db::community::list_public_invites(community_id).map_err(VectorError::Other)
     }
 
+    /// Bring [`list_public_invites`](Self::list_public_invites) up to date with the links this
+    /// account minted or retired on its other devices. Returns whether it changed.
+    pub async fn sync_public_invites(&self, community_id: &str) -> Result<bool> {
+        let held = Self::held_v2(community_id)?;
+        let transport = crate::community::transport::LiveTransport::with_timeout(std::time::Duration::from_secs(12));
+        crate::community::v2::service::adopt_invite_list(&transport, &held).await.map_err(VectorError::Other)
+    }
+
     /// Revoke a public invite link by its hex token. Retiring the LAST active link flips the Community to
     /// Private, which re-founds (rotates the base key + every channel key) to cut link-joined lurkers.
     /// Idempotent: a token this account doesn't hold is a no-op. Needs a local key when the revoke triggers
@@ -2957,13 +2977,14 @@ impl VectorCore {
     }
 
     /// Fill the hole in a channel's held history that a scroll up from `before_ms` is about to
-    /// cross, with the relay pages just below it. The count of messages that arrived; 0 when
+    /// cross, with the relay pages from its top down. The count of messages that arrived; 0 when
     /// there is no hole there, or the relays can't be reached (it stays for the next scroll).
     pub async fn fill_community_gap(&self, channel_id: &str, before_ms: u64) -> Result<usize> {
-        let before = before_ms / 1000;
-        if history_gaps::gap_at(channel_id, before).is_none() {
+        let Some(gap) = history_gaps::gap_at(channel_id, before_ms / 1000) else {
             return Ok(0);
-        }
+        };
+        // From the hole's top: a reader can step into it lower down, past rows it held.
+        let before = gap.hi + 1;
         let id = self.v2_community_for_channel(channel_id)?.ok_or_else(|| VectorError::Other("unknown community channel".into()))?;
         let count = Self::v2_backfill_channel_counted(
             &id, channel_id, 50, 2, None, Some(before),
@@ -4136,7 +4157,25 @@ impl VectorCore {
         let began = crate::clock::now_secs();
         let floor = crate::history_gaps::floor(channel_id, until, began);
         let reach = crate::history_gaps::reach(since, floor);
-        let Ok((page, next_before, complete)) = crate::community::v2::service::fetch_channel_history_paged(
+        let live = community.channel(&ch).map_or(community.root_epoch, |c| community.channel_secret(c).1);
+        // Epochs adopted since the proof are read whole. Unproven, the last few from the floor:
+        // a week rarely holds more rotations.
+        let past = until.is_none().then(|| match crate::history_gaps::proven_epoch(channel_id) {
+            Some(e) => (crate::community::Epoch(e), since),
+            None => (crate::community::Epoch(live.0.saturating_sub(UNPROVEN_EPOCHS)), reach),
+        });
+        // Published planes, and past epochs delivered read-only, that nothing here read: what they
+        // hold predates everything this device has, so they are read whole.
+        let unread: Vec<nostr_sdk::prelude::PublicKey> = match community.channel(&ch).filter(|_| until.is_none()) {
+            Some(c) => {
+                let read = crate::history_gaps::history_read(channel_id);
+                let cid_hex = crate::simd::hex::bytes_to_hex_32(&id.0);
+                let views = crate::db::community::history_views(&cid_hex, channel_id).unwrap_or_default().into_iter().filter_map(|(_, v)| nostr_sdk::prelude::PublicKey::from_slice(&v.address).ok());
+                c.published_history().into_iter().map(|(_, g)| g.pk()).chain(views).filter(|pk| !read.contains(&pk.to_hex())).collect()
+            }
+            None => Vec::new(),
+        };
+        let Ok((page, next_before, complete)) = crate::community::v2::service::fetch_channel_history_since_epoch(
             &transport,
             &community,
             &ch,
@@ -4160,6 +4199,8 @@ impl VectorCore {
                 held.fetch_add(skip.len(), std::sync::atomic::Ordering::Relaxed);
                 skip
             },
+            past,
+            &unread,
         )
         .await
         else {
@@ -4172,7 +4213,11 @@ impl VectorCore {
         // From the top, everything down to the floor is now read or in the ledger: proven once every
         // relay answered, so one that didn't is read from the old floor next time.
         if until.is_none() && since.is_none() && complete {
-            crate::history_gaps::prove(channel_id, began);
+            crate::history_gaps::prove(channel_id, began, live.0);
+        }
+        // Read to their end or to where an older page goes on from: either way, read.
+        if complete && !unread.is_empty() {
+            crate::history_gaps::mark_history_read(channel_id, unread.iter().map(|pk| pk.to_hex()));
         }
         (BackfillCount { fetched, new_messages, next_before, unreachable: false }, waiting)
     }
@@ -5130,15 +5175,7 @@ impl VectorCore {
         if private {
             return crate::community::v2::service::privatize_channel(&transport, &v2, &channel).await.map_err(VectorError::Other);
         }
-        let mut meta = v2.channel(&channel).ok_or_else(|| VectorError::Other("unknown channel".into()))?.metadata();
-        if !meta.private {
-            return Ok(());
-        }
-        // What only a Private Channel means goes with it.
-        meta.private = false;
-        meta.extra.remove("creator");
-        meta.extra.remove("public_until");
-        crate::community::v2::service::edit_channel_metadata(&transport, &v2, &channel, &meta).await.map_err(VectorError::Other)
+        crate::community::v2::service::publicize_channel(&transport, &v2, &channel).await.map_err(VectorError::Other)
     }
 
     /// Set exactly which Roles a member holds.
@@ -5150,7 +5187,7 @@ impl VectorCore {
         crate::community::v2::service::set_member_roles(&transport, &v2, &member, role_ids)
             .await
             .map_err(VectorError::Other)?;
-        Self::converge_v2_authority(&transport, community_id).await;
+        Self::converge_v2_authority_soon(community_id);
         Ok(())
     }
 
@@ -5170,7 +5207,7 @@ impl VectorCore {
         })
         .await
         .map_err(VectorError::Other)?;
-        Self::converge_v2_authority(&transport, community_id).await;
+        Self::converge_v2_authority_soon(community_id);
         Ok(())
     }
 
@@ -5218,6 +5255,23 @@ impl VectorCore {
             .filter_map(|g| PublicKey::from_hex(&g.member).ok().and_then(|pk| pk.to_bech32().ok()))
             .collect();
         Ok(serde_json::json!({ "owner": owner.to_bech32().ok(), "admins": admins }))
+    }
+
+    /// [`converge_v2_authority`](Self::converge_v2_authority) without holding the caller. A Role
+    /// change is in this device's own fold the moment it publishes, so the re-read only catches
+    /// what others changed meanwhile, and a bot handing out Roles answers as soon as the keys are out.
+    fn converge_v2_authority_soon(community_id: &str) {
+        let Some(id) = crate::simd::hex::hex_to_bytes_32_checked(community_id).map(crate::community::CommunityId) else { return };
+        // A listening client's worker runs the same re-read, one at a time however many ask.
+        if crate::community::v2::realtime::follow_worker_running() {
+            crate::community::v2::realtime::enqueue_follow(&id);
+            return;
+        }
+        let community_id = community_id.to_string();
+        crate::db::spawn_bound(async move {
+            let transport = crate::community::transport::LiveTransport::with_timeout(std::time::Duration::from_secs(12));
+            Self::converge_v2_authority(&transport, &community_id).await;
+        });
     }
 
     /// Fold the v2 control plane back in right after publishing an authority change, so the
@@ -5525,7 +5579,11 @@ impl VectorCore {
             .ok_or_else(|| VectorError::Other("v2 community not found".into()))?;
         crate::community::v2::service::dissolve_community(&transport, &community)
             .await
-            .map_err(VectorError::Other)
+            .map_err(VectorError::Other)?;
+        // Its icon and banner have nothing left to show on: off the media server too.
+        drop_community_image(community.icon.as_ref().map(|i| i.url.clone()), None);
+        drop_community_image(community.banner.as_ref().map(|i| i.url.clone()), community.icon.as_ref().map(|i| i.url.as_str()));
+        Ok(())
     }
 
     /// Edit community metadata (name / description) as an authorized member (MANAGE_METADATA). `None` leaves
@@ -5565,11 +5623,8 @@ impl VectorCore {
             .map_err(VectorError::Other)?
             .ok_or_else(|| VectorError::Other("v2 community not found".into()))?;
         let mut meta = community.metadata();
-        if is_banner {
-            meta.banner = None;
-        } else {
-            meta.icon = None;
-        }
+        let gone = if is_banner { meta.banner.take() } else { meta.icon.take() };
+        let kept = if is_banner { meta.icon.as_ref() } else { meta.banner.as_ref() }.map(|i| i.url.clone());
         let transport = LiveTransport::with_timeout(std::time::Duration::from_secs(12));
         crate::community::v2::service::edit_community_metadata(&transport, &community, &meta)
             .await
@@ -5578,6 +5633,7 @@ impl VectorCore {
         if !session.is_live() {
             return Err(VectorError::Other("account changed while removing the image".into()));
         }
+        drop_community_image(gone.map(|i| i.url), kept.as_deref());
         if let Some(updated) = crate::community::v2::service::persist_community_image(&cid, None, is_banner).await {
             self.register_v2_chats(&updated, &session).await;
         }
@@ -5653,11 +5709,8 @@ impl VectorCore {
             .map_err(VectorError::Db)?
             .ok_or_else(|| VectorError::NotFound("community".into()))?;
         let mut meta = community.metadata();
-        if is_banner {
-            meta.banner = Some(image.clone());
-        } else {
-            meta.icon = Some(image.clone());
-        }
+        let replaced = if is_banner { meta.banner.replace(image.clone()) } else { meta.icon.replace(image.clone()) };
+        let kept = if is_banner { meta.icon.as_ref() } else { meta.banner.as_ref() }.map(|i| i.url.clone());
         let transport = LiveTransport::with_timeout(std::time::Duration::from_secs(12));
         crate::community::v2::service::edit_community_metadata(&transport, &community, &meta)
             .await
@@ -5665,6 +5718,7 @@ impl VectorCore {
         if !session.is_live() {
             return Err(VectorError::Other("account changed while setting the image".into()));
         }
+        drop_community_image(replaced.map(|i| i.url).filter(|u| *u != url), kept.as_deref());
         if let Some(updated) = crate::community::v2::service::persist_community_image(&cid, Some(image), is_banner).await {
             self.register_v2_chats(&updated, &session).await;
         }
@@ -6266,9 +6320,7 @@ impl VectorCore {
                 let nostr_sdk::prelude::ClientNotification::Event { event, subscription_id, .. } = notification else { continue };
                 let route = if subscription_id == dm_sid {
                     LiveRoute::Dm
-                } else if community::v2::realtime::subscription_id().await.as_ref() == Some(&subscription_id)
-                    || community::v2::realtime::poolwide_subscription_id().await.as_ref() == Some(&subscription_id)
-                {
+                } else if community::v2::realtime::routes_live(&subscription_id) {
                     LiveRoute::CommunityV2
                 } else {
                     continue;
@@ -6435,6 +6487,11 @@ impl VectorCore {
 
         news::end();
         Ok(())
+    }
+
+    /// Owe this session's listener a replay of every live plane from `since_ms` on.
+    pub(crate) fn owe_live_replay(since_ms: u64) {
+        Self::owe_catch_up(false, false, [(EVERY_RELAY.to_string(), since_ms)]);
     }
 
     /// Owe this session's listener a catch-up: `communities` re-reads every Community, `dms`

@@ -1534,6 +1534,15 @@ async function processInlineImages(element) {
 }
 
 /** Build a clickable @name mention pill for an npub. */
+/**
+ * `text` with its code, fenced blocks and inline spans, blanked: a mention written as code is
+ * quoted, not made, so it pings nobody. A spoiler still pings, since it only hides the mention.
+ */
+function outsideCode(text) {
+    if (!text || !text.includes('`')) return text || '';
+    return text.replace(/(`+)(?!`)[\s\S]*?(?<!`)\1(?!`)/g, ' ');
+}
+
 function _buildMentionPill(npub, queueSync, communityId) {
     const profile = getProfile(npub);
     if (queueSync && !profile) {

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-sync-public-invites"
+description = "Enables the sync_public_invites command without any pre-configured scope."
+commands.allow = ["sync_public_invites"]
+
+[[permission]]
+identifier = "deny-sync-public-invites"
+description = "Denies the sync_public_invites command without any pre-configured scope."
+commands.deny = ["sync_public_invites"]

@@ -457,6 +457,15 @@ impl Ledger {
         retired.chain(live)
     }
 
+    /// The root epochs its live writer entries were minted under: what they carried is sealed
+    /// under each one's read key.
+    pub fn roots(&self) -> impl Iterator<Item = Epoch> + '_ {
+        self.entries.iter().filter_map(|e| match e.spell {
+            Spell::Writer { root, .. } => Some(root),
+            _ => None,
+        })
+    }
+
     /// When each writer address began, to bound what a read of it can hold.
     pub fn writer_start(&self, epoch: Epoch) -> Option<u64> {
         self.retired

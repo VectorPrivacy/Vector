@@ -19,7 +19,7 @@
 
     let { h } = $props();
     // h: mounted(els), searchInput(e), searchKeydown(e), setMode('emoji'|'gif'), railClick(e), railStop(),
-    //    mainClick(e), mainScroll(), gifClick(e), gifScroll(), kaomojiPick(face, e), islands (the grids' bag),
+    //    mainClick(e), mainScroll(), gifClick(e), gifMenu(e), gifScroll(), kaomojiPick(face, e), islands (the grids' bag),
     //    creator (the creator's bag), overlays (the overlays' bag)
 
     const st = pickerState();
@@ -95,7 +95,7 @@
 </div>
 <div class="gif-picker-content" style:display={p.mode === 'gif' ? 'flex' : 'none'}>
     <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-    <div class="gif-grid" id="gif-grid" use:tiling bind:this={gif} onclick={(e) => h.gifClick(e)} onscroll={() => h.gifScroll()}>
+    <div class="gif-grid" id="gif-grid" use:tiling bind:this={gif} onclick={(e) => h.gifClick(e)} oncontextmenu={(e) => h.gifMenu(e)} onscroll={() => h.gifScroll()}>
         {#if gif}<GifGrid grid={gif} h={h.islands} />{/if}
     </div>
 </div>

@@ -470,7 +470,7 @@ function showGifEmptyState(message) {
  * @param {string} gifId - The GIF ID
  */
 function selectGif(gifId) {
-    const gifUrl = `${GIF_API_BASE}/media/${gifId}/original.gif`;
+    const gifUrl = gifLink(gifId);
     const wasEmpty = !domChatMessageInput.value.trim();
 
     // Insert the GIF URL at cursor position (with auto-spacing)
@@ -495,6 +495,26 @@ function selectGif(gifId) {
     if (wasEmpty) {
         VectorSvelte.composerEls().send.click();
     }
+}
+
+/** The link a GIF is sent as. */
+function gifLink(gifId) {
+    return `${GIF_API_BASE}/media/${gifId}/original.gif`;
+}
+
+function _onGifGridContextMenu(e) {
+    const gifItem = e.target.closest('.gif-item');
+    if (!gifItem?.dataset.gifId) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const link = gifLink(gifItem.dataset.gifId);
+    showContextMenu({ x: e.clientX, y: e.clientY, items: [{
+        label: 'Copy Link',
+        icon: 'share',
+        onClick: () => navigator.clipboard.writeText(link)
+            .then(() => showToast('Copied Link'))
+            .catch(() => showToast('Failed to Copy')),
+    }] });
 }
 
 function _onGifGridClick(e) {
