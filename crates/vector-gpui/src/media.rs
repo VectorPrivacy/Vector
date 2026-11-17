@@ -183,6 +183,8 @@ pub struct Media {
     pub auto_download: AutoDownload,
     /// Nostr cards, by the references messages carry.
     pub embeds: crate::embeds::Cache,
+    /// Invite and Nostr cards seen resolving, so only a fresh resolve pops.
+    pub settle: crate::kit::Settle,
     /// Emoji packs shared in messages.
     pub packs: crate::packs::Cache,
     /// "Display Web Previews" turned off: no link or Nostr cards.

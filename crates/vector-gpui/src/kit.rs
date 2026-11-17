@@ -607,6 +607,42 @@ pub fn pop(id: impl Into<ElementId>, el: impl IntoElement, ms: u64) -> gpui::Ani
     )
 }
 
+/// `cic-pop-in`: a card that just resolved settles in from 0.97 with a little overshoot.
+pub fn settle_pop(id: impl Into<ElementId>, el: impl IntoElement) -> gpui::AnimationElement<gpui::Zoom> {
+    gpui::zoom(el).with_animation(
+        id,
+        gpui::Animation::new(std::time::Duration::from_millis(280)).with_easing(bezier(0.34, 1.56, 0.64, 1.)),
+        |z, t| z.scale(0.97 + 0.03 * t).opacity((0.6 + 0.4 * t).min(1.)),
+    )
+}
+
+/// Which async cards resolved on screen, so only a fresh resolve animates: one already
+/// settled when first drawn, or drawn again after scrolling away, fills in place.
+#[derive(Default)]
+pub struct Settle(std::collections::HashMap<String, Settled>);
+
+enum Settled {
+    Loading,
+    At(std::time::Instant),
+    Done,
+}
+
+impl Settle {
+    /// The card `key` is drawn, resolved or not: whether its entrance is still playing.
+    pub fn fresh(&mut self, key: &str, resolved: bool) -> bool {
+        let Some(seen) = self.0.get_mut(key) else {
+            self.0.insert(key.to_string(), if resolved { Settled::Done } else { Settled::Loading });
+            return false;
+        };
+        match seen {
+            Settled::Loading if resolved => *seen = Settled::At(std::time::Instant::now()),
+            Settled::At(at) if at.elapsed().as_millis() >= 300 => *seen = Settled::Done,
+            _ => {}
+        }
+        matches!(seen, Settled::At(_))
+    }
+}
+
 /// `.closing`: a modal kept on screen from its last open state while it fades out over 0.15 s
 /// (`modal-overlay-fade-out`). Closing is seen at render, so every way out gets it.
 pub struct Linger<T> {
@@ -696,6 +732,12 @@ pub fn popup_gone(gone: &Linger<()>, open: bool, window: &mut Window) -> Option<
             .with_priority(15)
             .into_any_element()
     })
+}
+
+/// CSS group opacity for a pane over the app background: the pane stays opaque and this cover
+/// fades off it, since GPUI's opacity reaches each layer apart and stacked fills bleed through.
+pub fn veil(shown: f32) -> Option<gpui::Div> {
+    (shown < 1.).then(|| div().absolute().inset_0().bg(c(APP_BG).opacity(1. - shown)))
 }
 
 /// A one-shot entrance (`revealPane`) for a surface that comes and goes: it plays when the

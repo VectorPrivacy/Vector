@@ -243,8 +243,9 @@ impl VectorApp {
             let on: crate::profile::OnAct = Rc::new(move |act, window, cx| {
                 app.update(cx, |app, cx| app.on_profile(act, window, cx)).ok();
             });
+            let fade = crate::kit::bezier(0., 0., 0.58, 1.)(self.profile_in.shown(0.4, window));
             let pane = crate::profile::pane(store, &self.media, p, &on, window, cx);
-            return screen(div().flex_1().min_h_0().flex().child(pane).into_any_element())
+            return screen(div().flex_1().min_h_0().flex().relative().child(pane).children(crate::kit::veil(fade)).into_any_element())
                 .child(self.slim_navbar(store, cx))
                 .into_any_element();
         }
@@ -256,12 +257,13 @@ impl VectorApp {
                 return view;
             }
             let back = cx.listener(|app, _: &gpui::ClickEvent, _, cx| app.slim_back(cx));
-            let anim = SharedString::from(format!("slim-chat-in-{id}"));
+            let t = crate::kit::bezier(0.22, 1., 0.36, 1.)(self.chat_in.shown(0.28, window));
             return div()
                 .flex_1()
                 .min_h_0()
                 .w_full()
                 .relative()
+                .left(px(width * 0.35 * (1. - t)))
                 .flex()
                 .child(self.chat_cached(id, cx))
                 .child(
@@ -279,11 +281,7 @@ impl VectorApp {
                         .on_click(back)
                         .child(svg().path("icons/chevron-double-left.svg").size(px(30.)).text_color(c(ACCENT))),
                 )
-                .with_animation(
-                    anim,
-                    gpui::Animation::new(std::time::Duration::from_millis(280)).with_easing(crate::kit::bezier(0.22, 1., 0.36, 1.)),
-                    move |d, t| d.left(px(width * 0.35 * (1. - t))).opacity(0.4 + 0.6 * t),
-                )
+                .children(crate::kit::veil(0.4 + 0.6 * t))
                 .into_any_element();
         }
         let header = self.slim_header(store, window, cx);
@@ -304,7 +302,11 @@ impl VectorApp {
                     .with_animation(
                         SharedString::from(format!("slim-drawer-in-{key}")),
                         gpui::Animation::new(std::time::Duration::from_millis(260)).with_easing(crate::kit::bezier(0.22, 1., 0.36, 1.)),
-                        move |d, t| d.relative().left(px(-width * 0.2 * (1. - t))).opacity(0.5 + 0.5 * t),
+                        move |d, t| {
+                            d.relative()
+                                .left(px(-width * 0.2 * (1. - t)))
+                                .children(crate::kit::veil(0.5 + 0.5 * t))
+                        },
                     )
                     .into_any_element();
             };

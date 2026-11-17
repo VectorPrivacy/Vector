@@ -37,11 +37,16 @@ impl VectorApp {
                 let (h, top) = bar.thumb();
                 // On the thumb: hold it where it was taken. On the track: centre it under the pointer.
                 bar.grab = if bar.on_thumb(y) { y - top } else { h / 2. };
+                bar.sought = y;
                 let p = bar.at(y, bar.grab);
                 self.bar_seek(p, false, cx);
             }
             Ev::Move(y) => {
                 if bar.dragging {
+                    if (y - bar.sought).abs() < 0.5 {
+                        return;
+                    }
+                    bar.sought = y;
                     let p = bar.at(y, bar.grab);
                     self.bar_seek(p, false, cx);
                 } else {

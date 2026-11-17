@@ -44,7 +44,7 @@ pub(crate) fn list_w() -> f32 {
 }
 /// `wsClampListWidth`: a width restored from a bigger monitor can't crush the conversation.
 fn clamp_list_w(want: f32, vw: f32, rail: f32) -> f32 {
-    want.min(480.).min((vw - rail - 380.).max(200.)).max(200.).round()
+    want.min(240.).min((vw - rail - 380.).max(200.)).max(200.).round()
 }
 const ROW_PITCH: f32 = 54.;
 
@@ -6842,7 +6842,7 @@ impl Render for VectorApp {
                                 let t = self.profile_in.shown(0.4, window);
                                 let el = crate::profile::pane(&store, &self.media, p, &on, window, cx);
                                 let fade = kit::bezier(0., 0., 0.58, 1.)(t);
-                                div().flex_1().min_w_0().h_full().flex().opacity(fade).child(el).into_any_element()
+                                div().flex_1().min_w_0().h_full().flex().relative().child(el).children(kit::veil(fade)).into_any_element()
                             }
                             (None, Some(id)) => {
                                 let t = self.chat_in.shown(0.25, window);
@@ -6868,7 +6868,7 @@ impl Render for VectorApp {
                                 None => self.chat_cached(id, cx),
                             };
                                 let fade = kit::bezier(0.46, 0.03, 0.52, 0.96)(t);
-                                div().flex_1().min_w_0().h_full().flex().opacity(fade).child(el).into_any_element()
+                                div().flex_1().min_w_0().h_full().flex().relative().child(el).children(kit::veil(fade)).into_any_element()
                             }
                             (None, None) => empty_pane(self.viktor.clone()).into_any_element(),
                         })

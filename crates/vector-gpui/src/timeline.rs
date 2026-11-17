@@ -1833,7 +1833,7 @@ fn invite_card(ctx: &Ctx, m: &Message, key: String) -> AnyElement {
             })
             .child(if joined.is_some() { "Open" } else { "Join" })
     });
-    div()
+    let card = div()
         .mt(px(8.))
         .max_w(px(446.))
         .p(px(12.))
@@ -1909,8 +1909,13 @@ fn invite_card(ctx: &Ctx, m: &Message, key: String) -> AnyElement {
                         }),
                 )
                 .children(button),
-        )
-        .into_any_element()
+        );
+    let fresh = ctx.media.borrow_mut().settle.fresh(&format!("cic-{key}"), state.is_some());
+    if fresh && ready {
+        crate::kit::settle_pop(SharedString::from(format!("cic-pop-{}-{key}", m.id)), card).into_any_element()
+    } else {
+        card.into_any_element()
+    }
 }
 
 /// `PivxBubble`: the amount, its fiat line, and the claim state the balance check settles.

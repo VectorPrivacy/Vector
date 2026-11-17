@@ -31,6 +31,8 @@ pub struct Bar {
     pub dragging: bool,
     /// The pointer's offset into the thumb while dragging.
     pub grab: f32,
+    /// Where the drag last sought: a held button repeats its last move every frame.
+    pub sought: f32,
     /// The pointer's place on the track while it's over it.
     pub hover: Option<f32>,
     /// The date at the place last pointed at, and at the top of the view.

@@ -858,7 +858,12 @@ fn card(ctx: &Ctx, m: &Message, r: &Ref) -> AnyElement {
                 .children(ext),
         );
     }
-    col.into_any_element()
+    let resolved = !matches!(state, State::Loading);
+    if ctx.media.borrow_mut().settle.fresh(&key, resolved) && matches!(state, State::Ready(_)) {
+        crate::kit::settle_pop(SharedString::from(format!("{key}-pop")), col).into_any_element()
+    } else {
+        col.into_any_element()
+    }
 }
 
 fn title(t: String) -> gpui::Div {
