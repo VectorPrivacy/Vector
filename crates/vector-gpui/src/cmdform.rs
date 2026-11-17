@@ -211,7 +211,8 @@ impl CommandForm {
     }
 
     fn on_enter(&mut self, i: usize, window: &mut Window, cx: &mut Context<Self>) {
-        if i + 1 == self.parts.len() {
+        let m = window.modifiers();
+        if i + 1 == self.parts.len() || m.control || m.platform {
             self.submit(window, cx);
         } else {
             self.focus(i + 1, false, window, cx);
@@ -303,7 +304,9 @@ impl CommandForm {
                     return self.focus(i - 1, true, window, cx);
                 }
             }
-            "enter" if i + 1 == self.parts.len() => return self.submit(window, cx),
+            "enter" if i + 1 == self.parts.len() || e.keystroke.modifiers.control || e.keystroke.modifiers.platform => {
+                return self.submit(window, cx);
+            }
             "enter" | "right" if i + 1 < self.parts.len() => return self.focus(i + 1, false, window, cx),
             "left" if i > 0 => return self.focus(i - 1, true, window, cx),
             "escape" => return cx.emit(Event::Exit),

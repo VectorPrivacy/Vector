@@ -6342,7 +6342,13 @@ impl Render for VectorApp {
                     cx.stop_propagation();
                     return;
                 }
-                if e.keystroke.key == "escape" && (app.escape_overlay() || app.nexus_escape(window, cx)) {
+                if app.popup_key(e, window, cx) {
+                    cx.stop_propagation();
+                    return;
+                }
+                if e.keystroke.key == "escape"
+                    && (app.escape_overlay() || app.escape_panel(window, cx) || app.nexus_escape(window, cx))
+                {
                     cx.stop_propagation();
                     cx.notify();
                 }
@@ -14527,6 +14533,53 @@ impl VectorApp {
     }
 
     /// Escape closes the topmost light overlay; true when it did.
+    /// Enter confirms an open popup and Escape dismisses it; a popup with a field leaves both to it.
+    fn popup_key(&mut self, e: &gpui::KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let Some((p, _)) = self.popup.as_ref() else { return false };
+        if p.input.is_some() || e.keystroke.modifiers.modified() {
+            return false;
+        }
+        let yes = match e.keystroke.key.as_str() {
+            "enter" => true,
+            "escape" => p.cancel.is_none(),
+            _ => return false,
+        };
+        self.answer_popup(yes, window, cx);
+        true
+    }
+
+    /// The full-pane overlays that close on Escape, each through its own Close so a busy or
+    /// unsaved one can refuse.
+    fn escape_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if self.menu.is_some() {
+            return false;
+        }
+        if self.badge_card.take().is_some() {
+            return true;
+        }
+        if self.settings.as_ref().is_some_and(|s| s.dialog.is_some()) {
+            self.on_net(crate::netdialog::Act::Close, window, cx);
+            return true;
+        }
+        if self.moderation.is_some() {
+            self.on_moderation(crate::moderation::Act::Close, window, cx);
+            return true;
+        }
+        if self.comm_settings.is_some() {
+            self.on_comm_settings(crate::commsettings::Act::Close, window, cx);
+            return true;
+        }
+        if self.switcher.is_some() {
+            self.close_switcher(cx);
+            return true;
+        }
+        if self.start.as_ref().is_some_and(|s| !s.search.focus_handle(cx).is_focused(window)) {
+            self.start_escape(window, cx);
+            return true;
+        }
+        false
+    }
+
     fn escape_overlay(&mut self) -> bool {
         if let Some(mut s) = self.scanner.take() {
             self.retired_frames.extend(s.frame.take());
