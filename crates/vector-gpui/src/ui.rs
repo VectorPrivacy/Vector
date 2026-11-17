@@ -259,6 +259,8 @@ pub struct VectorApp {
     /// The QR overlay's code, and what holds focus while it shows.
     qr: Option<(std::sync::Arc<gpui::RenderImage>, gpui::FocusHandle)>,
     switcher: Option<crate::switcher::Switcher>,
+    /// The switcher rises from the rail's account chip (Main Menu off).
+    switcher_up: bool,
     badge_card: Option<crate::badgecard::Card>,
     new_chat: Option<crate::newchat::NewChat>,
     create_community: Option<crate::createcommunity::CreateCommunity>,
@@ -1030,6 +1032,7 @@ impl VectorApp {
             status: None,
             qr: None,
             switcher: None,
+            switcher_up: false,
             badge_card: None,
             new_chat: None,
             create_community: None,
@@ -2311,6 +2314,12 @@ impl VectorApp {
             }
             "settings" => self.open_settings("appearance", window, cx),
             "miniapps" => self.show_nexus(None, window, cx),
+            "switch" if self.switcher.is_some() => self.close_switcher(cx),
+            "switch" => {
+                self.switcher_up = true;
+                self.open_switcher(cx);
+            }
+            "status" => self.open_status(window, cx),
             _ => {}
         }
         cx.notify();
@@ -6640,7 +6649,17 @@ impl Render for VectorApp {
                 let vp = window.viewport_size();
                 let hang = self.profile.is_none();
                 let (top, left) = if hang { (CHROME_H + 52., 8.) } else { (CHROME_H + 60., 0.) };
-                crate::switcher::view(s, top, left, (f32::from(vp.width), f32::from(vp.height)), hang, &on)
+                let anchor = if hang { crate::switcher::Anchor::Hang } else { crate::switcher::Anchor::Under };
+                crate::switcher::view(s, top, left, (f32::from(vp.width), f32::from(vp.height)), anchor, &on)
+            }))
+            .children(self.switcher.as_ref().filter(|_| self.switcher_up && self.profile.is_none() && !slim).map(|s| {
+                let app = cx.entity().downgrade();
+                let on: crate::switcher::OnAct = Rc::new(move |act, window, cx| {
+                    app.update(cx, |app, cx| app.on_switcher(act, window, cx)).ok();
+                });
+                let vp = window.viewport_size();
+                // `innerHeight - chip.top + 6`: the chip is 54px under 8px of padding.
+                crate::switcher::view(s, 0., 8., (f32::from(vp.width), f32::from(vp.height)), crate::switcher::Anchor::Up(8. + 54. + 6.), &on)
             }))
             .children(
                 self.switcher
@@ -6657,7 +6676,7 @@ impl Render for VectorApp {
                             CHROME_H + 60.,
                             rail_mode.width() + list_w(),
                             (f32::from(window.viewport_size().width), f32::from(window.viewport_size().height)),
-                            false,
+                            crate::switcher::Anchor::Under,
                             &on,
                         )
                     }),
@@ -7524,6 +7543,8 @@ fn rail(
         None => Rc::new(on_me),
     };
     let (on_me1, on_me2) = (on_me.clone(), on_me);
+    // Without the Main Menu the row's parts each go somewhere, as `AccountRow` in Tauri.
+    let parts = navbar.as_ref().map(|n| n.on.clone());
     let me = store.me();
     let my_name = me.map(|p| store.name(&p.id)).unwrap_or_default();
     let status = me.map(|p| p.status.title.clone()).filter(|t| !t.is_empty());
@@ -7630,6 +7651,7 @@ fn rail(
                     .motion_host()
                     .cursor_pointer()
                     .on_click(move |e, w, cx| on_me2(e, w, cx))
+                    .group("ws-rail-account")
                     .h(px(54.))
                     .rounded(px(12.))
                     .bg(c(RAIL_TILE))
@@ -7637,7 +7659,17 @@ fn rail(
                     .items_center()
                     .px(px(9.))
                     .gap(px(10.))
-                    .child(avatar(store, &store.my_npub, 38.))
+                    .child(match parts.clone() {
+                        Some(on) => div()
+                            .id("account-avatar-container")
+                            .on_click(move |_, w, cx| {
+                                cx.stop_propagation();
+                                on("switch", w, cx);
+                            })
+                            .child(avatar(store, &store.my_npub, 38.))
+                            .into_any_element(),
+                        None => avatar(store, &store.my_npub, 38.).into_any_element(),
+                    })
                     .child(
                         div()
                             .flex_1()
@@ -7655,6 +7687,13 @@ fn rail(
                             )
                             .child(
                                 div()
+                                    .id("account-status")
+                                    .when_some(parts.clone(), |d, on| {
+                                        d.on_click(move |_, w, cx| {
+                                            cx.stop_propagation();
+                                            on("status", w, cx);
+                                        })
+                                    })
                                     .mt(px(1.5))
                                     .truncate()
                                     .text_size(px(12.))
@@ -7671,7 +7710,29 @@ fn rail(
                                         None => "Set a Status".into_any_element(),
                                     }),
                             ),
-                    ),
+                    )
+                    .when_some(parts, |d, on| {
+                        d.child(
+                            div()
+                                .id("ws-account-caret")
+                                .tip("Switch account")
+                                .ml(px(-6.))
+                                .p(px(4.))
+                                .flex_none()
+                                .on_click(move |_, w, cx| {
+                                    cx.stop_propagation();
+                                    on("switch", w, cx);
+                                })
+                                .child(
+                                    svg()
+                                        .path("ui/caret-down.svg")
+                                        .w(px(10.))
+                                        .h(px(6.))
+                                        .text_color(white_a(0.4))
+                                        .group_hover("ws-rail-account", |s| s.text_color(white_a(0.75))),
+                                ),
+                        )
+                    }),
             ),
         ))
 }
@@ -18356,7 +18417,7 @@ impl VectorApp {
         let editing = self.switcher.as_ref().is_some_and(|s| s.editing);
         match self.profile.as_mut() {
             Some(p) => p.switcher = Some(editing),
-            None if !self.is_slim => return,
+            None if !self.is_slim && !self.switcher_up => return,
             None => {}
         }
         self.switcher = Some(crate::switcher::Switcher {
@@ -18370,6 +18431,7 @@ impl VectorApp {
 
     fn close_switcher(&mut self, cx: &mut Context<Self>) {
         self.switcher = None;
+        self.switcher_up = false;
         if let Some(p) = self.profile.as_mut() {
             p.switcher = None;
         }

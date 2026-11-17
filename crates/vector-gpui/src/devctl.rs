@@ -19,6 +19,7 @@
 //! - `dev:drag:<x1>,<y1>,<x2>,<y2>`: press at the first point, move with the button held, release at the second
 //! - `dev:drop:<channel|category>:<id>:<before|after|into>:<target id>`: a sidebar drop, as a drag lands it
 //! - `dev:leave`: the pointer leaves the window, as the platform reports it
+//! - `dev:device:<key>=<value>`: set a device preference (`ws_nav=navbar` turns the Main Menu off)
 //! - `dev:wheel:<x>,<y>,<dy>[,<n>]`: scroll what is under the point (positive is down), `n` times in one gesture, a final `1` landing a finger first
 //! - `dev:chatlist`: the chat list's scroll position and the archive row's state
 //! - `dev:type:<text>`: type into whatever has focus
@@ -161,6 +162,12 @@ pub fn run(app: &mut VectorApp, cmd: &str, window: &mut Window, cx: &mut Context
         }
         "pin" => app.dev_pin(rest, window, cx),
         "raise" => window.activate_window(),
+        "device" => {
+            if let Some((key, value)) = rest.split_once('=') {
+                crate::backend::device::set(key, value);
+                cx.notify();
+            }
+        }
         "unread" => {
             if let Some((chat, msg)) = rest.split_once(':') {
                 app.dev_mark_unread(chat.to_string(), msg.to_string(), cx);

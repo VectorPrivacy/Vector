@@ -37,6 +37,16 @@ pub enum Act {
 
 pub type OnAct = Rc<dyn Fn(Act, &mut Window, &mut App)>;
 
+#[derive(Clone, Copy, PartialEq)]
+pub enum Anchor {
+    /// Under the Profile header, over a dimmed backdrop.
+    Under,
+    /// `.cc-dropdown`: hanging from the slim header's avatar.
+    Hang,
+    /// `.ws-dropup`: rising from the rail's account chip, its bottom edge this far up.
+    Up(f32),
+}
+
 fn on_click(
     on: &OnAct,
     act: impl Fn() -> Act + 'static,
@@ -48,16 +58,17 @@ fn on_click(
     }
 }
 
-fn row(s: &Switcher, r: &Row, last: bool, on: &OnAct) -> AnyElement {
+fn row(s: &Switcher, r: &Row, last: bool, compact: bool, on: &OnAct) -> AnyElement {
     let active = r.npub == s.active;
+    let face = if compact { 24. } else { 28. };
     let avatar = match &r.avatar {
         Some(path) => img(path.clone()).object_fit(gpui::ObjectFit::Cover)
-            .size(px(28.))
+            .size(px(face))
             .rounded_full()
             .flex_shrink_0()
             .into_any_element(),
         None => img("icons/user-placeholder.svg")
-            .size(px(28.))
+            .size(px(face))
             .rounded_full()
             .flex_shrink_0()
             .into_any_element(),
@@ -67,8 +78,8 @@ fn row(s: &Switcher, r: &Row, last: bool, on: &OnAct) -> AnyElement {
         .id(SharedString::from(format!("switcher-{}", r.npub)))
         .flex()
         .items_center()
-        .gap(px(12.))
-        .px(px(18.))
+        .gap(px(if compact { 10. } else { 12. }))
+        .px(px(if compact { 10. } else { 18. }))
         .py(px(6.))
         .when(!last, |d| d.border_b_1().border_color(white_a(0.04)))
         .when(!active, |d| {
@@ -100,7 +111,7 @@ fn row(s: &Switcher, r: &Row, last: bool, on: &OnAct) -> AnyElement {
                         .text_color(c(0xf7f4f4))
                         .child(r.name.clone().unwrap_or_else(|| "Unnamed".into())),
                 )
-                .child(
+                .when(!compact, |d| d.child(
                     div()
                         .flex_1()
                         .min_w_0()
@@ -111,7 +122,7 @@ fn row(s: &Switcher, r: &Row, last: bool, on: &OnAct) -> AnyElement {
                         .line_height(px(24.))
                         .text_color(white_a(0.4))
                         .child(r.npub.clone()),
-                ),
+                )),
         )
         .when(s.editing, |d| {
             let npub = r.npub.clone();
@@ -136,8 +147,10 @@ fn row(s: &Switcher, r: &Row, last: bool, on: &OnAct) -> AnyElement {
 }
 
 /// The backdrop and the panel, over the column at `left` below a header ending at `top`.
-/// `viewport` is (width, height); `hang` drops it from the slim header's avatar.
-pub fn view(s: &Switcher, top: f32, left: f32, viewport: (f32, f32), hang: bool, on: &OnAct) -> AnyElement {
+/// `viewport` is (width, height).
+pub fn view(s: &Switcher, top: f32, left: f32, viewport: (f32, f32), anchor: Anchor, on: &OnAct) -> AnyElement {
+    let compact = matches!(anchor, Anchor::Up(_));
+    let hang = anchor != Anchor::Under;
     let close = {
         let on = on.clone();
         move |_: &gpui::MouseDownEvent, w: &mut Window, cx: &mut App| on(Act::Close, w, cx)
@@ -194,11 +207,20 @@ pub fn view(s: &Switcher, top: f32, left: f32, viewport: (f32, f32), hang: bool,
                 .flex_1()
                 .min_h_0()
                 .overflow_y_scroll()
-                .children(s.rows.iter().enumerate().map(|(i, r)| row(s, r, i + 1 == count, on))),
+                .children(s.rows.iter().enumerate().map(|(i, r)| row(s, r, i + 1 == count, compact, on))),
         )
         .children(add);
-    let panel = if hang {
-        // `.cc-dropdown`: a menu hanging from the avatar, not a takeover of the list.
+    let panel = if let Anchor::Up(bottom) = anchor {
+        panel
+            .absolute()
+            .bottom(px(bottom))
+            .left(px(left))
+            .w(px(crate::ui::RAIL_W - 1. - 16.))
+            .max_h(px((viewport.1 * 0.5).min(420.)))
+            .bg(c(0x161616))
+            .border_1()
+            .rounded(px(12.))
+    } else if hang {
         panel
             .absolute()
             .top(px(top))
@@ -218,19 +240,25 @@ pub fn view(s: &Switcher, top: f32, left: f32, viewport: (f32, f32), hang: bool,
             .border_r_1()
             .border_b_1()
             .rounded_b(px(12.))
-    }
-    .with_animation(
-        "profile-switcher-in",
-        gpui::Animation::new(std::time::Duration::from_millis(140)).with_easing(gpui::ease_out_quint()),
-        |d, t| d.opacity(t).mt(px(-6. * (1. - t))),
-    );
-    let backdrop = div().absolute().left(px(left)).right_0().bottom_0().on_mouse_down(MouseButton::Left, close);
+    };
+    let panel = if compact {
+        panel.into_any_element()
+    } else {
+        panel
+            .with_animation(
+                "profile-switcher-in",
+                gpui::Animation::new(std::time::Duration::from_millis(140)).with_easing(gpui::ease_out_quint()),
+                |d, t| d.opacity(t).mt(px(-6. * (1. - t))),
+            )
+            .into_any_element()
+    };
+    let backdrop = div().absolute().left(px(left)).right_0().bottom_0().occlude().on_mouse_down(MouseButton::Left, close);
     div()
         .absolute()
         .inset_0()
         .child(if hang { backdrop.top_0().left_0() } else { backdrop.top(px(top)).bg(gpui::black().opacity(0.45)) })
         .child(if hang {
-            panel.into_any_element()
+            panel
         } else {
             div().absolute().top(px(top)).left(px(left)).right_0().flex().justify_center().child(panel).into_any_element()
         })
