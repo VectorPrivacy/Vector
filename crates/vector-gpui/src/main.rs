@@ -258,6 +258,7 @@ fn main() {
                     ..Default::default()
                 },
                 |window, cx| {
+                    window.set_window_title("Vector");
                     chrome::hide_native_controls(window);
                     cx.new(|cx| match (fixtures, events) {
                         (Some((store, open)), _) => {

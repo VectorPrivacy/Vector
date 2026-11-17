@@ -1929,6 +1929,13 @@ pub struct Div {
 }
 
 impl Div {
+    /// What assistive technology reads for this element's text, in place of the
+    /// pieces it is drawn in (letters spaced apart one by one, say).
+    pub fn spoken(mut self, text: impl Into<SharedString>) -> Self {
+        self.interactivity.aria.spoken = Some(text.into());
+        self
+    }
+
     /// Add a listener to be called when the children of this `Div` are prepainted.
     /// This allows you to store the [`Bounds`] of the children for later use.
     pub fn on_children_prepainted(
@@ -2141,6 +2148,7 @@ impl Element for Div {
             scroll_handle.scroll_to_active_item();
         }
 
+        let spoken_text = self.interactivity.aria.spoken.clone();
         self.interactivity.prepaint(
             global_id,
             inspector_id,
@@ -2155,6 +2163,15 @@ impl Element for Div {
                     return hitbox;
                 }
 
+                let spoken = window.a11y.is_active()
+                    && match spoken_text {
+                        Some(text) => {
+                            crate::window::a11y::report_text(window, &text, bounds);
+                            window.a11y.nodes.hold_text();
+                            true
+                        }
+                        None => false,
+                    };
                 window.with_image_cache(image_cache, |window| {
                     window.with_element_offset(scroll_offset, |window| {
                         if let Some(order_fn) = &self.prepaint_order_fn {
@@ -2168,6 +2185,9 @@ impl Element for Div {
                             for child in &mut self.children {
                                 child.prepaint(window, cx);
                             }
+                        }
+                        if spoken {
+                            window.a11y.nodes.resume_text();
                         }
                     });
 
@@ -2236,6 +2256,8 @@ impl Element for Div {
 
 #[derive(Default)]
 pub(crate) struct AriaProperties {
+    /// Read in place of the text inside, which is drawn in pieces.
+    pub(crate) spoken: Option<SharedString>,
     pub(crate) author_id: Option<SharedString>,
     pub(crate) label: Option<SharedString>,
     pub(crate) description: Option<SharedString>,

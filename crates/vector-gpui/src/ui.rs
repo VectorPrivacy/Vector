@@ -14593,6 +14593,12 @@ impl VectorApp {
         if self.badge_card.take().is_some() {
             return true;
         }
+        if let Some(s) = self.settings.as_mut()
+            && s.open_select.take().is_some()
+        {
+            cx.notify();
+            return true;
+        }
         if self.settings.as_ref().is_some_and(|s| s.dialog.is_some()) {
             self.on_net(crate::netdialog::Act::Close, window, cx);
             return true;

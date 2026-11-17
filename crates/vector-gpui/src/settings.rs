@@ -1127,6 +1127,9 @@ fn theme_picker(s: &Settings, on: &OnAct) -> AnyElement {
         });
     let button = div()
         .id("theme-picker")
+        .role(gpui::Role::ComboBox)
+        .aria_expanded(open)
+        .aria_value(current.label)
         .flex()
         .items_center()
         .gap(px(8.))
@@ -1177,6 +1180,9 @@ fn theme_picker(s: &Settings, on: &OnAct) -> AnyElement {
             list = list.child(
                 div()
                     .id(t.value)
+                    .role(gpui::Role::ListBoxOption)
+                    .aria_label(t.label)
+                    .aria_selected(selected)
                     .flex()
                     .items_center()
                     .gap(px(8.))

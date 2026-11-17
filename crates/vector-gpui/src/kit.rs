@@ -10,7 +10,7 @@ use crate::theme::*;
 /// Text with CSS `letter-spacing`: GPUI has none, so each grapheme is laid out on its own,
 /// with the spacing after it as CSS adds it (trailing included).
 pub fn spaced(text: impl AsRef<str>, spacing: f32) -> gpui::Div {
-    let mut row = div().flex().flex_row().flex_shrink_0();
+    let mut row = div().flex().flex_row().flex_shrink_0().spoken(SharedString::from(text.as_ref().to_string()));
     for g in text.as_ref().graphemes(true) {
         let g = if g == " " { "\u{00a0}" } else { g };
         row = row.child(
@@ -44,7 +44,7 @@ pub fn gradient_text_in(text: &str, spacing: f32, phase: f32, from: gpui::Hsla, 
     let count = text.graphemes(true).count().max(1) as f32;
     // background-position swings 0% → 100% → 0%: the visible half of the 200% strip slides.
     let swing = 0.5 - 0.5 * (phase * std::f32::consts::TAU).cos();
-    let mut row = div().flex().flex_row().flex_shrink_0();
+    let mut row = div().flex().flex_row().flex_shrink_0().spoken(SharedString::from(text.to_string()));
     for (i, g) in text.graphemes(true).enumerate() {
         let x = (i as f32 + 0.5) / count;
         // Position on the 200%-wide strip: the element shows [swing*0.5, swing*0.5 + 0.5].
@@ -121,6 +121,9 @@ pub fn select_with(
     );
     let button = div()
         .id(id.into())
+        .role(gpui::Role::ComboBox)
+        .aria_expanded(open)
+        .aria_value(label)
         .flex()
         .items_center()
         .gap(px(8.))
@@ -179,6 +182,9 @@ pub fn select_with(
             list = list.child(
                 div()
                     .id(choice.value)
+                    .role(gpui::Role::ListBoxOption)
+                    .aria_label(choice.label)
+                    .aria_selected(selected)
                     .flex()
                     .items_center()
                     .gap(px(8.))
@@ -816,6 +822,7 @@ pub fn context_menu(
     let on_slide = std::rc::Rc::new(on_slide);
     let mut list = div()
         .id("context-menu")
+        .role(gpui::Role::Menu)
         .min_w(px(160.))
         .max_w(px(320.))
         .bg(c(0x1e1e1e))
@@ -893,6 +900,9 @@ pub fn context_menu(
         list = list.child(
             div()
                 .id(("ctx", ix))
+                .role(if item.checked { gpui::Role::MenuItemCheckBox } else { gpui::Role::MenuItem })
+                .when(item.checked, |d| d.aria_toggled(gpui::Toggled::True))
+                .when(item.kind == MenuKind::Sub, |d| d.aria_expanded(false))
                 .flex()
                 .items_center()
                 .when(!back && swatch.is_none() && !lead, |d| d.justify_between().gap(px(12.)))

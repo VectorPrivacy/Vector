@@ -421,6 +421,8 @@ pub(crate) struct A11yNodeBuilder {
     active_descendant: Option<NodeId>,
     /// Per open node, what has been added under it so far.
     frames: SmallVec<[Frame; 16]>,
+    /// Inside an element that reports its text whole: its pieces go unreported.
+    held_text: u32,
     #[cfg(debug_assertions)]
     node_info: FxHashMap<NodeId, debug::NodeDebugInfo>,
 }
@@ -435,6 +437,7 @@ impl A11yNodeBuilder {
             focus: None,
             active_descendant: None,
             frames: SmallVec::new(),
+            held_text: 0,
             #[cfg(debug_assertions)]
             node_info: FxHashMap::default(),
         }
@@ -468,9 +471,9 @@ impl A11yNodeBuilder {
             return false;
         }
 
-        // A switch takes its name from the text just before it, as an HTML label would.
+        // A switch or picker takes its name from the text just before it, as an HTML label would.
         let mut node = node;
-        if matches!(node.role(), accesskit::Role::Switch | accesskit::Role::CheckBox)
+        if matches!(node.role(), accesskit::Role::Switch | accesskit::Role::CheckBox | accesskit::Role::ComboBox)
             && node.label().is_none()
             && let Some(text) = self.frames.last().and_then(|f| f.last_text.clone())
         {
@@ -484,6 +487,14 @@ impl A11yNodeBuilder {
         self.nodes_stack.push(node);
         self.frames.push(Frame::default());
         true
+    }
+
+    pub(crate) fn hold_text(&mut self) {
+        self.held_text += 1;
+    }
+
+    pub(crate) fn resume_text(&mut self) {
+        self.held_text = self.held_text.saturating_sub(1);
     }
 
     pub(crate) fn mark_inferred(&mut self) {
@@ -506,7 +517,7 @@ impl A11yNodeBuilder {
     /// a node that already carries its own value (a `Label`) is skipped.
     pub(crate) fn push_text(&mut self, text: &str, bounds: accesskit::Rect) {
         let Some(parent) = self.nodes_stack.last() else { return };
-        if parent.role() == accesskit::Role::Label || text.trim().is_empty() {
+        if self.held_text > 0 || parent.role() == accesskit::Role::Label || text.trim().is_empty() {
             return;
         }
         let Some(&parent_id) = self.ids_stack.last() else { return };
@@ -583,6 +594,7 @@ impl A11yNodeBuilder {
         self.nodes_stack.push(root_node);
         self.frames.clear();
         self.frames.push(Frame::default());
+        self.held_text = 0;
         self.focus = None;
         self.active_descendant = None;
     }
