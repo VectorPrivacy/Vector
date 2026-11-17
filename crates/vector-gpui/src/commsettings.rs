@@ -7,7 +7,7 @@ use std::collections::HashSet;
 use std::rc::Rc;
 
 use gpui::prelude::*;
-use gpui::{AnyElement, App, Entity, FontWeight, ScrollHandle, SharedString, Window, div, px, svg};
+use gpui::{AnimationExt as _, AnyElement, App, Entity, FontWeight, ScrollHandle, SharedString, Window, div, px, svg};
 use crate::pic::img;
 
 use crate::composer::TextInput;
@@ -1503,6 +1503,14 @@ fn save_bar(m: &CommSettings, on: &OnAct, cx: &App) -> Option<AnyElement> {
             ],
         )
     };
+    // `cs-shake`, from the refusal that lit the warning.
+    let shaken = m.warn_until.filter(|_| warn).map(|t| {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        t.hash(&mut h);
+        let key = h.finish();
+        (SharedString::from(format!("cs-shake-{key}")), t)
+    });
     Some(
         div()
             .absolute()
@@ -1514,6 +1522,7 @@ fn save_bar(m: &CommSettings, on: &OnAct, cx: &App) -> Option<AnyElement> {
             .px(px(22.))
             .child(
                 div()
+                    .relative()
                     .w_full()
                     .max_w(px(600.))
                     .flex()
@@ -1550,10 +1559,33 @@ fn save_bar(m: &CommSettings, on: &OnAct, cx: &App) -> Option<AnyElement> {
                             })
                             .child(text),
                     )
-                    .child(div().flex().gap(px(6.)).children(actions)),
+                    .child(div().flex().gap(px(6.)).children(actions))
+                    .map(|bar| match shaken {
+                        Some((id, _)) => bar
+                            .with_animation(id, gpui::Animation::new(std::time::Duration::from_millis(420)), |d, t| {
+                                d.left(px(shake(t)))
+                            })
+                            .into_any_element(),
+                        None => bar.into_any_element(),
+                    }),
             )
+            // `.cs-savebar.visible`: up from below its own height, the fade quicker than the rise.
+            .with_animation("cs-bar-in", gpui::Animation::new(std::time::Duration::from_millis(320)), |d, t| {
+                let rise = crate::kit::bezier(0.22, 1., 0.36, 1.)(t);
+                let fade = crate::kit::bezier(0.25, 0.1, 0.25, 1.)((t * 1.6).min(1.));
+                d.relative().top(px(78. * (1. - rise))).opacity(fade)
+            })
             .into_any_element(),
     )
+}
+
+/// `cs-shake`'s offset at `t` of its run, each step eased on its own as CSS keyframes are.
+fn shake(t: f32) -> f32 {
+    const STOPS: [f32; 11] = [0., -1., 3., -5., 5., -5., 5., -5., 3., -1., 0.];
+    let at = (t * 10.).min(9.999);
+    let i = at as usize;
+    let k = crate::kit::bezier(0.36, 0.07, 0.19, 0.97)(at - i as f32);
+    STOPS[i] + (STOPS[i + 1] - STOPS[i]) * k
 }
 
 pub(crate) fn text_btn(
