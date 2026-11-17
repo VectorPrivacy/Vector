@@ -598,13 +598,12 @@ pub fn popup(
     .into_any_element()
 }
 
-/// `qr-overlay-pop`: a modal card comes in over `ms` with CSS `ease-out`, fading `out` of the way
-/// as it closes. Tauri also grows it from 0.92, which a div can't.
-pub fn pop<E: Styled + IntoElement + 'static>(id: impl Into<ElementId>, el: E, ms: u64) -> gpui::AnimationElement<E> {
-    el.with_animation(
+/// `qr-overlay-pop`: a modal card grows from 0.92 and fades in over `ms` with CSS `ease-out`.
+pub fn pop(id: impl Into<ElementId>, el: impl IntoElement, ms: u64) -> gpui::AnimationElement<gpui::Zoom> {
+    gpui::zoom(el).with_animation(
         id,
         gpui::Animation::new(std::time::Duration::from_millis(ms)).with_easing(bezier(0., 0., 0.58, 1.)),
-        |d, t| d.opacity(t),
+        |z, t| z.scale(0.92 + 0.08 * t).opacity(t),
     )
 }
 

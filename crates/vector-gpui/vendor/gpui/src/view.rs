@@ -1,7 +1,7 @@
 use crate::{
     AnyElement, AnyEntity, AnyWeakEntity, App, AvailableSpace, Bounds, ContentMask, Context,
     Element, ElementId, Entity, EntityId, GlobalElementId, InspectorElementId, IntoElement,
-    LayoutId, PaintIndex, Pixels, PrepaintStateIndex, Render, RenderOnce, Size, Style,
+    LayoutId, PaintIndex, Pixels, Point, PrepaintStateIndex, Render, RenderOnce, Size, Style,
     StyleRefinement, TextStyle, WeakEntity,
 };
 use crate::{Empty, Window};
@@ -326,6 +326,7 @@ struct ViewElementCacheKey {
     content_mask: ContentMask<Pixels>,
     text_style: TextStyle,
     opacity: f32,
+    zoom: Option<(Point<Pixels>, f32)>,
 }
 
 #[cfg(not(gpui_hot_reload))]
@@ -538,6 +539,7 @@ fn prepaint_view(
                 let content_mask = window.content_mask();
                 let text_style = window.text_style();
                 let opacity = window.element_opacity();
+                let zoom = window.element_zoom;
 
                 // Opacity is compared by bits so that a NaN opacity still matches itself
                 // and the view keeps using its cache.
@@ -546,6 +548,7 @@ fn prepaint_view(
                     && element_state.cache_key.content_mask == content_mask
                     && element_state.cache_key.text_style == text_style
                     && element_state.cache_key.opacity.to_bits() == opacity.to_bits()
+                    && element_state.cache_key.zoom == zoom
                     && !window.dirty_views.contains(&entity_id)
                     && !window.refreshing
                 {
@@ -582,6 +585,7 @@ fn prepaint_view(
                             content_mask,
                             text_style,
                             opacity,
+                            zoom,
                         },
                     },
                 )

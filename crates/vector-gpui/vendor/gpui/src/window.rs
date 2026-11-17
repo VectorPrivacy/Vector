@@ -274,6 +274,11 @@ impl WindowInvalidator {
     }
 
     #[track_caller]
+    pub fn painting(&self) -> bool {
+        matches!(self.inner.borrow().draw_phase, DrawPhase::Paint)
+    }
+
+    #[track_caller]
     pub fn debug_assert_paint(&self) {
         debug_assert!(
             matches!(self.inner.borrow().draw_phase, DrawPhase::Paint),
@@ -1031,6 +1036,7 @@ pub(crate) struct DeferredDraw {
     rem_size: Pixels,
     /// The opacity around the deferral point, as CSS opacity reaches every descendant.
     opacity: f32,
+    zoom: Option<(Point<Pixels>, f32)>,
     element: Option<AnyElement>,
     absolute_offset: Point<Pixels>,
     prepaint_range: Range<PrepaintStateIndex>,
@@ -1269,6 +1275,8 @@ pub struct Window {
     pub(crate) rendered_entity_stack: Vec<EntityId>,
     pub(crate) element_offset_stack: Vec<Point<Pixels>>,
     pub(crate) element_opacity: f32,
+    /// A scaled subtree's map, `p -> a + p * k` in window points, composed with any outer one.
+    pub(crate) element_zoom: Option<(Point<Pixels>, f32)>,
     pub(crate) content_mask_stack: Vec<ContentMask<Pixels>>,
     pub(crate) requested_autoscroll: Option<Bounds<Pixels>>,
     /// The [`TextInputConfiguration`] most recently forwarded to the platform
@@ -2409,6 +2417,7 @@ impl Window {
             element_offset_stack: Vec::new(),
             content_mask_stack: Vec::new(),
             element_opacity: 1.0,
+            element_zoom: None,
             requested_autoscroll: None,
             last_text_input_configuration: None,
             focused_text_input: None,
@@ -4198,7 +4207,7 @@ impl Window {
             traversal_order.sort_by_key(|ix| self.next_frame.deferred_draws[*ix].priority);
 
             for deferred_draw_ix in traversal_order {
-                let (element, parent_node, current_view, rem_size, absolute_offset, prepaint_range, opacity) = {
+                let (element, parent_node, current_view, rem_size, absolute_offset, prepaint_range, opacity, zoom) = {
                     let deferred_draw = &mut self.next_frame.deferred_draws[deferred_draw_ix];
                     self.element_id_stack
                         .clone_from(&deferred_draw.element_id_stack);
@@ -4212,6 +4221,7 @@ impl Window {
                         deferred_draw.absolute_offset,
                         deferred_draw.prepaint_range.clone(),
                         deferred_draw.opacity,
+                        deferred_draw.zoom,
                     )
                 };
                 self.next_frame.dispatch_tree.set_active_node(parent_node);
@@ -4223,7 +4233,9 @@ impl Window {
                             window.with_rem_size(Some(rem_size), |window| {
                                 window.with_absolute_element_offset(absolute_offset, |window| {
                                     let opacity = (opacity < 1.).then_some(opacity);
-                                    window.with_element_opacity(opacity, |window| element.prepaint(window, cx));
+                                    window.with_zoom_state(zoom, |window| {
+                                        window.with_element_opacity(opacity, |window| element.prepaint(window, cx))
+                                    });
                                 });
                             });
                         });
@@ -4278,7 +4290,9 @@ impl Window {
                         window.with_content_mask(content_mask, |window| {
                             window.with_rem_size(Some(deferred_draw.rem_size), |window| {
                                 let opacity = (deferred_draw.opacity < 1.).then_some(deferred_draw.opacity);
-                                window.with_element_opacity(opacity, |window| element.paint(window, cx));
+                                window.with_zoom_state(deferred_draw.zoom, |window| {
+                                    window.with_element_opacity(opacity, |window| element.paint(window, cx))
+                                });
                             });
                         })
                     })
@@ -4355,6 +4369,7 @@ impl Window {
                     content_mask: deferred_draw.content_mask,
                     rem_size: deferred_draw.rem_size,
                     opacity: deferred_draw.opacity,
+                    zoom: deferred_draw.zoom,
                     priority: deferred_draw.priority,
                     element: None,
                     absolute_offset: deferred_draw.absolute_offset,
@@ -4493,7 +4508,13 @@ impl Window {
         f: impl FnOnce(&mut Self) -> R,
     ) -> R {
         self.invalidator.debug_assert_paint_or_prepaint();
-        if let Some(mask) = mask {
+        if let Some(mut mask) = mask {
+            if let Some((a, k)) = self.element_zoom
+                && self.invalidator.painting()
+            {
+                let b = mask.bounds;
+                mask.bounds = Bounds { origin: point(a.x + b.origin.x * k, a.y + b.origin.y * k), size: size(b.size.width * k, b.size.height * k) };
+            }
             let mask = mask.intersect(&self.content_mask());
             self.content_mask_stack.push(mask);
             let result = f(self);
@@ -4533,6 +4554,28 @@ impl Window {
         self.element_offset_stack.push(offset);
         let result = f(self);
         self.element_offset_stack.pop();
+        result
+    }
+
+    /// Draw `f` scaled by `scale` about `pivot` (CSS `transform: scale()`): painting only, layout and
+    /// hit testing keep the unscaled boxes.
+    pub fn with_element_zoom<R>(&mut self, pivot: Point<Pixels>, scale: f32, f: impl FnOnce(&mut Self) -> R) -> R {
+        if scale == 1. {
+            return f(self);
+        }
+        let (a, k) = self.element_zoom.unwrap_or((Point::default(), 1.));
+        let zoom = (point(a.x + pivot.x * (k * (1. - scale)), a.y + pivot.y * (k * (1. - scale))), k * scale);
+        self.with_zoom_state(Some(zoom), f)
+    }
+
+    fn with_zoom_state<R>(&mut self, zoom: Option<(Point<Pixels>, f32)>, f: impl FnOnce(&mut Self) -> R) -> R {
+        let previous = std::mem::replace(&mut self.element_zoom, zoom);
+        let sf = self.scale_factor();
+        let device = zoom.map(|(a, k)| (a.scale(sf), k));
+        let previous_device = std::mem::replace(&mut self.next_frame.scene.zoom, device);
+        let result = f(self);
+        self.next_frame.scene.zoom = previous_device;
+        self.element_zoom = previous;
         result
     }
 
@@ -4845,6 +4888,7 @@ impl Window {
             content_mask,
             rem_size: self.rem_size(),
             opacity: self.element_opacity,
+            zoom: self.element_zoom,
             priority,
             element: Some(element),
             absolute_offset,
@@ -5027,7 +5071,8 @@ impl Window {
             border_style: quad.border_style,
         };
 
-        if !quad.background.is_transparent() {
+        // A zoomed quad's strips would clip to unzoomed bounds.
+        if !quad.background.is_transparent() || self.next_frame.scene.zoom.is_some() {
             self.next_frame.scene.insert_primitive(quad);
             return;
         }

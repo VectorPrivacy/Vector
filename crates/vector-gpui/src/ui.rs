@@ -120,6 +120,8 @@ pub struct VectorApp {
     msg_cursor: Option<String>,
     timeline_focus: gpui::FocusHandle,
     timeline_focused: bool,
+    /// The cursor ring shows only once the keyboard drives the timeline (`:focus-visible`).
+    timeline_ring: bool,
     syncing: bool,
     /// Spoilers revealed, by message.
     revealed: Rc<RefCell<HashMap<String, HashSet<u32>>>>,
@@ -969,6 +971,7 @@ impl VectorApp {
             msg_cursor: None,
             timeline_focus: cx.focus_handle().tab_stop(true),
             timeline_focused: false,
+            timeline_ring: false,
             syncing: false,
             revealed: Rc::default(),
             timeout_expiry: None,
@@ -6271,6 +6274,7 @@ impl VectorApp {
             _ => None,
         };
         if let Some(to) = to {
+            self.timeline_ring = true;
             self.msg_cursor = Some(rows[to].1.clone());
             self.timeline.scroll_to_reveal_item(rows[to].0);
             crate::pane::notify(&self.panes.timeline, cx);
@@ -6353,6 +6357,7 @@ impl Render for VectorApp {
         let focused = self.timeline_focus.is_focused(window);
         if focused != self.timeline_focused {
             self.timeline_focused = focused;
+            self.timeline_ring = focused && window.last_input_was_keyboard();
             crate::pane::notify(&self.panes.timeline, cx);
         }
         // The chat on screen: Settings, the app hub, a profile or a new chat or Community drawn in
@@ -9386,7 +9391,7 @@ impl VectorApp {
         };
         let app = cx.entity().downgrade();
         let scroller = self.timeline.clone();
-        let cursor = self.timeline_focus.is_focused(window).then(|| self.cursor_message(store, &id)).flatten();
+        let cursor = (self.timeline_ring && self.timeline_focus.is_focused(window)).then(|| self.cursor_message(store, &id)).flatten();
         let list = list(self.timeline.clone(), move |i, window, cx| {
             let rows_store = rows_store.borrow();
             let (Some(chat), Some(row)) = (rows_store.chat(&rows_id), rows.get(i)) else {
@@ -9435,12 +9440,13 @@ impl VectorApp {
             // A divider's 10px margins stand in for the row's own above it.
             let after_message = i > 0 && matches!(rows[i - 1], Row::Message { .. });
             let el = timeline_row(&ctx, row, after_message);
-            // `SlideIn` over 0.75 s; Tauri also grows it from its bottom-left corner.
+            // `SlideIn`: over 0.75 s from 100px left, growing from its bottom-left corner.
             let el = match (&arrived, row) {
                 (Some((id, at)), Row::Message { index, .. }) if chat.messages.get(*index).is_some_and(|m| &m.id == id) => {
                     window.request_animation_frame();
                     let t = kit::bezier(0.46, 0.03, 0.52, 0.96)((at.elapsed().as_secs_f32() / 0.75).min(1.));
-                    div().w_full().relative().left(px(-100. * (1. - t))).opacity(t).child(el).into_any_element()
+                    let grown = gpui::zoom(el).origin(0., 1.).scale(t).opacity(t);
+                    div().w_full().relative().left(px(-100. * (1. - t))).child(grown).into_any_element()
                 }
                 _ => el,
             };
@@ -9552,7 +9558,8 @@ impl VectorApp {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, e: &gpui::MouseDownEvent, window, cx| {
-                    if crate::select::press(e.position, e.click_count, window) == Some(true) {
+                    let ring = std::mem::take(&mut this.timeline_ring);
+                    if crate::select::press(e.position, e.click_count, window) == Some(true) || ring {
                         crate::pane::notify(&this.panes.timeline, cx);
                     }
                 }),

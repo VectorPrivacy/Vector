@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     AtlasTextureId, AtlasTile, Background, Bounds, ContentMask, Corners, Edges, Hsla, Pixels,
-    Point, Radians, ScaledPixels, Size, bounds_tree::BoundsTree, point,
+    Point, Radians, ScaledPixels, Size, bounds_tree::BoundsTree, point, size,
 };
 use std::{
     fmt::Debug,
@@ -52,6 +52,9 @@ pub struct Scene {
     pub surfaces: Vec<PaintSurface>,
     /// Sort keys with each primitive's index, kept between frames so sorting allocates nothing.
     sort_keys: Vec<(u64, u32)>,
+    /// While a zoomed subtree paints: `p -> a + p * k` on every primitive's geometry, in device
+    /// pixels. Content masks are mapped where they are pushed, so outer clips stay put.
+    pub(crate) zoom: Option<(Point<ScaledPixels>, f32)>,
 }
 
 /// Sorts `items` by `key`, keeping insertion order among equal keys (a layer's primitives share
@@ -116,6 +119,9 @@ impl Scene {
 
     pub fn insert_primitive(&mut self, primitive: impl Into<Primitive>) {
         let mut primitive = primitive.into();
+        if let Some((a, k)) = self.zoom {
+            primitive.zoom(a, k);
+        }
         let clipped_bounds = primitive
             .bounds()
             .intersect(&primitive.content_mask().bounds);
@@ -263,6 +269,56 @@ pub enum Primitive {
     SubpixelSprite(SubpixelSprite),
     PolychromeSprite(PolychromeSprite),
     Surface(PaintSurface),
+}
+
+impl Primitive {
+    /// Map the geometry through `p -> a + p * k`.
+    fn zoom(&mut self, a: Point<ScaledPixels>, k: f32) {
+        let at = |p: Point<ScaledPixels>| point(a.x + p.x * k, a.y + p.y * k);
+        let b = |r: Bounds<ScaledPixels>| Bounds { origin: at(r.origin), size: size(r.size.width * k, r.size.height * k) };
+        let c = |r: Corners<ScaledPixels>| Corners {
+            top_left: r.top_left * k,
+            top_right: r.top_right * k,
+            bottom_right: r.bottom_right * k,
+            bottom_left: r.bottom_left * k,
+        };
+        match self {
+            Primitive::Shadow(x) => {
+                x.bounds = b(x.bounds);
+                x.blur_radius = x.blur_radius * k;
+                x.corner_radii = c(x.corner_radii);
+                x.element_bounds = b(x.element_bounds);
+                x.element_corner_radii = c(x.element_corner_radii);
+            }
+            Primitive::Quad(x) => {
+                x.bounds = b(x.bounds);
+                x.corner_radii = c(x.corner_radii);
+                x.border_widths = Edges {
+                    top: x.border_widths.top * k,
+                    right: x.border_widths.right * k,
+                    bottom: x.border_widths.bottom * k,
+                    left: x.border_widths.left * k,
+                };
+            }
+            Primitive::Path(x) => {
+                x.bounds = b(x.bounds);
+                for v in &mut x.vertices {
+                    v.xy_position = at(v.xy_position);
+                }
+            }
+            Primitive::Underline(x) => {
+                x.bounds = b(x.bounds);
+                x.thickness = x.thickness * k;
+            }
+            Primitive::MonochromeSprite(x) => x.bounds = b(x.bounds),
+            Primitive::SubpixelSprite(x) => x.bounds = b(x.bounds),
+            Primitive::PolychromeSprite(x) => {
+                x.bounds = b(x.bounds);
+                x.corner_radii = c(x.corner_radii);
+            }
+            Primitive::Surface(x) => x.bounds = b(x.bounds),
+        }
+    }
 }
 
 #[expect(missing_docs)]
