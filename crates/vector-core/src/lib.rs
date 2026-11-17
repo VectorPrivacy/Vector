@@ -2224,7 +2224,7 @@ impl VectorCore {
         use crate::community::{transport::LiveTransport, CommunityId};
         crate::community::v2::invite::parse_invite_link(url).map_err(|_| VectorError::Other("not a Vector invite link".into()))?;
         let transport = LiveTransport::with_timeout(std::time::Duration::from_secs(12));
-        let bundle = crate::community::v2::service::fetch_public_bundle(&transport, url).await.map_err(VectorError::Other)?;
+        let bundle = crate::community::v2::service::fetch_public_bundle_for_preview(&transport, url).await.map_err(VectorError::Other)?;
         // Self-certifying: verified as the bundle decrypts, so it names the Community unfolded.
         let community_id = bundle.community_id.clone();
         if let Ok(id) = Self::id32(&community_id, "community_id") {

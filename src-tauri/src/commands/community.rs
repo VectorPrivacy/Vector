@@ -2889,7 +2889,7 @@ pub async fn preview_public_invite(url: String) -> Result<PublicInvitePreviewInf
     vector_core::community::v2::invite::parse_invite_link(&url).map_err(|_| "Not a Vector invite link".to_string())?;
     {
         let transport = LiveTransport::with_timeout(Duration::from_secs(12));
-        let bundle = vector_core::community::v2::service::fetch_public_bundle(&transport, &url).await?;
+        let bundle = vector_core::community::v2::service::fetch_public_bundle_for_preview(&transport, &url).await?;
         // The bundle's `community_id` is self-certifying (sha256 over owner+salt, verified as the
         // bundle is decrypted), so it names the community without folding anything.
         let community_id = bundle.community_id.clone();

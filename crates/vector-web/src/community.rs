@@ -343,7 +343,7 @@ pub async fn preview_public_invite(url: &str) -> Result<Value, String> {
         return Err("Only Concord v2 invite links can be opened on Vector Web".into());
     }
     let transport = LiveTransport::with_timeout(Duration::from_secs(12));
-    let bundle = vector_core::community::v2::service::fetch_public_bundle(&transport, url).await?;
+    let bundle = vector_core::community::v2::service::fetch_public_bundle_for_preview(&transport, url).await?;
     let community_id = bundle.community_id.clone();
     if let Ok(local) = load_v2(&community_id) {
         return Ok(json!({
