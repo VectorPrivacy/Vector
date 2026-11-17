@@ -2218,6 +2218,27 @@ impl VectorCore {
         Ok(channel_id)
     }
 
+    /// Make a new Channel shaped like `channel_id`: its privacy, topic, view, Category and
+    /// permission rules, under a new name. No messages come along. Needs Manage Channels, and
+    /// every rule copied must be one the caller could set. Returns the new channel id.
+    pub async fn duplicate_channel(&self, community_id: &str, channel_id: &str, name: &str) -> Result<String> {
+        use crate::community::{v2::service, transport::LiveTransport};
+        let session = crate::db::current_session();
+        let community = Self::v2_community(community_id)?;
+        let source = crate::community::ChannelId(Self::id32(channel_id, "channel_id")?);
+        let transport = LiveTransport::with_timeout(std::time::Duration::from_secs(20));
+        let id = service::duplicate_channel(&transport, &community, &source, name).await.map_err(VectorError::Other)?;
+        if let Ok(Some(fresh)) = crate::db::community::load_community_v2(community.id()) {
+            if session.is_live() {
+                self.register_v2_chats(&fresh, &session).await;
+            }
+        }
+        if let Some(client) = state::nostr_client() {
+            crate::community::v2::realtime::refresh_subscription(&client).await;
+        }
+        Ok(crate::simd::hex::bytes_to_hex_32(&id.0))
+    }
+
     /// What a public invite link shows before joining: name, description and icon, read from the
     /// Community's own Control Plane when its owner's root verifies (`verified`). Read-only.
     pub async fn preview_public_link(&self, url: &str) -> Result<LinkPreview> {

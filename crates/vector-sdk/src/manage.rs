@@ -635,6 +635,16 @@ impl Channel {
         self.set_overwrite(everyone).await
     }
 
+    /// Make a new Channel shaped like this one, under `name`: its privacy, topic, view, Category
+    /// (right after this one) and permission rules. No messages come along. Needs Manage
+    /// Channels, and is refused whole when a rule here is one the bot couldn't set itself.
+    pub async fn duplicate(&self, name: &str) -> Result<Channel> {
+        let cid = self.community_id()?;
+        require(&cid, Permissions::MANAGE_CHANNELS, "duplicating a channel").await?;
+        let id = VectorCore.duplicate_channel(&cid, &self.id, name).await?;
+        Ok(Channel { core: self.core, id, kind: self.kind })
+    }
+
     /// File it under `category` (or none) at `index` among that Category's Channels.
     pub async fn move_to(&self, category: Option<&Category>, index: usize) -> Result<()> {
         let cid = self.community_id()?;

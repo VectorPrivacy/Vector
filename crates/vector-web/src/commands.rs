@@ -487,6 +487,7 @@ pub async fn dispatch(cmd: &str, a: Args) -> Result<Value, String> {
             cm::community_control(&channel, &message_id, ControlOp::Delete).await.map(|_| Value::Null)
         }
         "create_community" => cm::create_community(a.str("name")?, a.opt_str("channelName"), a.de("relays")?).await,
+        "duplicate_community_channel" => core(VectorCore.duplicate_channel(&a.str("communityId")?, &a.str("channelId")?, &a.str("name")?).await),
         "create_community_channel" => {
             cm::create_community_channel(a.str("communityId")?, a.str("name")?, a.bool("private").unwrap_or(false), a.opt_str("categoryId"), a.bool("voice").unwrap_or(false)).await
         }

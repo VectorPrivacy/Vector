@@ -137,6 +137,7 @@
     "allow-get-channel-react-denied",
     "allow-get-community-mentions",
     "allow-create-community-channel",
+    "allow-duplicate-community-channel",
     "allow-delete-community-channel",
     "allow-set-community-image",
     "allow-remove-community-image",

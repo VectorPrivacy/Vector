@@ -10254,6 +10254,100 @@ pub async fn create_channel_in<T: Transport + ?Sized>(transport: &T, community: 
     Ok(id)
 }
 
+/// Make a Channel like `source` under `name`: as private, opening the same way with the same
+/// topic, in its Category right after it, and under the same rules: its own, and its
+/// Category's when it syncs (its own then lie dormant, as the original's do). Nothing said
+/// there comes along.
+///
+/// Every rule must be one this account could set itself, checked before anything is made: a
+/// copy missing one could be more open than what it copies.
+pub async fn duplicate_channel<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, source: &ChannelId, name: &str) -> Result<ChannelId, String> {
+    use crate::community::roles::OverwriteTarget;
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("a channel needs a name".to_string());
+    }
+    let me = me_pk()?;
+    ensure_channel_manager(community, &me)?;
+    let src = community.channel(source).ok_or("no such channel")?.clone();
+    if src.private && src.key.is_none() {
+        return Err("you can't duplicate a private channel you can't read".to_string());
+    }
+    let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+    let src_hex = crate::simd::hex::bytes_to_hex_32(&source.0);
+    let (me_hex, owner_hex) = (me.to_hex(), community.owner()?.to_hex());
+    let v2 = roles_v2_held(community);
+    let roster = crate::db::community::get_community_roles(&cid_hex)?;
+    let category = src.category().filter(|k| community.categories.iter().any(|c| c.id == *k));
+    let synced = v2.then(|| roster.syncs.get(&src_hex).and_then(|k| crate::simd::hex::hex_to_bytes_32_checked(k))).flatten();
+    // @everyone first: a public copy stands open until its rules land.
+    let mut rules: Vec<(OverwriteTarget, u64, u64)> =
+        if v2 { roster.overwrites.iter().filter(|o| o.scope == src_hex).map(|o| (o.target.clone(), o.allow.0, o.deny.0)).collect() } else { Vec::new() };
+    rules.sort_by_key(|(t, ..)| *t != OverwriteTarget::Everyone);
+    let refused = "this channel has permissions set above your roles, so only someone above you can duplicate it";
+    if rules.iter().any(|(t, allow, deny)| !roster.overwrite_support(&me_hex, &owner_hex, t).is_some_and(|held| (allow | deny) & !held == 0)) {
+        return Err(refused.to_string());
+    }
+    if let Some(cat) = synced {
+        let cat_hex = crate::simd::hex::bytes_to_hex_32(&cat);
+        if !may_swap_overwrites(&roster, Some(&owner_hex), &me_hex, &[cat_hex.as_str()], &|_| 0) {
+            return Err(refused.to_string());
+        }
+    }
+    // On the legacy roster a private channel's readers hold its access Role.
+    let readers: Vec<PublicKey> = if v2 || !src.private {
+        Vec::new()
+    } else {
+        let access = roster.channel_role_ids(&src_hex);
+        roster.grants.iter().filter(|g| g.member != me_hex && g.role_ids.iter().any(|r| access.contains(r))).filter_map(|g| PublicKey::from_hex(&g.member).ok()).collect()
+    };
+
+    let id = if src.private { create_private_channel(transport, community, name).await? } else { create_public_channel(transport, community, name).await? };
+    // The Channel stands from here, so a failure says so: a retry would make a second.
+    dress_duplicate(transport, community, &src, &id, category, synced, rules).await.map_err(|e| format!("the channel was made, but not everything was copied onto it: {e}"))?;
+    let held = || crate::db::community::load_community_v2(community.id()).and_then(|c| c.ok_or_else(|| "v2 community not found".to_string()));
+    for reader in readers {
+        if let Err(e) = grant_channel_access(transport, &held()?, &id, &reader).await {
+            crate::log_warn!("[v2:duplicate] a reader of the original isn't let into the copy: {e}");
+        }
+    }
+    Ok(id)
+}
+
+/// Give a fresh duplicate `src`'s details, its place right after it, and its rules.
+async fn dress_duplicate<T: Transport + ?Sized>(
+    transport: &T,
+    community: &CommunityV2,
+    src: &ChannelV2,
+    id: &ChannelId,
+    category: Option<[u8; 32]>,
+    synced: Option<[u8; 32]>,
+    rules: Vec<(crate::community::roles::OverwriteTarget, u64, u64)>,
+) -> Result<(), String> {
+    let held = || crate::db::community::load_community_v2(community.id()).and_then(|c| c.ok_or_else(|| "v2 community not found".to_string()));
+    let now = held()?;
+    let made = now.channel(id).ok_or("the new channel isn't held")?;
+    let mut meta = made.metadata();
+    if let Some(topic) = src.topic() {
+        meta.extra.insert("topic".into(), topic.into());
+    }
+    if src.view() != made.view() {
+        meta.extra.insert("view".into(), src.view().as_str().into());
+    }
+    meta.custom = src.meta_custom.clone();
+    edit_channel_metadata(transport, &now, id, &meta).await?;
+    let now = held()?;
+    let after = now.sidebar().into_iter().find(|(c, _)| c.map(|c| c.id) == category).and_then(|(_, group)| group.iter().filter(|c| c.id.0 != id.0).position(|c| c.id.0 == src.id.0));
+    move_channel(transport, &now, id, category, after.map_or(usize::MAX, |i| i + 1)).await?;
+    if let Some(cat) = synced {
+        set_channel_sync(transport, &held()?, id, Some(cat)).await?;
+    }
+    for (target, allow, deny) in rules {
+        set_overwrite(transport, &held()?, id.0, target, allow, deny).await?;
+    }
+    Ok(())
+}
+
 /// A sidebar entry a reorder may need to key first.
 enum Keyed {
     Channel(ChannelV2),
@@ -29360,6 +29454,153 @@ mod tests {
         set_member_roles(&bed.relay, &held, &x.public_key(), vec![admin]).await.unwrap();
         follow_control(&bed.relay, &held).await.unwrap();
         (bed, owner, x, crate::db::community::load_community_v2(community.id()).unwrap().unwrap())
+    }
+
+    /// A channel's own rules as the relays hold them, in a stable order.
+    async fn rules_of(relay: &MemoryRelay, community: &CommunityV2, channel: &ChannelId) -> Vec<(String, u64, u64)> {
+        let roles = fold_authority(community, &fetch_control(relay, community).await, &Floors::default()).roles;
+        let scope = crate::simd::hex::bytes_to_hex_32(&channel.0);
+        let mut rules: Vec<_> = roles.overwrites.iter().filter(|o| o.scope == scope).map(|o| (format!("{:?}", o.target), o.allow.0, o.deny.0)).collect();
+        rules.sort();
+        rules
+    }
+
+    #[tokio::test]
+    async fn a_duplicate_takes_its_originals_details_place_and_rules() {
+        use crate::community::roles::OverwriteTarget as T;
+        let (_tmp, _guard, _owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "Copy", vec!["wss://r".into()], None).await.unwrap();
+        activate_roles_v2(&relay, &community, crate::community::v2::roles::EVERYONE_DEFAULT).await.unwrap();
+        follow_control(&relay, &community).await.unwrap();
+        let held = || crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        let info = create_category(&relay, &held(), "Info").await.unwrap();
+        let news = create_channel_in(&relay, &held(), "news", false, Some(info)).await.unwrap();
+        set_channel_sync(&relay, &held(), &news, None).await.unwrap();
+        edit_channel_details(&relay, &held(), &news, "news", Some("Read this first"), super::super::community::ChannelView::Forum).await.unwrap();
+        let mut meta = held().channel(&news).unwrap().metadata();
+        meta.custom = Some([("slowmode".to_string(), serde_json::Value::from(30))].into_iter().collect());
+        edit_channel_metadata(&relay, &held(), &news, &meta).await.unwrap();
+        create_channel_in(&relay, &held(), "later", false, Some(info)).await.unwrap();
+        let writers = create_role_v2(&relay, &held(), "Writers", 0, Permissions::SEND_MESSAGES).await.unwrap();
+        let member = Keys::generate().public_key().to_hex();
+        set_overwrite(&relay, &held(), news.0, T::Everyone, 0, Permissions::SEND_MESSAGES).await.unwrap();
+        set_overwrite(&relay, &held(), news.0, T::Role(writers), Permissions::SEND_MESSAGES, 0).await.unwrap();
+        set_overwrite(&relay, &held(), news.0, T::Member(member), 0, Permissions::ADD_REACTIONS).await.unwrap();
+        send_chat_message(&relay, &held(), &news, "said in the original", None, &[], vec![]).await.unwrap();
+
+        let copy = duplicate_channel(&relay, &held(), &news, " news-2 ").await.unwrap();
+        let c = held();
+        let (a, b) = (c.channel(&news).unwrap(), c.channel(&copy).unwrap());
+        assert_eq!(b.name, "news-2");
+        assert_eq!((b.private, b.topic(), b.view(), b.category()), (a.private, a.topic(), a.view(), a.category()));
+        assert_eq!(b.topic(), Some("Read this first"));
+        assert_eq!(b.meta_custom, a.meta_custom);
+        assert!(b.meta_custom.is_some());
+        let group: Vec<&str> = c.sidebar().into_iter().find(|(k, _)| k.map(|k| k.id) == Some(info)).unwrap().1.iter().map(|ch| ch.name.as_str()).collect();
+        assert_eq!(group, vec!["news", "news-2", "later"], "right after the one it copies");
+        let rules = rules_of(&relay, &c, &copy).await;
+        assert_eq!(rules.len(), 3);
+        assert_eq!(rules, rules_of(&relay, &c, &news).await, "every rule, as it was");
+        assert!(fetch_channel(&relay, &c, &copy, 100).await.unwrap().is_empty(), "nothing said comes along");
+        assert!(duplicate_channel(&relay, &c, &news, "  ").await.is_err(), "it needs a name");
+    }
+
+    #[tokio::test]
+    async fn a_duplicate_of_a_synced_channel_syncs_and_of_a_private_one_is_private() {
+        use crate::community::roles::OverwriteTarget as T;
+        let (_tmp, _guard, _owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "Kinds", vec!["wss://r".into()], None).await.unwrap();
+        activate_roles_v2(&relay, &community, crate::community::v2::roles::EVERYONE_DEFAULT).await.unwrap();
+        follow_control(&relay, &community).await.unwrap();
+        let held = || crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        let hex = |ch: &ChannelId| crate::simd::hex::bytes_to_hex_32(&ch.0);
+        let staff = create_category(&relay, &held(), "Staff").await.unwrap();
+        set_overwrite(&relay, &held(), staff, T::Everyone, 0, Permissions::SEND_MESSAGES).await.unwrap();
+        let synced = create_channel_in(&relay, &held(), "notes", false, Some(staff)).await.unwrap();
+
+        let copy = duplicate_channel(&relay, &held(), &synced, "notes-2").await.unwrap();
+        let roles = fold_authority(&held(), &fetch_control(&relay, &held()).await, &Floors::default()).roles;
+        assert_eq!(roles.syncs.get(&hex(&copy)), Some(&crate::simd::hex::bytes_to_hex_32(&staff)), "it follows the same Category");
+        assert!(rules_of(&relay, &held(), &copy).await.is_empty(), "with no rules of its own");
+
+        // A synced Channel's own rules lie dormant until it unsyncs, and the copy keeps them so.
+        set_overwrite(&relay, &held(), synced.0, T::Everyone, 0, Permissions::ADD_REACTIONS).await.unwrap();
+        let copy = duplicate_channel(&relay, &held(), &synced, "notes-3").await.unwrap();
+        let roles = fold_authority(&held(), &fetch_control(&relay, &held()).await, &Floors::default()).roles;
+        assert_eq!(roles.syncs.get(&hex(&copy)), Some(&crate::simd::hex::bytes_to_hex_32(&staff)));
+        assert_eq!(rules_of(&relay, &held(), &copy).await.len(), 1);
+        assert_eq!(rules_of(&relay, &held(), &copy).await, rules_of(&relay, &held(), &synced).await);
+
+        let mods = create_role_v2(&relay, &held(), "Mods", 0, Permissions::VIEW_CHANNEL | Permissions::SEND_MESSAGES).await.unwrap();
+        let den = create_channel_in(&relay, &held(), "den", true, None).await.unwrap();
+        set_overwrite(&relay, &held(), den.0, T::Role(mods.clone()), Permissions::VIEW_CHANNEL | Permissions::SEND_MESSAGES, 0).await.unwrap();
+        let moderator = Keys::generate().public_key();
+        set_member_roles(&relay, &held(), &moderator, vec![mods]).await.unwrap();
+
+        let den2 = duplicate_channel(&relay, &held(), &den, "den-2").await.unwrap();
+        let c = held();
+        let made = c.channel(&den2).unwrap();
+        assert!(made.private && made.key.is_some(), "private, with a key of its own");
+        assert_ne!(made.key, c.channel(&den).unwrap().key);
+        assert_eq!(rules_of(&relay, &c, &den2).await, rules_of(&relay, &c, &den).await);
+        let roles = fold_authority(&c, &fetch_control(&relay, &c).await, &Floors::default()).roles;
+        let owner = c.owner().unwrap().to_hex();
+        assert!(roles.is_entitled(Some(&owner), &moderator.to_hex(), &hex(&den2), &[], &[]), "who read the original reads the copy");
+        assert!(!roles.is_entitled(Some(&owner), &Keys::generate().public_key().to_hex(), &hex(&den2), &[], &[]));
+    }
+
+    #[tokio::test]
+    async fn a_duplicate_is_refused_whole_when_a_rule_is_set_above_its_maker() {
+        use crate::community::roles::OverwriteTarget as T;
+        let (bed, owner, x, community) = v2_bed_with_admin("Above").await;
+        let held = || crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        let top = "f7".repeat(32);
+        publish_role_v2(&bed.relay, &held(), &owner.keys, &role_v2(&top, "Top", "1", 0), 1).await;
+        follow_control(&bed.relay, &held()).await.unwrap();
+        let guarded = create_public_channel(&bed.relay, &held(), "guarded").await.unwrap();
+        set_overwrite(&bed.relay, &held(), guarded.0, T::Role(top), Permissions::SEND_MESSAGES, 0).await.unwrap();
+        let plain = create_public_channel(&bed.relay, &held(), "plain").await.unwrap();
+        set_overwrite(&bed.relay, &held(), plain.0, T::Everyone, 0, Permissions::SEND_MESSAGES).await.unwrap();
+        // A rule for someone below its maker, in a permission the maker doesn't hold.
+        let unheld = create_public_channel(&bed.relay, &held(), "unheld").await.unwrap();
+        set_overwrite(&bed.relay, &held(), unheld.0, T::Everyone, Permissions::MANAGE_MESSAGES, 0).await.unwrap();
+        follow_control(&bed.relay, &held()).await.unwrap();
+
+        crate::state::MY_SECRET_KEY.store_from_keys(&x, &[]);
+        crate::state::set_my_public_key(x.public_key());
+        let before = held().channels.len();
+        let err = duplicate_channel(&bed.relay, &held(), &guarded, "guarded-2").await.unwrap_err();
+        assert!(err.contains("above your roles"), "{err}");
+        assert_eq!(held().channels.len(), before, "nothing was made");
+        let err = duplicate_channel(&bed.relay, &held(), &unheld, "unheld-2").await.unwrap_err();
+        assert!(err.contains("above your roles"), "{err}");
+        assert_eq!(held().channels.len(), before, "nothing was made");
+        let copy = duplicate_channel(&bed.relay, &held(), &plain, "plain-2").await.unwrap();
+        assert_eq!(rules_of(&bed.relay, &held(), &copy).await, rules_of(&bed.relay, &held(), &plain).await, "a rule within reach is copied");
+    }
+
+    #[tokio::test]
+    async fn on_the_legacy_roster_a_private_duplicate_lets_the_same_readers_in() {
+        let (_tmp, _guard, _owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "Legacy", vec!["wss://r".into()], None).await.unwrap();
+        let held = || crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        let den = create_private_channel(&relay, &held(), "den").await.unwrap();
+        let reader = Keys::generate().public_key();
+        grant_channel_access(&relay, &held(), &den, &reader).await.unwrap();
+        let attic = create_private_channel(&relay, &held(), "attic").await.unwrap();
+        let elsewhere = Keys::generate().public_key();
+        grant_channel_access(&relay, &held(), &attic, &elsewhere).await.unwrap();
+
+        let copy = duplicate_channel(&relay, &held(), &den, "den-2").await.unwrap();
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        let roster = crate::db::community::get_community_roles(&cid_hex).unwrap();
+        let owner = held().owner().unwrap().to_hex();
+        let copy_hex = crate::simd::hex::bytes_to_hex_32(&copy.0);
+        assert!(roster.is_entitled(Some(&owner), &reader.to_hex(), &copy_hex, &[], &[]));
+        assert!(!roster.is_entitled(Some(&owner), &elsewhere.to_hex(), &copy_hex, &[], &[]), "a reader of another channel stays out");
     }
 
     #[tokio::test]

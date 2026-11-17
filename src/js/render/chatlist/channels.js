@@ -854,6 +854,7 @@ async function openChannelMenu(communityId, channel, x, y) {
     if (communityCanAddChannels(communityId)) {
         items.push({ divider: true });
         items.push({ label: 'Edit Channel', icon: 'edit', onClick: () => openChannelEditorFor(communityId, channel) });
+        items.push({ label: 'Duplicate Channel', icon: 'copy', onClick: () => promptDuplicateChannel(communityId, channel) });
     }
     items.push(...startPinItems(`c/${communityId}/${channel.id}`), ...copyLinkItems('Channel', { community: communityId, channel: channel.id }));
     items.push(...copyIdItems('Channel', channel.id));
@@ -876,11 +877,16 @@ function promptCreateChannel(communityId, isPrivate = false, categoryId = null, 
     openCreateModal({ communityId, categoryId, kind: voice ? 'voice' : 'text', isPrivate });
 }
 
+/** The same modal, asking only for the copy's name. */
+function promptDuplicateChannel(communityId, channel) {
+    openCreateModal({ communityId, kind: channel.view === 'voice' ? 'voice' : 'text', source: { id: channel.id, name: channel.name, view: channel.view || 'chat' }, name: channel.name });
+}
+
 function openCreateModal(view) {
     const categoryName = view.categoryId ? (getCommunityCategories(view.communityId).find(c => c.id === view.categoryId)?.name || '') : '';
     VectorSvelte.createChannelModal.open({
-        category: false, categoryId: null, kind: 'text', isPrivate: false,
-        ...view, categoryName, name: '', busy: false, error: '',
+        category: false, categoryId: null, kind: 'text', isPrivate: false, source: null, name: '',
+        ...view, categoryName, busy: false, error: '',
     });
     pushBack('create-channel', closeCreateModal);
 }
@@ -905,12 +911,16 @@ async function submitCreateModal() {
             return;
         }
         const voice = s.kind === 'voice';
-        const channelId = await invoke('create_community_channel', { communityId: s.communityId, name, private: s.isPrivate, categoryId: s.categoryId, voice });
+        const channelId = s.source
+            ? await invoke('duplicate_community_channel', { communityId: s.communityId, channelId: s.source.id, name })
+            : await invoke('create_community_channel', { communityId: s.communityId, name, private: s.isPrivate, categoryId: s.categoryId, voice });
         closeCreateModal();
         refreshCommunityChannels();
-        openCommunityChannel(s.communityId, { id: channelId, name, view: voice ? 'voice' : 'chat' });
+        openCommunityChannel(s.communityId, { id: channelId, name, view: s.source ? s.source.view : voice ? 'voice' : 'chat' });
     } catch (e) {
         modal.patch({ busy: false, error: String(e) });
+        // A duplicate can stand with part of its rules missing.
+        if (s.source) refreshCommunityChannels();
     }
 }
 

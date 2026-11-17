@@ -109,6 +109,7 @@ let mods = community.create_role(
 let support = community.create_category("Support").await?;
 let tickets = community.create_channel_with("tickets", NewChannel::default().private().in_category(support.id())).await?;
 tickets.set_overwrite(Overwrite::role(&mods).allow(Permissions::VIEW_CHANNEL | Permissions::SEND_MESSAGES)).await?;
+let billing = tickets.duplicate("billing").await?;   // same settings and rules, no messages
 
 member.add_role(&mods).await?;
 member.timeout(std::time::Duration::from_secs(600)).await?;

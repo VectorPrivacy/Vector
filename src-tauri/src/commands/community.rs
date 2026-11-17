@@ -2640,6 +2640,15 @@ async fn create_community_channel_inner(
     Ok(channel_hex)
 }
 
+/// A new channel with another's settings and permission rules, under its own name.
+#[tauri::command]
+pub async fn duplicate_community_channel(community_id: String, channel_id: String, name: String) -> Result<String, String> {
+    vector_core::db::scoped_result(async move {
+        vector_core::VectorCore.duplicate_channel(&community_id, &channel_id, &name).await.map_err(|e| e.to_string())
+    })
+    .await
+}
+
 /// Tombstone a channel in a **v2** Community (CORD-03 §2). The primary channel is refused:
 /// it anchors the community's chat-list row and its history. Message history for a deleted
 /// channel stays in the local DB; the community document is the authority on which channels
