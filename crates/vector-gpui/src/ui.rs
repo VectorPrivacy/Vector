@@ -247,6 +247,8 @@ pub struct VectorApp {
     send_flipped: Option<std::time::Instant>,
     /// The message a jump landed on, flashing.
     jumped: Option<(String, std::time::Instant)>,
+    /// Someone else's message landing at the bottom of the open chat, sliding in (`.new-anim`).
+    arrived: Option<(String, std::time::Instant)>,
     /// Older history is on its way.
     paging: bool,
     /// A jump asked for while the chat's first page loads.
@@ -273,6 +275,13 @@ pub struct VectorApp {
     qr: Option<(std::sync::Arc<gpui::RenderImage>, gpui::FocusHandle)>,
     /// Closed modals still fading out.
     fades: Fades,
+    /// The unlocked login screen, fading out before the app shows (`.fadeout-anim`, 0.5 s).
+    login_out: Option<(Entity<LoginView>, std::time::Instant)>,
+    /// When the app first showed after login: the chat list rises in (`.intro-anim`), the rail fades in.
+    intro: Option<std::time::Instant>,
+    /// Wide panes that fade in as they appear: the chat (`.fadein-anim`), a profile (`.fadein-subtle-anim`).
+    chat_in: kit::Reveal,
+    profile_in: kit::Reveal,
     switcher: Option<crate::switcher::Switcher>,
     /// The switcher rises from the rail's account chip (Main Menu off).
     switcher_up: bool,
@@ -1017,6 +1026,7 @@ impl VectorApp {
             send_shown: false,
             send_flipped: None,
             jumped: None,
+            arrived: None,
             paging: false,
             opening: None,
             history_done: HashSet::new(),
@@ -1051,6 +1061,10 @@ impl VectorApp {
             status: None,
             qr: None,
             fades: Fades::default(),
+            login_out: None,
+            intro: None,
+            chat_in: kit::Reveal::default(),
+            profile_in: kit::Reveal::default(),
             switcher: None,
             switcher_up: false,
             badge_card: None,
@@ -3049,9 +3063,22 @@ impl VectorApp {
         .detach();
     }
 
+    /// How far the post-login entrance has come: the rail's fade (`.fadein-anim`, 0.25 s) and the
+    /// chat list's rise (`.intro-anim`, 0.5 s), each eased.
+    fn intro_ease(&self) -> (f32, f32) {
+        let t = self.intro.map_or(1., |at| at.elapsed().as_secs_f32());
+        (
+            kit::bezier(0.46, 0.03, 0.52, 0.96)((t / 0.25).min(1.)),
+            kit::bezier(0.25, 0.1, 0.25, 1.)((t / 0.5).min(1.)),
+        )
+    }
+
     fn logged_in(&mut self, npub: String, _window: &mut Window, cx: &mut Context<Self>) {
         self.store.borrow_mut().my_npub = npub;
-        self.screen = Screen::Main;
+        if let Screen::Login(view) = std::mem::replace(&mut self.screen, Screen::Main) {
+            self.login_out = Some((view, std::time::Instant::now()));
+        }
+        self.intro = None;
         if let Some(v) = self.net_initial() {
             self.on_transport_view(v, cx);
         }
@@ -3549,6 +3576,11 @@ impl VectorApp {
                     }
                 }
                 let changed = msg.id.clone();
+                let arrives = name == "message_new"
+                    && !msg.mine
+                    && self.open.as_deref() == Some(chat_id.as_str())
+                    && self.gap.is_none()
+                    && self.timeline.is_following_tail();
                 let known = if name == "message_new" {
                     self.store.borrow_mut().insert_message(&chat_id, msg)
                 } else {
@@ -3576,6 +3608,9 @@ impl VectorApp {
                         .ok();
                     })
                     .detach();
+                }
+                if arrives && self.store.borrow().chat(&chat_id).and_then(|c| c.messages.last()).is_some_and(|m| m.id == changed) {
+                    self.arrived = Some((changed.clone(), std::time::Instant::now()));
                 }
                 if self.open.as_deref() == Some(chat_id.as_str()) {
                     self.refresh_rows_at(&changed, true);
@@ -6577,8 +6612,25 @@ impl Render for VectorApp {
                         .with_priority(15)
                     }));
             }
-            Screen::Main => {}
+            Screen::Main => {
+                if let Some((view, at)) = &self.login_out {
+                    let t = at.elapsed().as_secs_f32() / 0.5;
+                    if t < 1. {
+                        window.request_animation_frame();
+                        let shown = 1. - kit::bezier(0.46, 0.03, 0.52, 0.96)(t);
+                        return root
+                            .child(div().absolute().inset_0().opacity(shown).child(view.clone()).child(kit::inert()))
+                            .child(div().absolute().top_0().left_0().right_0().child(chrome(window, true, false)));
+                    }
+                    self.login_out = None;
+                }
+                if self.intro.get_or_insert_with(std::time::Instant::now).elapsed().as_secs_f32() < 0.5 {
+                    window.request_animation_frame();
+                }
+            }
         }
+        self.chat_in.frame();
+        self.profile_in.frame();
         if let Some(view) = &self.reauth {
             return root
                 .child(div().absolute().inset_0().child(view.clone()))
@@ -6669,12 +6721,14 @@ impl Render for VectorApp {
                     .when(self.create_community.is_none(), |row| {
                         row.child(gpui::deferred(self.list_resizer(rail_mode.width(), list_full, cx)).with_priority(1))
                     })
-                    .child(crate::pane::cached(
-                        &self.panes.rail,
-                        gpui::StyleRefinement::default().w(px(rail_mode.width())).flex_shrink_0().h_full(),
-                        |app, window, cx| app.rail_pane(window, cx),
-                        cx,
-                    ))
+                    .child(
+                        div().w(px(rail_mode.width())).flex_shrink_0().h_full().opacity(self.intro_ease().0).child(crate::pane::cached(
+                            &self.panes.rail,
+                            gpui::StyleRefinement::default().size_full(),
+                            |app, window, cx| app.rail_pane(window, cx),
+                            cx,
+                        )),
+                    )
                     .when_some(self.settings.as_ref(), |row, settings| {
                         let app = cx.entity().downgrade();
                         let on: crate::settings::OnAct = Rc::new(move |act, window, cx| {
@@ -6697,12 +6751,22 @@ impl Render for VectorApp {
                     // Creating a Community has nothing to do with the list beside it: it takes
                     // everything right of the rail.
                     .when(self.settings.is_none() && self.nexus.is_none() && self.create_community.is_none(), |row| {
-                        row.child(crate::pane::cached(
-                            &self.panes.side,
-                            gpui::StyleRefinement::default().w(px(list_w())).flex_shrink_0().h_full(),
-                            |app, _, cx| app.side_pane(cx),
-                            cx,
-                        ))
+                        let rise = self.intro_ease().1;
+                        row.child(
+                            div()
+                                .w(px(list_w()))
+                                .flex_shrink_0()
+                                .h_full()
+                                .relative()
+                                .top(px(50. * (1. - rise)))
+                                .opacity(rise)
+                                .child(crate::pane::cached(
+                                    &self.panes.side,
+                                    gpui::StyleRefinement::default().size_full(),
+                                    |app, _, cx| app.side_pane(cx),
+                                    cx,
+                                )),
+                        )
                     })
                     .when(self.settings.is_none() && self.nexus.is_none(), |row| {
                         row.child(match (&self.profile, self.open.clone()) {
@@ -6769,9 +6833,14 @@ impl Render for VectorApp {
                                     app.update(cx, |app, cx| app.on_profile(act, window, cx))
                                         .ok();
                                 });
-                                crate::profile::pane(&store, &self.media, p, &on, window, cx)
+                                let t = self.profile_in.shown(0.4, window);
+                                let el = crate::profile::pane(&store, &self.media, p, &on, window, cx);
+                                let fade = kit::bezier(0., 0., 0.58, 1.)(t);
+                                div().flex_1().min_w_0().h_full().flex().opacity(fade).child(el).into_any_element()
                             }
-                            (None, Some(id)) => match self
+                            (None, Some(id)) => {
+                                let t = self.chat_in.shown(0.25, window);
+                                let el = match self
                                 .community
                                 .as_ref()
                                 .filter(|v| v.panel)
@@ -6791,7 +6860,10 @@ impl Render for VectorApp {
                                     ))
                                     .into_any_element(),
                                 None => self.chat_cached(id, cx),
-                            },
+                            };
+                                let fade = kit::bezier(0.46, 0.03, 0.52, 0.96)(t);
+                                div().flex_1().min_w_0().h_full().flex().opacity(fade).child(el).into_any_element()
+                            }
                             (None, None) => empty_pane(self.viktor.clone()).into_any_element(),
                         })
                     })
@@ -9299,6 +9371,7 @@ impl VectorApp {
             .jumped
             .clone()
             .filter(|(_, t)| t.elapsed().as_secs_f32() < 1.5);
+        let arrived = self.arrived.clone().filter(|(_, t)| t.elapsed().as_secs_f32() < 0.75);
         let cmd_names = self.command_names();
         // `.history-edge.alone`: a chat with nothing yet has its beginning mid-view.
         let anchors = self.anchors.clone();
@@ -9361,6 +9434,15 @@ impl VectorApp {
             // A divider's 10px margins stand in for the row's own above it.
             let after_message = i > 0 && matches!(rows[i - 1], Row::Message { .. });
             let el = timeline_row(&ctx, row, after_message);
+            // `SlideIn` over 0.75 s; Tauri also grows it from its bottom-left corner.
+            let el = match (&arrived, row) {
+                (Some((id, at)), Row::Message { index, .. }) if chat.messages.get(*index).is_some_and(|m| &m.id == id) => {
+                    window.request_animation_frame();
+                    let t = kit::bezier(0.46, 0.03, 0.52, 0.96)((at.elapsed().as_secs_f32() / 0.75).min(1.));
+                    div().w_full().relative().left(px(-100. * (1. - t))).opacity(t).child(el).into_any_element()
+                }
+                _ => el,
+            };
             // `.chat-rows > *:last-child`: clear of the typing strip.
             let el = if i + 1 == rows.len() {
                 div().pb(px(33.)).child(el).into_any_element()

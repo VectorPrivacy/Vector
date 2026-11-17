@@ -699,6 +699,36 @@ pub fn popup_gone(gone: &Linger<()>, open: bool, window: &mut Window) -> Option<
     })
 }
 
+/// A one-shot entrance (`revealPane`) for a surface that comes and goes: it plays when the
+/// surface is drawn after a root render that left it out.
+#[derive(Default)]
+pub struct Reveal {
+    seen: bool,
+    was: bool,
+    at: Option<std::time::Instant>,
+}
+
+impl Reveal {
+    /// Once per root render, before anything is drawn.
+    pub fn frame(&mut self) {
+        self.was = std::mem::take(&mut self.seen);
+    }
+
+    /// The surface is drawn in this render: how far its entrance has come, 0 to 1.
+    pub fn shown(&mut self, secs: f32, window: &mut Window) -> f32 {
+        self.seen = true;
+        if !self.was {
+            self.was = true;
+            self.at = Some(std::time::Instant::now());
+        }
+        let t = self.at.map_or(1., |at| (at.elapsed().as_secs_f32() / secs).min(1.));
+        if t < 1. {
+            window.request_animation_frame();
+        }
+        t
+    }
+}
+
 /// A hover label, where the web client sets a `title`.
 pub struct Tip(gpui::SharedString);
 

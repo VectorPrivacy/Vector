@@ -356,7 +356,17 @@ impl VectorApp {
                 .child(drawer_el)
                 .into_any_element();
         } else {
-            col.child(self.slim_navbar(store, cx)).into_any_element()
+            let (fade, rise) = self.intro_ease();
+            div()
+                .flex_1()
+                .min_h_0()
+                .w_full()
+                .flex()
+                .flex_col()
+                .bg(c(0x050505))
+                .child(col.relative().top(px(50. * (1. - rise))).opacity(rise))
+                .child(div().flex_shrink_0().opacity(fade).child(self.slim_navbar(store, cx)))
+                .into_any_element()
         }
     }
 
