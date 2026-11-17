@@ -620,8 +620,40 @@ impl Store {
         }
         match &self.unread {
             Some(counts) => counts.get(&chat.id).copied().unwrap_or(0) as usize,
-            None => unread_count(chat),
+            None => self.walk_unread(chat),
         }
+    }
+
+    /// `countUnreadMessages`: back to `last_read` or our own latest message; a Mark as Unread
+    /// counts back to its chosen message instead, past our own replies. A blocked or muted
+    /// sender's posts in a Community never count.
+    pub fn walk_unread(&self, chat: &SerializableChat) -> usize {
+        let from = chat.unread_from.as_str();
+        let group = chat.chat_type == vector_core::chat::ChatType::Community;
+        let mut n = 0;
+        for m in chat.messages.iter().rev() {
+            let reached = !from.is_empty() && m.id == from;
+            if m.mine {
+                if !from.is_empty() && !reached {
+                    continue;
+                }
+                break;
+            }
+            if from.is_empty() && !chat.last_read.is_empty() && m.id == chat.last_read {
+                break;
+            }
+            let hidden = group
+                && m.npub.as_deref().is_some_and(|n| {
+                    self.profiles.get(n).is_some_and(|p| p.is_blocked) || self.chat(n).is_some_and(|c| c.muted)
+                });
+            if !hidden {
+                n += 1;
+            }
+            if reached {
+                break;
+            }
+        }
+        n
     }
 
     /// A system line, put in place by time. False when it is already known.

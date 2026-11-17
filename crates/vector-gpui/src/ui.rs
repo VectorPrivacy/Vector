@@ -4150,7 +4150,7 @@ impl VectorApp {
         };
         let store = self.store.borrow();
         let Some(chat) = store.chat(id) else { return };
-        let count = store.unread.as_ref().and_then(|u| u.get(id.as_ref()).copied()).map_or_else(|| data::unread_count(chat), |n| n as usize);
+        let count = store.unread.as_ref().and_then(|u| u.get(id.as_ref()).copied()).map_or_else(|| store.walk_unread(chat), |n| n as usize);
         let loaded = chat.messages.iter().any(|m| m.id == anchor);
         if count == 0 || loaded || self.history_done.contains(id.as_ref()) {
             return;

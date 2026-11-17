@@ -89,7 +89,7 @@ pub fn badge(store: &Store, chat: &SerializableChat) -> usize {
     match ring {
         0 => match &store.unread {
             Some(counts) => counts.get(&chat.id).copied().unwrap_or(0) as usize,
-            None => crate::data::unread_count(chat),
+            None => store.walk_unread(chat),
         },
         1 if is_group(chat) => count(store, chat),
         _ => 0,
