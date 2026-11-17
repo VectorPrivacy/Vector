@@ -53,6 +53,8 @@ pub struct Models {
     pub front: bool,
     pub scale: f32,
     pub active: bool,
+    /// When the window went to the background or the idle pause, which stops every view's clock.
+    held: Option<Instant>,
     backdrop: Option<((u32, u32), Arc<RenderImage>)>,
     pub retired: Vec<Arc<RenderImage>>,
 }
@@ -141,10 +143,21 @@ impl Models {
     /// One frame: true while any view on screen moves on its own.
     pub fn tick(&mut self) -> bool {
         let now = Instant::now();
+        match (self.active, self.held) {
+            (false, None) => self.held = Some(now),
+            (true, Some(at)) => {
+                self.held = None;
+                for v in self.views.values_mut() {
+                    v.seen = v.seen.map(|t| t + (now - at));
+                }
+            }
+            _ => {}
+        }
+        let held = self.held;
         let retired = &mut self.retired;
         // An evicted view's last frame leaves the atlas with it, not just the cache.
         self.views.retain(|_, v| {
-            let keep = v.seen.is_none_or(|t| now - t < IDLE);
+            let keep = v.seen.is_none_or(|t| held.unwrap_or(now) - t < IDLE);
             if !keep {
                 retired.append(&mut v.retired);
                 retired.extend(v.frame.take());
@@ -335,7 +348,15 @@ pub fn stage(models: &mut Models, f: &Facts, src: impl FnOnce() -> Option<Src>, 
     }
     let note = |text: String, color| div().absolute().inset_0().flex().items_center().justify_center().p(px(16.)).text_center().text_size(px(13.)).text_color(color).child(text);
     if !models.settled(f.att) {
-        return Some(el.child(note("Loading model…".into(), ca(255, 255, 255, 0.5))).into_any_element());
+        let runs = models.active && !models.front;
+        let dwell = canvas(|_, _, _| {}, move |_, _, window, _| {
+            if runs {
+                window.request_animation_frame();
+            }
+        })
+        .absolute()
+        .size_0();
+        return Some(el.child(dwell).child(note("Loading model…".into(), ca(255, 255, 255, 0.5))).into_any_element());
     }
     let runs = models.active && !models.front;
     let v = models.view(f.att, f.ext, src)?;
