@@ -22,6 +22,7 @@ mod community;
 mod rail;
 mod voice;
 mod miniprofile;
+mod pings;
 mod pins;
 mod pickers;
 mod edithistory;

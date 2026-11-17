@@ -305,7 +305,8 @@ pub fn render(
 }
 
 /// The open bar, or the grey unread one, at the rail's edge.
-fn bars(d: gpui::Stateful<gpui::Div>, left: f32, inset: f32, open: bool, unread: bool) -> gpui::Stateful<gpui::Div> {
+/// Shut with something new, a short bar: grey for unread, the accent for a ping.
+fn bars(d: gpui::Stateful<gpui::Div>, left: f32, inset: f32, open: bool, unread: bool, ping: bool) -> gpui::Stateful<gpui::Div> {
     d.motion_host().when(open, |d| {
         d.child(
             div()
@@ -318,7 +319,7 @@ fn bars(d: gpui::Stateful<gpui::Div>, left: f32, inset: f32, open: bool, unread:
                 .bg(c(PRIMARY)),
         )
     })
-    .when(unread, |d| {
+    .when(!open && (unread || ping), |d| {
         d.child(
             div()
                 .absolute()
@@ -328,9 +329,13 @@ fn bars(d: gpui::Stateful<gpui::Div>, left: f32, inset: f32, open: bool, unread:
                 .w(px(4.))
                 .h(px(10.))
                 .rounded_r(px(4.))
-                .bg(c(ICON_MUTED)),
+                .bg(c(if ping { PRIMARY } else { ICON_MUTED })),
         )
     })
+}
+
+fn pinged(store: &Store, com: &Community) -> bool {
+    crate::pings::community(store, &com.community_id) > 0
 }
 
 /// `.is-quiet` (nothing new) and `.is-muted` dim a community's name until it's hovered or open.
@@ -418,6 +423,7 @@ fn item(store: &Store, com: &Community, open: bool, unread: bool, inset: f32, vo
         3.,
         open,
         unread,
+        !open && pinged(store, com),
     )
     .tip(com.name.clone())
     .on_click({
@@ -484,6 +490,7 @@ fn folder_head(
         3.,
         active,
         unread,
+        !open && members.iter().any(|c| pinged(store, c)),
     )
     .tip(label.to_string())
     .on_click({
@@ -634,6 +641,7 @@ pub fn render_slim(
                     6.,
                     !is_open && holds_active,
                     !is_open && any_unread,
+                    !is_open && members.iter().any(|c| pinged(store, c)),
                 )
                 .tip(label)
                 .on_click({
@@ -711,7 +719,7 @@ fn ring(id: SharedString) -> gpui::Stateful<gpui::Div> {
 fn tile(store: &Store, com: &Community, open: bool, unread: bool, edge: f32, voice: Option<bool>, zones: Zones, on: &OnAct) -> AnyElement {
     let unread = unread && !community_muted(store, com);
     let id = com.community_id.clone();
-    let el = bars(ring(SharedString::from(format!("rail-c-{id}"))), -edge - 3., 6., open, unread)
+    let el = bars(ring(SharedString::from(format!("rail-c-{id}"))), -edge - 3., 6., open, unread, !open && pinged(store, com))
         .tip(com.name.clone())
         .on_click({
             let (on, id) = (on.clone(), id.clone());

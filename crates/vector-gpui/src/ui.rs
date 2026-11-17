@@ -230,8 +230,6 @@ pub struct VectorApp {
     last_dm: Option<String>,
     /// Each chat's composer as it was left, until it is opened again. Runtime only.
     drafts: HashMap<String, Draft>,
-    /// Each Community's taggable Roles and @everyone rule.
-    mention_rules: HashMap<String, crate::mentions::Rules>,
     /// The draft has text: Send stands where the mic does.
     send_shown: bool,
     /// When typing last flipped the two: the swap runs from this clock, not element state.
@@ -1003,7 +1001,6 @@ impl VectorApp {
             last_dm: None,
             root_focus: cx.focus_handle(),
             drafts: HashMap::new(),
-            mention_rules: HashMap::new(),
             send_shown: false,
             send_flipped: None,
             jumped: None,
@@ -4085,7 +4082,7 @@ impl VectorApp {
         }
         self.sync_mentions(cx);
         let community = self.store.borrow().community_of(&id).map(|c| c.community_id.clone());
-        if let Some(cid) = community.filter(|c| self.live && !self.mention_rules.contains_key(c)) {
+        if let Some(cid) = community.filter(|c| self.live && !self.store.borrow().mention_rules.contains_key(c)) {
             self.load_mention_rules(cid, cx);
         }
         self.chip_passed.clear();
@@ -7558,7 +7555,15 @@ fn rail(
                 .cursor_pointer()
                 .on_click(move |_, w, cx| on(crate::community::Act::Dm(id.clone()), w, cx))
                 .child(avatar(store, &chat.id, 45.))
-                .child(slim_badge(white_a(0.9)).top(px(-2.)).right(px(-2.)))
+                .child(
+                    slim_badge(match (crate::pings::badge(store, chat), chat.muted) {
+                        (0, _) => white_a(0.9),
+                        (_, true) => white_a(0.45),
+                        _ => c(PRIMARY),
+                    })
+                    .top(px(-2.))
+                    .right(px(-2.)),
+                )
         }))
     });
     let dms = (!slim && navbar.is_none() && !unread.is_empty()).then(|| {
@@ -7591,13 +7596,22 @@ fn rail(
                             .text_color(c(0xffffff))
                             .child(store.name(&chat.id)),
                     )
-                    .child(
-                        div()
-                            .size(px(7.))
-                            .mr(px(5.))
-                            .rounded_full()
-                            .bg(white_a(0.32)),
-                    )
+                    // A number for a room still set to tell you everything; otherwise a dot.
+                    .child(match crate::pings::badge(store, chat) {
+                        0 => div().size(px(7.)).mr(px(5.)).rounded_full().bg(white_a(0.32)),
+                        n => div()
+                            .flex_shrink_0()
+                            .min_w(px(19.))
+                            .px(px(6.))
+                            .rounded(px(10.))
+                            .bg(if chat.muted { white_a(0.16) } else { c(PRIMARY) })
+                            .text_color(if chat.muted { white_a(0.75) } else { c(0x000000) })
+                            .text_size(px(11.))
+                            .font_weight(FontWeight::BOLD)
+                            .line_height(px(19.))
+                            .text_center()
+                            .child(crate::pings::text(n)),
+                    })
             }))
     });
 
@@ -8439,6 +8453,7 @@ fn preview_line_at(store: &Store, chat: &SerializableChat, color: gpui::Hsla, si
 
 fn chat_row(store: &Store, chat: &SerializableChat, active: bool, pinned: bool) -> gpui::Stateful<gpui::Div> {
     let unread = store.unread_count(chat) > 0 && !active;
+    let badge = if active { 0 } else { crate::pings::badge(store, chat) };
     let (name_color, name_weight) = match (unread, active) {
         (true, _) => (c(0xffffff), FontWeight::BOLD),
         (false, true) => (c(0xffffff), FontWeight::NORMAL),
@@ -8509,7 +8524,8 @@ fn chat_row(store: &Store, chat: &SerializableChat, active: bool, pinned: bool) 
                                 })
                                 .when(pinned, |d| {
                                     d.child(svg().path("icons/pin.svg").size(px(14.)).flex_shrink_0().text_color(c(ACCENT)))
-                                }),
+                                })
+                                .when(badge > 0, |d| d.child(crate::pings::row_pill(badge).ml_auto())),
                         )
                         .child(
                             div()
@@ -9240,7 +9256,7 @@ impl VectorApp {
         let invites = Rc::new(self.invite_previews.clone());
         let rules: Option<Rc<crate::mentions::Rules>> = store
             .community_of(&id)
-            .map(|c| match self.mention_rules.get(&c.community_id) {
+            .map(|c| match store.mention_rules.get(&c.community_id) {
                 Some(r) => Rc::new(r.clone()),
                 // Fixtures answer as the mock does: anyone may ping everyone.
                 None => Rc::new(crate::mentions::Rules { anyone: !self.live, ..Default::default() }),
@@ -13958,7 +13974,7 @@ impl VectorApp {
                         .map(|c| c.community_id.clone());
                     if let Some(id) = community
                         .as_ref()
-                        .filter(|id| self.live && !self.mention_rules.contains_key(*id))
+                        .filter(|id| self.live && !self.store.borrow().mention_rules.contains_key(*id))
                     {
                         self.load_mention_rules(id.clone(), cx);
                     }
@@ -13969,7 +13985,7 @@ impl VectorApp {
                         .as_ref()
                         .map(|v| v.members.as_slice())
                         .unwrap_or_default();
-                    let rules = community.as_ref().and_then(|id| self.mention_rules.get(id));
+                    let rules = community.as_ref().and_then(|id| store.mention_rules.get(id));
                     let p = Rc::new(mentions::candidates(&store, chat, roster, rules));
                     drop(store);
                     self.mention_pool = Some(p.clone());
@@ -13994,7 +14010,9 @@ impl VectorApp {
     }
 
     fn load_mention_rules(&mut self, community: String, cx: &mut Context<Self>) {
-        self.mention_rules
+        self.store
+            .borrow_mut()
+            .mention_rules
             .insert(community.clone(), Default::default());
         let id = community.clone();
         let rx = backend::run(async move { vector_core::VectorCore.community_mentions(&id).ok() });
@@ -14004,7 +14022,8 @@ impl VectorApp {
                 return;
             };
             this.update(cx, |this, cx| {
-                this.mention_rules.insert(community, rules);
+                this.store.borrow_mut().mention_rules.insert(community, rules);
+                cx.notify();
                 if this.mention.is_some() {
                     this.mention_pool = None;
                     this.update_shortcode(cx);

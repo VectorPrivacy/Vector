@@ -287,6 +287,11 @@ fn channel_row(
     let group = SharedString::from(format!("ch-{}", ch.channel_id));
     let muted = store.chat(&ch.channel_id).is_some_and(|chat| chat.muted);
     let unread = !open && !muted && channel_unread(store, ch) > 0;
+    // A number only for someone calling your name; a room set to Nothing is silent here too.
+    let pings = store
+        .chat(&ch.channel_id)
+        .filter(|chat| !open && chat.notify < 2)
+        .map_or(0, |chat| crate::pings::count(store, chat));
     let ink = if open || unread {
         c(0xffffff)
     } else if muted {
@@ -386,6 +391,7 @@ fn channel_row(
                 .when(unread, |d| d.font_weight(FontWeight::MEDIUM))
                 .child(ch.name.clone()),
         )
+        .when(pings > 0, |d| d.child(crate::pings::channel_pill(pings)))
         .when(owner || ch.is_voice(), |d| d.child(actions))
 }
 

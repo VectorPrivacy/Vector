@@ -319,6 +319,8 @@ pub struct Store {
     pub fixture_unlisted: HashMap<String, HashMap<String, String>>,
     /// Each community's role graph, once read: roster sections and name colours.
     pub role_graphs: HashMap<String, crate::community::Graph>,
+    /// Each Community's taggable Roles and @everyone rule, once read.
+    pub mention_rules: HashMap<String, crate::mentions::Rules>,
     /// Collapsed posts tapped open in the open chat.
     pub unveiled: HashSet<String>,
     /// Each community's logo and banner as local files, once resolved.
@@ -437,6 +439,21 @@ impl Store {
         for chat in &mut chats[from..] {
             chat.messages.retain(|m| !m.mine);
         }
+        // VECTOR_NOTIFY=<0|1|2>: every chat's resolved level. VECTOR_PINGS=1: each Community
+        // channel's newest message tags us.
+        if let Some(level) = std::env::var("VECTOR_NOTIFY").ok().and_then(|n| n.parse::<u8>().ok()) {
+            for chat in &mut chats {
+                chat.notify = level;
+            }
+        }
+        if std::env::var_os("VECTOR_PINGS").is_some() {
+            for chat in chats.iter_mut().filter(|c| c.chat_type == vector_core::chat::ChatType::Community) {
+                if let Some(m) = chat.messages.iter_mut().rev().find(|m| !m.mine) {
+                    m.content = format!("@{} {}", f.npub, m.content);
+                    chat.last_read.clear();
+                }
+            }
+        }
         chats.sort_by_key(|c| std::cmp::Reverse(last_activity(c)));
         crate::relayinfo::set_fixture(
             std::mem::take(&mut f.relay_info),
@@ -502,6 +519,7 @@ impl Store {
             unveiled: HashSet::new(),
             fixture_unlisted: f.unlisted,
             role_graphs: f.role_graphs.iter().map(|(k, v)| (k.clone(), crate::community::Graph::parse(v))).collect(),
+            mention_rules: HashMap::new(),
             art: HashMap::new(),
             hidden_banners: Vec::new(),
             pinned: demo.pinned,
@@ -567,6 +585,7 @@ impl Store {
             unveiled: HashSet::new(),
             fixture_unlisted: HashMap::new(),
             role_graphs: HashMap::new(),
+            mention_rules: HashMap::new(),
             art: HashMap::new(),
             hidden_banners: Vec::new(),
             streamer: Default::default(),

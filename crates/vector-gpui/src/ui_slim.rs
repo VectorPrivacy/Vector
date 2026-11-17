@@ -1459,6 +1459,7 @@ fn slim_row(store: &Store, chat: &SerializableChat) -> gpui::Stateful<gpui::Div>
         store.name(&chat.id),
         unread,
         pinned,
+        (false, crate::pings::text(crate::pings::badge(store, chat))),
         preview_line_at(store, chat, if unread { c(0xb2b2b2) } else { c(0x737373) }, 14., 19.),
         data::time_ago(store.now_ms(), last),
     )
@@ -1494,12 +1495,19 @@ fn community_row(store: &Store, com: &Community) -> gpui::Stateful<gpui::Div> {
         }
         None => div().into_any_element(),
     };
+    // A community's row answers for its whole space, so a collapsed channel still reaches it.
+    let channels = || com.channels.iter().filter_map(|ch| store.chat(&ch.channel_id));
+    let badge: usize = channels().map(|chat| crate::pings::badge(store, chat)).sum();
+    let pinged = channels().any(|chat| crate::pings::badge(store, chat) > 0 && crate::pings::count(store, chat) > 0);
+    // Past one synced page the count is a lower bound.
+    let count = if badge >= 20 && badge <= 99 { format!("{badge}+") } else { crate::pings::text(badge) };
     row_shell(
         SharedString::from(format!("cc-com-{}", com.community_id)),
         face,
         com.name.clone(),
         unread,
         false,
+        (pinged, count),
         preview,
         latest.map(|(_, at)| data::time_ago(store.now_ms(), at)).unwrap_or_default(),
     )
@@ -1511,6 +1519,7 @@ fn row_shell(
     name: String,
     unread: bool,
     pinned: bool,
+    (pinged, count): (bool, String),
     preview: AnyElement,
     time: String,
 ) -> gpui::Stateful<gpui::Div> {
@@ -1552,6 +1561,43 @@ fn row_shell(
                         )
                         .when(pinned, |d| {
                             d.child(svg().path("icons/pin.svg").size(px(14.)).flex_shrink_0().text_color(c(ACCENT)))
+                        })
+                        // Top-right corner: the @ (a ping waits) then the count.
+                        .when(pinged || count != "0", |d| {
+                            d.child(
+                                div()
+                                    .ml_auto()
+                                    .flex_shrink_0()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(7.))
+                                    .when(pinged, |d| {
+                                        d.child(
+                                            div()
+                                                .text_size(px(17.))
+                                                .font_weight(FontWeight::SEMIBOLD)
+                                                .line_height(px(17.))
+                                                .text_color(c(PRIMARY))
+                                                .child("@"),
+                                        )
+                                    })
+                                    .when(count != "0", |d| {
+                                        d.child(
+                                            div()
+                                                .min_w(px(22.))
+                                                .px(px(7.))
+                                                .py(px(3.))
+                                                .rounded_full()
+                                                .bg(c(PRIMARY))
+                                                .text_color(c(0x000000))
+                                                .text_size(px(12.))
+                                                .font_weight(FontWeight::BOLD)
+                                                .line_height(px(13.))
+                                                .text_center()
+                                                .child(count),
+                                        )
+                                    }),
+                            )
                         }),
                 )
                 .child(
