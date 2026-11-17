@@ -2413,7 +2413,9 @@ impl Interactivity {
                 let auto = !self.focusable
                     && window.auto_tab_stops
                     && self.window_control.is_none()
-                    && !self.click_listeners.is_empty();
+                    && (!self.click_listeners.is_empty()
+                        || (self.override_role == Some(accesskit::Role::Slider)
+                            && !self.key_down_listeners.is_empty()));
                 if (self.focusable || auto)
                     && self.tracked_focus_handle.is_none()
                     && let Some(element_state) = element_state.as_mut()

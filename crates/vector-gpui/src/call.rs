@@ -854,6 +854,10 @@ fn volume_slider(call: &Call, on: &OnAct) -> impl IntoElement {
             div()
                 .id("call-volume")
                 .as_slider("Their volume", format!("{}%", (call.volume * 100.).round()), pct)
+                .slider_keys(pct, 0.025, {
+                    let on = on.clone();
+                    move |f, w, cx| on(Act::Volume((f * 40.).round() / 20.), w, cx)
+                })
                 .relative()
                 .flex_1()
                 .min_w_0()

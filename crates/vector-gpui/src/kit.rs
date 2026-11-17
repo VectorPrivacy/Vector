@@ -650,6 +650,23 @@ pub trait Tipped: gpui::StatefulInteractiveElement + Sized {
             .aria_min_numeric_value(0.)
             .aria_max_numeric_value(100.)
     }
+
+    /// A slider's keys once focused: arrows by `step`, Page Up/Down by a tenth, Home and End.
+    fn slider_keys(self, frac: f32, step: f32, set: impl Fn(f32, &mut gpui::Window, &mut gpui::App) + 'static) -> Self {
+        self.on_key_down(move |e: &gpui::KeyDownEvent, w, cx| {
+            let to = match e.keystroke.key.as_str() {
+                "left" | "down" => frac - step,
+                "right" | "up" => frac + step,
+                "pagedown" => frac - 0.1,
+                "pageup" => frac + 0.1,
+                "home" => 0.,
+                "end" => 1.,
+                _ => return,
+            };
+            cx.stop_propagation();
+            set(to.clamp(0., 1.), w, cx);
+        })
+    }
 }
 
 impl<T: gpui::StatefulInteractiveElement> Tipped for T {}
@@ -944,6 +961,7 @@ fn menu_slider(
             on(ix, at(bounds.get(), e.position.x), w, cx);
         }
     };
+    let on_key = on.clone();
     let record = bounds.clone();
     let track = gpui::canvas(
         move |b, _, _| record.set(b),
@@ -990,6 +1008,7 @@ fn menu_slider(
             div()
                 .id(("ctx-slider", ix))
                 .as_slider(spoken.0, spoken.1, value)
+                .slider_keys(value, 0.05, move |f, w, cx| on_key(ix, f, w, cx))
                 .relative()
                 .w_full()
                 .h(px(20.))

@@ -1198,6 +1198,10 @@ fn slider(key: &str, label: &'static str, value: SharedString, frac: f32, live: 
     div()
         .id(key)
         .as_slider(label, value, frac)
+        .when(live, |d| {
+            let on = on.clone();
+            d.slider_keys(frac, 0.05, move |f, w, cx| on(act(f, true), w, cx))
+        })
         .size_full()
         .on_click(|_, _, cx| cx.stop_propagation())
         .child(

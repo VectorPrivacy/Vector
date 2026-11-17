@@ -1287,6 +1287,10 @@ fn waveform(
     div()
         .id(id)
         .as_slider("Seek", spoken, progress)
+        .when(seekable, |d| {
+            let on = on_seek.clone();
+            d.slider_keys(progress, 0.05, move |f, w, cx| on(f, true, w, cx))
+        })
         .group("audio-waveform")
         .flex_1()
         .h(px(tall))

@@ -3625,6 +3625,10 @@ fn slider(key: &'static str, value: f32, s: &Settings, on: &OnAct) -> AnyElement
     div()
         .id(key)
         .as_slider(name, format!("{}%", (value * 100.).round()), value)
+        .slider_keys(value, 0.05, {
+            let on = on.clone();
+            move |f, w, cx| on(Act::Volume(key, f), w, cx)
+        })
         .relative()
         .w_full()
         .h(px(22.))

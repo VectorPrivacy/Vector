@@ -266,6 +266,10 @@ pub fn preview_bar(blur: u8, dim: u8, dragging: Rc<Cell<Option<bool>>>, on: &OnA
                 if is_blur { value.to_string() } else { format!("{value}%") },
                 pct,
             )
+            .slider_keys(pct, if is_blur { 1. } else { 5. } / (hi - lo) as f32, {
+                let on = on.clone();
+                move |f, w, cx| on(Act::Slide(is_blur, (lo as f32 + f * (hi - lo) as f32).round() as u8), w, cx)
+            })
             .flex()
             .items_center()
             .gap(px(12.))
