@@ -337,11 +337,13 @@ pub fn stage(models: &mut Models, f: &Facts, src: impl FnOnce() -> Option<Src>, 
     if !models.settled(f.att) {
         return Some(el.child(note("Loading model…".into(), ca(255, 255, 255, 0.5))).into_any_element());
     }
+    let runs = models.active && !models.front;
     let v = models.view(f.att, f.ext, src)?;
     v.seen = Some(Instant::now());
     let size = v.css_size();
     let dragging = v.dragging();
-    let moving = v.moving_hint();
+    // A background window or the idle pause asks for no frames, or the driver keeps its pool.
+    let moving = v.moving_hint() && runs;
     el = el.child(measure(size, dragging, moving, on.clone()));
     if let Some(frame) = v.frame.clone() {
         el = el.child(img(frame).absolute().inset_0().size_full().opacity(v.opacity()));
