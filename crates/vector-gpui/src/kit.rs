@@ -653,7 +653,17 @@ pub trait Tipped: gpui::StatefulInteractiveElement + Sized {
 
     /// A slider's keys once focused: arrows by `step`, Page Up/Down by a tenth, Home and End.
     fn slider_keys(self, frac: f32, step: f32, set: impl Fn(f32, &mut gpui::Window, &mut gpui::App) + 'static) -> Self {
-        self.on_key_down(move |e: &gpui::KeyDownEvent, w, cx| {
+        use gpui::accesskit::{Action, ActionData};
+        let set = std::rc::Rc::new(set);
+        let (up, down, to) = (set.clone(), set.clone(), set.clone());
+        self.on_a11y_action(Action::Increment, move |_, w, cx| up((frac + step).clamp(0., 1.), w, cx))
+            .on_a11y_action(Action::Decrement, move |_, w, cx| down((frac - step).clamp(0., 1.), w, cx))
+            .on_a11y_action(Action::SetValue, move |data, w, cx| {
+                if let Some(ActionData::NumericValue(v)) = data {
+                    to((*v as f32 / 100.).clamp(0., 1.), w, cx);
+                }
+            })
+            .on_key_down(move |e: &gpui::KeyDownEvent, w, cx| {
             let to = match e.keystroke.key.as_str() {
                 "left" | "down" => frac - step,
                 "right" | "up" => frac + step,
@@ -665,7 +675,7 @@ pub trait Tipped: gpui::StatefulInteractiveElement + Sized {
             };
             cx.stop_propagation();
             set(to.clamp(0., 1.), w, cx);
-        })
+            })
     }
 }
 
