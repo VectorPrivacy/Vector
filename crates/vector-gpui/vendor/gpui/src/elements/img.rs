@@ -1286,7 +1286,7 @@ pub fn set_animation_idle(after: Duration) {
 
 /// Nobody has touched the window for a while: animated pictures hold the frame they're on, and
 /// nothing is presented for them, which lets the GPU driver release its working memory.
-pub(crate) fn animations_asleep() -> bool {
+pub fn animations_asleep() -> bool {
     let last = LAST_INPUT.with(|t| t.get()).unwrap_or_else(|| {
         let now = Instant::now();
         LAST_INPUT.with(|t| t.set(Some(now)));

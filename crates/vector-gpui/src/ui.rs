@@ -6403,7 +6403,7 @@ impl Render for VectorApp {
                 _ => {}
             }
             media.models.scale = window.scale_factor();
-            media.models.active = window.is_window_active();
+            media.models.active = window.is_window_active() && !gpui::animations_asleep();
             media.models.front = self.model_viewer.is_some();
             if media.models.tick() {
                 window.request_animation_frame();
