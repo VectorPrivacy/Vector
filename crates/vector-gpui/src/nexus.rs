@@ -2255,6 +2255,7 @@ pub fn view(
         .child(
             div()
                 .id("nx-refresh")
+                .aria_label("Refresh")
                 .group("nx-refresh")
                 .flex()
                 .items_center()

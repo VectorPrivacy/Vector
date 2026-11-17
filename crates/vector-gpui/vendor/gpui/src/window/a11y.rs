@@ -387,6 +387,14 @@ pub(crate) fn report_text(window: &mut Window, text: &str, bounds: Bounds<Pixels
     window.a11y.nodes.push_text(text, rect);
 }
 
+#[derive(Default)]
+struct Frame {
+    texts: u32,
+    last_text: Option<String>,
+    has_control: bool,
+    inferred: bool,
+}
+
 fn is_named_from_contents(role: accesskit::Role) -> bool {
     use accesskit::Role::*;
     matches!(
@@ -411,8 +419,8 @@ pub(crate) struct A11yNodeBuilder {
     /// pattern, which allows a focused container to act as if a descendant is
     /// focused.
     active_descendant: Option<NodeId>,
-    /// Per open node: text leaves added under it so far, and the latest one.
-    text_counts: SmallVec<[(u32, Option<String>); 16]>,
+    /// Per open node, what has been added under it so far.
+    frames: SmallVec<[Frame; 16]>,
     #[cfg(debug_assertions)]
     node_info: FxHashMap<NodeId, debug::NodeDebugInfo>,
 }
@@ -426,7 +434,7 @@ impl A11yNodeBuilder {
             seen_ids: FxHashSet::default(),
             focus: None,
             active_descendant: None,
-            text_counts: SmallVec::new(),
+            frames: SmallVec::new(),
             #[cfg(debug_assertions)]
             node_info: FxHashMap::default(),
         }
@@ -464,17 +472,33 @@ impl A11yNodeBuilder {
         let mut node = node;
         if matches!(node.role(), accesskit::Role::Switch | accesskit::Role::CheckBox)
             && node.label().is_none()
-            && let Some(text) = self.text_counts.last().and_then(|c| c.1.clone())
+            && let Some(text) = self.frames.last().and_then(|f| f.last_text.clone())
         {
             node.set_label(text);
         }
+        self.note_child(node.role());
         if let Some(parent) = self.nodes_stack.last_mut() {
             parent.push_child(id);
         }
         self.ids_stack.push(id);
         self.nodes_stack.push(node);
-        self.text_counts.push((0, None));
+        self.frames.push(Frame::default());
         true
+    }
+
+    pub(crate) fn mark_inferred(&mut self) {
+        if let Some(frame) = self.frames.last_mut() {
+            frame.inferred = true;
+        }
+    }
+
+    fn note_child(&mut self, role: accesskit::Role) {
+        use accesskit::Role::*;
+        if let Some(frame) = self.frames.last_mut()
+            && !matches!(role, Label | Image | GenericContainer)
+        {
+            frame.has_control = true;
+        }
     }
 
     /// Report a run of plain text as a `Label` leaf of the innermost open node,
@@ -486,12 +510,12 @@ impl A11yNodeBuilder {
             return;
         }
         let Some(&parent_id) = self.ids_stack.last() else { return };
-        let Some(count) = self.text_counts.last_mut() else { return };
-        count.0 += 1;
-        count.1 = Some(text.to_string());
+        let Some(frame) = self.frames.last_mut() else { return };
+        frame.texts += 1;
+        frame.last_text = Some(text.to_string());
         let mut hasher = std::hash::DefaultHasher::default();
         parent_id.0.hash(&mut hasher);
-        ("text", count.0).hash(&mut hasher);
+        ("text", frame.texts).hash(&mut hasher);
         let mut node = accesskit::Node::new(accesskit::Role::Label);
         node.set_value(text.to_string());
         node.set_bounds(bounds);
@@ -508,6 +532,7 @@ impl A11yNodeBuilder {
             return false;
         }
 
+        self.note_child(node.role());
         if let Some(parent) = self.nodes_stack.last_mut() {
             parent.push_child(id);
         }
@@ -524,10 +549,14 @@ impl A11yNodeBuilder {
     pub(crate) fn pop(&mut self) {
         debug_assert!(self.ids_stack.len() > 1, "pop would remove the root node");
 
-        let named = self.text_counts.pop().is_some_and(|c| c.1.is_some());
+        let frame = self.frames.pop().unwrap_or_default();
         if let (Some(id), Some(mut node)) = (self.ids_stack.pop(), self.nodes_stack.pop()) {
+            // A clickable area holding other controls (a backdrop, a card) is their container.
+            if frame.has_control && frame.inferred {
+                node.set_role(accesskit::Role::GenericContainer);
+            }
             // An icon-only control is named by its tooltip.
-            if !named && node.label().is_none() && is_named_from_contents(node.role()) {
+            if frame.last_text.is_none() && node.label().is_none() && is_named_from_contents(node.role()) {
                 if let Some(description) = node.description().map(str::to_owned) {
                     node.clear_description();
                     node.set_label(description);
@@ -552,8 +581,8 @@ impl A11yNodeBuilder {
 
         self.ids_stack.push(ROOT_NODE_ID);
         self.nodes_stack.push(root_node);
-        self.text_counts.clear();
-        self.text_counts.push((0, None));
+        self.frames.clear();
+        self.frames.push(Frame::default());
         self.focus = None;
         self.active_descendant = None;
     }

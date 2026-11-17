@@ -2,6 +2,7 @@
 //! overlapping avatar, status pill, name, fingerprint, bio, their roles in the community it
 //! was opened within, and two actions. Anchored beside the tap, else centred.
 
+use crate::kit::Tipped as _;
 use std::rc::Rc;
 use std::time::Instant;
 
@@ -204,6 +205,7 @@ pub fn render(m: &Mini, store: &Store, window: Size<Pixels>, anchors: &crate::ki
         }));
     let avatar = div()
         .id("mini-profile-avatar")
+        .tip("View Profile")
         .motion_live()
         .absolute()
         .top(px(28.))
@@ -308,7 +310,8 @@ pub fn render(m: &Mini, store: &Store, window: Size<Pixels>, anchors: &crate::ki
                 .items_center()
                 .justify_center()
                 .when(role.removable, |d| {
-                    d.group_hover(group.clone(), |d| d.size(px(12.)).mx(px(-1.)))
+                    d.aria_label(format!("Remove {}", role.name))
+                        .group_hover(group.clone(), |d| d.size(px(12.)).mx(px(-1.)))
                         .when(!busy, |d| d.cursor_pointer().on_click(click(on, Act::RemoveRole(role.id.clone()))))
                         .child(
                             svg()

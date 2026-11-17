@@ -1028,6 +1028,7 @@ pub fn info(
 ) -> gpui::Stateful<gpui::Div> {
     div()
         .id(id.into())
+        .aria_label("More info")
         .size(px(16.))
         .flex_shrink_0()
         .cursor_pointer()

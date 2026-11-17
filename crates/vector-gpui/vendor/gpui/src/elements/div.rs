@@ -2031,6 +2031,10 @@ impl Element for Div {
             })
     }
 
+    fn a11y_role_inferred(&self) -> bool {
+        self.interactivity.override_role.is_none() && !self.interactivity.click_listeners.is_empty()
+    }
+
     fn write_a11y_info(&self, node: &mut accesskit::Node) {
         self.interactivity.write_a11y_info(node);
     }
@@ -4306,6 +4310,10 @@ where
 
     fn a11y_role(&self) -> Option<accesskit::Role> {
         self.element.a11y_role()
+    }
+
+    fn a11y_role_inferred(&self) -> bool {
+        self.element.a11y_role_inferred()
     }
 
     fn write_a11y_info(&self, node: &mut accesskit::Node) {

@@ -114,6 +114,12 @@ pub trait Element: 'static + Sized {
         None
     }
 
+    /// Whether [`a11y_role`][Element::a11y_role] was inferred (a clickable element as a
+    /// button) rather than set. An inferred button holding other controls is their container.
+    fn a11y_role_inferred(&self) -> bool {
+        false
+    }
+
     /// Write accessibility properties to the given node.
     /// Called only when `a11y_role()` returns `Some`.
     ///
@@ -448,6 +454,9 @@ impl<E: Element> Drawable<E> {
                             self.element.write_a11y_info(&mut node);
                             window.a11y.node_bounds.insert(node_id, bounds);
                             pushed_a11y_node = window.a11y.nodes.push(node_id, node);
+                            if pushed_a11y_node && self.element.a11y_role_inferred() {
+                                window.a11y.nodes.mark_inferred();
+                            }
                             #[cfg(debug_assertions)]
                             if pushed_a11y_node {
                                 let view = window

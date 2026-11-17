@@ -211,6 +211,7 @@ fn head(m: &Moderation, on: &OnAct) -> impl IntoElement {
         .child(
             div()
                 .id("mod-x")
+                .aria_label("Close")
                 .px(px(6.))
                 .py(px(4.))
                 .text_size(px(15.))

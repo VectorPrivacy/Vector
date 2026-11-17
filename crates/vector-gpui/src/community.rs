@@ -343,6 +343,7 @@ fn channel_row(
             "chatlist-channel-{}",
             ch.channel_id
         )))
+        .role(gpui::Role::Button)
         .when_some(ch.topic.clone().filter(|t| !t.is_empty()), |d, t| d.tip(t))
         .group(group.clone())
         .mx(px(8.))

@@ -640,6 +640,7 @@ fn back(on: &OnAct) -> impl IntoElement {
     div()
         .id("stm-back")
         .mr(px(6.))
+        .aria_label("Back")
         .cursor_pointer()
         .on_click(click(on, || Act::Back))
         .child(
@@ -1085,6 +1086,7 @@ pub fn render(sm: &StartMenu, store: &Store, window: &Window, on: &OnAct, cx: &A
             d.child(
                 div()
                     .id("stm-back")
+                    .aria_label("Back")
                     .mr(px(6.))
                     .cursor_pointer()
                     .on_click(click(on, || Act::Folder(None)))

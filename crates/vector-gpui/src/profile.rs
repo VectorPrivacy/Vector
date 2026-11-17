@@ -494,7 +494,7 @@ pub fn pane(
     }
     if editing.is_none() {
         banner_box = banner_box.child(
-            small_option("profile-qr-btn", "ui/qr.svg", None, false)
+            small_option("profile-qr-btn", "ui/qr.svg", None, false).aria_label("Show profile QR code")
                 .right(px(16.))
                 .top(px(if mine { 68. } else { 10. }))
                 .on_click(click(on, Act::Qr)),
