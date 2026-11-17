@@ -702,6 +702,11 @@ pub async fn invite_links(community_id: String) -> InviteLinks {
     .await
 }
 
+/// Whether this account's links changed on its other devices.
+pub async fn sync_invites(community_id: String) -> bool {
+    db::scoped(async move { VectorCore.sync_public_invites(&community_id).await.unwrap_or(false) }).await
+}
+
 pub async fn revoke_invite(community_id: String, token: String) -> Result<(), String> {
     db::scoped(async move {
         VectorCore

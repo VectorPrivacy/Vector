@@ -153,7 +153,8 @@ fn pings_me(ctx: &Ctx, m: &Message) -> bool {
         return false;
     }
     let me = ctx.store.my_npub.as_str();
-    if !me.is_empty() && m.content.contains(&format!("@{me}")) {
+    let text = vector_core::types::outside_code(&m.content);
+    if !me.is_empty() && text.contains(&format!("@{me}")) {
         return true;
     }
     if !m.replied_to.is_empty() {
@@ -169,15 +170,15 @@ fn pings_me(ctx: &Ctx, m: &Message) -> bool {
     let sender = m.npub.as_deref().unwrap_or_default();
     let by_anyone = rules.anyone || rules.pingers.iter().any(|p| p == sender);
     let everyone = by_anyone
-        && m.content.match_indices("@everyone").any(|(i, _)| {
-            !m.content[i + 9..].chars().next().is_some_and(|c| c.is_alphanumeric() || c == '_')
+        && text.match_indices("@everyone").any(|(i, _)| {
+            !text[i + 9..].chars().next().is_some_and(|c| c.is_alphanumeric() || c == '_')
         });
     everyone
         || rules.roles.iter().any(|r| {
             r.held
                 && !r.name.is_empty()
                 && m.role_mentions.contains(&r.id)
-                && m.content.contains(&format!("@{}", r.name))
+                && text.contains(&format!("@{}", r.name))
                 && (r.mentionable || by_anyone)
         })
 }
@@ -187,13 +188,14 @@ fn tag_chips(ctx: &Ctx, m: &Message) -> Vec<(String, Option<u32>)> {
     let Some(rules) = ctx.rules else { return Vec::new() };
     let sender = if m.mine { ctx.store.my_npub.as_str() } else { m.npub.as_deref().unwrap_or_default() };
     let by_anyone = rules.anyone || rules.pingers.iter().any(|p| p == sender);
+    let text = vector_core::types::outside_code(&m.content);
     let mut out: Vec<(String, Option<u32>)> = rules
         .roles
         .iter()
         .filter(|r| {
             !r.name.is_empty()
                 && m.role_mentions.contains(&r.id)
-                && m.content.contains(&format!("@{}", r.name))
+                && text.contains(&format!("@{}", r.name))
                 && (r.mentionable || by_anyone)
         })
         .map(|r| (r.name.clone(), Some(r.color.map_or(PRIMARY, |c| c & 0xff_ffff))))

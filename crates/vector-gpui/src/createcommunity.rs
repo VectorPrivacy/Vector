@@ -1,4 +1,4 @@
-//! Create Community (`community/CommunitySetup.svelte`): its name with a live preview, who can
+//! Create Community (`community/CommunitySetup.svelte`): its name and icon, who can
 //! join, then the way in — a link to share (Public) or friends to invite (Private). The
 //! Community exists from the end of step 2; step 3 only hands out access to it.
 
@@ -203,131 +203,6 @@ fn choice(
                 ),
         )
         .child(radio(on_it))
-}
-
-/// The channel pane's own head and one channel, so the preview is how it will look.
-fn preview(name: &str, icon: Option<&crate::commsettings::Pick>) -> impl IntoElement {
-    let name = if name.trim().is_empty() {
-        "Your Community".to_string()
-    } else {
-        name.trim().to_string()
-    };
-    div()
-        .mt(px(32.))
-        .w(px(242.))
-        .flex()
-        .flex_col()
-        .child(
-            crate::kit::spaced("PREVIEW", 0.66)
-                .justify_center()
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_size(px(11.))
-                .line_height(px(24.))
-                .text_color(white_a(0.4)),
-        )
-        .child(
-            div()
-                .mt(px(8.))
-                .h(px(110.))
-                .rounded(px(12.))
-                .border_1()
-                .border_color(c(0x222222))
-                .bg(c(LIST_BG))
-                .overflow_hidden()
-                .child(
-                    div()
-                        .h(px(57.))
-                        .rounded_t(px(11.))
-                        .bg(c(0x171717))
-                        .flex()
-                        .items_center()
-                        .gap(px(10.))
-                        .px(px(12.))
-                        .child(match icon {
-                            Some(p) => div()
-                                .flex_shrink_0()
-                                .child(crate::commsettings::cut(p, 36., 36., 11.))
-                                .into_any_element(),
-                            None => img("icons/group-placeholder.svg")
-                                .size(px(36.))
-                                .rounded(px(11.))
-                                .flex_shrink_0()
-                                .into_any_element(),
-                        })
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .flex()
-                                .flex_col()
-                                .gap(px(2.))
-                                .child(
-                                    div()
-                                        .truncate()
-                                        .font_family(RUBIK)
-                                        .font_weight(FontWeight::SEMIBOLD)
-                                        .text_size(px(15.))
-                                        .line_height(px(18.))
-                                        .text_color(c(0xffffff))
-                                        .child(name),
-                                )
-                                .child(
-                                    div()
-                                        .flex()
-                                        .items_center()
-                                        .gap(px(2.5))
-                                        .text_size(px(12.))
-                                        .line_height(px(14.))
-                                        .text_color(white_a(0.42))
-                                        .child(
-                                            svg()
-                                                .path("icons/users-multi.svg")
-                                                .size(px(13.))
-                                                .text_color(white_a(0.42)),
-                                        )
-                                        .child("1 Member"),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .size(px(30.))
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .child(
-                                    svg()
-                                        .path("icons/chevron-down.svg")
-                                        .size(px(19.5))
-                                        .text_color(white_a(0.4)),
-                                ),
-                        ),
-                )
-                .child(
-                    div().pt(px(8.)).px(px(8.)).child(
-                        div()
-                            .h(px(32.))
-                            .rounded(px(4.))
-                            .bg(white_a(0.09))
-                            .flex()
-                            .items_center()
-                            .gap(px(8.))
-                            .px(px(8.))
-                            .child(
-                                svg()
-                                    .path("icons/channel-hash.svg")
-                                    .size(px(18.))
-                                    .text_color(c(0xffffff)),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(15.))
-                                    .line_height(px(24.))
-                                    .text_color(c(0xffffff))
-                                    .child("general"),
-                            ),
-                    ),
-                ),
-        )
 }
 
 /// The link as people read it: no scheme, and the long key cut down the middle.
@@ -658,35 +533,35 @@ pub fn view(m: &CreateCommunity, store: &Store, width: f32, on: &OnAct, cx: &App
             .flex()
             .flex_col()
             .items_center()
+            .gap(px(20.))
             .child(
                 div()
-                    .w_full()
-                    .max_w(px(420.))
+                    .id("cc-icon")
+                    .relative()
+                    .size(px(96.))
+                    .flex_shrink_0()
+                    .rounded_full()
                     .flex()
                     .items_center()
-                    .gap(px(12.))
-                    .child(
-                        div()
-                            .id("cc-icon")
-                            .relative()
-                            .size(px(56.))
-                            .flex_shrink_0()
-                            .cursor_pointer()
-                            .when(m.icon.is_none(), |d| d.opacity(0.7).hover(|s| s.opacity(1.)))
-                            .tip("Choose community icon")
-                            .on_click(click(on, || Act::PickIcon))
-                            .child(match &m.icon {
-                                Some(p) => crate::commsettings::cut(p, 56., 56., 28.),
-                                None => img("ui/group-placeholder-dim.svg")
-                                    .size(px(56.))
-                                    .rounded_full()
-                                    .into_any_element(),
-                            })
+                    .justify_center()
+                    .cursor_pointer()
+                    .when(m.icon.is_none(), |d| {
+                        d.border_2()
+                            .border_dashed()
+                            .border_color(white_a(0.2))
+                            .hover(|s| s.border_color(c(PRIMARY)))
+                    })
+                    .tip("Choose community icon")
+                    .on_click(click(on, || Act::PickIcon))
+                    .child(match &m.icon {
+                        Some(p) => div()
+                            .size_full()
+                            .child(crate::commsettings::cut(p, 96., 96., 48.))
                             .child(
                                 div()
                                     .absolute()
-                                    .left(px(31.))
-                                    .top(px(31.))
+                                    .right(px(-1.))
+                                    .bottom(px(-1.))
                                     .size(px(26.))
                                     .rounded_full()
                                     .bg(ca(0, 0, 0, 0.85))
@@ -699,34 +574,42 @@ pub fn view(m: &CreateCommunity, store: &Store, width: f32, on: &OnAct, cx: &App
                                             .size(px(19.))
                                             .text_color(c(PRIMARY)),
                                     ),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .h(px(42.))
-                            .relative()
-                            .rounded(px(8.))
-                            .border_1()
-                            .border_color(c(PRIMARY))
-                            .flex()
-                            .items_center()
-                            .pl(px(12.))
-                            .pr(px(52.))
-                            .child(div().flex_1().min_w_0().child(m.name.clone()))
-                            .child(
-                                div()
-                                    .absolute()
-                                    .right(px(12.))
-                                    .top(px(8.))
-                                    .text_size(px(12.))
-                                    .line_height(px(24.))
-                                    .text_color(white_a(0.35))
-                                    .child(format!("{}/{NAME_MAX}", name.chars().count())),
-                            ),
-                    ),
+                            )
+                            .into_any_element(),
+                        None => svg()
+                            .path("icons/image.svg")
+                            .size(px(32.))
+                            .text_color(white_a(0.5))
+                            .into_any_element(),
+                    }),
             )
-            .child(preview(&name, m.icon.as_ref()))
+            .child(
+                div()
+                    .w_full()
+                    .max_w(px(420.))
+                    .h(px(42.))
+                    .relative()
+                    .rounded(px(8.))
+                    .border_1()
+                    .border_color(c(PRIMARY))
+                    .flex()
+                    .items_center()
+                    .pl(px(12.))
+                    .pr(px(52.))
+                    .child(div().flex_1().min_w_0().child(m.name.clone()))
+                    .when(name.chars().count() >= 24, |d| {
+                        d.child(
+                            div()
+                                .absolute()
+                                .right(px(12.))
+                                .top(px(8.))
+                                .text_size(px(12.))
+                                .line_height(px(24.))
+                                .text_color(white_a(0.35))
+                                .child(format!("{}/{NAME_MAX}", name.chars().count())),
+                        )
+                    }),
+            )
             .into_any_element(),
         2 => div()
             .w_full()
@@ -854,91 +737,52 @@ pub fn view(m: &CreateCommunity, store: &Store, width: f32, on: &OnAct, cx: &App
     } else {
         m.error.clone().map(|e| div().child(e).into_any_element())
     };
+    // The steps and their buttons stay together, centred in the pane; a friend list to pick
+    // from takes the height it's given.
+    let invite = m.step >= 3 && !m.public;
     div()
         .size_full()
         .flex()
         .flex_col()
+        .justify_center()
         .bg(c(APP_BG))
         .child(
             div()
-                .flex_1()
                 .min_h_0()
+                .when(invite, |d| d.flex_1().pt(px(36.)))
                 .flex()
                 .flex_col()
-                .pt(px(18.))
-                .px(px(gutter))
+                .px(px(gutter + 15.))
+                .child(steps(m.step))
                 .child(
                     div()
-                        .mt(px(10.))
-                        .h(px(30.))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .font_weight(FontWeight::MEDIUM)
+                        .mt(px(22.))
+                        .text_center()
+                        .font_weight(FontWeight::SEMIBOLD)
                         .text_size(px(24.))
-                        .line_height(px(30.))
-                        .child(
-                            div()
-                                .w(px(50.))
-                                .h(px(30.))
-                                .flex()
-                                .justify_center()
-                                .opacity(0.7)
-                                .child(
-                                    svg()
-                                        .path("icons/users-multi.svg")
-                                        .size(px(30.))
-                                        .text_color(c(0xffffff)),
-                                ),
-                        )
-                        .child(crate::kit::spaced("Create Community", 1.)),
+                        .line_height(px(29.))
+                        .text_color(c(0xffffff))
+                        .child(title),
                 )
                 .child(
                     div()
-                        .mt(px(8.))
-                        .mx(px(40.))
-                        .h(px(1.))
-                        .flex_shrink_0()
-                        .bg(c(ACCENT)),
+                        .mt(px(6.))
+                        .mx_auto()
+                        .max_w(px(420.))
+                        .text_center()
+                        .text_size(px(14.))
+                        .line_height(px(20.3))
+                        .text_color(white_a(0.55))
+                        .child(lead),
                 )
                 .child(
                     div()
-                        .flex_1()
+                        .mt(px(24.))
                         .min_h_0()
+                        .when(invite, |d| d.flex_1())
                         .flex()
                         .flex_col()
-                        .px(px(15.))
-                        .child(steps(m.step))
-                        .child(
-                            div()
-                                .mt(px(22.))
-                                .text_center()
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_size(px(20.))
-                                .line_height(px(24.))
-                                .text_color(c(0xffffff))
-                                .child(title),
-                        )
-                        .child(
-                            div()
-                                .mt(px(6.))
-                                .mx_auto()
-                                .max_w(px(420.))
-                                .text_center()
-                                .text_size(px(14.))
-                                .line_height(px(20.3))
-                                .text_color(white_a(0.55))
-                                .child(lead),
-                        )
-                        .child(
-                            div()
-                                .mt(px(24.))
-                                .flex_1()
-                                .min_h_0()
-                                .flex()
-                                .flex_col()
-                                .child(body),
-                        ),
+                        .child(body),
                 ),
         )
         .child(

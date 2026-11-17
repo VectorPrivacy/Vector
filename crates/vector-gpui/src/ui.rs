@@ -6652,7 +6652,9 @@ impl Render for VectorApp {
                     .flex_1()
                     .min_h_0()
                     .relative()
-                    .child(gpui::deferred(self.list_resizer(rail_mode.width(), list_full, cx)).with_priority(1))
+                    .when(self.create_community.is_none(), |row| {
+                        row.child(gpui::deferred(self.list_resizer(rail_mode.width(), list_full, cx)).with_priority(1))
+                    })
                     .child(crate::pane::cached(
                         &self.panes.rail,
                         gpui::StyleRefinement::default().w(px(rail_mode.width())).flex_shrink_0().h_full(),
@@ -6678,7 +6680,9 @@ impl Render for VectorApp {
                         let width = f32::from(window.viewport_size().width) - rail_mode.width();
                         row.child(div().flex_1().min_w_0().h_full().children(self.nexus_view(width, cx)))
                     })
-                    .when(self.settings.is_none() && self.nexus.is_none(), |row| {
+                    // Creating a Community has nothing to do with the list beside it: it takes
+                    // everything right of the rail.
+                    .when(self.settings.is_none() && self.nexus.is_none() && self.create_community.is_none(), |row| {
                         row.child(crate::pane::cached(
                             &self.panes.side,
                             gpui::StyleRefinement::default().w(px(list_w())).flex_shrink_0().h_full(),
@@ -6697,8 +6701,7 @@ impl Render for VectorApp {
                                         })
                                         .ok();
                                     });
-                                let width =
-                                    f32::from(window.viewport_size().width) - rail_mode.width() - list_w();
+                                let width = f32::from(window.viewport_size().width) - rail_mode.width();
                                 div()
                                     .flex_1()
                                     .min_w_0()
@@ -11461,12 +11464,12 @@ impl VectorApp {
         }
         rows.push((kit::MenuItem::divider(), MenuAct::Nothing));
         rows.extend(self.notify_rows(&id, Some(&id)));
-        if self.store.borrow().banner(&id).is_some()
-            && self.store.borrow().hidden_banners.contains(&id)
-        {
+        // Here as well as on the banner itself: a touch screen may offer no menu on the image.
+        if self.store.borrow().banner(&id).is_some() {
+            let hidden = self.store.borrow().hidden_banners.contains(&id);
             rows.push((
-                kit::MenuItem::new("Show Banner", "eye"),
-                MenuAct::BannerHidden(id.clone(), false),
+                kit::MenuItem::new(if hidden { "Show Banner" } else { "Hide Banner" }, if hidden { "eye" } else { "eye-off" }),
+                MenuAct::BannerHidden(id.clone(), !hidden),
             ));
         }
         if caps.contains("ban") {
@@ -11885,6 +11888,20 @@ impl VectorApp {
             }
         } else {
             self.reload_invite_links(cx);
+            // Links minted or retired on this account's other devices, read after the local list shows.
+            let id = community.clone();
+            let rx = backend::run(backend::community::sync_invites(id));
+            cx.spawn(async move |this, cx| {
+                if rx.await == Ok(true) {
+                    this.update(cx, |this, cx| {
+                        if this.invite.as_ref().is_some_and(|m| !m.busy) {
+                            this.reload_invite_links(cx);
+                        }
+                    })
+                    .ok();
+                }
+            })
+            .detach();
             let id = community.clone();
             let rx = backend::run(async move {
                 let banned = backend::community::banned(&id);

@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use gpui::{AnyElement, App, FontWeight, IntoElement, ParentElement, SharedString, Styled, StyledImage, Window, div, px, svg};
+use gpui::{AnyElement, App, IntoElement, ParentElement, SharedString, Styled, StyledImage, Window, div, px, svg};
 use crate::pic::img;
 use serde::Deserialize;
 use vector_core::SerializableChat;
@@ -116,8 +116,22 @@ pub fn candidates(
                 .flatten(),
         );
     }
+    // A private channel's ping reaches only who reads it: its readers, and anyone seen posting there.
+    let readers = community.and_then(|c| {
+        let ch = c.channel(&chat.id).filter(|ch| ch.private)?;
+        let owner = c.owner_npub.as_deref();
+        Some(store.role_graphs.get(&c.community_id).map_or_else(
+            || owner.map(str::to_string).into_iter().collect(),
+            |g| g.readers(&ch.channel_id.to_ascii_lowercase(), owner),
+        ))
+    });
     let mut seen = std::collections::HashSet::new();
-    npubs.retain(|n| n.starts_with("npub1") && *n != me && seen.insert(*n));
+    npubs.retain(|n| {
+        n.starts_with("npub1")
+            && *n != me
+            && readers.as_ref().is_none_or(|r| r.contains(*n) || last.contains_key(n))
+            && seen.insert(*n)
+    });
     let mut out: Vec<(u64, Item)> = npubs
         .into_iter()
         .map(|npub| {
@@ -330,10 +344,8 @@ pub fn view(p: &Popup, pick: Rc<dyn Fn(usize, &mut Window, &mut App)>) -> AnyEle
                             .flex()
                             .items_center()
                             .justify_center()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(tint)
                             .bg(tint.opacity(0.16))
-                            .child("@")
+                            .child(svg().path("icons/at.svg").size(px(16.)).text_color(tint))
                             .into_any_element(),
                         Some("Role"),
                     )

@@ -205,7 +205,7 @@ impl Graph {
 
     /// Who may read Private Channel `channel`: the owner, and on the old roles the holders of a
     /// role scoped to it.
-    fn readers(&self, channel: &str, owner: Option<&str>) -> HashSet<String> {
+    pub fn readers(&self, channel: &str, owner: Option<&str>) -> HashSet<String> {
         let mut out: HashSet<String> = owner.map(str::to_string).into_iter().collect();
         if self.activated {
             out.extend(self.readers.get(channel).into_iter().flatten().cloned());
