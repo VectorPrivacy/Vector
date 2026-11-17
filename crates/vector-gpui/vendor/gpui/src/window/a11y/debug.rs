@@ -232,6 +232,17 @@ fn node_to_json(
         aria.insert("on_action".into(), json!(on_action));
     }
 
+    if !node.character_lengths().is_empty() {
+        aria.insert("character_lengths".into(), json!(node.character_lengths()));
+        aria.insert("word_starts".into(), json!(node.word_starts()));
+    }
+    if let Some(sel) = node.text_selection() {
+        let at = |p: &accesskit::TextPosition| {
+            json!([ephemeral.get(&p.node).cloned().unwrap_or_else(|| p.node.0.to_string()), p.character_index])
+        };
+        aria.insert("text_selection".into(), json!({ "anchor": at(&sel.anchor), "focus": at(&sel.focus) }));
+    }
+
     // String properties.
     if let Some(v) = node.label() {
         aria.insert("label".into(), json!(v));

@@ -372,19 +372,32 @@ impl<'a> A11ySubtreeBuilder<'a> {
     }
 }
 
+fn rect(window: &Window, bounds: Bounds<Pixels>) -> accesskit::Rect {
+    let scale = window.scale_factor();
+    accesskit::Rect {
+        x0: (bounds.origin.x.0 * scale) as f64,
+        y0: (bounds.origin.y.0 * scale) as f64,
+        x1: ((bounds.origin.x.0 + bounds.size.width.0) * scale) as f64,
+        y1: ((bounds.origin.y.0 + bounds.size.height.0) * scale) as f64,
+    }
+}
+
 /// Report text painted at `bounds` to assistive technology, when one is connected.
 pub(crate) fn report_text(window: &mut Window, text: &str, bounds: Bounds<Pixels>) {
     if !window.a11y.is_active() {
         return;
     }
-    let scale = window.scale_factor();
-    let rect = accesskit::Rect {
-        x0: (bounds.origin.x.0 * scale) as f64,
-        y0: (bounds.origin.y.0 * scale) as f64,
-        x1: ((bounds.origin.x.0 + bounds.size.width.0) * scale) as f64,
-        y1: ((bounds.origin.y.0 + bounds.size.height.0) * scale) as f64,
-    };
+    let rect = rect(window, bounds);
     window.a11y.nodes.push_text(text, rect);
+}
+
+/// Report an editor's text and its selection (byte offsets) under the current node.
+pub(crate) fn report_editable(window: &mut Window, text: &str, anchor: usize, focus: usize, bounds: Bounds<Pixels>) {
+    if !window.a11y.is_active() {
+        return;
+    }
+    let rect = rect(window, bounds);
+    window.a11y.nodes.push_text_runs(text, anchor, focus, rect);
 }
 
 #[derive(Default)]
@@ -506,7 +519,7 @@ impl A11yNodeBuilder {
     fn note_child(&mut self, role: accesskit::Role) {
         use accesskit::Role::*;
         if let Some(frame) = self.frames.last_mut()
-            && !matches!(role, Label | Image | GenericContainer)
+            && !matches!(role, Label | Image | GenericContainer | TextRun)
         {
             frame.has_control = true;
         }
@@ -531,6 +544,70 @@ impl A11yNodeBuilder {
         node.set_value(text.to_string());
         node.set_bounds(bounds);
         let _ = self.push_leaf(NodeId(hasher.finish()), node);
+    }
+
+    /// The text as runs of at most 255 graphemes, a hard line ending each, and the
+    /// selection set on the current node in their terms.
+    pub(crate) fn push_text_runs(&mut self, text: &str, anchor: usize, focus: usize, bounds: accesskit::Rect) {
+        use unicode_segmentation::UnicodeSegmentation;
+        let Some(&parent_id) = self.ids_stack.last() else { return };
+        // (byte start, value, lengths, word starts)
+        let mut runs: Vec<(usize, String, Vec<u8>, Vec<u8>)> = Vec::new();
+        let mut cur = (0, String::new(), Vec::new(), Vec::new());
+        let mut after_space = true;
+        for (at, g) in text.grapheme_indices(true) {
+            let Ok(len) = u8::try_from(g.len()) else { return };
+            if cur.2.len() == 255 {
+                runs.push(std::mem::replace(&mut cur, (at, String::new(), Vec::new(), Vec::new())));
+            }
+            let space = g.chars().all(char::is_whitespace);
+            if !space && after_space && !cur.2.is_empty() {
+                cur.3.push(cur.2.len() as u8);
+            }
+            cur.1.push_str(g);
+            cur.2.push(len);
+            after_space = space;
+            if g == "\n" || g == "\r\n" {
+                runs.push(std::mem::replace(&mut cur, (at + g.len(), String::new(), Vec::new(), Vec::new())));
+                after_space = true;
+            }
+        }
+        if !cur.2.is_empty() || runs.is_empty() || text.ends_with('\n') {
+            runs.push(cur);
+        }
+        let ids: Vec<NodeId> = (0..runs.len())
+            .map(|i| {
+                let mut hasher = std::hash::DefaultHasher::default();
+                parent_id.0.hash(&mut hasher);
+                ("run", i).hash(&mut hasher);
+                NodeId(hasher.finish())
+            })
+            .collect();
+        let position = |byte: usize| {
+            let at = runs.iter().rposition(|r| r.0 <= byte).unwrap_or(0);
+            let (start, _, lengths, _) = &runs[at];
+            let (mut sum, mut index) = (*start, 0);
+            for l in lengths {
+                if sum >= byte {
+                    break;
+                }
+                sum += *l as usize;
+                index += 1;
+            }
+            accesskit::TextPosition { node: ids[at], character_index: index }
+        };
+        let selection = accesskit::TextSelection { anchor: position(anchor), focus: position(focus) };
+        for (id, (_, value, lengths, words)) in ids.iter().zip(runs) {
+            let mut node = accesskit::Node::new(accesskit::Role::TextRun);
+            node.set_value(value);
+            node.set_character_lengths(lengths);
+            node.set_word_starts(words);
+            node.set_bounds(bounds);
+            let _ = self.push_leaf(*id, node);
+        }
+        if let Some(parent) = self.nodes_stack.last_mut() {
+            parent.set_text_selection(selection);
+        }
     }
 
     /// Add a leaf node as a child of the current top-of-stack node, without

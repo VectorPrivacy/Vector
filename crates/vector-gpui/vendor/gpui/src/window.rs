@@ -7570,6 +7570,11 @@ impl Window {
         a11y::report_text(self, text, bounds);
     }
 
+    /// Report an editor's whole text, with its selection as byte offsets (`focus` is the caret).
+    pub fn report_a11y_editable_text(&mut self, text: &str, anchor: usize, focus: usize, bounds: Bounds<Pixels>) {
+        a11y::report_editable(self, text, anchor, focus, bounds);
+    }
+
     /// Debug representation of the last frame's accessibility information.
     pub fn debug_a11y_tree_json(&self) -> Option<String> {
         self.a11y.debug_tree_json()

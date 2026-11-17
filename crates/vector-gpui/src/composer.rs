@@ -1449,6 +1449,11 @@ impl Element for TextElement {
     ) -> Self::PrepaintState {
         tab_order::place(&self.input, bounds, window);
         let input = self.input.read(cx);
+        if !input.look.masked {
+            let r = input.selected_range.clone();
+            let (anchor, focus) = if input.selection_reversed { (r.end, r.start) } else { (r.start, r.end) };
+            window.report_a11y_editable_text(&input.content, anchor, focus, bounds);
+        }
         let (text, runs, font_size) = input.display(window);
         let line_height = window.line_height();
         let wrap = input.multiline.map(|_| bounds.size.width);
