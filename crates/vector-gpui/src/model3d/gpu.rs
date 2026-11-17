@@ -703,3 +703,41 @@ impl Gpu {
         Ok(out)
     }
 }
+
+/// The first-frame stages one at a time, so the footprint probe can say which one costs.
+#[cfg(test)]
+impl Gpu {
+    pub fn probe_steps(&self, target: &Target, mark: &dyn Fn(&str)) {
+        let wait = |sub| {
+            self.device.poll(wgpu::PollType::Wait { submission_index: Some(sub), timeout: Some(std::time::Duration::from_secs(10)) }).unwrap();
+        };
+        let enc = self.device.create_command_encoder(&Default::default());
+        wait(self.queue.submit(std::iter::once(enc.finish())));
+        mark("empty submit");
+        let resolve = target.resolve.create_view(&Default::default());
+        let pass = |msaa: bool, depth: bool| {
+            let mut enc = self.device.create_command_encoder(&Default::default());
+            enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: if msaa { &target.msaa } else { &resolve },
+                    depth_slice: None,
+                    resolve_target: msaa.then_some(&resolve),
+                    ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT), store: if msaa { wgpu::StoreOp::Discard } else { wgpu::StoreOp::Store } },
+                })],
+                depth_stencil_attachment: depth.then(|| wgpu::RenderPassDepthStencilAttachment {
+                    view: &target.depth,
+                    depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.), store: wgpu::StoreOp::Discard }),
+                    stencil_ops: None,
+                }),
+                ..Default::default()
+            });
+            wait(self.queue.submit(std::iter::once(enc.finish())));
+        };
+        pass(false, false);
+        mark("clear 1x");
+        pass(true, false);
+        mark("clear msaa");
+        pass(true, true);
+        mark("clear +depth");
+    }
+}

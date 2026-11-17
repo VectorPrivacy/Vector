@@ -273,6 +273,9 @@ mod tests {
         mark("uploaded");
         let target = g.target(640, 640);
         mark("target");
+        if std::env::var_os("MODEL3D_STEPS").is_some() {
+            g.probe_steps(&target, &mark);
+        }
         let mut shot = super::gpu::Shot { pivot: glam::Quat::IDENTITY, distance: super::fit(model.radius, 1.), pose: None, morph: None };
         g.render(&model, &target, &shot).unwrap();
         mark("first frame");
