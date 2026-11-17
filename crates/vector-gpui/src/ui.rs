@@ -206,6 +206,8 @@ pub struct VectorApp {
     /// The open chat's Self-Destruct Timer, in seconds.
     self_destruct: Option<u64>,
     wallpaper: crate::wallpaper::Wallpaper,
+    /// `showProcessingOverlay`: a blocking card while this runs.
+    processing: Option<SharedString>,
     /// The chat pane as last painted, which the wallpaper covers.
     chat_box: Rc<std::cell::Cell<Option<gpui::Bounds<gpui::Pixels>>>>,
     /// Display → Background Wallpaper.
@@ -979,6 +981,7 @@ impl VectorApp {
             send_long: false,
             self_destruct: None,
             wallpaper: Default::default(),
+            processing: None,
             chat_box: Rc::default(),
             chat_bg: true,
             popout: Default::default(),
@@ -1625,7 +1628,11 @@ impl VectorApp {
                     .map(|i| i.community_id.clone());
             }
         }
-        // Fixtures: VECTOR_CREATE_COMMUNITY=1|2|public|private, the step to show.
+        // Fixtures: VECTOR_PROCESSING=<text> shows the processing card.
+        if let Ok(text) = std::env::var("VECTOR_PROCESSING") {
+            app.processing = Some(text.into());
+        }
+        // Fixtures: VECTOR_CREATE_COMMUNITY=1|2|busy|linking|public|private, the step to show.
         if let Ok(step) = std::env::var("VECTOR_CREATE_COMMUNITY") {
             app.open_create_community(window, cx);
             if let Ok(icon) = std::env::var("VECTOR_CC_ICON") {
@@ -1635,6 +1642,17 @@ impl VectorApp {
                 m.name.update(cx, |t, cx| t.set_text("Cool Kids", cx));
                 match step.as_str() {
                     "2" => m.step = 2,
+                    "busy" => {
+                        m.step = 2;
+                        m.busy = true;
+                        m.progress = Some(("Publishing the channels".into(), 0.42));
+                    }
+                    "linking" => {
+                        m.step = 3;
+                        m.public = true;
+                        m.created = Some(("fixture".into(), "fixture".into()));
+                        m.progress = Some(("Uploading the icon".into(), 0.7));
+                    }
                     "public" | "private" => {
                         m.step = 3;
                         m.public = step == "public";
@@ -6468,6 +6486,7 @@ impl Render for VectorApp {
         root.children(net_dialog)
             .children(net_info.map(|p| gpui::deferred(p).with_priority(14)))
             .children(popup.map(|p| gpui::deferred(p).with_priority(15)))
+            .children(self.processing.clone().map(|t| gpui::deferred(kit::processing(t)).with_priority(16)))
             .children(self.rekey.as_ref().map(|r| {
                 if r.animating() {
                     window.request_animation_frame();
@@ -8588,6 +8607,13 @@ impl VectorApp {
             let Ok(Ok(Some(paths))) = rx.await else { return };
             let Some(path) = paths.into_iter().next() else { return };
             let picked = path.to_string_lossy().to_string();
+            if live {
+                this.update(cx, |this, cx| {
+                    this.processing = Some("Processing image...".into());
+                    cx.notify();
+                })
+                .ok();
+            }
             let staged = if live {
                 let chat = chat.clone();
                 backend::run(vector_core::db::scoped(async move {
@@ -8601,6 +8627,7 @@ impl VectorApp {
                 Ok((path, false, crate::wallpaper::DEFAULT_DIM))
             };
             this.update(cx, |this, cx| {
+                this.processing = None;
                 match staged {
                     Ok((path, animated, recommended)) => this.stage_wallpaper(chat, path, animated, recommended, cx),
                     Err(e) => this.notice("Couldn\u{2019}t use that image", e, cx),

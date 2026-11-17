@@ -397,7 +397,10 @@ fn share(m: &CreateCommunity, narrow: bool, on: &OnAct) -> impl IntoElement {
                 .child(match (&m.link, &m.link_error) {
                     (Some(link), _) => div().id("cg-share-url").tip(link.to_string()).mt(px(10.)).map(|d| if narrow { d.flex_none().whitespace_nowrap() } else { d.truncate() }).font_weight(FontWeight::MEDIUM).text_size(px(15.)).line_height(px(24.)).text_color(c(0xffffff)).child(pretty(link)),
                     (None, Some(e)) => div().id("cg-share-status").mt(px(10.)).text_size(px(13.)).line_height(px(18.)).text_color(c(crate::timeline::DANGER)).child(format!("Couldn't create the link. {e}")),
-                    (None, None) => div().id("cg-share-status").mt(px(10.)).text_size(px(13.)).line_height(px(24.)).text_color(white_a(0.55)).child(m.progress.as_ref().map(|p| p.0.clone()).unwrap_or_else(|| "Getting ready".into())),
+                    (None, None) => div().id("cg-share-status").mt(px(10.)).text_size(px(13.)).line_height(px(24.)).text_color(white_a(0.55)).child(match &m.progress {
+                        Some((label, pct)) => crate::kit::stage_progress(label.clone(), *pct, 16.),
+                        None => crate::kit::stage_progress("Getting ready", 0., 16.),
+                    }),
                 })
                 .child(
                     div().mt(px(10.)).flex().gap(px(8.)).map(|d| {
@@ -824,12 +827,32 @@ pub fn view(m: &CreateCommunity, store: &Store, width: f32, on: &OnAct, cx: &App
             .into_any_element(),
         ],
     };
-    let status = if m.busy {
-        m.progress
-            .as_ref()
-            .map(|(label, pct)| format!("{label} · {}%", (pct * 100.).round() as u32))
+    // `.cg-status-line`: the stage between two rules fading in from the sides.
+    let rule = |to_right: bool| {
+        let (a, b) = (white_a(0.), white_a(0.22));
+        let (from, to) = if to_right { (a, b) } else { (b, a) };
+        div().flex_shrink(1.).w(px(48.)).h(px(1.)).bg(gpui::linear_gradient(
+            90.,
+            gpui::linear_color_stop(from, 0.),
+            gpui::linear_color_stop(to, 1.),
+        ))
+    };
+    let status: Option<AnyElement> = if m.busy {
+        m.progress.as_ref().map(|(label, pct)| {
+            div()
+                .flex()
+                .items_center()
+                .justify_center()
+                .gap(px(12.))
+                .text_size(px(13.5))
+                .text_color(white_a(0.78))
+                .child(rule(true))
+                .child(crate::kit::stage_progress(label.clone(), *pct, 16.))
+                .child(rule(false))
+                .into_any_element()
+        })
     } else {
-        m.error.clone()
+        m.error.clone().map(|e| div().child(e).into_any_element())
     };
     div()
         .size_full()

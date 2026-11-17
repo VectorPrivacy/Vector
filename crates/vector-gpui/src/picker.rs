@@ -1775,7 +1775,7 @@ impl EmojiPicker {
                     .child(
                         div()
                             .id(group.clone())
-                            .aria_label(format!(":{}:", e.code))
+                            .tip(format!(":{}:", e.code))
                             .group(group.clone())
                             .size(px(PACK_BOX))
                             .flex()
@@ -1833,6 +1833,7 @@ impl EmojiPicker {
                         div().flex_1().min_w_0().h(px(CELL)).child(
                             div()
                                 .id(group.clone())
+                                .tip(format!(":{}:", e.code))
                                 .size(px(CELL))
                                 .flex()
                                 .items_center()
@@ -1873,6 +1874,11 @@ impl EmojiPicker {
                     div()
                         .id(group.clone())
                         .aria_label(e.name)
+                        .tip(if e.shortcode.is_empty() {
+                            SharedString::from(e.name)
+                        } else {
+                            format!(":{}:", e.shortcode).into()
+                        })
                         .group(group)
                         .size(px(CELL))
                         .flex()

@@ -72,6 +72,94 @@ thread_local! {
     static OPEN_SELECT: std::cell::RefCell<Option<SelectKeys>> = const { std::cell::RefCell::new(None) };
 }
 
+/// `StageProgress`: a ring filled clockwise from the top to `pct` (0 to 1), then the stage's name.
+pub fn stage_progress(label: impl Into<SharedString>, pct: f32, size: f32) -> gpui::Div {
+    let fill = pct.clamp(0., 1.);
+    let color = c(PRIMARY);
+    let ring = gpui::canvas(
+        |_, _, _| {},
+        move |bounds: gpui::Bounds<gpui::Pixels>, _, window, _| {
+            use std::f32::consts::TAU;
+            let unit = f32::from(bounds.size.width.min(bounds.size.height)) / 24.;
+            let (mid, half) = (9. * unit, 1.5 * unit);
+            let center = bounds.center();
+            let at = |r: f32, a: f32| gpui::point(center.x + px(r * a.sin()), center.y - px(r * a.cos()));
+            let band = |from: f32, to: f32| {
+                let steps = ((to - from) / TAU * 96.).ceil().max(2.) as usize;
+                let mut pts = Vec::with_capacity(steps * 2 + 2);
+                for k in 0..=steps {
+                    pts.push(at(mid + half, from + (to - from) * k as f32 / steps as f32));
+                }
+                for k in (0..=steps).rev() {
+                    pts.push(at(mid - half, from + (to - from) * k as f32 / steps as f32));
+                }
+                let mut b = gpui::PathBuilder::fill();
+                b.add_polygon(&pts, true);
+                b.build().ok()
+            };
+            if let Some(p) = band(0., TAU) {
+                window.paint_path(p, color.opacity(0.22));
+            }
+            if fill > 0. {
+                if let Some(p) = band(0., fill * TAU) {
+                    window.paint_path(p, color);
+                }
+                // Round caps.
+                for a in [0., fill * TAU] {
+                    let c = at(mid, a);
+                    window.paint_quad(gpui::fill(
+                        gpui::Bounds::new(gpui::point(c.x - px(half), c.y - px(half)), gpui::size(px(half * 2.), px(half * 2.))),
+                        color,
+                    ).corner_radii(px(half)));
+                }
+            }
+        },
+    )
+    .size(px(size))
+    .flex_shrink_0();
+    let label = label.into();
+    div()
+        .flex()
+        .items_center()
+        .gap(px(9.))
+        .min_w_0()
+        .child(ring)
+        .child(div().min_w_0().truncate().child(label))
+}
+
+/// `.processing-overlay`: the window dimmed under a card with a spinner and a line of text.
+pub fn processing(text: SharedString) -> impl IntoElement {
+    div()
+        .id("processing-overlay")
+        .absolute()
+        .inset_0()
+        .occlude()
+        .flex()
+        .items_center()
+        .justify_center()
+        .bg(ca(0, 0, 0, 0.55))
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .items_center()
+                .gap(px(16.))
+                .px(px(36.))
+                .py(px(28.))
+                .rounded(px(16.))
+                .bg(ca(20, 22, 26, 0.92))
+                .shadow(vec![gpui::BoxShadow {
+                    color: ca(0, 0, 0, 0.5),
+                    offset: gpui::point(px(0.), px(12.)),
+                    blur_radius: px(40.),
+                    spread_radius: px(0.),
+                    inset: false,
+                }])
+                .child(div().size(px(42.)).child(crate::attachments::spinner(42., 3., 0.8, 0.25, white_a(0.15), c(ACCENT))))
+                .child(div().text_size(px(15.2)).text_color(c(0xe8e8ea)).child(text)),
+        )
+}
+
 /// One choice in a [`select`].
 pub struct Choice {
     pub value: &'static str,

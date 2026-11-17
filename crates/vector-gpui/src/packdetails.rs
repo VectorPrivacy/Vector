@@ -1,6 +1,7 @@
 //! The Pack Details modal (`PackDetailsOverlay.svelte`, `PackDetailsModal.svelte`): a pack a
 //! `vector://emojis/pack/<naddr>` link names, with its emojis and Add or Remove.
 
+use crate::kit::Tipped as _;
 use std::rc::Rc;
 
 use gpui::{AnyElement, App, FontWeight, InteractiveElement, IntoElement, ParentElement, ScrollHandle, StatefulInteractiveElement, Styled, Window, div, prelude::*, px, svg};
@@ -124,15 +125,24 @@ pub fn view(
                 .emojis
                 .iter()
                 .take(max_display)
-                .filter_map(|e| match media.custom(&src(&e.url), false) {
-                    Custom::Missing(_) => None,
-                    Custom::Ready(i) => Some(
-                        img(gpui::ImageSource::Render(i))
+                .enumerate()
+                .filter_map(|(ix, e)| {
+                    let thumb = match media.custom(&src(&e.url), false) {
+                        Custom::Missing(_) => return None,
+                        Custom::Ready(i) => img(gpui::ImageSource::Render(i))
                             .size_full()
                             .map(|i| gpui::StyledImage::object_fit(i, gpui::ObjectFit::Contain))
                             .into_any_element(),
-                    ),
-                    Custom::Pending => Some(div().into_any_element()),
+                        Custom::Pending => div().into_any_element(),
+                    };
+                    Some(
+                        div()
+                            .id(("pd-thumb", ix))
+                            .size_full()
+                            .tip(format!(":{}:", e.shortcode))
+                            .child(thumb)
+                            .into_any_element(),
+                    )
                 })
                 .collect();
             let mut grid = div().flex().flex_col().gap(px(6.));
