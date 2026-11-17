@@ -242,6 +242,51 @@ pub fn fit(radius: f32, aspect: f32) -> f32 {
 
 #[cfg(test)]
 mod tests {
+    fn footprint_mb() -> f64 {
+        #[cfg(target_os = "macos")]
+        {
+            let mut info: libc::rusage_info_v4 = unsafe { std::mem::zeroed() };
+            let ok = unsafe { libc::proc_pid_rusage(libc::getpid(), libc::RUSAGE_INFO_V4, &mut info as *mut _ as *mut libc::rusage_info_t) };
+            if ok == 0 { info.ri_phys_footprint as f64 / 1048576. } else { -1. }
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            std::fs::read_to_string("/proc/self/smaps_rollup")
+                .ok()
+                .and_then(|s| s.lines().filter(|l| l.starts_with("Private_")).map(|l| l.split_whitespace().nth(1)?.parse::<f64>().ok()).sum::<Option<f64>>())
+                .map_or(-1., |kb| kb / 1024.)
+        }
+    }
+
+    /// Footprint after each stage of showing `MODEL3D_PROBE`, at the chat's 640 px.
+    #[test]
+    fn footprint_probe() {
+        let Ok(path) = std::env::var("MODEL3D_PROBE") else { return };
+        let mark = |stage: &str| eprintln!("probe {stage:<14} {:>7.1} MB", footprint_mb());
+        mark("start");
+        let ext = std::path::Path::new(&path).extension().and_then(|e| e.to_str()).unwrap_or_default().to_ascii_lowercase();
+        let scene = super::parse(&std::fs::read(&path).unwrap(), &ext).unwrap();
+        mark("parsed");
+        let mut g = super::gpu::Gpu::new().expect("gpu");
+        mark("device");
+        let model = g.upload(scene);
+        mark("uploaded");
+        let target = g.target(640, 640);
+        mark("target");
+        let mut shot = super::gpu::Shot { pivot: glam::Quat::IDENTITY, distance: super::fit(model.radius, 1.), pose: None, morph: None };
+        g.render(&model, &target, &shot).unwrap();
+        mark("first frame");
+        for i in 0..90 {
+            shot.pivot = glam::Quat::from_rotation_y(i as f32 * 0.05);
+            g.render(&model, &target, &shot).unwrap();
+        }
+        mark("90 frames");
+        drop((target, model));
+        mark("model dropped");
+        drop(g);
+        mark("device dropped");
+    }
+
     /// Renders each model in `MODEL3D_DIR` to `<name>.png` beside it, at the chat's 640 px.
     #[test]
     fn renders_sample_models() {

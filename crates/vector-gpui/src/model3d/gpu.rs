@@ -170,6 +170,25 @@ fn mips(w: u32, h: u32, rgba: &[u8]) -> Vec<(u32, u32, Vec<u8>)> {
     out
 }
 
+/// One frame is in flight at a time, so the queue needs a handful of command buffers, not wgpu's 4096.
+#[cfg(target_os = "macos")]
+fn small_queue(adapter: &wgpu::Adapter, desc: &wgpu::DeviceDescriptor) -> Option<(wgpu::Device, wgpu::Queue)> {
+    use objc2_metal::MTLDevice as _;
+    if std::env::var_os("MODEL3D_QUEUE").is_some_and(|v| v == "wgpu") {
+        return None;
+    }
+    // SAFETY: the device and queue come from this adapter, with the descriptor's features and limits.
+    unsafe {
+        let raw = objc2::Message::retain(adapter.as_hal::<wgpu::hal::api::Metal>()?.raw_device());
+        let queue = raw.newCommandQueueWithMaxCommandBufferCount(16)?;
+        let open = wgpu::hal::OpenDevice {
+            device: wgpu::hal::metal::Device::device_from_raw(raw, desc.required_features, &desc.required_limits),
+            queue: wgpu::hal::metal::Queue::queue_from_raw(queue, 1.),
+        };
+        adapter.create_device_from_hal::<wgpu::hal::api::Metal>(open, desc).ok()
+    }
+}
+
 impl Gpu {
     pub fn new() -> Result<Self, String> {
         #[cfg(target_os = "linux")]
@@ -201,18 +220,20 @@ impl Gpu {
                 }
             }
             let adapter = adapter?;
-            let (device, queue) = adapter
-                .request_device(&wgpu::DeviceDescriptor {
-                    label: Some("model3d"),
-                    required_features: wgpu::Features::empty(),
-                    required_limits: wgpu::Limits::downlevel_defaults().using_resolution(adapter.limits()).using_alignment(adapter.limits()),
-                    memory_hints: wgpu::MemoryHints::MemoryUsage,
-                    trace: wgpu::Trace::Off,
-                    experimental_features: wgpu::ExperimentalFeatures::disabled(),
-                    default_queue: wgpu::QueueDescriptor::default(),
-                })
-                .await
-                .map_err(|e| e.to_string())?;
+            let desc = wgpu::DeviceDescriptor {
+                label: Some("model3d"),
+                required_features: wgpu::Features::empty(),
+                required_limits: wgpu::Limits::downlevel_defaults().using_resolution(adapter.limits()).using_alignment(adapter.limits()),
+                memory_hints: wgpu::MemoryHints::MemoryUsage,
+                trace: wgpu::Trace::Off,
+                experimental_features: wgpu::ExperimentalFeatures::disabled(),
+                default_queue: wgpu::QueueDescriptor::default(),
+            };
+            #[cfg(target_os = "macos")]
+            if let Some((device, queue)) = small_queue(&adapter, &desc) {
+                return Ok(Self::with(device, queue));
+            }
+            let (device, queue) = adapter.request_device(&desc).await.map_err(|e| e.to_string())?;
             Ok(Self::with(device, queue))
         })
     }
