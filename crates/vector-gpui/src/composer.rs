@@ -1704,6 +1704,7 @@ impl Render for TextInput {
                     },
                     |_, _, _, _| {},
                     Default::default(),
+                    None,
                     move |_, cx| {
                         close
                             .update(cx, |this, cx| {

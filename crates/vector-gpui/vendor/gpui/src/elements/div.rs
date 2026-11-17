@@ -3291,6 +3291,51 @@ impl Interactivity {
                             }
                         }
                     });
+
+                    // Shift+F10 or the Menu key: a right press at the element's centre, as browsers send contextmenu.
+                    window.on_key_event({
+                        let hitbox = hitbox.clone();
+                        move |event: &KeyDownEvent, phase, window, cx| {
+                            if !phase.bubble() || window.default_prevented() {
+                                return;
+                            }
+                            let stroke = &event.keystroke;
+                            let m = &stroke.modifiers;
+                            let menu = (stroke.key == "f10" && m.shift && !m.control && !m.alt && !m.platform)
+                                || (matches!(stroke.key.as_str(), "menu" | "contextmenu" | "apps") && !m.modified());
+                            if !menu {
+                                return;
+                            }
+                            cx.stop_propagation();
+                            let position = hitbox.bounds.center();
+                            window.defer(cx, move |window, cx| {
+                                let before = window.focused(cx);
+                                for input in [
+                                    crate::PlatformInput::MouseDown(MouseDownEvent {
+                                        button: MouseButton::Right,
+                                        position,
+                                        modifiers: crate::Modifiers::default(),
+                                        click_count: 1,
+                                        first_mouse: false,
+                                    }),
+                                    crate::PlatformInput::MouseUp(MouseUpEvent {
+                                        button: MouseButton::Right,
+                                        position,
+                                        modifiers: crate::Modifiers::default(),
+                                        click_count: 1,
+                                    }),
+                                ] {
+                                    window.dispatch_event(input, cx);
+                                }
+                                // Unlike a real press, the key leaves focus where it was.
+                                if let Some(before) = before
+                                    && window.focused(cx).as_ref() != Some(&before)
+                                {
+                                    window.focus(&before, cx);
+                                }
+                            });
+                        }
+                    });
                 }
 
                 window.on_mouse_event({

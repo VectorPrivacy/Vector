@@ -338,6 +338,8 @@ pub struct VectorApp {
     start: Option<crate::startmenu::StartMenu>,
     /// The context menu open: where, its rows, and what each does.
     menu: Option<(gpui::Point<gpui::Pixels>, Vec<kit::MenuItem>, Vec<MenuAct>)>,
+    /// The open menu's keyboard: it holds focus while open, then hands it back.
+    menu_keys: Option<MenuKeys>,
     /// The menu slider being dragged.
     menu_sliding: Rc<Cell<Option<usize>>>,
     voice: crate::voice::Voice,
@@ -1085,6 +1087,7 @@ impl VectorApp {
             retired_frames: Vec::new(),
             start: None,
             menu: None,
+            menu_keys: None,
             menu_sliding: Default::default(),
             voice: Default::default(),
             voice_ticking: false,
@@ -6163,12 +6166,58 @@ impl VectorApp {
     }
 }
 
+/// See [`VectorApp::menu_keys`]. `key` tells one menu (or submenu) from the next.
+struct MenuKeys {
+    key: u64,
+    focus: gpui::FocusHandle,
+    hi: Rc<std::cell::Cell<usize>>,
+    back_to: Option<gpui::FocusHandle>,
+}
+
+impl VectorApp {
+    fn sync_menu_keys(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let key = self.menu.as_ref().map(|(at, items, _)| {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::hash::DefaultHasher::default();
+            (f32::from(at.x).to_bits(), f32::from(at.y).to_bits()).hash(&mut h);
+            for i in items {
+                i.label.hash(&mut h);
+            }
+            h.finish()
+        });
+        match (key, self.menu_keys.as_mut()) {
+            (Some(key), Some(k)) if k.key == key => {}
+            (Some(key), Some(k)) => {
+                k.key = key;
+                k.hi.set(usize::MAX);
+            }
+            (Some(key), None) => {
+                let focus = cx.focus_handle();
+                let back_to = kit::take_press_focus().or_else(|| window.focused(cx));
+                let take = focus.clone();
+                window.defer(cx, move |w, cx| w.focus(&take, cx));
+                self.menu_keys = Some(MenuKeys { key, focus, hi: Rc::new(std::cell::Cell::new(usize::MAX)), back_to });
+            }
+            (None, Some(_)) => {
+                let k = self.menu_keys.take().expect("matched Some");
+                if k.focus.is_focused(window)
+                    && let Some(back) = k.back_to
+                {
+                    window.defer(cx, move |w, cx| w.focus(&back, cx));
+                }
+            }
+            (None, None) => {}
+        }
+    }
+}
+
 impl Render for VectorApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         #[cfg(feature = "devctl")]
         let _timed = crate::devctl::Timed::start();
         let me = cx.entity().downgrade();
         cx.defer(move |cx| crate::relayinfo::pump(me, cx));
+        self.sync_menu_keys(window, cx);
         // The chat on screen: Settings, the app hub, a profile or a new chat or Community drawn in
         // its place leave it as surely as opening another.
         let shown = self.open.clone().filter(|_| {
@@ -6342,7 +6391,7 @@ impl Render for VectorApp {
             }))
             .capture_key_down(cx.listener(|app, e: &gpui::KeyDownEvent, window, cx| {
                 // An open dropdown has focus and answers its own keys.
-                if window.context_stack().iter().any(|k| k.contains("Select")) {
+                if window.context_stack().iter().any(|k| k.contains("Select") || k.contains("Menu")) {
                     return;
                 }
                 if e.keystroke.key == "escape" {
@@ -6951,6 +7000,7 @@ impl Render for VectorApp {
                         slide.update(cx, |app, cx| app.on_menu_slide(ix, v, cx)).ok();
                     },
                     self.menu_sliding.clone(),
+                    self.menu_keys.as_ref().map(|k| (k.focus.clone(), k.hi.clone())),
                     move |_, cx| {
                         close
                             .update(cx, |app, cx| {
@@ -6963,9 +7013,10 @@ impl Render for VectorApp {
             }))
             .child(
                 gpui::canvas(|_, _, _| {}, |_, _, window, _| {
-                    window.on_mouse_event(|_: &gpui::MouseDownEvent, phase, _, _| {
+                    window.on_mouse_event(|_: &gpui::MouseDownEvent, phase, window, cx| {
                         if phase.capture() {
                             kit::note_press();
+                            kit::note_press_focus(window.focused(cx));
                         }
                     })
                 })

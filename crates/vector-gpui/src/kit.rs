@@ -629,6 +629,19 @@ pub fn note_press() {
     PRESSES.with(|p| p.set(p.get() + 1));
 }
 
+thread_local! {
+    static PRESS_FOCUS: std::cell::RefCell<Option<gpui::FocusHandle>> = const { std::cell::RefCell::new(None) };
+}
+
+/// What held focus as the latest press began, before the press moved it.
+pub fn note_press_focus(focus: Option<gpui::FocusHandle>) {
+    PRESS_FOCUS.with(|f| *f.borrow_mut() = focus);
+}
+
+pub fn take_press_focus() -> Option<gpui::FocusHandle> {
+    PRESS_FOCUS.with(|f| f.borrow_mut().take())
+}
+
 fn presses() -> u64 {
     PRESSES.with(|p| p.get())
 }
@@ -1074,10 +1087,19 @@ pub fn context_menu(
     on_pick: impl Fn(usize, &mut Window, &mut App) + 'static,
     on_slide: impl Fn(usize, f32, &mut Window, &mut App) + 'static,
     sliding: std::rc::Rc<std::cell::Cell<Option<usize>>>,
+    keys: Option<(gpui::FocusHandle, std::rc::Rc<std::cell::Cell<usize>>)>,
     on_close: impl Fn(&mut Window, &mut App) + 'static,
 ) -> AnyElement {
     let on_pick = std::rc::Rc::new(on_pick);
     let on_slide = std::rc::Rc::new(on_slide);
+    let on_close = std::rc::Rc::new(on_close);
+    let steps: std::rc::Rc<[usize]> = items
+        .iter()
+        .enumerate()
+        .filter(|(_, i)| !matches!(i.kind, MenuKind::Divider | MenuKind::Header) && i.slider.is_none() && !i.disabled)
+        .map(|(ix, _)| ix)
+        .collect();
+    let hi = keys.as_ref().map_or(usize::MAX, |(_, hi)| hi.get());
     let mut list = div()
         .id("context-menu")
         .role(gpui::Role::Menu)
@@ -1098,6 +1120,41 @@ pub fn context_menu(
         .occlude()
         .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .on_mouse_down(gpui::MouseButton::Right, |_, _, cx| cx.stop_propagation());
+    if let Some((focus, hi)) = keys {
+        let (pick, close, steps) = (on_pick.clone(), on_close.clone(), steps.clone());
+        let subs: std::rc::Rc<[(bool, bool)]> = items.iter().map(|i| (i.kind == MenuKind::Sub, i.kind == MenuKind::Back)).collect();
+        list = list.track_focus(&focus).key_context("Menu").on_key_down(move |e, w, cx| {
+            let at = steps.iter().position(|&ix| ix == hi.get());
+            let n = steps.len();
+            let go = |to: usize| hi.set(steps[to]);
+            match e.keystroke.key.as_str() {
+                _ if n == 0 => {
+                    if e.keystroke.key == "escape" {
+                        close(w, cx);
+                    }
+                }
+                "down" => go(at.map_or(0, |a| (a + 1) % n)),
+                "up" => go(at.map_or(n - 1, |a| (a + n - 1) % n)),
+                "home" => go(0),
+                "end" => go(n - 1),
+                "enter" | "space" => {
+                    if at.is_some() {
+                        pick(hi.get(), w, cx);
+                    }
+                }
+                "right" if at.is_some_and(|_| subs[hi.get()].0) => pick(hi.get(), w, cx),
+                "left" => {
+                    if let Some(back) = subs.iter().position(|s| s.1) {
+                        pick(back, w, cx);
+                    }
+                }
+                "escape" | "tab" => close(w, cx),
+                _ => return,
+            }
+            cx.stop_propagation();
+            w.refresh();
+        });
+    }
     for (ix, item) in items.iter().enumerate() {
         match item.kind {
             MenuKind::Divider => {
@@ -1192,6 +1249,9 @@ pub fn context_menu(
                 .when(live && !item.danger, |d| {
                     d.hover(|d| d.bg(c(0x2a2a2a)).text_color(c(0xffffff)))
                 })
+                .when(ix == hi, |d| {
+                    if item.danger { d.bg(danger.opacity(0.1)) } else { d.bg(c(0x2a2a2a)).text_color(c(0xffffff)) }
+                })
                 .when(live, |d| d.on_click(move |_, w, cx| pick(ix, w, cx)))
                 .when(back, |d| {
                     d.child(
@@ -1222,8 +1282,7 @@ pub fn context_menu(
                 }),
         );
     }
-    let close = std::rc::Rc::new(on_close);
-    let (c1, c2) = (close.clone(), close);
+    let (c1, c2) = (on_close.clone(), on_close);
     gpui::deferred(
         div()
             .absolute()
