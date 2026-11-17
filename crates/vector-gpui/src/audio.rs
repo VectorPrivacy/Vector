@@ -963,7 +963,8 @@ fn album_view(
     let art_px = if narrow { 64. } else { 128. };
     let id = &att.id;
     let line = |d: gpui::Div| d.overflow_hidden().text_ellipsis().whitespace_nowrap();
-    let (main, note) = split_title(t.album.as_deref().or(t.title.as_deref()).unwrap_or(&att.name));
+    let full = t.album.clone().or(t.title.clone()).unwrap_or_else(|| att.name.clone());
+    let (main, note) = split_title(&full);
     let byline = [t.artist.clone(), t.year.map(|y| y.to_string())]
         .into_iter()
         .flatten()
@@ -1045,6 +1046,8 @@ fn album_view(
         .gap(px(2.))
         .child(
             line(div())
+                .id("audio-album-title")
+                .tooltip(crate::kit::tooltip(full.clone()))
                 .text_size(px(15.75))
                 .line_height(px(19.7))
                 .font_weight(gpui::FontWeight::SEMIBOLD)
@@ -1062,7 +1065,15 @@ fn album_view(
                 .flex(),
         )
         .when(!byline.is_empty(), |d| {
-            d.child(line(div()).text_size(px(12.)).line_height(px(15.)).text_color(white_a(0.55)).child(byline))
+            d.child(
+                line(div())
+                    .id("audio-album-byline")
+                    .tooltip(crate::kit::tooltip(byline.clone()))
+                    .text_size(px(12.))
+                    .line_height(px(15.))
+                    .text_color(white_a(0.55))
+                    .child(byline),
+            )
         })
         .child(
             div()
@@ -1550,6 +1561,8 @@ pub fn view(
             .mx(px(8.))
             .child(
                 div()
+                    .id("audio-filename")
+                    .tooltip(crate::kit::tooltip(title.clone()))
                     .text_size(px(12.))
                     .line_height(px(15.))
                     .text_color(white_a(0.92))
@@ -1639,6 +1652,8 @@ pub fn view(
                 .gap(px(2.))
                 .child(
                     line(div())
+                        .id("audio-track-title")
+                        .tooltip(crate::kit::tooltip(track.clone()))
                         .text_size(px(15.75))
                         .line_height(px(19.7))
                         .font_weight(gpui::FontWeight::SEMIBOLD)
@@ -1648,6 +1663,8 @@ pub fn view(
                 .when(!byline.is_empty(), |d| {
                     d.child(
                         line(div())
+                            .id("audio-track-byline")
+                            .tooltip(crate::kit::tooltip(byline.clone()))
                             .text_size(px(12.))
                             .line_height(px(15.))
                             .text_color(white_a(0.55))

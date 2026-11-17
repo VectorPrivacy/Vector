@@ -111,6 +111,8 @@ pub struct Ctx<'a> {
     pub picker: Option<&'a str>,
     /// Why a send failed, by message.
     pub fail_reasons: &'a HashMap<String, String>,
+    /// What the hover toolbar's delete offers, by message, once the backend has said.
+    pub delete_meta: &'a HashMap<String, crate::backend::actions::DeleteOptions>,
     /// Attachment pictures, blurs and transfers.
     pub media: &'a std::cell::RefCell<crate::media::Media>,
     /// Device pixels per pixel, for decoding pictures at the size they draw.
@@ -1666,37 +1668,54 @@ fn reply_quote(ctx: &Ctx, m: &Message) -> Option<AnyElement> {
 
 /// `#dmsg-toolbar`: the hover actions at the row's top right (`_dmsgToolbarView`).
 fn toolbar(ctx: &Ctx, m: &Message, first: bool) -> Option<AnyElement> {
-    let mut acts: Vec<(&'static str, &'static str, Act, bool)> = Vec::new();
+    // Icon, label (its tooltip), action, danger, dimmed.
+    let mut acts: Vec<(&'static str, SharedString, Act, bool, bool)> = Vec::new();
+    let community = ctx.store.community_of(&ctx.chat.id);
+    let dissolved = community.is_some_and(|c| c.dissolved);
     if m.mine && m.pending && !m.failed {
+        // An upload can be called off until its last byte has left; a text send has no cancel.
+        let publishing = ctx.media.borrow().transfers.get(&m.id).is_some_and(|t| t.publishing());
+        if m.attachments.is_empty() || publishing {
+            return None;
+        }
+        acts.push(("icons/x.svg", "Cancel upload".into(), Act::CancelUpload(m.id.clone()), true, false));
+    } else if dissolved && !m.mine {
         return None;
-    }
-    if m.mine && m.failed {
-        acts.push(("icons/refresh.svg", "Retry send", Act::Retry, false));
-        acts.push((
-            "icons/trash.svg",
-            "Delete failed message",
-            Act::Delete,
-            true,
-        ));
+    } else if m.mine && m.failed {
+        let retry = match ctx.fail_reasons.get(&m.id) {
+            Some(why) => format!("Retry send. {why}").into(),
+            None => "Retry send".into(),
+        };
+        acts.push(("icons/refresh.svg", retry, Act::Retry, false, false));
+        acts.push(("icons/trash.svg", "Delete failed message".into(), Act::Delete, true, false));
     } else {
         let unique: HashSet<&str> = m.reactions.iter().map(|r| r.emoji.as_str()).collect();
-        if unique.len() < 8 && ctx.store.can_react(&ctx.chat.id) {
-            acts.push(("icons/smile-face.svg", "Add reaction", Act::React, false));
+        if !dissolved && unique.len() < 8 && ctx.store.can_react(&ctx.chat.id) {
+            acts.push(("icons/smile-face.svg", "Add reaction".into(), Act::React, false, false));
         }
-        acts.push(("icons/reply.svg", "Reply", Act::Reply, false));
-        if m.mine && !m.content.is_empty() && m.attachments.is_empty() && crate::data::command(m, ctx.commands).is_none() {
-            acts.push(("icons/edit.svg", "Edit", Act::Edit, false));
+        if !dissolved {
+            acts.push(("icons/reply.svg", "Reply".into(), Act::Reply, false, false));
+        }
+        if !dissolved && m.mine && !m.content.is_empty() && m.attachments.is_empty() && crate::data::command(m, ctx.commands).is_none() {
+            acts.push(("icons/edit.svg", "Edit".into(), Act::Edit, false, false));
         }
         if let Some(a) = m.attachments.iter().find(|a| a.downloaded && (a.resident || !a.path.is_empty())) {
-            acts.push(("icons/copy.svg", "Copy", Act::CopyFile(a.id.clone()), false));
+            acts.push(("icons/copy.svg", "Copy".into(), Act::CopyFile(a.id.clone()), false, false));
             acts.push(if a.resident {
-                ("icons/download.svg", "Save", Act::RevealFile(a.id.clone()), false)
+                ("icons/download.svg", "Save".into(), Act::RevealFile(a.id.clone()), false, false)
             } else {
-                ("icons/file-search.svg", "Reveal in folder", Act::RevealFile(a.id.clone()), false)
+                ("icons/file-search.svg", "Reveal in folder".into(), Act::RevealFile(a.id.clone()), false, false)
             });
         }
-        if ctx.chat.id.starts_with("npub1") || m.mine {
-            acts.push(("icons/trash.svg", "Delete message", Act::Delete, true));
+        let meta = ctx.delete_meta.get(&m.id);
+        if m.mine {
+            let limited = meta.is_some_and(|o| o.limited);
+            let label = if limited { "Delete message (limited)" } else { "Delete message" };
+            acts.push(("icons/trash.svg", label.into(), Act::Delete, true, limited));
+        } else if community.is_none() && ctx.chat.id.starts_with("npub1") {
+            acts.push(("icons/trash.svg", "Delete message".into(), Act::Delete, true, false));
+        } else if community.is_some() && meta.is_some_and(|o| o.hide) {
+            acts.push(("icons/trash.svg", "Hide message".into(), Act::Delete, true, false));
         }
     }
     // A continuation's text starts at its top edge: lift the bar clear of it.
@@ -1726,11 +1745,13 @@ fn toolbar(ctx: &Ctx, m: &Message, first: bool) -> Option<AnyElement> {
             let (act, id) = (ctx.on_act.clone(), m.id.clone());
             move |h, w, cx| act(&id, Act::Hover(*h), w, cx)
         });
-    for (i, (icon, _label, act, danger)) in acts.into_iter().enumerate() {
+    for (i, (icon, label, act, danger, dim)) in acts.into_iter().enumerate() {
         let (on, id) = (ctx.on_act.clone(), m.id.clone());
         bar = bar.child(
             div()
                 .id(i)
+                .tooltip(crate::kit::tooltip(label))
+                .when(dim, |d| d.opacity(0.45))
                 .size(px(26.))
                 .rounded(px(4.))
                 .flex()

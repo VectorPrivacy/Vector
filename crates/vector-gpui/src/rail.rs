@@ -418,6 +418,7 @@ fn item(store: &Store, com: &Community, open: bool, unread: bool, inset: f32, vo
         open,
         unread,
     )
+    .tooltip(crate::kit::tooltip(com.name.clone()))
     .on_click({
         let (on, id) = (on.clone(), id.clone());
         move |_, w, cx| on(Act::Open(id.clone()), w, cx)
@@ -483,6 +484,7 @@ fn folder_head(
         active,
         unread,
     )
+    .tooltip(crate::kit::tooltip(label.to_string()))
     .on_click({
         let (on, fid) = (on.clone(), fid.clone());
         move |_, w, cx| on(Act::RailFolder(fid.clone()), w, cx)
@@ -632,6 +634,7 @@ pub fn render_slim(
                     !is_open && holds_active,
                     !is_open && any_unread,
                 )
+                .tooltip(crate::kit::tooltip(label))
                 .on_click({
                     let (on, fid) = (on.clone(), fid.clone());
                     move |_, w, cx| on(Act::RailFolder(fid.clone()), w, cx)
@@ -708,6 +711,7 @@ fn tile(store: &Store, com: &Community, open: bool, unread: bool, edge: f32, voi
     let unread = unread && !community_muted(store, com);
     let id = com.community_id.clone();
     let el = bars(ring(SharedString::from(format!("rail-c-{id}"))), -edge - 3., 6., open, unread)
+        .tooltip(crate::kit::tooltip(com.name.clone()))
         .on_click({
             let (on, id) = (on.clone(), id.clone());
             move |_, w, cx| on(Act::Open(id.clone()), w, cx)

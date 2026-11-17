@@ -457,9 +457,10 @@ fn screen(
     } else {
         format!("{}'s screen", store.chat_name(viewing, channel))
     };
-    let btn = |id: &'static str, act: Act, child: AnyElement| {
+    let btn = |id: &'static str, tip: &'static str, act: Act, child: AnyElement| {
         div()
             .id(id)
+            .tooltip(crate::kit::tooltip(tip))
             .size(px(28.))
             .flex_shrink_0()
             .rounded(px(8.))
@@ -518,6 +519,7 @@ fn screen(
                 )
                 .child(btn(
                     "voice-screen-size",
+                    if voice.expanded { "Smaller" } else { "Bigger" },
                     Act::Expand,
                     icon(
                         if voice.expanded {
@@ -532,6 +534,7 @@ fn screen(
                 ))
                 .child(btn(
                     "voice-screen-hide",
+                    "Hide",
                     Act::HideScreen,
                     icon("icons/x.svg", 12., c(0xffffff)).into_any_element(),
                 )),
@@ -680,8 +683,22 @@ pub fn stage(
         };
         let pick = (session.is_some() && sharing).then(|| on.clone());
         let npub = p.npub.clone();
+        let path = if p.elsewhere {
+            Some("In this call on another app: you can't hear each other".to_string())
+        } else {
+            session
+                .and_then(|s| s.peers.iter().find(|x| x.npub == p.npub && x.connected))
+                .filter(|x| x.rtt_ms > 0)
+                .map(|x| format!("{} ms, {}", x.rtt_ms, if x.direct { "direct" } else { "through a relay" }))
+        };
+        let live_tip = match session {
+            Some(_) if is_viewing => "Hide their screen",
+            Some(_) => "Show their screen",
+            None => "Sharing their screen",
+        };
         div()
             .id(SharedString::from(format!("voice-tile-{}", p.npub)))
+            .when_some(path, |d, tip| d.tooltip(crate::kit::tooltip(tip)))
             .relative()
             .flex_shrink_0()
             .rounded(px(12.))
@@ -806,6 +823,8 @@ pub fn stage(
             .when(sharing, |d| {
                 d.child(
                     div()
+                        .id("voice-tile-live")
+                        .tooltip(crate::kit::tooltip(live_tip))
                         .absolute()
                         .top(px(6.))
                         .right(px(6.))

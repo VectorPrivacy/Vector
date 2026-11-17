@@ -144,6 +144,26 @@ impl VectorApp {
         .detach();
     }
 
+    /// The hover toolbar's delete row for `id`, asked of the backend once per message.
+    pub(super) fn want_delete_meta(&mut self, id: &str, cx: &mut Context<Self>) {
+        if !self.live || self.delete_meta.borrow().contains_key(id) {
+            return;
+        }
+        let Some(m) = self.message(id) else { return };
+        let in_community = self.open.as_deref().is_some_and(|c| self.store.borrow().community_of(c).is_some());
+        if !(m.mine || in_community) || m.pending || m.failed {
+            return;
+        }
+        let rx = backend::run(backend::actions::delete_options(id.to_string()));
+        let (meta, id) = (self.delete_meta.clone(), id.to_string());
+        cx.spawn(async move |this, cx| {
+            let Ok(opts) = rx.await else { return };
+            meta.borrow_mut().insert(id, opts);
+            this.update(cx, |this, cx| crate::pane::notify(&this.panes.timeline, cx)).ok();
+        })
+        .detach();
+    }
+
     pub(super) fn message_menu_act(&mut self, id: String, act: MsgAct, window: &mut Window, cx: &mut Context<Self>) {
         match act {
             MsgAct::Act(a) => self.on_act(id, a, window, cx),

@@ -124,6 +124,8 @@ pub struct VectorApp {
     popup: Option<(kit::Popup, PopupAct)>,
     rekey: Option<crate::rekey::Rekey>,
     fail_reasons: Rc<RefCell<HashMap<String, String>>>,
+    /// What the hover toolbar's delete offers, by message (`_dmsgDeleteMeta`).
+    delete_meta: Rc<RefCell<HashMap<String, backend::actions::DeleteOptions>>>,
     media: Rc<RefCell<crate::media::Media>>,
     emoji_picker: Entity<crate::picker::EmojiPicker>,
     /// The emoji picker is showing (for `picker`'s message, else the composer).
@@ -945,6 +947,7 @@ impl VectorApp {
             popup: None,
             rekey: None,
             fail_reasons: Rc::default(),
+            delete_meta: Rc::default(),
             media: crate::media::shared(),
             pack_details: None,
             pending_link: None,
@@ -4614,6 +4617,7 @@ impl VectorApp {
             Act::Hover(true) => {
                 self.hover_gen += 1;
                 if self.hovered.as_deref() != Some(id.as_str()) {
+                    self.want_delete_meta(&id, cx);
                     self.hovered = Some(id);
                     self.hover_in = 1;
                     // Only the message list shows it.
@@ -4857,6 +4861,15 @@ impl VectorApp {
             }
             Act::Delete => {
                 let failed = self.message(&id).is_some_and(|m| m.mine && m.failed);
+                let meta = self.delete_meta.borrow().get(&id).copied();
+                if let Some(o) = meta.filter(|_| !failed) {
+                    if o.mine {
+                        return self.message_menu_act(id, msgmenu_ops::MsgAct::Delete { limited: o.limited, attachments: o.attachments }, window, cx);
+                    }
+                    if o.hide && self.message(&id).is_some_and(|m| !m.mine) && self.open.as_deref().is_some_and(|c| self.store.borrow().community_of(c).is_some()) {
+                        return self.message_menu_act(id, msgmenu_ops::MsgAct::Hide, window, cx);
+                    }
+                }
                 let mut p = kit::Popup::notice("Delete this message?");
                 p.text = Some("Are you sure you want to delete this message?".into());
                 p.confirm = "Confirm".into();
@@ -8944,6 +8957,7 @@ impl VectorApp {
             _ => None,
         };
         let fail_reasons = self.fail_reasons.clone();
+        let delete_meta = self.delete_meta.clone();
         let media = self.media.clone();
         let live = self.live;
         let invites = Rc::new(self.invite_previews.clone());
@@ -8978,6 +8992,7 @@ impl VectorApp {
             };
             let revealed = revealed.borrow();
             let fail_reasons = fail_reasons.borrow();
+            let delete_meta = delete_meta.borrow();
             let ctx = timeline::Ctx {
                 by_id: &msg_index,
                 anchors: &anchors,
@@ -8992,6 +9007,7 @@ impl VectorApp {
                 replying: replying.as_deref(),
                 picker: picker.as_deref(),
                 fail_reasons: &fail_reasons,
+                delete_meta: &delete_meta,
                 media: &media,
                 scale: window.scale_factor(),
                 held: rows_store.is_request(chat),

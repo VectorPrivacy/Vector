@@ -1292,6 +1292,8 @@ fn audit(m: &CommSettings, store: &Store, on: &OnAct, cx: &App) -> AnyElement {
                             )
                             .child(
                                 div()
+                                    .id("audit-when")
+                                    .tooltip(crate::kit::tooltip(crate::audit::when_full(e["at"].as_u64().unwrap_or(0))))
                                     .mt(px(2.))
                                     .text_size(px(12.))
                                     .line_height(px(24.))
