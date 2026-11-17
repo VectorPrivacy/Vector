@@ -9783,13 +9783,6 @@ impl VectorApp {
                         Some(edge) => d.child(div().id("chat-start").size_full().flex().flex_col().overflow_y_scroll().child(div().my_auto().child(edge))),
                         None => d.child(messages),
                     })
-                    // After the list: painted over its media and toolbars, and hit first.
-                    .children(bar)
-                    .children(back)
-                    .children(pill)
-                    .children(request)
-                    .children(drawer)
-                    .children(typing_strip(store, &id, self.typing_fade, window))
                     // `.fadeout-bottom-msgs`: rows dim into the composer.
                     .child(
                         div()
@@ -9819,7 +9812,14 @@ impl VectorApp {
                                     gpui::linear_color_stop(ca(3, 3, 3, 0.), 0.2),
                                 )),
                         )
-                    }),
+                    })
+                    // After the list: painted over its media and toolbars, and hit first.
+                    .children(bar)
+                    .children(back)
+                    .children(pill)
+                    .children(request)
+                    .children(drawer)
+                    .children(typing_strip(store, &id, self.typing_fade, window)),
             )
             .children(preview_bar)
             .child(composer(
