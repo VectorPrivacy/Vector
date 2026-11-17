@@ -23,12 +23,16 @@ const EMOTICON_MAP = {
     '*': '😘', '-*': '😘',
 };
 
+// Codes that stand for a text symbol. Completed (`Vector:tm:`), one becomes its symbol where it
+// stands, with no space and no need for the list, since it belongs inside a word.
+const TEXT_SYMBOL_CODES = { tm: '\u2122', copyright: '\u00A9', registered: '\u00AE' };
+
 // Twemoji URL for a stock emoji (delegates to twemoji's own parsing, cached).
 const _twemojiUrlCache = {};
 function emojiToTwemojiUrl(emoji) {
     if (_twemojiUrlCache[emoji]) return _twemojiUrlCache[emoji];
     const span = document.createElement('span');
-    span.textContent = emoji;
+    span.textContent = plainTextSymbols(emoji);
     twemoji.parse(span, { callback: (icon) => '/twemoji/svg/' + icon + '.svg' });
     const img = span.querySelector('img');
     const url = img ? img.getAttribute('src') : null;
@@ -110,7 +114,7 @@ function initEmojiShortcodeSelector(textarea) {
         const after = textarea.value.substring(textarea.selectionStart);
         const insert = item.isCustom
             ? `:${item.shortcode}: `
-            : item.emoji + ' ';
+            : plainTextSymbols(item.emoji) + ' ';
         textarea.value = before + insert + after;
         const newPos = colonStart + insert.length;
         textarea.selectionStart = textarea.selectionEnd = newPos;
@@ -127,6 +131,19 @@ function initEmojiShortcodeSelector(textarea) {
         if (skipNextInput) { skipNextInput = false; return; }
         const val = textarea.value;
         const caret = textarea.selectionStart;
+
+        // A custom emoji of the same name keeps its code.
+        const done = /(?<!:):([a-z]+):$/.exec(val.slice(Math.max(0, caret - 16), caret));
+        const symbol = done && TEXT_SYMBOL_CODES[done[1]];
+        if (symbol && !searchCustomEmojis(done[1]).some(e => e.shortcode.toLowerCase().replace(/~\d+$/, '') === done[1])) {
+            const from = caret - done[0].length;
+            textarea.value = val.slice(0, from) + symbol + val.slice(caret);
+            textarea.selectionStart = textarea.selectionEnd = from + symbol.length;
+            hide();
+            skipNextInput = true;
+            textarea.dispatchEvent(new Event('input', { bubbles: true }));
+            return;
+        }
 
         // Walk backwards from caret to find a ':' after whitespace or at pos 0
         let foundColon = -1;

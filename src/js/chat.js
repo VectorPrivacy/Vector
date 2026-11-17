@@ -1758,6 +1758,7 @@ VectorSvelte.setScreen('composerPopups', {
     h: {
         bindCachedEmojiImg: (img, url, kind) => bindCachedEmojiImg(img, url, kind),
         twemojiUrl: (emoji) => emojiToTwemojiUrl(emoji),
+        plain: (emoji) => plainTextSymbols(emoji),
     },
 });
 
