@@ -417,7 +417,7 @@ pub fn alias_field(a: &Alias, book: &RouteBook, on: impl Fn(AliasAct, &mut Windo
     let help = {
         let on = on.clone();
         let key = n.help;
-        crate::settings::info("alias-help", move |_, w, cx| on(AliasAct::Help(key), w, cx))
+        crate::settings::info("alias-help", move |_, w, cx| on(AliasAct::Help(key), w, cx)).aria_label("Help")
     };
     let mut col = section(h4(n.title).child(div().ml(px(6.)).child(help)));
     if usable {

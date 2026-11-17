@@ -411,9 +411,8 @@ pub(crate) struct A11yNodeBuilder {
     /// pattern, which allows a focused container to act as if a descendant is
     /// focused.
     active_descendant: Option<NodeId>,
-    /// Per open node: text leaves added under it so far, and whether it now has
-    /// a name from its contents.
-    text_counts: SmallVec<[(u32, bool); 16]>,
+    /// Per open node: text leaves added under it so far, and the latest one.
+    text_counts: SmallVec<[(u32, Option<String>); 16]>,
     #[cfg(debug_assertions)]
     node_info: FxHashMap<NodeId, debug::NodeDebugInfo>,
 }
@@ -461,12 +460,20 @@ impl A11yNodeBuilder {
             return false;
         }
 
+        // A switch takes its name from the text just before it, as an HTML label would.
+        let mut node = node;
+        if matches!(node.role(), accesskit::Role::Switch | accesskit::Role::CheckBox)
+            && node.label().is_none()
+            && let Some(text) = self.text_counts.last().and_then(|c| c.1.clone())
+        {
+            node.set_label(text);
+        }
         if let Some(parent) = self.nodes_stack.last_mut() {
             parent.push_child(id);
         }
         self.ids_stack.push(id);
         self.nodes_stack.push(node);
-        self.text_counts.push((0, false));
+        self.text_counts.push((0, None));
         true
     }
 
@@ -481,7 +488,7 @@ impl A11yNodeBuilder {
         let Some(&parent_id) = self.ids_stack.last() else { return };
         let Some(count) = self.text_counts.last_mut() else { return };
         count.0 += 1;
-        count.1 = true;
+        count.1 = Some(text.to_string());
         let mut hasher = std::hash::DefaultHasher::default();
         parent_id.0.hash(&mut hasher);
         ("text", count.0).hash(&mut hasher);
@@ -517,7 +524,7 @@ impl A11yNodeBuilder {
     pub(crate) fn pop(&mut self) {
         debug_assert!(self.ids_stack.len() > 1, "pop would remove the root node");
 
-        let named = self.text_counts.pop().is_some_and(|c| c.1);
+        let named = self.text_counts.pop().is_some_and(|c| c.1.is_some());
         if let (Some(id), Some(mut node)) = (self.ids_stack.pop(), self.nodes_stack.pop()) {
             // An icon-only control is named by its tooltip.
             if !named && node.label().is_none() && is_named_from_contents(node.role()) {
@@ -546,7 +553,7 @@ impl A11yNodeBuilder {
         self.ids_stack.push(ROOT_NODE_ID);
         self.nodes_stack.push(root_node);
         self.text_counts.clear();
-        self.text_counts.push((0, false));
+        self.text_counts.push((0, None));
         self.focus = None;
         self.active_descendant = None;
     }

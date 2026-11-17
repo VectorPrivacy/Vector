@@ -986,6 +986,8 @@ pub fn toggle(
     };
     let track = div()
         .id(SharedString::from(format!("{id}-switch")))
+        .role(gpui::Role::Switch)
+        .aria_toggled(on.into())
         .relative()
         .w(px(50.))
         .h(px(24.))
@@ -1023,7 +1025,7 @@ pub fn toggle(
 pub fn info(
     id: impl Into<SharedString>,
     click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
-) -> impl IntoElement {
+) -> gpui::Stateful<gpui::Div> {
     div()
         .id(id.into())
         .size(px(16.))
@@ -1047,6 +1049,7 @@ pub fn toggle_row(
     switch: AnyElement,
     grouped: bool,
 ) -> impl IntoElement {
+    let label = label.into();
     let mut name = div()
         .flex()
         .items_center()
@@ -1054,9 +1057,9 @@ pub fn toggle_row(
         .text_size(px(16.))
         .line_height(px(19.))
         .text_color(c(0xffffff))
-        .child(label.into());
+        .child(label.clone());
     if let Some(explain) = explain {
-        name = name.child(info(SharedString::from(format!("{id}-info")), explain));
+        name = name.child(info(SharedString::from(format!("{id}-info")), explain).aria_label(format!("About {label}")));
     }
     div()
         .min_h(px(36.))

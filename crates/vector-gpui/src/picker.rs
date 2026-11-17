@@ -1775,6 +1775,7 @@ impl EmojiPicker {
                     .child(
                         div()
                             .id(group.clone())
+                            .aria_label(format!(":{}:", e.code))
                             .group(group.clone())
                             .size(px(PACK_BOX))
                             .flex()
@@ -1871,6 +1872,7 @@ impl EmojiPicker {
                 div().flex_1().min_w_0().h(px(CELL)).child(
                     div()
                         .id(group.clone())
+                        .aria_label(e.name)
                         .group(group)
                         .size(px(CELL))
                         .flex()
@@ -2035,6 +2037,8 @@ impl Render for EmojiPicker {
             div()
                 .id(icon)
                 .when(s.is_none(), |d| d.tip("Create new pack"))
+                .when(s == Some(Section::Recents), |d| d.aria_label("Recently used"))
+                .when(s == Some(Section::All), |d| d.aria_label("All emojis"))
                 .relative()
                 .size(px(30.))
                 .my(px(3.))

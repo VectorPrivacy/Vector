@@ -712,6 +712,7 @@ pub fn header(
         .child(
             div()
                 .id("chat-menu")
+                .tip("Chat Options")
                 .relative()
                 .size(px(40.))
                 .flex()
@@ -729,6 +730,8 @@ pub fn header(
         .child(
             div()
                 .id("details-toggle")
+                .tip(if panel { "Hide Details" } else { "Show Details" })
+                .aria_expanded(panel)
                 .ml(px(4.))
                 .size(px(32.))
                 .rounded(px(6.))
