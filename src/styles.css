@@ -12733,6 +12733,9 @@ input[type="checkbox"]:checked + .neon-toggle:before {
   left: 0;
   right: 0;
   z-index: 50;
+  max-height: 320px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
   padding: 4px;
   border: 1px solid #2a2a2a;
   border-radius: 8px;
@@ -12747,6 +12750,15 @@ input[type="checkbox"]:checked + .neon-toggle:before {
   opacity: 1;
   transform: none;
   pointer-events: auto;
+}
+/* Closed, the list takes no room once it has faded, so it adds no blank space to scroll into
+   below its pane, and opening doesn't shift the pane under it. */
+.vselect:not(.open) .vselect-list {
+  max-height: 0 !important;
+  padding-block: 0;
+  border-width: 0;
+  transition: opacity 0.14s ease, transform 0.18s cubic-bezier(0.22, 1, 0.36, 1),
+    max-height 0s 0.18s, padding 0s 0.18s, border-width 0s 0.18s;
 }
 .vselect-item {
   display: flex;
