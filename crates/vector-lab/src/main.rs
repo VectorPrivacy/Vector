@@ -5,6 +5,7 @@
 mod events;
 mod flood;
 mod gap;
+mod gate;
 #[cfg(feature = "voice")]
 mod voice;
 
@@ -95,6 +96,20 @@ impl Seen {
         }
     }
 
+    /// When the first event `f` picks arrived (unix ms), waiting up to `secs` for one.
+    pub async fn when(&self, secs: u64, f: impl Fn(&BotEvent) -> bool) -> Option<u64> {
+        let until = Instant::now() + Duration::from_secs(secs);
+        loop {
+            if let Some(at) = self.0.lock().unwrap().iter().find(|(_, e)| f(e)).map(|(at, _)| *at) {
+                return Some(at);
+            }
+            if Instant::now() > until {
+                return None;
+            }
+            tokio::time::sleep(Duration::from_millis(150)).await;
+        }
+    }
+
     pub fn all(&self) -> Vec<(u64, BotEvent)> {
         self.0.lock().unwrap().clone()
     }
@@ -168,6 +183,7 @@ fn roles(scenario: &str, opts: &Opts) -> Option<(Vec<String>, u64)> {
         #[cfg(feature = "voice")]
         "voice" => (vec!["owner".into(), "a".into(), "b".into()], 600),
         "flood" => (std::iter::once("owner".to_string()).chain((0..opts.bots).map(|i| format!("bot{i}"))).collect(), 900),
+        "gate" => (["owner", "gate"].map(String::from).into_iter().chain((0..opts.bots).map(|i| format!("m{i}"))).collect(), 1200),
         _ => return None,
     })
 }
@@ -179,6 +195,7 @@ async fn run_role(scenario: &str, role: &str, lab: Lab) {
         #[cfg(feature = "voice")]
         "voice" => voice::run(role, lab).await,
         "flood" => flood::run(role, lab).await,
+        "gate" => gate::run(role, lab).await,
         _ => {}
     }
 }
@@ -192,15 +209,17 @@ async fn scenario(name: &str, opts: &Opts, keep: bool) -> (Vec<(String, Check)>,
     let exe = std::env::current_exe().expect("this binary");
     let mut children = Vec::new();
     for role in &roles {
-        let log = std::fs::File::create(dir.join(format!("{role}.log"))).expect("a log file");
-        let child = tokio::process::Command::new(&exe)
+        let log = Arc::new(Mutex::new(std::fs::File::create(dir.join(format!("{role}.log"))).expect("a log file")));
+        let mut child = tokio::process::Command::new(&exe)
             .args(["--role", name, role])
             .arg(&dir)
-            .stdout(Stdio::from(log.try_clone().unwrap()))
-            .stderr(Stdio::from(log))
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
             .kill_on_drop(true)
             .spawn()
             .expect("start a role");
+        tokio::spawn(stamp(child.stdout.take().expect("piped"), log.clone()));
+        tokio::spawn(stamp(child.stderr.take().expect("piped"), log));
         children.push(child);
     }
     let all = futures_join(children);
@@ -219,6 +238,17 @@ async fn scenario(name: &str, opts: &Opts, keep: bool) -> (Vec<(String, Check)>,
         let _ = std::fs::remove_dir_all(&dir);
     }
     (out, timed_out)
+}
+
+/// Copy a role's output into its log, each line stamped with when it was written (unix ms), so
+/// the roles' logs line up with each other and with the times their checks report.
+async fn stamp<R: tokio::io::AsyncRead + Unpin>(out: R, log: Arc<Mutex<std::fs::File>>) {
+    use std::io::Write;
+    use tokio::io::AsyncBufReadExt;
+    let mut lines = tokio::io::BufReader::new(out).lines();
+    while let Ok(Some(line)) = lines.next_line().await {
+        let _ = writeln!(log.lock().unwrap(), "{} {line}", now_ms());
+    }
 }
 
 async fn futures_join(children: Vec<tokio::process::Child>) {
@@ -247,7 +277,7 @@ async fn main() {
             "--keep" => keep = true,
             "--bots" => opts.bots = it.next().and_then(|n| n.parse().ok()).unwrap_or(4).max(2),
             "--messages" => opts.messages = it.next().and_then(|n| n.parse().ok()).unwrap_or(25).max(1),
-            "all" => wanted.extend(["events", "gap", "voice", "flood"].map(String::from)),
+            "all" => wanted.extend(["events", "gap", "voice", "flood", "gate"].map(String::from)),
             "-h" | "--help" => return usage(),
             s => wanted.push(s.to_string()),
         }
@@ -279,5 +309,5 @@ async fn main() {
 }
 
 fn usage() {
-    println!("vector-lab [events] [gap] [voice] [flood] [all] [--relays wss://a,wss://b] [--long] [--keep] [--bots N] [--messages M]");
+    println!("vector-lab [events] [gap] [voice] [flood] [gate] [all] [--relays wss://a,wss://b] [--long] [--keep] [--bots N] [--messages M]");
 }
