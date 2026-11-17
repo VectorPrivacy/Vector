@@ -1,6 +1,7 @@
 //! The structured command composer (`CommandComposer.svelte`): one pill per argument in
 //! place of the draft, so quoting is the code's job and never the user's.
 
+use crate::kit::Tipped as _;
 use gpui::{AnyElement, App, Context, Entity, EventEmitter, FocusHandle, Focusable, FontWeight, InteractiveElement, IntoElement, KeyDownEvent, ParentElement, Render, SharedString, StatefulInteractiveElement, Styled, Window, div, prelude::*, px};
 use crate::pic::img;
 
@@ -367,7 +368,7 @@ impl Render for CommandForm {
                     let tip = p.arg.description.clone();
                     div()
                         .id(SharedString::from(format!("cmd-field-{i}")))
-                        .when(!tip.is_empty(), |d| d.tooltip(crate::kit::tooltip(tip)))
+                        .when(!tip.is_empty(), |d| d.tip(tip))
                         .bg(ca(0, 0, 0, 0.35))
                         .rounded(px(7.))
                         .px(px(8.))
@@ -384,7 +385,7 @@ impl Render for CommandForm {
                     let tip = if value.is_empty() { p.arg.description.clone() } else { value.clone() };
                     div()
                         .id(SharedString::from(format!("cmd-pick-{i}")))
-                        .when(!tip.is_empty(), |d| d.tooltip(crate::kit::tooltip(tip)))
+                        .when(!tip.is_empty(), |d| d.tip(tip))
                         .track_focus(&focus)
                         .relative()
                         .flex()
@@ -433,7 +434,7 @@ impl Render for CommandForm {
                 let rows = m.options.iter().enumerate().map(|(k, (v, label, face))| {
                     div()
                         .id(SharedString::from(format!("cmd-opt-{k}")))
-                        .tooltip(crate::kit::tooltip(label.clone()))
+                        .tip(label.clone())
                         .flex()
                         .items_center()
                         .gap(px(8.))

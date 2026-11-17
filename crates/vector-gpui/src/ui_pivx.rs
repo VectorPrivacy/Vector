@@ -1,6 +1,7 @@
 //! The PIVX wallet (`js/pivx.js`, `components/miniapps/pivx/`): the card in the attachment
 //! panel, its Deposit, Send, Withdraw and Settings dialogs, and the payments shown in chats.
 
+use crate::kit::Tipped as _;
 use std::time::{Duration, Instant};
 
 use gpui::{AnyElement, Context, Entity, FontWeight, SharedString, Task, Window, div, prelude::*, px, svg};
@@ -812,7 +813,7 @@ impl VectorApp {
             )
             .child({
                 let b = dock_btn(1, "pivx-deposit-btn", "plus-circle", "Deposit", false, deposit_off, w.deposit_loading)
-                    .when(deposit_off, |b| b.tooltip(crate::kit::tooltip("Balance too high - please withdraw first")));
+                    .when(deposit_off, |b| b.tip("Balance too high - please withdraw first"));
                 if w.deposit_loading { b } else { b.on_click(cx.listener(|app, _, _, cx| app.pivx_deposit(cx))) }
             })
             .child(

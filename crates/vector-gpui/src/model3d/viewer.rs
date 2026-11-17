@@ -1,6 +1,7 @@
 //! `ModelViewer.svelte`: a model full screen in the image viewer's frame. Drag to turn, wheel
 //! to zoom, double-click to reset; an animated model gets its clips, a scrubber and speed.
 
+use crate::kit::Tipped as _;
 use std::time::Duration;
 
 use futures::StreamExt;
@@ -404,7 +405,7 @@ impl Render for ModelViewer {
         if let Some(f) = self.file {
             controls = controls.child(
                 round_button("model-viewer-file")
-                    .tooltip(crate::kit::tooltip(if f == FileAction::Reveal { "Show in folder" } else { "Save" }))
+                    .tip(if f == FileAction::Reveal { "Show in folder" } else { "Save" })
                     .p(px(9.))
                     .on_click(cx.listener(|_, _, _, cx| cx.emit(Event::File)))
                     .child(svg().path(if f == FileAction::Reveal { "ui/mv-reveal.svg" } else { "ui/mv-save.svg" }).size_full().text_color(c(0xffffff))),
@@ -412,7 +413,7 @@ impl Render for ModelViewer {
         }
         controls = controls.child(
             round_button("model-viewer-reset")
-                .tooltip(crate::kit::tooltip("Reset view"))
+                .tip("Reset view")
                 .p(px(9.))
                 .on_click(cx.listener(|v, _, _, cx| {
                     v.view.reset();

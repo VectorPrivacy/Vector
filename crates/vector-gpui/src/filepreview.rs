@@ -2,6 +2,7 @@
 //! options and the buttons. The picture compresses in the background while it shows, so a
 //! compressed send rarely waits.
 
+use crate::kit::Tipped as _;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -891,7 +892,7 @@ impl Render for FilePreview {
                         .child(
                             div()
                                 .id("spoiler-toggle")
-                                .tooltip(crate::kit::tooltip(if self.spoiler { "Remove spoiler" } else { "Mark as spoiler" }))
+                                .tip(if self.spoiler { "Remove spoiler" } else { "Mark as spoiler" })
                                 .absolute()
                                 .bottom(px(8.))
                                 .right(px(8.))

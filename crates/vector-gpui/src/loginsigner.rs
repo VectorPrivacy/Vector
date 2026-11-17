@@ -1,6 +1,7 @@
 //! Login with Remote Signer: a pasted `bunker://` link, or a `nostrconnect://` QR the signer
 //! scans. The QR lives exactly as long as its single-use link.
 
+use crate::kit::Tipped as _;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -377,7 +378,7 @@ impl LoginView {
             .flex_none()
             .rounded(px(7.))
             .cursor_pointer()
-            .tooltip(crate::kit::tooltip("Pair with a QR code"))
+            .tip("Pair with a QR code")
             .on_click(cx.listener(|this, _, w, cx| this.signer_open_qr(w, cx)))
             .child(img("icons/login/qr.svg").size(px(40.)));
         let row = self

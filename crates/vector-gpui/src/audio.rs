@@ -1,6 +1,7 @@
 //! Audio attachments on the shared engine (`AudioPlayer.svelte`, `AudioSession`): play and
 //! pause, the spectral bars, the scrub, and one player sounding at a time.
 
+use crate::kit::Tipped as _;
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
@@ -1023,7 +1024,7 @@ fn album_view(
         };
         div()
             .id(SharedString::from(format!("album-{key}-{id}")))
-            .tooltip(crate::kit::tooltip(tip))
+            .tip(tip)
             .size(px(30.))
             .rounded(px(8.))
             .flex()
@@ -1047,7 +1048,7 @@ fn album_view(
         .child(
             line(div())
                 .id("audio-album-title")
-                .tooltip(crate::kit::tooltip(full.clone()))
+                .tip(full.clone())
                 .text_size(px(15.75))
                 .line_height(px(19.7))
                 .font_weight(gpui::FontWeight::SEMIBOLD)
@@ -1068,7 +1069,7 @@ fn album_view(
             d.child(
                 line(div())
                     .id("audio-album-byline")
-                    .tooltip(crate::kit::tooltip(byline.clone()))
+                    .tip(byline.clone())
                     .text_size(px(12.))
                     .line_height(px(15.))
                     .text_color(white_a(0.55))
@@ -1430,7 +1431,7 @@ pub fn view(
         let on = on.clone();
         div()
             .id(SharedString::from(format!("audio-lyrics-{}", att.id)))
-            .tooltip(crate::kit::tooltip(if open { "Hide lyrics" } else { "Lyrics" }))
+            .tip(if open { "Hide lyrics" } else { "Lyrics" })
             .size(px(34.))
             .ml(px(10.))
             .flex_shrink_0()
@@ -1562,7 +1563,7 @@ pub fn view(
             .child(
                 div()
                     .id("audio-filename")
-                    .tooltip(crate::kit::tooltip(title.clone()))
+                    .tip(title.clone())
                     .text_size(px(12.))
                     .line_height(px(15.))
                     .text_color(white_a(0.92))
@@ -1653,7 +1654,7 @@ pub fn view(
                 .child(
                     line(div())
                         .id("audio-track-title")
-                        .tooltip(crate::kit::tooltip(track.clone()))
+                        .tip(track.clone())
                         .text_size(px(15.75))
                         .line_height(px(19.7))
                         .font_weight(gpui::FontWeight::SEMIBOLD)
@@ -1664,7 +1665,7 @@ pub fn view(
                     d.child(
                         line(div())
                             .id("audio-track-byline")
-                            .tooltip(crate::kit::tooltip(byline.clone()))
+                            .tip(byline.clone())
                             .text_size(px(12.))
                             .line_height(px(15.))
                             .text_color(white_a(0.55))

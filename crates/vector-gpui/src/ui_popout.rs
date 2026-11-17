@@ -1,5 +1,6 @@
 //! The floating player on the app: what leaves a chat playing, and the box itself.
 
+use crate::kit::Tipped as _;
 use std::rc::Rc;
 
 use gpui::{AnyElement, Bounds, Context, CursorStyle, HitboxBehavior, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ObjectFit, Pixels, SharedString, Window, canvas, div, prelude::*, px, svg};
@@ -287,7 +288,7 @@ impl VectorApp {
             let on = on.clone();
             div()
                 .id(key)
-                .tooltip(crate::kit::tooltip(tip))
+                .tip(tip)
                 .size(px(32.))
                 .flex_none()
                 .rounded(px(8.))
@@ -332,7 +333,7 @@ impl VectorApp {
             .child(
                 div()
                     .id("popout-title")
-                    .tooltip(crate::kit::tooltip(title.clone()))
+                    .tip(title.clone())
                     .text_size(px(14.72))
                     .line_height(px(18.4))
                     .font_weight(gpui::FontWeight::SEMIBOLD)

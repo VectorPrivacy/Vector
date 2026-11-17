@@ -3,6 +3,7 @@
 //! into one image at the pane's size off the UI thread, newest request first, so a slider
 //! drag never queues stale work.
 
+use crate::kit::Tipped as _;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -267,7 +268,7 @@ pub fn preview_bar(blur: u8, dim: u8, dragging: Rc<Cell<Option<bool>>>, on: &OnA
                 div()
                     .id(if is_blur { "wp-blur-icon" } else { "wp-dim-icon" })
                     .flex_shrink_0()
-                    .tooltip(crate::kit::tooltip(if is_blur { "Blur" } else { "Brightness" }))
+                    .tip(if is_blur { "Blur" } else { "Brightness" })
                     .child(svg().path(icon).size(px(20.)).text_color(white_a(0.72))),
             )
             .child(

@@ -2,6 +2,7 @@
 //! `transportRouteBadge`), the Connection block of their dialogs, and the address a server keeps
 //! inside Tor or I2P (`AliasField.svelte`).
 
+use crate::kit::Tipped as _;
 use std::collections::HashMap;
 
 use gpui::prelude::*;
@@ -136,7 +137,7 @@ pub fn tag_status(t: &Tag, short: bool) -> AnyElement {
         .text_size(px(16.))
         .line_height(px(19.))
         .text_color(color)
-        .tooltip(crate::kit::tooltip(t.title.clone()))
+        .tip(t.title.clone())
         .child(svg().path(icon).size(px(16.)).flex_shrink_0().text_color(color))
         .child(match t.short.filter(|_| short) {
             Some(s) => SharedString::from(s),
@@ -158,7 +159,7 @@ pub fn badge(b: &Badge, dot: bool) -> AnyElement {
             .border_1()
             .when(!b.failed, |d| d.bg(c(0x5fd4ea)).border_color(ca(64, 200, 228, 0.3)))
             .when(b.failed, |d| d.border_dashed().border_color(white_a(0.2)))
-            .tooltip(crate::kit::tooltip(b.title.clone()))
+            .tip(b.title.clone())
             .into_any_element();
     }
     div()
@@ -174,7 +175,7 @@ pub fn badge(b: &Badge, dot: bool) -> AnyElement {
         .whitespace_nowrap()
         .when(!b.failed, |d| d.text_color(c(0x7adef0)).bg(ca(64, 200, 228, 0.12)).border_color(ca(64, 200, 228, 0.3)))
         .when(b.failed, |d| d.text_color(white_a(0.45)).border_dashed().border_color(white_a(0.2)))
-        .tooltip(crate::kit::tooltip(b.title.clone()))
+        .tip(b.title.clone())
         .child(b.text.clone())
         .into_any_element()
 }
@@ -449,7 +450,7 @@ pub fn alias_field(a: &Alias, book: &RouteBook, on: impl Fn(AliasAct, &mut Windo
                 .mt(px(8.))
                 .flex()
                 .gap(px(8.))
-                .child(div().id("alias-saved").tooltip(crate::kit::tooltip(saved.clone())).flex_1().min_w_0().truncate().font_family(MONO).text_size(px(12.)).line_height(px(38.)).text_color(white_a(0.45)).child(saved.clone()))
+                .child(div().id("alias-saved").tip(saved.clone()).flex_1().min_w_0().truncate().font_family(MONO).text_size(px(12.)).line_height(px(38.)).text_color(white_a(0.45)).child(saved.clone()))
                 .child(button("alias-remove-row", "Remove", false, !a.busy).when(!a.busy, |d| d.on_click(act(|| AliasAct::Remove)))),
         );
     }

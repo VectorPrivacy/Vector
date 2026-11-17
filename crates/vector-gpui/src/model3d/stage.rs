@@ -1,6 +1,7 @@
 //! `ModelAttachment.svelte`: a 320 px square to turn a model in, opened full screen by a tap,
 //! its animation behind a Play button. A giant model waits for "View in 3D".
 
+use crate::kit::Tipped as _;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -209,7 +210,7 @@ fn tool(id: &'static str, icon: &'static str, act: Act, on: &OnAct) -> AnyElemen
     let on = on.clone();
     div()
         .id(id)
-        .when_some(tip, |d, t| d.tooltip(crate::kit::tooltip(t)))
+        .when_some(tip, |d, t| d.tip(t))
         .size(px(32.))
         .flex()
         .items_center()

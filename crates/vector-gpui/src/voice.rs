@@ -2,6 +2,7 @@
 //! channel row, and the bar that follows the call around the app (`VoiceStage.svelte`,
 //! `VoiceBar.svelte`, `ChannelList.svelte`).
 
+use crate::kit::Tipped as _;
 use std::collections::HashMap;
 use std::cell::Cell;
 use std::rc::Rc;
@@ -275,7 +276,7 @@ pub fn members(voice: &Voice, store: &Store, community: &str, channel: &str, on:
             div()
                 .id(tip)
                 .flex()
-                .tooltip(crate::kit::tooltip(tip))
+                .tip(tip)
                 .child(icon(path, 12., if server { c(crate::call::DANGER) } else { white_a(0.45) }))
         };
         let key = SharedString::from(format!("voice-m-{channel}-{}", p.npub));
@@ -313,7 +314,7 @@ pub fn members(voice: &Voice, store: &Store, community: &str, channel: &str, on:
                             .gap(px(6.))
                             .flex_shrink_0()
                             .when(p.screen, |d| {
-                                d.child(div().id("live").tooltip(crate::kit::tooltip("Sharing their screen")).child(live_tag(9., 14., 5.)))
+                                d.child(div().id("live").tip("Sharing their screen").child(live_tag(9., 14., 5.)))
                             })
                             .when(p.camera, |d| d.child(flag("icons/video.svg", false, "Camera on")))
                             .when(p.muted, |d| {
@@ -376,7 +377,7 @@ fn mic_btn(s: &Session, on: &OnAct) -> impl IntoElement {
     let held = s.server_muted;
     let tint = if held { c(crate::call::DANGER) } else if off { c(ACCENT) } else { white_a(0.88) };
     held_btn("voice-mic", off, held)
-        .tooltip(crate::kit::tooltip(tip))
+        .tip(tip)
         .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .on_click(click(on, Act::Mic))
         .child(icon(if off { "icons/mic-off.svg" } else { "icons/mic-on.svg" }, 18.7, tint))
@@ -392,7 +393,7 @@ fn deafen_btn(s: &Session, on: &OnAct) -> impl IntoElement {
     let held = s.server_deafened;
     let tint = if held { c(crate::call::DANGER) } else if off { c(ACCENT) } else { white_a(0.88) };
     held_btn("voice-deafen", off, held)
-        .tooltip(crate::kit::tooltip(tip))
+        .tip(tip)
         .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .on_click(click(on, Act::Deafen))
         .child(icon(if off { "icons/volume-mute.svg" } else { "icons/volume-max.svg" }, 18.7, tint))
@@ -413,7 +414,7 @@ fn video_btn(
         (_, false) => "Share your screen",
     };
     call_btn(id, state)
-        .tooltip(crate::kit::tooltip(tip))
+        .tip(tip)
         .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .on_click(click(on, act))
         .child(icon(
@@ -460,7 +461,7 @@ fn screen(
     let btn = |id: &'static str, tip: &'static str, act: Act, child: AnyElement| {
         div()
             .id(id)
-            .tooltip(crate::kit::tooltip(tip))
+            .tip(tip)
             .size(px(28.))
             .flex_shrink_0()
             .rounded(px(8.))
@@ -544,7 +545,7 @@ fn screen(
 
 fn leave_btn(on: &OnAct) -> impl IntoElement {
     round_btn("voice-leave", 34.)
-        .tooltip(crate::kit::tooltip("Leave the call"))
+        .tip("Leave the call")
         .bg(c(crate::call::DANGER))
         .hover(|d| d.bg(c(0xff4db6)))
         .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
@@ -618,7 +619,7 @@ pub fn stage(
                     .flex()
                     .items_center()
                     .gap(px(5.))
-                    .tooltip(crate::kit::tooltip("Round trip to the slowest link in the call"))
+                    .tip("Round trip to the slowest link in the call")
                     .child(dot(q))
                     .child(format!("{ping} ms")),
             )
@@ -630,7 +631,7 @@ pub fn stage(
         let badge = |path: &'static str, server: bool, tip: &'static str| {
             div()
                 .id(tip)
-                .tooltip(crate::kit::tooltip(tip))
+                .tip(tip)
                 .size(px(26.))
                 .rounded_full()
                 .border_2()
@@ -698,7 +699,7 @@ pub fn stage(
         };
         div()
             .id(SharedString::from(format!("voice-tile-{}", p.npub)))
-            .when_some(path, |d, tip| d.tooltip(crate::kit::tooltip(tip)))
+            .when_some(path, |d, tip| d.tip(tip))
             .relative()
             .flex_shrink_0()
             .rounded(px(12.))
@@ -824,7 +825,7 @@ pub fn stage(
                 d.child(
                     div()
                         .id("voice-tile-live")
-                        .tooltip(crate::kit::tooltip(live_tip))
+                        .tip(live_tip)
                         .absolute()
                         .top(px(6.))
                         .right(px(6.))
@@ -1095,7 +1096,7 @@ pub fn bar(voice: &Voice, store: &Store, pos: Option<Point<Pixels>>, top: f32, o
                         .text_size(px(11.5))
                         .line_height(px(13.2))
                         .text_color(c(0xb2b2b2))
-                        .when_some(rtt_quality(ping), |d, q| d.child(div().id("voice-bar-ping").tooltip(crate::kit::tooltip(format!("{ping} ms to the slowest link"))).child(dot(q))))
+                        .when_some(rtt_quality(ping), |d, q| d.child(div().id("voice-bar-ping").tip(format!("{ping} ms to the slowest link")).child(dot(q))))
                         .child(div().truncate().child(status)),
                 ),
         )

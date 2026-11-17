@@ -2,6 +2,7 @@
 //! policies and the template gallery, or the editor for one draft. A policy is never enabled
 //! from a form alone, only from a preview of that same draft.
 
+use crate::kit::Tipped as _;
 use std::collections::{HashMap, HashSet};
 
 use gpui::prelude::*;
@@ -915,7 +916,7 @@ fn rules(p: &Policies, on: &OnAct) -> AnyElement {
                 let key = id.clone();
                 div()
                     .id(SharedString::from(format!("pol-add-{id}")))
-                    .when_some(k["description"].as_str().filter(|t| !t.is_empty()), |d, t| d.tooltip(crate::kit::tooltip(t.to_string())))
+                    .when_some(k["description"].as_str().filter(|t| !t.is_empty()), |d, t| d.tip(t.to_string()))
                     .px(px(11.))
                     .py(px(7.))
                     .rounded(px(8.))
@@ -1114,7 +1115,7 @@ fn editor(
     let can_preview = !p.busy && ready.is_ok();
     let preview_btn = div()
         .id("pol-preview")
-        .when_some(ready.as_ref().err().cloned(), |d, why| d.tooltip(crate::kit::tooltip(why)))
+        .when_some(ready.as_ref().err().cloned(), |d, why| d.tip(why))
         .min_w(px(232.))
         .justify_center()
         .px(px(14.))

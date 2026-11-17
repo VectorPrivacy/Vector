@@ -1,6 +1,7 @@
 //! Emoji packs shared in a message, as cards (`PackPreviewCard.svelte`, `js/emoji/pack-previews.js`):
 //! the pack's thumbs, logo, title and count, with Copy and Add / Remove.
 
+use crate::kit::Tipped as _;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -352,7 +353,7 @@ fn card(ctx: &Ctx, m: &Message, naddr: String) -> AnyElement {
                 .child(
                     div()
                         .id(SharedString::from(format!("{key}-copy")))
-                        .tooltip(crate::kit::tooltip("Copy share link"))
+                        .tip("Copy share link")
                         .w(px(28.))
                         .h_full()
                         .flex_shrink_0()

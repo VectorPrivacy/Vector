@@ -25,6 +25,7 @@
 //! - `dev:key:<keystroke>`: press one, as GPUI spells them (`enter`, `escape`, `cmd-k`)
 //! - `dev:sel`: the message paragraphs on screen and what is selected
 //! - `dev:caches`: each decoded picture cache's entries, MB and frames, and the video clips held
+//! - `dev:a11y`: the accessibility tree a screen reader would get, built from the next frames on
 //! - `dev:shot`: the window as `$TMPDIR/vector-devctl.png` (macOS and Windows)
 
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -269,6 +270,16 @@ pub fn run(app: &mut VectorApp, cmd: &str, window: &mut Window, cx: &mut Context
             Err(e) => answer(json!({ "error": e })),
         },
         "shot" => answer(shot()),
+        "a11y" => {
+            window.force_a11y_active();
+            window.on_next_frame(|window, _| {
+                window.refresh();
+                window.on_next_frame(|window, _| {
+                    let tree = window.debug_a11y_tree_json().unwrap_or_default();
+                    answer(serde_json::from_str(&tree).unwrap_or(serde_json::Value::String(tree)));
+                });
+            });
+        }
         // Stops the heap profiler: its report lands in dhat-heap.json in the working directory.
         #[cfg(feature = "dhat-heap")]
         "dhat" => drop(crate::DHAT.lock().unwrap().take()),

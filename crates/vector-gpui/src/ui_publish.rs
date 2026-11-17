@@ -1,6 +1,7 @@
 //! Publish to App Store, and Edit Listing (`PublishDialog.svelte`, `showPublishAppDialog`,
 //! `showEditListingDialog`).
 
+use crate::kit::Tipped as _;
 use std::path::PathBuf;
 
 use gpui::{AnyElement, Context, Entity, Focusable, FontWeight, SharedString, Task, Window, div, prelude::*, px, svg};
@@ -618,7 +619,7 @@ impl VectorApp {
                             .flex_1()
                             .child(label("Version", false))
                             .child(if editing {
-                                fixed(&f.version).id("pub-version").tooltip(crate::kit::tooltip("A new version is a new upload")).into_any_element()
+                                fixed(&f.version).id("pub-version").tip("A new version is a new upload").into_any_element()
                             } else {
                                 boxed(&f.version, false).into_any_element()
                             }),

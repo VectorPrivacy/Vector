@@ -1,6 +1,7 @@
 //! The Network section's dialogs (`settings/network/`): Add Relay, one relay's settings and
 //! activity, and one media server.
 
+use crate::kit::Tipped as _;
 use std::rc::Rc;
 
 use gpui::prelude::*;
@@ -542,7 +543,7 @@ fn relay(
                         .child(
                             div()
                                 .id("relay-info-url")
-                                .tooltip(crate::kit::tooltip(row.url.clone()))
+                                .tip(row.url.clone())
                                 .min_w_0()
                                 .truncate()
                                 .text_size(px(13.))
@@ -603,7 +604,7 @@ fn relay(
                         .child(
                             div()
                                 .id("relay-logs-copy")
-                                .tooltip(crate::kit::tooltip("Copy logs to clipboard"))
+                                .tip("Copy logs to clipboard")
                                 .size(px(24.))
                                 .flex()
                                 .items_center()
@@ -707,7 +708,7 @@ fn server(
     let mut body = div().pt(px(16.)).px(px(20.)).pb(px(20.)).flex().flex_col().gap(px(10.)).child(
         div()
             .id("server-info-url")
-            .tooltip(crate::kit::tooltip(info.url.clone()))
+            .tip(info.url.clone())
             .truncate()
             .text_size(px(13.))
             .line_height(px(24.))
@@ -838,7 +839,7 @@ fn tag_pill(t: &crate::routes::Tag) -> AnyElement {
         .text_size(px(10.))
         .font_weight(FontWeight::SEMIBOLD)
         .text_color(fg)
-        .tooltip(crate::kit::tooltip(t.title.clone()))
+        .tip(t.title.clone())
         .child(crate::kit::spaced(t.text.to_uppercase(), 0.5))
         .into_any_element()
 }

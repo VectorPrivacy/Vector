@@ -2,6 +2,7 @@
 //! install-wide choice the next account inherits; while adding a profile it only records the
 //! choice, which the commit applies once the live account is gone.
 
+use crate::kit::Tipped as _;
 use std::rc::Rc;
 
 use gpui::prelude::*;
@@ -666,7 +667,7 @@ impl LoginView {
                 .gap_y(px(6.))
                 .child(field("SAM port", n.port.as_ref(), 76., None))
                 .when(!n.sam_open && !has_auth, |d| {
-                    d.child(link("lg-sam-add", "Add SAM Password").tooltip(crate::kit::tooltip("Only if your router asks for one.")).on_click(cx.listener(|this, _, w, cx| this.open_sam_form(w, cx))))
+                    d.child(link("lg-sam-add", "Add SAM Password").tip("Only if your router asks for one.").on_click(cx.listener(|this, _, w, cx| this.open_sam_form(w, cx))))
                 }),
         );
         if has_auth && !n.sam_open {

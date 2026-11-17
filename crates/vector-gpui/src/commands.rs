@@ -1,6 +1,7 @@
 //! The `/` command picker (`command-picker.js`, `CommandPopup.svelte`): the sectioned list
 //! while the name is being typed, then the armed command's hint row.
 
+use crate::kit::Tipped as _;
 use std::rc::Rc;
 
 use gpui::{AnyElement, App, FontWeight, Hsla, InteractiveElement, IntoElement, ParentElement, SharedString, StatefulInteractiveElement, Styled, Window, div, prelude::*, px};
@@ -727,7 +728,7 @@ pub fn view(
                     };
                     div()
                         .id(SharedString::from(format!("cmd-{}", r.cmd.key())))
-                        .when_some(tip, |d, t| d.tooltip(crate::kit::tooltip(t)))
+                        .when_some(tip, |d, t| d.tip(t))
                         .relative()
                         .flex()
                         .flex_wrap()
@@ -811,7 +812,7 @@ pub fn view(
                         .children(h.cmd.args.iter().enumerate().map(|(i, a)| {
                             arg_chip(&a.name, !a.required, i == h.current)
                                 .id(SharedString::from(format!("hint-arg-{i}")))
-                                .when(!a.description.is_empty(), |d| d.tooltip(crate::kit::tooltip(a.description.clone())))
+                                .when(!a.description.is_empty(), |d| d.tip(a.description.clone()))
                         }))
                         .when(!h.cmd.description.is_empty(), |d| {
                             d.child(

@@ -1,6 +1,7 @@
 //! The slim layout below widescreen (`console.css`, `ChatListPane.svelte`): a header over the
 //! community rail and the pane beside it, the tab bar, and screens that take the window.
 
+use crate::kit::Tipped as _;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -625,7 +626,7 @@ impl VectorApp {
             .child(
                 div()
                     .id("cc-rail-add")
-                    .tooltip(kit::tooltip("Create Community"))
+                    .tip("Create Community")
                     .mt(px(5.))
                     .size(px(45.))
                     .flex_shrink_0()
@@ -644,7 +645,7 @@ impl VectorApp {
                 div()
                     .id("cc-rail-fold")
                     .group("cc-rail-fold")
-                    .tooltip(kit::tooltip("Hide communities"))
+                    .tip("Hide communities")
                     .mt(px(13.))
                     .w(px(45.))
                     .h(px(36.))
@@ -912,7 +913,7 @@ impl VectorApp {
             let suspects = self.raid.get(&cid).map_or(0, |r| r.1);
             actions = actions.child(
                 button("group-moderate-btn", "icons/vector_warning.svg", crate::timeline::DANGER, c(crate::timeline::DANGER), "Moderate")
-                    .tooltip(crate::kit::tooltip(format!("{suspects} accounts flagged as a raid")))
+                    .tip(format!("{suspects} accounts flagged as a raid"))
                     .on_click(cx.listener(move |app, _, window, cx| app.open_moderation(id.clone(), window, cx))),
             );
         } else if caps.contains("manage_channels") {
@@ -1351,7 +1352,7 @@ impl VectorApp {
             .child(if folded {
                 div()
                     .id("cc-rail-pull")
-                    .tooltip(kit::tooltip("Show communities"))
+                    .tip("Show communities")
                     .group("cc-rail-pull")
                     .w(px(26.))
                     .h(px(44.))

@@ -2,6 +2,7 @@
 //! a picture waits behind, and file boxes. Transfer state lives in [`Media`]; the message only
 //! says whether its bytes are here.
 
+use crate::kit::Tipped as _;
 use std::f32::consts::TAU;
 use std::sync::LazyLock;
 use std::time::Instant;
@@ -499,7 +500,7 @@ fn held_box(w: f32, h: f32) -> AnyElement {
         .flex()
         .items_center()
         .gap(px(8.))
-        .when(compact, |d| d.p(px(7.)).tooltip(crate::kit::tooltip("Accept to view")))
+        .when(compact, |d| d.p(px(7.)).tip("Accept to view"))
         .when(!compact, |d| d.pl(px(10.)).pr(px(14.)).py(px(7.)))
         .border_1()
         .border_color(c(0x363636))
@@ -575,7 +576,7 @@ fn download_box(
         .on_click(act(ctx, m, Act::Download(att.id.clone())));
     if compact {
         return base
-            .tooltip(crate::kit::tooltip(format!("{title} · {sub}")))
+            .tip(format!("{title} · {sub}"))
             .child(
                 tile.bg(ca(12, 12, 12, 0.82))
                     .hover(|s| s.bg(ca(24, 24, 24, 0.88)).border_color(c(0x4a4a4a))),

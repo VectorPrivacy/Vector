@@ -882,6 +882,27 @@ fn place(lines: &mut [Vec<Placed>], x: &mut f32, s: &Seg, atoms: &[Atom]) {
     *x += s.lead + s.width + s.tail;
 }
 
+/// The text a screen reader reads: emoji as their characters or `:shortcode:`, a pill as its words.
+fn spoken(atoms: &[Atom]) -> String {
+    let mut out = String::new();
+    for atom in atoms {
+        match atom {
+            Atom::Text { text, .. } => out.push_str(text),
+            Atom::Image { alt, .. } => out.push_str(alt),
+            Atom::Break => out.push('\n'),
+            Atom::Pill(pill) => {
+                for part in &pill.parts {
+                    if let Part::Text { text, .. } = part {
+                        out.push_str(text);
+                    }
+                }
+            }
+            Atom::Gap(_) | Atom::Ring(_) => {}
+        }
+    }
+    out
+}
+
 pub struct Prepainted {
     hits: Vec<(Hitbox, Target)>,
     images: Vec<AnyElement>,
@@ -964,6 +985,9 @@ impl Element for Inline {
         }
         if let Some(key) = &self.select {
             crate::select::place(key, &self.atoms, laid, bounds);
+        }
+        if window.is_a11y_active() {
+            window.report_a11y_text(&spoken(&self.atoms), bounds);
         }
         let s = laid.borrow();
         if let Some(cell) = &self.clipped

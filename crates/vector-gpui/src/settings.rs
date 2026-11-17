@@ -1,6 +1,7 @@
 //! Settings (`settings/Settings.svelte` in widescreen): a `SectionNav` in the list column,
 //! and the chosen category's headed blocks beside it.
 
+use crate::kit::Tipped as _;
 use std::collections::{HashMap, HashSet};
 use std::f32::consts::TAU;
 use std::rc::Rc;
@@ -1701,7 +1702,7 @@ fn notifications_block(s: &Settings, on: &OnAct) -> AnyElement {
     let choice = s.sound_choice();
     let preview = div()
         .id("notif-preview")
-        .tooltip(crate::kit::tooltip("Preview Sound"))
+        .tip("Preview Sound")
         .w(px(28.))
         .h(px(36.))
         .flex()
@@ -1789,7 +1790,7 @@ fn notifications_block(s: &Settings, on: &OnAct) -> AnyElement {
         col = col.child(
             div()
                 .id("notif-sound-chip")
-                .tooltip(crate::kit::tooltip("Click to change sound"))
+                .tip("Click to change sound")
                 .mt(px(5.))
                 .mb(px(15.))
                 .flex()
@@ -1825,7 +1826,7 @@ fn notifications_block(s: &Settings, on: &OnAct) -> AnyElement {
                 .child(
                     div()
                         .id("notif-sound-clear")
-                        .tooltip(crate::kit::tooltip("Remove custom sound"))
+                        .tip("Remove custom sound")
                         .size(px(20.))
                         .flex_shrink_0()
                         .flex()
@@ -2594,7 +2595,7 @@ fn relays_block(s: &Settings, on: &OnAct) -> AnyElement {
             .child(
                 div()
                     .id("relay-url")
-                    .tooltip(crate::kit::tooltip(r.url.clone()))
+                    .tip(r.url.clone())
                     .flex_1()
                     .min_w_0()
                     .truncate()
@@ -2648,7 +2649,7 @@ fn servers_block(s: &Settings, on: &OnAct) -> AnyElement {
             .child(
                 div()
                     .id("server-url")
-                    .tooltip(crate::kit::tooltip(sv.url.clone()))
+                    .tip(sv.url.clone())
                     .flex_1()
                     .min_w_0()
                     .truncate()
@@ -2837,7 +2838,7 @@ fn signer_card(npub: &str, dot: &str, on: &OnAct) -> AnyElement {
                 .child(
                     div()
                         .id("signer-npub")
-                        .tooltip(crate::kit::tooltip(npub.to_string()))
+                        .tip(npub.to_string())
                         .flex_1()
                         .font_family(crate::markdown::MONO)
                         .text_size(px(10.6))
@@ -4358,7 +4359,7 @@ pub fn view(s: &Settings, width: f32, on: &OnAct, cx: &App) -> AnyElement {
                         .child(
                             div()
                                 .id(SharedString::from(format!("cs-link-{}", a.id)))
-                                .tooltip(crate::kit::tooltip("Copy Link"))
+                                .tip("Copy Link")
                                 .ml(px(6.))
                                 .p(px(5.))
                                 .rounded(px(6.))

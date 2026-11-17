@@ -1,6 +1,7 @@
 //! The video half of `CallOverlay.svelte`: their pictures with ours in a corner, one of theirs
 //! filling the window, and each of our pictures' quality controls in the panel.
 
+use crate::kit::Tipped as _;
 use std::time::Instant;
 
 use gpui::{AnyElement, InteractiveElement, IntoElement, ObjectFit, ParentElement, StatefulInteractiveElement, Styled, StyledImage, div, prelude::FluentBuilder, px, svg};
@@ -45,12 +46,12 @@ fn video_btn(id: &'static str, k: usize, call: &Call, enabled: bool, on: &OnAct)
     let state = call.video_mine[k];
     let o = on.clone();
     call_btn(id, state)
-        .tooltip(crate::kit::tooltip(match (k, state) {
+        .tip(match (k, state) {
             (0, true) => "Turn the camera off",
             (0, false) => "Turn the camera on",
             (_, true) => "Stop sharing the screen",
             (_, false) => "Share the screen",
-        }))
+        })
         .when(!enabled, |d| d.opacity(0.35).cursor_default())
         .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .when(enabled, |d| d.on_click(move |_, w, cx| o(Act::Video(k, !state), w, cx)))
@@ -151,7 +152,7 @@ pub fn pictures(call: &Call, store: &Store, seen: &Seen, w: f32, max_h: f32, on:
                 let o = on.clone();
                 d.children(picture(seen, k, ObjectFit::Contain))
                     .when(seen.peer[k].is_none(), |d| d.child(idle(div()).child(format!("Waiting for their {}…", KIND[k]))))
-                    .child(small_btn("call-picture-max", "ui/call-max.svg").tooltip(crate::kit::tooltip("Fill the window")).top(px(8.)).right(px(8.)).on_click(move |_, w, cx| o(Act::Maximize(Some(k)), w, cx)))
+                    .child(small_btn("call-picture-max", "ui/call-max.svg").tip("Fill the window").top(px(8.)).right(px(8.)).on_click(move |_, w, cx| o(Act::Maximize(Some(k)), w, cx)))
                     .when(k == 1, |d| {
                         d.child(
                             div()
@@ -176,7 +177,7 @@ pub fn pictures(call: &Call, store: &Store, seen: &Seen, w: f32, max_h: f32, on:
             let o = on.clone();
             div()
                 .id("call-picture-inset")
-                .tooltip(crate::kit::tooltip("Fill the window with their camera"))
+                .tip("Fill the window with their camera")
                 .absolute()
                 .bottom(px(8.))
                 .left(px(8.))
@@ -275,7 +276,7 @@ pub fn maximized(call: &Call, seen: &Seen, chrome: f32, mic: AnyElement, hangup:
             .child(
                 div()
                     .id("call-max-restore")
-                    .tooltip(crate::kit::tooltip("Back to the call window (Esc)"))
+                    .tip("Back to the call window (Esc)")
                     .absolute()
                     .top(px(12.))
                     .right(px(12.))
@@ -292,7 +293,7 @@ pub fn maximized(call: &Call, seen: &Seen, chrome: f32, mic: AnyElement, hangup:
                 div().absolute().bottom(px(if controls { 72. } else { 16. })).left_0().right_0().flex().justify_center().child(
                     div()
                         .id("call-max-other")
-                        .tooltip(crate::kit::tooltip("Swap"))
+                        .tip("Swap")
                         .w(px(320.))
                         .h(px(201.))
                         .rounded(px(10.))

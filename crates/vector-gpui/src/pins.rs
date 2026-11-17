@@ -2,6 +2,7 @@
 //! the chat header. A row jumps to its message when this device holds it, else expands to read
 //! it in full; the conversation behind dims while the drawer is open.
 
+use crate::kit::Tipped as _;
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -194,7 +195,7 @@ fn control(id: SharedString, path: &'static str, hover: u32, on: &OnAct, act: Ac
     };
     div()
         .id(id.clone())
-        .tooltip(crate::kit::tooltip(tip))
+        .tip(tip)
         .group(id.clone())
         .size(px(22.))
         .flex_shrink_0()
@@ -422,7 +423,7 @@ pub fn drawer(pins: &Pins, store: &Store, revealed: &HashMap<String, HashSet<u32
 pub fn button(on: OnAct) -> impl IntoElement {
     div()
         .id("pins-btn")
-        .tooltip(crate::kit::tooltip("Pinned Messages"))
+        .tip("Pinned Messages")
         .size(px(40.))
         .flex_shrink_0()
         .flex()

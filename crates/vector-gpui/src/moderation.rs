@@ -2,6 +2,7 @@
 //! containment verbs, a banlist edition and a key rotation. Ticked is kept; the unticked set is
 //! what a rotation cuts.
 
+use crate::kit::Tipped as _;
 use std::collections::HashSet;
 use std::rc::Rc;
 
@@ -584,7 +585,7 @@ fn row(m: &Moderation, store: &Store, x: &Value, on: &OnAct) -> impl IntoElement
     let group = SharedString::from(format!("mod-row-{npub}"));
     div()
         .id(group.clone())
-        .when(locked, |d| d.tooltip(crate::kit::tooltip(reasons.first().copied().unwrap_or("Protected").to_string())))
+        .when(locked, |d| d.tip(reasons.first().copied().unwrap_or("Protected").to_string()))
         .group(group.clone())
         .relative()
         .flex()
@@ -938,7 +939,7 @@ fn foot(m: &Moderation, narrow: bool, on: &OnAct) -> impl IntoElement {
                 )
                 .when(over && m.intel.is_some(), |d| {
                     let room = max.saturating_sub(count);
-                    d.tooltip(crate::kit::tooltip(format!("The banlist holds {max}; only {room} slots are free. Rotate instead: it has no ceiling.")))
+                    d.tip(format!("The banlist holds {max}; only {room} slots are free. Rotate instead: it has no ceiling."))
                 })),
         )
 }

@@ -1,6 +1,7 @@
 //! `ProfileScreen`: the expanded profile, ours or a contact's. Header, banner and avatar,
 //! names and status, the contact options, description and npub.
 
+use crate::kit::Tipped as _;
 use std::rc::Rc;
 
 use gpui::prelude::*;
@@ -866,7 +867,7 @@ pub fn pane(
                     .child(
                         div()
                             .id("profile-npub-copy")
-                            .tooltip(crate::kit::tooltip("Copy npub"))
+                            .tip("Copy npub")
                             .size(px(28.))
                             .flex_shrink_0()
                             .rounded(px(8.))

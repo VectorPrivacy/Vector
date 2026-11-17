@@ -2,6 +2,7 @@
 //! the app. Overview, Relays and Bans edit a draft behind one save bar; closing with unsaved
 //! changes is refused, and the bar says why.
 
+use crate::kit::Tipped as _;
 use std::collections::HashSet;
 use std::rc::Rc;
 
@@ -644,7 +645,7 @@ fn overview(m: &CommSettings, store: &Store, compact: bool, on: &OnAct, cx: &App
                             .child(
                                 div()
                                     .id("cs-icon")
-                                    .when(editable, |d| d.tooltip(crate::kit::tooltip("Change icon")))
+                                    .when(editable, |d| d.tip("Change icon"))
                                     .group("cs-icon")
                                     .relative()
                                     .size(px(88.))
@@ -681,7 +682,7 @@ fn overview(m: &CommSettings, store: &Store, compact: bool, on: &OnAct, cx: &App
                     .child(
                         div()
                             .id("cs-banner")
-                            .when(editable, |d| d.tooltip(crate::kit::tooltip(if has_banner { "Change banner" } else { "Add a banner" })))
+                            .when(editable, |d| d.tip(if has_banner { "Change banner" } else { "Add a banner" }))
                             .group("cs-banner")
                             .relative()
                             .w(px(238.))
@@ -811,7 +812,7 @@ fn relay_row(
                 d.child(
                     div()
                         .id("cs-relay-auth")
-                        .tooltip(crate::kit::tooltip("What AUTH means"))
+                        .tip("What AUTH means")
                         .h(px(22.))
                         .px(px(8.))
                         .flex_shrink_0()
@@ -1293,7 +1294,7 @@ fn audit(m: &CommSettings, store: &Store, on: &OnAct, cx: &App) -> AnyElement {
                             .child(
                                 div()
                                     .id("audit-when")
-                                    .tooltip(crate::kit::tooltip(crate::audit::when_full(e["at"].as_u64().unwrap_or(0))))
+                                    .tip(crate::audit::when_full(e["at"].as_u64().unwrap_or(0)))
                                     .mt(px(2.))
                                     .text_size(px(12.))
                                     .line_height(px(24.))

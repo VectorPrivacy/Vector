@@ -2,6 +2,7 @@
 //! reorder, and the editor for one role: its look, its permissions and its members. Order and
 //! edits are drafts under the save bar; membership and deletion act at once.
 
+use crate::kit::Tipped as _;
 use std::collections::HashSet;
 
 use gpui::prelude::*;
@@ -889,7 +890,7 @@ fn editor(m: &CommSettings, store: &Store, on: &OnAct, cx: &App) -> AnyElement {
                     click(on, || CsAct::Role(Act::Custom)),
                 )
                 .when(!custom, |d| d.border_1().border_color(c(0x333333)))
-                .tooltip(crate::kit::tooltip("Custom colour"))
+                .tip("Custom colour")
                 .flex()
                 .items_center()
                 .justify_center()
@@ -1158,7 +1159,7 @@ fn editor(m: &CommSettings, store: &Store, on: &OnAct, cx: &App) -> AnyElement {
                 let remove: AnyElement = if editable {
                     div()
                         .id(SharedString::from(format!("role-rm-{npub}")))
-                        .tooltip(crate::kit::tooltip("Remove from role"))
+                        .tip("Remove from role")
                         .ml_auto()
                         .size(px(28.))
                         .flex()

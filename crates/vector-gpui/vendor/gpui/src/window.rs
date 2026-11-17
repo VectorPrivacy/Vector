@@ -7557,6 +7557,19 @@ impl Window {
         self.a11y.is_active()
     }
 
+    /// Build the accessibility tree from the next frame on as if assistive technology had
+    /// connected, for inspecting it with [`Self::debug_a11y_tree_json`].
+    pub fn force_a11y_active(&mut self) {
+        self.a11y.force_active();
+        self.refresh();
+    }
+
+    /// Report text a custom element paints at `bounds`, as the built-in text elements do:
+    /// a `Label` of the innermost accessible element, which names a button from its text.
+    pub fn report_a11y_text(&mut self, text: &str, bounds: Bounds<Pixels>) {
+        a11y::report_text(self, text, bounds);
+    }
+
     /// Debug representation of the last frame's accessibility information.
     pub fn debug_a11y_tree_json(&self) -> Option<String> {
         self.a11y.debug_tree_json()

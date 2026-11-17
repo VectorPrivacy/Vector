@@ -1,6 +1,7 @@
 //! `RailShortcuts`' Communities: the synced arrangement (order and folders) painted over
 //! the communities this device holds, dragged to rearrange.
 
+use crate::kit::Tipped as _;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
@@ -370,7 +371,7 @@ fn community_muted(store: &Store, com: &Community) -> bool {
 fn voice_badge(mine: bool) -> impl IntoElement {
     div()
         .id("rail-voice")
-        .tooltip(crate::kit::tooltip(if mine { "You are in a voice call here" } else { "Someone is in a voice call" }))
+        .tip(if mine { "You are in a voice call here" } else { "Someone is in a voice call" })
         .absolute()
         .left(px(2.))
         .bottom(px(2.))
@@ -418,7 +419,7 @@ fn item(store: &Store, com: &Community, open: bool, unread: bool, inset: f32, vo
         open,
         unread,
     )
-    .tooltip(crate::kit::tooltip(com.name.clone()))
+    .tip(com.name.clone())
     .on_click({
         let (on, id) = (on.clone(), id.clone());
         move |_, w, cx| on(Act::Open(id.clone()), w, cx)
@@ -484,7 +485,7 @@ fn folder_head(
         active,
         unread,
     )
-    .tooltip(crate::kit::tooltip(label.to_string()))
+    .tip(label.to_string())
     .on_click({
         let (on, fid) = (on.clone(), fid.clone());
         move |_, w, cx| on(Act::RailFolder(fid.clone()), w, cx)
@@ -634,7 +635,7 @@ pub fn render_slim(
                     !is_open && holds_active,
                     !is_open && any_unread,
                 )
-                .tooltip(crate::kit::tooltip(label))
+                .tip(label)
                 .on_click({
                     let (on, fid) = (on.clone(), fid.clone());
                     move |_, w, cx| on(Act::RailFolder(fid.clone()), w, cx)
@@ -711,7 +712,7 @@ fn tile(store: &Store, com: &Community, open: bool, unread: bool, edge: f32, voi
     let unread = unread && !community_muted(store, com);
     let id = com.community_id.clone();
     let el = bars(ring(SharedString::from(format!("rail-c-{id}"))), -edge - 3., 6., open, unread)
-        .tooltip(crate::kit::tooltip(com.name.clone()))
+        .tip(com.name.clone())
         .on_click({
             let (on, id) = (on.clone(), id.clone());
             move |_, w, cx| on(Act::Open(id.clone()), w, cx)

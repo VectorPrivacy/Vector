@@ -2,6 +2,7 @@
 //! join, then the way in — a link to share (Public) or friends to invite (Private). The
 //! Community exists from the end of step 2; step 3 only hands out access to it.
 
+use crate::kit::Tipped as _;
 use std::collections::HashSet;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -376,7 +377,7 @@ fn share(m: &CreateCommunity, narrow: bool, on: &OnAct) -> impl IntoElement {
         .child(
             div()
                 .id("cg-share-qr")
-                .when(ready, |d| d.tooltip(crate::kit::tooltip("Enlarge QR code")))
+                .when(ready, |d| d.tip("Enlarge QR code"))
                 .size(px(132.))
                 .flex_shrink_0()
                 .rounded(px(12.))
@@ -394,7 +395,7 @@ fn share(m: &CreateCommunity, narrow: bool, on: &OnAct) -> impl IntoElement {
                 .when(narrow, |d| d.w_full().items_center())
                 .child(crate::kit::spaced("INVITE LINK", 0.99).font_weight(FontWeight::BOLD).text_size(px(11.)).line_height(px(24.)).text_color(c(0x8a8a8a)))
                 .child(match (&m.link, &m.link_error) {
-                    (Some(link), _) => div().id("cg-share-url").tooltip(crate::kit::tooltip(link.to_string())).mt(px(10.)).map(|d| if narrow { d.flex_none().whitespace_nowrap() } else { d.truncate() }).font_weight(FontWeight::MEDIUM).text_size(px(15.)).line_height(px(24.)).text_color(c(0xffffff)).child(pretty(link)),
+                    (Some(link), _) => div().id("cg-share-url").tip(link.to_string()).mt(px(10.)).map(|d| if narrow { d.flex_none().whitespace_nowrap() } else { d.truncate() }).font_weight(FontWeight::MEDIUM).text_size(px(15.)).line_height(px(24.)).text_color(c(0xffffff)).child(pretty(link)),
                     (None, Some(e)) => div().id("cg-share-status").mt(px(10.)).text_size(px(13.)).line_height(px(18.)).text_color(c(crate::timeline::DANGER)).child(format!("Couldn't create the link. {e}")),
                     (None, None) => div().id("cg-share-status").mt(px(10.)).text_size(px(13.)).line_height(px(24.)).text_color(white_a(0.55)).child(m.progress.as_ref().map(|p| p.0.clone()).unwrap_or_else(|| "Getting ready".into())),
                 })
@@ -669,7 +670,7 @@ pub fn view(m: &CreateCommunity, store: &Store, width: f32, on: &OnAct, cx: &App
                             .flex_shrink_0()
                             .cursor_pointer()
                             .when(m.icon.is_none(), |d| d.opacity(0.7).hover(|s| s.opacity(1.)))
-                            .tooltip(crate::kit::tooltip("Choose community icon"))
+                            .tip("Choose community icon")
                             .on_click(click(on, || Act::PickIcon))
                             .child(match &m.icon {
                                 Some(p) => crate::commsettings::cut(p, 56., 56., 28.),

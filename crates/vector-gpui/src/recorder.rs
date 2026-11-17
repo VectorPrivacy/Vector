@@ -1,6 +1,7 @@
 //! The voice recorder (`voice.js`, `VoiceRecorderUI.svelte`): hold the mic to record, slide
 //! left to cancel, drag up to lock, then a preview to play, scrub, delete or send.
 
+use crate::kit::Tipped as _;
 use std::time::Instant;
 
 use gpui::{
@@ -705,7 +706,7 @@ fn dictate(busy: bool, on: On) -> AnyElement {
         .group_hover("voice-preview-dictate", |s| s.opacity(if busy { 1. } else { 0.7 }));
     div()
         .id("voice-preview-dictate")
-        .tooltip(crate::kit::tooltip("Turn into text"))
+        .tip("Turn into text")
         .size(px(45.))
         .flex_shrink_0()
         .rounded_full()

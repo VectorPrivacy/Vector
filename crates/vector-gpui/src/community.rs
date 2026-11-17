@@ -1,6 +1,7 @@
 //! Communities: the rail's rows, a Community's channel pane, its channel header and the
 //! member panel beside the conversation.
 
+use crate::kit::Tipped as _;
 use std::collections::HashSet;
 use std::rc::Rc;
 
@@ -302,7 +303,7 @@ fn channel_row(
         };
         div()
             .id(path)
-            .when_some(tip, |d, t| d.tooltip(crate::kit::tooltip(t)))
+            .when_some(tip, |d, t| d.tip(t))
             .when_some(act, |d, act| {
                 let on = on.clone();
                 d.on_click(move |_, w, cx| {
@@ -342,7 +343,7 @@ fn channel_row(
             "chatlist-channel-{}",
             ch.channel_id
         )))
-        .when_some(ch.topic.clone().filter(|t| !t.is_empty()), |d, t| d.tooltip(crate::kit::tooltip(t)))
+        .when_some(ch.topic.clone().filter(|t| !t.is_empty()), |d, t| d.tip(t))
         .group(group.clone())
         .mx(px(8.))
         .h(px(32.))
@@ -606,7 +607,7 @@ pub fn sidebar(
                 d.child(
                     div()
                         .id(SharedString::from(format!("cat-add-{}", cat.category_id)))
-                        .tooltip(crate::kit::tooltip(format!("Add a channel to {}", cat.name)))
+                        .tip(format!("Add a channel to {}", cat.name))
                         .size(px(22.))
                         .rounded(px(6.))
                         .flex()
@@ -911,7 +912,7 @@ fn member_row(store: &Store, cid: &str, npub: &str, owner: bool, colour: Option<
                                     .id("rank")
                                     .ml(px(5.))
                                     .flex()
-                                    .tooltip(crate::kit::tooltip("Owner"))
+                                    .tip("Owner")
                                     .child(icon("icons/crown.svg", 15., c(OWNER))),
                             )
                         })
@@ -920,7 +921,7 @@ fn member_row(store: &Store, cid: &str, npub: &str, owner: bool, colour: Option<
                                 div()
                                     .id("bot")
                                     .flex()
-                                    .tooltip(crate::kit::tooltip("Bot"))
+                                    .tip("Bot")
                                     .child(svg().path("icons/bot.svg").size(px(14.)).flex_shrink_0().text_color(c(ACCENT))),
                             )
                         })
@@ -934,7 +935,7 @@ fn member_row(store: &Store, cid: &str, npub: &str, owner: bool, colour: Option<
                                 .p(px(8.))
                                 .m(px(-8.))
                                 .cursor_pointer()
-                                .tooltip(crate::kit::tooltip(label))
+                                .tip(label)
                                 .on_click(move |_, w, cx| {
                                     cx.stop_propagation();
                                     tap(Act::Unlisted(why.clone()), w, cx)
@@ -1248,7 +1249,7 @@ pub fn invite_row(
     let button = |id: String, icon_path: &'static str, tip: &'static str, ink: gpui::Hsla, on: Click| {
         div()
             .id(SharedString::from(id))
-            .tooltip(crate::kit::tooltip(tip))
+            .tip(tip)
             .size(px(28.))
             .flex_shrink_0()
             .rounded_full()
@@ -1361,7 +1362,7 @@ pub fn invite_details(
     let person = |npub: &String| {
         div()
             .id(SharedString::from(format!("invite-person-{npub}")))
-            .tooltip(crate::kit::tooltip(npub.clone()))
+            .tip(npub.clone())
             .flex()
             .items_center()
             .gap(px(8.))
@@ -1489,7 +1490,7 @@ pub fn invite_details(
                     sent.0,
                     div()
                         .id("invite-sent")
-                        .tooltip(crate::kit::tooltip(crate::texttime::full(sent.1, false)))
+                        .tip(crate::texttime::full(sent.1, false))
                         .child(crate::util::relative_time(sent.1, now))
                         .into_any_element(),
                 ))
@@ -1498,7 +1499,7 @@ pub fn invite_details(
                     "Expires",
                     div()
                         .id("invite-ends")
-                        .tooltip(crate::kit::tooltip(crate::texttime::full(inv.ends_at, false)))
+                        .tip(crate::texttime::full(inv.ends_at, false))
                         .child(crate::util::relative_time(inv.ends_at, now))
                         .into_any_element(),
                 )),

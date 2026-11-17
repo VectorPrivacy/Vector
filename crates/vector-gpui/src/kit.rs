@@ -420,6 +420,17 @@ fn presses() -> u64 {
     PRESSES.with(|p| p.get())
 }
 
+/// A hover tooltip that also describes the element to a screen reader, and names it when
+/// the element has no text of its own.
+pub trait Tipped: gpui::StatefulInteractiveElement + Sized {
+    fn tip(self, text: impl Into<gpui::SharedString>) -> Self {
+        let text = text.into();
+        self.aria_description(text.clone()).tooltip(tooltip(text))
+    }
+}
+
+impl<T: gpui::StatefulInteractiveElement> Tipped for T {}
+
 pub fn tooltip(
     text: impl Into<gpui::SharedString>,
 ) -> impl Fn(&mut gpui::Window, &mut gpui::App) -> gpui::AnyView + 'static {

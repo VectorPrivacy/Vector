@@ -1,6 +1,7 @@
 //! Times that read the same everywhere (`text-time.js`): `<t:UNIX:STYLE>` shown in the
 //! reader's zone, a typed phrase read as a time, and a draft's trailing phrase offered as one.
 
+use crate::kit::Tipped as _;
 use chrono::{DateTime, Datelike, Duration, Local, NaiveDate, TimeZone};
 use crate::scan::{boundary, digit, fold_letter, lit, lit_i, matches, next, prev, run, word, At};
 use std::rc::Rc;
@@ -1220,11 +1221,11 @@ pub fn chip_view(chip: &Chip, now: f64, left: f32, accept: Rc<dyn Fn(&mut Window
                 .font_family(INTER)
                 .text_size(px(13.))
                 .cursor_pointer()
-                .tooltip(crate::kit::tooltip(format!(
+                .tip(format!(
                     "{}: {}",
                     if s.style == 'R' { "Make it a countdown" } else { "Show in everyone\u{2019}s time" },
                     full(s.unix, s.style == 'D')
-                )))
+                ))
                 .group("time-suggest")
                 .on_mouse_down(gpui::MouseButton::Left, move |_, w, cx| {
                     cx.stop_propagation();

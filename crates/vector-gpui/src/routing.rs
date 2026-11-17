@@ -2,6 +2,7 @@
 //! `TransportSteps`): a pill per network, the card of the one on view, then its own settings.
 //! A pill only changes the view; the card's Use button switches.
 
+use crate::kit::Tipped as _;
 use std::time::Instant;
 
 use gpui::prelude::*;
@@ -412,7 +413,7 @@ fn picker(r: &Routing, viewed: &str, on: &OnAct) -> AnyElement {
                 move || NetAct::View(k.clone())
             }));
         if k == in_use {
-            pill = pill.child(div().id("net-dot-in-use").flex_shrink_0().tooltip(crate::kit::tooltip("In use")).child(net_dot(&k, dot_kind)));
+            pill = pill.child(div().id("net-dot-in-use").flex_shrink_0().tip("In use").child(net_dot(&k, dot_kind)));
         }
         pills = pills.child(pill.child(div().whitespace_nowrap().overflow_hidden().text_ellipsis().child(label(&k).to_string())));
     }
@@ -591,7 +592,7 @@ fn card(r: &Routing, viewed: &str, phone: bool, on: &OnAct) -> AnyElement {
         body = body.child(
             div()
                 .id("tor-attribution")
-                .tooltip(crate::kit::tooltip("Visit torproject.org"))
+                .tip("Visit torproject.org")
                 .mt(px(6.))
                 .h(px(23.))
                 .opacity(0.85)
@@ -606,7 +607,7 @@ fn card(r: &Routing, viewed: &str, phone: bool, on: &OnAct) -> AnyElement {
         let k = viewed.to_string();
         div()
             .id("net-use")
-            .when_some(hold_why, |d, why| d.tooltip(crate::kit::tooltip(why)))
+            .when_some(hold_why, |d, why| d.tip(why))
             .flex_shrink_0()
             .h(px(32.))
             .px(px(16.))
@@ -880,7 +881,7 @@ fn circuits(r: &Routing, on: &OnAct) -> AnyElement {
     let loading = r.circuits.phase == Load::Loading;
     let refresh = div()
         .id("tor-circuits-refresh")
-        .tooltip(crate::kit::tooltip("Build a new circuit"))
+        .tip("Build a new circuit")
         .flex()
         .items_center()
         .gap(px(6.))
@@ -1005,7 +1006,7 @@ pub fn hops(hops: &[Value]) -> AnyElement {
                     "" => "—".to_string(),
                     a => a.to_string(),
                 }))
-                .when(!fp.is_empty(), |d| d.child(div().id(SharedString::from(format!("hop-fp-{fp}"))).tooltip(crate::kit::tooltip(fp.to_string())).font_family(MONO).text_size(px(11.)).text_color(white_a(0.42)).child(format!("{}…", &fp[..fp.len().min(8)])))),
+                .when(!fp.is_empty(), |d| d.child(div().id(SharedString::from(format!("hop-fp-{fp}"))).tip(fp.to_string()).font_family(MONO).text_size(px(11.)).text_color(white_a(0.42)).child(format!("{}…", &fp[..fp.len().min(8)])))),
         );
     }
     list.into_any_element()
@@ -1401,7 +1402,7 @@ fn outproxies(r: &Routing, cfg: &Value, v: &Value, on: &OnAct) -> AnyElement {
         let mv = |dir: isize, path: &'static str, can: bool| {
             div()
                 .id(SharedString::from(format!("op-move-{i}-{dir}")))
-                .tooltip(crate::kit::tooltip(if dir < 0 { "Move up" } else { "Move down" }))
+                .tip(if dir < 0 { "Move up" } else { "Move down" })
                 .w(px(22.))
                 .h(px(17.))
                 .flex()
@@ -1459,7 +1460,7 @@ fn outproxies(r: &Routing, cfg: &Value, v: &Value, on: &OnAct) -> AnyElement {
                 d.child(
                     div()
                         .id(SharedString::from(format!("op-health-{i}")))
-                        .when(!tip.is_empty(), |d| d.tooltip(crate::kit::tooltip(tip)))
+                        .when(!tip.is_empty(), |d| d.tip(tip))
                         .flex()
                         .items_center()
                         .gap(px(6.))
@@ -1476,7 +1477,7 @@ fn outproxies(r: &Routing, cfg: &Value, v: &Value, on: &OnAct) -> AnyElement {
                 d.child(
                     div()
                         .id(SharedString::from(format!("op-remove-{i}")))
-                        .tooltip(crate::kit::tooltip("Remove"))
+                        .tip("Remove")
                         .size(px(24.))
                         .flex_shrink_0()
                         .flex()
@@ -1491,7 +1492,7 @@ fn outproxies(r: &Routing, cfg: &Value, v: &Value, on: &OnAct) -> AnyElement {
             .child(
                 div()
                     .id(SharedString::from(format!("op-toggle-tip-{i}")))
-                    .tooltip(crate::kit::tooltip(if enabled { "On" } else { "Off" }))
+                    .tip(if enabled { "On" } else { "Off" })
                     .child(switch("op-toggle", enabled, !busy, on, move || NetAct::OpToggle(i, !enabled))),
             );
         rows = rows.child(row);
@@ -1652,7 +1653,7 @@ pub fn notice_line(n: Notice, open: impl Fn(&gpui::ClickEvent, &mut gpui::Window
         .font_weight(FontWeight::MEDIUM)
         .text_color(c(text))
         .cursor_pointer()
-        .tooltip(crate::kit::tooltip(tip))
+        .tip(tip)
         .on_click(open)
         .child(notice_dot(n.warn, dot))
         .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(n.text))

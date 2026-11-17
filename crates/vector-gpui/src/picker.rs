@@ -3,6 +3,7 @@
 //! cells cost only the rows on screen. Kaomoji mode is `KaomojiGrid.svelte`; GIF mode is
 //! `GifGrid.svelte` over `gifs.js`.
 
+use crate::kit::Tipped as _;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -1055,7 +1056,7 @@ impl EmojiPicker {
             .text_color(white_a(0.9))
             .whitespace_nowrap()
             .text_ellipsis()
-            .tooltip(crate::kit::tooltip(k.name))
+            .tip(k.name)
             .on_click(cx.listener(move |this, ev: &gpui::ClickEvent, _, cx| {
                 this.pick_kaomoji(k.face, ev.modifiers().shift, cx)
             }))
@@ -1537,7 +1538,7 @@ impl EmojiPicker {
                 d.child(
                     div()
                         .id(SharedString::from(format!("picker-pack-edit-{i}")))
-                        .tooltip(crate::kit::tooltip("Edit Pack"))
+                        .tip("Edit Pack")
                         .ml_auto()
                         .px(px(4.))
                         .flex_shrink_0()
@@ -2033,7 +2034,7 @@ impl Render for EmojiPicker {
             let on = level(s);
             div()
                 .id(icon)
-                .when(s.is_none(), |d| d.tooltip(crate::kit::tooltip("Create new pack")))
+                .when(s.is_none(), |d| d.tip("Create new pack"))
                 .relative()
                 .size(px(30.))
                 .my(px(3.))
@@ -2133,7 +2134,7 @@ impl Render for EmojiPicker {
                 });
                 div()
                     .id(SharedString::from(format!("picker-tab-{i}")))
-                    .tooltip(crate::kit::tooltip(p.title.clone()))
+                    .tip(p.title.clone())
                     .relative()
                     .flex_shrink_0()
                     .size(px(30.))

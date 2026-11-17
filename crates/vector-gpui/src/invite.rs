@@ -1,6 +1,7 @@
 //! Invite People (`community/InviteModal.svelte` + `InviteLinks.svelte`): the Community's
 //! invite links, then a contact picker for direct invites behind a Done / Invite N button.
 
+use crate::kit::Tipped as _;
 use std::collections::HashSet;
 use std::rc::Rc;
 
@@ -113,7 +114,7 @@ fn icon_btn(
 ) -> impl IntoElement {
     div()
         .id(id)
-        .tooltip(crate::kit::tooltip(tip))
+        .tip(tip)
         .w(px(38.4))
         .h(px(30.))
         .flex_shrink_0()
@@ -134,11 +135,11 @@ fn icon_btn(
 fn links(m: &Invite, store: &Store, on: &OnAct) -> impl IntoElement {
     let pill = div()
         .id("cmt-visibility")
-        .tooltip(crate::kit::tooltip(if m.public {
+        .tip(if m.public {
             "Anyone with a link can join"
         } else {
             "Invite-only — no public links"
-        }))
+        })
         .h(px(26.))
         .px(px(8.))
         .rounded_full()
@@ -285,18 +286,18 @@ fn links(m: &Invite, store: &Store, on: &OnAct) -> impl IntoElement {
                                         .id(SharedString::from(format!("cmt-url-{}", link.token)))
                                         .min_w_0()
                                         .truncate()
-                                        .tooltip(crate::kit::tooltip(link.url.clone()))
+                                        .tip(link.url.clone())
                                         .child(label),
                                 ),
                         )
                         .child(
                             div()
                                 .id(SharedString::from(format!("cmt-joins-{}", link.token)))
-                                .tooltip(crate::kit::tooltip(format!(
+                                .tip(format!(
                                     "{} member{} joined via this link",
                                     link.joins,
                                     if link.joins == 1 { "" } else { "s" }
-                                )))
+                                ))
                                 .mr(px(6.))
                                 .flex()
                                 .items_center()

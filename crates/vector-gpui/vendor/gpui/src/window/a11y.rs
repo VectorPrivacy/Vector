@@ -217,6 +217,10 @@ impl A11y {
         !self.force_disabled
     }
 
+    pub(crate) fn force_active(&self) {
+        self.active_flag.store(true, Ordering::SeqCst);
+    }
+
     pub(crate) fn is_active(&self) -> bool {
         self.active_this_frame
     }
@@ -368,6 +372,30 @@ impl<'a> A11ySubtreeBuilder<'a> {
     }
 }
 
+/// Report text painted at `bounds` to assistive technology, when one is connected.
+pub(crate) fn report_text(window: &mut Window, text: &str, bounds: Bounds<Pixels>) {
+    if !window.a11y.is_active() {
+        return;
+    }
+    let scale = window.scale_factor();
+    let rect = accesskit::Rect {
+        x0: (bounds.origin.x.0 * scale) as f64,
+        y0: (bounds.origin.y.0 * scale) as f64,
+        x1: ((bounds.origin.x.0 + bounds.size.width.0) * scale) as f64,
+        y1: ((bounds.origin.y.0 + bounds.size.height.0) * scale) as f64,
+    };
+    window.a11y.nodes.push_text(text, rect);
+}
+
+fn is_named_from_contents(role: accesskit::Role) -> bool {
+    use accesskit::Role::*;
+    matches!(
+        role,
+        Button | CheckBox | DefaultButton | Link | MenuItem | MenuItemCheckBox | MenuItemRadio
+            | RadioButton | Tab | ListItem
+    )
+}
+
 pub(crate) struct A11yNodeBuilder {
     ids_stack: SmallVec<[NodeId; 16]>,
     nodes_stack: SmallVec<[accesskit::Node; 16]>,
@@ -383,6 +411,9 @@ pub(crate) struct A11yNodeBuilder {
     /// pattern, which allows a focused container to act as if a descendant is
     /// focused.
     active_descendant: Option<NodeId>,
+    /// Per open node: text leaves added under it so far, and whether it now has
+    /// a name from its contents.
+    text_counts: SmallVec<[(u32, bool); 16]>,
     #[cfg(debug_assertions)]
     node_info: FxHashMap<NodeId, debug::NodeDebugInfo>,
 }
@@ -396,6 +427,7 @@ impl A11yNodeBuilder {
             seen_ids: FxHashSet::default(),
             focus: None,
             active_descendant: None,
+            text_counts: SmallVec::new(),
             #[cfg(debug_assertions)]
             node_info: FxHashMap::default(),
         }
@@ -411,11 +443,9 @@ impl A11yNodeBuilder {
     fn can_push(&mut self, id: NodeId) -> bool {
         debug_assert!(!self.ids_stack.is_empty(), "node pushed before push_root");
 
+        // Clickable elements report themselves, so a repeated id is a dropped node, not a panic.
         if !self.seen_ids.insert(id) {
-            debug_assert!(
-                false,
-                "Duplicate a11y node id: {id:?}. In a release build, this node would be silently discarded from the a11y tree."
-            );
+            log::debug!("Duplicate a11y node id: {id:?}, discarded from the a11y tree");
             return false;
         }
 
@@ -436,7 +466,29 @@ impl A11yNodeBuilder {
         }
         self.ids_stack.push(id);
         self.nodes_stack.push(node);
+        self.text_counts.push((0, false));
         true
+    }
+
+    /// Report a run of plain text as a `Label` leaf of the innermost open node,
+    /// which is how a button with no explicit label gets its name. Text inside
+    /// a node that already carries its own value (a `Label`) is skipped.
+    pub(crate) fn push_text(&mut self, text: &str, bounds: accesskit::Rect) {
+        let Some(parent) = self.nodes_stack.last() else { return };
+        if parent.role() == accesskit::Role::Label || text.trim().is_empty() {
+            return;
+        }
+        let Some(&parent_id) = self.ids_stack.last() else { return };
+        let Some(count) = self.text_counts.last_mut() else { return };
+        count.0 += 1;
+        count.1 = true;
+        let mut hasher = std::hash::DefaultHasher::default();
+        parent_id.0.hash(&mut hasher);
+        ("text", count.0).hash(&mut hasher);
+        let mut node = accesskit::Node::new(accesskit::Role::Label);
+        node.set_value(text.to_string());
+        node.set_bounds(bounds);
+        let _ = self.push_leaf(NodeId(hasher.finish()), node);
     }
 
     /// Add a leaf node as a child of the current top-of-stack node, without
@@ -465,7 +517,15 @@ impl A11yNodeBuilder {
     pub(crate) fn pop(&mut self) {
         debug_assert!(self.ids_stack.len() > 1, "pop would remove the root node");
 
-        if let (Some(id), Some(node)) = (self.ids_stack.pop(), self.nodes_stack.pop()) {
+        let named = self.text_counts.pop().is_some_and(|c| c.1);
+        if let (Some(id), Some(mut node)) = (self.ids_stack.pop(), self.nodes_stack.pop()) {
+            // An icon-only control is named by its tooltip.
+            if !named && node.label().is_none() && is_named_from_contents(node.role()) {
+                if let Some(description) = node.description().map(str::to_owned) {
+                    node.clear_description();
+                    node.set_label(description);
+                }
+            }
             self.all_nodes.push((id, node));
         }
     }
@@ -485,6 +545,8 @@ impl A11yNodeBuilder {
 
         self.ids_stack.push(ROOT_NODE_ID);
         self.nodes_stack.push(root_node);
+        self.text_counts.clear();
+        self.text_counts.push((0, false));
         self.focus = None;
         self.active_descendant = None;
     }

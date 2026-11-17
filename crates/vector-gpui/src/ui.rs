@@ -2,6 +2,7 @@
 //! offset is the Tauri layout's own (measured from `reference/` renders); the comment on a
 //! block names the CSS selector it reproduces.
 
+use crate::kit::Tipped as _;
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
@@ -2559,7 +2560,7 @@ impl VectorApp {
             .bottom_0()
             .left(px(rail + list - 6.))
             .w(px(11.))
-            .tooltip(kit::tooltip("Drag to resize (double-click to reset)"))
+            .tip("Drag to resize (double-click to reset)")
             .child(
                 canvas(
                     |b, window, _| window.insert_hitbox(b, gpui::HitboxBehavior::BlockMouse),
@@ -6999,7 +7000,7 @@ fn chrome(window: &Window, login: bool, mark_only: bool) -> gpui::Div {
         };
         div()
             .id(id)
-            .tooltip(crate::kit::tooltip(tip))
+            .tip(tip)
             .w(px(37.))
             .h_full()
             .flex()
@@ -7082,7 +7083,7 @@ fn chrome(window: &Window, login: bool, mark_only: bool) -> gpui::Div {
                         .justify_center()
                         .cursor_pointer()
                         .on_click(|_, _, cx| cx.open_url("https://docs.vectorapp.io"))
-                        .tooltip(crate::kit::tooltip("Help"))
+                        .tip("Help")
                         .child(
                             svg()
                                 .path("ui/chrome-help.svg")
@@ -7208,7 +7209,7 @@ fn nav_tabs(nav: &Navbar, slim: bool) -> impl IntoElement {
             .cursor_pointer()
             .when(active, |d| d.bg(white_a(0.045)))
             .hover(|d| d.bg(white_a(0.045)))
-            .when(slim, |d| d.tooltip(crate::kit::tooltip(label)))
+            .when(slim, |d| d.tip(label))
             .on_click(move |_, w, cx| on(id, w, cx))
             .child(svg().path(icon).size(px(28.)).flex_shrink_0().text_color(c(0xffffff)))
             .when(!slim, |d| {
@@ -7428,7 +7429,7 @@ fn rail(
             .child(
                 div()
                     .id("rail-create-community")
-                    .tooltip(crate::kit::tooltip("Create Community"))
+                    .tip("Create Community")
                     .size(px(45.))
                     .mx_auto()
                     .mt(px(2.))
@@ -7533,7 +7534,7 @@ fn rail(
             d.child(
                 div()
                     .id("ws-rail-collapse")
-                    .tooltip(crate::kit::tooltip(if slim { "Expand the sidebar" } else { "Collapse the sidebar" }))
+                    .tip(if slim { "Expand the sidebar" } else { "Collapse the sidebar" })
                     .mt(px(10.))
                     .mb(px(2.))
                     .when(slim, |d| d.w(px(40.)).mx_auto().rounded(px(12.)).justify_center())
@@ -7848,7 +7849,7 @@ fn chat_list(
                 .child(
                     div()
                         .id("chatlist-new")
-                        .tooltip(kit::tooltip("New Message or Community"))
+                        .tip("New Message or Community")
                         .size(px(32.))
                         .rounded(px(8.))
                         .border_1()
@@ -8470,6 +8471,7 @@ impl VectorApp {
                         d.child(
                             div()
                                 .id("chat-call")
+                                .aria_label("Call")
                                 .size(px(40.))
                                 .flex()
                                 .items_center()
@@ -8491,7 +8493,7 @@ impl VectorApp {
                         let chat = id.to_string();
                         div()
                             .id("chat-menu")
-                            .tooltip(crate::kit::tooltip("Chat Options"))
+                            .tip("Chat Options")
                             .relative()
                             .size(px(40.))
                             .flex()
@@ -10051,6 +10053,7 @@ fn composer(
                         "icons/smile-face.svg"
                     })
                     .id("composer-emoji")
+                    .aria_label("Emoji")
                     .cursor_pointer()
                     .on_click(
                         cx.listener(|app, _, window, cx| app.toggle_picker(None, window, cx)),
@@ -10156,6 +10159,7 @@ fn send_or_mic(
     };
     div()
         .id("chat-input-send")
+        .aria_label("Send")
         .group("chat-input-send")
         .w(px(38.))
         .h(px(45.))
@@ -10226,6 +10230,7 @@ fn attach_button(open: bool, turned: Option<std::time::Instant>, cx: &mut Contex
     let turn = if open { k } else { 1. - k };
     div()
         .id("chat-input-file")
+        .aria_label("Attach")
         .w(px(38.))
         .h(px(45.))
         .flex_shrink_0()

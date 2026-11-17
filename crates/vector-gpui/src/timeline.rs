@@ -2,6 +2,7 @@
 //! header, a reply's quote, the markdown body and the reactions, with the `.dmsg-*` metrics
 //! measured from the Tauri render.
 
+use crate::kit::Tipped as _;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -269,6 +270,7 @@ pub fn message_row(ctx: &Ctx, index: usize, first: bool, run: u32, gap: f32) -> 
             g.child(
                 div()
                     .id(key.clone())
+                    .aria_label(ctx.store.chat_name(&author, &ctx.chat.id))
                     .relative()
                     .mt(px(if has_quote { 26. } else { 2. }))
                     .cursor_pointer()
@@ -1750,7 +1752,7 @@ fn toolbar(ctx: &Ctx, m: &Message, first: bool) -> Option<AnyElement> {
         bar = bar.child(
             div()
                 .id(i)
-                .tooltip(crate::kit::tooltip(label))
+                .tip(label)
                 .when(dim, |d| d.opacity(0.45))
                 .size(px(26.))
                 .rounded(px(4.))

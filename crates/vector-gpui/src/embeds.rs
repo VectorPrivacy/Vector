@@ -2,6 +2,7 @@
 //! `js/nostr-embeds.js`). Only the backend fetches: the event from relays, its pictures
 //! through the linked-image cache.
 
+use crate::kit::Tipped as _;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
@@ -1246,7 +1247,7 @@ fn poster_in(env: &Env, short: bool, image: Option<&str>, video: Option<Media>, 
         .children(failed.map(|e| {
             div()
                 .id("ne-video-error")
-                .tooltip(crate::kit::tooltip(e))
+                .tip(e)
                 .absolute()
                 .left(px(8.))
                 .right(px(8.))

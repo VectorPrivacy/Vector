@@ -3,6 +3,7 @@
 //! puts this account on) and `BlossomCaps.svelte` (what uploads have taught us it takes).
 //! Data arrives as the backend serialises it, so fixtures and live read one shape.
 
+use crate::kit::Tipped as _;
 use std::cell::Cell;
 use std::rc::Rc;
 
@@ -556,7 +557,7 @@ fn row(cap: &Value, kind: u8, last: bool) -> impl IntoElement {
     };
     let context = div()
         .id(SharedString::from(format!("cap-{mime}-{enc}")))
-        .tooltip(crate::kit::tooltip(if enc { "Tested with encrypted chat data" } else { "Tested with public uploads (avatar, banner, etc.)" }))
+        .tip(if enc { "Tested with encrypted chat data" } else { "Tested with public uploads (avatar, banner, etc.)" })
         .flex_shrink_0()
         .px(px(5.))
         .py(px(2.))

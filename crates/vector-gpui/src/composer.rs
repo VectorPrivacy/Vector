@@ -1713,8 +1713,18 @@ impl Render for TextInput {
                 )),
             )
         });
+        let role = if self.look.masked {
+            gpui::accesskit::Role::PasswordInput
+        } else if self.multiline.is_some() {
+            gpui::accesskit::Role::MultilineTextInput
+        } else {
+            gpui::accesskit::Role::TextInput
+        };
         div()
             .id("text-input")
+            .role(role)
+            .aria_placeholder(self.placeholder.clone())
+            .when(!self.look.masked, |d| d.aria_value(self.content.clone()))
             .flex()
             .key_context("TextInput")
             .track_focus(&self.focus_handle(cx))

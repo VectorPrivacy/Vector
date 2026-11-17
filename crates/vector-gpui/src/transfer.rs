@@ -2,6 +2,7 @@
 //! plus text) or types the other's; the new device then shows a number and whose account is
 //! coming, the signed-in one asks for that number, and the new device signs in once it arrives.
 
+use crate::kit::Tipped as _;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -814,7 +815,7 @@ impl SecurityFlow {
                                 .child(
                                     div()
                                         .id("xfer-copy")
-                                        .tooltip(crate::kit::tooltip("Copy"))
+                                        .tip("Copy")
                                         .w(px(38.))
                                         .h(px(37.))
                                         .flex()

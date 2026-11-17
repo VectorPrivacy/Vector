@@ -2,6 +2,7 @@
 //! rail its own column holds the search, pages and categories; the page beside it is a view,
 //! a search, or one app in full.
 
+use crate::kit::Tipped as _;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -1771,7 +1772,7 @@ fn details(n: &Nexus, app: &MarketplaceApp, publisher: Option<&(SharedString, Op
                         .child(
                             div()
                                 .id("nx-copy-link")
-                                .tooltip(crate::kit::tooltip("Copy Link"))
+                                .tip("Copy Link")
                                 .cursor_pointer()
                                 .opacity(0.)
                                 .hover(|s| s.opacity(1.))
