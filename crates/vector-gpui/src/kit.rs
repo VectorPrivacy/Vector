@@ -61,6 +61,11 @@ pub fn gradient_text_in(text: &str, spacing: f32, phase: f32, from: gpui::Hsla, 
     row
 }
 
+/// The choice `value` names, or the first.
+fn value_of(choices: &[Choice], value: &str) -> &'static str {
+    choices.iter().find(|c| c.value == value).or(choices.first()).map_or("", |c| c.value)
+}
+
 /// The open [`select`]'s keyboard state: its focus and the highlighted row.
 struct SelectKeys {
     id: ElementId,
@@ -202,6 +207,35 @@ pub fn select_with(
     on_toggle: impl Fn(&mut Window, &mut App) + 'static,
     on_pick: impl Fn(&'static str, &mut Window, &mut App) + 'static + Clone,
 ) -> AnyElement {
+    select_look(id, width, font, choices, disabled, value, open, SelectLook::default(), on_toggle, on_pick)
+}
+
+/// What sets a [`select_look`] apart: a mark before each label, and the tick's colour.
+pub struct SelectLook {
+    pub lead: Option<std::rc::Rc<dyn Fn(&'static str) -> AnyElement>>,
+    pub check: u32,
+    pub priority: usize,
+}
+
+impl Default for SelectLook {
+    fn default() -> Self {
+        Self { lead: None, check: PRIMARY, priority: 1 }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn select_look(
+    id: impl Into<ElementId>,
+    width: f32,
+    font: f32,
+    choices: &[Choice],
+    disabled: &[&str],
+    value: &str,
+    open: bool,
+    look: SelectLook,
+    on_toggle: impl Fn(&mut Window, &mut App) + 'static,
+    on_pick: impl Fn(&'static str, &mut Window, &mut App) + 'static + Clone,
+) -> AnyElement {
     let label = choices
         .iter()
         .find(|c| c.value == value)
@@ -281,6 +315,7 @@ pub fn select_with(
                 }));
             }
         })
+        .children(look.lead.as_ref().map(|lead| lead(value_of(choices, value))))
         .child(
             div()
                 .flex_1()
@@ -371,18 +406,19 @@ pub fn select_with(
                             .cursor_pointer()
                             .on_click(move |_, w, cx| pick(v, w, cx))
                     })
-                    .child(div().flex_1().min_w_0().child(choice.label))
+                    .children(look.lead.as_ref().map(|lead| lead(v)))
+                    .child(div().flex_1().min_w_0().truncate().child(choice.label))
                     .when(selected, |s| {
                         s.child(
                             gpui::svg()
                                 .path("icons/check.svg")
                                 .size(px(14.))
-                                .text_color(c(PRIMARY)),
+                                .text_color(c(look.check)),
                         )
                     }),
             );
         }
-        root = root.child(gpui::deferred(list).with_priority(1));
+        root = root.child(gpui::deferred(list).with_priority(look.priority));
     }
     root.into_any_element()
 }

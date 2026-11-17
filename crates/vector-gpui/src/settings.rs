@@ -1109,113 +1109,25 @@ fn swatch(t: &Theme, size: f32) -> AnyElement {
 
 /// The theme picker: a `.vselect` whose rows wear each theme's swatch.
 fn theme_picker(s: &Settings, on: &OnAct) -> AnyElement {
-    let current = THEMES
-        .iter()
-        .find(|t| t.value == s.theme)
-        .unwrap_or(&THEMES[0]);
-    let open = s.open_select == Some("theme");
-    let caret = svg()
-        .path("ui/caret-down.svg")
-        .w(px(10.))
-        .h(px(6.))
-        .flex_shrink_0()
-        .text_color(c(0x888888))
-        .when(open, |d| {
-            d.with_transformation(gpui::Transformation::rotate(gpui::radians(
-                std::f32::consts::PI,
-            )))
-        });
-    let button = div()
-        .id("theme-picker")
-        .role(gpui::Role::ComboBox)
-        .aria_expanded(open)
-        .aria_value(current.label)
-        .flex()
-        .items_center()
-        .gap(px(8.))
-        .h(px(36.))
-        .px(px(12.))
-        .rounded(px(6.))
-        .border_1()
-        .border_color(c(if open { 0x474747 } else { 0x333333 }))
-        .hover(|d| d.border_color(c(0x474747)))
-        .bg(c(0x0a0a0a))
-        .text_size(px(16.))
-        .text_color(c(0xffffff))
-        .cursor_pointer()
-        .on_click(click(on, || Act::Select("theme")))
-        .child(
-            div()
-                .size(px(18.))
-                .flex()
-                .items_center()
-                .justify_center()
-                .child(swatch(current, 16.)),
-        )
-        .child(div().flex_1().min_w_0().truncate().child(current.label))
-        .child(caret);
-    let mut root = div().relative().w(px(230.)).flex_shrink_0().child(button);
-    if open {
-        let mut list = div()
-            .absolute()
-            .top(px(42.))
-            .left_0()
-            .right_0()
-            .p(px(4.))
-            .rounded(px(8.))
-            .border_1()
-            .border_color(c(0x2a2a2a))
-            .bg(c(0x111111))
-            .shadow(vec![gpui::BoxShadow {
-                color: ca(0, 0, 0, 0.55),
-                offset: gpui::point(px(0.), px(12.)),
-                blur_radius: px(32.),
-                spread_radius: px(0.),
-                inset: false,
-            }])
-            .occlude();
-        for t in &THEMES {
-            let selected = t.value == s.theme;
-            let v = t.value;
-            list = list.child(
-                div()
-                    .id(t.value)
-                    .role(gpui::Role::ListBoxOption)
-                    .aria_label(t.label)
-                    .aria_selected(selected)
-                    .flex()
-                    .items_center()
-                    .gap(px(8.))
-                    .h(px(34.))
-                    .px(px(8.))
-                    .rounded(px(6.))
-                    .text_size(px(16.))
-                    .text_color(c(if selected { 0xffffff } else { 0xcfcfcf }))
-                    .hover(|d| d.bg(c(0x1f1f1f)).text_color(c(0xffffff)))
-                    .cursor_pointer()
-                    .on_click(click(on, move || Act::Pick("theme", v)))
-                    .child(
-                        div()
-                            .size(px(18.))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .child(swatch(t, 16.)),
-                    )
-                    .child(div().flex_1().min_w_0().truncate().child(t.label))
-                    .when(selected, |d| {
-                        d.child(
-                            svg()
-                                .path("icons/check.svg")
-                                .size(px(14.))
-                                .text_color(c(ACCENT)),
-                        )
-                    }),
-            );
-        }
-        root = root.child(gpui::deferred(list).with_priority(2));
-    }
-    root.into_any_element()
+    let choices: Vec<crate::kit::Choice> = THEMES.iter().map(|t| crate::kit::Choice { value: t.value, label: t.label }).collect();
+    let lead = |v: &'static str| {
+        let t = THEMES.iter().find(|t| t.value == v).unwrap_or(&THEMES[0]);
+        div().size(px(18.)).flex_shrink_0().flex().items_center().justify_center().child(swatch(t, 16.)).into_any_element()
+    };
+    let look = crate::kit::SelectLook { lead: Some(std::rc::Rc::new(lead)), check: ACCENT, priority: 2 };
+    let (toggle, pick) = (on.clone(), on.clone());
+    crate::kit::select_look(
+        "theme-picker",
+        230.,
+        16.,
+        &choices,
+        &[],
+        &s.theme,
+        s.open_select == Some("theme"),
+        look,
+        move |w, cx| toggle(Act::Select("theme"), w, cx),
+        move |v, w, cx| pick(Act::Pick("theme", v), w, cx),
+    )
 }
 
 /// A row for the toggle `key`, grouped or not.
