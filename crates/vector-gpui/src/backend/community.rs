@@ -438,7 +438,7 @@ async fn sweep() {
             let since = (at > 0).then(|| {
                 (at / 1000)
                     .saturating_sub(SINCE_SLACK_SECS)
-                    .max(vector_core::history_gaps::proven(&hex).unwrap_or(0))
+                    .max(vector_core::history_gaps::proven(&hex, c.channel_secret(ch).1 .0).unwrap_or(0))
             });
             targets.push((
                 PaintTarget {
