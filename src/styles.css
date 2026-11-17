@@ -14142,6 +14142,25 @@ body.mobile:not(.ws) .navbar-btn::before {
     border-color: #4a4a4a;
 }
 
+/* Too narrow for the row but tall enough: a failure's words go under its icon and wrap. */
+.thumb-download.is-stacked {
+    flex-direction: column;
+    gap: 8px;
+    width: max-content;
+}
+
+.thumb-download.is-stacked .thumb-download-text {
+    padding-right: 0;
+    text-align: center;
+}
+
+.thumb-download.is-stacked .thumb-download-title,
+.thumb-download.is-stacked .thumb-download-sub {
+    white-space: normal;
+    overflow: visible;
+    text-wrap: balance;
+}
+
 .thumb-download-icon {
     position: relative;
     flex: none;

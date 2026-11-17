@@ -1015,6 +1015,36 @@ pub fn retry_source(att: &Attachment) -> Option<FileSource> {
     Some(FileSource::Sealed { path: kept.path(), hash: att.id.clone(), key: att.key.clone(), nonce: att.nonce.clone(), blob_sha256 })
 }
 
+/// Give up on a failed send for good. Its uploads leave the media servers only once nothing
+/// signed can still be read with them: no message was ever built, or its take-back is on a
+/// relay. A message that failed here may have landed, or may land yet, and would point at them.
+pub async fn abandon_failed_send(chat_id: &str, message_id: &str, attachments: &[Attachment]) {
+    let in_community = matches!(crate::db::community::community_id_for_channel(chat_id), Ok(Some(_)));
+    let unread = if in_community {
+        crate::community::v2::service::discard_unconfirmed(chat_id, message_id).await
+    } else {
+        match crate::db::nip17_keys::get_resend_payload_by_pending(message_id) {
+            Ok(None) => true,
+            Ok(Some(wrapped)) => match (wrapped.rumor.id, PublicKey::from_bech32(chat_id)) {
+                (Some(rumor_id), Ok(recipient)) => crate::deletion::take_back_failed_dm(&rumor_id, &recipient).await,
+                _ => false,
+            },
+            Err(_) => false,
+        }
+    };
+    if !unread {
+        return;
+    }
+    let urls: Vec<String> = attachments.iter().flat_map(|a| a.all_urls().map(str::to_string)).collect();
+    let urls = crate::db::attachments::urls_unreferenced_elsewhere(&urls, message_id).unwrap_or_default();
+    if urls.is_empty() {
+        return;
+    }
+    if let Ok(signer) = crate::signer::active_signer() {
+        crate::blossom::delete_blobs_best_effort(signer, urls);
+    }
+}
+
 /// Forget what a failed send of `att` kept to go again: its sealed copies and its bubble's source.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn discard_retry_copy(att: &Attachment) {

@@ -740,7 +740,7 @@ pub async fn send_community_message(
         let transport = LiveTransport::with_timeout(Duration::from_secs(12));
         // Same tags as the precomputed rumor above — the rumor id is a pure
         // function of its inputs, so any divergence would fork the optimistic id.
-        let sent = vector_core::community::v2::service::send_chat_message_at(
+        let sent = vector_core::community::v2::service::try_send_chat_message_at(
             &transport, &community, &ch, &content, reply_ref, &emoji_pairs, extra_tags, ms,
         )
         .await;
@@ -772,19 +772,13 @@ pub async fn send_community_message(
                 }
                 Ok(())
             }
-            Err(e) => {
-                // 3b. Failed — mark the optimistic message failed (offers retry in the UI).
-                let failed = {
-                    let mut state = vector_core::state::STATE.lock().await;
-                    state.update_message(&message_id, |m| {
-                        m.set_failed(true);
-                        m.set_pending(false);
-                    })
-                };
-                if let Some((_cid, ref msg)) = failed {
-                    callback.on_failed(&channel_id, &message_id, msg);
+            Err(unsent) => {
+                // 3b. Failed — mark the optimistic message failed (offers retry in the UI),
+                // under the id it was signed with when an epoch rolled since the precompute.
+                if let Some(msg) = vector_core::community::v2::service::mark_unsent(&channel_id, &message_id, &unsent).await {
+                    callback.on_failed(&channel_id, &message_id, &msg);
                 }
-                Err(e)
+                Err(unsent.error)
             }
         }
     })
@@ -1407,7 +1401,7 @@ async fn dispatch_community_attachment_message(
             imeta_tags.push(nostr_sdk::prelude::Tag::expiration(nostr_sdk::prelude::Timestamp::from_secs(exp)));
         }
         let transport = LiveTransport::with_timeout(Duration::from_secs(12));
-        let sent = vector_core::community::v2::service::send_chat_message(
+        let sent = vector_core::community::v2::service::try_send_chat_message(
             &transport, &community, &ch, &content, reply_ref, &emoji_pairs, imeta_tags,
         )
         .await;
@@ -1444,9 +1438,13 @@ async fn dispatch_community_attachment_message(
                 let webxdc_topic = uploaded.iter().find_map(|a| a.webxdc_topic.clone());
                 Ok(CommunityAttachmentSendResult { message_id: real_id, webxdc_topic })
             }
-            Err(e) => {
-                let _ = mark_attachment_send_failed(&callback, &channel_id, &pending_id).await;
-                Err(e)
+            Err(unsent) => {
+                // Signed and kept: the bubble becomes that message, so a retry sends it again
+                // as itself and a delete takes it back, with the files it names left alone.
+                if let Some(msg) = vector_core::community::v2::service::mark_unsent(&channel_id, &pending_id, &unsent).await {
+                    callback.on_failed(&channel_id, &pending_id, &msg);
+                }
+                Err(unsent.error)
             }
         }
     })

@@ -513,6 +513,7 @@ async function setupRustListeners() {
                         att.downloading = false;
                         att.download_failed = true;
                         att.download_error = failReason;
+                        att.download_gone = !!evt.payload.gone;
                         touched = true;
                     }
                 }

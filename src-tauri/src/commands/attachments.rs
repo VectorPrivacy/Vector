@@ -761,6 +761,10 @@ pub async fn download_attachment(npub: String, msg_id: String, attachment_id: St
         let mut held: Option<String> = None;
         let mut kept: Option<String> = None;
         let mut last_error: String = "Download failed".to_string();
+        // The sources the message itself names, and how many answered they hold no such file:
+        // all of them, and it is gone. A guessed mirror can rescue it, never keep it in doubt.
+        let named = candidates.len();
+        let mut missing = 0usize;
         let mut hash_swap_tried = false;
         // The source already given a fresh start: bytes it didn't serve can't condemn it twice.
         let mut clean_retry: Option<usize> = None;
@@ -794,10 +798,12 @@ pub async fn download_attachment(npub: String, msg_id: String, attachment_id: St
                         }
                         attempt += 1;
                         last_error = error.to_string();
+                        if error == net::NOT_ON_SERVER && i < named {
+                            missing += 1;
+                        }
                         let permanent = matches!(
                             error,
-                            "Media server returned an error status"
-                                | "File exceeds the maximum download size"
+                            net::SERVER_REFUSED | net::NOT_ON_SERVER | "File exceeds the maximum download size"
                         );
                         if !permanent && attempt < 3 {
                             vector_core::log_warn!(
@@ -1103,6 +1109,10 @@ pub async fn download_attachment(npub: String, msg_id: String, attachment_id: St
 
         // Every source is dead for now. Whatever arrived stays behind its
         // checkpoint, and the outcome says how far a resume would start.
+        let gone = missing == named;
+        if gone {
+            last_error = net::GONE_EVERYWHERE.to_string();
+        }
         vector_core::log_net_fail!(
             "[AttachmentDownload] failed: {} (msg {}, attachment {}) after {} source(s), url {}",
             last_error, msg_id, attachment_id, candidates.len(), &*attachment.url
@@ -1120,6 +1130,7 @@ pub async fn download_attachment(npub: String, msg_id: String, attachment_id: St
             "id": attachment_id,
             "success": false,
             "result": last_error,
+            "gone": gone,
             "resumeFrom": paused.map(|c| c.offset),
             "total": paused.and_then(|c| c.total),
         }));

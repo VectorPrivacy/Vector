@@ -97,6 +97,58 @@ fn author_is_banned_here(channel_id: &str, community: Option<&[u8; 32]>, author:
 /// deleter needs `MANAGE_MESSAGES`, a strict outrank, and a synced citation.
 /// Blocked once dissolved: a dead community honors no new authority action, only
 /// the self-deletes its seal deliberately leaves open (CORD-02 §9).
+struct EarlyDeletes;
+
+/// How many targets' early deletes a session remembers; the oldest make way.
+const EARLY_DELETES_KEPT: usize = 2048;
+
+/// Deletes that arrived ahead of the message they name: who asked, and what they cited.
+#[derive(Default)]
+struct EarlyDeleteSet {
+    by_target: std::collections::HashMap<[u8; 32], Vec<(PublicKey, nostr_sdk::prelude::Tags)>>,
+    order: std::collections::VecDeque<[u8; 32]>,
+}
+
+fn early_deletes() -> std::sync::Arc<std::sync::Mutex<EarlyDeleteSet>> {
+    crate::db::current_session().scoped::<EarlyDeletes, _>()
+}
+
+/// Keep a delete whose message isn't here yet (a take-back racing the resend it cancels, a
+/// newer page read before an older one). Only the message's author settles who may delete
+/// it, so the judgment waits for the message.
+fn park_early_delete(target: &[u8; 32], by: PublicKey, tags: &nostr_sdk::prelude::Tags) {
+    let kept = early_deletes();
+    let Ok(mut set) = kept.lock() else { return };
+    if !set.by_target.contains_key(target) {
+        if set.order.len() >= EARLY_DELETES_KEPT {
+            if let Some(oldest) = set.order.pop_front() {
+                set.by_target.remove(&oldest);
+            }
+        }
+        set.order.push_back(*target);
+    }
+    let asked = set.by_target.entry(*target).or_default();
+    if !asked.iter().any(|(pk, _)| *pk == by) {
+        asked.push((by, tags.clone()));
+    }
+}
+
+/// Whether a delete that came ahead of `target` stands now that its author is known, and
+/// whether it was a moderator's. Asked once: the entry goes either way.
+fn early_delete_of(channel_id: &str, target: &[u8; 32], author: &PublicKey) -> Option<bool> {
+    let asked = {
+        let kept = early_deletes();
+        let mut set = kept.lock().ok()?;
+        let asked = set.by_target.remove(target)?;
+        set.order.retain(|t| t != target);
+        asked
+    };
+    if asked.iter().any(|(by, _)| by == author) {
+        return Some(false);
+    }
+    asked.iter().any(|(by, tags)| moderation_delete_authorized(channel_id, by, author, tags)).then_some(true)
+}
+
 fn moderation_delete_authorized(
     channel_id: &str,
     deleter: &PublicKey,
@@ -209,6 +261,10 @@ fn apply_chat_to_state_in(
         ChatEvent::Message { opened, reply_to, emoji } => {
             let msg = chat_message_to_message(opened, reply_to, emoji, my_pubkey);
             // Our own failed message, read back from a relay, landed after all.
+            if let Some(moderated) = early_delete_of(channel_id, opened.rumor_id.as_bytes(), &opened.author) {
+                let _ = state.remove_message(&msg.id);
+                return Some(ChatPersist::Removed { id: msg.id, moderated });
+            }
             if msg.mine && state.find_message(&msg.id).is_some_and(|(_, m)| m.failed) {
                 super::service::confirm_in(state, &msg.id);
             }
@@ -326,7 +382,12 @@ fn apply_chat_to_state_in(
                 Some(n) => Some(n),
                 None => crate::db::events::event_author(&target_id).ok().flatten(),
             };
-            let author = author_npub.as_deref().and_then(|n| PublicKey::parse(n).ok())?;
+            let Some(author) = author_npub.as_deref().and_then(|n| PublicKey::parse(n).ok()) else {
+                if !crate::state::was_message_deleted(&target_id) {
+                    park_early_delete(target, opened.author, &opened.rumor.tags);
+                }
+                return None;
+            };
             let authorized = author == opened.author
                 || moderation_delete_authorized(channel_id, &opened.author, &author, &opened.rumor.tags);
             if !authorized {

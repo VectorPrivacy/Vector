@@ -220,7 +220,7 @@ pub async fn send_community_message(channel_id: String, content: String, replied
         callback.on_pending(&channel_id, &pending);
 
         let transport = LiveTransport::with_timeout(Duration::from_secs(12));
-        let sent = vector_core::community::v2::service::send_chat_message_at(
+        let sent = vector_core::community::v2::service::try_send_chat_message_at(
             &transport, &community, &ch, &content, reply_ref, &emoji_pairs, extra_tags, ms,
         )
         .await;
@@ -241,15 +241,11 @@ pub async fn send_community_message(channel_id: String, content: String, replied
                 }
                 Ok(())
             }
-            Err(e) => {
-                let failed = STATE.lock().await.update_message(&message_id, |m| {
-                    m.set_failed(true);
-                    m.set_pending(false);
-                });
-                if let Some((_, msg)) = failed {
+            Err(unsent) => {
+                if let Some(msg) = vector_core::community::v2::service::mark_unsent(&channel_id, &message_id, &unsent).await {
                     callback.on_failed(&channel_id, &message_id, &msg);
                 }
-                Err(e)
+                Err(unsent.error)
             }
         }
     })
@@ -540,10 +536,16 @@ pub async fn send_community_file(
         };
         let reply_ref = reply_owned.as_ref().map(|(id, a)| (id.as_str(), a.as_str()));
         let transport = LiveTransport::with_timeout(Duration::from_secs(12));
-        let sent = vector_core::community::v2::service::send_chat_message(&transport, &community, &ch, "", reply_ref, &[], tags).await;
+        let sent = vector_core::community::v2::service::try_send_chat_message(&transport, &community, &ch, "", reply_ref, &[], tags).await;
         let real_id = match sent {
             Ok(id) => id,
-            Err(e) => return failed(e).await,
+            // Signed and kept: the bubble becomes that message, files and all.
+            Err(unsent) => {
+                if let Some(msg) = vector_core::community::v2::service::mark_unsent(&channel_id, &pending_id, &unsent).await {
+                    callback.on_failed(&channel_id, &pending_id, &msg);
+                }
+                return Err(unsent.error);
+            }
         };
         let echoed = {
             let mut state = STATE.lock().await;

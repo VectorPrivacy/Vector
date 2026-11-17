@@ -232,7 +232,7 @@ async fn download(
                 }
                 Err(e) => {
                     last_err = e.to_string();
-                    let permanent = matches!(e, "Media server returned an error status" | "File exceeds the maximum download size");
+                    let permanent = matches!(e, net::SERVER_REFUSED | net::NOT_ON_SERVER | "File exceeds the maximum download size");
                     if permanent || attempt == MAX_ATTEMPTS {
                         break;
                     }

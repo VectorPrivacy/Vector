@@ -32,7 +32,7 @@ pub use relocate::{check_relays, move_relays, RelayCheck, RelayMove, RETIRED_REL
 pub(crate) use relocate::{clean_relays, relays_moved, resume_relay_copy, retired_relays};
 pub(crate) use audit::{note_moderation_delete, note_voice_directive};
 mod outbox;
-pub use outbox::{confirm_in, discard_unconfirmed, retry_unconfirmed};
+pub use outbox::{confirm_in, discard_unconfirmed, mark_unsent, retry_unconfirmed};
 mod purge;
 mod writing;
 mod sealing;
@@ -217,6 +217,40 @@ pub async fn send_chat_message<T: Transport + ?Sized>(
     send_chat_message_at(transport, community, channel_id, content, reply_to, emoji, extra_tags, next_send_ms()).await
 }
 
+/// A send no relay confirmed. `kept` names the signed message while it is held to go out
+/// again: it may still land, so it is retried, taken back and shown under that id alone.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Unsent {
+    pub kept: Option<String>,
+    pub error: String,
+}
+
+impl From<String> for Unsent {
+    fn from(error: String) -> Self {
+        Self { kept: None, error }
+    }
+}
+
+impl From<&str> for Unsent {
+    fn from(error: &str) -> Self {
+        Self { kept: None, error: error.to_string() }
+    }
+}
+
+/// [`send_chat_message`] for a caller that shows the message as it sends: a failure says
+/// which signed message it left behind, so the row on screen becomes that message.
+pub async fn try_send_chat_message<T: Transport + ?Sized>(
+    transport: &T,
+    community: &CommunityV2,
+    channel_id: &ChannelId,
+    content: &str,
+    reply_to: Option<(&str, &str)>,
+    emoji: &[(&str, &str)],
+    extra_tags: Vec<nostr_sdk::prelude::Tag>,
+) -> Result<String, Unsent> {
+    try_send_chat_message_at(transport, community, channel_id, content, reply_to, emoji, extra_tags, next_send_ms()).await
+}
+
 /// [`send_chat_message`] with an explicit event time. The rumor id is a pure
 /// function of its inputs, so a GUI that picks `at_ms` can precompute the id for
 /// its optimistic pending row — the in-process echo and the finalize then key
@@ -232,6 +266,21 @@ pub async fn send_chat_message_at<T: Transport + ?Sized>(
     extra_tags: Vec<nostr_sdk::prelude::Tag>,
     at_ms: u64,
 ) -> Result<String, String> {
+    try_send_chat_message_at(transport, community, channel_id, content, reply_to, emoji, extra_tags, at_ms).await.map_err(|unsent| unsent.error)
+}
+
+/// [`send_chat_message_at`], naming the signed message a failure left behind.
+#[allow(clippy::too_many_arguments)]
+pub async fn try_send_chat_message_at<T: Transport + ?Sized>(
+    transport: &T,
+    community: &CommunityV2,
+    channel_id: &ChannelId,
+    content: &str,
+    reply_to: Option<(&str, &str)>,
+    emoji: &[(&str, &str)],
+    extra_tags: Vec<nostr_sdk::prelude::Tag>,
+    at_ms: u64,
+) -> Result<String, Unsent> {
     let (author_pk, group, epoch) = chat_send_context(community, channel_id)?;
     refuse_while_timed_out(community, &author_pk)?;
     // An honest client posts only where it holds Send Messages (CORD-04 §8).
@@ -242,10 +291,10 @@ pub async fn send_chat_message_at<T: Transport + ?Sized>(
             .channel_permissions(owner.as_deref(), &author_pk.to_hex(), &crate::simd::hex::bytes_to_hex_32(&channel_id.0), community.channel(channel_id).is_some_and(|c| c.private))
             .contains(crate::community::roles::Permissions::SEND_MESSAGES)
     {
-        return Err("you can't send messages in this channel".to_string());
+        return Err("you can't send messages in this channel".into());
     }
     let rumor = chat::build_message_rumor(author_pk, channel_id, epoch, content, reply_to, emoji, extra_tags, at_ms);
-    publish_chat(transport, community, &group, author_pk, channel_id, epoch, rumor, at_ms, false).await
+    publish_chat_tracked(transport, community, &group, author_pk, channel_id, epoch, rumor, at_ms, false).await
 }
 
 /// A member timed out doesn't post, edit or react until it ends (CORD-04 §8).
@@ -622,6 +671,21 @@ async fn publish_chat<T: Transport + ?Sized>(
     at_ms: u64,
     ephemeral: bool,
 ) -> Result<String, String> {
+    publish_chat_tracked(transport, community, group, author_pk, channel_id, epoch, rumor, at_ms, ephemeral).await.map_err(|unsent| unsent.error)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn publish_chat_tracked<T: Transport + ?Sized>(
+    transport: &T,
+    community: &CommunityV2,
+    group: &GroupKey,
+    author_pk: PublicKey,
+    channel_id: &ChannelId,
+    epoch: Epoch,
+    rumor: nostr_sdk::prelude::UnsignedEvent,
+    at_ms: u64,
+    ephemeral: bool,
+) -> Result<String, Unsent> {
     crate::db::scoped(async move {
         let ch = community.channel(channel_id).ok_or("no such channel in this community")?;
         let (sending, wepoch) = writing::send_group(community, ch, group, rumor.kind.as_u16())?;
@@ -653,13 +717,16 @@ async fn publish_chat<T: Transport + ?Sized>(
         if kept {
             outbox::keep(&rumor_id, &wrap);
         }
+        let began = web_time::Instant::now();
         if let Err(e) = transport.publish(&wrap, &community.relays).await {
             // No relay answered, which is not the same as none taking it: ask before failing.
-            if !outbox::on_relays(transport, group.keys(), &wrap, &community.relays).await {
+            if !outbox::on_relays(transport, group.keys(), &wrap, &community.relays).await
+                && !(kept && outbox::again_once_reconnected(transport, group.keys(), &wrap, &community.relays, began).await)
+            {
                 if kept {
                     outbox::resend_later(rumor_id.clone());
                 }
-                return Err(e);
+                return Err(Unsent { kept: kept.then(|| rumor_id.clone()), error: e });
             }
         }
         if kept {
@@ -16937,6 +17004,135 @@ mod tests {
         let (_, row) = st.find_message(&id).expect("still one row");
         assert!(!row.failed && !row.pending, "a relay holding it proves it sent");
         assert!(outbox::kept(&id).is_none(), "and nothing is resent");
+    }
+
+    #[tokio::test]
+    async fn a_failed_bubble_becomes_the_message_that_was_signed() {
+        let (_tmp, _guard, _owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "Chat", vec!["wss://r".into()], None).await.unwrap();
+        let general = community.channels[0].id;
+        let channel = crate::simd::hex::bytes_to_hex_32(&general.0);
+        // A file send shows a placeholder until its message exists.
+        {
+            let mut st = crate::state::STATE.lock().await;
+            st.ensure_community_chat(&channel);
+            st.add_message_to_chat(&channel, &crate::types::Message { id: "pending-123".into(), mine: true, pending: true, ..Default::default() });
+        }
+        let unsent = try_send_chat_message(&Unreachable(&relay), &community, &general, "lost", None, &[], vec![]).await.unwrap_err();
+        let id = unsent.kept.clone().expect("the signed message is named");
+        assert!(outbox::kept(&id).is_some(), "and it is the one kept to go again");
+
+        let row = mark_unsent(&channel, "pending-123", &unsent).await.expect("the row stands");
+        assert_eq!(row.id, id, "the bubble is the message now");
+        assert!(row.failed && !row.pending);
+        assert!(crate::state::STATE.lock().await.find_message("pending-123").is_none(), "one row, not two");
+
+        // Landing later finds that row and shows it as sent.
+        relay.publish(&outbox::kept(&id).unwrap(), &community.relays).await.unwrap();
+        let me = crate::my_public_key().unwrap();
+        for f in fetch_channel(&relay, &community, &general, 100).await.unwrap() {
+            crate::community::v2::inbound::apply_chat_to_state(&mut *crate::state::STATE.lock().await, &f.event, &channel, &me);
+        }
+        let st = crate::state::STATE.lock().await;
+        let (_, row) = st.find_message(&id).expect("still one row");
+        assert!(!row.failed && !row.pending);
+    }
+
+    #[tokio::test]
+    async fn a_send_that_signed_nothing_names_nothing() {
+        let (_tmp, _guard, _owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "Chat", vec!["wss://r".into()], None).await.unwrap();
+        let unsent = try_send_chat_message(&relay, &community, &ChannelId([9; 32]), "nowhere", None, &[], vec![]).await.unwrap_err();
+        assert_eq!(unsent.kept, None, "refused before a message existed");
+    }
+
+    #[tokio::test]
+    async fn giving_up_on_a_failed_message_takes_it_back() {
+        let (_tmp, _guard, _owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let (community, general, id) = unconfirmed_send(&relay).await;
+        let channel = crate::simd::hex::bytes_to_hex_32(&general.0);
+        // It landed after all, unseen.
+        relay.publish(&outbox::kept(&id).unwrap(), &community.relays).await.unwrap();
+
+        assert!(!outbox::discard_unconfirmed_over(&Unreachable(&relay), &channel, &id).await, "its delete reached no relay: a copy can still be read");
+        assert!(outbox::kept(&id).is_none(), "it stops going out either way");
+
+        assert!(outbox::discard_unconfirmed_over(&relay, &channel, &id).await, "taken back");
+        let page = fetch_channel(&relay, &community, &general, 100).await.unwrap();
+        assert!(
+            page.iter().any(|f| matches!(&f.event, ChatEvent::Delete { target, .. } if crate::simd::hex::bytes_to_hex_32(target) == id)),
+            "readers are told to drop it"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_placeholder_that_never_became_a_message_has_nothing_to_take_back() {
+        let (_tmp, _guard, _owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "Chat", vec!["wss://r".into()], None).await.unwrap();
+        let general = community.channels[0].id;
+        let channel = crate::simd::hex::bytes_to_hex_32(&general.0);
+        let held = relay.stored_count();
+        assert!(outbox::discard_unconfirmed_over(&relay, &channel, "pending-123").await);
+        assert_eq!(relay.stored_count(), held, "and nothing was said about it");
+    }
+
+    #[tokio::test]
+    async fn a_delete_that_arrives_before_its_message_still_removes_it() {
+        let (_tmp, _guard, _owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "Chat", vec!["wss://r".into()], None).await.unwrap();
+        let general = community.channels[0].id;
+        let channel = crate::simd::hex::bytes_to_hex_32(&general.0);
+        let me = crate::my_public_key().unwrap();
+        let id = send_message(&relay, &community, &general, "gone").await.unwrap();
+        send_delete(&relay, &community, &general, &id, crate::community::v2::kind::MESSAGE, None).await.unwrap();
+        let page = fetch_channel(&relay, &community, &general, 100).await.unwrap();
+        let message = page.iter().find(|f| matches!(f.event, ChatEvent::Message { .. })).expect("the message is on the relay");
+        let delete = page.iter().find(|f| matches!(f.event, ChatEvent::Delete { .. })).expect("and so is its delete");
+
+        // A reader that meets them the wrong way round.
+        crate::state::clear_message_tombstones();
+        let early = crate::community::v2::inbound::apply_chat_to_state(&mut *crate::state::STATE.lock().await, &delete.event, &channel, &me);
+        assert!(early.is_none(), "nothing to remove yet");
+        let late = crate::community::v2::inbound::apply_chat_to_state(&mut *crate::state::STATE.lock().await, &message.event, &channel, &me);
+        assert!(matches!(late, Some(crate::community::v2::inbound::ChatPersist::Removed { .. })), "the delete waited for it");
+        assert!(crate::state::STATE.lock().await.find_message(&id).is_none());
+    }
+
+    #[tokio::test]
+    async fn a_strangers_early_delete_removes_nothing() {
+        let (_tmp, _guard, _owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "Chat", vec!["wss://r".into()], None).await.unwrap();
+        let general = community.channels[0].id;
+        let channel = crate::simd::hex::bytes_to_hex_32(&general.0);
+        let me = crate::my_public_key().unwrap();
+        let id = send_message(&relay, &community, &general, "stays").await.unwrap();
+        let other = send_message(&relay, &community, &general, "other").await.unwrap();
+        send_delete(&relay, &community, &general, &other, crate::community::v2::kind::MESSAGE, None).await.unwrap();
+        let page = fetch_channel(&relay, &community, &general, 100).await.unwrap();
+        let message = page.iter().find(|f| f.event.opened().rumor_id.to_hex() == id).expect("the message is on the relay");
+        let forged = match &page.iter().find(|f| matches!(f.event, ChatEvent::Delete { .. })).expect("a delete to borrow").event {
+            ChatEvent::Delete { opened, target_kind, .. } => {
+                let mut opened = opened.clone();
+                opened.author = Keys::generate().public_key();
+                ChatEvent::Delete { opened, target: crate::simd::hex::hex_to_bytes_32(&id), target_kind: *target_kind }
+            }
+            _ => unreachable!(),
+        };
+
+        // The reader holds nothing of the message yet.
+        crate::state::STATE.lock().await.remove_message(&id);
+        crate::db::events::delete_event(&id).await.unwrap();
+        let early = crate::community::v2::inbound::apply_chat_to_state(&mut *crate::state::STATE.lock().await, &forged, &channel, &me);
+        assert!(early.is_none());
+        let late = crate::community::v2::inbound::apply_chat_to_state(&mut *crate::state::STATE.lock().await, &message.event, &channel, &me);
+        assert!(matches!(late, Some(crate::community::v2::inbound::ChatPersist::New(_))), "only its author or a moderator deletes it");
+        assert!(crate::state::STATE.lock().await.find_message(&id).is_some());
     }
 
     #[tokio::test]

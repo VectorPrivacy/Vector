@@ -43,6 +43,8 @@
     const compact = $derived(boxW > 0 && (boxW < 205 || boxH < 76));
     // The held pill's one line, or its icon alone.
     const heldCompact = $derived(boxW > 0 && (boxW < 150 || boxH < 40));
+    // A failure says why even where the panel's row won't fit: the words go under the icon.
+    const stacked = $derived(compact && boxW >= 120 && boxH >= 140);
     // The ring plus a line under it, with air around both.
     const showRate = $derived(boxH >= 118 && boxW >= 120);
 
@@ -58,10 +60,13 @@
     // Part of the file is already here: the next download picks up from it.
     const paused = $derived.by(() => { messageVersion(msg.id); return h.pausedAt?.(att) || null; });
     const failed = $derived(!paused && !!att.download_failed);
-    const title = $derived(paused ? 'Resume Download' : failed ? 'Download Failed' : `Download ${(att.extension || '').toUpperCase()}`.trim());
+    // Every server the message names says the file is gone: nothing on this side is at fault.
+    const gone = $derived(failed && !!att.download_gone);
+    const title = $derived(paused ? 'Resume Download' : gone ? 'File Unavailable' : failed ? 'Download Failed' : `Download ${(att.extension || '').toUpperCase()}`.trim());
     // A failed download carries the backend's reason, so a red box is diagnosable at a glance.
     const sub = $derived.by(() => {
         if (paused) return `${h.formatBytes(paused.offset)}${paused.total ? ` of ${h.formatBytes(paused.total)}` : ''}`;
+        if (gone) return 'Deleted, or lost by its server';
         if (failed) return (att.download_error || '').slice(0, 64) || 'Tap to Retry';
         return att.size > 0 ? h.formatBytes(att.size) : 'Unknown Size';
     });
@@ -108,12 +113,13 @@
                 {#if !heldCompact}<span class="cutoff">Accept to view</span>{/if}
             </div>
         {:else}
+            {@const wordless = compact && !(failed && stacked)}
             <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-            <div class="thumb-download" class:is-compact={compact} class:is-failed={failed}
-                 data-attachment-id={att.id} role="button" tabindex="-1" title={compact ? `${title} · ${sub}` : null}
+            <div class="thumb-download" class:is-compact={wordless} class:is-stacked={compact && !wordless} class:is-failed={failed}
+                 data-attachment-id={att.id} role="button" tabindex="-1" title={wordless ? `${title} · ${sub}` : null}
                  onclick={download}>
-                <span class="thumb-download-icon"><span class="icon icon-{failed ? 'refresh' : 'download'}"></span></span>
-                {#if !compact}
+                <span class="thumb-download-icon"><span class="icon icon-{gone ? 'file-minus' : failed ? 'refresh' : 'download'}"></span></span>
+                {#if !wordless}
                     <span class="thumb-download-text">
                         <span class="thumb-download-title cutoff">{title}</span>
                         <span class="thumb-download-sub cutoff">{sub}</span>

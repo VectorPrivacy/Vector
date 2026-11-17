@@ -108,6 +108,8 @@
     const heldLine = $derived(sizeText ? `Accept to download · ${sizeText}` : 'Accept to download');
     const failLine = $derived.by(() => {
         const reason = (att.download_error || '').slice(0, 64);
+        // Every server says the file is gone: nothing on this side is at fault.
+        if (att.download_gone) return 'Unavailable · Deleted, or lost by its server';
         return reason ? `Failed: ${reason} · Tap to Retry` : 'Download Failed · Tap to Retry';
     });
 
