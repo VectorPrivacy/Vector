@@ -49,6 +49,8 @@
         { id: 'voice', name: 'Voice', desc: 'Opens its call, with the chat beside it.' },
     ];
 
+    const SYNCED = "This channel follows its category's permissions. Edit them from the category, or stop syncing to set its own.";
+    const OWN = 'This channel sets its own permissions.';
     const hex = (c) => `#${(c || 0x99aab5).toString(16).padStart(6, '0')}`;
     const permsOpen = $derived(!!st.perms?.activated && !!st.perms?.can_manage);
     const syncable = $derived(permsOpen && !st.isCategory && (!!st.perms?.synced || !!st.perms?.category));
@@ -122,12 +124,15 @@
             const stored = storedOverwrite(key);
             const set = stored.allow !== '0' || stored.deny !== '0';
             if (kind === 'role') { const r = roleOf(id); return { key, label: r?.name || 'Deleted role', color: r?.color, rank: r?.position ?? 1e9, set }; }
-            return { key, label: st.perms.member_names?.[id] || `${id.slice(0, 10)}…`, color: null, rank: 2e9, member: true, set };
+            const npub = st.perms.overwrites.find((o) => o.kind === 'member' && o.id === id)?.npub || st.perms.members.find((m) => m.id === id)?.npub || null;
+            if (npub) profileVersion(npub);
+            return { key, label: st.perms.member_names?.[id] || `${id.slice(0, 10)}…`, color: null, rank: 2e9, member: true, src: npub ? h.avatarSrc(npub) : null, set };
         }).sort((a, b) => (a.key === 'everyone') - (b.key === 'everyone') || a.rank - b.rank);
     });
-    const addable = $derived((st.perms?.roles || []).filter((r) => !targets.some((t) => t.key === `role:${r.role_id}`)));
+    // Only who you can set rules for: beneath your roles that hold Manage Roles.
+    const addable = $derived((st.perms?.roles || []).filter((r) => r.support != null && !targets.some((t) => t.key === `role:${r.role_id}`)));
     const addableMembers = $derived((st.perms?.members || [])
-        .filter((m) => !targets.some((t) => t.key === `member:${m.id}`))
+        .filter((m) => m.support != null && !targets.some((t) => t.key === `member:${m.id}`))
         .map((m) => ({ id: m.id, name: st.perms.member_names?.[m.id] || `${m.id.slice(0, 10)}…` }))
         .sort((a, b) => a.name.localeCompare(b.name)));
     const open = $derived(targets.find((t) => t.key === st.target));
@@ -142,7 +147,7 @@
     const pickMembers = $derived.by(() => {
         const rows = [];
         for (const m of st.perms?.members || []) {
-            if (!m.npub || targets.some((t) => t.key === `member:${m.id}`)) continue;
+            if (!m.npub || m.support == null || targets.some((t) => t.key === `member:${m.id}`)) continue;
             profileVersion(m.npub);
             const name = h.name(m.npub);
             const veiled = h.veiled(m.npub);
@@ -181,12 +186,36 @@
         if (BigInt(st.draft.deny) & bit) return 'deny';
         return 'inherit';
     };
-    const grantable = $derived(st.perms ? BigInt(st.perms.grantable) : 0n);
-    // A bit you lack can't be set, but one already set may be cleared.
-    function canTouch(bit) {
-        const stored = storedOverwrite(st.target);
-        return (grantable & bit) === bit || ((BigInt(stored.allow) | BigInt(stored.deny)) & bit) === bit;
+    // What you may set for a target: the bits from your roles strictly above it, while Manage
+    // Roles is among them; null where it's none. The backend judges a save by the same rule.
+    function supportOf(key) {
+        if (!st.perms || !key) return null;
+        if (key === 'everyone') return st.perms.everyone_support == null ? null : BigInt(st.perms.everyone_support);
+        const [kind, id] = key.split(':');
+        const entry = kind === 'role'
+            ? st.perms.roles.find((r) => r.role_id === id)
+            : st.perms.overwrites.find((o) => o.kind === 'member' && o.id === id) || st.perms.members.find((m) => m.id === id);
+        return entry?.support == null ? null : BigInt(entry.support);
     }
+    // A save restates the whole rule, so one bit you can't vouch for leaves it all as it is.
+    function editableFor(key) {
+        const held = supportOf(key);
+        if (held === null) return false;
+        const stored = storedOverwrite(key);
+        return ((BigInt(stored.allow) | BigInt(stored.deny)) & ~held) === 0n;
+    }
+    const support = $derived(supportOf(st.target));
+    const targetEditable = $derived(editableFor(st.target));
+    function canTouch(bit) { return targetEditable && (support & bit) === bit; }
+    // Why the open target can't be changed, when it can't.
+    const readOnlyWhy = $derived.by(() => {
+        if (!st.target || targetEditable) return '';
+        if (support !== null) return 'Its rules here include permissions your roles don\'t give you, so only someone above you can change them.';
+        if (st.target === 'everyone') return 'Changing @everyone here needs Manage Roles from one of your roles.';
+        if (st.target === `member:${st.perms.me}`) return 'These are your own rules here, so only someone above you can change them.';
+        if (st.target.startsWith('member:')) return 'This member holds a role at or above yours, so you can see their rules here but not change them.';
+        return 'This role sits at or above your own, so you can see its rules here but not change them.';
+    });
 
     // Locked: @everyone may post, react and join calls nowhere here, so every write takes the
     // channel's writer key and nothing anyone else sends reaches its readers.
@@ -194,8 +223,8 @@
     const everyoneRule = $derived(st.target === 'everyone' && st.draft ? st.draft : storedOverwrite('everyone'));
     const locked = $derived(LOCK_BITS.every((b) => (BigInt(everyoneRule.deny) & b) === b));
     const canLock = $derived.by(() => {
-        const stored = storedOverwrite('everyone');
-        return LOCK_BITS.every((b) => (grantable & b) === b || ((BigInt(stored.allow) | BigInt(stored.deny)) & b) === b);
+        const held = supportOf('everyone');
+        return editableFor('everyone') && LOCK_BITS.every((b) => (held & b) === b);
     });
     function setLocked(on) {
         selectOverwrite('everyone');
@@ -311,11 +340,11 @@
                                 <h3 class="cs-heading">Category Sync</h3>
                                 <div class="ce-sync">
                                     {#if st.perms.synced}
-                                        <p class="cs-lede">This channel follows its category's permissions. Edit them from the category, or stop syncing to set its own.</p>
-                                        <button class="cs-btn-text" disabled={st.busy} onclick={() => h.setSync({ communityId: st.communityId, channelId: st.channelId, categoryId: null })}>Stop syncing</button>
+                                        <p class="cs-lede">{st.perms.can_sync ? SYNCED : `${SYNCED} Stopping would change rules set above your roles, so only someone above you can.`}</p>
+                                        <button class="cs-btn-text" disabled={st.busy || !st.perms.can_sync} onclick={() => h.setSync({ communityId: st.communityId, channelId: st.channelId, categoryId: null })}>Stop syncing</button>
                                     {:else}
-                                        <p class="cs-lede">This channel sets its own permissions.</p>
-                                        <button class="cs-btn-text" disabled={st.busy} onclick={() => h.setSync({ communityId: st.communityId, channelId: st.channelId, categoryId: st.perms.category })}>Sync with its category</button>
+                                        <p class="cs-lede">{st.perms.can_sync ? OWN : `${OWN} Syncing would replace rules set above your roles, so only someone above you can.`}</p>
+                                        <button class="cs-btn-text" disabled={st.busy || !st.perms.can_sync} onclick={() => h.setSync({ communityId: st.communityId, channelId: st.channelId, categoryId: st.perms.category })}>Sync with its category</button>
                                     {/if}
                                 </div>
                             </section>
@@ -379,18 +408,20 @@
                                         {#each targets as t (t.key)}
                                             <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
                                             <div class="cs-role ce-target-row" class:on={st.target === t.key} onclick={() => !st.busy && selectOverwrite(t.key)}>
-                                                {#if t.member}<span class="cs-role-grip"><span class="icon icon-user"></span></span>
+                                                {#if t.member}<span class="cs-role-grip ce-target-avatar"><Avatar src={t.src} size={18} /></span>
                                                 {:else}<span class="cs-role-dot" style:background-color={hex(t.color)}></span>{/if}
                                                 <span class="cs-role-name cutoff">{t.label}</span>
                                                 {#if !t.set}<span class="cs-role-count">no rules yet</span>{/if}
+                                                {#if !editableFor(t.key)}<span class="ce-target-lock" title="You can't change these rules"><span class="icon icon-locked"></span></span>{/if}
                                                 <span class="cs-role-open">{#if st.target === t.key}<span class="icon icon-check"></span>{/if}</span>
                                             </div>
                                         {/each}
                                 </div>
                             </section>
-                            {#each PERM_GROUPS as g (g.id)}
+                            {#each PERM_GROUPS as g, gi (g.id)}
                                 <section class="cs-block" data-anchor={g.id}>
                                     <h3 class="cs-heading">{g.title}{#if open}<span class="ce-for">for {open.label}</span>{/if}</h3>
+                                    {#if gi === 0 && readOnlyWhy}<p class="cs-lede">{readOnlyWhy}</p>{/if}
                                     {#each g.perms as p (p.name)}
                                         {@const state = bitState(p.bit)}
                                         {@const closed = closedToEveryone(p.bit)}

@@ -26183,6 +26183,12 @@ body.mobile .cs-close-key { display: none; }
 .ce-target-row.on { background-color: #171717; }
 .ce-target-row.on .cs-role-name { color: #fff; font-weight: 500; }
 .ce-target-row .cs-role-open .icon { background-color: var(--icon-color-primary); }
+/* A target whose rules come from above you: shown, never editable. */
+.ce-target-lock { position: relative; display: flex; flex-shrink: 0; margin-left: auto; width: 14px; height: 14px; }
+.cs-role-count + .ce-target-lock { margin-left: 8px; }
+.ce-target-row .ce-target-lock + .cs-role-open { margin-left: 0; }
+.ce-target-avatar { display: flex; align-items: center; justify-content: center; }
+.ce-target-lock .icon { position: relative; inset: auto; width: 14px; height: 14px; margin: 0; background-color: #6f6f6f; }
 .ce-target-row .cs-role-grip { cursor: pointer; color: #6f6f6f; }
 .ce-for { margin-left: 0.3em; color: #8a8a8a; font-weight: 400; }
 .ce-target-row .cs-role-count, .ce-target-row .cs-role-open { margin-left: auto; }

@@ -7895,15 +7895,16 @@ pub async fn set_overwrite<T: Transport + ?Sized>(
         }
         // Who might gain or lose a key must be readable before anything is published.
         access_candidates(community, &view.roles)?;
-        let rank = match &target {
-            OverwriteTarget::Everyone => u32::MAX,
-            OverwriteTarget::Role(id) => view.roles.role(id).map(|r| r.position).ok_or("no such role")?,
+        match &target {
+            OverwriteTarget::Role(id) if view.roles.role(id).is_none() => return Err("no such role".to_string()),
             OverwriteTarget::Member(m) if *m == author.owner_hex => return Err("the owner holds every permission everywhere".to_string()),
-            OverwriteTarget::Member(m) => view.roles.highest_position(m).unwrap_or(u32::MAX),
-        };
+            _ => {}
+        }
         let current = view.roles.overwrites.iter().find(|o| o.scope == scope_hex && o.target == target);
         let (was_allow, was_deny) = current.map_or((0, 0), |o| (o.allow.0, o.deny.0));
-        if !author.supports(rank, allow | deny | ((was_allow ^ allow) | (was_deny ^ deny))) {
+        // The editor offers exactly this, so what it lets you pick is what saves.
+        let touched = allow | deny | ((was_allow ^ allow) | (was_deny ^ deny));
+        if !view.roles.overwrite_support(&author.me_hex, &author.owner_hex, &target).is_some_and(|held| touched & !held == 0) {
             return Err("you can only set permissions you hold, for roles and members beneath you".to_string());
         }
         let target_bytes = super::roles::overwrite_target_bytes(community.id(), &target).ok_or("malformed target")?;
@@ -13900,7 +13901,7 @@ fn fold_authority(community: &CommunityV2, editions: &[ParsedEdition], floors: &
 
 /// Whether `author_hex` could write every overwrite in `scopes` as it stands: what a sync
 /// swaps all at once (CORD-04 §8). `sealed_over` lends a Tenure's standing to one edition.
-fn may_swap_overwrites(roles: &crate::community::roles::CommunityRoles, owner_hex: Option<&str>, author_hex: &str, scopes: &[&str], sealed_over: &dyn Fn(u32) -> u64) -> bool {
+pub(crate) fn may_swap_overwrites(roles: &crate::community::roles::CommunityRoles, owner_hex: Option<&str>, author_hex: &str, scopes: &[&str], sealed_over: &dyn Fn(u32) -> u64) -> bool {
     use crate::community::roles::{OverwriteTarget, Permissions};
     if owner_hex == Some(author_hex) {
         return true;

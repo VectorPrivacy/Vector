@@ -389,6 +389,22 @@ impl CommunityRoles {
             .fold(Permissions::empty(), |acc, r| acc.union(r.permissions))
     }
 
+    /// The bits `me` may set in an overwrite on `target` (CORD-04 §3): every bit from its Roles
+    /// strictly above the target, while Manage Roles is among them. The owner may set any on
+    /// anyone but themselves. `None`: nothing at all. An edit must keep every bit it carries,
+    /// and every bit it changes, inside this.
+    pub fn overwrite_support(&self, me: &str, owner_hex: &str, target: &OverwriteTarget) -> Option<u64> {
+        let reach = match target {
+            OverwriteTarget::Member(m) if m == owner_hex => return None,
+            _ if me == owner_hex => return Some(u64::MAX),
+            OverwriteTarget::Everyone => u32::MAX,
+            OverwriteTarget::Role(id) => self.role(id)?.position,
+            OverwriteTarget::Member(m) => self.highest_position(m).unwrap_or(u32::MAX),
+        };
+        let held = self.permissions_above(me, reach);
+        held.contains(Permissions::MANAGE_ROLES).then_some(held.0)
+    }
+
     /// True iff the member's effective permissions include every bit in `bits`.
     pub fn has_permission(&self, member_hex: &str, bits: u64) -> bool {
         self.effective_permissions(member_hex).contains(bits)
@@ -814,6 +830,41 @@ mod tests {
         };
         assert!(!r.is_admin(&alice), "a social-only role holder is not an admin");
         assert!(r.is_privileged(&alice), "though they do hold a role");
+    }
+
+    #[test]
+    fn overwrite_support_comes_only_from_roles_above_the_target() {
+        let (owner, me, peer, plain) = ("00".repeat(32), "aa".repeat(32), "bb".repeat(32), "cc".repeat(32));
+        let role = |id: &str, position: u32, bits: u64| Role {
+            role_id: id.repeat(64), name: id.into(), position, permissions: Permissions(bits), scope: RoleScope::Server,
+            color: 0, rank: None, display: false, mentionable: false, extra: Default::default(),
+        };
+        let lead = Permissions::MANAGE_ROLES | Permissions::SEND_MESSAGES;
+        let r = CommunityRoles {
+            roles: vec![role("1", 1, Permissions::ATTACH_FILES), role("2", 2, lead), role("3", 3, Permissions::VIEW_CHANNEL), role("4", 4, Permissions::ADD_REACTIONS)],
+            grants: vec![
+                MemberGrant { member: me.clone(), role_ids: vec!["2".repeat(64), "4".repeat(64)] },
+                MemberGrant { member: peer.clone(), role_ids: vec!["2".repeat(64)] },
+            ],
+            everyone: Some(Permissions(Permissions::READ_MESSAGE_HISTORY)),
+            overwrites: Vec::new(), syncs: Default::default(), legacy_channels: None, creators: Default::default(),
+        };
+        use OverwriteTarget as T;
+        // Beneath both of my roles: both count, @everyone's own bits never do.
+        assert_eq!(r.overwrite_support(&me, &owner, &T::Everyone), Some(lead | Permissions::ADD_REACTIONS));
+        assert_eq!(r.overwrite_support(&me, &owner, &T::Member(plain.clone())), Some(lead | Permissions::ADD_REACTIONS));
+        // Between them: only the role above counts.
+        assert_eq!(r.overwrite_support(&me, &owner, &T::Role("3".repeat(64))), Some(lead));
+        // My own top role, a peer at it, and anything above: nothing.
+        assert_eq!(r.overwrite_support(&me, &owner, &T::Role("2".repeat(64))), None);
+        assert_eq!(r.overwrite_support(&me, &owner, &T::Member(peer.clone())), None);
+        assert_eq!(r.overwrite_support(&me, &owner, &T::Role("1".repeat(64))), None);
+        assert_eq!(r.overwrite_support(&me, &owner, &T::Role("f".repeat(64))), None, "a role that's gone");
+        // Without Manage Roles above it, a role beneath is out of reach too.
+        assert_eq!(r.overwrite_support(&plain, &owner, &T::Everyone), None);
+        // The owner sets anything on anyone but themselves.
+        assert_eq!(r.overwrite_support(&owner, &owner, &T::Role("1".repeat(64))), Some(u64::MAX));
+        assert_eq!(r.overwrite_support(&owner, &owner, &T::Member(owner.clone())), None);
     }
 
     #[test]

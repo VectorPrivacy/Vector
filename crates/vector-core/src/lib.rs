@@ -4896,6 +4896,7 @@ impl VectorCore {
         let roster = crate::db::community::get_community_roles(community_id).map_err(VectorError::Other)?;
         let is_owner = me == owner_hex;
         let chan = channel_id.to_ascii_lowercase();
+        let support = |target: &OverwriteTarget| roster.overwrite_support(&me, &owner_hex, target).map(|b| b.to_string());
         let mut roles: Vec<&crate::community::roles::Role> = roster.roles.iter().collect();
         roles.sort_by(|a, b| a.position.cmp(&b.position).then_with(|| a.role_id.cmp(&b.role_id)));
         let overwrites: Vec<serde_json::Value> = roster
@@ -4909,7 +4910,7 @@ impl VectorCore {
                     OverwriteTarget::Member(m) => ("member", Some(m.clone())),
                 };
                 let npub = (kind == "member").then(|| id.as_deref().and_then(|m| nostr_sdk::prelude::PublicKey::from_hex(m).ok()).and_then(|pk| ToBech32::to_bech32(&pk).ok())).flatten();
-                serde_json::json!({ "kind": kind, "id": id, "npub": npub, "allow": o.allow.0.to_string(), "deny": o.deny.0.to_string() })
+                serde_json::json!({ "kind": kind, "id": id, "npub": npub, "allow": o.allow.0.to_string(), "deny": o.deny.0.to_string(), "support": support(&o.target) })
             })
             .collect();
         let category = crate::simd::hex::hex_to_bytes_32_checked(&chan)
@@ -4917,21 +4918,35 @@ impl VectorCore {
             .and_then(|c| c.category())
             .filter(|k| v2.categories.iter().any(|x| x.id == *k))
             .map(|k| crate::simd::hex::bytes_to_hex_32(&k));
+        // Syncing, or stopping, swaps every rule on both sides, so it needs each settable.
+        let can_sync = {
+            let mut scopes = vec![chan.as_str()];
+            scopes.extend(category.as_deref());
+            scopes.extend(roster.syncs.get(&chan).map(String::as_str));
+            crate::community::v2::service::may_swap_overwrites(&roster, Some(&owner_hex), &me, &scopes, &|_| 0)
+        };
         Ok(serde_json::json!({
             "activated": Self::roles_v2_active(community_id, &roster),
             // The Category the channel files under, and whether it takes that Category's rules.
             "category": category,
             "synced": roster.syncs.get(&chan),
+            "can_sync": can_sync,
             "can_manage": is_owner || roster.is_authorized(&me, Some(&owner_hex), Permissions::MANAGE_ROLES),
             "grantable": if is_owner { u64::MAX.to_string() } else { roster.effective_permissions(&me).0.to_string() },
-            "roles": roles.iter().map(|r| serde_json::json!({ "role_id": r.role_id, "name": r.name, "color": r.color, "position": r.position })).collect::<Vec<_>>(),
+            // Per target, the bits this account may set on it; null where it may set none.
+            "me": me,
+            "everyone_support": support(&OverwriteTarget::Everyone),
+            "roles": roles
+                .iter()
+                .map(|r| serde_json::json!({ "role_id": r.role_id, "name": r.name, "color": r.color, "position": r.position, "support": support(&OverwriteTarget::Role(r.role_id.clone())) }))
+                .collect::<Vec<_>>(),
             "overwrites": overwrites,
             // Who a member overwrite can name: everyone this device knows, but the owner.
             "members": crate::community::v2::service::stored_memberlist(&v2)
                 .unwrap_or_default()
                 .into_iter()
                 .filter(|pk| pk.to_hex() != owner_hex)
-                .map(|pk| serde_json::json!({ "id": pk.to_hex(), "npub": ToBech32::to_bech32(&pk).ok() }))
+                .map(|pk| serde_json::json!({ "id": pk.to_hex(), "npub": ToBech32::to_bech32(&pk).ok(), "support": support(&OverwriteTarget::Member(pk.to_hex())) }))
                 .collect::<Vec<_>>(),
         }))
     }
