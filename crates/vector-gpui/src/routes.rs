@@ -339,7 +339,7 @@ impl Alias {
         self.input.read(cx).text().trim().to_ascii_lowercase()
     }
 
-    fn dirty(&self, book: &RouteBook, cx: &App) -> bool {
+    pub fn dirty(&self, book: &RouteBook, cx: &App) -> bool {
         self.typed(cx) != self.saved(book)
     }
 }

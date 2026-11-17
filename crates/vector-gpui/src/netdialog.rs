@@ -45,6 +45,13 @@ impl NetDialog {
         }
     }
 
+    pub fn alias_ref(&self) -> Option<&crate::routes::Alias> {
+        match self {
+            NetDialog::Relay { alias, .. } | NetDialog::Server { alias, .. } => alias.as_ref(),
+            NetDialog::AddRelay { .. } => None,
+        }
+    }
+
     pub fn url(&self) -> Option<&str> {
         match self {
             NetDialog::Relay { row, .. } => Some(&row.url),

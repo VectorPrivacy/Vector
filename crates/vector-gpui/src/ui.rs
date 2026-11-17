@@ -14533,6 +14533,20 @@ impl VectorApp {
     }
 
     /// Escape closes the topmost light overlay; true when it did.
+    /// Enter saves an edited alias, as its Save button does.
+    fn alias_enter(alias: Option<&crate::routes::Alias>, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(a) = alias else { return };
+        cx.subscribe_in(&a.input, window, |app, _, _: &SendText, window, cx| {
+            let dirty = app.settings.as_ref().is_some_and(|s| {
+                s.dialog.as_ref().and_then(|d| d.alias_ref()).is_some_and(|a| !a.busy && a.dirty(&s.book, cx))
+            });
+            if dirty {
+                app.alias_act(crate::routes::AliasAct::Save, window, cx);
+            }
+        })
+        .detach();
+    }
+
     /// Enter confirms an open popup and Escape dismisses it; a popup with a field leaves both to it.
     fn popup_key(&mut self, e: &gpui::KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) -> bool {
         let Some((p, _)) = self.popup.as_ref() else { return false };
@@ -17487,6 +17501,7 @@ impl VectorApp {
             Act::OpenRelay(url) => {
                 let Some(row) = s.relays.iter().flatten().find(|r| r.url == url).cloned() else { return };
                 let alias = crate::routes::Alias::new(&s.book, &row.url, true, cx);
+                Self::alias_enter(alias.as_ref(), window, cx);
                 let url = row.url.clone();
                 s.dialog = Some(crate::netdialog::NetDialog::Relay { row, metrics: Default::default(), logs: Vec::new(), mode_open: false, copied: false, alias, circuit: None });
                 self.dialog_route(url, cx);
@@ -17495,13 +17510,15 @@ impl VectorApp {
             Act::OpenServer(url) => {
                 let Some(info) = s.servers.iter().flatten().find(|r| r.url == url).cloned() else { return };
                 let (enabled, url) = (info.enabled, info.url.clone());
+                let alias = crate::routes::Alias::new(&s.book, &url, false, cx);
+                Self::alias_enter(alias.as_ref(), window, cx);
                 s.dialog = Some(crate::netdialog::NetDialog::Server {
                     info,
                     stats: None,
                     doc: crate::serverinfo::Load::Loading,
                     caps: crate::serverinfo::Load::Loading,
                     chart: Default::default(),
-                    alias: crate::routes::Alias::new(&s.book, &url, false, cx),
+                    alias,
                     circuit: None,
                 });
                 self.dialog_route(url.clone(), cx);
