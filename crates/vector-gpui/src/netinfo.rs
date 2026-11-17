@@ -4,7 +4,7 @@
 use std::rc::Rc;
 
 use gpui::prelude::*;
-use gpui::{AnyElement, App, FontWeight, HighlightStyle, StyledText, Window, div, px, svg};
+use gpui::{AnimationExt, AnyElement, App, FontWeight, HighlightStyle, StyledText, Window, div, px, svg};
 use crate::pic::img;
 
 use crate::theme::*;
@@ -209,5 +209,7 @@ pub fn modal(
         .bg(ca(0, 0, 0, 0.72))
         .on_click(move |_, w, cx| close(w, cx))
         .child(card)
+        // `.lg-net-card.pop-in`: in over 0.16 s.
+        .with_animation("net-info-in", gpui::Animation::new(std::time::Duration::from_millis(160)).with_easing(gpui::ease_out_quint()), |d, t| d.opacity(t))
         .into_any_element()
 }

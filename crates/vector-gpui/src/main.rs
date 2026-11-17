@@ -280,6 +280,8 @@ fn main() {
             }
         })
         .detach();
+        // Most of Tauri's hovers carry `transition: background-color .15s` and its kin.
+        gpui::set_hover_ease(std::time::Duration::from_millis(150));
         cx.on_app_quit(|_| {
             vector_media::whisper::unload();
             async {}

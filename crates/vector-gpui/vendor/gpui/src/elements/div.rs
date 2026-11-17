@@ -874,6 +874,14 @@ pub trait InteractiveElement: Sized {
         self
     }
 
+    /// Hover and group-hover styles blend over `ms` milliseconds with CSS's `ease`: colours and
+    /// opacity move, everything else switches halfway; 0 switches at once. Needs an element id to
+    /// keep its clock. Without one the default from [`set_hover_ease`] applies.
+    fn hover_ease(mut self, ms: u64) -> Self {
+        self.interactivity().hover_ease = Some(Duration::from_millis(ms));
+        self
+    }
+
     /// Apply the given style to this element when the mouse hovers over it
     fn hover(mut self, f: impl FnOnce(StyleRefinement) -> StyleRefinement) -> Self {
         debug_assert!(
@@ -2318,6 +2326,7 @@ pub struct Interactivity {
     pub(crate) focus_visible_style: Option<Box<StyleRefinement>>,
     pub(crate) hover_style: Option<Box<StyleRefinement>>,
     pub(crate) group_hover_style: Option<GroupStyle>,
+    pub(crate) hover_ease: Option<Duration>,
     pub(crate) active_style: Option<Box<StyleRefinement>>,
     pub(crate) group_active_style: Option<GroupStyle>,
     pub(crate) drag_over_styles: Vec<(
@@ -3670,6 +3679,8 @@ impl Interactivity {
     ) -> Style {
         let mut style = Style::default();
         style.refine(&self.base_style);
+        let mut element_state = element_state;
+        let (mut group_on, mut hover_on) = (false, false);
 
         if let Some(focus_handle) = self.tracked_focus_handle.as_ref() {
             if let Some(in_focus_style) = self.in_focus_style.as_ref()
@@ -3708,9 +3719,7 @@ impl Interactivity {
                         false
                     };
 
-                if is_group_hovered {
-                    style.refine(&group_hover.style);
-                }
+                group_on = is_group_hovered;
             }
 
             if let Some(hover_style) = self.hover_style.as_ref() {
@@ -3727,8 +3736,39 @@ impl Interactivity {
                     false
                 };
 
-                if is_hovered {
-                    style.refine(hover_style);
+                hover_on = is_hovered;
+            }
+        }
+        let refine = |base: &Style, group: bool, hover: bool| {
+            let mut s = base.clone();
+            if group && let Some(g) = self.group_hover_style.as_ref() {
+                s.refine(&g.style);
+            }
+            if hover && let Some(h) = self.hover_style.as_ref() {
+                s.refine(h);
+            }
+            s
+        };
+        let ease = self.hover_ease.unwrap_or_else(|| HOVER_EASE.with(|e| e.get()));
+        let fades = match (!ease.is_zero(), element_state.as_deref_mut()) {
+            (true, Some(state)) => {
+                let (g, h) = (state.group_fade.step(group_on, ease), state.hover_fade.step(hover_on, ease));
+                Some((g, h))
+            }
+            _ => None,
+        };
+        match fades {
+            Some((g, h)) if (g > 0. && g < 1.) || (h > 0. && h < 1.) => {
+                window.request_animation_frame();
+                let row = |hover: bool| blend_style(&refine(&style, false, hover), &refine(&style, true, hover), g);
+                style = blend_style(&row(false), &row(true), h);
+            }
+            _ => {
+                if group_on && let Some(g) = self.group_hover_style.as_ref() {
+                    style.refine(&g.style);
+                }
+                if hover_on && let Some(h) = self.hover_style.as_ref() {
+                    style.refine(h);
                 }
             }
         }
@@ -3885,6 +3925,114 @@ pub struct InteractiveElementState {
     ongoing_scroll: Option<Rc<RefCell<OngoingScroll>>>,
     pub(crate) active_tooltip: Option<Rc<RefCell<Option<ActiveTooltip>>>>,
     long_press_tooltip_active: Option<Rc<Cell<bool>>>,
+    hover_fade: Fade,
+    group_fade: Fade,
+}
+
+thread_local! {
+    static HOVER_EASE: Cell<Duration> = const { Cell::new(Duration::ZERO) };
+}
+
+/// How long every hover style without its own [`InteractiveElement::hover_ease`] takes to blend.
+pub fn set_hover_ease(ease: Duration) {
+    HOVER_EASE.with(|e| e.set(ease));
+}
+
+/// A hover style's blend: where it heads, since when, and from how far along.
+#[derive(Default, Clone, Copy)]
+struct Fade {
+    seen: bool,
+    on: bool,
+    since: Option<std::time::Instant>,
+    from: f32,
+}
+
+impl Fade {
+    fn at(&self, ease: Duration, now: std::time::Instant) -> f32 {
+        let to = self.on as u8 as f32;
+        match self.since {
+            Some(t) => {
+                let k = (now.saturating_duration_since(t).as_secs_f32() / ease.as_secs_f32().max(1e-3)).min(1.);
+                self.from + (to - self.from) * css_ease(k)
+            }
+            None => to,
+        }
+    }
+
+    /// How far toward hovered it stands; the first frame an element is seen it takes its state as is.
+    fn step(&mut self, on: bool, ease: Duration) -> f32 {
+        let now = std::time::Instant::now();
+        if !self.seen {
+            *self = Fade { seen: true, on, since: None, from: 0. };
+        } else if on != self.on {
+            self.from = self.at(ease, now);
+            self.on = on;
+            self.since = Some(now);
+        }
+        self.at(ease, now)
+    }
+}
+
+/// CSS `ease`, cubic-bezier(0.25, 0.1, 0.25, 1).
+fn css_ease(x: f32) -> f32 {
+    let (x1, y1, x2, y2) = (0.25f32, 0.1f32, 0.25f32, 1f32);
+    let at = |a: f32, b: f32, t: f32| 3. * a * (1. - t) * (1. - t) * t + 3. * b * (1. - t) * t * t + t * t * t;
+    let slope = |a: f32, b: f32, t: f32| 3. * a * (1. - t) * (1. - t) + 6. * (b - a) * (1. - t) * t + 3. * (1. - b) * t * t;
+    let mut t = x;
+    for _ in 0..8 {
+        let d = slope(x1, x2, t);
+        if d.abs() < 1e-6 {
+            break;
+        }
+        t = (t - (at(x1, x2, t) - x) / d).clamp(0., 1.);
+    }
+    at(y1, y2, t)
+}
+
+fn mix_color(a: crate::Hsla, b: crate::Hsla, t: f32) -> crate::Hsla {
+    use crate::{Hsla, Rgba};
+    let (a, b) = (Rgba::from(a), Rgba::from(b));
+    // Premultiplied, as CSS interpolates: a transparent end takes the other's hue.
+    let alpha = a.a + (b.a - a.a) * t;
+    let ch = |x: f32, y: f32| if alpha <= 0. { 0. } else { ((x * a.a) + ((y * b.a) - (x * a.a)) * t) / alpha };
+    Hsla::from(Rgba { r: ch(a.r, b.r), g: ch(a.g, b.g), b: ch(a.b, b.b), a: alpha })
+}
+
+fn mix_opt(a: Option<crate::Hsla>, b: Option<crate::Hsla>, t: f32) -> Option<crate::Hsla> {
+    use crate::Hsla;
+    match (a, b) {
+        (None, None) => None,
+        (a, b) => {
+            let a = a.unwrap_or_else(|| b.map_or(Hsla::transparent_black(), |b| b.opacity(0.)));
+            let b = b.unwrap_or_else(|| a.opacity(0.));
+            Some(mix_color(a, b, t))
+        }
+    }
+}
+
+/// `a` toward `b`: colours and opacity in between, the rest from whichever is nearer.
+fn blend_style(a: &Style, b: &Style, t: f32) -> Style {
+    use crate::Fill;
+    if t <= 0. {
+        return a.clone();
+    }
+    if t >= 1. {
+        return b.clone();
+    }
+    let mut out = if t < 0.5 { a.clone() } else { b.clone() };
+    let solid = |f: &Option<Fill>| f.as_ref().and_then(|f| f.color()?.as_solid());
+    let (fa, fb) = (solid(&a.background), solid(&b.background));
+    let gradient = |f: &Option<Fill>| f.is_some() && solid(f).is_none();
+    if !gradient(&a.background) && !gradient(&b.background) {
+        out.background = mix_opt(fa, fb, t).map(|c| Fill::from(c));
+    }
+    out.border_color = mix_opt(a.border_color, b.border_color, t);
+    out.text.color = mix_opt(a.text.color, b.text.color, t);
+    if a.opacity.is_some() || b.opacity.is_some() {
+        let (oa, ob) = (a.opacity.unwrap_or(1.), b.opacity.unwrap_or(1.));
+        out.opacity = Some(oa + (ob - oa) * t);
+    }
+    out
 }
 
 /// Whether or not the element or a group that contains it is clicked by the mouse.

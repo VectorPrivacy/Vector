@@ -58,6 +58,17 @@ struct Picker {
     rows: Vec<crate::switcher::Row>,
     active: Option<String>,
     open: bool,
+    /// Times the list opened or closed: the chevron turns only on a change, keyed by this.
+    flips: u64,
+}
+
+impl Picker {
+    fn set_open(&mut self, open: bool) {
+        if self.open != open {
+            self.open = open;
+            self.flips += 1;
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -231,7 +242,7 @@ impl LoginView {
     ) {
         self.picker = (rows.len() >= 2 && self.adding.is_none()).then(|| {
             let active = active.filter(|a| rows.iter().any(|r| &r.npub == a));
-            Picker { rows, active, open }
+            Picker { rows, active, open, flips: 0 }
         });
         cx.notify();
     }
@@ -277,7 +288,7 @@ impl LoginView {
                 .when(!self.busy, |d| {
                     d.on_click(cx.listener(|this, _, _, cx| {
                         if let Some(p) = this.picker.as_mut() {
-                            p.open = !p.open;
+                            p.set_open(!p.open);
                         }
                         cx.notify();
                     }))
@@ -291,12 +302,24 @@ impl LoginView {
                         .text_size(px(20.))
                         .line_height(px(24.)),
                 )
-                .child(if p.open {
-                    chevron.with_transformation(gpui::Transformation::rotate(gpui::radians(
-                        std::f32::consts::PI,
-                    )))
-                } else {
-                    chevron
+                // `.lg-account-chevron`: a half turn over 0.16 s as the list opens or closes.
+                .child({
+                    let open = p.open;
+                    let turned = move |c: gpui::Svg, t: f32| {
+                        let t = if open { t } else { 1. - t };
+                        c.with_transformation(gpui::Transformation::rotate(gpui::radians(std::f32::consts::PI * t)))
+                    };
+                    if p.flips == 0 {
+                        turned(chevron, 1.).into_any_element()
+                    } else {
+                        chevron
+                            .with_animation(
+                                gpui::ElementId::NamedInteger("lg-chevron".into(), p.flips),
+                                gpui::Animation::new(std::time::Duration::from_millis(160)).with_easing(gpui::ease_in_out),
+                                turned,
+                            )
+                            .into_any_element()
+                    }
                 })
                 .into_any_element(),
         )
@@ -338,7 +361,7 @@ impl LoginView {
                     .hover(|s| s.bg(ca(89, 252, 179, 0.1)).border_color(c(ACCENT)))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         if let Some(p) = this.picker.as_mut() {
-                            p.open = false;
+                            p.set_open(false);
                         }
                         cx.emit(PickAccount(npub.clone()));
                         cx.notify();
@@ -385,7 +408,7 @@ impl LoginView {
                         .bg(ca(3, 3, 3, 0.9))
                         .on_click(cx.listener(|this, _, _, cx| {
                             if let Some(p) = this.picker.as_mut() {
-                                p.open = false;
+                                p.set_open(false);
                             }
                             cx.notify();
                         })),
@@ -1258,7 +1281,9 @@ impl LoginView {
                         .mt(px(8.))
                         .text_size(px(24.))
                         .font_weight(FontWeight::BOLD),
-                    ),
+                    )
+                    // `.lg-aggro`: comes in over 0.32 s (Tauri also scales it up, which a div can't).
+                    .with_animation("lg-aggro-in", gpui::Animation::new(std::time::Duration::from_millis(320)).with_easing(gpui::ease_out_quint()), |d, t| d.opacity(t)),
             );
         } else if self.busy {
             window.request_animation_frame();
@@ -1402,7 +1427,9 @@ impl Render for LoginView {
                     .child(face("icons/login/aggro-bg-1.svg", 0.494, 0.669, 226., 224.))
                     .child(face("icons/login/aggro-bg-2.svg", 0.02, 0.122, 128., 127.))
                     .child(face("icons/login/aggro-bg-3.svg", 0.857, 0.445, 98., 97.))
-                    .child(face("icons/login/aggro-bg-4.svg", 0.051, 0.823, 60., 59.)),
+                    .child(face("icons/login/aggro-bg-4.svg", 0.051, 0.823, 60., 59.))
+                    // `.lg-aggro-bg`: fades in over 0.4 s.
+                    .with_animation("lg-aggro-bg", gpui::Animation::new(std::time::Duration::from_millis(400)).with_easing(gpui::ease_in_out), |d, t| d.opacity(t)),
             );
         }
 

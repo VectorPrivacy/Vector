@@ -1,7 +1,7 @@
 //! Small pieces many screens share: letter-spaced and gradient text, the `.vselect`
 //! dropdown, the popup dialog and Vector's buttons.
 
-use gpui::{AnyElement, App, ElementId, FontWeight, Hsla, IntoElement, ParentElement, SharedString, Styled, Window, div, prelude::*, px};
+use gpui::{AnimationExt, AnyElement, App, ElementId, FontWeight, Hsla, IntoElement, ParentElement, SharedString, Styled, Window, div, prelude::*, px};
 use crate::pic::img;
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -585,7 +585,13 @@ pub fn popup(
             .px(px(10.))
             .bg(ca(0, 0, 0, 0.85))
             .occlude()
-            .child(card),
+            .child(card)
+            // `.popup-container`: the dimming fades in over 0.2 s; the card itself shows at once.
+            .with_animation(
+                "popup-dim",
+                gpui::Animation::new(std::time::Duration::from_millis(200)).with_easing(gpui::ease_in_out),
+                |d, t| d.bg(ca(0, 0, 0, 0.85 * t)),
+            ),
     )
     // Above every modal a popup can be asked from (Invite People, Community Settings, ...).
     .with_priority(15)

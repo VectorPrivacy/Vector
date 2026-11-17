@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use futures::StreamExt;
-use gpui::{AnyElement, ClipboardItem, Context, Entity, Focusable, FontWeight, InteractiveElement, IntoElement, ParentElement, RenderImage, SharedString, StatefulInteractiveElement, Styled, Window, div, prelude::FluentBuilder, px};
+use gpui::{AnimationExt, AnyElement, ClipboardItem, Context, Entity, Focusable, FontWeight, InteractiveElement, IntoElement, ParentElement, RenderImage, SharedString, StatefulInteractiveElement, Styled, Window, div, prelude::FluentBuilder, px};
 use crate::pic::img;
 
 use super::LoginView;
@@ -511,6 +511,8 @@ impl LoginView {
                 .occlude()
                 .on_mouse_down(gpui::MouseButton::Left, cx.listener(|this, _, _, cx| this.signer_close_qr(cx)))
                 .child(card)
+                // `.lg-qr-overlay` and its card: fade in over 0.16 s.
+                .with_animation("lg-qr-in", gpui::Animation::new(std::time::Duration::from_millis(160)).with_easing(gpui::ease_out_quint()), |d, t| d.opacity(t))
                 .into_any_element(),
         )
     }
