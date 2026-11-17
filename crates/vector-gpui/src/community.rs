@@ -606,6 +606,7 @@ pub fn sidebar(
                 d.child(
                     div()
                         .id(SharedString::from(format!("cat-add-{}", cat.category_id)))
+                        .tooltip(crate::kit::tooltip(format!("Add a channel to {}", cat.name)))
                         .size(px(22.))
                         .rounded(px(6.))
                         .flex()
@@ -1359,6 +1360,8 @@ pub fn invite_details(
     let now = (store.now_ms() / 1000) as i64;
     let person = |npub: &String| {
         div()
+            .id(SharedString::from(format!("invite-person-{npub}")))
+            .tooltip(crate::kit::tooltip(npub.clone()))
             .flex()
             .items_center()
             .gap(px(8.))
@@ -1485,6 +1488,8 @@ pub fn invite_details(
                     false,
                     sent.0,
                     div()
+                        .id("invite-sent")
+                        .tooltip(crate::kit::tooltip(crate::texttime::full(sent.1, false)))
                         .child(crate::util::relative_time(sent.1, now))
                         .into_any_element(),
                 ))
@@ -1492,6 +1497,8 @@ pub fn invite_details(
                     false,
                     "Expires",
                     div()
+                        .id("invite-ends")
+                        .tooltip(crate::kit::tooltip(crate::texttime::full(inv.ends_at, false)))
                         .child(crate::util::relative_time(inv.ends_at, now))
                         .into_any_element(),
                 )),

@@ -2593,6 +2593,8 @@ fn relays_block(s: &Settings, on: &OnAct) -> AnyElement {
             )
             .child(
                 div()
+                    .id("relay-url")
+                    .tooltip(crate::kit::tooltip(r.url.clone()))
                     .flex_1()
                     .min_w_0()
                     .truncate()
@@ -2645,6 +2647,8 @@ fn servers_block(s: &Settings, on: &OnAct) -> AnyElement {
             .child(origin_pill(sv.is_default))
             .child(
                 div()
+                    .id("server-url")
+                    .tooltip(crate::kit::tooltip(sv.url.clone()))
                     .flex_1()
                     .min_w_0()
                     .truncate()
@@ -2832,6 +2836,8 @@ fn signer_card(npub: &str, dot: &str, on: &OnAct) -> AnyElement {
                 .child(div().w(px(70.)).flex_none().text_color(white_a(0.45)).child("Signer key"))
                 .child(
                     div()
+                        .id("signer-npub")
+                        .tooltip(crate::kit::tooltip(npub.to_string()))
                         .flex_1()
                         .font_family(crate::markdown::MONO)
                         .text_size(px(10.6))

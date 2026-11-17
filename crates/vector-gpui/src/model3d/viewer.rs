@@ -404,6 +404,7 @@ impl Render for ModelViewer {
         if let Some(f) = self.file {
             controls = controls.child(
                 round_button("model-viewer-file")
+                    .tooltip(crate::kit::tooltip(if f == FileAction::Reveal { "Show in folder" } else { "Save" }))
                     .p(px(9.))
                     .on_click(cx.listener(|_, _, _, cx| cx.emit(Event::File)))
                     .child(svg().path(if f == FileAction::Reveal { "ui/mv-reveal.svg" } else { "ui/mv-save.svg" }).size_full().text_color(c(0xffffff))),
@@ -411,6 +412,7 @@ impl Render for ModelViewer {
         }
         controls = controls.child(
             round_button("model-viewer-reset")
+                .tooltip(crate::kit::tooltip("Reset view"))
                 .p(px(9.))
                 .on_click(cx.listener(|v, _, _, cx| {
                     v.view.reset();

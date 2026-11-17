@@ -717,15 +717,17 @@ pub fn view(
                     let i = r.index;
                     let pick = pick.clone();
                     let on = i == *active;
-                    let face = r.show_bot.then(|| {
-                        if r.cmd.is_system() {
-                            avatar(&Face::Mark)
-                        } else {
-                            avatar(&bot_face(&r.cmd.bot).1.map_or(Face::Placeholder, Face::Path))
-                        }
-                    });
+                    let (face, tip) = if !r.show_bot {
+                        (None, None)
+                    } else if r.cmd.is_system() {
+                        (Some(avatar(&Face::Mark)), Some(SharedString::from("Vector")))
+                    } else {
+                        let (name, path) = bot_face(&r.cmd.bot);
+                        (Some(avatar(&path.map_or(Face::Placeholder, Face::Path))), Some(name))
+                    };
                     div()
                         .id(SharedString::from(format!("cmd-{}", r.cmd.key())))
+                        .when_some(tip, |d, t| d.tooltip(crate::kit::tooltip(t)))
                         .relative()
                         .flex()
                         .flex_wrap()
@@ -806,7 +808,11 @@ pub fn view(
                                 .text_color(gpui::white())
                                 .child(format!("/{}", h.cmd.name)),
                         )
-                        .children(h.cmd.args.iter().enumerate().map(|(i, a)| arg_chip(&a.name, !a.required, i == h.current)))
+                        .children(h.cmd.args.iter().enumerate().map(|(i, a)| {
+                            arg_chip(&a.name, !a.required, i == h.current)
+                                .id(SharedString::from(format!("hint-arg-{i}")))
+                                .when(!a.description.is_empty(), |d| d.tooltip(crate::kit::tooltip(a.description.clone())))
+                        }))
                         .when(!h.cmd.description.is_empty(), |d| {
                             d.child(
                                 div()

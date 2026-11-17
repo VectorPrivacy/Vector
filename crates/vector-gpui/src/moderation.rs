@@ -782,7 +782,7 @@ fn mod_btn(
     live: bool,
     on: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
     narrow: bool,
-) -> impl IntoElement {
+) -> gpui::Stateful<gpui::Div> {
     let red = c(crate::timeline::DANGER);
     div()
         .id(id)
@@ -934,7 +934,11 @@ fn foot(m: &Moderation, narrow: bool, on: &OnAct) -> impl IntoElement {
                     idle && cut > 0 && !over,
                     click(on, || Act::BanRotate),
                     narrow,
-                )),
+                )
+                .when(over && m.intel.is_some(), |d| {
+                    let room = max.saturating_sub(count);
+                    d.tooltip(crate::kit::tooltip(format!("The banlist holds {max}; only {room} slots are free. Rotate instead: it has no ceiling.")))
+                })),
         )
 }
 

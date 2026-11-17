@@ -534,6 +534,8 @@ fn relay(
                         }))
                         .child(
                             div()
+                                .id("relay-info-url")
+                                .tooltip(crate::kit::tooltip(row.url.clone()))
                                 .min_w_0()
                                 .truncate()
                                 .text_size(px(13.))
@@ -697,6 +699,8 @@ fn server(
     let bare = host.to_string();
     let mut body = div().pt(px(16.)).px(px(20.)).pb(px(20.)).flex().flex_col().gap(px(10.)).child(
         div()
+            .id("server-info-url")
+            .tooltip(crate::kit::tooltip(info.url.clone()))
             .truncate()
             .text_size(px(13.))
             .line_height(px(24.))

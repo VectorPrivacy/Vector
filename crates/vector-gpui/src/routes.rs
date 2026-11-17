@@ -449,7 +449,7 @@ pub fn alias_field(a: &Alias, book: &RouteBook, on: impl Fn(AliasAct, &mut Windo
                 .mt(px(8.))
                 .flex()
                 .gap(px(8.))
-                .child(div().flex_1().min_w_0().truncate().font_family(MONO).text_size(px(12.)).line_height(px(38.)).text_color(white_a(0.45)).child(saved.clone()))
+                .child(div().id("alias-saved").tooltip(crate::kit::tooltip(saved.clone())).flex_1().min_w_0().truncate().font_family(MONO).text_size(px(12.)).line_height(px(38.)).text_color(white_a(0.45)).child(saved.clone()))
                 .child(button("alias-remove-row", "Remove", false, !a.busy).when(!a.busy, |d| d.on_click(act(|| AliasAct::Remove)))),
         );
     }

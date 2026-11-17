@@ -687,6 +687,7 @@ fn glyph(g: &Glyph, size: f32) -> AnyElement {
 fn tile(
     id: SharedString,
     label: String,
+    titled: bool,
     sub: Option<&str>,
     g: AnyElement,
     plate: bool,
@@ -694,6 +695,7 @@ fn tile(
     list: bool,
     on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
 ) -> AnyElement {
+    let tip = titled.then(|| label.clone());
     if list {
         let mut text = div().flex().flex_col().min_w_0().child(
             div()
@@ -716,6 +718,7 @@ fn tile(
         }
         return div()
             .id(id)
+            .when_some(tip, |d, t| d.tooltip(crate::kit::tooltip(t)))
             .flex()
             .items_center()
             .gap(px(12.))
@@ -741,6 +744,7 @@ fn tile(
     let group = SharedString::from(format!("{id}-g"));
     div()
         .id(id)
+        .when_some(tip, |d, t| d.tooltip(crate::kit::tooltip(t)))
         .group(group.clone())
         .min_w_0()
         .flex()
@@ -1120,6 +1124,7 @@ pub fn render(sm: &StartMenu, store: &Store, window: &Window, on: &OnAct, cx: &A
                 let t = tile(
                     SharedString::from(format!("stm-pin-{ix}")),
                     r.label,
+                    true,
                     Some(r.sub.as_str()).filter(|s| !s.is_empty()),
                     glyph(
                         &r.glyph,
@@ -1179,6 +1184,7 @@ pub fn render(sm: &StartMenu, store: &Store, window: &Window, on: &OnAct, cx: &A
                 let t = tile(
                     SharedString::from(format!("stm-folder-{ix}")),
                     label,
+                    false,
                     Some("Folder"),
                     grid.into_any_element(),
                     true,
@@ -1216,6 +1222,7 @@ pub fn render(sm: &StartMenu, store: &Store, window: &Window, on: &OnAct, cx: &A
         tiles.push(tile(
             "stm-add".into(),
             "Add Pin".into(),
+            false,
             None,
             add,
             true,
@@ -1263,6 +1270,7 @@ pub fn render(sm: &StartMenu, store: &Store, window: &Window, on: &OnAct, cx: &A
                 tile(
                     SharedString::from(format!("stm-acct-{ix}")),
                     label,
+                    true,
                     Some(&sub),
                     pic.into_any_element(),
                     false,
@@ -1287,6 +1295,7 @@ pub fn render(sm: &StartMenu, store: &Store, window: &Window, on: &OnAct, cx: &A
             tiles.push(tile(
                 "stm-add-acct".into(),
                 "Add Account".into(),
+                false,
                 None,
                 add,
                 true,

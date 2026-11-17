@@ -617,7 +617,11 @@ impl VectorApp {
                         field()
                             .flex_1()
                             .child(label("Version", false))
-                            .child(if editing { fixed(&f.version) } else { boxed(&f.version, false) }),
+                            .child(if editing {
+                                fixed(&f.version).id("pub-version").tooltip(crate::kit::tooltip("A new version is a new upload")).into_any_element()
+                            } else {
+                                boxed(&f.version, false).into_any_element()
+                            }),
                     )
                     .child(
                         field().child(label("Kind", false)).child(

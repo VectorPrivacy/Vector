@@ -331,6 +331,8 @@ impl VectorApp {
             .gap(px(2.))
             .child(
                 div()
+                    .id("popout-title")
+                    .tooltip(crate::kit::tooltip(title.clone()))
                     .text_size(px(14.72))
                     .line_height(px(18.4))
                     .font_weight(gpui::FontWeight::SEMIBOLD)

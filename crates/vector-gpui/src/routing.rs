@@ -606,6 +606,7 @@ fn card(r: &Routing, viewed: &str, phone: bool, on: &OnAct) -> AnyElement {
         let k = viewed.to_string();
         div()
             .id("net-use")
+            .when_some(hold_why, |d, why| d.tooltip(crate::kit::tooltip(why)))
             .flex_shrink_0()
             .h(px(32.))
             .px(px(16.))
@@ -1004,7 +1005,7 @@ pub fn hops(hops: &[Value]) -> AnyElement {
                     "" => "—".to_string(),
                     a => a.to_string(),
                 }))
-                .when(!fp.is_empty(), |d| d.child(div().font_family(MONO).text_size(px(11.)).text_color(white_a(0.42)).child(format!("{}…", &fp[..fp.len().min(8)])))),
+                .when(!fp.is_empty(), |d| d.child(div().id(SharedString::from(format!("hop-fp-{fp}"))).tooltip(crate::kit::tooltip(fp.to_string())).font_family(MONO).text_size(px(11.)).text_color(white_a(0.42)).child(format!("{}…", &fp[..fp.len().min(8)])))),
         );
     }
     list.into_any_element()
@@ -1454,8 +1455,11 @@ fn outproxies(r: &Routing, cfg: &Value, v: &Value, on: &OnAct) -> AnyElement {
                     .child(div().overflow_hidden().whitespace_nowrap().text_ellipsis().font_family(MONO).text_size(px(11.5)).line_height(px(14.4)).text_color(white_a(0.42)).child(format!("{short}:{}", o.get("port").and_then(Value::as_u64).unwrap_or(0)))),
             )
             .when(health.is_some(), |d| {
+                let tip = [why.as_deref(), stale.then_some("Last known. I2P isn't connected.")].into_iter().flatten().collect::<Vec<_>>().join(" ");
                 d.child(
                     div()
+                        .id(SharedString::from(format!("op-health-{i}")))
+                        .when(!tip.is_empty(), |d| d.tooltip(crate::kit::tooltip(tip)))
                         .flex()
                         .items_center()
                         .gap(px(6.))
@@ -1484,8 +1488,12 @@ fn outproxies(r: &Routing, cfg: &Value, v: &Value, on: &OnAct) -> AnyElement {
                         .child(svg().path("ui/op-remove.svg").size(px(10.)).text_color(white_a(0.45))),
                 )
             })
-            .child(switch("op-toggle", enabled, !busy, on, move || NetAct::OpToggle(i, !enabled)));
-        let _ = why;
+            .child(
+                div()
+                    .id(SharedString::from(format!("op-toggle-tip-{i}")))
+                    .tooltip(crate::kit::tooltip(if enabled { "On" } else { "Off" }))
+                    .child(switch("op-toggle", enabled, !busy, on, move || NetAct::OpToggle(i, !enabled))),
+            );
         rows = rows.child(row);
     }
     let mut col = div().mb(px(4.)).flex().flex_col().child(head).child(rows);

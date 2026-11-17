@@ -394,9 +394,9 @@ fn share(m: &CreateCommunity, narrow: bool, on: &OnAct) -> impl IntoElement {
                 .when(narrow, |d| d.w_full().items_center())
                 .child(crate::kit::spaced("INVITE LINK", 0.99).font_weight(FontWeight::BOLD).text_size(px(11.)).line_height(px(24.)).text_color(c(0x8a8a8a)))
                 .child(match (&m.link, &m.link_error) {
-                    (Some(link), _) => div().mt(px(10.)).map(|d| if narrow { d.flex_none().whitespace_nowrap() } else { d.truncate() }).font_weight(FontWeight::MEDIUM).text_size(px(15.)).line_height(px(24.)).text_color(c(0xffffff)).child(pretty(link)),
-                    (None, Some(e)) => div().mt(px(10.)).text_size(px(13.)).line_height(px(18.)).text_color(c(crate::timeline::DANGER)).child(format!("Couldn't create the link. {e}")),
-                    (None, None) => div().mt(px(10.)).text_size(px(13.)).line_height(px(24.)).text_color(white_a(0.55)).child(m.progress.as_ref().map(|p| p.0.clone()).unwrap_or_else(|| "Getting ready".into())),
+                    (Some(link), _) => div().id("cg-share-url").tooltip(crate::kit::tooltip(link.to_string())).mt(px(10.)).map(|d| if narrow { d.flex_none().whitespace_nowrap() } else { d.truncate() }).font_weight(FontWeight::MEDIUM).text_size(px(15.)).line_height(px(24.)).text_color(c(0xffffff)).child(pretty(link)),
+                    (None, Some(e)) => div().id("cg-share-status").mt(px(10.)).text_size(px(13.)).line_height(px(18.)).text_color(c(crate::timeline::DANGER)).child(format!("Couldn't create the link. {e}")),
+                    (None, None) => div().id("cg-share-status").mt(px(10.)).text_size(px(13.)).line_height(px(24.)).text_color(white_a(0.55)).child(m.progress.as_ref().map(|p| p.0.clone()).unwrap_or_else(|| "Getting ready".into())),
                 })
                 .child(
                     div().mt(px(10.)).flex().gap(px(8.)).map(|d| {

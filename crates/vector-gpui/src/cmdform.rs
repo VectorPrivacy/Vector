@@ -361,7 +361,10 @@ impl Render for CommandForm {
                 Field::Text(t) => {
                     let chars = t.read(cx).text().chars().count().max(if p.arg.kind == ArgType::User { 6 } else { 0 });
                     let w = (chars as f32 * 7.4 + 26.).clamp(72., 34. * 7.4);
+                    let tip = p.arg.description.clone();
                     div()
+                        .id(SharedString::from(format!("cmd-field-{i}")))
+                        .when(!tip.is_empty(), |d| d.tooltip(crate::kit::tooltip(tip)))
                         .bg(ca(0, 0, 0, 0.35))
                         .rounded(px(7.))
                         .px(px(8.))
@@ -375,8 +378,10 @@ impl Render for CommandForm {
                 }
                 Field::Pick { focus, value } => {
                     let focus = focus.clone();
+                    let tip = if value.is_empty() { p.arg.description.clone() } else { value.clone() };
                     div()
                         .id(SharedString::from(format!("cmd-pick-{i}")))
+                        .when(!tip.is_empty(), |d| d.tooltip(crate::kit::tooltip(tip)))
                         .track_focus(&focus)
                         .relative()
                         .flex()
@@ -425,6 +430,7 @@ impl Render for CommandForm {
                 let rows = m.options.iter().enumerate().map(|(k, (v, label, face))| {
                     div()
                         .id(SharedString::from(format!("cmd-opt-{k}")))
+                        .tooltip(crate::kit::tooltip(label.clone()))
                         .flex()
                         .items_center()
                         .gap(px(8.))

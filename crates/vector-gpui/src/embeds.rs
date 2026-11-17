@@ -1243,8 +1243,10 @@ fn poster_in(env: &Env, short: bool, image: Option<&str>, video: Option<Media>, 
                     _ => d.child(svg().path("icons/play.svg").size(px(26.)).text_color(c(0xffffff))),
                 }),
         )
-        .children(failed.map(|_| {
+        .children(failed.map(|e| {
             div()
+                .id("ne-video-error")
+                .tooltip(crate::kit::tooltip(e))
                 .absolute()
                 .left(px(8.))
                 .right(px(8.))
