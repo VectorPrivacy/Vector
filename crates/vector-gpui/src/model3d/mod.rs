@@ -295,6 +295,7 @@ mod tests {
     fn renders_sample_models() {
         let Ok(dir) = std::env::var("MODEL3D_DIR") else { return };
         let mut g = super::gpu::Gpu::new().expect("gpu");
+        eprintln!("direct path: {}", g.is_direct());
         for e in std::fs::read_dir(&dir).unwrap().flatten() {
             let p = e.path();
             let ext = p.extension().and_then(|e| e.to_str()).unwrap_or_default().to_ascii_lowercase();

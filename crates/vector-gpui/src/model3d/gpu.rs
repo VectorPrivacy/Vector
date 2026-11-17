@@ -66,7 +66,35 @@ pub struct Gpu {
     obj_buf: wgpu::Buffer,
     joint_buf: wgpu::Buffer,
     obj_bind: wgpu::BindGroup,
+    /// Per-frame data is written straight into GPU-visible memory and frames come back through a
+    /// fragment pass: no copy pass, which costs its own driver pool on Apple GPUs.
+    direct: Option<Readback>,
 }
+
+struct Readback {
+    layout: wgpu::BindGroupLayout,
+    pipeline: wgpu::RenderPipeline,
+}
+
+const READBACK: &str = r#"
+@group(0) @binding(0) var src: texture_2d<f32>;
+@group(0) @binding(1) var<storage, read_write> dst: array<u32>;
+
+@vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
+    let p = vec2<f32>(f32((i << 1u) & 2u), f32(i & 2u));
+    return vec4<f32>(p * 2.0 - 1.0, 0.0, 1.0);
+}
+
+// Straight-alpha BGRA, as the CPU path un-premultiplies it.
+@fragment fn fs(@builtin(position) at: vec4<f32>) {
+    let xy = vec2<u32>(at.xy);
+    var q = vec4<u32>(round(clamp(textureLoad(src, xy, 0), vec4<f32>(0.0), vec4<f32>(1.0)) * 255.0));
+    if q.a != 0u && q.a != 255u {
+        q = vec4<u32>(vec3<u32>(min(round(vec3<f32>(q.rgb) * (255.0 / f32(q.a))), vec3<f32>(255.0))), q.a);
+    }
+    dst[xy.y * textureDimensions(src).x + xy.x] = q.b | (q.g << 8u) | (q.r << 16u) | (q.a << 24u);
+}
+"#;
 
 struct Part {
     vbuf: wgpu::Buffer,
@@ -133,6 +161,8 @@ pub struct Target {
     resolve: wgpu::Texture,
     readback: wgpu::Buffer,
     stride: u32,
+    /// The direct path's memoryless attachment and the bindings its readback pass draws with.
+    sink: Option<(wgpu::TextureView, wgpu::BindGroup)>,
 }
 
 impl Target {
@@ -193,7 +223,7 @@ impl Gpu {
     pub fn new() -> Result<Self, String> {
         #[cfg(target_os = "linux")]
         if let Some((device, queue)) = gpui_wgpu::shared_device() {
-            return Ok(Self::with(device, queue));
+            return Ok(Self::with(device, queue, false));
         }
         pollster::block_on(async {
             // The platform's own API first; GL only without one, as bringing up both costs memory.
@@ -220,9 +250,14 @@ impl Gpu {
                 }
             }
             let adapter = adapter?;
+            // Unified memory makes mapped buffers free; elsewhere it is opt-in, for testing.
+            let wanted = std::env::var_os("MODEL3D_DIRECT").map_or(cfg!(target_os = "macos"), |v| v != "0");
+            let direct = wanted
+                && adapter.features().contains(wgpu::Features::MAPPABLE_PRIMARY_BUFFERS)
+                && adapter.get_downlevel_capabilities().flags.contains(wgpu::DownlevelFlags::FRAGMENT_WRITABLE_STORAGE);
             let desc = wgpu::DeviceDescriptor {
                 label: Some("model3d"),
-                required_features: wgpu::Features::empty(),
+                required_features: if direct { wgpu::Features::MAPPABLE_PRIMARY_BUFFERS } else { wgpu::Features::empty() },
                 required_limits: wgpu::Limits::downlevel_defaults().using_resolution(adapter.limits()).using_alignment(adapter.limits()),
                 memory_hints: wgpu::MemoryHints::MemoryUsage,
                 trace: wgpu::Trace::Off,
@@ -231,14 +266,14 @@ impl Gpu {
             };
             #[cfg(target_os = "macos")]
             if let Some((device, queue)) = small_queue(&adapter, &desc) {
-                return Ok(Self::with(device, queue));
+                return Ok(Self::with(device, queue, direct));
             }
             let (device, queue) = adapter.request_device(&desc).await.map_err(|e| e.to_string())?;
-            Ok(Self::with(device, queue))
+            Ok(Self::with(device, queue, direct))
         })
     }
 
-    fn with(device: wgpu::Device, queue: wgpu::Queue) -> Self {
+    fn with(device: wgpu::Device, queue: wgpu::Queue, direct: bool) -> Self {
         let tex_entry = |b: u32, vis: wgpu::ShaderStages| wgpu::BindGroupLayoutEntry {
             binding: b,
             visibility: vis,
@@ -359,7 +394,7 @@ impl Gpu {
             mipmap_filter: wgpu::MipmapFilterMode::Linear,
             ..Default::default()
         });
-        let frame_buf = device.create_buffer(&wgpu::BufferDescriptor { label: Some("model3d frame"), size: std::mem::size_of::<FrameU>() as u64, usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+        let frame_buf = Self::buffer(&device, direct, "model3d frame", std::mem::size_of::<FrameU>() as u64, wgpu::BufferUsages::UNIFORM);
         let frame_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("model3d frame"),
             layout: &frame_layout,
@@ -370,13 +405,98 @@ impl Gpu {
             ],
         });
         let white = Self::texture(&device, &queue, 1, 1, &[255; 4], true).create_view(&wgpu::TextureViewDescriptor::default());
-        let (obj_buf, joint_buf, obj_bind) = Self::object_buffers(&device, &obj_layout, 64, 256);
-        Self { device, queue, mat_layout, obj_layout, pipelines, frame_buf, frame_bind, env_lod: (levels.len() - 1) as f32, white, obj_buf, joint_buf, obj_bind }
+        let (obj_buf, joint_buf, obj_bind) = Self::object_buffers(&device, direct, &obj_layout, 64, 256);
+        let direct = direct.then(|| Self::readback(&device));
+        Self { device, queue, mat_layout, obj_layout, pipelines, frame_buf, frame_bind, env_lod: (levels.len() - 1) as f32, white, obj_buf, joint_buf, obj_bind, direct }
     }
 
-    fn object_buffers(device: &wgpu::Device, layout: &wgpu::BindGroupLayout, objects: u64, joints: u64) -> (wgpu::Buffer, wgpu::Buffer, wgpu::BindGroup) {
-        let obj = device.create_buffer(&wgpu::BufferDescriptor { label: Some("model3d objects"), size: objects * OBJ_STRIDE, usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
-        let joint = device.create_buffer(&wgpu::BufferDescriptor { label: Some("model3d joints"), size: joints * 64, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+    #[cfg(test)]
+    pub fn is_direct(&self) -> bool {
+        self.direct.is_some()
+    }
+
+    fn readback(device: &wgpu::Device) -> Readback {
+        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("model3d readback"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Float { filterable: false }, view_dimension: wgpu::TextureViewDimension::D2, multisampled: false },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: None },
+                    count: None,
+                },
+            ],
+        });
+        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("model3d readback"), source: wgpu::ShaderSource::Wgsl(READBACK.into()) });
+        let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("model3d readback"), bind_group_layouts: &[Some(&layout)], immediate_size: 0 });
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("model3d readback"),
+            layout: Some(&pl),
+            vertex: wgpu::VertexState { module: &module, entry_point: Some("vs"), buffers: &[], compilation_options: wgpu::PipelineCompilationOptions::default() },
+            fragment: Some(wgpu::FragmentState {
+                module: &module,
+                entry_point: Some("fs"),
+                targets: &[Some(wgpu::ColorTargetState { format: COLOR, blend: None, write_mask: wgpu::ColorWrites::empty() })],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+        Readback { layout, pipeline }
+    }
+
+    /// A buffer the CPU fills each frame: mapped in place on the direct path, else staged.
+    fn buffer(device: &wgpu::Device, direct: bool, label: &str, size: u64, usage: wgpu::BufferUsages) -> wgpu::Buffer {
+        let usage = usage | if direct { wgpu::BufferUsages::MAP_WRITE } else { wgpu::BufferUsages::COPY_DST };
+        let b = device.create_buffer(&wgpu::BufferDescriptor { label: Some(label), size, usage, mapped_at_creation: direct });
+        if direct {
+            b.unmap();
+        }
+        b
+    }
+
+    /// Fills buffers from `buffer` before a frame's submit.
+    fn put(&self, writes: &[(&wgpu::Buffer, &[u8])]) -> Result<(), String> {
+        if self.direct.is_none() {
+            for (b, data) in writes {
+                self.queue.write_buffer(b, 0, data);
+            }
+            return Ok(());
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        for (i, (b, data)) in writes.iter().enumerate() {
+            let tx = tx.clone();
+            b.slice(..(data.len() as u64).next_multiple_of(4)).map_async(wgpu::MapMode::Write, move |r| {
+                let _ = tx.send((i, r));
+            });
+        }
+        drop(tx);
+        self.device.poll(wgpu::PollType::Wait { submission_index: None, timeout: Some(std::time::Duration::from_secs(10)) }).map_err(|e| e.to_string())?;
+        for (_, r) in rx.iter() {
+            r.map_err(|e| e.to_string())?;
+        }
+        for (b, data) in writes {
+            {
+                let mut view = b.slice(..(data.len() as u64).next_multiple_of(4)).get_mapped_range_mut().map_err(|e| e.to_string())?;
+                view.slice(..data.len()).copy_from_slice(data);
+            }
+            b.unmap();
+        }
+        Ok(())
+    }
+
+    fn object_buffers(device: &wgpu::Device, direct: bool, layout: &wgpu::BindGroupLayout, objects: u64, joints: u64) -> (wgpu::Buffer, wgpu::Buffer, wgpu::BindGroup) {
+        let obj = Self::buffer(device, direct, "model3d objects", objects * OBJ_STRIDE, wgpu::BufferUsages::UNIFORM);
+        let joint = Self::buffer(device, direct, "model3d joints", joints * 64, wgpu::BufferUsages::STORAGE);
         let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("model3d objects"),
             layout,
@@ -511,7 +631,8 @@ impl Gpu {
                             })
                             .collect();
                         let morphed = !p.targets.is_empty();
-                        let usage = if morphed { wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST } else { wgpu::BufferUsages::VERTEX };
+                        let refill = if self.direct.is_some() { wgpu::BufferUsages::MAP_WRITE } else { wgpu::BufferUsages::COPY_DST };
+                        let usage = if morphed { wgpu::BufferUsages::VERTEX | refill } else { wgpu::BufferUsages::VERTEX };
                         Part {
                             vbuf: self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("model3d vertices"), contents: bytemuck::cast_slice(&verts), usage }),
                             ibuf: self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("model3d indices"), contents: bytemuck::cast_slice(&p.idx), usage: wgpu::BufferUsages::INDEX }),
@@ -543,6 +664,30 @@ impl Gpu {
                 view_formats: &[],
             })
         };
+        if let Some(rb) = &self.direct {
+            let resolve = tex(COLOR, 1, wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING);
+            let readback = self.device.create_buffer(&wgpu::BufferDescriptor { label: Some("model3d readback"), size: (w * h * 4) as u64, usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::STORAGE, mapped_at_creation: true });
+            readback.unmap();
+            let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("model3d readback"),
+                layout: &rb.layout,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&resolve.create_view(&wgpu::TextureViewDescriptor::default())) },
+                    wgpu::BindGroupEntry { binding: 1, resource: readback.as_entire_binding() },
+                ],
+            });
+            let sink = tex(COLOR, 1, wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TRANSIENT_ATTACHMENT).create_view(&wgpu::TextureViewDescriptor::default());
+            return Target {
+                w,
+                h,
+                msaa: tex(COLOR, SAMPLES, wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TRANSIENT_ATTACHMENT).create_view(&wgpu::TextureViewDescriptor::default()),
+                depth: tex(DEPTH, SAMPLES, wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TRANSIENT_ATTACHMENT).create_view(&wgpu::TextureViewDescriptor::default()),
+                resolve,
+                readback,
+                stride: w * 4,
+                sink: Some((sink, bind)),
+            };
+        }
         let stride = (w * 4).div_ceil(256) * 256;
         Target {
             w,
@@ -553,6 +698,7 @@ impl Gpu {
             resolve: tex(COLOR, 1, wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC),
             readback: self.device.create_buffer(&wgpu::BufferDescriptor { label: Some("model3d readback"), size: (stride * h) as u64, usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false }),
             stride,
+            sink: None,
         }
     }
 
@@ -589,6 +735,7 @@ impl Gpu {
         }
         let mut objs: Vec<ObjU> = Vec::new();
         let mut draws: Vec<Draw> = Vec::new();
+        let mut morphed: Vec<(&wgpu::Buffer, Vec<Vertex>)> = Vec::new();
         for (ni, node) in scene.nodes.iter().enumerate() {
             let Some(parts) = node.mesh.and_then(|m| model.meshes.get(m)) else { continue };
             let skin = node.skin.filter(|&s| s < palettes.len());
@@ -601,7 +748,7 @@ impl Gpu {
                 .unwrap_or_default();
             for part in parts {
                 if let Some(m) = &part.morph {
-                    self.queue.write_buffer(&part.vbuf, 0, bytemuck::cast_slice(&m.apply(weights)));
+                    morphed.push((&part.vbuf, m.apply(weights)));
                 }
                 let skinned = part.skinned && skin.is_some();
                 let m = if skinned { root } else { root * world[ni] };
@@ -616,7 +763,7 @@ impl Gpu {
             }
         }
         if objs.len() as u64 * OBJ_STRIDE > self.obj_buf.size() || (joints.len().max(1) as u64 * 64) > self.joint_buf.size() {
-            let (a, b, c) = Self::object_buffers(&self.device, &self.obj_layout, (objs.len() as u64).next_power_of_two().max(64), (joints.len() as u64).next_power_of_two().max(256));
+            let (a, b, c) = Self::object_buffers(&self.device, self.direct.is_some(), &self.obj_layout, (objs.len() as u64).next_power_of_two().max(64), (joints.len() as u64).next_power_of_two().max(256));
             self.obj_buf = a;
             self.joint_buf = b;
             self.obj_bind = c;
@@ -626,15 +773,17 @@ impl Gpu {
             let b = bytemuck::bytes_of(o);
             obj_bytes[i * OBJ_STRIDE as usize..i * OBJ_STRIDE as usize + b.len()].copy_from_slice(b);
         }
-        if !obj_bytes.is_empty() {
-            self.queue.write_buffer(&self.obj_buf, 0, &obj_bytes);
-        }
-        if !joints.is_empty() {
-            let flat: Vec<[f32; 16]> = joints.iter().map(|m| m.to_cols_array()).collect();
-            self.queue.write_buffer(&self.joint_buf, 0, bytemuck::cast_slice(&flat));
-        }
+        let flat: Vec<[f32; 16]> = joints.iter().map(|m| m.to_cols_array()).collect();
         let fu = FrameU { view_proj: (proj * view).to_cols_array_2d(), cam: [eye.x, eye.y, eye.z, 1.], env: [self.env_lod, 0., 0., 0.] };
-        self.queue.write_buffer(&self.frame_buf, 0, bytemuck::bytes_of(&fu));
+        let mut writes: Vec<(&wgpu::Buffer, &[u8])> = morphed.iter().map(|(b, v)| (*b, bytemuck::cast_slice(v))).collect();
+        if !obj_bytes.is_empty() {
+            writes.push((&self.obj_buf, &obj_bytes));
+        }
+        if !flat.is_empty() {
+            writes.push((&self.joint_buf, bytemuck::cast_slice(&flat)));
+        }
+        writes.push((&self.frame_buf, bytemuck::bytes_of(&fu)));
+        self.put(&writes)?;
 
         // Opaque first, then the see-through back to front.
         let (mut opaque, mut clear): (Vec<&Draw>, Vec<&Draw>) = draws.iter().partition(|d| !model.materials[d.part.material].blend);
@@ -669,11 +818,27 @@ impl Gpu {
                 pass.draw_indexed(0..d.part.count, 0, 0..1);
             }
         }
-        enc.copy_texture_to_buffer(
-            wgpu::TexelCopyTextureInfo { texture: &target.resolve, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
-            wgpu::TexelCopyBufferInfo { buffer: &target.readback, layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(target.stride), rows_per_image: Some(h) } },
-            wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
-        );
+        if let (Some(rb), Some((sink, bind))) = (&self.direct, &target.sink) {
+            let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("model3d readback"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: sink,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT), store: wgpu::StoreOp::Discard },
+                })],
+                ..Default::default()
+            });
+            pass.set_pipeline(&rb.pipeline);
+            pass.set_bind_group(0, bind, &[]);
+            pass.draw(0..3, 0..1);
+        } else {
+            enc.copy_texture_to_buffer(
+                wgpu::TexelCopyTextureInfo { texture: &target.resolve, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+                wgpu::TexelCopyBufferInfo { buffer: &target.readback, layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(target.stride), rows_per_image: Some(h) } },
+                wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            );
+        }
         let submission = self.queue.submit(std::iter::once(enc.finish()));
         let (tx, rx) = std::sync::mpsc::channel();
         target.readback.slice(..).map_async(wgpu::MapMode::Read, move |r| {
@@ -691,6 +856,9 @@ impl Gpu {
             }
         }
         target.readback.unmap();
+        if self.direct.is_some() {
+            return Ok(out);
+        }
         for px in out.chunks_exact_mut(4) {
             let a = px[3];
             if a != 0 && a != 255 {
