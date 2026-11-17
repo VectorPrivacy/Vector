@@ -86,9 +86,17 @@ pub mod tags;
 pub mod mic_access;
 pub mod miniapps;
 #[cfg(feature = "whisper")]
-#[path = "../../../../src-tauri/src/whisper.rs"]
 #[allow(dead_code)]
-pub mod whisper;
+pub mod whisper {
+    include!("../../../../src-tauri/src/whisper.rs");
+
+    /// Free the cached context before exit: ggml's Metal teardown aborts while any of its buffers live.
+    pub fn unload() {
+        if let Ok(mut cache) = WHISPER_CTX_CACHE.try_lock() {
+            *cache = None;
+        }
+    }
+}
 #[path = "../../../../src-tauri/src/voice.rs"]
 #[allow(dead_code, unexpected_cfgs)]
 pub mod voice;

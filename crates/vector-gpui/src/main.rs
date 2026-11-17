@@ -279,6 +279,11 @@ fn main() {
             }
         })
         .detach();
+        cx.on_app_quit(|_| {
+            vector_media::whisper::unload();
+            async {}
+        })
+        .detach();
         if remember {
             winstate::enable();
             window
