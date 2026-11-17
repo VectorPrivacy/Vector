@@ -161,6 +161,8 @@ pub struct Clip {
     hovered: bool,
     moved: Option<Instant>,
     scrub: Option<f32>,
+    /// Since when it has sat paused or ended with its decoder held.
+    still: Option<Instant>,
 }
 
 impl Default for Clip {
@@ -180,6 +182,7 @@ impl Default for Clip {
             hovered: false,
             moved: None,
             scrub: None,
+            still: None,
         }
     }
 }
@@ -489,6 +492,28 @@ impl Videos {
         }
     }
 
+    /// Decoders of clips paused or ended for [`LET_GO`] dropped, and the frame buffers kept for
+    /// playback too once nothing plays.
+    pub fn let_go(&mut self) -> bool {
+        let mut any = false;
+        for c in self.clips.values_mut() {
+            let resting = !c.playing && !c.loading && c.scrub.is_none() && !c.big && c.play.as_ref().is_some_and(|p| !p.fresh);
+            if !resting {
+                c.still = None;
+            } else if c.still.get_or_insert_with(Instant::now).elapsed() >= LET_GO {
+                c.still = None;
+                c.play = None;
+                any = true;
+            }
+        }
+        if !self.clips.values().any(|c| c.playing || c.loading) {
+            let mut pool = BUFFERS.lock().unwrap_or_else(|e| e.into_inner());
+            any |= !pool.is_empty();
+            pool.clear();
+        }
+        any
+    }
+
     /// Dropped with its frames, so the next sight of it probes its source afresh.
     pub fn forget(&mut self, att: &str) {
         self.stop(att);
@@ -657,6 +682,9 @@ impl Videos {
             if c.playing || c.loading || p.fresh {
                 moving = true;
             }
+        }
+        if self.let_go() {
+            crate::trim::soon();
         }
         if self.active.as_ref().is_some_and(|a| self.clips.get(a).is_some_and(|c| !c.playing && !c.loading)) {
             self.active = None;
@@ -864,6 +892,8 @@ pub fn run(work: Work) -> futures::channel::oneshot::Receiver<WorkDone> {
 /// allocating (and the allocator keeping) a fresh one per frame.
 static BUFFERS: Mutex<Vec<Vec<u8>>> = Mutex::new(Vec::new());
 const BUFFERS_KEPT: usize = 8;
+/// A clip paused or ended this long lets its decoder go; the frame it shows stays.
+const LET_GO: Duration = Duration::from_secs(15);
 
 #[cfg_attr(not(feature = "video"), allow(dead_code))]
 fn frame_buffer(len: usize) -> Vec<u8> {
@@ -887,13 +917,21 @@ impl Videos {
 
     /// A retired frame, after the app has handed it to `drop_image`.
     pub fn recycle(&mut self, frame: Arc<RenderImage>) {
-        self.spent.push(frame);
         let mut pool = BUFFERS.lock().unwrap_or_else(|e| e.into_inner());
+        // Nothing playing needs a buffer next: these go back to the allocator.
+        if !self.clips.values().any(|c| c.playing || c.loading) {
+            pool.clear();
+            self.spent.clear();
+            return;
+        }
+        self.spent.push(frame);
         let mut held = Vec::new();
         for frame in self.spent.drain(..) {
             match Arc::try_unwrap(frame) {
                 Ok(image) => {
                     for buffer in image.into_buffers() {
+                        // A new size (the window filled or left) never takes the old ones.
+                        pool.retain(|b| b.len() == buffer.len());
                         if pool.len() >= BUFFERS_KEPT {
                             pool.remove(0);
                         }
@@ -1245,5 +1283,16 @@ mod tests {
         assert_eq!(v.retired.len(), 1);
         v.probed("a".into(), Some(info(None)));
         assert!(v.clip("a").is_some_and(|c| c.muted && c.position == 4_000));
+    }
+    #[test]
+    fn frames_retired_with_nothing_playing_go_back_to_the_allocator() {
+        let mut v = Videos::default();
+        let frame = || Arc::new(RenderImage::new(vec![image::Frame::new(image::RgbaImage::new(64, 36))]));
+        v.clips.insert("a".into(), Clip { playing: true, ..Clip::default() });
+        v.recycle(frame());
+        assert_eq!(BUFFERS.lock().unwrap().len(), 1);
+        v.clips.get_mut("a").unwrap().playing = false;
+        v.recycle(frame());
+        assert!(BUFFERS.lock().unwrap().is_empty() && v.spent.is_empty());
     }
 }

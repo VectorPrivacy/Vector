@@ -188,6 +188,7 @@ static ALLOC: dhat::Alloc = dhat::Alloc;
 pub static DHAT: std::sync::Mutex<Option<dhat::Profiler>> = std::sync::Mutex::new(None);
 
 fn main() {
+    trim::cap_arenas();
     #[cfg(feature = "dhat-heap")]
     {
         *DHAT.lock().unwrap() = Some(dhat::Profiler::builder().trim_backtraces(Some(12)).build());

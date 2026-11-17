@@ -14999,12 +14999,13 @@ impl VectorApp {
     /// own image cache too.
     fn sweep_pictures(&mut self, timed: bool, window: &mut Window, cx: &mut Context<Self>) {
         const IDLE: std::time::Duration = std::time::Duration::from_secs(60);
-        let (gone, frames) = {
+        let (gone, frames, released) = {
             let mut media = self.media.borrow_mut();
+            let released = timed && media.videos.let_go();
             let gone = media.sweep(IDLE, |image| window.image_on_screen(image));
-            (gone, std::mem::take(&mut media.videos.retired))
+            (gone, std::mem::take(&mut media.videos.retired), released)
         };
-        let any = !gone.is_empty() || !frames.is_empty();
+        let any = released || !gone.is_empty() || !frames.is_empty();
         for image in gone {
             let _ = window.drop_image(image);
         }

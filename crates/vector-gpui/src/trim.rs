@@ -52,6 +52,15 @@ pub use imp::soon;
 #[cfg(not(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos")))]
 pub fn soon() {}
 
+/// At most four glibc arenas: each decoding thread otherwise gets its own, and live blocks left
+/// scattered through it keep a trim from handing its pages back. Set before any thread starts.
+pub fn cap_arenas() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    if std::env::var_os("MALLOC_ARENA_MAX").is_none() {
+        unsafe { libc::mallopt(libc::M_ARENA_MAX, 4) };
+    }
+}
+
 /// Asks for a trim once the scope it guards ends, on every return path.
 pub struct OnDrop;
 
