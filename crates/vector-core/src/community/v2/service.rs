@@ -2418,6 +2418,11 @@ async fn accept_bundle<T: Transport + ?Sized>(
         // Captured before the save below: a re-accept of a held community must not
         // re-announce a membership this account already declared.
         let already_held = crate::db::community::load_community_v2(community.id()).ok().flatten().is_some();
+        // A seat taken anew is owed every delivery again: one back after leaving, in the same
+        // session, would otherwise find each already opened and never look at it twice.
+        if !already_held {
+            forget_opened_deliveries();
+        }
 
         // Authenticate the delivered community_root before trusting it. The owner
         // commitment proves WHO the owner is, but community_root (and channel keys) are
@@ -7958,7 +7963,12 @@ async fn settle_access<T: Transport + ?Sized>(
         }
     }
     let mut gained: std::collections::BTreeMap<PublicKey, ()> = Default::default();
-    let mut gained_in: Vec<(ChannelId, Epoch, Vec<PublicKey>)> = Vec::new();
+    // Readers take a Channel rotation only from its managers (CORD-06): without the
+    // standing, the cut waits for one of them rather than forking this device.
+    let may_rotate = me.to_hex() == owner_hex || after.is_authorized(&me.to_hex(), Some(&owner_hex), crate::community::roles::Permissions::MANAGE_CHANNELS);
+    // Per Channel: who lost it, how many come in without its history, and who reads it whole.
+    let mut rotating: Vec<(ChannelId, Vec<PublicKey>, Vec<PublicKey>)> = Vec::new();
+    let mut steady: Vec<(ChannelId, Vec<PublicKey>)> = Vec::new();
     for ch in community.channels.iter().filter(|c| c.private && c.key.is_some()) {
         let chan = crate::simd::hex::bytes_to_hex_32(&ch.id.0);
         let (mut lost, mut fresh, mut readers) = (Vec::new(), 0usize, Vec::new());
@@ -7980,46 +7990,81 @@ async fn settle_access<T: Transport + ?Sized>(
                 lost.push(*pk);
             }
         }
-        // Readers take a Channel rotation only from its managers (CORD-06): without the
-        // standing, the cut waits for one of them rather than forking this device.
-        let may_rotate = me.to_hex() == owner_hex || after.is_authorized(&me.to_hex(), Some(&owner_hex), crate::community::roles::Permissions::MANAGE_CHANNELS);
+        // Readers adopt a delivery only from a deliverer their fold entitles.
+        if !(me.to_hex() == owner_hex || after.is_entitled(Some(&owner_hex), &me.to_hex(), &chan, &[], &[])) {
+            readers.clear();
+        }
         if (!lost.is_empty() || fresh > 0) && !may_rotate {
             crate::log_warn!("[v2:access] {} lost and {fresh} gained a channel's View; a channel manager's rotation will settle them", lost.len());
+            steady.push((ch.id, readers));
         } else if !lost.is_empty() || fresh > 0 {
-            let held = crate::db::community::load_community_v2(community.id())?.ok_or("v2 community not found")?;
-            rekey_channel_excluding(transport, &held, &ch.id, after, &[], &lost).await?;
-        }
-        // Readers adopt a delivery only from a deliverer their fold entitles.
-        if !readers.is_empty() && (me.to_hex() == owner_hex || after.is_entitled(Some(&owner_hex), &me.to_hex(), &chan, &[], &[])) {
-            gained_in.push((ch.id, ch.epoch, readers));
+            rotating.push((ch.id, lost, readers));
+        } else {
+            steady.push((ch.id, readers));
         }
     }
+    steady.retain(|(_, readers)| !readers.is_empty());
+    // A Channel that stays at its epoch is delivered before any other is rotated: its key is one
+    // round trip away, and must not wait out a rotation it has no part in.
+    deliver_gained(transport, community, &steady).await?;
+    let mut moved: Vec<(ChannelId, Vec<PublicKey>)> = Vec::new();
+    for (channel, lost, readers) in rotating {
+        let held = crate::db::community::load_community_v2(community.id())?.ok_or("v2 community not found")?;
+        rekey_channel_excluding(transport, &held, &channel, after, &[], &lost).await?;
+        if !readers.is_empty() {
+            moved.push((channel, readers));
+        }
+    }
+    // At the epoch each now holds.
+    deliver_gained(transport, community, &moved).await?;
     if !gained.is_empty() {
         let held = crate::db::community::load_community_v2(community.id())?.ok_or("v2 community not found")?;
-        // On each Channel's access plane, which a member's client sweeps as soon as its roster
-        // moves, rather than leaving them to another holder's duty.
-        let ledger = crate::db::current_session().scoped::<AccessLedger, std::sync::Mutex<std::collections::HashSet<([u8; 32], u64, [u8; 32])>>>();
-        for (channel, epoch, readers) in &gained_in {
-            let delivered = async {
-                deliver_access(transport, &held, channel, readers).await?;
-                deliver_history(transport, &held, channel, readers).await
-            };
-            // At the epoch it now holds: a rotation above may have moved it.
-            let epoch = held.channel(channel).map_or(*epoch, |c| c.epoch);
-            match delivered.await {
-                Ok(_) => ledger.lock().unwrap_or_else(|e| e.into_inner()).extend(readers.iter().map(|pk| (channel.0, epoch.0, pk.to_bytes()))),
-                Err(e) => crate::log_warn!("[v2:access] delivering a gained channel's key failed (a holder's duty retries): {e}"),
-            }
-        }
         let signer = crate::signer::active_signer()?;
         for pk in gained.keys() {
             let bundle = bundle_of_with_overlay(&held, BundleAudience::Member(*pk), Some(me), None, None, &[], &[]);
             let wrap = invite::build_direct_invite_signed(&signer, me, pk, &bundle).await.map_err(|e| e.to_string())?;
             transport.publish(&wrap, &held.relays).await?;
-            send_to_inbox(&wrap, pk).await;
+            // The planes above already carry the key: the inbox copy only gets it there sooner,
+            // and resolving a stranger's inbox relays must not hold up the grant.
+            let pk = *pk;
+            crate::db::spawn_bound(async move { send_to_inbox(&wrap, &pk).await });
         }
     }
     writing::settle_writers(transport, community, before, after).await
+}
+
+/// Deliver each Channel's key, and every past epoch this device reads, to the members who just
+/// gained it with its history: on the Channel's access plane, which a member's client sweeps as
+/// soon as its roster moves, rather than leaving them to another holder's duty. Every Channel in
+/// one wave, so a Role that opens several keeps its member waiting one round trip, not one each.
+/// One that fails is logged and left to that duty.
+async fn deliver_gained<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, gained: &[(ChannelId, Vec<PublicKey>)]) -> Result<(), String> {
+    if gained.is_empty() {
+        return Ok(());
+    }
+    let held = crate::db::community::load_community_v2(community.id())?.ok_or("v2 community not found")?;
+    let ledger = crate::db::current_session().scoped::<AccessLedger, std::sync::Mutex<std::collections::HashSet<([u8; 32], u64, [u8; 32])>>>();
+    let delivered = in_one_wave(
+        gained
+            .iter()
+            .map(|(channel, readers)| {
+                let held = &held;
+                async move {
+                    deliver_access(transport, held, channel, readers).await?;
+                    deliver_history(transport, held, channel, readers).await
+                }
+            })
+            .collect(),
+    )
+    .await;
+    for ((channel, readers), delivered) in gained.iter().zip(delivered) {
+        let Some(epoch) = held.channel(channel).map(|c| c.epoch) else { continue };
+        match delivered {
+            Ok(_) => ledger.lock().unwrap_or_else(|e| e.into_inner()).extend(readers.iter().map(|pk| (channel.0, epoch.0, pk.to_bytes()))),
+            Err(e) => crate::log_warn!("[v2:access] delivering a gained channel's key failed (a holder's duty retries): {e}"),
+        }
+    }
+    Ok(())
 }
 
 /// A gift wrap to `recipient`'s DM inbox as well: their client reads gift wraps there, and a
@@ -8044,10 +8089,46 @@ async fn fetch_access_deliveries<T: Transport + ?Sized>(transport: &T, community
     fetch_plane_deliveries(transport, community, channel, rekey::RekeyScope::Channel(*channel)).await
 }
 
+tokio::task_local! {
+    /// The access planes one settling action has read, by address: `None` once the action wrote
+    /// to the plane itself, after which every read of it goes to the relays again.
+    static ACCESS_READS: std::cell::RefCell<std::collections::HashMap<[u8; 32], Option<std::sync::Arc<Vec<Event>>>>>;
+}
+
+/// Run `action` asking the relays for each access plane once, however many kinds of record it
+/// takes from one: a plane holds the Channel's keys, its history, its writer keys and their
+/// certifiers, and each is read by a step of its own. A plane the action writes to is read
+/// afresh from then on, so it never judges on a copy from before its own delivery.
+async fn reading_planes_once<F: std::future::Future>(action: F) -> F::Output {
+    if ACCESS_READS.try_with(|_| ()).is_ok() {
+        return action.await;
+    }
+    ACCESS_READS.scope(Default::default(), action).await
+}
+
+/// Every wrap on an access plane, from this action's earlier read of it when it has one.
+async fn access_plane_wraps<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, group: &GroupKey) -> Result<std::sync::Arc<Vec<Event>>, String> {
+    let address = group.pk().to_bytes();
+    let read = ACCESS_READS.try_with(|reads| reads.borrow().get(&address).cloned()).ok().flatten();
+    if let Some(Some(wraps)) = read {
+        return Ok(wraps);
+    }
+    let wraps = std::sync::Arc::new(plane_wraps(transport, community, group).await?);
+    if read.is_none() {
+        let _ = ACCESS_READS.try_with(|reads| reads.borrow_mut().entry(address).or_insert_with(|| Some(wraps.clone())).is_some());
+    }
+    Ok(wraps)
+}
+
+/// This action is about to write to an access plane: what it read of it before no longer stands.
+fn wrote_access_plane(group: &GroupKey) {
+    let _ = ACCESS_READS.try_with(|reads| reads.borrow_mut().insert(group.pk().to_bytes(), None));
+}
+
 /// The deliveries of `scope`'s keys on a Channel's access plane.
 async fn fetch_plane_deliveries<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, channel: &ChannelId, scope: rekey::RekeyScope) -> Result<Vec<rekey::AccessDelivery>, String> {
     let group = access_group(community, channel);
-    let wraps = plane_wraps(transport, community, &group).await?;
+    let wraps = access_plane_wraps(transport, community, &group).await?;
     Ok(wraps
         .iter()
         .filter_map(|w| stream::open_wrap(w, &group).ok().and_then(|o| rekey::parse_access_delivery(&o).ok()))
@@ -8159,6 +8240,7 @@ async fn build_deliveries(
         return Err("the active signer isn't this account".to_string());
     }
     let group = access_group(community, channel);
+    wrote_access_plane(&group);
     let mut blobs = Vec::with_capacity(recipients.len());
     for r in recipients {
         blobs.push(rekey::build_blob(&signer, &me.to_bytes(), r, scope, epoch, key).await.map_err(|e| e.to_string())?);
@@ -8212,6 +8294,7 @@ async fn deliver_history<T: Transport + ?Sized>(transport: &T, community: &Commu
         return Err("the active signer isn't this account".to_string());
     }
     let group = access_group(community, channel);
+    wrote_access_plane(&group);
     let at = now_ms() / 1000;
     for (epoch, view) in &views {
         let epoch = Epoch(*epoch);
@@ -8233,7 +8316,7 @@ async fn deliver_history<T: Transport + ?Sized>(transport: &T, community: &Commu
 /// Every history delivery for `channel` on its access plane.
 async fn fetch_history_deliveries<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, channel: &ChannelId) -> Result<Vec<rekey::HistoryDelivery>, String> {
     let group = access_group(community, channel);
-    let wraps = plane_wraps(transport, community, &group).await?;
+    let wraps = access_plane_wraps(transport, community, &group).await?;
     Ok(wraps.iter().filter_map(|w| stream::open_wrap(w, &group).ok().and_then(|o| rekey::parse_history_delivery(&o, channel).ok())).collect())
 }
 
@@ -8260,27 +8343,49 @@ pub(crate) fn history_collect_due(id: &crate::community::CommunityId, moved: boo
 /// with READ_MESSAGE_HISTORY, archive every past epoch it lacks that a deliverer the channel
 /// lets in sent it read-only. Returns how many epochs were archived.
 pub async fn collect_history<T: Transport + ?Sized>(transport: &T, community: &CommunityV2) -> Result<usize, String> {
+    let mut archived = 0;
+    for (_, n) in collect_history_rooms(transport, community).await? {
+        archived += n;
+    }
+    Ok(archived)
+}
+
+/// [`collect_history`], by Channel: each that took a past epoch, and how many. What those epochs
+/// hold is read by nothing yet.
+pub async fn collect_history_rooms<T: Transport + ?Sized>(transport: &T, community: &CommunityV2) -> Result<Vec<(ChannelId, usize)>, String> {
     use crate::community::roles::Permissions;
     let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
     let roster = crate::db::community::get_community_roles(&cid_hex)?;
     if roster.everyone.is_none() {
-        return Ok(0);
+        return Ok(Vec::new());
     }
     let owner_hex = community.owner()?.to_hex();
     let banned = crate::db::community::get_community_banlist(&cid_hex).unwrap_or_default();
     let me = me_pk()?;
     let signer = crate::signer::active_signer()?;
-    let opened = crate::db::current_session().scoped::<OpenedHistory, std::sync::Mutex<std::collections::HashSet<([u8; 32], [u8; 32], [u8; 32], u64)>>>();
-    let mut archived = 0;
-    for ch in community.channels.iter().filter(|c| c.private && c.key.is_some()) {
+    let opened = crate::db::current_session().scoped::<OpenedHistory, Opened>();
+    let mut archived: Vec<(ChannelId, usize)> = Vec::new();
+    let readable: Vec<_> = community
+        .channels
+        .iter()
+        .filter(|c| c.private && c.key.is_some())
+        .filter(|ch| roster.channel_permissions(Some(&owner_hex), &me.to_hex(), &crate::simd::hex::bytes_to_hex_32(&ch.id.0), true).contains(Permissions::READ_MESSAGE_HISTORY))
+        .collect();
+    let reads = in_one_wave(readable.iter().map(|ch| fetch_history_deliveries(transport, community, &ch.id)).collect()).await;
+    let mut unread = None;
+    for (ch, read) in readable.into_iter().zip(reads) {
         let chan = crate::simd::hex::bytes_to_hex_32(&ch.id.0);
-        if !roster.channel_permissions(Some(&owner_hex), &me.to_hex(), &chan, true).contains(Permissions::READ_MESSAGE_HISTORY) {
-            continue;
-        }
+        let read = match read {
+            Ok(read) => read,
+            Err(e) => {
+                unread.get_or_insert(e);
+                continue;
+            }
+        };
         let mut held: std::collections::HashSet<u64> = crate::db::community::held_epoch_keys(&cid_hex, &chan)?.into_iter().map(|(e, _)| e.0).collect();
         held.extend(crate::db::community::history_views(&cid_hex, &chan)?.into_iter().map(|(e, _)| e.0));
         held.insert(ch.epoch.0);
-        for d in fetch_history_deliveries(transport, community, &ch.id).await? {
+        for d in read {
             let h = d.deliverer.to_hex();
             let trusted = h == owner_hex || (!banned.contains(&h) && roster.is_entitled(Some(&owner_hex), &h, &chan, &[], &[]));
             if !trusted || d.epoch >= ch.epoch || held.contains(&d.epoch.0) {
@@ -8293,11 +8398,17 @@ pub async fn collect_history<T: Transport + ?Sized>(transport: &T, community: &C
             if let Ok(view) = rekey::open_history_blob(&signer, &d.deliverer, &ch.id, d.epoch, blob).await {
                 crate::db::community::store_history_view(&cid_hex, &chan, d.epoch.0, &view)?;
                 held.insert(d.epoch.0);
-                archived += 1;
+                match archived.last_mut() {
+                    Some((last, n)) if *last == ch.id => *n += 1,
+                    _ => archived.push((ch.id, 1)),
+                }
             }
         }
     }
-    Ok(archived)
+    match unread {
+        Some(e) => Err(e),
+        None => Ok(archived),
+    }
 }
 
 struct AccessDutyClock;
@@ -8320,6 +8431,16 @@ pub(crate) fn access_duty_due(id: &crate::community::CommunityId, roster_moved: 
 
 struct AccessLedger;
 struct OpenedDeliveries;
+
+type Opened = std::sync::Mutex<std::collections::HashSet<([u8; 32], [u8; 32], [u8; 32], u64)>>;
+
+/// Drop this session's marks of key, history and writer deliveries already opened.
+fn forget_opened_deliveries() {
+    let session = crate::db::current_session();
+    *session.scoped::<OpenedDeliveries, Opened>().lock().unwrap_or_else(|e| e.into_inner()) = Default::default();
+    *session.scoped::<OpenedHistory, Opened>().lock().unwrap_or_else(|e| e.into_inner()) = Default::default();
+    writing::forget_opened_writer_blobs();
+}
 struct AccessCollectClock;
 
 /// How often a keyless member re-reads its access planes when nothing in the roster moved.
@@ -8352,6 +8473,16 @@ pub(crate) fn access_collect_due(id: &crate::community::CommunityId, roster_move
     due
 }
 
+/// Of `out`, whom a whole read of the Roster taken now still leaves out of `chan`. A read that
+/// can't be taken whole cuts nobody: the duty runs again.
+async fn still_left_out<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, chan: &str, owner_hex: &str, out: Vec<PublicKey>) -> Vec<PublicKey> {
+    let now = fetch_authority(transport, community).await;
+    if !now.everyone_served || now.gapped {
+        return Vec::new();
+    }
+    out.into_iter().filter(|pk| now.banned.contains(&pk.to_hex()) || !now.roles.is_entitled(Some(owner_hex), &pk.to_hex(), chan, &[], &[])).collect()
+}
+
 /// What one run of the access duty did.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct AccessDuty {
@@ -8374,6 +8505,10 @@ pub struct AccessDuty {
 /// As the revocation backstop, a manager who outranks a holder the channel no longer lets in
 /// rotates them out.
 pub async fn access_duty<T: Transport + ?Sized>(transport: &T, community: &CommunityV2) -> Result<AccessDuty, String> {
+    reading_planes_once(access_duty_once(transport, community)).await
+}
+
+async fn access_duty_once<T: Transport + ?Sized>(transport: &T, community: &CommunityV2) -> Result<AccessDuty, String> {
     let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
     if crate::db::community::get_community_roles(&cid_hex)?.everyone.is_none() {
         return Ok(AccessDuty::default());
@@ -8431,6 +8566,12 @@ pub async fn access_duty<T: Transport + ?Sized>(transport: &T, community: &Commu
                     .collect::<std::collections::BTreeSet<_>>()
                     .into_iter()
                     .collect();
+                // The Roster was read before the plane: someone let in between the two reads holds a
+                // delivery the read can't account for. Cut only who a fresh read still leaves out.
+                let out = match out.is_empty() {
+                    true => out,
+                    false => still_left_out(transport, community, &chan, &owner_hex, out).await,
+                };
                 if !out.is_empty() {
                     if rekey_channel_at(transport, community, &ch.id, &rotation_roster(roster.clone(), &cid_hex), &[], &out, Some(epoch)).await? {
                         done.cut += out.len();
@@ -8486,20 +8627,33 @@ pub async fn collect_access<T: Transport + ?Sized>(transport: &T, community: &Co
     let banned = crate::db::community::get_community_banlist(&cid_hex).unwrap_or_default();
     let me = me_pk()?;
     let signer = crate::signer::active_signer()?;
-    let opened = crate::db::current_session().scoped::<OpenedDeliveries, std::sync::Mutex<std::collections::HashSet<([u8; 32], [u8; 32], [u8; 32], u64)>>>();
+    let opened = crate::db::current_session().scoped::<OpenedDeliveries, Opened>();
     let mut parked = 0;
-    for ch in community.channels.iter().filter(|c| c.private && c.key.is_none()) {
+    let owed: Vec<_> = community
+        .channels
+        .iter()
+        .filter(|c| c.private && c.key.is_none())
+        .filter(|ch| roster.is_entitled(Some(&owner_hex), &me.to_hex(), &crate::simd::hex::bytes_to_hex_32(&ch.id.0), &[], &[]))
+        .collect();
+    // One wave for every plane: a member let into several channels waits one round trip, not
+    // one each. A plane that can't be read keeps nobody from the others.
+    let reads = in_one_wave(owed.iter().map(|ch| fetch_access_deliveries(transport, community, &ch.id)).collect()).await;
+    let mut unread = None;
+    for (ch, read) in owed.into_iter().zip(reads) {
         let chan = crate::simd::hex::bytes_to_hex_32(&ch.id.0);
-        if !roster.is_entitled(Some(&owner_hex), &me.to_hex(), &chan, &[], &[]) {
-            continue;
-        }
+        let read = match read {
+            Ok(read) => read,
+            Err(e) => {
+                unread.get_or_insert(e);
+                continue;
+            }
+        };
         let scope = rekey::RekeyScope::Channel(ch.id);
         // Only deliverers the channel lets in, and only an epoch the keyless walk has reached
         // or its next: a keyless channel seats whatever it adopts first, so neither a stale key
         // nor one claimed far ahead may ever be on offer.
         let window = ch.epoch.0..=ch.epoch.0.saturating_add(1);
-        let deliveries: Vec<rekey::AccessDelivery> = fetch_access_deliveries(transport, community, &ch.id)
-            .await?
+        let deliveries: Vec<rekey::AccessDelivery> = read
             .into_iter()
             .filter(|d| window.contains(&d.epoch.0))
             .filter(|d| {
@@ -8526,7 +8680,52 @@ pub async fn collect_access<T: Transport + ?Sized>(transport: &T, community: &Co
             }
         }
     }
-    Ok(parked)
+    match unread {
+        Some(e) => Err(e),
+        None => Ok(parked),
+    }
+}
+
+/// Run `reads` together, a few at a time, and hand back what each came to in the order given.
+async fn in_one_wave<F: std::future::Future>(reads: Vec<F>) -> Vec<F::Output> {
+    use futures_util::stream::StreamExt;
+    futures_util::stream::iter(reads).buffered(CHANNEL_FAN_CONCURRENCY).collect().await
+}
+
+/// Whether `member` holds any Role here by the stored Roster.
+pub(crate) fn holds_grant(community: &CommunityV2, member: &PublicKey) -> bool {
+    let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+    let hex = member.to_hex();
+    crate::db::community::get_community_roles(&cid_hex).is_ok_and(|r| r.grants.iter().any(|g| g.member == hex && !g.role_ids.is_empty()))
+}
+
+/// Whether the stored Roster still owes this member a key someone else must deliver: a Private
+/// Channel's, or a restricted Channel's writer key.
+pub(crate) fn owed_keys(community: &CommunityV2) -> bool {
+    owed_channel_keys(community) || writing::owed_writer_keys(community)
+}
+
+/// Whether a restricted Channel's writer key, certificate or certifier is still owed to this member.
+pub(crate) fn owed_writer_keys(community: &CommunityV2) -> bool {
+    writing::owed_writer_keys(community)
+}
+
+/// Whether the stored Roster lets this member into a Private Channel it holds no key for, with
+/// its history: the key is then delivered on the access plane. Without history it comes in the
+/// rotation that mints the member a fresh epoch, which the rekey walk takes.
+pub(crate) fn owed_channel_keys(community: &CommunityV2) -> bool {
+    let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+    let (Ok(roster), Ok(owner), Ok(me)) = (crate::db::community::get_community_roles(&cid_hex), community.owner(), me_pk()) else { return false };
+    if roster.everyone.is_none() {
+        return false;
+    }
+    let (owner_hex, me_hex) = (owner.to_hex(), me.to_hex());
+    community
+        .channels
+        .iter()
+        .filter(|c| c.private && c.key.is_none())
+        .map(|ch| crate::simd::hex::bytes_to_hex_32(&ch.id.0))
+        .any(|chan| roster.is_entitled(Some(&owner_hex), &me_hex, &chan, &[], &[]) && roster.reads_history(Some(&owner_hex), &me_hex, &chan, &[], &[]))
 }
 
 /// Everyone a Private Channel's key could be owed to: every Grant holder, every member an
@@ -11020,6 +11219,12 @@ async fn rekey_channel_at<T: Transport + ?Sized>(
             c.epoch = new_epoch;
         }
         reseal_rotated(transport, &rotated, channel_id).await;
+        // The live subscription is addressed by each Channel's epoch, and a rotation this device
+        // made itself folds no change a follow would notice: without this it goes deaf in the room.
+        if let Some(client) = crate::state::nostr_client() {
+            crate::db::spawn_bound(async move { super::realtime::refresh_subscription(&client).await });
+        }
+        super::realtime::reread_tails(*community.id(), vec![(*channel_id, ch.epoch)]);
         Ok(true)
     })
     .await
@@ -11568,9 +11773,11 @@ pub(crate) async fn follow_control_live(community: &CommunityV2, wrap: &Event) -
         if held.editions.iter().any(|e| e.inner_id == edition.inner_id) {
             return Some(ControlFollow::default());
         }
-        // A Grant of mine may carry the staff key, which a remote signer opens: not on this path.
+        // A Grant of mine that carries the staff key takes a remote signer to open: not on this
+        // path. One that carries none folds here like anyone's, so a Role handed out is known at once.
         let mine = me_pk().is_ok_and(|me| edition.entity_id == super::derive::grant_locator(community.id(), &me.to_bytes()));
-        if mine || !held.staff.contains(&edition.author.to_bytes()) {
+        let keyed = mine && super::roles::parse_grant_control_wrap(&edition.content).is_some();
+        if keyed || !held.staff.contains(&edition.author.to_bytes()) {
             return None;
         }
         let id = edition.inner_id;
@@ -12951,7 +13158,16 @@ fn persist_writers(cid_hex: &str, channel_hex: &str, content: &str, version: u64
     match crate::db::community::set_community_writers(cid_hex, channel_hex, content, version as i64, rebased) {
         Ok(true) if moved => {
             if let Some(id) = crate::community::id32_from_hex(cid_hex) {
-                access_collect_now(&crate::community::CommunityId(id));
+                let id = crate::community::CommunityId(id);
+                access_collect_now(&id);
+                // A writer still on the epoch just left posts there a moment longer: read it again.
+                let read_at = crate::db::community::load_community_v2(&id).ok().flatten().and_then(|c| {
+                    let ch = c.channels.iter().find(|ch| crate::simd::hex::bytes_to_hex_32(&ch.id.0) == channel_hex)?;
+                    (!(ch.private && ch.key.is_none())).then(|| (ch.id, c.channel_secret(ch).1))
+                });
+                if let Some((channel, epoch)) = read_at {
+                    super::realtime::reread_tails(id, vec![(channel, epoch)]);
+                }
             }
             // The live subscription is addressed by the live writer: a move this device made itself
             // folds no change a follow would notice.
@@ -15025,6 +15241,66 @@ pub async fn explain_epoch_state<T: Transport + ?Sized>(
     }))
 }
 
+/// Wide enough to collapse a large community's channel fan into one wave, narrow enough that a
+/// catch-up does not present as a burst to every relay.
+const CHANNEL_FAN_CONCURRENCY: usize = 8;
+
+/// What one hop of a rekey walk reads, before any of it is judged.
+struct RekeyHop {
+    /// The roots a channel rekey may be addressed under: #0 the current one, then archived
+    /// priors. Shared with streamauth, so the auth registration covers exactly this fan.
+    roots: Vec<[u8; 32]>,
+    /// Each private Channel as held: its key, its epoch, and the epoch read for.
+    fan: Vec<(ChannelId, Option<[u8; 32]>, Epoch, Epoch)>,
+    /// A Channel's next-epoch chunks by `(channel, root index)`, where any were found.
+    channels: std::collections::HashMap<([u8; 32], usize), Vec<rekey::RekeyChunk>>,
+    /// The base plane's next-epoch chunks.
+    base: Vec<rekey::RekeyChunk>,
+}
+
+/// Read one hop in a single concurrent wave: every private Channel's next epoch under each
+/// addressing root, and the base plane's. Serially this is `channels x roots + 1` round trips
+/// before a hop can be decided, a week's absence walks dozens of hops, and every follow pays
+/// one hop even when nothing rotated. Only the reads overlap: the walk still judges channels
+/// first (a removal-forced channel rekey rides the PRIOR root, CORD-06 D2), then the base.
+async fn read_rekey_hop<T: Transport + ?Sized>(transport: &T, cur: &CommunityV2, cid_hex: &str) -> Result<RekeyHop, String> {
+    use futures_util::stream::StreamExt;
+    let roots = channel_rekey_addressing_roots(cur.community_root, cid_hex);
+    let fan: Vec<(ChannelId, Option<[u8; 32]>, Epoch, Epoch)> =
+        cur.channels.iter().filter(|c| c.private).map(|ch| (ch.id, ch.key, ch.epoch, Epoch(ch.epoch.0.saturating_add(1)))).collect();
+    // root #0 = current, #1.. = archived priors (indices only: root bytes are key material
+    // and must never reach a log).
+    let jobs: Vec<(ChannelId, usize, GroupKey, Epoch)> = fan
+        .iter()
+        .flat_map(|(cid, _, _, next)| roots.iter().enumerate().map(move |(ri, root)| (*cid, ri, channel_rekey_group_key(root, cid, *next), *next)))
+        .collect();
+    let channels = async {
+        let mut found = std::collections::HashMap::new();
+        let mut results = futures_util::stream::iter(jobs)
+            .map(|(cid, ri, group, next)| async move { (cid, ri, next, fetch_rekey_chunks(transport, cur, &group).await) })
+            .buffer_unordered(CHANNEL_FAN_CONCURRENCY);
+        while let Some((cid, ri, next, out)) = results.next().await {
+            let ch_hex = crate::simd::hex::bytes_to_hex_32(&cid.0);
+            match out {
+                Ok(chunks) if chunks.is_empty() => {}
+                Ok(chunks) => {
+                    crate::log_debug!("[v2:follow {}] ch {} next e{} root#{}/{}: {} rekey chunk(s)", &cid_hex[..8], &ch_hex[..8], next.0, ri, roots.len(), chunks.len());
+                    found.insert((cid.0, ri), chunks);
+                }
+                Err(e) => {
+                    crate::log_warn!("[v2:follow {}] ch {} next e{} root#{}/{}: rekey plane fetch failed: {}", &cid_hex[..8], &ch_hex[..8], next.0, ri, roots.len(), e);
+                    return Err(e);
+                }
+            }
+        }
+        Ok(found)
+    };
+    let base_group = base_rekey_group_key(&cur.community_root, cur.id(), Epoch(cur.root_epoch.0.saturating_add(1)));
+    let (channels, base) = futures_util::future::join(channels, fetch_rekey_chunks(transport, cur, &base_group)).await;
+    let (channels, base) = (channels?, base?);
+    Ok(RekeyHop { roots, fan, channels, base })
+}
+
 pub async fn follow_rekeys<T: Transport + ?Sized>(
     transport: &T,
     community: &CommunityV2,
@@ -15042,12 +15318,16 @@ pub async fn follow_rekeys<T: Transport + ?Sized>(
         // without this, a member who slept through a dissolution follows (and posts
         // into) a grave forever. Fail-open on transport failure: availability is
         // never death.
-        if is_dissolved(transport, community).await {
+        //
+        // The first hop's planes are read alongside: nothing is decided until both are in.
+        let (dead, first_hop) = futures_util::future::join(is_dissolved(transport, community), read_rekey_hop(transport, community, &cid_hex)).await;
+        if dead {
             if session.is_live() {
                 let _ = crate::db::community::set_community_dissolved(&cid_hex);
             }
             return Ok(RekeyFollow { updated: None, self_removed: false, removed_at: None, dissolved: true, wedged: false });
         }
+        let mut first_hop = Some(first_hop);
         let signer = crate::signer::active_signer()?;
         let my_pk = me_pk()?;
         let my_xonly = my_pk.to_bytes();
@@ -15256,77 +15536,16 @@ pub async fn follow_rekeys<T: Transport + ?Sized>(
         // finite chain terminates naturally; the cap defends against a relay feeding a
         // pathological set.
         const MAX_STEPS: usize = MAX_WALK_STEPS;
-        // Wide enough to collapse a large community's channel fan into one wave,
-        // narrow enough that a catch-up does not present as a burst to every relay.
-        const CHANNEL_FAN_CONCURRENCY: usize = 8;
         for _ in 0..MAX_STEPS {
             let mut advanced = false;
 
-            // The roots a channel rekey may be addressed under (re-read each pass —
-            // a base adopt below changes the head, and its predecessor is already
-            // archived). Shared with streamauth so the auth registration covers
-            // exactly this fan.
-            let addressing_roots = channel_rekey_addressing_roots(cur.community_root, &cid_hex);
-
-            // Private channels first: a removal-forced channel rekey rides the PRIOR
-            // root (CORD-06 D2), so read channels before a base adopt moves it.
-            let channel_ids: Vec<ChannelId> = cur.channels.iter().filter(|c| c.private).map(|c| c.id).collect();
-            // One concurrent wave per hop, not one round-trip per (channel, root).
-            // Serially this was `private channels x addressing roots` fetches before a
-            // single hop could be decided — around a hundred for a large community, and
-            // a week's absence walks dozens of hops. The decisions below still run
-            // serially and in the same order; only the reads overlap.
-            let fan: Vec<(ChannelId, Option<[u8; 32]>, Epoch, Epoch)> = channel_ids
-                .iter()
-                .filter_map(|cid| {
-                    cur.channel(cid).map(|ch| {
-                        (*cid, ch.key, ch.epoch, Epoch(ch.epoch.0.saturating_add(1)))
-                    })
-                })
-                .collect();
-            let mut prefetched: std::collections::HashMap<([u8; 32], usize), Vec<rekey::RekeyChunk>> =
-                std::collections::HashMap::new();
-            {
-                use futures_util::stream::StreamExt;
-                // root #0 = current, #1.. = archived priors (indices only — root
-                // bytes are key material and must never reach a log).
-                let jobs: Vec<(ChannelId, usize, GroupKey, Epoch)> = fan
-                    .iter()
-                    .flat_map(|(cid, _, _, next)| {
-                        addressing_roots.iter().enumerate().map(move |(ri, root)| {
-                            (*cid, ri, channel_rekey_group_key(root, cid, *next), *next)
-                        })
-                    })
-                    .collect();
-                let held = &cur;
-                let mut results = futures_util::stream::iter(jobs)
-                    .map(|(cid, ri, group, next)| async move {
-                        (cid, ri, next, fetch_rekey_chunks(transport, held, &group).await)
-                    })
-                    .buffer_unordered(CHANNEL_FAN_CONCURRENCY);
-                while let Some((cid, ri, next, out)) = results.next().await {
-                    let ch_hex = crate::simd::hex::bytes_to_hex_32(&cid.0);
-                    match out {
-                        Ok(chunks) => {
-                            if chunks.is_empty() {
-                                continue;
-                            }
-                            crate::log_debug!(
-                                "[v2:follow {}] ch {} next e{} root#{}/{}: {} rekey chunk(s)",
-                                &cid_hex[..8], &ch_hex[..8], next.0, ri, addressing_roots.len(), chunks.len()
-                            );
-                            prefetched.insert((cid.0, ri), chunks);
-                        }
-                        Err(e) => {
-                            crate::log_warn!(
-                                "[v2:follow {}] ch {} next e{} root#{}/{}: rekey plane fetch failed: {}",
-                                &cid_hex[..8], &ch_hex[..8], next.0, ri, addressing_roots.len(), e
-                            );
-                            return Err(e);
-                        }
-                    }
-                }
-            }
+            // Read against the state this hop decides on: the one read ahead stands only while
+            // the convergence above left the root where it was.
+            let hop = match first_hop.take().filter(|_| !changed) {
+                Some(read) => read?,
+                None => read_rekey_hop(transport, &cur, &cid_hex).await?,
+            };
+            let RekeyHop { roots: addressing_roots, fan, channels: mut prefetched, base } = hop;
 
             for (cid, held_key, held_epoch, next) in fan {
                 let ch_hex = crate::simd::hex::bytes_to_hex_32(&cid.0);
@@ -15403,9 +15622,7 @@ pub async fn follow_rekeys<T: Transport + ?Sized>(
                 let held_epoch = cur.root_epoch;
                 let held_key = cur.community_root;
                 let next = Epoch(held_epoch.0.saturating_add(1));
-                let group = base_rekey_group_key(&cur.community_root, cur.id(), next);
-                let chunks = fetch_rekey_chunks(transport, &cur, &group).await?;
-                let batches = vec![(chunks, Some((held_epoch, held_key)))];
+                let batches = vec![(base, Some((held_epoch, held_key)))];
                 match advance_scope(&batches, RekeyScope::Root, cur.id(), &base_rotator_ok, &base_rotator_outranks_me, &base_admissible, &signer, &my_xonly, next).await {
                     Advance::Adopt { new_key, control_pk, control_root, severed, rotator } => {
                         // CORD-02 §5: this npub's snapshot — and only this npub's —
@@ -15629,8 +15846,11 @@ async fn plane_wraps_held<T: Transport + ?Sized>(transport: &T, community: &Comm
         if control_sync::flooded(community, &view) {
             return None;
         }
+        let began = web_time::Instant::now();
         let sync = control_sync::sync_plane(transport, community, &view, control_sync::Wait::Quorum).await.ok().filter(|sync| !sync.flooded && !sync.unread)?;
+        let synced = began.elapsed();
         let unserved = control_sync::unserved_by_all(transport, &view, &sync).await?;
+        crate::log_debug!("[v2:plane {}] {} read in {:?} ({:?} to sync)", &community.id().to_hex()[..8], &group.pk_hex()[..8], began.elapsed(), synced);
         Some(view.all().ok()?.into_iter().filter(|w| !unserved.contains(&w.id)).collect())
     })
     .await
@@ -29785,6 +30005,88 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_action_reads_an_access_plane_once_and_afresh_after_writing_to_it() {
+        let (bed, owner, member) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Once", bed.relays.clone(), None).await.unwrap();
+        activate_roles_v2(&bed.relay, &community, crate::community::v2::roles::EVERYONE_DEFAULT).await.unwrap();
+        follow_control(&bed.relay, &community).await.unwrap();
+        let held = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        let ch = create_private_channel(&bed.relay, &held, "staff").await.unwrap();
+        let held = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        let (m, other) = (member.keys.public_key(), Keys::generate().public_key());
+        let room = held.channel(&ch).unwrap();
+        let (key, epoch) = (room.key.unwrap(), room.epoch);
+        // Someone else's delivery, sealed ahead of the action and published while it runs.
+        let theirs = build_deliveries(&held, &ch, rekey::RekeyScope::Channel(ch), epoch, None, &key, &[other], &Default::default(), false).await.unwrap();
+        let count = || async { fetch_access_deliveries(&bed.relay, &held, &ch).await.unwrap().len() };
+        let before = count().await;
+        reading_planes_once(async {
+            assert_eq!(count().await, before);
+            for wrap in &theirs {
+                bed.relay.publish(wrap, &held.relays).await.unwrap();
+            }
+            assert_eq!(count().await, before, "the plane was read once: a second look asks no relay");
+            deliver_access(&bed.relay, &held, &ch, &[m]).await.unwrap();
+            assert_eq!(count().await, before + 2, "after its own delivery the action reads the plane afresh");
+        })
+        .await;
+        assert_eq!(count().await, before + 2);
+        // Outside an action every read is the relays' own.
+        deliver_access(&bed.relay, &held, &ch, &[other]).await.unwrap();
+        assert_eq!(count().await, before + 3);
+    }
+
+    #[tokio::test]
+    async fn a_holder_never_cuts_someone_a_fresh_read_lets_in() {
+        use crate::community::roles::OverwriteTarget;
+        let (bed, owner, member) = TestBed::new();
+        let held = |c: &CommunityV2| crate::db::community::load_community_v2(c.id()).unwrap().unwrap();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Race", bed.relays.clone(), None).await.unwrap();
+        activate_roles_v2(&bed.relay, &community, crate::community::v2::roles::EVERYONE_DEFAULT).await.unwrap();
+        follow_control(&bed.relay, &community).await.unwrap();
+        let ch = create_private_channel(&bed.relay, &held(&community), "staff").await.unwrap();
+        let (m, chan) = (member.keys.public_key(), crate::simd::hex::bytes_to_hex_32(&ch.0));
+        let owner_hex = owner.keys.public_key().to_hex();
+        assert_eq!(still_left_out(&bed.relay, &held(&community), &chan, &owner_hex, vec![m]).await, vec![m], "not let in: cut");
+        set_overwrite(&bed.relay, &held(&community), ch.0, OverwriteTarget::Member(m.to_hex()), Permissions::VIEW_CHANNEL, 0).await.unwrap();
+        assert!(still_left_out(&bed.relay, &held(&community), &chan, &owner_hex, vec![m]).await.is_empty(), "let in since the duty's read: kept");
+    }
+
+    #[tokio::test]
+    async fn a_member_back_after_leaving_opens_its_key_delivery_again() {
+        use crate::community::roles::OverwriteTarget;
+        let (bed, owner, member) = TestBed::new();
+        let held = |c: &CommunityV2| crate::db::community::load_community_v2(c.id()).unwrap().unwrap();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Return", bed.relays.clone(), None).await.unwrap();
+        activate_roles_v2(&bed.relay, &community, crate::community::v2::roles::EVERYONE_DEFAULT).await.unwrap();
+        follow_control(&bed.relay, &community).await.unwrap();
+        let m = member.keys.public_key();
+        let ch = create_private_channel(&bed.relay, &held(&community), "staff").await.unwrap();
+        send_direct_invite(&bed.relay, &held(&community), &m, None, None).await.unwrap();
+        bed.swap_to(&member);
+        let invite = fetch_direct_invite(&bed.relay, &bed.relays, &m).await;
+        accept_direct_invite(&bed.relay, &invite).await.unwrap();
+        follow_control(&bed.relay, &held(&community)).await.unwrap();
+        bed.swap_to(&owner);
+        set_overwrite(&bed.relay, &held(&community), ch.0, OverwriteTarget::Member(m.to_hex()), Permissions::VIEW_CHANNEL, 0).await.unwrap();
+        bed.swap_to(&member);
+        follow_control(&bed.relay, &held(&community)).await.unwrap();
+        assert_eq!(collect_access(&bed.relay, &held(&community)).await.unwrap(), 1);
+        assert_eq!(absorb_parked_channel_keys(&held(&community), &crate::db::current_session()), vec![ch]);
+
+        // Gone and back without the session ending: the seat is new, the delivery is the same one.
+        leave_community(&bed.relay, &held(&community)).await.unwrap();
+        accept_direct_invite(&bed.relay, &invite).await.unwrap();
+        follow_control(&bed.relay, &held(&community)).await.unwrap();
+        assert!(held(&community).channel(&ch).is_some_and(|c| c.key.is_none()), "back without the key");
+        assert_eq!(collect_access(&bed.relay, &held(&community)).await.unwrap(), 1, "the delivery it opened before is opened again");
+        assert_eq!(absorb_parked_channel_keys(&held(&community), &crate::db::current_session()), vec![ch]);
+    }
+
+    #[tokio::test]
     async fn a_member_given_the_right_to_post_moments_after_joining_gets_the_key() {
         use crate::community::roles::OverwriteTarget;
         let (bed, owner, member) = TestBed::new();
@@ -34172,6 +34474,20 @@ mod tests {
         assert_eq!(crate::db::community::history_views(&cid_hex, &chan).unwrap().iter().map(|(e, _)| *e).collect::<Vec<_>>(), vec![first]);
         assert!(crate::db::community::held_epoch_key(&cid_hex, &chan, first.0).unwrap().is_none(), "never its secret");
         assert_eq!(texts(held()).await, vec!["early".to_string(), "later".to_string()], "history reads back");
+        // A catch-up that already proved the live epoch, as one run the moment the key landed has,
+        // reads an epoch delivered after it only when that plane counts as unread.
+        let proof = now_ms() / 1000;
+        let view = PublicKey::from_slice(&crate::db::community::history_views(&cid_hex, &chan).unwrap()[0].1.address).unwrap();
+        let caught = |unread: Vec<PublicKey>| {
+            let (relay, c) = (&bed.relay, held());
+            async move {
+                let live = c.channel(&ch).unwrap().epoch;
+                let (got, ..) = fetch_channel_history_since_epoch(relay, &c, &ch, 50, 2, Some(proof), None, crate::community::transport::Evidence::Quorum, |_, _, _| true, |_| Default::default(), Some((live, None)), &unread).await.unwrap();
+                got.iter().any(|e| matches!(&e.event, chat::ChatEvent::Message { opened, .. } if opened.rumor.content == "early"))
+            }
+        };
+        assert!(!caught(vec![]).await, "read from the proof, the delivered epoch is passed over");
+        assert!(caught(vec![view]).await, "unread, it is read whole");
         assert_eq!(collect_history(&bed.relay, &held()).await.unwrap(), 0, "once");
         as_reader(&n);
         assert_eq!(collect_access(&bed.relay, &held()).await.unwrap(), 0, "never this epoch's key, which opens what came before them");

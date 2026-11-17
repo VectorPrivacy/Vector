@@ -146,6 +146,24 @@ fn dissolved(handler: &dyn InboundEventHandler, community_id: &str) {
     handler.on_community_dissolved(community_id);
 }
 
+struct LiveAuthorityMoves;
+
+fn live_authority_moves() -> Arc<StdMutex<HashSet<[u8; 32]>>> {
+    crate::db::current_session().scoped::<LiveAuthorityMoves, _>()
+}
+
+/// A live fold moved `id`'s Roster or banlist. The full pass it queues re-reads a plane that
+/// already holds the change, so alone it would find nothing moved: no key looked for, no
+/// holder's duty run, and whoever the change let in left waiting on a clock.
+fn note_live_authority_move(id: &CommunityId) {
+    live_authority_moves().lock().unwrap_or_else(|e| e.into_inner()).insert(id.0);
+}
+
+/// Whether a live fold moved `id`'s authority since its last full pass. Asked once a pass.
+fn take_live_authority_move(id: &CommunityId) -> bool {
+    live_authority_moves().lock().unwrap_or_else(|e| e.into_inner()).remove(&id.0)
+}
+
 /// Whether a follow of this community is queued.
 pub(crate) fn follow_pending(id: &CommunityId) -> bool {
     V2_FOLLOW_PENDING.lock().unwrap_or_else(|e| e.into_inner()).contains(&id.0)
@@ -237,10 +255,69 @@ pub async fn debug_run_follow_stages(id: &CommunityId, session: &std::sync::Arc<
 /// Whether `id` is one of the live Concord subscriptions, without waiting: while a refresh holds
 /// them, every id answers yes.
 pub fn is_live_subscription(id: &SubscriptionId) -> bool {
+    if V2_RETIRED_SUBS.lock().unwrap_or_else(|e| e.into_inner()).contains(id) {
+        return true;
+    }
     match (V2_SUB_ID.try_lock(), V2_POOLWIDE_SUB_ID.try_lock()) {
         (Ok(targeted), Ok(poolwide)) => targeted.as_ref() == Some(id) || poolwide.as_ref() == Some(id),
         _ => true,
     }
+}
+
+/// How long after a live subscription is swapped what the planes carried is read once more,
+/// and how far back that read reaches.
+const SWAP_REPLAY_DELAY_MS: u64 = 2_000;
+const SWAP_REPLAY_BACK_MS: u64 = 15_000;
+
+/// How long after a Channel's writer epoch moves its last one is still listened to.
+const WRITER_TAIL_MS: u64 = 5 * 60 * 1000;
+
+/// The writer address a Channel left within [`WRITER_TAIL_MS`]: a writer who has not yet taken
+/// the new epoch goes on posting there for a moment, and the ledger still stands behind them.
+fn just_left_writer(ch: &super::community::ChannelV2) -> Option<PublicKey> {
+    let now = crate::clock::now_ms();
+    let ledger = ch.writers.as_ref()?;
+    let (live, _) = ledger.current_writer()?;
+    let began = ledger.writer_start(live)?;
+    if now.saturating_sub(began) > WRITER_TAIL_MS {
+        return None;
+    }
+    let (_, pk, _) = ledger.writers().filter(|(e, _, _)| *e < live).max_by_key(|(e, _, _)| e.0)?;
+    PublicKey::from_slice(&pk).ok()
+}
+
+/// Live subscriptions a refresh replaced, newest last. A relay pushes what it took in before it
+/// registered the new REQ down the old one, so the old one's events still count as live.
+static V2_RETIRED_SUBS: LazyLock<StdMutex<std::collections::VecDeque<SubscriptionId>>> = LazyLock::new(|| StdMutex::new(std::collections::VecDeque::new()));
+
+/// The live subscriptions now standing, read without waiting on a refresh: the listener asks
+/// for every event, and one held up while a refresh subscribes falls behind a ring that drops
+/// what it overwrites without a word.
+static V2_LIVE_SUBS: LazyLock<StdMutex<Vec<SubscriptionId>>> = LazyLock::new(|| StdMutex::new(Vec::new()));
+
+fn note_live_subscription(id: &SubscriptionId) {
+    let mut live = V2_LIVE_SUBS.lock().unwrap_or_else(|e| e.into_inner());
+    if !live.contains(id) {
+        live.push(id.clone());
+    }
+}
+
+/// How many replaced subscriptions are still listened to.
+const RETIRED_SUBS_KEPT: usize = 8;
+
+fn retire_subscription(id: SubscriptionId) {
+    V2_LIVE_SUBS.lock().unwrap_or_else(|e| e.into_inner()).retain(|l| *l != id);
+    let mut retired = V2_RETIRED_SUBS.lock().unwrap_or_else(|e| e.into_inner());
+    if retired.len() >= RETIRED_SUBS_KEPT {
+        retired.pop_front();
+    }
+    retired.push_back(id);
+}
+
+/// Whether an event that came in under `id` is a Concord live event: one of the live
+/// subscriptions, or one a refresh just replaced.
+pub fn routes_live(id: &SubscriptionId) -> bool {
+    V2_LIVE_SUBS.lock().unwrap_or_else(|e| e.into_inner()).contains(id) || V2_RETIRED_SUBS.lock().unwrap_or_else(|e| e.into_inner()).contains(id)
 }
 
 pub async fn subscription_id() -> Option<SubscriptionId> {
@@ -257,6 +334,8 @@ pub async fn clear() {
     *V2_SUB_ID.lock().await = None;
     *V2_POOLWIDE_SUB_ID.lock().await = None;
     *V2_SUB_FP.lock().await = None;
+    V2_RETIRED_SUBS.lock().unwrap_or_else(|e| e.into_inner()).clear();
+    V2_LIVE_SUBS.lock().unwrap_or_else(|e| e.into_inner()).clear();
     *seen_wraps().lock().unwrap_or_else(|e| e.into_inner()) = SeenWraps::default();
     // Drop the queue sender so the worker's channel closes and it exits; the
     // next login spawns a fresh worker.
@@ -333,6 +412,41 @@ pub(crate) async fn settle_owed_retractions<T: crate::community::transport::Tran
     }
 }
 
+/// How long after a Channel's epoch moves the epoch it left is read once more.
+const MOVED_TAIL_SECS: u64 = 8;
+
+/// Each Channel left the epoch beside it for a later one just now. A member who has not yet taken
+/// the new one goes on posting at the old for a moment, where nobody who moved is listening any
+/// more: read from that epoch up again once they have had time to, so what they said there is
+/// not lost. One after another: a Refounding moves every Channel at once.
+pub(crate) fn reread_tails(id: CommunityId, left: Vec<(crate::community::ChannelId, Epoch)>) {
+    // Nothing to read with: a rotation minted where no client is connected.
+    if left.is_empty() || crate::state::nostr_client().is_none() {
+        return;
+    }
+    let moved_at = crate::clock::now_secs();
+    crate::db::spawn_bound(async move {
+        crate::rt::time::sleep(std::time::Duration::from_secs(MOVED_TAIL_SECS)).await;
+        let transport = crate::community::transport::LiveTransport::with_timeout(std::time::Duration::from_secs(12));
+        let since = Some(moved_at.saturating_sub(60));
+        let settled = |wraps: &[nostr_sdk::prelude::EventId]| {
+            let hex: Vec<String> = wraps.iter().map(|w| w.to_hex()).collect();
+            let settled = crate::db::events::community_wraps_settled(&hex);
+            wraps.iter().zip(&hex).filter(|(_, h)| settled.contains(*h)).map(|(w, _)| *w).collect()
+        };
+        for (channel, from) in left {
+            if !crate::db::current_session().is_live() {
+                return;
+            }
+            let (Some(me), Ok(Some(community))) = (crate::state::my_public_key(), crate::db::community::load_community_v2(&id)) else { return };
+            let read = super::service::fetch_channel_history_since_epoch(&transport, &community, &channel, 200, 2, since, None, crate::community::transport::Evidence::Quorum, |_, _, _| true, settled, Some((from, since)), &[]).await;
+            if let Ok((page, ..)) = read {
+                crate::VectorCore::v2_ingest_chat_page(&crate::simd::hex::bytes_to_hex_32(&channel.0), me, crate::db::current_session(), page).await;
+            }
+        }
+    });
+}
+
 /// Read again each Channel whose live epoch moved, or whose published history grew, since `before`:
 /// the live subscription carries only what arrives next, and what those planes hold is history.
 fn reread_moved_channels(before: &CommunityV2) {
@@ -353,6 +467,17 @@ fn reread_moved_channels(before: &CommunityV2) {
         return;
     }
     let id = *after.id();
+    // Only a Channel read before and still read now has an epoch it left behind.
+    let readable = |ch: &super::community::ChannelV2| !(ch.private && ch.key.is_none());
+    let left = after
+        .channels
+        .iter()
+        .filter(|ch| readable(ch))
+        .filter_map(|ch| before.channel(&ch.id).filter(|was| readable(was)).map(|was| (ch.id, before.channel_secret(was).1, after.channel_secret(ch).1)))
+        .filter(|(_, left, now)| left != now)
+        .map(|(channel, left, _)| (channel, left))
+        .collect();
+    reread_tails(id, left);
     crate::db::spawn_bound(async move {
         for channel in moved {
             if !crate::db::current_session().is_live() {
@@ -387,6 +512,7 @@ fn community_addresses(c: &CommunityV2) -> Vec<PublicKey> {
         if let Some(pk) = ch.writers.as_ref().and_then(|l| l.current_writer()).and_then(|(_, pk)| PublicKey::from_slice(&pk).ok()) {
             out.push(pk);
         }
+        out.extend(just_left_writer(ch));
     }
     out.extend(rekey_authors(c));
     out
@@ -740,11 +866,13 @@ pub async fn force_refresh_subscription(client: &Client) {
         if let Some(old) = sub_guard.take() {
             crate::live_subs::forget(&old);
             let _ = client.unsubscribe(&old).await;
+            retire_subscription(old);
         }
         let mut pw = V2_POOLWIDE_SUB_ID.lock().await;
         if let Some(old) = pw.take() {
             crate::live_subs::forget(&old);
             let _ = client.unsubscribe(&old).await;
+            retire_subscription(old);
         }
         // Clearing the remembered plan too, so the equality check cannot match.
         *V2_SUB_FP.lock().await = None;
@@ -820,16 +948,21 @@ pub async fn refresh_subscription(client: &Client) {
         mark_subscription_ready(); // an unchanged live sub is a completed pass
         return; // the pool re-applies the live subs across reconnects.
     }
-    if let Some(old) = sub_guard.take() {
-        crate::live_subs::forget(&old);
-        let _ = client.unsubscribe(&old).await;
-    }
+    // The old subscriptions close only once the new ones stand: a relay sends a fresh REQ only what
+    // arrives after it, so closing first drops whatever is published in between.
+    let old_targeted = sub_guard.take();
     *fp_guard = Some(fingerprint);
 
     if plan.authors.is_empty() {
+        if let Some(old) = old_targeted {
+            crate::live_subs::forget(&old);
+            let _ = client.unsubscribe(&old).await;
+            retire_subscription(old);
+        }
         if let Some(old_pw) = V2_POOLWIDE_SUB_ID.lock().await.take() {
             crate::live_subs::forget(&old_pw);
             let _ = client.unsubscribe(&old_pw).await;
+            retire_subscription(old_pw);
         }
         // Completed with nothing to hear: READY with zero planes, which is a
         // different observable state from "still connecting".
@@ -840,12 +973,10 @@ pub async fn refresh_subscription(client: &Client) {
     let since = live_since();
     let SubPlan { authors, per_relay } = plan;
 
+    let mut retired: Vec<SubscriptionId> = old_targeted.into_iter().collect();
     {
         let mut pw = V2_POOLWIDE_SUB_ID.lock().await;
-        if let Some(old) = pw.take() {
-            crate::live_subs::forget(&old);
-            let _ = client.unsubscribe(&old).await;
-        }
+        retired.extend(pw.take());
         let filter = live_filter(authors, since);
         match client.subscribe(filter.clone()).await {
             Ok(out) => {
@@ -856,6 +987,7 @@ pub async fn refresh_subscription(client: &Client) {
                     out.success.keys().map(|r| r.to_string()).collect::<Vec<_>>(),
                     out.failed.iter().map(|(r, e)| format!("{r}: {e:?}")).collect::<Vec<_>>()
                 );
+                note_live_subscription(&out.value);
                 *pw = Some(out.value);
             }
             Err(e) => crate::log_warn!("[v2-sub] poolwide subscribe FAILED: {e}"),
@@ -872,11 +1004,24 @@ pub async fn refresh_subscription(client: &Client) {
                 out.success.keys().map(|r| r.to_string()).collect::<Vec<_>>(),
                 out.failed.iter().map(|(r, e)| format!("{r}: {e:?}")).collect::<Vec<_>>()
             );
+            note_live_subscription(&out.value);
             *sub_guard = Some(out.value);
         }
         Err(e) => crate::log_warn!("[v2-sub] targeted subscribe FAILED: {e}"),
     }
+    for old in retired {
+        crate::live_subs::forget(&old);
+        let _ = client.unsubscribe(&old).await;
+        retire_subscription(old);
+    }
     mark_subscription_ready();
+    // However the swap went, what was published while it ran is read once more: a relay may push
+    // it down neither subscription, and a listener held up meanwhile loses it to the ring.
+    let swapped_at = crate::clock::now_ms();
+    crate::db::spawn_bound(async move {
+        crate::rt::time::sleep(std::time::Duration::from_millis(SWAP_REPLAY_DELAY_MS)).await;
+        crate::VectorCore::owe_live_replay(swapped_at.saturating_sub(SWAP_REPLAY_BACK_MS));
+    });
     drop(fp_guard);
     drop(sub_guard);
 
@@ -1039,6 +1184,11 @@ async fn apply_live_control(c: &CommunityV2, wrap: &Event, handler: &dyn Inbound
     }
     if follow.updated.is_some() {
         refreshed(handler, &community_id);
+    } else if follow.authority_changed {
+        super::changes::notify(handler, &community_id);
+    }
+    if follow.authority_changed {
+        note_live_authority_move(c.id());
     }
     if moved_planes || follow.authority_changed || banned {
         enqueue_follow_urgent(c.id());
@@ -1162,11 +1312,21 @@ pub async fn dispatch_event(event: Event, handler: Arc<dyn InboundEventHandler>)
                     // Live membership motion: fold it into the persisted Guestbook so
                     // the memberlist stays a local read (the presence callback already
                     // fired inline), and refresh the overview when it lands.
+                    let joined = match &ev.entry {
+                        super::guestbook::GuestbookEntry::Join { member, .. } => Some(*member),
+                        _ => None,
+                    };
                     let changed = ingest_live(c, *ev, &event);
                     remember();
                     // Membership isn't a change the feed reports: joins and leaves have their own hook.
                     if changed {
                         handler.on_community_refreshed(&crate::simd::hex::bytes_to_hex_32(&c.id().0));
+                        // Someone back whose Roles still open private Channels is owed their keys
+                        // now, not at the next Roster change or the duty's period.
+                        if joined.is_some_and(|m| super::service::holds_grant(c, &m)) {
+                            super::service::access_duty_now(c.id());
+                            enqueue_follow(c.id());
+                        }
                     }
                     return;
                 }
@@ -1417,6 +1577,13 @@ async fn follow_community(session: &std::sync::Arc<crate::db::Session>, id: &Com
         let lock = follow_lock(id);
         let _guard = lock.lock().await;
         let transport = crate::community::transport::LiveTransport::with_timeout(std::time::Duration::from_secs(12));
+        let mut laps = Laps::start();
+        let moved_live = take_live_authority_move(id);
+        if moved_live {
+            note_roster_move(id);
+            keys_first(id, &community_id, &transport, &client, session, handler).await;
+            laps.mark("keys-first");
+        }
 
         // Rekey first (fresh DB state).
         let Ok(Some(current)) = crate::db::community::load_community_v2(id) else {
@@ -1467,11 +1634,18 @@ async fn follow_community(session: &std::sync::Arc<crate::db::Session>, id: &Com
             }
         }
 
+        laps.mark("rekeys");
+        take_owed_keys(id, &community_id, &transport, &client, session, handler).await;
         // Control second, on the (possibly new-root) freshly-reloaded state.
         let Ok(Some(current)) = crate::db::community::load_community_v2(id) else {
             return;
         };
         let followed = super::service::follow_control(&transport, &current).await;
+        laps.mark("control");
+        if followed.as_ref().is_ok_and(|c| c.authority_changed) {
+            note_roster_move(id);
+        }
+        take_owed_keys(id, &community_id, &transport, &client, session, handler).await;
         let control_ok = followed.is_ok();
         let control = match followed {
             Ok(c) => c,
@@ -1484,6 +1658,14 @@ async fn follow_community(session: &std::sync::Arc<crate::db::Session>, id: &Com
             }
         };
         let control_changed = control.updated.is_some();
+        // What a live fold already wrote counts as this pass's own: the first walk ran on it,
+        // so only the keys and duties that follow a Roster move are still owed.
+        let authority_changed = control.authority_changed || moved_live;
+        // The change feed hears of a fold once it is written, not after the key and history
+        // reads below: a member is told of a Role before its rooms finish filling.
+        if control_ok {
+            super::changes::notify(&*handler, &community_id);
+        }
         // The authority half is what the rekey walk gates on, and the walk ran BEFORE
         // this fold. Re-walk once, in-process, on the freshly-written state — a queue
         // re-enqueue would be both slower and, on a coalesced queue, droppable.
@@ -1503,8 +1685,9 @@ async fn follow_community(session: &std::sync::Arc<crate::db::Session>, id: &Com
                 }
             }
         }
+        laps.mark("re-walk");
         // Keys delivered on an access plane park for the vend judge just below.
-        let collect = super::service::access_collect_due(id, control.authority_changed);
+        let collect = super::service::access_collect_due(id, authority_changed);
         if let Some(current) = crate::db::community::load_community_v2(id).ok().flatten().filter(|_| collect) {
             match super::service::collect_access(&transport, &current).await {
                 Ok(0) => {}
@@ -1521,9 +1704,10 @@ async fn follow_community(session: &std::sync::Arc<crate::db::Session>, id: &Com
                 Err(e) => crate::log_warn!("[v2:follow {}] writer key read failed: {e}", &community_id[..8.min(community_id.len())]),
             }
         }
+        laps.mark("access");
         // A holder delivers only off a pass that read both planes: a failed one may hold a key
         // its roster hasn't caught up with.
-        if rekeys_ok && control_ok && super::service::access_duty_due(id, control.authority_changed) {
+        if rekeys_ok && control_ok && super::service::access_duty_due(id, authority_changed) {
             let owed = *id;
             crate::db::spawn_bound(async move {
                 // Every holder sees the same gap: a random wait lets the first delivery serve them all.
@@ -1543,14 +1727,24 @@ async fn follow_community(session: &std::sync::Arc<crate::db::Session>, id: &Com
                 }
             });
         }
-        if control.authority_changed {
-            // Holders deliver a few seconds after the change that entitled us: look again then.
+        if authority_changed {
+            // Whoever made the change delivers the keys it owes moments after it, and holders a
+            // few seconds after that: look again while one is still owed, and once more whatever
+            // this device thinks it is owed.
             let again = *id;
             crate::db::spawn_bound(async move {
-                crate::rt::time::sleep(std::time::Duration::from_secs(20)).await;
-                if crate::db::current_session().is_live() {
-                    super::service::access_collect_now(&again);
-                    enqueue_follow(&again);
+                let mut waited = 0;
+                for (at, whatever) in OWED_LOOKS_SECS {
+                    crate::rt::time::sleep(std::time::Duration::from_secs(at - waited)).await;
+                    waited = at;
+                    if !crate::db::current_session().is_live() {
+                        return;
+                    }
+                    let owed = crate::db::community::load_community_v2(&again).ok().flatten().is_some_and(|c| super::service::owed_keys(&c));
+                    if owed || whatever {
+                        super::service::access_collect_now(&again);
+                        enqueue_follow(&again);
+                    }
                 }
             });
         }
@@ -1558,44 +1752,8 @@ async fn follow_community(session: &std::sync::Arc<crate::db::Session>, id: &Com
         // vend that lands AFTER its Grant folded has nothing left to change the
         // control plane, so gating this on `changed` strands it until some unrelated
         // edition happens by (CORD-03 "delivered on grant").
-        if let Ok(Some(folded)) = crate::db::community::load_community_v2(id) {
-            let keyed = super::service::absorb_parked_channel_keys(&folded, session);
-            if !keyed.is_empty() {
-                crate::log_info!(
-                    "[v2:follow {}] adopted {} vended private-channel key(s)",
-                    &community_id[..8.min(community_id.len())],
-                    keyed.len()
-                );
-                // A newly-keyed channel adds its chat plane to the readable set, and
-                // the live subscription is addressed BY that set — without a rebuild
-                // we hold the key and still never hear the channel. Independent of
-                // `control_changed`: adopting a parked vend changes no control state.
-                refresh_subscription(&client).await;
-            }
-            // After adopting: a channel keyed just now is one whose history may be waiting.
-            let reread = crate::db::community::load_community_v2(id).ok().flatten();
-            if let Some(now) = reread.filter(|_| super::service::history_collect_due(id, control.authority_changed || !keyed.is_empty())) {
-                match super::service::collect_history(&transport, &now).await {
-                    Ok(0) => {}
-                    Ok(n) => crate::log_info!("[v2:follow {}] {n} past epoch(s) delivered read-only", &community_id[..8.min(community_id.len())]),
-                    Err(e) => crate::log_warn!("[v2:follow {}] history read failed: {e}", &community_id[..8.min(community_id.len())]),
-                }
-            }
-            for ch in keyed {
-                let hex = crate::simd::hex::bytes_to_hex_32(&ch.0);
-                // Read what was said while we were locked out. The live subscription
-                // only carries what arrives NEXT, so without this a member granted
-                // access walks into a room that looks empty. The count rides the hook:
-                // backfilled history is NOT dispatched as live messages, and without
-                // the number a handler cannot even tell there is history to go read.
-                let backfilled = crate::VectorCore::v2_backfill_channel(
-                    id, &hex, 50, 2, None, None,
-                    crate::community::transport::Evidence::Fast, 12,
-                )
-                .await;
-                handler.on_channel_keyed(&community_id, &hex, backfilled);
-            }
-        }
+        adopt_parked_keys(id, &community_id, &transport, &client, session, handler, authority_changed).await;
+        laps.mark("keys");
         if control_changed {
             refresh_subscription(&client).await;
             refreshed(&*handler, &community_id);
@@ -1632,6 +1790,7 @@ async fn follow_community(session: &std::sync::Arc<crate::db::Session>, id: &Com
             }
         }
 
+        laps.mark("notify");
         // Guestbook third: catch the membership store up from its cursor. Boot and
         // reconnect land here through this same queue, so the memberlist is a local
         // read by the time any panel asks — and every join/leave the catch-up folds
@@ -1647,6 +1806,11 @@ async fn follow_community(session: &std::sync::Arc<crate::db::Session>, id: &Com
                 super::service::record_eviction(&current, at);
                 self_removed(&*handler, &community_id);
                 return;
+            }
+            // Someone back whose Roles still open private Channels is owed their keys now.
+            if fresh.iter().any(|ev| matches!(&ev.entry, super::guestbook::GuestbookEntry::Join { member, .. } if super::service::holds_grant(&current, member))) {
+                super::service::access_duty_now(id);
+                enqueue_follow(id);
             }
             if !fresh.is_empty() {
                 surface_presence(&current, &fresh, handler);
@@ -1691,8 +1855,185 @@ async fn follow_community(session: &std::sync::Arc<crate::db::Session>, id: &Com
                 crate::log_info!("[v2:follow {}] {released} held post(s) stand now", &community_id[..8.min(community_id.len())]);
             }
         }
+        laps.mark("guestbook");
+        crate::log_debug!("[v2:follow {}] pass: {laps}", &community_id[..8.min(community_id.len())]);
     })
     .await
+}
+
+/// How many newly keyed Channels read their history at once.
+const KEYED_BACKFILL_CONCURRENCY: usize = 4;
+
+/// Adopt the Private Channel keys parked for `id` that its fold now lets in, read what each
+/// room held before, and tell the handler. `moved` is whether the Roster moved, which makes the
+/// past epochs delivered read-only due as well. Returns how many Channels were keyed.
+async fn adopt_parked_keys(
+    id: &CommunityId,
+    community_id: &str,
+    transport: &crate::community::transport::LiveTransport,
+    client: &Client,
+    session: &Arc<crate::db::Session>,
+    handler: &dyn InboundEventHandler,
+    moved: bool,
+) -> usize {
+    let Ok(Some(folded)) = crate::db::community::load_community_v2(id) else { return 0 };
+    let keyed = super::service::absorb_parked_channel_keys(&folded, session);
+    if !keyed.is_empty() {
+        crate::log_info!("[v2:follow {}] adopted {} vended private-channel key(s)", &community_id[..8.min(community_id.len())], keyed.len());
+        // A newly-keyed channel adds its chat plane to the readable set, and
+        // the live subscription is addressed BY that set — without a rebuild
+        // we hold the key and still never hear the channel. Independent of
+        // `control_changed`: adopting a parked vend changes no control state.
+        refresh_subscription(client).await;
+    }
+    // After adopting: a channel keyed just now is one whose history may be waiting.
+    let reread = crate::db::community::load_community_v2(id).ok().flatten();
+    let mut rooms: Vec<crate::community::ChannelId> = keyed.clone();
+    if let Some(now) = reread.filter(|_| super::service::history_collect_due(id, moved || !keyed.is_empty() || owed_history(id))) {
+        match super::service::collect_history_rooms(transport, &now).await {
+            Ok(took) if took.is_empty() => {}
+            // A past epoch taken after its room was read leaves that room to read again.
+            Ok(took) => {
+                crate::log_info!("[v2:follow {}] {} past epoch(s) delivered read-only", &community_id[..8.min(community_id.len())], took.iter().map(|(_, n)| n).sum::<usize>());
+                rooms.extend(took.into_iter().map(|(ch, _)| ch).filter(|ch| !keyed.contains(ch)));
+            }
+            Err(e) => crate::log_warn!("[v2:follow {}] history read failed: {e}", &community_id[..8.min(community_id.len())]),
+        }
+    }
+    // Read what was said while we were locked out. The live subscription
+    // only carries what arrives NEXT, so without this a member granted
+    // access walks into a room that looks empty. The count rides the hook:
+    // backfilled history is NOT dispatched as live messages, and without
+    // the number a handler cannot even tell there is history to go read.
+    // A few rooms at a time: a Role that opens several fills them together.
+    let rooms: Vec<String> = rooms.iter().map(|ch| crate::simd::hex::bytes_to_hex_32(&ch.0)).collect();
+    for rooms in rooms.chunks(KEYED_BACKFILL_CONCURRENCY) {
+        let fills = futures_util::future::join_all(rooms.iter().map(|hex| {
+            crate::VectorCore::v2_backfill_channel(id, hex, 50, 2, None, None, crate::community::transport::Evidence::Fast, 12)
+        }))
+        .await;
+        for (hex, backfilled) in rooms.iter().zip(fills) {
+            handler.on_channel_keyed(community_id, hex, backfilled);
+        }
+    }
+    keyed.len()
+}
+
+struct OwedLooks;
+
+/// Until when (unix ms) each community's passes look for owed keys between their stages.
+fn owed_looks() -> Arc<StdMutex<HashMap<[u8; 32], u64>>> {
+    crate::db::current_session().scoped::<OwedLooks, _>()
+}
+
+/// How long after a Roster move a pass keeps looking between its stages.
+const OWED_LOOKS_FOR_MS: u64 = 60_000;
+
+/// Whether a Roster move is fresh enough that its past epochs may still be on their way: whoever
+/// delivers a room's key sends its history just after, so one look can land between the two.
+fn owed_history(id: &CommunityId) -> bool {
+    owed_looks().lock().unwrap_or_else(|e| e.into_inner()).get(&id.0).is_some_and(|until| crate::clock::now_ms() < *until)
+}
+
+/// The Roster just moved: whoever it let in is delivered to over the next moments.
+fn note_roster_move(id: &CommunityId) {
+    owed_looks().lock().unwrap_or_else(|e| e.into_inner()).insert(id.0, crate::clock::now_ms() + OWED_LOOKS_FOR_MS);
+}
+
+/// Take whatever key the stored Roster still owes this member and someone has delivered since
+/// the last look. Asked between the stages of a pass, so a key that lands while one runs does
+/// not wait out the walks left in it. A member owed nothing reads no plane here.
+async fn take_owed_keys(
+    id: &CommunityId,
+    community_id: &str,
+    transport: &crate::community::transport::LiveTransport,
+    client: &Client,
+    session: &Arc<crate::db::Session>,
+    handler: &dyn InboundEventHandler,
+) {
+    // Only while a Roster move is fresh: a key nobody can deliver yet is left to the clocks.
+    if owed_looks().lock().unwrap_or_else(|e| e.into_inner()).get(&id.0).is_none_or(|until| crate::clock::now_ms() >= *until) {
+        return;
+    }
+    let Ok(Some(current)) = crate::db::community::load_community_v2(id) else { return };
+    let (rooms, writers) = (super::service::owed_channel_keys(&current), super::service::owed_writer_keys(&current));
+    if rooms {
+        if let Err(e) = super::service::collect_access(transport, &current).await {
+            crate::log_warn!("[v2:follow {}] access plane read failed: {e}", &community_id[..8.min(community_id.len())]);
+        }
+        adopt_parked_keys(id, community_id, transport, client, session, handler, false).await;
+    }
+    if writers {
+        match super::service::collect_writers(transport, &current).await {
+            Ok(0) => {}
+            Ok(n) => {
+                crate::log_info!("[v2:follow {}] took {n} writer key(s)", &community_id[..8.min(community_id.len())]);
+                refresh_subscription(client).await;
+                refreshed(handler, community_id);
+            }
+            Err(e) => crate::log_warn!("[v2:follow {}] writer key read failed: {e}", &community_id[..8.min(community_id.len())]),
+        }
+    }
+}
+
+/// When, after a Roster move, a pass looks for keys again: `(seconds after it, whether it looks
+/// even when this device counts nothing owed)`.
+const OWED_LOOKS_SECS: [(u64, bool); 3] = [(3, false), (8, false), (20, true)];
+
+/// When each look for a key is taken after the one before found none. Whoever let this member
+/// in publishes the key a moment after the change that owes it.
+const KEY_LOOKS_MS: [u64; 3] = [0, 400, 800];
+
+/// A live fold just moved the Roster: before the walks, which need nothing of it and can take
+/// seconds, take the keys of every Private Channel it let this member into. A member it let
+/// into nothing reads no plane here.
+async fn keys_first(
+    id: &CommunityId,
+    community_id: &str,
+    transport: &crate::community::transport::LiveTransport,
+    client: &Client,
+    session: &Arc<crate::db::Session>,
+    handler: &dyn InboundEventHandler,
+) {
+    for wait in KEY_LOOKS_MS {
+        let Ok(Some(current)) = crate::db::community::load_community_v2(id) else { return };
+        if !super::service::owed_channel_keys(&current) {
+            return;
+        }
+        crate::rt::time::sleep(std::time::Duration::from_millis(wait)).await;
+        if let Err(e) = super::service::collect_access(transport, &current).await {
+            crate::log_warn!("[v2:follow {}] access plane read failed: {e}", &community_id[..8.min(community_id.len())]);
+        }
+        // Past epochs are read for a room keyed here; the pass reads the rest at its usual place.
+        adopt_parked_keys(id, community_id, transport, client, session, handler, false).await;
+    }
+}
+
+/// How long each stage of a follow pass took, for the one line a pass logs.
+struct Laps {
+    last: web_time::Instant,
+    took: Vec<(&'static str, u128)>,
+}
+
+impl Laps {
+    fn start() -> Self {
+        Laps { last: web_time::Instant::now(), took: Vec::new() }
+    }
+
+    fn mark(&mut self, stage: &'static str) {
+        let now = web_time::Instant::now();
+        self.took.push((stage, now.duration_since(self.last).as_millis()));
+        self.last = now;
+    }
+}
+
+impl std::fmt::Display for Laps {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for (i, (stage, ms)) in self.took.iter().enumerate() {
+            write!(f, "{}{stage} {ms}ms", if i == 0 { "" } else { ", " })?;
+        }
+        Ok(())
+    }
 }
 
 /// Report the authorized Kicks a catch-up folded, as one heard live is.
@@ -1757,6 +2098,17 @@ mod tests {
 
     fn cid(b: u8) -> CommunityId {
         CommunityId([b; 32])
+    }
+
+    #[test]
+    fn a_live_authority_move_is_owed_to_exactly_one_pass() {
+        let (a, b) = (cid(0xA1), cid(0xB2));
+        assert!(!take_live_authority_move(&a), "nothing moved yet");
+        note_live_authority_move(&a);
+        note_live_authority_move(&a);
+        assert!(!take_live_authority_move(&b), "another community's move is not this one's");
+        assert!(take_live_authority_move(&a), "the pass a live fold queued hears of the move");
+        assert!(!take_live_authority_move(&a), "and the pass after it does not");
     }
 
     #[test]
@@ -1898,6 +2250,15 @@ mod tests {
         *V2_SUB_ID.lock().await = Some(live.clone());
         assert!(is_live_subscription(&live));
         assert!(!is_live_subscription(&other), "a fetch's subscription is not the live one");
+        // One a refresh replaced still carries what a relay took in before the new one stood.
+        let replaced = SubscriptionId::new("replaced-by-a-refresh");
+        assert!(!is_live_subscription(&replaced));
+        retire_subscription(replaced.clone());
+        assert!(is_live_subscription(&replaced) && routes_live(&replaced), "a replaced subscription still routes");
+        for i in 0..RETIRED_SUBS_KEPT {
+            retire_subscription(SubscriptionId::new(format!("later-{i}")));
+        }
+        assert!(!routes_live(&replaced), "only the last few are kept");
         // A refresh holding the ids answers at once, and errs toward dispatching.
         let held = V2_POOLWIDE_SUB_ID.lock().await;
         assert!(is_live_subscription(&other));

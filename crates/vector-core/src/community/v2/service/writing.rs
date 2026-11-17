@@ -630,6 +630,10 @@ pub(super) async fn settle_writers<T: Transport + ?Sized>(transport: &T, communi
 }
 
 async fn settle_writers_moved<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, before: &CommunityRoles, after: &CommunityRoles) -> Result<(), String> {
+    super::reading_planes_once(settle_writers_moved_once(transport, community, before, after)).await
+}
+
+async fn settle_writers_moved_once<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, before: &CommunityRoles, after: &CommunityRoles) -> Result<(), String> {
     let owner_hex = community.owner()?.to_hex();
     let me_hex = me_pk()?.to_hex();
     let may_manage = me_hex == owner_hex || after.is_authorized(&me_hex, Some(&owner_hex), Permissions::MANAGE_CHANNELS);
@@ -638,9 +642,15 @@ async fn settle_writers_moved<T: Transport + ?Sized>(transport: &T, community: &
         return Ok(());
     }
     // Writers come from the memberlist: a member granted a Role moments after joining is in it
-    // only once their Join is read.
-    if let Err(e) = super::sync_guestbook(transport, &held).await {
-        crate::log_warn!("v2: the Guestbook couldn't be read before settling writers (a backstop serves whoever it missed): {e}");
+    // only once their Join is read. A change that only regrants members already in it needs no
+    // read, which is what every Role a gate hands out is.
+    let regranted: Vec<&str> = after.grants.iter().filter(|g| !before.grants.contains(g)).map(|g| g.member.as_str()).collect();
+    let only_grants = before.roles == after.roles && before.overwrites == after.overwrites && before.syncs == after.syncs && before.everyone == after.everyone;
+    let seated = only_grants && !regranted.is_empty() && super::stored_memberlist(&held).is_ok_and(|members| regranted.iter().all(|m| members.iter().any(|pk| pk.to_hex() == *m)));
+    if !seated {
+        if let Err(e) = super::sync_guestbook(transport, &held).await {
+            crate::log_warn!("v2: the Guestbook couldn't be read before settling writers (a backstop serves whoever it missed): {e}");
+        }
     }
     let banned: std::collections::BTreeSet<String> = crate::db::community::get_community_banlist(&hex(&held.id().0)).unwrap_or_default().into_iter().collect();
     let (was, now) = (Posters::of(&held, before, &banned)?, Posters::of(&held, after, &banned)?);
@@ -1759,13 +1769,49 @@ async fn retract_since_bound<T: Transport + ?Sized>(transport: &T, community: &C
     Ok(taken)
 }
 
+/// What this member still lacks to write in `ch` at its ledger's live `epoch`: the key, a
+/// certificate that covers its rights, and for a manager the certifier.
+fn lacking(community: &CommunityV2, ch: &ChannelV2, ledger: &Ledger, epoch: Epoch, rights: Option<Rights>, manages: bool) -> (bool, bool, bool) {
+    let need_key = (rights.is_some() || manages) && live_writer(community, ch).is_none();
+    let covered = || my_cert(community, ch, epoch).is_some() || my_scoped_cert(community, ch, epoch).is_some_and(|(_, r)| rights.is_some_and(|need| Rights::Scoped(r).covers(need)));
+    let need_cert = rights.is_some() && ledger.certifier(epoch).is_some() && !covered();
+    let need_certifier = manages && certifier_held(community, ch, epoch).is_none() && ledger.certifier(epoch).is_some();
+    (need_key, need_cert, need_certifier)
+}
+
+/// Whether the stored Roster lets this member post in a restricted Channel it still lacks the
+/// live writer key or a certificate for. A manager's own copy of the key and its certifier are
+/// not counted: nothing it does for itself waits on them.
+pub(crate) fn owed_writer_keys(community: &CommunityV2) -> bool {
+    let cid_hex = hex(&community.id().0);
+    let (Ok(roster), Ok(owner), Ok(me)) = (crate::db::community::get_community_roles(&cid_hex), community.owner(), me_pk()) else { return false };
+    if roster.everyone.is_none() {
+        return false;
+    }
+    let (owner_hex, me_hex) = (owner.to_hex(), me.to_hex());
+    let banned = crate::db::community::get_community_banlist(&cid_hex).unwrap_or_default();
+    let manages = me_hex == owner_hex || (!banned.contains(&me_hex) && roster.is_authorized(&me_hex, Some(&owner_hex), Permissions::MANAGE_CHANNELS));
+    community.channels.iter().filter(|c| c.restricted()).any(|ch| {
+        let Some((ledger, (epoch, _))) = ch.writers.as_ref().and_then(|l| l.current_writer().map(|live| (l, live))) else { return false };
+        let rights = rights_of(&roster, &owner_hex, &me_hex, ch, ch.locked());
+        let (key, cert, _) = lacking(community, ch, ledger, epoch, rights, manages);
+        rights.is_some() && (key || cert)
+    })
+}
+
 struct OpenedWriterBlobs;
+type OpenedWriters = std::sync::Mutex<std::collections::HashSet<([u8; 32], [u8; 32], [u8; 32], [u8; 32])>>;
+
+/// Drop this session's marks of writer deliveries already opened.
+pub(super) fn forget_opened_writer_blobs() {
+    *crate::db::current_session().scoped::<OpenedWriterBlobs, OpenedWriters>().lock().unwrap_or_else(|e| e.into_inner()) = Default::default();
+}
 
 /// Fetch the live writer secret of every restricted Channel this member may post in, or manages,
 /// but can't yet, adopting one only if it derives to the address the ledger names; with it, this
 /// member's certificate, and for a manager the certifier. Returns how many secrets it took.
 pub async fn collect_writers<T: Transport + ?Sized>(transport: &T, community: &CommunityV2) -> Result<usize, String> {
-    crate::db::scoped(collect_writers_bound(transport, community)).await
+    crate::db::scoped(super::reading_planes_once(collect_writers_bound(transport, community))).await
 }
 
 async fn collect_writers_bound<T: Transport + ?Sized>(transport: &T, community: &CommunityV2) -> Result<usize, String> {
@@ -1780,16 +1826,13 @@ async fn collect_writers_bound<T: Transport + ?Sized>(transport: &T, community: 
     let banned = crate::db::community::get_community_banlist(&cid_hex).unwrap_or_default();
     let manages = me_hex == owner_hex || (!banned.contains(&me_hex) && roster.is_authorized(&me_hex, Some(&owner_hex), Permissions::MANAGE_CHANNELS));
     let signer = crate::signer::active_signer()?;
-    let opened = crate::db::current_session().scoped::<OpenedWriterBlobs, std::sync::Mutex<std::collections::HashSet<([u8; 32], [u8; 32], [u8; 32], [u8; 32])>>>();
+    let opened = crate::db::current_session().scoped::<OpenedWriterBlobs, OpenedWriters>();
     let mut adopted = 0;
     for ch in community.channels.iter().filter(|c| c.restricted()) {
         let rights = rights_of(&roster, &owner_hex, &me_hex, ch, ch.locked());
         let Some(ledger) = ch.writers.as_ref() else { continue };
         let Some((epoch, pk)) = ledger.current_writer() else { continue };
-        let need_key = (rights.is_some() || manages) && live_writer(community, ch).is_none();
-        let covered = || my_cert(community, ch, epoch).is_some() || my_scoped_cert(community, ch, epoch).is_some_and(|(_, r)| rights.is_some_and(|need| Rights::Scoped(r).covers(need)));
-        let need_cert = rights.is_some() && ledger.certifier(epoch).is_some() && !covered();
-        let need_certifier = manages && certifier_held(community, ch, epoch).is_none() && ledger.certifier(epoch).is_some();
+        let (need_key, need_cert, need_certifier) = lacking(community, ch, ledger, epoch, rights, manages);
         if !need_key && !need_cert && !need_certifier {
             continue;
         }

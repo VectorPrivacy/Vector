@@ -1607,6 +1607,7 @@ impl LiveTransport {
         if let Some(c) = hit {
             c
         } else {
+            let opened = web_time::Instant::now();
             // Cold: a dedicated connection authed AS the plane key (a NIP-42
             // connection holds ONE identity; the shared client's is the user's).
             // Authenticates as the PLANE key, not the user — hence its own
@@ -1640,21 +1641,28 @@ impl LiveTransport {
             client.connect().await;
             // Warmup with the gated filter shape triggers each relay's NIP-42
             // challenge so auto-auth completes ONCE here; pooled reuses skip it.
-            for r in targets {
-                let _ = client
-                    .fetch_events(nostr_sdk::prelude::ReqTarget::single(r.clone(), [filter.clone()]))
-                    // Tor-aware: this warmup carries a NIP-42 challenge round trip, so a
-                    // clearnet 5s budget expires mid-auth and every relay ends up
-                    // unauthenticated — which surfaces as `0/N attempted` below.
-                    .timeout(crate::relay_request_timeout(std::time::Duration::from_secs(5)))
-                    .await;
-            }
+            // Every relay at once: one that never answers costs its budget once, not
+            // once ahead of each relay after it.
+            futures_util::future::join_all(targets.iter().map(|r| {
+                let (client, filter) = (&client, filter.clone());
+                async move {
+                    let _ = client
+                        .fetch_events(nostr_sdk::prelude::ReqTarget::single(r.clone(), [filter]))
+                        // Tor-aware: this warmup carries a NIP-42 challenge round trip, so a
+                        // clearnet 5s budget expires mid-auth and every relay ends up
+                        // unauthenticated — which surfaces as `0/N attempted` below.
+                        .timeout(crate::relay_request_timeout(std::time::Duration::from_secs(5)))
+                        .await;
+                }
+            }))
+            .await;
             // The warmup ends at its EOSE while nostr-sdk answers the challenge on a task of its
             // own, and a relay may answer a REQ that reaches it before the AUTH with nothing.
             let budget = crate::relay_request_timeout(std::time::Duration::from_secs(5));
             futures_util::future::join_all(frames.into_iter().map(|f| authenticated(f, budget))).await;
             let ev = PLANE_POOL.insert(generation, key, client.clone());
             disconnect_clients(ev);
+            crate::log_debug!("[v2:plane] a connection as {} to {} relay(s) opened in {:?}", &plane.public_key().to_hex()[..8], targets.len(), opened.elapsed());
             client
         }
     }
