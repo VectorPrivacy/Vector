@@ -575,6 +575,7 @@ fn download_box(
         .on_click(act(ctx, m, Act::Download(att.id.clone())));
     if compact {
         return base
+            .tooltip(crate::kit::tooltip(format!("{title} · {sub}")))
             .child(
                 tile.bg(ca(12, 12, 12, 0.82))
                     .hover(|s| s.bg(ca(24, 24, 24, 0.88)).border_color(c(0x4a4a4a))),

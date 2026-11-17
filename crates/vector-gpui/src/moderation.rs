@@ -584,6 +584,7 @@ fn row(m: &Moderation, store: &Store, x: &Value, on: &OnAct) -> impl IntoElement
     let group = SharedString::from(format!("mod-row-{npub}"));
     div()
         .id(group.clone())
+        .when(locked, |d| d.tooltip(crate::kit::tooltip(reasons.first().copied().unwrap_or("Protected").to_string())))
         .group(group.clone())
         .relative()
         .flex()

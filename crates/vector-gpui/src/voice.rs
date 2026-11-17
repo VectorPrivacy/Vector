@@ -1095,7 +1095,7 @@ pub fn bar(voice: &Voice, store: &Store, pos: Option<Point<Pixels>>, top: f32, o
                         .text_size(px(11.5))
                         .line_height(px(13.2))
                         .text_color(c(0xb2b2b2))
-                        .when_some(rtt_quality(ping), |d, q| d.child(dot(q)))
+                        .when_some(rtt_quality(ping), |d, q| d.child(div().id("voice-bar-ping").tooltip(crate::kit::tooltip(format!("{ping} ms to the slowest link"))).child(dot(q))))
                         .child(div().truncate().child(status)),
                 ),
         )

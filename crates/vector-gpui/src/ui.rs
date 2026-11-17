@@ -6968,8 +6968,15 @@ impl VectorApp {
 fn chrome(window: &Window, login: bool, mark_only: bool) -> gpui::Div {
     let maximized = window.is_maximized();
     let ctl = |id: &'static str, icon: &'static str, area: WindowControlArea, hover: u32| {
+        let tip = match area {
+            WindowControlArea::Min => "Minimize",
+            WindowControlArea::Max if maximized => "Restore",
+            WindowControlArea::Max => "Maximize",
+            _ => "Close",
+        };
         div()
             .id(id)
+            .tooltip(crate::kit::tooltip(tip))
             .w(px(37.))
             .h_full()
             .flex()
@@ -7398,6 +7405,7 @@ fn rail(
             .child(
                 div()
                     .id("rail-create-community")
+                    .tooltip(crate::kit::tooltip("Create Community"))
                     .size(px(45.))
                     .mx_auto()
                     .mt(px(2.))

@@ -909,8 +909,10 @@ impl VectorApp {
         }
         if raid {
             let id = cid.clone();
+            let suspects = self.raid.get(&cid).map_or(0, |r| r.1);
             actions = actions.child(
                 button("group-moderate-btn", "icons/vector_warning.svg", crate::timeline::DANGER, c(crate::timeline::DANGER), "Moderate")
+                    .tooltip(crate::kit::tooltip(format!("{suspects} accounts flagged as a raid")))
                     .on_click(cx.listener(move |app, _, window, cx| app.open_moderation(id.clone(), window, cx))),
             );
         } else if caps.contains("manage_channels") {

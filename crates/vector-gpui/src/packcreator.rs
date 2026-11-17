@@ -1191,6 +1191,7 @@ impl EmojiPicker {
         let has_logo = cr.logo_preview.is_some() || (cr.logo_url.is_some() && !cr.logo_dead);
         let logo = div()
             .id("creator-logo")
+            .when(cr.logo_dead, |d| d.tooltip(crate::kit::tooltip("This pack icon is no longer available (it may have been deleted).")))
             .size(px(26.))
             .flex_shrink_0()
             .rounded(px(6.))
@@ -1320,7 +1321,7 @@ impl EmojiPicker {
                     .justify_center()
                     .cursor_pointer()
                     .when(saving, |d| d.opacity(0.6))
-                    .tooltip(crate::kit::tooltip(shortcode))
+                    .tooltip(crate::kit::tooltip(e.broken.clone().map_or(shortcode, SharedString::from)))
                     .on_hover(cx.listener(move |this, on: &bool, _, cx| {
                         if let Some(cr) = this.creator.as_mut() {
                             if *on {
