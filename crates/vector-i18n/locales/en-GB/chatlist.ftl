@@ -47,3 +47,34 @@ ago-weeks = { $count }w
 ago-months = { $count }mo
 # $count is how many years.
 ago-years = { $count }y
+
+## The left column on a wide window
+
+rail-messages = Messages
+rail-new-messages = New Messages
+rail-communities = Communities
+rail-create-community = Create Community
+rail-expand = Expand the sidebar
+rail-collapse-tip = Collapse the sidebar
+rail-collapse = Collapse
+rail-set-status = Set a Status
+rail-switch-account = Switch account
+
+## The chat list's header and tabs
+
+chats-title = Chats
+chats-new-tip = New Message or Community
+chats-new-message = New Message
+chats-new-community = New Community
+chats-tab-messages = Messages
+chats-tab-requests = Requests
+chats-requests-empty = New people who message you show up here.
+chats-get-started = Get Started
+chats-get-started-text = Create your first private chat.
+
+## The empty main pane
+
+welcome-pick = Pick a conversation to get started
+welcome-title = Welcome to Vector!
+# <link> marks the words that open the public community.
+welcome-text = Feel free to <link>join the public community</link> to learn more about Vector, discuss privacy, and make some new friends.

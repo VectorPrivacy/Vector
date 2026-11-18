@@ -68,3 +68,17 @@ start-deafen = Deafen
 start-undeafen = Undeafen
 start-input-device = Input device
 start-output-device = Output device
+
+## A pin's menu, and folders of pins
+
+start-open = Open
+start-ungroup = Ungroup
+start-details = View Details
+start-move-out = Move out of Folder
+start-copy-link = Copy Link
+start-unpin = Unpin
+start-folder-rename = Rename Folder
+start-pins-syncing = Still syncing your pins, try again in a moment
+start-not-member = You're not in this community
+start-unsupported = This pin opens something not in this build yet
+start-resize-tip = Drag to resize (double-click to reset)

@@ -100,3 +100,15 @@ login-signer-reconnect-title = Reconnect Your Remote Signer
 login-signer-generating = Generating connection link…
 login-signer-copy-link = Copy Link
 login-signer-copied = Copied
+
+## Help and notices around signing in
+
+login-methods-title = Ways to Sign In
+# <b> is bold, <br> a line break. The three names match login-method-qr, -key and -signer.
+login-methods-text = <b>QR Code</b><br>Use a device you're already signed in on. There, open Settings and choose Sign in on Another Device, then scan the code this device shows or type it in. Both devices confirm a number, so your keys pass between them without anyone else being able to read them.<br><br><b>Private Key</b><br>Paste your nsec or type your seed phrase. Good when you have your key backed up and no other device to hand.<br><br><b>Remote Signer</b><br>Keep your key in a signer app such as Amber or nsec.app, which approves what Vector signs. Paste its bunker:// link, or pair it by scanning the code Vector shows.
+login-loading-error = Loading Error
+login-signer-open-title = Approve in your signer
+# <br> is a line break; $link is the page's address, shown as code.
+login-signer-open-text = Your signer asked you to open this page. It opens in your browser, outside your private network.<br><code>{ $link }</code>
+login-signer-offline = Remote signer offline. Please check your signer app.
+login-signer-online = Remote signer back online.

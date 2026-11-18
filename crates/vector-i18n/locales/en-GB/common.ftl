@@ -6,10 +6,33 @@ dialog-okay = Okay
 dialog-confirm = Confirm
 dialog-cancel = Cancel
 dialog-close = Close
+dialog-open = Open
+dialog-rename = Rename
+
+## The window's title bar
+
+window-minimize = Minimize
+window-restore = Restore
+window-maximize = Maximize
+window-close = Close
+# Opens the online docs.
+help = Help
 
 ## Shown where an action's answer never came back, because the app's background half stopped
 
 backend-stopped = Backend stopped
+
+## Toasts once something is on the clipboard
+
+copied = Copied
+copied-link = Copied Link
+copied-clipboard = Copied to Clipboard
+copied-app-link = Copied App Link
+
+## A download's progress
+
+# $done and $total are megabytes.
+progress-mb = { NUMBER($done, minimumFractionDigits: 1, maximumFractionDigits: 1) }/{ NUMBER($total, minimumFractionDigits: 1, maximumFractionDigits: 1) } MB
 
 ## Shown where an action was dropped before it finished
 

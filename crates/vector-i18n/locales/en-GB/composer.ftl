@@ -1,0 +1,3 @@
+### The message composer.
+
+composer-placeholder = Enter message...

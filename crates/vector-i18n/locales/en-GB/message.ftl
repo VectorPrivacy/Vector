@@ -43,6 +43,21 @@ msg-delete-limited-text = This message can't be fully removed from relays becaus
 msg-hide-title = Hide this message?
 msg-hide-text = Permanently hide this message for everyone in the community. This can't be undone.
 msg-hide-failed = Hide Failed
+msg-react-failed = Reaction Failed
+msg-delete-failed = Delete Failed
+msg-edit-failed = Edit Failed
+msg-retry-impossible = Cannot retry
+msg-react-denied = You can't react in this channel
+# $error is why, as the relay or app gave it.
+msg-react-not-sent = Reaction not sent: { $error }
+# $error is why, as the relay or app gave it.
+msg-not-sent = Not sent: { $error }
+msg-accept-to-download = Accept the request to download files
+msg-save-failed = Save Failed
+msg-file-gone = This file isn't on this device any more
+# Jumping to a message, by link or from Pins, that can't be reached.
+msg-jump-unshown = That message can't be shown
+msg-jump-not-local = That message isn't in your local history
 
 ## The toolbar over a hovered message: each is its button's tooltip, alongside msg-retry,
 ## msg-cancel-upload, msg-reply, msg-edit, msg-copy, msg-save and msg-reveal above

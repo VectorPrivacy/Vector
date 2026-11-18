@@ -130,3 +130,10 @@ community-settings-report-full = Full report
 community-settings-report-lede = How this device reads the community. Versions and short IDs only, safe to share.
 community-settings-report-close = Close
 community-settings-report-copy = Copy Report
+
+## Leaving or deleting a community
+
+community-settings-not-deleted = Not Deleted
+community-settings-not-deleted-text = The name did not match, so nothing was changed.
+community-settings-delete-failed = Failed to Delete
+community-settings-leave-failed = Failed to Leave

@@ -5,3 +5,5 @@ account-unnamed = Unnamed
 account-add = Add Profile
 # Shown instead of account-add once the device holds as many accounts as it can.
 account-max = Maximum Accounts
+account-logout-failed = Logout failed
+account-delete-failed = Delete failed

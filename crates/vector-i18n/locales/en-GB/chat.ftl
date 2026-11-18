@@ -88,3 +88,48 @@ chat-end-blocked = Blocked: you won't receive new messages from them
 chat-end-dissolved = This community was dissolved by the owner.
 # $name is the community's name.
 chat-end-dissolved-named = { $name } was dissolved by the owner.
+
+## A chat's wallpaper
+
+wallpaper-remove-title = Remove wallpaper?
+wallpaper-remove-text = This will remove the wallpaper and revert to the default theme. This change syncs to your contact and your other devices.
+wallpaper-uploading = Uploading…
+# $percent is how much has gone up, from 1 to 100.
+wallpaper-uploading-percent = Uploading… { $percent }%
+
+## Blocking someone from a chat
+
+block-user-title = Block User
+block-user-text = Are you sure you want to block this user? You will no longer receive DMs from them.
+
+## Titles of the popup when a notification setting couldn't be saved
+
+chat-notify-failed = Notification Settings
+chat-mute-failed = Mute
+
+## Jumping to the first unread message
+
+unread-jump-syncing = Syncing…
+# $percent is how much history has arrived, from 0 to 100.
+unread-jump-syncing-percent = Syncing… { $percent }%
+unread-jump-unreachable = Couldn't reach the first unread message.
+
+## A custom emoji that didn't load, on clicking it
+
+emoji-unavailable-title = Emoji unavailable
+emoji-unavailable-text = This emoji couldn't be loaded (the host may be offline, or the file was removed).
+# $why is the reason, as the loader gave it.
+emoji-unavailable-why = This emoji couldn't be loaded ({ $why }).
+
+## Blocking and unblocking: the toast once it's done
+
+block-user-done = User Blocked
+unblock-user-done = User Unblocked
+wallpaper-remove-failed = Wallpaper not removed
+
+## A chat's header
+
+chat-notes = Notes
+chat-notes-subtitle = Encrypted Notes to Self
+chat-call = Call
+chat-options = Chat Options

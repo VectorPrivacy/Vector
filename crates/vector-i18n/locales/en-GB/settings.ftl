@@ -109,6 +109,7 @@ settings-streamer-message-shown = message shown
 ## Blocked users
 
 settings-blocked-none = No blocked users
+settings-unblocked = User unblocked
 settings-unblock = Unblock
 
 ## Notifications
@@ -277,6 +278,10 @@ settings-update-checking = Checking for updates...
 settings-update-ready = Update ready! Restart to apply.
 settings-update-no-newer = No newer build yet. You'll be offered the official build as soon as it releases.
 settings-update-restart = Restart Now
+settings-update-check-failed = Failed to check for updates
+settings-update-download-stopped = The download stopped
+# The banner across the top. $version is the new version, like "0.5.3".
+settings-update-banner = New Vector Update Available ({ $version }). Download Now
 
 ## Voice
 
@@ -291,6 +296,7 @@ settings-voice-model-recommended = { $model } [Recommended]
 # $progress is how far the download is, like "45%" or "12.3/140.0 MB".
 settings-voice-downloading = Downloading... { $progress }
 settings-voice-ready = Vector AI is ready
+settings-voice-model-deleted = Model Deleted
 settings-voice-not-downloaded = Model not downloaded
 settings-voice-cancel-download = Cancel Download
 # $size is the model's size, like "142 MB".
@@ -300,6 +306,8 @@ settings-voice-download = Download Model ({ $size })
 
 settings-device-default = Default
 settings-device-system-default = System Default
+# The device the system picks; $device is what it is now.
+settings-device-system-default-named = System Default ({ $device })
 settings-microphone = Microphone
 settings-speaker = Speaker
 settings-mic-volume = Microphone Volume

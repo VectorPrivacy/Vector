@@ -6,6 +6,7 @@ server-notice-maxed = An allowance on this server is used up. Uploads are routed
 server-notice-no-access = This server won’t take uploads from your account.
 server-notice-disabled = Disabled — uploads aren’t routed here.
 server-remove = Remove
+server-add-failed = Could not add server
 server-disable = Disable
 server-enable = Enable
 server-latency = Latency

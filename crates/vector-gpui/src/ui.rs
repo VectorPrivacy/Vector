@@ -217,7 +217,7 @@ pub struct VectorApp {
     new_btn: Rc<std::cell::Cell<Option<gpui::Bounds<gpui::Pixels>>>>,
     signer_offline_told: bool,
     call_mic_told: Option<String>,
-    jump_miss: Option<(String, &'static str)>,
+    jump_miss: Option<(String, SharedString)>,
     /// The window is narrower than widescreen: the slim layout.
     is_slim: bool,
     /// The window's width as of this frame, for helpers that don't take a `Window`.
@@ -702,7 +702,7 @@ impl VectorApp {
     fn base(store: Store, live: bool, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let store: Shared = Rc::new(RefCell::new(store));
         let input = cx.new(|cx| {
-            let mut t = TextInput::new("Enter message...", cx)
+            let mut t = TextInput::new(t::composer_placeholder(), cx)
                 .multiline(px(126.))
                 .twemoji()
                 .decorated()
@@ -788,8 +788,8 @@ impl VectorApp {
                     crate::cropper::Cropper::new(
                         image,
                         natural,
-                        "Crop to Square",
-                        "Drag to move. Drag a corner to resize.",
+                        t::crop_square_title(),
+                        t::crop_square_hint(),
                         false,
                         window,
                         cx,
@@ -816,11 +816,11 @@ impl VectorApp {
             |app, _, crate::picker::CellMenu(idx, at), _, cx| {
                 let rows = vec![
                     (
-                        kit::MenuItem::new("Rename Emoji", "edit"),
+                        kit::MenuItem::new(t::packs_emoji_rename(), "edit"),
                         MenuAct::CreatorRename(*idx),
                     ),
                     (
-                        kit::MenuItem::new("Delete Emoji", "trash").danger(),
+                        kit::MenuItem::new(t::packs_emoji_delete(), "trash").danger(),
                         MenuAct::CreatorDelete(*idx),
                     ),
                 ];
@@ -854,7 +854,7 @@ impl VectorApp {
         )
         .detach();
         cx.subscribe(&emoji_picker, |app, _, crate::picker::GifMenu(url, at), cx| {
-            let rows = vec![(kit::MenuItem::new("Copy Link", "share"), MenuAct::CopyLink(url.clone()))];
+            let rows = vec![(kit::MenuItem::new(t::msg_copy_link(), "share"), MenuAct::CopyLink(url.clone()))];
             app.show_menu(*at, rows, cx);
         })
         .detach();
@@ -862,18 +862,18 @@ impl VectorApp {
             &emoji_picker,
             |app, _, crate::picker::PackMenu(id, own, theme, at), cx| {
                 let mut rows = vec![(
-                    kit::MenuItem::new("Share Pack", "share"),
+                    kit::MenuItem::new(t::packs_share(), "share"),
                     MenuAct::PackShare(id.clone()),
                 )];
                 if *own {
                     rows.push((
-                        kit::MenuItem::new("Edit Pack", "edit"),
+                        kit::MenuItem::new(t::packs_edit(), "edit"),
                         MenuAct::PackEdit(id.clone()),
                     ));
                 }
                 if !*theme {
                     rows.push((
-                        kit::MenuItem::new("Remove Pack", "x-user").danger(),
+                        kit::MenuItem::new(t::packs_remove(), "x-user").danger(),
                         MenuAct::PackRemove(id.clone()),
                     ));
                 }
@@ -1393,7 +1393,7 @@ impl VectorApp {
                 if let Ok(m) = std::env::var("VECTOR_MOVING") {
                     let p: Vec<&str> = m.split('/').collect();
                     let n = |i: usize| p.get(i).and_then(|v| v.parse::<usize>().ok()).unwrap_or(0);
-                    s.moving = Some((format!("{} of {}", crate::security::thousands(n(0)), crate::security::thousands(n(1))), p.len() > 2));
+                    s.moving = Some((format!("{} of {}", crate::security::thousands(n(0)), crate::security::thousands(n(1))), p.len() > 2)); // i18n-exempt: fixture
                 }
             }
         }
@@ -1557,8 +1557,8 @@ impl VectorApp {
         }
         // Fixtures: VECTOR_REKEY=<pct> shows the relay move's progress ring.
         if let Some(pct) = std::env::var("VECTOR_REKEY").ok().and_then(|p| p.parse::<f32>().ok()) {
-            let mut r = crate::rekey::Rekey::new("Moving to new relays");
-            r.set(pct, Some("Copying history".into()));
+            let mut r = crate::rekey::Rekey::new("Moving to new relays"); // i18n-exempt: fixture
+            r.set(pct, Some("Copying history".into())); // i18n-exempt: fixture
             app.rekey = Some(r);
         }
         // Fixtures: VECTOR_UPLOAD_ERR=<raw error> shows its upload failure popup.
@@ -1577,7 +1577,7 @@ impl VectorApp {
                 u.phase = if phase == "avail" { crate::settings::UpdPhase::Available } else { crate::settings::UpdPhase::Downloading(42) };
                 u.found = Some((
                     "v0.5.2".into(),
-                    "- Faster sync\n- Fixed a crash when opening large images".into(),
+                    "- Faster sync\n- Fixed a crash when opening large images".into(), // i18n-exempt: fixture
                 ));
             }),
             _ => {}
@@ -1632,7 +1632,7 @@ impl VectorApp {
             let mut media = app.media.borrow_mut();
             match state.as_str() {
                 "loading" => drop(media.embed_videos.insert(url, VideoState::Loading(42))),
-                "failed" => drop(media.embed_videos.insert(url, VideoState::Failed("Media server returned an error status".into()))),
+                "failed" => drop(media.embed_videos.insert(url, VideoState::Failed("Media server returned an error status".into()))), // i18n-exempt: fixture
                 "ready" => drop(media.embed_videos.insert(url, VideoState::Ready(crate::audio::AudioInputSpec::File(clip)))),
                 "preview" => drop(media.embed_previews.insert(url, Some(crate::audio::AudioInputSpec::File(clip)))),
                 // With VECTOR_EMBED_STREAM=<https url>: that video, played while it downloads.
@@ -1642,7 +1642,7 @@ impl VectorApp {
                     let web = std::env::var("VECTOR_EMBED_STREAM").map_err(|e| e.to_string()).and_then(|u| crate::backend::stream::Web::new(&u));
                     let state = match web.map(|w| rt.block_on(crate::backend::stream::open(w, None))) {
                         Ok(Ok(s)) => VideoState::Ready(crate::audio::AudioInputSpec::Stream(s)),
-                        _ => VideoState::Failed("Couldn't stream it".into()),
+                        _ => VideoState::Failed("Couldn't stream it".into()), // i18n-exempt: fixture
                     };
                     media.embed_videos.insert(url, state);
                 }
@@ -1697,19 +1697,19 @@ impl VectorApp {
                 app.fixture_new_icon(icon.into(), window, cx);
             }
             if let Some(m) = app.create_community.as_mut() {
-                m.name.update(cx, |t, cx| t.set_text("Cool Kids", cx));
+                m.name.update(cx, |t, cx| t.set_text("Cool Kids", cx)); // i18n-exempt: fixture
                 match step.as_str() {
                     "2" => m.step = 2,
                     "busy" => {
                         m.step = 2;
                         m.busy = true;
-                        m.progress = Some(("Publishing the channels".into(), 0.42));
+                        m.progress = Some(("Publishing the channels".into(), 0.42)); // i18n-exempt: fixture
                     }
                     "linking" => {
                         m.step = 3;
                         m.public = true;
                         m.created = Some(("fixture".into(), "fixture".into()));
-                        m.progress = Some(("Uploading the icon".into(), 0.7));
+                        m.progress = Some(("Uploading the icon".into(), 0.7)); // i18n-exempt: fixture
                     }
                     "public" | "private" => {
                         m.step = 3;
@@ -1810,8 +1810,8 @@ impl VectorApp {
                 crate::cropper::Cropper::new(
                     Arc::new(image),
                     (w, h),
-                    "Crop Profile Picture",
-                    "Drag to move, or drag a corner to resize.",
+                    t::crop_avatar_title(),
+                    t::crop_avatar_hint(),
                     true,
                     window,
                     cx,
@@ -2005,7 +2005,7 @@ impl VectorApp {
             }
             MenuAct::StartCopyLink(link) => {
                 cx.write_to_clipboard(gpui::ClipboardItem::new_string(link));
-                self.show_toast("Copied Link", cx);
+                self.show_toast(&t::copied_link(), cx);
             }
             MenuAct::NewMessage => self.open_new_chat(window, cx),
             MenuAct::AddFriend => {
@@ -2039,10 +2039,10 @@ impl VectorApp {
             MenuAct::Msg(id, act) => self.message_menu_act(id, act, window, cx),
             MenuAct::ChangeWallpaper(chat) => self.pick_wallpaper(chat, cx),
             MenuAct::RemoveWallpaper(chat) => {
-                let mut popup = kit::Popup::notice("Remove wallpaper?");
-                popup.text = Some("This will remove the wallpaper and revert to the default theme. This change syncs to your contact and your other devices.".into());
-                popup.confirm = "Confirm".into();
-                popup.cancel = Some("Cancel".into());
+                let mut popup = kit::Popup::notice(t::wallpaper_remove_title());
+                popup.text = Some(t::wallpaper_remove_text());
+                popup.confirm = t::dialog_confirm();
+                popup.cancel = Some(t::dialog_cancel());
                 self.popup = Some((popup, PopupAct::RemoveWallpaper(chat)));
             }
             MenuAct::SetSelfDestruct(chat, secs) => {
@@ -2076,10 +2076,10 @@ impl VectorApp {
                 if self.blocked_by_sync(cx) {
                     return;
                 }
-                let mut popup = kit::Popup::notice("Block User");
-                popup.text = Some("Are you sure you want to block this user? You will no longer receive DMs from them.".into());
-                popup.confirm = "Confirm".into();
-                popup.cancel = Some("Cancel".into());
+                let mut popup = kit::Popup::notice(t::block_user_title());
+                popup.text = Some(t::block_user_text());
+                popup.confirm = t::dialog_confirm();
+                popup.cancel = Some(t::dialog_cancel());
                 self.popup = Some((popup, PopupAct::Block { npub }));
             }
             MenuAct::ChannelRead(id) => {
@@ -2119,7 +2119,7 @@ impl VectorApp {
             }
             MenuAct::PackShare(id) => {
                 self.on_pack(crate::packs::Act::Copy(id), cx);
-                self.toast = Some(("Copied to Clipboard".into(), std::time::Instant::now()));
+                self.toast = Some((t::copied_clipboard(), std::time::Instant::now()));
                 self.close_picker(window, cx);
             }
             MenuAct::PackRemove(id) => self.remove_pack(id, cx),
@@ -2144,30 +2144,30 @@ impl VectorApp {
             }
             MenuAct::NexusLink(id) => {
                 cx.write_to_clipboard(gpui::ClipboardItem::new_string(format!("https://vectorapp.io/go#nexus/{id}")));
-                self.toast = Some(("Copied App Link".into(), std::time::Instant::now()));
+                self.toast = Some((t::copied_app_link(), std::time::Instant::now()));
             }
             MenuAct::Copy(text) => {
                 cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
-                self.toast = Some(("Copied".into(), std::time::Instant::now()));
+                self.toast = Some((t::copied(), std::time::Instant::now()));
             }
             MenuAct::CopyLink(url) => {
                 cx.write_to_clipboard(gpui::ClipboardItem::new_string(url));
-                self.toast = Some(("Copied Link".into(), std::time::Instant::now()));
+                self.toast = Some((t::copied_link(), std::time::Instant::now()));
             }
             MenuAct::NotifyLevel(scope, level) => {
                 let rx = backend::run(backend::prefs::set_notify_level(scope, level));
-                self.report(rx, "Notification Settings", cx);
+                self.report(rx, t::chat_notify_failed(), cx);
             }
             MenuAct::NotifyMute(scope, ms) => {
                 let rx = backend::run(backend::prefs::set_notify_mute(scope, ms));
-                self.report(rx, "Mute", cx);
+                self.report(rx, t::chat_mute_failed(), cx);
             }
             MenuAct::SuppressEveryone(community, suppress) => {
                 let rx = backend::run(backend::prefs::set_suppress_everyone(
                     community,
                     Some(suppress),
                 ));
-                self.report(rx, "Notification Settings", cx);
+                self.report(rx, t::chat_notify_failed(), cx);
             }
             MenuAct::StartFolder(id) => {
                 if let Some(sm) = self.start.as_mut() {
@@ -2186,7 +2186,7 @@ impl VectorApp {
                     })
                 });
                 let input = cx.new(|cx| {
-                    TextInput::new("Folder", cx)
+                    TextInput::new(t::start_folder(), cx)
                         .with_look(kit::field_look())
                         .keep_on_submit()
                         .submit_empty()
@@ -2203,10 +2203,10 @@ impl VectorApp {
                 })
                 .detach();
                 window.focus(&input.focus_handle(cx), cx);
-                let mut popup = kit::Popup::notice("Rename Folder");
+                let mut popup = kit::Popup::notice(t::start_folder_rename());
                 popup.icon = None;
-                popup.confirm = "Rename".into();
-                popup.cancel = Some("Cancel".into());
+                popup.confirm = t::dialog_rename();
+                popup.cancel = Some(t::dialog_cancel());
                 popup.input = Some(input);
                 self.popup = Some((popup, PopupAct::RenameFolder { id }));
             }
@@ -2288,14 +2288,14 @@ impl VectorApp {
             vector_core::db::scoped(async move {
                 use vector_core::synced_prefs::{self, Pref};
                 if !synced_prefs::is_hydrated(Pref::Start) {
-                    return Err("Still syncing your pins, try again in a moment".to_string());
+                    return Err(t::start_pins_syncing().to_string());
                 }
                 synced_prefs::edit_layout(Pref::Start, f).map(|(layout, _)| layout)
             })
             .await
         });
         cx.spawn(async move |this, cx| {
-            let result = rx.await.unwrap_or_else(|_| Err("Backend stopped".into()));
+            let result = rx.await.unwrap_or_else(|_| Err(t::backend_stopped().into()));
             this.update(cx, |this, cx| {
                 match result {
                     Ok(layout) => {
@@ -2433,10 +2433,10 @@ impl VectorApp {
                     backend::mic::devices()
                 } else {
                     backend::mic::DeviceList {
-                        inputs: vec!["Built-in Microphone".into(), "USB Headset".into()],
-                        outputs: vec!["Built-in Speakers".into(), "USB Headset".into()],
-                        default_input: "Built-in Microphone".into(),
-                        default_output: "Built-in Speakers".into(),
+                        inputs: vec!["Built-in Microphone".into(), "USB Headset".into()], // i18n-exempt: fixture
+                        outputs: vec!["Built-in Speakers".into(), "USB Headset".into()], // i18n-exempt: fixture
+                        default_input: "Built-in Microphone".into(), // i18n-exempt: fixture
+                        default_output: "Built-in Speakers".into(), // i18n-exempt: fixture
                         prefs: Default::default(),
                     }
                 };
@@ -2455,9 +2455,9 @@ impl VectorApp {
                 };
                 let mut items = vec![kit::MenuItem {
                     label: if fallback.is_empty() {
-                        "System Default".into()
+                        t::settings_device_system_default()
                     } else {
-                        format!("System Default ({fallback})").into()
+                        t::settings_device_system_default_named(fallback.as_str())
                     },
                     icon: None,
                     checked: current.is_none(),
@@ -2480,15 +2480,15 @@ impl VectorApp {
                 let (items, acts): (Vec<_>, Vec<_>) = match (key, folder) {
                     (_, Some(id)) => vec![
                         (
-                            kit::MenuItem::new("Open", "folder"),
+                            kit::MenuItem::new(t::start_open(), "folder"),
                             MenuAct::StartFolder(id.clone()),
                         ),
                         (
-                            kit::MenuItem::new("Rename", "edit"),
+                            kit::MenuItem::new(t::dialog_rename(), "edit"),
                             MenuAct::StartRename(id.clone()),
                         ),
                         (
-                            kit::MenuItem::new("Ungroup", "grid-fill"),
+                            kit::MenuItem::new(t::start_ungroup(), "grid-fill"),
                             MenuAct::StartUngroup(id),
                         ),
                     ]
@@ -2497,19 +2497,19 @@ impl VectorApp {
                     (Some(key), None) => {
                         let mut rows = Vec::new();
                         if let Some(app) = key.strip_prefix("app/") {
-                            rows.push((kit::MenuItem::new("View Details", "info"), MenuAct::StartDetails(app.to_string())));
+                            rows.push((kit::MenuItem::new(t::start_details(), "info"), MenuAct::StartDetails(app.to_string())));
                         }
                         if in_folder.is_some() {
                             rows.push((
-                                kit::MenuItem::new("Move out of Folder", "chevron-left"),
+                                kit::MenuItem::new(t::start_move_out(), "chevron-left"),
                                 MenuAct::StartMoveOut(key.clone()),
                             ));
                         }
                         if let Some(link) = start_key_link(&key) {
-                            rows.push((kit::MenuItem::new("Copy Link", "share"), MenuAct::StartCopyLink(link)));
+                            rows.push((kit::MenuItem::new(t::start_copy_link(), "share"), MenuAct::StartCopyLink(link)));
                         }
                         rows.push((
-                            kit::MenuItem::new("Unpin", "pin").danger(),
+                            kit::MenuItem::new(t::start_unpin(), "pin").danger(),
                             MenuAct::StartUnpin(key),
                         ));
                         rows.into_iter().unzip()
@@ -2633,8 +2633,8 @@ impl VectorApp {
                             self.open_channel(ch.to_string(), window, cx);
                         }
                     }
-                    ["c", ..] => self.show_toast("You're not in this community", cx),
-                    _ => self.show_toast("This pin opens something not in this build yet", cx),
+                    ["c", ..] => self.show_toast(&t::start_not_member(), cx),
+                    _ => self.show_toast(&t::start_unsupported(), cx),
                 }
             }
         }
@@ -2652,7 +2652,7 @@ impl VectorApp {
             .bottom_0()
             .left(px(rail + list - 6.))
             .w(px(11.))
-            .tip("Drag to resize (double-click to reset)")
+            .tip(t::start_resize_tip())
             .child(
                 canvas(
                     |b, window, _| window.insert_hitbox(b, gpui::HitboxBehavior::BlockMouse),
@@ -2770,7 +2770,7 @@ impl VectorApp {
                     break;
                 }
             }
-            let res = rx.await.unwrap_or_else(|_| Err("The download stopped".into()));
+            let res = rx.await.unwrap_or_else(|_| Err(t::settings_update_download_stopped().into()));
             this.update(cx, |this, cx| {
                 match res {
                     Ok(path) => {
@@ -2817,7 +2817,7 @@ impl VectorApp {
         cx.spawn(async move |this, cx| {
             let result = rx
                 .await
-                .unwrap_or_else(|_| Err("Failed to check for updates".into()));
+                .unwrap_or_else(|_| Err(t::settings_update_check_failed().into()));
             let settled = this
                 .update(cx, |this, cx| {
                     cx.notify();
@@ -2884,7 +2884,7 @@ impl VectorApp {
                     (None, _) => this.show_login(None, window, cx),
                 }
                 if let Some(e) = info.load_error {
-                    this.notice("Loading Error", kit::escape(&e).into(), cx);
+                    this.notice(&t::login_loading_error(), kit::escape(&e).into(), cx);
                 }
             })
             .ok();
@@ -2958,14 +2958,9 @@ impl VectorApp {
         )
         .detach();
         cx.subscribe(&view, |this, _, _: &crate::login::MethodInfo, cx| {
-            let mut p = kit::Popup::notice("Ways to Sign In");
+            let mut p = kit::Popup::notice(t::login_methods_title());
             p.icon = None;
-            p.text = Some(
-                "<b>QR Code</b><br>Use a device you're already signed in on. There, open Settings and choose Sign in on Another Device, then scan the code this device shows or type it in. Both devices confirm a number, so your keys pass between them without anyone else being able to read them.\
-                 <br><br><b>Private Key</b><br>Paste your nsec or type your seed phrase. Good when you have your key backed up and no other device to hand.\
-                 <br><br><b>Remote Signer</b><br>Keep your key in a signer app such as Amber or nsec.app, which approves what Vector signs. Paste its bunker:// link, or pair it by scanning the code Vector shows."
-                    .into(),
-            );
+            p.text = Some(t::login_methods_text());
             this.popup = Some((p, PopupAct::Notice));
             cx.notify();
         })
@@ -2983,7 +2978,7 @@ impl VectorApp {
                 }
                 let rx = backend::run(account::switch(npub.clone()));
                 cx.spawn_in(window, async move |this, cx| {
-                    let result = rx.await.unwrap_or_else(|_| Err("Backend stopped".into()));
+                    let result = rx.await.unwrap_or_else(|_| Err(t::backend_stopped().into()));
                     this.update_in(cx, |this, window, cx| match result {
                         Ok(()) => this.reboot(window, cx),
                         Err(e) => log::error!("account switch failed: {e}"),
@@ -3060,11 +3055,11 @@ impl VectorApp {
         if !off_clearnet {
             return cx.open_url(&target);
         }
-        let mut popup = kit::Popup::notice("Approve in your signer");
+        let mut popup = kit::Popup::notice(t::login_signer_open_title());
         popup.icon = None;
-        popup.text = Some(format!("Your signer asked you to open this page. It opens in your browser, outside your private network.<br><code>{}</code>", target.replace('&', "&amp;").replace('<', "&lt;")).into());
-        popup.confirm = "Open".into();
-        popup.cancel = Some("Cancel".into());
+        popup.text = Some(t::login_signer_open_text(kit::escape(&target)));
+        popup.confirm = t::dialog_open();
+        popup.cancel = Some(t::dialog_cancel());
         self.popup = Some((popup, PopupAct::OpenWeb(target)));
         cx.notify();
     }
@@ -3077,7 +3072,7 @@ impl VectorApp {
             Ok::<_, String>(npub)
         });
         cx.spawn_in(window, async move |this, cx| {
-            let result = rx.await.unwrap_or_else(|_| Err("Backend stopped".into()));
+            let result = rx.await.unwrap_or_else(|_| Err(t::backend_stopped().into()));
             this.update_in(cx, |this, window, cx| match result {
                 Ok(npub) => this.logged_in(npub, window, cx),
                 Err(e) => {
@@ -3298,11 +3293,11 @@ impl VectorApp {
                 match state {
                     "offline" if self.live && !self.signer_offline_told => {
                         self.signer_offline_told = true;
-                        self.show_toast("Remote signer offline. Please check your signer app.", cx);
+                        self.show_toast(&t::login_signer_offline(), cx);
                     }
                     "online" if self.live && self.signer_offline_told => {
                         self.signer_offline_told = false;
-                        self.show_toast("Remote signer back online.", cx);
+                        self.show_toast(&t::login_signer_online(), cx);
                     }
                     "offline" | "online" => {}
                     _ => self.signer_offline_told = false,
@@ -3507,7 +3502,7 @@ impl VectorApp {
                     && self.call_mic_told != self.call.id
                 {
                     self.call_mic_told = self.call.id.clone();
-                    self.show_toast("You're muted: Vector doesn't have access to your microphone.", cx);
+                    self.show_toast(&t::call_mic_denied_muted(), cx);
                 }
             }
             "call_level" | "call_stats" => {
@@ -3533,15 +3528,15 @@ impl VectorApp {
                     self.video.stop(kind);
                     self.call.video_mine[k] = false;
                 }
-                self.show_toast("They cannot receive video from this device", cx);
+                self.show_toast(&t::call_no_video(), cx);
             }
             "audio_devices_changed" => self.reload_devices(cx),
             "player_refused" => {
                 let msg = payload.get("msg").and_then(Value::as_str).unwrap_or_default().to_string();
                 let why = match payload.get("code").and_then(Value::as_i64).unwrap_or(0) {
-                    101 | 150 | 152 => "Its owner only allows it on YouTube",
-                    100 => "Removed or made private on YouTube",
-                    _ => "YouTube won't play it in other apps",
+                    101 | 150 | 152 => t::embed_youtube_owner_only(),
+                    100 => t::embed_youtube_removed(),
+                    _ => t::embed_youtube_refused(),
                 };
                 self.store.borrow_mut().player_refused.insert(msg, why.into());
                 cx.notify();
@@ -3578,7 +3573,7 @@ impl VectorApp {
             "wallpaper_upload_progress" => {
                 if self.wallpaper.busy {
                     let pct = payload.get("progress").and_then(Value::as_f64).unwrap_or(0.).clamp(0., 100.).round();
-                    self.wallpaper.label = if pct > 0. { format!("Uploading\u{2026} {pct}%") } else { "Uploading\u{2026}".into() };
+                    self.wallpaper.label = if pct > 0. { t::wallpaper_uploading_percent(pct).into() } else { t::wallpaper_uploading().into() };
                 }
             }
             "message_removed" => {
@@ -3603,7 +3598,7 @@ impl VectorApp {
                     self.refresh_rows(false);
                 }
                 if payload.get("reason").and_then(Value::as_str) == Some("cancelled") {
-                    self.show_toast("Upload Cancelled", cx);
+                    self.show_toast(&t::upload_cancelled(), cx);
                 }
             }
             "message_new" | "message_update" => {
@@ -4275,7 +4270,7 @@ impl VectorApp {
         const BUDGET: usize = 500;
         const STALE_MS: u64 = 7 * 24 * 60 * 60 * 1000;
         let Some(jump) = self.unread_jump.as_mut().filter(|j| j.status.is_none()) else { return };
-        jump.status = Some("Syncing…".into());
+        jump.status = Some(t::unread_jump_syncing().into());
         jump.paused = false;
         let (chat, anchor) = (jump.chat.clone(), jump.anchor.clone());
         let community = self.store.borrow().community_of(&chat).is_some();
@@ -4321,7 +4316,7 @@ impl VectorApp {
                     let open = this
                         .update(cx, |this, cx| {
                             if let Some(j) = this.unread_jump.as_mut() {
-                                j.status = Some(format!("Syncing… {pct}%"));
+                                j.status = Some(t::unread_jump_syncing_percent(pct).into());
                             }
                             cx.notify();
                             this.open.as_ref() == Some(&chat)
@@ -4338,7 +4333,7 @@ impl VectorApp {
                 }
                 this.unread_jump = None;
                 this.history_done.remove(chat.as_ref());
-                this.jump_or_say(anchor, "Couldn't reach the first unread message.", cx);
+                this.jump_or_say(anchor, t::unread_jump_unreachable(), cx);
                 cx.notify();
             })
             .ok();
@@ -4459,11 +4454,11 @@ impl VectorApp {
     }
 
     /// A jump that says `miss` when the message can't be put on screen.
-    pub(crate) fn jump_or_say(&mut self, id: String, miss: &'static str, cx: &mut Context<Self>) {
+    pub(crate) fn jump_or_say(&mut self, id: String, miss: SharedString, cx: &mut Context<Self>) {
         self.jump_inner(id, Some(miss), cx);
     }
 
-    fn jump_inner(&mut self, id: String, miss: Option<&'static str>, cx: &mut Context<Self>) {
+    fn jump_inner(&mut self, id: String, miss: Option<SharedString>, cx: &mut Context<Self>) {
         if miss.is_some() {
             self.jump_miss = miss.map(|m| (id.clone(), m));
         }
@@ -4514,7 +4509,7 @@ impl VectorApp {
 
     fn jump_missed(&mut self, id: &str) {
         if let Some((_, say)) = self.jump_miss.take_if(|(j, _)| j == id) {
-            self.toast = Some((say.into(), std::time::Instant::now()));
+            self.toast = Some((say, std::time::Instant::now()));
         }
     }
 
@@ -4585,13 +4580,9 @@ impl VectorApp {
             Target::Action(a) if a.as_ref() == "edited" => self.show_edit_history(msg_id, window, cx),
             Target::Action(a) if a.starts_with(crate::inline::EMOJI_MISSING) => {
                 let why = &a[crate::inline::EMOJI_MISSING.len()..];
-                let text = if why.is_empty() {
-                    "This emoji couldn't be loaded (the host may be offline, or the file was removed).".to_string()
-                } else {
-                    format!("This emoji couldn't be loaded ({}).", kit::escape(why))
-                };
-                let mut p = kit::Popup::notice("Emoji unavailable");
-                p.text = Some(text.into());
+                let text = if why.is_empty() { t::emoji_unavailable_text() } else { t::emoji_unavailable_why(kit::escape(why)) };
+                let mut p = kit::Popup::notice(t::emoji_unavailable_title());
+                p.text = Some(text);
                 self.popup = Some((p, PopupAct::Notice));
             }
             Target::Action(_) => {}
@@ -4678,7 +4669,7 @@ impl VectorApp {
 
     #[cfg(feature = "devctl")]
     pub(crate) fn dev_dump(&self, id: &str) -> serde_json::Value {
-        let Some(mut m) = self.message(id) else { return serde_json::json!({ "error": "not loaded" }) };
+        let Some(mut m) = self.message(id) else { return serde_json::json!({ "error": "not loaded" }) }; // i18n-exempt: dev tooling
         for a in &mut m.attachments {
             a.key = format!("<{}>", a.key.len());
             a.nonce = format!("<{}>", a.nonce.len());
@@ -5001,8 +4992,9 @@ impl VectorApp {
                         }
                         Err(e) => {
                             this.set_send_state(&chat, &id, true, false);
+                            // i18n-exempt: core's English
                             if e.contains("no longer on this device") {
-                                this.notice("Cannot retry", e, cx);
+                                this.notice(&t::msg_retry_impossible(), e, cx);
                             }
                             cx.notify();
                         }
@@ -5023,10 +5015,10 @@ impl VectorApp {
                         return self.message_menu_act(id, msgmenu_ops::MsgAct::Hide, window, cx);
                     }
                 }
-                let mut p = kit::Popup::notice("Delete this message?");
-                p.text = Some("Are you sure you want to delete this message?".into());
-                p.confirm = "Confirm".into();
-                p.cancel = Some("Cancel".into());
+                let mut p = kit::Popup::notice(t::msg_delete_title());
+                p.text = Some(t::msg_delete_text());
+                p.confirm = t::dialog_confirm();
+                p.cancel = Some(t::dialog_cancel());
                 self.popup = Some((p, PopupAct::Delete { id, failed }));
                 cx.notify();
             }
@@ -5037,12 +5029,12 @@ impl VectorApp {
     fn report(
         &self,
         rx: futures::channel::oneshot::Receiver<Result<(), String>>,
-        title: &'static str,
+        title: SharedString,
         cx: &mut Context<Self>,
     ) {
         cx.spawn(async move |this, cx| {
             if let Ok(Err(e)) = rx.await {
-                this.update(cx, |this, cx| this.notice(title, e, cx)).ok();
+                this.update(cx, |this, cx| this.notice(&title, e, cx)).ok();
             }
         })
         .detach();
@@ -5160,7 +5152,7 @@ impl VectorApp {
             return;
         };
         if !self.store.borrow().can_react(&chat) {
-            return self.show_toast("You can't react in this channel", cx);
+            return self.show_toast(&t::msg_react_denied(), cx);
         }
         // Shown at once; the relay's echo replaces the message, this guess with it.
         let me = self.store.borrow().my_npub.clone();
@@ -5194,7 +5186,7 @@ impl VectorApp {
                             m.reactions.retain(|r| r.id != local);
                         }
                         this.refresh_rows(false);
-                        this.show_toast(&format!("Reaction not sent: {e}"), cx);
+                        this.show_toast(&t::msg_react_not_sent(e), cx);
                     })
                     .ok();
                 }
@@ -5214,7 +5206,7 @@ impl VectorApp {
             let rid = m.reactions[at].id.clone();
             drop(store);
             let rx = backend::run(backend::actions::unreact(rid));
-            self.report(rx, "Reaction Failed", cx);
+            self.report(rx, t::msg_react_failed(), cx);
         } else {
             m.reactions.remove(at);
             drop(store);
@@ -5318,7 +5310,7 @@ impl VectorApp {
         };
         if self.store.borrow().chat(&chat).is_some_and(|c| self.store.borrow().is_request(c)) {
             if !auto {
-                self.show_toast("Accept the request to download files", cx);
+                self.show_toast(&t::msg_accept_to_download(), cx);
             }
             return;
         }
@@ -5542,7 +5534,7 @@ impl VectorApp {
         {
             let mb = |k: &str| v.get(k).and_then(Value::as_f64).filter(|b| *b > 0.).map(|b| b / (1024. * 1024.));
             *d = match (mb("downloaded_bytes"), mb("total_bytes")) {
-                (Some(a), Some(b)) => format!("{a:.1}/{b:.1} MB"),
+                (Some(a), Some(b)) => t::progress_mb(a, b).into(),
                 _ => format!("{}%", v.get("progress").and_then(Value::as_f64).unwrap_or(0.).round()),
             };
         }
@@ -5637,13 +5629,13 @@ impl VectorApp {
             let rx = backend::run(async move {
                 let bytes = backend::attachments::bytes(Some(hash), String::new())
                     .await
-                    .ok_or("This file isn't on this device any more")?;
+                    .ok_or(t::msg_file_gone().to_string())?;
                 tokio::fs::write(&dest, bytes)
                     .await
                     .map_err(|e| e.to_string())
             });
             if let Ok(Err(e)) = rx.await {
-                this.update(cx, |this, cx| this.notice("Save Failed", e.to_string(), cx))
+                this.update(cx, |this, cx| this.notice(&t::msg_save_failed(), e.to_string(), cx))
                     .ok();
             }
         })
@@ -5713,13 +5705,13 @@ impl VectorApp {
         cx.notify();
         let rx = backend::run(backend::xdcurl::resolve(url.clone(), msg, true));
         cx.spawn(async move |this, cx| {
-            let result = rx.await.unwrap_or_else(|_| Err("Backend stopped".into()));
+            let result = rx.await.unwrap_or_else(|_| Err(t::backend_stopped().into()));
             this.update(cx, |this, cx| {
                 let mut media = this.media.borrow_mut();
                 media.transfers.remove(&url);
                 let state = match result {
                     Ok(Some(r)) => XdcUrl::Ready(r),
-                    Ok(None) => XdcUrl::Failed("Not found".into()),
+                    Ok(None) => XdcUrl::Failed(t::miniapp_not_found().into()),
                     Err(e) => XdcUrl::Failed(e),
                 };
                 media.xdc_urls.insert(key, state);
@@ -5770,7 +5762,7 @@ impl VectorApp {
         let src = match (&file, hash) {
             (Some(f), _) => f.to_string_lossy().into_owned(),
             (None, Some(h)) => vector_core::media::MediaRef::held(&h),
-            (None, None) => return self.show_toast("This app isn't on this device any more", cx),
+            (None, None) => return self.show_toast(&t::miniapp_gone(), cx),
         };
         self.perm_gate(
             backend::market::Ask::File(src.clone()),
@@ -5811,18 +5803,18 @@ impl VectorApp {
 
     /// `promptMicAccess`: where to allow the microphone, and a way there where the OS has one.
     pub(super) fn mic_access(&mut self, cx: &mut Context<Self>) {
-        let (where_, can_open) = if cfg!(target_os = "macos") {
-            ("System Settings → Privacy & Security → Microphone", true)
+        let (text, can_open) = if cfg!(target_os = "macos") {
+            (t::call_mic_access_text_macos(), true)
         } else if cfg!(windows) {
-            ("Settings → Privacy → Microphone", true)
+            (t::call_mic_access_text_windows(), true)
         } else {
-            ("your device's app settings", false)
+            (t::call_mic_access_text_other(), false)
         };
-        let mut p = kit::Popup::notice("Microphone Access");
-        p.text = Some(format!("Vector doesn't have access to your microphone. Allow it in {where_}, then try again.").into());
+        let mut p = kit::Popup::notice(t::call_mic_access_title());
+        p.text = Some(text);
         if can_open {
-            p.confirm = "Open Settings".into();
-            p.cancel = Some("Cancel".into());
+            p.confirm = t::call_mic_open_settings();
+            p.cancel = Some(t::dialog_cancel());
         }
         self.popup = Some((p, if can_open { PopupAct::OpenMicSettings } else { PopupAct::Notice }));
         cx.notify();
@@ -5837,7 +5829,7 @@ impl VectorApp {
         if u.routing {
             let app = cx.entity().downgrade();
             p.link = Some((
-                "Open Routing".into(),
+                t::upload_open_routing(),
                 Rc::new(move |window, cx| {
                     app.update(cx, |app, cx| {
                         app.popup = None;
@@ -5904,8 +5896,8 @@ impl VectorApp {
                         .is_none_or(|i| i.read(cx).text().trim() != name)
                 {
                     self.notice(
-                        "Not Deleted",
-                        "The name did not match, so nothing was changed.".into(),
+                        &t::community_settings_not_deleted(),
+                        t::community_settings_not_deleted_text().into(),
                         cx,
                     );
                     return;
@@ -5923,10 +5915,10 @@ impl VectorApp {
                     let result = rx.await;
                     this.update(cx, |this, cx| match result {
                         Ok(Err(e)) => this.notice(
-                            if owner {
-                                "Failed to Delete"
+                            &if owner {
+                                t::community_settings_delete_failed()
                             } else {
-                                "Failed to Leave"
+                                t::community_settings_leave_failed()
                             },
                             e,
                             cx,
@@ -5971,7 +5963,7 @@ impl VectorApp {
                 {
                     list.retain(|u| u.npub != npub);
                 }
-                self.set_blocked_toast(npub, false, if from_settings { "User unblocked" } else { "User Unblocked" }, cx);
+                self.set_blocked_toast(npub, false, if from_settings { t::settings_unblocked() } else { t::unblock_user_done() }, cx);
             }
             PopupAct::RemoveWallpaper(chat) => {
                 let rx = backend::run(vector_core::db::scoped(async move {
@@ -5979,7 +5971,7 @@ impl VectorApp {
                 }));
                 cx.spawn(async move |this, cx| {
                     if let Ok(Err(e)) = rx.await {
-                        this.update(cx, |this, cx| this.notice("Wallpaper not removed", e, cx)).ok();
+                        this.update(cx, |this, cx| this.notice(&t::wallpaper_remove_failed(), e, cx)).ok();
                     }
                 })
                 .detach();
@@ -5990,7 +5982,7 @@ impl VectorApp {
                     let ok = rx.await.unwrap_or(false);
                     this.update(cx, |this, cx| {
                         if ok {
-                            this.show_toast("Model Deleted", cx);
+                            this.show_toast(&t::settings_voice_model_deleted(), cx);
                         }
                         this.load_voice(cx);
                     })
@@ -6023,7 +6015,7 @@ impl VectorApp {
                     let result = rx.await.unwrap_or_else(|_| Err("cancelled".into()));
                     this.update(cx, |this, cx| {
                         if let Err(e) = result {
-                            let mut popup = kit::Popup::notice("Could not add server");
+                            let mut popup = kit::Popup::notice(t::server_add_failed());
                             popup.text = Some(kit::escape(&e).into());
                             this.popup = Some((popup, PopupAct::Notice));
                         }
@@ -6071,7 +6063,7 @@ impl VectorApp {
             PopupAct::Logout => {
                 let me = self.store.borrow().my_npub.clone();
                 self.settings = None;
-                self.remove_account_or(me, "Logout failed", window, cx);
+                self.remove_account_or(me, t::account_logout_failed(), window, cx);
             }
             PopupAct::RenameFolder { id } => {
                 if let Some(input) = popup.input {
@@ -6118,7 +6110,7 @@ impl VectorApp {
                 } else {
                     backend::run(backend::actions::delete(id))
                 };
-                self.report(rx, "Delete Failed", cx);
+                self.report(rx, t::msg_delete_failed(), cx);
             }
         }
     }
@@ -6229,7 +6221,7 @@ impl VectorApp {
         if let Mode::Edit { id: msg_id } = &mode {
             if self.live {
                 let rx = backend::run(backend::actions::edit(id.to_string(), msg_id.clone(), text));
-                self.report(rx, "Edit Failed", cx);
+                self.report(rx, t::msg_edit_failed(), cx);
             } else if let Some(m) = self
                 .store
                 .borrow_mut()
@@ -6271,7 +6263,7 @@ impl VectorApp {
                     this.update(cx, |this, cx| {
                         // A failed bubble offers its own retry; refused before one painted, the words go back.
                         if unsent(&this.store.borrow(), &receiver).is_subset(&before) {
-                            this.show_toast(&format!("Not sent: {e}"), cx);
+                            this.show_toast(&t::msg_not_sent(e), cx);
                             if this.open.as_deref() == Some(receiver.as_str()) && this.input.read(cx).text().is_empty() {
                                 this.input.update(cx, |i, cx| i.set_text(&words, cx));
                             }
@@ -6636,6 +6628,7 @@ impl VectorApp {
             }))
             .capture_key_down(cx.listener(|app, e: &gpui::KeyDownEvent, window, cx| {
                 // An open dropdown has focus and answers its own keys.
+                // i18n-exempt: key context names
                 if window.context_stack().iter().any(|k| k.contains("Select") || k.contains("Menu") || k.contains("Timeline")) {
                     return;
                 }
@@ -7378,9 +7371,7 @@ impl VectorApp {
                         .on_click(cx.listener(|this, _, window, cx| {
                             this.open_settings("updates", window, cx)
                         }))
-                        .child(format!(
-                            "New Vector Update Available ({version}). Download Now"
-                        )),
+                        .child(t::settings_update_banner(version.as_str())),
                 ),
         )
     }
@@ -7408,10 +7399,10 @@ fn chrome(window: &Window, login: bool, mark_only: bool) -> gpui::Div {
     let maximized = window.is_maximized();
     let ctl = |id: &'static str, icon: &'static str, area: WindowControlArea, hover: u32| {
         let tip = match area {
-            WindowControlArea::Min => "Minimize",
-            WindowControlArea::Max if maximized => "Restore",
-            WindowControlArea::Max => "Maximize",
-            _ => "Close",
+            WindowControlArea::Min => t::window_minimize(),
+            WindowControlArea::Max if maximized => t::window_restore(),
+            WindowControlArea::Max => t::window_maximize(),
+            _ => t::window_close(),
         };
         div()
             .id(id)
@@ -7498,7 +7489,7 @@ fn chrome(window: &Window, login: bool, mark_only: bool) -> gpui::Div {
                         .justify_center()
                         .cursor_pointer()
                         .on_click(|_, _, cx| cx.open_url("https://docs.vectorapp.io"))
-                        .tip("Help")
+                        .tip(t::help())
                         .child(
                             svg()
                                 .path("ui/chrome-help.svg")
@@ -7549,7 +7540,7 @@ pub(crate) fn avatar(store: &Store, npub: &str, size: f32) -> AnyElement {
     }
 }
 
-fn rail_label(text: &'static str) -> impl IntoElement {
+fn rail_label(text: SharedString) -> impl IntoElement {
     // .ws-rail-group-label
     div()
         .h(px(24.))
@@ -7595,16 +7586,17 @@ pub(crate) struct Navbar {
     pub on: Rc<dyn Fn(&'static str, &mut Window, &mut gpui::App)>,
 }
 
-const NAV_TABS: [(&str, &str, &str); 5] = [
-    ("profile", "Profile", "icons/user-circle.svg"),
-    ("chat", "Chat", "icons/chats.svg"),
-    ("bookmarks", "Bookmarks", "icons/bookmark-fill.svg"),
-    ("miniapps", "Mini Apps", "icons/grid-fill.svg"),
-    ("settings", "Settings", "icons/settings.svg"),
+const NAV_TABS: [(&str, fn() -> SharedString, &str); 5] = [
+    ("profile", t::start_profile, "icons/user-circle.svg"),
+    ("chat", t::start_chat, "icons/chats.svg"),
+    ("bookmarks", t::start_bookmarks, "icons/bookmark-fill.svg"),
+    ("miniapps", t::start_miniapps, "icons/grid-fill.svg"),
+    ("settings", t::start_settings, "icons/settings.svg"),
 ];
 
 fn nav_tabs(nav: &Navbar, slim: bool) -> impl IntoElement {
     div().pt(px(6.)).flex().flex_col().gap(px(2.)).children(NAV_TABS.iter().map(|&(id, label, icon)| {
+        let label = label();
         let on = nav.on.clone();
         let active = nav.active == id;
         let badge = (id == "chat" && nav.chat_badge > 0).then_some(nav.chat_badge);
@@ -7624,7 +7616,7 @@ fn nav_tabs(nav: &Navbar, slim: bool) -> impl IntoElement {
             .cursor_pointer()
             .when(active, |d| d.bg(white_a(0.045)))
             .hover(|d| d.bg(white_a(0.045)))
-            .when(slim, |d| d.tip(label))
+            .when(slim, |d| d.tip(label.clone()))
             .on_click(move |_, w, cx| on(id, w, cx))
             .child(svg().path(icon).size(px(28.)).flex_shrink_0().text_color(c(0xffffff)))
             .when(!slim, |d| {
@@ -7757,7 +7749,7 @@ fn rail(
                     .font_weight(FontWeight::MEDIUM)
                     .text_size(px(14.))
                     .text_color(c(0xffffff))
-                    .child("Messages")
+                    .child(t::rail_messages())
                     .when(any_unread, |d| {
                         d.child(
                             div()
@@ -7801,7 +7793,7 @@ fn rail(
     let dms = (!slim && navbar.is_none() && !unread.is_empty()).then(|| {
         div()
             .mt(px(10.))
-            .child(rail_label("New Messages"))
+            .child(rail_label(t::rail_new_messages()))
             .children(unread.iter().map(|chat| {
                 let (id, on) = (chat.id.clone(), on_c.clone());
                 div()
@@ -7861,7 +7853,7 @@ fn rail(
             .child(
                 div()
                     .id("rail-create-community")
-                    .tip("Create Community")
+                    .tip(t::rail_create_community())
                     .size(px(45.))
                     .mx_auto()
                     .mt(px(2.))
@@ -7881,7 +7873,7 @@ fn rail(
         .pt(px(16.))
         .pb(px(6.))
         .child(div().mx(px(16.)).h(px(1.)).bg(c(DIVIDER)))
-        .child(div().pt(px(16.)).child(rail_label("Communities")))
+        .child(div().pt(px(16.)).child(rail_label(t::rail_communities())))
         .child(crate::rail::render(store, &store.rail, folders, active, voice, on_c))
         .child(
             div()
@@ -7921,7 +7913,7 @@ fn rail(
                         .font_family(RUBIK)
                         .text_size(px(14.))
                         .text_color(white_a(0.55))
-                        .child("Create Community"),
+                        .child(t::rail_create_community()),
                 ),
         ) };
 
@@ -7968,7 +7960,7 @@ fn rail(
             d.child(
                 div()
                     .id("ws-rail-collapse")
-                    .tip(if slim { "Expand the sidebar" } else { "Collapse the sidebar" })
+                    .tip(if slim { t::rail_expand() } else { t::rail_collapse_tip() })
                     .mt(px(10.))
                     .mb(px(2.))
                     .when(slim, |d| d.w(px(40.)).mx_auto().rounded(px(12.)).justify_center())
@@ -8011,7 +8003,7 @@ fn rail(
                                 .font_weight(FontWeight::MEDIUM)
                                 .text_size(px(14.))
                                 .text_color(c(TEXT))
-                                .child("Collapse"),
+                                .child(t::rail_collapse()),
                         )
                     })
                     // `ws-rail-toggle-in`: a fade, as the rail's width jumps when it unlocks.
@@ -8105,7 +8097,7 @@ fn rail(
                                         )
                                         .into_any_element(),
                                         Some(s) => s.into_any_element(),
-                                        None => "Set a Status".into_any_element(),
+                                        None => t::rail_set_status().into_any_element(),
                                     }),
                             ),
                     )
@@ -8113,7 +8105,7 @@ fn rail(
                         d.child(
                             div()
                                 .id("ws-account-caret")
-                                .tip("Switch account")
+                                .tip(t::rail_switch_account())
                                 .ml(px(-6.))
                                 .p(px(4.))
                                 .flex_none()
@@ -8174,9 +8166,9 @@ fn chat_list(
         })
     }
     let (to_messages, to_requests) = (pick(false, cx), pick(true, cx));
-    let tab = |label: &'static str, on: bool, dot: bool, click| {
+    let tab = |id: &'static str, label: SharedString, on: bool, dot: bool, click| {
         div()
-            .id(label)
+            .id(id)
             .flex_1()
             .h(px(40.))
             .flex()
@@ -8277,7 +8269,7 @@ fn chat_list(
                 .line_height(px(20.))
                 .text_center()
                 .text_color(white_a(0.45))
-                .child("New people who message you show up here.")
+                .child(t::chats_requests_empty())
                 .into_any_element(),
         )
     } else {
@@ -8326,12 +8318,12 @@ fn chat_list(
                     div()
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(c(0xffffff))
-                        .child("Chats"),
+                        .child(t::chats_title()),
                 )
                 .child(
                     div()
                         .id("chatlist-new")
-                        .tip("New Message or Community")
+                        .tip(t::chats_new_tip())
                         .size(px(32.))
                         .rounded(px(8.))
                         .border_1()
@@ -8345,8 +8337,8 @@ fn chat_list(
                             app.show_menu(
                                 gpui::point(b.left(), b.bottom() + px(6.)),
                                 vec![
-                                    (kit::MenuItem::new("New Message", "chat-circle").lead(), MenuAct::NewMessage),
-                                    (kit::MenuItem::new("New Community", "users-multi").lead(), MenuAct::NewCommunity),
+                                    (kit::MenuItem::new(t::chats_new_message(), "chat-circle").lead(), MenuAct::NewMessage),
+                                    (kit::MenuItem::new(t::chats_new_community(), "users-multi").lead(), MenuAct::NewCommunity),
                                 ],
                                 cx,
                             );
@@ -8372,8 +8364,8 @@ fn chat_list(
                 .border_b_1()
                 .border_color(white_a(0.2))
                 .relative()
-                .child(tab("Messages", !requests, dot_messages, to_messages))
-                .child(tab("Requests", requests, dot_requests, to_requests))
+                .child(tab("Messages", t::chats_tab_messages(), !requests, dot_messages, to_messages))
+                .child(tab("Requests", t::chats_tab_requests(), requests, dot_requests, to_requests))
                 .child(bar),
         )
         .children(empty)
@@ -8506,7 +8498,7 @@ fn get_started(width: f32, cx: &mut Context<VectorApp>) -> impl IntoElement {
                             .line_height(px(18.))
                             .font_weight(FontWeight::BOLD)
                             .text_color(c(0xf7f4f4))
-                            .child("Get Started"),
+                            .child(t::chats_get_started()),
                     )
                     .when(width >= 290., |d| {
                         d.child(
@@ -8516,7 +8508,7 @@ fn get_started(width: f32, cx: &mut Context<VectorApp>) -> impl IntoElement {
                                 .text_size(px(12.))
                                 .line_height(px(14.))
                                 .text_color(white_a(0.7))
-                                .child("Create your first private chat."),
+                                .child(t::chats_get_started_text()),
                         )
                     }),
             ),
@@ -8799,22 +8791,25 @@ fn empty_pane(viktor: Option<Entity<crate::viktor::Viktor>>) -> AnyElement {
                 .text_size(px(14.))
                 .line_height(px(24.))
                 .text_color(white_a(0.35))
-                .child("Pick a conversation to get started"),
+                .child(t::welcome_pick()),
         )
         .into_any_element()
 }
 
 /// `.chatlist-intro` in the empty conversation pane: Viktor's welcome, pointing at the Hub.
 fn intro(viktor: Entity<crate::viktor::Viktor>) -> impl IntoElement {
-    const TEXT_P: &str = "Feel free to join the public community to learn more about Vector, discuss privacy, and make some new friends.";
-    let link = 13..13 + "join the public community".len();
+    let html = t::welcome_text();
+    let (before, rest) = html.split_once("<link>").unwrap_or((&html, ""));
+    let (inside, after) = rest.split_once("</link>").unwrap_or((rest, ""));
+    let text = format!("{before}{inside}{after}");
+    let link = before.len()..before.len() + inside.len();
     let accent = gpui::HighlightStyle {
         color: Some(c(ACCENT)),
         ..Default::default()
     };
     let words = gpui::InteractiveText::new(
         "intro-text",
-        gpui::StyledText::new(TEXT_P).with_highlights([(link.clone(), accent)]),
+        gpui::StyledText::new(text).with_highlights([(link.clone(), accent)]),
     )
     .on_click(vec![link], |_, _, cx| {
         cx.open_url("https://vectorapp.io/hub")
@@ -8840,7 +8835,7 @@ fn intro(viktor: Entity<crate::viktor::Viktor>) -> impl IntoElement {
                         .line_height(px(29.))
                         .font_weight(FontWeight::BOLD)
                         .text_color(c(0xf7f4f4))
-                        .child("Welcome to Vector!"),
+                        .child(t::welcome_title()),
                 )
                 .child(
                     div()
@@ -8869,7 +8864,7 @@ impl VectorApp {
         let id = id.clone();
         let notes = store.my_npub.as_str() == id.as_ref();
         let subtext = if notes {
-            "Encrypted Notes to Self".to_string()
+            t::chat_notes_subtitle().to_string()
         } else if store.stream_hidden(&id) {
             String::new()
         } else {
@@ -8893,7 +8888,7 @@ impl VectorApp {
                     .text_size(px(18.72))
                     .line_height(px(24.))
                     .text_color(c(TEXT))
-                    .child(if notes { "Notes".to_string() } else { store.name(&id) }),
+                    .child(if notes { t::chat_notes().to_string() } else { store.name(&id) }),
             );
         let menu = !notes || store.chat(&id).is_some();
         div()
@@ -8940,7 +8935,7 @@ impl VectorApp {
                         d.child(
                             div()
                                 .id("chat-call")
-                                .aria_label("Call")
+                                .aria_label(t::chat_call())
                                 .size(px(40.))
                                 .flex()
                                 .items_center()
@@ -8962,7 +8957,7 @@ impl VectorApp {
                         let chat = id.to_string();
                         div()
                             .id("chat-menu")
-                            .tip("Chat Options")
+                            .tip(t::chat_options())
                             .relative()
                             .size(px(40.))
                             .flex()
@@ -15011,13 +15006,13 @@ impl VectorApp {
             this.update_in(cx, |this, window, cx| {
                 match (at.chat, room) {
                     (Some(chat), Some(room)) if chat == room => {
-                        this.jump_or_say(message, "That message can't be shown", cx)
+                        this.jump_or_say(message, t::msg_jump_unshown(), cx)
                     }
                     (Some(chat), None) => {
                         if this.open.as_deref() != Some(chat.as_str()) {
                             this.open_chat(chat.into(), window, cx);
                         }
-                        this.jump_or_say(message, "That message can't be shown", cx);
+                        this.jump_or_say(message, t::msg_jump_unshown(), cx);
                     }
                     (_, room) if at.deleted => {
                         let _ = room;
@@ -15537,7 +15532,7 @@ impl VectorApp {
         let url = v.url.clone();
         let rx = backend::run(backend::embedvideo::play(v.url, v.size, v.sha256, v.fallbacks));
         cx.spawn(async move |this, cx| {
-            let result = rx.await.unwrap_or_else(|_| Err("Backend stopped".into()));
+            let result = rx.await.unwrap_or_else(|_| Err(t::backend_stopped().into()));
             this.update(cx, |this, cx| {
                 use crate::embeds::VideoState;
                 use backend::embedvideo::{Fetched, Playable};
@@ -17002,10 +16997,10 @@ impl VectorApp {
                         ..Default::default()
                     },
                     devices: backend::mic::DeviceList {
-                        inputs: named(&["Built-in Microphone", "USB Headset"]),
-                        outputs: named(&["Built-in Speakers", "USB Headset"]),
-                        default_input: "Built-in Microphone".into(),
-                        default_output: "Built-in Speakers".into(),
+                        inputs: named(&["Built-in Microphone", "USB Headset"]), // i18n-exempt: fixture
+                        outputs: named(&["Built-in Speakers", "USB Headset"]), // i18n-exempt: fixture
+                        default_input: "Built-in Microphone".into(), // i18n-exempt: fixture
+                        default_output: "Built-in Speakers".into(), // i18n-exempt: fixture
                         prefs: Default::default(),
                     },
                     direct: false,
@@ -19099,7 +19094,7 @@ impl VectorApp {
                 }
                 let rx = backend::run(account::switch(npub));
                 cx.spawn_in(window, async move |this, cx| {
-                    let result = rx.await.unwrap_or_else(|_| Err("Backend stopped".into()));
+                    let result = rx.await.unwrap_or_else(|_| Err(t::backend_stopped().into()));
                     this.update_in(cx, |this, window, cx| match result {
                         Ok(()) => this.reboot(window, cx),
                         Err(e) => this.notice_plain("Switch failed", &e, cx),
@@ -19148,13 +19143,13 @@ impl VectorApp {
     }
 
     fn remove_account(&mut self, npub: String, window: &mut Window, cx: &mut Context<Self>) {
-        self.remove_account_or(npub, "Delete failed", window, cx);
+        self.remove_account_or(npub, t::account_delete_failed(), window, cx);
     }
 
     fn remove_account_or(
         &mut self,
         npub: String,
-        fail: &'static str,
+        fail: SharedString,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -19166,11 +19161,11 @@ impl VectorApp {
         }
         let rx = backend::run(account::delete(npub));
         cx.spawn_in(window, async move |this, cx| {
-            let result = rx.await.unwrap_or_else(|_| Err("Backend stopped".into()));
+            let result = rx.await.unwrap_or_else(|_| Err(t::backend_stopped().into()));
             this.update_in(cx, |this, window, cx| match result {
                 Ok(true) => this.reboot(window, cx),
                 Ok(false) => this.open_switcher(cx),
-                Err(e) => this.notice_plain(fail, &e, cx),
+                Err(e) => this.notice_plain(&fail, &e, cx),
             })
             .ok();
         })
@@ -19482,15 +19477,15 @@ impl VectorApp {
     }
 
     fn set_blocked(&mut self, npub: String, block: bool, cx: &mut Context<Self>) {
-        self.set_blocked_toast(npub, block, if block { "User Blocked" } else { "User Unblocked" }, cx);
+        self.set_blocked_toast(npub, block, if block { t::block_user_done() } else { t::unblock_user_done() }, cx);
     }
 
-    fn set_blocked_toast(&mut self, npub: String, block: bool, done: &'static str, cx: &mut Context<Self>) {
+    fn set_blocked_toast(&mut self, npub: String, block: bool, done: SharedString, cx: &mut Context<Self>) {
         if !self.live {
             if let Some(p) = self.store.borrow_mut().profiles.get_mut(&npub) {
                 p.is_blocked = block;
             }
-            self.show_toast(done, cx);
+            self.show_toast(&done, cx);
             return;
         }
         let rx = if block {
@@ -19504,7 +19499,7 @@ impl VectorApp {
                 if let Some(p) = this.store.borrow_mut().profiles.get_mut(&npub) {
                     p.is_blocked = block;
                 }
-                this.show_toast(done, cx);
+                this.show_toast(&done, cx);
             })
             .ok();
         })
@@ -19546,7 +19541,7 @@ impl VectorApp {
         };
         let rx = view.update(cx, |v, cx| v.finish_transfer(window, cx));
         cx.spawn(async move |_, cx| {
-            let result = rx.await.unwrap_or_else(|_| Err("Backend stopped".into()));
+            let result = rx.await.unwrap_or_else(|_| Err(t::backend_stopped().into()));
             security.update(cx, |f, cx| f.transfer_finished(result, cx));
         })
         .detach();

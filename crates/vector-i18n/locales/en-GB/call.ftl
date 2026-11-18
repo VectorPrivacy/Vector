@@ -27,6 +27,17 @@ call-ended-elsewhere = Answered on another device
 ## Controls
 
 call-mic-off = Microphone access is off
+call-mic-denied-muted = You're muted: Vector doesn't have access to your microphone.
+call-no-video = They cannot receive video from this device
+
+## Asking for the microphone, where the system refused it. Each text names where the system
+## keeps the setting, as that system words it.
+
+call-mic-access-title = Microphone Access
+call-mic-access-text-macos = Vector doesn't have access to your microphone. Allow it in System Settings → Privacy & Security → Microphone, then try again.
+call-mic-access-text-windows = Vector doesn't have access to your microphone. Allow it in Settings → Privacy → Microphone, then try again.
+call-mic-access-text-other = Vector doesn't have access to your microphone. Allow it in your device's app settings, then try again.
+call-mic-open-settings = Open Settings
 call-mute = Mute microphone
 call-unmute = Unmute microphone
 call-hang-up = Hang up
