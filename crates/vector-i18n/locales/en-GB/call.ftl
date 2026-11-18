@@ -29,6 +29,9 @@ call-ended-elsewhere = Answered on another device
 call-mic-off = Microphone access is off
 call-mic-denied-muted = You're muted: Vector doesn't have access to your microphone.
 call-no-video = They cannot receive video from this device
+call-camera-failed = Could not open the camera
+call-screen-failed = Could not share the screen
+call-not-in-call = Not in a call
 
 ## Asking for the microphone, where the system refused it. Each text names where the system
 ## keeps the setting, as that system words it.

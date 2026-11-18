@@ -137,3 +137,53 @@ community-settings-not-deleted = Not Deleted
 community-settings-not-deleted-text = The name did not match, so nothing was changed.
 community-settings-delete-failed = Failed to Delete
 community-settings-leave-failed = Failed to Leave
+
+## Relays
+
+community-settings-auth-title = This relay uses AUTH
+community-settings-auth-text = AUTH relays ask every app to sign in with its Nostr key. Vector signs in as you, so the relay can link your npub to this community every time you connect. Without AUTH, the relay sees this community only through Concord's anonymous keys.
+
+    For faster connections and more privacy, use relays without AUTH.
+# $max is the most relays a community can have.
+community-settings-relays-max = At most { $max } relays.
+community-settings-relays-checking = Checking the new relays
+community-settings-relay-refused = This relay can't host the community
+# $relay is the relay's address.
+community-settings-relay-cant-hold = { $relay } can't hold this community.
+community-settings-move-title = Before this community moves
+# <br> is a line break. $cautions is each caution, already set out as paragraphs.
+community-settings-move-text = { $cautions }<br><br>Move anyway?
+community-settings-move-anyway = Move Anyway
+community-settings-moving = Moving to new relays
+community-settings-moved = Everyone will follow the community to its new relays
+community-settings-moved-gaps = Moved, with a few gaps
+community-settings-unban-failed = Unban failed
+community-settings-report-copied = Copied Sync Report
+community-settings-report-unread = The report couldn't be read.
+community-settings-audit-unread = The audit log couldn't be read.
+
+## What could go wrong moving to these relays. $relays is a list of relay addresses and
+## $count how many there are.
+
+# $relays lists the relays, in bold.
+community-settings-caution-throttled = { $relays } slowed down a short burst of test events. A community on a rate-limited relay can drop posts and fall out of sync when it's busy.
+# $relays lists the relays and $count is how many.
+community-settings-caution-tor = { $count ->
+    [one] { $relays } can only be reached over Tor. Members using Vector over Standard or I2P won't reach it.
+   *[other] { $relays } can only be reached over Tor. Members using Vector over Standard or I2P won't reach them.
+}
+# $relays lists the relays and $count is how many. Every relay is Tor-only.
+community-settings-caution-tor-last = { $count ->
+    [one] { $relays } can only be reached over Tor. Members using Vector over Standard or I2P won't reach it, and with no other relay left they'd lose this community.
+   *[other] { $relays } can only be reached over Tor. Members using Vector over Standard or I2P won't reach them, and with no other relay left they'd lose this community.
+}
+# $relays lists the relays and $count is how many.
+community-settings-caution-i2p = { $count ->
+    [one] { $relays } can only be reached over I2P. Members using Vector over Standard or Tor won't reach it.
+   *[other] { $relays } can only be reached over I2P. Members using Vector over Standard or Tor won't reach them.
+}
+# $relays lists the relays and $count is how many. Every relay is I2P-only.
+community-settings-caution-i2p-last = { $count ->
+    [one] { $relays } can only be reached over I2P. Members using Vector over Standard or Tor won't reach it, and with no other relay left they'd lose this community.
+   *[other] { $relays } can only be reached over I2P. Members using Vector over Standard or Tor won't reach them, and with no other relay left they'd lose this community.
+}

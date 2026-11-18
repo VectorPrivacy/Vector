@@ -125,7 +125,20 @@ emoji-unavailable-why = This emoji couldn't be loaded ({ $why }).
 
 block-user-done = User Blocked
 unblock-user-done = User Unblocked
+unblock-user-title = Unblock User
+# $name is who would be unblocked.
+unblock-user-text = Are you sure you want to unblock { $name }?
+request-accept-failed = Failed to accept
 wallpaper-remove-failed = Wallpaper not removed
+wallpaper-processing = Processing image...
+wallpaper-bad-image = Couldn’t use that image
+wallpaper-edit-mode = Edit Mode is enabled.
+wallpaper-static-title = Static wallpapers only
+wallpaper-static-text = Vector wallpapers don’t animate. We grabbed the first frame of your image to use instead.
+wallpaper-hidden-title = Background Wallpaper
+# <b> is bold. The path names the switch in Settings.
+wallpaper-hidden-text = Your wallpaper is set. If you want to be able to see it, please enable <b>Settings → Display → Background Wallpaper</b>.
+wallpaper-not-sent = Wallpaper not sent
 
 ## A chat's header
 
@@ -133,3 +146,66 @@ chat-notes = Notes
 chat-notes-subtitle = Encrypted Notes to Self
 chat-call = Call
 chat-options = Chat Options
+chat-menu-self-destruct = Self-Destruct Timer
+chat-menu-edit-channel = Edit Channel
+chat-menu-wallpaper-change = Change Wallpaper
+chat-menu-wallpaper-remove = Remove Wallpaper
+
+## How long new messages last, in the Self-Destruct Timer menu
+
+self-destruct-permanent = Permanent
+# $count is how many weeks.
+self-destruct-weeks = { $count ->
+    [one] { $count } Week
+   *[other] { $count } Weeks
+}
+# $count is how many days.
+self-destruct-days = { $count ->
+    [one] { $count } Day
+   *[other] { $count } Days
+}
+# $count is how many hours.
+self-destruct-hours = { $count ->
+    [one] { $count } Hour
+   *[other] { $count } Hours
+}
+# $count is how many minutes.
+self-destruct-minutes = { $count ->
+    [one] { $count } Minute
+   *[other] { $count } Minutes
+}
+# $count is how many seconds.
+self-destruct-seconds = { $count ->
+    [one] { $count } Second
+   *[other] { $count } Seconds
+}
+
+## The timeline
+
+# Screen readers name the list of messages by this.
+chat-timeline = Messages
+# A date divider. <b> marks the day, like "Today" or "Mon, 3 Nov"; $time is a time of day.
+day-divider = <b>{ $day }</b>, { $time }
+history-loading = Loading older messages…
+history-failed = Couldn't load older messages
+history-retry = Retry
+# The divider above the first unread message. Shown in capitals.
+chat-unread-divider = New
+# The top of a channel's history. $name is the channel's name.
+chat-start-channel-title = Welcome to #{ $name }
+chat-start-channel = This is the beginning of the channel.
+chat-start-channel-alone = This is the very beginning of the channel, say hello! 👋
+chat-start-limited = This is the beginning of your history.
+chat-start-notes = This is the beginning of your notes.
+chat-start-dm = This is the beginning of your conversation.
+unread-jump-lots = Lots of unread history: keep loading?
+# $count is how many new messages, at most 99.
+unread-jump-count = { NUMBER($count) }+ new messages
+
+## A message request, above the composer
+
+request-title = Message request
+request-load-pictures = Accept to load media & profile
+request-load = Accept to load media
+request-block = Block
+request-accept = Accept

@@ -50,3 +50,25 @@ create-community-open = Open Community
 create-community-invite = Invite { $count }
 create-community-invite-none = Invite
 create-community-skip = Skip for now
+
+## While it's made
+
+create-community-name-placeholder = Community Name
+create-community-friends-search = Search friends, or paste an npub
+create-community-link-making = Making your link
+create-community-link-ready = Invite link ready in Invite People
+create-community-stage-creating = Creating your community
+create-community-stage-online = Putting it online
+create-community-stage-owner = Making you the owner
+create-community-stage-done = Almost done
+create-community-failed = Community creation failed
+create-community-avatar-failed = Community created, but the avatar upload failed
+# $done is which invite is going out and $total how many there are.
+create-community-inviting = Inviting { $done } of { $total }
+create-community-invites-failed = Invites failed
+create-community-invites-sent = Invites sent
+# $count is how many invites didn't go out.
+create-community-invites-some-failed = { $count ->
+    [one] { $count } invite failed to send
+   *[other] { $count } invites failed to send
+}

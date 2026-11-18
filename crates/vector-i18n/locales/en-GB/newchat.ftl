@@ -2,6 +2,7 @@
 
 newchat-title = New Message
 newchat-start = Start Chat
+newchat-search = Search (paste npub, invite link, etc.)
 # An npub is a Nostr public key, the text people share to be found. Keep the word.
 newchat-empty = No contacts yet. Paste an npub to invite someone.
 newchat-no-matches = No matches.

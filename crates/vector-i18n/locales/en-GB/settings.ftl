@@ -278,6 +278,8 @@ settings-update-checking = Checking for updates...
 settings-update-ready = Update ready! Restart to apply.
 settings-update-no-newer = No newer build yet. You'll be offered the official build as soon as it releases.
 settings-update-restart = Restart Now
+# A badge on something just added. Shown in capitals.
+settings-new-badge = New
 settings-update-check-failed = Failed to check for updates
 settings-update-download-stopped = The download stopped
 # The banner across the top. $version is the new version, like "0.5.3".
@@ -321,3 +323,76 @@ settings-toggle-auto-gain = Automatic Gain
 settings-toggle-echo-cancel = Echo Cancellation
 settings-toggle-noise-suppress = Noise Suppression
 settings-toggle-direct = Direct Connection
+
+## Relays: adding, removing and disabling
+
+settings-relay-invalid = Invalid URL
+settings-relay-empty = Please enter a relay URL.
+settings-relay-add-failed = Failed to Add Relay
+settings-relay-disable-title = Disable Default Relay?
+# <b> is bold, <br> a line break.
+settings-relay-disable-text = This is a <b>default relay</b>. Disabling it may affect message delivery and sync reliability.<br><br>Are you sure you want to disable it?
+settings-relay-remove-title = Remove Relay?
+# <b> is bold. $relay is the relay's host.
+settings-relay-remove-text = Are you sure you want to remove <b>{ $relay }</b>?
+settings-server-remove-title = Remove media server?
+# <b> is bold. $server is the server's address.
+settings-server-remove-text = <b>{ $server }</b> will be removed from your list. Existing uploads on that server remain accessible.
+settings-server-add-title = Add Media Server
+# <b> is bold.
+settings-server-add-text = Enter the address of a Blossom-compatible server. A bare domain like <b>blossom.primal.net</b> works. Vector adds <b>https://</b> automatically.
+# The same, where I2P is on. <b> is bold, <br> a line break.
+settings-server-add-text-i2p = Enter the address of a Blossom-compatible server. A bare domain like <b>blossom.primal.net</b> works. Vector adds <b>https://</b> automatically.<br><br>An <b>.i2p</b> server gets <b>http://</b>. Only people using I2P can load files from it.
+settings-error = Error
+
+## Storage
+
+# $size is how much space was freed, like "12 MB".
+settings-storage-freed = Freed { $size }
+settings-storage-delete-failed = Delete Failed
+settings-storage-clear-failed = Clear Failed
+# $error is why.
+settings-storage-delete-failed-text = Could not delete: { $error }
+# $error is why.
+settings-storage-clear-failed-text = Could not clear storage: { $error }
+# Moving files between encrypted and plain storage. $done is how many have moved and
+# $total how many there are.
+settings-storage-progress = { $done } of { $total }
+settings-storage-clear-title = Clear Storage?
+settings-storage-clear-text = Deletes this account's files, plus the cache. This can't be undone.
+settings-keep-files = Keep Files
+settings-keep-downloading = Downloads in progress
+settings-keep-downloading-text = Turn this off once your downloads finish.
+settings-keep-stop-title = Stop keeping files?
+# $count is how many files and $size how much space they take, like "12 MB".
+settings-keep-stop-text = { $count ->
+    [one] { $count } kept file ({ $size }) will be deleted from this device. They load again when you open them.
+   *[other] { $count } kept files ({ $size }) will be deleted from this device. They load again when you open them.
+}
+settings-keep-plain-title = Keep media unencrypted?
+# $folder is where the files go.
+settings-keep-plain-text = Everything Vector keeps becomes a normal file in { $folder }. Any app or person with access to this device's files can open them.
+settings-keep-plain = Keep Unencrypted
+
+## Notification sounds
+
+settings-sound-too-large = File Too Large
+settings-sound-too-large-text = Notification sounds must be under 1MB. Please choose a shorter audio clip.
+settings-sound-too-long = Audio Too Long
+settings-sound-too-long-text = Notification sounds must be 10 seconds or less.
+
+## Other settings notices
+
+settings-link-copied = Copied Settings Link
+# $count is how many log lines were copied.
+settings-logs-copied = Copied { $count } log entries to clipboard
+settings-logs-none = No logs to copy!
+# $error is why.
+settings-voice-download-failed = Download failed: { $error }
+settings-voice-delete-title = Delete Model?
+# $model is the model's name.
+settings-voice-delete-text = Are you sure you want to delete the "{ $model }" model? This will free up disk space but you'll need to download it again to use it.
+settings-mic-test-stopped = The microphone test stopped
+settings-logout-title = Going Incognito?
+# <b> is bold, <br> a line break.
+settings-logout-text = Logging out of Vector will fully erase the database, <b>ensure you have a backup of your keys before logging out!</b><br><br>That said, would you like to continue?

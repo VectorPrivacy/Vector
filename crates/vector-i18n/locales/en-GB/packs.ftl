@@ -10,3 +10,12 @@ packs-remove = Remove Pack
 
 packs-emoji-rename = Rename Emoji
 packs-emoji-delete = Delete Emoji
+
+## Adding and removing packs
+
+packs-remove-failed = Couldn't Remove Pack
+packs-add-failed = Couldn't Add Pack
+packs-equipped = Pack equipped
+packs-full-title = Pack Slots Full!
+# $max is how many packs can be equipped at once.
+packs-full-text = Vector supports up to { $max } equipped packs. Remove one to add another.

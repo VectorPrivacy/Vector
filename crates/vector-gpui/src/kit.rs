@@ -1453,6 +1453,18 @@ pub fn runs(html: &str) -> Vec<(String, bool)> {
     out
 }
 
+/// [`runs`] as inline divs for a flex row, `<b>` ones styled by `strong`. Spaces at the joins
+/// become no-break spaces, which line layout can't trim.
+pub fn run_divs(html: &str, strong: impl Fn(gpui::Div) -> gpui::Div) -> Vec<gpui::Div> {
+    runs(html)
+        .into_iter()
+        .map(|(t, b)| {
+            let d = gpui::div().child(t.replace(' ', "\u{a0}"));
+            if b { strong(d) } else { d }
+        })
+        .collect()
+}
+
 /// Text safe inside a popup's `<b>`/`<br>` markup.
 pub fn escape(text: &str) -> String {
     text.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")

@@ -48,7 +48,7 @@ pub struct Recorder {
     /// The leftward and upward drag, clamped at zero.
     dx: f32,
     dy: f32,
-    pub status: &'static str,
+    pub status: gpui::SharedString,
     started: Option<Instant>,
     pub tooltip: Option<Instant>,
     lock_fading: Option<Instant>,
@@ -79,7 +79,7 @@ impl Default for Recorder {
             last_axis: None,
             dx: 0.,
             dy: 0.,
-            status: "Recording...",
+            status: crate::t::composer_recording(),
             started: None,
             tooltip: None,
             lock_fading: None,
@@ -144,7 +144,7 @@ impl Recorder {
 
     pub fn recording(&mut self) {
         self.state = State::Recording;
-        self.status = "Recording...";
+        self.status = crate::t::composer_recording();
         self.started = Some(Instant::now());
     }
 
@@ -381,7 +381,7 @@ pub fn strip(r: &Recorder) -> AnyElement {
                         .text_size(px(14.))
                         .font_weight(gpui::FontWeight::MEDIUM)
                         .text_color(white_a(0.8))
-                        .child(r.status),
+                        .child(r.status.clone()),
                 ),
         )
         .child(
@@ -413,7 +413,7 @@ pub fn strip(r: &Recorder) -> AnyElement {
                                 .text_color(if hot { c(RED) } else { white_a(0.5) }),
                         ),
                 )
-                .child(div().text_size(px(13.)).whitespace_nowrap().child("Slide to cancel")),
+                .child(div().text_size(px(13.)).whitespace_nowrap().child(crate::t::composer_slide_cancel())),
         )
         .child(
             div()
@@ -514,7 +514,7 @@ pub fn overlays(r: &Recorder) -> Vec<AnyElement> {
                     .text_color(gpui::white())
                     .whitespace_nowrap()
                     .opacity(p)
-                    .child("Hold to record")
+                    .child(crate::t::composer_hold_record())
                     .into_any_element(),
             );
         }
@@ -706,7 +706,7 @@ fn dictate(busy: bool, on: On) -> AnyElement {
         .group_hover("voice-preview-dictate", |s| s.opacity(if busy { 1. } else { 0.7 }));
     div()
         .id("voice-preview-dictate")
-        .tip("Turn into text")
+        .tip(crate::t::composer_dictate())
         .size(px(45.))
         .flex_shrink_0()
         .rounded_full()

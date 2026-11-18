@@ -1393,7 +1393,7 @@ impl VectorApp {
                 if let Ok(m) = std::env::var("VECTOR_MOVING") {
                     let p: Vec<&str> = m.split('/').collect();
                     let n = |i: usize| p.get(i).and_then(|v| v.parse::<usize>().ok()).unwrap_or(0);
-                    s.moving = Some((format!("{} of {}", crate::security::thousands(n(0)), crate::security::thousands(n(1))), p.len() > 2)); // i18n-exempt: fixture
+                    s.moving = Some((t::settings_storage_progress(n(0), n(1)).to_string(), p.len() > 2));
                 }
             }
         }
@@ -3370,7 +3370,7 @@ impl VectorApp {
                 let n = |k: &str| payload.get(k).and_then(Value::as_u64).unwrap_or(0);
                 let plain = payload.get("plain").and_then(Value::as_bool).unwrap_or(false);
                 if let Some(s) = self.settings.as_mut() {
-                    s.moving = (n("done") < n("total")).then(|| (format!("{} of {}", crate::security::thousands(n("done") as usize), crate::security::thousands(n("total") as usize)), plain));
+                    s.moving = (n("done") < n("total")).then(|| (t::settings_storage_progress(n("done"), n("total")).to_string(), plain));
                     cx.notify();
                 }
             }
@@ -8364,7 +8364,9 @@ fn chat_list(
                 .border_b_1()
                 .border_color(white_a(0.2))
                 .relative()
+                // i18n-exempt: element ids
                 .child(tab("Messages", t::chats_tab_messages(), !requests, dot_messages, to_messages))
+                // i18n-exempt: element ids
                 .child(tab("Requests", t::chats_tab_requests(), requests, dot_requests, to_requests))
                 .child(bar),
         )
@@ -9062,7 +9064,7 @@ impl VectorApp {
             let picked = path.to_string_lossy().to_string();
             if live {
                 this.update(cx, |this, cx| {
-                    this.processing = Some("Processing image...".into());
+                    this.processing = Some(t::wallpaper_processing().into());
                     cx.notify();
                 })
                 .ok();
@@ -9083,7 +9085,7 @@ impl VectorApp {
                 this.processing = None;
                 match staged {
                     Ok((path, animated, recommended)) => this.stage_wallpaper(chat, path, animated, recommended, cx),
-                    Err(e) => this.notice("Couldn\u{2019}t use that image", e, cx),
+                    Err(e) => this.notice(&t::wallpaper_bad_image(), e, cx),
                 }
             })
             .ok();
@@ -9102,11 +9104,11 @@ impl VectorApp {
         let ts = chrono::Utc::now().timestamp_millis() as u64;
         self.wallpaper.preview = Some(Preview { chat, path, blur, dim, ts });
         self.wallpaper.busy = false;
-        self.wallpaper.label = "Edit Mode is enabled.".into();
+        self.wallpaper.label = t::wallpaper_edit_mode().into();
         self.wallpaper.set_editing(true);
         if animated {
-            let mut popup = kit::Popup::notice("Static wallpapers only");
-            popup.text = Some("Vector wallpapers don\u{2019}t animate. We grabbed the first frame of your image to use instead.".into());
+            let mut popup = kit::Popup::notice(t::wallpaper_static_title());
+            popup.text = Some(t::wallpaper_static_text());
             self.popup = Some((popup, PopupAct::Notice));
         }
         cx.notify();
@@ -9145,18 +9147,18 @@ impl VectorApp {
             let res = rx.await.unwrap_or_else(|_| Err("cancelled".into()));
             this.update(cx, |this, cx| {
                 this.wallpaper.busy = false;
-                this.wallpaper.label = "Edit Mode is enabled.".into();
+                this.wallpaper.label = t::wallpaper_edit_mode().into();
                 match res {
                     Ok(()) => {
                         this.wallpaper.preview = None;
                         this.wallpaper.set_editing(false);
                         if !this.chat_bg {
-                            let mut popup = kit::Popup::notice("Background Wallpaper");
-                            popup.text = Some("Your wallpaper is set. If you want to be able to see it, please enable <b>Settings \u{2192} Display \u{2192} Background Wallpaper</b>.".into());
+                            let mut popup = kit::Popup::notice(t::wallpaper_hidden_title());
+                            popup.text = Some(t::wallpaper_hidden_text());
                             this.popup = Some((popup, PopupAct::Notice));
                         }
                     }
-                    Err(e) => this.notice_plain("Wallpaper not sent", &e, cx),
+                    Err(e) => this.notice_plain(&t::wallpaper_not_sent(), &e, cx),
                 }
                 cx.notify();
             })
@@ -9206,13 +9208,13 @@ impl VectorApp {
 
     /// `buildChatMenuItems`: what the open chat's ⋯ offers.
     fn open_chat_menu(&mut self, chat: String, cx: &mut Context<Self>) {
-        let mut items = vec![kit::MenuItem::new("Self-Destruct Timer", "clock")];
+        let mut items = vec![kit::MenuItem::new(t::chat_menu_self_destruct(), "clock")];
         let mut acts = vec![MenuAct::SelfDestruct(chat.clone())];
         let community = self.store.borrow().community_of(&chat).map(|c| c.community_id.clone());
         if let Some(community) = community
             && self.community_caps(&community).contains("manage_channels")
         {
-            items.push(kit::MenuItem::new("Edit Channel", "edit"));
+            items.push(kit::MenuItem::new(t::chat_menu_edit_channel(), "edit"));
             acts.push(MenuAct::EditChannel {
                 community,
                 channel: chat.clone(),
@@ -9221,10 +9223,10 @@ impl VectorApp {
         }
         let papered = self.store.borrow().chat(&chat).map(|c| !c.wallpaper_path.is_empty());
         if let Some(papered) = papered.filter(|_| self.store.borrow().community_of(&chat).is_none()) {
-            items.push(kit::MenuItem::new("Change Wallpaper", "image"));
+            items.push(kit::MenuItem::new(t::chat_menu_wallpaper_change(), "image"));
             acts.push(MenuAct::ChangeWallpaper(chat.clone()));
             if papered {
-                items.push(kit::MenuItem::new("Remove Wallpaper", "trash"));
+                items.push(kit::MenuItem::new(t::chat_menu_wallpaper_remove(), "trash"));
                 acts.push(MenuAct::RemoveWallpaper(chat));
             }
         }
@@ -9235,26 +9237,26 @@ impl VectorApp {
 
     /// The timer's durations, the current one ticked; a pick applies to the next send.
     fn open_self_destruct(&mut self, chat: String, at: gpui::Point<gpui::Pixels>) {
-        const OPTIONS: [(&str, Option<u64>); 8] = [
-            ("Permanent", None),
-            ("1 Week", Some(604_800)),
-            ("1 Day", Some(86_400)),
-            ("6 Hours", Some(21_600)),
-            ("1 Hour", Some(3_600)),
-            ("5 Minutes", Some(300)),
-            ("60 Seconds", Some(60)),
-            ("10 Seconds", Some(10)),
+        let options: [(SharedString, Option<u64>); 8] = [
+            (t::self_destruct_permanent(), None),
+            (t::self_destruct_weeks(1), Some(604_800)),
+            (t::self_destruct_days(1), Some(86_400)),
+            (t::self_destruct_hours(6), Some(21_600)),
+            (t::self_destruct_hours(1), Some(3_600)),
+            (t::self_destruct_minutes(5), Some(300)),
+            (t::self_destruct_seconds(60), Some(60)),
+            (t::self_destruct_seconds(10), Some(10)),
         ];
         let current = if self.live { vector_core::self_destruct::chat_duration_secs(&chat) } else { self.self_destruct };
-        let items = OPTIONS
+        let items = options
             .iter()
             .map(|(label, secs)| kit::MenuItem {
-                label: (*label).into(),
+                label: label.clone(),
                 hint: (*secs == current).then(|| "\u{2713}".into()),
                 ..Default::default()
             })
             .collect();
-        let acts = OPTIONS.iter().map(|(_, secs)| MenuAct::SetSelfDestruct(chat.clone(), *secs)).collect();
+        let acts = options.iter().map(|(_, secs)| MenuAct::SetSelfDestruct(chat.clone(), *secs)).collect();
         self.menu_trail.clear();
         self.menu = Some((at, items, acts));
     }
@@ -9661,9 +9663,9 @@ impl VectorApp {
         div()
             .id("timeline")
             .role(gpui::Role::List)
-            .aria_label("Messages")
+            .aria_label(t::chat_timeline())
             .track_focus(&self.timeline_focus)
-            .key_context("Timeline")
+            .key_context("Timeline") // i18n-exempt: key context
             .on_key_down(cx.listener(|this, e: &gpui::KeyDownEvent, window, cx| this.timeline_key(e, window, cx)))
             .size_full()
             .relative()
@@ -9996,7 +9998,7 @@ impl VectorApp {
 
 /// `.request-bar`: under the header of a DM from someone new, Block or Accept.
 fn request_bar(npub: String, pictures: bool, tiny: bool, cx: &mut Context<VectorApp>) -> impl IntoElement {
-    let button = |id: &'static str, label: &'static str| {
+    let button = |id: &'static str, label: SharedString| {
         div()
             .id(id)
             .flex_shrink_0()
@@ -10050,7 +10052,7 @@ fn request_bar(npub: String, pictures: bool, tiny: bool, cx: &mut Context<Vector
                         .font_weight(FontWeight::SEMIBOLD)
                         .line_height(px(17.))
                         .text_color(c(0xffffff))
-                        .child("Message request"),
+                        .child(t::request_title()),
                 )
                 .child(
                     div()
@@ -10058,15 +10060,11 @@ fn request_bar(npub: String, pictures: bool, tiny: bool, cx: &mut Context<Vector
                         .text_size(px(13.))
                         .line_height(px(16.))
                         .text_color(white_a(0.7))
-                        .child(if pictures {
-                            "Accept to load media & profile"
-                        } else {
-                            "Accept to load media"
-                        }),
+                        .child(if pictures { t::request_load_pictures() } else { t::request_load() }),
                 ),
         )
         .child(
-            button("request-block", "Block")
+            button("request-block", t::request_block())
                 .border_color(c(timeline::DANGER).opacity(0.6))
                 .text_color(c(timeline::DANGER))
                 .on_click(
@@ -10074,7 +10072,7 @@ fn request_bar(npub: String, pictures: bool, tiny: bool, cx: &mut Context<Vector
                 ),
         )
         .child(
-            button("request-accept", "Accept")
+            button("request-accept", t::request_accept())
                 .bg(c(PRIMARY))
                 .border_color(gpui::transparent_black())
                 .text_color(c(0x000000))
@@ -10097,12 +10095,12 @@ fn history_edge(store: &Store, chat: &SerializableChat, on: &timeline::OnAct, ed
     match edge {
         data::Edge::Loading => line(div())
             .child(div().size(px(14.)).child(crate::attachments::spinner(14., 2., 0.8, 0.25, ca(255, 255, 255, 0.15), c(PRIMARY))))
-            .child("Loading older messages…")
+            .child(t::history_loading())
             .into_any_element(),
         data::Edge::Retry => {
             let on = on.clone();
             line(div())
-                .child("Couldn't load older messages")
+                .child(t::history_failed())
                 .child(
                     div()
                         .id("history-retry")
@@ -10116,7 +10114,7 @@ fn history_edge(store: &Store, chat: &SerializableChat, on: &timeline::OnAct, ed
                         .text_color(c(0xffffff))
                         .cursor_pointer()
                         .on_click(move |_, w, cx| on("", timeline::Act::RetryHistory, w, cx))
-                        .child("Retry"),
+                        .child(t::history_retry()),
                 )
                 .into_any_element()
         }
@@ -10124,28 +10122,28 @@ fn history_edge(store: &Store, chat: &SerializableChat, on: &timeline::OnAct, ed
             let alone = chat.messages.is_empty();
             let (art, title, note) = match store.community_of(&chat.id) {
                 Some(com) => {
-                    let name = com.channel(&chat.id).map_or("general", |ch| ch.name.as_str());
+                    let name = com.channel(&chat.id).map_or("general", |ch| ch.name.as_str()); // i18n-exempt: the default channel's name
                     (
                         crate::community::logo(store, &com.community_id, 64., 32.).into_any_element(),
-                        format!("Welcome to #{name}"),
+                        t::chat_start_channel_title(name).to_string(),
                         if store.history_limited.contains(&chat.id) {
-                            "This is the beginning of your history."
+                            t::chat_start_limited()
                         } else if alone {
-                            "This is the very beginning of the channel, say hello! 👋"
+                            t::chat_start_channel_alone()
                         } else {
-                            "This is the beginning of the channel."
+                            t::chat_start_channel()
                         },
                     )
                 }
                 None if chat.id == store.my_npub => (
                     crate::ui::avatar(store, &chat.id, 64.),
-                    "Notes".to_string(),
-                    "This is the beginning of your notes.",
+                    t::chat_notes().to_string(),
+                    t::chat_start_notes(),
                 ),
                 None => (
                     crate::ui::avatar(store, &chat.id, 64.),
                     store.name(&chat.id),
-                    "This is the beginning of your conversation.",
+                    t::chat_start_dm(),
                 ),
             };
             div()
@@ -10178,9 +10176,8 @@ fn history_edge(store: &Store, chat: &SerializableChat, on: &timeline::OnAct, ed
 fn unread_jump_pill(j: &UnreadJump, cx: &mut Context<VectorApp>) -> AnyElement {
     let label = match (&j.status, j.paused) {
         (Some(s), _) => s.clone(),
-        (None, true) => "Lots of unread history: keep loading?".to_string(),
-        (None, false) if j.count > 99 => "99+ new messages".to_string(),
-        (None, false) => format!("{}+ new messages", j.count),
+        (None, true) => t::unread_jump_lots().to_string(),
+        (None, false) => t::unread_jump_count(j.count.min(99)).to_string(),
     };
     let busy = j.status.is_some();
     let app = cx.entity().downgrade();
@@ -10257,8 +10254,7 @@ fn timeline_row(ctx: &timeline::Ctx, row: &Row, after_message: bool) -> AnyEleme
                 .flex()
                 .text_size(px(12.))
                 .text_color(c(TEXT))
-                .child(div().font_weight(FontWeight::BOLD).child(label.clone()))
-                .child(format!(", {time}")),
+                .children(crate::kit::run_divs(&t::day_divider(label.as_str(), time.as_str()), |d| d.font_weight(FontWeight::BOLD))),
             white_a(0.1),
             0.7,
         ),
@@ -10270,7 +10266,7 @@ fn timeline_row(ctx: &timeline::Ctx, row: &Row, after_message: bool) -> AnyEleme
                 .font_weight(FontWeight::BOLD)
                 .text_size(px(11.))
                 .text_color(c(ACCENT))
-                .children("NEW".chars().map(|ch| div().child(ch.to_string()))),
+                .children(t::chat_unread_divider().to_uppercase().chars().map(|ch| div().child(ch.to_string()))),
             ca(89, 252, 179, 0.6),
             1.,
         ),
@@ -10498,13 +10494,9 @@ fn composer(
                         .whitespace_nowrap()
                         .text_size(px(13.5))
                         .text_color(white_a(0.85))
-                        .child("Replying to\u{a0}")
-                        .child(
-                            div()
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(c(ACCENT))
-                                .child(name.clone()),
-                        ),
+                        .children(crate::kit::run_divs(&t::composer_replying_to(kit::escape(&name)), |d| {
+                            d.font_weight(FontWeight::SEMIBOLD).text_color(c(ACCENT))
+                        })),
                 )
                 .child(
                     div()
@@ -10614,7 +10606,7 @@ fn composer(
                         "icons/smile-face.svg"
                     })
                     .id("composer-emoji")
-                    .aria_label("Emoji")
+                    .aria_label(t::composer_emoji())
                     .cursor_pointer()
                     .on_click(
                         cx.listener(|app, _, window, cx| app.toggle_picker(None, window, cx)),
@@ -10720,7 +10712,7 @@ fn send_or_mic(
     };
     div()
         .id("chat-input-send")
-        .aria_label("Send")
+        .aria_label(t::composer_send())
         .group("chat-input-send")
         .w(px(38.))
         .h(px(45.))
@@ -10791,7 +10783,7 @@ fn attach_button(open: bool, turned: Option<std::time::Instant>, cx: &mut Contex
     let turn = if open { k } else { 1. - k };
     div()
         .id("chat-input-file")
-        .aria_label("Attach")
+        .aria_label(t::composer_attach())
         .w(px(38.))
         .h(px(45.))
         .flex_shrink_0()
@@ -10840,7 +10832,7 @@ fn attachment_panel(
     let t = (opened.elapsed().as_secs_f32() / 0.3).min(1.);
     // cubic-bezier(0.4, 0, 0.2, 1)
     let e = 1. - (1. - t).powi(3);
-    let item = |i: usize, id: &'static str, icon: &'static str, size: f32, label: &'static str| {
+    let item = |i: usize, id: &'static str, icon: &'static str, size: f32, label: SharedString| {
         let it = ((opened.elapsed().as_secs_f32() - i as f32 * 0.08) / 0.3).clamp(0., 1.);
         div()
             .id(id)
@@ -10908,19 +10900,19 @@ fn attachment_panel(
                 .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .on_mouse_down_out(cx.listener(|app, _, _, cx| app.dismiss_attach(cx)))
                 .child(
-                    item(0, "attach-file", "icons/file.svg", 26., "File")
+                    item(0, "attach-file", "icons/file.svg", 26., t::composer_attach_file())
                         .on_click(cx.listener(|app, _, window, cx| app.pick_file(window, cx))),
                 )
                 .child(
-                    item(1, "attach-folder", "icons/folder.svg", 27., "Folder")
+                    item(1, "attach-folder", "icons/folder.svg", 27., t::composer_attach_folder())
                         .on_click(cx.listener(|app, _, window, cx| app.pick_folder(window, cx))),
                 )
                 .child(
-                    item(2, "attach-commands", "ui/slash.svg", 22.5, "Commands")
+                    item(2, "attach-commands", "ui/slash.svg", 22.5, t::composer_attach_commands())
                         .on_click(cx.listener(|app, _, window, cx| app.open_commands(window, cx))),
                 )
                 .child(
-                    item(3, "attach-miniapps", "icons/grid-outline.svg", 22., "Mini Apps")
+                    item(3, "attach-miniapps", "icons/grid-outline.svg", 22., t::composer_attach_miniapps())
                         .on_click(cx.listener(|app, _, window, cx| app.show_miniapps(window, cx))),
                 ),
         )
@@ -11076,13 +11068,11 @@ impl VectorApp {
                 let verdict = rx.await.ok();
                 this.update_in(cx, |this, window, cx| match verdict {
                     Some(v) if !v.likely => {
+                        // i18n-exempt: markup
                         let reasons: String = v.reasons.iter().map(|r| format!("<br>• {}", kit::escape(r))).collect();
                         this.notice(
-                            "No media server will take this file",
-                            format!(
-                                "This file is <b>{}</b>.{reasons}<br><br>Shrink the file, or add a server in Settings → Network.",
-                                crate::media::format_bytes_with(size as f64, 1, false)
-                            ),
+                            &t::upload_no_server_title(),
+                            t::upload_no_server_text(reasons, crate::media::format_bytes_with(size as f64, 1, false)).into(),
                             cx,
                         );
                     }
@@ -11141,7 +11131,7 @@ impl VectorApp {
                     crate::filepreview::Event::Close(path) => backend::archive::forget(path),
                     crate::filepreview::Event::Publish(path) => this.open_publish(path.clone(), window, cx),
                     crate::filepreview::Event::Failed(err) => {
-                        this.notice("Compression Failed", err.clone(), cx)
+                        this.notice(&t::upload_compression_failed(), err.clone(), cx)
                     }
                 }
             },
@@ -11199,6 +11189,7 @@ impl VectorApp {
                 Ok(Err(e)) => e,
                 Err(e) => e.to_string(),
             };
+            // i18n-exempt: core's English
             if err.contains("Upload cancelled") {
                 return;
             }
@@ -11232,7 +11223,7 @@ impl VectorApp {
         let cached = self.store.borrow().rosters.get(&id).cloned();
         if self.community.as_ref().is_none_or(|v| v.id != id) {
             let search = cx.new(|cx| {
-                TextInput::new("Search Members...", cx).with_look(crate::community::member_search_look(self.is_slim))
+                TextInput::new(t::member_search(), cx).with_look(crate::community::member_search_look(self.is_slim))
             });
             cx.subscribe(&search, |_, _, _: &crate::composer::InputChanged, cx| {
                 cx.notify()
@@ -11486,7 +11477,7 @@ impl VectorApp {
                     self.show_menu(
                         at,
                         vec![(
-                            kit::MenuItem::new("Hide Banner", "eye-off"),
+                            kit::MenuItem::new(t::community_hide_banner(), "eye-off"),
                             MenuAct::BannerHidden(id, true),
                         )],
                         cx,
@@ -11539,13 +11530,8 @@ impl VectorApp {
             Act::Unlisted(why) => {
                 let departed = why == "departed";
                 self.notice(
-                    if departed { "Departed Member" } else { "Unannounced Member" },
-                    if departed {
-                        "They left or were removed, yet are still posting. This may be suspicious, keep an eye on them."
-                    } else {
-                        "They joined and are posting without ever publishing a join event. This may be suspicious, keep an eye on them."
-                    }
-                    .into(),
+                    &if departed { t::community_departed_title() } else { t::community_unannounced_title() },
+                    if departed { t::community_departed_text() } else { t::community_unannounced_text() }.into(),
                     cx,
                 );
             }
@@ -11579,7 +11565,7 @@ impl VectorApp {
     /// `openMessagesMenu`: the Messages door's catch-up.
     pub(super) fn messages_menu(&mut self, at: gpui::Point<gpui::Pixels>, cx: &mut Context<Self>) {
         let none = self.unread_dms().is_empty();
-        let rows = vec![(kit::MenuItem::new("Mark All as Read", "check").disabled(none), MenuAct::ReadAllDms)];
+        let rows = vec![(kit::MenuItem::new(t::chats_mark_all_read(), "check").disabled(none), MenuAct::ReadAllDms)];
         self.show_menu(at, rows, cx);
     }
 
@@ -11597,18 +11583,18 @@ impl VectorApp {
 
     /// `notifyMenuItems`: the level and mute submenus for a Community, a channel or a DM.
     fn notify_rows(&self, scope: &str, community: Option<&str>) -> Vec<(kit::MenuItem, MenuAct)> {
-        const LEVELS: [(&str, &str); 3] = [
-            ("all", "All messages"),
-            ("mentions", "Mentions"),
-            ("nothing", "Nothing"),
+        let levels_named: [(&str, SharedString); 3] = [
+            ("all", t::notify_level_all()),
+            ("mentions", t::notify_level_mentions()),
+            ("nothing", t::notify_level_nothing()),
         ];
-        const MUTES: [(&str, i64); 6] = [
-            ("For 15 minutes", 15 * 60_000),
-            ("For 1 hour", 60 * 60_000),
-            ("For 3 hours", 3 * 60 * 60_000),
-            ("For 8 hours", 8 * 60 * 60_000),
-            ("For 24 hours", 24 * 60 * 60_000),
-            ("Until I turn it back on", -1),
+        let mute_for: [(SharedString, i64); 6] = [
+            (t::notify_mute_minutes(15), 15 * 60_000),
+            (t::notify_mute_hours(1), 60 * 60_000),
+            (t::notify_mute_hours(3), 3 * 60 * 60_000),
+            (t::notify_mute_hours(8), 8 * 60 * 60_000),
+            (t::notify_mute_hours(24), 24 * 60 * 60_000),
+            (t::notify_mute_forever(), -1),
         ];
         let views = if self.live {
             backend::prefs::notify_views(community.map(str::to_string), vec![scope.to_string()])
@@ -11625,27 +11611,18 @@ impl VectorApp {
         };
         let Some(me) = views.iter().find(|v| v.scope_id == scope).cloned() else {
             return vec![(
-                kit::MenuItem::new("Notification settings unavailable", "").disabled(true),
+                kit::MenuItem::new(t::notify_unavailable(), "").disabled(true),
                 MenuAct::Nothing,
             )];
         };
         let parent = community
             .and_then(|c| views.iter().find(|v| v.scope_id == c))
             .filter(|_| community != Some(scope));
-        let label = |v: &str| {
-            LEVELS
-                .iter()
-                .find(|l| l.0 == v)
-                .map(|l| l.1)
-                .unwrap_or("All messages")
-        };
+        let label = |v: &str| levels_named.iter().find(|l| l.0 == v).map_or_else(t::notify_level_all, |l| l.1.clone());
         let mut levels: Vec<(kit::MenuItem, MenuAct)> = Vec::new();
         if let Some(p) = parent {
             levels.push((
-                kit::MenuItem::new(
-                    format!("Use Community Default ({})", label(p.effective_level)),
-                    "",
-                )
+                kit::MenuItem::new(t::notify_use_default(label(p.effective_level).as_ref()), "")
                 .checked(me.level.is_none()),
                 MenuAct::NotifyLevel(scope.into(), None),
             ));
@@ -11655,7 +11632,7 @@ impl VectorApp {
         } else {
             Some(me.effective_level)
         });
-        for (value, name) in LEVELS {
+        for (value, name) in levels_named.iter().cloned() {
             levels.push((
                 kit::MenuItem::new(name, "").checked(ticked == Some(value)),
                 MenuAct::NotifyLevel(scope.into(), Some(value)),
@@ -11666,14 +11643,14 @@ impl VectorApp {
             let suppressed = me.suppress_everyone == Some(true);
             levels.push((kit::MenuItem::header("@everyone"), MenuAct::Nothing));
             levels.push((
-                kit::MenuItem::new("Allow", "")
+                kit::MenuItem::new(t::notify_everyone_allow(), "")
                     .checked(!suppressed)
                     .disabled(off)
-                    .hint(off.then(|| "off in App Settings".into())),
+                    .hint(off.then(|| t::notify_everyone_off().into())),
                 MenuAct::SuppressEveryone(scope.into(), false),
             ));
             levels.push((
-                kit::MenuItem::new("Suppress", "")
+                kit::MenuItem::new(t::notify_everyone_suppress(), "")
                     .checked(suppressed)
                     .disabled(off),
                 MenuAct::SuppressEveryone(scope.into(), true),
@@ -11682,18 +11659,18 @@ impl VectorApp {
         let mut mutes: Vec<(kit::MenuItem, MenuAct)> = Vec::new();
         if me.muted && me.mute_until == 0 {
             mutes.push((
-                kit::MenuItem::new("Muted by the community", "").disabled(true),
+                kit::MenuItem::new(t::notify_muted_by_community(), "").disabled(true),
                 MenuAct::Nothing,
             ));
             mutes.push((kit::MenuItem::divider(), MenuAct::Nothing));
         } else if me.muted {
             mutes.push((
-                kit::MenuItem::new("Unmute", "volume-max"),
+                kit::MenuItem::new(t::notify_unmute(), "volume-max"),
                 MenuAct::NotifyMute(scope.into(), 0),
             ));
             mutes.push((kit::MenuItem::divider(), MenuAct::Nothing));
         }
-        for (name, ms) in MUTES {
+        for (name, ms) in mute_for {
             mutes.push((
                 kit::MenuItem::new(name, ""),
                 MenuAct::NotifyMute(scope.into(), ms),
@@ -11703,27 +11680,24 @@ impl VectorApp {
             let at = chrono::Local.timestamp_millis_opt(me.mute_until).single();
             let today = chrono::Local::now().date_naive();
             at.map(|t| {
-                if t.date_naive() == today {
-                    format!("until {}", t.format("%H:%M"))
-                } else {
-                    format!("until {}", t.format("%a %H:%M"))
-                }
+                let time = if t.date_naive() == today { t.format("%H:%M") } else { t.format("%a %H:%M") };
+                crate::t::notify_muted_until(time.to_string()).into()
             })
             .unwrap_or_default()
         });
-        let sub = |label: &str, _icon: &str, rows: Vec<(kit::MenuItem, MenuAct)>| {
+        let sub = |label: SharedString, _icon: &str, rows: Vec<(kit::MenuItem, MenuAct)>| {
             let (items, acts): (Vec<_>, Vec<_>) = rows.into_iter().unzip();
-            MenuAct::Sub(SharedString::from(label.to_string()), items, acts)
+            MenuAct::Sub(label, items, acts)
         };
-        let mute_label = if me.muted { "Muted" } else { "Mute" };
+        let mute_label = if me.muted { t::notify_muted() } else { t::notify_mute() };
         vec![
             (
-                kit::MenuItem::new("Notification Settings", "bell").sub(),
-                sub("Notification Settings", "bell", levels),
+                kit::MenuItem::new(t::notify_settings(), "bell").sub(),
+                sub(t::notify_settings(), "bell", levels),
             ),
             (
                 kit::MenuItem::new(
-                    mute_label,
+                    mute_label.clone(),
                     if me.muted {
                         "volume-mute"
                     } else {
@@ -11759,13 +11733,13 @@ impl VectorApp {
         let mut rows: Vec<(kit::MenuItem, MenuAct)> = Vec::new();
         if unread {
             rows.push((
-                kit::MenuItem::new("Mark as Read", "check"),
+                kit::MenuItem::new(t::chats_mark_read(), "check"),
                 MenuAct::CommunityRead(id.clone()),
             ));
             rows.push((kit::MenuItem::divider(), MenuAct::Nothing));
         }
         rows.push((
-            kit::MenuItem::new("Invite People", "add-user"),
+            kit::MenuItem::new(t::community_invite(), "add-user"),
             MenuAct::InvitePeople(id.clone()),
         ));
         let caps = if self.live {
@@ -11784,20 +11758,20 @@ impl VectorApp {
         };
         if caps.contains("manage_channels") {
             rows.push((
-                kit::MenuItem::new("Create Channel", "channel-hash"),
+                kit::MenuItem::new(t::channel_create(), "channel-hash"),
                 MenuAct::CreateChannel {
                     community: id.clone(),
                     category: None,
                 },
             ));
             rows.push((
-                kit::MenuItem::new("Create Category", "plus"),
+                kit::MenuItem::new(t::channel_create_category(), "plus"),
                 MenuAct::CreateCategory(id.clone()),
             ));
         }
         if caps.contains("change_nickname") {
             rows.push((
-                kit::MenuItem::new("Change Nickname", "edit"),
+                kit::MenuItem::new(t::community_nickname(), "edit"),
                 MenuAct::CommunityNickname(id.clone()),
             ));
         }
@@ -11806,7 +11780,7 @@ impl VectorApp {
             .any(|c| caps.contains(*c))
         {
             rows.push((
-                kit::MenuItem::new("Community Settings", "settings"),
+                kit::MenuItem::new(t::community_settings(), "settings"),
                 MenuAct::CommunitySettings(id.clone()),
             ));
         }
@@ -11816,21 +11790,21 @@ impl VectorApp {
         if self.store.borrow().banner(&id).is_some() {
             let hidden = self.store.borrow().hidden_banners.contains(&id);
             rows.push((
-                kit::MenuItem::new(if hidden { "Show Banner" } else { "Hide Banner" }, if hidden { "eye" } else { "eye-off" }),
+                kit::MenuItem::new(if hidden { t::community_show_banner() } else { t::community_hide_banner() }, if hidden { "eye" } else { "eye-off" }),
                 MenuAct::BannerHidden(id.clone(), !hidden),
             ));
         }
         if caps.contains("ban") {
             let raid = self.raid.get(&id).filter(|r| r.0);
-            let mut item = kit::MenuItem::new("Moderation", "warning");
+            let mut item = kit::MenuItem::new(t::community_moderation(), "warning");
             if let Some((_, n)) = raid {
-                item = item.danger().hint(Some(format!("{n} flagged").into()));
+                item = item.danger().hint(Some(t::community_flagged(*n).into()));
             }
             rows.push((item, MenuAct::Moderation(id.clone())));
         }
         rows.extend(self.start_pin_row(format!("c/{id}")));
         rows.push((
-            kit::MenuItem::new("Copy Link", "share"),
+            kit::MenuItem::new(t::copy_link(), "share"),
             MenuAct::Copy(format!("https://vectorapp.io/c/{id}")),
         ));
         if self.advanced() && !self.store.borrow().stream_hidden(&id) {
@@ -11842,11 +11816,7 @@ impl VectorApp {
         rows.push((kit::MenuItem::divider(), MenuAct::Nothing));
         rows.push((
             kit::MenuItem::new(
-                if owner {
-                    "Delete Community"
-                } else {
-                    "Leave Community"
-                },
+                if owner { t::community_delete() } else { t::community_leave() },
                 "x-user",
             )
             .danger(),
@@ -11872,7 +11842,7 @@ impl VectorApp {
         let mut rows: Vec<(kit::MenuItem, MenuAct)> = Vec::new();
         if unread {
             rows.push((
-                kit::MenuItem::new("Mark as Read", "check"),
+                kit::MenuItem::new(t::chats_mark_read(), "check"),
                 MenuAct::ChannelRead(channel.clone()),
             ));
             rows.push((kit::MenuItem::divider(), MenuAct::Nothing));
@@ -11882,7 +11852,7 @@ impl VectorApp {
         if manage {
             rows.push((kit::MenuItem::divider(), MenuAct::Nothing));
             rows.push((
-                kit::MenuItem::new("Edit Channel", "edit"),
+                kit::MenuItem::new(t::chat_menu_edit_channel(), "edit"),
                 MenuAct::EditChannel {
                     community: community.clone(),
                     channel: channel.clone(),
@@ -11890,7 +11860,7 @@ impl VectorApp {
                 },
             ));
             rows.push((
-                kit::MenuItem::new("Duplicate Channel", "copy"),
+                kit::MenuItem::new(t::channel_duplicate(), "copy"),
                 MenuAct::DuplicateChannel {
                     community: community.clone(),
                     channel: channel.clone(),
@@ -11899,7 +11869,7 @@ impl VectorApp {
         }
         rows.extend(self.start_pin_row(format!("c/{community}/{channel}")));
         rows.push((
-            kit::MenuItem::new("Copy Link", "share"),
+            kit::MenuItem::new(t::copy_link(), "share"),
             MenuAct::Copy(format!("https://vectorapp.io/c/{community}/{channel}")),
         ));
         if self.advanced() && !self.store.borrow().stream_hidden(&channel) {
@@ -11916,7 +11886,7 @@ impl VectorApp {
         if manage && !primary {
             rows.push((kit::MenuItem::divider(), MenuAct::Nothing));
             rows.push((
-                kit::MenuItem::new("Delete Channel", "x").danger(),
+                kit::MenuItem::new(t::channel_menu_delete(), "x").danger(),
                 MenuAct::DeleteChannel {
                     community,
                     channel,
@@ -11940,14 +11910,14 @@ impl VectorApp {
         }
         let rows = vec![
             (
-                kit::MenuItem::new("Create Channel", "plus"),
+                kit::MenuItem::new(t::channel_create(), "plus"),
                 MenuAct::CreateChannel {
                     community: community.clone(),
                     category: Some(category.clone()),
                 },
             ),
             (
-                kit::MenuItem::new("Edit Category", "edit"),
+                kit::MenuItem::new(t::channel_menu_edit_category(), "edit"),
                 MenuAct::EditChannel {
                     community: community.clone(),
                     channel: category.clone(),
@@ -11956,7 +11926,7 @@ impl VectorApp {
             ),
             (kit::MenuItem::divider(), MenuAct::Nothing),
             (
-                kit::MenuItem::new("Delete Category", "x").danger(),
+                kit::MenuItem::new(t::channel_menu_delete_category(), "x").danger(),
                 MenuAct::DeleteChannel {
                     community,
                     channel: category,
@@ -12168,14 +12138,10 @@ impl VectorApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let mut popup = kit::Popup::notice(if owner {
-            "Delete this community?"
-        } else {
-            "Leave Community"
-        });
-        popup.cancel = Some("Cancel".into());
+        let mut popup = kit::Popup::notice(if owner { t::community_delete_title() } else { t::community_leave() });
+        popup.cancel = Some(t::dialog_cancel());
         if owner {
-            popup.text = Some(format!("This permanently ends \"<b>{name}</b>\" for everyone, including you. No new messages can be sent and no one can rejoin. People can still delete their own past messages. This cannot be undone.<br><br>Type the community name to confirm:").into());
+            popup.text = Some(t::community_delete_text(kit::escape(&name)));
             let input = cx.new(|cx| {
                 TextInput::new(name.clone(), cx)
                     .with_look(kit::field_look())
@@ -12193,9 +12159,7 @@ impl VectorApp {
             window.focus(&input.focus_handle(cx), cx);
             popup.input = Some(input);
         } else {
-            popup.text = Some(
-                format!("Leave \"<b>{name}</b>\"? You'll need a new invite to rejoin.").into(),
-            );
+            popup.text = Some(t::community_leave_text(kit::escape(&name)));
         }
         self.popup = Some((popup, PopupAct::LeaveCommunity { id, name, owner }));
         cx.notify();
@@ -12271,7 +12235,7 @@ impl VectorApp {
                     label: label.map(String::from),
                     joins,
                 };
-                m.links = vec![link("Ab3", Some("Reddit"), 3), link("Zx9", None, 0)];
+                m.links = vec![link("Ab3", Some("Reddit"), 3), link("Zx9", None, 0)]; // i18n-exempt: fixture
                 m.public = true;
             }
         } else {
@@ -12348,13 +12312,13 @@ impl VectorApp {
     }
 
     fn ask_invite_label(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let mut popup = kit::Popup::notice("Label this link");
+        let mut popup = kit::Popup::notice(t::invite_label_title());
         popup.icon = None;
-        popup.text = Some("Optional. A label lets you see which link people join through (e.g. \"Reddit\", \"Twitter\"). Leave blank to skip.".into());
-        popup.confirm = "Create link".into();
-        popup.cancel = Some("Cancel".into());
+        popup.text = Some(t::invite_label_text());
+        popup.confirm = t::invite_label_create();
+        popup.cancel = Some(t::dialog_cancel());
         let input = cx.new(|cx| {
-            TextInput::new("Label (optional)", cx)
+            TextInput::new(t::invite_label_placeholder(), cx)
                 .with_look(kit::field_look())
                 .keep_on_submit()
                 .submit_empty()
@@ -12379,7 +12343,7 @@ impl VectorApp {
         };
         m.busy = true;
         m.creating = true;
-        m.status = Some(("Creating link...".into(), false));
+        m.status = Some((t::invite_creating().into(), false));
         if !self.live {
             m.busy = false;
             m.creating = false;
@@ -12417,7 +12381,7 @@ impl VectorApp {
         m.busy = true;
         m.revoking = Some(token.clone());
         if !privatize {
-            m.status = Some(("Revoking…".into(), false));
+            m.status = Some((t::invite_revoking().into(), false));
         }
         if !self.live {
             m.links.retain(|l| l.token != token);
@@ -12432,14 +12396,14 @@ impl VectorApp {
             token,
         ));
         if privatize {
-            self.rekey = Some(crate::rekey::Rekey::new("Making community private"));
+            self.rekey = Some(crate::rekey::Rekey::new(t::invite_privatizing()));
         }
         cx.spawn(async move |this, cx| {
             let res = rx.await;
             if privatize && matches!(res, Ok(Ok(_))) {
                 this.update(cx, |this, cx| {
                     if let Some(r) = this.rekey.as_mut() {
-                        r.set(100., Some("Community is now private".into()));
+                        r.set(100., Some(t::invite_privatized().into()));
                     }
                     cx.notify();
                 })
@@ -12454,7 +12418,7 @@ impl VectorApp {
                     m.status = None;
                     if let Ok(Err(e)) = res {
                         if privatize {
-                            this.notice("Couldn't make private", e, cx);
+                            this.notice(&t::invite_privatize_failed(), e, cx);
                         } else if let Some(m) = this.invite.as_mut() {
                             m.status = Some((e, true));
                         }
@@ -12488,7 +12452,7 @@ impl VectorApp {
                 .filter(|ch| !ch.is_voice() && (ch.readable || com.system_channel.as_ref() == Some(&ch.channel_id)))
                 .map(|ch| crate::commsettings::PickChannel {
                     id: kit::interned(&ch.channel_id),
-                    name: kit::interned(if ch.name.is_empty() { "private channel" } else { &ch.name }),
+                    name: kit::interned(&if ch.name.is_empty() { t::community_private_channel().to_string() } else { ch.name.clone() }),
                     private: ch.private,
                     chat: ch.view.is_empty() || ch.view == "chat",
                 })
@@ -12535,9 +12499,9 @@ impl VectorApp {
                 ..kit::field_look()
             })
         });
-        let name_in = field("Community name", &name, crate::commsettings::NAME_MAX, cx);
+        let name_in = field(&t::community_name_placeholder(), &name, crate::commsettings::NAME_MAX, cx);
         let description_in = cx.new(|cx| {
-            let mut t = TextInput::new("Tell people what brings everyone here", cx)
+            let mut t = TextInput::new(t::community_description_placeholder(), cx)
                 .with_look(crate::composer::Look {
                     size: px(15.),
                     line_height: px(22.5),
@@ -12586,7 +12550,7 @@ impl VectorApp {
                 ..kit::field_look()
             })
         });
-        let role_name = field("new role", "", crate::roles::NAME_MAX, cx);
+        let role_name = field(&t::roles_new_name(), "", crate::roles::NAME_MAX, cx);
         let role_query = cx.new(|cx| {
             TextInput::new(t::search(), cx).with_look(crate::composer::Look {
                 size: px(16.),
@@ -12790,7 +12754,7 @@ impl VectorApp {
             }),
             None => {
                 let d = Draft {
-                    name: "new role".into(),
+                    name: t::roles_new_name().into(),
                     ..Default::default()
                 };
                 Some(Edit {
@@ -12947,31 +12911,22 @@ impl VectorApp {
                 else {
                     return;
                 };
-                let name = role["name"]
-                    .as_str()
-                    .filter(|n| !n.is_empty())
-                    .unwrap_or("this role")
-                    .to_string();
+                let name = role["name"].as_str().filter(|n| !n.is_empty()).map_or_else(|| t::roles_this_role().to_string(), kit::escape);
                 let held = role["holders"].as_array().map(Vec::len).unwrap_or(0);
-                let lost = match held {
-                    0 => String::new(),
-                    1 => " The member who holds it loses its permissions.".into(),
-                    n => format!(" The {n} members who hold it lose its permissions."),
-                };
-                let mut popup = kit::Popup::notice("Delete role");
-                popup.text = Some(format!("Delete {name}?{lost} This can't be undone.").into());
-                popup.confirm = "Delete".into();
-                popup.cancel = Some("Cancel".into());
+                let mut popup = kit::Popup::notice(t::roles_delete_title());
+                popup.text = Some(t::roles_delete_text(held, name));
+                popup.confirm = t::msg_delete();
+                popup.cancel = Some(t::dialog_cancel());
                 self.popup = Some((
                     popup,
                     PopupAct::DeleteRole(role["role_id"].as_str().unwrap_or("").to_string()),
                 ));
             }
             Act::Activate => {
-                let mut popup = kit::Popup::notice("Switch to the new roles");
-                popup.text = Some("Adds @everyone, channel permissions and role deletion. Every role carries over. Members on an older Vector keep the roles from before the switch and won't see later changes until they update.".into());
-                popup.confirm = "Switch".into();
-                popup.cancel = Some("Cancel".into());
+                let mut popup = kit::Popup::notice(t::roles_switch_title());
+                popup.text = Some(t::roles_switch_text());
+                popup.confirm = t::roles_switch();
+                popup.cancel = Some(t::dialog_cancel());
                 self.popup = Some((popup, PopupAct::ActivateRoles));
             }
             Act::AccessOpen => m.roles.access_open = !m.roles.access_open,
@@ -13004,7 +12959,7 @@ impl VectorApp {
                 reopen = Some("everyone".to_string());
             } else {
                 if name.is_empty() {
-                    self.show_toast("A role needs a name", cx);
+                    self.show_toast(&t::roles_name_required(), cx);
                     return;
                 }
                 save.role = Some(RoleWrite {
@@ -13068,7 +13023,7 @@ impl VectorApp {
         let id = m.community.clone();
         let rx = backend::run(backend::community::save_roles(id.clone(), save));
         cx.spawn(async move |this, cx| {
-            let res = rx.await.unwrap_or_else(|_| Err("Save failed".into()));
+            let res = rx.await.unwrap_or_else(|_| Err(t::save_failed().into()));
             this.update(cx, |this, cx| {
                 if let Some(m) = this.comm_settings.as_mut().filter(|m| m.community == id) {
                     m.saving = false;
@@ -13121,7 +13076,7 @@ impl VectorApp {
         cx.spawn(async move |this, cx| {
             let res = rx
                 .await
-                .unwrap_or_else(|_| Err("The roles couldn't be changed".into()));
+                .unwrap_or_else(|_| Err(t::roles_change_failed().into()));
             this.update(cx, |this, cx| {
                 if let Some(m) = this.comm_settings.as_mut().filter(|m| m.community == id) {
                     m.roles.busy = false;
@@ -13202,7 +13157,7 @@ impl VectorApp {
         cx.spawn(async move |this, cx| {
             let res = rx
                 .await
-                .unwrap_or_else(|_| Err("Couldn't change who holds this role".into()));
+                .unwrap_or_else(|_| Err(t::roles_holders_failed().into()));
             this.update(cx, |this, cx| {
                 if let Some(m) = this.comm_settings.as_mut().filter(|m| m.community == id) {
                     m.roles.busy = false;
@@ -13239,7 +13194,7 @@ impl VectorApp {
             rx
         };
         cx.spawn(async move |this, cx| {
-            let (control, epoch) = rx.await.unwrap_or_else(|_| (Err("The report couldn't be read.".into()), Err(String::new())));
+            let (control, epoch) = rx.await.unwrap_or_else(|_| (Err(t::community_settings_report_unread().into()), Err(String::new())));
             this.update(cx, |this, cx| {
                 let Some(r) = this.comm_settings.as_mut().filter(|m| m.community == id).and_then(|m| m.report.as_mut()) else {
                     return;
@@ -13295,7 +13250,7 @@ impl VectorApp {
         cx.spawn(async move |this, cx| {
             let res = rx
                 .await
-                .unwrap_or_else(|_| Err("The audit log couldn't be read.".into()));
+                .unwrap_or_else(|_| Err(t::community_settings_audit_unread().into()));
             this.update(cx, |this, cx| {
                 let Some(m) = this.comm_settings.as_mut().filter(|m| m.community == id) else {
                     return;
@@ -13328,8 +13283,8 @@ impl VectorApp {
         };
         match act {
             Act::ExplainAuth => self.notice(
-                "This relay uses AUTH",
-                "AUTH relays ask every app to sign in with its Nostr key. Vector signs in as you, so the relay can link your npub to this community every time you connect. Without AUTH, the relay sees this community only through Concord's anonymous keys.\n\nFor faster connections and more privacy, use relays without AUTH.".into(),
+                &t::community_settings_auth_title(),
+                t::community_settings_auth_text().into(),
                 cx,
             ),
             Act::PickIcon => self.pick_comm_image(false, window, cx),
@@ -13411,7 +13366,7 @@ impl VectorApp {
             Act::AddRelay => {
                 let raw = m.relay_input.read(cx).text().to_string();
                 if m.relays.len() >= RELAYS_MAX {
-                    m.relay_error = Some(format!("At most {RELAYS_MAX} relays."));
+                    m.relay_error = Some(t::community_settings_relays_max(RELAYS_MAX).into());
                 } else {
                     match relay_address(&raw, &m.relays, None) {
                         Ok(url) => {
@@ -13540,7 +13495,7 @@ impl VectorApp {
                         false,
                     ));
                     cx.spawn(async move |this, cx| {
-                        let res = rx.await.unwrap_or_else(|_| Err("Unban failed".into()));
+                        let res = rx.await.unwrap_or_else(|_| Err(t::community_settings_unban_failed().into()));
                         this.update(cx, |this, cx| {
                             if let Some(m) =
                                 this.comm_settings.as_mut().filter(|m| m.community == id)
@@ -13576,7 +13531,7 @@ impl VectorApp {
                 if let Some(e) = m.roles.edit.as_mut() {
                     e.draft = if e.id.is_none() {
                         crate::roles::Draft {
-                            name: "new role".into(),
+                            name: t::roles_new_name().into(),
                             ..Default::default()
                         }
                     } else {
@@ -13599,7 +13554,7 @@ impl VectorApp {
             Act::ReportCopy => {
                 if let Some(text) = m.report.as_ref().map(|r| r.text.to_string()).filter(|t| !t.is_empty()) {
                     cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
-                    self.toast = Some(("Copied Sync Report".into(), std::time::Instant::now()));
+                    self.toast = Some((t::community_settings_report_copied(), std::time::Instant::now()));
                 }
             }
             Act::Role(a) => return self.on_role(a, window, cx),
@@ -13745,7 +13700,7 @@ impl VectorApp {
                     break;
                 }
             }
-            let res = rx.await.unwrap_or_else(|_| Err("Save failed".into()));
+            let res = rx.await.unwrap_or_else(|_| Err(t::save_failed().into()));
             this.update(cx, |this, cx| {
                 let art = this.comm_settings.as_ref().is_some_and(|m| {
                     m.icon_pick.is_some()
@@ -13802,10 +13757,10 @@ impl VectorApp {
     /// the move; a throttling or single-network one waits on a yes.
     fn check_relays(&mut self, id: String, relays: Vec<String>, cx: &mut Context<Self>) {
         self.set_relay_saving(true);
-        self.rekey = Some(crate::rekey::Rekey::new("Checking the new relays"));
+        self.rekey = Some(crate::rekey::Rekey::new(t::community_settings_relays_checking()));
         let rx = backend::run(backend::community::check_relays(id.clone(), relays.clone()));
         cx.spawn(async move |this, cx| {
-            let res = rx.await.unwrap_or_else(|_| Err("Save failed".into()));
+            let res = rx.await.unwrap_or_else(|_| Err(t::save_failed().into()));
             this.update(cx, |this, cx| {
                 this.rekey = None;
                 this.set_relay_saving(false);
@@ -13815,8 +13770,8 @@ impl VectorApp {
                     Err(e) => return this.show_toast(&e, cx),
                 };
                 if let Some(bad) = checks.iter().find(|c| !c.ok) {
-                    let mut popup = kit::Popup::notice("This relay can't host the community");
-                    let why = bad.reason.clone().unwrap_or_else(|| format!("{} can't hold this community.", bad.relay));
+                    let mut popup = kit::Popup::notice(t::community_settings_relay_refused());
+                    let why = bad.reason.clone().unwrap_or_else(|| t::community_settings_relay_cant_hold(bad.relay.as_str()).into());
                     popup.text = Some(kit::escape(&why).into());
                     this.popup = Some((popup, PopupAct::Notice));
                     return;
@@ -13825,10 +13780,10 @@ impl VectorApp {
                 if cautions.is_empty() {
                     return this.move_relays(id, relays, cx);
                 }
-                let mut popup = kit::Popup::notice("Before this community moves");
-                popup.text = Some(format!("{}<br><br>Move anyway?", cautions.join("<br><br>")).into());
-                popup.confirm = "Move Anyway".into();
-                popup.cancel = Some("Cancel".into());
+                let mut popup = kit::Popup::notice(t::community_settings_move_title());
+                popup.text = Some(t::community_settings_move_text(cautions.join("<br><br>")));
+                popup.confirm = t::community_settings_move_anyway();
+                popup.cancel = Some(t::dialog_cancel());
                 this.popup = Some((popup, PopupAct::MoveRelays { id, relays }));
             })
             .ok();
@@ -13839,15 +13794,15 @@ impl VectorApp {
     /// `csMoveRelays`, second half: give the new relays the whole Community, then announce it.
     fn move_relays(&mut self, id: String, relays: Vec<String>, cx: &mut Context<Self>) {
         self.set_relay_saving(true);
-        self.rekey = Some(crate::rekey::Rekey::new("Moving to new relays"));
+        self.rekey = Some(crate::rekey::Rekey::new(t::community_settings_moving()));
         cx.notify();
         let rx = backend::run(backend::community::move_relays(id.clone(), relays));
         cx.spawn(async move |this, cx| {
-            let res = rx.await.unwrap_or_else(|_| Err("Save failed".into()));
+            let res = rx.await.unwrap_or_else(|_| Err(t::save_failed().into()));
             let ok = res.is_ok();
             this.update(cx, |this, cx| {
                 if ok && let Some(r) = this.rekey.as_mut() {
-                    r.set(100., Some("Everyone will follow the community to its new relays".into()));
+                    r.set(100., Some(t::community_settings_moved().into()));
                 }
                 cx.notify();
             })
@@ -13867,7 +13822,7 @@ impl VectorApp {
                         }
                         this.reload_communities(cx);
                         if !warnings.is_empty() {
-                            let mut popup = kit::Popup::notice("Moved, with a few gaps");
+                            let mut popup = kit::Popup::notice(t::community_settings_moved_gaps());
                             popup.text = Some(warnings.iter().map(|w| kit::escape(w)).collect::<Vec<_>>().join("<br><br>").into());
                             this.popup = Some((popup, PopupAct::Notice));
                         }
@@ -13913,19 +13868,11 @@ impl VectorApp {
                 .and_then(|n| n.get(&npub))
                 .cloned()
                 .unwrap_or_default();
-            let title = if mine {
-                "Change Nickname".to_string()
-            } else {
-                format!("Change {}'s Nickname", store.name(&npub))
-            };
+            let title = if mine { t::community_nickname_title() } else { t::community_nickname_title_other(store.name(&npub)) };
             (title, (own, mine), current)
         };
         let (own, mine) = own;
-        let placeholder = if own.is_empty() {
-            "Nickname".to_string()
-        } else {
-            own
-        };
+        let placeholder = if own.is_empty() { t::community_nickname_placeholder().to_string() } else { own };
         let input = cx.new(|cx| {
             let mut t = TextInput::new(placeholder, cx)
                 .with_look(kit::field_look())
@@ -13945,15 +13892,9 @@ impl VectorApp {
         window.focus(&input.focus_handle(cx), cx);
         let mut popup = kit::Popup::notice(title);
         popup.icon = None;
-        popup.text = Some(
-            format!(
-                "Everyone in this community sees it. Leave it empty to go by {} own name.",
-                if mine { "your" } else { "their" }
-            )
-            .into(),
-        );
-        popup.confirm = "Save".into();
-        popup.cancel = Some("Cancel".into());
+        popup.text = Some(if mine { t::community_nickname_text_mine() } else { t::community_nickname_text_theirs() });
+        popup.confirm = t::dialog_save();
+        popup.cancel = Some(t::dialog_cancel());
         popup.input = Some(input);
         self.popup = Some((popup, PopupAct::CommunityNickname { community, npub }));
         cx.notify();
@@ -13985,7 +13926,7 @@ impl VectorApp {
         cx.spawn(async move |this, cx| {
             let res = rx
                 .await
-                .unwrap_or_else(|_| Err("Couldn't set the nickname".into()));
+                .unwrap_or_else(|_| Err(t::community_nickname_failed().into()));
             this.update(cx, |this, cx| {
                 match res {
                     Ok(()) => {
@@ -14049,10 +13990,10 @@ impl VectorApp {
                 if m.public {
                     self.ask_invite_label(window, cx);
                 } else {
-                    let mut popup = kit::Popup::notice("Make community public?");
-                    popup.text = Some("Creating an invite link makes this community <b>public</b>: anyone with the link can join. You can make it private again later by revoking every link.".into());
-                    popup.confirm = "Make public".into();
-                    popup.cancel = Some("Cancel".into());
+                    let mut popup = kit::Popup::notice(t::invite_public_title());
+                    popup.text = Some(t::invite_public_text());
+                    popup.confirm = t::invite_public_confirm();
+                    popup.cancel = Some(t::dialog_cancel());
                     self.popup = Some((popup, PopupAct::InvitePublic));
                 }
             }
@@ -14062,10 +14003,10 @@ impl VectorApp {
                 }
                 let others: usize = m.others.iter().map(|o| o.1).sum();
                 if m.links.len() == 1 && others == 0 {
-                    let mut popup = kit::Popup::notice("Make community private?");
-                    popup.text = Some("Revoking the last invite link makes this community <b>private</b> again. This can take a few seconds.".into());
-                    popup.confirm = "Make private".into();
-                    popup.cancel = Some("Cancel".into());
+                    let mut popup = kit::Popup::notice(t::invite_private_title());
+                    popup.text = Some(t::invite_private_text());
+                    popup.confirm = t::invite_private_confirm();
+                    popup.cancel = Some(t::dialog_cancel());
                     self.popup = Some((popup, PopupAct::InvitePrivate { token }));
                 } else {
                     self.revoke_invite_link(token, false, cx);
@@ -14092,9 +14033,8 @@ impl VectorApp {
                 }
                 let targets: Vec<String> = m.picked.iter().cloned().collect();
                 let count = targets.len();
-                let people = |n: usize| if n == 1 { "person" } else { "people" };
                 m.busy = true;
-                m.status = Some((format!("Inviting {count} {}…", people(count)), false));
+                m.status = Some((t::invite_sending(count).into(), false));
                 let id = m.community.clone();
                 let live = self.live;
                 let rx = backend::run(async move {
@@ -14115,7 +14055,8 @@ impl VectorApp {
                         m.busy = false;
                         let fail = count - ok;
                         if fail == 0 {
-                            m.status = Some((format!("Invited {ok} {}!", people(ok)), false));
+                            let done: String = t::invite_sent(ok).into();
+                            m.status = Some((done.clone(), false));
                             m.picked.clear();
                             m.filter.update(cx, |t, cx| t.set_text("", cx));
                             cx.spawn(async move |this, cx| {
@@ -14126,7 +14067,7 @@ impl VectorApp {
                                     if let Some(m) = this.invite.as_mut().filter(|m| {
                                         m.status
                                             .as_ref()
-                                            .is_some_and(|s| !s.1 && s.0.starts_with("Invited"))
+                                            .is_some_and(|s| !s.1 && s.0 == done)
                                     }) {
                                         m.status = None;
                                         cx.notify();
@@ -14136,7 +14077,7 @@ impl VectorApp {
                             })
                             .detach();
                         } else {
-                            m.status = Some((format!("Invited {ok}, {fail} failed."), ok == 0));
+                            m.status = Some((t::invite_partial(fail, ok).into(), ok == 0));
                         }
                         cx.notify();
                     })
@@ -14158,7 +14099,7 @@ impl VectorApp {
                     .fixture_packs
                     .get(&naddr)
                     .cloned()
-                    .ok_or_else(|| "Pack not found on any relay".to_string());
+                    .ok_or_else(|| "Pack not found on any relay".to_string()); // i18n-exempt: fixture
                 self.media.borrow_mut().packs.settle(&naddr, res);
                 cx.notify();
                 continue;
@@ -14390,7 +14331,7 @@ impl VectorApp {
         let (Some(t), Some(&style)) = (&p.parsed, p.styles().get(i)) else {
             return;
         };
-        let code = format!("<t:{}:{style}> ", t.unix);
+        let code = format!("<t:{}:{style}> ", t.unix); // i18n-exempt: markup
         self.time_pick = None;
         self.input.update(cx, |input, cx| {
             input.set_nav(false);
@@ -14743,7 +14684,7 @@ impl VectorApp {
             "go" => match vector_core::golink::GoLink::parse_payload(&a.target) {
                 Some(link) => self.open_go_link(link, window, cx),
                 None => {
-                    self.toast = Some(("That link is broken".into(), std::time::Instant::now()))
+                    self.toast = Some((t::go_broken(), std::time::Instant::now()))
                 }
             },
             "settings" => self.open_settings_path(&a.target, window, cx),
@@ -14803,14 +14744,14 @@ impl VectorApp {
     fn preview_invite_link(&mut self, url: String, window: &mut Window, cx: &mut Context<Self>) {
         let Some(key) = crate::newchat::invite_card_keys(&url).into_iter().next() else {
             self.notice(
-                "Invalid Invite",
-                "This invite link could not be loaded.".into(),
+                &t::community_invalid_invite(),
+                t::community_invalid_invite_text().into(),
                 cx,
             );
             return;
         };
         self.toast = Some((
-            "Loading community invite…".into(),
+            t::community_invite_loading(),
             std::time::Instant::now(),
         ));
         let rx = if self.live {
@@ -14823,40 +14764,40 @@ impl VectorApp {
                 crate::backend::community::InvitePreview {
                     community_id: "c".repeat(64),
                     name,
-                    description: "Late-night builders, ships and shenanigans.".into(),
+                    description: "Late-night builders, ships and shenanigans.".into(), // i18n-exempt: fixture
                     icon: None,
                 }
             });
-            tx.send(preview.map_err(|_| "Not found on any relay".to_string()))
+            tx.send(preview.map_err(|_| "Not found on any relay".to_string())) // i18n-exempt: fixture
                 .ok();
             rx
         };
         cx.spawn_in(window, async move |this, cx| {
-            let res = rx.await.unwrap_or_else(|_| Err("Cancelled".into()));
+            let res = rx.await.unwrap_or_else(|_| Err(t::cancelled().to_string()));
             this.update_in(cx, |this, window, cx| {
                 this.toast = None;
                 match res {
                     Err(e) => this.notice(
-                        "Invalid Invite",
-                        format!("This invite link could not be loaded.\n\n{e}"),
+                        &t::community_invalid_invite(),
+                        t::community_invalid_invite_why(e).into(),
                         cx,
                     ),
                     Ok(p) if this.store.borrow().community(&p.community_id).is_some() => {
                         this.open_community(p.community_id, window, cx)
                     }
                     Ok(p) => {
-                        let mut text = format!("You've been invited to join {}.", p.name);
+                        let mut text: String = t::community_join_text(p.name.as_str()).into();
                         if !p.description.is_empty() {
                             text.push_str("\n\n");
                             text.push_str(&p.description);
                         }
                         this.popup = Some((
                             kit::Popup {
-                                title: format!("Join {}?", p.name).into(),
+                                title: t::community_join_title(p.name.as_str()),
                                 text: Some(text.into()),
                                 icon: Some("icons/group-placeholder.svg"),
-                                confirm: "Confirm".into(),
-                                cancel: Some("Cancel".into()),
+                                confirm: t::dialog_confirm(),
+                                cancel: Some(t::dialog_cancel()),
                                 input: None,
                                 fine: None,
                                 link: None,
@@ -14892,13 +14833,13 @@ impl VectorApp {
         };
         if let Some(community) = community {
             if self.store.borrow().community(&community).is_none() {
-                return self.refuse_go("You're not in this community");
+                return self.refuse_go(&t::go_not_member());
             }
             let Some(channel) = channel else {
                 return self.open_community(community, window, cx);
             };
             if self.store.borrow().chat(&channel).is_none() {
-                return self.refuse_go("That channel isn't available to you");
+                return self.refuse_go(&t::go_channel_unavailable());
             }
             if self.community.as_ref().is_none_or(|v| v.id != community) {
                 self.open_community_to(community, Some(channel.clone()), window, cx);
@@ -15016,10 +14957,10 @@ impl VectorApp {
                     }
                     (_, room) if at.deleted => {
                         let _ = room;
-                        this.refuse_go("That message was deleted");
+                        this.refuse_go(&t::go_message_deleted());
                     }
-                    (_, Some(_)) => this.refuse_go("That message isn't on this device yet"),
-                    (_, None) => this.refuse_go("That message isn't on this device"),
+                    (_, Some(_)) => this.refuse_go(&t::go_message_not_yet()),
+                    (_, None) => this.refuse_go(&t::go_message_missing()),
                 }
                 cx.notify();
             })
@@ -15086,13 +15027,13 @@ impl VectorApp {
         let i = id.clone();
         let rx = backend::run(async move { vector_core::emoji_packs::unsubscribe_pack(&i).await });
         cx.spawn(async move |this, cx| {
-            let res = rx.await.unwrap_or_else(|_| Err("Cancelled".into()));
+            let res = rx.await.unwrap_or_else(|_| Err(t::cancelled().to_string()));
             this.update(cx, |this, cx| match res {
                 Ok(()) => {
                     this.media.borrow_mut().packs.subscribed.remove(&id);
                     this.reload_picker_packs(cx);
                 }
-                Err(e) => this.notice("Couldn't Remove Pack", e, cx),
+                Err(e) => this.notice(&t::packs_remove_failed(), e, cx),
             })
             .ok();
         })
@@ -15166,10 +15107,8 @@ impl VectorApp {
                 };
                 if !subscribed && self.emoji_picker.read(cx).pack_count() >= max {
                     self.notice(
-                        "Pack Slots Full!",
-                        format!(
-                            "Vector supports up to {max} equipped packs. Remove one to add another."
-                        ),
+                        &t::packs_full_title(),
+                        t::packs_full_text(max).into(),
                         cx,
                     );
                     return;
@@ -15198,7 +15137,7 @@ impl VectorApp {
                     cx.background_executor()
                         .timer(std::time::Duration::from_millis(350))
                         .await;
-                    let res = rx.await.unwrap_or_else(|_| Err("Cancelled".into()));
+                    let res = rx.await.unwrap_or_else(|_| Err(t::cancelled().to_string()));
                     this.update(cx, |this, cx| {
                         let mut media = this.media.borrow_mut();
                         media.packs.busy.remove(&id);
@@ -15219,17 +15158,13 @@ impl VectorApp {
                                 {
                                     this.pack_details = None;
                                     this.toast =
-                                        Some(("Pack equipped".into(), std::time::Instant::now()));
+                                        Some((t::packs_equipped(), std::time::Instant::now()));
                                 }
                             }
                             Err(e) => {
                                 drop(media);
                                 this.notice(
-                                    if subscribed {
-                                        "Couldn't Remove Pack"
-                                    } else {
-                                        "Couldn't Add Pack"
-                                    },
+                                    &if subscribed { t::packs_remove_failed() } else { t::packs_add_failed() },
                                     e,
                                     cx,
                                 );
@@ -15257,7 +15192,7 @@ impl VectorApp {
             if !self.live {
                 let fix = self.store.borrow().fixture_embeds.get(&entity).cloned();
                 let res = fix
-                    .ok_or_else(|| "Not found on any relay".to_string())
+                    .ok_or_else(|| "Not found on any relay".to_string()) // i18n-exempt: fixture
                     .and_then(|v| serde_json::from_value(v).map_err(|e| e.to_string()));
                 self.media.borrow_mut().embeds.settle(&entity, res);
                 self.embed_settled(&entity, cx);
@@ -15448,7 +15383,7 @@ impl VectorApp {
             Act::OpenUrl(url) => self.open_web(&url, cx),
             Act::Copy(text, label) => {
                 cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
-                self.toast = Some((format!("{label} copied").into(), std::time::Instant::now()));
+                self.toast = Some((t::embed_copied(label), std::time::Instant::now()));
             }
             Act::Reveal(key) => {
                 if key.is_empty() {
@@ -15611,7 +15546,7 @@ impl VectorApp {
                 crate::backend::community::InvitePreview {
                     community_id: "c".repeat(64),
                     name,
-                    description: "Late-night builders, ships and shenanigans.".into(),
+                    description: "Late-night builders, ships and shenanigans.".into(), // i18n-exempt: fixture
                     icon: None,
                 }
             });
@@ -15649,7 +15584,7 @@ impl VectorApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.toast = Some((format!("Joining {name}…").into(), std::time::Instant::now()));
+        self.toast = Some((t::community_joining(name.as_str()), std::time::Instant::now()));
         let rx = backend::run(backend::community::join_by_link(
             crate::newchat::invite_url(&key),
         ));
@@ -15678,7 +15613,7 @@ impl VectorApp {
                         })
                         .detach();
                     }
-                    Ok(Err(e)) => this.notice("Failed to Join", e, cx),
+                    Ok(Err(e)) => this.notice(&t::community_join_failed(), e, cx),
                     Err(_) => {}
                 }
                 cx.notify();
@@ -15743,7 +15678,7 @@ impl VectorApp {
             let _ = backend::run(backend::community::decline_invite(community));
             return;
         }
-        self.toast = Some((format!("Joining {name}…").into(), std::time::Instant::now()));
+        self.toast = Some((t::community_joining(name.as_str()), std::time::Instant::now()));
         let rx = backend::run(backend::community::accept_invite(community.clone()));
         cx.spawn_in(window, async move |this, cx| {
             let res = rx.await;
@@ -15763,7 +15698,7 @@ impl VectorApp {
                             if landed {
                                 this.open_community(community, window, cx);
                             } else {
-                                this.show_toast("You were removed from this community by an admin", cx);
+                                this.show_toast(&t::community_removed_by_admin(), cx);
                             }
                             cx.notify();
                         })
@@ -15772,7 +15707,7 @@ impl VectorApp {
                     .detach();
                 }
                 Ok(Err(e)) => {
-                    this.notice("Couldn't Join", e, cx);
+                    this.notice(&t::community_join_refused(), e, cx);
                     this.reload_invites(cx);
                 }
                 Err(_) => {}
@@ -15974,7 +15909,7 @@ impl VectorApp {
             let res = rx.await;
             this.update(cx, |this, cx| {
                 if let Ok(Err(e)) = res {
-                    this.notice("Couldn't move it", e, cx);
+                    this.notice(&t::community_move_failed(), e, cx);
                 }
                 this.reload_communities(cx);
             })
@@ -16140,14 +16075,14 @@ impl VectorApp {
                 let (text, done) = if act == Act::Share {
                     (
                         format!("https://vectorapp.io/profile/{npub}"),
-                        "Profile Link Copied",
+                        t::profile_link_copied(),
                     )
                 } else {
-                    (npub.clone(), "Copied npub")
+                    (npub.clone(), t::profile_npub_copied())
                 };
                 cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
                 p.copied = Some((act, std::time::Instant::now()));
-                self.show_toast(done, cx);
+                self.show_toast(&done, cx);
                 cx.spawn(async move |this, cx| {
                     cx.background_executor()
                         .timer(std::time::Duration::from_millis(2010))
@@ -16163,7 +16098,7 @@ impl VectorApp {
             Act::Nickname => {
                 p.more_open = false;
                 let input = cx.new(|cx| {
-                    TextInput::new("Nickname", cx)
+                    TextInput::new(t::profile_nickname(), cx)
                         .with_look(kit::field_look())
                         .keep_on_submit()
                         .submit_empty()
@@ -16177,10 +16112,10 @@ impl VectorApp {
                 })
                 .detach();
                 window.focus(&input.focus_handle(cx), cx);
-                let mut popup = kit::Popup::notice("Choose a Nickname");
+                let mut popup = kit::Popup::notice(t::profile_nickname_title());
                 popup.icon = None;
-                popup.confirm = "Confirm".into();
-                popup.cancel = Some("Cancel".into());
+                popup.confirm = t::dialog_confirm();
+                popup.cancel = Some(t::dialog_cancel());
                 popup.input = Some(input);
                 self.popup = Some((popup, PopupAct::Nickname { npub }));
                 cx.notify();
@@ -16196,10 +16131,10 @@ impl VectorApp {
                 if blocked {
                     self.set_blocked(npub, false, cx);
                 } else {
-                    let mut popup = kit::Popup::notice("Block User");
-                    popup.text = Some("Are you sure you want to block this user? You will no longer receive DMs from them.".into());
-                    popup.confirm = "Confirm".into();
-                    popup.cancel = Some("Cancel".into());
+                    let mut popup = kit::Popup::notice(t::block_user_title());
+                    popup.text = Some(t::block_user_text());
+                    popup.confirm = t::dialog_confirm();
+                    popup.cancel = Some(t::dialog_cancel());
                     self.popup = Some((popup, PopupAct::Block { npub }));
                     cx.notify();
                 }
@@ -16279,7 +16214,7 @@ impl VectorApp {
                         me.banner_cached.clear();
                     }
                 }
-                self.show_toast("Profile Saved", cx);
+                self.show_toast(&t::profile_saved(), cx);
                 if !self.live || !(name_changed || about_changed || e.removed_banner) {
                     return;
                 }
@@ -16311,9 +16246,9 @@ impl VectorApp {
                         return;
                     }
                     this.update(cx, |this, cx| {
-                        let mut popup = kit::Popup::notice("Profile Update Failed!");
+                        let mut popup = kit::Popup::notice(t::profile_update_failed());
                         popup.text =
-                            Some("Failed to broadcast profile update to the network.".into());
+                            Some(t::profile_update_failed_text());
                         this.popup = Some((popup, PopupAct::Notice));
                         cx.notify();
                     })
@@ -16621,9 +16556,9 @@ impl VectorApp {
             (Act::Add, NetDialog::AddRelay { input, mode }) => {
                 let typed = input.read(cx).text().trim().to_string();
                 if typed.is_empty() {
-                    let mut popup = kit::Popup::notice("Invalid URL");
+                    let mut popup = kit::Popup::notice(t::settings_relay_invalid());
                     popup.icon = None;
-                    popup.text = Some("Please enter a relay URL.".into());
+                    popup.text = Some(t::settings_relay_empty());
                     self.popup = Some((popup, PopupAct::Notice));
                     return;
                 }
@@ -16665,7 +16600,7 @@ impl VectorApp {
                                 }
                             }
                             Err(e) => {
-                                let mut popup = kit::Popup::notice("Failed to Add Relay");
+                                let mut popup = kit::Popup::notice(t::settings_relay_add_failed());
                                 popup.icon = None;
                                 popup.text = Some(e.into());
                                 this.popup = Some((popup, PopupAct::Notice));
@@ -16712,11 +16647,13 @@ impl VectorApp {
                                     .to_string()
                             })
                             .unwrap_or_default();
+                        // i18n-exempt: diagnostic log copied for support
                         format!("[{at}] {}: {}", l.level.to_uppercase(), l.message)
                     })
                     .collect::<Vec<_>>()
                     .join("\n");
                 cx.write_to_clipboard(gpui::ClipboardItem::new_string(format!(
+                    // i18n-exempt: diagnostic log copied for support
                     "Relay: {}\n\n{text}",
                     row.url
                 )));
@@ -16725,10 +16662,10 @@ impl VectorApp {
             (Act::RelayAction, NetDialog::Relay { row, .. }) => {
                 let url = row.url.clone();
                 if row.is_default && row.enabled {
-                    let mut popup = kit::Popup::notice("Disable Default Relay?");
-                    popup.text = Some("This is a <b>default relay</b>. Disabling it may affect message delivery and sync reliability.<br><br>Are you sure you want to disable it?".into());
-                    popup.confirm = "Confirm".into();
-                    popup.cancel = Some("Cancel".into());
+                    let mut popup = kit::Popup::notice(t::settings_relay_disable_title());
+                    popup.text = Some(t::settings_relay_disable_text());
+                    popup.confirm = t::dialog_confirm();
+                    popup.cancel = Some(t::dialog_cancel());
                     self.popup = Some((popup, PopupAct::DisableRelay { url }));
                 } else if row.is_default {
                     self.net_change(
@@ -16741,16 +16678,10 @@ impl VectorApp {
                         cx,
                     );
                 } else {
-                    let mut popup = kit::Popup::notice("Remove Relay?");
-                    popup.text = Some(
-                        format!(
-                            "Are you sure you want to remove <b>{}</b>?",
-                            crate::settings::host(&url)
-                        )
-                        .into(),
-                    );
-                    popup.confirm = "Confirm".into();
-                    popup.cancel = Some("Cancel".into());
+                    let mut popup = kit::Popup::notice(t::settings_relay_remove_title());
+                    popup.text = Some(t::settings_relay_remove_text(crate::settings::host(&url)));
+                    popup.confirm = t::dialog_confirm();
+                    popup.cancel = Some(t::dialog_cancel());
                     self.popup = Some((popup, PopupAct::RemoveRelay { url }));
                 }
             }
@@ -16759,10 +16690,10 @@ impl VectorApp {
             (Act::ServerAction, NetDialog::Server { info, .. }) => {
                 let url = info.url.clone();
                 if info.is_custom {
-                    let mut popup = kit::Popup::notice("Remove media server?");
-                    popup.text = Some(format!("<b>{url}</b> will be removed from your list. Existing uploads on that server remain accessible.").into());
-                    popup.confirm = "Confirm".into();
-                    popup.cancel = Some("Cancel".into());
+                    let mut popup = kit::Popup::notice(t::settings_server_remove_title());
+                    popup.text = Some(t::settings_server_remove_text(url.as_str()));
+                    popup.confirm = t::dialog_confirm();
+                    popup.cancel = Some(t::dialog_cancel());
                     self.popup = Some((popup, PopupAct::RemoveServer { url }));
                 } else {
                     let enabled = !info.enabled;
@@ -16798,7 +16729,7 @@ impl VectorApp {
                     }
                     Ok(()) => {}
                     Err(e) => {
-                        let mut popup = kit::Popup::notice("Error");
+                        let mut popup = kit::Popup::notice(t::settings_error());
                         popup.text = Some(e.into());
                         this.popup = Some((popup, PopupAct::Notice));
                     }
@@ -17325,7 +17256,7 @@ impl VectorApp {
             return;
         }
         let Some(open) = self.video.camera_opener(kind) else {
-            self.show_toast("Could not open the camera", cx);
+            self.show_toast(&t::call_camera_failed(), cx);
             return;
         };
         self.video.starting[k] = true;
@@ -17340,7 +17271,7 @@ impl VectorApp {
                     } else {
                         backend::run(backend::calls::set_video(kind, true))
                     };
-                    rx.await.unwrap_or_else(|_| Err("Not in a call".into()))
+                    rx.await.unwrap_or_else(|_| Err(t::call_not_in_call().to_string()))
                 }
                 _ => Ok(()),
             };
@@ -17398,7 +17329,7 @@ impl VectorApp {
                 let change = p.change;
                 self.close_screen_pick();
                 let Some(open) = self.video.screen_opener(target) else {
-                    self.show_toast("Could not share the screen", cx);
+                    self.show_toast(&t::call_screen_failed(), cx);
                     return;
                 };
                 if !change {
@@ -17409,7 +17340,7 @@ impl VectorApp {
                     let cap = cx.background_executor().spawn(async move { open() }).await;
                     let told = match (&cap, told) {
                         (Ok(_), Some(rx)) => {
-                            rx.await.unwrap_or_else(|_| Err("Not in a call".into()))
+                            rx.await.unwrap_or_else(|_| Err(t::call_not_in_call().to_string()))
                         }
                         _ => Ok(()),
                     };
@@ -17518,7 +17449,7 @@ impl VectorApp {
         cx.spawn(async move |this, cx| {
             let started = rx
                 .await
-                .unwrap_or_else(|_| Err("The microphone test stopped".into()));
+                .unwrap_or_else(|_| Err(t::settings_mic_test_stopped().to_string()));
             let ok = this
                 .update(cx, |this, cx| match started {
                     Ok(()) => {
@@ -17670,25 +17601,22 @@ impl VectorApp {
                 }
                 match result {
                     Ok(freed) if slice => this.show_toast(
-                        &format!("Freed {}", vector_core::crypto::format_bytes(freed)),
+                        &t::settings_storage_freed(vector_core::crypto::format_bytes(freed)),
                         cx,
                     ),
                     Ok(_) => {}
                     Err(e) => {
                         let mut popup = kit::Popup::notice(if slice {
-                            "Delete Failed"
+                            t::settings_storage_delete_failed()
                         } else {
-                            "Clear Failed"
+                            t::settings_storage_clear_failed()
                         });
                         popup.icon = Some("icons/vector_warning.svg");
-                        popup.text = Some(
-                            if slice {
-                                format!("Could not delete: {e}")
-                            } else {
-                                format!("Could not clear storage: {e}")
-                            }
-                            .into(),
-                        );
+                        popup.text = Some(if slice {
+                            t::settings_storage_delete_failed_text(e)
+                        } else {
+                            t::settings_storage_clear_failed_text(e)
+                        });
                         this.popup = Some((popup, PopupAct::Notice));
                     }
                 }
@@ -17717,7 +17645,7 @@ impl VectorApp {
                     if let Some(s) = this.settings.as_mut() {
                         s.on.insert("keep_media", !on);
                     }
-                    let mut popup = kit::Popup::notice("Keep Files");
+                    let mut popup = kit::Popup::notice(t::settings_keep_files());
                     popup.icon = Some("icons/vector_warning.svg");
                     popup.text = Some(e.into());
                     this.popup = Some((popup, PopupAct::Notice));
@@ -17745,22 +17673,22 @@ impl VectorApp {
             let (files, bytes, busy) = rx.await.unwrap_or((0, 0, false));
             this.update(cx, |this, cx| {
                 if busy {
-                    let mut popup = kit::Popup::notice("Downloads in progress");
+                    let mut popup = kit::Popup::notice(t::settings_keep_downloading());
                     popup.icon = Some("icons/vector_warning.svg");
-                    popup.text = Some("Turn this off once your downloads finish.".into());
+                    popup.text = Some(t::settings_keep_downloading_text());
                     this.popup = Some((popup, PopupAct::Notice));
                     return cx.notify();
                 }
                 if files == 0 {
                     return this.set_keep_media(false, cx);
                 }
-                let mut popup = kit::Popup::notice("Stop keeping files?");
+                let mut popup = kit::Popup::notice(t::settings_keep_stop_title());
                 popup.icon = Some("icons/vector_warning.svg");
                 popup.text = Some(
-                    format!("{files} kept {} ({}) will be deleted from this device. They load again when you open them.", if files == 1 { "file" } else { "files" }, crate::media::format_bytes(bytes)).into(),
+                    t::settings_keep_stop_text(files, crate::media::format_bytes(bytes)),
                 );
-                popup.confirm = "Confirm".into();
-                popup.cancel = Some("Cancel".into());
+                popup.confirm = t::dialog_confirm();
+                popup.cancel = Some(t::dialog_cancel());
                 this.popup = Some((popup, PopupAct::StopKeeping));
                 cx.notify();
             })
@@ -17774,13 +17702,13 @@ impl VectorApp {
         if !on || !self.live {
             return self.set_keep_unencrypted(on, cx);
         }
-        let mut popup = kit::Popup::notice("Keep media unencrypted?");
+        let mut popup = kit::Popup::notice(t::settings_keep_plain_title());
         popup.icon = Some("icons/vector_warning.svg");
         popup.text = Some(
-            format!("Everything Vector keeps becomes a normal file in {}. Any app or person with access to this device's files can open them.", backend::mediaport::public_folder()).into(),
+            t::settings_keep_plain_text(backend::mediaport::public_folder()),
         );
-        popup.confirm = "Confirm".into();
-        popup.cancel = Some("Cancel".into());
+        popup.confirm = t::dialog_confirm();
+        popup.cancel = Some(t::dialog_cancel());
         self.popup = Some((popup, PopupAct::KeepPlain));
         cx.notify();
     }
@@ -17802,7 +17730,7 @@ impl VectorApp {
                     if let Some(s) = this.settings.as_mut() {
                         s.on.insert("keep_unencrypted", !on);
                     }
-                    let mut popup = kit::Popup::notice("Keep Unencrypted");
+                    let mut popup = kit::Popup::notice(t::settings_keep_plain());
                     popup.icon = Some("icons/vector_warning.svg");
                     popup.text = Some(e.into());
                     this.popup = Some((popup, PopupAct::Notice));
@@ -17835,12 +17763,12 @@ impl VectorApp {
                     Ok(p) => p,
                     Err(e) => {
                         let (title, text) = match e.as_str() {
-                            "FILE_TOO_LARGE" => ("File Too Large", "Notification sounds must be under 1MB. Please choose a shorter audio clip."),
-                            "AUDIO_TOO_LONG" => ("Audio Too Long", "Notification sounds must be 10 seconds or less."),
+                            "FILE_TOO_LARGE" => (t::settings_sound_too_large(), t::settings_sound_too_large_text()),
+                            "AUDIO_TOO_LONG" => (t::settings_sound_too_long(), t::settings_sound_too_long_text()),
                             _ => return log::warn!("custom sound: {e}"),
                         };
                         let mut popup = kit::Popup::notice(title);
-                        popup.text = Some(text.into());
+                        popup.text = Some(text);
                         this.popup = Some((popup, PopupAct::Notice));
                         return;
                     }
@@ -17961,7 +17889,7 @@ impl VectorApp {
                 cx.write_to_clipboard(gpui::ClipboardItem::new_string(format!(
                     "https://vectorapp.io/go#settings/{cat}/{anchor}"
                 )));
-                self.show_toast("Copied Settings Link", cx);
+                self.show_toast(&t::settings_link_copied(), cx);
             }
             Act::Fold(id) => {
                 s.open_select = None;
@@ -18209,10 +18137,10 @@ impl VectorApp {
             }
             Act::Unblock(npub) => {
                 let name = self.store.borrow().name(&npub);
-                let mut popup = kit::Popup::notice("Unblock User");
-                popup.text = Some(format!("Are you sure you want to unblock {name}?").into());
-                popup.confirm = "Confirm".into();
-                popup.cancel = Some("Cancel".into());
+                let mut popup = kit::Popup::notice(t::unblock_user_title());
+                popup.text = Some(t::unblock_user_text(name));
+                popup.confirm = t::dialog_confirm();
+                popup.cancel = Some(t::dialog_cancel());
                 self.popup = Some((popup, PopupAct::Unblock { npub }));
             }
             Act::CopyLogs => {
@@ -18221,9 +18149,9 @@ impl VectorApp {
                     Some(text) => {
                         let lines = text.lines().filter(|l| !l.trim().is_empty()).count();
                         cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
-                        self.show_toast(&format!("Copied {lines} log entries to clipboard"), cx);
+                        self.show_toast(&t::settings_logs_copied(lines), cx);
                     }
-                    None => self.show_toast("No logs to copy!", cx),
+                    None => self.show_toast(&t::settings_logs_none(), cx),
                 }
             }
             Act::AddServer => {
@@ -18231,22 +18159,16 @@ impl VectorApp {
                 cx.subscribe_in(&input, window, |app, _, _: &SendText, window, cx| app.answer_popup(true, window, cx)).detach();
                 cx.subscribe_in(&input, window, |app, _, _: &CancelInput, window, cx| app.answer_popup(false, window, cx)).detach();
                 window.focus(&input.focus_handle(cx), cx);
-                let mut popup = kit::Popup::notice("Add Media Server");
+                let mut popup = kit::Popup::notice(t::settings_server_add_title());
                 popup.icon = None;
                 let i2p = self
                     .net_view
                     .as_ref()
                     .and_then(|v| v.get("supported")?.as_array().map(|a| a.iter().any(|k| k == "i2p")))
                     .unwrap_or(false);
-                popup.text = Some(
-                    format!(
-                        "Enter the address of a Blossom-compatible server. A bare domain like <b>blossom.primal.net</b> works. Vector adds <b>https://</b> automatically.{}",
-                        if i2p { "<br><br>An <b>.i2p</b> server gets <b>http://</b>. Only people using I2P can load files from it." } else { "" }
-                    )
-                    .into(),
-                );
-                popup.confirm = "Confirm".into();
-                popup.cancel = Some("Cancel".into());
+                popup.text = Some(if i2p { t::settings_server_add_text_i2p() } else { t::settings_server_add_text() });
+                popup.confirm = t::dialog_confirm();
+                popup.cancel = Some(t::dialog_cancel());
                 popup.input = Some(input);
                 self.popup = Some((popup, PopupAct::AddServer));
             }
@@ -18303,7 +18225,7 @@ impl VectorApp {
                             if let Err(e) = &res
                                 && !e.contains("cancelled")
                             {
-                                v.error = format!("Download failed: {e}");
+                                v.error = t::settings_voice_download_failed(e.as_str()).to_string();
                             }
                         }
                         this.media.borrow_mut().audio.auto_transcribe = None;
@@ -18316,19 +18238,19 @@ impl VectorApp {
             Act::VoiceCancel => backend::transcribe::cancel_download(),
             Act::VoiceDelete => {
                 let Some(m) = s.voice.as_ref().and_then(|v| v.current()) else { return };
-                let mut popup = kit::Popup::notice("Delete Model?");
-                popup.text = Some(format!("Are you sure you want to delete the \"{}\" model? This will free up disk space but you'll need to download it again to use it.", m.name).into());
-                popup.confirm = "Confirm".into();
-                popup.cancel = Some("Cancel".into());
+                let mut popup = kit::Popup::notice(t::settings_voice_delete_title());
+                popup.text = Some(t::settings_voice_delete_text(&*m.name));
+                popup.confirm = t::dialog_confirm();
+                popup.cancel = Some(t::dialog_cancel());
                 self.popup = Some((popup, PopupAct::DeleteModel(m.name)));
             }
             Act::ClearStorage => {
                 if !s.clearing {
-                    let mut popup = kit::Popup::notice("Clear Storage?");
+                    let mut popup = kit::Popup::notice(t::settings_storage_clear_title());
                     popup.icon = Some("icons/vector_warning.svg".into());
-                    popup.text = Some("Deletes this account's files, plus the cache. This can't be undone.".into());
-                    popup.confirm = "Confirm".into();
-                    popup.cancel = Some("Cancel".into());
+                    popup.text = Some(t::settings_storage_clear_text());
+                    popup.confirm = t::dialog_confirm();
+                    popup.cancel = Some(t::dialog_cancel());
                     self.popup = Some((popup, PopupAct::ClearStorage));
                 }
             }
@@ -18428,10 +18350,10 @@ impl VectorApp {
                 }
             }
             Act::Logout => {
-                let mut popup = kit::Popup::notice("Going Incognito?");
-                popup.text = Some("Logging out of Vector will fully erase the database, <b>ensure you have a backup of your keys before logging out!</b><br><br>That said, would you like to continue?".into());
-                popup.confirm = "Confirm".into();
-                popup.cancel = Some("Cancel".into());
+                let mut popup = kit::Popup::notice(t::settings_logout_title());
+                popup.text = Some(t::settings_logout_text());
+                popup.confirm = t::dialog_confirm();
+                popup.cancel = Some(t::dialog_cancel());
                 self.popup = Some((popup, PopupAct::Logout));
             }
             Act::Link(key) => self.open_web(match key {
@@ -18483,7 +18405,7 @@ impl VectorApp {
 
     fn open_new_chat(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let filter = cx.new(|cx| {
-            TextInput::new("Search (paste npub, invite link, etc.)", cx).with_look(
+            TextInput::new(t::newchat_search(), cx).with_look(
                 crate::composer::Look {
                     placeholder: white_a(0.35),
                     ..kit::field_look()
@@ -18564,7 +18486,7 @@ impl VectorApp {
                 if ok {
                     this.reload_communities(cx);
                 } else {
-                    this.show_toast("Community created, but the avatar upload failed", cx);
+                    this.show_toast(&t::create_community_avatar_failed(), cx);
                 }
             })
             .ok();
@@ -18574,7 +18496,7 @@ impl VectorApp {
 
     fn open_create_community(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let name = cx.new(|cx| {
-            TextInput::new("Community Name", cx)
+            TextInput::new(t::create_community_name_placeholder(), cx)
                 .max_chars(crate::createcommunity::NAME_MAX)
                 .keep_on_submit()
                 .with_look(crate::composer::Look {
@@ -18599,7 +18521,7 @@ impl VectorApp {
         )
         .detach();
         let filter = cx.new(|cx| {
-            TextInput::new("Search friends, or paste an npub", cx).with_look(
+            TextInput::new(t::create_community_friends_search(), cx).with_look(
                 crate::composer::Look {
                     placeholder: white_a(0.35),
                     ..kit::field_look()
@@ -18680,7 +18602,7 @@ impl VectorApp {
             return;
         };
         m.link_error = None;
-        m.progress = Some(("Making your link".into(), 0.5));
+        m.progress = Some((t::create_community_link_making().into(), 0.5));
         let side = (114. * window.scale_factor()).round() as u32;
         let rx = backend::run(backend::community::create_public_invite(id.clone(), None));
         cx.spawn(async move |this, cx| {
@@ -18689,7 +18611,7 @@ impl VectorApp {
                 let still_here = this.create_community.as_ref().and_then(|m| m.created.as_ref()).is_some_and(|c| c.0 == id);
                 let Some(m) = this.create_community.as_mut().filter(|_| still_here) else {
                     if res.is_ok() {
-                        this.show_toast("Invite link ready in Invite People", cx);
+                        this.show_toast(&t::create_community_link_ready(), cx);
                     }
                     return;
                 };
@@ -18745,16 +18667,21 @@ impl VectorApp {
                 }
                 m.busy = true;
                 m.error = None;
-                m.progress = Some(("Creating your community".into(), 0.));
+                m.progress = Some((t::create_community_stage_creating().into(), 0.));
                 let rx = backend::run(backend::community::create_community(name));
                 // `ccStaged`: the stages walk on an easing toward 90% while the publish runs.
                 cx.spawn(async move |this, cx| {
-                    const STAGES: [&str; 4] = ["Creating your community", "Putting it online", "Making you the owner", "Almost done"];
+                    let stages = [
+                        t::create_community_stage_creating(),
+                        t::create_community_stage_online(),
+                        t::create_community_stage_owner(),
+                        t::create_community_stage_done(),
+                    ];
                     let t0 = std::time::Instant::now();
                     loop {
                         cx.background_executor().timer(std::time::Duration::from_millis(120)).await;
                         let p = 0.9 * (1. - (-2.3 * t0.elapsed().as_secs_f32() / 3.5).exp());
-                        let stage = STAGES[((p / 0.9 * STAGES.len() as f32) as usize).min(STAGES.len() - 1)];
+                        let stage = stages[((p / 0.9 * stages.len() as f32) as usize).min(stages.len() - 1)].clone();
                         let busy = this
                             .update(cx, |this, cx| {
                                 let Some(m) = this.create_community.as_mut().filter(|m| m.busy && m.created.is_none()) else {
@@ -18799,7 +18726,7 @@ impl VectorApp {
                             }
                             Err(e) => {
                                 m.error = Some(e.clone());
-                                this.notice("Community creation failed", e, cx);
+                                this.notice(&t::create_community_failed(), e, cx);
                             }
                         }
                         cx.notify();
@@ -18854,7 +18781,7 @@ impl VectorApp {
                 let n = picked.len();
                 m.busy = true;
                 m.error = None;
-                m.progress = Some(("Getting ready".into(), 0.05));
+                m.progress = Some((t::create_community_link_preparing().into(), 0.05));
                 let (step, mut steps) = futures::channel::mpsc::unbounded::<usize>();
                 let rx = backend::run(async move {
                     let mut failed = 0usize;
@@ -18872,7 +18799,7 @@ impl VectorApp {
                         let live = this.update(cx, |this, cx| {
                             if let Some(m) = this.create_community.as_mut() {
                                 m.progress = Some((
-                                    format!("Inviting {} of {n}", i + 1),
+                                    t::create_community_inviting(i + 1, n).into(),
                                     (i as f32 / n as f32).max(0.05),
                                 ));
                                 cx.notify();
@@ -18885,7 +18812,7 @@ impl VectorApp {
                     let Ok(failed) = rx.await else { return };
                     let done = this.update(cx, |this, cx| {
                         let m = this.create_community.as_mut()?;
-                        let label = if failed == n { "Invites failed" } else { "Invites sent" };
+                        let label = if failed == n { t::create_community_invites_failed() } else { t::create_community_invites_sent() };
                         m.progress = Some((label.into(), 1.));
                         cx.notify();
                         Some(())
@@ -18904,10 +18831,7 @@ impl VectorApp {
                         m.progress = None;
                         if failed > 0 {
                             this.show_toast(
-                                &format!(
-                                    "{failed} invite{} failed to send",
-                                    if failed == 1 { "" } else { "s" }
-                                ),
+                                &t::create_community_invites_some_failed(failed),
                                 cx,
                             );
                         }
@@ -19097,7 +19021,7 @@ impl VectorApp {
                     let result = rx.await.unwrap_or_else(|_| Err(t::backend_stopped().into()));
                     this.update_in(cx, |this, window, cx| match result {
                         Ok(()) => this.reboot(window, cx),
-                        Err(e) => this.notice_plain("Switch failed", &e, cx),
+                        Err(e) => this.notice_plain(&t::account_switch_failed(), &e, cx),
                     })
                     .ok();
                 })
@@ -19109,23 +19033,22 @@ impl VectorApp {
                 };
                 // A veiled row can't say which account it is, and this can't be undone.
                 if self.store.borrow().streamer.on && npub != self.store.borrow().my_npub {
-                    return self.show_toast("Turn off Streamer Mode to delete another account.", cx);
+                    return self.show_toast(&t::account_delete_streamer(), cx);
                 }
                 let row = s.rows.iter().find(|r| r.npub == npub);
                 let label = row
                     .and_then(|r| r.name.clone())
-                    .unwrap_or_else(|| "This account".into());
+                    .unwrap_or_else(|| t::account_this().to_string());
                 let last = s.rows.len() == 1;
-                let mut text = format!(
-                    "{label} will be permanently removed from this device, with the files it keeps in Vector. Make sure you have the seed phrase or nsec backed up if you want to recover it later, and save any files you want to keep."
-                );
+                let mut text = t::account_remove_text(label).to_string();
                 if last {
-                    text.push_str("\n\nThis is your only Vector account on this device. All downloaded attachments will also be removed. Copy any files you want to keep before continuing.");
+                    text.push_str("\n\n");
+                    text.push_str(&t::account_remove_last());
                 }
-                let mut popup = kit::Popup::notice("Remove Profile?");
+                let mut popup = kit::Popup::notice(t::account_remove_title());
                 popup.text = Some(text.into());
-                popup.confirm = "Confirm".into();
-                popup.cancel = Some("Cancel".into());
+                popup.confirm = t::dialog_confirm();
+                popup.cancel = Some(t::dialog_cancel());
                 self.popup = Some((popup, PopupAct::RemoveAccount { npub }));
                 cx.notify();
             }
@@ -19215,11 +19138,10 @@ impl VectorApp {
             filters: crate::pickers::picture(),
             prompt: Some(
                 if banner {
-                    "Choose Banner Image"
+                    t::profile_pick_banner()
                 } else {
-                    "Choose Profile Picture"
-                }
-                .into(),
+                    t::profile_pick_avatar()
+                },
             ),
         });
         let window = window.window_handle();
@@ -19233,8 +19155,8 @@ impl VectorApp {
             let Some(ext) = backend::upload::picture_ext(&path) else {
                 this.update(cx, |this, cx| {
                     this.notice(
-                        "Unsupported File",
-                        "Only PNG, JPEG, GIF and WebP images can be used.".into(),
+                        &t::profile_unsupported(),
+                        t::profile_unsupported_text().into(),
                         cx,
                     )
                 })
@@ -19253,8 +19175,8 @@ impl VectorApp {
             let Some((image, w, h)) = decoded else {
                 this.update(cx, |this, cx| {
                     this.notice(
-                        "Image Unreadable",
-                        "That picture couldn't be opened.".into(),
+                        &t::profile_unreadable(),
+                        t::profile_unreadable_text().into(),
                         cx,
                     )
                 })
@@ -19281,8 +19203,8 @@ impl VectorApp {
                             crate::cropper::Cropper::new(
                                 image,
                                 (w, h),
-                                "Crop Profile Picture",
-                                "Drag to move, or drag a corner to resize.",
+                                t::crop_avatar_title(),
+                                t::crop_avatar_hint(),
                                 true,
                                 window,
                                 cx,
@@ -19326,7 +19248,7 @@ impl VectorApp {
                     let (out, ext) = backend::upload::prepared(bytes, false, Some(c2))?;
                     crate::media::decode(&out, ext, (512, 512))
                         .map(|(i, _, _)| i)
-                        .ok_or_else(|| "Couldn't read the image".to_string())
+                        .ok_or_else(|| t::profile_image_unreadable().to_string())
                 })
                 .await;
             this.update(cx, |this, cx| match preview {
@@ -19340,7 +19262,7 @@ impl VectorApp {
                         cx.notify();
                     }
                 }
-                Err(e) => this.notice("Crop Failed", e, cx),
+                Err(e) => this.notice(&t::profile_crop_failed(), e, cx),
             })
             .ok();
         })
@@ -19355,8 +19277,7 @@ impl VectorApp {
         banner: bool,
         cx: &mut Context<Self>,
     ) {
-        let label = if banner { "Banner" } else { "Avatar" };
-        let prev = self
+                let prev = self
             .store
             .borrow()
             .profiles
@@ -19383,7 +19304,7 @@ impl VectorApp {
                 {
                     me.banner_cached = prev;
                 }
-                this.notice(&format!("{label} Upload Failed!"), err, cx);
+                this.notice(&if banner { t::profile_banner_upload_failed() } else { t::profile_avatar_upload_failed() }, err, cx);
             })
             .ok();
         })
@@ -19391,13 +19312,13 @@ impl VectorApp {
     }
 
     fn confirm_block_request(&mut self, npub: String, cx: &mut Context<Self>) {
-        let mut popup = kit::Popup::notice("Block User");
+        let mut popup = kit::Popup::notice(t::block_user_title());
         popup.text = Some(
-            "Are you sure you want to block this user? You will no longer receive DMs from them."
+            t::block_user_text()
                 .into(),
         );
-        popup.confirm = "Confirm".into();
-        popup.cancel = Some("Cancel".into());
+        popup.confirm = t::dialog_confirm();
+        popup.cancel = Some(t::dialog_cancel());
         self.popup = Some((popup, PopupAct::BlockRequest { npub }));
         cx.notify();
     }
@@ -19423,7 +19344,7 @@ impl VectorApp {
                 if ok {
                     lift(this, &npub, cx)
                 } else {
-                    this.show_toast("Failed to accept", cx)
+                    this.show_toast(&t::request_accept_failed(), cx)
                 }
             })
             .ok();
@@ -19470,7 +19391,7 @@ impl VectorApp {
     /// `blockedBySync`: account edits wait until the first sync lands, or it would undo them.
     pub(super) fn blocked_by_sync(&mut self, cx: &mut Context<Self>) -> bool {
         if self.live && self.syncing {
-            self.show_toast("Syncing your account — try again in a moment", cx);
+            self.show_toast(&t::account_syncing(), cx);
             return true;
         }
         false
@@ -19508,14 +19429,8 @@ impl VectorApp {
 
     fn set_nickname(&mut self, npub: String, nick: String, cx: &mut Context<Self>) {
         if nick.chars().count() >= 30 {
-            let mut popup = kit::Popup::notice("Woah woah!");
-            popup.text = Some(
-                format!(
-                    "A {}-character nickname seems excessive!",
-                    nick.chars().count()
-                )
-                .into(),
-            );
+            let mut popup = kit::Popup::notice(t::profile_nickname_long_title());
+            popup.text = Some(t::profile_nickname_long_text(nick.chars().count()));
             self.popup = Some((popup, PopupAct::Notice));
             cx.notify();
             return;
@@ -19535,7 +19450,7 @@ impl VectorApp {
         let security = self.security.clone();
         let Screen::Login(view) = &self.screen else {
             security.update(cx, |f, cx| {
-                f.transfer_finished(Err("Sign out of this account first".into()), cx)
+                f.transfer_finished(Err(t::account_sign_out_first().into()), cx)
             });
             return;
         };
@@ -19666,7 +19581,7 @@ impl VectorApp {
             ..Default::default()
         };
         let input = cx.new(|cx| {
-            let mut i = TextInput::new("What's happening?", cx)
+            let mut i = TextInput::new(t::profile_status_placeholder(), cx)
                 .with_look(look)
                 .twemoji()
                 .keep_on_submit()
@@ -19729,8 +19644,8 @@ impl VectorApp {
                 if let (Some(old), Some(p)) = (old, this.store.borrow_mut().profiles.get_mut(&me)) {
                     p.status.title = old;
                 }
-                let mut popup = kit::Popup::notice("Status Update Failed!");
-                popup.text = Some("Failed to broadcast status update to the network.".into());
+                let mut popup = kit::Popup::notice(t::profile_status_failed());
+                popup.text = Some(t::profile_status_failed_text());
                 this.popup = Some((popup, PopupAct::Notice));
                 cx.notify();
             })
@@ -19750,6 +19665,7 @@ impl VectorApp {
         let raw = input.read(cx).text().to_string();
         let text = raw.trim().to_string();
         let empty = text.is_empty();
+        let none = t::profile_status_none();
         let remaining = STATUS_MAX as i64 - raw.chars().count() as i64;
         let had = store.me().is_some_and(|p| !p.status.title.is_empty());
         let card =
@@ -19785,7 +19701,7 @@ impl VectorApp {
                                 .text_size(px(11.))
                                 .font_weight(FontWeight::BOLD)
                                 .text_color(white_a(0.45))
-                                .child("STATUS"),
+                                .child(t::profile_status_title().to_uppercase()),
                         )
                         .child(
                             div()
@@ -19856,7 +19772,7 @@ impl VectorApp {
                                         .line_height(px(24.))
                                         .text_color(c(0xffffff))
                                         .child(crate::inline::emoji_line(
-                                            if empty { "No status" } else { &text },
+                                            if empty { &none } else { &text },
                                             crate::inline::Look::new(INTER, 13.5, 24., c(0xffffff)),
                                             16.,
                                             3.,
@@ -19936,7 +19852,7 @@ impl VectorApp {
                                 .on_click(cx.listener(|app, _, _, cx| {
                                     app.save_status(Some(String::new()), cx)
                                 }))
-                                .child("Clear Status"),
+                                .child(t::profile_status_clear()),
                         )
                         .child(
                             div()
@@ -19951,7 +19867,7 @@ impl VectorApp {
                                 .font_weight(FontWeight::BOLD)
                                 .cursor_pointer()
                                 .on_click(cx.listener(|app, _, _, cx| app.save_status(None, cx)))
-                                .child("Save"),
+                                .child(t::dialog_save()),
                         ),
                 );
         Some(
@@ -20056,7 +19972,7 @@ impl VectorApp {
                     .text_center()
                     .cursor_pointer()
                     .on_click(cx.listener(move |app, _, _, cx| close(app, cx)))
-                    .child("Close"),
+                    .child(t::dialog_close()),
             );
         Some(
             gpui::deferred(
@@ -20152,7 +20068,7 @@ fn fixture_network() -> (
             "https://magnitude.vectorapp.io",
             true,
             "online",
-            "Online",
+            "Online", // i18n-exempt: fixture
             "connected",
             Some(84),
         ),
@@ -20160,7 +20076,7 @@ fn fixture_network() -> (
             "https://blossom.ditto.pub",
             true,
             "untested",
-            "Untested",
+            "Untested", // i18n-exempt: fixture
             "disabled",
             None,
         ),
@@ -20168,7 +20084,7 @@ fn fixture_network() -> (
             "https://blossom.primal.net",
             false,
             "disabled",
-            "Disabled",
+            "Disabled", // i18n-exempt: fixture
             "disabled",
             None,
         ),
@@ -20266,8 +20182,8 @@ impl VectorApp {
                         app.rec.dictating = false;
                         let text = match res {
                             Ok(t) if !t.is_empty() => t,
-                            Ok(_) => return app.show_toast("No words heard in that recording", cx),
-                            Err(_) => return app.show_toast("Couldn't turn that into text", cx),
+                            Ok(_) => return app.show_toast(&t::composer_no_words(), cx),
+                            Err(_) => return app.show_toast(&t::composer_transcribe_failed(), cx),
                         };
                         if let Some(id) = app.rec.source {
                             let _ = crate::audio::engine().map(|e| e.stop(id));
@@ -20279,6 +20195,7 @@ impl VectorApp {
                         }
                         app.input.update(cx, |i, cx| {
                             let now = i.text().trim().to_string();
+                            // i18n-exempt: joins dictated words onto the draft
                             let joined = if now.is_empty() { text } else { format!("{} {text}", i.text()) };
                             i.set_text(&joined, cx)
                         });
@@ -20326,7 +20243,7 @@ impl VectorApp {
                     }
                     Err(e) => {
                         app.rec.idle();
-                        app.notice("Recording Error", e, cx);
+                        app.notice(&t::composer_recording_error(), e, cx);
                     }
                 }
                 cx.notify();
@@ -20342,7 +20259,7 @@ impl VectorApp {
     }
 
     fn rec_stop(&mut self, cx: &mut Context<Self>) {
-        self.rec.status = "Processing...";
+        self.rec.status = t::composer_processing();
         let rx = rec_thread(|| vector_media::voice::AudioRecorder::global().stop());
         cx.spawn(async move |this, cx| {
             let done = rx.await.unwrap_or_else(|e| Err(e.to_string()));
@@ -20385,7 +20302,7 @@ impl VectorApp {
                 Ok(Err(e)) => e,
                 Err(e) => e.to_string(),
             };
-            this.update(cx, |this, cx| this.notice("Voice Message Failed", err, cx))
+            this.update(cx, |this, cx| this.notice(&t::composer_voice_failed(), err, cx))
                 .ok();
         })
         .detach();
@@ -20396,7 +20313,7 @@ impl VectorApp {
 fn sync_report_fixture(f: Option<serde_json::Value>) -> (Result<serde_json::Value, String>, Result<serde_json::Value, String>) {
     let f = f.unwrap_or_default();
     let epoch = if std::env::var("VECTOR_SYNC_REPORT").is_ok_and(|v| v == "epoch-error") {
-        Err("relay timed out".to_string())
+        Err("relay timed out".to_string()) // i18n-exempt: fixture
     } else {
         Ok(f["epoch"].clone())
     };
@@ -20416,6 +20333,7 @@ fn start_key_link(key: &str) -> Option<String> {
             })
         }
         "app" => Some(format!("{PLACE}nexus/{}", parts.next()?)),
+        // i18n-exempt: go link
         "settings" | "nexus" | "requests" => Some(format!("{PLACE}{key}")),
         _ => None,
     }
@@ -20427,12 +20345,10 @@ fn relay_cautions(checks: &[vector_core::community::v2::service::RelayCheck], re
     let mut out = Vec::new();
     let throttled: Vec<&str> = checks.iter().filter(|c| c.rate_limited).map(|c| c.relay.as_str()).collect();
     if !throttled.is_empty() {
-        out.push(format!(
-            "{} slowed down a short burst of test events. A community on a rate-limited relay can drop posts and fall out of sync when it's busy.",
-            named(throttled)
-        ));
+        out.push(t::community_settings_caution_throttled(named(throttled)).into());
     }
-    for (net, others, tld) in [("Tor", "Standard or I2P", ".onion"), ("I2P", "Standard or Tor", ".i2p")] {
+    // i18n-exempt: core's network names
+    for (net, tld) in [("Tor", ".onion"), ("I2P", ".i2p")] {
         let only: Vec<&str> = checks.iter().filter(|c| c.only_on == Some(net)).map(|c| c.relay.as_str()).collect();
         if only.is_empty() {
             continue;
@@ -20440,12 +20356,13 @@ fn relay_cautions(checks: &[vector_core::community::v2::service::RelayCheck], re
         let host = |r: &str| url::Url::parse(r).ok().and_then(|u| u.host_str().map(str::to_ascii_lowercase)).unwrap_or_default();
         let no_other_way_in = relays.iter().all(|r| host(r).ends_with(tld));
         let n = only.len();
-        out.push(format!(
-            "{} can only be reached over {net}. Members using Vector over {others} won't reach {}{}.",
-            named(only),
-            if n == 1 { "it" } else { "them" },
-            if no_other_way_in { ", and with no other relay left they'd lose this community" } else { "" },
-        ));
+        let said = match (tld, no_other_way_in) {
+            (".onion", false) => t::community_settings_caution_tor(n, named(only)),
+            (".onion", true) => t::community_settings_caution_tor_last(n, named(only)),
+            (_, false) => t::community_settings_caution_i2p(n, named(only)),
+            (_, true) => t::community_settings_caution_i2p_last(n, named(only)),
+        };
+        out.push(said.into());
     }
     out
 }

@@ -3544,7 +3544,7 @@ fn badge_new() -> impl IntoElement {
         .text_size(px(10.))
         .line_height(px(12.))
         .font_weight(FontWeight::BOLD)
-        .child(crate::kit::spaced("NEW", 0.5))
+        .child(crate::kit::spaced(t::settings_new_badge().to_uppercase(), 0.5))
 }
 
 /// `SectionNav`: the search, the title, each section with its anchors, the footer links.

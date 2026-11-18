@@ -647,9 +647,9 @@ fn card(ctx: &Ctx, m: &Message, r: &Ref) -> AnyElement {
                 let s = send.clone();
                 let copy = btn(
                     format!("{key}-copy"),
-                    format!("Copy {label}"),
+                    crate::t::embed_copy(label),
                     false,
-                    move |w, cx| s(Act::Copy(entity.clone(), format!("The {label}")), w, cx),
+                    move |w, cx| s(Act::Copy(entity.clone(), label.to_string()), w, cx),
                 );
                 let open = r.url.clone().map(|u| {
                     let s = send.clone();
@@ -1564,10 +1564,10 @@ pub fn modal(m: &Modal, env: &Env, viewport_h: f32) -> AnyElement {
         "nevent"
     };
     let actions = {
-        let (s, bech, lbl) = (send.clone(), e.bech32.clone(), format!("The {label}"));
+        let (s, bech, lbl) = (send.clone(), e.bech32.clone(), label.to_string());
         let copy = btn(
             "nem-copy".into(),
-            format!("Copy {label}"),
+            crate::t::embed_copy(label),
             false,
             move |w, cx| s(Act::Copy(bech.clone(), lbl.clone()), w, cx),
         );

@@ -140,3 +140,23 @@ roles-remove = Remove from role
 roles-members = Members
 roles-add-members = Add Members
 roles-delete = Delete Role
+
+## Deleting a role, and switching a community to the new roles
+
+# A new role's name until it's given one.
+roles-new-name = new role
+# Stands in for a role with no name in roles-delete-text.
+roles-this-role = this role
+roles-delete-title = Delete role
+# $name is the role's name; $holders is how many members hold it.
+roles-delete-text = { $holders ->
+    [0] Delete { $name }? This can't be undone.
+    [one] Delete { $name }? The member who holds it loses its permissions. This can't be undone.
+   *[other] Delete { $name }? The { $holders } members who hold it lose its permissions. This can't be undone.
+}
+roles-switch-title = Switch to the new roles
+roles-switch-text = Adds @everyone, channel permissions and role deletion. Every role carries over. Members on an older Vector keep the roles from before the switch and won't see later changes until they update.
+roles-switch = Switch
+roles-name-required = A role needs a name
+roles-change-failed = The roles couldn't be changed
+roles-holders-failed = Couldn't change who holds this role

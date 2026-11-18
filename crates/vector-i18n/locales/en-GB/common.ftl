@@ -8,6 +8,7 @@ dialog-cancel = Cancel
 dialog-close = Close
 dialog-open = Open
 dialog-rename = Rename
+dialog-save = Save
 
 ## The window's title bar
 
@@ -28,6 +29,9 @@ copied = Copied
 copied-link = Copied Link
 copied-clipboard = Copied to Clipboard
 copied-app-link = Copied App Link
+copy-link = Copy Link
+# The answer when a save never came back.
+save-failed = Save failed
 
 ## A download's progress
 

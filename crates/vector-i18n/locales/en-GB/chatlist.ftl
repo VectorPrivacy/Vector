@@ -12,6 +12,7 @@ chats-unpin = Unpin
 chats-archive = Archive
 chats-unarchive = Unarchive
 chats-block = Block
+chats-mark-all-read = Mark All as Read
 
 ## Toasts
 
