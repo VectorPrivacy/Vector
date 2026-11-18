@@ -71,6 +71,8 @@ class MainActivity : TauriActivity() {
         @JvmStatic
         external fun nativeRegisterNdkContext(activity: android.app.Activity)
         @JvmStatic
+        external fun nativeActivityDestroyed(activity: android.app.Activity)
+        @JvmStatic
         external fun nativeOnPause()
         @JvmStatic
         external fun nativeOnNotificationTap(chatId: String)
@@ -207,7 +209,7 @@ class MainActivity : TauriActivity() {
         super.onCreate(savedInstanceState)
         warnIfWebViewTooOld()
 
-        // ndk_context for Rust, when tao's glue in super.onCreate didn't register one.
+        // The Activity for Rust, and ndk_context when tao's glue in super.onCreate didn't register one.
         try { nativeRegisterNdkContext(this) } catch (e: Throwable) {
             android.util.Log.e("MainActivity", "nativeRegisterNdkContext failed", e)
         }
@@ -251,6 +253,13 @@ class MainActivity : TauriActivity() {
         super.onPause()
         stopGyro()   // never leave the rotation sensor running while backgrounded
         try { nativeOnPause() } catch (_: Exception) {}
+    }
+
+    override fun onDestroy() {
+        try { nativeActivityDestroyed(this) } catch (e: Throwable) {
+            android.util.Log.e("MainActivity", "nativeActivityDestroyed failed", e)
+        }
+        super.onDestroy()
     }
 
     override fun onStop() {

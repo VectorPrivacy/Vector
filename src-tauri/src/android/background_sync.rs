@@ -81,7 +81,7 @@ static BG_DATA_DIR: OnceLock<String> = OnceLock::new();
 /// on the orphaned standalone client: a community created mid-session never delivers live until restart.
 static PRESWAP_FOREGROUND_CLIENT: Mutex<Option<Client>> = Mutex::new(None);
 
-/// Register the ndk context when tao's activity glue hasn't. Every `ndk_context::android_context()`
+/// Record the live Activity, and register the ndk context when tao's activity glue hasn't. Every `ndk_context::android_context()`
 /// consumer (iroh's DNS, cpal, netdev, our JNI fallbacks) panics without one, and registering a
 /// second one panics too. Called from MainActivity.onCreate after the glue has run; it holds the
 /// application context, as tao does, for the process's life. The service-only process never runs
@@ -93,6 +93,7 @@ pub extern "C" fn Java_io_vectorapp_MainActivity_nativeRegisterNdkContext(
     activity: JObject<'_>,
 ) {
     crate::android::utils::jni_fence("Java_io_vectorapp_MainActivity_nativeRegisterNdkContext", || (), move || {
+        crate::android::utils::set_activity(&mut env, &activity);
         if crate::android::utils::context_registered() {
             return;
         }
@@ -122,6 +123,18 @@ pub extern "C" fn Java_io_vectorapp_MainActivity_nativeRegisterNdkContext(
         std::mem::forget(global);
         unsafe { ndk_context::initialize_android_context(vm_ptr, ctx_ptr) };
         logcat("ndk context registered");
+    })
+}
+
+/// Called from MainActivity.onDestroy via JNI
+#[no_mangle]
+pub extern "C" fn Java_io_vectorapp_MainActivity_nativeActivityDestroyed(
+    mut env: JNIEnv,
+    _class: JClass,
+    activity: JObject<'_>,
+) {
+    crate::android::utils::jni_fence("Java_io_vectorapp_MainActivity_nativeActivityDestroyed", || (), move || {
+        crate::android::utils::clear_activity(&mut env, &activity);
     })
 }
 
