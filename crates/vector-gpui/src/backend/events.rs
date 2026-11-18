@@ -119,21 +119,13 @@ impl InboundEventHandler for Handler {
         });
     }
 
-    fn on_community_presence(
-        &self,
-        chat_id: &str,
-        npub: &str,
-        joined: bool,
-        event_id: &str,
-        created_at: u64,
-        invited_by: Option<&str>,
-        invited_label: Option<&str>,
-    ) {
-        let (chat_id, npub, event_id) = (chat_id.to_string(), npub.to_string(), event_id.to_string());
-        let invited_by = invited_by.map(str::to_string);
-        let invited_label = invited_label.map(str::to_string);
+    fn on_community_presence(&self, p: &vector_core::Presence<'_>) {
+        let (chat_id, npub, event_id) = (p.channel_id.to_string(), p.npub.to_string(), p.event_id.to_string());
+        let invited_by = p.invited_by.map(str::to_string);
+        let invited_label = p.invited_label.map(str::to_string);
+        let (joined, created_at, shown) = (p.joined, p.created_at, p.shown);
         db::spawn_bound(async move {
-            presence(&chat_id, &npub, joined, &event_id, created_at, invited_by.as_deref(), invited_label.as_deref()).await;
+            presence(&chat_id, &npub, joined, &event_id, created_at, invited_by.as_deref(), invited_label.as_deref(), shown).await;
         });
     }
 
@@ -190,6 +182,8 @@ impl InboundEventHandler for Handler {
 
 /// A Community join or leave, saved as its system line and shown. The save dedups by event id,
 /// so relay replays and our own echo stay silent.
+/// A line that isn't `shown` is still kept: the member list reads it.
+#[allow(clippy::too_many_arguments)]
 async fn presence(
     channel_id: &str,
     npub: &str,
@@ -198,6 +192,7 @@ async fn presence(
     created_at: u64,
     invited_by: Option<&str>,
     invited_label: Option<&str>,
+    shown: bool,
 ) {
     use vector_core::stored_event::SystemEventType;
     let et = if joined { SystemEventType::MemberJoined } else { SystemEventType::MemberLeft };
@@ -216,6 +211,9 @@ async fn presence(
     });
     if nameless {
         vector_core::profile::sync::queue_profile_sync(npub.to_string(), vector_core::profile::sync::SyncPriority::High, false);
+    }
+    if !shown {
+        return;
     }
     vector_core::emit_event(
         "system_event",
