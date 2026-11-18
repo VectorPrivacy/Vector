@@ -588,6 +588,11 @@ impl DirectWriteState {
                 0.0,
             )?;
             let width = px(renderer_context.width);
+            // Runs left to right, whatever order a mixed-direction line was drawn in.
+            runs.sort_by(|a, b| {
+                let x = |r: &ShapedRun| r.glyphs.first().map_or(f32::MAX, |g| g.position.x.as_f32());
+                x(a).total_cmp(&x(b))
+            });
 
             Ok(LineLayout {
                 font_size,
@@ -1290,7 +1295,7 @@ impl IDWriteTextRenderer_Impl for TextRenderer_Impl {
     fn DrawGlyphRun(
         &self,
         clientdrawingcontext: *const ::core::ffi::c_void,
-        _baselineoriginx: f32,
+        baselineoriginx: f32,
         _baselineoriginy: f32,
         _measuringmode: DWRITE_MEASURING_MODE,
         glyphrun: *const DWRITE_GLYPH_RUN,
@@ -1355,6 +1360,7 @@ impl IDWriteTextRenderer_Impl for TextRenderer_Impl {
             // Tabs have layout advances but no glyph advances. Keep invisible
             // glyphs so LineLayout can map their byte indices to caret positions.
             let mut glyphs = Vec::new();
+            let mut pen = baselineoriginx;
             for (offset, &character) in text.iter().enumerate() {
                 if character != u16::from(b'\t') {
                     continue;
@@ -1376,15 +1382,16 @@ impl IDWriteTextRenderer_Impl for TextRenderer_Impl {
                 }
                 context
                     .index_converter
-                    .advance_to_utf16_ix(position as usize);
+                    .seek_utf16_ix(position as usize);
                 glyphs.push(ShapedGlyph {
                     id: GlyphId(u32::from(space)),
-                    position: point(px(context.width), px(0.0)),
+                    position: point(px(pen), px(0.0)),
                     index: context.index_converter.utf8_ix,
                     is_emoji: false,
                 });
-                context.width += metrics.width;
+                pen += metrics.width;
             }
+            context.width = context.width.max(pen);
             if !glyphs.is_empty() {
                 context.runs.push(ShapedRun { font_id, glyphs });
             }
@@ -1424,8 +1431,11 @@ impl IDWriteTextRenderer_Impl for TextRenderer_Impl {
             let mut utf16_idx = desc.textPosition as usize;
             let mut glyph_idx = 0;
             let mut glyphs = Vec::with_capacity(glyph_count);
+            // An odd bidi level runs right to left from its origin, glyphs in logical order.
+            let rtl = glyphrun.bidiLevel & 1 == 1;
+            let mut pen = baselineoriginx;
             for (cluster_utf16_len, cluster_glyph_count) in cluster_analyzer {
-                context.index_converter.advance_to_utf16_ix(utf16_idx);
+                context.index_converter.seek_utf16_ix(utf16_idx);
                 utf16_idx += cluster_utf16_len;
                 for (cluster_glyph_idx, glyph_id) in glyph_ids
                     [glyph_idx..(glyph_idx + cluster_glyph_count)]
@@ -1436,19 +1446,23 @@ impl IDWriteTextRenderer_Impl for TextRenderer_Impl {
                     let is_emoji =
                         color_font && is_color_glyph(font_face, id, &context.components.factory);
                     let this_glyph_idx = glyph_idx + cluster_glyph_idx;
+                    let advance = glyph_advances[this_glyph_idx];
+                    let offset = glyph_offsets[this_glyph_idx].advanceOffset;
+                    let x = if rtl { pen - advance - offset } else { pen + offset };
+                    pen += if rtl { -advance } else { advance };
                     glyphs.push(ShapedGlyph {
                         id,
-                        position: point(
-                            px(context.width + glyph_offsets[this_glyph_idx].advanceOffset),
-                            px(-glyph_offsets[this_glyph_idx].ascenderOffset),
-                        ),
+                        position: point(px(x), px(-glyph_offsets[this_glyph_idx].ascenderOffset)),
                         index: context.index_converter.utf8_ix,
                         is_emoji,
                     });
-                    context.width += glyph_advances[this_glyph_idx];
                 }
                 glyph_idx += cluster_glyph_count;
             }
+            if rtl {
+                glyphs.reverse();
+            }
+            context.width = context.width.max(if rtl { baselineoriginx } else { pen });
             context.runs.push(ShapedRun { font_id, glyphs });
         }
         Ok(())
@@ -1547,6 +1561,14 @@ impl<'a> StringIndexConverter<'a> {
             self.utf16_ix += c.len_utf16();
         }
         self.utf8_ix = self.text.len();
+    }
+
+    /// Like [`Self::advance_to_utf16_ix`], but may go back: right-to-left runs draw out of order.
+    fn seek_utf16_ix(&mut self, utf16_target: usize) {
+        if self.utf16_ix > utf16_target {
+            *self = Self::new(self.text);
+        }
+        self.advance_to_utf16_ix(utf16_target);
     }
 
     fn advance_to_utf16_ix(&mut self, utf16_target: usize) {

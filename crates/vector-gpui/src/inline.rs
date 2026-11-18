@@ -1898,4 +1898,38 @@ mod rtl_tests {
         assert_eq!(visual_order(&[0, 1, 2, 2, 1, 0]), vec![0, 4, 2, 3, 1, 5]);
         assert_eq!(visual_order(&[1, 1, 1]), vec![2, 1, 0]);
     }
+
+    #[cfg(target_os = "linux")]
+    fn platform_text() -> std::sync::Arc<dyn gpui::PlatformTextSystem> {
+        std::sync::Arc::new(gpui_wgpu::CosmicTextSystem::new("Rubik")) // i18n-exempt: font name
+    }
+
+    #[cfg(target_os = "macos")]
+    fn platform_text() -> std::sync::Arc<dyn gpui::PlatformTextSystem> {
+        std::sync::Arc::new(gpui_apple::AppleTextSystem::new())
+    }
+
+    #[cfg(target_os = "windows")]
+    fn platform_text() -> std::sync::Arc<dyn gpui::PlatformTextSystem> {
+        gpui_windows::text_system().expect("DirectWrite")
+    }
+
+    /// Each OS's shaper sets a Hebrew word inside an English line right to left, between the
+    /// words around it, with the glyphs of every run in left-to-right order.
+    #[test]
+    fn the_platform_shaper_orders_a_right_to_left_run() {
+        let ts = platform_text();
+        ts.add_fonts(vec![std::borrow::Cow::Borrowed(include_bytes!("../assets/fonts/Rubik-Regular.ttf"))]).unwrap();
+        let id = ts.font_id(&gpui::font("Rubik")).unwrap(); // i18n-exempt: font name
+        let text = "ab \u{5d0}\u{5d1}\u{5d2} cd";
+        let line = ts.layout_line(text, px(16.), &[gpui::FontRun { len: text.len(), font_id: id }]);
+        let glyphs: Vec<_> = line.runs.iter().flat_map(|r| r.glyphs.iter()).collect();
+        let x = |i: usize| glyphs.iter().find(|g| g.index == i).map(|g| f32::from(g.position.x)).unwrap_or_else(|| panic!("no glyph at {i}: {glyphs:?}"));
+        let order = [x(0), x(1), x(7), x(5), x(3), x(10), x(11)];
+        assert!(order.windows(2).all(|w| w[0] < w[1]), "a b \u{5d2} \u{5d1} \u{5d0} c d at {order:?}");
+        for run in &line.runs {
+            assert!(run.glyphs.windows(2).all(|w| w[0].position.x <= w[1].position.x), "a run out of order: {:?}", run.glyphs);
+        }
+        assert!(f32::from(line.width) >= x(11), "width {:?} short of the last glyph", line.width);
+    }
 }

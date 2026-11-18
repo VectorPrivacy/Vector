@@ -194,6 +194,12 @@ tempfile = "3"
 # The scanners that replaced regexes are tested against the patterns they replace.
 regex = "1"
 
+# Each platform's own shaper, for the bidi test that needs no window.
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+gpui_apple = { git = "https://github.com/zed-industries/zed", rev = "f8cfc7ed9e57503def9479138894f3139f5400cc" }
+[target.'cfg(target_os = "windows")'.dev-dependencies]
+gpui_windows = { git = "https://github.com/zed-industries/zed", rev = "f8cfc7ed9e57503def9479138894f3139f5400cc" }
+
 # gpui_linux at the same rev, plus file references on the clipboard (text/uri-list) for X11 and Wayland.
 [patch."https://github.com/zed-industries/zed"]
 # gpui at the same rev: animated images redraw when their next frame is due, not every vsync.
