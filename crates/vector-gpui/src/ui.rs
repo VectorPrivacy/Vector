@@ -3905,7 +3905,7 @@ impl VectorApp {
             .open
             .as_ref()
             .and_then(|id| store.chat(id))
-            .map(|c| data::timeline(c, store.system.get(&c.id).map_or(&[][..], Vec::as_slice), self.history_done.contains(&c.id), store.now_ms(), self.read_anchor.as_ref(), names.as_deref(), &|m| store.hidden(c, m) == Some(data::Hidden::Blocked)))
+            .map(|c| data::timeline(c, store.system.get(&c.id).map_or(&[][..], Vec::as_slice), self.history_done.contains(&c.id), store.now_ms(), self.read_anchor.as_ref(), names.as_deref(), &|m| store.hidden(c, m) == Some(data::Hidden::Blocked), &|m| store.revealed_as(c, m).is_some()))
             .unwrap_or_default();
         let gap = self.gap_index(&store);
         if let Some(g) = gap {
@@ -3941,9 +3941,9 @@ impl VectorApp {
                     Row::Date { label, time } => (label, time).hash(&mut h),
                     Row::Unread => {}
                     Row::Notice(n) => n.hash(&mut h),
-                    Row::Message { index, first, run } => {
+                    Row::Message { index, first, run, shown } => {
                         chat.and_then(|c| c.messages.get(*index)).map(|m| &m.id).hash(&mut h);
-                        (first, run).hash(&mut h);
+                        (first, run, shown).hash(&mut h);
                     }
                     Row::System { index, count } => {
                         system.and_then(|s| s.get(*index)).map(|l| &l.id).hash(&mut h);
@@ -4703,6 +4703,14 @@ impl VectorApp {
         match act {
             Act::Unveil(ids) => {
                 self.store.borrow_mut().unveiled.extend(ids);
+                self.refresh_rows(false);
+            }
+            Act::Veil(ids) => {
+                let mut store = self.store.borrow_mut();
+                for id in &ids {
+                    store.unveiled.remove(id);
+                }
+                drop(store);
                 self.refresh_rows(false);
             }
             Act::Mini(npub, key) => {
@@ -10291,7 +10299,7 @@ fn timeline_row(ctx: &timeline::Ctx, row: &Row, after_message: bool) -> AnyEleme
             .child(divider(div().text_size(px(12.)).text_color(c(TEXT)).child(text.clone()), white_a(0.1), 0.7))
             .into_any_element(),
         Row::System { index, count } => system_row(ctx, *index, *count),
-        Row::Message { index, first, run } => {
+        Row::Message { index, first, run, shown } => {
             let gap = if !after_message {
                 0.
             } else if *first {
@@ -10299,7 +10307,7 @@ fn timeline_row(ctx: &timeline::Ctx, row: &Row, after_message: bool) -> AnyEleme
             } else {
                 1.
             };
-            timeline::message_row(ctx, *index, *first, *run, gap)
+            timeline::message_row(ctx, *index, *first, *run, *shown, gap)
         }
     }
 }

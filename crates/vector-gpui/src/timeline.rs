@@ -31,6 +31,8 @@ pub enum Act {
     Play(crate::linkcard::Play),
     /// A collapsed post, or a run of them, tapped open.
     Unveil(Vec<String>),
+    /// Collapse shown messages again.
+    Veil(Vec<String>),
     /// Older history failed to load: ask again.
     RetryHistory,
     /// An avatar or name tapped: their mini profile, beside what was painted under the key.
@@ -248,10 +250,13 @@ fn author_menu(ctx: &Ctx, m: &Message, npub: &str, key: &SharedString) -> impl F
     }
 }
 
-pub fn message_row(ctx: &Ctx, index: usize, first: bool, run: u32, gap: f32) -> AnyElement {
+pub fn message_row(ctx: &Ctx, index: usize, first: bool, run: u32, shown: u32, gap: f32) -> AnyElement {
     let m = &ctx.chat.messages[index];
     let author = author_of(ctx, m);
     let hidden = ctx.store.hidden(ctx.chat, m);
+    let revealed = ctx.store.revealed_as(ctx.chat, m);
+    // A shown blocked post dims what it says; its author reads as it did collapsed.
+    let dim = |d: gpui::Div| d.when(matches!(revealed, Some(data::Hidden::Blocked | data::Hidden::Unauthorized)), |d| d.opacity(0.4));
     let quote = (!m.replied_to.is_empty() && hidden.is_none())
         .then(|| reply_quote(ctx, m))
         .flatten();
@@ -309,7 +314,7 @@ pub fn message_row(ctx: &Ctx, index: usize, first: bool, run: u32, gap: f32) -> 
         return row_shell(ctx, m, gap, gutter, body, pinged, replying, failed, hovered, first);
     }
     if let Some(q) = quote {
-        body = body.child(q);
+        body = body.child(dim(div()).child(q));
     }
     if first {
         body = body.child(
@@ -372,31 +377,21 @@ pub fn message_row(ctx: &Ctx, index: usize, first: bool, run: u32, gap: f32) -> 
         } else {
             vec![m.id.clone()]
         };
-        let (act, id) = (ctx.on_act.clone(), m.id.clone());
         let label: SharedString = if run > 1 { format!("{run} blocked messages").into() } else { why.label().into() };
-        let icon = if matches!(why, data::Hidden::NoSend | data::Hidden::TimedOut) { "icons/clock.svg" } else { "icons/cancel.svg" };
-        body = body.child(
-            div().flex().child(
-                div()
-                    .id(SharedString::from(format!("unveil:{}", m.id)))
-                    .flex()
-                    .items_center()
-                    .gap(px(5.))
-                    .cursor_pointer()
-                    .italic()
-                    .font_family(RUBIK)
-                    .text_size(px(15.))
-                    .line_height(px(21.))
-                    .text_color(white_a(0.3))
-                    .on_click(move |_, w, cx| act(&id, Act::Unveil(ids.clone()), w, cx))
-                    .child(svg().path(icon).size(px(14.)).flex_shrink_0().text_color(white_a(0.3)))
-                    .child(label),
-            ),
-        );
+        body = body.child(hidden_toggle(ctx, m, why, label, Act::Unveil(ids)));
         return row_shell(ctx, m, gap, gutter, body, false, replying, failed, hovered, first);
     }
+    if let Some(why) = revealed.filter(|_| shown > 0) {
+        let ids = ctx.chat.messages[index..].iter().take(shown as usize).map(|o| o.id.clone()).collect();
+        let what: SharedString = if shown > 1 && why == data::Hidden::Blocked {
+            format!("{shown} blocked messages").into()
+        } else {
+            why.label().into()
+        };
+        body = body.child(hidden_toggle(ctx, m, why, format!("{what} \u{b7} Hide").into(), Act::Veil(ids)));
+    }
     body = body.child(
-        div()
+        dim(div())
             .when(pending || failed, |d| d.opacity(0.6))
             .child(content(ctx, m))
             .children(crate::attachments::attachments(ctx, m))
@@ -444,7 +439,7 @@ pub fn message_row(ctx: &Ctx, index: usize, first: bool, run: u32, gap: f32) -> 
     );
     if let Some(reason) = ctx.fail_reasons.get(&m.id).filter(|_| failed) {
         body = body.child(
-            div()
+            dim(div())
                 .mt(px(4.))
                 .text_size(px(12.))
                 .line_height(px(16.2))
@@ -453,9 +448,35 @@ pub fn message_row(ctx: &Ctx, index: usize, first: bool, run: u32, gap: f32) -> 
         );
     }
     if let Some(r) = reactions(ctx, m) {
-        body = body.child(r);
+        body = body.child(dim(div()).child(r));
     }
     row_shell(ctx, m, gap, gutter, body, pinged, replying, failed, hovered, first)
+}
+
+/// `.dmsg-hidden-toggle`: what a collapsed row says in its place, or the line that collapses a
+/// shown run again.
+fn hidden_toggle(ctx: &Ctx, m: &Message, why: data::Hidden, label: SharedString, on: Act) -> AnyElement {
+    let (act, id) = (ctx.on_act.clone(), m.id.clone());
+    let icon = if matches!(why, data::Hidden::NoSend | data::Hidden::TimedOut) { "icons/clock.svg" } else { "icons/cancel.svg" };
+    div()
+        .flex()
+        .child(
+            div()
+                .id(SharedString::from(format!("unveil:{}", m.id)))
+                .flex()
+                .items_center()
+                .gap(px(5.))
+                .cursor_pointer()
+                .italic()
+                .font_family(RUBIK)
+                .text_size(px(15.))
+                .line_height(px(21.))
+                .text_color(white_a(0.3))
+                .on_click(move |_, w, cx| act(&id, on.clone(), w, cx))
+                .child(svg().path(icon).size(px(14.)).flex_shrink_0().text_color(white_a(0.3)))
+                .child(label),
+        )
+        .into_any_element()
 }
 
 #[allow(clippy::too_many_arguments)]

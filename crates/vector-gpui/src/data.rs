@@ -986,7 +986,22 @@ impl Store {
 
     /// `_dmsgPostedTimedOut` and a blocked group author: why `m` shows collapsed, if it does.
     pub fn hidden(&self, chat: &SerializableChat, m: &vector_core::Message) -> Option<Hidden> {
-        if m.mine || self.unveiled.contains(&m.id) {
+        if self.unveiled.contains(&m.id) {
+            return None;
+        }
+        self.hidden_for(chat, m)
+    }
+
+    /// Why a shown post was collapsed, for the line that collapses it again.
+    pub fn revealed_as(&self, chat: &SerializableChat, m: &vector_core::Message) -> Option<Hidden> {
+        if !self.unveiled.contains(&m.id) {
+            return None;
+        }
+        self.hidden_for(chat, m)
+    }
+
+    fn hidden_for(&self, chat: &SerializableChat, m: &vector_core::Message) -> Option<Hidden> {
+        if m.mine {
             return None;
         }
         let npub = m.npub.as_deref()?;
@@ -1138,11 +1153,13 @@ pub enum Row {
     /// Under the last message: why nothing new will arrive.
     Notice(String),
     /// `first` heads a streak (avatar and header); otherwise a continuation. `run` counts one
-    /// author's blocked messages folded into this row.
+    /// author's blocked messages folded into this row; `shown` the run of one author's shown
+    /// collapsed messages this row heads, which hide again together.
     Message {
         index: usize,
         first: bool,
         run: u32,
+        shown: u32,
     },
     /// `index` into the chat's system lines; `count` folds back-to-back repeats of a mergeable one.
     System {
@@ -1227,10 +1244,12 @@ pub fn timeline(
     read_anchor: Option<&Unread>,
     commands: Option<&HashSet<String>>,
     blocked: &dyn Fn(&vector_core::Message) -> bool,
+    revealed: &dyn Fn(&vector_core::Message) -> bool,
 ) -> Vec<Row> {
     let mut rows = Vec::with_capacity(chat.messages.len() + 2);
     let mut last_day = None;
     let mut run_head: Option<usize> = None;
+    let mut shown_head: Option<usize> = None;
     let at = |id: &str| chat.messages.iter().position(|m| m.id == id);
     let divider = match read_anchor {
         Some(Unread::At(id)) => at(id),
@@ -1265,6 +1284,7 @@ pub fn timeline(
         if push_system(&mut rows, &mut last_day, m.at) {
             after_system = true;
             run_head = None;
+            shown_head = None;
         }
         let day = local(m.at).date_naive();
         if last_day != Some(day) {
@@ -1274,6 +1294,7 @@ pub fn timeline(
             });
             last_day = Some(day);
             run_head = None;
+            shown_head = None;
         }
         if divider == Some(i) {
             rows.push(Row::Unread);
@@ -1291,7 +1312,18 @@ pub fn timeline(
         } else {
             run_head = Some(rows.len());
         }
-        rows.push(Row::Message { index: i, first, run: 1 });
+        let mut shown = 0;
+        if !revealed(m) {
+            shown_head = None;
+        } else if let Some(Row::Message { index, shown, .. }) = shown_head.and_then(|h| rows.get_mut(h))
+            && chat.messages[*index].npub == m.npub
+        {
+            *shown += 1;
+        } else {
+            shown_head = Some(rows.len());
+            shown = 1;
+        }
+        rows.push(Row::Message { index: i, first, run: 1, shown });
     }
     push_system(&mut rows, &mut last_day, u64::MAX);
     rows
