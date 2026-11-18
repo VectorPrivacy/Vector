@@ -12,6 +12,7 @@ use gpui::{AnyElement, App, Entity, FontWeight, PathBuilder, ScrollHandle, Share
 use crate::pic::img;
 
 use crate::composer::TextInput;
+use crate::t;
 use crate::theme::*;
 
 #[path = "settings_slim.rs"]
@@ -431,268 +432,89 @@ pub fn toggle_of(key: &str) -> Option<&'static Toggle> {
 }
 
 /// One explainer per (i): a title and HTML-lite text (`SETTINGS_HELP`, `DISPLAY_EXPLAINERS`).
-pub fn help(key: &str) -> Option<(&'static str, String)> {
+pub fn help(key: &str) -> Option<(SharedString, String)> {
     let (title, text) = match key {
-        "startMenu" => (
-            "Main Menu",
-            "<b>When enabled:</b> your Profile, Chat, Bookmarks, Mini Apps and Settings live in a Main Menu that opens from your row at the bottom of the sidebar, beside pins for the apps, chats and places you use most.<br><br><b>When disabled:</b> they sit down the sidebar as tabs, as before.<br><br>This applies to this device only.",
+        "startMenu" => (t::settings_help_start_menu(), t::settings_help_start_menu_text()),
+        "hideRail" => (t::settings_help_hide_rail(), t::settings_help_hide_rail_text()),
+        "imageTypes" => (t::settings_help_image_types(), t::settings_help_image_types_text()),
+        "chatBg" => (t::settings_help_chat_bg(), t::settings_help_chat_bg_text()),
+        "timeSuggestions" => (t::settings_help_time_suggestions(), t::settings_help_time_suggestions_text()),
+        "emoticons" => (t::settings_help_emoticons(), t::settings_help_emoticons_text()),
+        "autocorrect" => (t::settings_help_autocorrect(), t::settings_help_autocorrect_text()),
+        "sendOnEnter" => (t::settings_help_send_on_enter(), t::settings_help_send_on_enter_text()),
+        "floatingPlayer" => (t::settings_help_floating_player(), t::settings_help_floating_player_text()),
+        "relays" => (t::settings_help_relays(), t::settings_help_relays_text()),
+        "servers" => (t::settings_help_servers(), t::settings_help_servers_text()),
+        "mute" => (t::settings_help_mute(), t::settings_help_mute_text()),
+        "everyone" => (t::settings_help_everyone(), t::settings_help_everyone_text()),
+        "notifPrivacy" => (t::settings_help_notif_privacy(), t::settings_help_notif_privacy_text()),
+        "clock" => (t::settings_help_clock(), t::settings_help_clock_text()),
+        "keepMedia" => (t::settings_help_keep_media(), t::settings_help_keep_media_text()),
+        "keepUnencrypted" => (
+            t::settings_help_keep_unencrypted(),
+            t::settings_help_keep_unencrypted_text(crate::backend::mediaport::public_folder().to_string()),
         ),
-        "hideRail" => (
-            "Hide Community Rail",
-            "When enabled, the <b>community rail and its pull tab are hidden</b>, and your communities sit in the chat list behind the <b>All</b>, <b>Messages</b>, <b>Communities</b> and <b>Requests</b> filters.<br><br>This applies to this device only.",
-        ),
-        "imageTypes" => (
-            "Display Image Types",
-            "When enabled, images in chat will display a <b>small badge showing the file type</b> (e.g., PNG, GIF, WEBP) in the corner.<br><br>This helps identify image formats at a glance.",
-        ),
-        "chatBg" => (
-            "Background Wallpaper",
-            "This feature enables and disables background images inside of Chats (DMs & Communities).<br><br>Only applies to certain themes.",
-        ),
-        "timeSuggestions" => (
-            "Time Suggestions",
-            "When you type a time to come, like <b>in 6 hours</b> or <b>dec 25 at 8pm</b>, the composer offers to send it as a time everyone sees in their own zone: a live countdown, or the date and time where they are.<br><br>Press <b>Tab</b> or tap the suggestion to use it; keep typing to leave it as written.",
-        ),
-        "emoticons" => (
-            "Emoticon Suggestions",
-            "When enabled, text emoticons suggest the matching emoji as you type:<br><br><b>:)</b> → 🙂&nbsp;&nbsp; <b>:D</b> → 😄&nbsp;&nbsp; <b>:P</b> → 😛&nbsp;&nbsp; <b>:3</b> → 😺<br><br>Turn it off to type emoticons as plain text (e.g. <b>:3</b>) without the emoji selector getting in the way.",
-        ),
-        "autocorrect" => (
-            "Autocorrect",
-            "When enabled, your device corrects typos as you type in the chat box, using your system's autocorrect.<br><br>Turn it off if your system keeps \"fixing\" words you meant to type.",
-        ),
-        "sendOnEnter" => (
-            "Send on Enter",
-            "When enabled, <b>Enter</b> sends your message, and <b>Shift + Enter</b> starts a new line.<br><br>Turn it off to have Enter always start a new line; send with the Send button, or <b>Ctrl + Enter</b> (<b>Cmd + Enter</b> on a Mac).<br><br>On by default on computers and off on phones. This applies to this device only.",
-        ),
-        "floatingPlayer" => (
-            "Floating Player",
-            "When enabled, <b>audio and video keep playing</b> when you leave their chat, in a small player you can move and resize anywhere.<br><br>Runs of voice messages play through, and a video can shrink to sound only.<br><br>Turn it off to stop media when you leave its chat.",
-        ),
-        "relays" => (
-            "Nostr Relays",
-            "Nostr Relays are <b>decentralized servers that store and relay your messages</b> across the Nostr network.<br><br>Vector connects to multiple relays simultaneously to ensure your messages are delivered reliably and are censorship-resistant.",
-        ),
-        "servers" => (
-            "Media Servers",
-            "Media Servers are <b>Blossom-compatible servers that store your files</b> (images, videos, documents) for sharing in messages and for storage in an encrypted cloud.<br><br>Your server list syncs automatically across your devices.",
-        ),
-        "mute" => (
-            "Mute Notification Sounds",
-            "When enabled, Vector will <b>not play any notification sounds</b> for incoming messages.<br><br>You will still receive visual notifications and badges.",
-        ),
-        "everyone" => (
-            "Mute @everyone Pings",
-            "When enabled, <b>@everyone</b> mentions from group admins will <b>not bypass</b> your group mute setting.<br><br>By default, @everyone pings from admins will notify you even if the group is muted.",
-        ),
-        "notifPrivacy" => (
-            "Notification Content Privacy",
-            "Controls how much of a message shows in OS notifications (lock screen, banners).<br><br><b>Show sender and message</b>: full preview.<br><b>Hide message</b>: shows who messaged you, not what.<br><b>Hide sender</b>: shows the message, not who sent it.<br><b>Hide sender and message</b>: a generic \"You received a message\", revealing nothing.",
-        ),
-        "clock" => (
-            "Decentralised Clock",
-            "When enabled, Vector keeps time by your Nostr relays instead of this device. It asks up to eight of them for the time every hour, and uses their time only when at least three agree; otherwise it keeps this device’s.<br><br>A device whose clock has drifted otherwise sends messages that look minutes old or from the future, sees others’ messages the same way, and gets turned away by media servers that check the time.<br><br>Off: Vector uses this device’s clock as it is.",
-        ),
-        "keepMedia" => (
-            "Keep Files on This Device",
-            "<b>When enabled:</b> every file you receive is kept on this device, encrypted, so it opens instantly and never downloads twice.<br><br><b>When disabled:</b> files stay in memory while Vector is open, and load again after it closes. One too large to hold waits for a tap, then is kept. Turning it off deletes what it kept.",
-        ),
-        "keepUnencrypted" => {
-            return Some((
-                "Keep Unencrypted",
-                format!("What Vector keeps is saved as normal files in {}, so other apps and backups can open them.<br><br>Anyone with access to this device's files can open them too.", crate::backend::mediaport::public_folder()),
-            ));
-        }
-        "stripTracking" => (
-            "Strip Tracking Markers",
-            "When enabled, Vector will <b>automatically remove tracking markers</b> from URLs before displaying or sending them.<br><br>This helps reduce your footprint and enhances your privacy with no loss in functionality, only disable if you know what you're doing.",
-        ),
-        "sendTyping" => (
-            "Send Typing Indicators",
-            "When enabled, Vector will <b>notify your contacts when you are typing</b> a message to them.<br><br>Disable this if you prefer to type without others knowing you are composing a message.",
-        ),
-        "proxyMedia" => (
-            "Proxy Previews & Media",
-            "Fetches link previews and every download (avatars, banners, custom emoji, GIFs, pictures posted as links, attachments, wallpapers, community logos, mini apps) through your Magnitude server instead of from this device. Only your Nostr relays and Vector's own servers are reached directly.<br><br>A file loaded directly is a request from <b>your</b> address to whoever hosts it; through Magnitude, they see the server instead. Needs a Magnitude server in your Blossom list that offers it.<br><br>On Tor or I2P, a link preview with no Magnitude server to fetch it loads through that network instead.<br><br>Off: everything loads directly from its source.",
-        ),
-        "torMultiCircuit" => (
-            "Multi-Circuit",
-            "Each relay and media server gets its own Tor circuit. No single exit sees every server you use, and a slow circuit only slows the one connection riding it.<br><br>Turn this off to send everything over one shared circuit, like a VPN: fewer circuits to build, and one exit for all your traffic.",
-        ),
-        "torExternal" => (
-            "Use Running Tor",
-            "Vector connects through a Tor that's already running on this device instead of starting its own: <b>Tor Browser</b> (port 9150), or <b>tor</b> or <b>Orbot</b> (port 9050). It starts instantly and shares that Tor's bridges.<br><br>Vector trusts whatever answers on this port. Leave the port empty to find it.",
-        ),
-        "torBridges" => (
-            "Use Bridges",
-            "Bridges are private Tor relays that aren't listed publicly, so a network that blocks Tor can't block them as easily.<br><br>Turn this on if Tor fails to connect where you are, then paste bridge lines from <b>bridges.torproject.org</b>. You can set them up before switching to Tor.",
-        ),
-        "i2pRouter" => (
-            "I2P Router",
-            "Vector uses the I2P router already running on this device, through its SAM bridge.<br><br>In i2pd, set <b>[sam] enabled = true</b>. In Java I2P, start the <b>SAM application bridge</b>. On Android, turn on <b>SAM</b> in the i2pd app, where it starts off.<br><br>For a router on another machine, forward its SAM port to this one, for example over SSH.<br><br>Vector trusts whatever answers on this port. Other apps that can reach your router can use Vector's I2P address.",
-        ),
-        "i2pAuth" => (
-            "SAM Password",
-            "Only needed if your router asks for one.",
-        ),
-        "i2pIdentity" => (
-            "New Address",
-            "Vector gets fresh I2P addresses for this account and reconnects.<br><br>Your relays and other servers see different addresses, both shown under Connection. Servers see the new ones from then on.",
-        ),
-        "i2pOnly" => (
-            "I2P-Only",
-            "Vector reaches only I2P relays and servers, plus the I2P addresses you added.<br><br>Other relays and servers stay unreachable while this is on.",
-        ),
-        "i2pOutproxy" => (
-            "Outproxies",
-            "Relays and servers outside I2P are reached through an outproxy, tried in this order.<br><br>An outproxy sees which servers you use, and everyone using it shares its IP address.<br><br>It can link everything you reach through it.",
-        ),
-        "onionAlias" => (
-            "Onion Address",
-            "A server can also be reachable as a Tor onion service. Vector connects there instead of through a Tor exit.<br><br>Your connection stays encrypted to the server itself.",
-        ),
-        "i2pAlias" => (
-            "I2P Address",
-            "A server can also be reachable inside I2P. Vector connects there instead of through an outproxy.<br><br>Your connection stays encrypted to the server itself.",
-        ),
-        "transport" => (
-            "Routing",
-            "Choose how Vector reaches relays and servers.<br><br><b>Tor</b> and <b>I2P</b> hide your IP address. Calls and multiplayer Mini Apps ask before connecting outside them.",
-        ),
-        "autoDownload" => (
-            "Auto-Download Media",
-            "When enabled, Vector automatically downloads incoming photos, videos, voice messages and files (up to the size limit below).<br><br>Turn this off to keep attachments as previews and download them by hand, one at a time.",
-        ),
-        "autoDownloadLimit" => (
-            "Auto-Download Limit",
-            "The largest attachment size Vector will fetch automatically.<br><br>Anything above this waits for you to tap Download. Only applies while Auto-Download Media is on.",
-        ),
-        "videoQuality" => (
-            "Video Quality",
-            "How much Vector shrinks the videos you send. Smaller videos send faster and play smoothly on older phones.<br><br><b>Small</b> fits 540p, <b>Balanced</b> and <b>High</b> fit 720p, all at up to 30 fps. A video that is already small enough is sent as it is.<br><br><b>Original</b> never compresses, and the Compress option no longer shows.",
-        ),
-        "clearStorage" => (
-            "Clear Storage",
-            "Deletes the downloaded and sent files Vector has cached on this device, to free up space.<br><br>Your messages stay. Attachments can be downloaded again later if they are still available from their sender.",
-        ),
-        "encryption" => (
-            "Local Encryption",
-            "Protects your messages and keys if your device is lost or stolen.<br><br>Disabling speeds up app launch but stores data in plain text.",
-        ),
-        "changePin" => (
-            "Change PIN",
-            "Your PIN encrypts all local data including messages, keys, and secrets stored on your device. Resetting it will re-encrypt everything with your new PIN.",
-        ),
-        "changePassword" => (
-            "Change Password",
-            "Your password encrypts all local data including messages, keys, and secrets stored on your device. Resetting it will re-encrypt everything with your new password.",
-        ),
-        "exportAccount" => (
-            "Private Keys",
-            "Shows your private key and seed phrase. You only need these to back up your account offline or to use it in another Nostr app. To use Vector on another device, use Sign in on Another Device instead.",
-        ),
-        "transfer" => (
-            "Sign in on Another Device",
-            "Bring this account to a phone, computer or browser by scanning a code or typing it in. Both devices check a number together and you approve on this device, so your keys never leave it in a form anyone else can read. This device stays signed in.",
-        ),
-        "updates" => (
-            "Updates",
-            "This copy of Vector checks for new releases by itself: Check for Updates finds the newest one, then Download Update takes you to it.<br><br>We recommend always running the latest version: every release carries security, privacy and stability fixes.",
-        ),
-        "beta" => (
-            "Beta Updates",
-            "Beta builds are <b>release candidates of the next Vector version</b>, offered here before the official release.<br><br>They carry the newest fixes and features with a little less polish, and you'll be moved onto the official build the moment it releases.<br><br>Turning this off on a beta parks you on your current build until the next official release, then you ride stable from there.",
-        ),
-        "autoGain" => (
-            "Automatic Gain",
-            "Lifts a quiet microphone so nobody has to shout, and eases off a loud one.",
-        ),
-        "echoCancel" => (
-            "Echo Cancellation",
-            "Keeps your speakers out of your microphone, so the other side never hears themselves back.",
-        ),
-        "noiseSuppress" => (
-            "Noise Suppression",
-            "Takes down fans, keyboards and hum while you talk.",
-        ),
-        "direct" => (
-            "Direct Connection",
-            "Off, calls and Mini Apps reach people through a relay, so they never learn your IP address. On, you connect straight to them for lower latency, and they can see your IP address.",
-        ),
-        "streamerMode" => (
-            "Streamer Mode",
-            "Hides the names, pictures and keys of anyone who has not allowed streams, so you can share your screen.",
-        ),
-        "streamConsent" => (
-            "Show me on streams",
-            "Lets people using Streamer Mode show your name and picture on their streams.",
-        ),
-        "streamerWallpapers" => (
-            "Hide chat wallpapers",
-            "Shows a plain background in chats while you stream, since a wallpaper can give away who you are talking to.",
-        ),
-        "streamerNotif" => (
-            "While streaming, also hide",
-            "Hides more of each notification while Streamer Mode is on, on top of Notification Content Privacy.",
-        ),
-        "players" => (
-            "Video Players",
-            "Lets YouTube links play right in the chat, from their Web Preview. Nothing loads from YouTube until you press play, and then YouTube sees your IP address like any visit would.<br><br>Players stay off while you use Tor or I2P, since they load outside them.<br><br>This setting follows your account to your other devices.",
-        ),
-        "advancedMode" => (
-            "Advanced Mode",
-            "Shows extra detail meant for developers, such as <b>Copy ID</b> on communities, channels and messages, so a bot can be set up to work in just one of them.<br><br>This setting follows your account to your other devices.",
-        ),
-        "crashLog" => (
-            "Logs",
-            "Copies error logs and crash details to your clipboard.<br><br>Share with developers when reporting bugs to help diagnose issues.",
-        ),
-        "voiceModel" => (
-            "Vector Voice AI Model",
-            "The Vector Voice AI model <b>determines the Quality of your transcriptions.</b><br><br>A larger model will provide more accurate transcriptions & translations, but require more Disk Space, Memory and CPU power to run.",
-        ),
-        "voiceTranslate" => (
-            "Vector Voice Translations",
-            "Vector Voice AI can <b>automatically detect non-English languages and translate them in to English text for you.</b><br><br>You can decide whether Vector Voice transcribes in to their native spoken language, or instead translates in to English on your behalf.",
-        ),
-        "voiceTranscribe" => (
-            "Vector Voice Transcriptions",
-            "Vector Voice AI can <b>automatically transcribe incoming Voice Messages</b> for immediate reading, without needing to listen.<br><br>You can decide whether Vector Voice transcribes automatically, or if you prefer to transcribe each message explicitly.",
-        ),
-        "logout" => (
-            "Logout",
-            "Logout will erase the local database and remove all stored keys. You will lose access to your communities unless you have a backup.",
-        ),
+        "stripTracking" => (t::settings_help_strip_tracking(), t::settings_help_strip_tracking_text()),
+        "sendTyping" => (t::settings_help_send_typing(), t::settings_help_send_typing_text()),
+        "proxyMedia" => (t::settings_help_proxy_media(), t::settings_help_proxy_media_text()),
+        "torMultiCircuit" => (t::settings_help_tor_multi_circuit(), t::settings_help_tor_multi_circuit_text()),
+        "torExternal" => (t::settings_help_tor_external(), t::settings_help_tor_external_text()),
+        "torBridges" => (t::settings_help_tor_bridges(), t::settings_help_tor_bridges_text()),
+        "i2pRouter" => (t::settings_help_i2p_router(), t::settings_help_i2p_router_text()),
+        "i2pAuth" => (t::settings_help_i2p_auth(), t::settings_help_i2p_auth_text()),
+        "i2pIdentity" => (t::settings_help_i2p_identity(), t::settings_help_i2p_identity_text()),
+        "i2pOnly" => (t::settings_help_i2p_only(), t::settings_help_i2p_only_text()),
+        "i2pOutproxy" => (t::settings_help_i2p_outproxy(), t::settings_help_i2p_outproxy_text()),
+        "onionAlias" => (t::settings_help_onion_alias(), t::settings_help_onion_alias_text()),
+        "i2pAlias" => (t::settings_help_i2p_alias(), t::settings_help_i2p_alias_text()),
+        "transport" => (t::settings_help_transport(), t::settings_help_transport_text()),
+        "autoDownload" => (t::settings_help_auto_download(), t::settings_help_auto_download_text()),
+        "autoDownloadLimit" => (t::settings_help_auto_download_limit(), t::settings_help_auto_download_limit_text()),
+        "videoQuality" => (t::settings_help_video_quality(), t::settings_help_video_quality_text()),
+        "clearStorage" => (t::settings_help_clear_storage(), t::settings_help_clear_storage_text()),
+        "encryption" => (t::settings_help_encryption(), t::settings_help_encryption_text()),
+        "changePin" => (t::settings_help_change_pin(), t::settings_help_change_pin_text()),
+        "changePassword" => (t::settings_help_change_password(), t::settings_help_change_password_text()),
+        "exportAccount" => (t::settings_help_export_account(), t::settings_help_export_account_text()),
+        "transfer" => (t::settings_help_transfer(), t::settings_help_transfer_text()),
+        "updates" => (t::settings_help_updates(), t::settings_help_updates_text()),
+        "beta" => (t::settings_help_beta(), t::settings_help_beta_text()),
+        "autoGain" => (t::settings_help_auto_gain(), t::settings_help_auto_gain_text()),
+        "echoCancel" => (t::settings_help_echo_cancel(), t::settings_help_echo_cancel_text()),
+        "noiseSuppress" => (t::settings_help_noise_suppress(), t::settings_help_noise_suppress_text()),
+        "direct" => (t::settings_help_direct(), t::settings_help_direct_text()),
+        "streamerMode" => (t::settings_help_streamer_mode(), t::settings_help_streamer_mode_text()),
+        "streamConsent" => (t::settings_help_stream_consent(), t::settings_help_stream_consent_text()),
+        "streamerWallpapers" => (t::settings_help_streamer_wallpapers(), t::settings_help_streamer_wallpapers_text()),
+        "streamerNotif" => (t::settings_help_streamer_notif(), t::settings_help_streamer_notif_text()),
+        "players" => (t::settings_help_players(), t::settings_help_players_text()),
+        "advancedMode" => (t::settings_help_advanced_mode(), t::settings_help_advanced_mode_text()),
+        "crashLog" => (t::settings_help_crash_log(), t::settings_help_crash_log_text()),
+        "voiceModel" => (t::settings_help_voice_model(), t::settings_help_voice_model_text()),
+        "voiceTranslate" => (t::settings_help_voice_translate(), t::settings_help_voice_translate_text()),
+        "voiceTranscribe" => (t::settings_help_voice_transcribe(), t::settings_help_voice_transcribe_text()),
+        "logout" => (t::settings_help_logout(), t::settings_help_logout_text()),
         "webPreviews" => {
             // Off Clearnet every preview fetch rides the chosen network, or fails closed.
-            let lead = "When enabled, Vector will <b>automatically fetch and display previews</b> for links shared in messages.<br><br>";
             use vector_core::transport::{Kind, prefs, supported};
             let kind = prefs::live()
                 .kind()
                 .filter(|k| *k != Kind::Clearnet)
                 .map(Kind::label);
-            let text = match kind {
-                Some(label) => format!(
-                    "{lead}You have <b>{label}</b> on, so preview fetches route through it. Your IP address stays hidden from the linked sites."
-                ),
+            let rest = match kind {
+                Some(label) => t::settings_help_web_previews_routed(label),
                 None => {
-                    let others = supported()
-                        .into_iter()
-                        .filter(|k| *k != Kind::Clearnet)
-                        .map(Kind::label)
-                        .collect::<Vec<_>>()
-                        .join(" or ");
-                    let hint = if others.is_empty() {
-                        "<b>Use a VPN</b>".to_string()
-                    } else {
-                        format!("<b>Use {others}</b> (Privacy, Routing) <b>or a VPN</b>")
-                    };
-                    format!(
-                        "{lead}This may expose your IP address to the linked sites. {hint} if that's a concern."
-                    )
+                    let others: Vec<&str> = supported().into_iter().filter(|k| *k != Kind::Clearnet).map(Kind::label).collect();
+                    match others.split_first() {
+                        None => t::settings_help_web_previews_exposed(),
+                        Some((first, rest)) => {
+                            let either = rest.iter().fold(first.to_string(), |a, b| t::either(&a, *b).to_string());
+                            t::settings_help_web_previews_exposed_networks(either)
+                        }
+                    }
                 }
             };
-            return Some(("Web Previews", text));
+            (t::settings_help_web_previews(), format!("{}<br><br>{rest}", t::settings_help_web_previews_text()).into())
         }
         _ => return None,
     };

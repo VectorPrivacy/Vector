@@ -51,3 +51,8 @@ main-menu-unpin = Unpin
 
 # A percentage, such as a volume or a share of lost audio. $value is the number.
 percent = { $value }%
+
+## Joining names
+
+# Two choices, either of which will do. $first and $second are names, such as Tor and I2P.
+either = { $first } or { $second }
