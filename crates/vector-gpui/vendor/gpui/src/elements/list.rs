@@ -1328,7 +1328,7 @@ impl StateInner {
                         true => point(bounds.right() - padding.left - item.size.width, item_origin.y),
                         false => item_origin,
                     };
-                    window.with_content_mask(Some(ContentMask { bounds }), |window| {
+                    window.with_content_mask(Some(ContentMask::new(bounds)), |window| {
                         window.scroll_parents.push(crate::window::ScrollParent::List);
                         item.element.prepaint_at(at, window, cx);
                         window.scroll_parents.pop();
@@ -1670,7 +1670,7 @@ impl Element for List {
             }
         });
 
-        window.with_content_mask(Some(ContentMask { bounds }), |window| {
+        window.with_content_mask(Some(ContentMask::new(bounds)), |window| {
             for item in &mut prepaint.layout.item_layouts {
                 item.element.paint(window, cx);
             }

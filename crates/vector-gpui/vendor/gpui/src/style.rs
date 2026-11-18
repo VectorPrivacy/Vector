@@ -636,6 +636,21 @@ impl Style {
         }
     }
 
+    /// [`Self::overflow_mask`], its rounding mirrored with the layout.
+    pub fn overflow_mask_in(&self, bounds: Bounds<Pixels>, window: &Window) -> Option<ContentMask<Pixels>> {
+        let mut mask = self.overflow_mask(bounds, window.rem_size())?;
+        if window.mirrored() {
+            let c = mask.corner_radii;
+            mask.corner_radii = Corners {
+                top_left: c.top_right,
+                top_right: c.top_left,
+                bottom_right: c.bottom_left,
+                bottom_left: c.bottom_right,
+            };
+        }
+        Some(mask)
+    }
+
     /// Get the content mask for this element style, based on the given bounds.
     /// If the element does not hide its overflow, this will return `None`.
     pub fn overflow_mask(
@@ -678,11 +693,26 @@ impl Style {
                         point(bounds.origin.x, min.y),
                         point(bounds.bottom_right().x, max.y),
                     ),
-                    // both hidden
-                    (false, false) => Bounds::from_corners(min, max),
+                    // both hidden: clipped to the padding box's rounding, as CSS does
+                    (false, false) => {
+                        let (t, r, b, l) = (min.y - bounds.origin.y, bounds.right() - max.x, bounds.bottom() - max.y, min.x - bounds.origin.x);
+                        let bounds = Bounds::from_corners(min, max);
+                        let inner = |r: AbsoluteLength, a: Pixels, b: Pixels| {
+                            (r.to_pixels(rem_size) - a.max(b)).max(px(0.)).min(bounds.size.width.min(bounds.size.height) / 2.)
+                        };
+                        return Some(ContentMask {
+                            bounds,
+                            corner_radii: Corners {
+                                top_left: inner(self.corner_radii.top_left, t, l),
+                                top_right: inner(self.corner_radii.top_right, t, r),
+                                bottom_right: inner(self.corner_radii.bottom_right, b, r),
+                                bottom_left: inner(self.corner_radii.bottom_left, b, l),
+                            },
+                        });
+                    }
                 };
 
-                Some(ContentMask { bounds })
+                Some(ContentMask::new(bounds))
             }
         }
     }

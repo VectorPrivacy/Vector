@@ -1990,9 +1990,7 @@ impl Element for TextElement {
         );
         let field = bounds;
         let bounds = prepaint.text;
-        let mask = gpui::ContentMask {
-            bounds: Bounds::new(field.origin - point(px(0.), px(40.)), size(field.size.width, field.size.height + px(80.))),
-        };
+        let mask = gpui::ContentMask::new(Bounds::new(field.origin - point(px(0.), px(40.)), size(field.size.width, field.size.height + px(80.))));
         let (layout, caret) = window.with_content_mask(Some(mask), |window| {
             for quad in prepaint.selections.drain(..) {
                 window.paint_quad(quad);

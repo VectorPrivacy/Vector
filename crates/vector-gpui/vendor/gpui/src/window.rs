@@ -2514,13 +2514,24 @@ pub struct DispatchEventResult {
 }
 
 /// Indicates which region of the window is visible. Content falling outside of this mask will not be
-/// rendered. Currently, only rectangular content masks are supported, but we give the mask its own type
-/// to leave room to support more complex shapes in the future.
+/// rendered: a rectangle, rounded at its corners as CSS clips `overflow: hidden` to `border-radius`.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 #[repr(C)]
 pub struct ContentMask<P: Clone + Debug + Default + PartialEq> {
     /// The bounds
     pub bounds: Bounds<P>,
+    /// Each corner's rounding; zero clips square.
+    pub corner_radii: Corners<P>,
+}
+
+impl<P: Clone + Copy + Debug + Default + PartialEq> ContentMask<P> {
+    /// A square mask.
+    pub fn new(bounds: Bounds<P>) -> Self {
+        ContentMask {
+            bounds,
+            corner_radii: Corners::default(),
+        }
+    }
 }
 
 impl ContentMask<Pixels> {
@@ -2528,13 +2539,31 @@ impl ContentMask<Pixels> {
     pub fn scale(&self, factor: f32) -> ContentMask<ScaledPixels> {
         ContentMask {
             bounds: self.bounds.scale(factor),
+            corner_radii: self.corner_radii.scale(factor),
         }
     }
 
-    /// Intersect the content mask with the given content mask.
+    /// Intersect the content mask with the given content mask. A corner keeps the rounding of the
+    /// mask whose corner it is; one inside both masks' corners is square.
     pub fn intersect(&self, other: &Self) -> Self {
         let bounds = self.bounds.intersect(&other.bounds);
-        ContentMask { bounds }
+        let most = bounds.size.width.min(bounds.size.height) / 2.;
+        let near = |a: Point<Pixels>, b: Point<Pixels>| (a.x - b.x).abs() < px(0.5) && (a.y - b.y).abs() < px(0.5);
+        let corner = |at: fn(&Bounds<Pixels>) -> Point<Pixels>, radius: fn(&Corners<Pixels>) -> Pixels| {
+            let here = at(&bounds);
+            let mine = if near(here, at(&self.bounds)) { radius(&self.corner_radii) } else { px(0.) };
+            let theirs = if near(here, at(&other.bounds)) { radius(&other.corner_radii) } else { px(0.) };
+            mine.max(theirs).min(most)
+        };
+        ContentMask {
+            bounds,
+            corner_radii: Corners {
+                top_left: corner(|b| b.origin, |c| c.top_left),
+                top_right: corner(|b| b.top_right(), |c| c.top_right),
+                bottom_right: corner(|b| b.bottom_right(), |c| c.bottom_right),
+                bottom_left: corner(|b| b.bottom_left(), |c| c.bottom_left),
+            },
+        }
     }
 }
 
@@ -3564,12 +3593,10 @@ impl Window {
 
         let mut paint_span = |start, end| {
             self.next_frame.scene.insert_primitive(Underline {
-                content_mask: ContentMask {
-                    bounds: Bounds::from_corners(
-                        point(start, bounds.top()),
-                        point(end, bounds.bottom()),
-                    ),
-                },
+                content_mask: ContentMask::new(Bounds::from_corners(
+                    point(start, bounds.top()),
+                    point(end, bounds.bottom()),
+                )),
                 ..underline
             });
         };
@@ -3640,8 +3667,10 @@ impl Window {
 
     #[inline]
     fn snapped_content_mask(&self) -> ContentMask<ScaledPixels> {
+        let mask = self.content_mask();
         ContentMask {
-            bounds: self.cover_bounds(self.content_mask().bounds),
+            bounds: self.cover_bounds(mask.bounds),
+            corner_radii: mask.corner_radii.scale(self.scale_factor()),
         }
     }
 
@@ -4745,11 +4774,11 @@ impl Window {
         self.content_mask_stack
             .last()
             .cloned()
-            .unwrap_or_else(|| ContentMask {
-                bounds: Bounds {
+            .unwrap_or_else(|| {
+                ContentMask::new(Bounds {
                     origin: Point::default(),
                     size: self.viewport_size,
-                },
+                })
             })
     }
 
@@ -5166,8 +5195,11 @@ impl Window {
             border_style: quad.border_style,
         };
 
-        // A zoomed quad's strips would clip to unzoomed bounds.
-        if !quad.background.is_transparent() || self.next_frame.scene.zoom.is_some() {
+        // A zoomed quad's strips would clip to unzoomed bounds; a strip can't carry a rounded mask.
+        if !quad.background.is_transparent()
+            || self.next_frame.scene.zoom.is_some()
+            || quad.content_mask.corner_radii != Corners::default()
+        {
             self.next_frame.scene.insert_primitive(quad);
             return;
         }
@@ -5209,9 +5241,7 @@ impl Window {
             let content_mask_bounds = quad.content_mask.bounds.intersect(&strip);
             if !content_mask_bounds.is_empty() {
                 self.next_frame.scene.insert_primitive(Quad {
-                    content_mask: ContentMask {
-                        bounds: content_mask_bounds,
-                    },
+                    content_mask: ContentMask::new(content_mask_bounds),
                     ..quad
                 });
             }
@@ -10429,9 +10459,7 @@ mod tests {
             let scale = window.scale_factor();
             let original_mask = window.content_mask();
             let original_opacity = window.element_opacity();
-            let mask = ContentMask {
-                bounds: Bounds::from_corners(point(px(4.), px(10.)), point(px(16.), px(12.))),
-            };
+            let mask = ContentMask::new(Bounds::from_corners(point(px(4.), px(10.)), point(px(16.), px(12.))));
             let style = UnderlineStyle {
                 thickness: px(2.),
                 color: Some(hsla(0.25, 0.5, 0.75, 0.5)),
@@ -10574,12 +10602,10 @@ mod tests {
             canvas(
                 |_, _, _| {},
                 move |_, _, window, _| {
-                    window.content_mask_stack.push(ContentMask {
-                        bounds: Bounds::from_corners(
-                            point(px(-1000.), px(-1000.)),
-                            point(px(1000.), px(1000.)),
-                        ),
-                    });
+                    window.content_mask_stack.push(ContentMask::new(Bounds::from_corners(
+                        point(px(-1000.), px(-1000.)),
+                        point(px(1000.), px(1000.)),
+                    )));
                     paint(window);
                     window.content_mask_stack.pop();
                 },

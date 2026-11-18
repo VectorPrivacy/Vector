@@ -109,12 +109,10 @@ impl DebugFrameOverlay {
         let panel_left = viewport.width.0 - panel_width - cell * PANEL_MARGIN;
         let panel_top = cell * PANEL_MARGIN;
 
-        let content_mask = ContentMask {
-            bounds: Bounds {
-                origin: point(ScaledPixels(0.), ScaledPixels(0.)),
-                size: viewport,
-            },
-        };
+        let content_mask = ContentMask::new(Bounds {
+            origin: point(ScaledPixels(0.), ScaledPixels(0.)),
+            size: viewport,
+        });
 
         scene.insert_primitive(solid_quad(
             scaled_bounds(panel_left, panel_top, panel_width, panel_height),

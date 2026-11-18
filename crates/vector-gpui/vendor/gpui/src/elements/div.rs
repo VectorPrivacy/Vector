@@ -2573,7 +2573,7 @@ impl Interactivity {
                         None
                     };
                     window.with_content_mask(
-                        style.overflow_mask(bounds, window.rem_size()),
+                        style.overflow_mask_in(bounds, window),
                         |window| {
                             let scroll_offset =
                                 self.clamp_scroll_position(bounds, &style, window, cx);
@@ -2748,7 +2748,7 @@ impl Interactivity {
                     style.paint(bounds, window, cx, |window: &mut Window, cx: &mut App| {
                         window.with_text_style(style.text_style().cloned(), |window| {
                             window.with_content_mask(
-                                style.overflow_mask(bounds, window.rem_size()),
+                                style.overflow_mask_in(bounds, window),
                                 |window| {
                                     window.with_tab_group(tab_group, |window| {
                                         // Register the container's own focus handle *inside* its

@@ -492,7 +492,7 @@ impl Element for UniformList {
                         (self.render_items)(visible_range.clone(), window, cx)
                     };
 
-                    let content_mask = ContentMask { bounds };
+                    let content_mask = ContentMask::new(bounds);
                     window.with_content_mask(Some(content_mask), |window| {
                         for (mut item, ix) in items.into_iter().zip(visible_range.clone()) {
                             let item_top = item_height_f64 * ix as f64 - scroll_top;
