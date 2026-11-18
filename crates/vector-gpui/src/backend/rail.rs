@@ -39,7 +39,7 @@ pub async fn forget(community_id: String) {
 pub async fn edit(f: impl FnOnce(&mut RailLayout) -> Result<(), String> + Send + 'static) -> Result<RailLayout, String> {
     vector_core::db::scoped(async move {
         if !synced_prefs::is_hydrated(Pref::Rail) {
-            return Err("Still syncing your communities, try again in a moment".to_string());
+            return Err(crate::t::start_communities_syncing().to_string());
         }
         let (layout, changed) = synced_prefs::edit_layout(Pref::Rail, f)?;
         if changed {

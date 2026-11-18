@@ -118,3 +118,8 @@ security-already-enabled = Encryption is already enabled
 security-account-changed = Account changed, nothing was modified
 security-export-external = This is an external signer account. Your identity key lives on your signer app, never on this device, so there's nothing to export here.
 security-export-account-changed = The account changed, so nothing was exported
+
+## Changing how the account is encrypted
+
+security-rekey-starting = Starting...
+security-rekey-keep-open = Do not close the app during this process

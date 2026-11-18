@@ -32,7 +32,7 @@ impl log::Log for Logger {
     fn log(&self, record: &log::Record) {
         if record.level() <= log::Level::Error {
             append(&format!(
-                "[{} ERROR] {}: {}",
+                "[{} ERROR] {}: {}", // i18n-exempt: log format
                 vector_core::logging::timestamp_utc(),
                 record.target(),
                 record.args()
@@ -64,7 +64,7 @@ pub fn init(data_dir: Option<PathBuf>) {
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let backtrace = std::backtrace::Backtrace::force_capture();
             append(&format!(
-                "[{} PANIC] {info}\n\nBacktrace:\n{backtrace}\n",
+                "[{} PANIC] {info}\n\nBacktrace:\n{backtrace}\n", // i18n-exempt: log format
                 vector_core::logging::timestamp_utc()
             ));
         }));

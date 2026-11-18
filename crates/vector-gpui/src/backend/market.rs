@@ -5,7 +5,7 @@ use vector_media::miniapps::marketplace::{self as mk, MARKETPLACE_STATE};
 pub use mk::MarketplaceApp;
 
 fn handle() -> Result<tauri::AppHandle, String> {
-    vector_media::TAURI_APP.get().copied().ok_or_else(|| "The App Store isn't ready yet".to_string())
+    vector_media::TAURI_APP.get().copied().ok_or_else(|| crate::t::miniapp_store_not_ready().to_string())
 }
 
 /// Tags are relay data: one spelling of each, so every page and count agrees.
@@ -227,7 +227,7 @@ pub fn trusted_publisher() -> &'static str {
 
 /// `marketplace_publish_app`: upload the package, then sign its listing.
 pub async fn publish(file: String, listing: Listing) -> Result<String, String> {
-    let signer = vector_core::signer::active_signer().map_err(|e| format!("Failed to get signer: {e}"))?;
+    let signer = vector_core::signer::active_signer().map_err(|e| format!("Failed to get signer: {e}"))?; // i18n-exempt: developer error
     let servers = vector_core::state::get_blossom_servers();
     mk::publish_to_marketplace(signer, &file, &listing.borrow(""), servers).await
 }
@@ -235,10 +235,10 @@ pub async fn publish(file: String, listing: Listing) -> Result<String, String> {
 /// `marketplace_edit_listing`: a new listing over the package it already names.
 pub async fn edit_listing(listing: Listing) -> Result<Vec<MarketplaceApp>, String> {
     let session = vector_core::db::current_session();
-    let current = MARKETPLACE_STATE.read().await.get_app(&listing.id).cloned().ok_or("Listing not found")?;
+    let current = MARKETPLACE_STATE.read().await.get_app(&listing.id).cloned().ok_or_else(|| crate::t::miniapp_listing_not_found().to_string())?;
     let edited = vector_core::webxdc::edit_marketplace_listing(&current, &listing.borrow(&current.version)).await?;
     if !session.is_live() {
-        return Err("Account changed during the edit".into());
+        return Err(crate::t::miniapp_edit_account_changed().into());
     }
     let apps = {
         let mut state = MARKETPLACE_STATE.write().await;

@@ -240,10 +240,9 @@ pub fn render(bar: &Bar, window: &mut Window, on: OnEv) -> AnyElement {
 pub fn return_button(unread: u32, on: Rc<dyn Fn(&mut Window, &mut App)>) -> AnyElement {
     let lit = unread > 0;
     let label = match unread {
-        0 => "Jump to present".to_string(),
-        1 => "1 new message".to_string(),
-        n if n > 99 => "99+ new messages".to_string(),
-        n => format!("{n} new messages"),
+        0 => crate::t::jump_present(),
+        n if n > 99 => crate::t::jump_new_many(),
+        n => crate::t::jump_new(n),
     };
     let ink = if lit { c(PRIMARY) } else { c(0xffffff) };
     div()

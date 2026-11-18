@@ -54,7 +54,7 @@ pub fn allow_realtime() {
 /// The engine's own microphone test: the call's capture chain, metered by `mic_level` events.
 pub async fn mic_test_start() -> Result<(), String> {
     if session::snapshot().is_some() {
-        return Err("A call is in progress".into());
+        return Err(crate::t::call_in_progress().into());
     }
     crate::mic_access::require().await?;
     vector_core::db::scoped(session::mic_test_start()).await

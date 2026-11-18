@@ -2,6 +2,8 @@
 //! Vector QR it reads routed where it leads.
 
 use std::sync::Arc;
+
+use crate::t;
 use std::sync::mpsc::{Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
@@ -129,7 +131,7 @@ impl VectorApp {
                     (Err(e), _) => {
                         app.scanner = None;
                         log::warn!("qr scanner: {e}");
-                        app.show_toast("Camera unavailable", cx);
+                        app.show_toast(&t::qrscan_camera_unavailable(), cx);
                         false
                     }
                 })
@@ -151,7 +153,7 @@ impl VectorApp {
                             Out::Read(text) => app.route_scanned(text, cx),
                             Out::Lost => {
                                 app.close_qr_scanner(cx);
-                                app.show_toast("Camera unavailable", cx);
+                                app.show_toast(&t::qrscan_camera_unavailable(), cx);
                                 return false;
                             }
                         }
@@ -179,7 +181,7 @@ impl VectorApp {
     /// `routeScannedQr`: a sign-in code sends this account to that device; a link opens its
     /// place; an npub or a wrapped invite opens as typed into New Message would.
     fn route_scanned(&mut self, text: String, cx: &mut Context<Self>) {
-        let transfer = text.trim_start().to_lowercase().starts_with("vector transfer code:");
+        let transfer = text.trim_start().to_lowercase().starts_with("vector transfer code:"); // i18n-exempt: QR protocol prefix
         let link = (!transfer).then(|| vector_core::deep_link::parse_deep_link(text.trim())).flatten();
         let invite = crate::newchat::invite_key(&text);
         let go = crate::newchat::go_link(&text);
@@ -193,7 +195,7 @@ impl VectorApp {
                 && s.nudged.is_none_or(|t| now - t >= NUDGE_GAP)
             {
                 s.nudged = Some(now);
-                self.show_toast("Not a Vector QR code", cx);
+                self.show_toast(&t::qrscan_not_vector(), cx);
             }
             return;
         }
@@ -262,7 +264,7 @@ impl VectorApp {
                         .justify_center()
                         .text_size(px(14.))
                         .text_color(white_a(0.85))
-                        .child("Point at a Vector QR code"),
+                        .child(t::qrscan_point()),
                 )
                 .child(
                     div()
@@ -281,7 +283,7 @@ impl VectorApp {
                         .text_color(c(0x000000))
                         .cursor_pointer()
                         .on_click(cx.listener(|app, _, _, cx| app.close_qr_scanner(cx)))
-                        .child("Cancel"),
+                        .child(t::dialog_cancel()),
                 )
                 .into_any_element(),
         )

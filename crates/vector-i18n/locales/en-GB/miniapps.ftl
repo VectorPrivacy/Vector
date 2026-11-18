@@ -40,3 +40,11 @@ miniapp-play-invite = Play & Invite
 miniapp-play-alone = Play Alone
 miniapp-open-invite = Open & Invite
 miniapp-open-alone = Open Alone
+# The name of a Mini App link that doesn't give one.
+miniapp-unnamed = Mini App
+miniapp-not-a-link = Not a Mini App URL
+miniapp-store-not-ready = The App Store isn't ready yet
+miniapp-listing-not-found = Listing not found
+miniapp-edit-account-changed = Account changed during the edit
+miniapp-crashed = Mini App Crashed Unexpectedly
+miniapp-closing = The app is closing

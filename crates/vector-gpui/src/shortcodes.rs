@@ -40,7 +40,7 @@ const SHOWN: usize = 5;
 pub struct Popup {
     /// The `:`'s offset in the draft.
     pub start: usize,
-    pub header: &'static str,
+    pub header: gpui::SharedString,
     pub items: Vec<Cell>,
     pub active: usize,
 }
@@ -110,9 +110,9 @@ pub fn suggest(text: &str, caret: usize, picker: &EmojiPicker, emoticons: bool) 
     (!items.is_empty()).then(|| Popup {
         start,
         header: if query.is_empty() {
-            "Recently Used"
+            crate::t::picker_recently_used()
         } else {
-            "Emojis"
+            crate::t::picker_emojis()
         },
         items,
         active: 0,
@@ -173,7 +173,7 @@ pub fn view(
         .collect();
     panel(
         "emoji-shortcode-selector",
-        title(p.header, None),
+        title(&p.header, None),
         None,
         rows,
         p.active,

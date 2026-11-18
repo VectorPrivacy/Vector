@@ -168,9 +168,9 @@ pub fn render(m: &Mini, store: &Store, window: Size<Pixels>, anchors: &crate::ki
     let name = if !shown.is_empty() {
         shown
     } else if settled {
-        "Anon".into()
+        crate::t::member_anon().into()
     } else {
-        "Loading…".into()
+        crate::t::member_loading().into()
     };
     let status = if veiled { String::new() } else { p.map(|p| p.status.title.trim().to_string()).unwrap_or_default() };
     let about = if veiled { String::new() } else { p.map(|p| p.about.trim().to_string()).unwrap_or_default() };
@@ -206,7 +206,7 @@ pub fn render(m: &Mini, store: &Store, window: Size<Pixels>, anchors: &crate::ki
         }));
     let avatar = div()
         .id("mini-profile-avatar")
-        .tip("View Profile")
+        .tip(crate::t::member_view_profile())
         .motion_live()
         .absolute()
         .top(px(28.))
@@ -244,7 +244,7 @@ pub fn render(m: &Mini, store: &Store, window: Size<Pixels>, anchors: &crate::ki
                 }),
             )
     });
-    let action = |id: &'static str, label: &'static str, primary: bool, act: Act| {
+    let action = |id: &'static str, label: SharedString, primary: bool, act: Act| {
         div()
             .id(id)
             .flex_1()
@@ -294,7 +294,7 @@ pub fn render(m: &Mini, store: &Store, window: Size<Pixels>, anchors: &crate::ki
                     .items_center()
                     .gap(px(5.))
                     .child(svg().path("icons/crown.svg").size(px(11.)).text_color(c(0xfce459)))
-                    .child(div().text_color(c(0xfce459)).child("Owner")),
+                    .child(div().text_color(c(0xfce459)).child(crate::t::member_owner())),
             ));
         }
         for role in &r.roles {
@@ -311,7 +311,7 @@ pub fn render(m: &Mini, store: &Store, window: Size<Pixels>, anchors: &crate::ki
                 .items_center()
                 .justify_center()
                 .when(role.removable, |d| {
-                    d.aria_label(format!("Remove {}", role.name))
+                    d.aria_label(crate::t::member_role_remove(&*role.name))
                         .group_hover(group.clone(), |d| d.size(px(12.)).mx(px(-1.)))
                         .when(!busy, |d| d.cursor_pointer().on_click(click(on, Act::RemoveRole(role.id.clone()))))
                         .child(
@@ -448,8 +448,8 @@ pub fn render(m: &Mini, store: &Store, window: Size<Pixels>, anchors: &crate::ki
                 .mt(px(4.))
                 .flex()
                 .gap(px(6.))
-                .child(action("mp-message", "Send Message", true, Act::Message(m.npub.clone())))
-                .child(action("mp-view", "View Profile", false, Act::View(m.npub.clone()))),
+                .child(action("mp-message", crate::t::member_send_message(), true, Act::Message(m.npub.clone())))
+                .child(action("mp-view", crate::t::member_view_profile(), false, Act::View(m.npub.clone()))),
         );
     let card = div()
         .id("mini-profile")

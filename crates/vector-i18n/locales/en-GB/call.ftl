@@ -155,3 +155,15 @@ call-share-window = { $title } — { $app }
 call-share-screen-gone = The screen is gone
 call-share-window-closed = The window was closed
 call-share-pixel-format = This screen's pixel format isn't supported
+call-in-progress = A call is in progress
+
+## The camera
+
+call-camera-blocked = Camera access is blocked in your system privacy settings
+call-camera-silent = The camera never answered
+call-camera-open-failed = Could not open the camera
+call-share-looking = Looking for screens and windows…
+call-share-screens = Screens
+call-share-windows = Windows
+call-share-something-else = Share something else
+call-share-button = Share

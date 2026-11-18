@@ -95,3 +95,27 @@ preview-codeblock = Codeblock
 # $name is the code's language, like "Rust".
 preview-codeblock-named = { $name } Codeblock
 msg-react-not-yours = Cannot revoke a reaction that isn't yours
+
+## A message's edit history
+
+edit-history-title = Edit history
+edit-history-original = Original
+edit-history-edited = Edited
+
+## Copying a file to the clipboard
+
+clip-file-gone = This file isn't on this device any more
+# $error is why.
+clip-prepare-failed = Couldn't prepare the file: { $error }
+clip-no-cache = No cache folder
+clip-rejected = Pasteboard rejected the file references
+# $error is why.
+clip-open-failed = Failed to open clipboard: { $error }
+# $error is why.
+clip-write-failed = Clipboard write failed: { $error }
+clip-unsupported = Copying files to the clipboard isn't supported on this platform yet
+
+## Tooltips on a message's small markers
+
+msg-edited-tip = Click to view edit history
+msg-emoji-missing-tip = Emoji unavailable (tap for details)

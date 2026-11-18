@@ -87,22 +87,23 @@ fn main() {
                 }
             })
             .collect();
+        // Fluent names start with a letter, so `args__` can't be one of them.
         let sets: String = u
             .vars
             .iter()
             .map(|(v, k)| {
                 let p = scan::fn_name(v);
                 match k {
-                    scan::Kind::Any => format!("a.value({v:?}, {p}); "),
-                    scan::Kind::Num => format!("a.num({v:?}, {p}); "),
-                    scan::Kind::List => format!("a.list({v:?}, {p}); "),
+                    scan::Kind::Any => format!("args__.value({v:?}, {p}); "),
+                    scan::Kind::Num => format!("args__.num({v:?}, {p}); "),
+                    scan::Kind::List => format!("args__.list({v:?}, {p}); "),
                 }
             })
             .collect();
         let life = if u.vars.values().any(|k| *k == scan::Kind::Any) { "<'v>" } else { "" };
         writeln!(
             out,
-            "    pub fn {name}{life}({}) -> $ty {{ let mut a = $crate::Args::with_capacity({}); {sets}<$ty as ::core::convert::From<::std::string::String>>::from($crate::format({i}, &a)) }}",
+            "    pub fn {name}{life}({}) -> $ty {{ let mut args__ = $crate::Args::with_capacity({}); {sets}<$ty as ::core::convert::From<::std::string::String>>::from($crate::format({i}, &args__)) }}",
             params.join(", "),
             u.vars.len()
         )

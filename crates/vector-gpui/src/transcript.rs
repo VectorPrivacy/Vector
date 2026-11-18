@@ -96,16 +96,16 @@ impl Transcripts {
     }
 
     pub fn progress(&mut self, pct: u32) {
-        self.download = Some(Download { pct, text: format!("Downloading... {pct}%"), failed: false, until: None });
+        self.download = Some(Download { pct, text: crate::t::transcript_downloading(pct).to_string(), failed: false, until: None });
     }
 
     pub fn download_done(&mut self, ok: bool) {
         self.download = Some(if ok {
-            Download { pct: 100, text: "Ready!".into(), failed: false, until: Some(Instant::now() + Duration::from_secs(1)) }
+            Download { pct: 100, text: crate::t::transcript_ready().into(), failed: false, until: Some(Instant::now() + Duration::from_secs(1)) }
         } else {
             Download {
                 pct: self.download.as_ref().map_or(0, |d| d.pct),
-                text: "Download Failed".into(),
+                text: crate::t::transcript_download_failed().into(),
                 failed: true,
                 until: Some(Instant::now() + Duration::from_secs(3)),
             }
@@ -220,7 +220,7 @@ pub fn download_view(d: &Download, on_cancel: Rc<dyn Fn(&mut Window, &mut App)>)
                                 cx.stop_propagation();
                                 on_cancel(w, cx)
                             })
-                            .child("Cancel"),
+                            .child(crate::t::dialog_cancel()),
                     ),
                 ),
         )
@@ -241,7 +241,7 @@ pub fn view(
         return None;
     }
     let body: AnyElement = match &t.phase {
-        Phase::Error(e) => div().text_color(c(0xff5e5e)).child(format!("Error: {e}")).into_any_element(),
+        Phase::Error(e) => div().text_color(c(0xff5e5e)).child(crate::t::transcript_error(&**e)).into_any_element(),
         Phase::Ready { sections, lang, language } => {
             let named = (!language.is_empty() && language != "en" && !lang.is_empty() && lang != "auto")
                 .then(|| crate::langnames::name(language))
@@ -258,7 +258,7 @@ pub fn view(
                     .text_size(px(10.8))
                     .line_height(px(15.12))
                     .text_color(white_a(0.34))
-                    .child("Language Detected:")
+                    .child(crate::t::transcript_language())
                     .child(
                         div()
                             .flex()
@@ -271,7 +271,7 @@ pub fn view(
                     )
             });
             let text: AnyElement = if sections.is_empty() {
-                div().child("No transcription available").into_any_element()
+                div().child(crate::t::transcript_none()).into_any_element()
             } else {
                 let mut joined = String::new();
                 let mut ranges = Vec::with_capacity(sections.len());

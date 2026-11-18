@@ -112,7 +112,7 @@ pub async fn fetch_messages(init: bool) {
         db::spawn_bound(super::mediaport::after_boot());
     }
     db::spawn_bound(async move {
-        super::emit("sync_progress", serde_json::json!({ "mode": "Syncing" }));
+        super::emit("sync_progress", serde_json::json!({ "mode": "Syncing" })); // i18n-exempt: event payload
         let synced = db::current_session().scoped::<Synced, AtomicBool>();
         synced.store(false, Ordering::SeqCst);
         if dms(false).await.reached_none() {
@@ -144,7 +144,7 @@ fn watch_unreachable() {
             if std::time::Instant::now() >= deadline {
                 vector_core::emit_event(
                     "show_toast",
-                    &format!("Couldn't reach any of your {} relays, new messages may be missing", relays.len()),
+                    &crate::t::network_relays_unreachable(relays.len()),
                 );
                 return;
             }

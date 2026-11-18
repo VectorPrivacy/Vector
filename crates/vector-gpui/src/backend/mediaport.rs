@@ -263,10 +263,10 @@ fn unseal(hash: &[u8; 32], name: &str) -> Result<PathBuf, String> {
 /// A plain copy of a kept file in `dir`; one there already holding these bytes is used as is.
 /// Returns where it is, and whether this wrote it.
 fn place_plain(hash: &[u8; 32], name: &str, dir: &Path) -> Result<(PathBuf, bool), String> {
-    let src = vector_core::media::open(hash).ok_or("This file isn't on this device any more")?;
+    let src = vector_core::media::open(hash).ok_or_else(|| crate::t::file_not_on_device().to_string())?;
     let hex = vector_core::simd::hex::bytes_to_hex_string(hash);
     let holds = |path: &Path| vector_core::crypto::stream::hash_file(path).is_ok_and(|(h, _)| h == hex);
-    std::fs::create_dir_all(dir).map_err(|e| format!("Couldn't save the file: {e}"))?;
+    std::fs::create_dir_all(dir).map_err(|e| crate::t::file_save_failed(e.to_string()).to_string())?;
     let name = file_name(name, &hex, src.mime());
     let candidate = dir.join(&name);
     if holds(&candidate) {
@@ -277,7 +277,7 @@ fn place_plain(hash: &[u8; 32], name: &str, dir: &Path) -> Result<(PathBuf, bool
     // The store's keystream checks no tag: the copy proves its bytes.
     if !holds(&dest) {
         let _ = std::fs::remove_file(&dest);
-        return Err("Couldn't save the file: it didn't read back as sent".into());
+        return Err(crate::t::file_save_mismatch().into());
     }
     Ok((dest, true))
 }
@@ -318,7 +318,7 @@ fn copy_out(src: &dyn vector_core::media::MediaSource, dest: &Path) -> Result<()
     })();
     result.map_err(|e| {
         let _ = std::fs::remove_file(&tmp);
-        format!("Couldn't save the file: {e}")
+        crate::t::file_save_failed(e.to_string()).to_string()
     })
 }
 
@@ -354,10 +354,10 @@ async fn reflect_unsealed(hash: &[u8; 32], path: &str) {
 pub async fn set_keep_unencrypted(on: bool) -> Result<(), String> {
     vector_core::db::scoped(async move {
         if on && !vector_core::media::keep_media() {
-            return Err("Turn on Keep Files on This Device first.".into());
+            return Err(crate::t::settings_storage_keep_first().into());
         }
         if super::attachments::any_running() || !stop().await {
-            return Err("Change this once your downloads finish.".into());
+            return Err(crate::t::settings_storage_change_later().into());
         }
         vector_core::db::set_sql_setting("keep_unencrypted".into(), on.to_string())?;
         start(Duration::ZERO);

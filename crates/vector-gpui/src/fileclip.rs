@@ -8,20 +8,20 @@ pub async fn materialize(hash: Option<[u8; 32]>, path: String, name: String) -> 
         false => vector_core::vcache::read(std::path::Path::new(&path))?.to_vec(),
         true => crate::backend::attachments::bytes(hash, String::new())
             .await
-            .ok_or("This file isn't on this device any more")?,
+            .ok_or_else(|| crate::t::clip_file_gone().to_string())?,
     };
     let mut id = [0u8; 8];
     rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut id);
     let dir = root()?.join(vector_core::simd::hex::bytes_to_hex_string(&id));
-    tokio::fs::create_dir_all(&dir).await.map_err(|e| format!("Couldn't prepare the file: {e}"))?;
+    tokio::fs::create_dir_all(&dir).await.map_err(|e| crate::t::clip_prepare_failed(e.to_string()).to_string())?;
     let name = vector_core::crypto::sanitize_filename(&name);
     let file = dir.join(if name.is_empty() { "file" } else { &name });
-    tokio::fs::write(&file, bytes).await.map_err(|e| format!("Couldn't prepare the file: {e}"))?;
+    tokio::fs::write(&file, bytes).await.map_err(|e| crate::t::clip_prepare_failed(e.to_string()).to_string())?;
     Ok(file)
 }
 
 fn root() -> Result<PathBuf, String> {
-    Ok(dirs::cache_dir().ok_or("No cache folder")?.join("io.vectorapp.gpui").join("exports"))
+    Ok(dirs::cache_dir().ok_or_else(|| crate::t::clip_no_cache().to_string())?.join("io.vectorapp.gpui").join("exports"))
 }
 
 /// Clear what earlier launches handed out. Never mid-run: a paste may still be reading one.
@@ -88,7 +88,7 @@ pub fn write(paths: Vec<PathBuf>, _cx: &mut gpui::App) -> Result<(), String> {
     let array = NSArray::from_slice(&writers);
     let pb = NSPasteboard::generalPasteboard();
     pb.clearContents();
-    if pb.writeObjects(&array) { Ok(()) } else { Err("Pasteboard rejected the file references".into()) }
+    if pb.writeObjects(&array) { Ok(()) } else { Err(crate::t::clip_rejected().into()) }
 }
 
 #[cfg(windows)]
@@ -103,15 +103,15 @@ pub fn write(paths: Vec<PathBuf>, _cx: &mut gpui::App) -> Result<(), String> {
                 clip = Some(c);
                 break;
             }
-            Err(e) if attempt == 19 => return Err(format!("Failed to open clipboard: {e}")),
+            Err(e) if attempt == 19 => return Err(crate::t::clip_open_failed(e.to_string()).to_string()),
             Err(_) => std::thread::sleep(std::time::Duration::from_millis(10)),
         }
     }
     let _clip = clip;
-    FileList.write_clipboard(&paths[..]).map_err(|e| format!("Clipboard write failed: {e}"))
+    FileList.write_clipboard(&paths[..]).map_err(|e| crate::t::clip_write_failed(e.to_string()).to_string())
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "freebsd", target_os = "macos", windows)))]
 pub fn write(_paths: Vec<PathBuf>, _cx: &mut gpui::App) -> Result<(), String> {
-    Err("Copying files to the clipboard isn't supported on this platform yet".into())
+    Err(crate::t::clip_unsupported().into())
 }

@@ -52,11 +52,11 @@ pub fn img_plain(source: impl Into<ImageSource>) -> gpui::Img {
 fn sealed(source: ImageSource, n: u32, fit: &str) -> ImageSource {
     match source {
         ImageSource::Resource(Resource::Path(p)) => {
-            ImageSource::Resource(Resource::Embedded(format!("{SEALED}{}{fit}{n}", p.display()).into()))
+            ImageSource::Resource(Resource::Embedded(format!("{SEALED}{}{fit}{n}", p.display()).into())) // i18n-exempt: cache key
         }
         // A path given as a string arrives as an asset name.
         ImageSource::Resource(Resource::Embedded(name)) if Path::new(name.as_ref()).is_absolute() => {
-            ImageSource::Resource(Resource::Embedded(format!("{SEALED}{name}{fit}{n}").into()))
+            ImageSource::Resource(Resource::Embedded(format!("{SEALED}{name}{fit}{n}").into())) // i18n-exempt: cache key
         }
         // A bundled SVG with a drawn size is rasterised at it.
         ImageSource::Resource(Resource::Embedded(name)) if name.ends_with(".svg") && n < BIGGEST as u32 * 2 => {

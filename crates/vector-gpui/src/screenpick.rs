@@ -5,7 +5,7 @@
 use std::rc::Rc;
 use std::sync::Arc;
 
-use gpui::{AnyElement, App, FontWeight, InteractiveElement, IntoElement, ObjectFit, ParentElement, RenderImage, StatefulInteractiveElement, Styled, StyledImage, Window, div, prelude::FluentBuilder, px};
+use gpui::{AnyElement, App, FontWeight, SharedString, InteractiveElement, IntoElement, ObjectFit, ParentElement, RenderImage, StatefulInteractiveElement, Styled, StyledImage, Window, div, prelude::FluentBuilder, px};
 use crate::pic::img;
 
 use crate::callvideo::screen::{Source, Target};
@@ -104,7 +104,7 @@ fn tile(i: usize, ch: &Choice, selected: bool, on: &OnAct) -> AnyElement {
         .into_any_element()
 }
 
-fn button(id: &'static str, label: &'static str, primary: bool, enabled: bool, on: impl Fn(&mut Window, &mut App) + 'static) -> impl IntoElement {
+fn button(id: &'static str, label: SharedString, primary: bool, enabled: bool, on: impl Fn(&mut Window, &mut App) + 'static) -> impl IntoElement {
     div()
         .id(id)
         .px(px(20.))
@@ -122,10 +122,10 @@ fn button(id: &'static str, label: &'static str, primary: bool, enabled: bool, o
 
 pub fn render(p: &Picker, win: gpui::Size<gpui::Pixels>, on: &OnAct) -> AnyElement {
     let body: AnyElement = match &p.choices {
-        None => div().py(px(40.)).text_center().text_color(c(0xb2b2b2)).child("Looking for screens and windows…").into_any_element(),
+        None => div().py(px(40.)).text_center().text_color(c(0xb2b2b2)).child(crate::t::call_share_looking()).into_any_element(),
         Some(Err(e)) => div().py(px(40.)).text_center().text_color(c(0xb2b2b2)).child(e.clone()).into_any_element(),
         Some(Ok(list)) => {
-            let group = |title: &'static str, monitors: bool| {
+            let group = |title: SharedString, monitors: bool| {
                 let tiles: Vec<AnyElement> = list
                     .iter()
                     .enumerate()
@@ -148,8 +148,8 @@ pub fn render(p: &Picker, win: gpui::Size<gpui::Pixels>, on: &OnAct) -> AnyEleme
                 .gap(px(18.))
                 .max_h(px((f32::from(win.height) - 220.).max(200.)))
                 .overflow_y_scroll()
-                .children(group("Screens", true))
-                .children(group("Windows", false))
+                .children(group(crate::t::call_share_screens(), true))
+                .children(group(crate::t::call_share_windows(), false))
                 .into_any_element()
         }
     };
@@ -176,15 +176,15 @@ pub fn render(p: &Picker, win: gpui::Size<gpui::Pixels>, on: &OnAct) -> AnyEleme
         .font_family(INTER)
         .text_color(c(TEXT))
         .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
-        .child(div().text_size(px(18.)).font_weight(FontWeight::SEMIBOLD).child(if p.change { "Share something else" } else { "Share your screen" }))
+        .child(div().text_size(px(18.)).font_weight(FontWeight::SEMIBOLD).child(if p.change { crate::t::call_share_something_else() } else { crate::t::voice_screen_share() }))
         .child(body)
         .child(
             div()
                 .flex()
                 .justify_end()
                 .gap(px(10.))
-                .child(button("screen-pick-cancel", "Cancel", false, true, move |w, cx| cancel(Act::Cancel, w, cx)))
-                .child(button("screen-pick-share", "Share", true, can, move |w, cx| share(Act::Share, w, cx))),
+                .child(button("screen-pick-cancel", crate::t::dialog_cancel(), false, true, move |w, cx| cancel(Act::Cancel, w, cx)))
+                .child(button("screen-pick-share", crate::t::call_share_button(), true, can, move |w, cx| share(Act::Share, w, cx))),
         );
     let dismiss = on.clone();
     gpui::deferred(

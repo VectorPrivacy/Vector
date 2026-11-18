@@ -221,7 +221,7 @@ pub async fn set_notify_level(scope_id: String, level: Option<&'static str>) -> 
     let parsed = match level {
         None => None,
         Some(s) => {
-            Some(notify::NotifyLevel::from_label(s).ok_or_else(|| format!("unknown level: {s}"))?)
+            Some(notify::NotifyLevel::from_label(s).ok_or_else(|| format!("unknown level: {s}"))?) // i18n-exempt: developer error
         }
     };
     db::scoped(async move {

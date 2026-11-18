@@ -94,3 +94,4 @@ start-folder-teal = Teal
 start-folder-blue = Blue
 start-folder-purple = Purple
 start-folder-pink = Pink
+start-communities-syncing = Still syncing your communities, try again in a moment

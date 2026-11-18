@@ -32,3 +32,14 @@ member-ban-failed = Couldn't ban
 member-timeout-ends = Timeout ends in { $left }
 member-timeout-ending = Timeout ending
 member-search = Search Members...
+
+## A member's small profile card
+
+# Someone with no name yet.
+member-anon = Anon
+member-loading = Loading…
+member-owner = Owner
+# Screen readers name the button that takes a role away. $role is its name.
+member-role-remove = Remove { $role }
+member-send-message = Send Message
+member-private-channels = Private channels

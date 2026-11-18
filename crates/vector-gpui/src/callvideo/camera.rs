@@ -36,8 +36,8 @@ fn permitted() -> Result<(), String> {
         });
         match rx.recv_timeout(Duration::from_secs(120)) {
             Ok(true) => Ok(()),
-            Ok(false) => Err("Camera access is blocked in your system privacy settings".into()),
-            Err(_) => Err("The camera never answered".into()),
+            Ok(false) => Err(crate::t::call_camera_blocked().into()),
+            Err(_) => Err(crate::t::call_camera_silent().into()),
         }
     }
     #[cfg(not(target_os = "macos"))]
@@ -89,13 +89,13 @@ pub fn open(kind: VideoKind, to: Sender<In>) -> Result<Capture, String> {
                 Ok(c) => c,
                 Err(e) => {
                     log::warn!("camera: {e}");
-                    let _ = ready_tx.send(Err("Could not open the camera".into()));
+                    let _ = ready_tx.send(Err(crate::t::call_camera_open_failed().into()));
                     return;
                 }
             };
             if let Err(e) = cam.open_stream() {
                 log::warn!("camera stream: {e}");
-                let _ = ready_tx.send(Err("Could not open the camera".into()));
+                let _ = ready_tx.send(Err(crate::t::call_camera_open_failed().into()));
                 return;
             }
             let _ = ready_tx.send(Ok(()));
@@ -130,7 +130,7 @@ pub fn open(kind: VideoKind, to: Sender<In>) -> Result<Capture, String> {
         Ok(Err(e)) => Err(e),
         Err(_) => {
             stop.store(true, Ordering::Relaxed);
-            Err("The camera never answered".into())
+            Err(crate::t::call_camera_silent().into())
         }
     }
 }

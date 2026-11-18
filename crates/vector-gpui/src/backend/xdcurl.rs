@@ -72,7 +72,7 @@ fn hex(bytes: &[u8]) -> String {
 fn read_latch(raw: &str) -> Option<(String, String)> {
     let v: serde_json::Value = serde_json::from_str(raw).ok()?;
     let hash = v.get("hash")?.as_str()?.to_string();
-    let name = v.get("name").and_then(|n| n.as_str()).unwrap_or("Mini App").to_string();
+    let name = v.get("name").and_then(|n| n.as_str()).map(str::to_string).unwrap_or_else(|| crate::t::miniapp_unnamed().to_string());
     (hash.len() == 64 && hash.bytes().all(|b| b.is_ascii_hexdigit())).then_some((hash, name))
 }
 
@@ -105,7 +105,7 @@ pub async fn resolve(url: String, msg_id: String, download: bool) -> Result<Opti
         }
         let lower = url.split(['?', '#']).next().unwrap_or("").to_ascii_lowercase();
         if !(lower.starts_with("http://") || lower.starts_with("https://")) || !lower.ends_with(".xdc") {
-            return Err("Not a Mini App URL".into());
+            return Err(crate::t::miniapp_not_a_link().into());
         }
         vector_core::net::validate_url_not_private(&url).map_err(|e| e.to_string())?;
         let current = validator(&url).await;

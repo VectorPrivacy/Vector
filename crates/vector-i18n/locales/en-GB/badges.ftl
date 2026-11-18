@@ -24,3 +24,4 @@ badge-v2026-quote = “People should not be afraid of their governments. Governm
 
 badge-full-access = Full Premium Access
 badge-partial-access = Partial Premium Access
+badge-no-invite-code = No invite code found for this user

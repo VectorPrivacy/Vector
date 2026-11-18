@@ -19,7 +19,7 @@ pub struct Rekey {
 
 impl Rekey {
     pub fn new(title: impl Into<SharedString>) -> Self {
-        Self { title: title.into(), step: "Starting...".into(), from: 0., to: 0., since: Instant::now() }
+        Self { title: title.into(), step: crate::t::security_rekey_starting().into(), from: 0., to: 0., since: Instant::now() }
     }
 
     /// Sweep to `pct` from wherever the ring is now.
@@ -121,7 +121,7 @@ pub fn view(r: &Rekey) -> AnyElement {
                         .text_size(px(12.))
                         .text_color(amber)
                         .child(svg().path("icons/info.svg").size(px(14.)).flex_none().text_color(amber))
-                        .child("Do not close the app during this process"),
+                        .child(crate::t::security_rekey_keep_open()),
                 ),
         )
         .into_any_element()

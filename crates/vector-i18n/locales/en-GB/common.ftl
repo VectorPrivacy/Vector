@@ -113,3 +113,9 @@ either = { $first } or { $second }
 
 # A community whose name hasn't arrived.
 community-unnamed = Community
+
+## File types in the system's file picker
+
+picker-filter-images = Images
+picker-filter-image = Image
+picker-filter-audio = Audio Files

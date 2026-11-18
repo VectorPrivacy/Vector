@@ -384,7 +384,7 @@ pub fn decode(input: AudioInput, size: (u32, u32), from: u64, cmds: Receiver<Cmd
 pub fn decode_audio(input: &AudioInput) -> Result<(Vec<f32>, u32), String> {
     let reader: Box<dyn ReadSeek> = Box::new(Reader(input.open()?));
     let mut src = Source::open(reader).ok_or("unreadable")?;
-    let stream = src.input.streams().best(ffmpeg::media::Type::Audio).ok_or("no audio")?;
+    let stream = src.input.streams().best(ffmpeg::media::Type::Audio).ok_or("no audio")?; // i18n-exempt: developer error
     let index = stream.index();
     let ctx = ffmpeg::codec::context::Context::from_parameters(stream.parameters()).map_err(|e| e.to_string())?;
     let mut dec = ctx.decoder().audio().map_err(|e| e.to_string())?;
@@ -411,7 +411,7 @@ pub fn decode_audio(input: &AudioInput) -> Result<(Vec<f32>, u32), String> {
     let _ = dec.send_eof();
     drain(&mut dec, &mut samples, &mut rate);
     if samples.is_empty() || rate == 0 {
-        return Err("no audio".into());
+        return Err("no audio".into()); // i18n-exempt: developer error
     }
     Ok((samples, rate))
 }
@@ -458,7 +458,7 @@ impl AudioReader {
     pub fn open(input: &AudioInput) -> Result<Self, String> {
         let reader: Box<dyn ReadSeek> = Box::new(Reader(input.open()?));
         let mut src = Source::open(reader).ok_or("unreadable")?;
-        let stream = src.input.streams().best(ffmpeg::media::Type::Audio).ok_or("no audio")?;
+        let stream = src.input.streams().best(ffmpeg::media::Type::Audio).ok_or("no audio")?; // i18n-exempt: developer error
         let (index, tb) = (stream.index(), f64::from(stream.time_base()));
         let ctx = ffmpeg::codec::context::Context::from_parameters(stream.parameters()).map_err(|e| e.to_string())?;
         let dec = ctx.decoder().audio().map_err(|e| e.to_string())?;
@@ -475,7 +475,7 @@ impl AudioReader {
         let mut r = AudioReader { src, index, dec, frame: ffmpeg::frame::Audio::empty(), tb, rate: 0, eof: false };
         // The decoder's own rate can be the core's (HE-AAC doubles it): the first frame's is the one heard.
         let mut first = Vec::new();
-        r.rate = r.next(&mut first).and(Some(r.frame.rate())).filter(|&x| x > 0).ok_or("no audio")?;
+        r.rate = r.next(&mut first).and(Some(r.frame.rate())).filter(|&x| x > 0).ok_or("no audio")?; // i18n-exempt: developer error
         Ok(r)
     }
 

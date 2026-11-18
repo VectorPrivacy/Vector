@@ -80,17 +80,17 @@ async fn fetch(url: &str) -> Result<Vec<u8>, String> {
         .await
         .map_err(|e| e.to_string())?;
     if !resp.status().is_success() {
-        return Err(format!("HTTP {}", resp.status()));
+        return Err(format!("HTTP {}", resp.status())); // i18n-exempt: developer error
     }
     let total = resp.content_length().filter(|&n| n > 0);
     if total.is_some_and(|n| n as usize > MAX_BYTES) {
-        return Err("too large".into());
+        return Err("too large".into()); // i18n-exempt: developer error
     }
     let mut body = Vec::with_capacity(total.unwrap_or(0).min(MAX_BYTES as u64) as usize);
     let mut last = -1;
     while let Some(chunk) = resp.chunk().await.map_err(|e| e.to_string())? {
         if body.len() + chunk.len() > MAX_BYTES {
-            return Err("too large".into());
+            return Err("too large".into()); // i18n-exempt: developer error
         }
         body.extend_from_slice(&chunk);
         if let Some(t) = total {

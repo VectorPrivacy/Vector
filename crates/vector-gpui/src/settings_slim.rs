@@ -67,7 +67,7 @@ fn danger_head(s: &Settings) -> AnyElement {
                 .text_size(px(12.))
                 .line_height(px(24.))
                 .text_color(c(crate::timeline::DANGER))
-                .child("Irreversible Actions"),
+                .child(crate::t::slim_settings_danger()),
         )
         .into_any_element()
 }
@@ -191,7 +191,7 @@ fn update_row(version: Option<String>, open: bool, s: &Settings, on: &OnAct) -> 
                 .text_size(px(17.))
                 .line_height(px(22.))
                 .text_color(c(ACCENT))
-                .child(div().flex_shrink_0().child("Update Pending"))
+                .child(div().flex_shrink_0().child(crate::t::slim_settings_update_pending()))
                 .children(version.map(|v| {
                     div().ml(px(8.)).min_w_0().truncate().text_size(px(13.)).text_color(c(0x8a8a8a)).child(format!("– {v}"))
                 })),
@@ -255,7 +255,7 @@ pub fn slim_view(s: &Settings, on: &OnAct, cx: &App) -> AnyElement {
         first = false;
     }
     let empty = first;
-    let link = |label: &'static str, key: &'static str| {
+    let link = |label: gpui::SharedString, key: &'static str| {
         div()
             .id(SharedString::from(format!("sm-foot-{key}")))
             .text_size(px(15.))
@@ -330,7 +330,7 @@ pub fn slim_view(s: &Settings, on: &OnAct, cx: &App) -> AnyElement {
                         .line_height(px(36.))
                         .font_weight(FontWeight::BOLD)
                         .text_color(c(0xffffff))
-                        .child("Settings"),
+                        .child(crate::t::settings_title()),
                 )
                 .child(search)
                 .children(pending)
@@ -342,7 +342,7 @@ pub fn slim_view(s: &Settings, on: &OnAct, cx: &App) -> AnyElement {
                             .text_center()
                             .text_size(px(15.))
                             .text_color(c(0x6f6f6f))
-                            .child("No matches"),
+                            .child(crate::t::settings_search_none()),
                     )
                 })
                 .child(
@@ -352,9 +352,9 @@ pub fn slim_view(s: &Settings, on: &OnAct, cx: &App) -> AnyElement {
                         .flex_wrap()
                         .justify_center()
                         .gap(px(24.))
-                        .child(link("Donate", "donate"))
-                        .child(link("Docs", "gitbook"))
-                        .child(link("Privacy Policy", "privacy")),
+                        .child(link(crate::t::settings_link_donate(), "donate"))
+                        .child(link(crate::t::settings_link_docs(), "gitbook"))
+                        .child(link(crate::t::settings_link_privacy(), "privacy")),
                 ),
         )
         .into_any_element()

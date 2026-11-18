@@ -434,6 +434,7 @@ pub fn select_look(
         });
         if let Some((Some(focus), hi)) = keys {
             let (pick, toggle, live) = (on_pick.clone(), on_toggle.clone(), live.clone());
+            // i18n-exempt: key context
             list = list.track_focus(&focus).key_context("Select").on_key_down(move |e, w, cx| {
                 let step = |dir: isize| {
                     let n = live.len() as isize;
@@ -1732,6 +1733,7 @@ pub fn context_menu(
     if let Some((focus, hi)) = keys {
         let (pick, close, steps) = (on_pick.clone(), on_close.clone(), steps.clone());
         let subs: std::rc::Rc<[(bool, bool)]> = items.iter().map(|i| (i.kind == MenuKind::Sub, i.kind == MenuKind::Back)).collect();
+        // i18n-exempt: key context
         list = list.track_focus(&focus).key_context("Menu").on_key_down(move |e, w, cx| {
             let at = steps.iter().position(|&ix| ix == hi.get());
             let n = steps.len();

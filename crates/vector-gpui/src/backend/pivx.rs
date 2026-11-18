@@ -6,7 +6,7 @@ use vector_media::pivx as px;
 pub use px::PivxPromo;
 
 fn handle() -> Result<tauri::AppHandle, String> {
-    vector_media::TAURI_APP.get().copied().ok_or_else(|| "The wallet isn't ready yet".to_string())
+    vector_media::TAURI_APP.get().copied().ok_or_else(|| crate::t::pivx_not_ready().to_string())
 }
 
 pub async fn balance() -> Result<f64, String> {

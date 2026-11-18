@@ -180,7 +180,7 @@ pub async fn clear_all() -> Result<u64, String> {
     vector_core::db::scoped(async {
         let before = total();
         if !super::mediaport::stop().await {
-            return Err(CLEAR_BUSY.into());
+            return Err(crate::t::settings_storage_clear_busy().into());
         }
         clear_kept(None).await?;
         vector_core::db::blocking_bound(|| vector_core::media::store::forget_where(|_| true))
@@ -205,10 +205,10 @@ pub async fn clear_category(category: &str, exts: Vec<String>) -> Result<u64, St
         } else {
             let set: HashSet<String> = exts.iter().map(|e| e.to_lowercase()).collect();
             if set.is_empty() {
-                return Err("No file types to clear".into());
+                return Err(crate::t::settings_storage_no_types().into());
             }
             if !super::mediaport::stop().await {
-                return Err(CLEAR_BUSY.into());
+                return Err(crate::t::settings_storage_clear_busy().into());
             }
             clear_kept(Some(&set)).await?;
             let kept = set.clone();
@@ -256,8 +256,6 @@ pub async fn kept_summary() -> (u64, u64, bool) {
     (files + old, bytes + old_bytes, super::attachments::any_running())
 }
 
-const KEEP_MEDIA_BUSY: &str = "Turn this off once your downloads finish.";
-const CLEAR_BUSY: &str = "Clear this once your files finish moving.";
 
 /// Keep Files on or off. Off deletes what it kept, so a file is kept or held, never both.
 pub async fn set_keep_media(on: bool) -> Result<(), String> {
@@ -269,12 +267,12 @@ pub async fn set_keep_media(on: bool) -> Result<(), String> {
             return Ok(());
         }
         if super::attachments::any_running() || !super::mediaport::stop().await {
-            return Err(KEEP_MEDIA_BUSY.into());
+            return Err(crate::t::settings_storage_keep_busy().into());
         }
         set(false)?;
         if super::attachments::any_running() {
             let _ = set(true);
-            return Err(KEEP_MEDIA_BUSY.into());
+            return Err(crate::t::settings_storage_keep_busy().into());
         }
         vector_core::db::set_sql_setting("keep_unencrypted".into(), "false".into())?;
         clear_kept(None).await?;

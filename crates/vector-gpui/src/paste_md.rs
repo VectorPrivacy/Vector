@@ -206,7 +206,7 @@ pub fn html_to_markdown(html: &str, plain: &str) -> Option<String> {
         }
         let href = href.replace(')', "%29");
         if text.contains('[') || text.contains(']') {
-            format!("{out} ({href})")
+            format!("{out} ({href})") // i18n-exempt: markdown syntax
         } else {
             format!("[{out}]({href})")
         }

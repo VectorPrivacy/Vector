@@ -71,7 +71,7 @@ const KINDS: [Kind; 2] = [
     },
 ];
 
-const BASE58: &str = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+const BASE58: &str = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"; // i18n-exempt: base58 alphabet
 
 fn base58(s: &str) -> bool {
     let n = s.len();
@@ -139,7 +139,7 @@ pub fn card(id: &str, coin: &Coin, on_pay: impl Fn(String, &mut gpui::Window, &m
                 .cursor_pointer()
                 .active(|s| s.opacity(0.75))
                 .on_click(move |_, w, cx| on_pay(uri.clone(), w, cx))
-                .child("Pay"),
+                .child(crate::t::pivx_pay()),
         )
         .into_any_element()
 }

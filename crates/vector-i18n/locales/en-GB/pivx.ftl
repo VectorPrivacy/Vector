@@ -96,3 +96,6 @@ pivx-settings-saved = Wallet settings saved
 pivx-claimed = Claimed { NUMBER($amount, minimumFractionDigits: 2, maximumFractionDigits: 2, useGrouping: "false") } PIV
 # $error is why, as the wallet reported it.
 pivx-claim-failed = Failed to claim: { $error }
+pivx-not-ready = The wallet isn't ready yet
+# Pays a payment address found in a message.
+pivx-pay = Pay

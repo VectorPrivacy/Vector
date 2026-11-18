@@ -33,7 +33,7 @@ fn emit(e: Event) {
 /// Sends to the host. A window being opened is registered first, starting the host if need
 /// be; anything else is dropped while no host runs.
 fn post(msg: &ToHost, body: &[u8], opening: Option<(&str, Option<u64>)>) -> Result<(), String> {
-    let mut host = HOST.lock().map_err(|_| "Mini App host lock poisoned".to_string())?;
+    let mut host = HOST.lock().map_err(|_| "Mini App host lock poisoned".to_string())?; // i18n-exempt: developer error
     if host.is_none() {
         if opening.is_none() {
             return Ok(());
@@ -44,7 +44,7 @@ fn post(msg: &ToHost, body: &[u8], opening: Option<(&str, Option<u64>)>) -> Resu
     if let Some((label, isolated)) = opening {
         h.open.insert(label.to_string(), isolated);
     }
-    wire::write(&mut h.stdin, msg, body).map_err(|e| format!("Mini App host unreachable: {e}"))
+    wire::write(&mut h.stdin, msg, body).map_err(|e| format!("Mini App host unreachable: {e}")) // i18n-exempt: developer error
 }
 
 fn launch() -> Result<Host, String> {
@@ -56,7 +56,7 @@ fn launch() -> Result<Host, String> {
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
         .spawn()
-        .map_err(|e| format!("Mini Apps need {}: {e}", helper.display()))?;
+        .map_err(|e| format!("Mini Apps need {}: {e}", helper.display()))?; // i18n-exempt: developer error
     let stdin = child.stdin.take().expect("piped stdin");
     let mut stdout = child.stdout.take().expect("piped stdout");
     let generation = GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
@@ -91,7 +91,7 @@ fn gone(generation: u64) {
         if let Some(id) = isolated {
             vector_media::miniapps::isolated::stop_if(&label, id);
         }
-        emit(Event::Failed(label, "Mini App Crashed Unexpectedly".into()));
+        emit(Event::Failed(label, crate::t::miniapp_crashed().into()));
     }
 }
 
@@ -203,6 +203,6 @@ pub fn on_glib(f: impl FnOnce() + Send + 'static) -> Result<(), String> {
         });
         spawned.ok().and_then(|_| rx.recv().ok())
     });
-    ctx.as_ref().ok_or_else(|| "no GLib thread".to_string())?.invoke(f);
+    ctx.as_ref().ok_or_else(|| "no GLib thread".to_string())?.invoke(f); // i18n-exempt: developer error
     Ok(())
 }

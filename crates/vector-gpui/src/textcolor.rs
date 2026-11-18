@@ -746,9 +746,9 @@ pub fn command(src: &str) -> Option<Command> {
         let hex = (gap > 0 && arg_len > 0).then(|| vector_core::text_color::hex(&tail[gap..gap + arg_len])).flatten();
         let Some(hex) = hex else {
             return fail(if name == "gradient" {
-                format!("needs two {word}s, like /gradient pink #60a5fa text")
+                crate::t::composer_color_needs_two(word).to_string()
             } else {
-                format!("needs a {word}, like /{word} pink text")
+                crate::t::composer_color_needs_one(word).to_string()
             });
         };
         colors.push(hex);
@@ -757,7 +757,7 @@ pub fn command(src: &str) -> Option<Command> {
     let tail = &src[at..];
     let gap = tail.len() - tail.trim_start().len();
     if gap == 0 || tail.trim().is_empty() {
-        return fail(format!("needs some text to {word}"));
+        return fail(crate::t::composer_color_needs_text(word).to_string());
     }
     let effect = match name {
         "rainbow" => Effect::Rainbow,

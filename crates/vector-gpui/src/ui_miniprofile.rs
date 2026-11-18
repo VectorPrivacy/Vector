@@ -4,7 +4,7 @@ use gpui::{Bounds, Context, Pixels, Window};
 
 use super::{MenuAct, VectorApp};
 use crate::miniprofile::{Act, Mini};
-use crate::{backend, kit};
+use crate::{backend, kit, t};
 
 impl VectorApp {
     /// `showMiniProfile`: within a community (`community`, else the open channel's) it lists
@@ -79,7 +79,7 @@ impl VectorApp {
         let Some(community) = m.community.clone() else { return };
         let npub = m.npub.clone();
         let Some(view) = self.roles_view(&community) else { return };
-        let mut rows = vec![(kit::MenuItem::header("Roles"), MenuAct::Nothing)];
+        let mut rows = vec![(kit::MenuItem::header(t::member_roles()), MenuAct::Nothing)];
         rows.extend(member_role_rows(&view, &community, &npub, self.role_busy.as_deref()));
         self.show_menu(at, rows, cx);
     }
@@ -132,7 +132,7 @@ impl VectorApp {
         // The row back out of a submenu, or the Roles header, stays on top.
         let lead = items
             .first()
-            .is_some_and(|i| i.kind == kit::MenuKind::Back || (i.kind == kit::MenuKind::Header && i.label.as_ref() == "Roles"));
+            .is_some_and(|i| i.kind == kit::MenuKind::Back || (i.kind == kit::MenuKind::Header && i.label == t::member_roles()));
         let rows = member_role_rows(&view, community, npub, busy.as_deref());
         items.truncate(lead as usize);
         acts.truncate(lead as usize);
@@ -191,7 +191,7 @@ pub(super) fn member_role_rows(view: &serde_json::Value, community: &str, npub: 
         if !rows.is_empty() {
             rows.push((kit::MenuItem::divider(), MenuAct::Nothing));
         }
-        rows.push((kit::MenuItem::header("Private channels"), MenuAct::Nothing));
+        rows.push((kit::MenuItem::header(t::member_private_channels()), MenuAct::Nothing));
         rows.extend(channel_rows);
     }
     rows

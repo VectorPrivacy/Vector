@@ -265,7 +265,7 @@ fn surround(
     }
 }
 
-fn button(id: &'static str, label: &'static str, primary: bool) -> gpui::Stateful<gpui::Div> {
+fn button(id: &'static str, label: SharedString, primary: bool) -> gpui::Stateful<gpui::Div> {
     div()
         .id(id)
         .px(px(22.))
@@ -512,11 +512,11 @@ impl Render for Cropper {
                     .justify_end()
                     .gap(px(10.))
                     .child(
-                        button("crop-cancel", "Cancel", false)
+                        button("crop-cancel", crate::t::dialog_cancel(), false)
                             .on_click(cx.listener(|v, _, _, cx| v.answer(false, cx))),
                     )
                     .child(
-                        button("crop-confirm", "Crop", true)
+                        button("crop-confirm", crate::t::crop_confirm(), true)
                             .when(!ready, |d| d.opacity(0.5))
                             .on_click(cx.listener(|v, _, _, cx| v.answer(true, cx))),
                     ),

@@ -414,7 +414,7 @@ pub fn card(ctx: &Ctx, m: &Message) -> Option<AnyElement> {
                 .child(
                     div()
                         .min_w_0()
-                        .child(title.clone().unwrap_or_else(|| "Link Preview".into())),
+                        .child(title.clone().unwrap_or_else(|| crate::t::embed_link_preview().into())),
                 ),
         );
     if !description.is_empty() {
@@ -452,7 +452,7 @@ pub fn card(ctx: &Ctx, m: &Message) -> Option<AnyElement> {
         let refused = ctx.store.player_refused.get(&m.id).cloned();
         let playable = refused.is_none() && ctx.store.players_available();
         let service = if audio { "SoundCloud" } else { "YouTube" };
-        let label = refused.unwrap_or_else(|| if playable { format!("Plays from {service}") } else { "Opens in your browser".into() });
+        let label = refused.unwrap_or_else(|| if playable { crate::t::embed_plays_from(&*service).into() } else { crate::t::embed_opens_browser().into() });
         let play = {
             let (act, id, req) = (
                 ctx.on_act.clone(),

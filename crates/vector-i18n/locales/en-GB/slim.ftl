@@ -23,3 +23,5 @@ slim-raid-flagged = { $count ->
 slim-leave = Leave
 slim-muted = Muted
 slim-notify = Notify
+slim-settings-danger = Irreversible Actions
+slim-settings-update-pending = Update Pending

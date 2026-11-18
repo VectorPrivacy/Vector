@@ -178,7 +178,7 @@ const GLOBAL: &[&str] = &[
     // App-install and analytics session IDs
     "gps_adid", "is_retargeting", "analytics_context", "analytics_trace_id", "__io_lv", "_io_session_id",
     "_ly_c", "_ly_r", "_clde", "_cldee", "_bdadid", "adc_publisher", "adc_token", "bemobdata", "uzcid",
-    "beyond_uzcvid", "beyond_uzmcvid", "vsm_type", "vsm_cid", "vsm_pid", "Tcsack", "srclt", "lt_r",
+    "beyond_uzcvid", "beyond_uzmcvid", "vsm_type", "vsm_cid", "vsm_pid", "Tcsack", "srclt", "lt_r", // i18n-exempt: URL parameter
     "spot_im_redirect_source", "personaclick_search_query", "personaclick_input_query",
     "brave-campaign-id", "brave-creative-id", "brave-creative-set-id",
     // Publisher CMS campaign tags

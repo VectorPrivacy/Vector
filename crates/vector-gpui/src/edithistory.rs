@@ -243,7 +243,7 @@ pub fn render(
             .line_height(px(16.))
             .font_weight(gpui::FontWeight::SEMIBOLD)
             .text_color(white_a(0.55))
-            .child(if i == 0 { "Original" } else { "Edited" })
+            .child(if i == 0 { crate::t::edit_history_original() } else { crate::t::edit_history_edited() })
             .child(div().ml(px(4.)).font_weight(gpui::FontWeight::NORMAL).text_color(white_a(0.32)).child(when(h.entries[i].edited_at)));
         let toggle = on_toggle.clone();
         let body = if i > 0 {
@@ -339,7 +339,7 @@ pub fn render(
                 .text_size(px(12.))
                 .font_weight(gpui::FontWeight::SEMIBOLD)
                 .text_color(white_a(0.5))
-                .child("Edit history")
+                .child(crate::t::edit_history_title())
                 .child(
                     div()
                         .id("eh-close")

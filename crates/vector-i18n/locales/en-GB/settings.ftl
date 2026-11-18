@@ -425,3 +425,19 @@ settings-update-empty = The update holds no app
 settings-update-installer-failed = Couldn't start the installer: { $error }
 settings-update-unsupported = No in-app updates on this platform
 settings-update-nothing-to-start = Nothing to start
+
+## Why a storage change was refused
+
+settings-storage-keep-first = Turn on Keep Files on This Device first.
+settings-storage-change-later = Change this once your downloads finish.
+settings-storage-no-types = No file types to clear
+settings-storage-keep-busy = Turn this off once your downloads finish.
+settings-storage-clear-busy = Clear this once your files finish moving.
+
+## Checking for updates
+
+# $status is the server's answer, like "404 Not Found".
+settings-update-server-status = Update server answered { $status }
+settings-update-manifest-large = Update manifest too large
+# $error is why.
+settings-update-manifest-invalid = Invalid update manifest: { $error }

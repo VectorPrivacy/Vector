@@ -4,15 +4,15 @@
 
 use gpui::{Hsla, Rgba, rgb};
 
-pub const RUBIK: &str = "Rubik";
-pub const INTER: &str = "Inter";
+pub const RUBIK: &str = "Rubik"; // i18n-exempt: font name
+pub const INTER: &str = "Inter"; // i18n-exempt: font name
 /// What a webview's `monospace` resolves to on each platform.
 #[cfg(target_os = "macos")]
-pub const MONO: &str = "Menlo";
+pub const MONO: &str = "Menlo"; // i18n-exempt: font name
 #[cfg(target_os = "windows")]
-pub const MONO: &str = "Consolas";
+pub const MONO: &str = "Consolas"; // i18n-exempt: font name
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-pub const MONO: &str = "DejaVu Sans Mono";
+pub const MONO: &str = "DejaVu Sans Mono"; // i18n-exempt: font name
 
 pub fn c(hex: u32) -> Hsla {
     rgb(hex).into()

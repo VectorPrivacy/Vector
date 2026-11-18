@@ -19,3 +19,6 @@ secret-set-timer = Set a Self-Destruct Timer
 secret-send = Send Anyway
 # $seconds counts down until the button works.
 secret-send-wait = Send Anyway ({ $seconds })
+# Stands in for a channel with no name.
+secret-this-community = this community
+secret-pick-timer = Pick a timer, then send it again

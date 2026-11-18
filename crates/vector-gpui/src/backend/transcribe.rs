@@ -6,7 +6,7 @@ use vector_media::whisper;
 pub const DEFAULT_MODEL: &str = "small";
 
 fn app() -> Result<tauri::AppHandle, String> {
-    vector_media::TAURI_APP.get().copied().ok_or_else(|| "Audio engine not started".to_string())
+    vector_media::TAURI_APP.get().copied().ok_or_else(|| "Audio engine not started".to_string()) // i18n-exempt: developer error
 }
 
 fn setting(key: &str) -> Option<String> {

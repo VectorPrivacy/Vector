@@ -42,3 +42,24 @@ file-app-online = { $count ->
     [one] { $count } online
    *[other] { $count } online
 }
+
+## Why a download stopped
+
+file-too-large-to-hold = Too large to hold without keeping it
+file-already-downloading = This file is already downloading
+file-memory-full = Too much media is open to show this one
+
+## Saving a file out of Vector
+
+file-not-on-device = This file isn't on this device any more
+# $error is why.
+file-save-failed = Couldn't save the file: { $error }
+file-save-mismatch = Couldn't save the file: it didn't read back as sent
+
+## Sending a file
+
+file-empty = File is empty (0 bytes)
+# $error is why.
+file-metadata-failed = Failed to read file metadata: { $error }
+# $error is why.
+file-read-failed = Couldn't read the file: { $error }

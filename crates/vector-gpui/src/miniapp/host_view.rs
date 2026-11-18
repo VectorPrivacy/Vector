@@ -51,8 +51,8 @@ fn emit(e: Event) {
 }
 
 fn on_ui(f: impl FnOnce(&mut App) + Send + 'static) -> Result<(), String> {
-    let jobs = JOBS.get().ok_or("The app isn't ready yet")?;
-    jobs.unbounded_send(Box::new(f)).map_err(|_| "The app is closing".to_string())
+    let jobs = JOBS.get().ok_or_else(|| crate::t::miniapp_not_ready().to_string())?;
+    jobs.unbounded_send(Box::new(f)).map_err(|_| crate::t::miniapp_closing().to_string())
 }
 
 struct Page {

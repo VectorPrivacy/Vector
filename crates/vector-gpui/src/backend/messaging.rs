@@ -61,7 +61,7 @@ impl SendCallback for Callback {
             .cancel_token(pending_id)
             .is_some_and(|f| f.load(Ordering::Relaxed))
         {
-            return Err("Upload cancelled".into());
+            return Err("Upload cancelled".into()); // i18n-exempt: sentinel, matched by the send path
         }
         vector_core::emit_event(
             "attachment_upload_progress",
@@ -314,8 +314,8 @@ pub async fn send_file(
     if !IMAGE_EXTS.contains(&extension.as_str()) {
         match std::fs::metadata(&path) {
             Ok(m) if m.len() > 0 => {}
-            Ok(_) => return Err("File is empty (0 bytes)".into()),
-            Err(e) => return Err(format!("Failed to read file metadata: {e}")),
+            Ok(_) => return Err(crate::t::file_empty().into()),
+            Err(e) => return Err(crate::t::file_metadata_failed(e.to_string()).to_string()),
         }
         let source = vector_core::sending::FileSource::Path(path);
         return vector_core::sending::send_file_dm_from(
@@ -335,7 +335,7 @@ pub async fn send_file(
     let (ext, file) = (extension.clone(), path.clone());
     let processed = tokio::task::spawn_blocking(move || {
         let bytes =
-            Arc::new(std::fs::read(&file).map_err(|e| format!("Couldn't read the file: {e}"))?);
+            Arc::new(std::fs::read(&file).map_err(|e| crate::t::file_read_failed(e.to_string()).to_string())?);
         let out = crate::message::process_image_for_send(
             bytes,
             &ext,
@@ -405,7 +405,7 @@ pub async fn messages_around(
 pub async fn send_voice(receiver: String, replied_to: String) -> Result<(), String> {
     let pending = vector_media::voice::AudioRecorder::global()
         .take_pending()
-        .ok_or("No pending recording")?;
+        .ok_or("No pending recording")?; // i18n-exempt: developer error
     let _ = vector_media::audio_engine::AudioEngine::get().map(|e| e.stop(pending.source_id));
     let wav = tokio::task::spawn_blocking(move || pending.encode_wav())
         .await

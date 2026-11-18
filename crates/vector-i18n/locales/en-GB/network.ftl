@@ -18,3 +18,8 @@ outside-browser-text = It loads outside { $network }.<br><br>{ $url }
 outside-browser-text-unknown = It loads outside the network in use.<br><br>{ $url }
 outside-browser-open = Open
 outside-browser-copy = Copy Link
+# $count is how many relays you use.
+network-relays-unreachable = { $count ->
+    [one] Couldn't reach your relay, new messages may be missing
+   *[other] Couldn't reach any of your { $count } relays, new messages may be missing
+}

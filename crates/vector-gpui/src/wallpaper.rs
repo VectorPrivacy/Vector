@@ -235,7 +235,7 @@ pub enum Act {
 
 /// `#wallpaper-edit-bar`: over the header while a picture is staged.
 pub fn edit_bar(label: &str, busy: bool, alpha: f32, on: &OnAct) -> impl IntoElement {
-    let side = |id: &'static str, icon: &'static str, sz: f32, tint: gpui::Hsla, text: &'static str, act: fn() -> Act| {
+    let side = |id: &'static str, icon: &'static str, sz: f32, tint: gpui::Hsla, text: gpui::SharedString, act: fn() -> Act| {
         let on = on.clone();
         div()
             .id(id)
@@ -266,7 +266,7 @@ pub fn edit_bar(label: &str, busy: bool, alpha: f32, on: &OnAct) -> impl IntoEle
         .justify_between()
         .bg(gpui::rgb(0x161616))
         .opacity(alpha)
-        .child(side("wallpaper-edit-cancel-btn", "icons/edit-x.svg", 14., c(crate::timeline::DANGER), "Cancel", || Act::Cancel))
+        .child(side("wallpaper-edit-cancel-btn", "icons/edit-x.svg", 14., c(crate::timeline::DANGER), crate::t::dialog_cancel(), || Act::Cancel))
         .child(
             div()
                 .absolute()
@@ -279,7 +279,7 @@ pub fn edit_bar(label: &str, busy: bool, alpha: f32, on: &OnAct) -> impl IntoEle
                 .text_color(white_a(0.6))
                 .child(label.to_string()),
         )
-        .child(side("wallpaper-edit-save-btn", "icons/save.svg", 16., c(0x33DB98), "Save", || Act::Save))
+        .child(side("wallpaper-edit-save-btn", "icons/save.svg", 16., c(0x33DB98), crate::t::dialog_save(), || Act::Save))
 }
 
 /// `.wallpaper-preview-bar`: blur and brightness, over the composer.
@@ -290,7 +290,7 @@ pub fn preview_bar(blur: u8, dim: u8, dragging: Rc<Cell<Option<bool>>>, on: &OnA
         div()
             .id(if is_blur { "wp-blur" } else { "wp-dim" })
             .as_slider(
-                if is_blur { "Blur" } else { "Brightness" },
+                if is_blur { crate::t::wallpaper_blur() } else { crate::t::wallpaper_brightness() },
                 if is_blur { value.to_string() } else { format!("{value}%") },
                 pct,
             )
@@ -306,7 +306,7 @@ pub fn preview_bar(blur: u8, dim: u8, dragging: Rc<Cell<Option<bool>>>, on: &OnA
                 div()
                     .id(if is_blur { "wp-blur-icon" } else { "wp-dim-icon" })
                     .flex_shrink_0()
-                    .tip(if is_blur { "Blur" } else { "Brightness" })
+                    .tip(if is_blur { crate::t::wallpaper_blur() } else { crate::t::wallpaper_brightness() })
                     .child(svg().path(icon).size(px(20.)).text_color(white_a(0.72))),
             )
             .child(

@@ -12,3 +12,4 @@ crop-unreadable = Couldn't read the image
 crop-banner-title = Crop Banner
 crop-icon-title = Crop Icon
 crop-community-icon-title = Crop Community Icon
+crop-confirm = Crop

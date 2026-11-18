@@ -76,7 +76,7 @@ fn emit(event: &str, payload: serde_json::Value) {
 }
 
 /// What a download reports once every server its message names holds no such file.
-pub const GONE_EVERYWHERE: &str = "No longer on any media server";
+pub const GONE_EVERYWHERE: &str = "No longer on any media server"; // i18n-exempt: sentinel, matched and shown translated
 
 /// Whether every source the message itself names answers that it holds no such file. A guessed
 /// mirror can rescue a file, never keep it in doubt, so only the named ones are asked.
@@ -139,14 +139,14 @@ pub fn paused() -> HashMap<String, (u64, Option<u64>)> {
 
 pub async fn download(chat: String, msg_id: String, attachment_id: String, auto: bool) -> bool {
     let Some((chat_id, mut message)) = VectorCore.get_message(&msg_id).await else {
-        return fail(&chat, &msg_id, &attachment_id, "Message not found");
+        return fail(&chat, &msg_id, &attachment_id, "Message not found"); // i18n-exempt: developer error
     };
     let Some(idx) = message
         .attachments
         .iter()
         .position(|a| a.id == attachment_id)
     else {
-        return fail(&chat, &msg_id, &attachment_id, "Attachment not found");
+        return fail(&chat, &msg_id, &attachment_id, "Attachment not found"); // i18n-exempt: developer error
     };
     let attachment = message.attachments[idx].clone();
     if let Some(held) = vector_core::simd::hex::hex_to_bytes_32_checked(&attachment.id)
@@ -181,7 +181,7 @@ pub async fn download(chat: String, msg_id: String, attachment_id: String, auto:
     {
         emit(
             "attachment_download_result",
-            json!({ "profile_id": chat, "msg_id": msg_id, "id": attachment_id, "success": false, "cancelled": true, "result": "Too large to hold without keeping it" }),
+            json!({ "profile_id": chat, "msg_id": msg_id, "id": attachment_id, "success": false, "cancelled": true, "result": crate::t::file_too_large_to_hold().to_string() }),
         );
         return false;
     }
@@ -190,7 +190,7 @@ pub async fn download(chat: String, msg_id: String, attachment_id: String, auto:
             &chat,
             &msg_id,
             &attachment_id,
-            "This file is already downloading",
+            &crate::t::file_already_downloading(),
         );
     };
 
@@ -307,7 +307,7 @@ pub async fn download(chat: String, msg_id: String, attachment_id: String, auto:
             &chat,
             &msg_id,
             &attachment_id,
-            "Too much media is open to show this one",
+            &crate::t::file_memory_full(),
         );
     }
 

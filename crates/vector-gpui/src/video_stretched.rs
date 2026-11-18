@@ -65,7 +65,7 @@ pub fn open(input: AudioInput, speed: f32, duration_ms: u64) -> Result<Arc<Stret
             }
         })
         .map_err(|e| e.to_string())?;
-    rx.recv().map_err(|_| "no audio".to_string())?
+    rx.recv().map_err(|_| "no audio".to_string())? // i18n-exempt: developer error
 }
 
 impl Stretched {
@@ -213,7 +213,7 @@ impl vector_core::media::MediaSource for Stretched {
             st.read = frame + 1;
             self.wanted.notify_all();
             if waited >= READ_TIMEOUT {
-                return Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "The sound stopped loading"));
+                return Err(std::io::Error::new(std::io::ErrorKind::TimedOut, crate::t::video_sound_stopped().to_string()));
             }
             let step = Duration::from_millis(250);
             st = self.made.wait_timeout(st, step).unwrap().0;

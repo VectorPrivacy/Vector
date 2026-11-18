@@ -37,15 +37,14 @@ fn find<'a>(store: &'a Store, id: &str) -> Option<(&'a str, &'a vector_core::Mes
 }
 
 /// 1 → "Alice"; 2 → "Alice and Bob"; 3 → all three; 4+ → three and "N others".
-fn names(list: &[String]) -> String {
+fn reacted_by(list: &[String]) -> SharedString {
+    use crate::t;
     match list {
-        [a] => a.clone(),
-        [a, b] => format!("{a} and {b}"),
-        [a, b, c] => format!("{a}, {b}, and {c}"),
-        _ => {
-            let others = list.len() - 3;
-            format!("{}, and {others} other{}", list[..3].join(", "), if others == 1 { "" } else { "s" })
-        }
+        [] => SharedString::default(),
+        [a] => t::react_by_1(&**a),
+        [a, b] => t::react_by_2(&**a, &**b),
+        [a, b, c] => t::react_by_3(&**a, &**b, &**c),
+        [a, b, c, rest @ ..] => t::react_by_more(&**a, &**b, &**c, rest.len()),
     }
 }
 
@@ -141,7 +140,7 @@ pub fn tip(pop: &Pop, store: &Store, custom: Option<ImageSource>, anchor: Bounds
         .line_height(px(17.))
         .text_color(white_a(0.92))
         .child(glyph(&pop.emoji, custom, 16.))
-        .child(div().min_w_0().truncate().child(format!("reacted by {}", names(&who))))
+        .child(div().min_w_0().truncate().child(reacted_by(&who)))
         .child(
             div()
                 .flex_shrink_0()
@@ -151,7 +150,7 @@ pub fn tip(pop: &Pop, store: &Store, custom: Option<ImageSource>, anchor: Bounds
                 .border_color(white_a(0.1))
                 .text_size(px(11.))
                 .text_color(white_a(0.4))
-                .child("Right-click for details"),
+                .child(crate::t::react_details()),
         );
     Some(shell(pop, place(pop, anchor, pane, 6., true), body, 150))
 }

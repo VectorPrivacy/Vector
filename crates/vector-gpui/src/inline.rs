@@ -129,9 +129,9 @@ impl Tip {
             Tip::Dissolve(at) => {
                 let left = at - chrono::Utc::now().timestamp();
                 if left > 0 {
-                    format!("Message dissolves in {}", crate::timeline::countdown(left as u64))
+                    crate::t::msg_dissolves_in(crate::timeline::countdown(left as u64)).to_string()
                 } else {
-                    "Dissolving...".into()
+                    crate::t::msg_dissolving().into()
                 }
             }
         }
@@ -1047,8 +1047,8 @@ impl Element for Inline {
                             Kind::Mention(_) => (true, None),
                             Kind::Time(hint) if !hint.is_empty() => (false, Some(hint.clone())),
                             Kind::LinkTip(_, tip) => (false, Some(tip.clone())),
-                            Kind::Action(a) if a.as_ref() == "edited" => (false, Some("Click to view edit history".into())),
-                            Kind::Action(a) if a.starts_with(EMOJI_MISSING) => (false, Some("Emoji unavailable (tap for details)".into())),
+                            Kind::Action(a) if a.as_ref() == "edited" => (false, Some(crate::t::msg_edited_tip().into())),
+                            Kind::Action(a) if a.starts_with(EMOJI_MISSING) => (false, Some(crate::t::msg_emoji_missing_tip().into())),
                             _ => (false, None),
                         };
                         if lift || hint.is_some() {
@@ -1641,7 +1641,7 @@ mod rtl_tests {
     }
 
     fn order(text: &str, cuts: &[usize]) -> Vec<String> {
-        let atoms = vec![Atom::Text { text: text.to_string().into(), look: Look::new("Rubik", 15., 21., gpui::white()), kind: Kind::Plain }];
+        let atoms = vec![Atom::Text { text: text.to_string().into(), look: Look::new("Rubik", 15., 21., gpui::white()), kind: Kind::Plain }]; // i18n-exempt: font name
         let mut x = 0.;
         let mut items: Vec<Placed> = cuts
             .windows(2)
@@ -1672,9 +1672,9 @@ mod rtl_tests {
 
     #[test]
     fn mixed_lines_reverse_only_the_right_to_left_run() {
-        let t = "hi שלום עולם there";
+        let t = "hi שלום עולם there"; // i18n-exempt: fixture
         assert_eq!(order(t, &cuts(t)), vec!["hi", "עולם", "שלום", "there"]);
-        let plain = "just english words";
+        let plain = "just english words"; // i18n-exempt: fixture
         assert_eq!(order(plain, &cuts(plain)), vec!["just", "english", "words"]);
     }
 

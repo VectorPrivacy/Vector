@@ -6,6 +6,7 @@ use std::rc::Rc;
 use gpui::{Context, Window};
 
 use super::VectorApp;
+use crate::t;
 use crate::backend;
 use crate::pins::{Act, Pin};
 
@@ -176,7 +177,7 @@ impl VectorApp {
             let res = rx.await;
             this.update(cx, |this, cx| {
                 match res {
-                    Ok(Ok(())) if on => this.show_toast("Message pinned", cx),
+                    Ok(Ok(())) if on => this.show_toast(&t::pins_pinned_toast(), cx),
                     Ok(Err(e)) => this.show_toast(&e, cx),
                     _ => {}
                 }

@@ -80,3 +80,10 @@ embed-video-no-ranges = The video host stopped answering ranges
 # $status is the server's answer, like "404 Not Found".
 embed-video-host-status = The video host answered { $status }
 embed-video-short-range = The video host sent a short range
+
+## A link preview card
+
+embed-link-preview = Link Preview
+# $service is where it plays from, like "YouTube".
+embed-plays-from = Plays from { $service }
+embed-opens-browser = Opens in your browser

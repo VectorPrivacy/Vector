@@ -189,9 +189,9 @@ fn kinds(pin: &Pin) -> Vec<Atom> {
 
 fn control(id: SharedString, path: &'static str, hover: u32, on: &OnAct, act: Act) -> impl IntoElement {
     let tip = match &act {
-        Act::Open(_) => "Reveal in folder",
-        _ if path == "icons/x.svg" => "Unpin",
-        _ => "Show more",
+        Act::Open(_) => crate::t::pins_reveal(),
+        _ if path == "icons/x.svg" => crate::t::pins_unpin(),
+        _ => crate::t::pins_show_more(),
     };
     div()
         .id(id.clone())
@@ -359,13 +359,13 @@ fn demote(source: &str) -> String {
 /// The drawer and the dimmed conversation behind it, laid over the message list.
 /// `shown` falls from 1 as the drawer shuts (`pins-drawer-shut`).
 pub fn drawer(pins: &Pins, store: &Store, revealed: &HashMap<String, HashSet<u32>>, clock: f32, max_h: f32, shown: f32, on: &OnAct) -> AnyElement {
-    let notice = |text: &'static str| {
+    let notice = |text: SharedString| {
         div().p(px(16.)).text_size(px(13.)).opacity(0.6).text_center().child(text).into_any_element()
     };
     let list: Vec<AnyElement> = if pins.sealed {
-        vec![notice("This channel's pins are protected by a key you don't hold yet.")]
+        vec![notice(crate::t::pins_locked())]
     } else if pins.list.is_empty() {
-        vec![notice("No pinned messages yet.")]
+        vec![notice(crate::t::pins_none())]
     } else {
         pins.list.iter().map(|p| row(pins, p, store, revealed, clock, on)).collect()
     };
@@ -413,7 +413,7 @@ pub fn drawer(pins: &Pins, store: &Store, revealed: &HashMap<String, HashSet<u32
                         .cursor_pointer()
                         .text_size(px(14.))
                         .on_click(click(on, Act::Close))
-                        .child("Click to Close")
+                        .child(crate::t::pins_click_close())
                         .child(svg().path("ui/pins-close.svg").size(px(20.)).text_color(c(ACCENT))),
                 )
                 // `pins-drawer-open`: down 10px and in over 0.18 s.
@@ -432,7 +432,7 @@ pub fn drawer(pins: &Pins, store: &Store, revealed: &HashMap<String, HashSet<u32
 pub fn button(on: OnAct) -> impl IntoElement {
     div()
         .id("pins-btn")
-        .tip("Pinned Messages")
+        .tip(crate::t::pins_title())
         .size(px(40.))
         .flex_shrink_0()
         .flex()

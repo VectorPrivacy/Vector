@@ -1,6 +1,6 @@
 //! The community rail's arrangement: folders opened per device, edits synced per account.
 
-use gpui::{AppContext, Context, Focusable, Pixels, Point, SharedString, Window};
+use gpui::{AppContext, Context, Focusable, Pixels, Point, Window};
 use vector_core::rail_layout::{RailDrag, RailDrop, RailLayout, RailNode};
 
 use super::{MenuAct, PopupAct, VectorApp};

@@ -5,6 +5,7 @@ use gpui::{Context, Window};
 use vector_core::secrets::SecretKind;
 
 use super::VectorApp;
+use crate::t;
 use crate::secretguard::{Answer, Guard, Timer};
 
 impl VectorApp {
@@ -13,7 +14,7 @@ impl VectorApp {
         let (community, place) = {
             let store = self.store.borrow();
             match store.community_of(&chat) {
-                Some(com) => (true, com.channel(&chat).map(|ch| ch.name.to_string()).filter(|n| !n.is_empty()).unwrap_or_else(|| "this community".into())),
+                Some(com) => (true, com.channel(&chat).map(|ch| ch.name.to_string()).filter(|n| !n.is_empty()).unwrap_or_else(|| t::secret_this_community().into())),
                 None => (false, store.name(&chat)),
             }
         };
@@ -57,7 +58,7 @@ impl VectorApp {
             Answer::Timer => {
                 let at = self.chat_menu_at();
                 self.open_self_destruct(g.chat, at);
-                self.show_toast("Pick a timer, then send it again", cx);
+                self.show_toast(&t::secret_pick_timer(), cx);
             }
         }
         cx.notify();

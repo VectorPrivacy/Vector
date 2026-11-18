@@ -77,7 +77,7 @@ pub async fn of(npub: String, mine: bool) -> Badges {
 
 /// How many distinct users accepted `inviter`'s invite code, read from the trusted relays.
 async fn invited(inviter: PublicKey) -> Result<u32, String> {
-    let client = vector_core::state::nostr_client().ok_or("Nostr client not initialized")?;
+    let client = vector_core::state::nostr_client().ok_or("Nostr client not initialized")?; // i18n-exempt: developer error
     let relays = vector_core::state::active_trusted_relays().await;
     let timeout = vector_core::relay_request_timeout(std::time::Duration::from_secs(10));
     let filter = Filter::new()
@@ -102,7 +102,7 @@ async fn invited(inviter: PublicKey) -> Result<u32, String> {
             break;
         }
     }
-    let code = code.ok_or("No invite code found for this user")?;
+    let code = code.ok_or_else(|| crate::t::badge_no_invite_code().to_string())?;
     let filter = Filter::new()
         .kind(Kind::ApplicationSpecificData)
         .custom_tag(SingleLetterTag::LOWERCASE_D, code)

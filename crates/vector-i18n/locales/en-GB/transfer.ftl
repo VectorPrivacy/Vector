@@ -73,3 +73,11 @@ transfer-stopped = The transfer stopped.
 transfer-arrival-expired = The account that arrived has expired. Start again.
 # $error is why.
 transfer-finish-failed = Couldn't finish signing in: { $error }
+
+## Why an account transfer was refused
+
+transfer-not-waiting = The transfer is no longer waiting for approval
+transfer-signer-account = This account's key lives in your signer app, so there's nothing to send from here. Sign in with your signer on the other device.
+transfer-sign-in-first = Sign in first
+transfer-account-changed = The account changed, so nothing was sent
+transfer-key-mismatch = This device's stored key doesn't match the account, so nothing was sent

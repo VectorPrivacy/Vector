@@ -217,3 +217,30 @@ emoji-why-too-large = Image too large
 emoji-why-no-cache = No cache directory
 emoji-why-bad-url = Invalid emoji URL
 emoji-why-integrity = The image failed its integrity check
+wallpaper-blur = Blur
+wallpaper-brightness = Brightness
+
+## Who reacted, on hovering a reaction
+
+# $a is who reacted.
+react-by-1 = reacted by { $a }
+# $a and $b are who reacted.
+react-by-2 = reacted by { $a } and { $b }
+# $a, $b and $c are who reacted.
+react-by-3 = reacted by { $a }, { $b }, and { $c }
+# $a, $b and $c are the first three who reacted; $count is how many more did.
+react-by-more = { $count ->
+    [one] reacted by { $a }, { $b }, { $c }, and { $count } other
+   *[other] reacted by { $a }, { $b }, { $c }, and { $count } others
+}
+react-details = Right-click for details
+
+## The button back to the newest message
+
+jump-present = Jump to present
+# $count is how many new messages wait below, at most 99.
+jump-new = { $count ->
+    [one] { $count } new message
+   *[other] { $count } new messages
+}
+jump-new-many = 99+ new messages

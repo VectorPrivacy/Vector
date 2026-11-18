@@ -2016,7 +2016,7 @@ impl Render for EmojiPicker {
                     .flex()
                     .flex_shrink_0()
                     .gap(px(if tight { 2. } else { 4. }))
-                    .child(mode_btn("Emoji", t::picker_emoji(), Mode::Emoji, cx))
+                    .child(mode_btn("Emoji", t::picker_emoji(), Mode::Emoji, cx)) // i18n-exempt: element id
                     .when(!self.no_gifs, |d| d.child(mode_btn("GIF", "GIF".into(), Mode::Gif, cx)))
                     .when(!self.reaction, |d| {
                         d.child(mode_btn("(◕‿◕)", "(◕‿◕)".into(), Mode::Kaomoji, cx))

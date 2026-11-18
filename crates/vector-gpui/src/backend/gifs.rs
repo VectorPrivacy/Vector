@@ -62,10 +62,10 @@ pub async fn listing(query: String) -> Result<Vec<Gif>, String> {
     }
     let body = fetch(&format!("{SERVICE}/api/v1/{query}"), LISTING_MAX)
         .await
-        .map_err(|e| format!("gif service: {e}"))?
-        .ok_or("gif service: no usable answer")?;
+        .map_err(|e| format!("gif service: {e}"))? // i18n-exempt: developer error
+        .ok_or("gif service: no usable answer")?; // i18n-exempt: developer error
     let json: serde_json::Value =
-        serde_json::from_slice(&body).map_err(|_| "gif service: answer is not JSON")?;
+        serde_json::from_slice(&body).map_err(|_| "gif service: answer is not JSON")?; // i18n-exempt: developer error
     let results = json
         .get("results")
         .and_then(|r| r.as_array())

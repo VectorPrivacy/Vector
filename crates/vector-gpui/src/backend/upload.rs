@@ -42,16 +42,16 @@ pub async fn picture(
 ) -> Result<String, String> {
     let bytes = tokio::fs::read(&path)
         .await
-        .map_err(|_| "Image couldn't be loaded from disk")?;
-    picture_ext(&path).ok_or("File type is not allowed for avatars (only images are permitted)")?;
+        .map_err(|_| crate::t::profile_image_load_failed().to_string())?;
+    picture_ext(&path).ok_or_else(|| crate::t::profile_image_type().to_string())?;
     let (bytes, ext) = tokio::task::spawn_blocking(move || prepared(bytes, banner, crop))
         .await
         .map_err(|e| e.to_string())??;
     let bytes = Arc::new(bytes);
 
-    vector_core::state::nostr_client().ok_or("Not connected")?;
+    vector_core::state::nostr_client().ok_or_else(|| crate::t::profile_not_connected().to_string())?;
     let signer =
-        vector_core::signer::active_signer().map_err(|e| format!("Signer unavailable: {e}"))?;
+        vector_core::signer::active_signer().map_err(|e| crate::t::profile_signer_unavailable(e.to_string()).to_string())?;
     let progress: vector_core::blossom::ProgressCallback = Arc::new(|_, _| Ok(()));
     let url = vector_core::blossom::upload_blob_with_progress_and_failover(
         signer,
@@ -91,7 +91,7 @@ pub async fn picture(
     )
     .await
     {
-        return Err("Failed to broadcast the update to the network.".into());
+        return Err(crate::t::profile_broadcast_failed().into());
     }
     Ok(url)
 }

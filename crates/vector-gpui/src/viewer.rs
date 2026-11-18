@@ -490,7 +490,7 @@ impl Render for Viewer {
             .child(close)
             .child(controls)
             .child(pill(pct, zoom).bottom(px(20.)))
-            .child(pill("Scroll to zoom", tip).top(px(20.)))
+            .child(pill(crate::t::viewer_scroll_zoom(), tip).top(px(20.)))
             .with_animation(
                 "viewer-fade",
                 gpui::Animation::new(Duration::from_millis(200)),

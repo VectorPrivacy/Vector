@@ -27,7 +27,7 @@ mod platform {
     use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, CoCreateInstance};
     use windows::Win32::UI::Shell::{ITaskbarList3, TaskbarList};
     use windows::Win32::UI::WindowsAndMessaging::{CreateIconFromResourceEx, DestroyIcon, HICON, LR_DEFAULTCOLOR};
-    use windows::core::{PCWSTR, w};
+    use windows::core::{HSTRING, PCWSTR};
 
     const DOT: &[u8] = include_bytes!("../../../src-tauri/icons/icon_badge_notification.png");
 
@@ -46,7 +46,8 @@ mod platform {
                 return;
             }
             let Ok(icon) = CreateIconFromResourceEx(DOT, true, 0x0003_0000, 16, 16, LR_DEFAULTCOLOR) else { return };
-            let _ = list.SetOverlayIcon(hwnd, icon, w!("Unread messages"));
+            let label = HSTRING::from(&*crate::t::badge_unread());
+            let _ = list.SetOverlayIcon(hwnd, icon, PCWSTR(label.as_ptr()));
             let _ = DestroyIcon(icon);
         }
     }
@@ -67,7 +68,7 @@ mod platform {
             None,
             "/com/canonical/unity/launcherentry/vector",
             "com.canonical.Unity.LauncherEntry",
-            "Update",
+            "Update", // i18n-exempt: D-Bus signal name
             Some(&args),
         );
     }

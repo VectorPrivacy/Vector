@@ -66,3 +66,12 @@ profile-edit-unsaved = Unsaved Changes Made
 profile-edit-on = Edit Mode is Enabled
 profile-edit-save = Save
 profile-remove-banner = Remove Banner
+
+## Why a profile picture couldn't be uploaded
+
+profile-image-load-failed = Image couldn't be loaded from disk
+profile-image-type = File type is not allowed for avatars (only images are permitted)
+profile-not-connected = Not connected
+# $error is why.
+profile-signer-unavailable = Signer unavailable: { $error }
+profile-broadcast-failed = Failed to broadcast the update to the network.

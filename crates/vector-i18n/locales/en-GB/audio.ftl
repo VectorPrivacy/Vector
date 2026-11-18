@@ -41,3 +41,16 @@ video-unmute = Unmute
 video-volume = Volume
 video-full-screen = Full screen
 video-exit-full-screen = Exit full screen
+
+## Turning a voice message into text
+
+# $percent is from 0 to 100.
+transcript-downloading = Downloading... { $percent }%
+transcript-ready = Ready!
+transcript-download-failed = Download Failed
+# $error is why.
+transcript-error = Error: { $error }
+transcript-language = Language Detected:
+transcript-none = No transcription available
+video-sound-stopped = The sound stopped loading
+viewer-scroll-zoom = Scroll to zoom

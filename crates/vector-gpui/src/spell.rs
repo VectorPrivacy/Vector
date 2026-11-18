@@ -187,6 +187,7 @@ mod win {
                 let mut buf = [0u16; 85];
                 let n = GetUserDefaultLocaleName(&mut buf);
                 let mine = (n > 1).then(|| String::from_utf16_lossy(&buf[..n as usize - 1]));
+                // i18n-exempt: locale tag
                 for lang in mine.iter().map(String::as_str).chain(["en-US"]) {
                     let tag = HSTRING::from(lang);
                     if factory.IsSupported(PCWSTR(tag.as_ptr())).is_ok_and(|b| b.as_bool()) {

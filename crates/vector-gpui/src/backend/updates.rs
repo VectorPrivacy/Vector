@@ -42,7 +42,7 @@ impl Version {
     pub fn display(&self) -> String {
         let [a, b, c] = self.core;
         match self.preview {
-            Some(n) => format!("v{a}.{b}.{c} Preview {n}"),
+            Some(n) => crate::t::version_preview(n, format!("{a}.{b}.{c}")).to_string(),
             None => format!("v{a}.{b}.{c}"),
         }
     }
@@ -102,17 +102,17 @@ pub async fn check(preview_channel: bool) -> Result<Option<Release>, String> {
     let client = vector_core::net::shared_http_client();
     let mut resp = client.get(url).send().await.map_err(|e| e.to_string())?;
     if !resp.status().is_success() {
-        return Err(format!("Update server answered {}", resp.status()));
+        return Err(crate::t::settings_update_server_status(resp.status().to_string()).to_string());
     }
     let mut body = Vec::new();
     while let Some(chunk) = resp.chunk().await.map_err(|e| e.to_string())? {
         if body.len() + chunk.len() > MAX_MANIFEST {
-            return Err("Update manifest too large".into());
+            return Err(crate::t::settings_update_manifest_large().into());
         }
         body.extend_from_slice(&chunk);
     }
     let manifest: serde_json::Value =
-        serde_json::from_slice(&body).map_err(|e| format!("Invalid update manifest: {e}"))?;
+        serde_json::from_slice(&body).map_err(|e| crate::t::settings_update_manifest_invalid(e.to_string()).to_string())?;
     let Some(version) = manifest
         .get("version")
         .and_then(|v| v.as_str())

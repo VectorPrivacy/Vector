@@ -79,3 +79,5 @@ welcome-pick = Pick a conversation to get started
 welcome-title = Welcome to Vector!
 # <link> marks the words that open the public community.
 welcome-text = Feel free to <link>join the public community</link> to learn more about Vector, discuss privacy, and make some new friends.
+# Screen readers read this for the dot on Vector's taskbar button.
+badge-unread = Unread messages

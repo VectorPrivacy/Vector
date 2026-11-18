@@ -155,8 +155,8 @@ fn manifest(driver: &str) -> Option<&'static str> {
         "llvmpipe" => "*lvp*",
         "NVIDIA" => "*nvidia*",
         "NVK" => "*nouveau*",
-        d if d.starts_with("Intel open-source Mesa") => "*intel*",
-        d if d.starts_with("AMD open-source") || d.starts_with("AMD proprietary") => "*amd*",
+        d if d.starts_with("Intel open-source Mesa") => "*intel*", // i18n-exempt: driver name
+        d if d.starts_with("AMD open-source") || d.starts_with("AMD proprietary") => "*amd*", // i18n-exempt: driver name
         _ => return None,
     })
 }

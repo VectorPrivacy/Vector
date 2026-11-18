@@ -45,3 +45,13 @@ mention-role = Role
 mention-time-hint = A time everyone sees in their own zone
 mention-voice = Voice
 mention-text = Text
+
+## Typing /color, /gradient or /rainbow
+
+# $word is the command's name as typed, "color" or "colour". Write the sentence your
+# language needs; the example command stays as it is.
+composer-color-needs-two = needs two { $word }s, like /gradient pink #60a5fa text
+# $word is the command's name as typed, "color" or "colour".
+composer-color-needs-one = needs a { $word }, like /{ $word } pink text
+# $word is the effect's name as typed, like "rainbow" or "colour".
+composer-color-needs-text = needs some text to { $word }

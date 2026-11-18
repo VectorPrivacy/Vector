@@ -13,7 +13,7 @@ pub fn pinned() -> Vec<String> {
 
 /// Pin or unpin a row and sync it; the list as it now stands. Past the cap, the reason.
 pub async fn set_pinned(id: String, pin: bool) -> Result<Vec<String>, String> {
-    let client = vector_core::state::nostr_client().ok_or("Nostr client not initialized")?;
+    let client = vector_core::state::nostr_client().ok_or("Nostr client not initialized")?; // i18n-exempt: developer error
     let list = if pin {
         pinned_chats::pin_chat(&client, &id).await?
     } else {
@@ -25,7 +25,7 @@ pub async fn set_pinned(id: String, pin: bool) -> Result<Vec<String>, String> {
 
 /// Move a pin to just before `before`, or to the end.
 pub async fn move_pinned(id: String, before: Option<String>) -> Result<Vec<String>, String> {
-    let client = vector_core::state::nostr_client().ok_or("Nostr client not initialized")?;
+    let client = vector_core::state::nostr_client().ok_or("Nostr client not initialized")?; // i18n-exempt: developer error
     let list = pinned_chats::move_pinned_chat(&client, &id, before.as_deref()).await?;
     super::selfsync::emit_pinned(&list.chats);
     Ok(list.chats)
@@ -88,7 +88,7 @@ pub async fn mark_unread(chat_id: String) -> Option<String> {
 pub async fn mark_unread_from(chat_id: String, message_id: String) -> Result<u32, String> {
     let slim = {
         let mut state = STATE.lock().await;
-        let idx = state.chats.iter().position(|c| c.id == chat_id).ok_or("Chat not found")?;
+        let idx = state.chats.iter().position(|c| c.id == chat_id).ok_or("Chat not found")?; // i18n-exempt: developer error
         state.chats[idx].unread_from = vector_core::compact::encode_message_id(&message_id);
         db::chats::SlimChatDB::from_chat(&state.chats[idx], &state.interner)
     };

@@ -24,7 +24,7 @@ mod imp {
 
     impl Vp8 {
         pub fn new() -> Result<Self, String> {
-            let codec = codec().ok_or("no VP8 decoder in this FFmpeg")?;
+            let codec = codec().ok_or("no VP8 decoder in this FFmpeg")?; // i18n-exempt: developer error
             let dec = ffmpeg::codec::context::Context::new_with_codec(codec)
                 .decoder()
                 .video()
@@ -42,7 +42,7 @@ mod imp {
             }
             let f = &self.frame;
             if f.format() != ffmpeg::format::Pixel::YUV420P {
-                return Err(format!("unexpected VP8 pixel format {:?}", f.format()));
+                return Err(format!("unexpected VP8 pixel format {:?}", f.format())); // i18n-exempt: developer error
             }
             let (w, h) = (f.width() as usize, f.height() as usize);
             if w == 0 || h == 0 || w * h > max_px {
@@ -64,11 +64,11 @@ mod imp {
 
     impl Vp8 {
         pub fn new() -> Result<Self, String> {
-            Err("built without FFmpeg".into())
+            Err("built without FFmpeg".into()) // i18n-exempt: developer error
         }
 
         pub fn decode(&mut self, _: &[u8], _: usize) -> Result<Option<(u32, u32, Vec<u8>)>, String> {
-            Err("built without FFmpeg".into())
+            Err("built without FFmpeg".into()) // i18n-exempt: developer error
         }
     }
 }
