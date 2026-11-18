@@ -148,12 +148,7 @@ fn click(on: &OnAct, act: Act) -> impl Fn(&gpui::ClickEvent, &mut Window, &mut A
 
 /// `pinsFormatDate`: MM/DD/YYYY, local.
 fn date(ms: u64) -> String {
-    use chrono::TimeZone;
-    chrono::Local
-        .timestamp_millis_opt(ms as i64)
-        .single()
-        .map(|d| d.format("%m/%d/%Y").to_string())
-        .unwrap_or_default()
+    crate::dates::at_ms(ms as i64).map(|d| crate::dates::date(&d, crate::dates::DateStyle::Padded)).unwrap_or_default()
 }
 
 /// `pinsFirstDisplayLine`: rules, fences and blank lines never lead a preview.

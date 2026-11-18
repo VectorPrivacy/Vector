@@ -996,8 +996,8 @@ impl Store {
             return Some(t::compose_lock_key_pending());
         }
         let t = self.timeout(&community.community_id, &self.my_npub)?;
-        let until = chrono::DateTime::from_timestamp(t.until as i64, 0)?.with_timezone(&Local);
-        Some(t::compose_lock_timed_out(until.format("%a %I:%M %p").to_string()))
+        let until = crate::dates::at_secs(t.until as i64)?;
+        Some(t::compose_lock_timed_out(crate::dates::date_time(&until, crate::dates::DateStyle::Weekday, crate::dates::Clock::PADDED)))
     }
 
     /// `_dmsgPostedTimedOut` and a blocked group author: why `m` shows collapsed, if it does.
@@ -1144,7 +1144,7 @@ pub fn local(ms: u64) -> DateTime<Local> {
 
 /// A message's clock time, as `toLocaleTimeString([], {hour: 'numeric', minute: '2-digit'})`.
 pub fn clock(ms: u64) -> String {
-    local(ms).format("%-I:%M %p").to_string()
+    crate::dates::time(&local(ms), crate::dates::Clock::SHORT)
 }
 
 /// The date divider's bold half: "Today", "Yesterday", a weekday or a date.
@@ -1153,7 +1153,7 @@ pub fn day_label(now_ms: u64, ms: u64) -> String {
     match (now - then).num_days() {
         0 => t::day_today().into(),
         1 => t::day_yesterday().into(),
-        _ => then.format("%-m/%-d/%Y").to_string(),
+        _ => crate::dates::date(&local(ms), crate::dates::DateStyle::Numeric),
     }
 }
 

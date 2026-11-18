@@ -11,6 +11,7 @@ use gpui::{
     px, svg, AnimationExt,
 };
 
+use crate::dates::{self, Clock, DateStyle};
 use crate::shortcodes::Row;
 use crate::t;
 use crate::theme::*;
@@ -22,7 +23,7 @@ fn at(unix: i64) -> Option<DateTime<Local>> {
 }
 
 fn clock(t: &DateTime<Local>, seconds: bool) -> String {
-    if seconds { t.format("%-I:%M:%S %p").to_string() } else { t.format("%-I:%M %p").to_string() }
+    dates::time(t, if seconds { Clock::SECONDS } else { Clock::SHORT })
 }
 
 /// "in 2 hours", "3 days ago": the unit grows with the distance, always a count.
@@ -60,12 +61,12 @@ pub fn format(unix: i64, style: char, now: f64) -> String {
     match style {
         't' => clock(&t, false),
         'T' => clock(&t, true),
-        'd' => t.format("%m/%d/%Y").to_string(),
-        'D' => t.format("%B %-d, %Y").to_string(),
-        'F' => t::time_date_at(t.format("%A, %B %-d, %Y").to_string(), clock(&t, false)).into(),
-        's' => format!("{}, {}", t.format("%m/%d/%Y"), clock(&t, false)),
-        'S' => format!("{}, {}", t.format("%m/%d/%Y"), clock(&t, true)),
-        _ => t::time_date_at(t.format("%B %-d, %Y").to_string(), clock(&t, false)).into(),
+        'd' => dates::date(&t, DateStyle::Padded),
+        'D' => dates::date(&t, DateStyle::Long),
+        'F' => t::time_date_at(dates::date(&t, DateStyle::Full), clock(&t, false)).into(),
+        's' => dates::date_time(&t, DateStyle::Padded, Clock::SHORT),
+        'S' => dates::date_time(&t, DateStyle::Padded, Clock::SECONDS),
+        _ => t::time_date_at(dates::date(&t, DateStyle::Long), clock(&t, false)).into(),
     }
 }
 
@@ -84,9 +85,9 @@ fn zone(t: &DateTime<Local>) -> String {
 pub fn full(unix: i64, date_only: bool) -> String {
     let Some(t) = at(unix) else { return String::new() };
     if date_only {
-        return t.format("%A, %B %-d, %Y").to_string();
+        return dates::date(&t, DateStyle::Full);
     }
-    t::time_date_at_zone(t.format("%A, %B %-d, %Y").to_string(), clock(&t, true), zone(&t)).into()
+    t::time_date_at_zone(dates::date(&t, DateStyle::Full), clock(&t, true), zone(&t)).into()
 }
 
 /// A chip's hover (`ttHint`): how far off a written time is, or a countdown's moment.
@@ -99,7 +100,7 @@ pub fn hint(unix: i64, style: char, now: f64) -> String {
     }
     let Some(t) = at(unix) else { return String::new() };
     let this_year = at(now as i64).is_some_and(|n| n.year() == t.year());
-    if this_year { t.format("%a, %b %-d").to_string() } else { t.format("%a, %b %-d, %Y").to_string() }
+    dates::date(&t, if this_year { DateStyle::WeekdayDayMonth } else { DateStyle::WeekdayDayMonthYear })
 }
 
 /// A countdown's moment, briefly: the time today, else a short day and date too.
@@ -108,7 +109,7 @@ pub fn when_at(unix: i64, now: f64) -> String {
     if at(now as i64).is_some_and(|n| n.date_naive() == t.date_naive()) {
         return clock(&t, false);
     }
-    format!("{}, {}", t.format("%a, %b %-d"), clock(&t, false))
+    dates::date_time(&t, DateStyle::WeekdayDayMonth, Clock::SHORT)
 }
 
 // ---- reading a typed time ----
@@ -591,7 +592,8 @@ fn read(input: &str, now: DateTime<Local>) -> Option<Parsed> {
         date = NaiveDate::from_ymd_opt(d[1].as_deref()?.parse().ok()?, num(&d[2])?, num(&d[3])?)?;
         have_date = true;
     } else if let Some(d) = take(&mut text, slash_at, &any) {
-        let (month, day) = (num(&d[1])?, num(&d[2])?);
+        let (a, b) = (num(&d[1])?, num(&d[2])?);
+        let (day, month) = if vector_i18n::locale().dates.day_first() { (a, b) } else { (b, a) };
         let year = match d[3].as_deref() {
             Some(y) if y.len() == 2 => 2000 + y.parse::<i32>().ok()?,
             Some(y) => y.parse().ok()?,
@@ -662,8 +664,9 @@ fn read(input: &str, now: DateTime<Local>) -> Option<Parsed> {
                     if a == 0 {
                         a = 7;
                     }
-                    // The week starts on Sunday here: "next friday" is in next week.
-                    let to_week = match (0 - today + 7) % 7 {
+                    // "next friday" is the one in next week, not merely the next one to come.
+                    let week_start = vector_i18n::locale().dates.week_start as i64;
+                    let to_week = match (week_start - today + 7) % 7 {
                         0 => 7,
                         n => n,
                     };

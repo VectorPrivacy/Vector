@@ -325,16 +325,12 @@ pub fn played_ago(ms: i64, now: i64) -> String {
         60..3600 => t::store_played_minutes(s / 60).into(),
         3600..86400 => t::store_played_hours(s / 3600).into(),
         86400..604800 => t::store_played_days(s / 86400).into(),
-        _ => chrono::DateTime::from_timestamp_millis(ms)
-            .map(|d| d.with_timezone(&chrono::Local).format("%-d %b").to_string())
-            .unwrap_or_default(),
+        _ => crate::dates::at_ms(ms).map(|d| crate::dates::date(&d, crate::dates::DateStyle::DayMonth)).unwrap_or_default(),
     }
 }
 
 fn publish_date(secs: u64) -> String {
-    chrono::DateTime::from_timestamp(secs as i64, 0)
-        .map(|d| d.with_timezone(&chrono::Local).format("%b %-d, %Y").to_string())
-        .unwrap_or_default()
+    crate::dates::at_secs(secs as i64).map(|d| crate::dates::date(&d, crate::dates::DateStyle::Medium)).unwrap_or_default()
 }
 
 fn source_url(url: &str) -> String {

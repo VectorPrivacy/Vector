@@ -399,13 +399,7 @@ fn ago(secs: u64) -> String {
     } else if diff < 3600 {
         t::relay_minutes_ago(diff / 60).into()
     } else {
-        chrono::DateTime::from_timestamp(secs as i64, 0)
-            .map(|t| {
-                t.with_timezone(&chrono::Local)
-                    .format("%-I:%M:%S %p")
-                    .to_string()
-            })
-            .unwrap_or_default()
+        crate::dates::at_secs(secs as i64).map(|t| crate::dates::time(&t, crate::dates::Clock::SECONDS)).unwrap_or_default()
     }
 }
 
@@ -477,12 +471,8 @@ fn relay(
                     "error" => c(0xff5252),
                     _ => white_a(0.7),
                 };
-                let at = chrono::DateTime::from_timestamp(l.timestamp as i64, 0)
-                    .map(|t| {
-                        t.with_timezone(&chrono::Local)
-                            .format("%-I:%M:%S %p")
-                            .to_string()
-                    })
+                let at = crate::dates::at_secs(l.timestamp as i64)
+                    .map(|t| crate::dates::time(&t, crate::dates::Clock::SECONDS))
                     .unwrap_or_default();
                 div()
                     .px(px(12.))

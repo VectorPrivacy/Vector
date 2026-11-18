@@ -31,6 +31,7 @@ gpui = { git = "https://github.com/zed-industries/zed", rev = "f8cfc7ed9e57503de
 gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "f8cfc7ed9e57503def9479138894f3139f5400cc", default-features = false, features = ["x11", "wayland", "font-kit"] }
 vector-core = { path = "../vector-core", features = ["calls", "xdc"] }
 vector-i18n = { path = "../vector-i18n" }
+sys-locale = "0.3"
 anyhow = "1"
 unicode-segmentation = "1"
 unicode-bidi = "0.3"
@@ -120,7 +121,7 @@ tar = { version = "0.4", default-features = false }
 libc = "0.2"
 objc2 = "0.6"
 objc2-metal = { version = "0.3", default-features = false, features = ["std", "MTLDevice", "MTLCommandQueue"] }
-objc2-foundation = { version = "0.3", features = ["NSString", "NSArray", "NSURL", "NSEnumerator", "NSRange", "NSObjCRuntime"] }
+objc2-foundation = { version = "0.3", features = ["NSString", "NSArray", "NSURL", "NSEnumerator", "NSRange", "NSObjCRuntime", "NSDateFormatter", "NSFormatter", "NSLocale"] }
 objc2-app-kit = { version = "0.3", features = ["NSPasteboard", "NSPasteboardItem", "NSApplication", "NSDockTile", "NSResponder", "NSWindow", "NSView", "NSButton", "NSControl", "NSSpellChecker"] }
 raw-window-handle = "0.6"
 

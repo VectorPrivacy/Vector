@@ -11679,8 +11679,13 @@ impl VectorApp {
             let at = chrono::Local.timestamp_millis_opt(me.mute_until).single();
             let today = chrono::Local::now().date_naive();
             at.map(|t| {
-                let time = if t.date_naive() == today { t.format("%H:%M") } else { t.format("%a %H:%M") };
-                crate::t::notify_muted_until(time.to_string()).into()
+                use crate::dates::{Clock, DateStyle};
+                let time = if t.date_naive() == today {
+                    crate::dates::time(&t, Clock::PADDED)
+                } else {
+                    crate::dates::date_time(&t, DateStyle::Weekday, Clock::PADDED)
+                };
+                crate::t::notify_muted_until(time).into()
             })
             .unwrap_or_default()
         });
@@ -16639,12 +16644,8 @@ impl VectorApp {
                 let text = logs
                     .iter()
                     .map(|l| {
-                        let at = chrono::DateTime::from_timestamp(l.timestamp as i64, 0)
-                            .map(|t| {
-                                t.with_timezone(&chrono::Local)
-                                    .format("%-I:%M:%S %p")
-                                    .to_string()
-                            })
+                        let at = crate::dates::at_secs(l.timestamp as i64)
+                            .map(|t| crate::dates::time(&t, crate::dates::Clock::SECONDS))
                             .unwrap_or_default();
                         // i18n-exempt: diagnostic log copied for support
                         format!("[{at}] {}: {}", l.level.to_uppercase(), l.message)

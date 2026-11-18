@@ -102,8 +102,7 @@ impl Bar {
 
 /// `Intl.DateTimeFormat([], { dateStyle: 'medium' })`.
 pub fn date(ms: u64) -> String {
-    use chrono::TimeZone;
-    chrono::Local.timestamp_millis_opt(ms as i64).single().map(|d| d.format("%b %-d, %Y").to_string()).unwrap_or_default()
+    crate::dates::at_ms(ms as i64).map(|d| crate::dates::date(&d, crate::dates::DateStyle::Medium)).unwrap_or_default()
 }
 
 pub fn render(bar: &Bar, window: &mut Window, on: OnEv) -> AnyElement {

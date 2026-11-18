@@ -6,6 +6,7 @@
 //! then en-GB. One missing or broken translation never blanks a screen.
 
 mod check;
+mod dates;
 mod numbers;
 mod pseudo;
 #[allow(dead_code)]
@@ -20,6 +21,7 @@ use fluent_bundle::{FluentArgs, FluentResource, FluentValue, concurrent::FluentB
 use unic_langid::LanguageIdentifier;
 
 pub use check::{Report, check};
+pub use dates::{Civil, Clock, DateStyle, Dates};
 pub use numbers::LocaleData;
 
 include!(concat!(env!("OUT_DIR"), "/catalog.rs"));
@@ -142,7 +144,19 @@ struct Active {
 
 impl Active {
     fn build(tag: &str, chain: Vec<Arc<Lang>>, rtl: bool, pseudo: Pseudo) -> Self {
-        let mut a = Self { tag: tag.to_string(), rtl, pseudo, data: numbers::data_for(tag), chain, fixed: Box::new([]) };
+        let mut data = numbers::data_for(tag);
+        let (system, hour12) = SYSTEM.read().unwrap().clone();
+        let english = tag == BUILT_IN || pseudo != Pseudo::None;
+        if english || hour12.is_some() {
+            let d = Arc::make_mut(&mut data);
+            if english {
+                d.dates = dates::english_for(&system);
+            }
+            if let Some(h) = hour12 {
+                d.dates.hour12 = h;
+            }
+        }
+        let mut a = Self { tag: tag.to_string(), rtl, pseudo, data, chain, fixed: Box::new([]) };
         a.fixed = IDS
             .iter()
             .zip(FIXED)
@@ -175,6 +189,8 @@ static REGISTRY: LazyLock<RwLock<Registry>> = LazyLock::new(|| RwLock::new(Regis
 static ACTIVE: LazyLock<RwLock<Arc<Active>>> =
     LazyLock::new(|| RwLock::new(Arc::new(Active::build(BUILT_IN, vec![EN_GB_LANG.clone()], false, Pseudo::None))));
 static GENERATION: AtomicU64 = AtomicU64::new(0);
+/// The system's locale tag, and its 12 or 24-hour choice when it makes one.
+static SYSTEM: RwLock<(String, Option<bool>)> = RwLock::new((String::new(), None));
 
 thread_local! {
     static CURRENT: RefCell<Option<(u64, Arc<Active>)>> = const { RefCell::new(None) };
@@ -249,6 +265,13 @@ pub fn set_language(tag: &str) -> bool {
     *ACTIVE.write().unwrap() = Arc::new(Active::build(tag, chain, rtl, pseudo));
     GENERATION.fetch_add(1, Ordering::AcqRel);
     found
+}
+
+/// The system's locale (`en-US`, `de_DE.UTF-8`) and clock, for what the language leaves to
+/// the region: English's date order, and whether the clock runs to 12 or 24 hours.
+pub fn set_system_locale(tag: &str, hour12: Option<bool>) {
+    *SYSTEM.write().unwrap() = (tag.to_string(), hour12);
+    set_language(&language());
 }
 
 /// Every message id the code can ask for (`id` or `id.attribute`), in catalogue order.

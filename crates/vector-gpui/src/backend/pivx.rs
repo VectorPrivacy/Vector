@@ -87,10 +87,7 @@ pub async fn price(currency: String) -> Option<f64> {
 
 /// `detectDefaultCurrency`: the locale's region, else USD.
 pub fn default_currency() -> String {
-    let locale = std::env::var("LC_ALL")
-        .or_else(|_| std::env::var("LC_MONETARY"))
-        .or_else(|_| std::env::var("LANG"))
-        .unwrap_or_default();
+    let locale = sys_locale::get_locale().unwrap_or_default();
     let region = locale.split(['.', '@']).next().unwrap_or("").split(['_', '-']).nth(1).unwrap_or("").to_uppercase();
     let euro = [
         "IE", "DE", "FR", "ES", "IT", "NL", "BE", "AT", "PT", "FI", "GR", "SK", "SI", "EE", "LV", "LT", "MT", "CY",

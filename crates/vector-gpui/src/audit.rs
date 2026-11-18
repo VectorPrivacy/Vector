@@ -414,16 +414,14 @@ pub fn when(ms: u64, now: u64) -> String {
         0 => t::audit_today_at(crate::data::clock(ms)).into(),
         1 => t::audit_yesterday_at(crate::data::clock(ms)).into(),
         _ if chrono::Datelike::year(&d) == chrono::Datelike::year(&today) => {
-            d.format("%b %-d").to_string()
+            crate::dates::date(&d, crate::dates::DateStyle::DayMonth)
         }
-        _ => d.format("%b %-d, %Y").to_string(),
+        _ => crate::dates::date(&d, crate::dates::DateStyle::Medium),
     }
 }
 
 pub fn when_full(ms: u64) -> String {
-    crate::data::local(ms)
-        .format("%b %-d, %Y, %-I:%M %p")
-        .to_string()
+    crate::dates::date_time(&crate::data::local(ms), crate::dates::DateStyle::Medium, crate::dates::Clock::SHORT)
 }
 
 #[cfg(test)]

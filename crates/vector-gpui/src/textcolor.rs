@@ -646,11 +646,7 @@ impl Palette {
 /// territories (and with no English at all), `colour` elsewhere. Both are always read.
 pub fn color_word() -> &'static str {
     static WORD: std::sync::LazyLock<&'static str> = std::sync::LazyLock::new(|| {
-        let langs = ["LANGUAGE", "LC_ALL", "LC_MESSAGES", "LANG"]
-            .iter()
-            .filter_map(|k| std::env::var(k).ok())
-            .flat_map(|v| v.split(':').map(str::to_string).collect::<Vec<_>>())
-            .map(|l| l.replace('_', "-"));
+        let langs = sys_locale::get_locales().map(|l| l.replace('_', "-"));
         let english = langs.into_iter().find(|l| {
             let l = l.to_ascii_lowercase();
             l == "en" || l.starts_with("en-") || l.starts_with("en.")

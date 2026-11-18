@@ -13497,6 +13497,7 @@ dependencies = [
  "serde_json",
  "simd-adler32",
  "symphonia",
+ "sys-locale",
  "sysinfo 0.31.4",
  "tar",
  "tempfile",

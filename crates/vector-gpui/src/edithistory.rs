@@ -32,12 +32,8 @@ pub type OnToggle = Rc<dyn Fn(usize, &mut Window, &mut App)>;
 
 /// `toLocaleString(month: short, day, hour: 2-digit, minute: 2-digit)`.
 fn when(ms: u64) -> String {
-    use chrono::TimeZone;
-    chrono::Local
-        .timestamp_millis_opt(ms as i64)
-        .single()
-        .map(|d| d.format("%b %-d, %I:%M %p").to_string())
-        .unwrap_or_default()
+    use crate::dates::{Clock, DateStyle};
+    crate::dates::at_ms(ms as i64).map(|d| crate::dates::date_time(&d, DateStyle::DayMonth, Clock::PADDED)).unwrap_or_default()
 }
 
 // Diff runs ride through markdown as private-use sentinels, then become their looks.

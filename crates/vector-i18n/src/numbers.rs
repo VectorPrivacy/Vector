@@ -1,4 +1,4 @@
-//! The language-specific half of numbers, sizes, durations and lists, and the functions
+//! The language-specific half of numbers, sizes, durations, lists and dates, and the functions
 //! translations call to reach it (`NUMBER`, `BYTES`, `DURATION`, `LIST`).
 
 use std::borrow::Cow;
@@ -24,6 +24,7 @@ pub struct LocaleData {
     pub list_sep: Cow<'static, str>,
     pub list_last: Cow<'static, str>,
     pub list_pair: Cow<'static, str>,
+    pub dates: crate::dates::Dates,
 }
 
 impl Default for LocaleData {
@@ -36,6 +37,7 @@ impl Default for LocaleData {
             list_sep: ", ".into(),
             list_last: " and ".into(),
             list_pair: " and ".into(),
+            dates: Default::default(),
         }
     }
 }

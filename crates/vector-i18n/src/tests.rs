@@ -129,3 +129,21 @@ fn lookups_work_from_any_thread() {
     let s = h.join().unwrap();
     assert!(s == "Today" || s.contains('Ŧ') || s == "day-today" || s == "Hoy" || s == "Region");
 }
+
+#[test]
+fn the_system_locale_sets_englishs_calendar_and_the_clock() {
+    let _g = SWITCH.lock().unwrap_or_else(|e| e.into_inner());
+    let noon = Civil { year: 2026, month: 3, day: 4, weekday: 3, hour: 13, minute: 0, second: 0 };
+    set_system_locale("en-US", None);
+    assert_eq!(locale().dates.date(&noon, DateStyle::Numeric), "3/4/2026");
+    assert_eq!(locale().dates.time(&noon, Clock::SHORT), "1:00\u{202f}PM");
+    set_system_locale("en_GB.UTF-8", Some(true));
+    assert_eq!(locale().dates.date(&noon, DateStyle::Numeric), "04/03/2026");
+    assert_eq!(locale().dates.time(&noon, Clock::SHORT), "1:00\u{202f}pm");
+    install(pack("de", ""));
+    set_language("de");
+    assert!(locale().dates.hour12, "the system's clock holds in every language");
+    set_system_locale("", None);
+    set_language(BUILT_IN);
+    assert_eq!(locale().dates.time(&noon, Clock::SHORT), "13:00");
+}

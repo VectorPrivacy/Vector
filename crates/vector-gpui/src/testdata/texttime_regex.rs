@@ -162,7 +162,8 @@ pub fn read(input: &str, now: DateTime<Local>) -> Option<Parsed> {
         date = NaiveDate::from_ymd_opt(d[1].as_deref()?.parse().ok()?, num(&d[2])?, num(&d[3])?)?;
         have_date = true;
     } else if let Some(d) = take(&mut text, &SLASH, &any) {
-        let (month, day) = (num(&d[1])?, num(&d[2])?);
+        let (a, b) = (num(&d[1])?, num(&d[2])?);
+        let (day, month) = if vector_i18n::locale().dates.day_first() { (a, b) } else { (b, a) };
         let year = match d[3].as_deref() {
             Some(y) if y.len() == 2 => 2000 + y.parse::<i32>().ok()?,
             Some(y) => y.parse().ok()?,
@@ -233,8 +234,9 @@ pub fn read(input: &str, now: DateTime<Local>) -> Option<Parsed> {
                     if a == 0 {
                         a = 7;
                     }
-                    // The week starts on Sunday here: "next friday" is in next week.
-                    let to_week = match (0 - today + 7) % 7 {
+                    // "next friday" is the one in next week, not merely the next one to come.
+                    let week_start = vector_i18n::locale().dates.week_start as i64;
+                    let to_week = match (week_start - today + 7) % 7 {
                         0 => 7,
                         n => n,
                     };
