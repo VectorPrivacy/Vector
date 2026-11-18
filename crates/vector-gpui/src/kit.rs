@@ -70,10 +70,25 @@ struct SelectKeys {
     id: ElementId,
     focus: Option<gpui::FocusHandle>,
     hi: std::rc::Rc<std::cell::Cell<usize>>,
+    /// The option last scrolled into view.
+    shown: std::cell::Cell<usize>,
 }
+
+/// Where a select's button last drew, inside the band of the window its clipping ancestors
+/// leave visible, and its list's scroll.
+#[derive(Clone, Default)]
+struct SelectPlace {
+    button: gpui::Bounds<gpui::Pixels>,
+    band: gpui::Bounds<gpui::Pixels>,
+    scroll: gpui::ScrollHandle,
+}
+
+/// `.vselect-list`'s max-height.
+const SELECT_CAP: f32 = 320.;
 
 thread_local! {
     static OPEN_SELECT: std::cell::RefCell<Option<SelectKeys>> = const { std::cell::RefCell::new(None) };
+    static SELECT_PLACES: std::cell::RefCell<std::collections::HashMap<ElementId, SelectPlace>> = Default::default();
 }
 
 /// `StageProgress`: a ring filled clockwise from the top to `pct` (0 to 1), then the stage's name.
@@ -268,7 +283,12 @@ pub fn select_look(
                 }
             }
             _ => {
-                *o = Some(SelectKeys { id: id.clone(), focus: None, hi: std::rc::Rc::new(std::cell::Cell::new(at)) });
+                *o = Some(SelectKeys {
+                    id: id.clone(),
+                    focus: None,
+                    hi: std::rc::Rc::new(std::cell::Cell::new(at)),
+                    shown: std::cell::Cell::new(usize::MAX),
+                });
             }
         }
         o.as_ref().map(|k| (k.focus.clone(), k.hi.clone()))
@@ -321,6 +341,7 @@ pub fn select_look(
                     id: key_id.clone(),
                     focus: Some(focus),
                     hi: std::rc::Rc::new(std::cell::Cell::new(usize::MAX)),
+                    shown: std::cell::Cell::new(usize::MAX),
                 }));
             }
         })
@@ -335,20 +356,50 @@ pub fn select_look(
                 .child(label),
         )
         .child(caret);
+    let place_id = id.clone();
     let mut root = div()
         .relative()
         .map(|d| if width.is_finite() { d.w(px(width)) } else { d.w_full() })
         .flex_shrink_0()
-        .child(button);
+        .child(button)
+        .child(
+            gpui::canvas(
+                move |b, w, _| {
+                    let band = w.content_mask().bounds;
+                    SELECT_PLACES.with(|p| {
+                        let mut p = p.borrow_mut();
+                        if p.len() > 256 && !p.contains_key(&place_id) {
+                            p.clear();
+                        }
+                        let e = p.entry(place_id.clone()).or_default();
+                        (e.button, e.band) = (b, band);
+                    })
+                },
+                |_, _, _, _| {},
+            )
+            .absolute()
+            .inset_0(),
+        );
     // `.vselect-list`: opacity 0.14s ease and a 4px rise on 0.18s, both ways.
     let shown = ease(format!("vselect-fade-{id:?}").into(), open as u8 as f32, 0.14, css_ease());
     let slide = ease(format!("vselect-slide-{id:?}").into(), open as u8 as f32, 0.18, bezier(0.22, 1., 0.36, 1.));
     if shown > 0. {
+        // Toward the side with more room inside what clips it, and never taller than that side.
+        let place = SELECT_PLACES.with(|p| p.borrow().get(&id).cloned()).unwrap_or_default();
+        let natural = choices.len() as f32 * 34. + 10.;
+        let below = f32::from(place.band.bottom() - place.button.bottom()) - 24.;
+        let above = f32::from(place.button.top() - place.band.top()) - 24.;
+        let up = place.button.size.height > px(0.) && below < natural.min(SELECT_CAP) && above > below;
+        let room = (if up { above } else { below }).min(SELECT_CAP).max(96.);
         let mut list = div()
+            .id(SharedString::from(format!("vselect-list-{id:?}")))
             .absolute()
-            .top(px(42.))
+            .map(|d| if up { d.bottom(px(42.)) } else { d.top(px(42.)) })
             .left_0()
             .right_0()
+            .max_h(px(room))
+            .overflow_y_scroll()
+            .track_scroll(&place.scroll)
             .p(px(4.))
             .border_1()
             .border_color(c(0x2a2a2a))
@@ -363,6 +414,12 @@ pub fn select_look(
             }])
             .when(open, |d| d.occlude());
         let hi = keys.as_ref().map(|(_, hi)| hi.get()).unwrap_or(usize::MAX);
+        OPEN_SELECT.with(|o| {
+            if let Some(k) = o.borrow().as_ref().filter(|k| k.id == id && k.shown.get() != hi && hi != usize::MAX) {
+                k.shown.set(hi);
+                place.scroll.scroll_to_item(hi);
+            }
+        });
         if let Some((Some(focus), hi)) = keys {
             let (pick, toggle, live) = (on_pick.clone(), on_toggle.clone(), live.clone());
             list = list.track_focus(&focus).key_context("Select").on_key_down(move |e, w, cx| {
@@ -430,7 +487,7 @@ pub fn select_look(
                     }),
             );
         }
-        let list = gpui::zoom(list).shift(0., -4. * (1. - slide)).opacity(shown);
+        let list = gpui::zoom(list).shift(0., if up { 4. } else { -4. } * (1. - slide)).opacity(shown);
         root = root.child(gpui::deferred(list).with_priority(look.priority));
     }
     root.into_any_element()
