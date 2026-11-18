@@ -1,4 +1,4 @@
-# Hard-coded English left per file (1253 in all). Only ever lowered; see i18n_audit.rs.
+# Hard-coded English left per file (1046 in all). Only ever lowered; see i18n_audit.rs.
 applog.rs 2
 attachments.rs 26
 audio.rs 31
@@ -49,7 +49,6 @@ crop.rs 24
 cropper.rs 2
 downgrade.rs 9
 edithistory.rs 3
-embeds.rs 50
 fileclip.rs 8
 filepreview.rs 27
 golinks.rs 22
@@ -86,7 +85,6 @@ settings_slim.rs 7
 shortcodes.rs 2
 spell.rs 1
 textcolor.rs 3
-texttime.rs 53
 theme.rs 5
 transcript.rs 7
 ui_art.rs 10
@@ -100,12 +98,10 @@ ui_rail.rs 11
 ui_secretguard.rs 2
 ui_slim.rs 30
 untrack.rs 1
-uploaderr.rs 54
 util.rs 2
 video.rs 12
 video_ffmpeg.rs 4
 video_stretched.rs 2
 viewer.rs 1
 vkselect.rs 3
-voice.rs 50
 wallpaper.rs 6

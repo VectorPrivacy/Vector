@@ -12,6 +12,7 @@ use gpui::{
 };
 
 use crate::shortcodes::Row;
+use crate::t;
 use crate::theme::*;
 
 pub const STYLES: &str = "tTdDfFsSR";
@@ -29,25 +30,25 @@ pub fn relative(unix: i64, now: f64) -> String {
     let diff = unix as f64 - now;
     let abs = diff.abs();
     if abs < 0.5 {
-        return "now".into();
+        return t::time_relative_now().into();
     }
-    let (n, unit) = if abs < 59.5 {
-        (diff, "second")
+    type Say = fn(i64) -> gpui::SharedString;
+    let (n, (ahead, behind)): (f64, (Say, Say)) = if abs < 59.5 {
+        (diff, (t::time_in_seconds, t::time_ago_seconds))
     } else if abs < 2700. {
-        (diff / 60., "minute")
+        (diff / 60., (t::time_in_minutes, t::time_ago_minutes))
     } else if abs < 79_200. {
-        (diff / 3600., "hour")
+        (diff / 3600., (t::time_in_hours, t::time_ago_hours))
     } else if abs < 2_246_400. {
-        (diff / 86_400., "day")
+        (diff / 86_400., (t::time_in_days, t::time_ago_days))
     } else if abs < 28_512_000. {
-        (diff / 2_592_000., "month")
+        (diff / 2_592_000., (t::time_in_months, t::time_ago_months))
     } else {
-        (diff / 31_536_000., "year")
+        (diff / 31_536_000., (t::time_in_years, t::time_ago_years))
     };
     // Intl rounds half away from zero on the magnitude, and keeps the sign for the direction.
     let k = n.abs().round() as i64;
-    let unit = if k == 1 { unit.to_string() } else { format!("{unit}s") };
-    if diff >= 0. { format!("in {k} {unit}") } else { format!("{k} {unit} ago") }
+    if diff >= 0. { ahead(k) } else { behind(k) }.into()
 }
 
 /// A time in the reader's zone, in one of Discord's styles.
@@ -61,10 +62,10 @@ pub fn format(unix: i64, style: char, now: f64) -> String {
         'T' => clock(&t, true),
         'd' => t.format("%m/%d/%Y").to_string(),
         'D' => t.format("%B %-d, %Y").to_string(),
-        'F' => format!("{} at {}", t.format("%A, %B %-d, %Y"), clock(&t, false)),
+        'F' => t::time_date_at(t.format("%A, %B %-d, %Y").to_string(), clock(&t, false)).into(),
         's' => format!("{}, {}", t.format("%m/%d/%Y"), clock(&t, false)),
         'S' => format!("{}, {}", t.format("%m/%d/%Y"), clock(&t, true)),
-        _ => format!("{} at {}", t.format("%B %-d, %Y"), clock(&t, false)),
+        _ => t::time_date_at(t.format("%B %-d, %Y").to_string(), clock(&t, false)).into(),
     }
 }
 
@@ -75,6 +76,7 @@ fn zone(t: &DateTime<Local>) -> String {
     }
     let (sign, secs) = if secs < 0 { ('-', -secs) } else { ('+', secs) };
     let (h, m) = (secs / 3600, secs % 3600 / 60);
+    // i18n-exempt: zone names as Intl writes them
     if m == 0 { format!("GMT{sign}{h}") } else { format!("GMT{sign}{h}:{m:02}") }
 }
 
@@ -84,7 +86,7 @@ pub fn full(unix: i64, date_only: bool) -> String {
     if date_only {
         return t.format("%A, %B %-d, %Y").to_string();
     }
-    format!("{} at {} {}", t.format("%A, %B %-d, %Y"), clock(&t, true), zone(&t))
+    t::time_date_at_zone(t.format("%A, %B %-d, %Y").to_string(), clock(&t, true), zone(&t)).into()
 }
 
 /// A chip's hover (`ttHint`): how far off a written time is, or a countdown's moment.
@@ -174,7 +176,7 @@ fn dur_at(t: &str, p: usize) -> Option<(usize, [Span; 2])> {
         }
         return letters(e).map(|(a, end)| (end, [Some((p, a)), Some((a + 1, end))]));
     }
-    ["half an", "half a", "an", "a", "one", "half"].iter().find_map(|w| {
+    ["half an", "half a", "an", "a", "one", "half"].iter().find_map(|w| { // i18n-exempt: English input grammar
         let a = lit(t, p, w)?;
         letters(a).map(|(a, end)| (end, [Some((p, a)), Some((a + 1, end))]))
     })
@@ -267,7 +269,7 @@ type Caps = [Span; 5];
 
 /// `at ` if it's there.
 fn at_prefix(t: &str, p: usize) -> usize {
-    lit(t, p, "at ").unwrap_or(p)
+    lit(t, p, "at ").unwrap_or(p) // i18n-exempt: English input grammar
 }
 
 /// The first of `words` at `p` that ends on a word boundary, and where it ends.
@@ -345,7 +347,7 @@ fn at_at(t: &str, p: usize) -> Option<(usize, Caps)> {
     if !boundary(t, p) {
         return None;
     }
-    let q = lit(t, p, "at ")?;
+    let q = lit(t, p, "at ")?; // i18n-exempt: English input grammar
     let (n, e) = run(t, q, 2, digit);
     (n > 0 && !next(t, e).is_some_and(word)).then_some((e, [None, Some((q, e)), None, None, None]))
 }
@@ -355,7 +357,7 @@ fn part_at(t: &str, p: usize) -> Option<(usize, Caps)> {
     if !boundary(t, p) {
         return None;
     }
-    [lit(t, p, "in the "), lit(t, p, "this "), Some(p)].into_iter().flatten().find_map(|q| {
+    [lit(t, p, "in the "), lit(t, p, "this "), Some(p)].into_iter().flatten().find_map(|q| { // i18n-exempt: English input grammar
         let (_, e) = word_of(t, q, &["morning", "afternoon", "evening", "night"])?;
         Some((e, [None, Some((q, e)), None, None, None]))
     })
@@ -461,7 +463,7 @@ fn dm_at(t: &str, p: usize) -> Option<(usize, Caps)> {
     }
     day_ends(t, p).find_map(|(de, se)| {
         let sp = lit(t, se, " ")?;
-        [lit(t, sp, "of "), Some(sp)].into_iter().flatten().find_map(|m| {
+        [lit(t, sp, "of "), Some(sp)].into_iter().flatten().find_map(|m| { // i18n-exempt: English input grammar
             month_ends(t, m).find_map(|(mn, me)| {
                 let (end, year) = year_tail(t, me)?;
                 Some((end, [None, Some((p, de)), Some((m, mn)), year, None]))
@@ -501,7 +503,7 @@ fn weekday_at(t: &str, p: usize) -> Option<(usize, Caps)> {
     }
     let which = ["next", "this", "last", "on", "coming"].iter().filter_map(|w| lit(t, p, w).and_then(|e| lit(t, e, " ").map(|q| (Some((p, e)), q))));
     which.chain([(None, p)]).find_map(|(w, q)| {
-        [lit(t, q, "the "), Some(q)].into_iter().flatten().find_map(|n| {
+        [lit(t, q, "the "), Some(q)].into_iter().flatten().find_map(|n| { // i18n-exempt: English input grammar
             let (_, e) = word_of(t, n, &NAMES)?;
             Some((e, [None, w, Some((n, e)), None, None]))
         })
@@ -522,11 +524,11 @@ fn read(input: &str, now: DateTime<Local>) -> Option<Parsed> {
         return Some(Parsed { unix, date_only: false });
     }
     let now_f = now.timestamp_millis() as f64 / 1000.;
-    if let Some(rest) = text.strip_prefix("in ").filter(|r| !r.is_empty()) {
+    if let Some(rest) = text.strip_prefix("in ").filter(|r| !r.is_empty()) { // i18n-exempt: English input grammar
         let d = duration(rest)?;
         return Some(Parsed { unix: (now_f + d).round() as i64, date_only: false });
     }
-    let ago = [(" ago", -1.), (" from now", 1.)]
+    let ago = [(" ago", -1.), (" from now", 1.)] // i18n-exempt: English input grammar
         .into_iter()
         .find_map(|(w, sign)| text.strip_suffix(w).filter(|r| !r.is_empty()).map(|r| (r, sign)));
     if let Some((rest, sign)) = ago {
@@ -736,9 +738,9 @@ fn suggest_unit(word: &str, first: bool, spelled: bool) -> Option<&'static str> 
 /// `(?:\d+(?:\.\d+)?|an?|half an?) ?[a-z]+(?:,?(?: and)? \d+ ?[a-z]+)?`
 fn g_span(t: &str, s: At) -> At {
     let num = s.digits(t, 1, usize::MAX);
-    let amount = num.opt(|n| n.li(t, ".").digits(t, 1, usize::MAX)).or(s.any_li(t, &["a", "an", "half a", "half an"]));
+    let amount = num.opt(|n| n.li(t, ".").digits(t, 1, usize::MAX)).or(s.any_li(t, &["a", "an", "half a", "half an"])); // i18n-exempt: English input grammar
     let unit = amount.opt(|a| a.li(t, " ")).class(t, 1, usize::MAX, fold_letter);
-    unit.or(unit.opt(|u| u.li(t, ",")).opt(|u| u.li(t, " and")).li(t, " ").digits(t, 1, usize::MAX).opt(|x| x.li(t, " ")).class(t, 1, usize::MAX, fold_letter))
+    unit.or(unit.opt(|u| u.li(t, ",")).opt(|u| u.li(t, " and")).li(t, " ").digits(t, 1, usize::MAX).opt(|x| x.li(t, " ")).class(t, 1, usize::MAX, fold_letter)) // i18n-exempt: English input grammar
 }
 
 /// `jan(?:uary)?|…|sep(?:t(?:ember)?)?|…`
@@ -773,7 +775,7 @@ fn g_clock24(t: &str, s: At) -> At {
 /// `(,? (?:at )?(?:\d{1,2}(?::\d{2})? ?(?:am|pm)|\d{1,2}:\d{2}))?`
 fn g_clock(t: &str, s: At) -> At {
     s.opt(|x| {
-        let x = x.opt(|y| y.li(t, ",")).li(t, " ").opt(|y| y.li(t, "at "));
+        let x = x.opt(|y| y.li(t, ",")).li(t, " ").opt(|y| y.li(t, "at ")); // i18n-exempt: English input grammar
         g_hour(t, x).any_li(t, &["am", "pm"]).or(g_clock24(t, x))
     })
 }
@@ -785,7 +787,7 @@ fn g_time(t: &str, s: At) -> At {
 
 /// `today|tonight|tomorrow|tmrw|tmr|(?:(?:this|next|coming) )?(?:sun|mon|tues?|wed(?:nes)?|thu(?:rs)?|fri|sat(?:ur)?)day`
 fn g_dayword(t: &str, s: At) -> At {
-    let named = s.opt(|x| x.any_li(t, &["this ", "next ", "coming "]));
+    let named = s.opt(|x| x.any_li(t, &["this ", "next ", "coming "])); // i18n-exempt: English input grammar
     let named = named.any_li(t, &["sun", "mon", "tue", "tues", "wed", "wednes", "thu", "thurs", "fri", "sat", "satur"]).li(t, "day");
     s.any_li(t, &["today", "tonight", "tomorrow", "tmrw", "tmr"]).or(named)
 }
@@ -814,16 +816,16 @@ const FORMS: [Form; 7] = [
     Form {
         lead: "",
         phrase: |t, s| {
-            let ahead = g_span(t, s.li(t, "in "));
+            let ahead = g_span(t, s.li(t, "in ")); // i18n-exempt: English input grammar
             // Only a draft that has "from now" in it can end in it; neither word folds past ASCII.
-            let has_from = t.as_bytes().windows(8).any(|w| w.eq_ignore_ascii_case(b"from now"));
-            if has_from { ahead.or(g_span(t, s).li(t, " from now")) } else { ahead }
+            let has_from = t.as_bytes().windows(8).any(|w| w.eq_ignore_ascii_case(b"from now")); // i18n-exempt: English input grammar
+            if has_from { ahead.or(g_span(t, s).li(t, " from now")) } else { ahead } // i18n-exempt: English input grammar
         },
         last: fold_letter, relative: true,
         alone: false, first: |c| digit(c) || opens(c, "ahi"), span: None,
     },
     Form { lead: "", phrase: |t, s| g_clock(t, g_year(t, g_day(t, g_month(t, s).opt(|m| m.li(t, ".")).li(t, " ")))), last: |c| digit(c) || matches!(c.to_ascii_lowercase(), 't' | 'd' | 'h' | 'm'), relative: false, alone: false, first: |c| opens(c, "jfmasond"), span: Some(40) },
-    Form { lead: "the ", phrase: |t, s| g_clock(t, g_year(t, g_month(t, g_day(t, s).li(t, " ").opt(|x| x.li(t, "of "))))), last: |c| digit(c) || matches!(c.to_ascii_lowercase(), 'n' | 'y' | 'b' | 'r' | 'h' | 'l' | 'e' | 'g' | 't' | 'p' | 'v' | 'c' | 'm'), relative: false, alone: false, first: |c| digit(c) || opens(c, "t"), span: Some(48) },
+    Form { lead: "the ", phrase: |t, s| g_clock(t, g_year(t, g_month(t, g_day(t, s).li(t, " ").opt(|x| x.li(t, "of "))))), last: |c| digit(c) || matches!(c.to_ascii_lowercase(), 'n' | 'y' | 'b' | 'r' | 'h' | 'l' | 'e' | 'g' | 't' | 'p' | 'v' | 'c' | 'm'), relative: false, alone: false, first: |c| digit(c) || opens(c, "t"), span: Some(48) }, // i18n-exempt: English input grammar
     Form {
         lead: "",
         phrase: |t, s| {
@@ -834,23 +836,23 @@ const FORMS: [Form; 7] = [
         alone: false, first: digit, span: Some(24),
     },
     Form {
-        lead: "on ",
+        lead: "on ", // i18n-exempt: English input grammar
         phrase: |t, s| {
             let d = g_dayword(t, s);
-            g_time(t, d.opt(|x| x.li(t, ",")).li(t, " ").opt(|x| x.li(t, "at "))).or(d.li(t, " at ").digits(t, 1, 2))
+            g_time(t, d.opt(|x| x.li(t, ",")).li(t, " ").opt(|x| x.li(t, "at "))).or(d.li(t, " at ").digits(t, 1, 2)) // i18n-exempt: English input grammar
         },
         last: |c| digit(c) || matches!(c, 'm' | 'M' | '.'), relative: false,
         alone: false, first: |c| opens(c, "otncsmwf"), span: Some(48),
     },
     Form {
         lead: "",
-        phrase: |t, s| g_dayword(t, g_time(t, s.opt(|x| x.li(t, "at "))).opt(|x| x.li(t, ",")).li(t, " ").opt(|x| x.li(t, "on "))),
+        phrase: |t, s| g_dayword(t, g_time(t, s.opt(|x| x.li(t, "at "))).opt(|x| x.li(t, ",")).li(t, " ").opt(|x| x.li(t, "on "))), // i18n-exempt: English input grammar
         last: |c| matches!(c.to_ascii_lowercase(), 'y' | 't' | 'w' | 'r'), relative: false,
         alone: false, first: |c| digit(c) || opens(c, "a"), span: Some(48),
     },
     Form {
         lead: "",
-        phrase: |t, s| g_hour(t, s.opt(|x| x.li(t, "at "))).any_li(t, &["am", "pm", "a.m.", "p.m."]).or(g_clock24(t, s.li(t, "at "))),
+        phrase: |t, s| g_hour(t, s.opt(|x| x.li(t, "at "))).any_li(t, &["am", "pm", "a.m.", "p.m."]).or(g_clock24(t, s.li(t, "at "))), // i18n-exempt: English input grammar
         last: |c| digit(c) || matches!(c, 'm' | 'M' | '.'), relative: false,
         alone: true, first: |c| digit(c) || opens(c, "a"), span: Some(24),
     },
@@ -922,7 +924,7 @@ fn form_at(form: &Form, t: &str) -> Option<(usize, usize)> {
 /// `(?i)^(\d+\w* (of )?)?may\b`
 fn opens_with_may(t: &str) -> bool {
     let s = At::of(0);
-    let lead = s.digits(t, 1, usize::MAX).class(t, 0, usize::MAX, word).li(t, " ").opt(|x| x.li(t, "of "));
+    let lead = s.digits(t, 1, usize::MAX).class(t, 0, usize::MAX, word).li(t, " ").opt(|x| x.li(t, "of ")); // i18n-exempt: English input grammar
     s.or(lead).li(t, "may").iter().any(|e| boundary(t, e))
 }
 
@@ -963,7 +965,7 @@ fn amount_at(t: &str, p: usize) -> Option<(usize, [Span; 3])> {
         let u = lit(t, e, " ").unwrap_or(e);
         return units(u).map(|end| (end, [Some((p, e)), None, Some((u, end))]));
     }
-    ["half an ", "half a ", "an ", "a "].iter().find_map(|w| {
+    ["half an ", "half a ", "an ", "a "].iter().find_map(|w| { // i18n-exempt: English input grammar
         let u = lit_i(t, p, w)?;
         units(u).map(|end| (end, [None, Some((p, u - 1)), Some((u, end))]))
     })
@@ -981,8 +983,8 @@ pub fn suggest(before: &str, now: DateTime<Local>) -> Option<Suggestion> {
     // coming wednesday" and its closing mark).
     let dated = tail.chars().rev().take(32).any(digit);
     // The countdown needs its "in " or "from now"; neither folds past ASCII.
-    let counts = tail.as_bytes().windows(3).any(|w| w.eq_ignore_ascii_case(b"in "))
-        || tail.as_bytes().windows(8).any(|w| w.eq_ignore_ascii_case(b"from now"));
+    let counts = tail.as_bytes().windows(3).any(|w| w.eq_ignore_ascii_case(b"in ")) // i18n-exempt: English input grammar
+        || tail.as_bytes().windows(8).any(|w| w.eq_ignore_ascii_case(b"from now")); // i18n-exempt: English input grammar
     for form in FORMS.iter().filter(|f| if f.relative { counts } else { dated }) {
         let Some((ps, pe)) = form_at(form, tail) else { continue };
         let phrase = &tail[ps..pe];
@@ -1132,13 +1134,13 @@ pub fn picker(text: &str, caret: usize, now: DateTime<Local>, was: Option<&Picke
     Some(p)
 }
 
-fn style_name(style: char, unix: i64, now: f64) -> &'static str {
+fn style_name(style: char, unix: i64, now: f64) -> gpui::SharedString {
     match style {
-        'R' if unix as f64 >= now => "Countdown",
-        'R' => "Time since",
-        't' => "Time",
-        'D' => "Date",
-        _ => "Date and time",
+        'R' if unix as f64 >= now => t::time_style_countdown(),
+        'R' => t::time_style_since(),
+        't' => t::time_style_time(),
+        'D' => t::time_style_date(),
+        _ => t::time_style_date_time(),
     }
 }
 
@@ -1155,9 +1157,9 @@ fn note(text: String) -> AnyElement {
 
 /// `.time-selector`: each style, previewed for the time typed so far.
 pub fn picker_view(p: &Picker, now: f64, pick: Rc<dyn Fn(usize, &mut Window, &mut App)>) -> AnyElement {
-    let header = crate::shortcodes::title("Time", (!p.query.is_empty()).then(|| format!("· {}", p.query)));
+    let header = crate::shortcodes::title(&t::time_picker_title(), (!p.query.is_empty()).then(|| format!("· {}", p.query)));
     let (lead, rows) = match &p.parsed {
-        None => (note("Try “tomorrow 5pm”, “next monday”, “dec 25” or “in 2 hours”".into()), Vec::new()),
+        None => (note(t::time_picker_hint().into()), Vec::new()),
         Some(t) => (
             note(full(t.unix, t.date_only)),
             p.styles()
@@ -1165,7 +1167,7 @@ pub fn picker_view(p: &Picker, now: f64, pick: Rc<dyn Fn(usize, &mut Window, &mu
                 .map(|&style| Row {
                     art: None,
                     label: format(t.unix, style, now).into(),
-                    hint: Some(style_name(style, t.unix, now).into()),
+                    hint: Some(style_name(style, t.unix, now)),
                 })
                 .collect(),
         ),
@@ -1221,11 +1223,11 @@ pub fn chip_view(chip: &Chip, now: f64, left: f32, accept: Rc<dyn Fn(&mut Window
                 .font_family(INTER)
                 .text_size(px(13.))
                 .cursor_pointer()
-                .tip(format!(
-                    "{}: {}",
-                    if s.style == 'R' { "Make it a countdown" } else { "Show in everyone\u{2019}s time" },
-                    full(s.unix, s.style == 'D')
-                ))
+                .tip(if s.style == 'R' {
+                    t::time_suggest_countdown(full(s.unix, s.style == 'D'))
+                } else {
+                    t::time_suggest_local(full(s.unix, s.style == 'D'))
+                })
                 .group("time-suggest")
                 .on_mouse_down(gpui::MouseButton::Left, move |_, w, cx| {
                     cx.stop_propagation();
@@ -1252,7 +1254,7 @@ pub fn chip_view(chip: &Chip, now: f64, left: f32, accept: Rc<dyn Fn(&mut Window
                         .border_1()
                         .border_color(white_a(0.18))
                         .text_color(white_a(0.5))
-                        .child("Tab"),
+                        .child("Tab"), // i18n-exempt: key name
                 )
                 .with_animation(
                     gpui::ElementId::NamedInteger("time-suggest".into(), s.start as u64),

@@ -8,3 +8,25 @@ upload-no-server-title = No media server will take this file
 # <b> is bold, <br> a line break. $size is the file's size, like "2.1 GB"; $reasons is each
 # server's reason, already set out one per line.
 upload-no-server-text = This file is <b>{ $size }</b>.{ $reasons }<br><br>Shrink the file, or add a server in Settings → Network.
+
+## Why an upload was refused: popup titles
+
+upload-no-server-accepted = No media server accepted the file
+upload-servers-hint = Your media servers are in Settings → Network.
+upload-net-i2p-only = I2P-Only is on
+upload-net-other = Needs another network
+upload-net-changed = The network changed
+upload-net-missing = Network not in this build
+upload-net-connecting = Not connected yet
+upload-allowance = Upload allowance used up
+upload-storage-full = Storage full
+upload-too-large = File too large
+upload-bad-type = File type not supported
+upload-unknown-account = Media server doesn’t recognise your account
+upload-clock = Check this device’s clock
+upload-slow-down = Slow down a moment
+upload-rejected = Media server rejected your account
+upload-unreachable = Media server unreachable
+upload-no-server = No media server configured
+upload-failed = File send failed
+upload-failed-text = Vector could not send this file. Check your connection and try again, or pick a different file.

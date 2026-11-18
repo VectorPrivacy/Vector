@@ -16,6 +16,7 @@ use serde::Deserialize;
 
 use crate::call::{Quality, accent_mix, call_btn, dot, grade, phone, round_btn};
 use crate::data::Store;
+use crate::t;
 use crate::theme::*;
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -267,14 +268,14 @@ pub fn members(voice: &Voice, store: &Store, community: &str, channel: &str, on:
                 .text_size(px(12.))
                 .italic()
                 .text_color(white_a(0.45))
-                .child("Connecting…"),
+                .child(t::call_connecting()),
         );
     }
     for p in voice.present(channel) {
         let speaking = live.is_some_and(|s| !p.muted && s.level(&p.npub, me) > SPEAKING);
-        let flag = |path: &'static str, server: bool, tip: &'static str| {
+        let flag = |path: &'static str, server: bool, tip: SharedString| {
             div()
-                .id(tip)
+                .id(path)
                 .flex()
                 .tip(tip)
                 .child(icon(path, 12., if server { c(crate::call::DANGER) } else { white_a(0.45) }))
@@ -314,14 +315,14 @@ pub fn members(voice: &Voice, store: &Store, community: &str, channel: &str, on:
                             .gap(px(6.))
                             .flex_shrink_0()
                             .when(p.screen, |d| {
-                                d.child(div().id("live").tip("Sharing their screen").child(live_tag(9., 14., 5.)))
+                                d.child(div().id("live").tip(t::voice_sharing_their_screen()).child(live_tag(9., 14., 5.)))
                             })
-                            .when(p.camera, |d| d.child(flag("icons/video.svg", false, "Camera on")))
+                            .when(p.camera, |d| d.child(flag("icons/video.svg", false, t::voice_camera_on())))
                             .when(p.muted, |d| {
-                                d.child(flag("icons/mic-off.svg", p.server_muted, if p.server_muted { "Muted by a moderator" } else { "Muted" }))
+                                d.child(flag("icons/mic-off.svg", p.server_muted, if p.server_muted { t::voice_muted_by_mod() } else { t::voice_muted() }))
                             })
                             .when(p.deafened, |d| {
-                                d.child(flag("icons/volume-mute.svg", p.server_deafened, if p.server_deafened { "Deafened by a moderator" } else { "Deafened" }))
+                                d.child(flag("icons/volume-mute.svg", p.server_deafened, if p.server_deafened { t::voice_deafened_by_mod() } else { t::voice_deafened() }))
                             }),
                     )
                 }),
@@ -349,7 +350,7 @@ fn live_tag(size: f32, line: f32, pad: f32) -> impl IntoElement {
         .text_size(px(size))
         .line_height(px(line))
         .font_weight(gpui::FontWeight::BOLD)
-        .child("LIVE")
+        .child(t::voice_live().to_uppercase())
 }
 
 fn rtt_quality(ms: u32) -> Option<Quality> {
@@ -358,6 +359,7 @@ fn rtt_quality(ms: u32) -> Option<Quality> {
 
 /// `voiceKeyHint`: the app-wide shortcut for a voice control.
 fn key_hint(key: char) -> String {
+    // i18n-exempt: key names
     if cfg!(target_os = "macos") { format!("\u{2318}\u{21e7}{key}") } else { format!("Ctrl+Shift+{key}") }
 }
 
@@ -373,7 +375,13 @@ fn held_btn(id: &'static str, on_state: bool, held: bool) -> gpui::Stateful<gpui
 
 fn mic_btn(s: &Session, on: &OnAct) -> impl IntoElement {
     let off = s.mic_off();
-    let tip = if s.server_muted { "Muted by a moderator".to_string() } else { format!("{} ({})", if off { "Unmute" } else { "Mute" }, key_hint('M')) };
+    let tip = if s.server_muted {
+        t::voice_muted_by_mod()
+    } else if off {
+        t::voice_unmute_key(key_hint('M'))
+    } else {
+        t::voice_mute_key(key_hint('M'))
+    };
     let held = s.server_muted;
     let tint = if held { c(crate::call::DANGER) } else if off { c(ACCENT) } else { white_a(0.88) };
     held_btn("voice-mic", off, held)
@@ -386,9 +394,11 @@ fn mic_btn(s: &Session, on: &OnAct) -> impl IntoElement {
 fn deafen_btn(s: &Session, on: &OnAct) -> impl IntoElement {
     let off = s.deafened || s.server_deafened;
     let tip = if s.server_deafened {
-        "Deafened by a moderator".to_string()
+        t::voice_deafened_by_mod()
+    } else if s.deafened {
+        t::voice_undeafen_key(key_hint('D'))
     } else {
-        format!("{} ({})", if s.deafened { "Undeafen" } else { "Deafen" }, key_hint('D'))
+        t::voice_deafen_key(key_hint('D'))
     };
     let held = s.server_deafened;
     let tint = if held { c(crate::call::DANGER) } else if off { c(ACCENT) } else { white_a(0.88) };
@@ -408,10 +418,10 @@ fn video_btn(
     on: &OnAct,
 ) -> impl IntoElement {
     let tip = match (id, state) {
-        ("voice-camera", true) => "Turn your camera off",
-        ("voice-camera", false) => "Turn your camera on",
-        (_, true) => "Stop sharing your screen",
-        (_, false) => "Share your screen",
+        ("voice-camera", true) => t::voice_camera_turn_off(),
+        ("voice-camera", false) => t::voice_camera_turn_on(),
+        (_, true) => t::voice_screen_stop(),
+        (_, false) => t::voice_screen_share(),
     };
     call_btn(id, state)
         .tip(tip)
@@ -454,11 +464,11 @@ fn screen(
         _ => (max_w, 150f32.min(max_h)),
     };
     let label = if viewing == me {
-        "Your screen".to_string()
+        t::voice_your_screen()
     } else {
-        format!("{}'s screen", store.chat_name(viewing, channel))
+        t::voice_their_screen(store.chat_name(viewing, channel))
     };
-    let btn = |id: &'static str, tip: &'static str, act: Act, child: AnyElement| {
+    let btn = |id: &'static str, tip: SharedString, act: Act, child: AnyElement| {
         div()
             .id(id)
             .tip(tip)
@@ -520,7 +530,7 @@ fn screen(
                 )
                 .child(btn(
                     "voice-screen-size",
-                    if voice.expanded { "Smaller" } else { "Bigger" },
+                    if voice.expanded { t::voice_smaller() } else { t::voice_bigger() },
                     Act::Expand,
                     icon(
                         if voice.expanded {
@@ -535,7 +545,7 @@ fn screen(
                 ))
                 .child(btn(
                     "voice-screen-hide",
-                    "Hide",
+                    t::voice_hide(),
                     Act::HideScreen,
                     icon("icons/x.svg", 12., c(0xffffff)).into_any_element(),
                 )),
@@ -545,7 +555,7 @@ fn screen(
 
 fn leave_btn(on: &OnAct) -> impl IntoElement {
     round_btn("voice-leave", 34.)
-        .tip("Leave the call")
+        .tip(t::voice_leave())
         .bg(c(crate::call::DANGER))
         .hover(|d| d.bg(c(0xff4db6)))
         .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
@@ -581,9 +591,9 @@ pub fn stage(
         .text_size(px(12.))
         .text_color(c(0xb2b2b2))
         .child(if people.is_empty() {
-            "Nobody is here yet".to_string()
+            t::voice_nobody()
         } else {
-            format!("{} in the call", people.len())
+            t::voice_in_call(people.len())
         })
         .when_some(session.filter(|s| s.sharing), |d, s| {
             d.child(div().child("·"))
@@ -593,9 +603,9 @@ pub fn stage(
                         .truncate()
                         .text_color(c(ACCENT))
                         .child(if s.viewers > 0 {
-                            format!("Sharing your screen · {} watching", s.viewers)
+                            t::voice_sharing_watched(s.viewers)
                         } else {
-                            "Sharing your screen".to_string()
+                            t::voice_sharing()
                         }),
                 )
         })
@@ -608,7 +618,7 @@ pub fn stage(
                     .cursor_pointer()
                     .text_color(Quality::Fair.color())
                     .on_click(click(on, Act::MicAccess))
-                    .child("No microphone access: others can't hear you"),
+                    .child(t::voice_no_mic()),
             )
         })
         .when_some(rtt_quality(ping), |d, q| {
@@ -619,18 +629,18 @@ pub fn stage(
                     .flex()
                     .items_center()
                     .gap(px(5.))
-                    .tip("Round trip to the slowest link in the call")
+                    .tip(t::voice_ping_tip())
                     .child(dot(q))
-                    .child(format!("{ping} ms")),
+                    .child(t::call_delay_ms(ping)),
             )
         });
     let tiles = people.iter().map(|p| {
         let level = session.map_or(0., |s| s.level(&p.npub, me));
         let talk = (level * 2.).min(1.);
         let pending = session.is_some() && !connected(&p.npub);
-        let badge = |path: &'static str, server: bool, tip: &'static str| {
+        let badge = |path: &'static str, server: bool, tip: SharedString| {
             div()
-                .id(tip)
+                .id(path)
                 .tip(tip)
                 .size(px(26.))
                 .rounded_full()
@@ -657,9 +667,9 @@ pub fn stage(
         let has_cam = voice.cam(p, me) && (p.npub == me || voice.key_of(&p.npub).is_some());
         let is_viewing = viewing.as_deref() == Some(p.npub.as_str());
         let note = if p.elsewhere {
-            Some("another app")
+            Some(t::voice_note_elsewhere())
         } else if pending {
-            Some("connecting")
+            Some(t::voice_note_connecting())
         } else {
             None
         };
@@ -671,31 +681,31 @@ pub fn stage(
                 .flex()
                 .gap(px(2.))
                 .when(p.muted, |d| {
-                    d.child(badge("icons/mic-off.svg", p.server_muted, if p.server_muted { "Muted by a moderator" } else { "Muted" }))
+                    d.child(badge("icons/mic-off.svg", p.server_muted, if p.server_muted { t::voice_muted_by_mod() } else { t::voice_muted() }))
                 })
                 .when(p.deafened, |d| {
-                    d.child(badge("icons/volume-mute.svg", p.server_deafened, if p.server_deafened { "Deafened by a moderator" } else { "Deafened" }))
+                    d.child(badge("icons/volume-mute.svg", p.server_deafened, if p.server_deafened { t::voice_deafened_by_mod() } else { t::voice_deafened() }))
                 })
         });
         let name = if p.npub == me {
-            "You".to_string()
+            t::voice_you().to_string()
         } else {
             store.chat_name(&p.npub, channel)
         };
         let pick = (session.is_some() && sharing).then(|| on.clone());
         let npub = p.npub.clone();
         let path = if p.elsewhere {
-            Some("In this call on another app: you can't hear each other".to_string())
+            Some(t::voice_elsewhere_tip())
         } else {
             session
                 .and_then(|s| s.peers.iter().find(|x| x.npub == p.npub && x.connected))
                 .filter(|x| x.rtt_ms > 0)
-                .map(|x| format!("{} ms, {}", x.rtt_ms, if x.direct { "direct" } else { "through a relay" }))
+                .map(|x| if x.direct { t::voice_path_direct(x.rtt_ms) } else { t::voice_path_relay(x.rtt_ms) })
         };
         let live_tip = match session {
-            Some(_) if is_viewing => "Hide their screen",
-            Some(_) => "Show their screen",
-            None => "Sharing their screen",
+            Some(_) if is_viewing => t::voice_hide_their_screen(),
+            Some(_) => t::voice_show_their_screen(),
+            None => t::voice_sharing_their_screen(),
         };
         div()
             .id(SharedString::from(format!("voice-tile-{}", p.npub)))
@@ -836,7 +846,7 @@ pub fn stage(
                         .text_size(px(10.))
                         .line_height(px(16.))
                         .font_weight(gpui::FontWeight::BOLD)
-                        .child("LIVE"),
+                        .child(t::voice_live().to_uppercase()),
                 )
             })
     });
@@ -886,7 +896,7 @@ pub fn stage(
                     d.cursor_pointer()
                         .on_click(click(on, Act::Join(community.to_string(), channel.to_string())))
                 })
-                .child(if joining { "Joining…" } else { "Join Voice" }),
+                .child(if joining { t::voice_joining() } else { t::voice_join() }),
         ),
     };
     div()
@@ -974,13 +984,13 @@ pub fn bar(voice: &Voice, store: &Store, pos: Option<Point<Pixels>>, top: f32, o
     let s = voice.session.as_ref()?;
     let linked: Vec<&Peer> = s.linked().collect();
     let status = if !s.audio {
-        "Without audio".to_string()
+        t::voice_no_audio()
     } else {
         let time = clock(voice.since.map_or(0, |t| t.elapsed().as_secs()));
         if linked.is_empty() {
-            format!("Waiting for others · {time}")
+            t::voice_waiting(time)
         } else {
-            format!("{} in the call · {time}", linked.len() + 1)
+            t::voice_in_call_time(linked.len() + 1, time)
         }
     };
     let ping = s.ping();
@@ -988,7 +998,7 @@ pub fn bar(voice: &Voice, store: &Store, pos: Option<Point<Pixels>>, top: f32, o
     let name = store
         .community(&s.community_id)
         .and_then(|c| c.channel(&s.channel_id))
-        .map_or_else(|| "Voice".to_string(), |ch| ch.name.clone());
+        .map_or_else(|| t::voice_fallback_name().to_string(), |ch| ch.name.clone());
     let open = Act::Open(s.community_id.clone(), s.channel_id.clone());
     let down = {
         let (drag, bounds) = (voice.drag.clone(), voice.pill.clone());
@@ -1096,7 +1106,7 @@ pub fn bar(voice: &Voice, store: &Store, pos: Option<Point<Pixels>>, top: f32, o
                         .text_size(px(11.5))
                         .line_height(px(13.2))
                         .text_color(c(0xb2b2b2))
-                        .when_some(rtt_quality(ping), |d, q| d.child(div().id("voice-bar-ping").tip(format!("{ping} ms to the slowest link")).child(dot(q))))
+                        .when_some(rtt_quality(ping), |d, q| d.child(div().id("voice-bar-ping").tip(t::voice_ping_bar(ping)).child(dot(q))))
                         .child(div().truncate().child(status)),
                 ),
         )

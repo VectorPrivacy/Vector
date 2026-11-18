@@ -3,6 +3,7 @@
 //! through the linked-image cache.
 
 use crate::kit::Tipped as _;
+use crate::t;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
@@ -443,15 +444,15 @@ fn ref_kind(entity: &str) -> Option<u16> {
     }
 }
 
-/// What a reference reads as in a chat-list snippet or a chip.
-pub fn noun(entity: &str) -> &'static str {
+/// What a reference reads as in a chat-list snippet.
+fn preview_name(entity: &str) -> gpui::SharedString {
     match ref_kind(entity) {
-        Some(30023) => "Article",
-        Some(21 | 34235) => "Video",
-        Some(22 | 34236) => "Short",
-        Some(6 | 16) => "Repost",
-        Some(1111) => "Comment",
-        _ => "Post",
+        Some(30023) => t::embed_nostr_article(),
+        Some(21 | 34235) => t::embed_nostr_video(),
+        Some(22 | 34236) => t::embed_nostr_short(),
+        Some(6 | 16) => t::embed_nostr_repost(),
+        Some(1111) => t::embed_nostr_comment(),
+        _ => t::embed_nostr_post(),
     }
 }
 
@@ -465,8 +466,7 @@ pub fn for_preview(text: &str) -> std::borrow::Cow<'_, str> {
     let mut at = 0;
     for r in refs.iter().filter(|r| r.url.is_none()) {
         out.push_str(&text[at..r.start]);
-        out.push_str("Nostr ");
-        out.push_str(noun(&r.entity));
+        out.push_str(&preview_name(&r.entity));
         at = r.end;
     }
     (out + &text[at..]).into()
@@ -475,14 +475,14 @@ pub fn for_preview(text: &str) -> std::borrow::Cow<'_, str> {
 // ---------------------------------------------------------------------------------------------
 // The card.
 
-fn ref_label(entity: &str) -> &'static str {
+fn ref_label(entity: &str) -> gpui::SharedString {
     let l = entity.to_ascii_lowercase();
     if l.starts_with("naddr") {
-        "naddr"
+        "naddr".into()
     } else if l.starts_with("note") {
-        "note ID"
+        t::embed_note_id()
     } else {
-        "nevent"
+        "nevent".into()
     }
 }
 
@@ -604,20 +604,19 @@ fn card(ctx: &Ctx, m: &Message, r: &Ref) -> AnyElement {
         _ => None,
     };
     let eyebrow = match &e {
-        Some(e) if e.reposted_by.is_some() => format!(
-            "Reposted by {}",
-            ctx.store.name(e.reposted_by.as_deref().unwrap_or_default())
-        ),
-        Some(e) if e.kind == 1111 => "Nostr Comment".into(),
+        Some(e) if e.reposted_by.is_some() => {
+            t::embed_reposted_by(ctx.store.name(e.reposted_by.as_deref().unwrap_or_default())).to_string()
+        }
+        Some(e) if e.kind == 1111 => t::embed_nostr_comment().into(),
         Some(e) => match e.class.as_str() {
-            "post" => "Nostr Post",
-            "article" => "Nostr Article",
-            "video" => "Nostr Video",
-            "short" => "Nostr Short",
-            _ => "Nostr",
+            "post" => t::embed_nostr_post(),
+            "article" => t::embed_nostr_article(),
+            "video" => t::embed_nostr_video(),
+            "short" => t::embed_nostr_short(),
+            _ => t::embed_nostr(),
         }
         .into(),
-        None => "Nostr".into(),
+        None => t::embed_nostr().into(),
     };
     let mut col = div()
         .mt(px(8.))
@@ -647,7 +646,7 @@ fn card(ctx: &Ctx, m: &Message, r: &Ref) -> AnyElement {
                 let s = send.clone();
                 let copy = btn(
                     format!("{key}-copy"),
-                    crate::t::embed_copy(label),
+                    t::embed_copy(&*label),
                     false,
                     move |w, cx| s(Act::Copy(entity.clone(), label.to_string()), w, cx),
                 );
@@ -655,7 +654,7 @@ fn card(ctx: &Ctx, m: &Message, r: &Ref) -> AnyElement {
                     let s = send.clone();
                     btn(
                         format!("{key}-ext"),
-                        "Open Externally",
+                        t::embed_open_externally(),
                         false,
                         move |w, cx| s(Act::OpenUrl(u.clone()), w, cx),
                     )
@@ -666,7 +665,7 @@ fn card(ctx: &Ctx, m: &Message, r: &Ref) -> AnyElement {
                         .text_size(px(14.))
                         .line_height(px(19.6))
                         .text_color(white_a(0.6))
-                        .child("This post couldn't be loaded"),
+                        .child(t::embed_failed()),
                 )
                 .child(
                     div()
@@ -734,15 +733,15 @@ fn card(ctx: &Ctx, m: &Message, r: &Ref) -> AnyElement {
                         s(Act::Reveal(reveal_key.clone()), w, cx)
                     })
                     .child(div().min_w_0().text_color(c(0xffffff)).child(match warn {
-                        Some(w) => format!("Content warning: {w}"),
-                        None => "Content warning".into(),
+                        Some(w) => t::embed_content_warning_reason(w),
+                        None => t::embed_content_warning(),
                     }))
                     .child(
                         div()
                             .flex_shrink_0()
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(c(ACCENT))
-                            .child("Show"),
+                            .child(t::embed_show()),
                     ),
             )
             .into_any_element();
@@ -824,7 +823,7 @@ fn card(ctx: &Ctx, m: &Message, r: &Ref) -> AnyElement {
             let ex = expand.clone();
             Some(btn(
                 format!("{key}-read"),
-                "Read Article",
+                t::embed_read_article(),
                 true,
                 move |w, cx| ex(w, cx),
             ))
@@ -832,7 +831,7 @@ fn card(ctx: &Ctx, m: &Message, r: &Ref) -> AnyElement {
             let ex = expand.clone();
             Some(btn(
                 format!("{key}-more"),
-                "Show More",
+                t::embed_show_more(),
                 false,
                 move |w, cx| ex(w, cx),
             ))
@@ -843,7 +842,7 @@ fn card(ctx: &Ctx, m: &Message, r: &Ref) -> AnyElement {
             let s = send.clone();
             btn(
                 format!("{key}-ext"),
-                "Open Externally",
+                t::embed_open_externally(),
                 false,
                 move |w, cx| s(Act::OpenUrl(u.clone()), w, cx),
             )
@@ -931,15 +930,15 @@ fn author(env: &Env, e: &Embed, key: &str, send: &Send) -> AnyElement {
 /// `EmbedReplyTo.svelte`: what a comment answers.
 fn reply_to(reply: &ReplyTo, key: &str, send: &Send) -> AnyElement {
     let noun = match reply.kind {
-        Some(1) => "a post",
-        Some(1111) => "a comment",
-        Some(30023) => "an article",
-        Some(21 | 34235) => "a video",
-        Some(22 | 34236) => "a short",
-        Some(1063) => "a file",
-        Some(30311) => "a live stream",
-        Some(34550) => "a community",
-        _ => "a Nostr event",
+        Some(1) => t::embed_reply_post(),
+        Some(1111) => t::embed_reply_comment(),
+        Some(30023) => t::embed_reply_article(),
+        Some(21 | 34235) => t::embed_reply_video(),
+        Some(22 | 34236) => t::embed_reply_short(),
+        Some(1063) => t::embed_reply_file(),
+        Some(30311) => t::embed_reply_live(),
+        Some(34550) => t::embed_reply_community(),
+        _ => t::embed_reply_event(),
     };
     let web = reply.external.clone().filter(|x| {
         x.to_ascii_lowercase().starts_with("http://")
@@ -977,7 +976,7 @@ fn reply_to(reply: &ReplyTo, key: &str, send: &Send) -> AnyElement {
         .text_size(px(size))
         .line_height(px(size * 1.4))
         .text_color(white_a(0.55))
-        .child("Replying to")
+        .child(t::embed_replying_to())
         .child(tail)
         .into_any_element()
 }
@@ -1265,7 +1264,7 @@ fn poster_in(env: &Env, short: bool, image: Option<&str>, video: Option<Media>, 
                 .text_size(px(11.))
                 .line_height(px(14.3))
                 .text_center()
-                .child("Couldn't download the video. Tap to try again.")
+                .child(t::embed_video_failed())
         }))
         .children(badge.map(|b| {
             div()
@@ -1435,7 +1434,7 @@ pub fn modal(m: &Modal, env: &Env, viewport_h: f32) -> AnyElement {
     if let Some(name) = reposter {
         col = col.child(
             pad_first(div()).child(
-                crate::kit::spaced(format!("REPOSTED BY {}", name.to_uppercase()), 0.9)
+                crate::kit::spaced(t::embed_reposted_by(name).to_uppercase(), 0.9)
                     .font_weight(FontWeight::BOLD)
                     .text_size(px(10.))
                     .line_height(px(14.))
@@ -1469,8 +1468,8 @@ pub fn modal(m: &Modal, env: &Env, viewport_h: f32) -> AnyElement {
                 .on_click(move |_, w, cx| s(Act::Reveal(String::new()), w, cx))
                 .child(div().min_w_0().text_color(c(0xffffff)).child(
                     match e.content_warning.as_deref().filter(|w| !w.is_empty()) {
-                        Some(w) => format!("Content warning: {w}"),
-                        None => "Content warning".into(),
+                        Some(w) => t::embed_content_warning_reason(w),
+                        None => t::embed_content_warning(),
                     },
                 ))
                 .child(
@@ -1478,7 +1477,7 @@ pub fn modal(m: &Modal, env: &Env, viewport_h: f32) -> AnyElement {
                         .flex_shrink_0()
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(c(ACCENT))
-                        .child("Show"),
+                        .child(t::embed_show()),
                 ),
         );
     } else {
@@ -1567,13 +1566,13 @@ pub fn modal(m: &Modal, env: &Env, viewport_h: f32) -> AnyElement {
         let (s, bech, lbl) = (send.clone(), e.bech32.clone(), label.to_string());
         let copy = btn(
             "nem-copy".into(),
-            crate::t::embed_copy(label),
+            t::embed_copy(label),
             false,
             move |w, cx| s(Act::Copy(bech.clone(), lbl.clone()), w, cx),
         );
         let ext = v.url.clone().map(|u| {
             let s = send.clone();
-            btn("nem-ext".into(), "Open Externally", false, move |w, cx| {
+            btn("nem-ext".into(), t::embed_open_externally(), false, move |w, cx| {
                 s(Act::OpenUrl(u.clone()), w, cx)
             })
         });
@@ -1666,16 +1665,16 @@ fn quote(env: &Env, r: &Ref, key: &str) -> AnyElement {
         _ => None,
     };
     let label = match &e {
-        Some(e) if e.reposted_by.is_some() => "Quoted Repost",
-        Some(e) if e.kind == 1111 => "Quoted Comment",
+        Some(e) if e.reposted_by.is_some() => t::embed_quote_repost(),
+        Some(e) if e.kind == 1111 => t::embed_quote_comment(),
         Some(e) => match e.class.as_str() {
-            "post" => "Quoted Post",
-            "article" => "Quoted Article",
-            "video" => "Quoted Video",
-            "short" => "Quoted Short",
-            _ => "Quote",
+            "post" => t::embed_quote_post(),
+            "article" => t::embed_quote_article(),
+            "video" => t::embed_quote_video(),
+            "short" => t::embed_quote_short(),
+            _ => t::embed_quote(),
         },
-        None => "Quote",
+        None => t::embed_quote(),
     };
     let mut col = div()
         .id(id)
@@ -1744,8 +1743,8 @@ fn quote(env: &Env, r: &Ref, key: &str) -> AnyElement {
                         .text_color(white_a(0.5))
                         .child(
                             match e.content_warning.as_deref().filter(|w| !w.is_empty()) {
-                                Some(w) => format!("Content warning: {w}"),
-                                None => "Content warning".into(),
+                                Some(w) => t::embed_content_warning_reason(w),
+                                None => t::embed_content_warning(),
                             },
                         )
                         .into_any_element(),
