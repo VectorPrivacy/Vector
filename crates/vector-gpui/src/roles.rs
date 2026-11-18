@@ -14,6 +14,7 @@ use crate::commsettings::{
     input_box, lede, member_row, save_btn, search_box, short_npub, text_btn,
 };
 use crate::data::Store;
+use crate::settings::Label;
 use crate::t;
 use crate::theme::*;
 
@@ -28,12 +29,12 @@ pub const COLORS: [u32; 16] = [
 
 pub struct Perm {
     pub bit: u32,
-    pub name: &'static str,
-    pub desc: &'static str,
+    pub name: Label,
+    pub desc: Label,
     pub v2: bool,
 }
 
-const fn p(bit: u32, name: &'static str, desc: &'static str) -> Perm {
+const fn p(bit: u32, name: Label, desc: Label) -> Perm {
     Perm {
         bit,
         name,
@@ -42,7 +43,7 @@ const fn p(bit: u32, name: &'static str, desc: &'static str) -> Perm {
     }
 }
 
-const fn p2(bit: u32, name: &'static str, desc: &'static str) -> Perm {
+const fn p2(bit: u32, name: Label, desc: Label) -> Perm {
     Perm {
         bit,
         name,
@@ -52,125 +53,53 @@ const fn p2(bit: u32, name: &'static str, desc: &'static str) -> Perm {
 }
 
 pub const COMMUNITY: &[Perm] = &[
-    p(
-        2,
-        "Manage Community",
-        "Change the community's name, icon and description.",
-    ),
-    p(1, "Manage Channels", "Create, rename and delete channels."),
-    p(
-        0,
-        "Manage Roles",
-        "Create and edit roles beneath their own, and give them to members.",
-    ),
-    p(
-        6,
-        "Create Invites",
-        "Make invite links and invite people directly.",
-    ),
-    p(
-        8,
-        "View Audit Log",
-        "See the record of moderation and management actions.",
-    ),
+    p(2, t::roles_perm_manage_community, t::roles_perm_manage_community_desc),
+    p(1, t::roles_perm_manage_channels, t::roles_perm_manage_channels_desc),
+    p(0, t::roles_perm_manage_roles, t::roles_perm_manage_roles_desc),
+    p(6, t::roles_perm_create_invites, t::roles_perm_create_invites_desc),
+    p(8, t::roles_perm_view_audit_log, t::roles_perm_view_audit_log_desc),
 ];
 pub const MODERATION: &[Perm] = &[
-    p(
-        3,
-        "Kick Members",
-        "Remove members beneath them. A kicked member can rejoin.",
-    ),
-    p(
-        4,
-        "Ban Members",
-        "Ban members beneath them, silencing them and cutting them off for good.",
-    ),
-    p(
-        5,
-        "Manage Messages",
-        "Hide messages from members beneath them.",
-    ),
-    p(
-        11,
-        "Pin Messages",
-        "Pin messages to a channel for everyone to see.",
-    ),
-    p2(
-        26,
-        "Timeout Members",
-        "Silence members beneath them for a while.",
-    ),
-    p(
-        28,
-        "Manage Nicknames",
-        "Change the nicknames of members beneath them.",
-    ),
+    p(3, t::roles_perm_kick, t::roles_perm_kick_desc),
+    p(4, t::roles_perm_ban, t::roles_perm_ban_desc),
+    p(5, t::roles_perm_manage_messages, t::roles_perm_manage_messages_desc),
+    p(11, t::roles_perm_pin, t::roles_perm_pin_desc),
+    p2(26, t::roles_perm_timeout, t::roles_perm_timeout_desc),
+    p(28, t::roles_perm_manage_nicknames, t::roles_perm_manage_nicknames_desc),
 ];
 pub const CHANNELS: &[Perm] = &[
-    p(
-        13,
-        "View Channels",
-        "See channels and read what is posted in them.",
-    ),
-    p(14, "Send Messages", "Post in channels."),
-    p(15, "Send in Threads", "Reply in threads."),
-    p(16, "Attach Files", "Share images, videos and files."),
-    p(17, "Add Reactions", "React to messages."),
-    p(
-        18,
-        "Read Message History",
-        "Read what was posted before they could see a channel.",
-    ),
+    p(13, t::roles_perm_view_channels, t::roles_perm_view_channels_desc),
+    p(14, t::roles_perm_send, t::roles_perm_send_desc),
+    p(15, t::roles_perm_threads, t::roles_perm_threads_desc),
+    p(16, t::roles_perm_attach, t::roles_perm_attach_desc),
+    p(17, t::roles_perm_react, t::roles_perm_react_desc),
+    p(18, t::roles_perm_history, t::roles_perm_history_desc),
 ];
 pub const VOICE: &[Perm] = &[
-    p(19, "Connect", "Join calls."),
-    p(20, "Speak", "Talk in calls."),
-    p(21, "Video", "Share their camera or screen in calls."),
-    p(
-        22,
-        "Priority Speaker",
-        "Be heard over others while they talk.",
-    ),
-    p(23, "Mute Members", "Mute members beneath them in calls."),
-    p(
-        24,
-        "Deafen Members",
-        "Deafen members beneath them in calls.",
-    ),
-    p(
-        25,
-        "Move Members",
-        "Move members beneath them between calls.",
-    ),
+    p(19, t::roles_perm_connect, t::roles_perm_connect_desc),
+    p(20, t::roles_perm_speak, t::roles_perm_speak_desc),
+    p(21, t::roles_perm_video, t::roles_perm_video_desc),
+    p(22, t::roles_perm_priority, t::roles_perm_priority_desc),
+    p(23, t::roles_perm_mute, t::roles_perm_mute_desc),
+    p(24, t::roles_perm_deafen, t::roles_perm_deafen_desc),
+    p(25, t::roles_perm_move, t::roles_perm_move_desc),
 ];
 pub const CHAT: &[Perm] = &[
-    p(
-        9,
-        "Mention @everyone",
-        "Notify everyone at once, and mention any role.",
-    ),
-    p2(
-        29,
-        "Change Nickname",
-        "Choose what they go by in this community.",
-    ),
+    p(9, t::roles_perm_mention_everyone, t::roles_perm_mention_everyone_desc),
+    p2(29, t::roles_perm_change_nickname, t::roles_perm_change_nickname_desc),
 ];
 
-pub fn groups(v2: bool) -> Vec<(&'static str, &'static [Perm])> {
+pub fn groups(v2: bool) -> Vec<(Label, &'static [Perm])> {
     if v2 {
         vec![
-            ("Community", COMMUNITY),
-            ("Moderation", MODERATION),
-            ("Channels", CHANNELS),
-            ("Voice", VOICE),
-            ("Chat", CHAT),
+            (t::roles_group_community, COMMUNITY),
+            (t::roles_group_moderation, MODERATION),
+            (t::roles_group_channels, CHANNELS),
+            (t::roles_group_voice, VOICE),
+            (t::roles_group_chat, CHAT),
         ]
     } else {
-        vec![
-            ("Community", COMMUNITY),
-            ("Moderation", MODERATION),
-            ("Chat", CHAT),
-        ]
+        vec![(t::roles_group_community, COMMUNITY), (t::roles_group_moderation, MODERATION), (t::roles_group_chat, CHAT)]
     }
 }
 
@@ -416,7 +345,7 @@ fn grip(icon: &'static str, color: u32) -> impl IntoElement {
         .child(svg().path(icon).size(px(16.)).text_color(c(color)))
 }
 
-fn count(text: String) -> impl IntoElement {
+fn count(text: SharedString) -> impl IntoElement {
     div()
         .ml_auto()
         .flex_shrink_0()
@@ -446,7 +375,7 @@ fn list(m: &CommSettings, store: &Store, on: &OnAct) -> AnyElement {
     let Some(view) = r.view.as_ref() else {
         return block(
             true,
-            div().child(heading("Roles")).child(hint("Loading...")),
+            div().child(heading(t::roles_title())).child(hint(t::roles_loading())),
         )
         .into_any_element();
     };
@@ -459,8 +388,7 @@ fn list(m: &CommSettings, store: &Store, on: &OnAct) -> AnyElement {
             .as_array()
             .and_then(|a| a.iter().find(|c| c["channel_id"].as_str() == Some(id)))
             .and_then(|c| c["name"].as_str())
-            .unwrap_or("a private channel")
-            .to_string()
+            .map_or_else(|| t::roles_private_channel().to_string(), str::to_string)
     };
     let mut rows = div()
         .mb(px(10.))
@@ -498,7 +426,7 @@ fn list(m: &CommSettings, store: &Store, on: &OnAct) -> AnyElement {
                         .text_size(px(14.))
                         .line_height(px(24.))
                         .text_color(c(0xfce459))
-                        .child("Owner"),
+                        .child(t::roles_owner()),
                 )
                 .child(
                     div()
@@ -526,7 +454,7 @@ fn list(m: &CommSettings, store: &Store, on: &OnAct) -> AnyElement {
                 .text_center()
                 .text_size(px(12.5))
                 .text_color(white_a(0.4))
-                .child("No roles yet. Create one to start giving members permissions."),
+                .child(t::roles_none()),
         );
     }
     for role in all {
@@ -536,8 +464,7 @@ fn list(m: &CommSettings, store: &Store, on: &OnAct) -> AnyElement {
         let name = role["name"]
             .as_str()
             .filter(|n| !n.is_empty())
-            .unwrap_or("Unnamed role")
-            .to_string();
+            .map_or_else(|| t::roles_unnamed().to_string(), str::to_string);
         let held = role["holders"].as_array().map(Vec::len).unwrap_or(0);
         let open = on.clone();
         let key = id.clone();
@@ -575,10 +502,7 @@ fn list(m: &CommSettings, store: &Store, on: &OnAct) -> AnyElement {
                     .text_color(c(0x9a9a9a))
                     .child(format!("#{}", channel_name(ch)))
             }))
-            .child(count(format!(
-                "{held} {}",
-                if held == 1 { "member" } else { "members" }
-            )))
+            .child(count(t::roles_held(held)))
             .child(open_caret());
         if manageable {
             let drag = RoleDrag {
@@ -644,7 +568,7 @@ fn list(m: &CommSettings, store: &Store, on: &OnAct) -> AnyElement {
                         .text_color(if editable { c(0xcfcfcf) } else { c(0x9a9a9a) })
                         .child("@everyone"),
                 )
-                .child(count("all members".into()))
+                .child(count(t::roles_held_everyone()))
                 .child(open_caret()),
         );
     }
@@ -667,10 +591,10 @@ fn list(m: &CommSettings, store: &Store, on: &OnAct) -> AnyElement {
                     .flex()
                     .flex_col()
                     .gap(px(2.))
-                    .child(div().text_size(px(14.5)).text_color(c(0xe8e8e8)).child("New roles are available"))
-                    .child(div().text_size(px(12.5)).line_height(px(17.5)).text_color(c(0x7a7a7a)).child("@everyone, channel and voice permissions, and roles you can delete. Every role carries over, and private channels keep who can read them.")),
+                    .child(div().text_size(px(14.5)).text_color(c(0xe8e8e8)).child(t::roles_upgrade_title()))
+                    .child(div().text_size(px(12.5)).line_height(px(17.5)).text_color(c(0x7a7a7a)).child(t::roles_upgrade_text())),
             )
-            .child(save_btn("role-switch", "Switch", !r.busy, click(on, || CsAct::Role(Act::Activate))))
+            .child(save_btn("role-switch", t::roles_upgrade(), !r.busy, click(on, || CsAct::Role(Act::Activate))))
     });
     block(
         true,
@@ -682,13 +606,13 @@ fn list(m: &CommSettings, store: &Store, on: &OnAct) -> AnyElement {
                     .items_center()
                     .justify_between()
                     .gap(px(12.))
-                    .child(div().text_size(px(24.)).line_height(px(28.)).font_weight(FontWeight::BOLD).text_color(c(0xffffff)).child("Roles"))
-                    .when(can_manage && total < max, |d| d.child(small_btn("role-create", "Create Role", true, click(on, || CsAct::Role(Act::New))))),
+                    .child(div().text_size(px(24.)).line_height(px(28.)).font_weight(FontWeight::BOLD).text_color(c(0xffffff)).child(t::roles_title()))
+                    .when(can_manage && total < max, |d| d.child(small_btn("role-create", t::roles_create(), true, click(on, || CsAct::Role(Act::New))))),
             )
-            .child(lede("Members get the permissions of every role they hold. A role can manage only the roles beneath it, so the order matters: drag to arrange."))
+            .child(lede(t::roles_lede()))
             .children(upgrade)
             .child(rows)
-            .child(hint(format!("{total} of {max} roles"))),
+            .child(hint(t::roles_count(total, max))),
     )
     .into_any_element()
 }
@@ -721,8 +645,8 @@ fn small_btn(
 
 fn perm_row(
     id: SharedString,
-    name: &'static str,
-    desc: &'static str,
+    name: SharedString,
+    desc: SharedString,
     on_: bool,
     live: bool,
     on: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
@@ -805,8 +729,7 @@ fn editor(m: &CommSettings, store: &Store, on: &OnAct, cx: &App) -> AnyElement {
             .as_array()
             .and_then(|a| a.iter().find(|c| c["channel_id"].as_str() == Some(id)))
             .and_then(|c| c["name"].as_str())
-            .unwrap_or("a private channel")
-            .to_string()
+            .map_or_else(|| t::roles_private_channel().to_string(), str::to_string)
     };
     let back = div()
         .id("role-back")
@@ -833,10 +756,10 @@ fn editor(m: &CommSettings, store: &Store, on: &OnAct, cx: &App) -> AnyElement {
                 .size(px(16.))
                 .text_color(c(0x9a9a9a)),
         )
-        .child("All Roles");
+        .child(t::roles_back());
     let mut out = div().child(div().flex().child(back));
     if e.everyone {
-        out = out.child(block(true, div().child(heading("@everyone")).child(lede("What every member holds before any role. A role can add to it, never take from it."))));
+        out = out.child(block(true, div().child(heading("@everyone")).child(lede(t::roles_everyone_lede()))));
     } else {
         let name = m.role_name.read(cx).text().to_string();
         let bytes = name.len();
@@ -891,7 +814,7 @@ fn editor(m: &CommSettings, store: &Store, on: &OnAct, cx: &App) -> AnyElement {
                     click(on, || CsAct::Role(Act::Custom)),
                 )
                 .when(!custom, |d| d.border_1().border_color(c(0x333333)))
-                .tip("Custom colour")
+                .tip(t::roles_custom_colour())
                 .flex()
                 .items_center()
                 .justify_center()
@@ -935,24 +858,12 @@ fn editor(m: &CommSettings, store: &Store, on: &OnAct, cx: &App) -> AnyElement {
                 c(e.draft.color)
             })
             .child(dot(tint(e.draft.color)))
-            .child(if name.trim().is_empty() {
-                "new role".to_string()
-            } else {
-                name.trim().to_string()
-            });
+            .child(if name.trim().is_empty() { t::roles_preview_unnamed() } else { name.trim().to_string().into() });
         let mut display = div()
-            .child(heading(if e.id.is_none() {
-                "New Role"
-            } else {
-                "Display"
-            }))
-            .when(!editable, |d| {
-                d.child(lede(
-                    "This role sits at or above your own, so you can view it but not change it.",
-                ))
-            })
+            .child(heading(if e.id.is_none() { t::roles_new() } else { t::roles_section_role_display() }))
+            .when(!editable, |d| d.child(lede(t::roles_read_only())))
             .child(field_head(
-                "Role Name",
+                t::roles_name(),
                 Some((bytes, NAME_MAX, bytes > NAME_MAX || name.trim().is_empty())),
             ))
             .child(input_box(&m.role_name, 42., editable))
@@ -963,7 +874,7 @@ fn editor(m: &CommSettings, store: &Store, on: &OnAct, cx: &App) -> AnyElement {
                     .text_size(px(13.))
                     .line_height(px(24.))
                     .text_color(c(0xcfcfcf))
-                    .child("Role Colour"),
+                    .child(t::roles_colour()),
             )
             .child(
                 div()
@@ -986,16 +897,16 @@ fn editor(m: &CommSettings, store: &Store, on: &OnAct, cx: &App) -> AnyElement {
             display = display
                 .child(div().mt(px(22.)).child(perm_row(
                     "role-display".into(),
-                    "Show members separately",
-                    "List its members under the role's name in the member list.",
+                    t::roles_display_separately(),
+                    t::roles_display_separately_desc(),
                     e.draft.display,
                     editable,
                     click(on, || CsAct::Role(Act::Display)),
                 )))
                 .child(perm_row(
                     "role-mention".into(),
-                    "Allow anyone to mention this role",
-                    "Otherwise only members who can mention @everyone notify it.",
+                    t::roles_mentionable(),
+                    t::roles_mentionable_desc(),
                     e.draft.mentionable,
                     editable,
                     click(on, || CsAct::Role(Act::Mentionable)),
@@ -1008,12 +919,12 @@ fn editor(m: &CommSettings, store: &Store, on: &OnAct, cx: &App) -> AnyElement {
                     .text_size(px(13.))
                     .line_height(px(24.))
                     .text_color(c(0xcfcfcf))
-                    .child("Access"),
+                    .child(t::roles_access()),
             );
             if e.id.is_none() {
                 let choices: Vec<crate::kit::Choice> = std::iter::once(crate::kit::Choice {
                     value: "",
-                    label: "Every channel",
+                    label: crate::kit::interned(&t::roles_access_every_channel()),
                 })
                 .chain(
                     view["channels"]
@@ -1023,7 +934,7 @@ fn editor(m: &CommSettings, store: &Store, on: &OnAct, cx: &App) -> AnyElement {
                         .filter(|c| c["private"].as_bool().unwrap_or(false))
                         .filter_map(|c| {
                             let id = crate::kit::interned(c["channel_id"].as_str()?);
-                            let label = crate::kit::interned(&format!("#{} only", c["name"].as_str().unwrap_or("")));
+                            let label = crate::kit::interned(&t::roles_access_only(c["name"].as_str().unwrap_or("")));
                             Some(crate::kit::Choice { value: id, label })
                         }),
                 )
@@ -1031,15 +942,12 @@ fn editor(m: &CommSettings, store: &Store, on: &OnAct, cx: &App) -> AnyElement {
                 let (t, pk) = (on.clone(), on.clone());
                 display = display
                     .child(div().mt(px(10.)).child(crate::kit::select_look("role-access", 400., 14., &choices, &[], e.draft.channel_id.as_deref().unwrap_or(""), r.access_open, crate::kit::SelectLook { priority: crate::commsettings::LIST_PRIORITY, ..Default::default() }, move |w, cx| t(CsAct::Role(Act::AccessOpen), w, cx), move |v, w, cx| pk(CsAct::Role(Act::Access(v)), w, cx))))
-                    .child(hint("A role scoped to a private channel is that channel's access list: holding it is what lets someone read there. This can't be changed once the role exists.").mt(px(10.)));
+                    .child(hint(t::roles_access_hint()).mt(px(10.)));
             } else {
                 display = display.child(
                     hint(match &e.draft.channel_id {
-                        Some(ch) => format!(
-                            "#{} only. Holding this role is what lets someone read that channel.",
-                            channel_name(ch)
-                        ),
-                        None => "Every channel.".into(),
+                        Some(ch) => t::roles_access_scoped(channel_name(ch)),
+                        None => t::roles_access_everywhere(),
                     })
                     .mt(px(2.)),
                 );
@@ -1048,11 +956,11 @@ fn editor(m: &CommSettings, store: &Store, on: &OnAct, cx: &App) -> AnyElement {
         out = out.child(block(true, display));
     }
     let mut perms = div()
-        .child(heading("Permissions"))
-        .child(lede("You can only turn on permissions you hold yourself."));
+        .child(heading(if e.everyone { t::roles_section_everyone_permissions() } else { t::roles_section_role_permissions() }))
+        .child(lede(t::roles_permissions_lede()));
     for (i, (title, list)) in groups(v2).into_iter().enumerate() {
         perms = perms.child(
-            crate::kit::spaced(title.to_uppercase(), 0.66)
+            crate::kit::spaced(title().to_uppercase(), 0.66)
                 .mt(px(if i == 0 { 4. } else { 22. }))
                 .mb(px(10.))
                 .font_weight(FontWeight::SEMIBOLD)
@@ -1066,8 +974,8 @@ fn editor(m: &CommSettings, store: &Store, on: &OnAct, cx: &App) -> AnyElement {
             let b = p.bit;
             perms = perms.child(perm_row(
                 SharedString::from(format!("role-perm-{}", p.bit)),
-                p.name,
-                p.desc,
+                (p.name)(),
+                (p.desc)(),
                 has,
                 r.can_toggle(bit),
                 click(on, move || CsAct::Role(Act::Perm(b))),
@@ -1097,11 +1005,7 @@ fn editor(m: &CommSettings, store: &Store, on: &OnAct, cx: &App) -> AnyElement {
                 .filter(|n| matches(n))
                 .collect();
             if candidates.is_empty() {
-                body = body.child(empty(if q.is_empty() {
-                    "Everyone already holds this role."
-                } else {
-                    "No matches."
-                }));
+                body = body.child(empty(if q.is_empty() { t::roles_all_hold() } else { t::roles_no_matches() }));
             }
             for npub in candidates {
                 let key = npub.clone();
@@ -1124,18 +1028,18 @@ fn editor(m: &CommSettings, store: &Store, on: &OnAct, cx: &App) -> AnyElement {
                     .gap(px(8.))
                     .child(text_btn(
                         "role-add-cancel",
-                        "Cancel",
+                        t::roles_cancel(),
                         true,
                         click(on, || CsAct::Role(Act::Adding(false))),
                     ))
                     .child(save_btn(
                         "role-add",
                         if r.busy {
-                            "Adding...".to_string()
+                            t::roles_adding()
                         } else if n == 0 {
-                            "Add".to_string()
+                            t::roles_add()
                         } else {
-                            format!("Add {n}")
+                            t::roles_add_count(n)
                         },
                         n > 0 && !r.busy,
                         click(on, || CsAct::Role(Act::AddPicked)),
@@ -1144,11 +1048,7 @@ fn editor(m: &CommSettings, store: &Store, on: &OnAct, cx: &App) -> AnyElement {
         } else {
             let shown: Vec<&String> = holders.iter().filter(|n| matches(n)).collect();
             if shown.is_empty() {
-                body = body.child(empty(if q.is_empty() {
-                    "Nobody holds this role yet."
-                } else {
-                    "No matches."
-                }));
+                body = body.child(empty(if q.is_empty() { t::roles_nobody() } else { t::roles_no_matches() }));
             }
             for npub in shown {
                 let key = npub.clone();
@@ -1156,7 +1056,7 @@ fn editor(m: &CommSettings, store: &Store, on: &OnAct, cx: &App) -> AnyElement {
                 let remove: AnyElement = if editable {
                     div()
                         .id(SharedString::from(format!("role-rm-{npub}")))
-                        .tip("Remove from role")
+                        .tip(t::roles_remove())
                         .ml_auto()
                         .size(px(28.))
                         .flex()
@@ -1198,12 +1098,12 @@ fn editor(m: &CommSettings, store: &Store, on: &OnAct, cx: &App) -> AnyElement {
                                 .line_height(px(28.))
                                 .font_weight(FontWeight::BOLD)
                                 .text_color(c(0xffffff))
-                                .child("Members"),
+                                .child(t::roles_members()),
                         )
                         .when(editable && !r.adding, |d| {
                             d.child(small_btn(
                                 "role-add-members",
-                                "Add Members",
+                                t::roles_add_members(),
                                 true,
                                 click(on, || CsAct::Role(Act::Adding(true))),
                             ))
@@ -1235,7 +1135,7 @@ fn editor(m: &CommSettings, store: &Store, on: &OnAct, cx: &App) -> AnyElement {
                                 .hover(|d| d.bg(ca(255, 46, 169, 0.18)))
                                 .on_click(click(on, || CsAct::Role(Act::Delete)))
                         })
-                        .child("Delete Role"),
+                        .child(t::roles_delete()),
                 ),
             ));
         }
@@ -1243,7 +1143,7 @@ fn editor(m: &CommSettings, store: &Store, on: &OnAct, cx: &App) -> AnyElement {
     out.into_any_element()
 }
 
-fn empty(text: &'static str) -> impl IntoElement {
+fn empty(text: SharedString) -> impl IntoElement {
     div()
         .py(px(4.))
         .text_center()
