@@ -11,8 +11,9 @@ use intl_memoizer::Memoizable;
 use intl_memoizer::concurrent::IntlLangMemoizer;
 use unic_langid::LanguageIdentifier;
 
-/// What a language pack says about its numbers (from CLDR).
-#[derive(Clone, Debug, PartialEq)]
+/// What a language pack says about its numbers and dates (from CLDR).
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct LocaleData {
     pub decimal: Cow<'static, str>,
     pub group: Cow<'static, str>,

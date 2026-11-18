@@ -58,7 +58,8 @@ impl Clock {
 }
 
 /// What a language says about its calendar.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct Dates {
     pub months: [Cow<'static, str>; 12],
     pub months_short: [Cow<'static, str>; 12],

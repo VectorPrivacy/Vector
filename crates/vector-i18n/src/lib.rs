@@ -8,6 +8,7 @@
 mod check;
 mod dates;
 mod numbers;
+mod pack;
 mod pseudo;
 #[allow(dead_code)]
 mod scan;
@@ -23,6 +24,7 @@ use unic_langid::LanguageIdentifier;
 pub use check::{Report, check};
 pub use dates::{Civil, Clock, DateStyle, Dates};
 pub use numbers::LocaleData;
+pub use pack::english_revision;
 
 include!(concat!(env!("OUT_DIR"), "/catalog.rs"));
 
@@ -48,10 +50,15 @@ pub struct Pack {
     /// `(file name, source)`, mirroring the en-GB files.
     pub files: Vec<(String, String)>,
     pub data: LocaleData,
+    /// The [`english_revision`] it was built against.
+    pub english: String,
+    /// Translated share of that English, 0 to 100.
+    pub coverage: u32,
 }
 
 impl Pack {
-    /// A folder of `.ftl` files, as a translator keeps them.
+    /// A folder of `.ftl` files, as a translator keeps them, with the language's number and
+    /// date data in an optional `locale.json`.
     pub fn from_dir(tag: &str, dir: &std::path::Path) -> std::io::Result<Self> {
         let mut files = vec![];
         for e in std::fs::read_dir(dir)? {
@@ -61,7 +68,14 @@ impl Pack {
             }
         }
         files.sort();
-        Ok(Self { tag: tag.to_string(), name: tag.to_string(), rtl: is_rtl_tag(tag), files, data: LocaleData::default() })
+        let data = match std::fs::read(dir.join("locale.json")) {
+            Ok(b) => serde_json::from_slice(&b).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, format!("locale.json: {e}")))?,
+            Err(_) => LocaleData::default(),
+        };
+        let lang = Lang::new(tag, &files, LocaleData::default(), false);
+        let name = lang.format(NAME_ID, None).unwrap_or_else(|| tag.to_string());
+        let coverage = check(&files).coverage();
+        Ok(Self { tag: tag.to_string(), name, rtl: is_rtl_tag(tag), files, data, english: english_revision(), coverage })
     }
 }
 
@@ -209,18 +223,36 @@ fn with_active<R>(f: impl FnOnce(&Active) -> R) -> R {
     f(&active)
 }
 
-/// Adds or replaces a pack. Takes effect on the next [`set_language`] for its tag.
+/// The message a language names itself with, which the language list reads.
+pub const NAME_ID: &str = "language-name";
+
+/// Adds or replaces a pack. Takes effect on the next [`set_language`] for its tag; the
+/// generation moves so a cached language list is rebuilt.
 pub fn install(pack: Pack) {
     let mut r = REGISTRY.write().unwrap();
     r.langs.retain(|(t, _)| *t != pack.tag);
     r.packs.retain(|p| p.tag != pack.tag);
     r.packs.push(Arc::new(pack));
+    GENERATION.fetch_add(1, Ordering::AcqRel);
 }
 
-/// The languages that can be chosen: en-GB, then every installed pack.
-pub fn languages() -> Vec<(String, String)> {
+/// A language that can be chosen.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Language {
+    pub tag: String,
+    /// In its own language.
+    pub name: String,
+    pub coverage: u32,
+}
+
+/// The languages that can be chosen: en-GB, then every installed pack by name.
+pub fn languages() -> Vec<Language> {
     let r = REGISTRY.read().unwrap();
-    std::iter::once((BUILT_IN.to_string(), "English (UK)".to_string())).chain(r.packs.iter().map(|p| (p.tag.clone(), p.name.clone()))).collect()
+    let english = EN_GB_LANG.format(NAME_ID, None).unwrap_or_else(|| BUILT_IN.to_string());
+    let mut packs: Vec<Language> =
+        r.packs.iter().map(|p| Language { tag: p.tag.clone(), name: p.name.clone(), coverage: p.coverage }).collect();
+    packs.sort_by(|a, b| a.name.cmp(&b.name));
+    std::iter::once(Language { tag: BUILT_IN.to_string(), name: english, coverage: 100 }).chain(packs).collect()
 }
 
 fn lang(r: &mut Registry, tag: &str) -> Option<Arc<Lang>> {

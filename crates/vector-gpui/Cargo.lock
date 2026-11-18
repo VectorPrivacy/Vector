@@ -13589,9 +13589,12 @@ dependencies = [
 name = "vector-i18n"
 version = "0.1.0"
 dependencies = [
+ "flate2",
  "fluent-bundle",
  "fluent-syntax",
  "intl-memoizer",
+ "serde",
+ "serde_json",
  "unic-langid",
 ]
 

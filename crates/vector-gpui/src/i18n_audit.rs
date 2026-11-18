@@ -245,7 +245,11 @@ mod tests {
             let needle = format!("t::{f}");
             all.match_indices(&needle).any(|(i, _)| !all[i + needle.len()..].starts_with(|c: char| c.is_ascii_alphanumeric() || c == '_'))
         };
-        let unused: Vec<&str> = vector_i18n::ids().iter().copied().filter(|id| !used(&vector_i18n::function_name(id))).collect();
+        let unused: Vec<&str> = vector_i18n::ids()
+            .iter()
+            .copied()
+            .filter(|id| *id != vector_i18n::NAME_ID && !used(&vector_i18n::function_name(id)))
+            .collect();
         assert!(unused.is_empty(), "en-GB messages nothing calls: {unused:?}");
     }
 

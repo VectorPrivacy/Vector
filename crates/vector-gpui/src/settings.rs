@@ -797,6 +797,54 @@ fn row(s: &Settings, key: &'static str, on: &OnAct, grouped: bool) -> AnyElement
     .into_any_element()
 }
 
+/// Every installed language, each named in itself, with how far along an unfinished one is.
+fn languages() -> &'static [crate::kit::Choice] {
+    crate::kit::choices("languages", || {
+        vector_i18n::languages()
+            .into_iter()
+            .map(|l| {
+                let label = if l.coverage < 100 { t::settings_language_partial(l.coverage, &l.name) } else { l.name.as_str().into() };
+                crate::kit::Choice { value: crate::kit::interned(&l.tag), label: crate::kit::interned(&label) }
+            })
+            .collect()
+    })
+}
+
+fn language_row(s: &Settings, on: &OnAct) -> AnyElement {
+    div()
+        .min_h(px(36.))
+        .mb(px(5.))
+        .flex()
+        .items_center()
+        .gap(px(12.))
+        .child(
+            div()
+                .flex_1()
+                .text_size(px(16.))
+                .line_height(px(19.))
+                .text_color(c(0xffffff))
+                .child(t::settings_language()),
+        )
+        .child(crate::kit::select_with(
+            "language-picker",
+            230.,
+            16.,
+            languages(),
+            &[],
+            &vector_i18n::language(),
+            s.open_select == Some("language"),
+            {
+                let on = on.clone();
+                move |w, cx| on(Act::Select("language"), w, cx)
+            },
+            {
+                let on = on.clone();
+                move |v, w, cx| on(Act::Pick("language", v), w, cx)
+            },
+        ))
+        .into_any_element()
+}
+
 fn display_block(s: &Settings, on: &OnAct) -> AnyElement {
     let mut col = div()
         .flex()
@@ -818,7 +866,8 @@ fn display_block(s: &Settings, on: &OnAct) -> AnyElement {
                         .child(t::settings_theme()),
                 )
                 .child(theme_picker(s, on)),
-        );
+        )
+        .when(vector_i18n::languages().len() > 1, |d| d.child(language_row(s, on)));
     let mut last = "";
     let rows: Vec<&Toggle> = if s.slim {
         std::iter::once(&RAIL_HIDDEN).chain(DISPLAY.iter().filter(|t| t.key != "ws_nav")).collect()

@@ -21,7 +21,7 @@ settings-section-privacy = Privacy
 settings-section-blocked = Blocked Users
     .keys = blocked users block unblock
 settings-section-display = Display
-    .keys = theme colour color vector satoshi chatstr cosmic purple neon xmr display image types background wallpaper rich composer emoticon suggestions time suggestions countdown autocorrect send on enter return key floating player main menu navbar navigation pins sidebar tabs
+    .keys = theme colour color language translation locale vector satoshi chatstr cosmic purple neon xmr display image types background wallpaper rich composer emoticon suggestions time suggestions countdown autocorrect send on enter return key floating player main menu navbar navigation pins sidebar tabs
 settings-section-notifications = Notifications
     .keys = mute sounds everyone pings content privacy sound prelude techno custom
 settings-section-relays = Nostr Relays
@@ -58,6 +58,10 @@ settings-group-media = Media
 settings-group-chat-list = Chat List
 settings-group-appearance = Appearance
 settings-theme = Theme
+settings-language = Language
+# A language in the Language list that isn't fully translated yet. $name is the language's
+# own name, like "Español"; $coverage is how much of the app it covers, from 0 to 99.
+settings-language-partial = { $name } ({ $coverage }%)
 
 settings-toggle-ws-nav = Main Menu
 settings-toggle-display-image-types = Display Image Types

@@ -1,13 +1,22 @@
 //! The app's language. A device setting, not an account one, so the login screen reads in it.
 
+use std::path::{Path, PathBuf};
+
 use crate::backend::device;
 
 const KEY: &str = "ui_language";
+const PACK_EXT: &str = "vpack";
 
-/// The saved language, after any packs a translator points the app at with `VECTOR_LANG_DIR`
-/// (a folder of language folders, as in `crates/vector-i18n/locales`). `VECTOR_LANG` overrides.
-/// The system's locale and clock come first: English's date order and the clock follow them.
-pub fn init() {
+/// Where downloaded packs live, beside the device settings.
+pub fn packs_dir(data_dir: &Path) -> PathBuf {
+    data_dir.join("languages")
+}
+
+/// The saved language, after the packs downloaded to `packs` and any a translator points the
+/// app at with `VECTOR_LANG_DIR` (a folder of language folders, as in
+/// `crates/vector-i18n/locales`). `VECTOR_LANG` overrides. The system's locale and clock come
+/// first: English's date order and the clock follow them.
+pub fn init(packs: Option<PathBuf>) {
     // VECTOR_LOCALE stands in for the system's, as `en-US` or `en-GB:24`.
     let (locale, hour12) = match std::env::var("VECTOR_LOCALE") {
         Ok(v) => match v.split_once(':') {
@@ -17,6 +26,13 @@ pub fn init() {
         Err(_) => (sys_locale::get_locale().unwrap_or_default(), system_hour12()),
     };
     vector_i18n::set_system_locale(&locale, hour12);
+    for e in packs.and_then(|d| std::fs::read_dir(d).ok()).into_iter().flatten().flatten() {
+        if e.path().extension().is_some_and(|x| x == PACK_EXT)
+            && let Some(p) = std::fs::read(e.path()).ok().and_then(|b| vector_i18n::Pack::from_bytes(&b).ok())
+        {
+            vector_i18n::install(p);
+        }
+    }
     if let Some(root) = std::env::var_os("VECTOR_LANG_DIR") {
         for e in std::fs::read_dir(&root).into_iter().flatten().flatten() {
             let tag = e.file_name().to_string_lossy().into_owned();

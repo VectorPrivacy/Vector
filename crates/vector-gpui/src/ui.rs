@@ -18101,6 +18101,7 @@ impl VectorApp {
                             pack_reload = true;
                         }
                     }
+                    "language" => crate::lang::set(value, cx),
                     "notif-privacy" => {
                         s.notif_privacy = value.to_string();
                         if self.live {

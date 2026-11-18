@@ -4,7 +4,15 @@ use super::*;
 static SWITCH: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn pack(tag: &str, src: &str) -> Pack {
-    Pack { tag: tag.into(), name: tag.into(), rtl: false, files: vec![("chat.ftl".into(), src.into())], data: LocaleData::default() }
+    Pack {
+        tag: tag.into(),
+        name: tag.into(),
+        rtl: false,
+        files: vec![("chat.ftl".into(), src.into())],
+        data: LocaleData::default(),
+        english: english_revision(),
+        coverage: 0,
+    }
 }
 
 #[test]
@@ -146,4 +154,40 @@ fn the_system_locale_sets_englishs_calendar_and_the_clock() {
     set_system_locale("", None);
     set_language(BUILT_IN);
     assert_eq!(locale().dates.time(&noon, Clock::SHORT), "13:00");
+}
+
+#[test]
+fn a_pack_survives_its_trip_and_refuses_what_isnt_one() {
+    let dir = std::env::temp_dir().join(format!("vector-i18n-pack-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("language.ftl"), "language-name = Español\n").unwrap();
+    std::fs::write(dir.join("chat.ftl"), "day-today = Hoy\n").unwrap();
+    std::fs::write(dir.join("locale.json"), r#"{"decimal": ",", "dates": {"week_start": 1, "hour12": false}}"#).unwrap();
+    let p = Pack::from_dir("es", &dir).unwrap();
+    std::fs::remove_dir_all(&dir).ok();
+    assert_eq!(p.name, "Español");
+    assert_eq!(p.data.decimal, ",");
+    assert_eq!(p.data.dates.months[0], "January", "what locale.json leaves out stays en-GB's");
+    assert!(p.coverage < 5);
+    assert_eq!(p.english, english_revision());
+
+    let bytes = p.to_bytes();
+    let back = Pack::from_bytes(&bytes).unwrap();
+    assert_eq!((back.tag.as_str(), back.name.as_str(), back.coverage), ("es", "Español", p.coverage));
+    assert_eq!(back.files, p.files);
+    assert_eq!(back.data, p.data);
+
+    assert!(Pack::from_bytes(b"not deflate at all").is_err());
+    let mut english = back.clone();
+    english.tag = BUILT_IN.into();
+    assert!(Pack::from_bytes(&english.to_bytes()).is_err(), "a pack can't stand in for the built-in English");
+    english.tag = "../es".into();
+    assert!(Pack::from_bytes(&english.to_bytes()).is_err());
+}
+
+#[test]
+fn the_built_in_english_names_itself() {
+    let _g = SWITCH.lock().unwrap_or_else(|e| e.into_inner());
+    let langs = languages();
+    assert_eq!(langs[0], Language { tag: BUILT_IN.into(), name: "English (UK)".into(), coverage: 100 });
 }

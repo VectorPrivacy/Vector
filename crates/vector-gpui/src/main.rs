@@ -230,8 +230,9 @@ fn main() {
     if fixtures.is_none() {
         fileclip::purge();
     }
+    let packs = fixtures.is_none().then(|| lang::packs_dir(&data_dir));
     let events = fixtures.is_none().then(|| backend::start(data_dir));
-    lang::init();
+    lang::init(packs);
 
     let os_links = links_tx.clone();
     let app = gpui_platform::application().with_assets(assets::Assets);
