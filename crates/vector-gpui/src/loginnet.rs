@@ -13,16 +13,13 @@ use super::LoginView;
 use crate::backend::{self, transport as net};
 use crate::composer::{CancelInput, Look, SendText, TextInput};
 use crate::kit::{self, Choice};
+use crate::t;
 use crate::theme::*;
 
-const NETS: &[Choice] = &[
-    Choice { value: "clearnet", label: "Standard" },
-    Choice { value: "tor", label: "Tor" },
-    Choice { value: "i2p", label: "I2P" },
-];
+const NETS: [&str; 3] = ["clearnet", "tor", "i2p"];
 
-fn label(kind: &str) -> &str {
-    NETS.iter().find(|c| c.value == kind).map_or(kind, |c| c.label)
+fn label(kind: &str) -> SharedString {
+    crate::routing::label(kind)
 }
 
 fn json<T: serde::Serialize>(v: T) -> Value {
@@ -92,7 +89,7 @@ impl Default for LoginNet {
 }
 
 fn intern(kind: &str) -> &'static str {
-    NETS.iter().find(|c| c.value == kind).map_or("", |c| c.value)
+    NETS.iter().find(|v| **v == kind).copied().unwrap_or("")
 }
 
 fn there(v: &Value, kind: &str) -> bool {
@@ -153,7 +150,7 @@ impl LoginView {
             self.net.kind = "";
             self.net.busy = false;
             self.net.hold = true;
-            self.net.failed = if prelogin == "unknown" { "Choose how Vector connects.".into() } else { format!("This build doesn't include {}.", label(&prelogin)) };
+            self.net.failed = if prelogin == "unknown" { t::routing_choose().into() } else { t::routing_missing(&label(&prelogin)).into() };
             self.net.failed_code.clear();
             cx.notify();
             return;
@@ -220,7 +217,7 @@ impl LoginView {
             let err = match rx.await {
                 Ok(Ok(_)) => String::new(),
                 Ok(Err(e)) => e,
-                Err(_) => "Backend stopped".into(),
+                Err(_) => t::backend_stopped().into(),
             };
             this.update(cx, |this, cx| {
                 if seq != this.net.seq {
@@ -266,7 +263,7 @@ impl LoginView {
         } else if !err.is_empty() {
             err
         } else {
-            reason.map_or_else(|| format!("{} couldn't connect.", label(n.kind)), str::to_string)
+            reason.map_or_else(|| t::login_net_couldnt_connect(&label(n.kind)).into(), str::to_string)
         };
         n.busy = starting;
         n.hold = !up;
@@ -282,7 +279,7 @@ impl LoginView {
             cx.notify();
             let rx = backend::run(net::transport_retry(None));
             cx.spawn(async move |this, cx| {
-                let res = rx.await.unwrap_or_else(|_| Err("Backend stopped".into()));
+                let res = rx.await.unwrap_or_else(|_| Err(t::backend_stopped().into()));
                 this.update(cx, |this, cx| match res {
                     Ok(v) => this.net_paint(Some(json(v)), String::new(), cx),
                     Err(e) => {
@@ -316,7 +313,7 @@ impl LoginView {
 
     fn set_sam_port(&mut self, text: &str, cx: &mut Context<Self>) {
         let Some(port) = text.parse::<u16>().ok().filter(|p| *p >= 1) else {
-            self.net.sam_error = "Enter a port from 1 to 65535.".into();
+            self.net.sam_error = t::routing_port_range().into();
             cx.notify();
             return;
         };
@@ -335,12 +332,12 @@ impl LoginView {
         let (user, password) = auth.unwrap_or_default();
         let u = user.trim();
         if u.is_empty() != password.is_empty() {
-            self.net.sam_error = "Enter both a username and a password.".into();
+            self.net.sam_error = t::login_net_sam_both().into();
             cx.notify();
             return false;
         }
         if u.chars().chain(password.chars()).any(|ch| ch.is_whitespace() || ch == '"' || ch == '=') {
-            self.net.sam_error = "Use letters, numbers and symbols, without spaces or quotes.".into();
+            self.net.sam_error = t::login_net_sam_chars().into();
             cx.notify();
             return false;
         }
@@ -372,9 +369,9 @@ impl LoginView {
             return Ok(());
         }
         if n.kind.is_empty() {
-            return Err(if n.failed.is_empty() { "Choose how Vector connects.".into() } else { n.failed.clone() });
+            return Err(if n.failed.is_empty() { t::routing_choose().into() } else { n.failed.clone() });
         }
-        Err(format!("{} isn't connected yet. Try again, or pick another network.", label(n.kind)))
+        Err(t::login_net_not_yet(&label(n.kind)).into())
     }
 
     /// What Add Profile's commit starts the new account on.
@@ -509,7 +506,7 @@ impl LoginView {
             let entity = entity.clone();
             move |v: &'static str, _: &mut Window, cx: &mut App| entity.update(cx, |this, cx| this.net_pick(v, cx))
         };
-        let choices: Vec<Choice> = self.net.kinds.iter().filter_map(|k| NETS.iter().find(|c| c.value == *k).map(|c| Choice { value: c.value, label: c.label })).collect();
+        let choices: Vec<Choice> = self.net.kinds.iter().map(|k| Choice { value: k, label: kit::interned(&label(k)) }).collect();
         let select = div().opacity(if self.net.busy { 0.6 } else { 1. }).child(kit::select("lg-net-select", 130., &choices, self.net.kind, self.net.select_open, toggle, pick));
         Some(
             div()
@@ -526,12 +523,12 @@ impl LoginView {
                         .gap(px(8.))
                         .text_size(px(16.))
                         .line_height(px(19.))
-                        .child("Network")
+                        .child(t::login_net())
                         .when(!tabs.is_empty(), |d| {
                             d.child(
                                 div()
                                     .id("lg-net-info")
-                                    .aria_label("About these networks")
+                                    .aria_label(t::login_net_about())
                                     .cursor_pointer()
                                     .on_click(move |_, w, cx| entity.update(cx, |this, cx| this.net_info(Some(first), w, cx)))
                                     .child(svg().path("icons/info.svg").size(px(18.)).text_color(c(0x333333)).hover(|d| d.text_color(c(ICON_MUTED)))),
@@ -573,12 +570,12 @@ impl LoginView {
                                 s.with_transformation(gpui::Transformation::rotate(gpui::percentage(t)))
                             }),
                     )
-                    .child(div().text_color(c(0x59fcb3)).child(format!("{} connecting…", label(n.kind))))
-                    .child("Do not close app."),
+                    .child(div().text_color(c(0x59fcb3)).child(t::login_net_connecting(&label(n.kind))))
+                    .child(t::login_net_keep_open()),
             );
         } else if !n.failed.is_empty() {
             let danger = |a: f32| ca(0xff, 0x2e, 0xa9, a);
-            let btn = |id: &'static str, text: &'static str| {
+            let btn = |id: &'static str, text: SharedString| {
                 div()
                     .id(id)
                     .px(px(10.))
@@ -597,10 +594,10 @@ impl LoginView {
             };
             let mut actions = div().flex_none().flex().flex_col().gap(px(4.));
             if !n.kind.is_empty() {
-                actions = actions.child(btn("lg-net-retry", "Retry").on_click(cx.listener(|this, _, _, cx| this.net_retry(cx))));
+                actions = actions.child(btn("lg-net-retry", t::routing_retry()).on_click(cx.listener(|this, _, _, cx| this.net_retry(cx))));
             }
             if n.kind == "i2p" && (n.failed_code == "router_unreachable" || n.failed_code.starts_with("sam_")) {
-                let text = if n.failed_code.starts_with("sam_auth") { "Add SAM Password" } else { "Change Port" };
+                let text = if n.failed_code.starts_with("sam_auth") { t::routing_add_sam_password() } else { t::login_net_change_port() };
                 actions = actions.child(btn("lg-net-port", text).on_click(cx.listener(|this, _, w, cx| this.net_change_port(w, cx))));
             }
             slot = slot.child(
@@ -634,7 +631,7 @@ impl LoginView {
     /// The I2P tab's router setup: the SAM port, and the credentials for a router that asks.
     fn sam_router(&self, cx: &mut Context<Self>) -> AnyElement {
         let n = &self.net;
-        let field = |name: &'static str, input: Option<&Entity<TextInput>>, w: f32, min_label: Option<f32>| {
+        let field = |name: SharedString, input: Option<&Entity<TextInput>>, w: f32, min_label: Option<f32>| {
             div()
                 .flex()
                 .items_center()
@@ -657,7 +654,7 @@ impl LoginView {
                         .children(input.cloned()),
                 )
         };
-        let link = |id: &'static str, text: &'static str| {
+        let link = |id: &'static str, text: SharedString| {
             div().id(id).text_color(c(0x5fd4ea)).cursor_pointer().hover(|d| d.underline()).child(text)
         };
         let has_auth = !n.sam_user.is_empty() && !n.sam_password.is_empty();
@@ -670,9 +667,9 @@ impl LoginView {
                 .justify_center()
                 .gap_x(px(16.))
                 .gap_y(px(6.))
-                .child(field("SAM port", n.port.as_ref(), 76., None))
+                .child(field(t::login_net_sam_port(), n.port.as_ref(), 76., None))
                 .when(!n.sam_open && !has_auth, |d| {
-                    d.child(link("lg-sam-add", "Add SAM Password").tip("Only if your router asks for one.").on_click(cx.listener(|this, _, w, cx| this.open_sam_form(w, cx))))
+                    d.child(link("lg-sam-add", t::routing_add_sam_password()).tip(t::login_net_sam_only_if()).on_click(cx.listener(|this, _, w, cx| this.open_sam_form(w, cx))))
                 }),
         );
         if has_auth && !n.sam_open {
@@ -682,25 +679,25 @@ impl LoginView {
                     .flex()
                     .items_center()
                     .gap(px(12.))
-                    .child(SharedString::from(format!("Signs in as {}.", n.sam_user)))
-                    .child(link("lg-sam-remove", "Remove").on_click(cx.listener(|this, _, _, cx| {
+                    .child(t::routing_signs_in_as(&n.sam_user))
+                    .child(link("lg-sam-remove", t::routing_remove()).on_click(cx.listener(|this, _, _, cx| {
                         this.set_sam_auth(None, cx);
                     }))),
             );
         } else if n.sam_open {
             let ready = n.user.as_ref().zip(n.password.as_ref()).is_some_and(|(u, p)| !u.read(cx).text().is_empty() && !p.read(cx).text().is_empty());
             col = col
-                .child(div().mt(px(18.)).child(field("Username", n.user.as_ref(), 160., Some(72.))))
-                .child(div().mt(px(18.)).child(field("Password", n.password.as_ref(), 160., Some(72.))))
+                .child(div().mt(px(18.)).child(field(t::routing_username(), n.user.as_ref(), 160., Some(72.))))
+                .child(div().mt(px(18.)).child(field(t::routing_password(), n.password.as_ref(), 160., Some(72.))))
                 .child(
                     div()
                         .mt(px(10.))
                         .flex()
                         .items_center()
                         .gap(px(12.))
-                        .child(link("lg-sam-cancel", "Cancel").on_click(cx.listener(|this, _, _, cx| this.close_sam_form(cx))))
+                        .child(link("lg-sam-cancel", t::dialog_cancel()).on_click(cx.listener(|this, _, _, cx| this.close_sam_form(cx))))
                         .child(
-                            link("lg-sam-use", "Use")
+                            link("lg-sam-use", t::login_net_use())
                                 .when(!ready, |d| d.opacity(0.4).cursor_default())
                                 .on_click(cx.listener(|this, _, _, cx| this.save_sam(cx))),
                         ),
