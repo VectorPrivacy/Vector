@@ -697,22 +697,29 @@ impl VectorApp {
 
     /// `inviteMiniAppToChat`: send the package, then open it from the message the send surfaces.
     pub(super) fn invite_miniapp(&mut self, app: GridApp, chat: String, cx: &mut Context<Self>) {
-        let Some(vector_core::media::MediaRef::File(path)) = vector_core::media::MediaRef::parse(&app.src)
-        else {
+        use vector_core::media::MediaRef;
+        let Some(src) = MediaRef::parse(&app.src) else {
             self.play_solo(app.src, cx);
             return;
         };
         let prior = self.newest_own_xdc(&chat).map(|(id, _, _)| id);
         let receiver = chat.clone();
-        let send = backend::run(backend::messaging::send_file(
-            receiver,
-            String::new(),
-            PathBuf::from(path),
-            String::new(),
-            false,
-            false,
-            None,
-        ));
+        let send = match src {
+            MediaRef::File(path) => backend::run(backend::messaging::send_file(
+                receiver,
+                String::new(),
+                PathBuf::from(path),
+                String::new(),
+                false,
+                false,
+                None,
+            )),
+            // A kept app has no file name of its own: it goes out under the app's.
+            MediaRef::Held(hash) => {
+                let name = format!("{}.xdc", if app.name.is_empty() { "app" } else { app.name.as_str() }); // i18n-exempt: a file name
+                backend::run(backend::messaging::send_held(receiver, hash, name))
+            }
+        };
         let chat2 = chat.clone();
         cx.spawn(async move |this, cx| {
             // The pending bubble lands well before the upload ends; play from it once it does.

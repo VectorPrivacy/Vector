@@ -149,7 +149,7 @@ impl Recorder {
     }
 
     pub fn moved(&mut self, at: Point<Pixels>) -> Effect {
-        if !matches!(self.state, State::Recording | State::Pending) {
+        if !matches!(self.state, State::Recording | State::Pending) || self.lock_fading.is_some() {
             return Effect::None;
         }
         let dx = f32::from(self.origin.x - at.x);
@@ -183,6 +183,8 @@ impl Recorder {
                 self.tooltip = Some(Instant::now());
                 Effect::None
             }
+            // Locked already, while the lock target fades.
+            State::Recording if self.lock_fading.is_some() => Effect::None,
             State::Recording => Effect::Stop,
             _ => Effect::None,
         }
@@ -770,6 +772,20 @@ mod tests {
         r.recording();
         assert_eq!(r.moved(point(px(500.), px(680.))), Effect::None);
         assert_eq!(r.moved(point(px(500.), px(600.))), Effect::Lock);
+    }
+
+    #[test]
+    fn letting_go_as_the_lock_fades_in_keeps_recording() {
+        let mut r = Recorder::default();
+        r.press(point(px(500.), px(700.)));
+        r.recording();
+        assert_eq!(r.moved(point(px(500.), px(600.))), Effect::Lock);
+        r.lock();
+        assert_eq!(r.moved(point(px(380.), px(600.))), Effect::None, "no cancel once locked");
+        assert_eq!(r.released(), Effect::None);
+        r.locked();
+        assert_eq!(r.state, State::Locked);
+        assert_eq!(r.released(), Effect::None);
     }
 
     #[test]

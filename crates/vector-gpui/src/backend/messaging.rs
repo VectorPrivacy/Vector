@@ -367,6 +367,28 @@ pub async fn send_file(
     .map(|_| ())
 }
 
+/// Media Vector holds (a Mini App kept from a chat), sent from its bytes under `name`.
+pub async fn send_held(receiver: String, hash: [u8; 32], name: String) -> Result<(), String> {
+    let src = vector_core::media::open(&hash).ok_or_else(|| crate::t::file_not_on_device().to_string())?;
+    let bytes = tokio::task::spawn_blocking(move || vector_core::media::read_all(&*src))
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| crate::t::file_read_failed(e.to_string()).to_string())?;
+    let name = vector_core::crypto::sanitize_filename(&name);
+    if !receiver.starts_with("npub1") {
+        return super::community_files::send_bytes(receiver, bytes, name).await;
+    }
+    let extension = std::path::Path::new(&name)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    let config = file_send_config(&receiver);
+    vector_core::sending::send_file_dm_with_meta(&receiver, Arc::new(bytes), &name, &extension, None, None, None, &config, Arc::new(Callback))
+        .await
+        .map(|_| ())
+}
+
 /// The preview's background compression of a picked image.
 pub fn precompress(
     path: &std::path::Path,

@@ -44,6 +44,12 @@ pub async fn send_file(
     dispatch(channel, content, replied_to, vec![prepared]).await
 }
 
+/// Bytes in hand sent as they are, under `name`.
+pub async fn send_bytes(channel: String, bytes: Vec<u8>, name: String) -> Result<(), String> {
+    let prepared = prepare_bytes(bytes, &name, false, false, None).await?;
+    dispatch(channel, String::new(), String::new(), vec![prepared]).await.map(|_| ())
+}
+
 /// A voice note: a nameless WAV, which members draw as a waveform.
 pub async fn send_voice(channel: String, wav: Vec<u8>, replied_to: String) -> Result<(), String> {
     let mut prepared = prepare_bytes(wav, "voice-message.wav", false, false, None).await?;

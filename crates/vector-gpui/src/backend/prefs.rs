@@ -9,6 +9,14 @@ use vector_core::synced_prefs::{self, IdList, NicknameMap, Pref};
 
 /// Publish `pref`'s projection behind the caller: the UI has already moved.
 pub fn publish_projection(pref: Pref) {
+    // Archiving calls this from the UI thread, outside any runtime.
+    let _runtime = match tokio::runtime::Handle::try_current() {
+        Ok(_) => None,
+        Err(_) => match super::RT.get() {
+            Some(rt) => Some(rt.enter()),
+            None => return,
+        },
+    };
     db::spawn_bound(async move {
         let Some(client) = vector_core::state::nostr_client() else {
             return;

@@ -98,6 +98,11 @@ pub mod isolated {
         core::stop_if(label, id)
     }
 
+    /// Whether `port` serves a Mini App now.
+    pub fn is_live_port(port: u16) -> bool {
+        core::is_live_port(port)
+    }
+
     #[cfg(target_os = "macos")]
     pub fn store_identifier(partition: &str) -> Option<[u8; 16]> {
         core::store_identifier(partition)

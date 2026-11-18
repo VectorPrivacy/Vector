@@ -191,6 +191,8 @@ fn webview(spec: &Spec, window: &Window) -> Result<(wry::WebView, Option<WebCont
         .with_bounds(fill(window))
         .with_url(&first);
     let view = builder.build_as_child(window).map_err(|e| e.to_string())?;
+    #[cfg(target_os = "macos")]
+    super::pointer_lock::grant(&view);
     Ok((view, context))
 }
 

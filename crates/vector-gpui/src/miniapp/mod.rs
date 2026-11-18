@@ -16,6 +16,9 @@ mod host;
 #[cfg(target_os = "linux")]
 mod wire;
 
+#[cfg(target_os = "macos")]
+mod pointer_lock;
+
 #[cfg(not(target_os = "linux"))]
 #[path = "host_view.rs"]
 mod host;

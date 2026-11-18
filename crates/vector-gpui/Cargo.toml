@@ -121,6 +121,7 @@ rev = "cddb2f5d80dc0009b2ef6767635140cacf90a007"
 tar = { version = "0.4", default-features = false }
 libc = "0.2"
 objc2 = "0.6"
+block2 = "0.6"
 objc2-metal = { version = "0.3", default-features = false, features = ["std", "MTLDevice", "MTLCommandQueue"] }
 objc2-foundation = { version = "0.3", features = ["NSString", "NSArray", "NSURL", "NSEnumerator", "NSRange", "NSObjCRuntime", "NSDateFormatter", "NSFormatter", "NSLocale"] }
 objc2-app-kit = { version = "0.3", features = ["NSPasteboard", "NSPasteboardItem", "NSApplication", "NSDockTile", "NSResponder", "NSWindow", "NSView", "NSButton", "NSControl", "NSSpellChecker"] }
