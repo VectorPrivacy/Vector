@@ -1289,12 +1289,22 @@ impl LoginView {
             window.request_animation_frame();
             let phase = (self.born.elapsed().as_secs_f32() / 6.).fract();
             block = block.child(
-                div().mb(px(25.)).child(
-                    kit::gradient_text(&self.title, 1.6, phase)
-                        .font_weight(FontWeight::BOLD)
-                        .text_size(px(16.))
-                        .line_height(px(24.)),
-                ),
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .gap(px(10.))
+                    .mb(px(25.))
+                    // An account left unencrypted has no lock to show.
+                    .when(self.title.as_ref() != "Setting up your account...", |d| {
+                        d.child(img("icons/login/lock.svg").w(px(22.)).h(px(29.)))
+                    })
+                    .child(
+                        kit::gradient_text(&self.title, 1.6, phase)
+                            .font_weight(FontWeight::BOLD)
+                            .text_size(px(16.))
+                            .line_height(px(24.)),
+                    ),
             );
         } else {
             block = block.child(lg_title(
