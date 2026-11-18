@@ -1,4 +1,4 @@
-# Hard-coded English left per file (3340 in all). Only ever lowered; see i18n_audit.rs.
+# Hard-coded English left per file (3245 in all). Only ever lowered; see i18n_audit.rs.
 applog.rs 2
 attachments.rs 27
 audio.rs 31
@@ -74,8 +74,6 @@ miniapp/host_view.rs 2
 miniapp/mod.rs 27
 miniprofile.rs 7
 moderation.rs 32
-netdialog.rs 30
-netinfo.rs 30
 nexus.rs 126
 packcreator.rs 90
 packdetails.rs 9
@@ -99,7 +97,6 @@ screenpick.rs 7
 scrollbar.rs 4
 secretguard.rs 16
 security.rs 76
-serverinfo.rs 35
 settings_slim.rs 7
 shortcodes.rs 2
 spell.rs 1

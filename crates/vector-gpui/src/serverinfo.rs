@@ -12,6 +12,7 @@ use gpui::{AnyElement, App, Bounds, FontWeight, Pixels, SharedString, Window, di
 use serde_json::Value;
 
 use crate::media::format_bytes_with;
+use crate::t;
 use crate::theme::*;
 use crate::timeline::DANGER;
 
@@ -78,7 +79,7 @@ pub fn performance(stats: &Value, chart: &Chart, window: &mut Window, on_hover: 
     if latency.is_none() && mbps.is_none() {
         return None;
     }
-    let stat = |name: &str, value: Option<String>, unit: &'static str| {
+    let stat = |name: &str, value: Option<String>, unit: SharedString| {
         div()
             .flex_1()
             .min_w_0()
@@ -113,12 +114,12 @@ pub fn performance(stats: &Value, chart: &Chart, window: &mut Window, on_hover: 
     let uploads = stats["uploads"].as_u64().unwrap_or(0);
     let total = stats["bytes_total"].as_u64().unwrap_or(0);
     let mut foot = if pts.is_empty() {
-        format!("{uploads} upload{}", if uploads == 1 { "" } else { "s" })
+        t::server_uploads(uploads).to_string()
     } else {
-        format!("Speed of your last {} uploads", s.len())
+        t::server_speed_of_last(s.len()).to_string()
     };
     if total > 0 {
-        foot = format!("{foot} · {}", bytes(total as f64, 1));
+        foot = format!("{} · {}", foot, bytes(total as f64, 1));
     }
     let chart_el = (!pts.is_empty()).then(|| spark(&s, &pts, chart, window, on_hover));
     Some(
@@ -129,9 +130,9 @@ pub fn performance(stats: &Value, chart: &Chart, window: &mut Window, on_hover: 
                 div()
                     .flex()
                     .gap(px(10.))
-                    .child(stat("Latency", latency.map(|l| format!("{}", l.round() as i64)), "ms"))
-                    .child(stat("Upload", mbps.map(mbit), "Mbit/s"))
-                    .child(stat("Best", stats["best_mbps"].as_f64().map(mbit), "Mbit/s")),
+                    .child(stat(&t::server_latency(), latency.map(|l| format!("{}", l.round() as i64)), t::server_unit_ms()))
+                    .child(stat(&t::server_upload(), mbps.map(mbit), t::server_unit_mbits()))
+                    .child(stat(&t::server_best(), stats["best_mbps"].as_f64().map(mbit), t::server_unit_mbits())),
             )
             .children(chart_el)
             .child(div().mt(px(4.)).text_size(px(11.)).line_height(px(24.)).text_color(white_a(0.45)).child(foot))
@@ -178,7 +179,7 @@ fn spark(s: &[(f64, u64)], pts: &[(f32, f32)], chart: &Chart, window: &mut Windo
             .line_height(px(16.))
             .whitespace_nowrap()
             .flex()
-            .child(div().text_color(c(ACCENT)).font_weight(FontWeight::SEMIBOLD).child(format!("{} Mbit/s", mbit(mbps))))
+            .child(div().text_color(c(ACCENT)).font_weight(FontWeight::SEMIBOLD).child(t::server_mbits(mbit(mbps))))
             .when(size > 0, |d| d.child(format!(" · {}", bytes(size as f64, 1))));
         // A zero-width anchor at the dot; the tip hangs from it, inward near an edge.
         div()
@@ -310,7 +311,7 @@ fn meter(name: &str, used: u64, limit: u64, note: String) -> gpui::Div {
                         .line_height(px(24.))
                         .text_color(white_a(0.5))
                         .child(name.to_uppercase())
-                        .child(div().text_color(white_a(0.35)).child(format!(" · {note}"))),
+                        .child(div().text_color(white_a(0.35)).child(format!(" · {}", note))),
                 )
                 .child(
                     div()
@@ -322,7 +323,7 @@ fn meter(name: &str, used: u64, limit: u64, note: String) -> gpui::Div {
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(c(0xffffff))
                         .child(bytes(used as f64, 1))
-                        .child(div().font_weight(FontWeight::NORMAL).text_color(white_a(0.45)).child(format!("of {}", bytes(limit as f64, 1)))),
+                        .child(div().font_weight(FontWeight::NORMAL).text_color(white_a(0.45)).child(t::server_meter_of(bytes(limit as f64, 1)))),
                 ),
         )
         .child(
@@ -343,16 +344,19 @@ pub fn account(info: &Value, host: &str) -> Option<AnyElement> {
     let caller = &info["caller"];
     if !caller.is_object() {
         let max = info["max_blob"].as_u64()?;
-        return Some(blurb(format!("Accepts files up to {}.", bytes(max as f64, 1))).into_any_element());
+        return Some(blurb(t::server_accepts_up_to(bytes(max as f64, 1))).into_any_element());
     }
     let allowed = caller["allowed"].as_bool().unwrap_or(false);
     let official = OFFICIAL.iter().any(|d| host == *d || host.ends_with(&format!(".{d}")));
     let tier = caller["tier"].as_str().unwrap_or_default();
     let premium = allowed && official && tier == "badged";
-    let name = if !allowed {
-        "No access".to_string()
+    let name: SharedString = if !allowed {
+        t::server_no_access()
     } else {
-        caller["plan_title"].as_str().filter(|t| !t.is_empty()).or(Some(tier).filter(|t| !t.is_empty())).unwrap_or("Member").to_string()
+        match caller["plan_title"].as_str().filter(|t| !t.is_empty()).or(Some(tier).filter(|t| !t.is_empty())) {
+            Some(plan) => plan.to_string().into(),
+            None => t::server_member(),
+        }
     };
     let desc = if allowed { caller["plan_description"].as_str().unwrap_or_default() } else { "" };
     let n = |k: &str| caller[k].as_u64().unwrap_or(0);
@@ -361,7 +365,7 @@ pub fn account(info: &Value, host: &str) -> Option<AnyElement> {
         .flex_col()
         .gap(px(2.))
         .min_w_0()
-        .child(label("Your plan"))
+        .child(label(&t::server_your_plan()))
         .child(
             div()
                 .text_size(px(22.))
@@ -401,7 +405,7 @@ pub fn account(info: &Value, host: &str) -> Option<AnyElement> {
                             .text_color(c(ACCENT))
                             .child(bytes(n("max_blob") as f64, 0)),
                     )
-                    .child(label("per file").mt(px(3.))),
+                    .child(label(&t::server_per_file()).mt(px(3.))),
             )
         });
     let body = if allowed {
@@ -410,11 +414,11 @@ pub fn account(info: &Value, host: &str) -> Option<AnyElement> {
             .flex()
             .flex_col()
             .gap(px(10.))
-            .child(meter("Storage", n("storage_used"), n("storage_limit"), format!("{files} file{}", if files == 1 { "" } else { "s" })))
-            .child(meter("Today", n("daily_used"), n("daily_limit"), "resets 00:00 UTC".into()))
+            .child(meter(&t::server_storage(), n("storage_used"), n("storage_limit"), t::server_files(files).into()))
+            .child(meter(&t::server_today(), n("daily_used"), n("daily_limit"), t::server_resets().into()))
     } else {
         let reasons: Vec<&str> = caller["reasons"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
-        let text = if reasons.is_empty() { "This server won’t take uploads from your account.".to_string() } else { reasons.join(" ") };
+        let text = if reasons.is_empty() { t::server_notice_no_access().to_string() } else { reasons.join(" ") };
         div().text_size(px(13.)).line_height(px(18.85)).text_color(white_a(0.75)).child(text)
     };
     let card = div()
@@ -470,10 +474,10 @@ pub fn skeleton() -> AnyElement {
             div()
                 .flex()
                 .justify_between()
-                .child(div().flex().flex_col().gap(px(2.)).child(label("Your plan")).child(bar(70.)))
-                .child(div().flex().flex_col().items_end().child(bar(70.)).child(label("per file").mt(px(3.)))),
+                .child(div().flex().flex_col().gap(px(2.)).child(label(&t::server_your_plan())).child(bar(70.)))
+                .child(div().flex().flex_col().items_end().child(bar(70.)).child(label(&t::server_per_file()).mt(px(3.)))),
         )
-        .child(div().flex().flex_col().gap(px(10.)).child(m("Storage")).child(m("Today")))
+        .child(div().flex().flex_col().gap(px(10.)).child(m(&t::server_storage())).child(m(&t::server_today())))
         .into_any_element()
 }
 
@@ -484,11 +488,9 @@ fn blurb(text: impl Into<SharedString>) -> gpui::Div {
 /// `BlossomCaps.svelte` under its "What we’ve learned" header.
 pub fn learned(caps: &Load<Vec<Value>>) -> AnyElement {
     let body: AnyElement = match caps {
-        Load::Loading => quiet("Loading…"),
-        Load::Error => quiet("Could not load capability data."),
-        Load::Ok(list) if list.is_empty() => {
-            quiet("No capability data yet. Vector learns each server’s file-type and size limits as you send files.")
-        }
+        Load::Loading => quiet(t::server_caps_loading()),
+        Load::Error => quiet(t::server_caps_error()),
+        Load::Ok(list) if list.is_empty() => quiet(t::server_caps_none()),
         Load::Ok(list) => {
             let o = |c: &Value| c["outcome"].as_u64().unwrap_or(0);
             let max = |c: &Value| c["max_accepted_size"].as_u64().unwrap_or(0);
@@ -518,13 +520,13 @@ pub fn learned(caps: &Load<Vec<Value>>) -> AnyElement {
                 div().flex().flex_col().children(items.iter().enumerate().map(move |(i, cap)| row(cap, kind, i + 1 == n)))
             };
             if !accepted.is_empty() {
-                col = col.child(group("Accepts", ACCENT)).child(rows(&accepted, 1));
+                col = col.child(group(&t::server_caps_accepts(), ACCENT)).child(rows(&accepted, 1));
             }
             if !limited.is_empty() {
-                col = col.child(group("Size-limited", 0xffc107)).child(rows(&limited, 3));
+                col = col.child(group(&t::server_caps_limited(), 0xffc107)).child(rows(&limited, 3));
             }
             if !rejected.is_empty() {
-                col = col.child(group("Rejects", DANGER)).child(rows(&rejected, 2));
+                col = col.child(group(&t::server_caps_rejects(), DANGER)).child(rows(&rejected, 2));
             }
             col.into_any_element()
         }
@@ -538,14 +540,14 @@ pub fn learned(caps: &Load<Vec<Value>>) -> AnyElement {
                 .line_height(px(24.))
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(white_a(0.7))
-                .child("What we’ve learned"),
+                .child(t::server_caps_title()),
         )
-        .child(blurb("This server doesn’t say what it accepts, so Vector learns as you send: the largest file it has taken of each type, and the types it has refused. Uploads are routed to the best-suited server automatically.").mt(px(8.)).mb(px(12.)))
+        .child(blurb(t::server_caps_blurb()).mt(px(8.)).mb(px(12.)))
         .child(body)
         .into_any_element()
 }
 
-fn quiet(text: &'static str) -> AnyElement {
+fn quiet(text: SharedString) -> AnyElement {
     div().text_size(px(13.)).line_height(px(24.)).text_color(ca(246, 246, 246, 0.51)).child(text).into_any_element()
 }
 
@@ -557,7 +559,7 @@ fn row(cap: &Value, kind: u8, last: bool) -> impl IntoElement {
     };
     let context = div()
         .id(SharedString::from(format!("cap-{mime}-{enc}")))
-        .tip(if enc { "Tested with encrypted chat data" } else { "Tested with public uploads (avatar, banner, etc.)" })
+        .tip(if enc { t::server_cap_encrypted_tip() } else { t::server_cap_public_tip() })
         .flex_shrink_0()
         .px(px(5.))
         .py(px(2.))
@@ -567,7 +569,7 @@ fn row(cap: &Value, kind: u8, last: bool) -> impl IntoElement {
         .line_height(px(24.))
         .font_weight(FontWeight::SEMIBOLD)
         .text_color(white_a(0.55))
-        .child(if enc { "ENCRYPTED" } else { "PUBLIC" });
+        .child(if enc { t::server_cap_encrypted() } else { t::server_cap_public() }.to_uppercase());
     let size = |t: String| div().flex_shrink_0().text_size(px(11.)).line_height(px(24.)).text_color(ca(246, 246, 246, 0.425)).child(t);
     let fade = match kind {
         2 => 0.5,
@@ -593,12 +595,12 @@ fn row(cap: &Value, kind: u8, last: bool) -> impl IntoElement {
                 .child(marker("✓", ACCENT))
                 .child(mime_el)
                 .child(context)
-                .child(size(format!("{} max", bytes(cap["max_accepted_size"].as_f64().unwrap_or(0.), 1)))),
+                .child(size(t::server_cap_max(bytes(cap["max_accepted_size"].as_f64().unwrap_or(0.), 1)).into())),
             3 => d
                 .child(marker("⚠", 0xffc107))
                 .child(mime_el)
                 .child(context)
-                .child(size(format!("rejects ≥ {}", bytes(cap["min_rejected_size"].as_f64().unwrap_or(0.), 1)))),
+                .child(size(t::server_cap_rejects_from(bytes(cap["min_rejected_size"].as_f64().unwrap_or(0.), 1)).into())),
             _ => d.child(mime_el).child(context).child(marker("✕", DANGER)),
         })
 }

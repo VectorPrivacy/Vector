@@ -9,7 +9,7 @@ use gpui::{AnyElement, App, Entity, FontWeight, SharedString, Window, div, px, s
 
 use crate::backend::network::{RelayLog, RelayMetrics, RelayRow};
 use crate::composer::TextInput;
-use crate::kit::Choice;
+use crate::t;
 use crate::theme::*;
 use crate::timeline::DANGER;
 
@@ -80,25 +80,21 @@ pub enum Act {
 
 pub type OnAct = Rc<dyn Fn(Act, &mut Window, &mut App)>;
 
-const ADD_MODES: [(&str, &str); 3] = [
-    ("both", "Read & Write"),
-    ("read", "Read"),
-    ("write", "Write"),
+const ADD_MODES: [(&str, fn() -> SharedString); 3] = [
+    ("both", t::relay_mode_both),
+    ("read", t::relay_mode_read),
+    ("write", t::relay_mode_write),
 ];
-const RELAY_MODES: [Choice; 3] = [
-    Choice {
-        value: "both",
-        label: "Read & Write",
-    },
-    Choice {
-        value: "read",
-        label: "Read Only",
-    },
-    Choice {
-        value: "write",
-        label: "Write Only",
-    },
+const RELAY_MODES: [(&str, fn() -> SharedString); 3] = [
+    ("both", t::relay_mode_both),
+    ("read", t::relay_mode_read_only),
+    ("write", t::relay_mode_write_only),
 ];
+
+/// A relay's state in its pill.
+fn state_word(status: &str) -> SharedString {
+    if status == "disconnected" { t::relay_disconnected() } else { crate::settings::said(status) }
+}
 
 fn click(
     on: &OnAct,
@@ -132,7 +128,7 @@ fn pill(status: &str) -> AnyElement {
         .text_size(px(10.))
         .font_weight(FontWeight::SEMIBOLD)
         .text_color(fg)
-        .child(crate::kit::spaced(status.to_uppercase(), 0.5))
+        .child(crate::kit::spaced(state_word(status).to_uppercase(), 0.5))
         .into_any_element()
 }
 
@@ -206,9 +202,9 @@ fn add_relay(input: &Entity<TextInput>, mode: &'static str, on: &OnAct, cx: &App
         .unwrap_or("")
         .to_string();
     let inside = if host.ends_with(".i2p") {
-        Some("I2P")
+        Some("I2P") // i18n-exempt: a name
     } else if host.ends_with(".onion") {
-        Some("Tor")
+        Some("Tor") // i18n-exempt: a name
     } else {
         None
     };
@@ -227,7 +223,7 @@ fn add_relay(input: &Entity<TextInput>, mode: &'static str, on: &OnAct, cx: &App
                 .line_height(px(24.))
                 .font_weight(FontWeight::BOLD)
                 .text_color(c(0xffffff))
-                .child("Add Relay"),
+                .child(t::relay_add_title()),
         )
         .child(
             div()
@@ -267,7 +263,7 @@ fn add_relay(input: &Entity<TextInput>, mode: &'static str, on: &OnAct, cx: &App
                 .when(!on_it, |d| d.text_color(white_a(0.6)))
                 .cursor_pointer()
                 .on_click(click(on, move || Act::Mode(v)))
-                .child(*label)
+                .child(label())
         }));
     let mut body = div()
         .flex()
@@ -293,9 +289,7 @@ fn add_relay(input: &Entity<TextInput>, mode: &'static str, on: &OnAct, cx: &App
             div()
                 .text_size(px(12.))
                 .text_color(white_a(0.5))
-                .child(format!(
-                    "Only people using {net} can send to you on this relay."
-                )),
+                .child(t::relay_add_inside(net)),
         );
     }
     body = body.child(modes).child(
@@ -309,7 +303,7 @@ fn add_relay(input: &Entity<TextInput>, mode: &'static str, on: &OnAct, cx: &App
                     .border_color(white_a(0.2))
                     .hover(|d| d.opacity(0.75))
                     .on_click(click(on, || Act::Close))
-                    .child("Cancel"),
+                    .child(t::dialog_cancel()),
             )
             .child(
                 button("add-relay-confirm", 42.)
@@ -317,7 +311,7 @@ fn add_relay(input: &Entity<TextInput>, mode: &'static str, on: &OnAct, cx: &App
                     .text_color(c(0x000000))
                     .hover(|d| d.opacity(0.75))
                     .on_click(click(on, || Act::Add))
-                    .child("Add"),
+                    .child(t::relay_add()),
             ),
     );
     card("add-relay", div().child(header).child(body), on)
@@ -327,9 +321,9 @@ fn add_relay(input: &Entity<TextInput>, mode: &'static str, on: &OnAct, cx: &App
 fn native_select(value: &str, disabled: bool, open: bool, on: &OnAct) -> AnyElement {
     let label = RELAY_MODES
         .iter()
-        .find(|m| m.value == value)
-        .map(|m| m.label)
-        .unwrap_or("");
+        .find(|m| m.0 == value)
+        .map(|m| (m.1)())
+        .unwrap_or_default();
     let chevron = svg()
         .path("icons/chevron-down.svg")
         .size(px(12.))
@@ -373,7 +367,7 @@ fn native_select(value: &str, disabled: bool, open: bool, on: &OnAct) -> AnyElem
                     .bg(c(0x111111))
                     .occlude()
                     .children(RELAY_MODES.iter().map(|m| {
-                        let v = m.value;
+                        let v = m.0;
                         let on_it = v == value;
                         div()
                             .id(SharedString::from(format!("mode-{v}")))
@@ -388,7 +382,7 @@ fn native_select(value: &str, disabled: bool, open: bool, on: &OnAct) -> AnyElem
                             .hover(|d| d.bg(c(0x1f1f1f)))
                             .cursor_pointer()
                             .on_click(click(on, move || Act::RelayMode(v)))
-                            .child(m.label)
+                            .child((m.1)())
                     })),
             )
             .with_priority(11),
@@ -401,9 +395,9 @@ fn ago(secs: u64) -> String {
     let now = vector_core::clock::now_secs();
     let diff = now.saturating_sub(secs);
     if diff < 60 {
-        format!("{diff}s ago")
+        t::relay_seconds_ago(diff).into()
     } else if diff < 3600 {
-        format!("{}m ago", diff / 60)
+        t::relay_minutes_ago(diff / 60).into()
     } else {
         chrono::DateTime::from_timestamp(secs as i64, 0)
             .map(|t| {
@@ -446,12 +440,12 @@ fn relay(
         .unwrap_or_else(|| "--".into());
     let checked = metrics.last_check.filter(|_| !held).map(ago).unwrap_or_else(|| "--".into());
     let ping_color = if held { c(0x59fcb3) } else { ping_color };
-    let metric_label = |t: &'static str| {
+    let metric_label = |text: SharedString| {
         div()
             .text_size(px(11.))
             .line_height(px(24.))
             .text_color(white_a(0.5))
-            .child(crate::kit::spaced(t.to_uppercase(), 0.5))
+            .child(crate::kit::spaced(text.to_uppercase(), 0.5))
     };
     let metric_value = |t: String, color| {
         div()
@@ -470,7 +464,7 @@ fn relay(
             .line_height(px(24.))
             .italic()
             .text_color(white_a(0.7))
-            .child("No activity recorded yet")
+            .child(t::relay_no_activity())
             .into_any_element()
     } else {
         div()
@@ -513,9 +507,9 @@ fn relay(
             .into_any_element()
     };
     let action = if row.is_default && !row.enabled {
-        "Enable"
+        t::relay_enable()
     } else {
-        "Disable"
+        t::relay_disable()
     };
     let body = div()
         .p(px(20.))
@@ -564,10 +558,10 @@ fn relay(
                 .flex()
                 .items_center()
                 .gap(px(4.))
-                .child(metric_label("Ping"))
+                .child(metric_label(t::relay_ping()))
                 .child(metric_value(ping, ping_color))
                 .child(div().flex_1())
-                .child(metric_label("Last Check"))
+                .child(metric_label(t::relay_last_check()))
                 .child(metric_value(checked, c(0x59fcb3))),
         )
         .child(
@@ -580,7 +574,7 @@ fn relay(
                         .text_size(px(13.))
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(white_a(0.8))
-                        .child("Mode"),
+                        .child(t::relay_mode()),
                 )
                 .child(mode),
         )
@@ -601,12 +595,12 @@ fn relay(
                                 .line_height(px(24.))
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .text_color(white_a(0.7))
-                                .child("Recent Activity"),
+                                .child(t::relay_activity()),
                         )
                         .child(
                             div()
                                 .id("relay-logs-copy")
-                                .tip("Copy logs to clipboard")
+                                .tip(t::relay_copy_logs())
                                 .size(px(24.))
                                 .flex()
                                 .items_center()
@@ -662,7 +656,7 @@ fn relay(
                         .border_color(c(0x474747))
                         .hover(|d| d.opacity(0.75))
                         .on_click(click(on, || Act::Close))
-                        .child("Close"),
+                        .child(t::dialog_close()),
                 ),
         );
     card("relay-info", body, on)
@@ -688,22 +682,18 @@ fn server(
         "disabled"
     };
     let notice = match state {
-        "offline" => Some(
-            "Vector couldn’t reach this server recently. Uploads are routed elsewhere until it answers again.",
-        ),
-        "maxed" => Some(
-            "An allowance on this server is used up. Uploads are routed elsewhere until it frees up.",
-        ),
-        "no_access" => Some("This server won’t take uploads from your account."),
-        "disabled" => Some("Disabled — uploads aren’t routed here."),
+        "offline" => Some(t::server_notice_offline()),
+        "maxed" => Some(t::server_notice_maxed()),
+        "no_access" => Some(t::server_notice_no_access()),
+        "disabled" => Some(t::server_notice_disabled()),
         _ => None,
     };
     let action = if info.is_custom {
-        "Remove"
+        t::server_remove()
     } else if info.enabled {
-        "Disable"
+        t::server_disable()
     } else {
-        "Enable"
+        t::server_enable()
     };
     let host = crate::settings::host(&info.url);
     let bare = host.to_string();
@@ -795,7 +785,7 @@ fn server(
                     .border_color(white_a(0.2))
                     .hover(|d| d.opacity(0.75))
                     .on_click(click(on, || Act::Close))
-                    .child("Close"),
+                    .child(t::dialog_close()),
             ),
     );
     card("server-info", body, on)

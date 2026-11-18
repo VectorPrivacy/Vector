@@ -4,9 +4,10 @@
 use std::rc::Rc;
 
 use gpui::prelude::*;
-use gpui::{AnimationExt, AnyElement, App, FontWeight, HighlightStyle, StyledText, Window, div, px, svg};
+use gpui::{AnimationExt, AnyElement, App, FontWeight, HighlightStyle, SharedString, StyledText, Window, div, px, svg};
 use crate::pic::img;
 
+use crate::t;
 use crate::theme::*;
 
 pub const LINKS: &[(&str, &str)] = &[
@@ -44,16 +45,15 @@ fn tab_bar(tabs: &[&'static str], on: &'static str, pick: Rc<dyn Fn(&'static str
                 .hover(|d| d.text_color(c(0xffffff)))
                 .cursor_pointer()
                 .on_click(move |_, w, cx| pick(k, w, cx))
-                .child(if k == "i2p" { "I2P" } else { "Tor" }),
+                .child(if k == "i2p" { "I2P" } else { "Tor" }), // i18n-exempt: names
         );
     }
     bar.into_any_element()
 }
 
-/// `lead` bold and white, then the rest in the paragraph's own colour.
-fn lead_bold(bold: &str, rest: &str, weight: FontWeight) -> StyledText {
-    let text = format!("{bold}{rest}");
-    StyledText::new(text).with_highlights([(0..bold.len(), HighlightStyle { color: Some(c(0xffffff)), font_weight: Some(weight), ..Default::default() })])
+/// Its `<b>` lead white at `weight`, the rest in the paragraph's own colour.
+fn lead_bold(html: &str, weight: FontWeight) -> StyledText {
+    crate::kit::rich_with(html, HighlightStyle { color: Some(c(0xffffff)), font_weight: Some(weight), ..Default::default() })
 }
 
 pub fn modal(
@@ -65,36 +65,24 @@ pub fn modal(
 ) -> AnyElement {
     let i2p = kind == "i2p";
     let accent = if i2p { c(0x5fd4ea) } else { c(0xbe5aed) };
-    let (title, lead, points, note_b, note, disclaimer, learn, key): (_, _, [(&str, &str); 4], _, _, _, _, &'static str) = if i2p {
+    let (title, lead, points, note, disclaimer, learn, key): (SharedString, SharedString, [SharedString; 4], SharedString, SharedString, SharedString, &'static str) = if i2p {
         (
-            "I2P Network",
-            "Route Vector through your own I2P router so relays and servers never see your IP address.",
-            [
-                ("IP Obfuscation", ": relays see I2P, not you"),
-                ("No Exit Needed", ": .i2p relays never leave the network"),
-                ("No Central Directory", ": nothing central to block or seize"),
-                ("One-Way Tunnels", ": sending and receiving take separate paths"),
-            ],
-            "Expect slower connections.",
-            " Starting can take a few minutes. Servers outside I2P are reached through an outproxy, which can see and link the ones you use.",
-            "I2P is independent software run by its volunteers, not operated by Vector.",
-            "Learn more about I2P",
+            t::netinfo_i2p_title(),
+            t::netinfo_i2p_lead(),
+            [t::netinfo_i2p_point_ip(), t::netinfo_i2p_point_exit(), t::netinfo_i2p_point_directory(), t::netinfo_i2p_point_tunnels()],
+            t::netinfo_i2p_note(),
+            t::netinfo_i2p_disclaimer(),
+            t::netinfo_i2p_learn(),
             "i2p",
         )
     } else {
         (
-            "Tor Network",
-            "Route Vector’s connection through Tor so relays and servers never see your real IP address.",
-            [
-                ("IP Obfuscation", ": relays see Tor, not you"),
-                ("Location Privacy", ": your country stays hidden"),
-                ("ISP Shielding", ": your provider can’t see which relays you use"),
-                ("Censorship Resistance", ": reach relays blocked on your network"),
-            ],
-            "Expect slower connections.",
-            " Your traffic takes a longer path through volunteer relays worldwide so messages and media take more time to send and load, noticeably slower than a VPN.",
-            "Tor is independent software maintained by the Tor Project, not operated by Vector.",
-            "Learn more about Tor",
+            t::netinfo_tor_title(),
+            t::netinfo_tor_lead(),
+            [t::netinfo_tor_point_ip(), t::netinfo_tor_point_location(), t::netinfo_tor_point_isp(), t::netinfo_tor_point_censorship()],
+            t::netinfo_tor_note(),
+            t::netinfo_tor_disclaimer(),
+            t::netinfo_tor_learn(),
             "torAttribution",
         )
     };
@@ -144,13 +132,13 @@ pub fn modal(
         .child(div().mt(px(12.)).text_size(px(22.)).line_height(px(27.)).font_weight(FontWeight::BOLD).child(title))
         .child(div().mt(px(12.)).max_w(px(400.)).text_size(px(15.)).line_height(px(20.)).text_color(accent).child(lead));
     let mut list = div().mt(px(if i2p { 14. } else { 20. })).py(px(4.)).gap(px(4.)).flex().flex_col().text_size(px(14.)).line_height(px(20.)).text_color(c(ICON_MUTED));
-    for (b, rest) in points {
+    for point in points {
         list = list.child(
             div()
                 .relative()
                 .pl(px(16.))
                 .child(div().absolute().left(px(2.)).text_color(c(0xffffff)).child("•"))
-                .child(lead_bold(b, rest, FontWeight::BOLD)),
+                .child(lead_bold(&point, FontWeight::BOLD)),
         );
     }
     card = card.child(div().flex().justify_center().child(list.text_left())).children(extras.router);
@@ -166,7 +154,7 @@ pub fn modal(
             .line_height(px(17.))
             .text_color(c(ICON_MUTED))
             .text_left()
-            .child(lead_bold(note_b, note, FontWeight::MEDIUM)),
+            .child(lead_bold(&note, FontWeight::MEDIUM)),
     );
     if !in_settings {
         card = card.child(
@@ -175,7 +163,7 @@ pub fn modal(
                 .text_size(px(12.))
                 .line_height(px(15.))
                 .text_color(c(ICON_MUTED))
-                .child(lead_bold("", "You can change this any time in Settings > Privacy > Routing.", FontWeight::NORMAL)),
+                .child(t::netinfo_settings_hint()),
         );
     }
     card = card

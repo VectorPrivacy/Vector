@@ -5,6 +5,7 @@
 dialog-okay = Okay
 dialog-confirm = Confirm
 dialog-cancel = Cancel
+dialog-close = Close
 
 ## Shown where an action's answer never came back, because the app's background half stopped
 
