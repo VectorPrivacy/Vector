@@ -1532,7 +1532,7 @@ impl EntityInputHandler for TextInput {
         let range = self.range_from_utf16(&range_utf16);
         if layout.has_bidi() {
             let spans = layout.spans(range.clone(), px(0.));
-            let (x0, x1, y) = match (spans.first(), spans.iter().filter(|s| s.2 == spans[0].2).last()) {
+            let (x0, x1, y) = match (spans.first(), spans.iter().rfind(|s| s.2 == spans[0].2)) {
                 (Some(f), Some(l)) => (f.0, l.1, f.2),
                 _ => {
                     let p = layout.position(range.start);
