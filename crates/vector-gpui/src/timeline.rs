@@ -377,18 +377,14 @@ pub fn message_row(ctx: &Ctx, index: usize, first: bool, run: u32, shown: u32, g
         } else {
             vec![m.id.clone()]
         };
-        let label: SharedString = if run > 1 { format!("{run} blocked messages").into() } else { why.label().into() };
+        let label: SharedString = if run > 1 { crate::t::hidden_blocked_run(run) } else { why.label() };
         body = body.child(hidden_toggle(ctx, m, why, label, Act::Unveil(ids)));
         return row_shell(ctx, m, gap, gutter, body, false, replying, failed, hovered, first);
     }
     if let Some(why) = revealed.filter(|_| shown > 0) {
         let ids = ctx.chat.messages[index..].iter().take(shown as usize).map(|o| o.id.clone()).collect();
-        let what: SharedString = if shown > 1 && why == data::Hidden::Blocked {
-            format!("{shown} blocked messages").into()
-        } else {
-            why.label().into()
-        };
-        body = body.child(hidden_toggle(ctx, m, why, format!("{what} \u{b7} Hide").into(), Act::Veil(ids)));
+        let what = if shown > 1 && why == data::Hidden::Blocked { crate::t::hidden_blocked_run(shown) } else { why.label() };
+        body = body.child(hidden_toggle(ctx, m, why, crate::t::hidden_hide(what.as_ref()), Act::Veil(ids)));
     }
     body = body.child(
         dim(div())
@@ -414,9 +410,9 @@ pub fn message_row(ctx: &Ctx, index: usize, first: bool, run: u32, shown: u32, g
                             .tooltip(move |w, cx| {
                                 let left = at as i64 - chrono::Utc::now().timestamp();
                                 let text = if left > 0 {
-                                    format!("Message dissolves in {}", countdown(left as u64))
+                                    crate::t::msg_dissolves_in(countdown(left as u64))
                                 } else {
-                                    "Dissolving...".into()
+                                    crate::t::msg_dissolving()
                                 };
                                 crate::kit::tooltip(text)(w, cx)
                             })
@@ -1389,7 +1385,7 @@ pub fn timeout_mark(store: &Store, community: Option<&str>, npub: &str) -> Optio
             .flex_shrink_0()
             .child(svg().path("icons/clock-snooze.svg").size(px(14.)).text_color(c(DANGER)))
             .tooltip(crate::kit::countdown_tip(t.until, store.now_ms() / 1000, |left| {
-                if left > 0 { format!("Timeout ends in {}", countdown(left as u64)) } else { "Timeout ending".into() }
+                if left > 0 { crate::t::member_timeout_ends(countdown(left as u64)).into() } else { crate::t::member_timeout_ending().into() }
             }))
             .into_any_element(),
     )
@@ -1398,9 +1394,9 @@ pub fn timeout_mark(store: &Store, community: Option<&str>, npub: &str) -> Optio
 /// `fmtCountdown`: days and hours, hours and minutes, or m:ss.
 pub fn countdown(secs: u64) -> String {
     if secs >= 86_400 {
-        format!("{}d {}h", secs / 86_400, secs % 86_400 / 3600)
+        crate::t::countdown_days(secs / 86_400, secs % 86_400 / 3600).into()
     } else if secs >= 3600 {
-        format!("{}h {}m", secs / 3600, secs % 3600 / 60)
+        crate::t::countdown_hours(secs / 3600, secs % 3600 / 60).into()
     } else {
         format!("{}:{:02}", secs / 60, secs % 60)
     }
@@ -1636,7 +1632,7 @@ fn reply_quote(ctx: &Ctx, m: &Message) -> Option<AnyElement> {
                 .clone()
                 .or_else(|| parent.and_then(|p| p.attachments.first()).map(|a| a.extension.clone()))
                 .filter(|e| !e.is_empty());
-            let (icon, label) = ext.as_deref().map_or(("attachment", "Attachment"), crate::data::file_type);
+            let (icon, label) = ext.as_deref().map_or_else(|| ("attachment", crate::t::file_type_attachment()), crate::data::file_type);
             div()
                 .flex()
                 .items_center()
@@ -1716,44 +1712,44 @@ fn toolbar(ctx: &Ctx, m: &Message, first: bool) -> Option<AnyElement> {
         if m.attachments.is_empty() || publishing {
             return None;
         }
-        acts.push(("icons/x.svg", "Cancel upload".into(), Act::CancelUpload(m.id.clone()), true, false));
+        acts.push(("icons/x.svg", crate::t::msg_cancel_upload(), Act::CancelUpload(m.id.clone()), true, false));
     } else if dissolved && !m.mine {
         return None;
     } else if m.mine && m.failed {
         let retry = match ctx.fail_reasons.get(&m.id) {
-            Some(why) => format!("Retry send. {why}").into(),
-            None => "Retry send".into(),
+            Some(why) => crate::t::msg_bar_retry_why(why.as_str()),
+            None => crate::t::msg_retry(),
         };
         acts.push(("icons/refresh.svg", retry, Act::Retry, false, false));
-        acts.push(("icons/trash.svg", "Delete failed message".into(), Act::Delete, true, false));
+        acts.push(("icons/trash.svg", crate::t::msg_bar_delete_failed(), Act::Delete, true, false));
     } else {
         let unique: HashSet<&str> = m.reactions.iter().map(|r| r.emoji.as_str()).collect();
         if !dissolved && unique.len() < 8 && ctx.store.can_react(&ctx.chat.id) {
-            acts.push(("icons/smile-face.svg", "Add reaction".into(), Act::React, false, false));
+            acts.push(("icons/smile-face.svg", crate::t::msg_bar_react(), Act::React, false, false));
         }
         if !dissolved {
-            acts.push(("icons/reply.svg", "Reply".into(), Act::Reply, false, false));
+            acts.push(("icons/reply.svg", crate::t::msg_reply(), Act::Reply, false, false));
         }
         if !dissolved && m.mine && !m.content.is_empty() && m.attachments.is_empty() && crate::data::command(m, ctx.commands).is_none() {
-            acts.push(("icons/edit.svg", "Edit".into(), Act::Edit, false, false));
+            acts.push(("icons/edit.svg", crate::t::msg_edit(), Act::Edit, false, false));
         }
         if let Some(a) = m.attachments.iter().find(|a| a.downloaded && (a.resident || !a.path.is_empty())) {
-            acts.push(("icons/copy.svg", "Copy".into(), Act::CopyFile(a.id.clone()), false, false));
+            acts.push(("icons/copy.svg", crate::t::msg_copy(), Act::CopyFile(a.id.clone()), false, false));
             acts.push(if a.resident {
-                ("icons/download.svg", "Save".into(), Act::RevealFile(a.id.clone()), false, false)
+                ("icons/download.svg", crate::t::msg_save(), Act::RevealFile(a.id.clone()), false, false)
             } else {
-                ("icons/file-search.svg", "Reveal in folder".into(), Act::RevealFile(a.id.clone()), false, false)
+                ("icons/file-search.svg", crate::t::msg_reveal(), Act::RevealFile(a.id.clone()), false, false)
             });
         }
         let meta = ctx.delete_meta.get(&m.id);
         if m.mine {
             let limited = meta.is_some_and(|o| o.limited);
-            let label = if limited { "Delete message (limited)" } else { "Delete message" };
-            acts.push(("icons/trash.svg", label.into(), Act::Delete, true, limited));
+            let label = if limited { crate::t::msg_bar_delete_limited() } else { crate::t::msg_bar_delete() };
+            acts.push(("icons/trash.svg", label, Act::Delete, true, limited));
         } else if community.is_none() && ctx.chat.id.starts_with("npub1") {
-            acts.push(("icons/trash.svg", "Delete message".into(), Act::Delete, true, false));
+            acts.push(("icons/trash.svg", crate::t::msg_bar_delete(), Act::Delete, true, false));
         } else if community.is_some() && meta.is_some_and(|o| o.hide) {
-            acts.push(("icons/trash.svg", "Hide message".into(), Act::Delete, true, false));
+            acts.push(("icons/trash.svg", crate::t::msg_bar_hide(), Act::Delete, true, false));
         }
     }
     // A continuation's text starts at its top edge: lift the bar clear of it.
@@ -1822,8 +1818,8 @@ fn invite_card(ctx: &Ctx, m: &Message, key: String) -> AnyElement {
         (_, Some(c)) => (Some(c.name.clone()), c.description.clone()),
         (Some(Preview::Ready(i)), None) => (Some(i.name.clone()), i.description.clone()),
         (Some(Preview::Failed), _) => (
-            Some("Invite Unavailable".to_string()),
-            "This invite could not be loaded — it may be revoked or expired.".to_string(),
+            Some(crate::t::invite_card_unavailable().into()),
+            crate::t::invite_card_unavailable_text().into(),
         ),
         _ => (None, String::new()),
     };
@@ -1857,7 +1853,7 @@ fn invite_card(ctx: &Ctx, m: &Message, key: String) -> AnyElement {
                     .hover(|d| d.opacity(0.9))
                     .on_click(move |_, w, cx| act(&id, Act::Invite(k.clone()), w, cx))
             })
-            .child(if joined.is_some() { "Open" } else { "Join" })
+            .child(if joined.is_some() { crate::t::invite_card_open() } else { crate::t::invite_card_join() })
     });
     let card = div()
         .mt(px(8.))
@@ -1871,7 +1867,7 @@ fn invite_card(ctx: &Ctx, m: &Message, key: String) -> AnyElement {
         .flex_col()
         .gap(px(10.))
         .child(
-            crate::kit::spaced("COMMUNITY INVITE", 0.9)
+            crate::kit::spaced(&crate::t::invite_card_title().to_uppercase(), 0.9)
                 .font_weight(FontWeight::BOLD)
                 .text_size(px(10.))
                 .line_height(px(14.))
@@ -1949,13 +1945,13 @@ fn pivx_bubble(ctx: &Ctx, m: &Message, pay: &crate::data::PivxPay) -> AnyElement
     use crate::data::PivxPhase;
     let (phase, hint) = match ctx.store.pivx_bubbles.get(&pay.gift_code) {
         Some((p, h)) => (*p, h.clone()),
-        None => (PivxPhase::Claimable, if m.mine { "Click to reclaim" } else { "Click to claim" }.to_string()),
+        None => (PivxPhase::Claimable, if m.mine { crate::t::pivx_bubble_reclaim() } else { crate::t::pivx_bubble_claim() }.to_string()),
     };
     let fiat = ctx
         .store
         .pivx_price
         .as_ref()
-        .map(|(price, cur)| format!("~{:.2} {cur}", pay.amount_piv * price));
+        .map(|(price, cur)| crate::t::pivx_fiat(pay.amount_piv * price, cur.as_str()));
     let busy = matches!(phase, PivxPhase::Syncing | PivxPhase::Claiming);
     let open = !busy && phase != PivxPhase::Claimed;
     let (act, code) = (ctx.on_act.clone(), pay.gift_code.clone());
@@ -1994,7 +1990,7 @@ fn pivx_bubble(ctx: &Ctx, m: &Message, pay: &crate::data::PivxPay) -> AnyElement
                         .line_height(px(18.))
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(c(TEXT))
-                        .child(format!("{:.2} PIV", pay.amount_piv)),
+                        .child(crate::t::pivx_amount(pay.amount_piv)),
                 )
                 .children(fiat.map(|f| div().text_size(px(11.)).line_height(px(13.)).text_color(c(TEXT)).opacity(0.7).child(f)))
                 .child(

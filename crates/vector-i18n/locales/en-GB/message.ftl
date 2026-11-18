@@ -43,3 +43,31 @@ msg-delete-limited-text = This message can't be fully removed from relays becaus
 msg-hide-title = Hide this message?
 msg-hide-text = Permanently hide this message for everyone in the community. This can't be undone.
 msg-hide-failed = Hide Failed
+
+## The toolbar over a hovered message: each is its button's tooltip, alongside msg-retry,
+## msg-cancel-upload, msg-reply, msg-edit, msg-copy, msg-save and msg-reveal above
+
+# $why is why the send failed.
+msg-bar-retry-why = Retry send. { $why }
+msg-bar-delete-failed = Delete failed message
+msg-bar-react = Add reaction
+msg-bar-delete = Delete message
+# The signing key isn't on this device, so only part of it can be deleted.
+msg-bar-delete-limited = Delete message (limited)
+msg-bar-hide = Hide message
+
+## The timer on a message that will disappear
+
+# $left is a countdown, like "2h 5m".
+msg-dissolves-in = Message dissolves in { $left }
+msg-dissolving = Dissolving...
+
+## A community invite link, shown as a card
+
+# Shown in capitals.
+invite-card-title = Community Invite
+invite-card-unavailable = Invite Unavailable
+invite-card-unavailable-text = This invite could not be loaded — it may be revoked or expired.
+# Opens a community you're already in.
+invite-card-open = Open
+invite-card-join = Join

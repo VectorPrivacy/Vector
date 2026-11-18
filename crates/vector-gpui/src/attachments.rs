@@ -855,8 +855,8 @@ fn file_box_on(
         .flatten()
         .filter(|_| state == FileState::Local);
     let title: SharedString = match &package {
-        Some(p) => if p.name.is_empty() { "Mini App".into() } else { p.name.clone().into() },
-        None if att.name.is_empty() => description.into(),
+        Some(p) => if p.name.is_empty() { crate::t::file_type_mini_app() } else { p.name.clone().into() },
+        None if att.name.is_empty() => description.clone(),
         None => att.name.clone().into(),
     };
     let live = mini.then(|| {

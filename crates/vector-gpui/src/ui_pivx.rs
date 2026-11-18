@@ -11,6 +11,7 @@ use serde_json::Value;
 use super::{VectorApp, backend};
 use crate::composer::{InputChanged, TextInput};
 use crate::data::PivxPhase;
+use crate::t;
 use crate::theme::*;
 
 const PURPLE: u32 = 0x642d8f;
@@ -601,12 +602,12 @@ impl VectorApp {
                 .collect()
         };
         for (code, address, mine) in todo {
-            let claimable = (PivxPhase::Claimable, if mine { "Click to reclaim" } else { "Click to claim" }.to_string());
+            let claimable = (PivxPhase::Claimable, if mine { t::pivx_bubble_reclaim() } else { t::pivx_bubble_claim() }.to_string());
             let Some(address) = address.filter(|_| self.live) else {
                 self.store.borrow_mut().pivx_bubbles.insert(code, claimable);
                 continue;
             };
-            self.store.borrow_mut().pivx_bubbles.insert(code.clone(), (PivxPhase::Syncing, "Syncing...".into()));
+            self.store.borrow_mut().pivx_bubbles.insert(code.clone(), (PivxPhase::Syncing, t::pivx_bubble_syncing().into()));
             cx.spawn(async move |this, cx| {
                 let mut tries = 0;
                 let settled = loop {
@@ -619,13 +620,13 @@ impl VectorApp {
                                 this.store
                                     .borrow_mut()
                                     .pivx_bubbles
-                                    .insert(code.clone(), (PivxPhase::Syncing, "Confirming...".into()));
+                                    .insert(code.clone(), (PivxPhase::Syncing, t::pivx_bubble_confirming().into()));
                                 cx.notify();
                             })
                             .ok();
                             cx.background_executor().timer(Duration::from_secs(3)).await;
                         }
-                        Ok(Ok(_)) => break (PivxPhase::Claimed, "Claimed".into()),
+                        Ok(Ok(_)) => break (PivxPhase::Claimed, t::pivx_bubble_claimed().into()),
                         _ => break claimable,
                     }
                 };
@@ -645,7 +646,7 @@ impl VectorApp {
         if matches!(phase, Some(PivxPhase::Claimed | PivxPhase::Claiming)) {
             return;
         }
-        self.store.borrow_mut().pivx_bubbles.insert(code.clone(), (PivxPhase::Claiming, "Claiming...".into()));
+        self.store.borrow_mut().pivx_bubbles.insert(code.clone(), (PivxPhase::Claiming, t::pivx_bubble_claiming().into()));
         cx.notify();
         if !self.live {
             return;
@@ -656,7 +657,7 @@ impl VectorApp {
             this.update(cx, |this, cx| {
                 match res {
                     Ok(v) => {
-                        this.store.borrow_mut().pivx_bubbles.insert(code, (PivxPhase::Claimed, "Claimed!".into()));
+                        this.store.borrow_mut().pivx_bubbles.insert(code, (PivxPhase::Claimed, t::pivx_bubble_claimed_now().into()));
                         let amount = v.get("amount_piv").and_then(Value::as_f64).map(|a| format!("{a:.2}")).unwrap_or_default();
                         this.show_toast(&format!("Claimed {amount} PIV"), cx);
                         this.refresh_pivx_wallet(cx);
@@ -665,7 +666,7 @@ impl VectorApp {
                         this.store
                             .borrow_mut()
                             .pivx_bubbles
-                            .insert(code, (PivxPhase::Failed, "Claim failed - tap to retry".into()));
+                            .insert(code, (PivxPhase::Failed, t::pivx_bubble_failed().into()));
                         this.show_toast(&format!("Failed to claim: {e}"), cx);
                     }
                 }

@@ -180,7 +180,7 @@ fn kinds(pin: &Pin) -> Vec<Atom> {
     pin.files
         .iter()
         .map(|(_, ext)| Atom::Text {
-            text: if ext.is_empty() { "Attachment".into() } else { crate::data::file_type(ext).1.into() },
+            text: if ext.is_empty() { crate::t::file_type_attachment().into() } else { crate::data::file_type(ext).1.into() },
             look: l.clone(),
             kind: Kind::Plain,
         })

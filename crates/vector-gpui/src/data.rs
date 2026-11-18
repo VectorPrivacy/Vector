@@ -129,7 +129,7 @@ impl From<RawInvite> for Invite {
         Self {
             community_id: r.community_id,
             name: if b.name.is_empty() {
-                "Community".into()
+                t::community_unnamed().into()
             } else {
                 b.name
             },
@@ -199,12 +199,12 @@ pub enum Hidden {
 }
 
 impl Hidden {
-    pub fn label(self) -> &'static str {
+    pub fn label(self) -> gpui::SharedString {
         match self {
-            Hidden::Blocked => "Blocked message",
-            Hidden::Unauthorized => "Unauthorized poster",
-            Hidden::NoSend => "Posted where they can't send",
-            Hidden::TimedOut => "Sent while timed out",
+            Hidden::Blocked => t::hidden_blocked(),
+            Hidden::Unauthorized => t::hidden_unauthorized(),
+            Hidden::NoSend => t::hidden_no_send(),
+            Hidden::TimedOut => t::hidden_timed_out(),
         }
     }
 }
@@ -405,6 +405,7 @@ impl Streamer {
             let _ = std::fs::create_dir_all(&dir);
             let _ = std::fs::write(
                 &path,
+                // i18n-exempt: markup
                 format!(r##"<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256"><circle cx="128" cy="128" r="128" fill="#{r:02x}{g:02x}{b:02x}"/></svg>"##),
             );
         }
@@ -485,7 +486,7 @@ impl Store {
             std::mem::take(&mut f.relay_info),
             path.parent().unwrap_or(Path::new(".")).to_path_buf(),
         );
-        Ok(Self {
+        let mut store = Self {
             my_npub: f.npub,
             profiles: f.profiles.into_iter().map(|p| (p.id.clone(), p)).collect(),
             chats,
@@ -567,7 +568,20 @@ impl Store {
                 }
                 st
             },
-        })
+        };
+        // Fixtures: VECTOR_SYSTEM=1 puts one line of each kind at the end of the first chat.
+        if std::env::var_os("VECTOR_SYSTEM").is_some()
+            && let Some(chat) = store.chats.first()
+        {
+            let (id, at) = (chat.id.clone(), chat.messages.last().map_or(0, |m| m.at));
+            let npub = chat.messages.iter().rev().find_map(|m| m.npub.clone()).unwrap_or_else(|| id.clone());
+            for kind in 0..6u8 {
+                let via = (kind == 1).then(|| ("Friends".to_string(), npub.clone())); // i18n-exempt: fixture
+                let line = SysLine { id: format!("sys-demo-{kind}"), at: at + 1 + kind as u64, kind, npub: npub.clone(), via };
+                store.add_system(&id, line);
+            }
+        }
+        Ok(store)
     }
 
     /// A live account's store, filled as its events arrive.
@@ -963,27 +977,27 @@ impl Store {
     }
 
     /// Why the composer can't send in `chat`, as its placeholder.
-    pub fn send_lock(&self, chat: &str) -> Option<String> {
+    pub fn send_lock(&self, chat: &str) -> Option<gpui::SharedString> {
         if self.chat(chat).is_some_and(|c| c.chat_type == vector_core::ChatType::DirectMessage)
             && self.profiles.get(chat).is_some_and(|p| p.is_blocked)
         {
-            return Some("Unblock to send messages".into());
+            return Some(t::compose_lock_blocked());
         }
         let community = self.community_of(chat)?;
         let channel = community.channel(chat)?;
         if community.dissolved {
-            return Some("This community has been dissolved.".into());
+            return Some(t::compose_lock_dissolved());
         }
         const SEND_MESSAGES: u64 = 1 << 14;
         if channel.my_permissions.as_deref().and_then(|p| p.parse::<u64>().ok()).is_some_and(|p| p & SEND_MESSAGES == 0) {
-            return Some("You can't send messages in this channel".into());
+            return Some(t::compose_lock_no_permission());
         }
         if channel.restricted && !channel.can_post {
-            return Some("Your key to post here is on its way".into());
+            return Some(t::compose_lock_key_pending());
         }
         let t = self.timeout(&community.community_id, &self.my_npub)?;
         let until = chrono::DateTime::from_timestamp(t.until as i64, 0)?.with_timezone(&Local);
-        Some(format!("You're timed out until {}", until.format("%a %I:%M %p")))
+        Some(t::compose_lock_timed_out(until.format("%a %I:%M %p").to_string()))
     }
 
     /// `_dmsgPostedTimedOut` and a blocked group author: why `m` shows collapsed, if it does.
@@ -1025,14 +1039,14 @@ impl Store {
     }
 
     /// What closes the timeline: a blocked contact, or a community its owner dissolved.
-    pub fn end_notice(&self, chat: &str) -> Option<String> {
+    pub fn end_notice(&self, chat: &str) -> Option<gpui::SharedString> {
         if self.chat(chat).is_some_and(|c| c.chat_type == vector_core::ChatType::DirectMessage)
             && self.profiles.get(chat).is_some_and(|p| p.is_blocked)
         {
-            return Some("Blocked: you won't receive new messages from them".into());
+            return Some(t::chat_end_blocked());
         }
         let c = self.community_of(chat).filter(|c| c.dissolved)?;
-        Some(format!("{} was dissolved by the owner.", if c.name.is_empty() { "This community" } else { &c.name }))
+        Some(if c.name.is_empty() { t::chat_end_dissolved() } else { t::chat_end_dissolved_named(c.name.as_str()) })
     }
 
     pub fn community_of(&self, channel_id: &str) -> Option<&Community> {
@@ -1096,28 +1110,28 @@ pub fn preview_text(chat: &SerializableChat) -> String {
         return String::new();
     };
     let body = if m.content.is_empty() && !m.attachments.is_empty() {
-        "Sent a file".to_string()
+        t::chats_preview_file().to_string()
     } else {
-        crate::newchat::replace_invite_links(&m.content, "Community Invite")
+        crate::newchat::replace_invite_links(&m.content, &t::chats_preview_invite())
             .lines()
             .next()
             .unwrap_or_default()
             .to_string()
     };
-    if m.mine { format!("You: {body}") } else { body }
+    if m.mine { t::chats_preview_mine(body).to_string() } else { body }
 }
 
 /// `timeAgo` (misc.js).
 pub fn time_ago(now_ms: u64, at_ms: u64) -> String {
     let s = now_ms.saturating_sub(at_ms) / 1000;
     match s {
-        0..60 => "Now".into(),
-        60..3600 => format!("{}m", s / 60),
-        3600..86_400 => format!("{}h", s / 3600),
-        86_400..604_800 => format!("{}d", s / 86_400),
-        604_800..2_592_000 => format!("{}w", s / 604_800),
-        2_592_000..31_536_000 => format!("{}mo", s / 2_592_000),
-        _ => format!("{}y", s / 31_536_000),
+        0..60 => t::ago_now().into(),
+        60..3600 => t::ago_minutes(s / 60).into(),
+        3600..86_400 => t::ago_hours(s / 3600).into(),
+        86_400..604_800 => t::ago_days(s / 86_400).into(),
+        604_800..2_592_000 => t::ago_weeks(s / 604_800).into(),
+        2_592_000..31_536_000 => t::ago_months(s / 2_592_000).into(),
+        _ => t::ago_years(s / 31_536_000).into(),
     }
 }
 
@@ -1181,16 +1195,18 @@ pub struct SysLine {
     pub via: Option<(String, String)>,
 }
 
-/// `systemEventSuffix`.
-pub fn system_suffix(kind: u8) -> &'static str {
-    match kind {
-        0 => " has left",
-        1 => " has joined",
-        2 => " was removed",
-        3 => " changed the wallpaper",
-        4 => " removed the wallpaper",
-        5 => " modified the Pins",
-        _ => "",
+/// `systemEventSuffix`, as a sentence with the actor's name in `<b>`.
+pub fn system_text(kind: u8, name: &str, via: Option<&str>, count: u32) -> gpui::SharedString {
+    let name = crate::kit::escape(name);
+    match (kind, via) {
+        (0, _) => t::system_left(name),
+        (1, Some(link)) => t::system_joined_via(crate::kit::escape(link), name),
+        (1, None) => t::system_joined(name),
+        (2, _) => t::system_removed(name),
+        (3, _) => t::system_wallpaper_changed(count, name),
+        (4, _) => t::system_wallpaper_removed(count, name),
+        (5, _) => t::system_pins_modified(count, name),
+        _ => format!("<b>{name}</b>").into(),
     }
 }
 
@@ -1349,222 +1365,223 @@ pub fn command(m: &vector_core::Message, known: Option<&HashSet<String>>) -> Opt
 }
 
 /// `getFileTypeInfo` (misc.js): an extension's icon and description.
-pub fn file_type(extension: &str) -> (&'static str, &'static str) {
-    match extension.to_ascii_lowercase().as_str() {
-        "png" => ("image", "Picture"),
-        "jpg" => ("image", "Picture"),
-        "jpeg" => ("image", "Picture"),
-        "gif" => ("film", "GIF Animation"),
-        "webp" => ("image", "Picture"),
-        "jxl" => ("image", "Picture"),
-        "svg" => ("image", "Vector Image"),
-        "bmp" => ("image", "Bitmap Image"),
-        "ico" => ("image", "Icon"),
-        "tiff" => ("image", "TIFF Image"),
-        "tif" => ("image", "TIFF Image"),
-        "raw" => ("image", "RAW Image"),
-        "dng" => ("image", "RAW Image"),
-        "cr2" => ("image", "Canon RAW"),
-        "nef" => ("image", "Nikon RAW"),
-        "arw" => ("image", "Sony RAW"),
-        "orf" => ("image", "Olympus RAW"),
-        "rw2" => ("image", "Panasonic RAW"),
-        "wav" => ("mic-on", "Voice Message"),
-        "mp3" => ("mic-on", "Audio Clip"),
-        "m4a" => ("mic-on", "Audio Clip"),
-        "aac" => ("mic-on", "Audio Clip"),
-        "flac" => ("mic-on", "Audio Clip"),
-        "ogg" => ("mic-on", "Audio Clip"),
-        "wma" => ("mic-on", "Audio Clip"),
-        "opus" => ("mic-on", "Audio Clip"),
-        "ape" => ("mic-on", "Audio Clip"),
-        "wv" => ("mic-on", "Audio Clip"),
-        "aup" => ("mic-on", "Audacity Project"),
-        "flp" => ("mic-on", "FL Studio Project"),
-        "als" => ("mic-on", "Ableton Project"),
-        "logic" => ("mic-on", "Logic Project"),
-        "band" => ("mic-on", "GarageBand Project"),
-        "mp4" => ("film", "Video"),
-        "webm" => ("film", "Video"),
-        "mov" => ("film", "Video"),
-        "avi" => ("film", "Video"),
-        "mkv" => ("film", "Video"),
-        "flv" => ("film", "Flash Video"),
-        "wmv" => ("film", "Windows Video"),
-        "mpg" => ("film", "MPEG Video"),
-        "mpeg" => ("film", "MPEG Video"),
-        "m4v" => ("film", "MPEG-4 Video"),
-        "3gp" => ("film", "3GP Video"),
-        "3g2" => ("film", "3G2 Video"),
-        "f4v" => ("film", "Flash MP4 Video"),
-        "asf" => ("film", "Advanced Systems Format"),
-        "rm" => ("film", "RealMedia"),
-        "vob" => ("film", "DVD Video"),
-        "ogv" => ("film", "Ogg Video"),
-        "mxf" => ("film", "Material Exchange Format"),
-        "m2ts" => ("film", "Blu-ray Video"),
-        "pdf" => ("file", "PDF Document"),
-        "doc" => ("file", "Word Document"),
-        "docx" => ("file", "Word Document"),
-        "xls" => ("file", "Excel Spreadsheet"),
-        "xlsx" => ("file", "Excel Spreadsheet"),
-        "ppt" => ("file", "PowerPoint Presentation"),
-        "pptx" => ("file", "PowerPoint Presentation"),
-        "odt" => ("file", "OpenDocument Text"),
-        "ods" => ("file", "OpenDocument Spreadsheet"),
-        "odp" => ("file", "OpenDocument Presentation"),
-        "rtf" => ("file", "Rich Text Document"),
-        "tex" => ("file", "LaTeX Document"),
-        "pages" => ("file", "Pages Document"),
-        "numbers" => ("file", "Numbers Spreadsheet"),
-        "key" => ("file", "Keynote Presentation"),
-        "txt" => ("file", "Text File"),
-        "md" => ("file", "Markdown File"),
-        "log" => ("file", "Log File"),
-        "csv" => ("file", "CSV File"),
-        "tsv" => ("file", "TSV File"),
-        "json" => ("file", "JSON File"),
-        "xml" => ("file", "XML File"),
-        "yaml" => ("file", "YAML File"),
-        "yml" => ("file", "YAML File"),
-        "toml" => ("file", "TOML File"),
-        "sql" => ("file", "SQL File"),
-        "db" => ("file", "Database File"),
-        "sqlite" => ("file", "SQLite Database"),
-        "zip" => ("folder", "ZIP Archive"),
-        "rar" => ("folder", "RAR Archive"),
-        "7z" => ("folder", "7-Zip Archive"),
-        "tar" => ("folder", "TAR Archive"),
-        "gz" => ("folder", "GZip Archive"),
-        "bz2" => ("folder", "BZip2 Archive"),
-        "xz" => ("folder", "XZ Archive"),
-        "tgz" => ("folder", "Compressed TAR"),
-        "tbz" => ("folder", "Compressed TAR"),
-        "txz" => ("folder", "Compressed TAR"),
-        "cab" => ("folder", "Cabinet Archive"),
-        "iso" => ("file", "Disc Image"),
-        "dmg" => ("file", "macOS Disk Image"),
-        "pkg" => ("file", "Package File"),
-        "deb" => ("file", "Debian Package"),
-        "rpm" => ("file", "RPM Package"),
-        "apk" => ("file", "Android Package"),
-        "ipa" => ("file", "iOS App"),
-        "jar" => ("file", "Java Archive"),
-        "war" => ("file", "Web Archive"),
-        "ear" => ("file", "Enterprise Archive"),
-        "obj" => ("file", "3D Object"),
-        "fbx" => ("file", "Autodesk FBX"),
-        "gltf" => ("file", "GL Transmission Format"),
-        "glb" => ("file", "GL Binary"),
-        "stl" => ("file", "Stereolithography"),
-        "ply" => ("file", "Polygon File"),
-        "dae" => ("file", "COLLADA"),
-        "3ds" => ("file", "3D Studio"),
-        "blend" => ("file", "Blender File"),
-        "c4d" => ("file", "Cinema 4D"),
-        "max" => ("file", "3ds Max"),
-        "ma" => ("file", "Maya ASCII"),
-        "mb" => ("file", "Maya Binary"),
-        "usdz" => ("file", "Universal Scene"),
-        "dwg" => ("file", "AutoCAD Drawing"),
-        "dxf" => ("file", "Drawing Exchange"),
-        "step" => ("file", "STEP CAD"),
-        "stp" => ("file", "STEP CAD"),
-        "iges" => ("file", "IGES CAD"),
-        "igs" => ("file", "IGES CAD"),
-        "sat" => ("file", "ACIS SAT"),
-        "ipt" => ("file", "Inventor Part"),
-        "iam" => ("file", "Inventor Assembly"),
-        "prt" => ("file", "Part File"),
-        "sldprt" => ("file", "SolidWorks Part"),
-        "sldasm" => ("file", "SolidWorks Assembly"),
-        "slddrw" => ("file", "SolidWorks Drawing"),
-        "catpart" => ("file", "CATIA Part"),
-        "catproduct" => ("file", "CATIA Product"),
-        "js" => ("file", "JavaScript"),
-        "ts" => ("file", "TypeScript"),
-        "jsx" => ("file", "React JSX"),
-        "tsx" => ("file", "React TSX"),
-        "py" => ("file", "Python"),
-        "rs" => ("file", "Rust"),
-        "go" => ("file", "Go"),
-        "java" => ("file", "Java"),
-        "kt" => ("file", "Kotlin"),
-        "cpp" => ("file", "C++"),
-        "cc" => ("file", "C++"),
-        "cxx" => ("file", "C++"),
-        "c" => ("file", "C"),
-        "h" => ("file", "Header File"),
-        "hpp" => ("file", "C++ Header"),
-        "cs" => ("file", "C#"),
-        "rb" => ("file", "Ruby"),
-        "php" => ("file", "PHP"),
-        "swift" => ("file", "Swift"),
-        "m" => ("file", "Objective-C"),
-        "mm" => ("file", "Objective-C++"),
-        "lua" => ("file", "Lua"),
-        "r" => ("file", "R Script"),
-        "scala" => ("file", "Scala"),
-        "clj" => ("file", "Clojure"),
-        "dart" => ("file", "Dart"),
-        "ex" => ("file", "Elixir"),
-        "elm" => ("file", "Elm"),
-        "erl" => ("file", "Erlang"),
-        "fs" => ("file", "F#"),
-        "hs" => ("file", "Haskell"),
-        "jl" => ("file", "Julia"),
-        "nim" => ("file", "Nim"),
-        "pl" => ("file", "Perl"),
-        "sh" => ("file", "Shell Script"),
-        "bash" => ("file", "Bash Script"),
-        "zsh" => ("file", "Zsh Script"),
-        "fish" => ("file", "Fish Script"),
-        "ps1" => ("file", "PowerShell"),
-        "bat" => ("file", "Batch File"),
-        "cmd" => ("file", "Command File"),
-        "vb" => ("file", "Visual Basic"),
-        "vbs" => ("file", "VBScript"),
-        "asm" => ("file", "Assembly"),
-        "s" => ("file", "Assembly"),
-        "ini" => ("file", "INI Config"),
-        "cfg" => ("file", "Config File"),
-        "conf" => ("file", "Config File"),
-        "config" => ("file", "Config File"),
-        "env" => ("file", "Environment File"),
-        "properties" => ("file", "Properties File"),
-        "plist" => ("file", "Property List"),
-        "gitignore" => ("file", "Git Ignore"),
-        "dockerignore" => ("file", "Docker Ignore"),
-        "editorconfig" => ("file", "Editor Config"),
-        "eslintrc" => ("file", "ESLint Config"),
-        "prettierrc" => ("file", "Prettier Config"),
-        "html" => ("file", "HTML File"),
-        "htm" => ("file", "HTML File"),
-        "css" => ("file", "CSS Stylesheet"),
-        "scss" => ("file", "SCSS Stylesheet"),
-        "sass" => ("file", "Sass Stylesheet"),
-        "less" => ("file", "Less Stylesheet"),
-        "vue" => ("file", "Vue Component"),
-        "svelte" => ("file", "Svelte Component"),
-        "eps" => ("file", "Encapsulated PostScript"),
-        "ai" => ("file", "Adobe Illustrator"),
-        "sketch" => ("file", "Sketch File"),
-        "fig" => ("file", "Figma File"),
-        "xd" => ("file", "Adobe XD"),
-        "exe" => ("file", "Executable"),
-        "msi" => ("file", "Windows Installer"),
-        "app" => ("file", "macOS Application"),
-        "ttf" => ("file", "TrueType Font"),
-        "otf" => ("file", "OpenType Font"),
-        "woff" => ("file", "Web Font"),
-        "woff2" => ("file", "Web Font 2"),
-        "eot" => ("file", "Embedded OpenType"),
-        "ics" => ("file", "Calendar File"),
-        "vcf" => ("file", "vCard Contact"),
-        "torrent" => ("file", "Torrent File"),
-        "xdc" => ("gift", "Mini App"),
-        _ => ("file-unknown", "Unknown File"),
-    }
+pub fn file_type(extension: &str) -> (&'static str, gpui::SharedString) {
+    let (icon, said): (&'static str, fn() -> gpui::SharedString) = match extension.to_ascii_lowercase().as_str() {
+        "png" => ("image", t::file_type_picture),
+        "jpg" => ("image", t::file_type_picture),
+        "jpeg" => ("image", t::file_type_picture),
+        "gif" => ("film", t::file_type_gif_animation),
+        "webp" => ("image", t::file_type_picture),
+        "jxl" => ("image", t::file_type_picture),
+        "svg" => ("image", t::file_type_vector_image),
+        "bmp" => ("image", t::file_type_bitmap_image),
+        "ico" => ("image", t::file_type_icon),
+        "tiff" => ("image", t::file_type_tiff_image),
+        "tif" => ("image", t::file_type_tiff_image),
+        "raw" => ("image", t::file_type_raw_image),
+        "dng" => ("image", t::file_type_raw_image),
+        "cr2" => ("image", t::file_type_canon_raw),
+        "nef" => ("image", t::file_type_nikon_raw),
+        "arw" => ("image", t::file_type_sony_raw),
+        "orf" => ("image", t::file_type_olympus_raw),
+        "rw2" => ("image", t::file_type_panasonic_raw),
+        "wav" => ("mic-on", t::file_type_voice_message),
+        "mp3" => ("mic-on", t::file_type_audio_clip),
+        "m4a" => ("mic-on", t::file_type_audio_clip),
+        "aac" => ("mic-on", t::file_type_audio_clip),
+        "flac" => ("mic-on", t::file_type_audio_clip),
+        "ogg" => ("mic-on", t::file_type_audio_clip),
+        "wma" => ("mic-on", t::file_type_audio_clip),
+        "opus" => ("mic-on", t::file_type_audio_clip),
+        "ape" => ("mic-on", t::file_type_audio_clip),
+        "wv" => ("mic-on", t::file_type_audio_clip),
+        "aup" => ("mic-on", t::file_type_audacity_project),
+        "flp" => ("mic-on", t::file_type_fl_studio_project),
+        "als" => ("mic-on", t::file_type_ableton_project),
+        "logic" => ("mic-on", t::file_type_logic_project),
+        "band" => ("mic-on", t::file_type_garageband_project),
+        "mp4" => ("film", t::file_type_video),
+        "webm" => ("film", t::file_type_video),
+        "mov" => ("film", t::file_type_video),
+        "avi" => ("film", t::file_type_video),
+        "mkv" => ("film", t::file_type_video),
+        "flv" => ("film", t::file_type_flash_video),
+        "wmv" => ("film", t::file_type_windows_video),
+        "mpg" => ("film", t::file_type_mpeg_video),
+        "mpeg" => ("film", t::file_type_mpeg_video),
+        "m4v" => ("film", t::file_type_mpeg_4_video),
+        "3gp" => ("film", t::file_type_3gp_video),
+        "3g2" => ("film", t::file_type_3g2_video),
+        "f4v" => ("film", t::file_type_flash_mp4_video),
+        "asf" => ("film", t::file_type_advanced_systems_format),
+        "rm" => ("film", t::file_type_realmedia),
+        "vob" => ("film", t::file_type_dvd_video),
+        "ogv" => ("film", t::file_type_ogg_video),
+        "mxf" => ("film", t::file_type_material_exchange_format),
+        "m2ts" => ("film", t::file_type_blu_ray_video),
+        "pdf" => ("file", t::file_type_pdf_document),
+        "doc" => ("file", t::file_type_word_document),
+        "docx" => ("file", t::file_type_word_document),
+        "xls" => ("file", t::file_type_excel_spreadsheet),
+        "xlsx" => ("file", t::file_type_excel_spreadsheet),
+        "ppt" => ("file", t::file_type_powerpoint_presentation),
+        "pptx" => ("file", t::file_type_powerpoint_presentation),
+        "odt" => ("file", t::file_type_opendocument_text),
+        "ods" => ("file", t::file_type_opendocument_spreadsheet),
+        "odp" => ("file", t::file_type_opendocument_presentation),
+        "rtf" => ("file", t::file_type_rich_text_document),
+        "tex" => ("file", t::file_type_latex_document),
+        "pages" => ("file", t::file_type_pages_document),
+        "numbers" => ("file", t::file_type_numbers_spreadsheet),
+        "key" => ("file", t::file_type_keynote_presentation),
+        "txt" => ("file", t::file_type_text_file),
+        "md" => ("file", t::file_type_markdown_file),
+        "log" => ("file", t::file_type_log_file),
+        "csv" => ("file", t::file_type_csv_file),
+        "tsv" => ("file", t::file_type_tsv_file),
+        "json" => ("file", t::file_type_json_file),
+        "xml" => ("file", t::file_type_xml_file),
+        "yaml" => ("file", t::file_type_yaml_file),
+        "yml" => ("file", t::file_type_yaml_file),
+        "toml" => ("file", t::file_type_toml_file),
+        "sql" => ("file", t::file_type_sql_file),
+        "db" => ("file", t::file_type_database_file),
+        "sqlite" => ("file", t::file_type_sqlite_database),
+        "zip" => ("folder", t::file_type_zip_archive),
+        "rar" => ("folder", t::file_type_rar_archive),
+        "7z" => ("folder", t::file_type_7_zip_archive),
+        "tar" => ("folder", t::file_type_tar_archive),
+        "gz" => ("folder", t::file_type_gzip_archive),
+        "bz2" => ("folder", t::file_type_bzip2_archive),
+        "xz" => ("folder", t::file_type_xz_archive),
+        "tgz" => ("folder", t::file_type_compressed_tar),
+        "tbz" => ("folder", t::file_type_compressed_tar),
+        "txz" => ("folder", t::file_type_compressed_tar),
+        "cab" => ("folder", t::file_type_cabinet_archive),
+        "iso" => ("file", t::file_type_disc_image),
+        "dmg" => ("file", t::file_type_macos_disk_image),
+        "pkg" => ("file", t::file_type_package_file),
+        "deb" => ("file", t::file_type_debian_package),
+        "rpm" => ("file", t::file_type_rpm_package),
+        "apk" => ("file", t::file_type_android_package),
+        "ipa" => ("file", t::file_type_ios_app),
+        "jar" => ("file", t::file_type_java_archive),
+        "war" => ("file", t::file_type_web_archive),
+        "ear" => ("file", t::file_type_enterprise_archive),
+        "obj" => ("file", t::file_type_3d_object),
+        "fbx" => ("file", t::file_type_autodesk_fbx),
+        "gltf" => ("file", t::file_type_gl_transmission_format),
+        "glb" => ("file", t::file_type_gl_binary),
+        "stl" => ("file", t::file_type_stereolithography),
+        "ply" => ("file", t::file_type_polygon_file),
+        "dae" => ("file", t::file_type_collada),
+        "3ds" => ("file", t::file_type_3d_studio),
+        "blend" => ("file", t::file_type_blender_file),
+        "c4d" => ("file", t::file_type_cinema_4d),
+        "max" => ("file", t::file_type_3ds_max),
+        "ma" => ("file", t::file_type_maya_ascii),
+        "mb" => ("file", t::file_type_maya_binary),
+        "usdz" => ("file", t::file_type_universal_scene),
+        "dwg" => ("file", t::file_type_autocad_drawing),
+        "dxf" => ("file", t::file_type_drawing_exchange),
+        "step" => ("file", t::file_type_step_cad),
+        "stp" => ("file", t::file_type_step_cad),
+        "iges" => ("file", t::file_type_iges_cad),
+        "igs" => ("file", t::file_type_iges_cad),
+        "sat" => ("file", t::file_type_acis_sat),
+        "ipt" => ("file", t::file_type_inventor_part),
+        "iam" => ("file", t::file_type_inventor_assembly),
+        "prt" => ("file", t::file_type_part_file),
+        "sldprt" => ("file", t::file_type_solidworks_part),
+        "sldasm" => ("file", t::file_type_solidworks_assembly),
+        "slddrw" => ("file", t::file_type_solidworks_drawing),
+        "catpart" => ("file", t::file_type_catia_part),
+        "catproduct" => ("file", t::file_type_catia_product),
+        "js" => ("file", t::file_type_javascript),
+        "ts" => ("file", t::file_type_typescript),
+        "jsx" => ("file", t::file_type_react_jsx),
+        "tsx" => ("file", t::file_type_react_tsx),
+        "py" => ("file", t::file_type_python),
+        "rs" => ("file", t::file_type_rust),
+        "go" => ("file", t::file_type_go),
+        "java" => ("file", t::file_type_java),
+        "kt" => ("file", t::file_type_kotlin),
+        "cpp" => ("file", t::file_type_cpp),
+        "cc" => ("file", t::file_type_cpp),
+        "cxx" => ("file", t::file_type_cpp),
+        "c" => ("file", t::file_type_c),
+        "h" => ("file", t::file_type_header_file),
+        "hpp" => ("file", t::file_type_cpp_header),
+        "cs" => ("file", t::file_type_c_sharp),
+        "rb" => ("file", t::file_type_ruby),
+        "php" => ("file", t::file_type_php),
+        "swift" => ("file", t::file_type_swift),
+        "m" => ("file", t::file_type_objective_c),
+        "mm" => ("file", t::file_type_objective_cpp),
+        "lua" => ("file", t::file_type_lua),
+        "r" => ("file", t::file_type_r_script),
+        "scala" => ("file", t::file_type_scala),
+        "clj" => ("file", t::file_type_clojure),
+        "dart" => ("file", t::file_type_dart),
+        "ex" => ("file", t::file_type_elixir),
+        "elm" => ("file", t::file_type_elm),
+        "erl" => ("file", t::file_type_erlang),
+        "fs" => ("file", t::file_type_f_sharp),
+        "hs" => ("file", t::file_type_haskell),
+        "jl" => ("file", t::file_type_julia),
+        "nim" => ("file", t::file_type_nim),
+        "pl" => ("file", t::file_type_perl),
+        "sh" => ("file", t::file_type_shell_script),
+        "bash" => ("file", t::file_type_bash_script),
+        "zsh" => ("file", t::file_type_zsh_script),
+        "fish" => ("file", t::file_type_fish_script),
+        "ps1" => ("file", t::file_type_powershell),
+        "bat" => ("file", t::file_type_batch_file),
+        "cmd" => ("file", t::file_type_command_file),
+        "vb" => ("file", t::file_type_visual_basic),
+        "vbs" => ("file", t::file_type_vbscript),
+        "asm" => ("file", t::file_type_assembly),
+        "s" => ("file", t::file_type_assembly),
+        "ini" => ("file", t::file_type_ini_config),
+        "cfg" => ("file", t::file_type_config_file),
+        "conf" => ("file", t::file_type_config_file),
+        "config" => ("file", t::file_type_config_file),
+        "env" => ("file", t::file_type_environment_file),
+        "properties" => ("file", t::file_type_properties_file),
+        "plist" => ("file", t::file_type_property_list),
+        "gitignore" => ("file", t::file_type_git_ignore),
+        "dockerignore" => ("file", t::file_type_docker_ignore),
+        "editorconfig" => ("file", t::file_type_editor_config),
+        "eslintrc" => ("file", t::file_type_eslint_config),
+        "prettierrc" => ("file", t::file_type_prettier_config),
+        "html" => ("file", t::file_type_html_file),
+        "htm" => ("file", t::file_type_html_file),
+        "css" => ("file", t::file_type_css_stylesheet),
+        "scss" => ("file", t::file_type_scss_stylesheet),
+        "sass" => ("file", t::file_type_sass_stylesheet),
+        "less" => ("file", t::file_type_less_stylesheet),
+        "vue" => ("file", t::file_type_vue_component),
+        "svelte" => ("file", t::file_type_svelte_component),
+        "eps" => ("file", t::file_type_encapsulated_postscript),
+        "ai" => ("file", t::file_type_adobe_illustrator),
+        "sketch" => ("file", t::file_type_sketch_file),
+        "fig" => ("file", t::file_type_figma_file),
+        "xd" => ("file", t::file_type_adobe_xd),
+        "exe" => ("file", t::file_type_executable),
+        "msi" => ("file", t::file_type_windows_installer),
+        "app" => ("file", t::file_type_macos_application),
+        "ttf" => ("file", t::file_type_truetype_font),
+        "otf" => ("file", t::file_type_opentype_font),
+        "woff" => ("file", t::file_type_web_font),
+        "woff2" => ("file", t::file_type_web_font_2),
+        "eot" => ("file", t::file_type_embedded_opentype),
+        "ics" => ("file", t::file_type_calendar_file),
+        "vcf" => ("file", t::file_type_vcard_contact),
+        "torrent" => ("file", t::file_type_torrent_file),
+        "xdc" => ("gift", t::file_type_mini_app),
+        _ => ("file-unknown", t::file_type_unknown_file),
+    };
+    (icon, said())
 }
 
 /// Each `npub1…` or `nprofile1…` in `text`, with any `@` or `nostr:` before it, and the

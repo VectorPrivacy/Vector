@@ -34,26 +34,38 @@ copy-id-channel = Copy Channel ID
 
 ## Lengths of time, for choices like a timeout's
 
+# $count is how many seconds.
 time-seconds = { $count ->
     [one] { $count } second
    *[other] { $count } seconds
 }
+# $count is how many minutes.
 time-minutes = { $count ->
     [one] { $count } minute
    *[other] { $count } minutes
 }
+# $count is how many hours.
 time-hours = { $count ->
     [one] { $count } hour
    *[other] { $count } hours
 }
+# $count is how many days.
 time-days = { $count ->
     [one] { $count } day
    *[other] { $count } days
 }
+# $count is how many weeks.
 time-weeks = { $count ->
     [one] { $count } week
    *[other] { $count } weeks
 }
+
+## A countdown's short form, over a minute; under one it's a clock like 3:05
+
+# $days and $hours are whole numbers, like "2d 5h".
+countdown-days = { $days }d { $hours }h
+# $hours and $minutes are whole numbers, like "3h 20m".
+countdown-hours = { $hours }h { $minutes }m
 
 ## The Main Menu toggle on anything that can be pinned there
 
@@ -69,3 +81,8 @@ percent = { $value }%
 
 # Two choices, either of which will do. $first and $second are names, such as Tor and I2P.
 either = { $first } or { $second }
+
+## Stand-in names
+
+# A community whose name hasn't arrived.
+community-unnamed = Community

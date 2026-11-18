@@ -3925,7 +3925,7 @@ impl VectorApp {
         if gap.is_none()
             && let Some(notice) = self.open.as_deref().and_then(|id| store.end_notice(id))
         {
-            rows.push(Row::Notice(notice));
+            rows.push(Row::Notice(notice.into()));
         }
         drop(store);
         if let Some(edge) = self.edge() {
@@ -8615,37 +8615,23 @@ fn preview_line_at(store: &Store, chat: &SerializableChat, color: gpui::Hsla, si
     let Some(m) = chat.messages.last() else {
         return crate::inline::inline(Vec::new(), look).into_any_element();
     };
-    let prefix = if m.mine { "You: " } else { "" };
+    let plain = |text: SharedString| crate::inline::Atom::Text { text, look: look.clone(), kind: crate::inline::Kind::Plain };
+    let mine = |body: SharedString| if m.mine { t::chats_preview_mine(body.as_ref()) } else { body };
     let atoms = if m.pending {
-        vec![crate::inline::Atom::Text {
-            text: "Sending...".into(),
-            look: look.clone(),
-            kind: crate::inline::Kind::Plain,
-        }]
+        vec![plain(t::chats_preview_sending())]
     } else if store.pivx.contains_key(&m.id) {
-        vec![crate::inline::Atom::Text {
-            text: format!("{prefix}Sent a PIVX Payment").into(),
-            look: look.clone(),
-            kind: crate::inline::Kind::Plain,
-        }]
+        vec![plain(mine(t::chats_preview_pivx()))]
     } else if m.content.is_empty() && !m.attachments.is_empty() {
-        let text = format!(
-            "{prefix}Sent a {}",
-            data::file_type(&m.attachments[0].extension).1
-        );
-        vec![crate::inline::Atom::Text {
-            text: text.into(),
-            look: look.clone(),
-            kind: crate::inline::Kind::Plain,
-        }]
+        vec![plain(mine(t::chats_preview_sent(data::file_type(&m.attachments[0].extension).1.as_ref())))]
     } else {
+        let (before, _, after) = if m.mine {
+            crate::kit::around(&t::chats_preview_mine("<body></body>"), "body")
+        } else {
+            Default::default()
+        };
         let mut v = Vec::new();
-        if !prefix.is_empty() {
-            v.push(crate::inline::Atom::Text {
-                text: prefix.into(),
-                look: look.clone(),
-                kind: crate::inline::Kind::Plain,
-            });
+        if !before.is_empty() {
+            v.push(plain(before.into()));
         }
         let content = crate::texttime::localize(
             &m.content,
@@ -8671,6 +8657,9 @@ fn preview_line_at(store: &Store, chat: &SerializableChat, color: gpui::Hsla, si
             }
         }
         v.extend(atoms);
+        if !after.is_empty() {
+            v.push(plain(after.into()));
+        }
         v
     };
     crate::inline::inline(atoms, look)
@@ -10319,20 +10308,8 @@ fn system_row(ctx: &timeline::Ctx, index: usize, count: u32) -> AnyElement {
         line.kind == 1
             && ctx.store.community_of(&ctx.chat.id).is_some_and(|c| ctx.store.invite_sight.get(&c.community_id) == Some(&true))
     });
-    let suffix = format!(
-        "{}{}{}",
-        data::system_suffix(line.kind),
-        via.map(|(label, _)| format!(" via {label}")).unwrap_or_default(),
-        if count > 1 { format!(" {count} times") } else { String::new() }
-    );
-    let suffix = match via {
-        Some((_, by)) => div()
-            .id(SharedString::from(format!("system-via-{}", line.id)))
-            .tip(format!("{}'s invite link", ctx.store.chat_name(by, &ctx.chat.id)))
-            .child(suffix)
-            .into_any_element(),
-        None => suffix.into_any_element(),
-    };
+    let text = data::system_text(line.kind, &name, via.map(|(label, _)| label.as_str()), count);
+    let tip = via.map(|(_, by)| t::system_via_tip(ctx.store.chat_name(by, &ctx.chat.id)));
     let open = {
         let (act, id, npub) = (ctx.on_act.clone(), line.id.clone(), line.npub.clone());
         move |_: &gpui::ClickEvent, w: &mut Window, cx: &mut gpui::App| {
@@ -10351,8 +10328,16 @@ fn system_row(ctx: &timeline::Ctx, index: usize, count: u32) -> AnyElement {
         .cursor_pointer()
         .on_click(open)
         .child(div().mr(px(5.)).child(crate::ui::avatar(ctx.store, &line.npub, 16.)))
-        .child(div().font_weight(FontWeight::SEMIBOLD).group_hover(group, |d| d.underline()).child(name))
-        .child(suffix);
+        .children(crate::kit::runs(&text).into_iter().enumerate().map(|(i, (run, strong))| {
+            let run = run.replace(' ', "\u{a0}");
+            if strong {
+                div().font_weight(FontWeight::SEMIBOLD).group_hover(group.clone(), |d| d.underline()).child(run).into_any_element()
+            } else if let Some(tip) = tip.clone() {
+                div().id(SharedString::from(format!("system-via-{}-{i}", line.id))).tip(tip).child(run).into_any_element()
+            } else {
+                div().child(run).into_any_element()
+            }
+        }));
     divider(label, white_a(0.1), 0.7)
 }
 

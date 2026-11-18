@@ -1,6 +1,6 @@
-# Hard-coded English left per file (2371 in all). Only ever lowered; see i18n_audit.rs.
+# Hard-coded English left per file (2091 in all). Only ever lowered; see i18n_audit.rs.
 applog.rs 2
-attachments.rs 27
+attachments.rs 26
 audio.rs 31
 backend/account.rs 19
 backend/actions.rs 9
@@ -21,7 +21,6 @@ backend/market.rs 4
 backend/mediaport.rs 6
 backend/messaging.rs 5
 backend/network.rs 23
-backend/notify.rs 7
 backend/packs.rs 11
 backend/pivx.rs 1
 backend/prefs.rs 1
@@ -48,7 +47,6 @@ community.rs 29
 composer.rs 10
 crop.rs 24
 cropper.rs 2
-data.rs 225
 downgrade.rs 9
 edithistory.rs 3
 embeds.rs 54
@@ -75,7 +73,7 @@ payaddr.rs 2
 pic.rs 2
 picker.rs 26
 pickers.rs 4
-pins.rs 8
+pins.rs 7
 preview.rs 14
 profile.rs 23
 qr.rs 7
@@ -93,15 +91,14 @@ spell.rs 1
 textcolor.rs 3
 texttime.rs 53
 theme.rs 5
-timeline.rs 31
 transcript.rs 7
 transfer.rs 50
-ui.rs 562
+ui.rs 555
 ui_art.rs 10
 ui_miniapps.rs 19
 ui_miniprofile.rs 3
 ui_pins.rs 2
-ui_pivx.rs 65
+ui_pivx.rs 57
 ui_popout.rs 16
 ui_publish.rs 47
 ui_qrscan.rs 6

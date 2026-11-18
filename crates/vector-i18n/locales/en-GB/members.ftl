@@ -13,13 +13,21 @@ member-ban = Ban
 
 ## Toasts. $name is the member's name in this community.
 
+# $name is the member's name.
 member-timed-out = { $name } is timed out
+# $name is the member's name.
 member-timeout-lifted = { $name }'s timeout is lifted
 
 ## Confirmations. <b> is bold; $name is the member's name in this community.
 
 member-kick-title = Kick member
+# $name is the member's name.
 member-kick-text = Kick <b>{ $name }</b>? They'll be removed from the community but can rejoin with a new invite.
 member-ban-title = Ban member
+# $name is the member's name.
 member-ban-text = Ban <b>{ $name }</b>? They'll be removed from the community and can't rejoin unless you unban them.
 member-ban-failed = Couldn't ban
+
+# Hovering the clock by a timed-out member's name. $left is a countdown, like "2h 5m".
+member-timeout-ends = Timeout ends in { $left }
+member-timeout-ending = Timeout ending

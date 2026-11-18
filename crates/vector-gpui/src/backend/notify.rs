@@ -35,6 +35,7 @@ pub fn focused() -> bool {
 /// main thread, so a click that launches Vector finds it; Linux waits for its first message.
 pub fn install() {
     // The Tauri client's identity: this client replaces it, so its toast clicks land here.
+    // i18n-exempt: the product name
     tauri::set_config(tauri::Config { identifier: "io.vectorapp".into(), product_name: Some("Vector".into()) });
     tauri::set_window(tauri::WindowHooks {
         focused: || FOCUSED.load(Ordering::Relaxed),
@@ -114,7 +115,7 @@ fn show(data: NotificationData) {
 
 fn file_body(msg: &Message) -> String {
     let ext = msg.attachments.first().map(|a| a.extension.as_str()).unwrap_or("file");
-    format!("Sent a {}", crate::data::file_type(ext).1)
+    crate::t::chats_preview_sent(crate::data::file_type(ext).1.as_ref()).into()
 }
 
 /// A new DM or file from someone else, unless the chat is set quieter than everything.
@@ -130,7 +131,7 @@ pub async fn direct(chat_id: &str, msg: &Message) {
     let gate = notify::StreamGate::load();
     let (name, body, avatar) = {
         let state = STATE.lock().await;
-        let sender = notify::sender(&state, &gate, chat_id, "New Message");
+        let sender = notify::sender(&state, &gate, chat_id, &crate::t::notify_new_message());
         let body = if msg.attachments.is_empty() {
             strip_content_for_preview(&notify::resolve_mentions(&msg.content, &state, &gate))
         } else {
@@ -190,11 +191,11 @@ pub async fn community(chat_id: &str, msg: &Message) {
     let nickname = VectorCore.member_nickname(&community_id, sender_npub);
     let (sender, community_name, avatar, content) = {
         let state = STATE.lock().await;
-        let notify::Sender { name, avatar } = notify::sender_in(&state, &gate, sender_npub, "Someone", nickname);
+        let notify::Sender { name, avatar } = notify::sender_in(&state, &gate, sender_npub, &crate::t::notify_someone(), nickname);
         let community_name = state
             .get_chat(chat_id)
             .and_then(|c| c.metadata.get_name().map(str::to_string))
-            .unwrap_or_else(|| "Community".to_string());
+            .unwrap_or_else(|| crate::t::community_unnamed().into());
         let content = if msg.attachments.is_empty() {
             strip_content_for_preview(&notify::resolve_mentions(&msg.content, &state, &gate))
         } else {
@@ -266,6 +267,7 @@ mod tests {
         install();
         set_focused(false);
         let chat = "npub1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq".to_string();
+        // i18n-exempt: test fixture
         show(NotificationData::direct_message("Alice".into(), "hi **there**".into(), None, chat.clone()).with_message_id("ab".into()));
         std::thread::sleep(std::time::Duration::from_secs(1));
         read(&chat);
