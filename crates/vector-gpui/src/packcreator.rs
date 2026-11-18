@@ -1580,7 +1580,7 @@ impl EmojiPicker {
                             .flex()
                             .flex_col()
                             .items_center()
-                            .child(img("icons/vector_warning.svg").size(px(100.)).mb(px(10.)))
+                            .child(crate::pic::img_fit("icons/vector_warning.svg", 100.).size(px(100.)).mb(px(10.)))
                             .child(
                                 div()
                                     .mb(px(6.))

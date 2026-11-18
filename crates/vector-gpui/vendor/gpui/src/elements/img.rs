@@ -803,9 +803,16 @@ impl Asset for ImageAssetLoader {
                 });
                 Ok(Arc::new(RenderImage::new(data.collect::<smallvec::SmallVec<[_; 1]>>())))
             } else {
-                svg_renderer
-                    .render_single_frame(&bytes, 1.0)
-                    .map_err(Into::into)
+                let svg = svg_renderer.parse_svg(&bytes)?;
+                // A fit hint is the drawn size in device pixels: rasterised there, it stays sharp.
+                let scale = match fit {
+                    Some((max, _)) => {
+                        let size = svg.0.size();
+                        max as f32 / size.width().max(size.height()).max(1.) / crate::SMOOTH_SVG_SCALE_FACTOR
+                    }
+                    None => 1.0,
+                };
+                svg_renderer.render_parsed(&svg, scale).map_err(Into::into)
             }
         }
     }

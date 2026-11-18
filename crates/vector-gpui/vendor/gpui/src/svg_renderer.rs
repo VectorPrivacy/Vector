@@ -100,7 +100,7 @@ pub struct SvgRenderer {
 /// [`SvgRenderer::render_parsed`]. Parsing resolves fonts and converts text
 /// to paths, so callers that need to rasterize the same SVG at multiple
 /// scales should retain this value to avoid re-paying the parse cost.
-pub struct ParsedSvg(usvg::Tree);
+pub struct ParsedSvg(pub(crate) usvg::Tree);
 
 /// The size in which to rasterize the SVG.
 #[derive(Clone, Copy)]

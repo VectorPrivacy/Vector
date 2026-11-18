@@ -84,7 +84,7 @@ pub fn render(current: &str, required: &str) -> AnyElement {
         .border_1()
         .border_color(c(DANGER).opacity(0.45))
         .font_family(INTER)
-        .child(img("icons/vector_warning.svg").size(px(84.)).mb(px(12.)))
+        .child(crate::pic::img_fit("icons/vector_warning.svg", 84.).size(px(84.)).mb(px(12.)))
         .child(
             // The inline icon's line box and the heading's own top margin, as the stylesheet lays them.
             div()

@@ -25,7 +25,12 @@ pub fn img_face(source: impl Into<ImageSource>, px: f32) -> Stateful<gpui::Img> 
 }
 
 fn fitted(source: ImageSource, px: f32, how: &str) -> Stateful<gpui::Img> {
-    let fit = ((px * 2.).ceil() as u32).clamp(64, BIGGEST as u32 * 2).next_power_of_two();
+    let svg = matches!(&source, ImageSource::Resource(Resource::Embedded(n)) if n.ends_with(".svg"));
+    // An SVG is cheap to rasterise at exactly its drawn size, where a decode is shared.
+    let fit = match ((px * 2.).ceil() as u32).min(BIGGEST as u32 * 2) {
+        n if svg => n,
+        n => n.max(64).next_power_of_two(),
+    };
     let source = sealed(source, fit, how);
     let id = match &source {
         ImageSource::Render(image) => ElementId::NamedInteger("pic".into(), image.id.0 as u64),
@@ -52,6 +57,10 @@ fn sealed(source: ImageSource, n: u32, fit: &str) -> ImageSource {
         // A path given as a string arrives as an asset name.
         ImageSource::Resource(Resource::Embedded(name)) if Path::new(name.as_ref()).is_absolute() => {
             ImageSource::Resource(Resource::Embedded(format!("{SEALED}{name}{fit}{n}").into()))
+        }
+        // A bundled SVG with a drawn size is rasterised at it.
+        ImageSource::Resource(Resource::Embedded(name)) if name.ends_with(".svg") && n < BIGGEST as u32 * 2 => {
+            ImageSource::Resource(Resource::Embedded(format!("{name}{fit}{n}").into()))
         }
         other => other,
     }

@@ -7353,7 +7353,7 @@ fn chrome(window: &Window, login: bool, mark_only: bool) -> gpui::Div {
                                     .h(px(20.)),
                             )
                             .when(!mark_only, |d| d.child(
-                                img("ui/logo-typeface.svg")
+                                crate::pic::img_fit("ui/logo-typeface.svg", 92.)
                                     .absolute()
                                     .left(px(32.))
                                     .top(px(9.5))

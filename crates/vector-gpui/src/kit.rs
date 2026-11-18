@@ -463,7 +463,7 @@ pub fn popup(
     let ok = answer.clone();
     let mut content = div().flex().flex_col().items_center().p(px(5.)).mb(px(10.));
     if let Some(icon) = p.icon {
-        content = content.child(img(icon).h(px(100.)).w(px(100.)).mb(px(26.)));
+        content = content.child(crate::pic::img_fit(icon, 100.).h(px(100.)).w(px(100.)).mb(px(26.)));
     }
     content = content.child(
         div()
@@ -669,7 +669,31 @@ pub fn chip_pop(id: impl Into<ElementId>, el: impl IntoElement) -> gpui::Animati
 /// (`modal-overlay-fade-out`). Closing is seen at render, so every way out gets it.
 pub struct Linger<T> {
     last: std::cell::RefCell<Option<T>>,
-    gone: std::cell::Cell<Option<std::time::Instant>>,
+    gone: std::cell::Cell<Option<Fade>>,
+}
+
+/// How far a fade-out has run. It advances by at most a frame's worth per draw, so a slow
+/// frame (the closing action's own work) slows the fade instead of skipping most of it.
+#[derive(Clone, Copy)]
+struct Fade {
+    /// 0 to 1.
+    t: f32,
+    /// The draw before; none until the first frame after the close.
+    at: Option<std::time::Instant>,
+}
+
+impl Fade {
+    const NEW: Self = Self { t: 0., at: None };
+    const STEP_MAX: f32 = 1. / 30.;
+
+    fn step(&mut self, secs: f32) -> f32 {
+        let now = std::time::Instant::now();
+        if let Some(at) = self.at {
+            self.t += (now - at).as_secs_f32().min(Self::STEP_MAX) / secs;
+        }
+        self.at = Some(now);
+        self.t
+    }
 }
 
 impl<T> Default for Linger<T> {
@@ -678,25 +702,32 @@ impl<T> Default for Linger<T> {
     }
 }
 
+const LINGER_SECS: f32 = 0.15;
+
 impl<T: Clone> Linger<T> {
     /// What to draw, and its opacity: 1 while open, falling to 0 once closed.
     pub fn track(&self, live: Option<&T>, window: &mut Window) -> Option<(T, f32)> {
+        self.track_for(live, LINGER_SECS, bezier(0., 0., 0.58, 1.), window)
+    }
+
+    /// [`Self::track`] over `secs`, eased by `ease`.
+    pub fn track_for(&self, live: Option<&T>, secs: f32, ease: impl Fn(f32) -> f32, window: &mut Window) -> Option<(T, f32)> {
         if let Some(v) = live {
             *self.last.borrow_mut() = Some(v.clone());
             self.gone.set(None);
             return Some((v.clone(), 1.));
         }
         let last = self.last.borrow().clone()?;
-        let at = self.gone.get().unwrap_or_else(std::time::Instant::now);
-        self.gone.set(Some(at));
-        let t = at.elapsed().as_secs_f32() / 0.15;
+        let mut fade = self.gone.get().unwrap_or(Fade::NEW);
+        let t = fade.step(secs);
+        self.gone.set(Some(fade));
         if t >= 1. {
             *self.last.borrow_mut() = None;
             self.gone.set(None);
             return None;
         }
         window.request_animation_frame();
-        Some((last, 1. - bezier(0., 0., 0.58, 1.)(t)))
+        Some((last, 1. - ease(t)))
     }
 
     /// True while a closed modal is still fading.
@@ -710,14 +741,15 @@ impl<T> Linger<T> {
     pub fn close(&self, gone: Option<T>) {
         if let Some(v) = gone {
             *self.last.borrow_mut() = Some(v);
-            self.gone.set(Some(std::time::Instant::now()));
+            self.gone.set(Some(Fade::NEW));
         }
     }
 
     /// Draw the closed state while it fades, with its opacity.
     pub fn fading<R>(&self, window: &mut Window, draw: impl FnOnce(&T, f32, &mut Window) -> R) -> Option<R> {
-        let at = self.gone.get()?;
-        let t = at.elapsed().as_secs_f32() / 0.15;
+        let mut fade = self.gone.get()?;
+        let t = fade.step(LINGER_SECS);
+        self.gone.set(Some(fade));
         if t >= 1. {
             *self.last.borrow_mut() = None;
             self.gone.set(None);
@@ -748,7 +780,8 @@ pub fn inert() -> gpui::Div {
 
 /// `.popup-container` once its popup is answered: the card goes at once, the dimming fades.
 pub fn popup_gone(gone: &Linger<()>, open: bool, window: &mut Window) -> Option<AnyElement> {
-    let (_, shown) = gone.track(open.then_some(&()), window)?;
+    // `.popup-container`'s `transition: background-color 0.2s ease`.
+    let (_, shown) = gone.track_for(open.then_some(&()), 0.2, bezier(0.25, 0.1, 0.25, 1.), window)?;
     (shown < 1.).then(|| {
         gpui::deferred(div().absolute().inset_0().bg(ca(0, 0, 0, 0.85 * shown)).child(inert()))
             .with_priority(15)
