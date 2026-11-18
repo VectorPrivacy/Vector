@@ -5369,7 +5369,7 @@ impl VectorApp {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .child(crate::video::view(&format!("full-{att}"), clip, false, Some((w, w / aspect)), 0., on)),
+                    .child(crate::video::view(&format!("full-{att}"), clip, false, Some((w, w / aspect)), (0., 0.), on)),
             )
             .with_priority(30)
             .into_any_element(),

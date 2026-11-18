@@ -994,7 +994,9 @@ mod stretched;
 pub type OnAct = Rc<dyn Fn(Act, &mut Window, &mut App)>;
 
 /// The clip at its fitted size, its controls over it while paused or pointed at.
-pub fn view(id: &str, clip: &Clip, dim: bool, size: Option<(f32, f32)>, radius: f32, on: OnAct) -> AnyElement {
+/// `radius`: the top corners' and the bottom corners'.
+pub fn view(id: &str, clip: &Clip, dim: bool, size: Option<(f32, f32)>, radius: (f32, f32), on: OnAct) -> AnyElement {
+    let (top, bottom) = (px(radius.0), px(radius.1));
     let info = clip.info.as_ref();
     let (w, h) = size.unwrap_or_else(|| info.map_or((MAX_W, MAX_H * 0.6), |i| fit(i.w, i.h)));
     let picture = clip.picture();
@@ -1157,7 +1159,8 @@ pub fn view(id: &str, clip: &Clip, dim: bool, size: Option<(f32, f32)>, radius: 
         .relative()
         .w(px(w))
         .h(px(h))
-        .rounded(px(radius))
+        .rounded_t(top)
+        .rounded_b(bottom)
         .overflow_hidden()
         .bg(gpui::black())
         .cursor_pointer()
@@ -1168,7 +1171,7 @@ pub fn view(id: &str, clip: &Clip, dim: bool, size: Option<(f32, f32)>, radius: 
             cx.stop_propagation();
             on(Act::Toggle, w, cx)
         })
-        .children(picture.map(|p| img(p).size_full().object_fit(ObjectFit::Contain)))
+        .children(picture.map(|p| img(p).size_full().object_fit(ObjectFit::Contain).rounded_t(top).rounded_b(bottom)))
         .children(veil)
         .children(spin)
         .when(shown, |d| d.child(bar))

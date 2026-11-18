@@ -10,6 +10,8 @@ use crate::popout::{Act, Corner, Item, Kind};
 use crate::theme::*;
 use super::VectorApp;
 
+/// The shell's radius inside its border: the content mask is square, so what meets the top corners rounds itself.
+const INNER: f32 = 13.;
 const TITLE: u32 = 0xebebeb;
 
 type On = Rc<dyn Fn(Act, &mut Window, &mut gpui::App)>;
@@ -488,7 +490,7 @@ impl VectorApp {
                     c,
                     false,
                     Some((pic_w, pic_h)),
-                    0.,
+                    (INNER, 0.),
                     Rc::new(move |a, w, cx| on(Act::Video(a), w, cx)),
                 )
             });
@@ -497,7 +499,7 @@ impl VectorApp {
                 .flex_col()
                 .pb(px(10.))
                 .gap(px(8.))
-                .child(div().w(px(pic_w)).h(px(pic_h)).bg(gpui::black()).children(video))
+                .child(div().w(px(pic_w)).h(px(pic_h)).rounded_t(px(INNER)).bg(gpui::black()).children(video))
                 .child(
                     div()
                         .flex()
@@ -703,7 +705,7 @@ impl VectorApp {
                     .bg(c(0x161616))
                     .border_1()
                     .border_color(c(0x363636))
-                    .rounded(px(14.))
+                    .rounded(px(INNER + 1.))
                     .shadow(vec![
                         gpui::BoxShadow {
                             color: gpui::black().opacity(0.85),

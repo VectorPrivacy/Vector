@@ -144,7 +144,7 @@ pub fn attachments(ctx: &Ctx, m: &Message) -> Option<AnyElement> {
                             clip,
                             m.pending,
                             size,
-                            8.,
+                            (8., 8.),
                             std::rc::Rc::new(move |a, w, cx| on_act(&msg, Act::Video(aid.clone(), a), w, cx)),
                         );
                         let view = if m.mine && m.pending {

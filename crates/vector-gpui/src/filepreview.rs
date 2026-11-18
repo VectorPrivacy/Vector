@@ -229,7 +229,7 @@ impl FilePreview {
             clip,
             false,
             Some((w * s, h * s)),
-            8.,
+            (8., 8.),
             std::rc::Rc::new(move |a, _, cx| {
                 on_media.borrow_mut().videos.act(&k, Some(crate::audio::AudioInputSpec::File(path.clone())), a);
                 me.update(cx, |_, cx| cx.notify()).ok();

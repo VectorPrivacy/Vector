@@ -1167,7 +1167,7 @@ fn poster_in(env: &Env, short: bool, image: Option<&str>, video: Option<Media>, 
                 .w_full()
                 .flex()
                 .justify_center()
-                .child(crate::video::view(&id, clip, false, Some(size), 8., Rc::new(move |a, win, cx| s(Act::Clip(cid.clone(), a), win, cx))))
+                .child(crate::video::view(&id, clip, false, Some(size), (8., 8.), Rc::new(move |a, win, cx| s(Act::Clip(cid.clone(), a), win, cx))))
                 .into_any_element();
         }
         // Fetched, still being read: the spinner stays until it plays.
